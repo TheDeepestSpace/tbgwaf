@@ -72,6 +72,17 @@ RUN ARCH="$(uname -m)"; \
 RUN mkdir -p /__w /github/workspace /tmp && \
     chmod -R 777 /__w /github /tmp 2>/dev/null || true
 
+# Install the Emscripten SDK (Stage D: WASM/WebGL2 build target) so the
+# devcontainer can build tactics_app_web locally, not just natively.
+ARG EMSDK_VERSION=latest
+RUN git clone --depth 1 https://github.com/emscripten-core/emsdk.git /opt/emsdk && \
+    /opt/emsdk/emsdk install ${EMSDK_VERSION} && \
+    /opt/emsdk/emsdk activate ${EMSDK_VERSION} && \
+    chmod -R a+rX /opt/emsdk && \
+    mkdir -p /etc/zsh && \
+    echo 'source /opt/emsdk/emsdk_env.sh > /dev/null' >> /etc/bash.bashrc && \
+    echo 'source /opt/emsdk/emsdk_env.sh > /dev/null' >> /etc/zsh/zshrc
+
 # Setup oh-my-zsh for dev user
 USER dev
 ARG DOCKER_OHMYZSH_SCRIPT_NAME=zsh-in-docker.sh

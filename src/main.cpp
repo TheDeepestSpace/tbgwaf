@@ -7,9 +7,16 @@
 #include <backends/imgui_impl_opengl3.h>
 #include <backends/imgui_impl_sdl2.h>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include <functional>
+#endif
+
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <optional>
 #include <vector>
 
 #include "game/GameLogic.h"
@@ -33,6 +40,12 @@ namespace {
 constexpr int kInitialWindowWidth = 1280;
 constexpr int kInitialWindowHeight = 720;
 constexpr int kShadowMapSize = 2048;
+
+// Stage-D split-screen: one shared window/canvas is divided into two
+// side-by-side viewports, left = Blue, right = Red. Both read the same
+// single GameLogic instance; only the camera and the fog-of-war-filtered
+// draw/pick lists differ per pane.
+constexpr int kPaneCount = 2;
 
 // Flat, unlit shader used for UI-ish overlays (selection highlights, the
 // move-path preview line) that should stay crisp regardless of shadowing.
@@ -258,6 +271,23 @@ bool IsUnitVisibleForRender(const Unit& unit, Team viewingTeam, bool fogActive,
   return visibility.UnitVisible(unit.id);
 }
 
+// Pane 0 is the left half of the window (Blue), pane 1 is the right half
+// (Red). Arbitrary but fixed for the lifetime of the app.
+Team PaneTeam(int pane) { return pane == 0 ? Team::Blue : Team::Red; }
+
+struct PaneRect {
+  int x = 0;
+  int width = 0;
+};
+
+PaneRect ComputePaneRect(int pane, int windowWidth) {
+  const int leftWidth = windowWidth / 2;
+  if (pane == 0) return PaneRect{0, leftWidth};
+  return PaneRect{leftWidth, windowWidth - leftWidth};
+}
+
+int PaneForX(int x, int windowWidth) { return x < windowWidth / 2 ? 0 : 1; }
+
 }  // namespace
 
 int main() {
@@ -325,7 +355,12 @@ int main() {
   pathLine.Init();
 
   // Stage-C: a single directional light (simulating overhead factory
-  // lighting) casting a basic shadow map, single cascade, hard-edged.
+  // lighting) casting a basic shadow map, single cascade, hard-edged. The
+  // light and the static map geometry are shared by both panes; only the
+  // *casters* (which units are drawn into it) change per pane, since each
+  // team's shadow map must not leak the position of units hidden by their
+  // own fog-of-war. The single FBO/texture is simply re-rendered once per
+  // pane, immediately before that pane's color pass consumes it.
   GLuint shadowFbo = 0;
   GLuint shadowDepthTex = 0;
   glGenFramebuffers(1, &shadowFbo);
@@ -363,11 +398,18 @@ int main() {
                  lightDistance * 2.0f);
   const glm::mat4 lightSpaceMatrix = lightProj * lightView;
 
-  gfx::OrbitCamera camera;
+  // Stage-D: one independent orbit camera per pane/team (index 0 = Blue,
+  // 1 = Red), so each side can freely rotate/zoom its own view without
+  // affecting the other's.
+  std::array<gfx::OrbitCamera, kPaneCount> cameras;
+  // Each pane only gets half the window's horizontal space, so the default
+  // zoom (tuned for a single full-width view) would clip the far edge of
+  // the map; start pulled back further so both spawns fit by default.
+  for (auto& camera : cameras) camera.Zoom(10.0f);
   GameLogic game;
 
   bool quit = false;
-  bool rightDragging = false;
+  int rightDragPane = -1;  // -1 = not dragging; else the pane a right-drag started in.
   glm::vec3 hoveredGroundPoint(0.0f);
   bool hasHoveredGroundPoint = false;
 
@@ -377,9 +419,12 @@ int main() {
   int frameCount = 0;
   constexpr int kSmokeTestMaxFrames = 60;
 
-  while (!quit) {
+  auto runFrame = [&]() {
     int windowWidth = kInitialWindowWidth, windowHeight = kInitialWindowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+
+    std::array<PaneRect, kPaneCount> paneRects;
+    for (int pane = 0; pane < kPaneCount; ++pane) paneRects[pane] = ComputePaneRect(pane, windowWidth);
 
     // Mouse-driven game input (world picking) must not be dispatched until
     // io.WantCaptureMouse reflects the UI actually built *this* frame:
@@ -401,20 +446,21 @@ int main() {
       if (event.type == SDL_QUIT) {
         quit = true;
       } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_RIGHT) {
-        rightDragging = true;
+        rightDragPane = PaneForX(event.button.x, windowWidth);
       } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_RIGHT) {
-        rightDragging = false;
+        rightDragPane = -1;
       } else if (event.type == SDL_MOUSEMOTION) {
         mouseX = event.motion.x;
         mouseY = event.motion.y;
-        if (rightDragging && !ImGui::GetIO().WantCaptureMouse) {
+        if (rightDragPane >= 0 && !ImGui::GetIO().WantCaptureMouse) {
           constexpr float kRotateSpeed = 0.005f;
-          camera.Rotate(-event.motion.xrel * kRotateSpeed, event.motion.yrel * kRotateSpeed);
+          cameras[rightDragPane].Rotate(-event.motion.xrel * kRotateSpeed,
+                                         event.motion.yrel * kRotateSpeed);
         }
       } else if (event.type == SDL_MOUSEWHEEL) {
         if (!ImGui::GetIO().WantCaptureMouse) {
           constexpr float kZoomSpeed = 1.5f;
-          camera.Zoom(-event.wheel.y * kZoomSpeed);
+          cameras[PaneForX(mouseX, windowWidth)].Zoom(-event.wheel.y * kZoomSpeed);
         }
       } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
         leftClickPending = true;
@@ -429,27 +475,28 @@ int main() {
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
 
-    const glm::mat4 view = camera.ViewMatrix();
-    const glm::mat4 proj =
-        camera.ProjectionMatrix(static_cast<float>(windowWidth) / static_cast<float>(windowHeight));
-    const glm::mat4 viewProj = proj * view;
-    const ImVec4 viewport(0, 0, static_cast<float>(windowWidth), static_cast<float>(windowHeight));
-
-    // Stage-B fog-of-war: this is a local hot-seat prototype (see the
-    // WASM/Pages issue for why it isn't split into two per-team views yet),
-    // so we render whichever team currently has the turn's fog-of-war. Once
-    // the match ends there's nothing left to hide.
-    Team viewingTeam = Team::Blue;
-    TeamVisibility viewingTeamVisibility;
-    bool fogActive = false;
+    // Stage-D: whichever team currently has the turn is the "active" pane --
+    // only that side's viewport accepts game-action input (unit selection,
+    // move/shoot targeting). The other pane keeps rendering its own live
+    // fog-of-war view (so both players can always watch the match) but is
+    // dimmed and ignores clicks, matching local split-screen console games
+    // where only the active player's half responds during their turn.
+    // Camera orbit/zoom is *not* gated this way -- either player can look
+    // around their own pane at any time.
+    std::optional<Team> activeTeam;
     if (game.Mode() != InputMode::GameOver) {
       if (const auto actorId = game.CurrentActorId()) {
         if (const Unit* actor = game.FindUnit(*actorId)) {
-          viewingTeam = actor->team;
-          viewingTeamVisibility = game.ComputeVisibility(viewingTeam);
-          fogActive = true;
+          activeTeam = actor->team;
         }
       }
+    }
+    const bool fogActive = game.Mode() != InputMode::GameOver;
+    auto isPaneActive = [&](int pane) { return activeTeam && *activeTeam == PaneTeam(pane); };
+
+    std::array<TeamVisibility, kPaneCount> paneVisibility;
+    for (int pane = 0; pane < kPaneCount; ++pane) {
+      if (fogActive) paneVisibility[pane] = game.ComputeVisibility(PaneTeam(pane));
     }
 
     // --- UI ---
@@ -493,16 +540,25 @@ int main() {
       }
       ImGui::End();
 
-      if (const auto selectedId = game.SelectedUnitId()) {
+      if (const auto selectedId = game.SelectedUnitId(); selectedId && activeTeam) {
         const Unit* selected = game.FindUnit(*selectedId);
         if (selected && (game.Mode() == InputMode::ActionMenu ||
                           game.Mode() == InputMode::AwaitingMoveDestination ||
                           game.Mode() == InputMode::AwaitingShootTarget)) {
+          const int activePane = *activeTeam == Team::Blue ? 0 : 1;
+          const PaneRect& activeRect = paneRects[activePane];
+          const glm::mat4 activeView = cameras[activePane].ViewMatrix();
+          const glm::mat4 activeProj = cameras[activePane].ProjectionMatrix(
+              static_cast<float>(activeRect.width) / static_cast<float>(windowHeight));
+          const glm::vec4 activeViewport(static_cast<float>(activeRect.x), 0.0f,
+                                          static_cast<float>(activeRect.width),
+                                          static_cast<float>(windowHeight));
           const glm::vec3 headTop = selected->position + glm::vec3(0.0f, 1.9f, 0.0f);
           const glm::vec3 screenPos =
-              glm::project(headTop, view, proj, glm::vec4(viewport.x, viewport.y, viewport.z, viewport.w));
+              glm::project(headTop, activeView, activeProj, activeViewport);
           // glm::project assumes a bottom-left viewport origin; flip Y for
-          // ImGui's top-left screen space.
+          // ImGui's top-left screen space. X is already absolute window
+          // space since activeViewport.x carries the pane's own offset.
           const ImVec2 windowPos(screenPos.x, windowHeight - screenPos.y);
           ImGui::SetNextWindowPos(windowPos, ImGuiCond_Always, ImVec2(0.5f, 1.0f));
           ImGui::Begin("Actions", nullptr,
@@ -522,16 +578,41 @@ int main() {
       }
     }
 
+    // Pane divider, per-pane team labels, and a dimming overlay on whichever
+    // pane isn't currently allowed to act -- the split-screen equivalent of
+    // "grey out the inactive side" for local multiplayer.
+    ImDrawList* overlay = ImGui::GetForegroundDrawList();
+    overlay->AddLine(ImVec2(static_cast<float>(paneRects[1].x), 0.0f),
+                      ImVec2(static_cast<float>(paneRects[1].x), static_cast<float>(windowHeight)),
+                      IM_COL32(255, 255, 255, 60), 2.0f);
+    for (int pane = 0; pane < kPaneCount; ++pane) {
+      const PaneRect& rect = paneRects[pane];
+      const bool active = isPaneActive(pane);
+      const char* status = game.Winner() ? "" : (active ? " - your turn" : "");
+      char label[64];
+      std::snprintf(label, sizeof(label), "%s%s", TeamName(PaneTeam(pane)), status);
+      overlay->AddText(ImVec2(rect.x + 10.0f, windowHeight - 24.0f), IM_COL32(255, 255, 255, 220),
+                        label);
+      if (game.Mode() != InputMode::GameOver && !active) {
+        overlay->AddRectFilled(ImVec2(static_cast<float>(rect.x), 0.0f),
+                                ImVec2(static_cast<float>(rect.x + rect.width),
+                                       static_cast<float>(windowHeight)),
+                                IM_COL32(0, 0, 0, 110));
+      }
+    }
+
     // --- Dispatch deferred input, now that WantCaptureMouse reflects the UI
     // actually built this frame. ---
     if (escapePending) game.CancelAction();
 
-    const bool worldInputAllowed = !ImGui::GetIO().WantCaptureMouse;
-    if (worldInputAllowed) {
-      if (game.Mode() == InputMode::AwaitingMoveDestination) {
-        const gfx::Ray hoverRay = camera.ScreenPointToRay(
-            static_cast<float>(mouseX), static_cast<float>(mouseY),
-            static_cast<float>(windowWidth), static_cast<float>(windowHeight));
+    const bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse;
+    if (!uiWantsMouse) {
+      const int hoverPane = PaneForX(mouseX, windowWidth);
+      if (isPaneActive(hoverPane) && game.Mode() == InputMode::AwaitingMoveDestination) {
+        const PaneRect& rect = paneRects[hoverPane];
+        const gfx::Ray hoverRay = cameras[hoverPane].ScreenPointToRay(
+            static_cast<float>(mouseX - rect.x), static_cast<float>(mouseY),
+            static_cast<float>(rect.width), static_cast<float>(windowHeight));
         glm::vec3 hoverPoint;
         if (IntersectGroundOrClimbTop(hoverRay, game.GetScene().obstacles, &hoverPoint)) {
           hoveredGroundPoint = hoverPoint;
@@ -540,111 +621,138 @@ int main() {
         }
       }
       if (leftClickPending) {
-        const gfx::Ray clickRay = camera.ScreenPointToRay(
-            static_cast<float>(leftClickX), static_cast<float>(leftClickY),
-            static_cast<float>(windowWidth), static_cast<float>(windowHeight));
-        // Only figures actually rendered this frame (own team, or enemies
-        // currently inside the viewing team's FOV) are pickable -- a hidden
-        // enemy's collision box must not be clickable just because it
-        // happens to sit behind something that is drawn.
-        std::vector<Unit> pickableUnits;
-        for (const Unit& unit : game.GetScene().units) {
-          if (unit.alive && IsUnitVisibleForRender(unit, viewingTeam, fogActive,
-                                                    viewingTeamVisibility)) {
-            pickableUnits.push_back(unit);
+        const int clickPane = PaneForX(leftClickX, windowWidth);
+        if (isPaneActive(clickPane)) {
+          const PaneRect& rect = paneRects[clickPane];
+          const gfx::Ray clickRay = cameras[clickPane].ScreenPointToRay(
+              static_cast<float>(leftClickX - rect.x), static_cast<float>(leftClickY),
+              static_cast<float>(rect.width), static_cast<float>(windowHeight));
+          // Only figures actually rendered on this pane this frame (own
+          // team, or enemies currently inside this team's FOV) are pickable
+          // -- a hidden enemy's collision box must not be clickable just
+          // because it happens to sit behind something that is drawn.
+          const Team clickTeam = PaneTeam(clickPane);
+          std::vector<Unit> pickableUnits;
+          for (const Unit& unit : game.GetScene().units) {
+            if (unit.alive && IsUnitVisibleForRender(unit, clickTeam, fogActive,
+                                                       paneVisibility[clickPane])) {
+              pickableUnits.push_back(unit);
+            }
           }
-        }
-        const int hitUnit = PickUnit(clickRay, pickableUnits);
-        if (hitUnit >= 0) {
-          game.ClickUnit(hitUnit);
-        } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
-          glm::vec3 point;
-          if (IntersectGroundOrClimbTop(clickRay, game.GetScene().obstacles, &point)) {
-            game.ClickGround(point);
+          const int hitUnit = PickUnit(clickRay, pickableUnits);
+          if (hitUnit >= 0) {
+            game.ClickUnit(hitUnit);
+          } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
+            glm::vec3 point;
+            if (IntersectGroundOrClimbTop(clickRay, game.GetScene().obstacles, &point)) {
+              game.ClickGround(point);
+            }
           }
         }
       }
     }
 
-    // --- Shadow pass: render casters (obstacles + currently-visible figures)
-    // depth-only from the light's point of view. Units hidden by fog-of-war
-    // must not cast a shadow either, or their position would leak through
-    // it. ---
+    // --- Render: one shadow pass + one color pass per pane. The shadow map
+    // is a single shared resource re-rendered immediately before each pane's
+    // color pass consumes it, so each team's shadows only come from casters
+    // that team can currently see. ---
     const auto& obstacles = game.GetScene().obstacles;
-    glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo);
-    glViewport(0, 0, kShadowMapSize, kShadowMapSize);
-    glClear(GL_DEPTH_BUFFER_BIT);
-    depthShader.Use();
-    for (const auto& obstacle : obstacles) {
-      const AABB& bounds = obstacle.bounds;
-      DrawBoxDepth(depthShader, cubeMesh, lightSpaceMatrix, bounds.min, bounds.max - bounds.min);
-    }
-    for (const Unit& unit : game.GetScene().units) {
-      if (!unit.alive) continue;
-      if (!IsUnitVisibleForRender(unit, viewingTeam, fogActive, viewingTeamVisibility)) continue;
-      DrawUnitDepth(depthShader, cubeMesh, lightSpaceMatrix, unit);
-    }
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    for (int pane = 0; pane < kPaneCount; ++pane) {
+      const Team team = PaneTeam(pane);
+      const PaneRect& rect = paneRects[pane];
+      const TeamVisibility& visibility = paneVisibility[pane];
 
-    // --- Render ---
-    glViewport(0, 0, windowWidth, windowHeight);
-    glClearColor(0.10f, 0.11f, 0.13f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+      glDisable(GL_SCISSOR_TEST);
+      glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo);
+      glViewport(0, 0, kShadowMapSize, kShadowMapSize);
+      glClear(GL_DEPTH_BUFFER_BIT);
+      depthShader.Use();
+      for (const auto& obstacle : obstacles) {
+        const AABB& bounds = obstacle.bounds;
+        DrawBoxDepth(depthShader, cubeMesh, lightSpaceMatrix, bounds.min, bounds.max - bounds.min);
+      }
+      for (const Unit& unit : game.GetScene().units) {
+        if (!unit.alive) continue;
+        if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+        DrawUnitDepth(depthShader, cubeMesh, lightSpaceMatrix, unit);
+      }
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    litShader.Use();
-    litShader.SetVec3("uLightDir", lightDir);
-    litShader.SetVec3("uViewPos", camera.Position());
-    litShader.SetInt("uShadowMap", 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, shadowDepthTex);
+      // Scissor, not just viewport, is required here: glClear() would
+      // otherwise clear the whole framebuffer (including the other pane's
+      // already-drawn half) regardless of the glViewport rect.
+      glEnable(GL_SCISSOR_TEST);
+      glViewport(rect.x, 0, rect.width, windowHeight);
+      glScissor(rect.x, 0, rect.width, windowHeight);
+      glClearColor(0.10f, 0.11f, 0.13f, 1.0f);
+      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    const float mapHalfExtent = tactics::constants::kMapHalfExtent;
-    DrawBoxLit(litShader, cubeMesh, viewProj, lightSpaceMatrix,
-               glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
-               glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f),
-               glm::vec4(0.16f, 0.18f, 0.20f, 1.0f));
+      const glm::mat4 view = cameras[pane].ViewMatrix();
+      const glm::mat4 proj = cameras[pane].ProjectionMatrix(
+          static_cast<float>(rect.width) / static_cast<float>(windowHeight));
+      const glm::mat4 viewProj = proj * view;
 
-    for (size_t i = 0; i < obstacles.size(); ++i) {
-      const bool obstacleVisible = !fogActive || viewingTeamVisibility.ObstacleVisible(i);
-      const AABB& bounds = obstacles[i].bounds;
-      const glm::vec4 baseColor = obstacles[i].climbable ? glm::vec4(0.55f, 0.48f, 0.3f, 1.0f)
-                                                          : glm::vec4(0.55f, 0.55f, 0.6f, 1.0f);
-      const glm::vec4 color = obstacleVisible ? baseColor : glm::vec4(0.22f, 0.22f, 0.24f, 1.0f);
-      DrawBoxLit(litShader, cubeMesh, viewProj, lightSpaceMatrix, bounds.min,
-                 bounds.max - bounds.min, color);
-    }
+      litShader.Use();
+      litShader.SetVec3("uLightDir", lightDir);
+      litShader.SetVec3("uViewPos", cameras[pane].Position());
+      litShader.SetInt("uShadowMap", 0);
+      glActiveTexture(GL_TEXTURE0);
+      glBindTexture(GL_TEXTURE_2D, shadowDepthTex);
 
-    for (const Unit& unit : game.GetScene().units) {
-      if (!unit.alive) continue;
-      if (!IsUnitVisibleForRender(unit, viewingTeam, fogActive, viewingTeamVisibility)) continue;
-      DrawUnit(litShader, cubeMesh, viewProj, lightSpaceMatrix, unit);
-    }
+      const float mapHalfExtent = tactics::constants::kMapHalfExtent;
+      DrawBoxLit(litShader, cubeMesh, viewProj, lightSpaceMatrix,
+                 glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
+                 glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f),
+                 glm::vec4(0.16f, 0.18f, 0.20f, 1.0f));
 
-    unlitShader.Use();
-    if (const auto actorId = game.CurrentActorId(); actorId && game.Mode() != InputMode::GameOver) {
-      if (const Unit* actor = game.FindUnit(*actorId)) {
-        DrawHighlight(unlitShader, cubeMesh, viewProj, actor->position,
-                      glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+      for (size_t i = 0; i < obstacles.size(); ++i) {
+        const bool obstacleVisible = !fogActive || visibility.ObstacleVisible(i);
+        const AABB& bounds = obstacles[i].bounds;
+        const glm::vec4 baseColor = obstacles[i].climbable ? glm::vec4(0.55f, 0.48f, 0.3f, 1.0f)
+                                                            : glm::vec4(0.55f, 0.55f, 0.6f, 1.0f);
+        const glm::vec4 color = obstacleVisible ? baseColor : glm::vec4(0.22f, 0.22f, 0.24f, 1.0f);
+        DrawBoxLit(litShader, cubeMesh, viewProj, lightSpaceMatrix, bounds.min,
+                   bounds.max - bounds.min, color);
+      }
+
+      for (const Unit& unit : game.GetScene().units) {
+        if (!unit.alive) continue;
+        if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+        DrawUnit(litShader, cubeMesh, viewProj, lightSpaceMatrix, unit);
+      }
+
+      unlitShader.Use();
+      if (const auto actorId = game.CurrentActorId(); actorId && game.Mode() != InputMode::GameOver) {
+        if (const Unit* actor = game.FindUnit(*actorId)) {
+          if (IsUnitVisibleForRender(*actor, team, fogActive, visibility)) {
+            DrawHighlight(unlitShader, cubeMesh, viewProj, actor->position,
+                          glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+          }
+        }
+      }
+      // Selection/move-preview state belongs to whichever team is currently
+      // acting, so only their own pane draws it.
+      if (isPaneActive(pane)) {
+        if (const auto selectedId = game.SelectedUnitId()) {
+          if (const Unit* selected = game.FindUnit(*selectedId)) {
+            DrawHighlight(unlitShader, cubeMesh, viewProj, selected->position,
+                          glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
+          }
+        }
+        if (game.Mode() == InputMode::AwaitingMoveDestination) {
+          if (game.MovePreviewValid() && game.MovePreviewPath().size() >= 2) {
+            pathLine.SetPoints(game.MovePreviewPath());
+            unlitShader.SetMat4("uMVP", viewProj);
+            unlitShader.SetVec4("uColor", glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
+            pathLine.Draw();
+          } else if (hasHoveredGroundPoint) {
+            DrawHighlight(unlitShader, cubeMesh, viewProj, hoveredGroundPoint,
+                          glm::vec4(0.9f, 0.15f, 0.15f, 1.0f));
+          }
+        }
       }
     }
-    if (const auto selectedId = game.SelectedUnitId()) {
-      if (const Unit* selected = game.FindUnit(*selectedId)) {
-        DrawHighlight(unlitShader, cubeMesh, viewProj, selected->position,
-                      glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
-      }
-    }
-
-    if (game.Mode() == InputMode::AwaitingMoveDestination) {
-      if (game.MovePreviewValid() && game.MovePreviewPath().size() >= 2) {
-        pathLine.SetPoints(game.MovePreviewPath());
-        unlitShader.SetMat4("uMVP", viewProj);
-        unlitShader.SetVec4("uColor", glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
-        pathLine.Draw();
-      } else if (hasHoveredGroundPoint) {
-        DrawHighlight(unlitShader, cubeMesh, viewProj, hoveredGroundPoint,
-                      glm::vec4(0.9f, 0.15f, 0.15f, 1.0f));
-      }
-    }
+    glDisable(GL_SCISSOR_TEST);
 
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -654,7 +762,18 @@ int main() {
     if (isSmokeTest && ++frameCount >= kSmokeTestMaxFrames) {
       quit = true;
     }
-  }
+
+#ifdef __EMSCRIPTEN__
+    if (quit) emscripten_cancel_main_loop();
+#endif
+  };
+
+#ifdef __EMSCRIPTEN__
+  std::function<void()> frameFn = runFrame;
+  emscripten_set_main_loop_arg(
+      [](void* arg) { (*static_cast<std::function<void()>*>(arg))(); }, &frameFn, 0, 1);
+#else
+  while (!quit) runFrame();
 
   pathLine.Destroy();
   cubeMesh.Destroy();
@@ -666,5 +785,6 @@ int main() {
   SDL_GL_DeleteContext(glContext);
   SDL_DestroyWindow(window);
   SDL_Quit();
+#endif
   return 0;
 }

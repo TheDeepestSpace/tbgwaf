@@ -1,9 +1,23 @@
 # tbgwaf
 
 A turn-based tactics prototype: two 3-figure squads (Blue vs Red) fight on a
-blocky obstacle field until one side is eliminated.
+blocky obstacle field, each side fogged from the other's view, until one team
+is eliminated.
 
-## Build
+**[Play it in your browser](https://thedeepestspace.github.io/tbgwaf/)** --
+local split-screen, no install required.
+
+## Play in browser
+
+The [live Pages build](https://thedeepestspace.github.io/tbgwaf/) is the same
+native game compiled to WebAssembly/WebGL2, rendered as one page split into
+two viewports: Blue's view on the left, Red's view on the right, both driven
+by a single shared match (not two tabs, not networked). Each side has its own
+camera; whichever team currently has the turn is the only side that's lit and
+accepts input, the other side is dimmed until it's their turn. See
+[Controls](#controls) below -- they apply identically in-browser and native.
+
+## Native build
 
 ```sh
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -13,6 +27,22 @@ ctest --test-dir build --output-on-failure
 
 Run the game with `./build/tactics_app`. `ctest` also runs a headless
 smoke test under `xvfb-run` if available.
+
+## Web (WASM) build
+
+Requires the [Emscripten SDK](https://emscripten.io/docs/getting_started/downloads.html)
+(already installed and on `PATH` in this repo's devcontainer):
+
+```sh
+emcmake cmake -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-web
+```
+
+This produces `build-web/tactics_app.{html,js,wasm}`. Serve the directory
+with any static file server (e.g. `python3 -m http.server -d build-web`) and
+open `tactics_app.html` -- it can't be opened as a `file://` URL, browsers
+block WASM/fetch from local files. Pushes to `master` build and publish this
+target to GitHub Pages automatically (`.github/workflows/pages.yml`).
 
 ## Controls
 
@@ -24,8 +54,12 @@ smoke test under `xvfb-run` if available.
     target is within your figure's forward-facing FOV cone and there's a
     clear line of sight; otherwise it's a miss. Either way the action is
     consumed.
-- **Right-click drag** to orbit the camera; **scroll** to zoom.
+- **Right-click drag** to orbit the camera; **scroll** to zoom. Either side
+  can freely look around its own viewport at any time, independent of whose
+  turn it is.
 - **Esc** cancels the current action/selection.
 
 Turns strictly alternate Blue/Red (skipping eliminated figures) until every
-figure on one team is dead.
+figure on one team is dead. Only the acting team's viewport accepts
+selection/move/shoot clicks; the other viewport ignores clicks (and is
+visually dimmed) until it's their turn again.

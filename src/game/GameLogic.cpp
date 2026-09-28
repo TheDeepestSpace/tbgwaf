@@ -8,6 +8,7 @@ namespace tactics {
 
 void GameLogic::Reset() {
   scene_ = BuildDefaultScene();
+  obstacleBounds_ = ObstacleBounds(scene_.obstacles);
   navMesh_.Build(scene_.obstacles, constants::kMapHalfExtent, constants::kAgentRadius);
   turnManager_.StartRound(scene_.units);
 
@@ -69,9 +70,9 @@ void GameLogic::ClickGround(const glm::vec3& point) {
   if (!navMesh_.FindPath(mover->position, point, &path)) return;
 
   const glm::vec3 origin = mover->position;
-  mover->position = glm::vec3(point.x, 0.0f, point.z);
+  mover->position = path.back();
   const glm::vec3 delta = mover->position - origin;
-  if (glm::length(delta) > 1e-4f) {
+  if (glm::length(glm::vec2(delta.x, delta.z)) > 1e-4f) {
     mover->facingYaw = std::atan2(delta.z, delta.x);
   }
   CompleteAction();
@@ -118,7 +119,7 @@ bool GameLogic::ResolveShot(Unit& shooter, Unit& target) {
   const bool hit =
       InFovCone(shooter.EyePosition(), shooter.FacingDirection(), target.EyePosition(),
                 constants::kShootHalfFovDegrees, constants::kShootRange) &&
-      LineOfSightClear(shooter.EyePosition(), target.EyePosition(), scene_.obstacles);
+      LineOfSightClear(shooter.EyePosition(), target.EyePosition(), obstacleBounds_);
   if (hit) target.alive = false;
   return hit;
 }

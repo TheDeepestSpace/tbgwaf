@@ -71,4 +71,14 @@ void Shader::SetVec4(const char* name, const glm::vec4& value) const {
   glUniform4fv(loc, 1, &value[0]);
 }
 
+void Shader::SetVec3(const char* name, const glm::vec3& value) const {
+  const GLint loc = glGetUniformLocation(program_, name);
+  glUniform3fv(loc, 1, &value[0]);
+}
+
+void Shader::SetInt(const char* name, int value) const {
+  const GLint loc = glGetUniformLocation(program_, name);
+  glUniform1i(loc, value);
+}
+
 }  // namespace gfx

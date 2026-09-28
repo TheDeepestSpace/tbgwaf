@@ -50,7 +50,7 @@ class GameLogic {
   // the current scene state (cheap given the handful of units/obstacles
   // here), so callers always see a result consistent with the latest move.
   TeamVisibility ComputeVisibility(Team team) const {
-    return tactics::ComputeTeamVisibility(team, scene_.units, scene_.obstacles);
+    return tactics::ComputeTeamVisibility(team, scene_.units, obstacleBounds_);
   }
 
   // Input events, driven by the input/render layer after it has resolved a
@@ -77,6 +77,7 @@ class GameLogic {
   Scene scene_;
   NavMesh navMesh_;
   TurnManager turnManager_;
+  std::vector<AABB> obstacleBounds_;  // Cached flat bounds of scene_.obstacles for LOS/FOV checks.
 
   InputMode mode_ = InputMode::AwaitingSelection;
   std::optional<int> selectedUnitId_;

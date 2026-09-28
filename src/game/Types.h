@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include <glm/glm.hpp>
 
 namespace tactics {
@@ -18,6 +20,21 @@ struct AABB {
   glm::vec3 Center() const { return (min + max) * 0.5f; }
   glm::vec3 HalfExtents() const { return (max - min) * 0.5f; }
 };
+
+// A map obstacle. `climbable` obstacles get a navmesh connection from
+// ground level up to their top surface (see NavMesh); non-climbable
+// obstacles are simply impassable walls.
+struct Obstacle {
+  AABB bounds;
+  bool climbable = false;
+};
+
+inline std::vector<AABB> ObstacleBounds(const std::vector<Obstacle>& obstacles) {
+  std::vector<AABB> result;
+  result.reserve(obstacles.size());
+  for (const auto& obstacle : obstacles) result.push_back(obstacle.bounds);
+  return result;
+}
 
 // Map/world tuning constants shared across gameplay systems.
 namespace constants {

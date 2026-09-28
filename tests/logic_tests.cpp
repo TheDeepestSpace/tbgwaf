@@ -110,6 +110,52 @@ void TestNavMeshRejectsPointsInsideObstacle() {
   CHECK(!nav.FindPath(glm::vec3(-8, 0, 0), glm::vec3(0, 0, 0), &path));
 }
 
+void TestNavMeshClimbsOntoClimbableObstacle() {
+  std::vector<Obstacle> obstacles = {
+      Obstacle{AABB{glm::vec3(-1.0f, 0.0f, -1.0f), glm::vec3(1.0f, 1.2f, 1.0f)},
+               /*climbable=*/true},
+  };
+  NavMesh nav;
+  nav.Build(obstacles, /*mapHalfExtent=*/10.0f, /*agentRadius=*/0.4f);
+
+  const glm::vec3 start(-8.0f, 0.0f, 0.0f);
+  const glm::vec3 top(0.0f, 1.2f, 0.0f);  // Center of the crate's top surface.
+
+  std::vector<glm::vec3> path;
+  CHECK(nav.FindPath(start, top, &path));
+  CHECK(path.size() >= 2);
+  CHECK(std::fabs(path.front().x - start.x) < 1e-3f);
+  CHECK(std::fabs(path.front().z - start.z) < 1e-3f);
+  // The path must actually climb: it should end at the obstacle's top
+  // elevation, and pass through ground level along the way (not spawn
+  // directly on top or treat the obstacle as flat-ground-passable).
+  CHECK(std::fabs(path.back().y - 1.2f) < 1e-3f);
+  bool sawGroundLevel = false;
+  bool sawTopLevel = false;
+  for (const auto& p : path) {
+    if (std::fabs(p.y) < 1e-3f) sawGroundLevel = true;
+    if (std::fabs(p.y - 1.2f) < 1e-3f) sawTopLevel = true;
+  }
+  CHECK(sawGroundLevel);
+  CHECK(sawTopLevel);
+}
+
+void TestNavMeshObstacleOverloadStillRoutesAroundNonClimbable() {
+  std::vector<Obstacle> obstacles = {
+      Obstacle{AABB{glm::vec3(-2.0f, 0.0f, -2.0f), glm::vec3(2.0f, 2.0f, 2.0f)},
+               /*climbable=*/false},
+  };
+  NavMesh nav;
+  nav.Build(obstacles, 10.0f, 0.4f);
+
+  const glm::vec3 start(-8.0f, 0.0f, 0.0f);
+  const glm::vec3 goal(8.0f, 0.0f, 0.0f);
+  std::vector<glm::vec3> path;
+  CHECK(nav.FindPath(start, goal, &path));
+  CHECK(path.size() > 2);  // Must detour; a non-climbable obstacle has no top connection.
+  for (const auto& p : path) CHECK(std::fabs(p.y) < 1e-3f);  // Never leaves ground level.
+}
+
 void TestRaycastLineOfSight() {
   std::vector<AABB> obstacles = {
       AABB{glm::vec3(-1.0f, 0.0f, -1.0f), glm::vec3(1.0f, 2.0f, 1.0f)},
@@ -120,6 +166,18 @@ void TestRaycastLineOfSight() {
   CHECK(LineOfSightClear(glm::vec3(-8, 5.0f, 0), glm::vec3(8, 5.0f, 0), obstacles));
   // Clear: offset row that never enters the obstacle's footprint.
   CHECK(LineOfSightClear(glm::vec3(-8, 1.5f, 5), glm::vec3(8, 1.5f, 5), obstacles));
+}
+
+void TestElevatedEyePositionSeesOverObstacle() {
+  // Stage-C sanity check: a figure standing atop a climbed obstacle has a
+  // raised eye position, and existing 3D LOS/FOV logic (Stage A/B) should
+  // handle that correctly with no special-casing -- a shot blocked at ground
+  // level becomes clear once the shooter's eye is above the obstacle.
+  std::vector<AABB> obstacles = {
+      AABB{glm::vec3(-1.0f, 0.0f, -1.0f), glm::vec3(1.0f, 2.0f, 1.0f)},
+  };
+  CHECK(!LineOfSightClear(glm::vec3(-5.0f, 1.5f, 0.0f), glm::vec3(5.0f, 1.5f, 0.0f), obstacles));
+  CHECK(LineOfSightClear(glm::vec3(-5.0f, 3.5f, 0.0f), glm::vec3(5.0f, 1.5f, 0.0f), obstacles));
 }
 
 void TestFovCone() {
@@ -322,6 +380,27 @@ void TestGameLogicMoveUpdatesPositionAndFacing() {
   CHECK(game.CurrentActorId() == 3);  // Turn advanced.
 }
 
+void TestGameLogicMoveCanClimbOntoObstacle() {
+  // BuildDefaultScene marks the standalone crates climbable; the one at
+  // (-4, 6.5) is a 1.2x1.2 footprint, 1.2 tall (see Scene.cpp).
+  GameLogic game;
+  CHECK(game.CurrentActorId() == 0);
+  game.ClickUnit(0);
+  game.ChooseMove();
+
+  const glm::vec3 crateTop(-4.0f, 1.2f, 6.5f);
+  game.HoverGround(crateTop);
+  CHECK(game.MovePreviewValid());
+
+  game.ClickGround(crateTop);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  const Unit* moved = game.FindUnit(0);
+  CHECK(std::fabs(moved->position.x - crateTop.x) < 1e-3f);
+  CHECK(std::fabs(moved->position.z - crateTop.z) < 1e-3f);
+  CHECK(std::fabs(moved->position.y - crateTop.y) < 1e-3f);
+  CHECK(game.CurrentActorId() == 3);  // Turn advanced.
+}
+
 void TestGameLogicWinCondition() {
   GameLogic game;
   // Directly eliminate the Red team to drive the game-over transition
@@ -348,7 +427,10 @@ int main() {
   TestNavMeshRoutesAroundObstacle();
   TestNavMeshDirectPathWhenUnobstructed();
   TestNavMeshRejectsPointsInsideObstacle();
+  TestNavMeshClimbsOntoClimbableObstacle();
+  TestNavMeshObstacleOverloadStillRoutesAroundNonClimbable();
   TestRaycastLineOfSight();
+  TestElevatedEyePositionSeesOverObstacle();
   TestFovCone();
   TestTeamVisibilityAggregatesAcrossFigures();
   TestTurnManagerAlternatesAndSkipsDead();
@@ -357,6 +439,7 @@ int main() {
   TestGameLogicShootRowsMatchLayout();
   TestGameLogicShootGatingRequiresTeamVisibility();
   TestGameLogicMoveUpdatesPositionAndFacing();
+  TestGameLogicMoveCanClimbOntoObstacle();
   TestGameLogicWinCondition();
 
   if (g_failures == 0) {

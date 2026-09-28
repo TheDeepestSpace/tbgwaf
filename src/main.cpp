@@ -23,6 +23,7 @@
 using tactics::AABB;
 using tactics::GameLogic;
 using tactics::InputMode;
+using tactics::Obstacle;
 using tactics::Team;
 using tactics::TeamVisibility;
 using tactics::Unit;
@@ -31,8 +32,11 @@ namespace {
 
 constexpr int kInitialWindowWidth = 1280;
 constexpr int kInitialWindowHeight = 720;
+constexpr int kShadowMapSize = 2048;
 
-const char* kVertexShaderSrc = R"(#version 300 es
+// Flat, unlit shader used for UI-ish overlays (selection highlights, the
+// move-path preview line) that should stay crisp regardless of shadowing.
+const char* kUnlitVertexShaderSrc = R"(#version 300 es
 layout(location = 0) in vec3 aPos;
 uniform mat4 uMVP;
 void main() {
@@ -40,13 +44,82 @@ void main() {
 }
 )";
 
-const char* kFragmentShaderSrc = R"(#version 300 es
+const char* kUnlitFragmentShaderSrc = R"(#version 300 es
 precision mediump float;
 uniform vec4 uColor;
 out vec4 FragColor;
 void main() {
   FragColor = uColor;
 }
+)";
+
+// Lit shader used for the actual scene geometry (ground, obstacles,
+// figures): a single directional light with a basic shadow map, and a
+// per-face normal derived from screen-space position derivatives (GLSL ES
+// 3.00 has dFdx/dFdy as core, so every cube face gets a correct flat normal
+// without needing a dedicated per-face-vertex mesh).
+const char* kLitVertexShaderSrc = R"(#version 300 es
+layout(location = 0) in vec3 aPos;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+uniform mat4 uLightSpaceMatrix;
+out vec3 vWorldPos;
+out vec4 vLightSpacePos;
+void main() {
+  vec4 world = uModel * vec4(aPos, 1.0);
+  vWorldPos = world.xyz;
+  vLightSpacePos = uLightSpaceMatrix * world;
+  gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)";
+
+const char* kLitFragmentShaderSrc = R"(#version 300 es
+precision highp float;
+in vec3 vWorldPos;
+in vec4 vLightSpacePos;
+uniform vec4 uColor;
+uniform vec3 uLightDir;  // Direction the light travels; surfaces face -uLightDir.
+uniform vec3 uViewPos;
+uniform sampler2D uShadowMap;
+out vec4 FragColor;
+
+float ComputeShadow(vec3 normal) {
+  vec3 proj = vLightSpacePos.xyz / vLightSpacePos.w;
+  proj = proj * 0.5 + 0.5;
+  if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z > 1.0) {
+    return 0.0;  // Outside the light's frustum: treat as unshadowed.
+  }
+  float closestDepth = texture(uShadowMap, proj.xy).r;
+  float currentDepth = proj.z;
+  float bias = max(0.003 * (1.0 - max(dot(normal, -uLightDir), 0.0)), 0.0008);
+  return (currentDepth - bias) > closestDepth ? 1.0 : 0.0;
+}
+
+void main() {
+  vec3 normal = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
+  vec3 viewDir = normalize(uViewPos - vWorldPos);
+  if (dot(normal, viewDir) < 0.0) normal = -normal;
+
+  float diffuse = max(dot(normal, -uLightDir), 0.0);
+  float shadow = ComputeShadow(normal);
+  const float kAmbient = 0.35;
+  float lit = kAmbient + (1.0 - shadow) * diffuse * 0.65;
+  FragColor = vec4(uColor.rgb * lit, uColor.a);
+}
+)";
+
+// Depth-only shader for the shadow map pass.
+const char* kDepthVertexShaderSrc = R"(#version 300 es
+layout(location = 0) in vec3 aPos;
+uniform mat4 uLightMVP;
+void main() {
+  gl_Position = uLightMVP * vec4(aPos, 1.0);
+}
+)";
+
+const char* kDepthFragmentShaderSrc = R"(#version 300 es
+precision mediump float;
+void main() {}
 )";
 
 void DrawBox(const gfx::Shader& shader, const gfx::CubeMesh& cube, const glm::mat4& viewProj,
@@ -58,21 +131,58 @@ void DrawBox(const gfx::Shader& shader, const gfx::CubeMesh& cube, const glm::ma
   cube.Draw();
 }
 
-void DrawUnit(const gfx::Shader& shader, const gfx::CubeMesh& cube, const glm::mat4& viewProj,
-              const Unit& unit) {
-  const glm::vec4 color = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
-                                                    : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
+// Lit variant: also uploads the model matrix (for world-space position/light
+// coordinates in the fragment shader) alongside the color. Light direction,
+// view position, and the shadow map itself are set once per frame, not
+// per-object, since they don't vary between draw calls.
+void DrawBoxLit(const gfx::Shader& shader, const gfx::CubeMesh& cube, const glm::mat4& viewProj,
+                 const glm::mat4& lightSpaceMatrix, const glm::vec3& minCorner,
+                 const glm::vec3& size, const glm::vec4& color) {
+  const glm::mat4 model =
+      glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
+  shader.SetMat4("uModel", model);
+  shader.SetMat4("uMVP", viewProj * model);
+  shader.SetMat4("uLightSpaceMatrix", lightSpaceMatrix);
+  shader.SetVec4("uColor", color);
+  cube.Draw();
+}
+
+void DrawBoxDepth(const gfx::Shader& shader, const gfx::CubeMesh& cube,
+                   const glm::mat4& lightSpaceMatrix, const glm::vec3& minCorner,
+                   const glm::vec3& size) {
+  const glm::mat4 model =
+      glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
+  shader.SetMat4("uLightMVP", lightSpaceMatrix * model);
+  cube.Draw();
+}
+
+void UnitBoxes(const Unit& unit, glm::vec3* outBodyMin, glm::vec3* outBodySize,
+               glm::vec3* outHeadMin, glm::vec3* outHeadSize) {
   constexpr float kHalfWidth = tactics::constants::kUnitHalfWidth;
   constexpr float kBodyHeight = 1.4f;
   constexpr float kHeadSize = 0.4f;
+  *outBodyMin = unit.position - glm::vec3(kHalfWidth, 0.0f, kHalfWidth);
+  *outBodySize = glm::vec3(kHalfWidth * 2.0f, kBodyHeight, kHalfWidth * 2.0f);
+  *outHeadMin = unit.position + glm::vec3(-kHeadSize * 0.5f, kBodyHeight, -kHeadSize * 0.5f);
+  *outHeadSize = glm::vec3(kHeadSize, kHeadSize, kHeadSize);
+}
 
-  const glm::vec3 bodyMin = unit.position - glm::vec3(kHalfWidth, 0.0f, kHalfWidth);
-  DrawBox(shader, cube, viewProj, bodyMin, glm::vec3(kHalfWidth * 2.0f, kBodyHeight, kHalfWidth * 2.0f),
-          color);
+void DrawUnit(const gfx::Shader& shader, const gfx::CubeMesh& cube, const glm::mat4& viewProj,
+              const glm::mat4& lightSpaceMatrix, const Unit& unit) {
+  const glm::vec4 color = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
+                                                    : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
+  glm::vec3 bodyMin, bodySize, headMin, headSize;
+  UnitBoxes(unit, &bodyMin, &bodySize, &headMin, &headSize);
+  DrawBoxLit(shader, cube, viewProj, lightSpaceMatrix, bodyMin, bodySize, color);
+  DrawBoxLit(shader, cube, viewProj, lightSpaceMatrix, headMin, headSize, color);
+}
 
-  const glm::vec3 headMin =
-      unit.position + glm::vec3(-kHeadSize * 0.5f, kBodyHeight, -kHeadSize * 0.5f);
-  DrawBox(shader, cube, viewProj, headMin, glm::vec3(kHeadSize, kHeadSize, kHeadSize), color);
+void DrawUnitDepth(const gfx::Shader& shader, const gfx::CubeMesh& cube,
+                    const glm::mat4& lightSpaceMatrix, const Unit& unit) {
+  glm::vec3 bodyMin, bodySize, headMin, headSize;
+  UnitBoxes(unit, &bodyMin, &bodySize, &headMin, &headSize);
+  DrawBoxDepth(shader, cube, lightSpaceMatrix, bodyMin, bodySize);
+  DrawBoxDepth(shader, cube, lightSpaceMatrix, headMin, headSize);
 }
 
 void DrawHighlight(const gfx::Shader& shader, const gfx::CubeMesh& cube, const glm::mat4& viewProj,
@@ -100,6 +210,43 @@ int PickUnit(const gfx::Ray& ray, const std::vector<Unit>& units) {
 }
 
 const char* TeamName(Team team) { return team == Team::Blue ? "Blue" : "Red"; }
+
+// Stage-C climbing: a ground/move click can land either on the y=0 ground
+// plane or on top of a climbable obstacle (a crate's top face). Both are
+// finite planes from the ray's point of view, so pick whichever the ray
+// actually hits nearer the camera -- matches how the scene is rendered
+// (the ground plane is infinite but obstacles occlude it visually).
+bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const std::vector<Obstacle>& obstacles,
+                                glm::vec3* outPoint) {
+  bool found = false;
+  float bestT = std::numeric_limits<float>::infinity();
+  glm::vec3 bestPoint(0.0f);
+
+  glm::vec3 groundPoint;
+  if (gfx::OrbitCamera::IntersectGroundPlane(ray, &groundPoint)) {
+    const float t = glm::dot(groundPoint - ray.origin, ray.direction);
+    found = true;
+    bestT = t;
+    bestPoint = groundPoint;
+  }
+
+  constexpr float kTopFaceEpsilon = 1e-2f;
+  for (const auto& obstacle : obstacles) {
+    if (!obstacle.climbable) continue;
+    float t = 0.0f;
+    if (!tactics::RayIntersectsAABB(ray.origin, ray.direction, obstacle.bounds, &t)) continue;
+    const glm::vec3 hit = ray.origin + ray.direction * t;
+    if (hit.y < obstacle.bounds.max.y - kTopFaceEpsilon) continue;  // Hit a side, not the top.
+    if (t < bestT) {
+      found = true;
+      bestT = t;
+      bestPoint = hit;
+    }
+  }
+
+  if (found && outPoint) *outPoint = bestPoint;
+  return found;
+}
 
 // Stage-B fog-of-war: a unit is drawable/pickable in this frame's view if
 // it's on the viewing team (you always see your own figures) or, when fog
@@ -157,15 +304,64 @@ int main() {
 
   glEnable(GL_DEPTH_TEST);
 
-  gfx::Shader colorShader;
-  if (!colorShader.Compile(kVertexShaderSrc, kFragmentShaderSrc)) {
-    std::fprintf(stderr, "Failed to compile the color shader\n");
+  gfx::Shader unlitShader;
+  if (!unlitShader.Compile(kUnlitVertexShaderSrc, kUnlitFragmentShaderSrc)) {
+    std::fprintf(stderr, "Failed to compile the unlit shader\n");
+    return 1;
+  }
+  gfx::Shader litShader;
+  if (!litShader.Compile(kLitVertexShaderSrc, kLitFragmentShaderSrc)) {
+    std::fprintf(stderr, "Failed to compile the lit shader\n");
+    return 1;
+  }
+  gfx::Shader depthShader;
+  if (!depthShader.Compile(kDepthVertexShaderSrc, kDepthFragmentShaderSrc)) {
+    std::fprintf(stderr, "Failed to compile the shadow depth shader\n");
     return 1;
   }
   gfx::CubeMesh cubeMesh;
   cubeMesh.Init();
   gfx::LineMesh pathLine;
   pathLine.Init();
+
+  // Stage-C: a single directional light (simulating overhead factory
+  // lighting) casting a basic shadow map, single cascade, hard-edged.
+  GLuint shadowFbo = 0;
+  GLuint shadowDepthTex = 0;
+  glGenFramebuffers(1, &shadowFbo);
+  glGenTextures(1, &shadowDepthTex);
+  glBindTexture(GL_TEXTURE_2D, shadowDepthTex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, kShadowMapSize, kShadowMapSize, 0,
+               GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadowDepthTex, 0);
+  {
+    const GLenum noColorBuffer = GL_NONE;
+    glDrawBuffers(1, &noColorBuffer);
+    glReadBuffer(GL_NONE);
+  }
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+    std::fprintf(stderr, "Shadow map framebuffer incomplete\n");
+    return 1;
+  }
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+  // The light and map geometry are both static, so the light-space matrix
+  // is fixed for the whole session.
+  const glm::vec3 lightDir = glm::normalize(glm::vec3(0.35f, -1.0f, 0.25f));
+  const float mapHalfExtentForLight = tactics::constants::kMapHalfExtent;
+  const float lightDistance = mapHalfExtentForLight * 3.0f;
+  const glm::vec3 lightPos = -lightDir * lightDistance;
+  const glm::mat4 lightView = glm::lookAt(lightPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+  const float orthoHalfExtent = mapHalfExtentForLight * 1.5f;
+  const glm::mat4 lightProj =
+      glm::ortho(-orthoHalfExtent, orthoHalfExtent, -orthoHalfExtent, orthoHalfExtent, 0.1f,
+                 lightDistance * 2.0f);
+  const glm::mat4 lightSpaceMatrix = lightProj * lightView;
 
   gfx::OrbitCamera camera;
   GameLogic game;
@@ -337,7 +533,7 @@ int main() {
             static_cast<float>(mouseX), static_cast<float>(mouseY),
             static_cast<float>(windowWidth), static_cast<float>(windowHeight));
         glm::vec3 hoverPoint;
-        if (gfx::OrbitCamera::IntersectGroundPlane(hoverRay, &hoverPoint)) {
+        if (IntersectGroundOrClimbTop(hoverRay, game.GetScene().obstacles, &hoverPoint)) {
           hoveredGroundPoint = hoverPoint;
           hasHoveredGroundPoint = true;
           game.HoverGround(hoverPoint);
@@ -363,61 +559,89 @@ int main() {
           game.ClickUnit(hitUnit);
         } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
           glm::vec3 point;
-          if (gfx::OrbitCamera::IntersectGroundPlane(clickRay, &point)) {
+          if (IntersectGroundOrClimbTop(clickRay, game.GetScene().obstacles, &point)) {
             game.ClickGround(point);
           }
         }
       }
     }
 
+    // --- Shadow pass: render casters (obstacles + currently-visible figures)
+    // depth-only from the light's point of view. Units hidden by fog-of-war
+    // must not cast a shadow either, or their position would leak through
+    // it. ---
+    const auto& obstacles = game.GetScene().obstacles;
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo);
+    glViewport(0, 0, kShadowMapSize, kShadowMapSize);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    depthShader.Use();
+    for (const auto& obstacle : obstacles) {
+      const AABB& bounds = obstacle.bounds;
+      DrawBoxDepth(depthShader, cubeMesh, lightSpaceMatrix, bounds.min, bounds.max - bounds.min);
+    }
+    for (const Unit& unit : game.GetScene().units) {
+      if (!unit.alive) continue;
+      if (!IsUnitVisibleForRender(unit, viewingTeam, fogActive, viewingTeamVisibility)) continue;
+      DrawUnitDepth(depthShader, cubeMesh, lightSpaceMatrix, unit);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
     // --- Render ---
     glViewport(0, 0, windowWidth, windowHeight);
     glClearColor(0.10f, 0.11f, 0.13f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    colorShader.Use();
+    litShader.Use();
+    litShader.SetVec3("uLightDir", lightDir);
+    litShader.SetVec3("uViewPos", camera.Position());
+    litShader.SetInt("uShadowMap", 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, shadowDepthTex);
 
     const float mapHalfExtent = tactics::constants::kMapHalfExtent;
-    DrawBox(colorShader, cubeMesh, viewProj, glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
-            glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f),
-            glm::vec4(0.16f, 0.18f, 0.20f, 1.0f));
+    DrawBoxLit(litShader, cubeMesh, viewProj, lightSpaceMatrix,
+               glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
+               glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f),
+               glm::vec4(0.16f, 0.18f, 0.20f, 1.0f));
 
-    const auto& obstacles = game.GetScene().obstacles;
     for (size_t i = 0; i < obstacles.size(); ++i) {
       const bool obstacleVisible = !fogActive || viewingTeamVisibility.ObstacleVisible(i);
-      const glm::vec4 color = obstacleVisible ? glm::vec4(0.55f, 0.55f, 0.6f, 1.0f)
-                                               : glm::vec4(0.22f, 0.22f, 0.24f, 1.0f);
-      DrawBox(colorShader, cubeMesh, viewProj, obstacles[i].min, obstacles[i].max - obstacles[i].min,
-              color);
-    }
-
-    if (const auto actorId = game.CurrentActorId(); actorId && game.Mode() != InputMode::GameOver) {
-      if (const Unit* actor = game.FindUnit(*actorId)) {
-        DrawHighlight(colorShader, cubeMesh, viewProj, actor->position,
-                      glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
-      }
-    }
-    if (const auto selectedId = game.SelectedUnitId()) {
-      if (const Unit* selected = game.FindUnit(*selectedId)) {
-        DrawHighlight(colorShader, cubeMesh, viewProj, selected->position,
-                      glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
-      }
+      const AABB& bounds = obstacles[i].bounds;
+      const glm::vec4 baseColor = obstacles[i].climbable ? glm::vec4(0.55f, 0.48f, 0.3f, 1.0f)
+                                                          : glm::vec4(0.55f, 0.55f, 0.6f, 1.0f);
+      const glm::vec4 color = obstacleVisible ? baseColor : glm::vec4(0.22f, 0.22f, 0.24f, 1.0f);
+      DrawBoxLit(litShader, cubeMesh, viewProj, lightSpaceMatrix, bounds.min,
+                 bounds.max - bounds.min, color);
     }
 
     for (const Unit& unit : game.GetScene().units) {
       if (!unit.alive) continue;
       if (!IsUnitVisibleForRender(unit, viewingTeam, fogActive, viewingTeamVisibility)) continue;
-      DrawUnit(colorShader, cubeMesh, viewProj, unit);
+      DrawUnit(litShader, cubeMesh, viewProj, lightSpaceMatrix, unit);
+    }
+
+    unlitShader.Use();
+    if (const auto actorId = game.CurrentActorId(); actorId && game.Mode() != InputMode::GameOver) {
+      if (const Unit* actor = game.FindUnit(*actorId)) {
+        DrawHighlight(unlitShader, cubeMesh, viewProj, actor->position,
+                      glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+      }
+    }
+    if (const auto selectedId = game.SelectedUnitId()) {
+      if (const Unit* selected = game.FindUnit(*selectedId)) {
+        DrawHighlight(unlitShader, cubeMesh, viewProj, selected->position,
+                      glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
+      }
     }
 
     if (game.Mode() == InputMode::AwaitingMoveDestination) {
       if (game.MovePreviewValid() && game.MovePreviewPath().size() >= 2) {
         pathLine.SetPoints(game.MovePreviewPath());
-        colorShader.SetMat4("uMVP", viewProj);
-        colorShader.SetVec4("uColor", glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
+        unlitShader.SetMat4("uMVP", viewProj);
+        unlitShader.SetVec4("uColor", glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
         pathLine.Draw();
       } else if (hasHoveredGroundPoint) {
-        DrawHighlight(colorShader, cubeMesh, viewProj, hoveredGroundPoint,
+        DrawHighlight(unlitShader, cubeMesh, viewProj, hoveredGroundPoint,
                       glm::vec4(0.9f, 0.15f, 0.15f, 1.0f));
       }
     }
@@ -434,6 +658,8 @@ int main() {
 
   pathLine.Destroy();
   cubeMesh.Destroy();
+  glDeleteTextures(1, &shadowDepthTex);
+  glDeleteFramebuffers(1, &shadowFbo);
   ImGui_ImplOpenGL3_Shutdown();
   ImGui_ImplSDL2_Shutdown();
   ImGui::DestroyContext();

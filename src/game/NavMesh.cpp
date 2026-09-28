@@ -12,6 +12,12 @@ namespace {
 
 constexpr float kEps = 1e-4f;
 
+// Climb-top cells are inset from the obstacle's own footprint so an agent
+// standing on top doesn't have its center placed right at (or past) the
+// edge. Smaller than `kAgentRadius` so even a 1.2x1.2 crate keeps a usable
+// top surface.
+constexpr float kClimbTopInset = 0.15f;
+
 struct ZInterval {
   float lo, hi;
 };
@@ -53,12 +59,38 @@ std::vector<glm::vec3> PullTaut(const std::vector<glm::vec3>& waypoints,
   return result;
 }
 
+// True if axis-aligned rectangle `cell` and `rect` share a border segment of
+// positive length (touching along one axis while overlapping on the other).
+bool RectsAdjacent(const NavCell& cell, const AABB& rect) {
+  const bool xTouch =
+      std::fabs(cell.xMax - rect.min.x) < kEps || std::fabs(cell.xMin - rect.max.x) < kEps;
+  const bool zOverlap = cell.zMin < rect.max.z - kEps && cell.zMax > rect.min.z + kEps;
+  if (xTouch && zOverlap) return true;
+
+  const bool zTouch =
+      std::fabs(cell.zMax - rect.min.z) < kEps || std::fabs(cell.zMin - rect.max.z) < kEps;
+  const bool xOverlap = cell.xMin < rect.max.x - kEps && cell.xMax > rect.min.x + kEps;
+  return zTouch && xOverlap;
+}
+
 }  // namespace
 
 void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, float agentRadius) {
+  BuildGroundMesh(obstacles, mapHalfExtent, agentRadius);
+}
+
+void NavMesh::Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent,
+                     float agentRadius) {
+  BuildGroundMesh(ObstacleBounds(obstacles), mapHalfExtent, agentRadius);
+  AddClimbConnections(obstacles, agentRadius);
+}
+
+void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, float mapHalfExtent,
+                               float agentRadius) {
   cells_.clear();
   neighbors_.clear();
   paddedFootprints_.clear();
+  mapHalfExtent_ = mapHalfExtent;
 
   const float mapMin = -mapHalfExtent;
   const float mapMax = mapHalfExtent;
@@ -113,13 +145,13 @@ void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, flo
     for (const auto& iv : merged) {
       if (iv.lo - cursor > kEps) {
         cellsByStrip[i].push_back(static_cast<int>(cells_.size()));
-        cells_.push_back(NavCell{stripXMin, stripXMax, cursor, iv.lo});
+        cells_.push_back(NavCell{stripXMin, stripXMax, cursor, iv.lo, 0.0f});
       }
       cursor = std::max(cursor, iv.hi);
     }
     if (mapMax - cursor > kEps) {
       cellsByStrip[i].push_back(static_cast<int>(cells_.size()));
-      cells_.push_back(NavCell{stripXMin, stripXMax, cursor, mapMax});
+      cells_.push_back(NavCell{stripXMin, stripXMax, cursor, mapMax, 0.0f});
     }
   }
 
@@ -139,24 +171,64 @@ void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, flo
   }
 }
 
+void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float agentRadius) {
+  const int groundCellCount = static_cast<int>(cells_.size());
+
+  for (const auto& obstacle : obstacles) {
+    if (!obstacle.climbable) continue;
+    const AABB& bounds = obstacle.bounds;
+
+    const float xMin = bounds.min.x + kClimbTopInset;
+    const float xMax = bounds.max.x - kClimbTopInset;
+    const float zMin = bounds.min.z + kClimbTopInset;
+    const float zMax = bounds.max.z - kClimbTopInset;
+    if (xMax <= xMin + kEps || zMax <= zMin + kEps) continue;  // Too small to stand on.
+
+    const int topIdx = static_cast<int>(cells_.size());
+    cells_.push_back(NavCell{xMin, xMax, zMin, zMax, bounds.max.y});
+    neighbors_.emplace_back();
+
+    const AABB padded{
+        glm::vec3(std::max(-mapHalfExtent_, bounds.min.x - agentRadius), bounds.min.y,
+                   std::max(-mapHalfExtent_, bounds.min.z - agentRadius)),
+        glm::vec3(std::min(mapHalfExtent_, bounds.max.x + agentRadius), bounds.min.y,
+                   std::min(mapHalfExtent_, bounds.max.z + agentRadius))};
+
+    for (int groundIdx = 0; groundIdx < groundCellCount; ++groundIdx) {
+      if (!RectsAdjacent(cells_[groundIdx], padded)) continue;
+      neighbors_[groundIdx].push_back(topIdx);
+      neighbors_[topIdx].push_back(groundIdx);
+    }
+  }
+}
+
 bool NavMesh::IsWalkable(float x, float z) const { return FindCellContaining(x, z) >= 0; }
 
-int NavMesh::FindCellContaining(float x, float z) const {
+int NavMesh::FindCellContaining(float x, float z) const { return FindCellContaining(x, z, 0.0f); }
+
+int NavMesh::FindCellContaining(float x, float z, float yHint) const {
+  int best = -1;
+  float bestDy = std::numeric_limits<float>::infinity();
   for (size_t i = 0; i < cells_.size(); ++i) {
-    if (cells_[i].Contains(x, z)) return static_cast<int>(i);
+    if (!cells_[i].Contains(x, z)) continue;
+    const float dy = std::fabs(cells_[i].elevation - yHint);
+    if (dy < bestDy) {
+      bestDy = dy;
+      best = static_cast<int>(i);
+    }
   }
-  return -1;
+  return best;
 }
 
 bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* outPath) const {
   if (!outPath) return false;
   outPath->clear();
-  start.y = 0.0f;
-  goal.y = 0.0f;
 
-  const int startCell = FindCellContaining(start.x, start.z);
-  const int goalCell = FindCellContaining(goal.x, goal.z);
+  const int startCell = FindCellContaining(start.x, start.z, start.y);
+  const int goalCell = FindCellContaining(goal.x, goal.z, goal.y);
   if (startCell < 0 || goalCell < 0) return false;
+  start.y = cells_[startCell].elevation;
+  goal.y = cells_[goalCell].elevation;
 
   if (startCell == goalCell) {
     outPath->push_back(start);
@@ -215,10 +287,22 @@ bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* 
   for (size_t i = 0; i + 1 < cellPath.size(); ++i) {
     const NavCell& a = cells_[cellPath[i]];
     const NavCell& b = cells_[cellPath[i + 1]];
-    const float zLo = std::max(a.zMin, b.zMin);
-    const float zHi = std::min(a.zMax, b.zMax);
-    const float boundaryX = std::fabs(a.xMax - b.xMin) < kEps ? a.xMax : a.xMin;
-    waypoints.push_back(glm::vec3(boundaryX, 0.0f, (zLo + zHi) * 0.5f));
+    if (std::fabs(a.elevation - b.elevation) > kEps) {
+      // Climb transition: walk to the point in `a` nearest `b`'s top, then
+      // step straight up (or down) onto the nearest point within `b`.
+      const glm::vec3 bCenter = b.Center();
+      const glm::vec3 approach(std::clamp(bCenter.x, a.xMin, a.xMax), a.elevation,
+                                std::clamp(bCenter.z, a.zMin, a.zMax));
+      const glm::vec3 landing(std::clamp(approach.x, b.xMin, b.xMax), b.elevation,
+                               std::clamp(approach.z, b.zMin, b.zMax));
+      waypoints.push_back(approach);
+      waypoints.push_back(landing);
+    } else {
+      const float zLo = std::max(a.zMin, b.zMin);
+      const float zHi = std::min(a.zMax, b.zMax);
+      const float boundaryX = std::fabs(a.xMax - b.xMin) < kEps ? a.xMax : a.xMin;
+      waypoints.push_back(glm::vec3(boundaryX, a.elevation, (zLo + zHi) * 0.5f));
+    }
   }
   waypoints.push_back(goal);
 

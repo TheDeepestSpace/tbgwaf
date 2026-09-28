@@ -10,6 +10,7 @@
 #include "game/TurnManager.h"
 #include "game/Types.h"
 #include "game/Unit.h"
+#include "game/Visibility.h"
 
 namespace tactics {
 
@@ -43,6 +44,14 @@ class GameLogic {
 
   Unit* FindUnit(int id);
   const Unit* FindUnit(int id) const;
+
+  // Stage-B fog-of-war: which enemy figures/obstacles are currently inside
+  // the combined FOV of `team`'s living figures. Recomputed on demand from
+  // the current scene state (cheap given the handful of units/obstacles
+  // here), so callers always see a result consistent with the latest move.
+  TeamVisibility ComputeVisibility(Team team) const {
+    return tactics::ComputeTeamVisibility(team, scene_.units, scene_.obstacles);
+  }
 
   // Input events, driven by the input/render layer after it has resolved a
   // screen click into either a unit id or a ground-plane world point.

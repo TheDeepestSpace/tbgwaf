@@ -12,6 +12,7 @@
 #include "game/Scene.h"
 #include "game/TurnManager.h"
 #include "game/Types.h"
+#include "game/Visibility.h"
 
 namespace {
 
@@ -28,6 +29,8 @@ void ReportFailure(const char* file, int line, const char* expr) {
   } while (0)
 
 using namespace tactics;
+
+constexpr float kPi = 3.14159265358979323846f;
 
 // Coarse sampling check: true if the closed segment [a,b] ever enters the
 // strict interior of `box` (XZ only). Used to confirm a path doesn't cut
@@ -130,6 +133,40 @@ void TestFovCone() {
   CHECK(!InFovCone(origin, forward, glm::vec3(100, 1.5f, 0), 75.0f, 30.0f));  // Out of range.
 }
 
+void TestTeamVisibilityAggregatesAcrossFigures() {
+  // A wall blocks the straight z=0 line; blueA (on that line) can't see the
+  // Red figure directly, but blueB's diagonal line of sight is clear. Team
+  // visibility should be the union across all of a team's living figures,
+  // not just any single one of them.
+  std::vector<AABB> obstacles = {
+      AABB{glm::vec3(-1.0f, 0.0f, -3.0f), glm::vec3(1.0f, 2.0f, 3.0f)},
+      // A small crate placed directly behind blueB (opposite its facing),
+      // clearly outside every living Blue figure's FOV cone.
+      AABB{glm::vec3(-11.18f, 0.0f, -9.84f), glm::vec3(-10.18f, 1.0f, -8.84f)},
+  };
+
+  std::vector<Unit> units(3);
+  units[0].id = 0;
+  units[0].team = Team::Blue;
+  units[0].position = glm::vec3(-8.0f, 0.0f, 0.0f);
+  units[0].facingYaw = 0.0f;  // Faces +X, straight down the blocked z=0 line.
+
+  units[1].id = 1;
+  units[1].team = Team::Blue;
+  units[1].position = glm::vec3(-8.0f, 0.0f, -8.0f);
+  units[1].facingYaw = std::atan2(8.0f, 16.0f);  // Faces the Red figure diagonally.
+
+  units[2].id = 2;
+  units[2].team = Team::Red;
+  units[2].position = glm::vec3(8.0f, 0.0f, 0.0f);
+  units[2].facingYaw = kPi;
+
+  const TeamVisibility visibility = ComputeTeamVisibility(Team::Blue, units, obstacles);
+  CHECK(visibility.UnitVisible(2));       // Visible via blueB even though blueA is blocked.
+  CHECK(visibility.ObstacleVisible(0));   // The wall itself is in view.
+  CHECK(!visibility.ObstacleVisible(1));  // Crate behind blueB: outside every cone.
+}
+
 void TestTurnManagerAlternatesAndSkipsDead() {
   std::vector<Unit> units(4);
   units[0].id = 0;
@@ -220,6 +257,42 @@ void TestGameLogicShootRowsMatchLayout() {
   CHECK(!game.Winner().has_value());  // Red still has id3, id5 alive.
 }
 
+void TestGameLogicShootGatingRequiresTeamVisibility() {
+  GameLogic game;
+
+  // Turn every living Blue figure to face away from Red (-X instead of +X):
+  // Red is now entirely outside Blue's combined FOV, regardless of LOS.
+  for (int id = 0; id <= 2; ++id) {
+    game.FindUnit(id)->facingYaw = kPi;
+  }
+  for (int redId = 3; redId <= 5; ++redId) {
+    CHECK(!game.ComputeVisibility(Team::Blue).UnitVisible(redId));
+  }
+
+  CHECK(game.CurrentActorId() == 0);
+  game.ClickUnit(0);
+  game.ChooseShoot();
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+
+  // Red5 is alive and would otherwise be a legal target, but it's outside
+  // Blue's team FOV: the click must be a no-op (not a guaranteed miss) --
+  // the turn stays with blue0 and nothing is resolved.
+  game.ClickUnit(5);
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+  CHECK(game.FindUnit(5)->alive);
+  CHECK(game.CurrentActorId() == 0);
+
+  // Turn blue0 back to face Red: Red5 re-enters Blue's FOV with clear LOS
+  // and becomes a valid, hittable target again (previously-hidden-now-
+  // visible enemies still resolve via the Stage-A hit logic).
+  game.FindUnit(0)->facingYaw = 0.0f;
+  CHECK(game.ComputeVisibility(Team::Blue).UnitVisible(5));
+  game.ClickUnit(5);
+  CHECK(!game.FindUnit(5)->alive);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(game.CurrentActorId() == 3);  // Turn advanced after the resolved shot.
+}
+
 void TestGameLogicMoveUpdatesPositionAndFacing() {
   GameLogic game;
   game.ClickUnit(0);
@@ -277,10 +350,12 @@ int main() {
   TestNavMeshRejectsPointsInsideObstacle();
   TestRaycastLineOfSight();
   TestFovCone();
+  TestTeamVisibilityAggregatesAcrossFigures();
   TestTurnManagerAlternatesAndSkipsDead();
   TestCheckWinner();
   TestGameLogicSelectionGating();
   TestGameLogicShootRowsMatchLayout();
+  TestGameLogicShootGatingRequiresTeamVisibility();
   TestGameLogicMoveUpdatesPositionAndFacing();
   TestGameLogicWinCondition();
 

@@ -50,6 +50,11 @@ void GameLogic::ClickUnit(int unitId) {
     Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
     if (!shooter) return;
     if (unit->team == shooter->team) return;  // Can only shoot enemies.
+    // Stage-B fog-of-war: a figure outside the shooter's team's current
+    // combined FOV isn't a valid target at all (the click is a no-op, not a
+    // guaranteed miss) -- distinct from an in-FOV shot that misses due to
+    // the shooter's own cone/LOS in ResolveShot below.
+    if (!ComputeVisibility(shooter->team).UnitVisible(unit->id)) return;
     ResolveShot(*shooter, *unit);
     CompleteAction();
   }

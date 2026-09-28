@@ -15,6 +15,7 @@
 #include "game/GameLogic.h"
 #include "game/Raycast.h"
 #include "game/Types.h"
+#include "game/Visibility.h"
 #include "gfx/Camera.h"
 #include "gfx/Mesh.h"
 #include "gfx/Shader.h"
@@ -23,6 +24,7 @@ using tactics::AABB;
 using tactics::GameLogic;
 using tactics::InputMode;
 using tactics::Team;
+using tactics::TeamVisibility;
 using tactics::Unit;
 
 namespace {
@@ -98,6 +100,16 @@ int PickUnit(const gfx::Ray& ray, const std::vector<Unit>& units) {
 }
 
 const char* TeamName(Team team) { return team == Team::Blue ? "Blue" : "Red"; }
+
+// Stage-B fog-of-war: a unit is drawable/pickable in this frame's view if
+// it's on the viewing team (you always see your own figures) or, when fog
+// is active, currently inside that team's combined FOV.
+bool IsUnitVisibleForRender(const Unit& unit, Team viewingTeam, bool fogActive,
+                             const TeamVisibility& visibility) {
+  if (unit.team == viewingTeam) return true;
+  if (!fogActive) return true;
+  return visibility.UnitVisible(unit.id);
+}
 
 }  // namespace
 
@@ -227,6 +239,23 @@ int main() {
     const glm::mat4 viewProj = proj * view;
     const ImVec4 viewport(0, 0, static_cast<float>(windowWidth), static_cast<float>(windowHeight));
 
+    // Stage-B fog-of-war: this is a local hot-seat prototype (see the
+    // WASM/Pages issue for why it isn't split into two per-team views yet),
+    // so we render whichever team currently has the turn's fog-of-war. Once
+    // the match ends there's nothing left to hide.
+    Team viewingTeam = Team::Blue;
+    TeamVisibility viewingTeamVisibility;
+    bool fogActive = false;
+    if (game.Mode() != InputMode::GameOver) {
+      if (const auto actorId = game.CurrentActorId()) {
+        if (const Unit* actor = game.FindUnit(*actorId)) {
+          viewingTeam = actor->team;
+          viewingTeamVisibility = game.ComputeVisibility(viewingTeam);
+          fogActive = true;
+        }
+      }
+    }
+
     // --- UI ---
     if (const auto winner = game.Winner()) {
       ImGui::SetNextWindowPos(ImVec2(windowWidth * 0.5f, windowHeight * 0.3f), ImGuiCond_Always,
@@ -318,7 +347,18 @@ int main() {
         const gfx::Ray clickRay = camera.ScreenPointToRay(
             static_cast<float>(leftClickX), static_cast<float>(leftClickY),
             static_cast<float>(windowWidth), static_cast<float>(windowHeight));
-        const int hitUnit = PickUnit(clickRay, game.GetScene().units);
+        // Only figures actually rendered this frame (own team, or enemies
+        // currently inside the viewing team's FOV) are pickable -- a hidden
+        // enemy's collision box must not be clickable just because it
+        // happens to sit behind something that is drawn.
+        std::vector<Unit> pickableUnits;
+        for (const Unit& unit : game.GetScene().units) {
+          if (unit.alive && IsUnitVisibleForRender(unit, viewingTeam, fogActive,
+                                                    viewingTeamVisibility)) {
+            pickableUnits.push_back(unit);
+          }
+        }
+        const int hitUnit = PickUnit(clickRay, pickableUnits);
         if (hitUnit >= 0) {
           game.ClickUnit(hitUnit);
         } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
@@ -342,9 +382,13 @@ int main() {
             glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f),
             glm::vec4(0.16f, 0.18f, 0.20f, 1.0f));
 
-    for (const AABB& obstacle : game.GetScene().obstacles) {
-      DrawBox(colorShader, cubeMesh, viewProj, obstacle.min, obstacle.max - obstacle.min,
-              glm::vec4(0.55f, 0.55f, 0.6f, 1.0f));
+    const auto& obstacles = game.GetScene().obstacles;
+    for (size_t i = 0; i < obstacles.size(); ++i) {
+      const bool obstacleVisible = !fogActive || viewingTeamVisibility.ObstacleVisible(i);
+      const glm::vec4 color = obstacleVisible ? glm::vec4(0.55f, 0.55f, 0.6f, 1.0f)
+                                               : glm::vec4(0.22f, 0.22f, 0.24f, 1.0f);
+      DrawBox(colorShader, cubeMesh, viewProj, obstacles[i].min, obstacles[i].max - obstacles[i].min,
+              color);
     }
 
     if (const auto actorId = game.CurrentActorId(); actorId && game.Mode() != InputMode::GameOver) {
@@ -362,6 +406,7 @@ int main() {
 
     for (const Unit& unit : game.GetScene().units) {
       if (!unit.alive) continue;
+      if (!IsUnitVisibleForRender(unit, viewingTeam, fogActive, viewingTeamVisibility)) continue;
       DrawUnit(colorShader, cubeMesh, viewProj, unit);
     }
 

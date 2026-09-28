@@ -46,6 +46,7 @@ set(GAME_LOGIC_SOURCES
   src/game/Scene.cpp
   src/game/NavMesh.cpp
   src/game/Raycast.cpp
+  src/game/Visibility.cpp
   src/game/TurnManager.cpp
   src/game/GameLogic.cpp
 )

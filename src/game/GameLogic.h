@@ -1,0 +1,80 @@
+#pragma once
+
+#include <optional>
+#include <vector>
+
+#include <glm/glm.hpp>
+
+#include "game/NavMesh.h"
+#include "game/Scene.h"
+#include "game/TurnManager.h"
+#include "game/Types.h"
+#include "game/Unit.h"
+
+namespace tactics {
+
+enum class InputMode {
+  AwaitingSelection,      // Waiting for the click on the current actor.
+  ActionMenu,             // Current actor selected; waiting for Move/Shoot/Pass.
+  AwaitingMoveDestination,  // Waiting for a ground click to move to.
+  AwaitingShootTarget,    // Waiting for a click on an enemy figure to shoot.
+  GameOver,
+};
+
+// Owns the whole Stage-A game state machine: scene, navmesh, turn order, and
+// the click-driven selection/action flow. Deliberately free of any
+// SDL/GL/ImGui dependency so it can be driven and verified headlessly.
+class GameLogic {
+ public:
+  GameLogic() { Reset(); }
+
+  void Reset();
+
+  const Scene& GetScene() const { return scene_; }
+  const NavMesh& GetNavMesh() const { return navMesh_; }
+  InputMode Mode() const { return mode_; }
+  std::optional<int> SelectedUnitId() const { return selectedUnitId_; }
+  std::optional<int> CurrentActorId() const { return turnManager_.CurrentActorId(scene_.units); }
+  std::optional<Team> Winner() const { return winner_; }
+  int RoundNumber() const { return turnManager_.RoundNumber(); }
+
+  const std::vector<glm::vec3>& MovePreviewPath() const { return movePreviewPath_; }
+  bool MovePreviewValid() const { return movePreviewValid_; }
+
+  Unit* FindUnit(int id);
+  const Unit* FindUnit(int id) const;
+
+  // Input events, driven by the input/render layer after it has resolved a
+  // screen click into either a unit id or a ground-plane world point.
+  void ClickUnit(int unitId);
+  void ClickGround(const glm::vec3& point);
+  void HoverGround(const glm::vec3& point);
+
+  // Action menu choices, valid only while Mode() == ActionMenu.
+  void ChooseMove();
+  void ChooseShoot();
+  void ChoosePass();
+
+  // Steps back one level: AwaitingMove/ShootTarget -> ActionMenu -> AwaitingSelection.
+  void CancelAction();
+
+  // Deterministic hit resolution: FOV cone + clear line-of-sight. Exposed
+  // directly so it can be unit tested without going through the click flow.
+  bool ResolveShot(Unit& shooter, Unit& target);
+
+ private:
+  void CompleteAction();
+
+  Scene scene_;
+  NavMesh navMesh_;
+  TurnManager turnManager_;
+
+  InputMode mode_ = InputMode::AwaitingSelection;
+  std::optional<int> selectedUnitId_;
+  std::optional<Team> winner_;
+
+  std::vector<glm::vec3> movePreviewPath_;
+  bool movePreviewValid_ = false;
+};
+
+}  // namespace tactics

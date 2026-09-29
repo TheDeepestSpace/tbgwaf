@@ -9,6 +9,11 @@ static HTML page embedding the videos, grouped by classification. The page
 is deployed into the existing per-PR gh-pages preview by
 .github/workflows/pr-preview.yml.
 
+Scenarios present at the PR's head but untouched by the PR are listed too,
+under "Unchanged scenarios", so reviewers see the full scenario set — but
+without a video, since re-rendering scenarios the PR didn't change would
+just be wasted CI time.
+
 Must run with a working X display (CI wraps it in xvfb-run) and ffmpeg on
 PATH. Always writes an index.html, even when the PR touches no scenarios.
 """
@@ -49,10 +54,11 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
 <h1>Gameplay scenario review</h1>
-<p>Scenarios under <code>{scenario_dir}</code> touched by this PR, classified from
-git metadata on the YAML files. Each video is the full scripted scenario as
-rendered for that team's fog-of-war pane (the PR's version; no base-branch
-comparison).</p>
+<p>Scenarios under <code>{scenario_dir}</code>, classified against this PR from
+git metadata on the YAML files. New and modified scenarios get a video (the
+full scripted scenario as rendered for that team's fog-of-war pane, the PR's
+version; no base-branch comparison); unchanged scenarios are listed without
+one.</p>
 {sections}
 </body>
 </html>
@@ -72,6 +78,15 @@ def classify_changes(base: str, head: str, repo_root: Path) -> dict[str, list[st
         if status and status[0] in changes:
             changes[status[0]].append(path)
     return changes
+
+
+def list_scenario_paths(ref: str, repo_root: Path) -> list[str]:
+    """Returns paths of all scenario YAMLs present at ref."""
+    out = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", ref, "--", SCENARIO_DIR],
+        cwd=repo_root, check=True, capture_output=True, text=True,
+    ).stdout
+    return [p for p in out.splitlines() if p.endswith((".yaml", ".yml"))]
 
 
 def record_videos(paths: list[str], runner: Path, repo_root: Path, media_dir: Path) -> dict:
@@ -154,6 +169,10 @@ def main() -> int:
     args = parser.parse_args()
 
     changes = classify_changes(args.base, args.head, args.repo_root)
+    all_paths = list_scenario_paths(args.head, args.repo_root)
+    changed_paths = set(changes["A"]) | set(changes["M"])
+    changes["U"] = [p for p in all_paths if p not in changed_paths]
+
     args.out.mkdir(parents=True, exist_ok=True)
     media_dir = args.out / "media"
 
@@ -166,6 +185,7 @@ def main() -> int:
         sections = "\n".join([
             build_section("New scenarios", changes["A"], results),
             build_section("Modified scenarios", changes["M"], results),
+            build_section("Unchanged scenarios", changes["U"], None),
             build_section("Deleted scenarios", changes["D"], None),
         ])
 
@@ -173,7 +193,7 @@ def main() -> int:
         PAGE_TEMPLATE.format(scenario_dir=SCENARIO_DIR, sections=sections))
     print(f"[scenario-review] wrote {args.out / 'index.html'} "
           f"({len(changes['A'])} new, {len(changes['M'])} modified, "
-          f"{len(changes['D'])} deleted)", file=sys.stderr)
+          f"{len(changes['U'])} unchanged, {len(changes['D'])} deleted)", file=sys.stderr)
     # Video failures are surfaced on the page itself; the page build only
     # fails if git classification failed (raised above).
     return 0

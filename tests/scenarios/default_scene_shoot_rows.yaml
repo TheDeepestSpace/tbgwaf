@@ -1,0 +1,47 @@
+# Replicates BuildDefaultScene() (src/game/Scene.cpp) and the same shot
+# outcomes as TestGameLogicShootRowsMatchLayout in tests/logic_tests.cpp:
+# the top/bottom lanes are wall-blocked (shots there must miss), the middle
+# lane is open (a clean shot must hit), and turn order must skip a figure
+# that dies mid-round.
+name: default_scene_shoot_rows
+
+map:
+  obstacles:
+    - {center: [0, -4], half_extent: [1.0, 2.0], height: 2.0, climbable: false}
+    - {center: [0, 4], half_extent: [1.0, 2.0], height: 2.0, climbable: false}
+    - {center: [-4, 6.5], half_extent: [0.6, 0.6], height: 1.2, climbable: true}
+    - {center: [4, -6.5], half_extent: [0.6, 0.6], height: 1.2, climbable: true}
+    - {center: [-3.5, -7.5], half_extent: [0.6, 0.6], height: 1.2, climbable: true}
+    - {center: [3.5, 7.5], half_extent: [0.6, 0.6], height: 1.2, climbable: true}
+
+units:
+  - {id: 0, team: blue, position: [-8, 0, -4], facing_degrees: 0}
+  - {id: 1, team: blue, position: [-8, 0, 0], facing_degrees: 0}
+  - {id: 2, team: blue, position: [-8, 0, 4], facing_degrees: 0}
+  - {id: 3, team: red, position: [8, 0, -4], facing_degrees: 180}
+  - {id: 4, team: red, position: [8, 0, 0], facing_degrees: 180}
+  - {id: 5, team: red, position: [8, 0, 4], facing_degrees: 180}
+
+script:
+  # Row z=-4 is behind the first wall: blue0 -> red3 must miss.
+  - action: shoot
+    actor: 0
+    target: 3
+  - assert: {unit: 3, alive: true}
+  - assert: {current_actor: 3}
+
+  # Symmetric: red0 shooting back across the same blocked row also misses.
+  - action: shoot
+    actor: 3
+    target: 0
+  - assert: {unit: 0, alive: true}
+  - assert: {current_actor: 1}
+
+  # Row z=0 is the open middle lane: blue1 -> red4 must hit.
+  - action: shoot
+    actor: 1
+    target: 4
+  - assert: {unit: 4, alive: false}
+  - assert: {winner: none}  # Red still has id3, id5 alive.
+  # Turn order must skip the now-dead red4 and land on blue2.
+  - assert: {current_actor: 2}

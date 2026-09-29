@@ -10,7 +10,7 @@ void GameLogic::Reset() {
   scene_ = BuildDefaultScene();
   obstacleBounds_ = ObstacleBounds(scene_.obstacles);
   navMesh_.Build(scene_.obstacles, constants::kMapHalfExtent, constants::kAgentRadius);
-  turnManager_.StartRound(scene_.units);
+  turnManager_.StartRound();
 
   mode_ = InputMode::AwaitingSelection;
   selectedUnitId_.reset();
@@ -19,6 +19,8 @@ void GameLogic::Reset() {
   movePreviewValid_ = false;
   moveAnimPath_.clear();
   moveAnimSegment_ = 0;
+  commitOrder_.clear();
+  commitIndex_ = 0;
 }
 
 Unit* GameLogic::FindUnit(int id) {
@@ -35,17 +37,28 @@ const Unit* GameLogic::FindUnit(int id) const {
   return nullptr;
 }
 
+bool GameLogic::CanCommitTurn() const {
+  bool anyLiving = false;
+  for (const auto& unit : scene_.units) {
+    if (!unit.alive || unit.team != turnManager_.CurrentTeam()) continue;
+    anyLiving = true;
+    if (unit.plan.type == PlannedActionType::None) return false;
+  }
+  return anyLiving;
+}
+
 void GameLogic::ClickUnit(int unitId) {
   if (winner_) return;
+  if (mode_ == InputMode::Moving) return;  // A commit is animating; input is inert.
   Unit* unit = FindUnit(unitId);
   if (!unit || !unit->alive) return;
 
   if (mode_ == InputMode::AwaitingSelection) {
-    const auto current = turnManager_.CurrentActorId(scene_.units);
-    if (current && *current == unitId) {
-      selectedUnitId_ = unitId;
-      mode_ = InputMode::ActionMenu;
-    }
+    // Any living figure on the currently acting team can be (re)selected to
+    // set or revise its plan, regardless of whether it already has one.
+    if (unit->team != turnManager_.CurrentTeam()) return;
+    selectedUnitId_ = unitId;
+    mode_ = InputMode::ActionMenu;
     return;
   }
 
@@ -58,8 +71,11 @@ void GameLogic::ClickUnit(int unitId) {
     // guaranteed miss) -- distinct from an in-FOV shot that misses due to
     // the shooter's own cone/LOS in ResolveShot below.
     if (!ComputeVisibility(shooter->team).UnitVisible(unit->id)) return;
-    ResolveShot(*shooter, *unit);
-    CompleteAction();
+    shooter->plan.type = PlannedActionType::Shoot;
+    shooter->plan.shootTargetId = unit->id;
+    shooter->plan.movePath.clear();
+    selectedUnitId_.reset();
+    mode_ = InputMode::AwaitingSelection;
   }
 }
 
@@ -71,13 +87,13 @@ void GameLogic::ClickGround(const glm::vec3& point) {
   std::vector<glm::vec3> path;
   if (!navMesh_.FindPath(mover->position, point, &path)) return;
 
-  // Animate rather than teleport: hand the resolved path off to Update(),
-  // which walks the mover along it at constant speed and completes the
-  // action once the path is consumed. NavMesh::FindPath always returns at
-  // least [start, goal] on success.
-  moveAnimPath_ = std::move(path);
-  moveAnimSegment_ = 0;
-  mode_ = InputMode::Moving;
+  // Plan only: NavMesh::FindPath always returns at least [start, goal] on
+  // success. Nothing moves until this plan is executed by CommitTurn().
+  mover->plan.type = PlannedActionType::Move;
+  mover->plan.movePath = std::move(path);
+  mover->plan.shootTargetId = -1;
+  selectedUnitId_.reset();
+  mode_ = InputMode::AwaitingSelection;
   movePreviewPath_.clear();
   movePreviewValid_ = false;
 }
@@ -87,7 +103,8 @@ void GameLogic::Update(float dtSeconds) {
   Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || moveAnimPath_.size() < 2) {
     moveAnimPath_.clear();
-    CompleteAction();
+    ++commitIndex_;
+    ContinueCommit();
     return;
   }
 
@@ -115,7 +132,8 @@ void GameLogic::Update(float dtSeconds) {
 
   if (moveAnimSegment_ + 1 >= moveAnimPath_.size()) {
     moveAnimPath_.clear();
-    CompleteAction();
+    ++commitIndex_;
+    ContinueCommit();
   }
 }
 
@@ -142,7 +160,13 @@ void GameLogic::ChooseShoot() {
 
 void GameLogic::ChoosePass() {
   if (mode_ != InputMode::ActionMenu) return;
-  CompleteAction();
+  Unit* unit = FindUnit(selectedUnitId_.value_or(-1));
+  if (!unit) return;
+  unit->plan.type = PlannedActionType::Pass;
+  unit->plan.movePath.clear();
+  unit->plan.shootTargetId = -1;
+  selectedUnitId_.reset();
+  mode_ = InputMode::AwaitingSelection;
 }
 
 void GameLogic::CancelAction() {
@@ -165,11 +189,68 @@ bool GameLogic::ResolveShot(Unit& shooter, Unit& target) {
   return hit;
 }
 
-void GameLogic::CompleteAction() {
+void GameLogic::CommitTurn() {
+  if (!CanCommitTurn()) return;
+  if (mode_ != InputMode::AwaitingSelection && mode_ != InputMode::ActionMenu &&
+      mode_ != InputMode::AwaitingMoveDestination && mode_ != InputMode::AwaitingShootTarget) {
+    return;
+  }
+
   selectedUnitId_.reset();
-  mode_ = InputMode::AwaitingSelection;
   movePreviewPath_.clear();
   movePreviewValid_ = false;
+
+  commitOrder_.clear();
+  const Team committingTeam = turnManager_.CurrentTeam();
+  for (const auto& unit : scene_.units) {
+    if (unit.alive && unit.team == committingTeam) commitOrder_.push_back(unit.id);
+  }
+  commitIndex_ = 0;
+  mode_ = InputMode::AwaitingSelection;
+  ContinueCommit();
+}
+
+void GameLogic::ContinueCommit() {
+  while (commitIndex_ < commitOrder_.size()) {
+    Unit* unit = FindUnit(commitOrder_[commitIndex_]);
+    if (!unit || !unit->alive) {
+      ++commitIndex_;
+      continue;
+    }
+
+    const PlannedAction plan = unit->plan;
+    unit->plan = PlannedAction{};
+
+    if (plan.type == PlannedActionType::Move) {
+      moveAnimPath_ = plan.movePath;
+      moveAnimSegment_ = 0;
+      selectedUnitId_ = unit->id;
+      mode_ = InputMode::Moving;
+      return;  // Update() drives the animation and resumes the commit.
+    }
+
+    if (plan.type == PlannedActionType::Shoot) {
+      // A known PoC scope cut: actions in a commit resolve in squad order
+      // against world state as it stands after each prior action, not
+      // simultaneously. If an earlier action in this same commit already
+      // killed the planned target, this shot simply has nothing to hit.
+      Unit* target = FindUnit(plan.shootTargetId);
+      if (target && target->alive) {
+        ResolveShot(*unit, *target);
+      }
+    }
+
+    ++commitIndex_;
+  }
+
+  FinishCommit();
+}
+
+void GameLogic::FinishCommit() {
+  selectedUnitId_.reset();
+  commitOrder_.clear();
+  commitIndex_ = 0;
+  mode_ = InputMode::AwaitingSelection;
 
   const auto winner = CheckWinner(scene_.units);
   if (winner) {
@@ -177,7 +258,7 @@ void GameLogic::CompleteAction() {
     mode_ = InputMode::GameOver;
     return;
   }
-  turnManager_.AdvanceTurn(scene_.units);
+  turnManager_.AdvanceTurn();
 }
 
 }  // namespace tactics

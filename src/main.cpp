@@ -526,11 +526,7 @@ int main() {
     // around their own pane at any time.
     std::optional<Team> activeTeam;
     if (game.Mode() != InputMode::GameOver) {
-      if (const auto actorId = game.CurrentActorId()) {
-        if (const Unit* actor = game.FindUnit(*actorId)) {
-          activeTeam = actor->team;
-        }
-      }
+      activeTeam = game.CurrentTeam();
     }
     const bool fogActive = game.Mode() != InputMode::GameOver;
     auto isPaneActive = [&](int pane) { return activeTeam && *activeTeam == PaneTeam(pane); };
@@ -552,36 +548,44 @@ int main() {
       }
       ImGui::End();
     } else {
+      int plannedCount = 0, totalCount = 0;
+      for (const Unit& unit : game.GetScene().units) {
+        if (!unit.alive || !activeTeam || unit.team != *activeTeam) continue;
+        ++totalCount;
+        if (unit.plan.type != tactics::PlannedActionType::None) ++plannedCount;
+      }
+
       ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
       ImGui::Begin("Turn", nullptr,
                    ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
                        ImGuiWindowFlags_NoMove);
       ImGui::Text("Round %d", game.RoundNumber());
-      if (const auto actorId = game.CurrentActorId()) {
-        const Unit* actor = game.FindUnit(*actorId);
-        if (actor) {
-          ImGui::Text("%s team's turn (figure #%d)", TeamName(actor->team), actor->id);
-        }
+      if (activeTeam) {
+        ImGui::Text("%s team's turn -- plan every figure, then commit.", TeamName(*activeTeam));
+        ImGui::Text("Planned: %d / %d", plannedCount, totalCount);
       }
       switch (game.Mode()) {
         case InputMode::AwaitingSelection:
-          ImGui::TextWrapped("Click the highlighted figure to act.");
+          ImGui::TextWrapped("Click one of your figures to plan its action.");
           break;
         case InputMode::ActionMenu:
-          ImGui::TextWrapped("Choose an action.");
+          ImGui::TextWrapped("Choose an action to plan.");
           break;
         case InputMode::AwaitingMoveDestination:
           ImGui::TextWrapped("Click a destination on the ground (Esc to cancel).");
           break;
         case InputMode::AwaitingShootTarget:
-          ImGui::TextWrapped("Click an enemy figure to shoot (Esc to cancel).");
+          ImGui::TextWrapped("Click an enemy figure to plan a shot (Esc to cancel).");
           break;
         case InputMode::Moving:
-          ImGui::TextWrapped("Figure is moving...");
+          ImGui::TextWrapped("Committing turn: figure is moving...");
           break;
         default:
           break;
       }
+      ImGui::BeginDisabled(!game.CanCommitTurn());
+      if (ImGui::Button("Commit Turn")) game.CommitTurn();
+      ImGui::EndDisabled();
       ImGui::End();
 
       if (const auto selectedId = game.SelectedUnitId(); selectedId && activeTeam) {
@@ -792,12 +796,17 @@ int main() {
       glDepthMask(GL_TRUE);
       glDisable(GL_BLEND);
 
-      if (const auto actorId = game.CurrentActorId(); actorId && game.Mode() != InputMode::GameOver) {
-        if (const Unit* actor = game.FindUnit(*actorId)) {
-          if (IsUnitVisibleForRender(*actor, team, fogActive, visibility)) {
-            DrawHighlight(unlitShader, cubeMesh, viewProj, actor->position,
-                          glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
-          }
+      // Plan-then-commit: every living figure on the team currently planning
+      // gets a highlight in its own pane (dim white = still needs a plan,
+      // green = plan set) -- this is squad-wide now, not a single actor.
+      if (isPaneActive(pane) && game.Mode() != InputMode::GameOver) {
+        for (const Unit& unit : game.GetScene().units) {
+          if (!unit.alive || unit.team != team) continue;
+          if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+          const bool planned = unit.plan.type != tactics::PlannedActionType::None;
+          const glm::vec4 color = planned ? glm::vec4(0.25f, 0.9f, 0.35f, 1.0f)
+                                            : glm::vec4(1.0f, 1.0f, 1.0f, 0.6f);
+          DrawHighlight(unlitShader, cubeMesh, viewProj, unit.position, color);
         }
       }
       // Selection/move-preview state belongs to whichever team is currently
@@ -818,6 +827,29 @@ int main() {
           } else if (hasHoveredGroundPoint) {
             DrawHighlight(unlitShader, cubeMesh, viewProj, hoveredGroundPoint,
                           glm::vec4(0.9f, 0.15f, 0.15f, 1.0f));
+          }
+        }
+
+        // Visual feedback for the whole squad's plan so far (issue point 5):
+        // a planned move reuses the same path-line rendering as the live
+        // preview above; a planned shot gets a simple shooter->target line.
+        for (const Unit& unit : game.GetScene().units) {
+          if (!unit.alive || unit.team != team) continue;
+          if (unit.plan.type == tactics::PlannedActionType::Move &&
+              unit.plan.movePath.size() >= 2) {
+            pathLine.SetPoints(unit.plan.movePath);
+            unlitShader.SetMat4("uMVP", viewProj);
+            unlitShader.SetVec4("uColor", glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
+            pathLine.Draw();
+          } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
+            if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {
+              const std::vector<glm::vec3> shotLine = {unit.EyePosition(),
+                                                         shotTarget->EyePosition()};
+              pathLine.SetPoints(shotLine);
+              unlitShader.SetMat4("uMVP", viewProj);
+              unlitShader.SetVec4("uColor", glm::vec4(0.95f, 0.25f, 0.2f, 1.0f));
+              pathLine.Draw();
+            }
           }
         }
       }

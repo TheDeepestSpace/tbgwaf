@@ -225,30 +225,21 @@ void TestTeamVisibilityAggregatesAcrossFigures() {
   CHECK(!visibility.ObstacleVisible(1));  // Crate behind blueB: outside every cone.
 }
 
-void TestTurnManagerAlternatesAndSkipsDead() {
-  std::vector<Unit> units(4);
-  units[0].id = 0;
-  units[0].team = Team::Blue;
-  units[1].id = 1;
-  units[1].team = Team::Blue;
-  units[2].id = 2;
-  units[2].team = Team::Red;
-  units[3].id = 3;
-  units[3].team = Team::Red;
-
+void TestTurnManagerAlternatesByTeamAndRounds() {
+  // Plan-then-commit turn model: a "turn" is a whole team's block, not a
+  // single figure, so the manager just alternates Blue/Red and bumps the
+  // round once both have gone.
   TurnManager tm;
-  tm.StartRound(units);
-  CHECK(tm.CurrentActorId(units) == 0);
-  tm.AdvanceTurn(units);
-  CHECK(tm.CurrentActorId(units) == 2);
-  tm.AdvanceTurn(units);
-  CHECK(tm.CurrentActorId(units) == 1);
+  tm.StartRound();
+  CHECK(tm.CurrentTeam() == Team::Blue);
+  CHECK(tm.RoundNumber() == 1);
 
-  // Kill unit 3 mid-round; it should be skipped when its turn comes up.
-  units[3].alive = false;
-  tm.AdvanceTurn(units);
-  // unit 3 (dead) is skipped -> round exhausted -> new round starts at 0.
-  CHECK(tm.CurrentActorId(units) == 0);
+  tm.AdvanceTurn();
+  CHECK(tm.CurrentTeam() == Team::Red);
+  CHECK(tm.RoundNumber() == 1);
+
+  tm.AdvanceTurn();
+  CHECK(tm.CurrentTeam() == Team::Blue);
   CHECK(tm.RoundNumber() == 2);
 }
 
@@ -272,47 +263,115 @@ void TestCheckWinner() {
 void TestGameLogicSelectionGating() {
   GameLogic game;
   CHECK(game.Mode() == InputMode::AwaitingSelection);
-  CHECK(game.CurrentActorId() == 0);  // Blue0 acts first (Scene builds Blue ids 0-2, Red 3-5).
+  CHECK(game.CurrentTeam() == Team::Blue);  // Blue plans first (Scene builds Blue ids 0-2, Red 3-5).
 
-  // Clicking a unit that isn't the current actor must be a no-op.
+  // Clicking a figure on the non-acting team must be a no-op.
   game.ClickUnit(3);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(!game.SelectedUnitId().has_value());
 
-  game.ClickUnit(0);
+  // Any living figure on the acting team can be selected to plan its action
+  // -- there's no single "current actor" any more, the whole squad plans.
+  game.ClickUnit(1);
   CHECK(game.Mode() == InputMode::ActionMenu);
-  CHECK(game.SelectedUnitId() == 0);
+  CHECK(game.SelectedUnitId() == 1);
 
   game.CancelAction();
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(!game.SelectedUnitId().has_value());
 }
 
+void TestGameLogicPlanThenCommitDefersExecutionAndAppliesInSquadOrder() {
+  GameLogic game;
+  CHECK(game.CurrentTeam() == Team::Blue);
+
+  const glm::vec3 blue0Start = game.FindUnit(0)->position;
+  const glm::vec3 blue1Start = game.FindUnit(1)->position;
+
+  // Plan a move on blue0, a shoot (open lane, would hit) on blue1, and a
+  // pass on blue2 -- one action per figure, nothing executes yet.
+  game.ClickUnit(0);
+  game.ChooseMove();
+  const glm::vec3 destination(-3.0f, 0.0f, -4.0f);
+  game.ClickGround(destination);
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Move);
+
+  game.ClickUnit(1);
+  game.ChooseShoot();
+  game.ClickUnit(4);
+  CHECK(game.FindUnit(1)->plan.type == tactics::PlannedActionType::Shoot);
+  CHECK(game.FindUnit(1)->plan.shootTargetId == 4);
+
+  CHECK(!game.CanCommitTurn());  // blue2 hasn't planned yet.
+  game.ClickUnit(2);
+  game.ChoosePass();
+  CHECK(game.FindUnit(2)->plan.type == tactics::PlannedActionType::Pass);
+  CHECK(game.CanCommitTurn());
+
+  // World state is completely unchanged by planning alone.
+  CHECK(glm::distance(game.FindUnit(0)->position, blue0Start) < 1e-6f);
+  CHECK(glm::distance(game.FindUnit(1)->position, blue1Start) < 1e-6f);
+  CHECK(game.FindUnit(4)->alive);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(game.CurrentTeam() == Team::Blue);
+
+  game.CommitTurn();
+
+  // Actions apply in squad order: blue0's move animates first, so blue1's
+  // shot hasn't resolved yet.
+  CHECK(game.Mode() == InputMode::Moving);
+  CHECK(game.FindUnit(4)->alive);
+
+  game.Update(100.0f);  // Finish blue0's move; blue1's shot and blue2's pass
+                         // then resolve synchronously in the same call.
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(glm::distance(game.FindUnit(0)->position, destination) < 1e-3f);
+  CHECK(!game.FindUnit(4)->alive);         // blue1's planned shot applied.
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::None);  // Plans cleared.
+  CHECK(game.FindUnit(1)->plan.type == tactics::PlannedActionType::None);
+  CHECK(game.CurrentTeam() == Team::Red);  // Turn passed to the other team.
+}
+
 void TestGameLogicShootRowsMatchLayout() {
   GameLogic game;
-  // Row z=-4 (blue id0 vs red id3) is behind the first wall: must miss.
-  CHECK(game.CurrentActorId() == 0);
+  // Row z=-4 (blue id0 vs red id3) is behind the first wall: must miss. Row
+  // z=0 (blue id1 vs red id4) is the open lane: must hit. Plan both plus a
+  // pass for blue2, then commit the whole squad at once.
+  CHECK(game.CurrentTeam() == Team::Blue);
   game.ClickUnit(0);
   game.ChooseShoot();
   CHECK(game.Mode() == InputMode::AwaitingShootTarget);
   game.ClickUnit(3);
-  CHECK(game.FindUnit(3)->alive);         // Blocked shot: miss.
-  CHECK(game.Mode() == InputMode::AwaitingSelection);
-  CHECK(game.CurrentActorId() == 3);       // Turn advanced to red0.
+  CHECK(game.FindUnit(3)->alive);  // Still just a plan.
 
-  // Symmetric: red0 shooting blue0 across the same blocked row also misses.
-  game.ClickUnit(3);
-  game.ChooseShoot();
-  game.ClickUnit(0);
-  CHECK(game.FindUnit(0)->alive);
-  CHECK(game.CurrentActorId() == 1);  // blue1.
-
-  // Row z=0 (blue id1 vs red id4) is the open lane: must hit.
   game.ClickUnit(1);
   game.ChooseShoot();
   game.ClickUnit(4);
-  CHECK(!game.FindUnit(4)->alive);
-  CHECK(!game.Winner().has_value());  // Red still has id3, id5 alive.
+
+  game.ClickUnit(2);
+  game.ChoosePass();
+
+  CHECK(game.CanCommitTurn());
+  game.CommitTurn();
+
+  CHECK(game.FindUnit(3)->alive);      // Blocked shot: miss.
+  CHECK(!game.FindUnit(4)->alive);     // Open lane: hit.
+  CHECK(!game.Winner().has_value());   // Red still has id3, id5 alive.
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(game.CurrentTeam() == Team::Red);  // Turn advanced to Red.
+
+  // Symmetric: red0 shooting blue0 across the same blocked row also misses,
+  // and Red's other figures just pass.
+  game.ClickUnit(3);
+  game.ChooseShoot();
+  game.ClickUnit(0);
+  game.ClickUnit(4);
+  game.ChoosePass();
+  game.ClickUnit(5);
+  game.ChoosePass();
+  game.CommitTurn();
+  CHECK(game.FindUnit(0)->alive);
+  CHECK(game.CurrentTeam() == Team::Blue);
 }
 
 void TestGameLogicShootGatingRequiresTeamVisibility() {
@@ -327,28 +386,27 @@ void TestGameLogicShootGatingRequiresTeamVisibility() {
     CHECK(!game.ComputeVisibility(Team::Blue).UnitVisible(redId));
   }
 
-  CHECK(game.CurrentActorId() == 0);
   game.ClickUnit(0);
   game.ChooseShoot();
   CHECK(game.Mode() == InputMode::AwaitingShootTarget);
 
   // Red5 is alive and would otherwise be a legal target, but it's outside
   // Blue's team FOV: the click must be a no-op (not a guaranteed miss) --
-  // the turn stays with blue0 and nothing is resolved.
+  // no plan is recorded and blue0 stays selected for targeting.
   game.ClickUnit(5);
   CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::None);
   CHECK(game.FindUnit(5)->alive);
-  CHECK(game.CurrentActorId() == 0);
 
   // Turn blue0 back to face Red: Red5 re-enters Blue's FOV with clear LOS
-  // and becomes a valid, hittable target again (previously-hidden-now-
-  // visible enemies still resolve via the Stage-A hit logic).
+  // and becomes a valid planning target again.
   game.FindUnit(0)->facingYaw = 0.0f;
   CHECK(game.ComputeVisibility(Team::Blue).UnitVisible(5));
   game.ClickUnit(5);
-  CHECK(!game.FindUnit(5)->alive);
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Shoot);
+  CHECK(game.FindUnit(0)->plan.shootTargetId == 5);
+  CHECK(game.FindUnit(5)->alive);  // Still just a plan; nothing resolved yet.
   CHECK(game.Mode() == InputMode::AwaitingSelection);
-  CHECK(game.CurrentActorId() == 3);  // Turn advanced after the resolved shot.
 }
 
 void TestGameLogicMoveUpdatesPositionAndFacing() {
@@ -368,15 +426,32 @@ void TestGameLogicMoveUpdatesPositionAndFacing() {
 
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
   game.ClickGround(destination);
-  // Movement is animated, not instant: the click kicks off a Moving
-  // animation rather than snapping the figure straight to the destination.
+  // Planning only: the click records blue0's plan and returns to unit
+  // selection -- nothing moves and the turn does not advance yet.
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  const Unit* planned = game.FindUnit(0);
+  CHECK(planned->plan.type == tactics::PlannedActionType::Move);
+  CHECK(std::fabs(planned->position.x - (-8.0f)) < 1e-3f);
+  CHECK(std::fabs(planned->position.z - (-4.0f)) < 1e-3f);
+  CHECK(game.CurrentTeam() == Team::Blue);
+
+  // Fill out the rest of Blue's plan and commit the turn.
+  game.ClickUnit(1);
+  game.ChoosePass();
+  game.ClickUnit(2);
+  game.ChoosePass();
+  CHECK(game.CanCommitTurn());
+  game.CommitTurn();
+
+  // blue0's move animates rather than teleporting: it's first in squad
+  // order, so the commit starts by animating it.
   CHECK(game.Mode() == InputMode::Moving);
   const Unit* moving = game.FindUnit(0);
   CHECK(std::fabs(moving->position.x - (-8.0f)) < 1e-3f);
   CHECK(std::fabs(moving->position.z - (-4.0f)) < 1e-3f);
 
   // A large fast-forward dt should consume the whole path and complete the
-  // move action in one Update() call.
+  // move action (and the rest of the commit) in one Update() call.
   game.Update(100.0f);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   const Unit* moved = game.FindUnit(0);
@@ -387,7 +462,7 @@ void TestGameLogicMoveUpdatesPositionAndFacing() {
   const float expectedYaw = std::atan2(4.0f, 8.0f);
   CHECK(std::fabs(moved->facingYaw - expectedYaw) < 1e-3f);
 
-  CHECK(game.CurrentActorId() == 3);  // Turn advanced.
+  CHECK(game.CurrentTeam() == Team::Red);  // Turn advanced.
 }
 
 void TestGameLogicMoveAnimatesProgressively() {
@@ -401,6 +476,13 @@ void TestGameLogicMoveAnimatesProgressively() {
   game.HoverGround(destination);
   CHECK(game.MovePreviewValid());
   game.ClickGround(destination);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);  // Planned only.
+
+  game.ClickUnit(1);
+  game.ChoosePass();
+  game.ClickUnit(2);
+  game.ChoosePass();
+  game.CommitTurn();
   CHECK(game.Mode() == InputMode::Moving);
 
   const glm::vec3 start(-8.0f, 0.0f, -4.0f);
@@ -422,6 +504,7 @@ void TestGameLogicMoveAnimatesProgressively() {
   game.Update(100.0f);  // Fast-forward the rest.
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(glm::distance(game.FindUnit(0)->position, destination) < 1e-3f);
+  CHECK(game.CurrentTeam() == Team::Red);
 }
 
 void TestGameLogicMoveIgnoresInputWhileAnimating() {
@@ -430,13 +513,18 @@ void TestGameLogicMoveIgnoresInputWhileAnimating() {
   game.ChooseMove();
   const glm::vec3 destination(-3.0f, 0.0f, -4.0f);
   game.ClickGround(destination);
+  game.ClickUnit(1);
+  game.ChoosePass();
+  game.ClickUnit(2);
+  game.ChoosePass();
+  game.CommitTurn();
   CHECK(game.Mode() == InputMode::Moving);
 
   const glm::vec3 midStart = game.FindUnit(0)->position;
 
-  // Input during the animation must be a no-op, not a desync: clicking
-  // another unit, re-clicking ground, or hitting cancel/pass should all
-  // leave the in-flight move untouched.
+  // Input during the commit's move animation must be a no-op, not a
+  // desync: clicking another unit, re-clicking ground, cancel, pass, or
+  // even re-triggering commit should all leave the in-flight move untouched.
   game.ClickUnit(3);
   CHECK(game.Mode() == InputMode::Moving);
   game.ClickGround(glm::vec3(5.0f, 0.0f, 5.0f));
@@ -445,19 +533,21 @@ void TestGameLogicMoveIgnoresInputWhileAnimating() {
   CHECK(game.Mode() == InputMode::Moving);
   game.ChoosePass();
   CHECK(game.Mode() == InputMode::Moving);
+  game.CommitTurn();
+  CHECK(game.Mode() == InputMode::Moving);
   CHECK(glm::distance(game.FindUnit(0)->position, midStart) < 1e-6f);
 
   game.Update(100.0f);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(glm::distance(game.FindUnit(0)->position, destination) < 1e-3f);
-  CHECK(game.CurrentActorId() == 3);  // Turn advanced exactly once.
+  CHECK(game.CurrentTeam() == Team::Red);  // Turn advanced exactly once.
 }
 
 void TestGameLogicMoveCanClimbOntoObstacle() {
   // BuildDefaultScene marks the standalone crates climbable; the one at
   // (-4, 6.5) is a 1.2x1.2 footprint, 1.2 tall (see Scene.cpp).
   GameLogic game;
-  CHECK(game.CurrentActorId() == 0);
+  CHECK(game.CurrentTeam() == Team::Blue);
   game.ClickUnit(0);
   game.ChooseMove();
 
@@ -466,6 +556,13 @@ void TestGameLogicMoveCanClimbOntoObstacle() {
   CHECK(game.MovePreviewValid());
 
   game.ClickGround(crateTop);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);  // Planned only.
+
+  game.ClickUnit(1);
+  game.ChoosePass();
+  game.ClickUnit(2);
+  game.ChoosePass();
+  game.CommitTurn();
   CHECK(game.Mode() == InputMode::Moving);
 
   game.Update(100.0f);  // Fast-forward through the climb animation.
@@ -474,7 +571,7 @@ void TestGameLogicMoveCanClimbOntoObstacle() {
   CHECK(std::fabs(moved->position.x - crateTop.x) < 1e-3f);
   CHECK(std::fabs(moved->position.z - crateTop.z) < 1e-3f);
   CHECK(std::fabs(moved->position.y - crateTop.y) < 1e-3f);
-  CHECK(game.CurrentActorId() == 3);  // Turn advanced.
+  CHECK(game.CurrentTeam() == Team::Red);  // Turn advanced.
 }
 
 void TestGameLogicWinCondition() {
@@ -485,9 +582,15 @@ void TestGameLogicWinCondition() {
   game.FindUnit(4)->alive = false;
   game.FindUnit(5)->alive = false;
 
-  CHECK(game.CurrentActorId() == 0);
+  CHECK(game.CurrentTeam() == Team::Blue);
   game.ClickUnit(0);
   game.ChoosePass();
+  game.ClickUnit(1);
+  game.ChoosePass();
+  game.ClickUnit(2);
+  game.ChoosePass();
+  CHECK(game.CanCommitTurn());
+  game.CommitTurn();
 
   CHECK(game.Mode() == InputMode::GameOver);
   CHECK(game.Winner() == Team::Blue);
@@ -509,9 +612,10 @@ int main() {
   TestElevatedEyePositionSeesOverObstacle();
   TestFovCone();
   TestTeamVisibilityAggregatesAcrossFigures();
-  TestTurnManagerAlternatesAndSkipsDead();
+  TestTurnManagerAlternatesByTeamAndRounds();
   TestCheckWinner();
   TestGameLogicSelectionGating();
+  TestGameLogicPlanThenCommitDefersExecutionAndAppliesInSquadOrder();
   TestGameLogicShootRowsMatchLayout();
   TestGameLogicShootGatingRequiresTeamVisibility();
   TestGameLogicMoveUpdatesPositionAndFacing();

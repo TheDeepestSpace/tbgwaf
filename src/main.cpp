@@ -34,6 +34,7 @@ using tactics::InputMode;
 using tactics::Obstacle;
 using tactics::Team;
 using tactics::TeamVisibility;
+using tactics::TriggerAction;
 using tactics::Unit;
 
 namespace {
@@ -613,6 +614,8 @@ int main() {
             ImGui::SameLine();
             if (ImGui::Button("Shoot")) game.ChooseShoot();
             ImGui::SameLine();
+            if (ImGui::Button("Overwatch")) game.ChooseOverwatch();
+            ImGui::SameLine();
             if (ImGui::Button("Pass")) game.ChoosePass();
           } else {
             if (ImGui::Button("Cancel")) game.CancelAction();
@@ -799,6 +802,15 @@ int main() {
                           glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
           }
         }
+      }
+      // Overwatch indicator: a minimal PoC-grade ground marker (distinct from
+      // the white current-actor ring and the yellow selection ring) under
+      // every figure currently armed to fire during an enemy's move.
+      for (const Unit& unit : game.GetScene().units) {
+        if (!unit.alive || unit.triggerAction != TriggerAction::Shoot) continue;
+        if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+        DrawHighlight(unlitShader, cubeMesh, viewProj, unit.position,
+                      glm::vec4(1.0f, 0.55f, 0.0f, 1.0f));
       }
       // Selection/move-preview state belongs to whichever team is currently
       // acting, so only their own pane draws it.

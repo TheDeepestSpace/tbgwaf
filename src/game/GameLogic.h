@@ -72,6 +72,10 @@ class GameLogic {
   void ChooseShoot();
   void ChoosePass();
 
+  // Arms overwatch (triggerAction = Shoot) on the acting unit and ends its
+  // turn, the same way ChoosePass() does today.
+  void ChooseOverwatch();
+
   // Steps back one level: AwaitingMove/ShootTarget -> ActionMenu -> AwaitingSelection.
   void CancelAction();
 
@@ -81,6 +85,12 @@ class GameLogic {
 
  private:
   void CompleteAction();
+
+  // Checks every living enemy of `mover` armed with triggerAction == Shoot
+  // for FOV+LOS on `mover`'s current (mid-move) position. On the first
+  // watcher that has a shot, resolves it (killing `mover`), consumes that
+  // watcher's trigger, and returns true so Update() can interrupt the move.
+  bool TriggerOverwatch(Unit& mover);
 
   Scene scene_;
   NavMesh navMesh_;

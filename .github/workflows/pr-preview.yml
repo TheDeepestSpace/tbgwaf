@@ -22,6 +22,11 @@ jobs:
       - name: Checkout code
         if: github.event.action != 'closed'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: the scenario review page classifies scenarios as
+          # new/modified/deleted via `git diff <base>...<head>`, which needs
+          # the merge base to be present locally.
+          fetch-depth: 0
 
       - name: Set up Emscripten
         if: github.event.action != 'closed'
@@ -49,6 +54,39 @@ jobs:
           cp build-web/tactics_app.js site/
           cp build-web/tactics_app.wasm site/
 
+      # --- Gameplay scenario review page (issue #14 stage 3): record a
+      # per-team WebM video for every scenario at the PR's head and publish
+      # them on an HTML page inside the same per-PR preview. ---
+      - name: Install native toolchain and video dependencies
+        if: github.event.action != 'closed'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev mesa-common-dev \
+            xvfb ffmpeg
+
+      - name: Configure (native)
+        if: github.event.action != 'closed'
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build visual scenario runner
+        if: github.event.action != 'closed'
+        run: cmake --build build --target tactics_visual_tests
+
+      - name: Generate scenario review page
+        if: github.event.action != 'closed'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          SDL_VIDEODRIVER: x11
+        run: |
+          xvfb-run --auto-servernum --server-args='-screen 0 1280x1024x24' \
+            python3 scripts/generate_scenario_review_page.py \
+              --base ${{ github.event.pull_request.base.sha }} \
+              --head ${{ github.event.pull_request.head.sha }} \
+              --runner build/tactics_visual_tests \
+              --out site/scenarios
+
       - name: Deploy PR preview
         uses: rossjrw/pr-preview-action@ffa7509e91a3ec8dfc2e5536c4d5c1acdf7a6de9 # v1.8.1
         with:
@@ -56,3 +94,25 @@ jobs:
           preview-branch: gh-pages
           umbrella-dir: pr-preview
           action: auto
+
+      # The pr-preview action's own sticky comment links only to the site
+      # root (the playable build); add/refresh one direct link to the
+      # scenario review page so reviewers can click straight through.
+      - name: Link scenario review page on the PR
+        if: github.event.action != 'closed'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          marker='<!-- gameplay-scenario-review -->'
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          repo="${GITHUB_REPOSITORY#*/}"
+          url="https://${owner}.github.io/${repo}/pr-preview/pr-${PR_NUMBER}/scenarios/"
+          body="$(printf '%s\n%s' "$marker" "🎬 [Gameplay scenario review page](${url}) — per-team videos of every scenario, grouped by how this PR changes it (updates with each push; may take a minute to go live after deploy).")"
+          existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --paginate --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" | head -n1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" -f body="$body" > /dev/null
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" -f body="$body" > /dev/null
+          fi

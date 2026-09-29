@@ -40,6 +40,7 @@ set(APP_GFX_SOURCES
   src/gfx/Shader.cpp
   src/gfx/Mesh.cpp
   src/gfx/Camera.cpp
+  src/gfx/SceneRenderer.cpp
 )
 
 if(EMSCRIPTEN)
@@ -102,10 +103,23 @@ else()
   target_compile_definitions(imgui PUBLIC IMGUI_IMPL_OPENGL_ES3)
   target_link_libraries(imgui PUBLIC PkgConfig::SDL2 PkgConfig::GLESV2)
 
-  add_executable(tactics_app ${APP_GFX_SOURCES})
+  # SDL-free GL rendering code (issue #14 stage 2): shared between the
+  # interactive app and the headless visual scenario runner so both draw the
+  # per-team fog-of-war panes through the exact same code path.
+  add_library(tactics_gfx STATIC
+    src/gfx/Shader.cpp
+    src/gfx/Mesh.cpp
+    src/gfx/Camera.cpp
+    src/gfx/SceneRenderer.cpp
+  )
+  target_include_directories(tactics_gfx PUBLIC src)
+  target_link_libraries(tactics_gfx PUBLIC tactics_logic PkgConfig::GLESV2 glm::glm)
+
+  add_executable(tactics_app src/main.cpp)
   target_include_directories(tactics_app PRIVATE src)
   target_link_libraries(tactics_app PRIVATE
     tactics_logic
+    tactics_gfx
     imgui
     PkgConfig::SDL2
     PkgConfig::EGL
@@ -146,7 +160,40 @@ else()
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 
+  # Visual scenario runner (issue #14 stages 2+3): PNG golden capture/diff
+  # and per-team scenario videos. stb supplies single-header PNG read/write;
+  # header-only, so only its source dir is needed (no CMakeLists to add).
+  FetchContent_Declare(
+    stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20
+  )
+  FetchContent_MakeAvailable(stb)
+
+  add_executable(tactics_visual_tests tests/visual/visual_main.cpp)
+  target_include_directories(tactics_visual_tests PRIVATE src tests ${stb_SOURCE_DIR})
+  target_link_libraries(tactics_visual_tests PRIVATE
+    tactics_scenario
+    tactics_gfx
+    PkgConfig::SDL2
+    PkgConfig::EGL
+  )
+
   find_program(XVFB_RUN_EXECUTABLE xvfb-run)
+  if(XVFB_RUN_EXECUTABLE)
+    # Golden-screenshot regression run (no --video: ffmpeg isn't needed for
+    # the ctest pass, only for the PR review page built in CI).
+    add_test(
+      NAME visual_tests
+      COMMAND ${XVFB_RUN_EXECUTABLE} --auto-servernum --server-args=-screen\ 0\ 1280x1024x24
+              $<TARGET_FILE:tactics_visual_tests> --out-dir ${CMAKE_BINARY_DIR}/visual_out
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    )
+    set_tests_properties(visual_tests PROPERTIES
+      TIMEOUT 300
+      ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
+    )
+  endif()
   if(XVFB_RUN_EXECUTABLE)
     add_test(
       NAME smoke_test

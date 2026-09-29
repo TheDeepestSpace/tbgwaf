@@ -88,8 +88,8 @@ jobs:
             file: ${{ inputs.dockerfile }}
             target: ${{ inputs.target }}
             push: true
-            tags: ${{ steps.meta.outputs.tags }}
-            labels: ${{ steps.meta.outputs.labels }}
+            tags: ${{ toJSON(steps.meta.outputs.tags) }}
+            labels: ${{ toJSON(steps.meta.outputs.labels) }}
             platforms: linux/amd64
             cache-from: |
               type=gha

@@ -32,7 +32,7 @@ jobs:
     outputs:
       image-tag: ${{ steps.meta.outputs.tags }}
       image-primary-tag: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
-      image-digest: ${{ steps.build.outputs.digest }}
+      image-digest: ${{ fromJSON(steps.build.outputs.outputs).digest }}
 
     steps:
       - name: Free up disk space
@@ -71,18 +71,29 @@ jobs:
 
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
         with:
-          context: .
-          file: ${{ inputs.dockerfile }}
-          target: ${{ inputs.target }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64
-          cache-from: |
-            type=gha
-            type=registry,ref=${{ inputs.image-name }}:buildcache
-          cache-to: |
-            type=gha,mode=max
-            type=registry,ref=${{ inputs.image-name }}:buildcache,mode=max
+          action: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+          attempt_limit: 4
+          attempt_delay: 0
+          pre_retry_command: |
+            count_file="$RUNNER_TEMP/docker-build-retry-attempt"
+            attempt=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
+            echo "$attempt" > "$count_file"
+            delay=$(( 15 * (2 ** (attempt - 1)) ))
+            echo "Docker build/push failed (likely a transient registry error, e.g. 429), retrying in ${delay}s (retry ${attempt})..."
+            sleep "$delay"
+          with: |
+            context: .
+            file: ${{ inputs.dockerfile }}
+            target: ${{ inputs.target }}
+            push: true
+            tags: ${{ steps.meta.outputs.tags }}
+            labels: ${{ steps.meta.outputs.labels }}
+            platforms: linux/amd64
+            cache-from: |
+              type=gha
+              type=registry,ref=${{ inputs.image-name }}:buildcache
+            cache-to: |
+              type=gha,mode=max
+              type=registry,ref=${{ inputs.image-name }}:buildcache,mode=max

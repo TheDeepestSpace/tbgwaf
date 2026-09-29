@@ -368,6 +368,16 @@ void TestGameLogicMoveUpdatesPositionAndFacing() {
 
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
   game.ClickGround(destination);
+  // Movement is animated, not instant: the click kicks off a Moving
+  // animation rather than snapping the figure straight to the destination.
+  CHECK(game.Mode() == InputMode::Moving);
+  const Unit* moving = game.FindUnit(0);
+  CHECK(std::fabs(moving->position.x - (-8.0f)) < 1e-3f);
+  CHECK(std::fabs(moving->position.z - (-4.0f)) < 1e-3f);
+
+  // A large fast-forward dt should consume the whole path and complete the
+  // move action in one Update() call.
+  game.Update(100.0f);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   const Unit* moved = game.FindUnit(0);
   CHECK(std::fabs(moved->position.x - destination.x) < 1e-3f);
@@ -378,6 +388,69 @@ void TestGameLogicMoveUpdatesPositionAndFacing() {
   CHECK(std::fabs(moved->facingYaw - expectedYaw) < 1e-3f);
 
   CHECK(game.CurrentActorId() == 3);  // Turn advanced.
+}
+
+void TestGameLogicMoveAnimatesProgressively() {
+  GameLogic game;
+  game.ClickUnit(0);
+  game.ChooseMove();
+  // Straight line, same row, short of the wall at x in [-1,1] so the path
+  // collapses to a direct two-point segment (no detour to complicate the
+  // expected travel distance).
+  const glm::vec3 destination(-3.0f, 0.0f, -4.0f);
+  game.HoverGround(destination);
+  CHECK(game.MovePreviewValid());
+  game.ClickGround(destination);
+  CHECK(game.Mode() == InputMode::Moving);
+
+  const glm::vec3 start(-8.0f, 0.0f, -4.0f);
+  const float totalDistance = glm::distance(start, destination);
+  const float halfwayDt = (totalDistance * 0.5f) / tactics::constants::kMoveSpeed;
+
+  game.Update(halfwayDt);
+  CHECK(game.Mode() == InputMode::Moving);  // Not there yet.
+  const Unit* midway = game.FindUnit(0);
+  // Should have advanced roughly half the distance, but strictly less than
+  // the full distance -- proving this is a real interpolation, not a
+  // disguised teleport.
+  CHECK(glm::distance(midway->position, start) > totalDistance * 0.25f);
+  CHECK(glm::distance(midway->position, destination) > 1e-3f);
+  // Facing already snapped to the direction of travel (+X), matching the
+  // original instant-turn behavior.
+  CHECK(std::fabs(midway->facingYaw - 0.0f) < 1e-3f);
+
+  game.Update(100.0f);  // Fast-forward the rest.
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(glm::distance(game.FindUnit(0)->position, destination) < 1e-3f);
+}
+
+void TestGameLogicMoveIgnoresInputWhileAnimating() {
+  GameLogic game;
+  game.ClickUnit(0);
+  game.ChooseMove();
+  const glm::vec3 destination(-3.0f, 0.0f, -4.0f);
+  game.ClickGround(destination);
+  CHECK(game.Mode() == InputMode::Moving);
+
+  const glm::vec3 midStart = game.FindUnit(0)->position;
+
+  // Input during the animation must be a no-op, not a desync: clicking
+  // another unit, re-clicking ground, or hitting cancel/pass should all
+  // leave the in-flight move untouched.
+  game.ClickUnit(3);
+  CHECK(game.Mode() == InputMode::Moving);
+  game.ClickGround(glm::vec3(5.0f, 0.0f, 5.0f));
+  CHECK(game.Mode() == InputMode::Moving);
+  game.CancelAction();
+  CHECK(game.Mode() == InputMode::Moving);
+  game.ChoosePass();
+  CHECK(game.Mode() == InputMode::Moving);
+  CHECK(glm::distance(game.FindUnit(0)->position, midStart) < 1e-6f);
+
+  game.Update(100.0f);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(glm::distance(game.FindUnit(0)->position, destination) < 1e-3f);
+  CHECK(game.CurrentActorId() == 3);  // Turn advanced exactly once.
 }
 
 void TestGameLogicMoveCanClimbOntoObstacle() {
@@ -393,6 +466,9 @@ void TestGameLogicMoveCanClimbOntoObstacle() {
   CHECK(game.MovePreviewValid());
 
   game.ClickGround(crateTop);
+  CHECK(game.Mode() == InputMode::Moving);
+
+  game.Update(100.0f);  // Fast-forward through the climb animation.
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   const Unit* moved = game.FindUnit(0);
   CHECK(std::fabs(moved->position.x - crateTop.x) < 1e-3f);
@@ -439,6 +515,8 @@ int main() {
   TestGameLogicShootRowsMatchLayout();
   TestGameLogicShootGatingRequiresTeamVisibility();
   TestGameLogicMoveUpdatesPositionAndFacing();
+  TestGameLogicMoveAnimatesProgressively();
+  TestGameLogicMoveIgnoresInputWhileAnimating();
   TestGameLogicMoveCanClimbOntoObstacle();
   TestGameLogicWinCondition();
 

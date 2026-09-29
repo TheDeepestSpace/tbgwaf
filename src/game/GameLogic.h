@@ -19,6 +19,7 @@ enum class InputMode {
   ActionMenu,             // Current actor selected; waiting for Move/Shoot/Pass.
   AwaitingMoveDestination,  // Waiting for a ground click to move to.
   AwaitingShootTarget,    // Waiting for a click on an enemy figure to shoot.
+  Moving,                 // Selected actor is animating along its resolved move path.
   GameOver,
 };
 
@@ -59,6 +60,13 @@ class GameLogic {
   void ClickGround(const glm::vec3& point);
   void HoverGround(const glm::vec3& point);
 
+  // Advances an in-flight move animation (Mode() == InputMode::Moving) by
+  // `dtSeconds`, moving the selected unit along its resolved path at
+  // constant speed and completing the action once the path is consumed. A
+  // no-op in any other mode. `main.cpp`'s frame loop drives this with real
+  // frame delta; tests can pass a large dt to fast-forward to completion.
+  void Update(float dtSeconds);
+
   // Action menu choices, valid only while Mode() == ActionMenu.
   void ChooseMove();
   void ChooseShoot();
@@ -85,6 +93,13 @@ class GameLogic {
 
   std::vector<glm::vec3> movePreviewPath_;
   bool movePreviewValid_ = false;
+
+  // In-flight move animation state, valid only while mode_ == Moving.
+  // moveAnimPath_[moveAnimSegment_] is the waypoint the mover last passed
+  // through; moveAnimPath_[moveAnimSegment_ + 1] is the one it's walking
+  // toward.
+  std::vector<glm::vec3> moveAnimPath_;
+  size_t moveAnimSegment_ = 0;
 };
 
 }  // namespace tactics

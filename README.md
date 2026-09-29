@@ -44,6 +44,12 @@ open `tactics_app.html` -- it can't be opened as a `file://` URL, browsers
 block WASM/fetch from local files. Pushes to `master` build and publish this
 target to GitHub Pages automatically (`.github/workflows/pages.yml`).
 
+Pull requests also get their own preview build, published to a per-PR
+subdirectory (`pr-preview/pr-<number>/`) on the `gh-pages` branch
+(`.github/workflows/pr-preview.yml`) without touching the production build.
+The workflow comments on the PR with a link to the preview once it's ready,
+and removes the preview automatically when the PR closes.
+
 ## Controls
 
 - **Left click** a highlighted figure (whoever's turn it is) to select it,

@@ -1,0 +1,58 @@
+name: Deploy PR preview to GitHub Pages
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: pr-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    # Forked PRs don't get a token with write access, so previews are
+    # limited to same-repo branches.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        if: github.event.action != 'closed'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Emscripten
+        if: github.event.action != 'closed'
+        uses: mymindstorm/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16
+        with:
+          version: latest
+
+      - name: Install Ninja
+        if: github.event.action != 'closed'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Configure (Emscripten)
+        if: github.event.action != 'closed'
+        run: emcmake cmake -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build tactics_app (WASM/WebGL2)
+        if: github.event.action != 'closed'
+        run: cmake --build build-web
+
+      - name: Assemble Pages site
+        if: github.event.action != 'closed'
+        run: |
+          mkdir -p site
+          cp build-web/tactics_app.html site/index.html
+          cp build-web/tactics_app.js site/
+          cp build-web/tactics_app.wasm site/
+
+      - name: Deploy PR preview
+        uses: rossjrw/pr-preview-action@ffa7509e91a3ec8dfc2e5536c4d5c1acdf7a6de9 # v1.8.1
+        with:
+          source-dir: ./site/
+          preview-branch: gh-pages
+          umbrella-dir: pr-preview
+          action: auto

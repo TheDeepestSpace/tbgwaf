@@ -281,7 +281,7 @@ void TestGameLogicSelectionGating() {
   CHECK(!game.SelectedUnitId().has_value());
 }
 
-void TestGameLogicPlanThenCommitDefersExecutionAndAppliesInSquadOrder() {
+void TestGameLogicPlanThenCommitDefersExecutionAndAppliesSimultaneously() {
   GameLogic game;
   CHECK(game.CurrentTeam() == Team::Blue);
 
@@ -317,19 +317,59 @@ void TestGameLogicPlanThenCommitDefersExecutionAndAppliesInSquadOrder() {
 
   game.CommitTurn();
 
-  // Actions apply in squad order: blue0's move animates first, so blue1's
-  // shot hasn't resolved yet.
+  // Shots resolve the instant the turn is committed -- blue1's shot doesn't
+  // wait on blue0's move animation to finish.
   CHECK(game.Mode() == InputMode::Moving);
-  CHECK(game.FindUnit(4)->alive);
-
-  game.Update(100.0f);  // Finish blue0's move; blue1's shot and blue2's pass
-                         // then resolve synchronously in the same call.
-  CHECK(game.Mode() == InputMode::AwaitingSelection);
-  CHECK(glm::distance(game.FindUnit(0)->position, destination) < 1e-3f);
-  CHECK(!game.FindUnit(4)->alive);         // blue1's planned shot applied.
+  CHECK(!game.FindUnit(4)->alive);          // blue1's planned shot already applied.
   CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::None);  // Plans cleared.
   CHECK(game.FindUnit(1)->plan.type == tactics::PlannedActionType::None);
+  CHECK(game.IsUnitMoving(0));               // blue0's planned move is animating.
+
+  game.Update(100.0f);  // Finish blue0's move (the only thing left in flight).
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(glm::distance(game.FindUnit(0)->position, destination) < 1e-3f);
   CHECK(game.CurrentTeam() == Team::Red);  // Turn passed to the other team.
+}
+
+void TestGameLogicCommitAnimatesMultipleMovesConcurrently() {
+  GameLogic game;
+  game.ClickUnit(0);
+  game.ChooseMove();
+  const glm::vec3 destination0(-3.0f, 0.0f, -4.0f);
+  game.ClickGround(destination0);
+
+  game.ClickUnit(1);
+  game.ChooseMove();
+  const glm::vec3 destination1(-3.0f, 0.0f, 0.0f);
+  game.ClickGround(destination1);
+
+  game.ClickUnit(2);
+  game.ChoosePass();
+  CHECK(game.CanCommitTurn());
+  game.CommitTurn();
+  CHECK(game.Mode() == InputMode::Moving);
+  CHECK(game.IsUnitMoving(0));
+  CHECK(game.IsUnitMoving(1));
+
+  const glm::vec3 start0(-8.0f, 0.0f, -4.0f);
+  const glm::vec3 start1(-8.0f, 0.0f, 0.0f);
+  const float totalDistance = glm::distance(start0, destination0);
+  const float halfwayDt = (totalDistance * 0.5f) / tactics::constants::kMoveSpeed;
+
+  // A single Update() call advances every animating figure at once -- blue1
+  // doesn't sit idle waiting for blue0 to finish moving first.
+  game.Update(halfwayDt);
+  CHECK(game.Mode() == InputMode::Moving);
+  CHECK(glm::distance(game.FindUnit(0)->position, start0) > totalDistance * 0.25f);
+  CHECK(glm::distance(game.FindUnit(1)->position, start1) > totalDistance * 0.25f);
+  CHECK(glm::distance(game.FindUnit(0)->position, destination0) > 1e-3f);
+  CHECK(glm::distance(game.FindUnit(1)->position, destination1) > 1e-3f);
+
+  game.Update(100.0f);  // Fast-forward the rest.
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(glm::distance(game.FindUnit(0)->position, destination0) < 1e-3f);
+  CHECK(glm::distance(game.FindUnit(1)->position, destination1) < 1e-3f);
+  CHECK(game.CurrentTeam() == Team::Red);
 }
 
 void TestGameLogicShootRowsMatchLayout() {
@@ -615,7 +655,8 @@ int main() {
   TestTurnManagerAlternatesByTeamAndRounds();
   TestCheckWinner();
   TestGameLogicSelectionGating();
-  TestGameLogicPlanThenCommitDefersExecutionAndAppliesInSquadOrder();
+  TestGameLogicPlanThenCommitDefersExecutionAndAppliesSimultaneously();
+  TestGameLogicCommitAnimatesMultipleMovesConcurrently();
   TestGameLogicShootRowsMatchLayout();
   TestGameLogicShootGatingRequiresTeamVisibility();
   TestGameLogicMoveUpdatesPositionAndFacing();

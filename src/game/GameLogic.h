@@ -29,10 +29,12 @@ enum class InputMode {
 //
 // Turn model: on its turn, a team assigns one plan (Move/Shoot/Pass) to each
 // of its living figures -- nothing happens yet. Once every living figure on
-// the team has a plan, CommitTurn() executes them in squad order, one at a
-// time (each resolves against world state as it stands after the previous
-// one in the same commit -- a deliberate PoC simplification, not true
-// simultaneous WEGO resolution). The turn then passes to the other team.
+// the team has a plan, CommitTurn() resolves them all at once: every planned
+// shot is judged against the same pre-commit snapshot of the enemy team (so
+// one figure's shot never depends on whether an ally's shot in the same
+// commit already landed), and every planned move animates concurrently
+// rather than one figure waiting for the last to finish. The turn then
+// passes to the other team once every planned move has finished animating.
 class GameLogic {
  public:
   GameLogic() { Reset(); }
@@ -73,12 +75,12 @@ class GameLogic {
   void ClickGround(const glm::vec3& point);
   void HoverGround(const glm::vec3& point);
 
-  // Advances an in-flight commit's move animation (Mode() == InputMode::Moving)
-  // by `dtSeconds`, moving the animating unit along its planned path at
-  // constant speed and continuing on to the rest of the committed turn's
-  // planned actions once the path is consumed. A no-op in any other mode.
-  // `main.cpp`'s frame loop drives this with real frame delta; tests can
-  // pass a large dt to fast-forward to completion.
+  // Advances every in-flight planned move (Mode() == InputMode::Moving) by
+  // `dtSeconds` at once, moving each animating figure along its own planned
+  // path at constant speed, and finishes the commit once every move's path
+  // is consumed. A no-op in any other mode. `main.cpp`'s frame loop drives
+  // this with real frame delta; tests can pass a large dt to fast-forward to
+  // completion.
   void Update(float dtSeconds);
 
   // Action menu choices, valid only while Mode() == ActionMenu. Each records
@@ -91,20 +93,32 @@ class GameLogic {
   // Steps back one level: AwaitingMove/ShootTarget -> ActionMenu -> AwaitingSelection.
   void CancelAction();
 
-  // Executes the current team's planned actions in squad order, one at a
-  // time, then hands the turn to the other team. No-op unless
+  // Resolves every one of the current team's planned shots simultaneously
+  // and kicks off every planned move's animation concurrently, then hands
+  // the turn to the other team once all move animations finish (immediately,
+  // in this same call, if nobody planned a move). No-op unless
   // CanCommitTurn().
   void CommitTurn();
+
+  // True while `unitId` has an in-flight planned move animating as part of
+  // the current commit (multiple figures can be animating at once).
+  bool IsUnitMoving(int unitId) const;
 
   // Deterministic hit resolution: FOV cone + clear line-of-sight. Exposed
   // directly so it can be unit tested without going through the click flow.
   bool ResolveShot(Unit& shooter, Unit& target);
 
  private:
-  // Executes commitOrder_[commitIndex_] onward, stopping to let Update()
-  // animate a planned move, or falling through to FinishCommit() once the
-  // queue is exhausted.
-  void ContinueCommit();
+  // One figure's in-flight planned move; multiple can be active at once
+  // since a commit animates the whole team's planned moves concurrently.
+  // path[segment] is the waypoint the mover last passed through;
+  // path[segment + 1] is the one it's walking toward.
+  struct ActiveMove {
+    int unitId = -1;
+    std::vector<glm::vec3> path;
+    size_t segment = 0;
+  };
+
   void FinishCommit();
 
   Scene scene_;
@@ -119,17 +133,9 @@ class GameLogic {
   std::vector<glm::vec3> movePreviewPath_;
   bool movePreviewValid_ = false;
 
-  // In-flight move animation state, valid only while mode_ == Moving.
-  // moveAnimPath_[moveAnimSegment_] is the waypoint the mover last passed
-  // through; moveAnimPath_[moveAnimSegment_ + 1] is the one it's walking
-  // toward.
-  std::vector<glm::vec3> moveAnimPath_;
-  size_t moveAnimSegment_ = 0;
-
-  // Turn-commit execution state: the committing team's living figures, in
-  // squad order, and how far through that order the commit has progressed.
-  std::vector<int> commitOrder_;
-  size_t commitIndex_ = 0;
+  // Every figure's in-flight planned move for the current commit, valid only
+  // while mode_ == Moving; empty once all of them finish.
+  std::vector<ActiveMove> activeMoves_;
 };
 
 }  // namespace tactics

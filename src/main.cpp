@@ -578,7 +578,7 @@ int main() {
           ImGui::TextWrapped("Click an enemy figure to plan a shot (Esc to cancel).");
           break;
         case InputMode::Moving:
-          ImGui::TextWrapped("Committing turn: figure is moving...");
+          ImGui::TextWrapped("Committing turn: figures are moving...");
           break;
         default:
           break;
@@ -816,6 +816,16 @@ int main() {
           if (const Unit* selected = game.FindUnit(*selectedId)) {
             DrawHighlight(unlitShader, cubeMesh, viewProj, selected->position,
                           glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
+          }
+        }
+        // A commit now animates every planned move at once, so highlight
+        // each figure currently mid-move rather than just a single actor.
+        if (game.Mode() == InputMode::Moving) {
+          for (const Unit& unit : game.GetScene().units) {
+            if (unit.team == team && game.IsUnitMoving(unit.id)) {
+              DrawHighlight(unlitShader, cubeMesh, viewProj, unit.position,
+                            glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
+            }
           }
         }
         if (game.Mode() == InputMode::AwaitingMoveDestination) {

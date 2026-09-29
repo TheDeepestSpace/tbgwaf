@@ -1,5 +1,6 @@
 #include "game/GameLogic.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "game/Raycast.h"
@@ -17,10 +18,7 @@ void GameLogic::Reset() {
   winner_.reset();
   movePreviewPath_.clear();
   movePreviewValid_ = false;
-  moveAnimPath_.clear();
-  moveAnimSegment_ = 0;
-  commitOrder_.clear();
-  commitIndex_ = 0;
+  activeMoves_.clear();
 }
 
 Unit* GameLogic::FindUnit(int id) {
@@ -100,41 +98,45 @@ void GameLogic::ClickGround(const glm::vec3& point) {
 
 void GameLogic::Update(float dtSeconds) {
   if (mode_ != InputMode::Moving) return;
-  Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
-  if (!mover || moveAnimPath_.size() < 2) {
-    moveAnimPath_.clear();
-    ++commitIndex_;
-    ContinueCommit();
-    return;
-  }
 
-  float remaining = dtSeconds * constants::kMoveSpeed;
-  while (remaining > 0.0f && moveAnimSegment_ + 1 < moveAnimPath_.size()) {
-    const glm::vec3& segStart = moveAnimPath_[moveAnimSegment_];
-    const glm::vec3& segEnd = moveAnimPath_[moveAnimSegment_ + 1];
+  const float distance = dtSeconds * constants::kMoveSpeed;
+  for (ActiveMove& move : activeMoves_) {
+    Unit* mover = FindUnit(move.unitId);
+    if (!mover || move.path.size() < 2) continue;
 
-    const glm::vec3 segDelta = segEnd - segStart;
-    if (glm::length(glm::vec2(segDelta.x, segDelta.z)) > 1e-4f) {
-      mover->facingYaw = std::atan2(segDelta.z, segDelta.x);
+    float remaining = distance;
+    while (remaining > 0.0f && move.segment + 1 < move.path.size()) {
+      const glm::vec3& segStart = move.path[move.segment];
+      const glm::vec3& segEnd = move.path[move.segment + 1];
+
+      const glm::vec3 segDelta = segEnd - segStart;
+      if (glm::length(glm::vec2(segDelta.x, segDelta.z)) > 1e-4f) {
+        mover->facingYaw = std::atan2(segDelta.z, segDelta.x);
+      }
+
+      const glm::vec3 toEnd = segEnd - mover->position;
+      const float distToEnd = glm::length(toEnd);
+      if (distToEnd <= remaining) {
+        mover->position = segEnd;
+        remaining -= distToEnd;
+        ++move.segment;
+      } else {
+        mover->position += (toEnd / distToEnd) * remaining;
+        remaining = 0.0f;
+      }
     }
-
-    const glm::vec3 toEnd = segEnd - mover->position;
-    const float distToEnd = glm::length(toEnd);
-    if (distToEnd <= remaining) {
-      mover->position = segEnd;
-      remaining -= distToEnd;
-      ++moveAnimSegment_;
-    } else {
-      mover->position += (toEnd / distToEnd) * remaining;
-      remaining = 0.0f;
-    }
   }
 
-  if (moveAnimSegment_ + 1 >= moveAnimPath_.size()) {
-    moveAnimPath_.clear();
-    ++commitIndex_;
-    ContinueCommit();
-  }
+  // Every mover advances together above; drop whichever ones just finished
+  // their path, and once none are left the whole commit is done.
+  activeMoves_.erase(std::remove_if(activeMoves_.begin(), activeMoves_.end(),
+                                     [](const ActiveMove& move) {
+                                       return move.path.size() < 2 ||
+                                              move.segment + 1 >= move.path.size();
+                                     }),
+                      activeMoves_.end());
+
+  if (activeMoves_.empty()) FinishCommit();
 }
 
 void GameLogic::HoverGround(const glm::vec3& point) {
@@ -189,6 +191,13 @@ bool GameLogic::ResolveShot(Unit& shooter, Unit& target) {
   return hit;
 }
 
+bool GameLogic::IsUnitMoving(int unitId) const {
+  for (const ActiveMove& move : activeMoves_) {
+    if (move.unitId == unitId) return true;
+  }
+  return false;
+}
+
 void GameLogic::CommitTurn() {
   if (!CanCommitTurn()) return;
   if (mode_ != InputMode::AwaitingSelection && mode_ != InputMode::ActionMenu &&
@@ -200,56 +209,40 @@ void GameLogic::CommitTurn() {
   movePreviewPath_.clear();
   movePreviewValid_ = false;
 
-  commitOrder_.clear();
+  // Snapshot who's alive before any of this commit's shots resolve, so a
+  // shot's outcome never depends on whether an ally's shot earlier in the
+  // same commit already landed on the same target -- every planned shot is
+  // judged against the same pre-commit world state.
+  std::vector<bool> aliveAtCommit(scene_.units.size());
+  for (const auto& unit : scene_.units) aliveAtCommit[unit.id] = unit.alive;
+
   const Team committingTeam = turnManager_.CurrentTeam();
-  for (const auto& unit : scene_.units) {
-    if (unit.alive && unit.team == committingTeam) commitOrder_.push_back(unit.id);
-  }
-  commitIndex_ = 0;
-  mode_ = InputMode::AwaitingSelection;
-  ContinueCommit();
-}
-
-void GameLogic::ContinueCommit() {
-  while (commitIndex_ < commitOrder_.size()) {
-    Unit* unit = FindUnit(commitOrder_[commitIndex_]);
-    if (!unit || !unit->alive) {
-      ++commitIndex_;
-      continue;
-    }
-
-    const PlannedAction plan = unit->plan;
-    unit->plan = PlannedAction{};
+  activeMoves_.clear();
+  for (auto& unit : scene_.units) {
+    if (!unit.alive || unit.team != committingTeam) continue;
+    const PlannedAction plan = unit.plan;
+    unit.plan = PlannedAction{};
 
     if (plan.type == PlannedActionType::Move) {
-      moveAnimPath_ = plan.movePath;
-      moveAnimSegment_ = 0;
-      selectedUnitId_ = unit->id;
-      mode_ = InputMode::Moving;
-      return;  // Update() drives the animation and resumes the commit.
-    }
-
-    if (plan.type == PlannedActionType::Shoot) {
-      // A known PoC scope cut: actions in a commit resolve in squad order
-      // against world state as it stands after each prior action, not
-      // simultaneously. If an earlier action in this same commit already
-      // killed the planned target, this shot simply has nothing to hit.
+      activeMoves_.push_back(ActiveMove{unit.id, plan.movePath, 0});
+    } else if (plan.type == PlannedActionType::Shoot) {
       Unit* target = FindUnit(plan.shootTargetId);
-      if (target && target->alive) {
-        ResolveShot(*unit, *target);
+      if (target && aliveAtCommit[target->id]) {
+        ResolveShot(unit, *target);
       }
     }
-
-    ++commitIndex_;
   }
 
-  FinishCommit();
+  if (activeMoves_.empty()) {
+    FinishCommit();
+  } else {
+    mode_ = InputMode::Moving;  // Update() animates every planned move concurrently.
+  }
 }
 
 void GameLogic::FinishCommit() {
   selectedUnitId_.reset();
-  commitOrder_.clear();
-  commitIndex_ = 0;
+  activeMoves_.clear();
   mode_ = InputMode::AwaitingSelection;
 
   const auto winner = CheckWinner(scene_.units);

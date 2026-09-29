@@ -208,8 +208,8 @@ void DrawHighlight(const gfx::Shader& shader, const gfx::CubeMesh& cube, const g
 
 // Renders a unit's FOV as a flat, ground-level, lightly team-colored
 // translucent triangle fan spanning kShootHalfFovDegrees around
-// FacingDirection(), capped at kFovConeVisualRange (shorter than the
-// "effectively unlimited" kShootRange so it doesn't run off the map).
+// FacingDirection(), capped at kFovConeVisualRange (bigger than the map
+// diagonal, so it always visually reaches the map edge).
 // Caller is responsible for enabling blending around this call.
 void DrawFovCone(const gfx::Shader& shader, gfx::TriangleFanMesh& mesh, const glm::mat4& viewProj,
                   const Unit& unit) {
@@ -333,6 +333,7 @@ int main() {
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
   SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+  SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
   SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
   SDL_Window* window = SDL_CreateWindow(
@@ -728,7 +729,8 @@ int main() {
       glViewport(rect.x, 0, rect.width, windowHeight);
       glScissor(rect.x, 0, rect.width, windowHeight);
       glClearColor(0.10f, 0.11f, 0.13f, 1.0f);
-      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+      glClearStencil(0);
+      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
       const glm::mat4 view = cameras[pane].ViewMatrix();
       const glm::mat4 proj = cameras[pane].ProjectionMatrix(
@@ -767,14 +769,26 @@ int main() {
       // Each pane shows only its own team's FOV cones -- your own vision,
       // not intel about what the enemy can see. Translucent overlay: blend
       // on, no depth writes (so it never occludes anything drawn after it).
+      // Every cone in a pane shares identical color+alpha, so where
+      // teammates' cones overlap, blending each one in would compound into
+      // a darker/more opaque patch that isn't actually meaningful (it's
+      // still just this team's own vision). The stencil buffer (cleared per
+      // pane above) caps each pixel to a single cone's worth of blending:
+      // the first cone to touch a pixel blends and claims it (stencil
+      // 0 -> 1), any later cone covering that same pixel is discarded, so
+      // overlaps read as one flat shade instead of stacking.
       unlitShader.Use();
       glEnable(GL_BLEND);
       glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
       glDepthMask(GL_FALSE);
+      glEnable(GL_STENCIL_TEST);
+      glStencilFunc(GL_EQUAL, 0, 0xFF);
+      glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
       for (const Unit& unit : game.GetScene().units) {
         if (!unit.alive || unit.team != team) continue;
         DrawFovCone(unlitShader, fovConeMesh, viewProj, unit);
       }
+      glDisable(GL_STENCIL_TEST);
       glDepthMask(GL_TRUE);
       glDisable(GL_BLEND);
 

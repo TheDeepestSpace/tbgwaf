@@ -6,8 +6,10 @@
 
 namespace tactics {
 
-void GameLogic::Reset() {
-  scene_ = BuildDefaultScene();
+void GameLogic::Reset() { Reset(BuildDefaultScene()); }
+
+void GameLogic::Reset(Scene scene) {
+  scene_ = std::move(scene);
   obstacleBounds_ = ObstacleBounds(scene_.obstacles);
   navMesh_.Build(scene_.obstacles, constants::kMapHalfExtent, constants::kAgentRadius);
   turnManager_.StartRound(scene_.units);

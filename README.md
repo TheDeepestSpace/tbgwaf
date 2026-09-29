@@ -28,6 +28,17 @@ ctest --test-dir build --output-on-failure
 Run the game with `./build/tactics_app`. `ctest` also runs a headless
 smoke test under `xvfb-run` if available.
 
+### Gameplay scenario tests
+
+`tests/scenarios/*.yaml` are state-only (no rendering) gameplay regression
+tests: each declares a map + starting units, then a scripted sequence of
+player-equivalent actions (`move`/`shoot`/`pass`/`cancel`, driven through the
+same click/choose API the interactive game uses) interleaved with
+assertions on the resulting state (alive/dead, position, per-team FOV
+visibility, current actor, round number, winner). They run as the
+`scenario_tests` ctest target; see `tests/scenario/Scenario.h` for the full
+field reference and `tests/scenarios/*.yaml` for examples.
+
 ## Web (WASM) build
 
 Requires the [Emscripten SDK](https://emscripten.io/docs/getting_started/downloads.html)

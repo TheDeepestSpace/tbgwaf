@@ -1,0 +1,32 @@
+# Regression coverage for the fog-of-war shoot gating exercised by
+# TestGameLogicShootGatingRequiresTeamVisibility in tests/logic_tests.cpp: a
+# living enemy outside the shooter's team FOV must not be a clickable target
+# at all (the click is a no-op, not a guaranteed miss), and a no-op must not
+# consume the actor's turn.
+name: fov_gating_blocks_out_of_view_shot
+
+units:
+  # Facing away (180 degrees) from red: red is entirely outside blue's cone.
+  - {id: 0, team: blue, position: [-5, 0, 0], facing_degrees: 180}
+  - {id: 1, team: red, position: [5, 0, 0], facing_degrees: 0}
+
+script:
+  - assert: {unit: 1, visible_to: blue, visible: false}
+
+  - action: shoot
+    actor: 0
+    target: 1
+    expect_noop: true
+  - assert: {unit: 1, alive: true}
+  - assert: {current_actor: 0}  # Turn not consumed by the gated no-op.
+
+  - action: cancel
+    actor: 0
+  - action: pass
+    actor: 0
+  - assert: {current_actor: 1}
+
+  - action: pass
+    actor: 1
+  - assert: {current_actor: 0}
+  - assert: {round: 2}

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -29,8 +30,13 @@ enum class InputMode {
 class GameLogic {
  public:
   GameLogic() { Reset(); }
+  // Drives the same state machine over a caller-supplied scene instead of
+  // BuildDefaultScene(), so tests (e.g. YAML gameplay scenarios) can exercise
+  // arbitrary maps/unit layouts without duplicating any game logic.
+  explicit GameLogic(Scene scene) { Reset(std::move(scene)); }
 
   void Reset();
+  void Reset(Scene scene);
 
   const Scene& GetScene() const { return scene_; }
   const NavMesh& GetNavMesh() const { return navMesh_; }

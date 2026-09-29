@@ -120,6 +120,32 @@ else()
   target_link_libraries(tactics_logic_tests PRIVATE tactics_logic)
   add_test(NAME logic_tests COMMAND tactics_logic_tests)
 
+  # YAML gameplay scenarios (issue #14): a native-only, test-only dependency,
+  # so it's kept out of tactics_logic (which the WASM build also links) to
+  # avoid cross-compiling yaml-cpp for Emscripten.
+  set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+  set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(
+    yaml-cpp
+    GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
+    GIT_TAG 0.8.0
+  )
+  FetchContent_MakeAvailable(yaml-cpp)
+
+  add_library(tactics_scenario STATIC tests/scenario/Scenario.cpp)
+  target_include_directories(tactics_scenario PUBLIC src tests)
+  target_link_libraries(tactics_scenario PUBLIC tactics_logic yaml-cpp::yaml-cpp)
+
+  add_executable(tactics_scenario_tests tests/scenario_tests.cpp)
+  target_include_directories(tactics_scenario_tests PRIVATE src tests)
+  target_link_libraries(tactics_scenario_tests PRIVATE tactics_scenario)
+  add_test(
+    NAME scenario_tests
+    COMMAND tactics_scenario_tests
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
+
   find_program(XVFB_RUN_EXECUTABLE xvfb-run)
   if(XVFB_RUN_EXECUTABLE)
     add_test(

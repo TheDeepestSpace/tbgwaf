@@ -10,6 +10,7 @@
 // See tests/scenarios/*.yaml for the file format by example, and
 // tests/scenario_tests.cpp for how these are run in CI.
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -18,6 +19,10 @@
 
 #include "game/Scene.h"
 #include "game/Types.h"
+
+namespace tactics {
+class GameLogic;
+}
 
 namespace tactics::scenario {
 
@@ -73,8 +78,35 @@ struct ScenarioResult {
   std::vector<std::string> failures;
 };
 
+// Optional observation points for the expensive/visual run mode (issue #14
+// stage 2/3). The default-constructed value reproduces the cheap/logic-only
+// mode exactly: move animations are fast-forwarded in a single Update()
+// call and no callbacks fire.
+struct PlaybackHooks {
+  // When > 0, move animations are advanced in fixed ticks of this many
+  // seconds (with onFrame fired after each tick) instead of being
+  // fast-forwarded, so a frame-by-frame capture sees the actual motion.
+  float tickSeconds = 0.0f;
+
+  // Extra onFrame calls emitted while the state is at rest: once at the
+  // initial state and once after each completed action, so captured video
+  // holds on each turn's outcome instead of cutting instantly.
+  int holdFramesAfterAction = 0;
+
+  // Fired for every playback frame (initial holds, each move tick, and
+  // post-action holds). The game state is mid-scenario; do not mutate it.
+  std::function<void(const GameLogic&)> onFrame;
+
+  // Fired once at the initial state (completedActions == 0) and once after
+  // each action step resolves (completedActions == 1, 2, ...). Assert-only
+  // steps do not fire it: a "turn" for capture purposes is one executed
+  // action.
+  std::function<void(const GameLogic&, int completedActions)> onActionComplete;
+};
+
 // Runs `scenario` against a fresh GameLogic instance built from its scene,
 // executing each step's action or checking its assertion in order.
+ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks);
 ScenarioResult RunScenario(const Scenario& scenario);
 
 }  // namespace tactics::scenario

@@ -1,5 +1,6 @@
 #include "scenario/Scenario.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <stdexcept>
 #include <utility>
@@ -139,7 +140,7 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
 }
 
 bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
-                    ScenarioResult* result) {
+                    const PlaybackHooks& hooks, ScenarioResult* result) {
   auto Fail = [&](const std::string& msg) {
     result->failures.push_back("step " + std::to_string(stepIndex) + " (actor " +
                                 std::to_string(action.actor) + "): " + msg);
@@ -164,7 +165,23 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
       if (game.Mode() != InputMode::Moving) {
         return Fail("has no path to destination " + ToString(action.destination));
       }
-      game.Update(1.0e6f);  // Fast-forward past the move animation, like the existing unit tests.
+      if (hooks.tickSeconds > 0.0f) {
+        // Visual mode: advance in fixed ticks and let the observer capture
+        // each in-between frame of the walk. Bounded so a stuck animation
+        // fails the scenario instead of hanging the runner.
+        constexpr int kMaxMoveTicks = 20000;
+        int ticks = 0;
+        while (game.Mode() == InputMode::Moving && ++ticks <= kMaxMoveTicks) {
+          game.Update(hooks.tickSeconds);
+          if (hooks.onFrame) hooks.onFrame(game);
+        }
+        if (game.Mode() == InputMode::Moving) {
+          return Fail("move animation did not complete within " +
+                      std::to_string(kMaxMoveTicks) + " ticks");
+        }
+      } else {
+        game.Update(1.0e6f);  // Fast-forward past the move animation, like the existing unit tests.
+      }
       return true;
     }
     case ScenarioAction::Kind::Shoot: {
@@ -275,21 +292,35 @@ Scenario LoadScenarioFromFile(const std::string& path) {
   return scenario;
 }
 
-ScenarioResult RunScenario(const Scenario& scenario) {
+ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks) {
   ScenarioResult result;
   GameLogic game(scenario.scene);
 
+  auto EmitHoldFrames = [&] {
+    if (!hooks.onFrame) return;
+    for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) hooks.onFrame(game);
+  };
+
+  EmitHoldFrames();
+  if (hooks.onActionComplete) hooks.onActionComplete(game, 0);
+
+  int completedActions = 0;
   for (int i = 0; i < static_cast<int>(scenario.steps.size()); ++i) {
     const ScenarioStep& step = scenario.steps[i];
     if (step.action) {
-      if (!ExecuteAction(game, *step.action, i, &result)) {
+      if (!ExecuteAction(game, *step.action, i, hooks, &result)) {
         break;  // The script's own preconditions were violated; state past this point is unreliable.
       }
+      ++completedActions;
+      EmitHoldFrames();
+      if (hooks.onActionComplete) hooks.onActionComplete(game, completedActions);
     } else {
       CheckAssertion(game, *step.assertion, i, &result);
     }
   }
   return result;
 }
+
+ScenarioResult RunScenario(const Scenario& scenario) { return RunScenario(scenario, {}); }
 
 }  // namespace tactics::scenario

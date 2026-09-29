@@ -113,6 +113,12 @@ void GameLogic::Update(float dtSeconds) {
       mover->position += (toEnd / distToEnd) * remaining;
       remaining = 0.0f;
     }
+
+    if (TriggerOverwatch(*mover)) {
+      moveAnimPath_.clear();
+      CompleteAction();
+      return;
+    }
   }
 
   if (moveAnimSegment_ + 1 >= moveAnimPath_.size()) {
@@ -147,6 +153,14 @@ void GameLogic::ChoosePass() {
   CompleteAction();
 }
 
+void GameLogic::ChooseOverwatch() {
+  if (mode_ != InputMode::ActionMenu) return;
+  Unit* unit = FindUnit(selectedUnitId_.value_or(-1));
+  if (!unit) return;
+  unit->triggerAction = TriggerAction::Shoot;
+  CompleteAction();
+}
+
 void GameLogic::CancelAction() {
   if (mode_ == InputMode::AwaitingMoveDestination || mode_ == InputMode::AwaitingShootTarget) {
     mode_ = InputMode::ActionMenu;
@@ -165,6 +179,18 @@ bool GameLogic::ResolveShot(Unit& shooter, Unit& target) {
       LineOfSightClear(shooter.EyePosition(), target.EyePosition(), obstacleBounds_);
   if (hit) target.alive = false;
   return hit;
+}
+
+bool GameLogic::TriggerOverwatch(Unit& mover) {
+  for (auto& watcher : scene_.units) {
+    if (!watcher.alive || watcher.team == mover.team) continue;
+    if (watcher.triggerAction != TriggerAction::Shoot) continue;
+    if (ResolveShot(watcher, mover)) {
+      watcher.triggerAction = TriggerAction::None;
+      return true;
+    }
+  }
+  return false;
 }
 
 void GameLogic::CompleteAction() {

@@ -182,7 +182,9 @@ DiffResult DiffImages(const Image& golden, const Image& actual, int threshold) {
 }
 
 // One ffmpeg process fed raw RGB frames over a pipe, encoding a browser-
-// playable H.264 MP4 (the PR review page embeds these directly).
+// playable VP9 WebM (the PR review page embeds these directly). Realtime
+// deadline keeps VP9 encoding fast enough for CI; -b:v 0 makes -crf a pure
+// constant-quality target.
 class VideoEncoder {
  public:
   bool Open(const fs::path& outPath, int width, int height) {
@@ -190,8 +192,9 @@ class VideoEncoder {
     char cmd[1024];
     std::snprintf(cmd, sizeof(cmd),
                   "ffmpeg -loglevel error -y -f rawvideo -pixel_format rgb24 "
-                  "-video_size %dx%d -framerate %d -i - -c:v libx264 -preset veryfast "
-                  "-crf 23 -pix_fmt yuv420p -movflags +faststart \"%s\"",
+                  "-video_size %dx%d -framerate %d -i - -c:v libvpx-vp9 -b:v 0 "
+                  "-crf 32 -deadline realtime -cpu-used 5 -row-mt 1 "
+                  "-pix_fmt yuv420p \"%s\"",
                   width, height, kVideoFps, outPath.string().c_str());
     pipe_ = popen(cmd, "w");
     frameBytes_ = static_cast<size_t>(width) * height * 3;
@@ -269,7 +272,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   if (options.video) {
     for (int pane = 0; pane < 2; ++pane) {
       const fs::path videoPath =
-          options.outDir / stem / (std::string(TeamName(PaneTeam(pane))) + ".mp4");
+          options.outDir / stem / (std::string(TeamName(PaneTeam(pane))) + ".webm");
       if (!encoders[pane].Open(videoPath, paneWidth, kWindowHeight)) {
         std::fprintf(stderr, "FAIL %s: could not start ffmpeg for %s\n", stem.c_str(),
                      videoPath.string().c_str());

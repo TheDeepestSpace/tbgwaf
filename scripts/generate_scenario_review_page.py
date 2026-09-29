@@ -3,16 +3,12 @@
 
 Classifies the gameplay scenarios touched by a PR as new/modified/deleted
 purely from git metadata on the YAML files under tests/scenarios/ (never
-from screenshot diffs), records a continuous per-team video for each
-new/modified scenario via the tactics_visual_tests runner, and emits a
-static HTML page embedding the videos, grouped by classification. The page
-is deployed into the existing per-PR gh-pages preview by
-.github/workflows/pr-preview.yml.
-
-Scenarios present at the PR's head but untouched by the PR are listed too,
-under "Unchanged scenarios", so reviewers see the full scenario set — but
-without a video, since re-rendering scenarios the PR didn't change would
-just be wasted CI time.
+from screenshot diffs), records a continuous per-team WebM video for every
+scenario present at the PR's head — new, modified, and unchanged alike —
+via the tactics_visual_tests runner, and emits a static HTML page embedding
+the videos, grouped by classification. Deleted scenarios have nothing to
+render and are listed by name only. The page is deployed into the existing
+per-PR gh-pages preview by .github/workflows/pr-preview.yml.
 
 Must run with a working X display (CI wraps it in xvfb-run) and ffmpeg on
 PATH. Always writes an index.html, even when the PR touches no scenarios.
@@ -55,10 +51,10 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <body>
 <h1>Gameplay scenario review</h1>
 <p>Scenarios under <code>{scenario_dir}</code>, classified against this PR from
-git metadata on the YAML files. New and modified scenarios get a video (the
-full scripted scenario as rendered for that team's fog-of-war pane, the PR's
-version; no base-branch comparison); unchanged scenarios are listed without
-one.</p>
+git metadata on the YAML files. Every scenario present at the PR's head —
+new, modified, and unchanged — gets a video: the full scripted scenario as
+rendered for that team's fog-of-war pane, the PR's version (no base-branch
+comparison). Deleted scenarios are listed by name only.</p>
 {sections}
 </body>
 </html>
@@ -109,9 +105,9 @@ def record_videos(paths: list[str], runner: Path, repo_root: Path, media_dir: Pa
                 dest = media_dir / stem
                 dest.mkdir(parents=True, exist_ok=True)
                 for team in ("blue", "red"):
-                    video = src / f"{team}.mp4"
+                    video = src / f"{team}.webm"
                     if video.is_file():
-                        shutil.copy2(video, dest / f"{team}.mp4")
+                        shutil.copy2(video, dest / f"{team}.webm")
                         have_video = True
             results[path] = {"stem": stem, "ok": ok, "have_video": have_video,
                              "detail": detail}
@@ -140,7 +136,7 @@ def scenario_entry(path: str, info: dict | None) -> str:
             lines.append(
                 f'<figure class="pane {team}"><figcaption>{team.capitalize()} view'
                 f'</figcaption><video controls muted loop '
-                f'src="media/{html.escape(info["stem"])}/{team}.mp4"></video></figure>')
+                f'src="media/{html.escape(info["stem"])}/{team}.webm"></video></figure>')
         lines.append("</div>")
     else:
         lines.append('<p class="note">⚠ No video could be recorded.</p>')
@@ -176,7 +172,7 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     media_dir = args.out / "media"
 
-    renderable = changes["A"] + changes["M"]
+    renderable = changes["A"] + changes["M"] + changes["U"]
     results = record_videos(renderable, args.runner.resolve(), args.repo_root, media_dir)
 
     if not any(changes.values()):
@@ -185,7 +181,7 @@ def main() -> int:
         sections = "\n".join([
             build_section("New scenarios", changes["A"], results),
             build_section("Modified scenarios", changes["M"], results),
-            build_section("Unchanged scenarios", changes["U"], None),
+            build_section("Unchanged scenarios", changes["U"], results),
             build_section("Deleted scenarios", changes["D"], None),
         ])
 

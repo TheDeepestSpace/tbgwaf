@@ -55,8 +55,8 @@ jobs:
           cp build-web/tactics_app.wasm site/
 
       # --- Gameplay scenario review page (issue #14 stage 3): record a
-      # per-team video for every scenario the PR adds or modifies and
-      # publish them on an HTML page inside the same per-PR preview. ---
+      # per-team WebM video for every scenario at the PR's head and publish
+      # them on an HTML page inside the same per-PR preview. ---
       - name: Install native toolchain and video dependencies
         if: github.event.action != 'closed'
         run: |
@@ -108,7 +108,7 @@ jobs:
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           repo="${GITHUB_REPOSITORY#*/}"
           url="https://${owner}.github.io/${repo}/pr-preview/pr-${PR_NUMBER}/scenarios/"
-          body="$(printf '%s\n%s' "$marker" "🎬 [Gameplay scenario review page](${url}) — per-team videos of every scenario this PR adds or modifies (updates with each push; may take a minute to go live after deploy).")"
+          body="$(printf '%s\n%s' "$marker" "🎬 [Gameplay scenario review page](${url}) — per-team videos of every scenario, grouped by how this PR changes it (updates with each push; may take a minute to go live after deploy).")"
           existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             --paginate --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" | head -n1)
           if [ -n "$existing" ]; then

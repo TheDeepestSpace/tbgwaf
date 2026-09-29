@@ -7,8 +7,10 @@
 
 namespace tactics {
 
-void GameLogic::Reset() {
-  scene_ = BuildDefaultScene();
+void GameLogic::Reset() { Reset(BuildDefaultScene()); }
+
+void GameLogic::Reset(Scene scene) {
+  scene_ = std::move(scene);
   obstacleBounds_ = ObstacleBounds(scene_.obstacles);
   navMesh_.Build(scene_.obstacles, constants::kMapHalfExtent, constants::kAgentRadius);
   turnManager_.StartRound();
@@ -125,6 +127,12 @@ void GameLogic::Update(float dtSeconds) {
         remaining = 0.0f;
       }
     }
+
+    if (TriggerOverwatch(*mover)) {
+      // Force this mover's removal below without disturbing the others,
+      // which keep animating their own planned moves this commit.
+      move.segment = move.path.size();
+    }
   }
 
   // Every mover advances together above; drop whichever ones just finished
@@ -171,6 +179,17 @@ void GameLogic::ChoosePass() {
   mode_ = InputMode::AwaitingSelection;
 }
 
+void GameLogic::ChooseOverwatch() {
+  if (mode_ != InputMode::ActionMenu) return;
+  Unit* unit = FindUnit(selectedUnitId_.value_or(-1));
+  if (!unit) return;
+  unit->plan.type = PlannedActionType::Overwatch;
+  unit->plan.movePath.clear();
+  unit->plan.shootTargetId = -1;
+  selectedUnitId_.reset();
+  mode_ = InputMode::AwaitingSelection;
+}
+
 void GameLogic::CancelAction() {
   if (mode_ == InputMode::AwaitingMoveDestination || mode_ == InputMode::AwaitingShootTarget) {
     mode_ = InputMode::ActionMenu;
@@ -194,6 +213,18 @@ bool GameLogic::ResolveShot(Unit& shooter, Unit& target) {
 bool GameLogic::IsUnitMoving(int unitId) const {
   for (const ActiveMove& move : activeMoves_) {
     if (move.unitId == unitId) return true;
+  }
+  return false;
+}
+
+bool GameLogic::TriggerOverwatch(Unit& mover) {
+  for (auto& watcher : scene_.units) {
+    if (!watcher.alive || watcher.team == mover.team) continue;
+    if (watcher.triggerAction != TriggerAction::Shoot) continue;
+    if (ResolveShot(watcher, mover)) {
+      watcher.triggerAction = TriggerAction::None;
+      return true;
+    }
   }
   return false;
 }
@@ -230,6 +261,8 @@ void GameLogic::CommitTurn() {
       if (target && aliveAtCommit[target->id]) {
         ResolveShot(unit, *target);
       }
+    } else if (plan.type == PlannedActionType::Overwatch) {
+      unit.triggerAction = TriggerAction::Shoot;
     }
   }
 

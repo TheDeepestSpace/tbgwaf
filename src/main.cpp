@@ -34,6 +34,7 @@ using tactics::InputMode;
 using tactics::Obstacle;
 using tactics::Team;
 using tactics::TeamVisibility;
+using tactics::TriggerAction;
 using tactics::Unit;
 
 namespace {
@@ -145,20 +146,29 @@ void DrawBox(const gfx::Shader& shader, const gfx::CubeMesh& cube, const glm::ma
   cube.Draw();
 }
 
-// Lit variant: also uploads the model matrix (for world-space position/light
-// coordinates in the fragment shader) alongside the color. Light direction,
-// view position, and the shadow map itself are set once per frame, not
-// per-object, since they don't vary between draw calls.
-void DrawBoxLit(const gfx::Shader& shader, const gfx::CubeMesh& cube, const glm::mat4& viewProj,
-                 const glm::mat4& lightSpaceMatrix, const glm::vec3& minCorner,
-                 const glm::vec3& size, const glm::vec4& color) {
-  const glm::mat4 model =
-      glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
+// Lit variant that takes a full model matrix rather than an axis-aligned
+// minCorner/size pair, for geometry (e.g. the gun box) that needs a
+// rotation term a translate*scale composition can't express. Also uploads
+// the model matrix (for world-space position/light coordinates in the
+// fragment shader) alongside the color. Light direction, view position, and
+// the shadow map itself are set once per frame, not per-object, since they
+// don't vary between draw calls.
+void DrawBoxLitModel(const gfx::Shader& shader, const gfx::CubeMesh& cube,
+                      const glm::mat4& viewProj, const glm::mat4& lightSpaceMatrix,
+                      const glm::mat4& model, const glm::vec4& color) {
   shader.SetMat4("uModel", model);
   shader.SetMat4("uMVP", viewProj * model);
   shader.SetMat4("uLightSpaceMatrix", lightSpaceMatrix);
   shader.SetVec4("uColor", color);
   cube.Draw();
+}
+
+void DrawBoxLit(const gfx::Shader& shader, const gfx::CubeMesh& cube, const glm::mat4& viewProj,
+                 const glm::mat4& lightSpaceMatrix, const glm::vec3& minCorner,
+                 const glm::vec3& size, const glm::vec4& color) {
+  const glm::mat4 model =
+      glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
+  DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, model, color);
 }
 
 void DrawBoxDepth(const gfx::Shader& shader, const gfx::CubeMesh& cube,
@@ -181,14 +191,35 @@ void UnitBoxes(const Unit& unit, glm::vec3* outBodyMin, glm::vec3* outBodySize,
   *outHeadSize = glm::vec3(kHeadSize, kHeadSize, kHeadSize);
 }
 
+// Model matrix for a small gun box attached to the body, oriented along
+// unit.facingYaw and offset forward from unit.position. The rotation axis
+// is (0,-1,0) rather than the more usual (0,1,0): FacingDirection() defines
+// "forward" directly as (cos(yaw), 0, sin(yaw)) rather than via a rotation
+// matrix, and glm::rotate(yaw, {0,1,0}) turns the local +X axis into
+// (cos(yaw), 0, -sin(yaw)) — the mirror image. Negating the axis cancels
+// that sign flip so the gun visually points the same way as the FOV cone.
+glm::mat4 GunModel(const Unit& unit) {
+  constexpr float kGunLength = 0.5f;
+  constexpr float kGunThickness = 0.08f;
+  constexpr float kGunChestHeight = 0.9f;
+  const glm::vec3 size(kGunLength, kGunThickness, kGunThickness);
+  const glm::vec3 localMin(tactics::constants::kUnitHalfWidth, kGunChestHeight,
+                            -kGunThickness * 0.5f);
+  return glm::translate(glm::mat4(1.0f), unit.position) *
+         glm::rotate(glm::mat4(1.0f), unit.facingYaw, glm::vec3(0.0f, -1.0f, 0.0f)) *
+         glm::translate(glm::mat4(1.0f), localMin) * glm::scale(glm::mat4(1.0f), size);
+}
+
 void DrawUnit(const gfx::Shader& shader, const gfx::CubeMesh& cube, const glm::mat4& viewProj,
               const glm::mat4& lightSpaceMatrix, const Unit& unit) {
   const glm::vec4 color = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
                                                     : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
+  constexpr glm::vec4 kGunColor(0.12f, 0.12f, 0.12f, 1.0f);
   glm::vec3 bodyMin, bodySize, headMin, headSize;
   UnitBoxes(unit, &bodyMin, &bodySize, &headMin, &headSize);
   DrawBoxLit(shader, cube, viewProj, lightSpaceMatrix, bodyMin, bodySize, color);
   DrawBoxLit(shader, cube, viewProj, lightSpaceMatrix, headMin, headSize, color);
+  DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, GunModel(unit), kGunColor);
 }
 
 void DrawUnitDepth(const gfx::Shader& shader, const gfx::CubeMesh& cube,
@@ -617,6 +648,8 @@ int main() {
             ImGui::SameLine();
             if (ImGui::Button("Shoot")) game.ChooseShoot();
             ImGui::SameLine();
+            if (ImGui::Button("Overwatch")) game.ChooseOverwatch();
+            ImGui::SameLine();
             if (ImGui::Button("Pass")) game.ChoosePass();
           } else {
             if (ImGui::Button("Cancel")) game.CancelAction();
@@ -808,6 +841,15 @@ int main() {
                                             : glm::vec4(1.0f, 1.0f, 1.0f, 0.6f);
           DrawHighlight(unlitShader, cubeMesh, viewProj, unit.position, color);
         }
+      }
+      // Overwatch indicator: a minimal PoC-grade ground marker (distinct from
+      // the white current-actor ring and the yellow selection ring) under
+      // every figure currently armed to fire during an enemy's move.
+      for (const Unit& unit : game.GetScene().units) {
+        if (!unit.alive || unit.triggerAction != TriggerAction::Shoot) continue;
+        if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+        DrawHighlight(unlitShader, cubeMesh, viewProj, unit.position,
+                      glm::vec4(1.0f, 0.55f, 0.0f, 1.0f));
       }
       // Selection/move-preview state belongs to whichever team is currently
       // acting, so only their own pane draws it.

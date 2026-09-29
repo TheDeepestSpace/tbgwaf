@@ -1,0 +1,27 @@
+# Regression coverage for climbable-obstacle pathfinding, matching
+# TestGameLogicMoveCanClimbOntoObstacle in tests/logic_tests.cpp: a move
+# destination on top of a climbable crate should route up onto it rather
+# than being rejected as unreachable.
+name: move_and_climb_crate
+
+map:
+  obstacles:
+    - {center: [0, 0], half_extent: [0.6, 0.6], height: 1.2, climbable: true}
+
+units:
+  - {id: 0, team: blue, position: [-5, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [5, 0, 0], facing_degrees: 180}
+
+script:
+  - action: move
+    actor: 0
+    destination: [0, 1.2, 0]  # The crate's top surface.
+  - action: commit
+  - assert: {unit: 0, position: [0, 1.2, 0], tolerance: 0.05}
+  - assert: {current_team: red}
+
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {current_team: blue}
+  - assert: {round: 2}

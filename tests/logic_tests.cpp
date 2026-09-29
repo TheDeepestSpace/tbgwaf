@@ -614,6 +614,75 @@ void TestGameLogicMoveCanClimbOntoObstacle() {
   CHECK(game.CurrentTeam() == Team::Red);  // Turn advanced.
 }
 
+void TestGameLogicOverwatchFiresOnEnemyEnteringFov() {
+  GameLogic game;
+
+  // Reposition red4 due west of blue1 -- squarely behind blue1's fixed +X
+  // facing, so it starts outside blue1's FOV cone regardless of LOS -- then
+  // send it walking east along the open z=0 lane, straight through blue1's
+  // position and into its watched cone.
+  game.FindUnit(4)->position = glm::vec3(-9.5f, 0.0f, 0.0f);
+
+  // Blue plans: blue0 and blue2 pass, blue1 arms overwatch instead of a
+  // Move/Shoot/Pass -- nothing fires yet, since a plan is just recorded
+  // until the whole team's turn is committed.
+  CHECK(game.CurrentTeam() == Team::Blue);
+  game.ClickUnit(0);
+  game.ChoosePass();
+  game.ClickUnit(1);
+  game.ChooseOverwatch();
+  CHECK(game.FindUnit(1)->plan.type == tactics::PlannedActionType::Overwatch);
+  CHECK(game.FindUnit(1)->triggerAction == TriggerAction::None);  // Not armed until commit.
+  game.ClickUnit(2);
+  game.ChoosePass();
+  CHECK(game.CanCommitTurn());
+  game.CommitTurn();
+
+  // Committing arms blue1's trigger and hands the turn to Red.
+  CHECK(game.FindUnit(1)->triggerAction == TriggerAction::Shoot);
+  CHECK(game.CurrentTeam() == Team::Red);
+
+  // Red plans: red3 and red5 pass, red4 moves east through blue1's watched
+  // lane toward the far side. Committing kicks off red4's move.
+  game.ClickUnit(3);
+  game.ChoosePass();
+  game.ClickUnit(4);
+  game.ChooseMove();
+  const glm::vec3 destination(0.0f, 0.0f, 0.0f);
+  game.ClickGround(destination);
+  game.ClickUnit(5);
+  game.ChoosePass();
+  CHECK(game.CanCommitTurn());
+  game.CommitTurn();
+  CHECK(game.Mode() == InputMode::Moving);
+
+  // Step frame-by-frame (rather than one huge fast-forward dt) so the
+  // overwatch check actually samples red4's position incrementally along
+  // the path -- a single giant dt would jump it straight from start to
+  // destination in one position update, skipping the mid-path FOV entry
+  // this test exists to catch. blue1 should spot red4 and fire the moment
+  // it crosses into FOV with clear LOS, interrupting the move well short of
+  // the destination.
+  int steps = 0;
+  while (game.Mode() == InputMode::Moving && steps < 10000) {
+    game.Update(0.02f);
+    ++steps;
+  }
+  CHECK(steps < 10000);  // Sanity: the loop above actually terminated.
+
+  CHECK(!game.FindUnit(4)->alive);
+  CHECK(game.FindUnit(1)->triggerAction == TriggerAction::None);  // One-shot: trigger consumed.
+  const glm::vec3 moverStop = game.FindUnit(4)->position;
+  CHECK(glm::distance(moverStop, destination) > 1.0f);  // Died mid-path, short of the destination.
+  CHECK(moverStop.x > -9.5f + 1e-3f);                    // But had actually started moving.
+
+  // The interrupted move still finishes Red's commit and passes the turn.
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(game.CurrentTeam() == Team::Blue);
+  CHECK(game.RoundNumber() == 2);
+  CHECK(!game.Winner().has_value());  // Red still has id3 and id5 alive.
+}
+
 void TestGameLogicWinCondition() {
   GameLogic game;
   // Directly eliminate the Red team to drive the game-over transition
@@ -663,6 +732,7 @@ int main() {
   TestGameLogicMoveAnimatesProgressively();
   TestGameLogicMoveIgnoresInputWhileAnimating();
   TestGameLogicMoveCanClimbOntoObstacle();
+  TestGameLogicOverwatchFiresOnEnemyEnteringFov();
   TestGameLogicWinCondition();
 
   if (g_failures == 0) {

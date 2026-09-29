@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -27,8 +28,8 @@ enum class InputMode {
 // click-driven plan-then-commit flow. Deliberately free of any SDL/GL/ImGui
 // dependency so it can be driven and verified headlessly.
 //
-// Turn model: on its turn, a team assigns one plan (Move/Shoot/Pass) to each
-// of its living figures -- nothing happens yet. Once every living figure on
+// Turn model: on its turn, a team assigns one plan (Move/Shoot/Pass/Overwatch)
+// to each of its living figures -- nothing happens yet. Once every living figure on
 // the team has a plan, CommitTurn() resolves them all at once: every planned
 // shot is judged against the same pre-commit snapshot of the enemy team (so
 // one figure's shot never depends on whether an ally's shot in the same
@@ -38,8 +39,13 @@ enum class InputMode {
 class GameLogic {
  public:
   GameLogic() { Reset(); }
+  // Drives the same state machine over a caller-supplied scene instead of
+  // BuildDefaultScene(), so tests (e.g. YAML gameplay scenarios) can exercise
+  // arbitrary maps/unit layouts without duplicating any game logic.
+  explicit GameLogic(Scene scene) { Reset(std::move(scene)); }
 
   void Reset();
+  void Reset(Scene scene);
 
   const Scene& GetScene() const { return scene_; }
   const NavMesh& GetNavMesh() const { return navMesh_; }
@@ -90,6 +96,10 @@ class GameLogic {
   void ChooseShoot();
   void ChoosePass();
 
+  // Plans overwatch (triggerAction = Shoot, armed once this commits) on the
+  // acting unit, the same way ChoosePass() plans a pass.
+  void ChooseOverwatch();
+
   // Steps back one level: AwaitingMove/ShootTarget -> ActionMenu -> AwaitingSelection.
   void CancelAction();
 
@@ -120,6 +130,12 @@ class GameLogic {
   };
 
   void FinishCommit();
+
+  // Checks every living enemy of `mover` armed with triggerAction == Shoot
+  // for FOV+LOS on `mover`'s current (mid-move) position. On the first
+  // watcher that has a shot, resolves it (killing `mover`), consumes that
+  // watcher's trigger, and returns true so Update() can interrupt the move.
+  bool TriggerOverwatch(Unit& mover);
 
   Scene scene_;
   NavMesh navMesh_;

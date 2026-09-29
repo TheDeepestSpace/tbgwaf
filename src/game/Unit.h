@@ -12,13 +12,21 @@ namespace tactics {
 // Plan-then-commit turn model: during a team's planning phase, choosing an
 // action for a figure only records what it *will* do -- nothing executes
 // until the whole team's turn is committed (see GameLogic::CommitTurn).
-enum class PlannedActionType { None, Move, Shoot, Pass };
+// Overwatch doesn't act immediately either: it just arms triggerAction below
+// as part of the same commit.
+enum class PlannedActionType { None, Move, Shoot, Pass, Overwatch };
 
 struct PlannedAction {
   PlannedActionType type = PlannedActionType::None;
   std::vector<glm::vec3> movePath;  // Resolved via NavMesh::FindPath, for type == Move.
   int shootTargetId = -1;           // For type == Shoot.
 };
+
+// A standing order a figure can arm on its turn, to react automatically
+// during an enemy's move instead of acting immediately. `None` is the
+// default (no reaction); `Shoot` is the overwatch PoC. Left room to extend
+// with more reactions later.
+enum class TriggerAction { None, Shoot };
 
 struct Unit {
   int id = -1;
@@ -27,6 +35,7 @@ struct Unit {
   float facingYaw = 0.0f;    // Radians, measured from +X axis in the XZ plane.
   bool alive = true;
   PlannedAction plan;  // This figure's plan for the current/upcoming team commit.
+  TriggerAction triggerAction = TriggerAction::None;
 
   glm::vec3 EyePosition() const {
     return position + glm::vec3(0.0f, constants::kEyeHeight, 0.0f);

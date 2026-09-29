@@ -17,6 +17,8 @@ void GameLogic::Reset() {
   winner_.reset();
   movePreviewPath_.clear();
   movePreviewValid_ = false;
+  moveAnimPath_.clear();
+  moveAnimSegment_ = 0;
 }
 
 Unit* GameLogic::FindUnit(int id) {
@@ -69,13 +71,52 @@ void GameLogic::ClickGround(const glm::vec3& point) {
   std::vector<glm::vec3> path;
   if (!navMesh_.FindPath(mover->position, point, &path)) return;
 
-  const glm::vec3 origin = mover->position;
-  mover->position = path.back();
-  const glm::vec3 delta = mover->position - origin;
-  if (glm::length(glm::vec2(delta.x, delta.z)) > 1e-4f) {
-    mover->facingYaw = std::atan2(delta.z, delta.x);
+  // Animate rather than teleport: hand the resolved path off to Update(),
+  // which walks the mover along it at constant speed and completes the
+  // action once the path is consumed. NavMesh::FindPath always returns at
+  // least [start, goal] on success.
+  moveAnimPath_ = std::move(path);
+  moveAnimSegment_ = 0;
+  mode_ = InputMode::Moving;
+  movePreviewPath_.clear();
+  movePreviewValid_ = false;
+}
+
+void GameLogic::Update(float dtSeconds) {
+  if (mode_ != InputMode::Moving) return;
+  Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
+  if (!mover || moveAnimPath_.size() < 2) {
+    moveAnimPath_.clear();
+    CompleteAction();
+    return;
   }
-  CompleteAction();
+
+  float remaining = dtSeconds * constants::kMoveSpeed;
+  while (remaining > 0.0f && moveAnimSegment_ + 1 < moveAnimPath_.size()) {
+    const glm::vec3& segStart = moveAnimPath_[moveAnimSegment_];
+    const glm::vec3& segEnd = moveAnimPath_[moveAnimSegment_ + 1];
+
+    const glm::vec3 segDelta = segEnd - segStart;
+    if (glm::length(glm::vec2(segDelta.x, segDelta.z)) > 1e-4f) {
+      mover->facingYaw = std::atan2(segDelta.z, segDelta.x);
+    }
+
+    const glm::vec3 toEnd = segEnd - mover->position;
+    const float distToEnd = glm::length(toEnd);
+    if (distToEnd <= remaining) {
+      mover->position = segEnd;
+      remaining -= distToEnd;
+      ++moveAnimSegment_;
+    } else {
+      mover->position += (toEnd / distToEnd) * remaining;
+      remaining = 0.0f;
+    }
+  }
+
+  if (moveAnimSegment_ + 1 >= moveAnimPath_.size()) {
+    moveAnimPath_.clear();
+    CompleteAction();
+  }
 }
 
 void GameLogic::HoverGround(const glm::vec3& point) {

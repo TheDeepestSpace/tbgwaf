@@ -78,4 +78,35 @@ void LineMesh::Draw() const {
   glBindVertexArray(0);
 }
 
+void TriangleFanMesh::Init() {
+  glGenVertexArrays(1, &vao_);
+  glGenBuffers(1, &vbo_);
+  glBindVertexArray(vao_);
+  glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+  glBindVertexArray(0);
+}
+
+void TriangleFanMesh::Destroy() {
+  if (vbo_) glDeleteBuffers(1, &vbo_);
+  if (vao_) glDeleteVertexArrays(1, &vao_);
+  vao_ = vbo_ = 0;
+}
+
+void TriangleFanMesh::SetPoints(const std::vector<glm::vec3>& points) {
+  pointCount_ = static_cast<GLsizei>(points.size());
+  if (pointCount_ == 0) return;
+  glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+  glBufferData(GL_ARRAY_BUFFER, points.size() * sizeof(glm::vec3), points.data(),
+               GL_DYNAMIC_DRAW);
+}
+
+void TriangleFanMesh::Draw() const {
+  if (pointCount_ < 3) return;
+  glBindVertexArray(vao_);
+  glDrawArrays(GL_TRIANGLE_FAN, 0, pointCount_);
+  glBindVertexArray(0);
+}
+
 }  // namespace gfx

@@ -45,6 +45,11 @@ constexpr float kUnitHeight = 1.8f;
 constexpr float kEyeHeight = 1.5f;
 constexpr float kShootRange = 30.0f;          // Effectively unlimited within the map.
 constexpr float kShootHalfFovDegrees = 75.0f;  // 150 degree total FOV cone.
+constexpr float kMoveSpeed = 4.0f;  // World units per second for move animation.
+// Visual length of the rendered FOV cone overlay: shorter than kShootRange
+// (which is "effectively unlimited") so the cone doesn't run off the edge
+// of the map.
+constexpr float kFovConeVisualRange = kMapHalfExtent;
 }  // namespace constants
 
 }  // namespace tactics

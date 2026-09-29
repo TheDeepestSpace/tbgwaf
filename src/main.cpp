@@ -13,6 +13,7 @@
 #endif
 
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -205,6 +206,37 @@ void DrawHighlight(const gfx::Shader& shader, const gfx::CubeMesh& cube, const g
   DrawBox(shader, cube, viewProj, minCorner, glm::vec3(kHalf * 2.0f, 0.04f, kHalf * 2.0f), color);
 }
 
+// Renders a unit's FOV as a flat, ground-level, lightly team-colored
+// translucent triangle fan spanning kShootHalfFovDegrees around
+// FacingDirection(), capped at kFovConeVisualRange (shorter than the
+// "effectively unlimited" kShootRange so it doesn't run off the map).
+// Caller is responsible for enabling blending around this call.
+void DrawFovCone(const gfx::Shader& shader, gfx::TriangleFanMesh& mesh, const glm::mat4& viewProj,
+                  const Unit& unit) {
+  constexpr int kArcSegments = 24;
+  constexpr float kGroundOffset = 0.015f;
+  constexpr float kConeAlpha = 0.15f;
+  const float halfFovRad = glm::radians(tactics::constants::kShootHalfFovDegrees);
+  const float range = tactics::constants::kFovConeVisualRange;
+
+  std::vector<glm::vec3> points;
+  points.reserve(kArcSegments + 2);
+  points.push_back(unit.position + glm::vec3(0.0f, kGroundOffset, 0.0f));
+  for (int i = 0; i <= kArcSegments; ++i) {
+    const float t = static_cast<float>(i) / static_cast<float>(kArcSegments);
+    const float angle = unit.facingYaw - halfFovRad + 2.0f * halfFovRad * t;
+    points.push_back(unit.position + glm::vec3(std::cos(angle) * range, kGroundOffset,
+                                                std::sin(angle) * range));
+  }
+  mesh.SetPoints(points);
+
+  const glm::vec4 baseColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
+                                                        : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
+  shader.SetMat4("uMVP", viewProj);
+  shader.SetVec4("uColor", glm::vec4(baseColor.r, baseColor.g, baseColor.b, kConeAlpha));
+  mesh.Draw();
+}
+
 // Finds the alive unit whose bounding box the ray hits nearest, or -1.
 int PickUnit(const gfx::Ray& ray, const std::vector<Unit>& units) {
   int bestId = -1;
@@ -353,6 +385,8 @@ int main() {
   cubeMesh.Init();
   gfx::LineMesh pathLine;
   pathLine.Init();
+  gfx::TriangleFanMesh fovConeMesh;
+  fovConeMesh.Init();
 
   // Stage-C: a single directional light (simulating overhead factory
   // lighting) casting a basic shadow map, single cascade, hard-edged. The
@@ -418,6 +452,7 @@ int main() {
   const bool isSmokeTest = std::getenv("TBGWAF_SMOKE_TEST") != nullptr;
   int frameCount = 0;
   constexpr int kSmokeTestMaxFrames = 60;
+  Uint32 lastFrameTicks = SDL_GetTicks();
 
   auto runFrame = [&]() {
     int windowWidth = kInitialWindowWidth, windowHeight = kInitialWindowHeight;
@@ -474,6 +509,11 @@ int main() {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
+
+    const Uint32 nowTicks = SDL_GetTicks();
+    const float dt = static_cast<float>(nowTicks - lastFrameTicks) / 1000.0f;
+    lastFrameTicks = nowTicks;
+    game.Update(dt);
 
     // Stage-D: whichever team currently has the turn is the "active" pane --
     // only that side's viewport accepts game-action input (unit selection,
@@ -534,6 +574,9 @@ int main() {
           break;
         case InputMode::AwaitingShootTarget:
           ImGui::TextWrapped("Click an enemy figure to shoot (Esc to cancel).");
+          break;
+        case InputMode::Moving:
+          ImGui::TextWrapped("Figure is moving...");
           break;
         default:
           break;
@@ -721,7 +764,20 @@ int main() {
         DrawUnit(litShader, cubeMesh, viewProj, lightSpaceMatrix, unit);
       }
 
+      // Each pane shows only its own team's FOV cones -- your own vision,
+      // not intel about what the enemy can see. Translucent overlay: blend
+      // on, no depth writes (so it never occludes anything drawn after it).
       unlitShader.Use();
+      glEnable(GL_BLEND);
+      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+      glDepthMask(GL_FALSE);
+      for (const Unit& unit : game.GetScene().units) {
+        if (!unit.alive || unit.team != team) continue;
+        DrawFovCone(unlitShader, fovConeMesh, viewProj, unit);
+      }
+      glDepthMask(GL_TRUE);
+      glDisable(GL_BLEND);
+
       if (const auto actorId = game.CurrentActorId(); actorId && game.Mode() != InputMode::GameOver) {
         if (const Unit* actor = game.FindUnit(*actorId)) {
           if (IsUnitVisibleForRender(*actor, team, fogActive, visibility)) {
@@ -776,6 +832,7 @@ int main() {
   while (!quit) runFrame();
 
   pathLine.Destroy();
+  fovConeMesh.Destroy();
   cubeMesh.Destroy();
   glDeleteTextures(1, &shadowDepthTex);
   glDeleteFramebuffers(1, &shadowFbo);

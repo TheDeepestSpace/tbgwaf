@@ -330,6 +330,7 @@ void TestGameLogicPlanThenCommitDefersExecutionAndAppliesSimultaneously() {
   game.ChooseMove();
   const glm::vec3 destination(-3.0f, 0.0f, -4.0f);
   game.ClickGround(destination);
+  game.ConfirmMove();
   CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Move);
 
   game.ClickUnit(1);
@@ -373,11 +374,13 @@ void TestGameLogicCommitAnimatesMultipleMovesConcurrently() {
   game.ChooseMove();
   const glm::vec3 destination0(-3.0f, 0.0f, -4.0f);
   game.ClickGround(destination0);
+  game.ConfirmMove();
 
   game.ClickUnit(1);
   game.ChooseMove();
   const glm::vec3 destination1(-3.0f, 0.0f, 0.0f);
   game.ClickGround(destination1);
+  game.ConfirmMove();
 
   game.ClickUnit(2);
   game.ChoosePass();
@@ -521,6 +524,7 @@ void TestGameLogicMoveUpdatesPositionAndFacing() {
 
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
   game.ClickGround(destination);
+  game.ConfirmMove();
   // Planning only: the click records blue0's plan and returns to unit
   // selection -- nothing moves and the turn does not advance yet.
   CHECK(game.Mode() == InputMode::AwaitingSelection);
@@ -571,6 +575,7 @@ void TestGameLogicMoveAnimatesProgressively() {
   game.HoverGround(destination);
   CHECK(game.MovePreviewValid());
   game.ClickGround(destination);
+  game.ConfirmMove();
   CHECK(game.Mode() == InputMode::AwaitingSelection);  // Planned only.
 
   game.ClickUnit(1);
@@ -602,12 +607,43 @@ void TestGameLogicMoveAnimatesProgressively() {
   CHECK(game.CurrentTeam() == Team::Red);
 }
 
+void TestGameLogicMoveFacingConfirmFlow() {
+  GameLogic game;
+  const int id = 0;
+  game.ClickUnit(id);
+  game.ChooseMove();
+  const glm::vec3 destination = game.FindUnit(id)->position + glm::vec3(3.0f, 0.0f, 0.0f);
+  game.ClickGround(destination);
+  CHECK(game.Mode() == InputMode::ConfirmingMoveFacing);
+  CHECK(game.FindUnit(id)->plan.type == PlannedActionType::None);
+  CHECK(std::fabs(game.PendingMoveFacing()) < 1e-3f);  // Natural direction: +X.
+
+  // Cancel steps back to destination picking.
+  game.CancelAction();
+  CHECK(game.Mode() == InputMode::AwaitingMoveDestination);
+  game.ClickGround(destination);
+  game.SetPendingMoveFacing(1.5f);
+  game.ConfirmMove();
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(game.FindUnit(id)->plan.type == PlannedActionType::Move);
+  CHECK(std::fabs(game.FindUnit(id)->plan.endFacingYaw - 1.5f) < 1e-4f);
+
+  for (int other : {1, 2}) {
+    game.ClickUnit(other);
+    game.ChoosePass();
+  }
+  game.CommitTurn();
+  game.Update(100.0f);
+  CHECK(std::fabs(game.FindUnit(id)->facingYaw - 1.5f) < 1e-4f);
+}
+
 void TestGameLogicMoveIgnoresInputWhileAnimating() {
   GameLogic game(LegacyScene());
   game.ClickUnit(0);
   game.ChooseMove();
   const glm::vec3 destination(-3.0f, 0.0f, -4.0f);
   game.ClickGround(destination);
+  game.ConfirmMove();
   game.ClickUnit(1);
   game.ChoosePass();
   game.ClickUnit(2);
@@ -651,6 +687,7 @@ void TestGameLogicMoveCanClimbOntoObstacle() {
   CHECK(game.MovePreviewValid());
 
   game.ClickGround(crateTop);
+  game.ConfirmMove();
   CHECK(game.Mode() == InputMode::AwaitingSelection);  // Planned only.
 
   game.ClickUnit(1);
@@ -705,6 +742,7 @@ void TestGameLogicOverwatchFiresOnEnemyEnteringFov() {
   game.ChooseMove();
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
   game.ClickGround(destination);
+  game.ConfirmMove();
   game.ClickUnit(5);
   game.ChoosePass();
   CHECK(game.CanCommitTurn());
@@ -771,6 +809,7 @@ void TestSnapshotRoundTripMirrorsMatch() {
   a.ClickUnit(0);
   a.ChooseMove();
   a.ClickGround(glm::vec3(0.0f, 0.0f, 0.0f));
+  a.ConfirmMove();
   a.ClickUnit(1);
   a.ChoosePass();
   a.ClickUnit(2);
@@ -820,6 +859,7 @@ int main() {
   TestGameLogicDownedEnemyStaysVisibleInFov();
   TestGameLogicMoveUpdatesPositionAndFacing();
   TestGameLogicMoveAnimatesProgressively();
+  TestGameLogicMoveFacingConfirmFlow();
   TestGameLogicMoveIgnoresInputWhileAnimating();
   TestGameLogicMoveCanClimbOntoObstacle();
   TestGameLogicOverwatchFiresOnEnemyEnteringFov();

@@ -31,6 +31,9 @@ struct PaneOverlays {
   std::optional<glm::vec3> selectionHighlight;     // Yellow ring under the selected figure.
   std::optional<glm::vec3> invalidHoverHighlight;  // Red ring on an unreachable hover point.
   const std::vector<glm::vec3>* movePreviewPath = nullptr;  // Yellow preview polyline.
+  // Wireframe, team-tinted stand-in for the mover at its pending destination
+  // and facing, while the player is choosing the move's final facing.
+  std::optional<tactics::Unit> facingGhost;
 };
 
 // Owns the GL resources (shaders, meshes, the shadow map) for the per-team

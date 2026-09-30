@@ -19,6 +19,7 @@ enum class PlannedActionType { None, Move, Shoot, Pass, Overwatch };
 struct PlannedAction {
   PlannedActionType type = PlannedActionType::None;
   std::vector<glm::vec3> movePath;  // Resolved via NavMesh::FindPath, for type == Move.
+  float endFacingYaw = 0.0f;        // Final facing once the path ends, for type == Move.
   int shootTargetId = -1;           // For type == Shoot.
 };
 

@@ -208,6 +208,7 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
     case ScenarioAction::Kind::Move: {
       game.ChooseMove();
       game.ClickGround(action.destination);
+      game.ConfirmMove();  // Untouched ghost: natural travel-direction facing.
       if (game.Mode() != InputMode::AwaitingSelection) {
         return Fail("has no path to destination " + ToString(action.destination));
       }

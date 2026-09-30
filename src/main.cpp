@@ -178,7 +178,10 @@ int main() {
   // Each pane only gets half the window's horizontal space, so the default
   // zoom (tuned for a single full-width view) would clip the far edge of
   // the map; start pulled back further so both spawns fit by default.
-  for (auto& camera : cameras) camera.Zoom(10.0f);
+  for (auto& camera : cameras) {
+    camera.Zoom(10.0f);
+    camera.Update(1.0e3f);  // Snap to the initial zoom rather than gliding.
+  }
   GameLogic game;
 
   bool quit = false;
@@ -253,6 +256,7 @@ int main() {
     const float dt = static_cast<float>(nowTicks - lastFrameTicks) / 1000.0f;
     lastFrameTicks = nowTicks;
     game.Update(dt);
+    for (auto& camera : cameras) camera.Update(dt);
 
     // Stage-D: whichever team currently has the turn is the "active" pane --
     // only that side's viewport accepts game-action input (unit selection,

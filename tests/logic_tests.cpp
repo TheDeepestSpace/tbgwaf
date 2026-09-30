@@ -495,6 +495,15 @@ void TestGameLogicShootGatingRequiresTeamVisibility() {
   CHECK(game.Mode() == InputMode::AwaitingSelection);
 }
 
+void TestGameLogicDownedEnemyStaysVisibleInFov() {
+  GameLogic game(LegacyScene());
+  CHECK(game.ComputeVisibility(Team::Blue).UnitVisible(5));
+  game.FindUnit(5)->alive = false;
+  CHECK(game.ComputeVisibility(Team::Blue).UnitVisible(5));
+  for (int id = 0; id <= 2; ++id) game.FindUnit(id)->facingYaw = kPi;
+  CHECK(!game.ComputeVisibility(Team::Blue).UnitVisible(5));
+}
+
 void TestGameLogicMoveUpdatesPositionAndFacing() {
   GameLogic game(LegacyScene());
   game.ClickUnit(0);
@@ -775,6 +784,7 @@ int main() {
   TestGameLogicShootRowsMatchLayout();
   TestDefaultSceneSquadsStartHidden();
   TestGameLogicShootGatingRequiresTeamVisibility();
+  TestGameLogicDownedEnemyStaysVisibleInFov();
   TestGameLogicMoveUpdatesPositionAndFacing();
   TestGameLogicMoveAnimatesProgressively();
   TestGameLogicMoveIgnoresInputWhileAnimating();

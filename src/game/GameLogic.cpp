@@ -99,6 +99,14 @@ void GameLogic::ClickGround(const glm::vec3& point) {
 }
 
 void GameLogic::Update(float dtSeconds) {
+  // Knockdowns advance regardless of mode: an overwatch kill can happen
+  // mid-enemy-turn while this team isn't the one animating.
+  for (Unit& unit : scene_.units) {
+    if (unit.alive || unit.knockdownElapsed < 0.0f) continue;
+    unit.knockdownElapsed =
+        std::min(unit.knockdownElapsed + dtSeconds, constants::kKnockdownDuration);
+  }
+
   if (mode_ != InputMode::Moving) return;
 
   const float distance = dtSeconds * constants::kMoveSpeed;
@@ -206,7 +214,16 @@ bool GameLogic::ResolveShot(Unit& shooter, Unit& target) {
       InFovCone(shooter.EyePosition(), shooter.FacingDirection(), target.EyePosition(),
                 constants::kShootHalfFovDegrees, constants::kShootRange) &&
       LineOfSightClear(shooter.EyePosition(), target.EyePosition(), obstacleBounds_);
-  if (hit) target.alive = false;
+  if (hit) {
+    target.alive = false;
+    glm::vec3 dir = target.position - shooter.position;
+    dir.y = 0.0f;
+    if (glm::length(dir) < 1e-4f) dir = shooter.FacingDirection();
+    dir = glm::normalize(dir);
+    // up x dir: tipping around this axis leans the figure toward dir.
+    target.knockdownAxis = glm::vec3(dir.z, 0.0f, -dir.x);
+    target.knockdownElapsed = 0.0f;
+  }
   return hit;
 }
 

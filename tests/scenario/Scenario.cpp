@@ -20,9 +20,11 @@ std::string ToString(const glm::vec3& v) {
   return buf;
 }
 
+std::string ToString(Team team) { return team == Team::Blue ? "blue" : "red"; }
+
 std::string ToString(const std::optional<Team>& team) {
   if (!team) return "none";
-  return *team == Team::Blue ? "blue" : "red";
+  return ToString(*team);
 }
 
 Team ParseTeam(const std::string& raw, const std::string& context) {
@@ -90,10 +92,15 @@ Scene ParseScene(const YAML::Node& root) {
 }
 
 ScenarioAction ParseAction(const YAML::Node& node) {
-  if (!node["actor"]) throw std::runtime_error("script action step requires 'actor'");
   ScenarioAction action;
-  action.actor = node["actor"].as<int>();
   const std::string kind = node["action"].as<std::string>();
+  if (kind == "commit") {
+    action.kind = ScenarioAction::Kind::Commit;
+    return action;
+  }
+
+  if (!node["actor"]) throw std::runtime_error("script action step requires 'actor'");
+  action.actor = node["actor"].as<int>();
   if (kind == "move") {
     action.kind = ScenarioAction::Kind::Move;
     action.destination = ParseVec3(node["destination"], "script[].destination");
@@ -107,7 +114,8 @@ ScenarioAction ParseAction(const YAML::Node& node) {
   } else if (kind == "cancel") {
     action.kind = ScenarioAction::Kind::Cancel;
   } else {
-    throw std::runtime_error("unknown script action '" + kind + "' (expected move/shoot/pass/cancel)");
+    throw std::runtime_error("unknown script action '" + kind +
+                              "' (expected move/shoot/pass/cancel/commit)");
   }
   return action;
 }
@@ -122,7 +130,9 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
     assertion.visibleToTeam = ParseTeam(node["visible_to"].as<std::string>(), "assert.visible_to");
   }
   if (node["visible"]) assertion.visible = node["visible"].as<bool>();
-  if (node["current_actor"]) assertion.currentActor = node["current_actor"].as<int>();
+  if (node["current_team"]) {
+    assertion.currentTeam = ParseTeam(node["current_team"].as<std::string>(), "assert.current_team");
+  }
   if (node["round"]) assertion.round = node["round"].as<int>();
   if (node["winner"]) {
     assertion.checkWinner = true;
@@ -147,54 +157,73 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
     return false;
   };
 
-  const auto currentActor = game.CurrentActorId();
-  if (!currentActor || *currentActor != action.actor) {
-    return Fail("expected to act now, but it's " +
-                (currentActor ? std::to_string(*currentActor) : std::string("nobody")) + "'s turn");
+  if (action.kind == ScenarioAction::Kind::Commit) {
+    if (!game.CanCommitTurn()) {
+      return Fail("cannot commit: not every living figure on " + ToString(game.CurrentTeam()) +
+                  "'s team has a plan yet");
+    }
+    game.CommitTurn();
+    if (hooks.tickSeconds > 0.0f) {
+      // Visual mode: advance in fixed ticks and let the observer capture
+      // each in-between frame of the commit's animation. Bounded so a stuck
+      // animation fails the scenario instead of hanging the runner.
+      constexpr int kMaxMoveTicks = 20000;
+      int ticks = 0;
+      while (game.Mode() == InputMode::Moving && ++ticks <= kMaxMoveTicks) {
+        game.Update(hooks.tickSeconds);
+        if (hooks.onFrame) hooks.onFrame(game);
+      }
+      if (game.Mode() == InputMode::Moving) {
+        return Fail("commit animation did not complete within " +
+                    std::to_string(kMaxMoveTicks) + " ticks");
+      }
+    } else {
+      game.Update(1.0e6f);  // Fast-forward past any planned moves' animation.
+    }
+    return true;
+  }
+
+  if (action.kind == ScenarioAction::Kind::Cancel) {
+    game.CancelAction();
+    return true;
+  }
+
+  // Move/Shoot/Pass only ever record a plan on the acting figure, so it must
+  // belong to the team currently planning its turn.
+  const Unit* actorUnit = game.FindUnit(action.actor);
+  if (!actorUnit || !actorUnit->alive) {
+    return Fail("is dead or does not exist");
+  }
+  if (actorUnit->team != game.CurrentTeam()) {
+    return Fail("belongs to a team that isn't planning right now (it's " +
+                ToString(game.CurrentTeam()) + "'s turn)");
   }
 
   game.ClickUnit(action.actor);
   if (game.SelectedUnitId() != action.actor || game.Mode() != InputMode::ActionMenu) {
-    return Fail("could not be selected (dead, or already game over?)");
+    return Fail("could not be selected (already game over?)");
   }
 
   switch (action.kind) {
     case ScenarioAction::Kind::Move: {
       game.ChooseMove();
       game.ClickGround(action.destination);
-      if (game.Mode() != InputMode::Moving) {
+      if (game.Mode() != InputMode::AwaitingSelection) {
         return Fail("has no path to destination " + ToString(action.destination));
-      }
-      if (hooks.tickSeconds > 0.0f) {
-        // Visual mode: advance in fixed ticks and let the observer capture
-        // each in-between frame of the walk. Bounded so a stuck animation
-        // fails the scenario instead of hanging the runner.
-        constexpr int kMaxMoveTicks = 20000;
-        int ticks = 0;
-        while (game.Mode() == InputMode::Moving && ++ticks <= kMaxMoveTicks) {
-          game.Update(hooks.tickSeconds);
-          if (hooks.onFrame) hooks.onFrame(game);
-        }
-        if (game.Mode() == InputMode::Moving) {
-          return Fail("move animation did not complete within " +
-                      std::to_string(kMaxMoveTicks) + " ticks");
-        }
-      } else {
-        game.Update(1.0e6f);  // Fast-forward past the move animation, like the existing unit tests.
       }
       return true;
     }
     case ScenarioAction::Kind::Shoot: {
       game.ChooseShoot();
       game.ClickUnit(action.target);
-      const bool resolved = game.Mode() != InputMode::AwaitingShootTarget;
-      if (action.expectNoop && resolved) {
+      const bool planned = game.Mode() != InputMode::AwaitingShootTarget;
+      if (action.expectNoop && planned) {
         return Fail("shot at " + std::to_string(action.target) +
-                    " was expected to be a gated no-op, but it resolved");
+                    " was expected to be a gated no-op, but it was planned");
       }
-      if (!action.expectNoop && !resolved) {
+      if (!action.expectNoop && !planned) {
         return Fail("shot at " + std::to_string(action.target) +
-                    " did not resolve (invalid target, or outside the shooter's team FOV?)");
+                    " could not be planned (invalid target, or outside the shooter's team FOV?)");
       }
       if (action.expectNoop) game.CancelAction();  // Return to ActionMenu, mirroring a real player.
       return true;
@@ -203,8 +232,8 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
       game.ChoosePass();
       return true;
     case ScenarioAction::Kind::Cancel:
-      game.CancelAction();
-      return true;
+    case ScenarioAction::Kind::Commit:
+      break;  // Handled above.
   }
   return true;
 }
@@ -247,12 +276,9 @@ void CheckAssertion(const GameLogic& game, const ScenarioAssertion& a, int stepI
     Fail("expected winner=" + ToString(a.expectedWinner) + " but was " + ToString(game.Winner()));
   }
 
-  if (a.currentActor) {
-    const auto current = game.CurrentActorId();
-    if (!current || *current != *a.currentActor) {
-      Fail("expected current actor " + std::to_string(*a.currentActor) + " but it's " +
-           (current ? std::to_string(*current) : std::string("nobody")) + "'s turn");
-    }
+  if (a.currentTeam && game.CurrentTeam() != *a.currentTeam) {
+    Fail("expected current team " + ToString(*a.currentTeam) + " but it's " +
+         ToString(game.CurrentTeam()) + "'s turn");
   }
 
   if (a.round && game.RoundNumber() != *a.round) {

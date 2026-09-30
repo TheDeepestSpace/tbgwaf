@@ -264,11 +264,7 @@ int main() {
     // around their own pane at any time.
     std::optional<Team> activeTeam;
     if (game.Mode() != InputMode::GameOver) {
-      if (const auto actorId = game.CurrentActorId()) {
-        if (const Unit* actor = game.FindUnit(*actorId)) {
-          activeTeam = actor->team;
-        }
-      }
+      activeTeam = game.CurrentTeam();
     }
     const bool fogActive = game.Mode() != InputMode::GameOver;
     auto isPaneActive = [&](int pane) { return activeTeam && *activeTeam == PaneTeam(pane); };
@@ -290,36 +286,44 @@ int main() {
       }
       ImGui::End();
     } else {
+      int plannedCount = 0, totalCount = 0;
+      for (const Unit& unit : game.GetScene().units) {
+        if (!unit.alive || !activeTeam || unit.team != *activeTeam) continue;
+        ++totalCount;
+        if (unit.plan.type != tactics::PlannedActionType::None) ++plannedCount;
+      }
+
       ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
       ImGui::Begin("Turn", nullptr,
                    ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
                        ImGuiWindowFlags_NoMove);
       ImGui::Text("Round %d", game.RoundNumber());
-      if (const auto actorId = game.CurrentActorId()) {
-        const Unit* actor = game.FindUnit(*actorId);
-        if (actor) {
-          ImGui::Text("%s team's turn (figure #%d)", TeamName(actor->team), actor->id);
-        }
+      if (activeTeam) {
+        ImGui::Text("%s team's turn -- plan every figure, then commit.", TeamName(*activeTeam));
+        ImGui::Text("Planned: %d / %d", plannedCount, totalCount);
       }
       switch (game.Mode()) {
         case InputMode::AwaitingSelection:
-          ImGui::TextWrapped("Click the highlighted figure to act.");
+          ImGui::TextWrapped("Click one of your figures to plan its action.");
           break;
         case InputMode::ActionMenu:
-          ImGui::TextWrapped("Choose an action.");
+          ImGui::TextWrapped("Choose an action to plan.");
           break;
         case InputMode::AwaitingMoveDestination:
           ImGui::TextWrapped("Click a destination on the ground (Esc to cancel).");
           break;
         case InputMode::AwaitingShootTarget:
-          ImGui::TextWrapped("Click an enemy figure to shoot (Esc to cancel).");
+          ImGui::TextWrapped("Click an enemy figure to plan a shot (Esc to cancel).");
           break;
         case InputMode::Moving:
-          ImGui::TextWrapped("Figure is moving...");
+          ImGui::TextWrapped("Committing turn: figures are moving...");
           break;
         default:
           break;
       }
+      ImGui::BeginDisabled(!game.CanCommitTurn());
+      if (ImGui::Button("Commit Turn")) game.CommitTurn();
+      ImGui::EndDisabled();
       ImGui::End();
 
       if (const auto selectedId = game.SelectedUnitId(); selectedId && activeTeam) {

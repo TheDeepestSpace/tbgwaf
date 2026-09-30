@@ -197,6 +197,16 @@ void GameLogic::ClickGround(const glm::vec3& point) {
   movePreviewValid_ = false;
 }
 
+bool GameLogic::HasActiveKnockdown() const {
+  for (const Unit& unit : scene_.units) {
+    if (!unit.alive && unit.knockdownElapsed >= 0.0f &&
+        unit.knockdownElapsed < constants::kKnockdownDuration) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void GameLogic::Update(float dtSeconds) {
   // Knockdowns advance regardless of mode: an overwatch kill can happen
   // mid-enemy-turn while this team isn't the one animating.

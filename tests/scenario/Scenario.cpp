@@ -173,6 +173,12 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
         game.Update(hooks.tickSeconds);
         if (hooks.onFrame) hooks.onFrame(game);
       }
+      // Shots resolve at commit, so the fall may outlive (or entirely
+      // precede) the move animation; keep ticking until it lands.
+      while (game.HasActiveKnockdown() && ++ticks <= kMaxMoveTicks) {
+        game.Update(hooks.tickSeconds);
+        if (hooks.onFrame) hooks.onFrame(game);
+      }
       if (game.Mode() == InputMode::Moving) {
         return Fail("commit animation did not complete within " +
                     std::to_string(kMaxMoveTicks) + " ticks");

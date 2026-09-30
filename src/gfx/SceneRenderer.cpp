@@ -418,9 +418,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   for (size_t i = 0; i < obstacles.size(); ++i) {
     const bool obstacleVisible = !fogActive || visibility.ObstacleVisible(i);
     const AABB& bounds = obstacles[i].bounds;
-    const glm::vec4 baseColor = obstacles[i].climbable ? glm::vec4(0.55f, 0.48f, 0.3f, 1.0f)
-                                                       : glm::vec4(0.55f, 0.55f, 0.6f, 1.0f);
-    const glm::vec4 color = obstacleVisible ? baseColor : glm::vec4(0.22f, 0.22f, 0.24f, 1.0f);
+    const glm::vec4 color = obstacleVisible ? glm::vec4(0.55f, 0.55f, 0.6f, 1.0f) : glm::vec4(0.22f, 0.22f, 0.24f, 1.0f);
     DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, bounds.min,
                bounds.max - bounds.min, color);
   }

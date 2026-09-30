@@ -27,7 +27,7 @@ enum class InputMode {
 
 // Serializable dynamic match state (everything that changes after Reset()
 // on a fixed scene). Used to mirror one authoritative match into a second,
-// non-simulating instance (two-tab play): the follower imports snapshots
+// non-simulating instance (two-pane play): the follower imports snapshots
 // instead of re-simulating, so float divergence can't desync the two.
 struct GameSnapshot {
   struct UnitState {
@@ -46,8 +46,8 @@ struct GameSnapshot {
   int winner = -1;          // -1 = none, else static_cast<int>(Team).
 };
 
-// Text encoding of a snapshot (for BroadcastChannel). Deserialize returns
-// false on malformed input.
+// Text encoding of a snapshot (for the page-level message bus). Deserialize
+// returns false on malformed input.
 std::string SerializeSnapshot(const GameSnapshot& snapshot);
 bool DeserializeSnapshot(const std::string& text, GameSnapshot* out);
 

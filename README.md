@@ -5,19 +5,19 @@ blocky obstacle field, each side fogged from the other's view, until one team
 is eliminated.
 
 **[Play it in your browser](https://thedeepestspace.github.io/tbgwaf/)** --
-two tabs, one per player, no install required.
+both players on one screen, no install required.
 
 ## Play in browser
 
 The [live Pages build](https://thedeepestspace.github.io/tbgwaf/) is the same
-native game compiled to WebAssembly/WebGL2. For two-player play open it in two
-tabs/windows of the same browser: `?player=blue` and `?player=red`. Each tab is
-a separate full-screen UI for one team. The tab whose team is on the move runs
-the simulation and broadcasts the match state to the other tab over a
-same-origin `BroadcastChannel` (no server); the other tab mirrors it and is
-heavily blurred until it's their turn. Without `?player=` the page runs
-hot-seat (one view that follows the active team, no blur). Cross-machine play
-is not supported. See [Controls](#controls) below.
+native game compiled to WebAssembly/WebGL2. The page shows two panes side by
+side -- Blue on the left, Red on the right -- each a separate canvas with its
+own client instance of the game (own camera, input, and UI); the WASM module
+is instantiated once per pane. The pane whose team is on the move runs the
+simulation and shares the match state with the other instance over an in-page
+message bus, so both panes always show the same match; the waiting side just
+mirrors it and is heavily blurred/dimmed until it's their turn. Cross-machine
+play is not supported. See [Controls](#controls) below.
 
 ## Native build
 

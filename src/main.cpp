@@ -9,7 +9,6 @@
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
-#include <emscripten/html5.h>
 #include <functional>
 #endif
 
@@ -44,35 +43,52 @@ namespace {
 constexpr int kInitialWindowWidth = 1280;
 constexpr int kInitialWindowHeight = 720;
 
-// Two-tab play: each browser tab (shell.html?player=blue / ?player=red)
-// runs its own full-screen single-viewport UI for one team. The tab whose
-// team has the turn is authoritative: it runs input + simulation and
-// broadcasts a GameSnapshot over a same-origin BroadcastChannel after every
-// change. The other tab is a follower: it renders the last received
-// snapshot, ignores game input, and is blurred by the page. Without a
-// ?player= parameter (or on native builds) there is no channel and the view
-// simply follows whichever team is on the move (hot-seat).
+// Two-pane play: the page (web/index.html) shows both teams side by side by
+// instantiating this module twice -- one client instance per team, each with
+// its own <canvas>, camera, input, and UI. The instance whose team has the
+// turn is authoritative: it runs input + simulation and posts a GameSnapshot
+// on the page-level message bus after every change. The other instance is a
+// follower: it renders the last received snapshot, ignores game input, and
+// its pane is blurred by the page. A bare module load without the page's
+// Module overrides (or a native build) has no bus and the single view simply
+// follows whichever team is on the move (hot-seat).
 constexpr int kTeamCount = 2;
 constexpr Uint32 kPeerSyncTimeoutMs = 500;
 
 #ifdef __EMSCRIPTEN__
-// 0 = blue, 1 = red, -1 = not specified.
+// Emscripten's SDL2 port reaches the canvas through the "#canvas" CSS
+// selector (canvas sizing, mouse-event registration), which cannot address
+// per-instance canvases in a page that instantiates this module twice. Bind
+// the selector to this instance's own canvas via the module-scoped
+// specialHTMLTargets table instead; must run before SDL_Init.
+EM_JS(void, tbgwaf_bind_canvas, (), {
+  specialHTMLTargets["#canvas"] = Module.canvas;
+});
+
+// 0 = blue, 1 = red, -1 = not specified. The page assigns each client
+// instance its team via the Module.tbgwafPlayer override.
 EM_JS(int, tbgwaf_requested_player, (), {
-  const p = new URLSearchParams(window.location.search).get("player");
-  if (p === "blue") return 0;
-  if (p === "red") return 1;
+  if (Module.tbgwafPlayer === "blue") return 0;
+  if (Module.tbgwafPlayer === "red") return 1;
   return -1;
 });
 
+// The bus (Module.tbgwafBus, one object shared by both instances on the
+// page) is just a list of per-instance inboxes: posting appends the message
+// to every inbox but our own, and each instance drains its inbox at the top
+// of its frame.
 EM_JS(void, tbgwaf_channel_open, (), {
-  if (Module.tbgwafChannel) return;
+  if (Module.tbgwafInbox) return;
   Module.tbgwafInbox = [];
-  Module.tbgwafChannel = new BroadcastChannel("tbgwaf-match");
-  Module.tbgwafChannel.onmessage = function (e) { Module.tbgwafInbox.push(String(e.data)); };
+  if (Module.tbgwafBus) Module.tbgwafBus.inboxes.push(Module.tbgwafInbox);
 });
 
 EM_JS(void, tbgwaf_channel_post, (const char* msg), {
-  if (Module.tbgwafChannel) Module.tbgwafChannel.postMessage(UTF8ToString(msg));
+  if (!Module.tbgwafBus) return;
+  const text = UTF8ToString(msg);
+  for (const inbox of Module.tbgwafBus.inboxes) {
+    if (inbox !== Module.tbgwafInbox) inbox.push(text);
+  }
 });
 
 // Returns a malloc'd message (caller frees) or null if the inbox is empty.
@@ -86,8 +102,17 @@ EM_JS(char*, tbgwaf_channel_next, (), {
 });
 
 EM_JS(void, tbgwaf_set_blur, (int on), {
-  const el = document.getElementById("blur-overlay");
+  const el = Module.tbgwafBlurOverlay;
   if (el) el.classList.toggle("on", !!on);
+});
+
+// CSS size of this instance's own canvas (each client renders into its own
+// <canvas>, so a global "#canvas" selector would not do).
+EM_JS(double, tbgwaf_canvas_css_width, (), {
+  return Module.canvas.getBoundingClientRect().width;
+});
+EM_JS(double, tbgwaf_canvas_css_height, (), {
+  return Module.canvas.getBoundingClientRect().height;
 });
 #endif
 
@@ -150,6 +175,9 @@ bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const std::vector<Obstacle>&
 }  // namespace
 
 int main() {
+#ifdef __EMSCRIPTEN__
+  tbgwaf_bind_canvas();
+#endif
   if (SDL_Init(SDL_INIT_VIDEO) != 0) {
     std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
     return 1;
@@ -201,17 +229,18 @@ int main() {
   if (!renderer.Init()) return 1;
 
   // One independent orbit camera per team (index = static_cast<int>(Team)),
-  // so hot-seat play keeps each side's own view; in two-tab play only the
-  // tab's own team's camera is ever used.
+  // so hot-seat play keeps each side's own view; in two-pane play only the
+  // instance's own team's camera is ever used.
   std::array<gfx::OrbitCamera, kTeamCount> cameras;
   GameLogic game;
 
-  // Which team this window plays. nullopt = hot-seat (follow the active team).
+  // Which team this client instance plays. nullopt = hot-seat (follow the
+  // active team).
   std::optional<Team> fixedTeam;
   bool networked = false;
   // Until a peer answers our hello (or the timeout passes), our fresh local
   // state may be stale relative to a match already in progress in the other
-  // tab, so we don't act on it.
+  // instance, so we don't act on it.
   bool awaitingPeerSync = false;
   Uint32 peerSyncDeadline = 0;
 #ifdef __EMSCRIPTEN__
@@ -246,10 +275,10 @@ int main() {
 
   auto runFrame = [&]() {
 #ifdef __EMSCRIPTEN__
-    // Full-screen canvas: track the element's CSS size.
+    // Track our own canvas element's CSS size (half the page per pane).
     {
-      double cssW = 0.0, cssH = 0.0;
-      emscripten_get_element_css_size("#canvas", &cssW, &cssH);
+      const double cssW = tbgwaf_canvas_css_width();
+      const double cssH = tbgwaf_canvas_css_height();
       int curW = 0, curH = 0;
       SDL_GetWindowSize(window, &curW, &curH);
       if (cssW >= 1.0 && cssH >= 1.0 && (curW != static_cast<int>(cssW) || curH != static_cast<int>(cssH))) {
@@ -267,11 +296,11 @@ int main() {
         const std::string msg(raw);
         std::free(raw);
         if (msg == "H") {
-          // A tab just opened: hand it the current match state.
+          // A peer instance just opened: hand it the current match state.
           forceBroadcast = true;
         } else if (msg.size() > 2 && msg[0] == 'S' && msg[1] == ' ') {
           // Only a follower (or a finished match) takes state from the
-          // peer; the active tab is the source of truth.
+          // peer; the active instance is the source of truth.
           const auto active = currentActiveTeam();
           const bool authoritative = !awaitingPeerSync && active && *active == *fixedTeam;
           GameSnapshot snap;
@@ -441,7 +470,7 @@ int main() {
       }
     }
 
-    // Team label for this window.
+    // Team label for this pane.
     {
       const char* status = game.Winner() ? "" : (isActive ? " - your turn" : "");
       char label[64];
@@ -510,7 +539,7 @@ int main() {
 
     // --- Render: one shadow pass + one color pass, inside
     // SceneRenderer::RenderPane. Selection/move-preview overlays belong to
-    // whichever team is currently acting, so only the active window gets them. ---
+    // whichever team is currently acting, so only the active pane gets them. ---
     gfx::PaneOverlays overlays;
     if (isActive) {
       if (const auto selectedId = game.SelectedUnitId()) {

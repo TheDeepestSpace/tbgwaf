@@ -37,10 +37,10 @@ class LineMesh {
   GLsizei pointCount_ = 0;
 };
 
-// A dynamic filled polygon (GL_TRIANGLE_FAN), rebuilt each frame from a
-// point list whose first entry is the fan's center. Used for the FOV cone
-// overlay (center = unit position, remaining points = the cone's arc).
-class TriangleFanMesh {
+// A dynamic triangle soup (GL_TRIANGLES), rebuilt each frame from a point
+// list holding three vertices per triangle. Used for the FOV cone overlay,
+// which can have holes (obstacle shadows) and so isn't fan-shaped.
+class TriangleMesh {
  public:
   void Init();
   void Destroy();

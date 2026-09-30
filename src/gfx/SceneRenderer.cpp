@@ -3,10 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 #include <glm/gtc/matrix_transform.hpp>
-
-#include "game/Raycast.h"
 
 using tactics::AABB;
 using tactics::GameLogic;
@@ -230,14 +229,98 @@ void DrawHighlight(const Shader& shader, const CubeMesh& cube, const glm::mat4& 
   DrawBox(shader, cube, viewProj, minCorner, glm::vec3(kHalf * 2.0f, 0.04f, kHalf * 2.0f), color);
 }
 
+// A [begin, end) stretch of ground along one sight ray, as horizontal
+// distances from the eye.
+struct GroundSpan {
+  float begin = 0.0f;
+  float end = 0.0f;
+};
+
+// Horizontal distances at which a ray from `eye` along the XZ direction
+// `dir` enters and exits `box`'s footprint. False if the footprint is missed
+// entirely (or lies fully behind the eye).
+bool FootprintSpan(const glm::vec3& eye, const glm::vec2& dir, const AABB& box, float* outEnter,
+                   float* outExit) {
+  float enter = 0.0f;
+  float exit = std::numeric_limits<float>::max();
+  const float origin[2] = {eye.x, eye.z};
+  const float d[2] = {dir.x, dir.y};
+  const float boxMin[2] = {box.min.x, box.min.z};
+  const float boxMax[2] = {box.max.x, box.max.z};
+  for (int axis = 0; axis < 2; ++axis) {
+    if (std::abs(d[axis]) < 1e-8f) {
+      if (origin[axis] < boxMin[axis] || origin[axis] > boxMax[axis]) return false;
+      continue;
+    }
+    float t0 = (boxMin[axis] - origin[axis]) / d[axis];
+    float t1 = (boxMax[axis] - origin[axis]) / d[axis];
+    if (t0 > t1) std::swap(t0, t1);
+    enter = std::max(enter, t0);
+    exit = std::min(exit, t1);
+  }
+  if (exit < enter) return false;
+  *outEnter = enter;
+  *outExit = exit;
+  return true;
+}
+
+// The stretch of ground along one sight ray that the eye cannot see, i.e.
+// where a target could hide crouched at ground level. The sightline from the
+// eye down to the ground point at distance t drops linearly from eye.y to 0,
+// so the box hides the ground from its near face until the sightline over
+// its top far edge lands: t = exit * eye.y / (eye.y - top). A box whose top
+// reaches eye level hides everything behind it.
+bool GroundShadow(const glm::vec3& eye, const glm::vec2& dir, const AABB& box, float range,
+                  GroundSpan* outShadow) {
+  float enter = 0.0f;
+  float exit = 0.0f;
+  if (!FootprintSpan(eye, dir, box, &enter, &exit)) return false;
+  if (box.min.y >= eye.y) return false;  // Sightlines only descend; a box above the eye never blocks.
+  // A raised box bottom lets sightlines pass underneath: the shadow only
+  // starts once the sightline through the bottom near edge lands.
+  const float begin = enter / (1.0f - box.min.y / eye.y);
+  const float end =
+      box.max.y >= eye.y ? range : std::min(range, exit * eye.y / (eye.y - box.max.y));
+  if (begin >= end || begin >= range) return false;
+  *outShadow = GroundSpan{begin, end};
+  return true;
+}
+
+// The visible stretches of ground along one sight ray within [0, range]:
+// the complement of the union of every obstacle's ground shadow.
+std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2& dir,
+                                           const std::vector<tactics::Obstacle>& obstacles,
+                                           float range) {
+  std::vector<GroundSpan> shadows;
+  for (const auto& obstacle : obstacles) {
+    GroundSpan shadow;
+    if (GroundShadow(eye, dir, obstacle.bounds, range, &shadow)) shadows.push_back(shadow);
+  }
+  std::sort(shadows.begin(), shadows.end(),
+            [](const GroundSpan& a, const GroundSpan& b) { return a.begin < b.begin; });
+
+  std::vector<GroundSpan> visible;
+  float cursor = 0.0f;
+  for (const auto& shadow : shadows) {
+    if (shadow.begin > cursor) visible.push_back(GroundSpan{cursor, shadow.begin});
+    cursor = std::max(cursor, shadow.end);
+    if (cursor >= range) break;
+  }
+  if (cursor < range) visible.push_back(GroundSpan{cursor, range});
+  return visible;
+}
+
 // Renders a unit's FOV as a flat, ground-level, lightly team-colored
-// translucent triangle fan spanning kShootHalfFovDegrees around
+// translucent overlay spanning kShootHalfFovDegrees around
 // FacingDirection(), capped at kFovConeVisualRange (bigger than the map
-// diagonal, so it always visually reaches the map edge). Each ray stops at the
-// nearest obstacle footprint hit from the unit's eye position; all obstacles
-// occlude, even ones shorter than eye height.
+// diagonal, so it always visually reaches the map edge). Occlusion is 3D:
+// the cone's tip is the unit's eye, so an obstacle below eye level only
+// shadows the strip of ground it actually hides -- the overlay resumes where
+// the sightline over its top edge lands, and only a target crouched at
+// ground level right behind the obstacle stays hidden. Obstacles at or above
+// eye level shadow everything behind them.
 // Caller is responsible for enabling blending around this call.
-void DrawFovCone(const Shader& shader, TriangleFanMesh& mesh, const glm::mat4& viewProj,
+void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& viewProj,
                  const Unit& unit, const std::vector<tactics::Obstacle>& obstacles) {
   constexpr int kArcSegments = 24;
   constexpr float kGroundOffset = 0.015f;
@@ -275,25 +358,43 @@ void DrawFovCone(const Shader& shader, TriangleFanMesh& mesh, const glm::mat4& v
   }
   std::sort(offsets.begin(), offsets.end());
 
-  std::vector<glm::vec3> points;
-  points.reserve(offsets.size() + 1);
-  points.push_back(unit.position + glm::vec3(0.0f, kGroundOffset, 0.0f));
+  std::vector<glm::vec2> dirs;
+  std::vector<std::vector<GroundSpan>> spansPerRay;
+  dirs.reserve(offsets.size());
+  spansPerRay.reserve(offsets.size());
   for (const float offset : offsets) {
     const float angle = unit.facingYaw + offset;
-    const glm::vec3 dir(std::cos(angle), 0.0f, std::sin(angle));
-    float reach = range;
-    for (const auto& obstacle : obstacles) {
-      // The cone is a ground overlay, so every obstacle occludes it by its
-      // footprint -- including ones shorter than eye height. Clamp the ray
-      // origin's height into the box so the horizontal ray tests footprint only.
-      const AABB& b = obstacle.bounds;
-      const glm::vec3 origin(eye.x, glm::clamp(eye.y, b.min.y, b.max.y), eye.z);
-      float hitT = 0.0f;
-      if (tactics::RayIntersectsAABB(origin, dir, b, &hitT) && hitT < reach) {
-        reach = hitT;
-      }
+    const glm::vec2 dir(std::cos(angle), std::sin(angle));
+    dirs.push_back(dir);
+    spansPerRay.push_back(VisibleGroundSpans(eye, dir, obstacles, range));
+  }
+
+  // Stitch adjacent rays into quads, one per matching visible span. Corner
+  // rays keep the span structure identical across a slice except in the
+  // epsilon-thin slivers at corners, where dropping unmatched spans is
+  // invisible. Shadow boundaries of straight box edges are straight lines on
+  // the ground, so the quads trace them exactly.
+  const auto groundPoint = [&](const glm::vec2& dir, float t) {
+    return glm::vec3(eye.x + dir.x * t, kGroundOffset, eye.z + dir.y * t);
+  };
+  std::vector<glm::vec3> points;
+  points.reserve(offsets.size() * 6);
+  for (size_t i = 0; i + 1 < offsets.size(); ++i) {
+    const auto& left = spansPerRay[i];
+    const auto& right = spansPerRay[i + 1];
+    const size_t pairCount = std::min(left.size(), right.size());
+    for (size_t k = 0; k < pairCount; ++k) {
+      const glm::vec3 l0 = groundPoint(dirs[i], left[k].begin);
+      const glm::vec3 l1 = groundPoint(dirs[i], left[k].end);
+      const glm::vec3 r0 = groundPoint(dirs[i + 1], right[k].begin);
+      const glm::vec3 r1 = groundPoint(dirs[i + 1], right[k].end);
+      points.push_back(l0);
+      points.push_back(r0);
+      points.push_back(r1);
+      points.push_back(l0);
+      points.push_back(r1);
+      points.push_back(l1);
     }
-    points.push_back(unit.position + glm::vec3(dir.x * reach, kGroundOffset, dir.z * reach));
   }
   mesh.SetPoints(points);
 

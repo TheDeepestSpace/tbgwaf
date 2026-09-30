@@ -1,5 +1,6 @@
 #include "gfx/SceneRenderer.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -217,21 +218,50 @@ void DrawFovCone(const Shader& shader, TriangleFanMesh& mesh, const glm::mat4& v
   constexpr int kArcSegments = 24;
   constexpr float kGroundOffset = 0.015f;
   constexpr float kConeAlpha = 0.15f;
+  // Angular nudge to either side of an obstacle corner: one ray lands on the
+  // occluding face right at the corner, the other shoots past it.
+  constexpr float kCornerEpsilon = 1e-3f;
   const float halfFovRad = glm::radians(tactics::constants::kShootHalfFovDegrees);
   const float range = tactics::constants::kFovConeVisualRange;
+  const glm::vec3 eye = unit.EyePosition();
 
-  std::vector<glm::vec3> points;
-  points.reserve(kArcSegments + 2);
-  points.push_back(unit.position + glm::vec3(0.0f, kGroundOffset, 0.0f));
+  // Boundary ray angles as offsets from facingYaw in [-halfFov, +halfFov].
+  // A uniform fan alone puts the occlusion edge on a chord between the two
+  // samples straddling an obstacle corner, which reads as a skewed edge that
+  // misses the corner; casting extra rays at each potentially occluding
+  // corner (nudged to either side) pins the edge exactly onto the corner.
+  std::vector<float> offsets;
+  offsets.reserve(kArcSegments + 1 + obstacles.size() * 12);
   for (int i = 0; i <= kArcSegments; ++i) {
     const float t = static_cast<float>(i) / static_cast<float>(kArcSegments);
-    const float angle = unit.facingYaw - halfFovRad + 2.0f * halfFovRad * t;
+    offsets.push_back(-halfFovRad + 2.0f * halfFovRad * t);
+  }
+  constexpr float kTwoPi = 6.28318530717958647692f;
+  for (const auto& obstacle : obstacles) {
+    const AABB& b = obstacle.bounds;
+    if (eye.y < b.min.y || eye.y > b.max.y) continue;  // Too short/high to occlude eye rays.
+    for (const float x : {b.min.x, b.max.x}) {
+      for (const float z : {b.min.z, b.max.z}) {
+        const float delta =
+            std::remainder(std::atan2(z - eye.z, x - eye.x) - unit.facingYaw, kTwoPi);
+        for (const float nudged : {delta - kCornerEpsilon, delta, delta + kCornerEpsilon}) {
+          if (nudged >= -halfFovRad && nudged <= halfFovRad) offsets.push_back(nudged);
+        }
+      }
+    }
+  }
+  std::sort(offsets.begin(), offsets.end());
+
+  std::vector<glm::vec3> points;
+  points.reserve(offsets.size() + 1);
+  points.push_back(unit.position + glm::vec3(0.0f, kGroundOffset, 0.0f));
+  for (const float offset : offsets) {
+    const float angle = unit.facingYaw + offset;
     const glm::vec3 dir(std::cos(angle), 0.0f, std::sin(angle));
     float reach = range;
     for (const auto& obstacle : obstacles) {
       float hitT = 0.0f;
-      if (tactics::RayIntersectsAABB(unit.EyePosition(), dir, obstacle.bounds, &hitT) &&
-          hitT < reach) {
+      if (tactics::RayIntersectsAABB(eye, dir, obstacle.bounds, &hitT) && hitT < reach) {
         reach = hitT;
       }
     }

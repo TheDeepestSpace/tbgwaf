@@ -5,6 +5,8 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "game/Raycast.h"
+
 using tactics::AABB;
 using tactics::GameLogic;
 using tactics::InputMode;
@@ -207,10 +209,11 @@ void DrawHighlight(const Shader& shader, const CubeMesh& cube, const glm::mat4& 
 // Renders a unit's FOV as a flat, ground-level, lightly team-colored
 // translucent triangle fan spanning kShootHalfFovDegrees around
 // FacingDirection(), capped at kFovConeVisualRange (bigger than the map
-// diagonal, so it always visually reaches the map edge).
+// diagonal, so it always visually reaches the map edge). Each ray stops at the
+// nearest obstacle hit from the unit's eye position, matching gameplay LOS.
 // Caller is responsible for enabling blending around this call.
 void DrawFovCone(const Shader& shader, TriangleFanMesh& mesh, const glm::mat4& viewProj,
-                 const Unit& unit) {
+                 const Unit& unit, const std::vector<tactics::Obstacle>& obstacles) {
   constexpr int kArcSegments = 24;
   constexpr float kGroundOffset = 0.015f;
   constexpr float kConeAlpha = 0.15f;
@@ -223,8 +226,16 @@ void DrawFovCone(const Shader& shader, TriangleFanMesh& mesh, const glm::mat4& v
   for (int i = 0; i <= kArcSegments; ++i) {
     const float t = static_cast<float>(i) / static_cast<float>(kArcSegments);
     const float angle = unit.facingYaw - halfFovRad + 2.0f * halfFovRad * t;
-    points.push_back(unit.position + glm::vec3(std::cos(angle) * range, kGroundOffset,
-                                               std::sin(angle) * range));
+    const glm::vec3 dir(std::cos(angle), 0.0f, std::sin(angle));
+    float reach = range;
+    for (const auto& obstacle : obstacles) {
+      float hitT = 0.0f;
+      if (tactics::RayIntersectsAABB(unit.EyePosition(), dir, obstacle.bounds, &hitT) &&
+          hitT < reach) {
+        reach = hitT;
+      }
+    }
+    points.push_back(unit.position + glm::vec3(dir.x * reach, kGroundOffset, dir.z * reach));
   }
   mesh.SetPoints(points);
 
@@ -405,7 +416,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.team != team) continue;
-    DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit);
+    DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit, obstacles);
   }
   glDisable(GL_STENCIL_TEST);
   glDepthMask(GL_TRUE);

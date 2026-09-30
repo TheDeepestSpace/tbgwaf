@@ -411,16 +411,22 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glDepthMask(GL_TRUE);
   glDisable(GL_BLEND);
 
-  if (const auto actorId = game.CurrentActorId(); actorId && game.Mode() != InputMode::GameOver) {
-    if (const Unit* actor = game.FindUnit(*actorId)) {
-      if (IsUnitVisibleForRender(*actor, team, fogActive, visibility)) {
-        DrawHighlight(unlitShader_, cubeMesh_, viewProj, actor->position,
-                      glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
-      }
+  // Plan-then-commit: every living figure on the team currently planning
+  // gets a highlight in its own pane (dim white = still needs a plan,
+  // green = plan set) -- this is squad-wide now, not a single actor.
+  const bool paneActive = team == game.CurrentTeam() && game.Mode() != InputMode::GameOver;
+  if (paneActive) {
+    for (const Unit& unit : game.GetScene().units) {
+      if (!unit.alive || unit.team != team) continue;
+      if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+      const bool planned = unit.plan.type != tactics::PlannedActionType::None;
+      const glm::vec4 color = planned ? glm::vec4(0.25f, 0.9f, 0.35f, 1.0f)
+                                        : glm::vec4(1.0f, 1.0f, 1.0f, 0.6f);
+      DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position, color);
     }
   }
   // Overwatch indicator: a minimal PoC-grade ground marker (distinct from
-  // the white current-actor ring and the yellow selection ring) under
+  // the plan-then-commit ring and the yellow selection ring) under
   // every figure currently armed to fire during an enemy's move.
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.triggerAction != tactics::TriggerAction::Shoot) continue;
@@ -434,14 +440,49 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawHighlight(unlitShader_, cubeMesh_, viewProj, *overlays.selectionHighlight,
                   glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
   }
+  // A commit animates every planned move at once, so highlight each figure
+  // currently mid-move rather than just a single actor.
+  if (paneActive && game.Mode() == InputMode::Moving) {
+    for (const Unit& unit : game.GetScene().units) {
+      if (unit.team == team && game.IsUnitMoving(unit.id)) {
+        DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position,
+                      glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
+      }
+    }
+  }
   if (overlays.movePreviewPath && overlays.movePreviewPath->size() >= 2) {
     pathLine_.SetPoints(*overlays.movePreviewPath);
     unlitShader_.SetMat4("uMVP", viewProj);
     unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
     pathLine_.Draw();
+    // Mark the final position with the same square used for selection.
+    DrawHighlight(unlitShader_, cubeMesh_, viewProj, overlays.movePreviewPath->back(),
+                  glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
   } else if (overlays.invalidHoverHighlight) {
     DrawHighlight(unlitShader_, cubeMesh_, viewProj, *overlays.invalidHoverHighlight,
                   glm::vec4(0.9f, 0.15f, 0.15f, 1.0f));
+  }
+  // Visual feedback for the whole squad's plan so far: a planned move reuses
+  // the same path-line rendering as the live preview above; a planned shot
+  // gets a simple shooter->target line.
+  if (paneActive) {
+    for (const Unit& unit : game.GetScene().units) {
+      if (!unit.alive || unit.team != team) continue;
+      if (unit.plan.type == tactics::PlannedActionType::Move && unit.plan.movePath.size() >= 2) {
+        pathLine_.SetPoints(unit.plan.movePath);
+        unlitShader_.SetMat4("uMVP", viewProj);
+        unlitShader_.SetVec4("uColor", glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
+        pathLine_.Draw();
+      } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
+        if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {
+          const std::vector<glm::vec3> shotLine = {unit.EyePosition(), shotTarget->EyePosition()};
+          pathLine_.SetPoints(shotLine);
+          unlitShader_.SetMat4("uMVP", viewProj);
+          unlitShader_.SetVec4("uColor", glm::vec4(0.95f, 0.25f, 0.2f, 1.0f));
+          pathLine_.Draw();
+        }
+      }
+    }
   }
   glDisable(GL_SCISSOR_TEST);
 }

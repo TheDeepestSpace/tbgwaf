@@ -8,47 +8,38 @@
 
 namespace tactics {
 
-// Drives the strict, alternating turn order described in the Stage-A spec:
-// exactly one figure acts at a time, action order alternates Blue/Red as
-// far as each team's remaining figures allow, and a new round begins once
-// every living figure has acted once.
+// Drives the plan-then-commit round structure: one "turn" is a whole team
+// planning and then committing actions for every one of its living figures,
+// not a single figure acting. Turns alternate Blue/Red; a new round begins
+// once both teams have committed a turn.
 class TurnManager {
  public:
-  // (Re)builds the round order from the currently alive units, interleaved
-  // by team (Blue0, Red0, Blue1, Red1, ...). Call once at game start and
-  // again whenever a new round needs to begin.
-  void StartRound(const std::vector<Unit>& units);
+  // (Re)starts the round at Blue's turn. Call once at game start.
+  void StartRound();
 
-  // Unit id whose turn it currently is, or std::nullopt if no living units
-  // remain (shouldn't happen once a winner is declared).
-  std::optional<int> CurrentActorId(const std::vector<Unit>& units) const;
+  // The team whose planning/commit phase it currently is.
+  Team CurrentTeam() const { return currentTeam_; }
 
-  // Call after the current actor has finished its action (move/shoot/pass).
-  // Advances to the next living actor, starting a new round automatically
-  // when the current round is exhausted.
-  void AdvanceTurn(const std::vector<Unit>& units);
+  // Call after the current team's committed turn has fully resolved.
+  // Switches to the other team, starting a new round once Blue is back up.
+  void AdvanceTurn();
 
   int RoundNumber() const { return roundNumber_; }
 
   // Full turn-order state, exposed so a match can be mirrored between two
   // GameLogic instances (see GameLogic::ExportState / ImportState).
   struct State {
-    std::vector<int> order;
-    size_t cursor = 0;
+    Team currentTeam = Team::Blue;
     int roundNumber = 0;
   };
-  State GetState() const { return State{order_, cursor_, roundNumber_}; }
+  State GetState() const { return State{currentTeam_, roundNumber_}; }
   void SetState(const State& state) {
-    order_ = state.order;
-    cursor_ = state.cursor;
+    currentTeam_ = state.currentTeam;
     roundNumber_ = state.roundNumber;
   }
 
  private:
-  void SkipDead(const std::vector<Unit>& units);
-
-  std::vector<int> order_;
-  size_t cursor_ = 0;
+  Team currentTeam_ = Team::Blue;
   int roundNumber_ = 0;
 };
 

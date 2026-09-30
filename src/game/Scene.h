@@ -7,7 +7,7 @@
 
 namespace tactics {
 
-// Hardcoded Stage-A scene: a ~20x20 unit field with box-shaped obstacles and
+// Hardcoded Stage-A scene: a ~30x30 unit field with box-shaped obstacles and
 // two 3-figure squads facing each other across the map.
 struct Scene {
   std::vector<Obstacle> obstacles;

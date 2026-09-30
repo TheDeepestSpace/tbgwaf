@@ -27,9 +27,9 @@ struct NavCell {
 
 // Free-space navmesh for a flat ground plane with axis-aligned box obstacles,
 // built via vertical-slab decomposition. Cells form a graph searched with
-// A*; the resulting cell-to-cell corridor is then pulled taut with a
-// visibility-shortcut pass (greedily skipping to the furthest waypoint with
-// a clear line of sight) to produce a smooth, continuous-space path.
+// A*; the resulting cell-to-cell corridor is then pulled taut with the
+// funnel algorithm (bending only at obstacle corners) to produce a
+// shortest continuous-space path within the corridor.
 //
 // Climbable obstacles additionally get a "climb-top" cell placed at their
 // summit, wired into the graph with edges to every ground cell bordering

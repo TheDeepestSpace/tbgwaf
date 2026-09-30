@@ -439,6 +439,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     unlitShader_.SetMat4("uMVP", viewProj);
     unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
     pathLine_.Draw();
+    // Mark the final position with the same square used for selection.
+    DrawHighlight(unlitShader_, cubeMesh_, viewProj, overlays.movePreviewPath->back(),
+                  glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
   } else if (overlays.invalidHoverHighlight) {
     DrawHighlight(unlitShader_, cubeMesh_, viewProj, *overlays.invalidHoverHighlight,
                   glm::vec4(0.9f, 0.15f, 0.15f, 1.0f));

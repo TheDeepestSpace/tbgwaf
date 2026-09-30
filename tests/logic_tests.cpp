@@ -18,6 +18,7 @@ namespace {
 
 int g_failures = 0;
 
+
 void ReportFailure(const char* file, int line, const char* expr) {
   std::fprintf(stderr, "CHECK FAILED at %s:%d: %s\n", file, line, expr);
   ++g_failures;
@@ -29,6 +30,41 @@ void ReportFailure(const char* file, int line, const char* expr) {
   } while (0)
 
 using namespace tactics;
+
+// The original open-lane 20x20 layout (walls at z=+-4, four crates). Many
+// tests rely on its clear middle lane; the richer default scene has no
+// initial sightlines between squads (see TestDefaultSceneSquadsStartHidden).
+tactics::Scene LegacyScene() {
+  auto box = [](float cx, float cz, float hx, float hz, float h, bool climbable) {
+    return tactics::Obstacle{tactics::AABB{glm::vec3(cx - hx, 0.0f, cz - hz), glm::vec3(cx + hx, h, cz + hz)},
+                    climbable};
+  };
+  tactics::Scene scene;
+  scene.obstacles.push_back(box(0.0f, -4.0f, 1.0f, 2.0f, 2.0f, false));
+  scene.obstacles.push_back(box(0.0f, 4.0f, 1.0f, 2.0f, 2.0f, false));
+  scene.obstacles.push_back(box(-4.0f, 6.5f, 0.6f, 0.6f, 1.2f, true));
+  scene.obstacles.push_back(box(4.0f, -6.5f, 0.6f, 0.6f, 1.2f, true));
+  scene.obstacles.push_back(box(-3.5f, -7.5f, 0.6f, 0.6f, 1.2f, true));
+  scene.obstacles.push_back(box(3.5f, 7.5f, 0.6f, 0.6f, 1.2f, true));
+  const float rows[3] = {-4.0f, 0.0f, 4.0f};
+  for (int i = 0; i < 3; ++i) {
+    tactics::Unit blue;
+    blue.id = i;
+    blue.team = tactics::Team::Blue;
+    blue.position = glm::vec3(-8.0f, 0.0f, rows[i]);
+    blue.facingYaw = 0.0f;
+    scene.units.push_back(blue);
+  }
+  for (int i = 0; i < 3; ++i) {
+    tactics::Unit red;
+    red.id = 3 + i;
+    red.team = tactics::Team::Red;
+    red.position = glm::vec3(8.0f, 0.0f, rows[i]);
+    red.facingYaw = 3.14159265358979f;
+    scene.units.push_back(red);
+  }
+  return scene;
+}
 
 constexpr float kPi = 3.14159265358979323846f;
 
@@ -270,7 +306,7 @@ void TestCheckWinner() {
 }
 
 void TestGameLogicSelectionGating() {
-  GameLogic game;
+  GameLogic game(LegacyScene());
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(game.CurrentActorId() == 0);  // Blue0 acts first (Scene builds Blue ids 0-2, Red 3-5).
 
@@ -289,7 +325,7 @@ void TestGameLogicSelectionGating() {
 }
 
 void TestGameLogicShootRowsMatchLayout() {
-  GameLogic game;
+  GameLogic game(LegacyScene());
   // Row z=-4 (blue id0 vs red id3) is behind the first wall: must miss.
   CHECK(game.CurrentActorId() == 0);
   game.ClickUnit(0);
@@ -315,8 +351,18 @@ void TestGameLogicShootRowsMatchLayout() {
   CHECK(!game.Winner().has_value());  // Red still has id3, id5 alive.
 }
 
-void TestGameLogicShootGatingRequiresTeamVisibility() {
+void TestDefaultSceneSquadsStartHidden() {
   GameLogic game;
+  for (Team team : {Team::Blue, Team::Red}) {
+    const auto visibility = game.ComputeVisibility(team);
+    for (const Unit& unit : game.GetScene().units) {
+      if (unit.team != team) CHECK(!visibility.UnitVisible(unit.id));
+    }
+  }
+}
+
+void TestGameLogicShootGatingRequiresTeamVisibility() {
+  GameLogic game(LegacyScene());
 
   // Turn every living Blue figure to face away from Red (-X instead of +X):
   // Red is now entirely outside Blue's combined FOV, regardless of LOS.
@@ -352,7 +398,7 @@ void TestGameLogicShootGatingRequiresTeamVisibility() {
 }
 
 void TestGameLogicMoveUpdatesPositionAndFacing() {
-  GameLogic game;
+  GameLogic game(LegacyScene());
   game.ClickUnit(0);
   game.ChooseMove();
   CHECK(game.Mode() == InputMode::AwaitingMoveDestination);
@@ -391,7 +437,7 @@ void TestGameLogicMoveUpdatesPositionAndFacing() {
 }
 
 void TestGameLogicMoveAnimatesProgressively() {
-  GameLogic game;
+  GameLogic game(LegacyScene());
   game.ClickUnit(0);
   game.ChooseMove();
   // Straight line, same row, short of the wall at x in [-1,1] so the path
@@ -425,7 +471,7 @@ void TestGameLogicMoveAnimatesProgressively() {
 }
 
 void TestGameLogicMoveIgnoresInputWhileAnimating() {
-  GameLogic game;
+  GameLogic game(LegacyScene());
   game.ClickUnit(0);
   game.ChooseMove();
   const glm::vec3 destination(-3.0f, 0.0f, -4.0f);
@@ -456,7 +502,7 @@ void TestGameLogicMoveIgnoresInputWhileAnimating() {
 void TestGameLogicMoveCanClimbOntoObstacle() {
   // BuildDefaultScene marks the standalone crates climbable; the one at
   // (-4, 6.5) is a 1.2x1.2 footprint, 1.2 tall (see Scene.cpp).
-  GameLogic game;
+  GameLogic game(LegacyScene());
   CHECK(game.CurrentActorId() == 0);
   game.ClickUnit(0);
   game.ChooseMove();
@@ -478,7 +524,7 @@ void TestGameLogicMoveCanClimbOntoObstacle() {
 }
 
 void TestGameLogicOverwatchFiresOnEnemyEnteringFov() {
-  GameLogic game;
+  GameLogic game(LegacyScene());
 
   // Reposition red4 due west of blue1 -- squarely behind blue1's fixed +X
   // facing, so it starts outside blue1's FOV cone regardless of LOS -- then
@@ -539,7 +585,7 @@ void TestGameLogicOverwatchFiresOnEnemyEnteringFov() {
 }
 
 void TestGameLogicWinCondition() {
-  GameLogic game;
+  GameLogic game(LegacyScene());
   // Directly eliminate the Red team to drive the game-over transition
   // without depending on precise shot geometry (already covered above).
   game.FindUnit(3)->alive = false;
@@ -574,6 +620,7 @@ int main() {
   TestCheckWinner();
   TestGameLogicSelectionGating();
   TestGameLogicShootRowsMatchLayout();
+  TestDefaultSceneSquadsStartHidden();
   TestGameLogicShootGatingRequiresTeamVisibility();
   TestGameLogicMoveUpdatesPositionAndFacing();
   TestGameLogicMoveAnimatesProgressively();

@@ -46,6 +46,18 @@ constexpr float kEyeHeight = 1.5f;
 constexpr float kShootRange = 45.0f;          // Effectively unlimited within the map.
 constexpr float kShootHalfFovDegrees = 75.0f;  // 150 degree total FOV cone.
 constexpr float kKnockdownDuration = 0.4f;  // Seconds for a hit unit to fall over.
+// Visual-only figure animation (procedural humanoid, see gfx/SceneRenderer):
+// the walk cycle is driven by distance travelled -- one full stride cycle
+// (both legs) per kWalkStrideLength world units, so limbs stay in step with
+// the ground at any run speed -- and blends in/out with an exponential
+// decay at kWalkBlendRate (same damping form as the camera zoom) so a
+// figure stopping mid-stride settles instead of snapping to rest.
+constexpr float kWalkStrideLength = 1.5f;
+constexpr float kWalkBlendRate = 12.0f;  // Per second; ~90% settled after 0.2 s.
+// Quick-draw pistol beat played by a shooter whose shot resolves: a short
+// draw/aim raise, then a recoil kick that decays back down. Purely
+// presentational; hit resolution itself stays instantaneous.
+constexpr float kShootAnimDuration = 0.7f;
 constexpr float kMoveSpeed = 4.0f;  // Default run speed, world units per second.
 // WEGO rounds: both teams' committed plans execute together over one
 // fixed-length window. A figure's plannable move distance is bounded by

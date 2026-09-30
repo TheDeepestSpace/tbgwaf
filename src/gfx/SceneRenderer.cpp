@@ -1,10 +1,12 @@
 #include "gfx/SceneRenderer.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <limits>
 
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 using tactics::AABB;
@@ -149,36 +151,6 @@ void DrawBoxDepth(const Shader& shader, const CubeMesh& cube, const glm::mat4& l
   cube.Draw();
 }
 
-void UnitBoxes(const Unit& unit, glm::vec3* outBodyMin, glm::vec3* outBodySize,
-               glm::vec3* outHeadMin, glm::vec3* outHeadSize) {
-  constexpr float kHalfWidth = tactics::constants::kUnitHalfWidth;
-  constexpr float kBodyHeight = 1.4f;
-  constexpr float kHeadSize = 0.4f;
-  *outBodyMin = unit.position - glm::vec3(kHalfWidth, 0.0f, kHalfWidth);
-  *outBodySize = glm::vec3(kHalfWidth * 2.0f, kBodyHeight, kHalfWidth * 2.0f);
-  *outHeadMin = unit.position + glm::vec3(-kHeadSize * 0.5f, kBodyHeight, -kHeadSize * 0.5f);
-  *outHeadSize = glm::vec3(kHeadSize, kHeadSize, kHeadSize);
-}
-
-// Model matrix for a small gun box attached to the body, oriented along
-// unit.facingYaw and offset forward from unit.position. The rotation axis
-// is (0,-1,0) rather than the more usual (0,1,0): FacingDirection() defines
-// "forward" directly as (cos(yaw), 0, sin(yaw)) rather than via a rotation
-// matrix, and glm::rotate(yaw, {0,1,0}) turns the local +X axis into
-// (cos(yaw), 0, -sin(yaw)) — the mirror image. Negating the axis cancels
-// that sign flip so the gun visually points the same way as the FOV cone.
-glm::mat4 GunModel(const Unit& unit) {
-  constexpr float kGunLength = 0.5f;
-  constexpr float kGunThickness = 0.08f;
-  constexpr float kGunChestHeight = 0.9f;
-  const glm::vec3 size(kGunLength, kGunThickness, kGunThickness);
-  const glm::vec3 localMin(tactics::constants::kUnitHalfWidth, kGunChestHeight,
-                           -kGunThickness * 0.5f);
-  return glm::translate(glm::mat4(1.0f), unit.position) *
-         glm::rotate(glm::mat4(1.0f), unit.facingYaw, glm::vec3(0.0f, -1.0f, 0.0f)) *
-         glm::translate(glm::mat4(1.0f), localMin) * glm::scale(glm::mat4(1.0f), size);
-}
-
 // Tip-over transform pivoting at the feet (unit.position) around
 // knockdownAxis, ease-out from 0 to ~85 degrees. Identity for standing units.
 glm::mat4 KnockdownModel(const Unit& unit) {
@@ -192,34 +164,206 @@ glm::mat4 KnockdownModel(const Unit& unit) {
          glm::translate(glm::mat4(1.0f), -unit.position);
 }
 
+// ---------------------------------------------------------------------------
+// Procedural humanoid figure. No mesh format or loader: every body part is
+// the same unit CubeMesh under its own model matrix, composed the way the
+// gun already was -- translate(position) * rotate(facingYaw) * local part
+// transform -- so the whole figure rides the unit's position/facing and the
+// KnockdownModel() tip-over exactly like the old two-box body did.
+//
+// Figure-local frame: +X forward (FacingDirection), +Y up, +Z the figure's
+// right-hand side. Limbs hang from a pivot (hip / shoulder) and swing about
+// the local Z axis: a positive swing angle moves a hanging limb forward.
+// Proportions add up to kUnitHeight so the figure still fits Unit::Bounds().
+
+constexpr float kLegLength = 0.8f;
+constexpr float kLegThickness = 0.18f;
+constexpr float kLegSideOffset = 0.11f;  // Leg center from the figure's midline.
+constexpr float kHipHeight = kLegLength;
+constexpr float kTorsoHeight = 0.62f;
+constexpr float kTorsoWidth = 0.5f;   // Side to side (Z).
+constexpr float kTorsoDepth = 0.28f;  // Front to back (X).
+constexpr float kHeadSize = 0.3f;
+constexpr float kShoulderHeight = 1.38f;
+constexpr float kArmLength = 0.62f;
+constexpr float kArmThickness = 0.14f;
+constexpr float kArmSideOffset = kTorsoWidth * 0.5f + kArmThickness * 0.5f;
+constexpr float kGunLength = 0.36f;
+constexpr float kGunThickness = 0.08f;
+
+// Walk cycle (blended by unit.walkBlend): legs swing in antiphase, each arm
+// opposite its own side's leg, plus a small vertical bob twice per stride.
+constexpr float kLegSwingAmplitude = 0.6f;   // Radians, ~34 degrees.
+constexpr float kArmSwingAmplitude = 0.45f;  // Radians, ~26 degrees.
+constexpr float kWalkBobHeight = 0.025f;
+
+// Quick-draw pistol beat (unit.shootElapsed over kShootAnimDuration):
+//  stage 1, draw/aim: the gun arm snaps from hanging at the side up to a
+//    straight horizontal aim (ease-out over kAimRaiseDuration) while the
+//    pistol levels from its low-ready forward tilt to align with the arm,
+//    and the whole arm twists at the shoulder onto the target's bearing;
+//  stage 2, recoil: at the end of the raise the shot "fires" -- the arm and
+//    muzzle kick upward and the pistol slides back into the hand, all
+//    decaying exponentially (same decay form as the camera zoom damping)
+//    -- and over the last kLowerDuration the arm eases back down to rest.
+constexpr float kAimRaiseDuration = 0.12f;
+constexpr float kLowerDuration = 0.25f;
+constexpr float kRecoilDecayRate = 12.0f;             // Per second.
+constexpr float kRecoilArmKick = glm::radians(18.0f);  // Whole-arm lift.
+constexpr float kRecoilMuzzleFlip = glm::radians(22.0f);
+constexpr float kRecoilSlide = 0.07f;  // Pistol pushed back along its barrel.
+
+float EaseOutQuad(float t) {
+  t = glm::clamp(t, 0.0f, 1.0f);
+  return 1.0f - (1.0f - t) * (1.0f - t);
+}
+
+// Everything the quick-draw beat needs, sampled at the unit's shootElapsed.
+struct ShootPose {
+  float raise = 0.0f;   // 0 = arm hanging at rest, 1 = fully extended aim.
+  float recoil = 0.0f;  // 1 at the instant of the shot, decaying to 0.
+  float aimYawDelta = 0.0f;  // Shoulder twist toward the target, relative to facingYaw.
+};
+
+ShootPose SampleShootPose(const Unit& unit) {
+  ShootPose pose;
+  if (unit.shootElapsed < 0.0f) return pose;
+  const float t = unit.shootElapsed;
+  const float lowerStart = tactics::constants::kShootAnimDuration - kLowerDuration;
+  if (t < kAimRaiseDuration) {
+    pose.raise = EaseOutQuad(t / kAimRaiseDuration);
+  } else {
+    pose.raise = 1.0f - EaseOutQuad((t - lowerStart) / kLowerDuration);
+    pose.recoil = std::exp(-kRecoilDecayRate * (t - kAimRaiseDuration));
+  }
+  constexpr float kTwoPi = 6.28318530717958647692f;
+  pose.aimYawDelta = std::remainder(unit.shootAimYaw - unit.facingYaw, kTwoPi) * pose.raise;
+  return pose;
+}
+
+// unit.position / unit.facingYaw as a frame. The rotation axis is (0,-1,0)
+// rather than the more usual (0,1,0): FacingDirection() defines "forward"
+// directly as (cos(yaw), 0, sin(yaw)) rather than via a rotation matrix, and
+// glm::rotate(yaw, {0,1,0}) turns the local +X axis into (cos(yaw), 0,
+// -sin(yaw)) -- the mirror image. Negating the axis cancels that sign flip
+// so the figure visually faces the same way as its FOV cone.
+glm::mat4 YawFrame(const glm::vec3& origin, float yaw) {
+  return glm::translate(glm::mat4(1.0f), origin) *
+         glm::rotate(glm::mat4(1.0f), yaw, glm::vec3(0.0f, -1.0f, 0.0f));
+}
+
 glm::mat4 BoxModel(const glm::vec3& minCorner, const glm::vec3& size) {
   return glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
 }
 
+// Frame of a limb hanging from `pivot` (in the figure frame), swung forward
+// by `swing` radians about the pivot, optionally twisted about the vertical
+// axis first (yaw, same sign convention as facingYaw). The limb's own box
+// then extends from the pivot down the frame's -Y axis.
+glm::mat4 LimbFrame(const glm::mat4& figure, const glm::vec3& pivot, float swing,
+                    float yawTwist = 0.0f) {
+  return figure * glm::translate(glm::mat4(1.0f), pivot) *
+         glm::rotate(glm::mat4(1.0f), yawTwist, glm::vec3(0.0f, -1.0f, 0.0f)) *
+         glm::rotate(glm::mat4(1.0f), swing, glm::vec3(0.0f, 0.0f, 1.0f));
+}
+
+glm::mat4 HangingBox(const glm::mat4& limb, float length, float thickness) {
+  return limb * BoxModel(glm::vec3(-thickness * 0.5f, -length, -thickness * 0.5f),
+                         glm::vec3(thickness, length, thickness));
+}
+
+struct FigurePart {
+  glm::mat4 model{1.0f};
+  glm::vec4 color{1.0f};
+};
+
+constexpr int kFigurePartCount = 7;
+using FigureParts = std::array<FigurePart, kFigurePartCount>;
+
+// Poses the whole figure for the unit's current animation state and returns
+// each part's world model matrix (knockdown tip-over included) with its color.
+FigureParts BuildFigure(const Unit& unit) {
+  const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
+                                                      : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
+  const glm::vec4 limbColor = teamColor * glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);
+  constexpr glm::vec4 kHeadColor(0.87f, 0.72f, 0.58f, 1.0f);
+  constexpr glm::vec4 kGunColor(0.12f, 0.12f, 0.12f, 1.0f);
+
+  // Walk cycle: right leg leads at phase 0; the arms counter-swing.
+  const float stride = std::sin(unit.walkPhase) * unit.walkBlend;
+  const float rightLegSwing = kLegSwingAmplitude * stride;
+  const float leftLegSwing = -rightLegSwing;
+  const float rightArmWalkSwing = -kArmSwingAmplitude * stride;
+  const float leftArmWalkSwing = -rightArmWalkSwing;
+  const float bob = kWalkBobHeight * (1.0f - std::cos(2.0f * unit.walkPhase)) * 0.5f *
+                    unit.walkBlend;
+
+  const ShootPose shot = SampleShootPose(unit);
+  // Gun arm: walk swing at rest, blended into the straight-forward aim
+  // (90 degrees) as the draw raises it, plus the recoil lift on top.
+  const float gunArmSwing = glm::mix(rightArmWalkSwing, glm::half_pi<float>(), shot.raise) +
+                            kRecoilArmKick * shot.recoil;
+  // Pistol in the hand: tilted 90 degrees so it points forward while the
+  // arm hangs (low ready), aligning with the arm as the aim comes up, then
+  // flipping up with the recoil.
+  const float gunPitch =
+      glm::half_pi<float>() * (1.0f - shot.raise) + kRecoilMuzzleFlip * shot.recoil;
+
+  const glm::mat4 fall = KnockdownModel(unit);
+  const glm::mat4 figure =
+      fall * YawFrame(unit.position + glm::vec3(0.0f, bob, 0.0f), unit.facingYaw);
+
+  FigureParts parts;
+  // Torso and head.
+  parts[0] = {figure * BoxModel(glm::vec3(-kTorsoDepth * 0.5f, kHipHeight, -kTorsoWidth * 0.5f),
+                                glm::vec3(kTorsoDepth, kTorsoHeight, kTorsoWidth)),
+              teamColor};
+  parts[1] = {figure * BoxModel(glm::vec3(-kHeadSize * 0.5f,
+                                          tactics::constants::kUnitHeight - kHeadSize,
+                                          -kHeadSize * 0.5f),
+                                glm::vec3(kHeadSize)),
+              kHeadColor};
+  // Legs, pivoting at the hips.
+  parts[2] = {HangingBox(LimbFrame(figure, glm::vec3(0.0f, kHipHeight, -kLegSideOffset),
+                                   leftLegSwing),
+                         kLegLength, kLegThickness),
+              limbColor};
+  parts[3] = {HangingBox(LimbFrame(figure, glm::vec3(0.0f, kHipHeight, kLegSideOffset),
+                                   rightLegSwing),
+                         kLegLength, kLegThickness),
+              limbColor};
+  // Arms, pivoting at the shoulders; the right one holds the pistol.
+  parts[4] = {HangingBox(LimbFrame(figure, glm::vec3(0.0f, kShoulderHeight, -kArmSideOffset),
+                                   leftArmWalkSwing),
+                         kArmLength, kArmThickness),
+              limbColor};
+  const glm::mat4 gunArm = LimbFrame(figure, glm::vec3(0.0f, kShoulderHeight, kArmSideOffset),
+                                     gunArmSwing, shot.aimYawDelta);
+  parts[5] = {HangingBox(gunArm, kArmLength, kArmThickness), limbColor};
+  // Pistol: gripped at the hand (end of the arm), barrel extending along the
+  // hand frame's -Y once pitched, recoil sliding it back toward the hand.
+  const glm::mat4 gun = gunArm *
+                        glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -kArmLength, 0.0f)) *
+                        glm::rotate(glm::mat4(1.0f), gunPitch, glm::vec3(0.0f, 0.0f, 1.0f)) *
+                        glm::translate(glm::mat4(1.0f),
+                                       glm::vec3(0.0f, kRecoilSlide * shot.recoil, 0.0f));
+  parts[6] = {HangingBox(gun, kGunLength, kGunThickness), kGunColor};
+  return parts;
+}
+
 void DrawUnit(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
               const glm::mat4& lightSpaceMatrix, const Unit& unit) {
-  const glm::vec4 color = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
-                                                  : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
-  constexpr glm::vec4 kGunColor(0.12f, 0.12f, 0.12f, 1.0f);
-  glm::vec3 bodyMin, bodySize, headMin, headSize;
-  UnitBoxes(unit, &bodyMin, &bodySize, &headMin, &headSize);
-  const glm::mat4 fall = KnockdownModel(unit);
-  DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, fall * BoxModel(bodyMin, bodySize),
-                  color);
-  DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, fall * BoxModel(headMin, headSize),
-                  color);
-  DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, fall * GunModel(unit), kGunColor);
+  for (const FigurePart& part : BuildFigure(unit)) {
+    DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, part.model, part.color);
+  }
 }
 
 void DrawUnitDepth(const Shader& shader, const CubeMesh& cube, const glm::mat4& lightSpaceMatrix,
                    const Unit& unit) {
-  glm::vec3 bodyMin, bodySize, headMin, headSize;
-  UnitBoxes(unit, &bodyMin, &bodySize, &headMin, &headSize);
-  const glm::mat4 fall = KnockdownModel(unit);
-  shader.SetMat4("uLightMVP", lightSpaceMatrix * fall * BoxModel(bodyMin, bodySize));
-  cube.Draw();
-  shader.SetMat4("uLightMVP", lightSpaceMatrix * fall * BoxModel(headMin, headSize));
-  cube.Draw();
+  for (const FigurePart& part : BuildFigure(unit)) {
+    shader.SetMat4("uLightMVP", lightSpaceMatrix * part.model);
+    cube.Draw();
+  }
 }
 
 void DrawHighlight(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,

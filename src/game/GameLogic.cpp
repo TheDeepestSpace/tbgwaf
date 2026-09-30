@@ -64,6 +64,10 @@ GameSnapshot GameLogic::ExportState() const {
     u.planPath = unit.plan.movePath;
     u.knockdownAxis = unit.knockdownAxis;
     u.knockdownElapsed = unit.knockdownElapsed;
+    u.walkPhase = unit.walkPhase;
+    u.walkBlend = unit.walkBlend;
+    u.shootElapsed = unit.shootElapsed;
+    u.shootAimYaw = unit.shootAimYaw;
     u.moving = IsUnitMoving(unit.id);
     snap.units.push_back(std::move(u));
   }
@@ -105,6 +109,10 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     unit->triggerAction = u.triggerAction;
     unit->knockdownAxis = u.knockdownAxis;
     unit->knockdownElapsed = u.knockdownElapsed;
+    unit->walkPhase = u.walkPhase;
+    unit->walkBlend = u.walkBlend;
+    unit->shootElapsed = u.shootElapsed;
+    unit->shootAimYaw = u.shootAimYaw;
     ApplyPlan(u, unit);
     if (u.moving) mirroredMoving_.push_back(u.id);
   }
@@ -143,7 +151,9 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
         << u.facingYaw << ' ' << (u.alive ? 1 : 0) << ' ' << static_cast<int>(u.triggerAction)
         << ' ' << static_cast<int>(u.planType) << ' ' << u.planShootTargetId << ' '
         << u.knockdownAxis.x << ' ' << u.knockdownAxis.y << ' ' << u.knockdownAxis.z << ' '
-        << u.knockdownElapsed << ' ' << (u.moving ? 1 : 0) << ' ' << u.planPath.size();
+        << u.knockdownElapsed << ' ' << u.walkPhase << ' ' << u.walkBlend << ' '
+        << u.shootElapsed << ' ' << u.shootAimYaw << ' ' << (u.moving ? 1 : 0) << ' '
+        << u.planPath.size();
     for (const auto& p : u.planPath) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
   }
   return out.str();
@@ -166,7 +176,8 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
     size_t pathCount = 0;
     if (!(in >> u.id >> u.position.x >> u.position.y >> u.position.z >> u.facingYaw >> alive >>
           trigger >> plan >> u.planShootTargetId >> u.knockdownAxis.x >> u.knockdownAxis.y >>
-          u.knockdownAxis.z >> u.knockdownElapsed >> moving >> pathCount)) {
+          u.knockdownAxis.z >> u.knockdownElapsed >> u.walkPhase >> u.walkBlend >>
+          u.shootElapsed >> u.shootAimYaw >> moving >> pathCount)) {
       return false;
     }
     if (trigger < 0 || trigger > static_cast<int>(TriggerAction::Shoot)) return false;
@@ -267,16 +278,35 @@ void GameLogic::ClickGround(const glm::vec3& point, Team byTeam) {
 }
 
 void GameLogic::Update(float dtSeconds) {
-  // Knockdowns advance regardless of mode: they're purely visual and can
-  // outlast the round that caused them.
+  // Knockdowns and the quick-draw beat advance regardless of mode: they're
+  // purely visual and can outlast the round that caused them. A knockdown
+  // holds its final pose; the shoot beat returns to idle (<0) once done.
   for (Unit& unit : scene_.units) {
-    if (unit.alive || unit.knockdownElapsed < 0.0f) continue;
-    unit.knockdownElapsed =
-        std::min(unit.knockdownElapsed + dtSeconds, constants::kKnockdownDuration);
+    if (!unit.alive && unit.knockdownElapsed >= 0.0f) {
+      unit.knockdownElapsed =
+          std::min(unit.knockdownElapsed + dtSeconds, constants::kKnockdownDuration);
+    }
+    if (unit.shootElapsed >= 0.0f) {
+      unit.shootElapsed += dtSeconds;
+      if (unit.shootElapsed >= constants::kShootAnimDuration) unit.shootElapsed = -1.0f;
+    }
   }
 
-  if (mode_ != InputMode::Executing) return;
+  if (mode_ == InputMode::Executing) AdvanceExecutingRound(dtSeconds);
 
+  // Walk-cycle blend, judged *after* the movement step so a move that
+  // finished (or a mover that died) this very tick already starts easing
+  // back to the rest pose. Exponential-decay lerp, same form as
+  // OrbitCamera::Update's zoom damping: a large dt snaps straight to the
+  // target, so a fast-forwarded round leaves everyone at rest.
+  for (Unit& unit : scene_.units) {
+    const float target = unit.alive && IsUnitMoving(unit.id) ? 1.0f : 0.0f;
+    unit.walkBlend +=
+        (target - unit.walkBlend) * std::min(1.0f, constants::kWalkBlendRate * dtSeconds);
+  }
+}
+
+void GameLogic::AdvanceExecutingRound(float dtSeconds) {
   for (ActiveMove& move : activeMoves_) {
     Unit* mover = FindUnit(move.unitId);
     if (!mover || move.path.size() < 2) continue;
@@ -299,6 +329,7 @@ void GameLogic::Update(float dtSeconds) {
 
       const glm::vec3 toEnd = segEnd - mover->position;
       const float distToEnd = glm::length(toEnd);
+      const float step = std::min(distToEnd, remaining);
       if (distToEnd <= remaining) {
         mover->position = segEnd;
         remaining -= distToEnd;
@@ -307,6 +338,12 @@ void GameLogic::Update(float dtSeconds) {
         mover->position += (toEnd / distToEnd) * remaining;
         remaining = 0.0f;
       }
+      // Distance-driven walk cycle: feet stay in step with the ground
+      // regardless of run speed or frame rate. Wrapped so the phase can't
+      // grow without bound over a long match.
+      constexpr float kTwoPi = 6.28318530717958647692f;
+      mover->walkPhase =
+          std::fmod(mover->walkPhase + step * (kTwoPi / constants::kWalkStrideLength), kTwoPi);
     }
 
     if (TriggerOverwatch(*mover)) {
@@ -409,6 +446,10 @@ bool GameLogic::ResolveShot(Unit& shooter, Unit& target) {
     // up x dir: tipping around this axis leans the figure toward dir.
     target.knockdownAxis = glm::vec3(dir.z, 0.0f, -dir.x);
     target.knockdownElapsed = 0.0f;
+    // Presentation only: start the shooter's quick-draw beat, aimed at the
+    // target's actual bearing (which may sit anywhere inside the FOV cone).
+    shooter.shootElapsed = 0.0f;
+    shooter.shootAimYaw = std::atan2(dir.z, dir.x);
   }
   return hit;
 }

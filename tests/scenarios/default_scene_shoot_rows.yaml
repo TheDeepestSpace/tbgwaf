@@ -1,4 +1,4 @@
-# Replicates BuildDefaultScene() (src/game/Scene.cpp) and the same shot
+# Replicates the original open-lane layout (not the current BuildDefaultScene()) and the same shot
 # outcomes as TestGameLogicShootRowsMatchLayout in tests/logic_tests.cpp:
 # the top/bottom lanes are wall-blocked (shots there must miss), the middle
 # lane is open (a clean shot must hit), and every planned shot on a team's

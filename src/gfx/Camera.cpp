@@ -20,6 +20,11 @@ void OrbitCamera::Update(float dt) {
   distance_ += (targetDistance_ - distance_) * std::min(1.0f, kZoomDampingRate * dt);
 }
 
+void OrbitCamera::FitToExtent(float halfExtent) {
+  // Margin covers the narrow half-width pane and the tilted view.
+  distance_ = targetDistance_ = std::clamp(halfExtent * 2.4f, kMinDistance, kMaxDistance);
+}
+
 void OrbitCamera::Pan(float deltaRight, float deltaForward) {
   const glm::vec3 forward(-std::cos(yaw_), 0.0f, -std::sin(yaw_));
   const glm::vec3 right(std::sin(yaw_), 0.0f, -std::cos(yaw_));

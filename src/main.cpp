@@ -245,10 +245,6 @@ int main() {
   // One independent orbit camera per pane, so each side can freely
   // rotate/zoom its own view without affecting the other's.
   std::array<gfx::OrbitCamera, kMaxPanes> cameras;
-  // Each pane only gets half the page's horizontal space, so the default
-  // zoom (tuned for a single full-width view) would clip the far edge of
-  // the map; start pulled back further so both spawns fit by default.
-  for (auto& camera : cameras) camera.Zoom(10.0f);
   // Both web clients must build the same city, so the seed is fixed unless a
   // native run overrides it via TBGWAF_MAP_SEED.
   uint32_t mapSeed = 1;
@@ -256,6 +252,8 @@ int main() {
     mapSeed = static_cast<uint32_t>(std::strtoul(seedEnv, nullptr, 10));
   }
   GameLogic game(tactics::GenerateUrbanMap(mapSeed));
+  // Start zoomed out far enough that the whole map is in view.
+  for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
 
   // Which team this client instance plays (web two-canvas mode); nullopt =
   // one window showing both teams.
@@ -407,7 +405,7 @@ int main() {
         }
       } else if (event.type == SDL_MOUSEWHEEL) {
         if (!ImGui::GetIO().WantCaptureMouse) {
-          constexpr float kZoomSpeed = 8.0f;
+          constexpr float kZoomSpeed = 0.1f;  // Fraction of current distance per tick.
           // preciseY carries fractional trackpad deltas; wheel.y is rounded to
           // whole ticks, which makes trackpad zoom steppy.
 #if SDL_VERSION_ATLEAST(2, 0, 18)
@@ -415,7 +413,8 @@ int main() {
 #else
           const float wheelY = static_cast<float>(event.wheel.y);
 #endif
-          cameras[PaneForX(mouseX, paneCount, windowWidth)].Zoom(-wheelY * kZoomSpeed);
+          gfx::OrbitCamera& camera = cameras[PaneForX(mouseX, paneCount, windowWidth)];
+          camera.Zoom(-wheelY * kZoomSpeed * camera.TargetDistance());
         }
       } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
         // A drag that panned the camera must not also fire a click.

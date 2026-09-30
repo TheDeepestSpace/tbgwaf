@@ -10,11 +10,15 @@ struct Ray {
 };
 
 // Bird's-eye orbit camera: rotates and zooms around a fixed ground-plane
-// focus point. No panning/free-fly, matching the Stage-A spec.
+// focus point, and pans that focus point across the ground plane.
 class OrbitCamera {
  public:
   void Rotate(float deltaYawRadians, float deltaPitchRadians);
   void Zoom(float deltaDistance);
+  // Moves `target` along the ground-projected right/forward axes (derived
+  // from yaw only, so pitch never tilts the pan plane). Deltas are scaled by
+  // the orbit distance so pan speed feels consistent across zoom levels.
+  void Pan(float deltaRight, float deltaForward);
 
   glm::vec3 Position() const;
   glm::mat4 ViewMatrix() const;

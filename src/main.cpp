@@ -182,6 +182,8 @@ int main() {
   GameLogic game;
 
   bool quit = false;
+  int leftDragPane = -1;  // -1 = not dragging; else the pane a left-drag (pan) started in.
+  float leftDragDistance = 0.0f;  // Accumulated pixels moved during the current left-drag.
   int rightDragPane = -1;  // -1 = not dragging; else the pane a right-drag started in.
   glm::vec3 hoveredGroundPoint(0.0f);
   bool hasHoveredGroundPoint = false;
@@ -223,9 +225,19 @@ int main() {
         rightDragPane = PaneForX(event.button.x, windowWidth);
       } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_RIGHT) {
         rightDragPane = -1;
+      } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+        leftDragPane = PaneForX(event.button.x, windowWidth);
+        leftDragDistance = 0.0f;
       } else if (event.type == SDL_MOUSEMOTION) {
         mouseX = event.motion.x;
         mouseY = event.motion.y;
+        if (leftDragPane >= 0 && !ImGui::GetIO().WantCaptureMouse) {
+          constexpr float kPanSpeed = 0.0015f;
+          // Drag the world under the cursor: target moves opposite to the drag.
+          cameras[leftDragPane].Pan(-event.motion.xrel * kPanSpeed, event.motion.yrel * kPanSpeed);
+          leftDragDistance += std::hypot(static_cast<float>(event.motion.xrel),
+                                          static_cast<float>(event.motion.yrel));
+        }
         if (rightDragPane >= 0 && !ImGui::GetIO().WantCaptureMouse) {
           constexpr float kRotateSpeed = 0.005f;
           cameras[rightDragPane].Rotate(-event.motion.xrel * kRotateSpeed,
@@ -237,7 +249,11 @@ int main() {
           cameras[PaneForX(mouseX, windowWidth)].Zoom(-event.wheel.y * kZoomSpeed);
         }
       } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
-        leftClickPending = true;
+        // A drag that panned the camera must not also fire a click.
+        constexpr float kClickDragThresholdPx = 5.0f;
+        if (leftDragDistance < kClickDragThresholdPx) leftClickPending = true;
+        leftDragPane = -1;
+        leftDragDistance = 0.0f;
         leftClickX = event.button.x;
         leftClickY = event.button.y;
       } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
@@ -260,7 +276,7 @@ int main() {
     // fog-of-war view (so both players can always watch the match) but is
     // dimmed and ignores clicks, matching local split-screen console games
     // where only the active player's half responds during their turn.
-    // Camera orbit/zoom is *not* gated this way -- either player can look
+    // Camera orbit/zoom/pan is *not* gated this way -- either player can look
     // around their own pane at any time.
     std::optional<Team> activeTeam;
     if (game.Mode() != InputMode::GameOver) {

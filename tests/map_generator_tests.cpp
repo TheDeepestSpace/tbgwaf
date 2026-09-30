@@ -1,6 +1,7 @@
 // Seeded regression tests for the procedural urban map generator and the
 // range-scoped navmesh it feeds. Headless: no SDL/GL/ImGui.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -64,7 +65,7 @@ void TestDeterminismAndVariety() {
 // up here first (update the numbers deliberately when it's intended).
 void TestPinnedSeedFingerprints() {
   struct Expected { uint32_t seed; size_t buildings; };
-  const Expected expected[] = {{1u, 124}, {42u, 126}, {2024u, 129}};
+  const Expected expected[] = {{1u, 122}, {42u, 126}, {2024u, 126}};
   for (const auto& e : expected) {
     const Scene scene = GenerateUrbanMap(e.seed);
     if (scene.obstacles.size() != e.buildings) {
@@ -86,20 +87,10 @@ void TestMapIsMuchLargerThanDefault() {
   }
 }
 
-struct BlockRect { float x0, x1, z0, z1; };
+using BlockRect = UrbanBlock;
 
-std::vector<BlockRect> Blocks(const MapGeneratorConfig& c) {
-  const float totalX = c.blocksX * c.blockSize + (c.blocksX + 1) * c.streetWidth;
-  const float totalZ = c.blocksZ * c.blockSize + (c.blocksZ + 1) * c.streetWidth;
-  std::vector<BlockRect> blocks;
-  for (int bx = 0; bx < c.blocksX; ++bx) {
-    for (int bz = 0; bz < c.blocksZ; ++bz) {
-      const float x0 = -totalX * 0.5f + c.streetWidth + bx * (c.blockSize + c.streetWidth);
-      const float z0 = -totalZ * 0.5f + c.streetWidth + bz * (c.blockSize + c.streetWidth);
-      blocks.push_back({x0, x0 + c.blockSize, z0, z0 + c.blockSize});
-    }
-  }
-  return blocks;
+std::vector<BlockRect> Blocks(uint32_t seed, const MapGeneratorConfig& c) {
+  return UrbanBlocks(seed, c);
 }
 
 bool Inside(const AABB& b, const BlockRect& r, float inset) {
@@ -109,8 +100,8 @@ bool Inside(const AABB& b, const BlockRect& r, float inset) {
 
 void TestStreetsAndSidewalksAreObstacleFree() {
   const MapGeneratorConfig c;
-  const auto blocks = Blocks(c);
   for (uint32_t seed : kSeeds) {
+    const auto blocks = Blocks(seed, c);
     const Scene scene = GenerateUrbanMap(seed);
     size_t perBlock[16] = {};
     for (const auto& o : scene.obstacles) {
@@ -148,8 +139,8 @@ float Separation(const AABB& a, const AABB& b) {
 
 void TestEveryBlockHasWallToWallAndGappedRuns() {
   const MapGeneratorConfig c;
-  const auto blocks = Blocks(c);
   for (uint32_t seed : kSeeds) {
+    const auto blocks = Blocks(seed, c);
     const Scene scene = GenerateUrbanMap(seed);
     for (const auto& block : blocks) {
       std::vector<AABB> in;
@@ -167,6 +158,76 @@ void TestEveryBlockHasWallToWallAndGappedRuns() {
       }
       CHECK(wall);
       CHECK(gap);
+    }
+  }
+}
+
+void TestVariedHeightsWithFewTowers() {
+  const MapGeneratorConfig c;
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed);
+    int towers = 0, medium = 0;
+    float lo = 1e9f, hi = 0.0f;
+    for (const auto& o : scene.obstacles) {
+      const float h = o.bounds.max.y;
+      lo = std::min(lo, h);
+      hi = std::max(hi, h);
+      CHECK(h >= c.minBuildingHeight - kEps);
+      if (h >= c.towerMinHeight - kEps) ++towers;
+      else if (h >= 4.5f && h <= 7.5f) ++medium;
+    }
+    CHECK(towers == c.towerCount);
+    CHECK(hi - lo > 8.0f);
+    CHECK(medium * 2 > static_cast<int>(scene.obstacles.size()) / 2);  // Mostly medium.
+  }
+}
+
+void TestBlocksAndStreetsVary() {
+  const MapGeneratorConfig c;
+  for (uint32_t seed : kSeeds) {
+    const auto blocks = Blocks(seed, c);
+    float minW = 1e9f, maxW = 0.0f, minGap = 1e9f, maxGap = 0.0f;
+    for (const auto& b : blocks) {
+      minW = std::min(minW, b.x1 - b.x0);
+      maxW = std::max(maxW, b.x1 - b.x0);
+      CHECK(b.x1 - b.x0 >= c.minBlockSize - kEps && b.z1 - b.z0 >= c.minBlockSize - kEps);
+    }
+    CHECK(maxW - minW > 1.0f);
+    // Straight streets: columns share x extents, rows share z extents.
+    for (const auto& a : blocks) {
+      for (const auto& b : blocks) {
+        if (std::fabs(a.x0 - b.x0) < kEps) CHECK(std::fabs(a.x1 - b.x1) < kEps);
+        if (std::fabs(a.z0 - b.z0) < kEps) CHECK(std::fabs(a.z1 - b.z1) < kEps);
+      }
+    }
+    for (int i = 1; i < c.blocksX; ++i) {
+      const float w = blocks[i * c.blocksZ].x0 - blocks[(i - 1) * c.blocksZ].x1;
+      minGap = std::min(minGap, w);
+      maxGap = std::max(maxGap, w);
+    }
+    CHECK(maxGap - minGap > 0.5f);
+    CHECK(minGap >= c.streetWidth * c.streetWidthMin - kEps);
+    CHECK(maxGap <= c.streetWidth * c.streetWidthMax + kEps);
+  }
+}
+
+void TestSidewalksLineEveryBlock() {
+  const MapGeneratorConfig c;
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed);
+    const auto blocks = Blocks(seed, c);
+    CHECK(scene.sidewalks.size() == blocks.size() * 4);
+    for (const AABB& s : scene.sidewalks) {
+      CHECK(s.max.y > 0.0f && s.max.y < 0.3f);  // Curb, not a wall.
+      bool inBlock = false;
+      for (const auto& b : blocks) inBlock |= Inside(s, b, 0.0f);
+      CHECK(inBlock);
+      // Never overlaps a building footprint.
+      for (const auto& o : scene.obstacles) {
+        const bool overlap = s.min.x < o.bounds.max.x - kEps && o.bounds.min.x < s.max.x - kEps &&
+                             s.min.z < o.bounds.max.z - kEps && o.bounds.min.z < s.max.z - kEps;
+        CHECK(!overlap);
+      }
     }
   }
 }
@@ -245,9 +306,9 @@ void TestGameLogicUsesRangeScopedNavMesh() {
 }
 
 void TestVisibilityStillSpansWholeMap() {
-  // Spawns sit on the same central east-west street, ~128 units apart.
+  // Spawns sit on the same middle east-west street, ~128 units apart.
   const Scene scene = GenerateUrbanMap(42);
-  const Unit& blue = scene.units[1];  // z == 0 row.
+  const Unit& blue = scene.units[1];  // Middle street row.
   const Unit& red = scene.units[4];
   CHECK(glm::distance(blue.position, red.position) > 100.0f);
   CHECK(IsPointVisibleToTeam(Team::Blue, red.position + glm::vec3(0, 1.0f, 0), scene.units,
@@ -262,6 +323,9 @@ int main() {
   TestMapIsMuchLargerThanDefault();
   TestStreetsAndSidewalksAreObstacleFree();
   TestEveryBlockHasWallToWallAndGappedRuns();
+  TestVariedHeightsWithFewTowers();
+  TestBlocksAndStreetsVary();
+  TestSidewalksLineEveryBlock();
   TestNavMeshFullyReachableFromSpawns();
   TestWindowedNavMeshMatchesGlobalWithinBudget();
   TestGameLogicUsesRangeScopedNavMesh();

@@ -538,6 +538,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
              glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f),
              glm::vec4(0.16f, 0.18f, 0.20f, 1.0f));
 
+  for (const AABB& slab : game.GetScene().sidewalks) {
+    DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, slab.min, slab.max - slab.min,
+               glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
+  }
+
   for (size_t i = 0; i < obstacles.size(); ++i) {
     const bool obstacleVisible = !fogActive || visibility.ObstacleVisible(i);
     const AABB& bounds = obstacles[i].bounds;

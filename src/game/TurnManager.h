@@ -30,6 +30,20 @@ class TurnManager {
 
   int RoundNumber() const { return roundNumber_; }
 
+  // Full turn-order state, exposed so a match can be mirrored between two
+  // GameLogic instances (see GameLogic::ExportState / ImportState).
+  struct State {
+    std::vector<int> order;
+    size_t cursor = 0;
+    int roundNumber = 0;
+  };
+  State GetState() const { return State{order_, cursor_, roundNumber_}; }
+  void SetState(const State& state) {
+    order_ = state.order;
+    cursor_ = state.cursor;
+    roundNumber_ = state.roundNumber;
+  }
+
  private:
   void SkipDead(const std::vector<Unit>& units);
 

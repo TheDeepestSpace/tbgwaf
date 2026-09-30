@@ -1,6 +1,7 @@
 #include "game/GameLogic.h"
 
 #include <cmath>
+#include <sstream>
 
 #include "game/Raycast.h"
 
@@ -21,6 +22,97 @@ void GameLogic::Reset(Scene scene) {
   movePreviewValid_ = false;
   moveAnimPath_.clear();
   moveAnimSegment_ = 0;
+}
+
+GameSnapshot GameLogic::ExportState() const {
+  GameSnapshot snap;
+  for (const auto& unit : scene_.units) {
+    snap.units.push_back({unit.id, unit.position, unit.facingYaw, unit.alive, unit.triggerAction});
+  }
+  snap.turn = turnManager_.GetState();
+  snap.mode = mode_;
+  snap.selectedUnitId = selectedUnitId_.value_or(-1);
+  snap.winner = winner_ ? static_cast<int>(*winner_) : -1;
+  return snap;
+}
+
+bool GameLogic::ImportState(const GameSnapshot& snap) {
+  if (snap.units.size() != scene_.units.size()) return false;
+  for (const auto& u : snap.units) {
+    if (!FindUnit(u.id)) return false;
+  }
+  for (const auto& u : snap.units) {
+    Unit* unit = FindUnit(u.id);
+    unit->position = u.position;
+    unit->facingYaw = u.facingYaw;
+    unit->alive = u.alive;
+    unit->triggerAction = u.triggerAction;
+  }
+  turnManager_.SetState(snap.turn);
+  mode_ = snap.mode;
+  if (snap.selectedUnitId >= 0) {
+    selectedUnitId_ = snap.selectedUnitId;
+  } else {
+    selectedUnitId_.reset();
+  }
+  if (snap.winner >= 0) {
+    winner_ = static_cast<Team>(snap.winner);
+  } else {
+    winner_.reset();
+  }
+  movePreviewPath_.clear();
+  movePreviewValid_ = false;
+  moveAnimPath_.clear();
+  moveAnimSegment_ = 0;
+  return true;
+}
+
+std::string SerializeSnapshot(const GameSnapshot& snap) {
+  std::ostringstream out;
+  out.precision(9);
+  out << static_cast<int>(snap.mode) << ' ' << snap.selectedUnitId << ' ' << snap.winner << ' '
+      << snap.turn.roundNumber << ' ' << snap.turn.cursor << ' ' << snap.turn.order.size();
+  for (int id : snap.turn.order) out << ' ' << id;
+  out << ' ' << snap.units.size();
+  for (const auto& u : snap.units) {
+    out << ' ' << u.id << ' ' << u.position.x << ' ' << u.position.y << ' ' << u.position.z << ' '
+        << u.facingYaw << ' ' << (u.alive ? 1 : 0) << ' ' << static_cast<int>(u.triggerAction);
+  }
+  return out.str();
+}
+
+bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
+  std::istringstream in(text);
+  GameSnapshot snap;
+  int mode = 0;
+  size_t orderCount = 0, unitCount = 0;
+  if (!(in >> mode >> snap.selectedUnitId >> snap.winner >> snap.turn.roundNumber >>
+        snap.turn.cursor >> orderCount)) {
+    return false;
+  }
+  if (mode < 0 || mode > static_cast<int>(InputMode::GameOver)) return false;
+  if (snap.winner < -1 || snap.winner > 1) return false;
+  constexpr size_t kMaxEntries = 1024;
+  if (orderCount > kMaxEntries) return false;
+  snap.mode = static_cast<InputMode>(mode);
+  snap.turn.order.resize(orderCount);
+  for (int& id : snap.turn.order) {
+    if (!(in >> id)) return false;
+  }
+  if (!(in >> unitCount) || unitCount > kMaxEntries) return false;
+  snap.units.resize(unitCount);
+  for (auto& u : snap.units) {
+    int alive = 0, trigger = 0;
+    if (!(in >> u.id >> u.position.x >> u.position.y >> u.position.z >> u.facingYaw >> alive >>
+          trigger)) {
+      return false;
+    }
+    if (trigger < 0 || trigger > static_cast<int>(TriggerAction::Shoot)) return false;
+    u.alive = alive != 0;
+    u.triggerAction = static_cast<TriggerAction>(trigger);
+  }
+  *outSnap = std::move(snap);
+  return true;
 }
 
 Unit* GameLogic::FindUnit(int id) {

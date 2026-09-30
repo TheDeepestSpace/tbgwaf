@@ -137,8 +137,10 @@ const char* TeamName(Team team) { return team == Team::Blue ? "Blue" : "Red"; }
 // finite planes from the ray's point of view, so pick whichever the ray
 // actually hits nearer the camera -- matches how the scene is rendered
 // (the ground plane is infinite but obstacles occlude it visually).
-bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const std::vector<Obstacle>& obstacles,
-                                glm::vec3* outPoint) {
+//
+// Any walkable surface counts, not just crates: climbable obstacles and the
+// scene's flat walkable slabs (sidewalks) are all picked by their top face.
+bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const tactics::Scene& scene, glm::vec3* outPoint) {
   bool found = false;
   float bestT = std::numeric_limits<float>::infinity();
   glm::vec3 bestPoint(0.0f);
@@ -152,18 +154,21 @@ bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const std::vector<Obstacle>&
   }
 
   constexpr float kTopFaceEpsilon = 1e-2f;
-  for (const auto& obstacle : obstacles) {
-    if (!obstacle.climbable) continue;
+  auto considerSurface = [&](const tactics::AABB& bounds) {
     float t = 0.0f;
-    if (!tactics::RayIntersectsAABB(ray.origin, ray.direction, obstacle.bounds, &t)) continue;
+    if (!tactics::RayIntersectsAABB(ray.origin, ray.direction, bounds, &t)) return;
     const glm::vec3 hit = ray.origin + ray.direction * t;
-    if (hit.y < obstacle.bounds.max.y - kTopFaceEpsilon) continue;  // Hit a side, not the top.
+    if (hit.y < bounds.max.y - kTopFaceEpsilon) return;  // Hit a side, not the top.
     if (t < bestT) {
       found = true;
       bestT = t;
       bestPoint = hit;
     }
+  };
+  for (const auto& obstacle : scene.obstacles) {
+    if (obstacle.climbable) considerSurface(obstacle.bounds);
   }
+  for (const tactics::AABB& slab : scene.sidewalks) considerSurface(slab);
 
   if (found && outPoint) *outPoint = bestPoint;
   return found;
@@ -610,7 +615,7 @@ int main() {
             static_cast<float>(mouseX - rect.x), static_cast<float>(mouseY),
             static_cast<float>(rect.width), static_cast<float>(windowHeight));
         glm::vec3 hoverPoint;
-        if (IntersectGroundOrClimbTop(hoverRay, game.GetScene().obstacles, &hoverPoint)) {
+        if (IntersectGroundOrClimbTop(hoverRay, game.GetScene(), &hoverPoint)) {
           hoveredGroundPoint = hoverPoint;
           hasHoveredGroundPoint = true;
           // Team-tagged: hovering over the *other* player's pane just clears
@@ -641,7 +646,7 @@ int main() {
           game.ClickUnit(hitUnit, clickTeam);
         } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
           glm::vec3 point;
-          if (IntersectGroundOrClimbTop(clickRay, game.GetScene().obstacles, &point)) {
+          if (IntersectGroundOrClimbTop(clickRay, game.GetScene(), &point)) {
             game.ClickGround(point, clickTeam);
           }
         }

@@ -1,12 +1,11 @@
 #pragma once
 
-// Split-screen HUD shared by the interactive app (src/main.cpp) and the
-// headless visual scenario runner (tests/visual), so screenshots/videos show
-// exactly the UI a player sees. Must be called between ImGui::NewFrame() and
+// Per-team HUD shared by the interactive app (src/main.cpp) and the headless
+// visual scenario runner (tests/visual), so screenshots/videos show exactly
+// the UI a player sees. Must be called between ImGui::NewFrame() and
 // ImGui::Render(). Const w.r.t. the game: button presses are reported back
 // via HudActions for the caller to apply.
 
-#include <array>
 #include <optional>
 
 #include <glm/glm.hpp>
@@ -20,8 +19,8 @@ namespace ui {
 
 constexpr int kPaneCount = 2;
 
-// Pane 0 is the left half of the window (Blue), pane 1 the right half (Red).
-// Arbitrary but fixed for the lifetime of the app.
+// Pane 0 is the left half of the visual runner's window (Blue), pane 1 the
+// right half (Red). Arbitrary but fixed.
 inline tactics::Team PaneTeam(int pane) {
   return pane == 0 ? tactics::Team::Blue : tactics::Team::Red;
 }
@@ -29,6 +28,7 @@ inline const char* TeamName(tactics::Team team) {
   return team == tactics::Team::Blue ? "Blue" : "Red";
 }
 
+// Horizontal extent of one team's view within the ImGui display.
 struct PaneRect {
   int x = 0;
   int width = 0;
@@ -40,10 +40,7 @@ inline PaneRect ComputePaneRect(int pane, int windowWidth) {
   return PaneRect{leftWidth, windowWidth - leftWidth};
 }
 
-inline int PaneForX(int x, int windowWidth) { return x < windowWidth / 2 ? 0 : 1; }
-
-// Whichever team currently has the turn is the "active" pane -- only that
-// side accepts game-action input. nullopt once the game is over.
+// The team currently planning its turn; nullopt once the game is over.
 std::optional<tactics::Team> ActiveTeam(const tactics::GameLogic& game);
 
 // Projects a world point to top-left-origin window pixels, as seen through
@@ -53,6 +50,7 @@ glm::vec2 WorldToWindow(const glm::vec3& world, const gfx::OrbitCamera& camera,
 
 struct HudActions {
   bool newMatch = false;
+  bool commit = false;
   bool move = false;
   bool shoot = false;
   bool overwatch = false;
@@ -60,9 +58,9 @@ struct HudActions {
   bool cancel = false;
 };
 
-// Draws the Turn / Game Over panel, the floating action menu, the pane
-// divider, team labels and the inactive-pane dimming overlay.
-HudActions DrawHud(const tactics::GameLogic& game, int windowWidth, int windowHeight,
-                   const std::array<gfx::OrbitCamera, kPaneCount>& cameras);
+// Draws `team`'s view of the HUD inside `rect`: the Turn / Game Over panel,
+// the floating action menu (only when `isActive`) and the team label.
+HudActions DrawHud(const tactics::GameLogic& game, tactics::Team team, bool isActive,
+                   const PaneRect& rect, int windowHeight, const gfx::OrbitCamera& camera);
 
 }  // namespace ui

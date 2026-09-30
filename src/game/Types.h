@@ -38,16 +38,17 @@ inline std::vector<AABB> ObstacleBounds(const std::vector<Obstacle>& obstacles) 
 
 // Map/world tuning constants shared across gameplay systems.
 namespace constants {
-constexpr float kMapHalfExtent = 10.0f;  // ~20x20 playable area centered on origin.
+constexpr float kMapHalfExtent = 15.0f;  // ~30x30 playable area centered on origin.
 constexpr float kAgentRadius = 0.4f;     // Padding used to inflate obstacles for the navmesh.
 constexpr float kUnitHalfWidth = 0.35f;
 constexpr float kUnitHeight = 1.8f;
 constexpr float kEyeHeight = 1.5f;
-constexpr float kShootRange = 30.0f;          // Effectively unlimited within the map.
+constexpr float kShootRange = 45.0f;          // Effectively unlimited within the map.
 constexpr float kShootHalfFovDegrees = 75.0f;  // 150 degree total FOV cone.
+constexpr float kKnockdownDuration = 0.4f;  // Seconds for a hit unit to fall over.
 constexpr float kMoveSpeed = 4.0f;  // World units per second for move animation.
 // Visual length of the rendered FOV cone overlay. Sized off kShootRange
-// (already bigger than the map diagonal, 2*kMapHalfExtent*sqrt(2) ~= 28.3)
+// (already bigger than the map diagonal, 2*kMapHalfExtent*sqrt(2) ~= 42.4)
 // so the cone visually reaches the map edge no matter where a unit stands
 // or faces; it's fine for the cone to overshoot past the boundary.
 constexpr float kFovConeVisualRange = kShootRange;

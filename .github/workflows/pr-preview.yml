@@ -20,7 +20,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        if: github.event.action != 'closed'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history: the scenario review page classifies scenarios as
@@ -50,7 +49,7 @@ jobs:
         if: github.event.action != 'closed'
         run: |
           mkdir -p site
-          cp build-web/tactics_app.html site/index.html
+          cp build-web/index.html site/
           cp build-web/tactics_app.js site/
           cp build-web/tactics_app.wasm site/
 

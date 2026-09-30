@@ -177,6 +177,23 @@ glm::mat4 GunModel(const Unit& unit) {
          glm::translate(glm::mat4(1.0f), localMin) * glm::scale(glm::mat4(1.0f), size);
 }
 
+// Tip-over transform pivoting at the feet (unit.position) around
+// knockdownAxis, ease-out from 0 to ~85 degrees. Identity for standing units.
+glm::mat4 KnockdownModel(const Unit& unit) {
+  if (unit.alive || unit.knockdownElapsed < 0.0f) return glm::mat4(1.0f);
+  constexpr float kMaxTilt = glm::radians(85.0f);
+  const float t = glm::clamp(unit.knockdownElapsed / tactics::constants::kKnockdownDuration, 0.0f,
+                             1.0f);
+  const float eased = 1.0f - (1.0f - t) * (1.0f - t);
+  return glm::translate(glm::mat4(1.0f), unit.position) *
+         glm::rotate(glm::mat4(1.0f), kMaxTilt * eased, unit.knockdownAxis) *
+         glm::translate(glm::mat4(1.0f), -unit.position);
+}
+
+glm::mat4 BoxModel(const glm::vec3& minCorner, const glm::vec3& size) {
+  return glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
+}
+
 void DrawUnit(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
               const glm::mat4& lightSpaceMatrix, const Unit& unit) {
   const glm::vec4 color = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
@@ -184,17 +201,23 @@ void DrawUnit(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewP
   constexpr glm::vec4 kGunColor(0.12f, 0.12f, 0.12f, 1.0f);
   glm::vec3 bodyMin, bodySize, headMin, headSize;
   UnitBoxes(unit, &bodyMin, &bodySize, &headMin, &headSize);
-  DrawBoxLit(shader, cube, viewProj, lightSpaceMatrix, bodyMin, bodySize, color);
-  DrawBoxLit(shader, cube, viewProj, lightSpaceMatrix, headMin, headSize, color);
-  DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, GunModel(unit), kGunColor);
+  const glm::mat4 fall = KnockdownModel(unit);
+  DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, fall * BoxModel(bodyMin, bodySize),
+                  color);
+  DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, fall * BoxModel(headMin, headSize),
+                  color);
+  DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, fall * GunModel(unit), kGunColor);
 }
 
 void DrawUnitDepth(const Shader& shader, const CubeMesh& cube, const glm::mat4& lightSpaceMatrix,
                    const Unit& unit) {
   glm::vec3 bodyMin, bodySize, headMin, headSize;
   UnitBoxes(unit, &bodyMin, &bodySize, &headMin, &headSize);
-  DrawBoxDepth(shader, cube, lightSpaceMatrix, bodyMin, bodySize);
-  DrawBoxDepth(shader, cube, lightSpaceMatrix, headMin, headSize);
+  const glm::mat4 fall = KnockdownModel(unit);
+  shader.SetMat4("uLightMVP", lightSpaceMatrix * fall * BoxModel(bodyMin, bodySize));
+  cube.Draw();
+  shader.SetMat4("uLightMVP", lightSpaceMatrix * fall * BoxModel(headMin, headSize));
+  cube.Draw();
 }
 
 void DrawHighlight(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
@@ -335,7 +358,6 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min, bounds.max - bounds.min);
   }
   for (const Unit& unit : game.GetScene().units) {
-    if (!unit.alive) continue;
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
     DrawUnitDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, unit);
   }
@@ -380,7 +402,6 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   for (const Unit& unit : game.GetScene().units) {
-    if (!unit.alive) continue;
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
     DrawUnit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, unit);
   }
@@ -411,16 +432,22 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glDepthMask(GL_TRUE);
   glDisable(GL_BLEND);
 
-  if (const auto actorId = game.CurrentActorId(); actorId && game.Mode() != InputMode::GameOver) {
-    if (const Unit* actor = game.FindUnit(*actorId)) {
-      if (IsUnitVisibleForRender(*actor, team, fogActive, visibility)) {
-        DrawHighlight(unlitShader_, cubeMesh_, viewProj, actor->position,
-                      glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
-      }
+  // Plan-then-commit: every living figure on the team currently planning
+  // gets a highlight in its own pane (dim white = still needs a plan,
+  // green = plan set) -- this is squad-wide now, not a single actor.
+  const bool paneActive = team == game.CurrentTeam() && game.Mode() != InputMode::GameOver;
+  if (paneActive) {
+    for (const Unit& unit : game.GetScene().units) {
+      if (!unit.alive || unit.team != team) continue;
+      if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+      const bool planned = unit.plan.type != tactics::PlannedActionType::None;
+      const glm::vec4 color = planned ? glm::vec4(0.25f, 0.9f, 0.35f, 1.0f)
+                                        : glm::vec4(1.0f, 1.0f, 1.0f, 0.6f);
+      DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position, color);
     }
   }
   // Overwatch indicator: a minimal PoC-grade ground marker (distinct from
-  // the white current-actor ring and the yellow selection ring) under
+  // the plan-then-commit ring and the yellow selection ring) under
   // every figure currently armed to fire during an enemy's move.
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.triggerAction != tactics::TriggerAction::Shoot) continue;
@@ -434,14 +461,49 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawHighlight(unlitShader_, cubeMesh_, viewProj, *overlays.selectionHighlight,
                   glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
   }
+  // A commit animates every planned move at once, so highlight each figure
+  // currently mid-move rather than just a single actor.
+  if (paneActive && game.Mode() == InputMode::Moving) {
+    for (const Unit& unit : game.GetScene().units) {
+      if (unit.team == team && game.IsUnitMoving(unit.id)) {
+        DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position,
+                      glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
+      }
+    }
+  }
   if (overlays.movePreviewPath && overlays.movePreviewPath->size() >= 2) {
     pathLine_.SetPoints(*overlays.movePreviewPath);
     unlitShader_.SetMat4("uMVP", viewProj);
     unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
     pathLine_.Draw();
+    // Mark the final position with the same square used for selection.
+    DrawHighlight(unlitShader_, cubeMesh_, viewProj, overlays.movePreviewPath->back(),
+                  glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
   } else if (overlays.invalidHoverHighlight) {
     DrawHighlight(unlitShader_, cubeMesh_, viewProj, *overlays.invalidHoverHighlight,
                   glm::vec4(0.9f, 0.15f, 0.15f, 1.0f));
+  }
+  // Visual feedback for the whole squad's plan so far: a planned move reuses
+  // the same path-line rendering as the live preview above; a planned shot
+  // gets a simple shooter->target line.
+  if (paneActive) {
+    for (const Unit& unit : game.GetScene().units) {
+      if (!unit.alive || unit.team != team) continue;
+      if (unit.plan.type == tactics::PlannedActionType::Move && unit.plan.movePath.size() >= 2) {
+        pathLine_.SetPoints(unit.plan.movePath);
+        unlitShader_.SetMat4("uMVP", viewProj);
+        unlitShader_.SetVec4("uColor", glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
+        pathLine_.Draw();
+      } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
+        if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {
+          const std::vector<glm::vec3> shotLine = {unit.EyePosition(), shotTarget->EyePosition()};
+          pathLine_.SetPoints(shotLine);
+          unlitShader_.SetMat4("uMVP", viewProj);
+          unlitShader_.SetVec4("uColor", glm::vec4(0.95f, 0.25f, 0.2f, 1.0f));
+          pathLine_.Draw();
+        }
+      }
+    }
   }
   glDisable(GL_SCISSOR_TEST);
 }

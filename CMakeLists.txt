@@ -71,18 +71,31 @@ if(EMSCRIPTEN)
   # -sUSE_SDL=2 must apply at compile time too (it changes where SDL
   # headers are found); the rest are link-only settings.
   target_compile_options(tactics_app_web PRIVATE -sUSE_SDL=2)
+  # MODULARIZE: the page (web/index.html) instantiates the module twice --
+  # one client per team, each with its own canvas -- so the output is a
+  # factory-function .js instead of an emcc-generated HTML page.
   target_link_options(tactics_app_web PRIVATE
     -sUSE_SDL=2
     -sUSE_WEBGL2=1
     -sFULL_ES3=1
     -sALLOW_MEMORY_GROWTH=1
     -sNO_EXIT_RUNTIME=1
-    --shell-file ${CMAKE_SOURCE_DIR}/web/shell.html
+    -sMODULARIZE=1
+    -sEXPORT_NAME=createTbgwafModule
   )
   set_target_properties(tactics_app_web PROPERTIES
     OUTPUT_NAME "tactics_app"
-    SUFFIX ".html"
+    SUFFIX ".js"
   )
+  # The page is static; keep a copy next to the build output so the build
+  # dir can be served as-is for local testing.
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/index.html
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_SOURCE_DIR}/web/index.html ${CMAKE_BINARY_DIR}/index.html
+    DEPENDS ${CMAKE_SOURCE_DIR}/web/index.html
+  )
+  add_custom_target(tactics_web_page ALL DEPENDS ${CMAKE_BINARY_DIR}/index.html)
 else()
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
@@ -116,7 +129,7 @@ else()
   target_include_directories(tactics_gfx PUBLIC src)
   target_link_libraries(tactics_gfx PUBLIC tactics_logic PkgConfig::GLESV2 glm::glm)
 
-  # Split-screen HUD (Turn panel, action menu, pane dimming), shared by the
+  # Per-team HUD (Turn panel, action menu, team label), shared by the
   # interactive app and the visual scenario runner.
   add_library(tactics_ui STATIC src/ui/Hud.cpp)
   target_include_directories(tactics_ui PUBLIC src)

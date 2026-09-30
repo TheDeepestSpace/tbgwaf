@@ -283,18 +283,27 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(static_cast<float>(kWindowWidth), static_cast<float>(kWindowHeight));
     io.DeltaTime = 1.0f / kVideoFps;
+    // Each team's pane gets its own HUD, as in its own browser tab.
+    auto drawHud = [&](const GameLogic& g) {
+      const auto activeTeam = ui::ActiveTeam(g);
+      for (int pane = 0; pane < ui::kPaneCount; ++pane) {
+        const Team team = PaneTeam(pane);
+        ui::DrawHud(g, team, activeTeam && *activeTeam == team,
+                    ui::ComputePaneRect(pane, kWindowWidth), kWindowHeight, cameras[pane]);
+      }
+    };
     // Auto-resize windows need a couple of frames to settle on their content
     // size (and stay hidden meanwhile), as they would in the live app; run
     // throw-away frames first so every capture is fully laid out.
     for (int warmup = 0; warmup < 3; ++warmup) {
       ImGui_ImplOpenGL3_NewFrame();
       ImGui::NewFrame();
-      ui::DrawHud(game, kWindowWidth, kWindowHeight, cameras);
+      drawHud(game);
       ImGui::EndFrame();
     }
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
-    ui::DrawHud(game, kWindowWidth, kWindowHeight, cameras);
+    drawHud(game);
     if (marker) {
       if (const auto team = ui::ActiveTeam(game)) {
         const int pane = *team == Team::Blue ? 0 : 1;

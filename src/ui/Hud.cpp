@@ -1,6 +1,7 @@
 #include "ui/Hud.h"
 
 #include <cstdio>
+#include <string>
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -15,10 +16,7 @@ namespace ui {
 
 std::optional<Team> ActiveTeam(const GameLogic& game) {
   if (game.Mode() == InputMode::GameOver) return std::nullopt;
-  if (const auto actorId = game.CurrentActorId()) {
-    if (const Unit* actor = game.FindUnit(*actorId)) return actor->team;
-  }
-  return std::nullopt;
+  return game.CurrentTeam();
 }
 
 glm::vec2 WorldToWindow(const glm::vec3& world, const gfx::OrbitCamera& camera,
@@ -35,68 +33,74 @@ glm::vec2 WorldToWindow(const glm::vec3& world, const gfx::OrbitCamera& camera,
   return glm::vec2(screen.x, windowHeight - screen.y);
 }
 
-HudActions DrawHud(const GameLogic& game, int windowWidth, int windowHeight,
-                   const std::array<gfx::OrbitCamera, kPaneCount>& cameras) {
+HudActions DrawHud(const GameLogic& game, Team team, bool isActive, const PaneRect& rect,
+                   int windowHeight, const gfx::OrbitCamera& camera) {
   HudActions actions;
-  std::array<PaneRect, kPaneCount> paneRects;
-  for (int pane = 0; pane < kPaneCount; ++pane) {
-    paneRects[pane] = ComputePaneRect(pane, windowWidth);
-  }
   const std::optional<Team> activeTeam = ActiveTeam(game);
-  auto isPaneActive = [&](int pane) { return activeTeam && *activeTeam == PaneTeam(pane); };
+  // Window ids are suffixed with the team so two panes can share one ImGui
+  // context (the visual runner) without their windows colliding.
+  const std::string suffix = std::string("##") + TeamName(team);
+  auto id = [&](const char* title) { return std::string(title) + suffix; };
+  const float left = static_cast<float>(rect.x);
 
   if (const auto winner = game.Winner()) {
-    ImGui::SetNextWindowPos(ImVec2(windowWidth * 0.5f, windowHeight * 0.3f), ImGuiCond_Always,
-                             ImVec2(0.5f, 0.5f));
-    ImGui::Begin("Game Over", nullptr,
+    ImGui::SetNextWindowPos(ImVec2(left + rect.width * 0.5f, windowHeight * 0.3f),
+                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::Begin(id("Game Over").c_str(), nullptr,
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize);
     ImGui::Text("%s team wins!", TeamName(*winner));
     if (ImGui::Button("New Match")) actions.newMatch = true;
     ImGui::End();
   } else {
-    ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
-    ImGui::Begin("Turn", nullptr,
+    int plannedCount = 0, totalCount = 0;
+    for (const Unit& unit : game.GetScene().units) {
+      if (!unit.alive || !activeTeam || unit.team != *activeTeam) continue;
+      ++totalCount;
+      if (unit.plan.type != tactics::PlannedActionType::None) ++plannedCount;
+    }
+
+    ImGui::SetNextWindowPos(ImVec2(left + 10, 10), ImGuiCond_Always);
+    ImGui::Begin(id("Turn").c_str(), nullptr,
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
                      ImGuiWindowFlags_NoMove);
     ImGui::Text("Round %d", game.RoundNumber());
-    if (const auto actorId = game.CurrentActorId()) {
-      const Unit* actor = game.FindUnit(*actorId);
-      if (actor) {
-        ImGui::Text("%s team's turn (figure #%d)", TeamName(actor->team), actor->id);
-      }
+    if (activeTeam) {
+      ImGui::Text("%s team's turn -- plan every figure, then commit.", TeamName(*activeTeam));
+      ImGui::Text("Planned: %d / %d", plannedCount, totalCount);
     }
     switch (game.Mode()) {
       case InputMode::AwaitingSelection:
-        ImGui::TextWrapped("Click the highlighted figure to act.");
+        ImGui::TextWrapped("Click one of your figures to plan its action.");
         break;
       case InputMode::ActionMenu:
-        ImGui::TextWrapped("Choose an action.");
+        ImGui::TextWrapped("Choose an action to plan.");
         break;
       case InputMode::AwaitingMoveDestination:
         ImGui::TextWrapped("Click a destination on the ground (Esc to cancel).");
         break;
       case InputMode::AwaitingShootTarget:
-        ImGui::TextWrapped("Click an enemy figure to shoot (Esc to cancel).");
+        ImGui::TextWrapped("Click an enemy figure to plan a shot (Esc to cancel).");
         break;
       case InputMode::Moving:
-        ImGui::TextWrapped("Figure is moving...");
+        ImGui::TextWrapped("Committing turn: figures are moving...");
         break;
       default:
         break;
     }
+    ImGui::BeginDisabled(!game.CanCommitTurn());
+    if (ImGui::Button("Commit Turn")) actions.commit = true;
+    ImGui::EndDisabled();
     ImGui::End();
 
-    if (const auto selectedId = game.SelectedUnitId(); selectedId && activeTeam) {
+    if (const auto selectedId = game.SelectedUnitId(); selectedId && isActive) {
       const Unit* selected = game.FindUnit(*selectedId);
       if (selected && (game.Mode() == InputMode::ActionMenu ||
                         game.Mode() == InputMode::AwaitingMoveDestination ||
                         game.Mode() == InputMode::AwaitingShootTarget)) {
-        const int activePane = *activeTeam == Team::Blue ? 0 : 1;
-        const glm::vec2 pos =
-            WorldToWindow(selected->position + glm::vec3(0.0f, 1.9f, 0.0f), cameras[activePane],
-                          paneRects[activePane], windowHeight);
+        const glm::vec2 pos = WorldToWindow(selected->position + glm::vec3(0.0f, 1.9f, 0.0f),
+                                            camera, rect, windowHeight);
         ImGui::SetNextWindowPos(ImVec2(pos.x, pos.y), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
-        ImGui::Begin("Actions", nullptr,
+        ImGui::Begin(id("Actions").c_str(), nullptr,
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar);
         if (game.Mode() == InputMode::ActionMenu) {
@@ -115,28 +119,12 @@ HudActions DrawHud(const GameLogic& game, int windowWidth, int windowHeight,
     }
   }
 
-  // Pane divider, per-pane team labels, and a dimming overlay on whichever
-  // pane isn't currently allowed to act -- the split-screen equivalent of
-  // "grey out the inactive side" for local multiplayer.
-  ImDrawList* overlay = ImGui::GetForegroundDrawList();
-  overlay->AddLine(ImVec2(static_cast<float>(paneRects[1].x), 0.0f),
-                    ImVec2(static_cast<float>(paneRects[1].x), static_cast<float>(windowHeight)),
-                    IM_COL32(255, 255, 255, 60), 2.0f);
-  for (int pane = 0; pane < kPaneCount; ++pane) {
-    const PaneRect& rect = paneRects[pane];
-    const bool active = isPaneActive(pane);
-    const char* status = game.Winner() ? "" : (active ? " - your turn" : "");
-    char label[64];
-    std::snprintf(label, sizeof(label), "%s%s", TeamName(PaneTeam(pane)), status);
-    overlay->AddText(ImVec2(rect.x + 10.0f, windowHeight - 24.0f), IM_COL32(255, 255, 255, 220),
-                      label);
-    if (game.Mode() != InputMode::GameOver && !active) {
-      overlay->AddRectFilled(ImVec2(static_cast<float>(rect.x), 0.0f),
-                              ImVec2(static_cast<float>(rect.x + rect.width),
-                                     static_cast<float>(windowHeight)),
-                              IM_COL32(0, 0, 0, 110));
-    }
-  }
+  // Team label for this pane.
+  const char* status = game.Winner() ? "" : (isActive ? " - your turn" : "");
+  char label[64];
+  std::snprintf(label, sizeof(label), "%s%s", TeamName(team), status);
+  ImGui::GetForegroundDrawList()->AddText(ImVec2(left + 10.0f, windowHeight - 24.0f),
+                                           IM_COL32(255, 255, 255, 220), label);
   return actions;
 }
 

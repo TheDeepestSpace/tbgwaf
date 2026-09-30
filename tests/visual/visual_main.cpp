@@ -253,7 +253,10 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   // is half-width, so start zoomed out enough for both spawns to fit).
   // Nothing perturbs them at runtime, so captures are deterministic.
   std::array<gfx::OrbitCamera, 2> cameras;
-  for (auto& camera : cameras) camera.Zoom(10.0f);
+  for (auto& camera : cameras) {
+    camera.Zoom(10.0f);
+    camera.Update(1.0e3f);  // Snap to the initial zoom (matches main.cpp).
+  }
 
   const int paneWidth = kWindowWidth / 2;
   auto renderBothPanes = [&](const GameLogic& game) {

@@ -401,8 +401,15 @@ int main() {
         }
       } else if (event.type == SDL_MOUSEWHEEL) {
         if (!ImGui::GetIO().WantCaptureMouse) {
-          constexpr float kZoomSpeed = 1.5f;
-          camera.Zoom(-event.wheel.y * kZoomSpeed);
+          constexpr float kZoomSpeed = 8.0f;
+          // preciseY carries fractional trackpad deltas; wheel.y is rounded to
+          // whole ticks, which makes trackpad zoom steppy.
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+          const float wheelY = event.wheel.preciseY;
+#else
+          const float wheelY = static_cast<float>(event.wheel.y);
+#endif
+          camera.Zoom(-wheelY * kZoomSpeed);
         }
       } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
         // A drag that panned the camera must not also fire a click.
@@ -427,6 +434,7 @@ int main() {
     // Only the authoritative side simulates; a follower just mirrors
     // snapshots (and in hot-seat mode the local side is always the actor).
     if (isActive) game.Update(dt);
+    for (auto& camera : cameras) camera.Update(dt);
 
     const bool fogActive = game.Mode() != InputMode::GameOver;
     TeamVisibility visibility;

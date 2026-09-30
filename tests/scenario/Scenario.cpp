@@ -1,3 +1,4 @@
+#include <cmath>
 #include "scenario/Scenario.h"
 
 #include <algorithm>
@@ -104,6 +105,9 @@ ScenarioAction ParseAction(const YAML::Node& node) {
   if (kind == "move") {
     action.kind = ScenarioAction::Kind::Move;
     action.destination = ParseVec3(node["destination"], "script[].destination");
+    if (node["final_facing_degrees"]) {
+      action.finalFacingDegrees = node["final_facing_degrees"].as<float>();
+    }
   } else if (kind == "shoot") {
     action.kind = ScenarioAction::Kind::Shoot;
     if (!node["target"]) throw std::runtime_error("script 'shoot' action requires 'target'");
@@ -125,6 +129,7 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   if (node["unit"]) assertion.unit = node["unit"].as<int>();
   if (node["alive"]) assertion.alive = node["alive"].as<bool>();
   if (node["position"]) assertion.position = ParseVec3(node["position"], "assert.position");
+  if (node["facing_degrees"]) assertion.facingDegrees = node["facing_degrees"].as<float>();
   if (node["tolerance"]) assertion.tolerance = node["tolerance"].as<float>();
   if (node["visible_to"]) {
     assertion.visibleToTeam = ParseTeam(node["visible_to"].as<std::string>(), "assert.visible_to");
@@ -140,8 +145,9 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
     assertion.expectedWinner = raw == "none" ? std::optional<Team>() : ParseTeam(raw, "assert.winner");
   }
 
-  if ((assertion.alive || assertion.position || assertion.visible) && !assertion.unit) {
-    throw std::runtime_error("assert checking alive/position/visible requires 'unit'");
+  if ((assertion.alive || assertion.position || assertion.facingDegrees ||
+       assertion.visible) && !assertion.unit) {
+    throw std::runtime_error("assert checking alive/position/facing_degrees/visible requires 'unit'");
   }
   if (assertion.visible.has_value() != assertion.visibleToTeam.has_value()) {
     throw std::runtime_error("assert 'visible' and 'visible_to' must be set together");
@@ -211,6 +217,9 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
       if (game.Mode() != InputMode::AwaitingSelection) {
         return Fail("has no path to destination " + ToString(action.destination));
       }
+      if (action.finalFacingDegrees) {
+        game.SetPlannedMoveFacing(action.actor, *action.finalFacingDegrees * 3.14159265f / 180.0f);
+      }
       return true;
     }
     case ScenarioAction::Kind::Shoot: {
@@ -259,6 +268,17 @@ void CheckAssertion(const GameLogic& game, const ScenarioAssertion& a, int stepI
           Fail("unit " + std::to_string(*a.unit) + " expected position near " +
                ToString(*a.position) + " but is at " + ToString(unit->position) + " (off by " +
                std::to_string(dist) + ")");
+        }
+      }
+      if (a.facingDegrees) {
+        // Compare on the circle so -180 and 180 are the same heading.
+        float diff = std::fmod(unit->facingYaw * 180.0f / 3.14159265f - *a.facingDegrees, 360.0f);
+        if (diff > 180.0f) diff -= 360.0f;
+        if (diff < -180.0f) diff += 360.0f;
+        if (std::fabs(diff) > a.tolerance) {
+          Fail("unit " + std::to_string(*a.unit) + " expected facing near " +
+               std::to_string(*a.facingDegrees) + " deg but is at " +
+               std::to_string(unit->facingYaw * 180.0f / 3.14159265f));
         }
       }
       if (a.visible) {

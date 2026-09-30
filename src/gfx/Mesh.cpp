@@ -78,7 +78,7 @@ void LineMesh::Draw() const {
   glBindVertexArray(0);
 }
 
-void TriangleFanMesh::Init() {
+void TriangleMesh::Init() {
   glGenVertexArrays(1, &vao_);
   glGenBuffers(1, &vbo_);
   glBindVertexArray(vao_);
@@ -88,13 +88,13 @@ void TriangleFanMesh::Init() {
   glBindVertexArray(0);
 }
 
-void TriangleFanMesh::Destroy() {
+void TriangleMesh::Destroy() {
   if (vbo_) glDeleteBuffers(1, &vbo_);
   if (vao_) glDeleteVertexArrays(1, &vao_);
   vao_ = vbo_ = 0;
 }
 
-void TriangleFanMesh::SetPoints(const std::vector<glm::vec3>& points) {
+void TriangleMesh::SetPoints(const std::vector<glm::vec3>& points) {
   pointCount_ = static_cast<GLsizei>(points.size());
   if (pointCount_ == 0) return;
   glBindBuffer(GL_ARRAY_BUFFER, vbo_);
@@ -102,10 +102,10 @@ void TriangleFanMesh::SetPoints(const std::vector<glm::vec3>& points) {
                GL_DYNAMIC_DRAW);
 }
 
-void TriangleFanMesh::Draw() const {
+void TriangleMesh::Draw() const {
   if (pointCount_ < 3) return;
   glBindVertexArray(vao_);
-  glDrawArrays(GL_TRIANGLE_FAN, 0, pointCount_);
+  glDrawArrays(GL_TRIANGLES, 0, pointCount_);
   glBindVertexArray(0);
 }
 

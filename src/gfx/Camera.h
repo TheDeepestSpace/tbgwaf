@@ -14,7 +14,11 @@ struct Ray {
 class OrbitCamera {
  public:
   void Rotate(float deltaYawRadians, float deltaPitchRadians);
+  // Adjusts the zoom *target*; Update() glides the actual distance toward it.
   void Zoom(float deltaDistance);
+  // Advances zoom smoothing by dt seconds (frame-rate independent).
+  void Update(float dt);
+
   // Moves `target` along the ground-projected right/forward axes (derived
   // from yaw only, so pitch never tilts the pan plane). Deltas are scaled by
   // the orbit distance so pan speed feels consistent across zoom levels.
@@ -38,10 +42,12 @@ class OrbitCamera {
   float yaw_ = -0.9f;                    // Radians around Y.
   float pitch_ = 0.9599f;                // ~55 degrees above horizon.
   float distance_ = 18.0f;
+  float targetDistance_ = 18.0f;
   static constexpr float kMinPitch = 0.4363f;   // ~25 degrees.
   static constexpr float kMaxPitch = 1.4835f;   // ~85 degrees.
   static constexpr float kMinDistance = 6.0f;
   static constexpr float kMaxDistance = 35.0f;
+  static constexpr float kZoomDampingRate = 24.0f;  // 1/s; higher = snappier.
 };
 
 }  // namespace gfx

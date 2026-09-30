@@ -13,7 +13,11 @@ void OrbitCamera::Rotate(float deltaYawRadians, float deltaPitchRadians) {
 }
 
 void OrbitCamera::Zoom(float deltaDistance) {
-  distance_ = std::clamp(distance_ + deltaDistance, kMinDistance, kMaxDistance);
+  targetDistance_ = std::clamp(targetDistance_ + deltaDistance, kMinDistance, kMaxDistance);
+}
+
+void OrbitCamera::Update(float dt) {
+  distance_ += (targetDistance_ - distance_) * std::min(1.0f, kZoomDampingRate * dt);
 }
 
 void OrbitCamera::Pan(float deltaRight, float deltaForward) {

@@ -36,27 +36,61 @@ std::vector<ZInterval> MergeIntervals(std::vector<ZInterval> intervals) {
   return merged;
 }
 
-// Greedily skips to the furthest waypoint reachable with a clear line of
-// sight, pulling the path taut while staying outside every obstacle.
-std::vector<glm::vec3> PullTaut(const std::vector<glm::vec3>& waypoints,
-                                 const std::vector<AABB>& obstacles) {
-  if (waypoints.size() <= 2) return waypoints;
+struct Portal {
+  glm::vec2 left, right;
+};
 
-  std::vector<glm::vec3> result;
-  result.push_back(waypoints.front());
-  size_t anchor = 0;
-  while (anchor + 1 < waypoints.size()) {
-    size_t next = anchor + 1;
-    for (size_t candidate = waypoints.size() - 1; candidate > anchor; --candidate) {
-      if (LineOfSightClear(waypoints[anchor], waypoints[candidate], obstacles)) {
-        next = candidate;
-        break;
+// Twice the signed area of triangle (a, b, c) in the XZ plane.
+float TriArea2(glm::vec2 a, glm::vec2 b, glm::vec2 c) {
+  const glm::vec2 ab = b - a;
+  const glm::vec2 ac = c - a;
+  return ac.x * ab.y - ab.x * ac.y;
+}
+
+// Simple stupid funnel algorithm: pulls a path from `start` to `goal` taut
+// through a sequence of portals, bending only at portal endpoints (i.e.
+// obstacle corners). Appends the corners and `goal` (not `start`) to `out`.
+void Funnel(glm::vec2 start, glm::vec2 goal, const std::vector<Portal>& inner,
+            std::vector<glm::vec2>* out) {
+  std::vector<Portal> portals;
+  portals.push_back({start, start});
+  portals.insert(portals.end(), inner.begin(), inner.end());
+  portals.push_back({goal, goal});
+
+  glm::vec2 apex = start, left = start, right = start;
+  size_t leftIdx = 0, rightIdx = 0;
+  for (size_t i = 1; i < portals.size(); ++i) {
+    const glm::vec2 newLeft = portals[i].left;
+    const glm::vec2 newRight = portals[i].right;
+
+    if (TriArea2(apex, right, newRight) <= 0.0f) {
+      if (apex == right || TriArea2(apex, left, newRight) > 0.0f) {
+        right = newRight;
+        rightIdx = i;
+      } else {
+        out->push_back(left);
+        apex = left;
+        right = left;
+        rightIdx = leftIdx;
+        i = leftIdx;
+        continue;
       }
     }
-    result.push_back(waypoints[next]);
-    anchor = next;
+    if (TriArea2(apex, left, newLeft) >= 0.0f) {
+      if (apex == left || TriArea2(apex, right, newLeft) < 0.0f) {
+        left = newLeft;
+        leftIdx = i;
+      } else {
+        out->push_back(right);
+        apex = right;
+        left = right;
+        leftIdx = rightIdx;
+        i = rightIdx;
+        continue;
+      }
+    }
   }
-  return result;
+  out->push_back(goal);
 }
 
 // True if axis-aligned rectangle `cell` and `rect` share a border segment of
@@ -236,14 +270,40 @@ bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* 
     return true;
   }
 
+  // Where a path crosses from cell `a` into `b`: it walks to `approach` in
+  // `a`, then continues from `landing` in `b`. Same-elevation borders use the
+  // point on the border nearest the straight line from `from` to the goal; climbs walk to the point in `a` nearest `b`'s
+  // top, then step straight up (or down) onto the nearest point within `b`.
+  auto transition = [&](const NavCell& a, const NavCell& b, glm::vec3 from,
+                        glm::vec3* approach, glm::vec3* landing) {
+    if (std::fabs(a.elevation - b.elevation) > kEps) {
+      const glm::vec3 bCenter = b.Center();
+      *approach = glm::vec3(std::clamp(bCenter.x, a.xMin, a.xMax), a.elevation,
+                            std::clamp(bCenter.z, a.zMin, a.zMax));
+      *landing = glm::vec3(std::clamp(approach->x, b.xMin, b.xMax), b.elevation,
+                           std::clamp(approach->z, b.zMin, b.zMax));
+    } else {
+      const float zLo = std::max(a.zMin, b.zMin);
+      const float zHi = std::min(a.zMax, b.zMax);
+      const float boundaryX = std::fabs(a.xMax - b.xMin) < kEps ? a.xMax : a.xMin;
+      const float dx = goal.x - from.x;
+      const float t = std::fabs(dx) > kEps ? std::clamp((boundaryX - from.x) / dx, 0.0f, 1.0f) : 0.0f;
+      const float z = std::clamp(from.z + t * (goal.z - from.z), zLo, zHi);
+      *approach = *landing = glm::vec3(boundaryX, a.elevation, z);
+    }
+  };
+
+  // A* over cells, costed by the actual walking distance between the points
+  // where the path enters each cell (not cell centers, which badly misjudge
+  // large cells and can make crossing a crate look cheaper than walking
+  // around it).
   const size_t n = cells_.size();
   std::vector<float> gScore(n, std::numeric_limits<float>::infinity());
   std::vector<int> cameFrom(n, -1);
   std::vector<bool> closed(n, false);
+  std::vector<glm::vec3> entry(n, start);
 
-  auto heuristic = [&](int cell) {
-    return glm::distance(cells_[cell].Center(), cells_[goalCell].Center());
-  };
+  auto heuristic = [&](int cell) { return glm::distance(entry[cell], goal); };
 
   using QueueItem = std::pair<float, int>;
   std::priority_queue<QueueItem, std::vector<QueueItem>, std::greater<QueueItem>> open;
@@ -264,11 +324,14 @@ bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* 
 
     for (int next : neighbors_[current]) {
       if (closed[next]) continue;
-      const float tentativeG =
-          gScore[current] + glm::distance(cells_[current].Center(), cells_[next].Center());
+      glm::vec3 approach, landing;
+      transition(cells_[current], cells_[next], entry[current], &approach, &landing);
+      const float tentativeG = gScore[current] + glm::distance(entry[current], approach) +
+                               glm::distance(approach, landing);
       if (tentativeG < gScore[next]) {
         gScore[next] = tentativeG;
         cameFrom[next] = current;
+        entry[next] = landing;
         open.push({tentativeG + heuristic(next), next});
       }
     }
@@ -282,31 +345,45 @@ bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* 
   }
   std::reverse(cellPath.begin(), cellPath.end());
 
-  std::vector<glm::vec3> waypoints;
-  waypoints.push_back(start);
+  // Walk the cell corridor. Each maximal run of same-elevation cells is
+  // pulled taut with the funnel algorithm through the shared cell borders;
+  // climb transitions are hard waypoints (approach, then landing).
+  outPath->push_back(start);
+  glm::vec3 from = start;
+  std::vector<Portal> portals;
+  auto flush = [&](glm::vec3 to) {
+    std::vector<glm::vec2> pts;
+    Funnel({from.x, from.z}, {to.x, to.z}, portals, &pts);
+    for (const auto& pt : pts) {
+      const glm::vec3 p(pt.x, from.y, pt.y);
+      if (glm::distance(p, outPath->back()) > kEps) outPath->push_back(p);
+    }
+    if (outPath->size() == 1 || glm::distance(outPath->back(), to) > kEps) {
+      outPath->push_back(to);
+    }
+    outPath->back().y = to.y;
+    portals.clear();
+  };
   for (size_t i = 0; i + 1 < cellPath.size(); ++i) {
     const NavCell& a = cells_[cellPath[i]];
     const NavCell& b = cells_[cellPath[i + 1]];
     if (std::fabs(a.elevation - b.elevation) > kEps) {
-      // Climb transition: walk to the point in `a` nearest `b`'s top, then
-      // step straight up (or down) onto the nearest point within `b`.
-      const glm::vec3 bCenter = b.Center();
-      const glm::vec3 approach(std::clamp(bCenter.x, a.xMin, a.xMax), a.elevation,
-                                std::clamp(bCenter.z, a.zMin, a.zMax));
-      const glm::vec3 landing(std::clamp(approach.x, b.xMin, b.xMax), b.elevation,
-                               std::clamp(approach.z, b.zMin, b.zMax));
-      waypoints.push_back(approach);
-      waypoints.push_back(landing);
+      glm::vec3 approach, landing;
+      transition(a, b, from, &approach, &landing);
+      flush(approach);
+      outPath->push_back(landing);
+      from = landing;
     } else {
       const float zLo = std::max(a.zMin, b.zMin);
       const float zHi = std::min(a.zMax, b.zMax);
-      const float boundaryX = std::fabs(a.xMax - b.xMin) < kEps ? a.xMax : a.xMin;
-      waypoints.push_back(glm::vec3(boundaryX, a.elevation, (zLo + zHi) * 0.5f));
+      const bool movingPosX = std::fabs(a.xMax - b.xMin) < kEps;
+      const float boundaryX = movingPosX ? a.xMax : a.xMin;
+      // Orientation matches TriArea2's handedness: moving +x, "left" is zHi.
+      const glm::vec2 lo(boundaryX, zLo), hi(boundaryX, zHi);
+      portals.push_back(movingPosX ? Portal{hi, lo} : Portal{lo, hi});
     }
   }
-  waypoints.push_back(goal);
-
-  *outPath = PullTaut(waypoints, paddedFootprints_);
+  flush(goal);
   return true;
 }
 

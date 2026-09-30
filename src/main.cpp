@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "game/GameLogic.h"
+#include "game/MapGenerator.h"
 #include "game/Raycast.h"
 #include "game/Types.h"
 #include "game/Visibility.h"
@@ -248,7 +249,13 @@ int main() {
   // zoom (tuned for a single full-width view) would clip the far edge of
   // the map; start pulled back further so both spawns fit by default.
   for (auto& camera : cameras) camera.Zoom(10.0f);
-  GameLogic game;
+  // Both web clients must build the same city, so the seed is fixed unless a
+  // native run overrides it via TBGWAF_MAP_SEED.
+  uint32_t mapSeed = 1;
+  if (const char* seedEnv = std::getenv("TBGWAF_MAP_SEED")) {
+    mapSeed = static_cast<uint32_t>(std::strtoul(seedEnv, nullptr, 10));
+  }
+  GameLogic game(tactics::GenerateUrbanMap(mapSeed));
 
   // Which team this client instance plays (web two-canvas mode); nullopt =
   // one window showing both teams.
@@ -324,7 +331,7 @@ int main() {
         } else if (msg == "C") {
           if (isSimulator && game.CanCommitRound()) game.CommitRound();
         } else if (msg == "N") {
-          if (isSimulator && game.Mode() == InputMode::GameOver) game.Reset();
+          if (isSimulator && game.Mode() == InputMode::GameOver) game.Reset(tactics::GenerateUrbanMap(mapSeed));
         } else if (msg.size() > 2 && (msg[0] == 'S' || msg[0] == 'P') && msg[1] == ' ') {
           GameSnapshot snap;
           if (!DeserializeSnapshot(msg.substr(2), &snap)) continue;
@@ -472,7 +479,7 @@ int main() {
       }
       if (ImGui::Button("New Match")) {
         if (isSimulator) {
-          game.Reset();
+          game.Reset(tactics::GenerateUrbanMap(mapSeed));
         } else {
 #ifdef __EMSCRIPTEN__
           tbgwaf_channel_post("N");

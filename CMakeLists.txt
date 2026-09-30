@@ -24,6 +24,7 @@ FetchContent_MakeAvailable(imgui)
 # into both the playable app and the headless logic test binary.
 set(GAME_LOGIC_SOURCES
   src/game/Scene.cpp
+  src/game/MapGenerator.cpp
   src/game/NavMesh.cpp
   src/game/Raycast.cpp
   src/game/Visibility.cpp
@@ -145,6 +146,11 @@ else()
   target_include_directories(tactics_logic_tests PRIVATE src)
   target_link_libraries(tactics_logic_tests PRIVATE tactics_logic)
   add_test(NAME logic_tests COMMAND tactics_logic_tests)
+
+  add_executable(tactics_map_generator_tests tests/map_generator_tests.cpp)
+  target_include_directories(tactics_map_generator_tests PRIVATE src)
+  target_link_libraries(tactics_map_generator_tests PRIVATE tactics_logic)
+  add_test(NAME map_generator_tests COMMAND tactics_map_generator_tests)
 
   # YAML gameplay scenarios (issue #14): a native-only, test-only dependency,
   # so it's kept out of tactics_logic (which the WASM build also links) to

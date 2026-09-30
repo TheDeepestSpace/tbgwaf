@@ -254,7 +254,8 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   // Nothing perturbs them at runtime, so captures are deterministic.
   std::array<gfx::OrbitCamera, 2> cameras;
   for (auto& camera : cameras) {
-    camera.Zoom(10.0f);
+    camera.Zoom(scenario.cameraZoom);
+    if (scenario.cameraTarget) camera.target = glm::vec3(scenario.cameraTarget->x, 0.0f, scenario.cameraTarget->y);
     camera.Update(1.0e3f);  // Snap to the initial zoom (matches main.cpp).
   }
 

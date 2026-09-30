@@ -46,7 +46,7 @@ class OrbitCamera {
   static constexpr float kMinPitch = 0.4363f;   // ~25 degrees.
   static constexpr float kMaxPitch = 1.4835f;   // ~85 degrees.
   static constexpr float kMinDistance = 6.0f;
-  static constexpr float kMaxDistance = 35.0f;
+  static constexpr float kMaxDistance = 140.0f;
   static constexpr float kZoomDampingRate = 24.0f;  // 1/s; higher = snappier.
 };
 

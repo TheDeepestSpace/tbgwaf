@@ -37,7 +37,7 @@ glm::mat4 OrbitCamera::ViewMatrix() const {
 }
 
 glm::mat4 OrbitCamera::ProjectionMatrix(float aspectRatio) const {
-  return glm::perspective(glm::radians(45.0f), aspectRatio, 0.1f, 100.0f);
+  return glm::perspective(glm::radians(45.0f), aspectRatio, 0.1f, 400.0f);
 }
 
 Ray OrbitCamera::ScreenPointToRay(float screenX, float screenY, float screenWidth,

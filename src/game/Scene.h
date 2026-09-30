@@ -12,6 +12,9 @@ namespace tactics {
 struct Scene {
   std::vector<Obstacle> obstacles;
   std::vector<Unit> units;  // 3 Blue + 3 Red, in this order.
+  // Playable area is [-mapHalfExtent, mapHalfExtent]^2 in XZ. Defaults to the
+  // hand-authored scene's size; MapGenerator sets a much larger value.
+  float mapHalfExtent = constants::kMapHalfExtent;
 };
 
 Scene BuildDefaultScene();

@@ -1,0 +1,29 @@
+# Seeded procedural city (seed 42): the spawns sit ~128 units apart on the
+# central east-west street. FOV/LOS/shooting are full-map raycasts, so blue1
+# can hit red1 across the whole map while the navmesh stays range-scoped.
+# A change to the generator's layout for this seed shows up as a golden diff.
+name: generated_city_cross_map_shot
+
+map:
+  generate: {seed: 42}
+
+camera: {target: [0, 0], zoom: 100}
+
+script:
+  - assert: {unit: 4, visible_to: blue, visible: true}
+  - action: shoot
+    actor: 1
+    target: 4
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 2
+  - action: pass
+    actor: 3
+  - action: pass
+    actor: 4
+  - action: pass
+    actor: 5
+  - action: commit
+  - assert: {unit: 4, alive: false}
+  - assert: {round: 2}

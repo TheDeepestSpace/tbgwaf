@@ -461,18 +461,9 @@ bool SceneRenderer::Init() {
   }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-  // The light and map geometry are both static, so the light-space matrix
-  // is fixed for the whole session.
+  // The light direction is fixed; the light-space matrix depends on the
+  // scene's map size and is recomputed per RenderPane.
   lightDir_ = glm::normalize(glm::vec3(0.35f, -1.0f, 0.25f));
-  const float mapHalfExtentForLight = tactics::constants::kMapHalfExtent;
-  const float lightDistance = mapHalfExtentForLight * 3.0f;
-  const glm::vec3 lightPos = -lightDir_ * lightDistance;
-  const glm::mat4 lightView = glm::lookAt(lightPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-  const float orthoHalfExtent = mapHalfExtentForLight * 1.5f;
-  const glm::mat4 lightProj =
-      glm::ortho(-orthoHalfExtent, orthoHalfExtent, -orthoHalfExtent, orthoHalfExtent, 0.1f,
-                 lightDistance * 2.0f);
-  lightSpaceMatrix_ = lightProj * lightView;
 
   glEnable(GL_DEPTH_TEST);
   return true;
@@ -493,6 +484,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                int y, int width, int height, const PaneOverlays& overlays,
                                GLuint targetFramebuffer) {
   const auto& obstacles = game.GetScene().obstacles;
+  const float mapHalfExtent = game.GetScene().mapHalfExtent;
+
+  // Light frustum sized to cover the whole map.
+  const float lightDistance = mapHalfExtent * 3.0f;
+  const glm::mat4 lightView = glm::lookAt(-lightDir_ * lightDistance, glm::vec3(0.0f),
+                                          glm::vec3(0.0f, 1.0f, 0.0f));
+  const float orthoHalfExtent = mapHalfExtent * 1.5f;
+  lightSpaceMatrix_ = glm::ortho(-orthoHalfExtent, orthoHalfExtent, -orthoHalfExtent,
+                                 orthoHalfExtent, 0.1f, lightDistance * 2.0f) *
+                      lightView;
 
   // Shadow pass: only casters this team can currently see.
   glDisable(GL_SCISSOR_TEST);
@@ -532,7 +533,6 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
 
-  const float mapHalfExtent = tactics::constants::kMapHalfExtent;
   DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_,
              glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
              glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f),

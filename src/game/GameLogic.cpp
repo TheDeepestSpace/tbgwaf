@@ -37,7 +37,8 @@ void GameLogic::Reset() { Reset(BuildDefaultScene()); }
 void GameLogic::Reset(Scene scene) {
   scene_ = std::move(scene);
   obstacleBounds_ = ObstacleBounds(scene_.obstacles);
-  navMesh_.Build(scene_.obstacles, constants::kMapHalfExtent, constants::kAgentRadius);
+  navMesh_ = NavMesh();
+  navMeshUnitId_ = -1;
   roundNumber_ = 1;
 
   mode_ = InputMode::AwaitingSelection;
@@ -48,6 +49,29 @@ void GameLogic::Reset(Scene scene) {
   activeMoves_.clear();
   pendingShots_.clear();
   mirroredMoving_.clear();
+}
+
+void GameLogic::EnsureNavMeshFor(const Unit& mover) {
+  if (navMeshUnitId_ == mover.id && navMeshOrigin_ == mover.position) return;
+
+  // Any path of length <= MoveBudget stays within Euclidean distance
+  // MoveBudget of the start, hence inside this window, so the window's
+  // shortest path equals the global one whenever that one is affordable;
+  // when the global shortest exceeds the budget, the windowed result can only
+  // be longer or absent -- rejected by the budget check either way. So no
+  // margin is needed for correctness; the small one keeps the goal-side
+  // padded obstacle footprints from being clipped at the window edge and
+  // absorbs float error.
+  const float reach = mover.MoveBudget() + 2.0f * constants::kAgentRadius;
+  const float half = scene_.mapHalfExtent;
+  NavRegion region;
+  region.xMin = std::max(-half, mover.position.x - reach);
+  region.xMax = std::min(half, mover.position.x + reach);
+  region.zMin = std::max(-half, mover.position.z - reach);
+  region.zMax = std::min(half, mover.position.z + reach);
+  navMesh_.Build(scene_.obstacles, region, constants::kAgentRadius);
+  navMeshUnitId_ = mover.id;
+  navMeshOrigin_ = mover.position;
 }
 
 GameSnapshot GameLogic::ExportState() const {
@@ -249,6 +273,7 @@ void GameLogic::ClickGround(const glm::vec3& point, Team byTeam) {
   Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->team != byTeam) return;
 
+  EnsureNavMeshFor(*mover);
   std::vector<glm::vec3> path;
   if (!navMesh_.FindPath(mover->position, point, &path)) return;
   // The round executes over a fixed window, so a figure can only plan as far
@@ -343,6 +368,7 @@ void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
   if (mode_ != InputMode::AwaitingMoveDestination) return;
   const Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->team != byTeam) return;
+  EnsureNavMeshFor(*mover);
   movePreviewValid_ = navMesh_.FindPath(mover->position, point, &movePreviewPath_) &&
                       PathLength(movePreviewPath_) <= mover->MoveBudget();
 }

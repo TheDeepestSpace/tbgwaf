@@ -16,6 +16,12 @@ void OrbitCamera::Zoom(float deltaDistance) {
   distance_ = std::clamp(distance_ + deltaDistance, kMinDistance, kMaxDistance);
 }
 
+void OrbitCamera::Pan(float deltaRight, float deltaForward) {
+  const glm::vec3 forward(-std::cos(yaw_), 0.0f, -std::sin(yaw_));
+  const glm::vec3 right(std::sin(yaw_), 0.0f, -std::cos(yaw_));
+  target += (right * deltaRight + forward * deltaForward) * distance_;
+}
+
 glm::vec3 OrbitCamera::Position() const {
   const float horizontalRadius = distance_ * std::cos(pitch_);
   return target + glm::vec3(horizontalRadius * std::cos(yaw_), distance_ * std::sin(pitch_),

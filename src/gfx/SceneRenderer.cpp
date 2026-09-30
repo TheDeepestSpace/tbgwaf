@@ -211,6 +211,36 @@ void DrawUnit(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewP
   DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, fall * GunModel(unit), kGunColor);
 }
 
+// Wireframe unit cube transformed by `model` (same convention as BoxModel:
+// the unit cube [0,1]^3), drawn as one line strip that retraces a few edges
+// to cover all 12. Line strips rather than GL_LINE polygon mode, which
+// WebGL2/GLES don't have.
+void DrawWireBox(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
+                 const glm::mat4& model, const glm::vec4& color) {
+  glm::vec3 b[4] = {{0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}};
+  glm::vec3 t[4] = {{0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}};
+  const std::vector<glm::vec3> local = {b[0], b[1], b[2], b[3], b[0], t[0], t[1], b[1],
+                                        t[1], t[2], b[2], t[2], t[3], b[3], t[3], t[0]};
+  std::vector<glm::vec3> points;
+  points.reserve(local.size());
+  for (const glm::vec3& p : local) points.push_back(glm::vec3(model * glm::vec4(p, 1.0f)));
+  lines.SetPoints(points);
+  shader.SetMat4("uMVP", viewProj);
+  shader.SetVec4("uColor", color);
+  lines.Draw();
+}
+
+void DrawUnitWireframe(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
+                       const Unit& unit) {
+  // Common highlight green for both teams.
+  const glm::vec4 color(0.3f, 0.9f, 0.4f, 1.0f);
+  glm::vec3 bodyMin, bodySize, headMin, headSize;
+  UnitBoxes(unit, &bodyMin, &bodySize, &headMin, &headSize);
+  DrawWireBox(shader, lines, viewProj, BoxModel(bodyMin, bodySize), color);
+  DrawWireBox(shader, lines, viewProj, BoxModel(headMin, headSize), color);
+  DrawWireBox(shader, lines, viewProj, GunModel(unit), color);
+}
+
 void DrawUnitDepth(const Shader& shader, const CubeMesh& cube, const glm::mat4& lightSpaceMatrix,
                    const Unit& unit) {
   glm::vec3 bodyMin, bodySize, headMin, headSize;
@@ -642,6 +672,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         unlitShader_.SetMat4("uMVP", viewProj);
         unlitShader_.SetVec4("uColor", glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
         pathLine_.Draw();
+        // Wireframe stand-in at the destination, showing the planned final
+        // facing (persists until the turn is committed).
+        Unit ghost = unit;
+        ghost.position = unit.plan.movePath.back();
+        ghost.facingYaw = unit.plan.endFacingYaw;
+        DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost);
       } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
         if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {
           const std::vector<glm::vec3> shotLine = {unit.EyePosition(), shotTarget->EyePosition()};

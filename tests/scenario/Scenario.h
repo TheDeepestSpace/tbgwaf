@@ -38,6 +38,8 @@ struct ScenarioAction {
   int actor = -1;  // Unused (and not required in YAML) for Commit.
   Kind kind = Kind::Pass;
   glm::vec3 destination{0.0f};  // Move only.
+  std::optional<float> finalFacingDegrees;  // Move only: re-aims the planned
+                                             // wireframe before commit.
   int target = -1;              // Shoot only.
   bool expectNoop = false;      // Shoot only: the click is expected not to
                                  // resolve (e.g. target outside the
@@ -51,6 +53,7 @@ struct ScenarioAssertion {
   std::optional<int> unit;
   std::optional<bool> alive;
   std::optional<glm::vec3> position;
+  std::optional<float> facingDegrees;  // Paired with `unit`; degrees, atan2(dz, dx).
   float tolerance = 0.05f;
 
   std::optional<Team> visibleToTeam;  // Paired with `visible`.

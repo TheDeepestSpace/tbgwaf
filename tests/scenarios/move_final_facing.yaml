@@ -1,0 +1,27 @@
+# Showcases choosing a move's final facing: the wireframe ghost defaults to
+# the direction of travel, can be re-aimed any time before the round is
+# committed (final_facing_degrees, mirroring a drag of the wireframe), and
+# the unit ends the move facing that way. Unit 1 (same round) keeps the default facing.
+# The per-turn goldens show the wireframe at the destination before commit.
+name: move_final_facing
+
+map:
+  obstacles: []
+
+units:
+  - {id: 0, team: blue, position: [-5, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [5, 0, 5], facing_degrees: 180}
+
+script:
+  - action: move
+    actor: 0
+    destination: [-5, 0, 4]        # Travel direction is +Z (90 deg).
+    final_facing_degrees: 0        # Re-aimed toward +X before commit.
+  - action: move
+    actor: 1
+    destination: [5, 0, 0]         # Travel direction is -Z (-90 deg).
+  - action: commit
+  - assert: {unit: 0, position: [-5, 0, 4], tolerance: 0.05}
+  - assert: {unit: 0, facing_degrees: 0, tolerance: 0.5}
+  - assert: {unit: 1, position: [5, 0, 0], tolerance: 0.05}
+  - assert: {unit: 1, facing_degrees: -90, tolerance: 0.5}

@@ -38,6 +38,8 @@ struct GameSnapshot {
     TriggerAction triggerAction = TriggerAction::None;
     PlannedActionType planType = PlannedActionType::None;  // Move paths are not mirrored.
     int planShootTargetId = -1;
+    glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
+    float knockdownElapsed = -1.0f;
   };
   std::vector<UnitState> units;
   TurnManager::State turn;

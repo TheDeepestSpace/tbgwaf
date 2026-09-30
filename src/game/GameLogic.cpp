@@ -28,7 +28,8 @@ GameSnapshot GameLogic::ExportState() const {
   GameSnapshot snap;
   for (const auto& unit : scene_.units) {
     snap.units.push_back({unit.id, unit.position, unit.facingYaw, unit.alive, unit.triggerAction,
-                          unit.plan.type, unit.plan.shootTargetId});
+                          unit.plan.type, unit.plan.shootTargetId, unit.knockdownAxis,
+                          unit.knockdownElapsed});
   }
   snap.turn = turnManager_.GetState();
   snap.mode = mode_;
@@ -51,6 +52,8 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     unit->plan = PlannedAction{};
     unit->plan.type = u.planType;
     unit->plan.shootTargetId = u.planShootTargetId;
+    unit->knockdownAxis = u.knockdownAxis;
+    unit->knockdownElapsed = u.knockdownElapsed;
   }
   turnManager_.SetState(snap.turn);
   mode_ = snap.mode;
@@ -79,7 +82,8 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
   for (const auto& u : snap.units) {
     out << ' ' << u.id << ' ' << u.position.x << ' ' << u.position.y << ' ' << u.position.z << ' '
         << u.facingYaw << ' ' << (u.alive ? 1 : 0) << ' ' << static_cast<int>(u.triggerAction) << ' '
-        << static_cast<int>(u.planType) << ' ' << u.planShootTargetId;
+        << static_cast<int>(u.planType) << ' ' << u.planShootTargetId << ' ' << u.knockdownAxis.x << ' '
+        << u.knockdownAxis.y << ' ' << u.knockdownAxis.z << ' ' << u.knockdownElapsed;
   }
   return out.str();
 }
@@ -104,7 +108,8 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
   for (auto& u : snap.units) {
     int alive = 0, trigger = 0, plan = 0;
     if (!(in >> u.id >> u.position.x >> u.position.y >> u.position.z >> u.facingYaw >> alive >>
-          trigger >> plan >> u.planShootTargetId)) {
+          trigger >> plan >> u.planShootTargetId >> u.knockdownAxis.x >> u.knockdownAxis.y >>
+          u.knockdownAxis.z >> u.knockdownElapsed)) {
       return false;
     }
     if (trigger < 0 || trigger > static_cast<int>(TriggerAction::Shoot)) return false;

@@ -811,6 +811,11 @@ void TestSnapshotRoundTripMirrorsMatch() {
   a.ChoosePass();
   a.CommitTurn();
   a.Update(0.5f);  // Mid-move: positions/facing have changed.
+  Unit* killed = a.FindUnit(3);
+  CHECK(killed);
+  killed->alive = false;
+  killed->knockdownAxis = glm::vec3(0.6f, 0.0f, -0.8f);
+  killed->knockdownElapsed = 0.4f;
 
   GameSnapshot decoded;
   CHECK(DeserializeSnapshot(SerializeSnapshot(a.ExportState()), &decoded));
@@ -826,6 +831,8 @@ void TestSnapshotRoundTripMirrorsMatch() {
     CHECK(mirrored && mirrored->position == unit.position);
     CHECK(mirrored && mirrored->facingYaw == unit.facingYaw);
     CHECK(mirrored && mirrored->plan.type == unit.plan.type);
+    CHECK(mirrored && mirrored->knockdownAxis == unit.knockdownAxis);
+    CHECK(mirrored && mirrored->knockdownElapsed == unit.knockdownElapsed);
   }
 
   GameSnapshot bad;

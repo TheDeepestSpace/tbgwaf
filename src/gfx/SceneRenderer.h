@@ -63,7 +63,7 @@ class SceneRenderer {
   Shader depthShader_;
   CubeMesh cubeMesh_;
   LineMesh pathLine_;
-  TriangleFanMesh fovConeMesh_;
+  TriangleMesh fovConeMesh_;
   GLuint shadowFbo_ = 0;
   GLuint shadowDepthTex_ = 0;
   glm::vec3 lightDir_{0.0f, -1.0f, 0.0f};

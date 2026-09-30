@@ -146,6 +146,40 @@ void TestNavMeshRejectsPointsInsideObstacle() {
   CHECK(!nav.FindPath(glm::vec3(-8, 0, 0), glm::vec3(0, 0, 0), &path));
 }
 
+void TestNavMeshPathIsTight() {
+  // One box padded to [-2.4, 2.4]^2. The shortest path from start to goal
+  // wraps the padded corners, so its length is computable analytically.
+  std::vector<AABB> obstacles = {
+      AABB{glm::vec3(-2.0f, 0.0f, -2.0f), glm::vec3(2.0f, 2.0f, 2.0f)},
+  };
+  NavMesh nav;
+  nav.Build(obstacles, 10.0f, 0.4f);
+
+  const glm::vec3 start(-8.0f, 0.0f, -1.0f);
+  const glm::vec3 goal(8.0f, 0.0f, 1.0f);
+  std::vector<glm::vec3> path;
+  CHECK(nav.FindPath(start, goal, &path));
+
+  float length = 0.0f;
+  for (size_t i = 0; i + 1 < path.size(); ++i) length += glm::distance(path[i], path[i + 1]);
+
+  const float c = 2.4f;
+  auto viaCorners = [&](float z) {
+    return glm::distance(start, glm::vec3(-c, 0, z)) + 2.0f * c +
+           glm::distance(glm::vec3(c, 0, z), goal);
+  };
+  const float optimal = std::fmin(viaCorners(-c), viaCorners(c));
+  CHECK(length <= optimal + 1e-3f);
+
+  // Every interior vertex must be a padded obstacle corner (no mid-cell or
+  // portal-midpoint wobble), and the path must stay outside the padded box.
+  CHECK(path.size() == 4);
+  for (size_t i = 1; i + 1 < path.size(); ++i) {
+    CHECK(std::fabs(std::fabs(path[i].x) - c) < 1e-3f);
+    CHECK(std::fabs(std::fabs(path[i].z) - c) < 1e-3f);
+  }
+}
+
 void TestNavMeshClimbsOntoClimbableObstacle() {
   std::vector<Obstacle> obstacles = {
       Obstacle{AABB{glm::vec3(-1.0f, 0.0f, -1.0f), glm::vec3(1.0f, 1.2f, 1.0f)},
@@ -852,6 +886,7 @@ int main() {
   TestNavMeshRoutesAroundObstacle();
   TestNavMeshDirectPathWhenUnobstructed();
   TestNavMeshRejectsPointsInsideObstacle();
+  TestNavMeshPathIsTight();
   TestNavMeshClimbsOntoClimbableObstacle();
   TestNavMeshObstacleOverloadStillRoutesAroundNonClimbable();
   TestRaycastLineOfSight();

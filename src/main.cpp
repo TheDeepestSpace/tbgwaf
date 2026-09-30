@@ -237,7 +237,14 @@ int main() {
       } else if (event.type == SDL_MOUSEWHEEL) {
         if (!ImGui::GetIO().WantCaptureMouse) {
           constexpr float kZoomSpeed = 4.0f;
-          cameras[PaneForX(mouseX, windowWidth)].Zoom(-event.wheel.y * kZoomSpeed);
+          // preciseY carries fractional trackpad deltas; wheel.y is rounded to
+          // whole ticks, which makes trackpad zoom steppy.
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+          const float wheelY = event.wheel.preciseY;
+#else
+          const float wheelY = static_cast<float>(event.wheel.y);
+#endif
+          cameras[PaneForX(mouseX, windowWidth)].Zoom(-wheelY * kZoomSpeed);
         }
       } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
         leftClickPending = true;

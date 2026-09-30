@@ -13,9 +13,9 @@ The [live Pages build](https://thedeepestspace.github.io/tbgwaf/) is the same
 native game compiled to WebAssembly/WebGL2, rendered as one page split into
 two viewports: Blue's view on the left, Red's view on the right, both driven
 by a single shared match (not two tabs, not networked). Each side has its own
-camera; whichever team currently has the turn is the only side that's lit and
-accepts input, the other side is dimmed until it's their turn. See
-[Controls](#controls) below -- they apply identically in-browser and native.
+camera and plans its own squad's round concurrently with the other -- there
+is no waiting for the enemy's turn. See [Controls](#controls) below -- they
+apply identically in-browser and native.
 
 ## Native build
 
@@ -35,7 +35,7 @@ tests: each declares a map + starting units, then a scripted sequence of
 player-equivalent actions (`move`/`shoot`/`pass`/`cancel`, driven through the
 same click/choose API the interactive game uses) interleaved with
 assertions on the resulting state (alive/dead, position, per-team FOV
-visibility, current actor, round number, winner). They run as the
+visibility, round number, winner). They run as the
 `scenario_tests` ctest target; see `tests/scenario/Scenario.h` for the full
 field reference and `tests/scenarios/*.yaml` for examples.
 
@@ -95,20 +95,25 @@ and removes the preview automatically when the PR closes.
 
 ## Controls
 
-- **Left click** a highlighted figure (whoever's turn it is) to select it,
-  then choose **Move**, **Shoot**, or **Pass** from the action menu.
+- **Left click** one of your own figures (in your own viewport) to select
+  it, then choose **Move**, **Shoot**, **Overwatch**, or **Pass** from the
+  action menu.
   - Move: click a destination on the ground; the figure paths around
-    obstacles via its navmesh and walks there.
-  - Shoot: click an enemy figure. It's a hit (one-shot kill) only if the
-    target is within your figure's forward-facing FOV cone and there's a
-    clear line of sight; otherwise it's a miss. Either way the action is
-    consumed.
+    obstacles via its navmesh. A move can only reach as far as the figure
+    can run within one round's fixed execution window.
+  - Shoot: click an enemy figure. Once the round executes, the shot fires
+    the first instant the target is within your figure's forward-facing FOV
+    cone with a clear line of sight -- including mid-round, if the target
+    only walks into view while the round plays out. If that never happens
+    before everything stops moving, the shot expires as a miss.
 - **Right-click drag** to orbit the camera; **scroll** to zoom. Either side
-  can freely look around its own viewport at any time, independent of whose
-  turn it is.
+  can freely look around its own viewport at any time.
 - **Esc** cancels the current action/selection.
 
-Turns strictly alternate Blue/Red (skipping eliminated figures) until every
-figure on one team is dead. Only the acting team's viewport accepts
-selection/move/shoot clicks; the other viewport ignores clicks (and is
-visually dimmed) until it's their turn again.
+Rounds are simultaneous (WEGO): both teams plan every living figure
+concurrently -- each viewport only accepts clicks for its own squad -- and a
+single **Commit Round** then executes both sides' plans together, moves
+animating concurrently and shots resolving continuously against live
+FOV/line-of-sight. Two figures shooting each other in the same instant both
+go down (wiping out both squads at once is a draw). Play continues round by
+round until a team is eliminated.

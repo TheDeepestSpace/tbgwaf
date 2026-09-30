@@ -270,20 +270,23 @@ int main() {
     lastFrameTicks = nowTicks;
     game.Update(dt);
 
-    // Stage-D: whichever team currently has the turn is the "active" pane --
-    // only that side's viewport accepts game-action input (unit selection,
-    // move/shoot targeting). The other pane keeps rendering its own live
-    // fog-of-war view (so both players can always watch the match) but is
-    // dimmed and ignores clicks, matching local split-screen console games
-    // where only the active player's half responds during their turn.
-    // Camera orbit/zoom/pan is *not* gated this way -- either player can look
-    // around their own pane at any time.
-    std::optional<Team> activeTeam;
-    if (game.Mode() != InputMode::GameOver) {
-      activeTeam = game.CurrentTeam();
-    }
+    // WEGO rounds: both teams plan simultaneously, so during the planning
+    // phase *both* panes accept game-action input (unit selection,
+    // move/shoot targeting), each acting only for its own team --
+    // GameLogic's team-tagged input calls enforce that a pane can never
+    // plan the other side's figures. While a committed round executes (and
+    // after game over) neither pane takes action input. Camera
+    // orbit/zoom/pan is never gated -- either player can look around their
+    // own pane at any time.
+    const bool planning =
+        game.Mode() != InputMode::GameOver && game.Mode() != InputMode::Executing;
     const bool fogActive = game.Mode() != InputMode::GameOver;
-    auto isPaneActive = [&](int pane) { return activeTeam && *activeTeam == PaneTeam(pane); };
+    // The team whose plan the shared selection/preview overlays currently
+    // belong to (only one figure is ever mid-selection at a time).
+    std::optional<Team> selectedTeam;
+    if (const auto selectedId = game.SelectedUnitId()) {
+      if (const Unit* selected = game.FindUnit(*selectedId)) selectedTeam = selected->team;
+    }
 
     std::array<TeamVisibility, kPaneCount> paneVisibility;
     for (int pane = 0; pane < kPaneCount; ++pane) {
@@ -291,36 +294,46 @@ int main() {
     }
 
     // --- UI ---
-    if (const auto winner = game.Winner()) {
+    if (game.Mode() == InputMode::GameOver) {
       ImGui::SetNextWindowPos(ImVec2(windowWidth * 0.5f, windowHeight * 0.3f), ImGuiCond_Always,
                                ImVec2(0.5f, 0.5f));
       ImGui::Begin("Game Over", nullptr,
                    ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize);
-      ImGui::Text("%s team wins!", TeamName(*winner));
+      if (const auto winner = game.Winner()) {
+        ImGui::Text("%s team wins!", TeamName(*winner));
+      } else {
+        // Simultaneous execution can down the last figure on both sides in
+        // the same instant.
+        ImGui::Text("Mutual annihilation -- draw!");
+      }
       if (ImGui::Button("New Match")) {
         game.Reset();
       }
       ImGui::End();
     } else {
-      int plannedCount = 0, totalCount = 0;
+      int plannedCount[kPaneCount] = {0, 0}, totalCount[kPaneCount] = {0, 0};
       for (const Unit& unit : game.GetScene().units) {
-        if (!unit.alive || !activeTeam || unit.team != *activeTeam) continue;
-        ++totalCount;
-        if (unit.plan.type != tactics::PlannedActionType::None) ++plannedCount;
+        if (!unit.alive) continue;
+        const int pane = unit.team == Team::Blue ? 0 : 1;
+        ++totalCount[pane];
+        if (unit.plan.type != tactics::PlannedActionType::None) ++plannedCount[pane];
       }
 
       ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
-      ImGui::Begin("Turn", nullptr,
+      ImGui::Begin("Round", nullptr,
                    ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
                        ImGuiWindowFlags_NoMove);
       ImGui::Text("Round %d", game.RoundNumber());
-      if (activeTeam) {
-        ImGui::Text("%s team's turn -- plan every figure, then commit.", TeamName(*activeTeam));
-        ImGui::Text("Planned: %d / %d", plannedCount, totalCount);
+      if (planning) {
+        ImGui::Text("Both teams plan every figure, then commit the round.");
+        for (int pane = 0; pane < kPaneCount; ++pane) {
+          ImGui::Text("%s planned: %d / %d", TeamName(PaneTeam(pane)), plannedCount[pane],
+                      totalCount[pane]);
+        }
       }
       switch (game.Mode()) {
         case InputMode::AwaitingSelection:
-          ImGui::TextWrapped("Click one of your figures to plan its action.");
+          ImGui::TextWrapped("Click one of your figures (in your own pane) to plan its action.");
           break;
         case InputMode::ActionMenu:
           ImGui::TextWrapped("Choose an action to plan.");
@@ -331,23 +344,23 @@ int main() {
         case InputMode::AwaitingShootTarget:
           ImGui::TextWrapped("Click an enemy figure to plan a shot (Esc to cancel).");
           break;
-        case InputMode::Moving:
-          ImGui::TextWrapped("Committing turn: figures are moving...");
+        case InputMode::Executing:
+          ImGui::TextWrapped("Round executing: both teams' plans are playing out...");
           break;
         default:
           break;
       }
-      ImGui::BeginDisabled(!game.CanCommitTurn());
-      if (ImGui::Button("Commit Turn")) game.CommitTurn();
+      ImGui::BeginDisabled(!game.CanCommitRound());
+      if (ImGui::Button("Commit Round")) game.CommitRound();
       ImGui::EndDisabled();
       ImGui::End();
 
-      if (const auto selectedId = game.SelectedUnitId(); selectedId && activeTeam) {
+      if (const auto selectedId = game.SelectedUnitId(); selectedId && selectedTeam) {
         const Unit* selected = game.FindUnit(*selectedId);
         if (selected && (game.Mode() == InputMode::ActionMenu ||
                           game.Mode() == InputMode::AwaitingMoveDestination ||
                           game.Mode() == InputMode::AwaitingShootTarget)) {
-          const int activePane = *activeTeam == Team::Blue ? 0 : 1;
+          const int activePane = *selectedTeam == Team::Blue ? 0 : 1;
           const PaneRect& activeRect = paneRects[activePane];
           const glm::mat4 activeView = cameras[activePane].ViewMatrix();
           const glm::mat4 activeProj = cameras[activePane].ProjectionMatrix(
@@ -382,27 +395,17 @@ int main() {
       }
     }
 
-    // Pane divider, per-pane team labels, and a dimming overlay on whichever
-    // pane isn't currently allowed to act -- the split-screen equivalent of
-    // "grey out the inactive side" for local multiplayer.
+    // Pane divider and per-pane team labels. Both teams plan at once, so
+    // there's no "inactive side" to dim any more -- each pane is always its
+    // own player's live view.
     ImDrawList* overlay = ImGui::GetForegroundDrawList();
     overlay->AddLine(ImVec2(static_cast<float>(paneRects[1].x), 0.0f),
                       ImVec2(static_cast<float>(paneRects[1].x), static_cast<float>(windowHeight)),
                       IM_COL32(255, 255, 255, 60), 2.0f);
     for (int pane = 0; pane < kPaneCount; ++pane) {
       const PaneRect& rect = paneRects[pane];
-      const bool active = isPaneActive(pane);
-      const char* status = game.Winner() ? "" : (active ? " - your turn" : "");
-      char label[64];
-      std::snprintf(label, sizeof(label), "%s%s", TeamName(PaneTeam(pane)), status);
       overlay->AddText(ImVec2(rect.x + 10.0f, windowHeight - 24.0f), IM_COL32(255, 255, 255, 220),
-                        label);
-      if (game.Mode() != InputMode::GameOver && !active) {
-        overlay->AddRectFilled(ImVec2(static_cast<float>(rect.x), 0.0f),
-                                ImVec2(static_cast<float>(rect.x + rect.width),
-                                       static_cast<float>(windowHeight)),
-                                IM_COL32(0, 0, 0, 110));
-      }
+                        TeamName(PaneTeam(pane)));
     }
 
     // --- Dispatch deferred input, now that WantCaptureMouse reflects the UI
@@ -410,9 +413,9 @@ int main() {
     if (escapePending) game.CancelAction();
 
     const bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse;
-    if (!uiWantsMouse) {
+    if (!uiWantsMouse && planning) {
       const int hoverPane = PaneForX(mouseX, windowWidth);
-      if (isPaneActive(hoverPane) && game.Mode() == InputMode::AwaitingMoveDestination) {
+      if (game.Mode() == InputMode::AwaitingMoveDestination) {
         const PaneRect& rect = paneRects[hoverPane];
         const gfx::Ray hoverRay = cameras[hoverPane].ScreenPointToRay(
             static_cast<float>(mouseX - rect.x), static_cast<float>(mouseY),
@@ -421,36 +424,36 @@ int main() {
         if (IntersectGroundOrClimbTop(hoverRay, game.GetScene().obstacles, &hoverPoint)) {
           hoveredGroundPoint = hoverPoint;
           hasHoveredGroundPoint = true;
-          game.HoverGround(hoverPoint);
+          // Team-tagged: hovering over the *other* player's pane just clears
+          // the preview instead of steering this pane's selected mover.
+          game.HoverGround(hoverPoint, PaneTeam(hoverPane));
         }
       }
       if (leftClickPending) {
         const int clickPane = PaneForX(leftClickX, windowWidth);
-        if (isPaneActive(clickPane)) {
-          const PaneRect& rect = paneRects[clickPane];
-          const gfx::Ray clickRay = cameras[clickPane].ScreenPointToRay(
-              static_cast<float>(leftClickX - rect.x), static_cast<float>(leftClickY),
-              static_cast<float>(rect.width), static_cast<float>(windowHeight));
-          // Only figures actually rendered on this pane this frame (own
-          // team, or enemies currently inside this team's FOV) are pickable
-          // -- a hidden enemy's collision box must not be clickable just
-          // because it happens to sit behind something that is drawn.
-          const Team clickTeam = PaneTeam(clickPane);
-          std::vector<Unit> pickableUnits;
-          for (const Unit& unit : game.GetScene().units) {
-            if (unit.alive && gfx::IsUnitVisibleForRender(unit, clickTeam, fogActive,
-                                                            paneVisibility[clickPane])) {
-              pickableUnits.push_back(unit);
-            }
+        const PaneRect& rect = paneRects[clickPane];
+        const gfx::Ray clickRay = cameras[clickPane].ScreenPointToRay(
+            static_cast<float>(leftClickX - rect.x), static_cast<float>(leftClickY),
+            static_cast<float>(rect.width), static_cast<float>(windowHeight));
+        // Only figures actually rendered on this pane this frame (own
+        // team, or enemies currently inside this team's FOV) are pickable
+        // -- a hidden enemy's collision box must not be clickable just
+        // because it happens to sit behind something that is drawn.
+        const Team clickTeam = PaneTeam(clickPane);
+        std::vector<Unit> pickableUnits;
+        for (const Unit& unit : game.GetScene().units) {
+          if (unit.alive && gfx::IsUnitVisibleForRender(unit, clickTeam, fogActive,
+                                                          paneVisibility[clickPane])) {
+            pickableUnits.push_back(unit);
           }
-          const int hitUnit = PickUnit(clickRay, pickableUnits);
-          if (hitUnit >= 0) {
-            game.ClickUnit(hitUnit);
-          } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
-            glm::vec3 point;
-            if (IntersectGroundOrClimbTop(clickRay, game.GetScene().obstacles, &point)) {
-              game.ClickGround(point);
-            }
+        }
+        const int hitUnit = PickUnit(clickRay, pickableUnits);
+        if (hitUnit >= 0) {
+          game.ClickUnit(hitUnit, clickTeam);
+        } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
+          glm::vec3 point;
+          if (IntersectGroundOrClimbTop(clickRay, game.GetScene().obstacles, &point)) {
+            game.ClickGround(point, clickTeam);
           }
         }
       }
@@ -458,11 +461,12 @@ int main() {
 
     // --- Render: one shadow pass + one color pass per pane, both inside
     // SceneRenderer::RenderPane. Selection/move-preview overlays belong to
-    // whichever team is currently acting, so only their pane gets them. ---
+    // whichever team the currently selected figure is on, so only that
+    // player's pane shows them (the other side must not see enemy plans). ---
     for (int pane = 0; pane < kPaneCount; ++pane) {
       const PaneRect& rect = paneRects[pane];
       gfx::PaneOverlays overlays;
-      if (isPaneActive(pane)) {
+      if (selectedTeam && *selectedTeam == PaneTeam(pane)) {
         if (const auto selectedId = game.SelectedUnitId()) {
           if (const Unit* selected = game.FindUnit(*selectedId)) {
             overlays.selectionHighlight = selected->position;

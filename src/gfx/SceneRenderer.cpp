@@ -232,9 +232,8 @@ void DrawWireBox(const Shader& shader, LineMesh& lines, const glm::mat4& viewPro
 
 void DrawUnitWireframe(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
                        const Unit& unit) {
-  // Blue: the planned-path green; red: the matching red plan color.
-  const glm::vec4 color = unit.team == Team::Blue ? glm::vec4(0.3f, 0.9f, 0.4f, 1.0f)
-                                                  : glm::vec4(0.95f, 0.25f, 0.2f, 1.0f);
+  // Common highlight green for both teams.
+  const glm::vec4 color(0.3f, 0.9f, 0.4f, 1.0f);
   glm::vec3 bodyMin, bodySize, headMin, headSize;
   UnitBoxes(unit, &bodyMin, &bodySize, &headMin, &headSize);
   DrawWireBox(shader, lines, viewProj, BoxModel(bodyMin, bodySize), color);

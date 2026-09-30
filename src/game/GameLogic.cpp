@@ -290,6 +290,16 @@ void GameLogic::SetPlannedMoveFacing(int unitId, float yaw, Team byTeam) {
   unit->plan.endFacingYaw = std::remainder(yaw, 2.0f * 3.14159265358979f);
 }
 
+bool GameLogic::HasActiveKnockdown() const {
+  for (const Unit& unit : scene_.units) {
+    if (!unit.alive && unit.knockdownElapsed >= 0.0f &&
+        unit.knockdownElapsed < constants::kKnockdownDuration) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void GameLogic::Update(float dtSeconds) {
   // Knockdowns advance regardless of mode: they're purely visual and can
   // outlast the round that caused them.

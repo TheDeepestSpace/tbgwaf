@@ -916,6 +916,7 @@ void TestSnapshotMirrorsMatchAndTeamPlans() {
   red.ChooseMove();
   red.ClickGround(red.FindUnit(3)->position + glm::vec3(1.0f, 0.0f, 0.0f), Team::Red);
   CHECK(red.FindUnit(3)->plan.type == PlannedActionType::Move);
+  red.SetPlannedMoveFacing(3, 1.25f, Team::Red);
   for (int id : {4, 5}) {
     red.ClickUnit(id, Team::Red);
     red.ChoosePass();
@@ -928,6 +929,7 @@ void TestSnapshotMirrorsMatchAndTeamPlans() {
   CHECK(blue.ImportTeamPlans(redSnap, Team::Red));
   CHECK(blue.FindUnit(3)->plan.type == PlannedActionType::Move);
   CHECK(blue.FindUnit(3)->plan.movePath == red.FindUnit(3)->plan.movePath);
+  CHECK(std::fabs(blue.FindUnit(3)->plan.endFacingYaw - 1.25f) < 1e-4f);
   CHECK(blue.FindUnit(0)->plan.type == PlannedActionType::Pass);
   CHECK(blue.CanCommitRound());
 

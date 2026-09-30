@@ -62,6 +62,7 @@ GameSnapshot GameLogic::ExportState() const {
     u.planType = unit.plan.type;
     u.planShootTargetId = unit.plan.shootTargetId;
     u.planPath = unit.plan.movePath;
+    u.planEndFacingYaw = unit.plan.endFacingYaw;
     u.knockdownAxis = unit.knockdownAxis;
     u.knockdownElapsed = unit.knockdownElapsed;
     u.moving = IsUnitMoving(unit.id);
@@ -90,6 +91,7 @@ void ApplyPlan(const GameSnapshot::UnitState& u, Unit* unit) {
   unit->plan.type = u.planType;
   unit->plan.shootTargetId = u.planShootTargetId;
   unit->plan.movePath = u.planPath;
+  unit->plan.endFacingYaw = u.planEndFacingYaw;
 }
 
 }  // namespace
@@ -141,7 +143,7 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
   for (const auto& u : snap.units) {
     out << ' ' << u.id << ' ' << u.position.x << ' ' << u.position.y << ' ' << u.position.z << ' '
         << u.facingYaw << ' ' << (u.alive ? 1 : 0) << ' ' << static_cast<int>(u.triggerAction)
-        << ' ' << static_cast<int>(u.planType) << ' ' << u.planShootTargetId << ' '
+        << ' ' << static_cast<int>(u.planType) << ' ' << u.planShootTargetId << ' ' << u.planEndFacingYaw << ' '
         << u.knockdownAxis.x << ' ' << u.knockdownAxis.y << ' ' << u.knockdownAxis.z << ' '
         << u.knockdownElapsed << ' ' << (u.moving ? 1 : 0) << ' ' << u.planPath.size();
     for (const auto& p : u.planPath) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
@@ -165,7 +167,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
     int alive = 0, trigger = 0, plan = 0, moving = 0;
     size_t pathCount = 0;
     if (!(in >> u.id >> u.position.x >> u.position.y >> u.position.z >> u.facingYaw >> alive >>
-          trigger >> plan >> u.planShootTargetId >> u.knockdownAxis.x >> u.knockdownAxis.y >>
+          trigger >> plan >> u.planShootTargetId >> u.planEndFacingYaw >> u.knockdownAxis.x >> u.knockdownAxis.y >>
           u.knockdownAxis.z >> u.knockdownElapsed >> moving >> pathCount)) {
       return false;
     }

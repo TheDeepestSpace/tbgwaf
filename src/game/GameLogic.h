@@ -46,6 +46,7 @@ struct GameSnapshot {
     PlannedActionType planType = PlannedActionType::None;
     int planShootTargetId = -1;
     std::vector<glm::vec3> planPath;
+    float planEndFacingYaw = 0.0f;
     glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
     float knockdownElapsed = -1.0f;
     bool moving = false;  // Has an in-flight move in the executing round.

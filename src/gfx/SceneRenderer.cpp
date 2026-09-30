@@ -211,7 +211,8 @@ void DrawHighlight(const Shader& shader, const CubeMesh& cube, const glm::mat4& 
 // translucent triangle fan spanning kShootHalfFovDegrees around
 // FacingDirection(), capped at kFovConeVisualRange (bigger than the map
 // diagonal, so it always visually reaches the map edge). Each ray stops at the
-// nearest obstacle hit from the unit's eye position, matching gameplay LOS.
+// nearest obstacle footprint hit from the unit's eye position; all obstacles
+// occlude, even ones shorter than eye height.
 // Caller is responsible for enabling blending around this call.
 void DrawFovCone(const Shader& shader, TriangleFanMesh& mesh, const glm::mat4& viewProj,
                  const Unit& unit, const std::vector<tactics::Obstacle>& obstacles) {
@@ -228,7 +229,7 @@ void DrawFovCone(const Shader& shader, TriangleFanMesh& mesh, const glm::mat4& v
   // Boundary ray angles as offsets from facingYaw in [-halfFov, +halfFov].
   // A uniform fan alone puts the occlusion edge on a chord between the two
   // samples straddling an obstacle corner, which reads as a skewed edge that
-  // misses the corner; casting extra rays at each potentially occluding
+  // misses the corner; casting extra rays at each obstacle
   // corner (nudged to either side) pins the edge exactly onto the corner.
   std::vector<float> offsets;
   offsets.reserve(kArcSegments + 1 + obstacles.size() * 12);
@@ -239,7 +240,6 @@ void DrawFovCone(const Shader& shader, TriangleFanMesh& mesh, const glm::mat4& v
   constexpr float kTwoPi = 6.28318530717958647692f;
   for (const auto& obstacle : obstacles) {
     const AABB& b = obstacle.bounds;
-    if (eye.y < b.min.y || eye.y > b.max.y) continue;  // Too short/high to occlude eye rays.
     for (const float x : {b.min.x, b.max.x}) {
       for (const float z : {b.min.z, b.max.z}) {
         const float delta =
@@ -260,8 +260,13 @@ void DrawFovCone(const Shader& shader, TriangleFanMesh& mesh, const glm::mat4& v
     const glm::vec3 dir(std::cos(angle), 0.0f, std::sin(angle));
     float reach = range;
     for (const auto& obstacle : obstacles) {
+      // The cone is a ground overlay, so every obstacle occludes it by its
+      // footprint -- including ones shorter than eye height. Clamp the ray
+      // origin's height into the box so the horizontal ray tests footprint only.
+      const AABB& b = obstacle.bounds;
+      const glm::vec3 origin(eye.x, glm::clamp(eye.y, b.min.y, b.max.y), eye.z);
       float hitT = 0.0f;
-      if (tactics::RayIntersectsAABB(eye, dir, obstacle.bounds, &hitT) && hitT < reach) {
+      if (tactics::RayIntersectsAABB(origin, dir, b, &hitT) && hitT < reach) {
         reach = hitT;
       }
     }

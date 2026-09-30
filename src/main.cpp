@@ -258,6 +258,8 @@ int main() {
   Team hotSeatTeam = Team::Blue;
 
   bool quit = false;
+  bool leftDragging = false;
+  float leftDragDistance = 0.0f;  // Accumulated pixels moved during the current left-drag.
   glm::vec3 hoveredGroundPoint(0.0f);
   bool hasHoveredGroundPoint = false;
 
@@ -347,9 +349,19 @@ int main() {
 
       if (event.type == SDL_QUIT) {
         quit = true;
+      } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+        leftDragging = true;
+        leftDragDistance = 0.0f;
       } else if (event.type == SDL_MOUSEMOTION) {
         mouseX = event.motion.x;
         mouseY = event.motion.y;
+        if (leftDragging && !ImGui::GetIO().WantCaptureMouse) {
+          constexpr float kPanSpeed = 0.0015f;
+          // Drag the world under the cursor: target moves opposite to the drag.
+          camera.Pan(-event.motion.xrel * kPanSpeed, event.motion.yrel * kPanSpeed);
+          leftDragDistance += std::hypot(static_cast<float>(event.motion.xrel),
+                                          static_cast<float>(event.motion.yrel));
+        }
         if ((event.motion.state & SDL_BUTTON_RMASK) && !ImGui::GetIO().WantCaptureMouse) {
           constexpr float kRotateSpeed = 0.005f;
           camera.Rotate(-event.motion.xrel * kRotateSpeed, event.motion.yrel * kRotateSpeed);
@@ -360,7 +372,11 @@ int main() {
           camera.Zoom(-event.wheel.y * kZoomSpeed);
         }
       } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
-        leftClickPending = true;
+        // A drag that panned the camera must not also fire a click.
+        constexpr float kClickDragThresholdPx = 5.0f;
+        if (leftDragDistance < kClickDragThresholdPx) leftClickPending = true;
+        leftDragging = false;
+        leftDragDistance = 0.0f;
         leftClickX = event.button.x;
         leftClickY = event.button.y;
       } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {

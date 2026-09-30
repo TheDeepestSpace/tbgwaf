@@ -940,6 +940,21 @@ void TestGameLogicPlaybookDefaultDoesNothing() {
   CHECK(glm::distance(game.FindUnit(4)->position, destination) < 1e-3f);
 }
 
+// Regression: the Shoot rule only fires on enemies. Arms red3 (Shoot) and
+// walks red4 through its FOV; the teammate must be left alone.
+void TestGameLogicPlaybookIgnoresSameTeamMover() {
+  GameLogic game(LegacyScene());
+  game.FindUnit(3)->reactionOnStationary = ReactionRule::Shoot;
+  game.FindUnit(1)->reactionOnStationary = ReactionRule::DoNothing;
+
+  const glm::vec3 destination(0.0f, 0.0f, 0.0f);
+  StartRed4WalkThroughBlue1Lane(game, destination);
+  game.Update(100.0f);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(game.FindUnit(4)->alive);
+  CHECK(glm::distance(game.FindUnit(4)->position, destination) < 1e-3f);
+}
+
 void TestGameLogicWinCondition() {
   GameLogic game(LegacyScene());
   // Directly eliminate the Red team to drive the game-over transition
@@ -1176,6 +1191,7 @@ int main() {
   TestGameLogicOverwatchFiresOnEnemyEnteringFov();
   TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds();
   TestGameLogicPlaybookDefaultDoesNothing();
+  TestGameLogicPlaybookIgnoresSameTeamMover();
   TestGameLogicWinCondition();
   TestSnapshotMirrorsMatchAndTeamPlans();
   TestSightingRecordedImmediatelyOnEntry();

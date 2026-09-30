@@ -264,6 +264,20 @@ bool FootprintSpan(const glm::vec3& eye, const glm::vec2& dir, const AABB& box, 
   return true;
 }
 
+// `range` clipped to where the ray leaves the playable map footprint, so the
+// FOV cone stops at the boundary. Zero if the eye stands outside the map and
+// the ray never enters it.
+float ClipToMap(const glm::vec3& eye, const glm::vec2& dir, float range) {
+  constexpr float kHalf = tactics::constants::kMapHalfExtent;
+  AABB map;
+  map.min = glm::vec3(-kHalf, 0.0f, -kHalf);
+  map.max = glm::vec3(kHalf, 0.0f, kHalf);
+  float enter = 0.0f;
+  float exit = 0.0f;
+  if (!FootprintSpan(eye, dir, map, &enter, &exit)) return 0.0f;
+  return std::min(range, exit);
+}
+
 // The stretch of ground along one sight ray that the eye cannot see, i.e.
 // where a target could hide crouched at ground level. The sightline from the
 // eye down to the ground point at distance t drops linearly from eye.y to 0,
@@ -313,7 +327,7 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
 // Renders a unit's FOV as a flat, ground-level, lightly team-colored
 // translucent overlay spanning kShootHalfFovDegrees around
 // FacingDirection(), capped at kFovConeVisualRange (bigger than the map
-// diagonal, so it always visually reaches the map edge). Occlusion is 3D:
+// diagonal) and clipped at the map boundary. Occlusion is 3D:
 // the cone's tip is the unit's eye, so an obstacle below eye level only
 // shadows the strip of ground it actually hides -- the overlay resumes where
 // the sightline over its top edge lands, and only a target crouched at
@@ -366,7 +380,7 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
     const float angle = unit.facingYaw + offset;
     const glm::vec2 dir(std::cos(angle), std::sin(angle));
     dirs.push_back(dir);
-    spansPerRay.push_back(VisibleGroundSpans(eye, dir, obstacles, range));
+    spansPerRay.push_back(VisibleGroundSpans(eye, dir, obstacles, ClipToMap(eye, dir, range)));
   }
 
   // Stitch adjacent rays into quads, one per matching visible span. Corner

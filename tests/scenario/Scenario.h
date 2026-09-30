@@ -97,6 +97,13 @@ struct PlaybackHooks {
   // post-action holds). The game state is mid-scenario; do not mutate it.
   std::function<void(const GameLogic&)> onFrame;
 
+  // Fired just before each scripted click is applied (unit selection, move
+  // destination, shoot target), with the world-space point the equivalent
+  // real mouse click would land on (unit head for figures, the ground point
+  // for destinations). Lets a renderer show the cursor landing before the
+  // state changes. The game state is the pre-click state; do not mutate it.
+  std::function<void(const GameLogic&, const glm::vec3& worldPoint)> onClick;
+
   // Fired once at the initial state (completedActions == 0) and once after
   // each action step resolves (completedActions == 1, 2, ...). Assert-only
   // steps do not fire it: a "turn" for capture purposes is one executed

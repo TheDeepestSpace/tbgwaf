@@ -147,13 +147,25 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
     return false;
   };
 
+  // Reports where the equivalent mouse click would land (a figure's head, to
+  // match the HUD's anchor point) before driving the state.
+  auto NotifyClick = [&](const glm::vec3& worldPoint) {
+    if (hooks.onClick) hooks.onClick(game, worldPoint);
+  };
+  auto ClickUnitAt = [&](int id) {
+    if (const Unit* unit = game.FindUnit(id)) {
+      NotifyClick(unit->position + glm::vec3(0.0f, 1.9f, 0.0f));
+    }
+    game.ClickUnit(id);
+  };
+
   const auto currentActor = game.CurrentActorId();
   if (!currentActor || *currentActor != action.actor) {
     return Fail("expected to act now, but it's " +
                 (currentActor ? std::to_string(*currentActor) : std::string("nobody")) + "'s turn");
   }
 
-  game.ClickUnit(action.actor);
+  ClickUnitAt(action.actor);
   if (game.SelectedUnitId() != action.actor || game.Mode() != InputMode::ActionMenu) {
     return Fail("could not be selected (dead, or already game over?)");
   }
@@ -161,6 +173,7 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
   switch (action.kind) {
     case ScenarioAction::Kind::Move: {
       game.ChooseMove();
+      NotifyClick(action.destination);
       game.ClickGround(action.destination);
       if (game.Mode() != InputMode::Moving) {
         return Fail("has no path to destination " + ToString(action.destination));
@@ -186,7 +199,7 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
     }
     case ScenarioAction::Kind::Shoot: {
       game.ChooseShoot();
-      game.ClickUnit(action.target);
+      ClickUnitAt(action.target);
       const bool resolved = game.Mode() != InputMode::AwaitingShootTarget;
       if (action.expectNoop && resolved) {
         return Fail("shot at " + std::to_string(action.target) +

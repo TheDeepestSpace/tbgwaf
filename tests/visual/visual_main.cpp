@@ -19,6 +19,9 @@
 
 #include <SDL.h>
 #include <GLES3/gl3.h>
+#include <glm/glm.hpp>
+#include <imgui.h>
+#include <backends/imgui_impl_opengl3.h>
 
 #include <algorithm>
 #include <array>
@@ -44,6 +47,7 @@
 #include "gfx/Camera.h"
 #include "gfx/SceneRenderer.h"
 #include "scenario/Scenario.h"
+#include "ui/Hud.h"
 
 namespace fs = std::filesystem;
 
@@ -60,10 +64,13 @@ constexpr int kVideoFps = 30;
 // Frames held on the initial state and after each action so video viewers
 // can actually read each turn's outcome (0.5 s at kVideoFps).
 constexpr int kHoldFrames = 15;
+// Frames the click marker is shown before each scripted click lands (video
+// only): a ring contracting onto the click point, then a brief hold.
+constexpr int kClickFrames = 12;
 
 // Pane 0 is the left half (Blue), pane 1 the right half (Red) -- same
 // arbitrary-but-fixed assignment as the interactive app.
-Team PaneTeam(int pane) { return pane == 0 ? Team::Blue : Team::Red; }
+using ui::PaneTeam;
 const char* TeamName(Team team) { return team == Team::Blue ? "blue" : "red"; }
 
 struct Options {
@@ -252,11 +259,18 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   // Fixed default cameras, identical to the app's startup view (each pane
   // is half-width, so start zoomed out enough for both spawns to fit).
   // Nothing perturbs them at runtime, so captures are deterministic.
-  std::array<gfx::OrbitCamera, 2> cameras;
+  std::array<gfx::OrbitCamera, ui::kPaneCount> cameras;
   for (auto& camera : cameras) camera.Zoom(10.0f);
 
   const int paneWidth = kWindowWidth / 2;
-  auto renderBothPanes = [&](const GameLogic& game) {
+  // Optional cursor marker: `progress` runs 0 -> 1 as the ring closes in.
+  struct ClickMarker {
+    glm::vec3 world;
+    float progress;
+  };
+  // Draws both 3D panes, then the same HUD the interactive app builds
+  // (ui::DrawHud), then the click marker on the acting team's pane.
+  auto renderBothPanes = [&](const GameLogic& game, const ClickMarker* marker = nullptr) {
     const bool fogActive = game.Mode() != InputMode::GameOver;
     for (int pane = 0; pane < 2; ++pane) {
       const Team team = PaneTeam(pane);
@@ -265,6 +279,43 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
       renderer.RenderPane(game, team, fogActive, visibility, cameras[pane], pane * paneWidth, 0,
                           paneWidth, kWindowHeight);
     }
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(static_cast<float>(kWindowWidth), static_cast<float>(kWindowHeight));
+    io.DeltaTime = 1.0f / kVideoFps;
+    // Auto-resize windows need a couple of frames to settle on their content
+    // size (and stay hidden meanwhile), as they would in the live app; run
+    // throw-away frames first so every capture is fully laid out.
+    for (int warmup = 0; warmup < 3; ++warmup) {
+      ImGui_ImplOpenGL3_NewFrame();
+      ImGui::NewFrame();
+      ui::DrawHud(game, kWindowWidth, kWindowHeight, cameras);
+      ImGui::EndFrame();
+    }
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui::NewFrame();
+    ui::DrawHud(game, kWindowWidth, kWindowHeight, cameras);
+    if (marker) {
+      if (const auto team = ui::ActiveTeam(game)) {
+        const int pane = *team == Team::Blue ? 0 : 1;
+        const glm::vec2 p = ui::WorldToWindow(marker->world, cameras[pane],
+                                              ui::ComputePaneRect(pane, kWindowWidth),
+                                              kWindowHeight);
+        ImDrawList* draw = ImGui::GetForegroundDrawList();
+        const ImVec2 c(p.x, p.y);
+        const float radius = 8.0f + 30.0f * (1.0f - marker->progress);
+        const int alpha = static_cast<int>(120 + 135 * marker->progress);
+        draw->AddCircle(c, radius, IM_COL32(255, 220, 40, alpha), 32, 3.0f);
+        draw->AddCircleFilled(c, 4.0f, IM_COL32(255, 220, 40, 255));
+        // Arrow cursor with its tip on the click point.
+        draw->AddTriangleFilled(c, ImVec2(c.x + 12, c.y + 22), ImVec2(c.x + 22, c.y + 14),
+                                IM_COL32(255, 255, 255, 255));
+        draw->AddTriangle(c, ImVec2(c.x + 12, c.y + 22), ImVec2(c.x + 22, c.y + 14),
+                          IM_COL32(0, 0, 0, 255), 1.5f);
+      }
+    }
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
   };
 
   std::array<VideoEncoder, 2> encoders;
@@ -284,15 +335,25 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   int imageFailures = 0;
   tactics::scenario::PlaybackHooks hooks;
   if (options.video && videoOk) {
-    hooks.tickSeconds = 1.0f / kVideoFps;
-    hooks.holdFramesAfterAction = kHoldFrames;
-    hooks.onFrame = [&](const GameLogic& game) {
-      renderBothPanes(game);
+    auto writeVideoFrame = [&](const GameLogic& game, const ClickMarker* marker) {
+      renderBothPanes(game, marker);
       const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);
       for (int pane = 0; pane < 2; ++pane) {
         if (!encoders[pane].WriteFrame(CropColumns(frame, pane * paneWidth, paneWidth))) {
           videoOk = false;
         }
+      }
+    };
+    hooks.tickSeconds = 1.0f / kVideoFps;
+    hooks.holdFramesAfterAction = kHoldFrames;
+    hooks.onFrame = [&](const GameLogic& game) { writeVideoFrame(game, nullptr); };
+    // Show the cursor landing on the figure/ground point before the click
+    // takes effect, instead of jump-cutting between states.
+    hooks.onClick = [&](const GameLogic& game, const glm::vec3& worldPoint) {
+      for (int i = 0; i < kClickFrames; ++i) {
+        const float progress = std::min(1.0f, static_cast<float>(i + 1) / (kClickFrames * 0.7f));
+        const ClickMarker marker{worldPoint, progress};
+        writeVideoFrame(game, &marker);
       }
     };
   }
@@ -487,6 +548,14 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // ImGui without the SDL backend: no input, we set DisplaySize/DeltaTime
+  // ourselves per frame, so the HUD renders deterministically.
+  IMGUI_CHECKVERSION();
+  ImGui::CreateContext();
+  ImGui::StyleColorsDark();
+  ImGui::GetIO().IniFilename = nullptr;
+  ImGui_ImplOpenGL3_Init("#version 300 es");
+
   gfx::SceneRenderer renderer;
   if (!renderer.Init()) return 1;
 
@@ -496,6 +565,8 @@ int main(int argc, char** argv) {
   }
 
   renderer.Destroy();
+  ImGui_ImplOpenGL3_Shutdown();
+  ImGui::DestroyContext();
   SDL_GL_DeleteContext(glContext);
   SDL_DestroyWindow(window);
   SDL_Quit();

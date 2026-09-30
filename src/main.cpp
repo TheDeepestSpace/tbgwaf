@@ -26,6 +26,7 @@
 #include "game/Visibility.h"
 #include "gfx/Camera.h"
 #include "gfx/SceneRenderer.h"
+#include "ui/Hud.h"
 
 using tactics::GameLogic;
 using tactics::InputMode;
@@ -33,6 +34,11 @@ using tactics::Obstacle;
 using tactics::Team;
 using tactics::TeamVisibility;
 using tactics::Unit;
+using ui::ComputePaneRect;
+using ui::PaneForX;
+using ui::PaneRect;
+using ui::PaneTeam;
+constexpr int kPaneCount = ui::kPaneCount;
 
 namespace {
 
@@ -43,8 +49,6 @@ constexpr int kInitialWindowHeight = 720;
 // side-by-side viewports, left = Blue, right = Red. Both read the same
 // single GameLogic instance; only the camera and the fog-of-war-filtered
 // draw/pick lists differ per pane.
-constexpr int kPaneCount = 2;
-
 // Finds the alive unit whose bounding box the ray hits nearest, or -1.
 int PickUnit(const gfx::Ray& ray, const std::vector<Unit>& units) {
   int bestId = -1;
@@ -61,8 +65,6 @@ int PickUnit(const gfx::Ray& ray, const std::vector<Unit>& units) {
   }
   return bestId;
 }
-
-const char* TeamName(Team team) { return team == Team::Blue ? "Blue" : "Red"; }
 
 // Stage-C climbing: a ground/move click can land either on the y=0 ground
 // plane or on top of a climbable obstacle (a crate's top face). Both are
@@ -100,23 +102,6 @@ bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const std::vector<Obstacle>&
   if (found && outPoint) *outPoint = bestPoint;
   return found;
 }
-
-// Pane 0 is the left half of the window (Blue), pane 1 is the right half
-// (Red). Arbitrary but fixed for the lifetime of the app.
-Team PaneTeam(int pane) { return pane == 0 ? Team::Blue : Team::Red; }
-
-struct PaneRect {
-  int x = 0;
-  int width = 0;
-};
-
-PaneRect ComputePaneRect(int pane, int windowWidth) {
-  const int leftWidth = windowWidth / 2;
-  if (pane == 0) return PaneRect{0, leftWidth};
-  return PaneRect{leftWidth, windowWidth - leftWidth};
-}
-
-int PaneForX(int x, int windowWidth) { return x < windowWidth / 2 ? 0 : 1; }
 
 }  // namespace
 
@@ -262,14 +247,7 @@ int main() {
     // where only the active player's half responds during their turn.
     // Camera orbit/zoom is *not* gated this way -- either player can look
     // around their own pane at any time.
-    std::optional<Team> activeTeam;
-    if (game.Mode() != InputMode::GameOver) {
-      if (const auto actorId = game.CurrentActorId()) {
-        if (const Unit* actor = game.FindUnit(*actorId)) {
-          activeTeam = actor->team;
-        }
-      }
-    }
+    const std::optional<Team> activeTeam = ui::ActiveTeam(game);
     const bool fogActive = game.Mode() != InputMode::GameOver;
     auto isPaneActive = [&](int pane) { return activeTeam && *activeTeam == PaneTeam(pane); };
 
@@ -279,111 +257,13 @@ int main() {
     }
 
     // --- UI ---
-    if (const auto winner = game.Winner()) {
-      ImGui::SetNextWindowPos(ImVec2(windowWidth * 0.5f, windowHeight * 0.3f), ImGuiCond_Always,
-                               ImVec2(0.5f, 0.5f));
-      ImGui::Begin("Game Over", nullptr,
-                   ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize);
-      ImGui::Text("%s team wins!", TeamName(*winner));
-      if (ImGui::Button("New Match")) {
-        game.Reset();
-      }
-      ImGui::End();
-    } else {
-      ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
-      ImGui::Begin("Turn", nullptr,
-                   ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
-                       ImGuiWindowFlags_NoMove);
-      ImGui::Text("Round %d", game.RoundNumber());
-      if (const auto actorId = game.CurrentActorId()) {
-        const Unit* actor = game.FindUnit(*actorId);
-        if (actor) {
-          ImGui::Text("%s team's turn (figure #%d)", TeamName(actor->team), actor->id);
-        }
-      }
-      switch (game.Mode()) {
-        case InputMode::AwaitingSelection:
-          ImGui::TextWrapped("Click the highlighted figure to act.");
-          break;
-        case InputMode::ActionMenu:
-          ImGui::TextWrapped("Choose an action.");
-          break;
-        case InputMode::AwaitingMoveDestination:
-          ImGui::TextWrapped("Click a destination on the ground (Esc to cancel).");
-          break;
-        case InputMode::AwaitingShootTarget:
-          ImGui::TextWrapped("Click an enemy figure to shoot (Esc to cancel).");
-          break;
-        case InputMode::Moving:
-          ImGui::TextWrapped("Figure is moving...");
-          break;
-        default:
-          break;
-      }
-      ImGui::End();
-
-      if (const auto selectedId = game.SelectedUnitId(); selectedId && activeTeam) {
-        const Unit* selected = game.FindUnit(*selectedId);
-        if (selected && (game.Mode() == InputMode::ActionMenu ||
-                          game.Mode() == InputMode::AwaitingMoveDestination ||
-                          game.Mode() == InputMode::AwaitingShootTarget)) {
-          const int activePane = *activeTeam == Team::Blue ? 0 : 1;
-          const PaneRect& activeRect = paneRects[activePane];
-          const glm::mat4 activeView = cameras[activePane].ViewMatrix();
-          const glm::mat4 activeProj = cameras[activePane].ProjectionMatrix(
-              static_cast<float>(activeRect.width) / static_cast<float>(windowHeight));
-          const glm::vec4 activeViewport(static_cast<float>(activeRect.x), 0.0f,
-                                          static_cast<float>(activeRect.width),
-                                          static_cast<float>(windowHeight));
-          const glm::vec3 headTop = selected->position + glm::vec3(0.0f, 1.9f, 0.0f);
-          const glm::vec3 screenPos =
-              glm::project(headTop, activeView, activeProj, activeViewport);
-          // glm::project assumes a bottom-left viewport origin; flip Y for
-          // ImGui's top-left screen space. X is already absolute window
-          // space since activeViewport.x carries the pane's own offset.
-          const ImVec2 windowPos(screenPos.x, windowHeight - screenPos.y);
-          ImGui::SetNextWindowPos(windowPos, ImGuiCond_Always, ImVec2(0.5f, 1.0f));
-          ImGui::Begin("Actions", nullptr,
-                       ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
-                           ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar);
-          if (game.Mode() == InputMode::ActionMenu) {
-            if (ImGui::Button("Move")) game.ChooseMove();
-            ImGui::SameLine();
-            if (ImGui::Button("Shoot")) game.ChooseShoot();
-            ImGui::SameLine();
-            if (ImGui::Button("Overwatch")) game.ChooseOverwatch();
-            ImGui::SameLine();
-            if (ImGui::Button("Pass")) game.ChoosePass();
-          } else {
-            if (ImGui::Button("Cancel")) game.CancelAction();
-          }
-          ImGui::End();
-        }
-      }
-    }
-
-    // Pane divider, per-pane team labels, and a dimming overlay on whichever
-    // pane isn't currently allowed to act -- the split-screen equivalent of
-    // "grey out the inactive side" for local multiplayer.
-    ImDrawList* overlay = ImGui::GetForegroundDrawList();
-    overlay->AddLine(ImVec2(static_cast<float>(paneRects[1].x), 0.0f),
-                      ImVec2(static_cast<float>(paneRects[1].x), static_cast<float>(windowHeight)),
-                      IM_COL32(255, 255, 255, 60), 2.0f);
-    for (int pane = 0; pane < kPaneCount; ++pane) {
-      const PaneRect& rect = paneRects[pane];
-      const bool active = isPaneActive(pane);
-      const char* status = game.Winner() ? "" : (active ? " - your turn" : "");
-      char label[64];
-      std::snprintf(label, sizeof(label), "%s%s", TeamName(PaneTeam(pane)), status);
-      overlay->AddText(ImVec2(rect.x + 10.0f, windowHeight - 24.0f), IM_COL32(255, 255, 255, 220),
-                        label);
-      if (game.Mode() != InputMode::GameOver && !active) {
-        overlay->AddRectFilled(ImVec2(static_cast<float>(rect.x), 0.0f),
-                                ImVec2(static_cast<float>(rect.x + rect.width),
-                                       static_cast<float>(windowHeight)),
-                                IM_COL32(0, 0, 0, 110));
-      }
-    }
+    const ui::HudActions hud = ui::DrawHud(game, windowWidth, windowHeight, cameras);
+    if (hud.newMatch) game.Reset();
+    if (hud.move) game.ChooseMove();
+    if (hud.shoot) game.ChooseShoot();
+    if (hud.overwatch) game.ChooseOverwatch();
+    if (hud.pass) game.ChoosePass();
+    if (hud.cancel) game.CancelAction();
 
     // --- Dispatch deferred input, now that WantCaptureMouse reflects the UI
     // actually built this frame. ---

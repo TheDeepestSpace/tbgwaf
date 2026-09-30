@@ -41,7 +41,7 @@ TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
   result.visibleObstacle.resize(obstacles.size(), false);
 
   for (const auto& target : units) {
-    if (!target.alive || target.team == team) continue;
+    if (target.team == team) continue;  // Downed enemies stay visible while in FOV.
     if (IsPointVisibleToTeam(team, target.EyePosition(), units, obstacles)) {
       result.visibleUnit[target.id] = true;
     }

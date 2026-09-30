@@ -36,7 +36,7 @@ jobs:
       - name: Assemble Pages site
         run: |
           mkdir -p site
-          cp build-web/tactics_app.html site/index.html
+          cp build-web/index.html site/
           cp build-web/tactics_app.js site/
           cp build-web/tactics_app.wasm site/
 

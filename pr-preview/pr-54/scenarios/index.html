@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Gameplay scenario review</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 1400px;
+         padding: 0 1rem; background: #14161a; color: #e8e8e8; }
+  h1 { font-size: 1.5rem; }
+  h2 { border-bottom: 1px solid #3a3f47; padding-bottom: 0.3rem; margin-top: 2.5rem; }
+  h2 .count { color: #8a919c; font-weight: normal; font-size: 1rem; }
+  .scenario { margin: 1.5rem 0; }
+  .scenario h3 { margin-bottom: 0.2rem; }
+  .scenario .path { color: #8a919c; font-size: 0.85rem; font-family: monospace; }
+  .panes { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.8rem; }
+  .pane { flex: 1; min-width: 320px; max-width: 640px; }
+  .pane figcaption { margin-bottom: 0.3rem; font-weight: bold; }
+  .pane.blue figcaption { color: #6d9eeb; }
+  .pane.red figcaption { color: #e06666; }
+  video { width: 100%; background: #000; border: 1px solid #3a3f47; }
+  .note { color: #d0a24a; }
+  .empty { color: #8a919c; font-style: italic; }
+</style>
+</head>
+<body>
+<h1>Gameplay scenario review</h1>
+<p>Scenarios under <code>tests/scenarios</code>, classified against this PR from
+git metadata on the YAML files. Every scenario present at the PR's head —
+new, modified, and unchanged — gets a video: the full scripted scenario as
+rendered for that team's fog-of-war pane, the PR's version (no base-branch
+comparison). Deleted scenarios are listed by name only.</p>
+<h2>New scenarios <span class="count">(2)</span></h2>
+<div class="scenario"><h3>generated_city_cross_map_shot</h3><div class="path">tests/scenarios/generated_city_cross_map_shot.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video controls muted loop src="media/generated_city_cross_map_shot/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video controls muted loop src="media/generated_city_cross_map_shot/red.webm"></video></figure>
+</div>
+</div>
+<div class="scenario"><h3>generated_city_rim_moves</h3><div class="path">tests/scenarios/generated_city_rim_moves.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video controls muted loop src="media/generated_city_rim_moves/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video controls muted loop src="media/generated_city_rim_moves/red.webm"></video></figure>
+</div>
+</div>
+<h2>Modified scenarios <span class="count">(0)</span></h2>
+<p class="empty">None.</p>
+<h2>Unchanged scenarios <span class="count">(3)</span></h2>
+<div class="scenario"><h3>default_scene_shoot_rows</h3><div class="path">tests/scenarios/default_scene_shoot_rows.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video controls muted loop src="media/default_scene_shoot_rows/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video controls muted loop src="media/default_scene_shoot_rows/red.webm"></video></figure>
+</div>
+</div>
+<div class="scenario"><h3>fov_gating_blocks_out_of_view_shot</h3><div class="path">tests/scenarios/fov_gating_blocks_out_of_view_shot.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video controls muted loop src="media/fov_gating_blocks_out_of_view_shot/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video controls muted loop src="media/fov_gating_blocks_out_of_view_shot/red.webm"></video></figure>
+</div>
+</div>
+<div class="scenario"><h3>move_and_climb_crate</h3><div class="path">tests/scenarios/move_and_climb_crate.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video controls muted loop src="media/move_and_climb_crate/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video controls muted loop src="media/move_and_climb_crate/red.webm"></video></figure>
+</div>
+</div>
+<h2>Deleted scenarios <span class="count">(0)</span></h2>
+<p class="empty">None.</p>
+</body>
+</html>

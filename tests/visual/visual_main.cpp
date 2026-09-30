@@ -348,16 +348,17 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
 
   int imageFailures = 0;
   tactics::scenario::PlaybackHooks hooks;
-  if (options.video && videoOk) {
-    auto writeVideoFrame = [&](const GameLogic& game, const ClickMarker* marker) {
-      renderBothPanes(game, marker);
-      const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);
-      for (int pane = 0; pane < 2; ++pane) {
-        if (!encoders[pane].WriteFrame(CropColumns(frame, pane * paneWidth, paneWidth))) {
-          videoOk = false;
-        }
+  // Declared outside the `if`: the hooks below outlive its scope.
+  auto writeVideoFrame = [&](const GameLogic& game, const ClickMarker* marker) {
+    renderBothPanes(game, marker);
+    const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);
+    for (int pane = 0; pane < 2; ++pane) {
+      if (!encoders[pane].WriteFrame(CropColumns(frame, pane * paneWidth, paneWidth))) {
+        videoOk = false;
       }
-    };
+    }
+  };
+  if (options.video && videoOk) {
     hooks.tickSeconds = 1.0f / kVideoFps;
     hooks.holdFramesAfterAction = kHoldFrames;
     hooks.onFrame = [&](const GameLogic& game) { writeVideoFrame(game, nullptr); };

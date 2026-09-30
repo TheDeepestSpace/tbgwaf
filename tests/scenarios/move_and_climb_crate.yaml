@@ -1,7 +1,8 @@
 # Regression coverage for climbable-obstacle pathfinding, matching
 # TestGameLogicMoveCanClimbOntoObstacle in tests/logic_tests.cpp: a move
 # destination on top of a climbable crate should route up onto it rather
-# than being rejected as unreachable.
+# than being rejected as unreachable. Both figures act in the same WEGO
+# round: blue0 climbs while red1 crosses the open ground concurrently.
 name: move_and_climb_crate
 
 map:
@@ -16,12 +17,10 @@ script:
   - action: move
     actor: 0
     destination: [0, 1.2, 0]  # The crate's top surface.
+  - action: move
+    actor: 1
+    destination: [5, 0, -5]
   - action: commit
   - assert: {unit: 0, position: [0, 1.2, 0], tolerance: 0.05}
-  - assert: {current_team: red}
-
-  - action: pass
-    actor: 1
-  - action: commit
-  - assert: {current_team: blue}
+  - assert: {unit: 1, position: [5, 0, -5], tolerance: 0.05}
   - assert: {round: 2}

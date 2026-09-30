@@ -135,9 +135,6 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
     assertion.visibleToTeam = ParseTeam(node["visible_to"].as<std::string>(), "assert.visible_to");
   }
   if (node["visible"]) assertion.visible = node["visible"].as<bool>();
-  if (node["current_team"]) {
-    assertion.currentTeam = ParseTeam(node["current_team"].as<std::string>(), "assert.current_team");
-  }
   if (node["round"]) assertion.round = node["round"].as<int>();
   if (node["winner"]) {
     assertion.checkWinner = true;
@@ -164,27 +161,26 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
   };
 
   if (action.kind == ScenarioAction::Kind::Commit) {
-    if (!game.CanCommitTurn()) {
-      return Fail("cannot commit: not every living figure on " + ToString(game.CurrentTeam()) +
-                  "'s team has a plan yet");
+    if (!game.CanCommitRound()) {
+      return Fail("cannot commit: not every living figure (on both teams) has a plan yet");
     }
-    game.CommitTurn();
+    game.CommitRound();
     if (hooks.tickSeconds > 0.0f) {
       // Visual mode: advance in fixed ticks and let the observer capture
-      // each in-between frame of the commit's animation. Bounded so a stuck
+      // each in-between frame of the round's execution. Bounded so a stuck
       // animation fails the scenario instead of hanging the runner.
       constexpr int kMaxMoveTicks = 20000;
       int ticks = 0;
-      while (game.Mode() == InputMode::Moving && ++ticks <= kMaxMoveTicks) {
+      while (game.Mode() == InputMode::Executing && ++ticks <= kMaxMoveTicks) {
         game.Update(hooks.tickSeconds);
         if (hooks.onFrame) hooks.onFrame(game);
       }
-      if (game.Mode() == InputMode::Moving) {
-        return Fail("commit animation did not complete within " +
+      if (game.Mode() == InputMode::Executing) {
+        return Fail("round execution did not complete within " +
                     std::to_string(kMaxMoveTicks) + " ticks");
       }
     } else {
-      game.Update(1.0e6f);  // Fast-forward past any planned moves' animation.
+      game.Update(1.0e6f);  // Fast-forward the executing round in one coarse tick.
     }
     return true;
   }
@@ -194,18 +190,17 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
     return true;
   }
 
-  // Move/Shoot/Pass only ever record a plan on the acting figure, so it must
-  // belong to the team currently planning its turn.
+  // Move/Shoot/Pass only ever record a plan on the acting figure. Both
+  // teams plan concurrently, so scripts may freely interleave actors from
+  // either side before a single round commit; each click is tagged with the
+  // actor's own team, the same as a click landing in that player's pane.
   const Unit* actorUnit = game.FindUnit(action.actor);
   if (!actorUnit || !actorUnit->alive) {
     return Fail("is dead or does not exist");
   }
-  if (actorUnit->team != game.CurrentTeam()) {
-    return Fail("belongs to a team that isn't planning right now (it's " +
-                ToString(game.CurrentTeam()) + "'s turn)");
-  }
+  const Team actorTeam = actorUnit->team;
 
-  game.ClickUnit(action.actor);
+  game.ClickUnit(action.actor, actorTeam);
   if (game.SelectedUnitId() != action.actor || game.Mode() != InputMode::ActionMenu) {
     return Fail("could not be selected (already game over?)");
   }
@@ -213,18 +208,20 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
   switch (action.kind) {
     case ScenarioAction::Kind::Move: {
       game.ChooseMove();
-      game.ClickGround(action.destination);
+      game.ClickGround(action.destination, actorTeam);
       if (game.Mode() != InputMode::AwaitingSelection) {
-        return Fail("has no path to destination " + ToString(action.destination));
+        return Fail("has no path to destination " + ToString(action.destination) +
+                    " (unreachable, or beyond the mover's round move budget)");
       }
       if (action.finalFacingDegrees) {
-        game.SetPlannedMoveFacing(action.actor, *action.finalFacingDegrees * 3.14159265f / 180.0f);
+        game.SetPlannedMoveFacing(action.actor, *action.finalFacingDegrees * 3.14159265f / 180.0f,
+                                  actorTeam);
       }
       return true;
     }
     case ScenarioAction::Kind::Shoot: {
       game.ChooseShoot();
-      game.ClickUnit(action.target);
+      game.ClickUnit(action.target, actorTeam);
       const bool planned = game.Mode() != InputMode::AwaitingShootTarget;
       if (action.expectNoop && planned) {
         return Fail("shot at " + std::to_string(action.target) +
@@ -294,11 +291,6 @@ void CheckAssertion(const GameLogic& game, const ScenarioAssertion& a, int stepI
 
   if (a.checkWinner && game.Winner() != a.expectedWinner) {
     Fail("expected winner=" + ToString(a.expectedWinner) + " but was " + ToString(game.Winner()));
-  }
-
-  if (a.currentTeam && game.CurrentTeam() != *a.currentTeam) {
-    Fail("expected current team " + ToString(*a.currentTeam) + " but it's " +
-         ToString(game.CurrentTeam()) + "'s turn");
   }
 
   if (a.round && game.RoundNumber() != *a.round) {

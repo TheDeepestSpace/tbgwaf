@@ -18,17 +18,16 @@ script:
     target: 1
     expect_noop: true
   - assert: {unit: 1, alive: true}
-  - assert: {current_team: blue}  # No plan recorded by the gated no-op.
 
+  # The gated no-op recorded no plan, so blue0 still needs one before the
+  # round can commit; both figures pass and the round resolves with no shots.
   - action: cancel
     actor: 0
   - action: pass
     actor: 0
-  - action: commit
-  - assert: {current_team: red}
-
   - action: pass
     actor: 1
   - action: commit
-  - assert: {current_team: blue}
+  - assert: {unit: 0, alive: true}
+  - assert: {unit: 1, alive: true}
   - assert: {round: 2}

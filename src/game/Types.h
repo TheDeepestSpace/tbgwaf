@@ -46,7 +46,11 @@ constexpr float kEyeHeight = 1.5f;
 constexpr float kShootRange = 45.0f;          // Effectively unlimited within the map.
 constexpr float kShootHalfFovDegrees = 75.0f;  // 150 degree total FOV cone.
 constexpr float kKnockdownDuration = 0.4f;  // Seconds for a hit unit to fall over.
-constexpr float kMoveSpeed = 4.0f;  // World units per second for move animation.
+constexpr float kMoveSpeed = 4.0f;  // Default run speed, world units per second.
+// WEGO rounds: both teams' committed plans execute together over one
+// fixed-length window. A figure's plannable move distance is bounded by
+// runSpeed * kRoundDuration, so every move animation fits in the window.
+constexpr float kRoundDuration = 5.0f;  // Seconds of execution per round.
 // Visual length of the rendered FOV cone overlay. Sized off kShootRange
 // (already bigger than the map diagonal, 2*kMapHalfExtent*sqrt(2) ~= 42.4)
 // so the cone visually reaches the map edge no matter where a unit stands

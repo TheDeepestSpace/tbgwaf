@@ -9,11 +9,12 @@
 
 namespace tactics {
 
-// Plan-then-commit turn model: during a team's planning phase, choosing an
-// action for a figure only records what it *will* do -- nothing executes
-// until the whole team's turn is committed (see GameLogic::CommitTurn).
-// Overwatch doesn't act immediately either: it just arms triggerAction below
-// as part of the same commit.
+// WEGO plan-then-commit round model: during the planning phase both teams
+// choose an action for each of their figures, which only records what the
+// figure *will* do -- nothing executes until the whole round is committed
+// (see GameLogic::CommitRound), at which point every plan on both teams
+// plays out together. Overwatch doesn't act immediately either: it just
+// arms triggerAction below as part of the same commit.
 enum class PlannedActionType { None, Move, Shoot, Pass, Overwatch };
 
 struct PlannedAction {
@@ -39,8 +40,13 @@ struct Unit {
   // around it topples the figure in the shot's direction of travel.
   glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
   float knockdownElapsed = -1.0f;  // Seconds since hit; <0 = not falling.
-  PlannedAction plan;  // This figure's plan for the current/upcoming team commit.
+  float runSpeed = constants::kMoveSpeed;  // World units per second while moving.
+  PlannedAction plan;  // This figure's plan for the current/upcoming round commit.
   TriggerAction triggerAction = TriggerAction::None;
+
+  // How far this figure can move in one round's fixed execution window --
+  // the plannable path-length cap enforced by GameLogic::ClickGround.
+  float MoveBudget() const { return runSpeed * constants::kRoundDuration; }
 
   glm::vec3 EyePosition() const {
     return position + glm::vec3(0.0f, constants::kEyeHeight, 0.0f);

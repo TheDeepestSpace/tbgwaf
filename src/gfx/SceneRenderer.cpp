@@ -574,10 +574,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glEnable(GL_STENCIL_TEST);
   glStencilFunc(GL_EQUAL, 0, 0xFF);
   glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+  // The cone sits a hair above the ground; on a large map the depth buffer's
+  // resolution at distance exceeds that gap, so bias it toward the camera to
+  // avoid z-fighting speckle.
+  glEnable(GL_POLYGON_OFFSET_FILL);
+  glPolygonOffset(-2.0f, -4.0f);
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.team != team) continue;
     DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit, obstacles);
   }
+  glDisable(GL_POLYGON_OFFSET_FILL);
   glDisable(GL_STENCIL_TEST);
   glDepthMask(GL_TRUE);
   glDisable(GL_BLEND);

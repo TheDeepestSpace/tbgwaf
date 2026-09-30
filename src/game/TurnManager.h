@@ -26,6 +26,18 @@ class TurnManager {
 
   int RoundNumber() const { return roundNumber_; }
 
+  // Full turn-order state, exposed so a match can be mirrored between two
+  // GameLogic instances (see GameLogic::ExportState / ImportState).
+  struct State {
+    Team currentTeam = Team::Blue;
+    int roundNumber = 0;
+  };
+  State GetState() const { return State{currentTeam_, roundNumber_}; }
+  void SetState(const State& state) {
+    currentTeam_ = state.currentTeam;
+    roundNumber_ = state.roundNumber;
+  }
+
  private:
   Team currentTeam_ = Team::Blue;
   int roundNumber_ = 0;

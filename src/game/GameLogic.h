@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -23,6 +24,32 @@ enum class InputMode {
   Moving,                 // A planned move is animating as part of a turn commit.
   GameOver,
 };
+
+// Serializable dynamic match state (everything that changes after Reset()
+// on a fixed scene). Used to mirror one authoritative match into a second,
+// non-simulating instance (two-pane play): the follower imports snapshots
+// instead of re-simulating, so float divergence can't desync the two.
+struct GameSnapshot {
+  struct UnitState {
+    int id = -1;
+    glm::vec3 position{0.0f};
+    float facingYaw = 0.0f;
+    bool alive = true;
+    TriggerAction triggerAction = TriggerAction::None;
+    PlannedActionType planType = PlannedActionType::None;  // Move paths are not mirrored.
+    int planShootTargetId = -1;
+  };
+  std::vector<UnitState> units;
+  TurnManager::State turn;
+  InputMode mode = InputMode::AwaitingSelection;
+  int selectedUnitId = -1;  // -1 = none.
+  int winner = -1;          // -1 = none, else static_cast<int>(Team).
+};
+
+// Text encoding of a snapshot (for the page-level message bus). Deserialize
+// returns false on malformed input.
+std::string SerializeSnapshot(const GameSnapshot& snapshot);
+bool DeserializeSnapshot(const std::string& text, GameSnapshot* out);
 
 // Owns the whole game state machine: scene, navmesh, turn order, and the
 // click-driven plan-then-commit flow. Deliberately free of any SDL/GL/ImGui
@@ -99,6 +126,13 @@ class GameLogic {
   // Plans overwatch (triggerAction = Shoot, armed once this commits) on the
   // acting unit, the same way ChoosePass() plans a pass.
   void ChooseOverwatch();
+
+  // Snapshot of the dynamic match state. ImportState overwrites this
+  // instance's state with it (any in-flight move/preview is dropped) and
+  // returns false, leaving state untouched, if the snapshot doesn't match
+  // this scene's units.
+  GameSnapshot ExportState() const;
+  bool ImportState(const GameSnapshot& snapshot);
 
   // Steps back one level: AwaitingMove/ShootTarget -> ActionMenu -> AwaitingSelection.
   void CancelAction();

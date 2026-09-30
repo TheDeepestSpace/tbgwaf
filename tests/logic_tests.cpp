@@ -766,6 +766,39 @@ void TestGameLogicWinCondition() {
 
 }  // namespace
 
+void TestSnapshotRoundTripMirrorsMatch() {
+  GameLogic a;
+  a.ClickUnit(0);
+  a.ChooseMove();
+  a.ClickGround(glm::vec3(0.0f, 0.0f, 0.0f));
+  a.ClickUnit(1);
+  a.ChoosePass();
+  a.ClickUnit(2);
+  a.ChoosePass();
+  a.CommitTurn();
+  a.Update(0.5f);  // Mid-move: positions/facing have changed.
+
+  GameSnapshot decoded;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(a.ExportState()), &decoded));
+
+  GameLogic b;
+  CHECK(b.ImportState(decoded));
+  CHECK(b.Mode() == a.Mode());
+  CHECK(b.CurrentTeam() == a.CurrentTeam());
+  CHECK(b.SelectedUnitId() == a.SelectedUnitId());
+  CHECK(b.RoundNumber() == a.RoundNumber());
+  for (const auto& unit : a.GetScene().units) {
+    const Unit* mirrored = b.FindUnit(unit.id);
+    CHECK(mirrored && mirrored->position == unit.position);
+    CHECK(mirrored && mirrored->facingYaw == unit.facingYaw);
+    CHECK(mirrored && mirrored->plan.type == unit.plan.type);
+  }
+
+  GameSnapshot bad;
+  CHECK(!DeserializeSnapshot("garbage", &bad));
+  CHECK(!DeserializeSnapshot("", &bad));
+}
+
 int main() {
   TestNavMeshRoutesAroundObstacle();
   TestNavMeshDirectPathWhenUnobstructed();
@@ -791,6 +824,7 @@ int main() {
   TestGameLogicMoveCanClimbOntoObstacle();
   TestGameLogicOverwatchFiresOnEnemyEnteringFov();
   TestGameLogicWinCondition();
+  TestSnapshotRoundTripMirrorsMatch();
 
   if (g_failures == 0) {
     std::printf("All logic tests passed.\n");

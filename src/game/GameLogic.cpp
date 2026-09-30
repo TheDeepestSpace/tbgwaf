@@ -66,7 +66,6 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   }
   movePreviewPath_.clear();
   movePreviewValid_ = false;
-  pendingMovePath_.clear();
   activeMoves_.clear();
   return true;
 }
@@ -194,37 +193,25 @@ void GameLogic::ClickGround(const glm::vec3& point) {
     }
   }
 
-  // Not planned yet: the player still picks the final facing. NavMesh::
-  // FindPath always returns at least [start, goal] on success.
-  pendingMovePath_ = std::move(path);
-  pendingFacingYaw_ = yaw;
-  mode_ = InputMode::ConfirmingMoveFacing;
+  // Plan immediately; the facing stays adjustable via SetPlannedMoveFacing()
+  // until the turn is committed. NavMesh::FindPath always returns at least
+  // [start, goal] on success.
+  mover->plan.type = PlannedActionType::Move;
+  mover->plan.movePath = std::move(path);
+  mover->plan.endFacingYaw = yaw;
+  mover->plan.shootTargetId = -1;
+  selectedUnitId_.reset();
   movePreviewPath_.clear();
   movePreviewValid_ = false;
-}
-
-void GameLogic::SetPendingMoveFacing(float yaw) {
-  if (mode_ != InputMode::ConfirmingMoveFacing) return;
-  pendingFacingYaw_ = std::remainder(yaw, 2.0f * 3.14159265358979f);
-}
-
-void GameLogic::RotatePendingMoveFacing(float deltaYaw) {
-  if (mode_ != InputMode::ConfirmingMoveFacing) return;
-  SetPendingMoveFacing(pendingFacingYaw_ + deltaYaw);
-}
-
-void GameLogic::ConfirmMove() {
-  if (mode_ != InputMode::ConfirmingMoveFacing) return;
-  Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
-  if (!mover) return;
-  // Plan only: nothing moves until this plan is executed by CommitTurn().
-  mover->plan.type = PlannedActionType::Move;
-  mover->plan.movePath = std::move(pendingMovePath_);
-  mover->plan.endFacingYaw = pendingFacingYaw_;
-  mover->plan.shootTargetId = -1;
-  pendingMovePath_.clear();
-  selectedUnitId_.reset();
   mode_ = InputMode::AwaitingSelection;
+}
+
+void GameLogic::SetPlannedMoveFacing(int unitId, float yaw) {
+  if (mode_ == InputMode::Moving || mode_ == InputMode::GameOver) return;
+  Unit* unit = FindUnit(unitId);
+  if (!unit || !unit->alive || unit->team != CurrentTeam()) return;
+  if (unit->plan.type != PlannedActionType::Move || unit->plan.movePath.empty()) return;
+  unit->plan.endFacingYaw = std::remainder(yaw, 2.0f * 3.14159265358979f);
 }
 
 void GameLogic::Update(float dtSeconds) {
@@ -332,11 +319,7 @@ void GameLogic::ChooseOverwatch() {
 }
 
 void GameLogic::CancelAction() {
-  if (mode_ == InputMode::ConfirmingMoveFacing) {
-    pendingMovePath_.clear();
-    mode_ = InputMode::AwaitingMoveDestination;
-  } else if (mode_ == InputMode::AwaitingMoveDestination ||
-             mode_ == InputMode::AwaitingShootTarget) {
+  if (mode_ == InputMode::AwaitingMoveDestination || mode_ == InputMode::AwaitingShootTarget) {
     mode_ = InputMode::ActionMenu;
     movePreviewPath_.clear();
     movePreviewValid_ = false;

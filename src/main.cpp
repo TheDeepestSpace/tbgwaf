@@ -260,6 +260,7 @@ int main() {
   bool quit = false;
   bool leftDragging = false;
   constexpr float kClickDragThresholdPx = 5.0f;
+  int aimedUnitId = -1;  // Unit whose planned-move ghost is being dragged, or -1.
   float leftDragDistance = 0.0f;  // Accumulated pixels moved during the current left-drag.
   glm::vec3 hoveredGroundPoint(0.0f);
   bool hasHoveredGroundPoint = false;
@@ -353,12 +354,38 @@ int main() {
       } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
         leftDragging = true;
         leftDragDistance = 0.0f;
+        // Grabbing a planned move's wireframe ghost re-aims its final facing
+        // (instead of panning) until the button is released.
+        aimedUnitId = -1;
+        if (isActive && !ImGui::GetIO().WantCaptureMouse && game.Mode() != InputMode::Moving &&
+            game.Mode() != InputMode::GameOver) {
+          const gfx::Ray grabRay = camera.ScreenPointToRay(
+              static_cast<float>(event.button.x), static_cast<float>(event.button.y),
+              static_cast<float>(windowWidth), static_cast<float>(windowHeight));
+          if (std::fabs(grabRay.direction.y) > 1e-4f) {
+            constexpr float kGrabRadius = 0.7f;
+            for (const Unit& unit : game.GetScene().units) {
+              if (!unit.alive || unit.team != game.CurrentTeam() ||
+                  unit.plan.type != tactics::PlannedActionType::Move || unit.plan.movePath.empty()) {
+                continue;
+              }
+              const glm::vec3 dest = unit.plan.movePath.back();
+              const float t = (dest.y + 0.9f - grabRay.origin.y) / grabRay.direction.y;
+              if (t <= 0.0f) continue;
+              const glm::vec3 hit = grabRay.origin + grabRay.direction * t;
+              if (glm::length(glm::vec2(hit.x - dest.x, hit.z - dest.z)) <= kGrabRadius) {
+                aimedUnitId = unit.id;
+                break;
+              }
+            }
+          }
+        }
       } else if (event.type == SDL_MOUSEMOTION) {
         mouseX = event.motion.x;
         mouseY = event.motion.y;
-        // While choosing a move's final facing, left-drag aims the ghost
-        // (handled after the UI pass) instead of panning the camera.
-        const bool aimingFacing = isActive && game.Mode() == InputMode::ConfirmingMoveFacing;
+        // While a ghost is grabbed, left-drag aims it (handled after the UI
+        // pass) instead of panning the camera.
+        const bool aimingFacing = aimedUnitId >= 0;
         if (leftDragging && !ImGui::GetIO().WantCaptureMouse) {
           leftDragDistance += std::hypot(static_cast<float>(event.motion.xrel),
                                           static_cast<float>(event.motion.yrel));
@@ -382,6 +409,7 @@ int main() {
         if (leftDragDistance < kClickDragThresholdPx) leftClickPending = true;
         leftDragging = false;
         leftDragDistance = 0.0f;
+        aimedUnitId = -1;
         leftClickX = event.button.x;
         leftClickY = event.button.y;
       } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
@@ -443,9 +471,6 @@ int main() {
         case InputMode::AwaitingMoveDestination:
           ImGui::TextWrapped("Click a destination on the ground (Esc to cancel).");
           break;
-        case InputMode::ConfirmingMoveFacing:
-          ImGui::TextWrapped("Drag to turn the ghost, then click or press Confirm (Esc to go back).");
-          break;
         case InputMode::AwaitingShootTarget:
           ImGui::TextWrapped("Click an enemy figure to plan a shot (Esc to cancel).");
           break;
@@ -464,7 +489,6 @@ int main() {
         const Unit* selected = game.FindUnit(*selectedId);
         if (selected && (game.Mode() == InputMode::ActionMenu ||
                           game.Mode() == InputMode::AwaitingMoveDestination ||
-                          game.Mode() == InputMode::ConfirmingMoveFacing ||
                           game.Mode() == InputMode::AwaitingShootTarget)) {
           const glm::mat4 view = camera.ViewMatrix();
           const glm::mat4 proj = camera.ProjectionMatrix(aspect);
@@ -487,10 +511,6 @@ int main() {
             if (ImGui::Button("Overwatch")) game.ChooseOverwatch();
             ImGui::SameLine();
             if (ImGui::Button("Pass")) game.ChoosePass();
-          } else if (game.Mode() == InputMode::ConfirmingMoveFacing) {
-            if (ImGui::Button("Confirm")) game.ConfirmMove();
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel")) game.CancelAction();
           } else {
             if (ImGui::Button("Cancel")) game.CancelAction();
           }
@@ -526,27 +546,23 @@ int main() {
           game.HoverGround(hoverPoint);
         }
       }
-      if (game.Mode() == InputMode::ConfirmingMoveFacing) {
-        if (leftDragging && leftDragDistance >= kClickDragThresholdPx) {
-          // Aim the ghost at the cursor's point on the destination's plane.
-          const gfx::Ray aimRay =
-              camera.ScreenPointToRay(static_cast<float>(mouseX), static_cast<float>(mouseY),
-                                       static_cast<float>(windowWidth),
-                                       static_cast<float>(windowHeight));
-          const glm::vec3 dest = game.PendingMoveDestination();
-          if (std::fabs(aimRay.direction.y) > 1e-4f) {
-            const float t = (dest.y - aimRay.origin.y) / aimRay.direction.y;
-            if (t > 0.0f) {
-              const glm::vec3 hit = aimRay.origin + aimRay.direction * t;
-              if (glm::length(glm::vec2(hit.x - dest.x, hit.z - dest.z)) > 0.1f) {
-                game.SetPendingMoveFacing(std::atan2(hit.z - dest.z, hit.x - dest.x));
-              }
+      if (aimedUnitId >= 0 && leftDragging && leftDragDistance >= kClickDragThresholdPx) {
+        // Aim the ghost at the cursor's point on the destination's plane.
+        const Unit* aimed = game.FindUnit(aimedUnitId);
+        const gfx::Ray aimRay =
+            camera.ScreenPointToRay(static_cast<float>(mouseX), static_cast<float>(mouseY),
+                                     static_cast<float>(windowWidth),
+                                     static_cast<float>(windowHeight));
+        if (aimed && !aimed->plan.movePath.empty() && std::fabs(aimRay.direction.y) > 1e-4f) {
+          const glm::vec3 dest = aimed->plan.movePath.back();
+          const float t = (dest.y - aimRay.origin.y) / aimRay.direction.y;
+          if (t > 0.0f) {
+            const glm::vec3 hit = aimRay.origin + aimRay.direction * t;
+            if (glm::length(glm::vec2(hit.x - dest.x, hit.z - dest.z)) > 0.1f) {
+              game.SetPlannedMoveFacing(aimedUnitId, std::atan2(hit.z - dest.z, hit.x - dest.x));
             }
           }
         }
-        // A plain click (not a drag) locks the move in.
-        if (leftClickPending) game.ConfirmMove();
-        leftClickPending = false;
       }
       if (leftClickPending) {
         const gfx::Ray clickRay =
@@ -596,16 +612,6 @@ int main() {
       if (const auto selectedId = game.SelectedUnitId()) {
         if (const Unit* selected = game.FindUnit(*selectedId)) {
           overlays.selectionHighlight = selected->position;
-        }
-      }
-      if (game.Mode() == InputMode::ConfirmingMoveFacing) {
-        if (const auto selectedId = game.SelectedUnitId()) {
-          if (const Unit* selected = game.FindUnit(*selectedId)) {
-            Unit ghost = *selected;
-            ghost.position = game.PendingMoveDestination();
-            ghost.facingYaw = game.PendingMoveFacing();
-            overlays.facingGhost = ghost;
-          }
         }
       }
       if (game.Mode() == InputMode::AwaitingMoveDestination) {

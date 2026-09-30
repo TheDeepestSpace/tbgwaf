@@ -230,8 +230,9 @@ void DrawWireBox(const Shader& shader, LineMesh& lines, const glm::mat4& viewPro
 
 void DrawUnitWireframe(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
                        const Unit& unit) {
-  const glm::vec4 color = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
-                                                  : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
+  // Blue: the planned-path green; red: the matching red plan color.
+  const glm::vec4 color = unit.team == Team::Blue ? glm::vec4(0.3f, 0.9f, 0.4f, 1.0f)
+                                                  : glm::vec4(0.95f, 0.25f, 0.2f, 1.0f);
   glm::vec3 bodyMin, bodySize, headMin, headSize;
   UnitBoxes(unit, &bodyMin, &bodySize, &headMin, &headSize);
   DrawWireBox(shader, lines, viewProj, BoxModel(bodyMin, bodySize), color);
@@ -513,9 +514,6 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawHighlight(unlitShader_, cubeMesh_, viewProj, *overlays.invalidHoverHighlight,
                   glm::vec4(0.9f, 0.15f, 0.15f, 1.0f));
   }
-  if (overlays.facingGhost) {
-    DrawUnitWireframe(unlitShader_, pathLine_, viewProj, *overlays.facingGhost);
-  }
   // Visual feedback for the whole squad's plan so far: a planned move reuses
   // the same path-line rendering as the live preview above; a planned shot
   // gets a simple shooter->target line.
@@ -527,6 +525,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         unlitShader_.SetMat4("uMVP", viewProj);
         unlitShader_.SetVec4("uColor", glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
         pathLine_.Draw();
+        // Wireframe stand-in at the destination, showing the planned final
+        // facing (persists until the turn is committed).
+        Unit ghost = unit;
+        ghost.position = unit.plan.movePath.back();
+        ghost.facingYaw = unit.plan.endFacingYaw;
+        DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost);
       } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
         if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {
           const std::vector<glm::vec3> shotLine = {unit.EyePosition(), shotTarget->EyePosition()};

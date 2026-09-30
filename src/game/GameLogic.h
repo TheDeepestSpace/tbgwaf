@@ -20,7 +20,6 @@ enum class InputMode {
   AwaitingSelection,      // Waiting for a click on one of the acting team's living figures.
   ActionMenu,             // A figure is selected; waiting for Move/Shoot/Pass to plan its action.
   AwaitingMoveDestination,  // Waiting for a ground click to plan a move to.
-  ConfirmingMoveFacing,   // Destination picked; adjusting the final facing before locking the move in.
   AwaitingShootTarget,    // Waiting for a click on an enemy figure to plan a shot at.
   Moving,                 // A planned move is animating as part of a turn commit.
   GameOver,
@@ -124,20 +123,9 @@ class GameLogic {
   void ChooseShoot();
   void ChoosePass();
 
-  // Move facing step, valid only while Mode() == ConfirmingMoveFacing.
-  // ClickGround() stashes the destination and enters this mode with the
-  // pending facing defaulted to the path's natural final-segment direction;
-  // ConfirmMove() writes the Move plan (with that facing) and returns to
-  // unit selection. CancelAction() steps back to picking a destination.
-  void SetPendingMoveFacing(float yaw);
-  void RotatePendingMoveFacing(float deltaYaw);
-  void ConfirmMove();
-  float PendingMoveFacing() const { return pendingFacingYaw_; }
-  // Destination of the pending move (last path point); only meaningful while
-  // Mode() == ConfirmingMoveFacing.
-  glm::vec3 PendingMoveDestination() const {
-    return pendingMovePath_.empty() ? glm::vec3(0.0f) : pendingMovePath_.back();
-  }
+  // Re-aims a planned move's final facing. Allowed at any time before the
+  // turn is committed; no-op for units without a planned move.
+  void SetPlannedMoveFacing(int unitId, float yaw);
 
   // Plans overwatch (triggerAction = Shoot, armed once this commits) on the
   // acting unit, the same way ChoosePass() plans a pass.
@@ -197,8 +185,6 @@ class GameLogic {
   std::optional<int> selectedUnitId_;
   std::optional<Team> winner_;
 
-  std::vector<glm::vec3> pendingMovePath_;  // Chosen but not yet confirmed move.
-  float pendingFacingYaw_ = 0.0f;
   std::vector<glm::vec3> movePreviewPath_;
   bool movePreviewValid_ = false;
 

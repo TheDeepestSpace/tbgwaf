@@ -46,6 +46,7 @@ struct GameSnapshot {
     PlannedActionType planType = PlannedActionType::None;
     int planShootTargetId = -1;
     std::vector<glm::vec3> planPath;
+    float planEndFacingYaw = 0.0f;
     glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
     float knockdownElapsed = -1.0f;
     // Figure animation state (see Unit): a follower mirrors these rather
@@ -150,6 +151,10 @@ class GameLogic {
   void ChooseShoot();
   void ChoosePass();
 
+  // Re-aims a planned move's final facing. Allowed at any time before the
+  // round is committed, by the unit's own team; no-op for units without a planned move.
+  void SetPlannedMoveFacing(int unitId, float yaw, Team byTeam);
+
   // Plans overwatch (triggerAction = Shoot, armed once this commits) on the
   // acting unit, the same way ChoosePass() plans a pass.
   void ChooseOverwatch();
@@ -192,6 +197,7 @@ class GameLogic {
     int unitId = -1;
     std::vector<glm::vec3> path;
     size_t segment = 0;
+    float endFacingYaw = 0.0f;  // Snapped to once the path is consumed.
   };
 
   // A planned shot waiting for its first tick with valid FOV+LOS. Expires

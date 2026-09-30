@@ -62,6 +62,7 @@ GameSnapshot GameLogic::ExportState() const {
     u.planType = unit.plan.type;
     u.planShootTargetId = unit.plan.shootTargetId;
     u.planPath = unit.plan.movePath;
+    u.planEndFacingYaw = unit.plan.endFacingYaw;
     u.knockdownAxis = unit.knockdownAxis;
     u.knockdownElapsed = unit.knockdownElapsed;
     u.walkPhase = unit.walkPhase;
@@ -94,6 +95,7 @@ void ApplyPlan(const GameSnapshot::UnitState& u, Unit* unit) {
   unit->plan.type = u.planType;
   unit->plan.shootTargetId = u.planShootTargetId;
   unit->plan.movePath = u.planPath;
+  unit->plan.endFacingYaw = u.planEndFacingYaw;
 }
 
 }  // namespace
@@ -149,7 +151,7 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
   for (const auto& u : snap.units) {
     out << ' ' << u.id << ' ' << u.position.x << ' ' << u.position.y << ' ' << u.position.z << ' '
         << u.facingYaw << ' ' << (u.alive ? 1 : 0) << ' ' << static_cast<int>(u.triggerAction)
-        << ' ' << static_cast<int>(u.planType) << ' ' << u.planShootTargetId << ' '
+        << ' ' << static_cast<int>(u.planType) << ' ' << u.planShootTargetId << ' ' << u.planEndFacingYaw << ' '
         << u.knockdownAxis.x << ' ' << u.knockdownAxis.y << ' ' << u.knockdownAxis.z << ' '
         << u.knockdownElapsed << ' ' << u.walkPhase << ' ' << u.walkBlend << ' '
         << u.shootElapsed << ' ' << u.shootAimYaw << ' ' << (u.moving ? 1 : 0) << ' '
@@ -175,9 +177,9 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
     int alive = 0, trigger = 0, plan = 0, moving = 0;
     size_t pathCount = 0;
     if (!(in >> u.id >> u.position.x >> u.position.y >> u.position.z >> u.facingYaw >> alive >>
-          trigger >> plan >> u.planShootTargetId >> u.knockdownAxis.x >> u.knockdownAxis.y >>
-          u.knockdownAxis.z >> u.knockdownElapsed >> u.walkPhase >> u.walkBlend >>
-          u.shootElapsed >> u.shootAimYaw >> moving >> pathCount)) {
+          trigger >> plan >> u.planShootTargetId >> u.planEndFacingYaw >> u.knockdownAxis.x >>
+          u.knockdownAxis.y >> u.knockdownAxis.z >> u.knockdownElapsed >> u.walkPhase >>
+          u.walkBlend >> u.shootElapsed >> u.shootAimYaw >> moving >> pathCount)) {
       return false;
     }
     if (trigger < 0 || trigger > static_cast<int>(TriggerAction::Shoot)) return false;
@@ -266,15 +268,37 @@ void GameLogic::ClickGround(const glm::vec3& point, Team byTeam) {
   // as it can actually run in that time.
   if (PathLength(path) > mover->MoveBudget()) return;
 
+  // Default the final facing to the path's last non-degenerate segment
+  // direction (what the walk animation would leave the figure facing), so an
+  // untouched ghost costs nothing extra.
+  float yaw = mover->facingYaw;
+  for (size_t i = path.size(); i-- > 1;) {
+    const glm::vec3 delta = path[i] - path[i - 1];
+    if (glm::length(glm::vec2(delta.x, delta.z)) > 1e-4f) {
+      yaw = std::atan2(delta.z, delta.x);
+      break;
+    }
+  }
+
   // Plan only: NavMesh::FindPath always returns at least [start, goal] on
-  // success. Nothing moves until this plan is executed by CommitRound().
+  // success. Nothing moves until this plan is executed by CommitRound(); the
+  // facing stays adjustable via SetPlannedMoveFacing() until then.
   mover->plan.type = PlannedActionType::Move;
   mover->plan.movePath = std::move(path);
+  mover->plan.endFacingYaw = yaw;
   mover->plan.shootTargetId = -1;
   selectedUnitId_.reset();
-  mode_ = InputMode::AwaitingSelection;
   movePreviewPath_.clear();
   movePreviewValid_ = false;
+  mode_ = InputMode::AwaitingSelection;
+}
+
+void GameLogic::SetPlannedMoveFacing(int unitId, float yaw, Team byTeam) {
+  if (mode_ == InputMode::Executing || mode_ == InputMode::GameOver) return;
+  Unit* unit = FindUnit(unitId);
+  if (!unit || !unit->alive || unit->team != byTeam) return;
+  if (unit->plan.type != PlannedActionType::Move || unit->plan.movePath.empty()) return;
+  unit->plan.endFacingYaw = std::remainder(yaw, 2.0f * 3.14159265358979f);
 }
 
 void GameLogic::Update(float dtSeconds) {
@@ -344,6 +368,10 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
       constexpr float kTwoPi = 6.28318530717958647692f;
       mover->walkPhase =
           std::fmod(mover->walkPhase + step * (kTwoPi / constants::kWalkStrideLength), kTwoPi);
+    }
+
+    if (mover->alive && move.segment + 1 >= move.path.size()) {
+      mover->facingYaw = move.endFacingYaw;
     }
 
     if (TriggerOverwatch(*mover)) {
@@ -518,7 +546,7 @@ void GameLogic::CommitRound() {
     unit.plan = PlannedAction{};
 
     if (plan.type == PlannedActionType::Move) {
-      activeMoves_.push_back(ActiveMove{unit.id, plan.movePath, 0});
+      activeMoves_.push_back(ActiveMove{unit.id, plan.movePath, 0, plan.endFacingYaw});
     } else if (plan.type == PlannedActionType::Shoot) {
       pendingShots_.push_back(PendingShot{unit.id, plan.shootTargetId});
     } else if (plan.type == PlannedActionType::Overwatch) {

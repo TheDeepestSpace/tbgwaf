@@ -5,11 +5,13 @@
 // same GameLogic click/choose API a real player uses (ClickUnit/ChooseMove/
 // ChooseShoot/ChoosePass/ClickGround), so a scenario exercises exactly the
 // same code path as the interactive game. No rendering: assertions only see
-// game *state* (positions, alive/dead, FOV visibility, turn order, winner).
+// game *state* (positions, alive/dead, FOV visibility, round number, winner).
 //
-// Actions only ever plan a figure's move/shoot/pass; a plan-then-commit
-// team's turn doesn't execute anything until a script's own explicit
-// `action: commit` step, which mirrors clicking "Commit Turn".
+// Actions only ever plan a figure's move/shoot/pass. Both teams plan the
+// same WEGO round concurrently, so a script interleaves actors from either
+// side freely; nothing executes until the script's own explicit
+// `action: commit` step, which mirrors clicking "Commit Round" and plays
+// out every figure's plan on both teams simultaneously.
 //
 // See tests/scenarios/*.yaml for the file format by example, and
 // tests/scenario_tests.cpp for how these are run in CI.
@@ -57,7 +59,6 @@ struct ScenarioAssertion {
   bool checkWinner = false;
   std::optional<Team> expectedWinner;  // nullopt means "no winner yet".
 
-  std::optional<Team> currentTeam;
   std::optional<int> round;
 };
 

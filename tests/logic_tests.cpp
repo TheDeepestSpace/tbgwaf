@@ -1,16 +1,16 @@
 // Headless logic tests for Stage A: navmesh/pathfinding, raycast LOS/FOV,
-// turn ordering, and the click-driven game state machine. No SDL/GL/ImGui
+// WEGO round phases, and the click-driven game state machine. No SDL/GL/ImGui
 // dependency, so this runs in plain CI without a display.
 
 #include <cmath>
 #include <cstdio>
+#include <initializer_list>
 #include <vector>
 
 #include "game/GameLogic.h"
 #include "game/NavMesh.h"
 #include "game/Raycast.h"
 #include "game/Scene.h"
-#include "game/TurnManager.h"
 #include "game/Types.h"
 #include "game/Visibility.h"
 
@@ -295,24 +295,6 @@ void TestTeamVisibilityAggregatesAcrossFigures() {
   CHECK(!visibility.ObstacleVisible(1));  // Crate behind blueB: outside every cone.
 }
 
-void TestTurnManagerAlternatesByTeamAndRounds() {
-  // Plan-then-commit turn model: a "turn" is a whole team's block, not a
-  // single figure, so the manager just alternates Blue/Red and bumps the
-  // round once both have gone.
-  TurnManager tm;
-  tm.StartRound();
-  CHECK(tm.CurrentTeam() == Team::Blue);
-  CHECK(tm.RoundNumber() == 1);
-
-  tm.AdvanceTurn();
-  CHECK(tm.CurrentTeam() == Team::Red);
-  CHECK(tm.RoundNumber() == 1);
-
-  tm.AdvanceTurn();
-  CHECK(tm.CurrentTeam() == Team::Blue);
-  CHECK(tm.RoundNumber() == 2);
-}
-
 void TestCheckWinner() {
   std::vector<Unit> units(2);
   units[0].id = 0;
@@ -327,161 +309,277 @@ void TestCheckWinner() {
   CHECK(CheckWinner(units) == Team::Blue);
 
   units[0].alive = false;
-  CHECK(!CheckWinner(units).has_value());  // Both dead: no winner.
+  CHECK(!CheckWinner(units).has_value());  // Both dead: no winner (a draw).
 }
 
-void TestGameLogicSelectionGating() {
+void TestRoundPlanningTeamGating() {
   GameLogic game(LegacyScene());
   CHECK(game.Mode() == InputMode::AwaitingSelection);
-  CHECK(game.CurrentTeam() == Team::Blue);  // Blue plans first (Scene builds Blue ids 0-2, Red 3-5).
+  CHECK(game.RoundNumber() == 1);
 
-  // Clicking a figure on the non-acting team must be a no-op.
-  game.ClickUnit(3);
+  // Input is team-tagged (the pane a click lands in): a click from Blue's
+  // side must never select a Red figure, even though both teams plan the
+  // same round.
+  game.ClickUnit(3, Team::Blue);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(!game.SelectedUnitId().has_value());
 
-  // Any living figure on the acting team can be selected to plan its action
-  // -- there's no single "current actor" any more, the whole squad plans.
-  game.ClickUnit(1);
+  // Any living figure can be (re)selected by its own side to set or revise
+  // its plan -- there's no single "current actor", the whole squad plans.
+  game.ClickUnit(1, Team::Blue);
   CHECK(game.Mode() == InputMode::ActionMenu);
   CHECK(game.SelectedUnitId() == 1);
-
   game.CancelAction();
-  CHECK(game.Mode() == InputMode::AwaitingSelection);
-  CHECK(!game.SelectedUnitId().has_value());
+
+  // Both teams plan concurrently: Red can select its own figure without
+  // waiting for Blue to finish (or commit) anything.
+  game.ClickUnit(3, Team::Red);
+  CHECK(game.Mode() == InputMode::ActionMenu);
+  CHECK(game.SelectedUnitId() == 3);
+  game.CancelAction();
+
+  // While Blue is aiming a shot, a click from Red's side must not pick the
+  // target for it (it could otherwise steer Blue's shot at Red's choosing).
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+  game.ClickUnit(4, Team::Red);
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::None);
+  game.ClickUnit(4, Team::Blue);
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Shoot);
+  CHECK(game.FindUnit(0)->plan.shootTargetId == 4);
 }
 
-void TestGameLogicPlanThenCommitDefersExecutionAndAppliesSimultaneously() {
+void TestRoundCommitRequiresBothTeamsPlanned() {
   GameLogic game(LegacyScene());
-  CHECK(game.CurrentTeam() == Team::Blue);
 
   const glm::vec3 blue0Start = game.FindUnit(0)->position;
-  const glm::vec3 blue1Start = game.FindUnit(1)->position;
 
-  // Plan a move on blue0, a shoot (open lane, would hit) on blue1, and a
-  // pass on blue2 -- one action per figure, nothing executes yet.
-  game.ClickUnit(0);
+  // Blue plans a move, a shot down the open middle lane, and a pass.
+  game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
   const glm::vec3 destination(-3.0f, 0.0f, -4.0f);
-  game.ClickGround(destination);
+  game.ClickGround(destination, Team::Blue);
   CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Move);
-
-  game.ClickUnit(1);
+  game.ClickUnit(1, Team::Blue);
   game.ChooseShoot();
-  game.ClickUnit(4);
-  CHECK(game.FindUnit(1)->plan.type == tactics::PlannedActionType::Shoot);
-  CHECK(game.FindUnit(1)->plan.shootTargetId == 4);
-
-  CHECK(!game.CanCommitTurn());  // blue2 hasn't planned yet.
-  game.ClickUnit(2);
+  game.ClickUnit(4, Team::Blue);
+  game.ClickUnit(2, Team::Blue);
   game.ChoosePass();
-  CHECK(game.FindUnit(2)->plan.type == tactics::PlannedActionType::Pass);
-  CHECK(game.CanCommitTurn());
+
+  // Every living Blue figure has a plan, but the round can't commit until
+  // Red's squad is fully planned too -- both teams execute together.
+  CHECK(!game.CanCommitRound());
+
+  for (int redId : {3, 4, 5}) {
+    game.ClickUnit(redId, Team::Red);
+    game.ChoosePass();
+  }
+  CHECK(game.CanCommitRound());
 
   // World state is completely unchanged by planning alone.
   CHECK(glm::distance(game.FindUnit(0)->position, blue0Start) < 1e-6f);
-  CHECK(glm::distance(game.FindUnit(1)->position, blue1Start) < 1e-6f);
   CHECK(game.FindUnit(4)->alive);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
-  CHECK(game.CurrentTeam() == Team::Blue);
+  CHECK(game.RoundNumber() == 1);
 
-  game.CommitTurn();
+  game.CommitRound();
 
-  // Shots resolve the instant the turn is committed -- blue1's shot doesn't
-  // wait on blue0's move animation to finish.
-  CHECK(game.Mode() == InputMode::Moving);
-  CHECK(!game.FindUnit(4)->alive);          // blue1's planned shot already applied.
+  // blue1's shot already connects at the pre-move positions, so it fires
+  // the instant the round starts -- it doesn't wait on blue0's move.
+  CHECK(game.Mode() == InputMode::Executing);
+  CHECK(!game.FindUnit(4)->alive);
   CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::None);  // Plans cleared.
   CHECK(game.FindUnit(1)->plan.type == tactics::PlannedActionType::None);
-  CHECK(game.IsUnitMoving(0));               // blue0's planned move is animating.
+  CHECK(game.IsUnitMoving(0));  // blue0's planned move is animating.
 
   game.Update(100.0f);  // Finish blue0's move (the only thing left in flight).
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(glm::distance(game.FindUnit(0)->position, destination) < 1e-3f);
-  CHECK(game.CurrentTeam() == Team::Red);  // Turn passed to the other team.
+  CHECK(game.RoundNumber() == 2);  // One commit resolved the whole round.
 }
 
-void TestGameLogicCommitAnimatesMultipleMovesConcurrently() {
+void TestRoundExecutesBothTeamsMovesConcurrently() {
   GameLogic game(LegacyScene());
-  game.ClickUnit(0);
+  game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
-  const glm::vec3 destination0(-3.0f, 0.0f, -4.0f);
-  game.ClickGround(destination0);
-
-  game.ClickUnit(1);
-  game.ChooseMove();
-  const glm::vec3 destination1(-3.0f, 0.0f, 0.0f);
-  game.ClickGround(destination1);
-
-  game.ClickUnit(2);
+  const glm::vec3 blueDestination(-3.0f, 0.0f, -4.0f);
+  game.ClickGround(blueDestination, Team::Blue);
+  game.ClickUnit(1, Team::Blue);
   game.ChoosePass();
-  CHECK(game.CanCommitTurn());
-  game.CommitTurn();
-  CHECK(game.Mode() == InputMode::Moving);
-  CHECK(game.IsUnitMoving(0));
-  CHECK(game.IsUnitMoving(1));
+  game.ClickUnit(2, Team::Blue);
+  game.ChoosePass();
 
-  const glm::vec3 start0(-8.0f, 0.0f, -4.0f);
-  const glm::vec3 start1(-8.0f, 0.0f, 0.0f);
-  const float totalDistance = glm::distance(start0, destination0);
+  game.ClickUnit(5, Team::Red);
+  game.ChooseMove();
+  const glm::vec3 redDestination(3.0f, 0.0f, 4.0f);
+  game.ClickGround(redDestination, Team::Red);
+  game.ClickUnit(3, Team::Red);
+  game.ChoosePass();
+  game.ClickUnit(4, Team::Red);
+  game.ChoosePass();
+
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+  CHECK(game.Mode() == InputMode::Executing);
+  CHECK(game.IsUnitMoving(0));
+  CHECK(game.IsUnitMoving(5));
+
+  const glm::vec3 blueStart(-8.0f, 0.0f, -4.0f);
+  const glm::vec3 redStart(8.0f, 0.0f, 4.0f);
+  const float totalDistance = glm::distance(blueStart, blueDestination);
   const float halfwayDt = (totalDistance * 0.5f) / tactics::constants::kMoveSpeed;
 
-  // A single Update() call advances every animating figure at once -- blue1
-  // doesn't sit idle waiting for blue0 to finish moving first.
+  // A single Update() call advances figures of *both* teams at once -- Red's
+  // mover doesn't sit frozen waiting for a separate Red turn.
   game.Update(halfwayDt);
-  CHECK(game.Mode() == InputMode::Moving);
-  CHECK(glm::distance(game.FindUnit(0)->position, start0) > totalDistance * 0.25f);
-  CHECK(glm::distance(game.FindUnit(1)->position, start1) > totalDistance * 0.25f);
-  CHECK(glm::distance(game.FindUnit(0)->position, destination0) > 1e-3f);
-  CHECK(glm::distance(game.FindUnit(1)->position, destination1) > 1e-3f);
+  CHECK(game.Mode() == InputMode::Executing);
+  CHECK(glm::distance(game.FindUnit(0)->position, blueStart) > totalDistance * 0.25f);
+  CHECK(glm::distance(game.FindUnit(5)->position, redStart) > totalDistance * 0.25f);
+  CHECK(glm::distance(game.FindUnit(0)->position, blueDestination) > 1e-3f);
+  CHECK(glm::distance(game.FindUnit(5)->position, redDestination) > 1e-3f);
 
   game.Update(100.0f);  // Fast-forward the rest.
   CHECK(game.Mode() == InputMode::AwaitingSelection);
-  CHECK(glm::distance(game.FindUnit(0)->position, destination0) < 1e-3f);
-  CHECK(glm::distance(game.FindUnit(1)->position, destination1) < 1e-3f);
-  CHECK(game.CurrentTeam() == Team::Red);
+  CHECK(glm::distance(game.FindUnit(0)->position, blueDestination) < 1e-3f);
+  CHECK(glm::distance(game.FindUnit(5)->position, redDestination) < 1e-3f);
+  CHECK(game.RoundNumber() == 2);
 }
 
-void TestGameLogicShootRowsMatchLayout() {
+void TestShootRowsResolveSimultaneouslyAcrossTeams() {
   GameLogic game(LegacyScene());
-  // Row z=-4 (blue id0 vs red id3) is behind the first wall: must miss. Row
-  // z=0 (blue id1 vs red id4) is the open lane: must hit. Plan both plus a
-  // pass for blue2, then commit the whole squad at once.
-  CHECK(game.CurrentTeam() == Team::Blue);
-  game.ClickUnit(0);
-  game.ChooseShoot();
-  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
-  game.ClickUnit(3);
-  CHECK(game.FindUnit(3)->alive);  // Still just a plan.
+  // Every figure shoots its opposite number in the same round. Rows z=-4 and
+  // z=4 are behind the walls (all four of those shots must miss); row z=0 is
+  // the open lane, so blue1 and red4 fire at each other simultaneously --
+  // judged against the same snapshot, both shots land.
+  const int pairs[3][2] = {{0, 3}, {1, 4}, {2, 5}};
+  for (const auto& pair : pairs) {
+    game.ClickUnit(pair[0], Team::Blue);
+    game.ChooseShoot();
+    game.ClickUnit(pair[1], Team::Blue);
+    game.ClickUnit(pair[1], Team::Red);
+    game.ChooseShoot();
+    game.ClickUnit(pair[0], Team::Red);
+  }
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
 
-  game.ClickUnit(1);
-  game.ChooseShoot();
-  game.ClickUnit(4);
-
-  game.ClickUnit(2);
-  game.ChoosePass();
-
-  CHECK(game.CanCommitTurn());
-  game.CommitTurn();
-
-  CHECK(game.FindUnit(3)->alive);      // Blocked shot: miss.
-  CHECK(!game.FindUnit(4)->alive);     // Open lane: hit.
-  CHECK(!game.Winner().has_value());   // Red still has id3, id5 alive.
+  // No moves were planned, so the round resolves and finishes in the commit
+  // call itself: still-blocked shots can never connect once nobody moves.
   CHECK(game.Mode() == InputMode::AwaitingSelection);
-  CHECK(game.CurrentTeam() == Team::Red);  // Turn advanced to Red.
-
-  // Symmetric: red0 shooting blue0 across the same blocked row also misses,
-  // and Red's other figures just pass.
-  game.ClickUnit(3);
-  game.ChooseShoot();
-  game.ClickUnit(0);
-  game.ClickUnit(4);
-  game.ChoosePass();
-  game.ClickUnit(5);
-  game.ChoosePass();
-  game.CommitTurn();
   CHECK(game.FindUnit(0)->alive);
-  CHECK(game.CurrentTeam() == Team::Blue);
+  CHECK(!game.FindUnit(1)->alive);  // Mutual open-lane exchange downs both...
+  CHECK(!game.FindUnit(4)->alive);  // ...shooters at the same instant.
+  CHECK(game.FindUnit(2)->alive);
+  CHECK(game.FindUnit(3)->alive);
+  CHECK(game.FindUnit(5)->alive);
+  CHECK(!game.Winner().has_value());
+  CHECK(game.RoundNumber() == 2);
+}
+
+void TestMutualEliminationIsDraw() {
+  GameLogic game(LegacyScene());
+  // Leave only the open middle lane's pair alive, shooting each other.
+  for (int id : {0, 2, 3, 5}) game.FindUnit(id)->alive = false;
+
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.ClickUnit(4, Team::Blue);
+  game.ClickUnit(4, Team::Red);
+  game.ChooseShoot();
+  game.ClickUnit(1, Team::Red);
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+
+  // Both last figures down each other in the same tick: game over, no winner.
+  CHECK(!game.FindUnit(1)->alive);
+  CHECK(!game.FindUnit(4)->alive);
+  CHECK(game.Mode() == InputMode::GameOver);
+  CHECK(!game.Winner().has_value());
+}
+
+void TestMoveBudgetCapsPlannedPaths() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+
+  // blue0 can cover runSpeed * kRoundDuration world units per round. A far
+  // corner beyond that budget must be rejected at plan time -- the round's
+  // execution window is fixed, so the figure could never get there in time.
+  const Unit* mover = game.FindUnit(0);
+  const glm::vec3 tooFar(11.0f, 0.0f, 8.0f);
+  CHECK(glm::distance(mover->position, tooFar) > mover->MoveBudget());
+  game.HoverGround(tooFar, Team::Blue);
+  CHECK(!game.MovePreviewValid());
+  game.ClickGround(tooFar, Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingMoveDestination);  // Rejected: no plan.
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::None);
+
+  // A destination inside the budget plans normally.
+  const glm::vec3 nearEnough(-3.0f, 0.0f, -4.0f);
+  game.HoverGround(nearEnough, Team::Blue);
+  CHECK(game.MovePreviewValid());
+  game.ClickGround(nearEnough, Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Move);
+}
+
+void TestPendingShotFiresWhenTargetWalksIntoView() {
+  GameLogic game(LegacyScene());
+
+  // Park red4 behind the z=-4 wall from blue1's perspective: blue1's own
+  // line of sight is blocked at plan time, but blue2's diagonal view is
+  // clear, so red4 is inside Blue's *team* FOV and a legal shot target.
+  Unit* red4 = game.FindUnit(4);
+  red4->position = glm::vec3(5.0f, 0.0f, -4.0f);
+  CHECK(game.ComputeVisibility(Team::Blue).UnitVisible(4));
+  CHECK(!game.ResolveShot(*game.FindUnit(1), *red4));  // Blocked right now: no kill.
+  CHECK(red4->alive);
+
+  game.ClickUnit(0, Team::Blue);
+  game.ChoosePass();
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.ClickUnit(4, Team::Blue);
+  game.ClickUnit(2, Team::Blue);
+  game.ChoosePass();
+
+  // Red sends red4 out of cover, north along x=5 into the open lane.
+  game.ClickUnit(3, Team::Red);
+  game.ChoosePass();
+  game.ClickUnit(4, Team::Red);
+  game.ChooseMove();
+  const glm::vec3 destination(5.0f, 0.0f, 0.0f);
+  game.ClickGround(destination, Team::Red);
+  game.ClickUnit(5, Team::Red);
+  game.ChoosePass();
+
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+
+  // Tick 0: still behind the wall, so the shot holds instead of resolving
+  // as a one-time miss -- the continuous re-check is the point of WEGO.
+  CHECK(game.Mode() == InputMode::Executing);
+  CHECK(game.FindUnit(4)->alive);
+
+  // Step frame-by-frame so the per-tick FOV/LOS re-check samples red4's
+  // position incrementally: blue1 must fire the moment red4 clears the
+  // wall's cover, dropping it mid-path well short of the destination.
+  int steps = 0;
+  while (game.Mode() == InputMode::Executing && steps < 10000) {
+    game.Update(0.02f);
+    ++steps;
+  }
+  CHECK(steps < 10000);  // Sanity: the loop above actually terminated.
+
+  CHECK(!game.FindUnit(4)->alive);
+  const glm::vec3 moverStop = game.FindUnit(4)->position;
+  CHECK(moverStop.z > -3.5f);                            // Had actually started moving...
+  CHECK(glm::distance(moverStop, destination) > 1.5f);   // ...but died short of the goal.
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(game.RoundNumber() == 2);
+  CHECK(!game.Winner().has_value());
 }
 
 void TestDefaultSceneSquadsStartHidden() {
@@ -506,14 +604,14 @@ void TestGameLogicShootGatingRequiresTeamVisibility() {
     CHECK(!game.ComputeVisibility(Team::Blue).UnitVisible(redId));
   }
 
-  game.ClickUnit(0);
+  game.ClickUnit(0, Team::Blue);
   game.ChooseShoot();
   CHECK(game.Mode() == InputMode::AwaitingShootTarget);
 
   // Red5 is alive and would otherwise be a legal target, but it's outside
   // Blue's team FOV: the click must be a no-op (not a guaranteed miss) --
   // no plan is recorded and blue0 stays selected for targeting.
-  game.ClickUnit(5);
+  game.ClickUnit(5, Team::Blue);
   CHECK(game.Mode() == InputMode::AwaitingShootTarget);
   CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::None);
   CHECK(game.FindUnit(5)->alive);
@@ -522,7 +620,7 @@ void TestGameLogicShootGatingRequiresTeamVisibility() {
   // and becomes a valid planning target again.
   game.FindUnit(0)->facingYaw = 0.0f;
   CHECK(game.ComputeVisibility(Team::Blue).UnitVisible(5));
-  game.ClickUnit(5);
+  game.ClickUnit(5, Team::Blue);
   CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Shoot);
   CHECK(game.FindUnit(0)->plan.shootTargetId == 5);
   CHECK(game.FindUnit(5)->alive);  // Still just a plan; nothing resolved yet.
@@ -538,49 +636,59 @@ void TestGameLogicDownedEnemyStaysVisibleInFov() {
   CHECK(!game.ComputeVisibility(Team::Blue).UnitVisible(5));
 }
 
+// Plans a pass for every living figure except the ids in `except`, on both
+// teams -- the boilerplate for tests that only care about one or two units'
+// plans now that a round commit needs everyone planned.
+void PassEveryoneElse(GameLogic& game, std::initializer_list<int> except) {
+  for (const Unit& unit : game.GetScene().units) {
+    if (!unit.alive) continue;
+    bool skip = false;
+    for (int id : except) skip |= (unit.id == id);
+    if (skip || unit.plan.type != tactics::PlannedActionType::None) continue;
+    game.ClickUnit(unit.id, unit.team);
+    game.ChoosePass();
+  }
+}
+
 void TestGameLogicMoveUpdatesPositionAndFacing() {
   GameLogic game(LegacyScene());
-  game.ClickUnit(0);
+  game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
   CHECK(game.Mode() == InputMode::AwaitingMoveDestination);
 
   // Hovering a point inside an obstacle footprint should not produce a
   // valid preview.
-  game.HoverGround(glm::vec3(0.0f, 0.0f, -4.0f));
+  game.HoverGround(glm::vec3(0.0f, 0.0f, -4.0f), Team::Blue);
   CHECK(!game.MovePreviewValid());
 
   // Hovering the open middle lane should produce a valid preview.
-  game.HoverGround(glm::vec3(0.0f, 0.0f, 0.0f));
+  game.HoverGround(glm::vec3(0.0f, 0.0f, 0.0f), Team::Blue);
   CHECK(game.MovePreviewValid());
 
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
-  game.ClickGround(destination);
+  game.ClickGround(destination, Team::Blue);
   // Planning only: the click records blue0's plan and returns to unit
-  // selection -- nothing moves and the turn does not advance yet.
+  // selection -- nothing moves and the round does not advance yet.
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   const Unit* planned = game.FindUnit(0);
   CHECK(planned->plan.type == tactics::PlannedActionType::Move);
   CHECK(std::fabs(planned->position.x - (-8.0f)) < 1e-3f);
   CHECK(std::fabs(planned->position.z - (-4.0f)) < 1e-3f);
-  CHECK(game.CurrentTeam() == Team::Blue);
+  CHECK(game.RoundNumber() == 1);
 
-  // Fill out the rest of Blue's plan and commit the turn.
-  game.ClickUnit(1);
-  game.ChoosePass();
-  game.ClickUnit(2);
-  game.ChoosePass();
-  CHECK(game.CanCommitTurn());
-  game.CommitTurn();
+  // Fill out the rest of both squads' plans and commit the round.
+  PassEveryoneElse(game, {0});
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
 
-  // blue0's move animates rather than teleporting: it's first in squad
-  // order, so the commit starts by animating it.
-  CHECK(game.Mode() == InputMode::Moving);
+  // blue0's move animates rather than teleporting.
+  CHECK(game.Mode() == InputMode::Executing);
   const Unit* moving = game.FindUnit(0);
   CHECK(std::fabs(moving->position.x - (-8.0f)) < 1e-3f);
   CHECK(std::fabs(moving->position.z - (-4.0f)) < 1e-3f);
 
   // A large fast-forward dt should consume the whole path and complete the
-  // move action (and the rest of the commit) in one Update() call.
+  // move action (and the rest of the round) in one Update() call.
   game.Update(100.0f);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   const Unit* moved = game.FindUnit(0);
@@ -591,35 +699,32 @@ void TestGameLogicMoveUpdatesPositionAndFacing() {
   const float expectedYaw = std::atan2(4.0f, 8.0f);
   CHECK(std::fabs(moved->facingYaw - expectedYaw) < 1e-3f);
 
-  CHECK(game.CurrentTeam() == Team::Red);  // Turn advanced.
+  CHECK(game.RoundNumber() == 2);  // Round advanced.
 }
 
 void TestGameLogicMoveAnimatesProgressively() {
   GameLogic game(LegacyScene());
-  game.ClickUnit(0);
+  game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
   // Straight line, same row, short of the wall at x in [-1,1] so the path
   // collapses to a direct two-point segment (no detour to complicate the
   // expected travel distance).
   const glm::vec3 destination(-3.0f, 0.0f, -4.0f);
-  game.HoverGround(destination);
+  game.HoverGround(destination, Team::Blue);
   CHECK(game.MovePreviewValid());
-  game.ClickGround(destination);
+  game.ClickGround(destination, Team::Blue);
   CHECK(game.Mode() == InputMode::AwaitingSelection);  // Planned only.
 
-  game.ClickUnit(1);
-  game.ChoosePass();
-  game.ClickUnit(2);
-  game.ChoosePass();
-  game.CommitTurn();
-  CHECK(game.Mode() == InputMode::Moving);
+  PassEveryoneElse(game, {0});
+  game.CommitRound();
+  CHECK(game.Mode() == InputMode::Executing);
 
   const glm::vec3 start(-8.0f, 0.0f, -4.0f);
   const float totalDistance = glm::distance(start, destination);
   const float halfwayDt = (totalDistance * 0.5f) / tactics::constants::kMoveSpeed;
 
   game.Update(halfwayDt);
-  CHECK(game.Mode() == InputMode::Moving);  // Not there yet.
+  CHECK(game.Mode() == InputMode::Executing);  // Not there yet.
   const Unit* midway = game.FindUnit(0);
   // Should have advanced roughly half the distance, but strictly less than
   // the full distance -- proving this is a real interpolation, not a
@@ -633,66 +738,60 @@ void TestGameLogicMoveAnimatesProgressively() {
   game.Update(100.0f);  // Fast-forward the rest.
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(glm::distance(game.FindUnit(0)->position, destination) < 1e-3f);
-  CHECK(game.CurrentTeam() == Team::Red);
+  CHECK(game.RoundNumber() == 2);
 }
 
-void TestGameLogicMoveIgnoresInputWhileAnimating() {
+void TestGameLogicIgnoresInputWhileExecuting() {
   GameLogic game(LegacyScene());
-  game.ClickUnit(0);
+  game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
   const glm::vec3 destination(-3.0f, 0.0f, -4.0f);
-  game.ClickGround(destination);
-  game.ClickUnit(1);
-  game.ChoosePass();
-  game.ClickUnit(2);
-  game.ChoosePass();
-  game.CommitTurn();
-  CHECK(game.Mode() == InputMode::Moving);
+  game.ClickGround(destination, Team::Blue);
+  PassEveryoneElse(game, {0});
+  game.CommitRound();
+  CHECK(game.Mode() == InputMode::Executing);
 
   const glm::vec3 midStart = game.FindUnit(0)->position;
 
-  // Input during the commit's move animation must be a no-op, not a
-  // desync: clicking another unit, re-clicking ground, cancel, pass, or
-  // even re-triggering commit should all leave the in-flight move untouched.
-  game.ClickUnit(3);
-  CHECK(game.Mode() == InputMode::Moving);
-  game.ClickGround(glm::vec3(5.0f, 0.0f, 5.0f));
-  CHECK(game.Mode() == InputMode::Moving);
+  // Input during the round's execution must be a no-op, not a desync:
+  // clicking another unit (from either side), re-clicking ground, cancel,
+  // pass, or even re-triggering commit should all leave the in-flight move
+  // untouched.
+  game.ClickUnit(3, Team::Red);
+  CHECK(game.Mode() == InputMode::Executing);
+  game.ClickGround(glm::vec3(5.0f, 0.0f, 5.0f), Team::Blue);
+  CHECK(game.Mode() == InputMode::Executing);
   game.CancelAction();
-  CHECK(game.Mode() == InputMode::Moving);
+  CHECK(game.Mode() == InputMode::Executing);
   game.ChoosePass();
-  CHECK(game.Mode() == InputMode::Moving);
-  game.CommitTurn();
-  CHECK(game.Mode() == InputMode::Moving);
+  CHECK(game.Mode() == InputMode::Executing);
+  game.CommitRound();
+  CHECK(game.Mode() == InputMode::Executing);
   CHECK(glm::distance(game.FindUnit(0)->position, midStart) < 1e-6f);
 
   game.Update(100.0f);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(glm::distance(game.FindUnit(0)->position, destination) < 1e-3f);
-  CHECK(game.CurrentTeam() == Team::Red);  // Turn advanced exactly once.
+  CHECK(game.RoundNumber() == 2);  // Round advanced exactly once.
 }
 
 void TestGameLogicMoveCanClimbOntoObstacle() {
-  // BuildDefaultScene marks the standalone crates climbable; the one at
-  // (-4, 6.5) is a 1.2x1.2 footprint, 1.2 tall (see Scene.cpp).
+  // LegacyScene marks the standalone crates climbable; the one at
+  // (-4, 6.5) is a 1.2x1.2 footprint, 1.2 tall.
   GameLogic game(LegacyScene());
-  CHECK(game.CurrentTeam() == Team::Blue);
-  game.ClickUnit(0);
+  game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
 
   const glm::vec3 crateTop(-4.0f, 1.2f, 6.5f);
-  game.HoverGround(crateTop);
+  game.HoverGround(crateTop, Team::Blue);
   CHECK(game.MovePreviewValid());
 
-  game.ClickGround(crateTop);
+  game.ClickGround(crateTop, Team::Blue);
   CHECK(game.Mode() == InputMode::AwaitingSelection);  // Planned only.
 
-  game.ClickUnit(1);
-  game.ChoosePass();
-  game.ClickUnit(2);
-  game.ChoosePass();
-  game.CommitTurn();
-  CHECK(game.Mode() == InputMode::Moving);
+  PassEveryoneElse(game, {0});
+  game.CommitRound();
+  CHECK(game.Mode() == InputMode::Executing);
 
   game.Update(100.0f);  // Fast-forward through the climb animation.
   CHECK(game.Mode() == InputMode::AwaitingSelection);
@@ -700,7 +799,7 @@ void TestGameLogicMoveCanClimbOntoObstacle() {
   CHECK(std::fabs(moved->position.x - crateTop.x) < 1e-3f);
   CHECK(std::fabs(moved->position.z - crateTop.z) < 1e-3f);
   CHECK(std::fabs(moved->position.y - crateTop.y) < 1e-3f);
-  CHECK(game.CurrentTeam() == Team::Red);  // Turn advanced.
+  CHECK(game.RoundNumber() == 2);  // Round advanced.
 }
 
 void TestGameLogicOverwatchFiresOnEnemyEnteringFov() {
@@ -709,41 +808,27 @@ void TestGameLogicOverwatchFiresOnEnemyEnteringFov() {
   // Reposition red4 due west of blue1 -- squarely behind blue1's fixed +X
   // facing, so it starts outside blue1's FOV cone regardless of LOS -- then
   // send it walking east along the open z=0 lane, straight through blue1's
-  // position and into its watched cone.
+  // position and into its watched cone. Under WEGO the overwatch arms and
+  // the enemy move it interrupts happen in the *same* round's commit.
   game.FindUnit(4)->position = glm::vec3(-9.5f, 0.0f, 0.0f);
 
-  // Blue plans: blue0 and blue2 pass, blue1 arms overwatch instead of a
-  // Move/Shoot/Pass -- nothing fires yet, since a plan is just recorded
-  // until the whole team's turn is committed.
-  CHECK(game.CurrentTeam() == Team::Blue);
-  game.ClickUnit(0);
-  game.ChoosePass();
-  game.ClickUnit(1);
+  game.ClickUnit(1, Team::Blue);
   game.ChooseOverwatch();
   CHECK(game.FindUnit(1)->plan.type == tactics::PlannedActionType::Overwatch);
   CHECK(game.FindUnit(1)->triggerAction == TriggerAction::None);  // Not armed until commit.
-  game.ClickUnit(2);
-  game.ChoosePass();
-  CHECK(game.CanCommitTurn());
-  game.CommitTurn();
 
-  // Committing arms blue1's trigger and hands the turn to Red.
-  CHECK(game.FindUnit(1)->triggerAction == TriggerAction::Shoot);
-  CHECK(game.CurrentTeam() == Team::Red);
-
-  // Red plans: red3 and red5 pass, red4 moves east through blue1's watched
-  // lane toward the far side. Committing kicks off red4's move.
-  game.ClickUnit(3);
-  game.ChoosePass();
-  game.ClickUnit(4);
+  game.ClickUnit(4, Team::Red);
   game.ChooseMove();
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
-  game.ClickGround(destination);
-  game.ClickUnit(5);
-  game.ChoosePass();
-  CHECK(game.CanCommitTurn());
-  game.CommitTurn();
-  CHECK(game.Mode() == InputMode::Moving);
+  game.ClickGround(destination, Team::Red);
+
+  PassEveryoneElse(game, {1, 4});
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+
+  // Committing arms blue1's trigger and kicks off red4's move concurrently.
+  CHECK(game.FindUnit(1)->triggerAction == TriggerAction::Shoot);
+  CHECK(game.Mode() == InputMode::Executing);
 
   // Step frame-by-frame (rather than one huge fast-forward dt) so the
   // overwatch check actually samples red4's position incrementally along
@@ -753,7 +838,7 @@ void TestGameLogicOverwatchFiresOnEnemyEnteringFov() {
   // it crosses into FOV with clear LOS, interrupting the move well short of
   // the destination.
   int steps = 0;
-  while (game.Mode() == InputMode::Moving && steps < 10000) {
+  while (game.Mode() == InputMode::Executing && steps < 10000) {
     game.Update(0.02f);
     ++steps;
   }
@@ -765,9 +850,8 @@ void TestGameLogicOverwatchFiresOnEnemyEnteringFov() {
   CHECK(glm::distance(moverStop, destination) > 1.0f);  // Died mid-path, short of the destination.
   CHECK(moverStop.x > -9.5f + 1e-3f);                    // But had actually started moving.
 
-  // The interrupted move still finishes Red's commit and passes the turn.
+  // The interrupted move still finishes the round.
   CHECK(game.Mode() == InputMode::AwaitingSelection);
-  CHECK(game.CurrentTeam() == Team::Blue);
   CHECK(game.RoundNumber() == 2);
   CHECK(!game.Winner().has_value());  // Red still has id3 and id5 alive.
 }
@@ -780,59 +864,63 @@ void TestGameLogicWinCondition() {
   game.FindUnit(4)->alive = false;
   game.FindUnit(5)->alive = false;
 
-  CHECK(game.CurrentTeam() == Team::Blue);
-  game.ClickUnit(0);
-  game.ChoosePass();
-  game.ClickUnit(1);
-  game.ChoosePass();
-  game.ClickUnit(2);
-  game.ChoosePass();
-  CHECK(game.CanCommitTurn());
-  game.CommitTurn();
+  // Only living figures need plans, so Blue alone can commit the round.
+  for (int id : {0, 1, 2}) {
+    game.ClickUnit(id, Team::Blue);
+    game.ChoosePass();
+  }
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
 
   CHECK(game.Mode() == InputMode::GameOver);
   CHECK(game.Winner() == Team::Blue);
 
   // Further input after game over must be inert.
-  game.ClickUnit(1);
+  game.ClickUnit(1, Team::Blue);
   CHECK(game.Mode() == InputMode::GameOver);
 }
 
 }  // namespace
 
-void TestSnapshotRoundTripMirrorsMatch() {
-  GameLogic a;
-  a.ClickUnit(0);
-  a.ChooseMove();
-  a.ClickGround(glm::vec3(0.0f, 0.0f, 0.0f));
-  a.ClickUnit(1);
-  a.ChoosePass();
-  a.ClickUnit(2);
-  a.ChoosePass();
-  a.CommitTurn();
-  a.Update(0.5f);  // Mid-move: positions/facing have changed.
-  Unit* killed = a.FindUnit(3);
-  CHECK(killed);
-  killed->alive = false;
-  killed->knockdownAxis = glm::vec3(0.6f, 0.0f, -0.8f);
-  killed->knockdownElapsed = 0.4f;
+void TestSnapshotMirrorsMatchAndTeamPlans() {
+  GameLogic blue, red;
+  // Each canvas's instance plans only its own team.
+  for (int id : {0, 1, 2}) {
+    blue.ClickUnit(id, Team::Blue);
+    blue.ChoosePass();
+  }
+  red.ClickUnit(3, Team::Red);
+  red.ChooseMove();
+  red.ClickGround(red.FindUnit(3)->position + glm::vec3(1.0f, 0.0f, 0.0f), Team::Red);
+  CHECK(red.FindUnit(3)->plan.type == PlannedActionType::Move);
+  for (int id : {4, 5}) {
+    red.ClickUnit(id, Team::Red);
+    red.ChoosePass();
+  }
+  CHECK(!blue.CanCommitRound());
 
+  GameSnapshot redSnap;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(red.ExportState()), &redSnap));
+  // Blue learns Red's plans (incl. the move path) without touching its own.
+  CHECK(blue.ImportTeamPlans(redSnap, Team::Red));
+  CHECK(blue.FindUnit(3)->plan.type == PlannedActionType::Move);
+  CHECK(blue.FindUnit(3)->plan.movePath == red.FindUnit(3)->plan.movePath);
+  CHECK(blue.FindUnit(0)->plan.type == PlannedActionType::Pass);
+  CHECK(blue.CanCommitRound());
+
+  blue.CommitRound();
+  blue.Update(0.5f);  // Mid-move.
   GameSnapshot decoded;
-  CHECK(DeserializeSnapshot(SerializeSnapshot(a.ExportState()), &decoded));
-
-  GameLogic b;
-  CHECK(b.ImportState(decoded));
-  CHECK(b.Mode() == a.Mode());
-  CHECK(b.CurrentTeam() == a.CurrentTeam());
-  CHECK(b.SelectedUnitId() == a.SelectedUnitId());
-  CHECK(b.RoundNumber() == a.RoundNumber());
-  for (const auto& unit : a.GetScene().units) {
-    const Unit* mirrored = b.FindUnit(unit.id);
+  CHECK(DeserializeSnapshot(SerializeSnapshot(blue.ExportState()), &decoded));
+  CHECK(red.ImportState(decoded));
+  CHECK(red.Mode() == blue.Mode());
+  CHECK(red.RoundNumber() == blue.RoundNumber());
+  CHECK(red.IsUnitMoving(3) == blue.IsUnitMoving(3));
+  for (const auto& unit : blue.GetScene().units) {
+    const Unit* mirrored = red.FindUnit(unit.id);
     CHECK(mirrored && mirrored->position == unit.position);
     CHECK(mirrored && mirrored->facingYaw == unit.facingYaw);
     CHECK(mirrored && mirrored->plan.type == unit.plan.type);
-    CHECK(mirrored && mirrored->knockdownAxis == unit.knockdownAxis);
-    CHECK(mirrored && mirrored->knockdownElapsed == unit.knockdownElapsed);
   }
 
   GameSnapshot bad;
@@ -851,22 +939,24 @@ int main() {
   TestElevatedEyePositionSeesOverObstacle();
   TestFovCone();
   TestTeamVisibilityAggregatesAcrossFigures();
-  TestTurnManagerAlternatesByTeamAndRounds();
   TestCheckWinner();
-  TestGameLogicSelectionGating();
-  TestGameLogicPlanThenCommitDefersExecutionAndAppliesSimultaneously();
-  TestGameLogicCommitAnimatesMultipleMovesConcurrently();
-  TestGameLogicShootRowsMatchLayout();
+  TestRoundPlanningTeamGating();
+  TestRoundCommitRequiresBothTeamsPlanned();
+  TestRoundExecutesBothTeamsMovesConcurrently();
+  TestShootRowsResolveSimultaneouslyAcrossTeams();
+  TestMutualEliminationIsDraw();
+  TestMoveBudgetCapsPlannedPaths();
+  TestPendingShotFiresWhenTargetWalksIntoView();
   TestDefaultSceneSquadsStartHidden();
   TestGameLogicShootGatingRequiresTeamVisibility();
   TestGameLogicDownedEnemyStaysVisibleInFov();
   TestGameLogicMoveUpdatesPositionAndFacing();
   TestGameLogicMoveAnimatesProgressively();
-  TestGameLogicMoveIgnoresInputWhileAnimating();
+  TestGameLogicIgnoresInputWhileExecuting();
   TestGameLogicMoveCanClimbOntoObstacle();
   TestGameLogicOverwatchFiresOnEnemyEnteringFov();
   TestGameLogicWinCondition();
-  TestSnapshotRoundTripMirrorsMatch();
+  TestSnapshotMirrorsMatchAndTeamPlans();
 
   if (g_failures == 0) {
     std::printf("All logic tests passed.\n");

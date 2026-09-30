@@ -9,7 +9,6 @@
 
 #include "game/NavMesh.h"
 #include "game/Scene.h"
-#include "game/TurnManager.h"
 #include "game/Types.h"
 #include "game/Unit.h"
 #include "game/Visibility.h"
@@ -17,18 +16,26 @@
 namespace tactics {
 
 enum class InputMode {
-  AwaitingSelection,      // Waiting for a click on one of the acting team's living figures.
+  AwaitingSelection,      // Waiting for a click on one of either team's living figures.
   ActionMenu,             // A figure is selected; waiting for Move/Shoot/Pass to plan its action.
   AwaitingMoveDestination,  // Waiting for a ground click to plan a move to.
   AwaitingShootTarget,    // Waiting for a click on an enemy figure to plan a shot at.
-  Moving,                 // A planned move is animating as part of a turn commit.
+  Executing,              // A committed round is playing out; planning input is inert.
   GameOver,
 };
 
+// Returns the winning team if exactly one side has living units, or
+// std::nullopt if neither side has won outright (both sides have survivors,
+// or -- a genuine possibility under simultaneous execution -- both sides
+// were wiped out in the same round, which GameLogic treats as a draw).
+std::optional<Team> CheckWinner(const std::vector<Unit>& units);
+
 // Serializable dynamic match state (everything that changes after Reset()
-// on a fixed scene). Used to mirror one authoritative match into a second,
-// non-simulating instance (two-pane play): the follower imports snapshots
-// instead of re-simulating, so float divergence can't desync the two.
+// on a fixed scene), used by two-canvas web play: each canvas runs its own
+// GameLogic instance for one team. The instance for Blue is the simulator
+// (it alone commits and executes rounds); the Red instance mirrors its
+// snapshots instead of re-simulating so float divergence can't desync the
+// two. During planning each side only ships its own team's plans.
 struct GameSnapshot {
   struct UnitState {
     int id = -1;
@@ -36,16 +43,17 @@ struct GameSnapshot {
     float facingYaw = 0.0f;
     bool alive = true;
     TriggerAction triggerAction = TriggerAction::None;
-    PlannedActionType planType = PlannedActionType::None;  // Move paths are not mirrored.
+    PlannedActionType planType = PlannedActionType::None;
     int planShootTargetId = -1;
+    std::vector<glm::vec3> planPath;
     glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
     float knockdownElapsed = -1.0f;
+    bool moving = false;  // Has an in-flight move in the executing round.
   };
   std::vector<UnitState> units;
-  TurnManager::State turn;
   InputMode mode = InputMode::AwaitingSelection;
-  int selectedUnitId = -1;  // -1 = none.
-  int winner = -1;          // -1 = none, else static_cast<int>(Team).
+  int roundNumber = 1;
+  int winner = -1;  // -1 = none, else static_cast<int>(Team).
 };
 
 // Text encoding of a snapshot (for the page-level message bus). Deserialize
@@ -53,18 +61,24 @@ struct GameSnapshot {
 std::string SerializeSnapshot(const GameSnapshot& snapshot);
 bool DeserializeSnapshot(const std::string& text, GameSnapshot* out);
 
-// Owns the whole game state machine: scene, navmesh, turn order, and the
+// Owns the whole game state machine: scene, navmesh, round phases, and the
 // click-driven plan-then-commit flow. Deliberately free of any SDL/GL/ImGui
 // dependency so it can be driven and verified headlessly.
 //
-// Turn model: on its turn, a team assigns one plan (Move/Shoot/Pass/Overwatch)
-// to each of its living figures -- nothing happens yet. Once every living figure on
-// the team has a plan, CommitTurn() resolves them all at once: every planned
-// shot is judged against the same pre-commit snapshot of the enemy team (so
-// one figure's shot never depends on whether an ally's shot in the same
-// commit already landed), and every planned move animates concurrently
-// rather than one figure waiting for the last to finish. The turn then
-// passes to the other team once every planned move has finished animating.
+// WEGO round model: each round has two phases. During *planning*, both teams
+// concurrently assign one plan (Move/Shoot/Pass/Overwatch) to each of their
+// living figures -- nothing happens yet, and either team may revise its own
+// figures' plans at any time (input calls carry the acting team, so a player
+// can only ever plan their own side). Once every living figure on both teams
+// has a plan, CommitRound() starts the *executing* phase: every planned move
+// on both teams animates concurrently (bounded by each figure's MoveBudget()
+// so it fits the round's fixed kRoundDuration window), and every planned
+// shot re-checks the shooter's live FOV/LOS each tick, firing at the first
+// instant it connects -- so a target that walks into a shooter's cone
+// mid-round can be hit. All shots that connect in the same tick are judged
+// against the same tick-start snapshot, so two figures shooting each other
+// simultaneously both die. The round ends once nothing is left in flight,
+// and the next round's planning begins.
 class GameLogic {
  public:
   GameLogic() { Reset(); }
@@ -80,13 +94,12 @@ class GameLogic {
   const NavMesh& GetNavMesh() const { return navMesh_; }
   InputMode Mode() const { return mode_; }
   std::optional<int> SelectedUnitId() const { return selectedUnitId_; }
-  Team CurrentTeam() const { return turnManager_.CurrentTeam(); }
   std::optional<Team> Winner() const { return winner_; }
-  int RoundNumber() const { return turnManager_.RoundNumber(); }
+  int RoundNumber() const { return roundNumber_; }
 
-  // True once every living figure on the current team has a non-None plan,
-  // i.e. CommitTurn() is ready to be called.
-  bool CanCommitTurn() const;
+  // True once every living figure on *both* teams has a non-None plan,
+  // i.e. CommitRound() is ready to be called.
+  bool CanCommitRound() const;
   // True while any killed unit is still mid-fall (knockdown animation running).
   bool HasActiveKnockdown() const;
 
@@ -105,24 +118,30 @@ class GameLogic {
   }
 
   // Input events, driven by the input/render layer after it has resolved a
-  // screen click into either a unit id or a ground-plane world point. These
-  // only ever record/modify a figure's plan; nothing executes until
-  // CommitTurn().
-  void ClickUnit(int unitId);
-  void ClickGround(const glm::vec3& point);
-  void HoverGround(const glm::vec3& point);
+  // screen click into either a unit id or a ground-plane world point.
+  // `byTeam` is the side the input came from (in split-screen, the clicked
+  // pane's team): a player can only select/plan their own figures, even
+  // though both teams plan at once. These only ever record/modify a figure's
+  // plan; nothing executes until CommitRound().
+  void ClickUnit(int unitId, Team byTeam);
+  void ClickGround(const glm::vec3& point, Team byTeam);
+  void HoverGround(const glm::vec3& point, Team byTeam);
 
-  // Advances every in-flight planned move (Mode() == InputMode::Moving) by
-  // `dtSeconds` at once, moving each animating figure along its own planned
-  // path at constant speed, and finishes the commit once every move's path
-  // is consumed. A no-op in any other mode. `main.cpp`'s frame loop drives
-  // this with real frame delta; tests can pass a large dt to fast-forward to
-  // completion.
+  // Advances the executing round (Mode() == InputMode::Executing) by
+  // `dtSeconds`: every in-flight planned move on both teams advances along
+  // its own path at the mover's run speed, and every not-yet-fired planned
+  // shot re-checks its live FOV/LOS, firing the first tick it connects. The
+  // round finishes once no moves remain in flight (unfired shots then expire
+  // as misses -- with nobody moving, their geometry can no longer change).
+  // A no-op in any other mode. `main.cpp`'s frame loop drives this with real
+  // frame delta; tests can pass a large dt to fast-forward to completion,
+  // though mid-path events (overwatch, shots connecting mid-move) then only
+  // sample the coarse positions that dt steps through.
   void Update(float dtSeconds);
 
   // Action menu choices, valid only while Mode() == ActionMenu. Each records
   // a plan on the selected figure and returns to unit selection within the
-  // still-active team's turn.
+  // still-active planning phase.
   void ChooseMove();
   void ChooseShoot();
   void ChoosePass();
@@ -131,34 +150,38 @@ class GameLogic {
   // acting unit, the same way ChoosePass() plans a pass.
   void ChooseOverwatch();
 
-  // Snapshot of the dynamic match state. ImportState overwrites this
-  // instance's state with it (any in-flight move/preview is dropped) and
-  // returns false, leaving state untouched, if the snapshot doesn't match
-  // this scene's units.
-  GameSnapshot ExportState() const;
-  bool ImportState(const GameSnapshot& snapshot);
-
   // Steps back one level: AwaitingMove/ShootTarget -> ActionMenu -> AwaitingSelection.
   void CancelAction();
 
-  // Resolves every one of the current team's planned shots simultaneously
-  // and kicks off every planned move's animation concurrently, then hands
-  // the turn to the other team once all move animations finish (immediately,
-  // in this same call, if nobody planned a move). No-op unless
-  // CanCommitTurn().
-  void CommitTurn();
+  // Starts the round's executing phase: resolves every planned shot that
+  // already connects at the pre-move positions, kicks off every planned
+  // move on both teams concurrently, and arms planned overwatches. Held
+  // shots keep re-checking each Update() tick. Finishes immediately (in
+  // this same call) if nobody planned a move. No-op unless CanCommitRound().
+  void CommitRound();
+
+  // Snapshot of the dynamic match state. ImportState overwrites the whole
+  // match (a follower mirroring the simulator) and returns false, leaving
+  // state untouched, if the snapshot doesn't match this scene's units.
+  // ImportTeamPlans only copies `team`'s figures' plans (planning phase:
+  // learning what the other side has planned) and leaves everything else,
+  // including local selection, alone; it too returns false on mismatch.
+  GameSnapshot ExportState() const;
+  bool ImportState(const GameSnapshot& snapshot);
+  bool ImportTeamPlans(const GameSnapshot& snapshot, Team team);
 
   // True while `unitId` has an in-flight planned move animating as part of
-  // the current commit (multiple figures can be animating at once).
+  // the executing round (figures from both teams can be animating at once).
   bool IsUnitMoving(int unitId) const;
 
-  // Deterministic hit resolution: FOV cone + clear line-of-sight. Exposed
-  // directly so it can be unit tested without going through the click flow.
+  // Deterministic hit resolution: FOV cone + clear line-of-sight, applied
+  // immediately. Exposed directly so it can be unit tested without going
+  // through the click flow; also the overwatch trigger path.
   bool ResolveShot(Unit& shooter, Unit& target);
 
  private:
   // One figure's in-flight planned move; multiple can be active at once
-  // since a commit animates the whole team's planned moves concurrently.
+  // since a commit animates both teams' planned moves concurrently.
   // path[segment] is the waypoint the mover last passed through;
   // path[segment + 1] is the one it's walking toward.
   struct ActiveMove {
@@ -167,7 +190,26 @@ class GameLogic {
     size_t segment = 0;
   };
 
-  void FinishCommit();
+  // A planned shot waiting for its first tick with valid FOV+LOS. Expires
+  // (as a miss / hold-fire) if the shooter or target dies first, or if the
+  // round ends with it still blocked.
+  struct PendingShot {
+    int shooterId = -1;
+    int targetId = -1;
+  };
+
+  // FOV+LOS check only, no side effects -- the "would ResolveShot hit"
+  // predicate, split out so a tick's simultaneous shots can all be judged
+  // against the same snapshot before any of them is applied.
+  bool ShotConnects(const Unit& shooter, const Unit& target) const;
+
+  // Judges every pending shot against the current (start-of-resolution)
+  // state, then applies all connecting hits at once: mutual shots in the
+  // same tick both land. Fired shots and shots whose shooter/target died
+  // are removed from pendingShots_.
+  void ResolvePendingShots();
+
+  void FinishRound();
 
   // Checks every living enemy of `mover` armed with triggerAction == Shoot
   // for FOV+LOS on `mover`'s current (mid-move) position. On the first
@@ -177,7 +219,7 @@ class GameLogic {
 
   Scene scene_;
   NavMesh navMesh_;
-  TurnManager turnManager_;
+  int roundNumber_ = 1;
   std::vector<AABB> obstacleBounds_;  // Cached flat bounds of scene_.obstacles for LOS/FOV checks.
 
   InputMode mode_ = InputMode::AwaitingSelection;
@@ -187,9 +229,14 @@ class GameLogic {
   std::vector<glm::vec3> movePreviewPath_;
   bool movePreviewValid_ = false;
 
-  // Every figure's in-flight planned move for the current commit, valid only
-  // while mode_ == Moving; empty once all of them finish.
+  // Every figure's in-flight planned move / not-yet-fired planned shot for
+  // the executing round, valid only while mode_ == Executing; empty once
+  // the round finishes.
   std::vector<ActiveMove> activeMoves_;
+  std::vector<PendingShot> pendingShots_;
+  // Ids of figures a simulating peer reports as mid-move (ImportState only;
+  // a follower has no activeMoves_ of its own).
+  std::vector<int> mirroredMoving_;
 };
 
 }  // namespace tactics

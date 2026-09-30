@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <limits>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "game/GameLogic.h"
@@ -27,9 +28,12 @@
 #include "gfx/Camera.h"
 #include "gfx/SceneRenderer.h"
 
+using tactics::DeserializeSnapshot;
 using tactics::GameLogic;
+using tactics::GameSnapshot;
 using tactics::InputMode;
 using tactics::Obstacle;
+using tactics::SerializeSnapshot;
 using tactics::Team;
 using tactics::TeamVisibility;
 using tactics::Unit;
@@ -39,11 +43,74 @@ namespace {
 constexpr int kInitialWindowWidth = 1280;
 constexpr int kInitialWindowHeight = 720;
 
-// Stage-D split-screen: one shared window/canvas is divided into two
-// side-by-side viewports, left = Blue, right = Red. Both read the same
-// single GameLogic instance; only the camera and the fog-of-war-filtered
-// draw/pick lists differ per pane.
-constexpr int kPaneCount = 2;
+// Panes: a native build shows both teams side by side in one window (left =
+// Blue, right = Red) off a single GameLogic. The web page
+// (web/index.html) instead shows them as two separate <canvas>es by
+// instantiating this module twice -- one client per team, each with its own
+// canvas, camera, input, and UI, filling that canvas with a single pane.
+// Both teams plan at once (WEGO), so the two instances share one match by
+// exchanging state over a page-level message bus: each instance ships its
+// own team's plans while planning, and the Blue instance alone commits and
+// simulates the round (Red asks it to), broadcasting snapshots that the Red
+// instance mirrors rather than re-simulating.
+constexpr int kMaxPanes = 2;
+constexpr Uint32 kPeerSyncTimeoutMs = 500;
+
+#ifdef __EMSCRIPTEN__
+// Emscripten's SDL2 port reaches the canvas through the "#canvas" CSS
+// selector (canvas sizing, mouse-event registration), which cannot address
+// per-instance canvases in a page that instantiates this module twice. Bind
+// the selector to this instance's own canvas via the module-scoped
+// specialHTMLTargets table instead; must run before SDL_Init.
+EM_JS(void, tbgwaf_bind_canvas, (), {
+  specialHTMLTargets["#canvas"] = Module.canvas;
+});
+
+// 0 = blue, 1 = red, -1 = not specified. The page assigns each client
+// instance its team via the Module.tbgwafPlayer override.
+EM_JS(int, tbgwaf_requested_player, (), {
+  if (Module.tbgwafPlayer === "blue") return 0;
+  if (Module.tbgwafPlayer === "red") return 1;
+  return -1;
+});
+
+// The bus (Module.tbgwafBus, one object shared by both instances on the
+// page) is just a list of per-instance inboxes: posting appends the message
+// to every inbox but our own, and each instance drains its inbox at the top
+// of its frame.
+EM_JS(void, tbgwaf_channel_open, (), {
+  if (Module.tbgwafInbox) return;
+  Module.tbgwafInbox = [];
+  if (Module.tbgwafBus) Module.tbgwafBus.inboxes.push(Module.tbgwafInbox);
+});
+
+EM_JS(void, tbgwaf_channel_post, (const char* msg), {
+  if (!Module.tbgwafBus) return;
+  const text = UTF8ToString(msg);
+  for (const inbox of Module.tbgwafBus.inboxes) {
+    if (inbox !== Module.tbgwafInbox) inbox.push(text);
+  }
+});
+
+// Returns a malloc'd message (caller frees) or null if the inbox is empty.
+EM_JS(char*, tbgwaf_channel_next, (), {
+  if (!Module.tbgwafInbox || Module.tbgwafInbox.length === 0) return 0;
+  const msg = Module.tbgwafInbox.shift();
+  const size = lengthBytesUTF8(msg) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(msg, ptr, size);
+  return ptr;
+});
+
+// CSS size of this instance's own canvas (each client renders into its own
+// <canvas>, so a global "#canvas" selector would not do).
+EM_JS(double, tbgwaf_canvas_css_width, (), {
+  return Module.canvas.getBoundingClientRect().width;
+});
+EM_JS(double, tbgwaf_canvas_css_height, (), {
+  return Module.canvas.getBoundingClientRect().height;
+});
+#endif
 
 // Finds the alive unit whose bounding box the ray hits nearest, or -1.
 int PickUnit(const gfx::Ray& ray, const std::vector<Unit>& units) {
@@ -101,26 +168,29 @@ bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const std::vector<Obstacle>&
   return found;
 }
 
-// Pane 0 is the left half of the window (Blue), pane 1 is the right half
-// (Red). Arbitrary but fixed for the lifetime of the app.
-Team PaneTeam(int pane) { return pane == 0 ? Team::Blue : Team::Red; }
-
 struct PaneRect {
   int x = 0;
   int width = 0;
 };
 
-PaneRect ComputePaneRect(int pane, int windowWidth) {
+// One pane fills the window; two split it down the middle (pane 0 left).
+PaneRect ComputePaneRect(int pane, int paneCount, int windowWidth) {
+  if (paneCount == 1) return PaneRect{0, windowWidth};
   const int leftWidth = windowWidth / 2;
   if (pane == 0) return PaneRect{0, leftWidth};
   return PaneRect{leftWidth, windowWidth - leftWidth};
 }
 
-int PaneForX(int x, int windowWidth) { return x < windowWidth / 2 ? 0 : 1; }
+int PaneForX(int x, int paneCount, int windowWidth) {
+  return paneCount == 1 || x < windowWidth / 2 ? 0 : 1;
+}
 
 }  // namespace
 
 int main() {
+#ifdef __EMSCRIPTEN__
+  tbgwaf_bind_canvas();
+#endif
   if (SDL_Init(SDL_INIT_VIDEO) != 0) {
     std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
     return 1;
@@ -171,15 +241,43 @@ int main() {
   gfx::SceneRenderer renderer;
   if (!renderer.Init()) return 1;
 
-  // Stage-D: one independent orbit camera per pane/team (index 0 = Blue,
-  // 1 = Red), so each side can freely rotate/zoom its own view without
-  // affecting the other's.
-  std::array<gfx::OrbitCamera, kPaneCount> cameras;
-  // Each pane only gets half the window's horizontal space, so the default
+  // One independent orbit camera per pane, so each side can freely
+  // rotate/zoom its own view without affecting the other's.
+  std::array<gfx::OrbitCamera, kMaxPanes> cameras;
+  // Each pane only gets half the page's horizontal space, so the default
   // zoom (tuned for a single full-width view) would clip the far edge of
   // the map; start pulled back further so both spawns fit by default.
   for (auto& camera : cameras) camera.Zoom(10.0f);
   GameLogic game;
+
+  // Which team this client instance plays (web two-canvas mode); nullopt =
+  // one window showing both teams.
+  std::optional<Team> fixedTeam;
+  // Until the simulator answers our hello (or the timeout passes), our fresh
+  // local state may be stale relative to a match already in progress, so a
+  // follower doesn't act on it.
+  bool awaitingPeerSync = false;
+  Uint32 peerSyncDeadline = 0;
+#ifdef __EMSCRIPTEN__
+  if (const int requested = tbgwaf_requested_player(); requested >= 0) {
+    fixedTeam = requested == 0 ? Team::Blue : Team::Red;
+    tbgwaf_channel_open();
+    tbgwaf_channel_post("H");
+    awaitingPeerSync = *fixedTeam != Team::Blue;
+    peerSyncDeadline = SDL_GetTicks() + kPeerSyncTimeoutMs;
+  }
+#endif
+  const bool networked = fixedTeam.has_value();
+  // The Blue instance (or the lone native window) simulates rounds; the Red
+  // instance mirrors it during execution.
+  const bool isSimulator = !networked || *fixedTeam == Team::Blue;
+  const int paneCount = networked ? 1 : kMaxPanes;
+  auto paneTeam = [&](int pane) {
+    if (networked) return *fixedTeam;
+    return pane == 0 ? Team::Blue : Team::Red;
+  };
+  std::string lastSentState;
+  bool forceBroadcast = false;
 
   bool quit = false;
   int leftDragPane = -1;  // -1 = not dragging; else the pane a left-drag (pan) started in.
@@ -196,11 +294,68 @@ int main() {
   Uint32 lastFrameTicks = SDL_GetTicks();
 
   auto runFrame = [&]() {
+#ifdef __EMSCRIPTEN__
+    // Track our own canvas element's CSS size (half the page per canvas).
+    if (networked) {
+      const double cssW = tbgwaf_canvas_css_width();
+      const double cssH = tbgwaf_canvas_css_height();
+      int curW = 0, curH = 0;
+      SDL_GetWindowSize(window, &curW, &curH);
+      if (cssW >= 1.0 && cssH >= 1.0 &&
+          (curW != static_cast<int>(cssW) || curH != static_cast<int>(cssH))) {
+        SDL_SetWindowSize(window, static_cast<int>(cssW), static_cast<int>(cssH));
+      }
+    }
+#endif
     int windowWidth = kInitialWindowWidth, windowHeight = kInitialWindowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
-    std::array<PaneRect, kPaneCount> paneRects;
-    for (int pane = 0; pane < kPaneCount; ++pane) paneRects[pane] = ComputePaneRect(pane, windowWidth);
+    // --- Sync: apply the peer's state / answer its requests. ---
+    auto isPlanningMode = [](InputMode mode) {
+      return mode != InputMode::Executing && mode != InputMode::GameOver;
+    };
+#ifdef __EMSCRIPTEN__
+    if (networked) {
+      while (char* raw = tbgwaf_channel_next()) {
+        const std::string msg(raw);
+        std::free(raw);
+        if (msg == "H") {
+          forceBroadcast = true;  // A peer just opened: hand it our state.
+        } else if (msg == "C") {
+          if (isSimulator && game.CanCommitRound()) game.CommitRound();
+        } else if (msg == "N") {
+          if (isSimulator && game.Mode() == InputMode::GameOver) game.Reset();
+        } else if (msg.size() > 2 && (msg[0] == 'S' || msg[0] == 'P') && msg[1] == ' ') {
+          GameSnapshot snap;
+          if (!DeserializeSnapshot(msg.substr(2), &snap)) continue;
+          if (msg[0] == 'S' && !isSimulator) {
+            // Simulator state. Mid-planning of the same round we only learn
+            // the simulator's team's plans (keeping our own plans and
+            // selection); otherwise (execution, game over, a new round) we
+            // take its whole state.
+            const bool samePlanning = isPlanningMode(snap.mode) &&
+                                      isPlanningMode(game.Mode()) &&
+                                      snap.roundNumber == game.RoundNumber();
+            const bool ok = samePlanning ? game.ImportTeamPlans(snap, Team::Blue)
+                                         : game.ImportState(snap);
+            if (ok) awaitingPeerSync = false;
+          } else if (msg[0] == 'P' && isSimulator) {
+            // The follower's plans for its own team, only meaningful while
+            // we're planning the same round.
+            if (isPlanningMode(game.Mode()) && snap.roundNumber == game.RoundNumber()) {
+              game.ImportTeamPlans(snap, Team::Red);
+            }
+          }
+        }
+      }
+      if (awaitingPeerSync && SDL_GetTicks() >= peerSyncDeadline) awaitingPeerSync = false;
+    }
+#endif
+
+    std::array<PaneRect, kMaxPanes> paneRects;
+    for (int pane = 0; pane < paneCount; ++pane) {
+      paneRects[pane] = ComputePaneRect(pane, paneCount, windowWidth);
+    }
 
     // Mouse-driven game input (world picking) must not be dispatched until
     // io.WantCaptureMouse reflects the UI actually built *this* frame:
@@ -222,11 +377,11 @@ int main() {
       if (event.type == SDL_QUIT) {
         quit = true;
       } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_RIGHT) {
-        rightDragPane = PaneForX(event.button.x, windowWidth);
+        rightDragPane = PaneForX(event.button.x, paneCount, windowWidth);
       } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_RIGHT) {
         rightDragPane = -1;
       } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
-        leftDragPane = PaneForX(event.button.x, windowWidth);
+        leftDragPane = PaneForX(event.button.x, paneCount, windowWidth);
         leftDragDistance = 0.0f;
       } else if (event.type == SDL_MOUSEMOTION) {
         mouseX = event.motion.x;
@@ -253,7 +408,7 @@ int main() {
 #else
           const float wheelY = static_cast<float>(event.wheel.y);
 #endif
-          cameras[PaneForX(mouseX, windowWidth)].Zoom(-wheelY * kZoomSpeed);
+          cameras[PaneForX(mouseX, paneCount, windowWidth)].Zoom(-wheelY * kZoomSpeed);
         }
       } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
         // A drag that panned the camera must not also fire a click.
@@ -275,7 +430,9 @@ int main() {
     const Uint32 nowTicks = SDL_GetTicks();
     const float dt = static_cast<float>(nowTicks - lastFrameTicks) / 1000.0f;
     lastFrameTicks = nowTicks;
-    game.Update(dt);
+    // A follower mirrors execution from the simulator's snapshots; running
+    // its own (empty) round would end it immediately.
+    if (isSimulator || game.Mode() != InputMode::Executing) game.Update(dt);
     for (auto& camera : cameras) camera.Update(dt);
 
     // WEGO rounds: both teams plan simultaneously, so during the planning
@@ -286,8 +443,7 @@ int main() {
     // after game over) neither pane takes action input. Camera
     // orbit/zoom/pan is never gated -- either player can look around their
     // own pane at any time.
-    const bool planning =
-        game.Mode() != InputMode::GameOver && game.Mode() != InputMode::Executing;
+    const bool planning = isPlanningMode(game.Mode()) && !awaitingPeerSync;
     const bool fogActive = game.Mode() != InputMode::GameOver;
     // The team whose plan the shared selection/preview overlays currently
     // belong to (only one figure is ever mid-selection at a time).
@@ -296,9 +452,9 @@ int main() {
       if (const Unit* selected = game.FindUnit(*selectedId)) selectedTeam = selected->team;
     }
 
-    std::array<TeamVisibility, kPaneCount> paneVisibility;
-    for (int pane = 0; pane < kPaneCount; ++pane) {
-      if (fogActive) paneVisibility[pane] = game.ComputeVisibility(PaneTeam(pane));
+    std::array<TeamVisibility, kMaxPanes> paneVisibility;
+    for (int pane = 0; pane < paneCount; ++pane) {
+      if (fogActive) paneVisibility[pane] = game.ComputeVisibility(paneTeam(pane));
     }
 
     // --- UI ---
@@ -315,11 +471,17 @@ int main() {
         ImGui::Text("Mutual annihilation -- draw!");
       }
       if (ImGui::Button("New Match")) {
-        game.Reset();
+        if (isSimulator) {
+          game.Reset();
+        } else {
+#ifdef __EMSCRIPTEN__
+          tbgwaf_channel_post("N");
+#endif
+        }
       }
       ImGui::End();
     } else {
-      int plannedCount[kPaneCount] = {0, 0}, totalCount[kPaneCount] = {0, 0};
+      int plannedCount[2] = {0, 0}, totalCount[2] = {0, 0};
       for (const Unit& unit : game.GetScene().units) {
         if (!unit.alive) continue;
         const int pane = unit.team == Team::Blue ? 0 : 1;
@@ -334,9 +496,9 @@ int main() {
       ImGui::Text("Round %d", game.RoundNumber());
       if (planning) {
         ImGui::Text("Both teams plan every figure, then commit the round.");
-        for (int pane = 0; pane < kPaneCount; ++pane) {
-          ImGui::Text("%s planned: %d / %d", TeamName(PaneTeam(pane)), plannedCount[pane],
-                      totalCount[pane]);
+        for (int team = 0; team < 2; ++team) {
+          ImGui::Text("%s planned: %d / %d", TeamName(static_cast<Team>(team)),
+                      plannedCount[team], totalCount[team]);
         }
       }
       switch (game.Mode()) {
@@ -359,7 +521,18 @@ int main() {
           break;
       }
       ImGui::BeginDisabled(!game.CanCommitRound());
-      if (ImGui::Button("Commit Round")) game.CommitRound();
+      if (ImGui::Button("Commit Round")) {
+        if (isSimulator) {
+          game.CommitRound();
+        } else {
+#ifdef __EMSCRIPTEN__
+          // Send our latest plans first so the simulator commits with them.
+          lastSentState = SerializeSnapshot(game.ExportState());
+          tbgwaf_channel_post(("P " + lastSentState).c_str());
+          tbgwaf_channel_post("C");
+#endif
+        }
+      }
       ImGui::EndDisabled();
       ImGui::End();
 
@@ -368,7 +541,7 @@ int main() {
         if (selected && (game.Mode() == InputMode::ActionMenu ||
                           game.Mode() == InputMode::AwaitingMoveDestination ||
                           game.Mode() == InputMode::AwaitingShootTarget)) {
-          const int activePane = *selectedTeam == Team::Blue ? 0 : 1;
+          const int activePane = networked || *selectedTeam == Team::Blue ? 0 : 1;
           const PaneRect& activeRect = paneRects[activePane];
           const glm::mat4 activeView = cameras[activePane].ViewMatrix();
           const glm::mat4 activeProj = cameras[activePane].ProjectionMatrix(
@@ -407,13 +580,15 @@ int main() {
     // there's no "inactive side" to dim any more -- each pane is always its
     // own player's live view.
     ImDrawList* overlay = ImGui::GetForegroundDrawList();
-    overlay->AddLine(ImVec2(static_cast<float>(paneRects[1].x), 0.0f),
-                      ImVec2(static_cast<float>(paneRects[1].x), static_cast<float>(windowHeight)),
-                      IM_COL32(255, 255, 255, 60), 2.0f);
-    for (int pane = 0; pane < kPaneCount; ++pane) {
+    if (paneCount == 2) {
+      overlay->AddLine(ImVec2(static_cast<float>(paneRects[1].x), 0.0f),
+                        ImVec2(static_cast<float>(paneRects[1].x), static_cast<float>(windowHeight)),
+                        IM_COL32(255, 255, 255, 60), 2.0f);
+    }
+    for (int pane = 0; pane < paneCount; ++pane) {
       const PaneRect& rect = paneRects[pane];
       overlay->AddText(ImVec2(rect.x + 10.0f, windowHeight - 24.0f), IM_COL32(255, 255, 255, 220),
-                        TeamName(PaneTeam(pane)));
+                        TeamName(paneTeam(pane)));
     }
 
     // --- Dispatch deferred input, now that WantCaptureMouse reflects the UI
@@ -422,7 +597,7 @@ int main() {
 
     const bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse;
     if (!uiWantsMouse && planning) {
-      const int hoverPane = PaneForX(mouseX, windowWidth);
+      const int hoverPane = PaneForX(mouseX, paneCount, windowWidth);
       if (game.Mode() == InputMode::AwaitingMoveDestination) {
         const PaneRect& rect = paneRects[hoverPane];
         const gfx::Ray hoverRay = cameras[hoverPane].ScreenPointToRay(
@@ -434,11 +609,11 @@ int main() {
           hasHoveredGroundPoint = true;
           // Team-tagged: hovering over the *other* player's pane just clears
           // the preview instead of steering this pane's selected mover.
-          game.HoverGround(hoverPoint, PaneTeam(hoverPane));
+          game.HoverGround(hoverPoint, paneTeam(hoverPane));
         }
       }
       if (leftClickPending) {
-        const int clickPane = PaneForX(leftClickX, windowWidth);
+        const int clickPane = PaneForX(leftClickX, paneCount, windowWidth);
         const PaneRect& rect = paneRects[clickPane];
         const gfx::Ray clickRay = cameras[clickPane].ScreenPointToRay(
             static_cast<float>(leftClickX - rect.x), static_cast<float>(leftClickY),
@@ -447,7 +622,7 @@ int main() {
         // team, or enemies currently inside this team's FOV) are pickable
         // -- a hidden enemy's collision box must not be clickable just
         // because it happens to sit behind something that is drawn.
-        const Team clickTeam = PaneTeam(clickPane);
+        const Team clickTeam = paneTeam(clickPane);
         std::vector<Unit> pickableUnits;
         for (const Unit& unit : game.GetScene().units) {
           if (unit.alive && gfx::IsUnitVisibleForRender(unit, clickTeam, fogActive,
@@ -471,10 +646,10 @@ int main() {
     // SceneRenderer::RenderPane. Selection/move-preview overlays belong to
     // whichever team the currently selected figure is on, so only that
     // player's pane shows them (the other side must not see enemy plans). ---
-    for (int pane = 0; pane < kPaneCount; ++pane) {
+    for (int pane = 0; pane < paneCount; ++pane) {
       const PaneRect& rect = paneRects[pane];
       gfx::PaneOverlays overlays;
-      if (selectedTeam && *selectedTeam == PaneTeam(pane)) {
+      if (selectedTeam && *selectedTeam == paneTeam(pane)) {
         if (const auto selectedId = game.SelectedUnitId()) {
           if (const Unit* selected = game.FindUnit(*selectedId)) {
             overlays.selectionHighlight = selected->position;
@@ -488,7 +663,7 @@ int main() {
           }
         }
       }
-      renderer.RenderPane(game, PaneTeam(pane), fogActive, paneVisibility[pane], cameras[pane],
+      renderer.RenderPane(game, paneTeam(pane), fogActive, paneVisibility[pane], cameras[pane],
                           rect.x, 0, rect.width, windowHeight, overlays);
     }
 
@@ -496,6 +671,19 @@ int main() {
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
     SDL_GL_SwapWindow(window);
+
+#ifdef __EMSCRIPTEN__
+    // Publish state changes: the simulator ships the whole match, the
+    // follower just its plans (only while planning).
+    if (networked && !awaitingPeerSync && (isSimulator || isPlanningMode(game.Mode()))) {
+      std::string state = SerializeSnapshot(game.ExportState());
+      if (forceBroadcast || state != lastSentState) {
+        tbgwaf_channel_post(((isSimulator ? "S " : "P ") + state).c_str());
+        lastSentState = std::move(state);
+        forceBroadcast = false;
+      }
+    }
+#endif
 
     if (isSmokeTest && ++frameCount >= kSmokeTestMaxFrames) {
       quit = true;

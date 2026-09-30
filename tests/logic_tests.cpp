@@ -882,6 +882,52 @@ void TestGameLogicWinCondition() {
 
 }  // namespace
 
+void TestSnapshotMirrorsMatchAndTeamPlans() {
+  GameLogic blue, red;
+  // Each canvas's instance plans only its own team.
+  for (int id : {0, 1, 2}) {
+    blue.ClickUnit(id, Team::Blue);
+    blue.ChoosePass();
+  }
+  red.ClickUnit(3, Team::Red);
+  red.ChooseMove();
+  red.ClickGround(red.FindUnit(3)->position + glm::vec3(1.0f, 0.0f, 0.0f), Team::Red);
+  CHECK(red.FindUnit(3)->plan.type == PlannedActionType::Move);
+  for (int id : {4, 5}) {
+    red.ClickUnit(id, Team::Red);
+    red.ChoosePass();
+  }
+  CHECK(!blue.CanCommitRound());
+
+  GameSnapshot redSnap;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(red.ExportState()), &redSnap));
+  // Blue learns Red's plans (incl. the move path) without touching its own.
+  CHECK(blue.ImportTeamPlans(redSnap, Team::Red));
+  CHECK(blue.FindUnit(3)->plan.type == PlannedActionType::Move);
+  CHECK(blue.FindUnit(3)->plan.movePath == red.FindUnit(3)->plan.movePath);
+  CHECK(blue.FindUnit(0)->plan.type == PlannedActionType::Pass);
+  CHECK(blue.CanCommitRound());
+
+  blue.CommitRound();
+  blue.Update(0.5f);  // Mid-move.
+  GameSnapshot decoded;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(blue.ExportState()), &decoded));
+  CHECK(red.ImportState(decoded));
+  CHECK(red.Mode() == blue.Mode());
+  CHECK(red.RoundNumber() == blue.RoundNumber());
+  CHECK(red.IsUnitMoving(3) == blue.IsUnitMoving(3));
+  for (const auto& unit : blue.GetScene().units) {
+    const Unit* mirrored = red.FindUnit(unit.id);
+    CHECK(mirrored && mirrored->position == unit.position);
+    CHECK(mirrored && mirrored->facingYaw == unit.facingYaw);
+    CHECK(mirrored && mirrored->plan.type == unit.plan.type);
+  }
+
+  GameSnapshot bad;
+  CHECK(!DeserializeSnapshot("garbage", &bad));
+  CHECK(!DeserializeSnapshot("", &bad));
+}
+
 int main() {
   TestNavMeshRoutesAroundObstacle();
   TestNavMeshDirectPathWhenUnobstructed();
@@ -910,6 +956,7 @@ int main() {
   TestGameLogicMoveCanClimbOntoObstacle();
   TestGameLogicOverwatchFiresOnEnemyEnteringFov();
   TestGameLogicWinCondition();
+  TestSnapshotMirrorsMatchAndTeamPlans();
 
   if (g_failures == 0) {
     std::printf("All logic tests passed.\n");

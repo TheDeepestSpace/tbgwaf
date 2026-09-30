@@ -49,7 +49,7 @@ jobs:
         if: github.event.action != 'closed'
         run: |
           mkdir -p site
-          cp build-web/tactics_app.html site/index.html
+          cp build-web/index.html site/
           cp build-web/tactics_app.js site/
           cp build-web/tactics_app.wasm site/
 
@@ -102,12 +102,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           marker='<!-- gameplay-scenario-review -->'
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           repo="${GITHUB_REPOSITORY#*/}"
           url="https://${owner}.github.io/${repo}/pr-preview/pr-${PR_NUMBER}/scenarios/"
-          body="$(printf '%s\n%s' "$marker" "🎬 [Gameplay scenario review page](${url}) — per-team videos of every scenario, grouped by how this PR changes it (updates with each push; may take a minute to go live after deploy).")"
+          body="$(printf '%s\n%s' "$marker" "🎬 [Gameplay scenario review page](${url}) — per-team videos of every scenario, grouped by how this PR changes it, refreshed at commit \`${HEAD_SHA:0:7}\` (updates with each push; may take a minute to go live after deploy).")"
           existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             --paginate --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" | head -n1)
           if [ -n "$existing" ]; then

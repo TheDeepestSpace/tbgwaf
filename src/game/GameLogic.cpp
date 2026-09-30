@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 
 #include "game/Raycast.h"
 
@@ -46,6 +47,142 @@ void GameLogic::Reset(Scene scene) {
   movePreviewValid_ = false;
   activeMoves_.clear();
   pendingShots_.clear();
+  mirroredMoving_.clear();
+}
+
+GameSnapshot GameLogic::ExportState() const {
+  GameSnapshot snap;
+  for (const auto& unit : scene_.units) {
+    GameSnapshot::UnitState u;
+    u.id = unit.id;
+    u.position = unit.position;
+    u.facingYaw = unit.facingYaw;
+    u.alive = unit.alive;
+    u.triggerAction = unit.triggerAction;
+    u.planType = unit.plan.type;
+    u.planShootTargetId = unit.plan.shootTargetId;
+    u.planPath = unit.plan.movePath;
+    u.knockdownAxis = unit.knockdownAxis;
+    u.knockdownElapsed = unit.knockdownElapsed;
+    u.moving = IsUnitMoving(unit.id);
+    snap.units.push_back(std::move(u));
+  }
+  snap.mode = mode_;
+  snap.roundNumber = roundNumber_;
+  snap.winner = winner_ ? static_cast<int>(*winner_) : -1;
+  return snap;
+}
+
+namespace {
+
+bool SnapshotMatchesUnits(const GameSnapshot& snap, const std::vector<Unit>& units) {
+  if (snap.units.size() != units.size()) return false;
+  for (const auto& u : snap.units) {
+    bool found = false;
+    for (const auto& unit : units) found |= unit.id == u.id;
+    if (!found) return false;
+  }
+  return true;
+}
+
+void ApplyPlan(const GameSnapshot::UnitState& u, Unit* unit) {
+  unit->plan = PlannedAction{};
+  unit->plan.type = u.planType;
+  unit->plan.shootTargetId = u.planShootTargetId;
+  unit->plan.movePath = u.planPath;
+}
+
+}  // namespace
+
+bool GameLogic::ImportState(const GameSnapshot& snap) {
+  if (!SnapshotMatchesUnits(snap, scene_.units)) return false;
+  mirroredMoving_.clear();
+  for (const auto& u : snap.units) {
+    Unit* unit = FindUnit(u.id);
+    unit->position = u.position;
+    unit->facingYaw = u.facingYaw;
+    unit->alive = u.alive;
+    unit->triggerAction = u.triggerAction;
+    unit->knockdownAxis = u.knockdownAxis;
+    unit->knockdownElapsed = u.knockdownElapsed;
+    ApplyPlan(u, unit);
+    if (u.moving) mirroredMoving_.push_back(u.id);
+  }
+  mode_ = snap.mode;
+  roundNumber_ = snap.roundNumber;
+  if (snap.winner >= 0) {
+    winner_ = static_cast<Team>(snap.winner);
+  } else {
+    winner_.reset();
+  }
+  selectedUnitId_.reset();
+  movePreviewPath_.clear();
+  movePreviewValid_ = false;
+  activeMoves_.clear();
+  pendingShots_.clear();
+  return true;
+}
+
+bool GameLogic::ImportTeamPlans(const GameSnapshot& snap, Team team) {
+  if (!SnapshotMatchesUnits(snap, scene_.units)) return false;
+  for (const auto& u : snap.units) {
+    Unit* unit = FindUnit(u.id);
+    if (unit->team != team) continue;
+    ApplyPlan(u, unit);
+  }
+  return true;
+}
+
+std::string SerializeSnapshot(const GameSnapshot& snap) {
+  std::ostringstream out;
+  out.precision(9);
+  out << static_cast<int>(snap.mode) << ' ' << snap.winner << ' ' << snap.roundNumber << ' '
+      << snap.units.size();
+  for (const auto& u : snap.units) {
+    out << ' ' << u.id << ' ' << u.position.x << ' ' << u.position.y << ' ' << u.position.z << ' '
+        << u.facingYaw << ' ' << (u.alive ? 1 : 0) << ' ' << static_cast<int>(u.triggerAction)
+        << ' ' << static_cast<int>(u.planType) << ' ' << u.planShootTargetId << ' '
+        << u.knockdownAxis.x << ' ' << u.knockdownAxis.y << ' ' << u.knockdownAxis.z << ' '
+        << u.knockdownElapsed << ' ' << (u.moving ? 1 : 0) << ' ' << u.planPath.size();
+    for (const auto& p : u.planPath) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
+  }
+  return out.str();
+}
+
+bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
+  std::istringstream in(text);
+  GameSnapshot snap;
+  int mode = 0;
+  size_t unitCount = 0;
+  constexpr size_t kMaxEntries = 1024;
+  if (!(in >> mode >> snap.winner >> snap.roundNumber >> unitCount)) return false;
+  if (mode < 0 || mode > static_cast<int>(InputMode::GameOver)) return false;
+  if (snap.winner < -1 || snap.winner > 1) return false;
+  if (unitCount > kMaxEntries) return false;
+  snap.mode = static_cast<InputMode>(mode);
+  snap.units.resize(unitCount);
+  for (auto& u : snap.units) {
+    int alive = 0, trigger = 0, plan = 0, moving = 0;
+    size_t pathCount = 0;
+    if (!(in >> u.id >> u.position.x >> u.position.y >> u.position.z >> u.facingYaw >> alive >>
+          trigger >> plan >> u.planShootTargetId >> u.knockdownAxis.x >> u.knockdownAxis.y >>
+          u.knockdownAxis.z >> u.knockdownElapsed >> moving >> pathCount)) {
+      return false;
+    }
+    if (trigger < 0 || trigger > static_cast<int>(TriggerAction::Shoot)) return false;
+    if (plan < 0 || plan > static_cast<int>(PlannedActionType::Overwatch)) return false;
+    if (pathCount > kMaxEntries) return false;
+    u.planType = static_cast<PlannedActionType>(plan);
+    u.alive = alive != 0;
+    u.moving = moving != 0;
+    u.triggerAction = static_cast<TriggerAction>(trigger);
+    u.planPath.resize(pathCount);
+    for (auto& p : u.planPath) {
+      if (!(in >> p.x >> p.y >> p.z)) return false;
+    }
+  }
+  *outSnap = std::move(snap);
+  return true;
 }
 
 Unit* GameLogic::FindUnit(int id) {
@@ -304,6 +441,9 @@ void GameLogic::ResolvePendingShots() {
 }
 
 bool GameLogic::IsUnitMoving(int unitId) const {
+  for (int id : mirroredMoving_) {
+    if (id == unitId) return true;
+  }
   for (const ActiveMove& move : activeMoves_) {
     if (move.unitId == unitId) return true;
   }

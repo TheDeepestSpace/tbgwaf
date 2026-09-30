@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -28,6 +29,37 @@ enum class InputMode {
 // or -- a genuine possibility under simultaneous execution -- both sides
 // were wiped out in the same round, which GameLogic treats as a draw).
 std::optional<Team> CheckWinner(const std::vector<Unit>& units);
+
+// Serializable dynamic match state (everything that changes after Reset()
+// on a fixed scene), used by two-canvas web play: each canvas runs its own
+// GameLogic instance for one team. The instance for Blue is the simulator
+// (it alone commits and executes rounds); the Red instance mirrors its
+// snapshots instead of re-simulating so float divergence can't desync the
+// two. During planning each side only ships its own team's plans.
+struct GameSnapshot {
+  struct UnitState {
+    int id = -1;
+    glm::vec3 position{0.0f};
+    float facingYaw = 0.0f;
+    bool alive = true;
+    TriggerAction triggerAction = TriggerAction::None;
+    PlannedActionType planType = PlannedActionType::None;
+    int planShootTargetId = -1;
+    std::vector<glm::vec3> planPath;
+    glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
+    float knockdownElapsed = -1.0f;
+    bool moving = false;  // Has an in-flight move in the executing round.
+  };
+  std::vector<UnitState> units;
+  InputMode mode = InputMode::AwaitingSelection;
+  int roundNumber = 1;
+  int winner = -1;  // -1 = none, else static_cast<int>(Team).
+};
+
+// Text encoding of a snapshot (for the page-level message bus). Deserialize
+// returns false on malformed input.
+std::string SerializeSnapshot(const GameSnapshot& snapshot);
+bool DeserializeSnapshot(const std::string& text, GameSnapshot* out);
 
 // Owns the whole game state machine: scene, navmesh, round phases, and the
 // click-driven plan-then-commit flow. Deliberately free of any SDL/GL/ImGui
@@ -126,6 +158,16 @@ class GameLogic {
   // this same call) if nobody planned a move. No-op unless CanCommitRound().
   void CommitRound();
 
+  // Snapshot of the dynamic match state. ImportState overwrites the whole
+  // match (a follower mirroring the simulator) and returns false, leaving
+  // state untouched, if the snapshot doesn't match this scene's units.
+  // ImportTeamPlans only copies `team`'s figures' plans (planning phase:
+  // learning what the other side has planned) and leaves everything else,
+  // including local selection, alone; it too returns false on mismatch.
+  GameSnapshot ExportState() const;
+  bool ImportState(const GameSnapshot& snapshot);
+  bool ImportTeamPlans(const GameSnapshot& snapshot, Team team);
+
   // True while `unitId` has an in-flight planned move animating as part of
   // the executing round (figures from both teams can be animating at once).
   bool IsUnitMoving(int unitId) const;
@@ -190,6 +232,9 @@ class GameLogic {
   // the round finishes.
   std::vector<ActiveMove> activeMoves_;
   std::vector<PendingShot> pendingShots_;
+  // Ids of figures a simulating peer reports as mid-move (ImportState only;
+  // a follower has no activeMoves_ of its own).
+  std::vector<int> mirroredMoving_;
 };
 
 }  // namespace tactics

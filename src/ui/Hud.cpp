@@ -1,6 +1,5 @@
 #include "ui/Hud.h"
 
-#include <cstdio>
 #include <string>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -13,11 +12,6 @@ using tactics::Team;
 using tactics::Unit;
 
 namespace ui {
-
-std::optional<Team> ActiveTeam(const GameLogic& game) {
-  if (game.Mode() == InputMode::GameOver) return std::nullopt;
-  return game.CurrentTeam();
-}
 
 glm::vec2 WorldToWindow(const glm::vec3& world, const gfx::OrbitCamera& camera,
                         const PaneRect& rect, int windowHeight) {
@@ -33,44 +27,53 @@ glm::vec2 WorldToWindow(const glm::vec3& world, const gfx::OrbitCamera& camera,
   return glm::vec2(screen.x, windowHeight - screen.y);
 }
 
-HudActions DrawHud(const GameLogic& game, Team team, bool isActive, const PaneRect& rect,
+HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRect& rect,
                    int windowHeight, const gfx::OrbitCamera& camera) {
   HudActions actions;
-  const std::optional<Team> activeTeam = ActiveTeam(game);
   // Window ids are suffixed with the team so two panes can share one ImGui
   // context (the visual runner) without their windows colliding.
   const std::string suffix = std::string("##") + TeamName(team);
   auto id = [&](const char* title) { return std::string(title) + suffix; };
   const float left = static_cast<float>(rect.x);
 
-  if (const auto winner = game.Winner()) {
+  if (game.Mode() == InputMode::GameOver) {
     ImGui::SetNextWindowPos(ImVec2(left + rect.width * 0.5f, windowHeight * 0.3f),
                              ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::Begin(id("Game Over").c_str(), nullptr,
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize);
-    ImGui::Text("%s team wins!", TeamName(*winner));
+    if (const auto winner = game.Winner()) {
+      ImGui::Text("%s team wins!", TeamName(*winner));
+    } else {
+      // Simultaneous execution can down the last figure on both sides in
+      // the same instant.
+      ImGui::Text("Mutual annihilation -- draw!");
+    }
     if (ImGui::Button("New Match")) actions.newMatch = true;
     ImGui::End();
   } else {
-    int plannedCount = 0, totalCount = 0;
+    int plannedCount[2] = {0, 0}, totalCount[2] = {0, 0};
     for (const Unit& unit : game.GetScene().units) {
-      if (!unit.alive || !activeTeam || unit.team != *activeTeam) continue;
-      ++totalCount;
-      if (unit.plan.type != tactics::PlannedActionType::None) ++plannedCount;
+      if (!unit.alive) continue;
+      const int idx = unit.team == Team::Blue ? 0 : 1;
+      ++totalCount[idx];
+      if (unit.plan.type != tactics::PlannedActionType::None) ++plannedCount[idx];
     }
 
     ImGui::SetNextWindowPos(ImVec2(left + 10, 10), ImGuiCond_Always);
-    ImGui::Begin(id("Turn").c_str(), nullptr,
+    ImGui::Begin(id("Round").c_str(), nullptr,
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
                      ImGuiWindowFlags_NoMove);
     ImGui::Text("Round %d", game.RoundNumber());
-    if (activeTeam) {
-      ImGui::Text("%s team's turn -- plan every figure, then commit.", TeamName(*activeTeam));
-      ImGui::Text("Planned: %d / %d", plannedCount, totalCount);
+    if (planning) {
+      ImGui::Text("Both teams plan every figure, then commit the round.");
+      for (int t = 0; t < 2; ++t) {
+        ImGui::Text("%s planned: %d / %d", TeamName(static_cast<Team>(t)), plannedCount[t],
+                    totalCount[t]);
+      }
     }
     switch (game.Mode()) {
       case InputMode::AwaitingSelection:
-        ImGui::TextWrapped("Click one of your figures to plan its action.");
+        ImGui::TextWrapped("Click one of your figures (in your own pane) to plan its action.");
         break;
       case InputMode::ActionMenu:
         ImGui::TextWrapped("Choose an action to plan.");
@@ -81,22 +84,25 @@ HudActions DrawHud(const GameLogic& game, Team team, bool isActive, const PaneRe
       case InputMode::AwaitingShootTarget:
         ImGui::TextWrapped("Click an enemy figure to plan a shot (Esc to cancel).");
         break;
-      case InputMode::Moving:
-        ImGui::TextWrapped("Committing turn: figures are moving...");
+      case InputMode::Executing:
+        ImGui::TextWrapped("Round executing: both teams' plans are playing out...");
         break;
       default:
         break;
     }
-    ImGui::BeginDisabled(!game.CanCommitTurn());
-    if (ImGui::Button("Commit Turn")) actions.commit = true;
+    ImGui::BeginDisabled(!game.CanCommitRound());
+    if (ImGui::Button("Commit Round")) actions.commit = true;
     ImGui::EndDisabled();
     ImGui::End();
 
-    if (const auto selectedId = game.SelectedUnitId(); selectedId && isActive) {
+    // The shared selection belongs to one team's figure; only that team's
+    // pane shows its action menu.
+    if (const auto selectedId = game.SelectedUnitId()) {
       const Unit* selected = game.FindUnit(*selectedId);
-      if (selected && (game.Mode() == InputMode::ActionMenu ||
-                        game.Mode() == InputMode::AwaitingMoveDestination ||
-                        game.Mode() == InputMode::AwaitingShootTarget)) {
+      if (selected && selected->team == team &&
+          (game.Mode() == InputMode::ActionMenu ||
+           game.Mode() == InputMode::AwaitingMoveDestination ||
+           game.Mode() == InputMode::AwaitingShootTarget)) {
         const glm::vec2 pos = WorldToWindow(selected->position + glm::vec3(0.0f, 1.9f, 0.0f),
                                             camera, rect, windowHeight);
         ImGui::SetNextWindowPos(ImVec2(pos.x, pos.y), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
@@ -119,12 +125,8 @@ HudActions DrawHud(const GameLogic& game, Team team, bool isActive, const PaneRe
     }
   }
 
-  // Team label for this pane.
-  const char* status = game.Winner() ? "" : (isActive ? " - your turn" : "");
-  char label[64];
-  std::snprintf(label, sizeof(label), "%s%s", TeamName(team), status);
   ImGui::GetForegroundDrawList()->AddText(ImVec2(left + 10.0f, windowHeight - 24.0f),
-                                           IM_COL32(255, 255, 255, 220), label);
+                                           IM_COL32(255, 255, 255, 220), TeamName(team));
   return actions;
 }
 

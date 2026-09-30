@@ -577,11 +577,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glDepthMask(GL_TRUE);
   glDisable(GL_BLEND);
 
-  // Plan-then-commit: every living figure on the team currently planning
-  // gets a highlight in its own pane (dim white = still needs a plan,
-  // green = plan set) -- this is squad-wide now, not a single actor.
-  const bool paneActive = team == game.CurrentTeam() && game.Mode() != InputMode::GameOver;
-  if (paneActive) {
+  // WEGO planning: both teams plan concurrently, so during the planning
+  // phase every pane highlights its own team's living figures (dim white =
+  // still needs a plan, green = plan set) -- this is squad-wide, not a
+  // single actor.
+  const bool planning =
+      game.Mode() != InputMode::GameOver && game.Mode() != InputMode::Executing;
+  if (planning) {
     for (const Unit& unit : game.GetScene().units) {
       if (!unit.alive || unit.team != team) continue;
       if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
@@ -606,9 +608,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawHighlight(unlitShader_, cubeMesh_, viewProj, *overlays.selectionHighlight,
                   glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
   }
-  // A commit animates every planned move at once, so highlight each figure
-  // currently mid-move rather than just a single actor.
-  if (paneActive && game.Mode() == InputMode::Moving) {
+  // An executing round animates both teams' planned moves at once; each
+  // pane highlights its own team's figures currently mid-move.
+  if (game.Mode() == InputMode::Executing) {
     for (const Unit& unit : game.GetScene().units) {
       if (unit.team == team && game.IsUnitMoving(unit.id)) {
         DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position,
@@ -630,8 +632,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
   // Visual feedback for the whole squad's plan so far: a planned move reuses
   // the same path-line rendering as the live preview above; a planned shot
-  // gets a simple shooter->target line.
-  if (paneActive) {
+  // gets a simple shooter->target line. Own team only -- the enemy's plans
+  // stay hidden even where its figures are visible.
+  if (planning) {
     for (const Unit& unit : game.GetScene().units) {
       if (!unit.alive || unit.team != team) continue;
       if (unit.plan.type == tactics::PlannedActionType::Move && unit.plan.movePath.size() >= 2) {

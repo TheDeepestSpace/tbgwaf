@@ -268,6 +268,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   const int paneWidth = kWindowWidth / 2;
   // Optional cursor marker: `progress` runs 0 -> 1 as the ring closes in.
   struct ClickMarker {
+    Team team;
     glm::vec3 world;
     float progress;
   };
@@ -287,12 +288,11 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     io.DisplaySize = ImVec2(static_cast<float>(kWindowWidth), static_cast<float>(kWindowHeight));
     io.DeltaTime = 1.0f / kVideoFps;
     // Each team's pane gets its own HUD, as in its own browser tab.
+    const bool planning = game.Mode() != InputMode::Executing && game.Mode() != InputMode::GameOver;
     auto drawHud = [&](const GameLogic& g) {
-      const auto activeTeam = ui::ActiveTeam(g);
       for (int pane = 0; pane < ui::kPaneCount; ++pane) {
-        const Team team = PaneTeam(pane);
-        ui::DrawHud(g, team, activeTeam && *activeTeam == team,
-                    ui::ComputePaneRect(pane, kWindowWidth), kWindowHeight, cameras[pane]);
+        ui::DrawHud(g, PaneTeam(pane), planning, ui::ComputePaneRect(pane, kWindowWidth),
+                    kWindowHeight, cameras[pane]);
       }
     };
     // Auto-resize windows need a couple of frames to settle on their content
@@ -308,8 +308,8 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     ImGui::NewFrame();
     drawHud(game);
     if (marker) {
-      if (const auto team = ui::ActiveTeam(game)) {
-        const int pane = *team == Team::Blue ? 0 : 1;
+      {
+        const int pane = marker->team == Team::Blue ? 0 : 1;
         const glm::vec2 p = ui::WorldToWindow(marker->world, cameras[pane],
                                               ui::ComputePaneRect(pane, kWindowWidth),
                                               kWindowHeight);
@@ -364,10 +364,10 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     hooks.onFrame = [&](const GameLogic& game) { writeVideoFrame(game, nullptr); };
     // Show the cursor landing on the figure/ground point before the click
     // takes effect, instead of jump-cutting between states.
-    hooks.onClick = [&](const GameLogic& game, const glm::vec3& worldPoint) {
+    hooks.onClick = [&](const GameLogic& game, Team team, const glm::vec3& worldPoint) {
       for (int i = 0; i < kClickFrames; ++i) {
         const float progress = std::min(1.0f, static_cast<float>(i + 1) / (kClickFrames * 0.7f));
-        const ClickMarker marker{worldPoint, progress};
+        const ClickMarker marker{team, worldPoint, progress};
         writeVideoFrame(game, &marker);
       }
     };

@@ -1,6 +1,6 @@
 #pragma once
 
-// Per-team HUD shared by the interactive app (src/main.cpp) and the headless
+// Per-pane HUD shared by the interactive app (src/main.cpp) and the headless
 // visual scenario runner (tests/visual), so screenshots/videos show exactly
 // the UI a player sees. Must be called between ImGui::NewFrame() and
 // ImGui::Render(). Const w.r.t. the game: button presses are reported back
@@ -40,9 +40,6 @@ inline PaneRect ComputePaneRect(int pane, int windowWidth) {
   return PaneRect{leftWidth, windowWidth - leftWidth};
 }
 
-// The team currently planning its turn; nullopt once the game is over.
-std::optional<tactics::Team> ActiveTeam(const tactics::GameLogic& game);
-
 // Projects a world point to top-left-origin window pixels, as seen through
 // `camera` rendered into `rect` (full window height `windowHeight`).
 glm::vec2 WorldToWindow(const glm::vec3& world, const gfx::OrbitCamera& camera,
@@ -58,9 +55,11 @@ struct HudActions {
   bool cancel = false;
 };
 
-// Draws `team`'s view of the HUD inside `rect`: the Turn / Game Over panel,
-// the floating action menu (only when `isActive`) and the team label.
-HudActions DrawHud(const tactics::GameLogic& game, tactics::Team team, bool isActive,
+// Draws `team`'s view of the HUD inside `rect`: the Round / Game Over panel,
+// the floating action menu (when `team` has a figure mid-selection), and the
+// team label. Both teams plan simultaneously, so every pane is always live;
+// `planning` is false while a round executes or the peer sync is pending.
+HudActions DrawHud(const tactics::GameLogic& game, tactics::Team team, bool planning,
                    const PaneRect& rect, int windowHeight, const gfx::OrbitCamera& camera);
 
 }  // namespace ui

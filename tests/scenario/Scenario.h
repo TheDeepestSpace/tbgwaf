@@ -5,11 +5,13 @@
 // same GameLogic click/choose API a real player uses (ClickUnit/ChooseMove/
 // ChooseShoot/ChoosePass/ClickGround), so a scenario exercises exactly the
 // same code path as the interactive game. No rendering: assertions only see
-// game *state* (positions, alive/dead, FOV visibility, turn order, winner).
+// game *state* (positions, alive/dead, FOV visibility, round number, winner).
 //
-// Actions only ever plan a figure's move/shoot/pass; a plan-then-commit
-// team's turn doesn't execute anything until a script's own explicit
-// `action: commit` step, which mirrors clicking "Commit Turn".
+// Actions only ever plan a figure's move/shoot/pass. Both teams plan the
+// same WEGO round concurrently, so a script interleaves actors from either
+// side freely; nothing executes until the script's own explicit
+// `action: commit` step, which mirrors clicking "Commit Round" and plays
+// out every figure's plan on both teams simultaneously.
 //
 // See tests/scenarios/*.yaml for the file format by example, and
 // tests/scenario_tests.cpp for how these are run in CI.
@@ -57,7 +59,6 @@ struct ScenarioAssertion {
   bool checkWinner = false;
   std::optional<Team> expectedWinner;  // nullopt means "no winner yet".
 
-  std::optional<Team> currentTeam;
   std::optional<int> round;
 };
 
@@ -101,11 +102,11 @@ struct PlaybackHooks {
   std::function<void(const GameLogic&)> onFrame;
 
   // Fired just before each scripted click is applied (unit selection, move
-  // destination, shoot target), with the world-space point the equivalent
+  // destination, shoot target) by `team`'s player, with the world-space point the equivalent
   // real mouse click would land on (unit head for figures, the ground point
   // for destinations). Lets a renderer show the cursor landing before the
   // state changes. The game state is the pre-click state; do not mutate it.
-  std::function<void(const GameLogic&, const glm::vec3& worldPoint)> onClick;
+  std::function<void(const GameLogic&, Team team, const glm::vec3& worldPoint)> onClick;
 
   // Fired once at the initial state (completedActions == 0) and once after
   // each action step resolves (completedActions == 1, 2, ...). Assert-only

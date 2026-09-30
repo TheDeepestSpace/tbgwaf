@@ -34,7 +34,7 @@ struct TeamVisibility {
 bool IsPointVisibleToTeam(Team team, const glm::vec3& point, const std::vector<Unit>& units,
                            const std::vector<AABB>& obstacles);
 
-// Computes the full per-team visibility set: which living enemy figures and
+// Computes the full per-team visibility set: which enemy figures (downed included) and
 // which obstacles are currently inside the combined FOV of `team`'s living
 // figures.
 TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,

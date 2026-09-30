@@ -180,6 +180,23 @@ glm::mat4 GunModel(const Unit& unit) {
          glm::translate(glm::mat4(1.0f), localMin) * glm::scale(glm::mat4(1.0f), size);
 }
 
+// Tip-over transform pivoting at the feet (unit.position) around
+// knockdownAxis, ease-out from 0 to ~85 degrees. Identity for standing units.
+glm::mat4 KnockdownModel(const Unit& unit) {
+  if (unit.alive || unit.knockdownElapsed < 0.0f) return glm::mat4(1.0f);
+  constexpr float kMaxTilt = glm::radians(85.0f);
+  const float t = glm::clamp(unit.knockdownElapsed / tactics::constants::kKnockdownDuration, 0.0f,
+                             1.0f);
+  const float eased = 1.0f - (1.0f - t) * (1.0f - t);
+  return glm::translate(glm::mat4(1.0f), unit.position) *
+         glm::rotate(glm::mat4(1.0f), kMaxTilt * eased, unit.knockdownAxis) *
+         glm::translate(glm::mat4(1.0f), -unit.position);
+}
+
+glm::mat4 BoxModel(const glm::vec3& minCorner, const glm::vec3& size) {
+  return glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
+}
+
 void DrawUnit(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
               const glm::mat4& lightSpaceMatrix, const Unit& unit) {
   const glm::vec4 color = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
@@ -187,17 +204,23 @@ void DrawUnit(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewP
   constexpr glm::vec4 kGunColor(0.12f, 0.12f, 0.12f, 1.0f);
   glm::vec3 bodyMin, bodySize, headMin, headSize;
   UnitBoxes(unit, &bodyMin, &bodySize, &headMin, &headSize);
-  DrawBoxLit(shader, cube, viewProj, lightSpaceMatrix, bodyMin, bodySize, color);
-  DrawBoxLit(shader, cube, viewProj, lightSpaceMatrix, headMin, headSize, color);
-  DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, GunModel(unit), kGunColor);
+  const glm::mat4 fall = KnockdownModel(unit);
+  DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, fall * BoxModel(bodyMin, bodySize),
+                  color);
+  DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, fall * BoxModel(headMin, headSize),
+                  color);
+  DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, fall * GunModel(unit), kGunColor);
 }
 
 void DrawUnitDepth(const Shader& shader, const CubeMesh& cube, const glm::mat4& lightSpaceMatrix,
                    const Unit& unit) {
   glm::vec3 bodyMin, bodySize, headMin, headSize;
   UnitBoxes(unit, &bodyMin, &bodySize, &headMin, &headSize);
-  DrawBoxDepth(shader, cube, lightSpaceMatrix, bodyMin, bodySize);
-  DrawBoxDepth(shader, cube, lightSpaceMatrix, headMin, headSize);
+  const glm::mat4 fall = KnockdownModel(unit);
+  shader.SetMat4("uLightMVP", lightSpaceMatrix * fall * BoxModel(bodyMin, bodySize));
+  cube.Draw();
+  shader.SetMat4("uLightMVP", lightSpaceMatrix * fall * BoxModel(headMin, headSize));
+  cube.Draw();
 }
 
 void DrawHighlight(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
@@ -381,7 +404,6 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min, bounds.max - bounds.min);
   }
   for (const Unit& unit : game.GetScene().units) {
-    if (!unit.alive) continue;
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
     DrawUnitDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, unit);
   }
@@ -424,7 +446,6 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   for (const Unit& unit : game.GetScene().units) {
-    if (!unit.alive) continue;
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
     DrawUnit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, unit);
   }

@@ -1,1 +1,108 @@
-<!doctypehtml><html lang=en><head><meta charset=utf-8><meta content="width=device-width,initial-scale=1"name=viewport><title>tbgwaf</title><style>body,html{margin:0;padding:0;background:#16171a;color:#e6e6e6;font-family:-apple-system,system-ui,sans-serif}#hud{position:fixed;top:8px;right:12px;z-index:20;font-size:12px;opacity:.8;text-align:right}#hud a{color:#9cc4ff}#status:empty{display:none}canvas#canvas{background:#000;display:block;position:fixed;inset:0;width:100vw;height:100vh}#blur-overlay{position:fixed;inset:0;z-index:10;display:none;backdrop-filter:blur(28px) brightness(0.6);-webkit-backdrop-filter:blur(28px) brightness(0.6);align-items:center;justify-content:center;font-size:22px;text-shadow:0 1px 4px #000}#blur-overlay.on{display:flex}</style></head><body><canvas height=720 id=canvas oncontextmenu=event.preventDefault() tabindex=-1 width=1280></canvas><div id=blur-overlay><span id=blur-text>Waiting for the other player...</span></div><div id=hud><div id=who></div><div id=status>Loading...</div></div><script>var Module={canvas:document.getElementById("canvas"),setStatus:function(e){document.getElementById("status").innerText=e}};!function(){var e=new URLSearchParams(window.location.search).get("player"),t=document.getElementById("who");if("blue"===e||"red"===e){document.title="tbgwaf - "+e,t.textContent="Playing as "+e+". Open the other player in a second tab: ";var a="blue"===e?"red":"blue";t.innerHTML+='<a href="?player='+a+'" target="_blank">'+a+"</a>"}else t.innerHTML='Hot-seat mode. Two-tab play: <a href="?player=blue" target="_blank">Blue</a> / <a href="?player=red" target="_blank">Red</a>'}(),window.onerror=function(){Module.setStatus("Failed to load -- check the browser console.")}</script><script async src=tactics_app.js></script></body></html>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>tbgwaf</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #16171a;
+        color: #e6e6e6;
+        font-family: -apple-system, system-ui, sans-serif;
+        overflow: hidden;
+      }
+      #hud {
+        position: fixed;
+        top: 8px;
+        right: 12px;
+        z-index: 20;
+        font-size: 12px;
+        opacity: 0.8;
+        text-align: right;
+      }
+      #status:empty { display: none; }
+      #panes {
+        display: flex;
+        width: 100vw;
+        height: 100vh;
+      }
+      .pane {
+        position: relative;
+        flex: 1 1 50%;
+        min-width: 0;
+      }
+      .pane + .pane { border-left: 2px solid #000; }
+      .pane canvas {
+        background: #000;
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      /* Covers the pane whose team is not on the move: a strong blur (plus
+         a heavy dim) so board state is unreadable. */
+      .blur-overlay {
+        position: absolute;
+        inset: 0;
+        z-index: 10;
+        display: none;
+        backdrop-filter: blur(28px) brightness(0.35);
+        -webkit-backdrop-filter: blur(28px) brightness(0.35);
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+        text-shadow: 0 1px 4px #000;
+      }
+      .blur-overlay.on { display: flex; }
+    </style>
+  </head>
+  <body>
+    <div id="panes">
+      <div class="pane" id="pane-blue">
+        <canvas oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+        <div class="blur-overlay"><span>Red is planning...</span></div>
+      </div>
+      <div class="pane" id="pane-red">
+        <canvas oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+        <div class="blur-overlay"><span>Blue is planning...</span></div>
+      </div>
+    </div>
+    <div id="hud">
+      <div>Blue plays the left pane, Red the right; the side not on the move is blurred.</div>
+      <div id="status">Loading...</div>
+    </div>
+    <script src="tactics_app.js"></script>
+    <script type="text/javascript">
+      var statusEl = document.getElementById("status");
+      window.onerror = function () {
+        statusEl.innerText = "Failed to load -- check the browser console.";
+      };
+      // Both teams play on this one page: the module is instantiated twice,
+      // one client per team, each rendering into its own canvas. The two
+      // instances keep one shared match by exchanging state snapshots over
+      // this bus (a list of per-instance inboxes); at any moment the
+      // instance whose team is on the move simulates and the other mirrors.
+      var bus = { inboxes: [] };
+      // The factory promise only settles when main() exits, which an
+      // infinite main loop never does -- so readiness is tracked via
+      // onRuntimeInitialized instead.
+      var pending = 2;
+      function spawnClient(player) {
+        var pane = document.getElementById("pane-" + player);
+        createTbgwafModule({
+          canvas: pane.querySelector("canvas"),
+          tbgwafPlayer: player,
+          tbgwafBus: bus,
+          tbgwafBlurOverlay: pane.querySelector(".blur-overlay"),
+          onRuntimeInitialized: function () {
+            if (--pending === 0) statusEl.innerText = "";
+          },
+        });
+      }
+      spawnClient("blue");
+      spawnClient("red");
+    </script>
+  </body>
+</html>

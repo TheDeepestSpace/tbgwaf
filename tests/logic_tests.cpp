@@ -741,6 +741,29 @@ void TestGameLogicMoveAnimatesProgressively() {
   CHECK(game.RoundNumber() == 2);
 }
 
+void TestGameLogicMoveFacingAdjustableBeforeCommit() {
+  GameLogic game(LegacyScene());
+  const int id = 0;
+  game.ClickUnit(id, Team::Blue);
+  game.ChooseMove();
+  const glm::vec3 destination = game.FindUnit(id)->position + glm::vec3(3.0f, 0.0f, 0.0f);
+  game.ClickGround(destination, Team::Blue);
+  // Planned right away, defaulting to the natural direction (+X).
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(game.FindUnit(id)->plan.type == PlannedActionType::Move);
+  CHECK(std::fabs(game.FindUnit(id)->plan.endFacingYaw) < 1e-3f);
+
+  // Still rotatable later, without reselecting the unit.
+  game.SetPlannedMoveFacing(id, 1.5f, Team::Blue);
+  CHECK(std::fabs(game.FindUnit(id)->plan.endFacingYaw - 1.5f) < 1e-4f);
+
+  PassEveryoneElse(game, {id});
+  game.CommitRound();
+  game.SetPlannedMoveFacing(id, -1.0f, Team::Blue);  // Ignored once committed.
+  game.Update(100.0f);
+  CHECK(std::fabs(game.FindUnit(id)->facingYaw - 1.5f) < 1e-4f);
+}
+
 void TestGameLogicIgnoresInputWhileExecuting() {
   GameLogic game(LegacyScene());
   game.ClickUnit(0, Team::Blue);
@@ -893,6 +916,7 @@ void TestSnapshotMirrorsMatchAndTeamPlans() {
   red.ChooseMove();
   red.ClickGround(red.FindUnit(3)->position + glm::vec3(1.0f, 0.0f, 0.0f), Team::Red);
   CHECK(red.FindUnit(3)->plan.type == PlannedActionType::Move);
+  red.SetPlannedMoveFacing(3, 1.25f, Team::Red);
   for (int id : {4, 5}) {
     red.ClickUnit(id, Team::Red);
     red.ChoosePass();
@@ -905,6 +929,7 @@ void TestSnapshotMirrorsMatchAndTeamPlans() {
   CHECK(blue.ImportTeamPlans(redSnap, Team::Red));
   CHECK(blue.FindUnit(3)->plan.type == PlannedActionType::Move);
   CHECK(blue.FindUnit(3)->plan.movePath == red.FindUnit(3)->plan.movePath);
+  CHECK(std::fabs(blue.FindUnit(3)->plan.endFacingYaw - 1.25f) < 1e-4f);
   CHECK(blue.FindUnit(0)->plan.type == PlannedActionType::Pass);
   CHECK(blue.CanCommitRound());
 
@@ -952,6 +977,7 @@ int main() {
   TestGameLogicDownedEnemyStaysVisibleInFov();
   TestGameLogicMoveUpdatesPositionAndFacing();
   TestGameLogicMoveAnimatesProgressively();
+  TestGameLogicMoveFacingAdjustableBeforeCommit();
   TestGameLogicIgnoresInputWhileExecuting();
   TestGameLogicMoveCanClimbOntoObstacle();
   TestGameLogicOverwatchFiresOnEnemyEnteringFov();

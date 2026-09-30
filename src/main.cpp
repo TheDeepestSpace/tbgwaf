@@ -182,6 +182,8 @@ int main() {
   GameLogic game;
 
   bool quit = false;
+  int leftDragPane = -1;  // -1 = not dragging; else the pane a left-drag (pan) started in.
+  float leftDragDistance = 0.0f;  // Accumulated pixels moved during the current left-drag.
   int rightDragPane = -1;  // -1 = not dragging; else the pane a right-drag started in.
   glm::vec3 hoveredGroundPoint(0.0f);
   bool hasHoveredGroundPoint = false;
@@ -223,9 +225,19 @@ int main() {
         rightDragPane = PaneForX(event.button.x, windowWidth);
       } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_RIGHT) {
         rightDragPane = -1;
+      } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+        leftDragPane = PaneForX(event.button.x, windowWidth);
+        leftDragDistance = 0.0f;
       } else if (event.type == SDL_MOUSEMOTION) {
         mouseX = event.motion.x;
         mouseY = event.motion.y;
+        if (leftDragPane >= 0 && !ImGui::GetIO().WantCaptureMouse) {
+          constexpr float kPanSpeed = 0.0015f;
+          // Drag the world under the cursor: target moves opposite to the drag.
+          cameras[leftDragPane].Pan(-event.motion.xrel * kPanSpeed, event.motion.yrel * kPanSpeed);
+          leftDragDistance += std::hypot(static_cast<float>(event.motion.xrel),
+                                          static_cast<float>(event.motion.yrel));
+        }
         if (rightDragPane >= 0 && !ImGui::GetIO().WantCaptureMouse) {
           constexpr float kRotateSpeed = 0.005f;
           cameras[rightDragPane].Rotate(-event.motion.xrel * kRotateSpeed,
@@ -237,7 +249,11 @@ int main() {
           cameras[PaneForX(mouseX, windowWidth)].Zoom(-event.wheel.y * kZoomSpeed);
         }
       } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
-        leftClickPending = true;
+        // A drag that panned the camera must not also fire a click.
+        constexpr float kClickDragThresholdPx = 5.0f;
+        if (leftDragDistance < kClickDragThresholdPx) leftClickPending = true;
+        leftDragPane = -1;
+        leftDragDistance = 0.0f;
         leftClickX = event.button.x;
         leftClickY = event.button.y;
       } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
@@ -260,15 +276,11 @@ int main() {
     // fog-of-war view (so both players can always watch the match) but is
     // dimmed and ignores clicks, matching local split-screen console games
     // where only the active player's half responds during their turn.
-    // Camera orbit/zoom is *not* gated this way -- either player can look
+    // Camera orbit/zoom/pan is *not* gated this way -- either player can look
     // around their own pane at any time.
     std::optional<Team> activeTeam;
     if (game.Mode() != InputMode::GameOver) {
-      if (const auto actorId = game.CurrentActorId()) {
-        if (const Unit* actor = game.FindUnit(*actorId)) {
-          activeTeam = actor->team;
-        }
-      }
+      activeTeam = game.CurrentTeam();
     }
     const bool fogActive = game.Mode() != InputMode::GameOver;
     auto isPaneActive = [&](int pane) { return activeTeam && *activeTeam == PaneTeam(pane); };
@@ -290,36 +302,44 @@ int main() {
       }
       ImGui::End();
     } else {
+      int plannedCount = 0, totalCount = 0;
+      for (const Unit& unit : game.GetScene().units) {
+        if (!unit.alive || !activeTeam || unit.team != *activeTeam) continue;
+        ++totalCount;
+        if (unit.plan.type != tactics::PlannedActionType::None) ++plannedCount;
+      }
+
       ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
       ImGui::Begin("Turn", nullptr,
                    ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
                        ImGuiWindowFlags_NoMove);
       ImGui::Text("Round %d", game.RoundNumber());
-      if (const auto actorId = game.CurrentActorId()) {
-        const Unit* actor = game.FindUnit(*actorId);
-        if (actor) {
-          ImGui::Text("%s team's turn (figure #%d)", TeamName(actor->team), actor->id);
-        }
+      if (activeTeam) {
+        ImGui::Text("%s team's turn -- plan every figure, then commit.", TeamName(*activeTeam));
+        ImGui::Text("Planned: %d / %d", plannedCount, totalCount);
       }
       switch (game.Mode()) {
         case InputMode::AwaitingSelection:
-          ImGui::TextWrapped("Click the highlighted figure to act.");
+          ImGui::TextWrapped("Click one of your figures to plan its action.");
           break;
         case InputMode::ActionMenu:
-          ImGui::TextWrapped("Choose an action.");
+          ImGui::TextWrapped("Choose an action to plan.");
           break;
         case InputMode::AwaitingMoveDestination:
           ImGui::TextWrapped("Click a destination on the ground (Esc to cancel).");
           break;
         case InputMode::AwaitingShootTarget:
-          ImGui::TextWrapped("Click an enemy figure to shoot (Esc to cancel).");
+          ImGui::TextWrapped("Click an enemy figure to plan a shot (Esc to cancel).");
           break;
         case InputMode::Moving:
-          ImGui::TextWrapped("Figure is moving...");
+          ImGui::TextWrapped("Committing turn: figures are moving...");
           break;
         default:
           break;
       }
+      ImGui::BeginDisabled(!game.CanCommitTurn());
+      if (ImGui::Button("Commit Turn")) game.CommitTurn();
+      ImGui::EndDisabled();
       ImGui::End();
 
       if (const auto selectedId = game.SelectedUnitId(); selectedId && activeTeam) {

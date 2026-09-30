@@ -7,6 +7,10 @@
 // same code path as the interactive game. No rendering: assertions only see
 // game *state* (positions, alive/dead, FOV visibility, turn order, winner).
 //
+// Actions only ever plan a figure's move/shoot/pass; a plan-then-commit
+// team's turn doesn't execute anything until a script's own explicit
+// `action: commit` step, which mirrors clicking "Commit Turn".
+//
 // See tests/scenarios/*.yaml for the file format by example, and
 // tests/scenario_tests.cpp for how these are run in CI.
 
@@ -27,16 +31,15 @@ class GameLogic;
 namespace tactics::scenario {
 
 struct ScenarioAction {
-  enum class Kind { Move, Shoot, Pass, Cancel };
+  enum class Kind { Move, Shoot, Pass, Cancel, Commit };
 
-  int actor = -1;
+  int actor = -1;  // Unused (and not required in YAML) for Commit.
   Kind kind = Kind::Pass;
   glm::vec3 destination{0.0f};  // Move only.
   int target = -1;              // Shoot only.
   bool expectNoop = false;      // Shoot only: the click is expected not to
                                  // resolve (e.g. target outside the
-                                 // shooter's team FOV) and not consume the
-                                 // turn.
+                                 // shooter's team FOV) and not record a plan.
 };
 
 // Every field is optional; only the ones present in the YAML step are
@@ -54,7 +57,7 @@ struct ScenarioAssertion {
   bool checkWinner = false;
   std::optional<Team> expectedWinner;  // nullopt means "no winner yet".
 
-  std::optional<int> currentActor;
+  std::optional<Team> currentTeam;
   std::optional<int> round;
 };
 

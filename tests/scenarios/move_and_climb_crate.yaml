@@ -16,10 +16,12 @@ script:
   - action: move
     actor: 0
     destination: [0, 1.2, 0]  # The crate's top surface.
+  - action: commit
   - assert: {unit: 0, position: [0, 1.2, 0], tolerance: 0.05}
-  - assert: {current_actor: 1}
+  - assert: {current_team: red}
 
   - action: pass
     actor: 1
-  - assert: {current_actor: 0}
+  - action: commit
+  - assert: {current_team: blue}
   - assert: {round: 2}

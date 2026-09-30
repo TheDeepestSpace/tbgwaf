@@ -2,7 +2,7 @@
 # TestGameLogicShootGatingRequiresTeamVisibility in tests/logic_tests.cpp: a
 # living enemy outside the shooter's team FOV must not be a clickable target
 # at all (the click is a no-op, not a guaranteed miss), and a no-op must not
-# consume the actor's turn.
+# record a plan.
 name: fov_gating_blocks_out_of_view_shot
 
 units:
@@ -18,15 +18,17 @@ script:
     target: 1
     expect_noop: true
   - assert: {unit: 1, alive: true}
-  - assert: {current_actor: 0}  # Turn not consumed by the gated no-op.
+  - assert: {current_team: blue}  # No plan recorded by the gated no-op.
 
   - action: cancel
     actor: 0
   - action: pass
     actor: 0
-  - assert: {current_actor: 1}
+  - action: commit
+  - assert: {current_team: red}
 
   - action: pass
     actor: 1
-  - assert: {current_actor: 0}
+  - action: commit
+  - assert: {current_team: blue}
   - assert: {round: 2}

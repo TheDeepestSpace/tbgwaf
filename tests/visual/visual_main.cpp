@@ -315,15 +315,17 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
                                               kWindowHeight);
         ImDrawList* draw = ImGui::GetForegroundDrawList();
         const ImVec2 c(p.x, p.y);
-        const float radius = 8.0f + 30.0f * (1.0f - marker->progress);
-        const int alpha = static_cast<int>(120 + 135 * marker->progress);
-        draw->AddCircle(c, radius, IM_COL32(255, 220, 40, alpha), 32, 3.0f);
-        draw->AddCircleFilled(c, 4.0f, IM_COL32(255, 220, 40, 255));
+        const float radius = 18.0f + 60.0f * (1.0f - marker->progress);
+        const int alpha = static_cast<int>(140 + 115 * marker->progress);
+        // Dark under-stroke keeps the ring readable against any background.
+        draw->AddCircle(c, radius, IM_COL32(0, 0, 0, alpha), 48, 9.0f);
+        draw->AddCircle(c, radius, IM_COL32(255, 220, 40, alpha), 48, 5.0f);
+        draw->AddCircleFilled(c, 7.0f, IM_COL32(0, 0, 0, 255));
+        draw->AddCircleFilled(c, 5.0f, IM_COL32(255, 220, 40, 255));
         // Arrow cursor with its tip on the click point.
-        draw->AddTriangleFilled(c, ImVec2(c.x + 12, c.y + 22), ImVec2(c.x + 22, c.y + 14),
-                                IM_COL32(255, 255, 255, 255));
-        draw->AddTriangle(c, ImVec2(c.x + 12, c.y + 22), ImVec2(c.x + 22, c.y + 14),
-                          IM_COL32(0, 0, 0, 255), 1.5f);
+        const ImVec2 b(c.x + 20, c.y + 36), r(c.x + 36, c.y + 24);
+        draw->AddTriangleFilled(c, b, r, IM_COL32(255, 255, 255, 255));
+        draw->AddTriangle(c, b, r, IM_COL32(0, 0, 0, 255), 2.5f);
       }
     }
     ImGui::Render();

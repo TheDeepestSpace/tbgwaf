@@ -211,6 +211,36 @@ void DrawUnit(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewP
   DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, fall * GunModel(unit), kGunColor);
 }
 
+// Wireframe unit cube transformed by `model` (same convention as BoxModel:
+// the unit cube [0,1]^3), drawn as one line strip that retraces a few edges
+// to cover all 12. Line strips rather than GL_LINE polygon mode, which
+// WebGL2/GLES don't have.
+void DrawWireBox(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
+                 const glm::mat4& model, const glm::vec4& color) {
+  glm::vec3 b[4] = {{0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}};
+  glm::vec3 t[4] = {{0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}};
+  const std::vector<glm::vec3> local = {b[0], b[1], b[2], b[3], b[0], t[0], t[1], b[1],
+                                        t[1], t[2], b[2], t[2], t[3], b[3], t[3], t[0]};
+  std::vector<glm::vec3> points;
+  points.reserve(local.size());
+  for (const glm::vec3& p : local) points.push_back(glm::vec3(model * glm::vec4(p, 1.0f)));
+  lines.SetPoints(points);
+  shader.SetMat4("uMVP", viewProj);
+  shader.SetVec4("uColor", color);
+  lines.Draw();
+}
+
+void DrawUnitWireframe(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
+                       const Unit& unit) {
+  // Common highlight green for both teams.
+  const glm::vec4 color(0.3f, 0.9f, 0.4f, 1.0f);
+  glm::vec3 bodyMin, bodySize, headMin, headSize;
+  UnitBoxes(unit, &bodyMin, &bodySize, &headMin, &headSize);
+  DrawWireBox(shader, lines, viewProj, BoxModel(bodyMin, bodySize), color);
+  DrawWireBox(shader, lines, viewProj, BoxModel(headMin, headSize), color);
+  DrawWireBox(shader, lines, viewProj, GunModel(unit), color);
+}
+
 void DrawUnitDepth(const Shader& shader, const CubeMesh& cube, const glm::mat4& lightSpaceMatrix,
                    const Unit& unit) {
   glm::vec3 bodyMin, bodySize, headMin, headSize;
@@ -264,6 +294,20 @@ bool FootprintSpan(const glm::vec3& eye, const glm::vec2& dir, const AABB& box, 
   return true;
 }
 
+// `range` clipped to where the ray leaves the playable map footprint, so the
+// FOV cone stops at the boundary. Zero if the eye stands outside the map and
+// the ray never enters it.
+float ClipToMap(const glm::vec3& eye, const glm::vec2& dir, float range) {
+  constexpr float kHalf = tactics::constants::kMapHalfExtent;
+  AABB map;
+  map.min = glm::vec3(-kHalf, 0.0f, -kHalf);
+  map.max = glm::vec3(kHalf, 0.0f, kHalf);
+  float enter = 0.0f;
+  float exit = 0.0f;
+  if (!FootprintSpan(eye, dir, map, &enter, &exit)) return 0.0f;
+  return std::min(range, exit);
+}
+
 // The stretch of ground along one sight ray that the eye cannot see, i.e.
 // where a target could hide crouched at ground level. The sightline from the
 // eye down to the ground point at distance t drops linearly from eye.y to 0,
@@ -313,7 +357,7 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
 // Renders a unit's FOV as a flat, ground-level, lightly team-colored
 // translucent overlay spanning kShootHalfFovDegrees around
 // FacingDirection(), capped at kFovConeVisualRange (bigger than the map
-// diagonal, so it always visually reaches the map edge). Occlusion is 3D:
+// diagonal) and clipped at the map boundary. Occlusion is 3D:
 // the cone's tip is the unit's eye, so an obstacle below eye level only
 // shadows the strip of ground it actually hides -- the overlay resumes where
 // the sightline over its top edge lands, and only a target crouched at
@@ -366,7 +410,7 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
     const float angle = unit.facingYaw + offset;
     const glm::vec2 dir(std::cos(angle), std::sin(angle));
     dirs.push_back(dir);
-    spansPerRay.push_back(VisibleGroundSpans(eye, dir, obstacles, range));
+    spansPerRay.push_back(VisibleGroundSpans(eye, dir, obstacles, ClipToMap(eye, dir, range)));
   }
 
   // Stitch adjacent rays into quads, one per matching visible span. Corner
@@ -641,6 +685,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         unlitShader_.SetMat4("uMVP", viewProj);
         unlitShader_.SetVec4("uColor", glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
         pathLine_.Draw();
+        // Wireframe stand-in at the destination, showing the planned final
+        // facing (persists until the turn is committed).
+        Unit ghost = unit;
+        ghost.position = unit.plan.movePath.back();
+        ghost.facingYaw = unit.plan.endFacingYaw;
+        DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost);
       } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
         if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {
           const std::vector<glm::vec3> shotLine = {unit.EyePosition(), shotTarget->EyePosition()};

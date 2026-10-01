@@ -34,7 +34,9 @@ struct MapGeneratorConfig {
 struct UrbanBlock { float x0, x1, z0, z1; };
 
 // Deterministic procedural city: a straight grid of streets of varying
-// width separating blocks of varying size, each block ringed by a sidewalk
+// width separating blocks of varying size. Some blocks merge two or three
+// cells (roads included) or three cells at an angle (L), and some are empty
+// open areas. Each block is ringed by a sidewalk
 // and, behind it, buildings. Building heights cluster by block (a smooth
 // low-to-high field with mostly medium heights) plus a couple of towers.
 // Junctions between adjacent buildings are either wall-to-wall (touching,
@@ -46,6 +48,15 @@ Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& config = {});
 
 // Block footprints GenerateUrbanMap(seed, config) uses (x-major order).
 std::vector<UrbanBlock> UrbanBlocks(uint32_t seed, const MapGeneratorConfig& config = {});
+
+// A city block as built: one or more grid cells joined with the streets
+// between them (`x0..x1` / `z0..z1` is the bounding box). `notch` marks an
+// L of three cells (the box minus one corner cell); `empty` an open area
+// with a sidewalk ring but no buildings.
+struct UrbanLot { float x0, x1, z0, z1; bool empty, notch; };
+
+// Lots GenerateUrbanMap(seed, config) builds.
+std::vector<UrbanLot> UrbanLots(uint32_t seed, const MapGeneratorConfig& config = {});
 
 // Half-extent of the generated map for `config` (independent of seed).
 float UrbanMapHalfExtent(const MapGeneratorConfig& config);

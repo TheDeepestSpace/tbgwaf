@@ -65,7 +65,7 @@ void TestDeterminismAndVariety() {
 // up here first (update the numbers deliberately when it's intended).
 void TestPinnedSeedFingerprints() {
   struct Expected { uint32_t seed; size_t buildings; };
-  const Expected expected[] = {{1u, 122}, {42u, 126}, {2024u, 126}};
+  const Expected expected[] = {{1u, 115}, {42u, 120}, {2024u, 126}};
   for (const auto& e : expected) {
     const Scene scene = GenerateUrbanMap(e.seed);
     if (scene.obstacles.size() != e.buildings) {
@@ -89,8 +89,20 @@ void TestMapIsMuchLargerThanDefault() {
 
 using BlockRect = UrbanBlock;
 
+float Area(const BlockRect& r) { return (r.x1 - r.x0) * (r.z1 - r.z0); }
+
 std::vector<BlockRect> Blocks(uint32_t seed, const MapGeneratorConfig& c) {
   return UrbanBlocks(seed, c);
+}
+
+// Built lots (merged cells, L-shapes, open areas) as bounding rectangles.
+std::vector<BlockRect> Lots(uint32_t seed, const MapGeneratorConfig& c, bool buildingsOnly) {
+  std::vector<BlockRect> out;
+  for (const auto& l : UrbanLots(seed, c)) {
+    if (buildingsOnly && l.empty) continue;
+    out.push_back({l.x0, l.x1, l.z0, l.z1});
+  }
+  return out;
 }
 
 bool Inside(const AABB& b, const BlockRect& r, float inset) {
@@ -101,7 +113,7 @@ bool Inside(const AABB& b, const BlockRect& r, float inset) {
 void TestStreetsAndSidewalksAreObstacleFree() {
   const MapGeneratorConfig c;
   for (uint32_t seed : kSeeds) {
-    const auto blocks = Blocks(seed, c);
+    const auto blocks = Lots(seed, c, /*buildingsOnly=*/true);
     const Scene scene = GenerateUrbanMap(seed);
     size_t perBlock[16] = {};
     for (const auto& o : scene.obstacles) {
@@ -109,7 +121,10 @@ void TestStreetsAndSidewalksAreObstacleFree() {
       for (size_t i = 0; i < blocks.size(); ++i) {
         // Fully inside a block, behind the sidewalk setback: so it neither
         // touches a street corridor nor a sidewalk strip.
-        if (Inside(o.bounds, blocks[i], c.sidewalkWidth)) owner = static_cast<int>(i);
+        if (Inside(o.bounds, blocks[i], c.sidewalkWidth) &&
+            (owner < 0 || Area(blocks[i]) < Area(blocks[owner]))) {
+          owner = static_cast<int>(i);
+        }
       }
       CHECK(owner >= 0);
       if (owner >= 0) ++perBlock[owner];
@@ -140,7 +155,7 @@ float Separation(const AABB& a, const AABB& b) {
 void TestEveryBlockHasWallToWallAndGappedRuns() {
   const MapGeneratorConfig c;
   for (uint32_t seed : kSeeds) {
-    const auto blocks = Blocks(seed, c);
+    const auto blocks = Lots(seed, c, /*buildingsOnly=*/true);
     const Scene scene = GenerateUrbanMap(seed);
     for (const auto& block : blocks) {
       std::vector<AABB> in;
@@ -215,8 +230,10 @@ void TestSidewalksLineEveryBlock() {
   const MapGeneratorConfig c;
   for (uint32_t seed : kSeeds) {
     const Scene scene = GenerateUrbanMap(seed);
-    const auto blocks = Blocks(seed, c);
-    CHECK(scene.sidewalks.size() == blocks.size() * 4);
+    const auto blocks = Lots(seed, c, /*buildingsOnly=*/false);
+    size_t expected = 0;
+    for (const auto& l : UrbanLots(seed, c)) expected += l.notch ? 6 : 4;
+    CHECK(scene.sidewalks.size() == expected);
     for (const AABB& s : scene.sidewalks) {
       CHECK(s.max.y > 0.0f && s.max.y < 0.3f);  // Curb, not a wall.
       bool inBlock = false;
@@ -230,6 +247,33 @@ void TestSidewalksLineEveryBlock() {
       }
     }
   }
+}
+
+// Over many seeds the generator produces merged blocks, L-shapes and open
+// areas, and every lot stays within the grid of streets.
+void TestLotVariety() {
+  const MapGeneratorConfig c;
+  int merged = 0, ls = 0, empties = 0, plain = 0;
+  for (uint32_t seed = 1; seed <= 40; ++seed) {
+    for (const auto& l : UrbanLots(seed, c)) {
+      const bool multi = l.x1 - l.x0 > c.blockSize * 1.6f + c.streetWidth * 0.5f ||
+                         l.z1 - l.z0 > c.blockSize * 1.6f + c.streetWidth * 0.5f;
+      if (l.empty) ++empties;
+      else if (l.notch) ++ls;
+      else if (multi) ++merged;
+      else ++plain;
+    }
+    // Middle east-west street stays clear of buildings for the spawn rows.
+    const Scene scene = GenerateUrbanMap(seed);
+    const Unit& blue = scene.units[1];
+    for (const auto& o : scene.obstacles) {
+      CHECK(!(o.bounds.min.z < blue.position.z + 0.5f && o.bounds.max.z > blue.position.z - 0.5f));
+    }
+  }
+  CHECK(merged > 0);
+  CHECK(ls > 0);
+  CHECK(empties > 0);
+  CHECK(plain > merged + ls + empties);
 }
 
 void TestNavMeshFullyReachableFromSpawns() {
@@ -326,6 +370,7 @@ int main() {
   TestVariedHeightsWithFewTowers();
   TestBlocksAndStreetsVary();
   TestSidewalksLineEveryBlock();
+  TestLotVariety();
   TestNavMeshFullyReachableFromSpawns();
   TestWindowedNavMeshMatchesGlobalWithinBudget();
   TestGameLogicUsesRangeScopedNavMesh();

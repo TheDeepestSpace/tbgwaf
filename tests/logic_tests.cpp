@@ -879,26 +879,25 @@ void TestGameLogicOverwatchFiresOnEnemyEnteringFov() {
   CHECK(!game.Winner().has_value());  // Red still has id3 and id5 alive.
 }
 
-// Shared setup: blue passes (committing its turn), then red4 -- repositioned
-// due west of blue1, behind its fixed +X facing -- plans a walk east through
-// blue1's open lane. Leaves the move animating.
+// Shared setup: blue passes while red4 -- repositioned due west of blue1,
+// behind its fixed +X facing -- plans a walk east through blue1's open
+// lane. Commits the round, leaving the move animating.
 void StartRed4WalkThroughBlue1Lane(GameLogic& game, const glm::vec3& destination) {
   game.FindUnit(4)->position = glm::vec3(-9.5f, 0.0f, 0.0f);
   for (int id : {0, 1, 2}) {
-    game.ClickUnit(id);
+    game.ClickUnit(id, Team::Blue);
     game.ChoosePass();
   }
-  game.CommitTurn();
-  CHECK(game.CurrentTeam() == Team::Red);
-  game.ClickUnit(3);
+  game.ClickUnit(3, Team::Red);
   game.ChoosePass();
-  game.ClickUnit(4);
+  game.ClickUnit(4, Team::Red);
   game.ChooseMove();
-  game.ClickGround(destination);
-  game.ClickUnit(5);
+  game.ClickGround(destination, Team::Red);
+  game.ClickUnit(5, Team::Red);
   game.ChoosePass();
-  game.CommitTurn();
-  CHECK(game.Mode() == InputMode::Moving);
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+  CHECK(game.Mode() == InputMode::Executing);
 }
 
 void TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds() {
@@ -912,7 +911,7 @@ void TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds() {
   StartRed4WalkThroughBlue1Lane(game, destination);
 
   int steps = 0;
-  while (game.Mode() == InputMode::Moving && steps < 10000) {
+  while (game.Mode() == InputMode::Executing && steps < 10000) {
     game.Update(0.02f);
     ++steps;
   }
@@ -924,7 +923,6 @@ void TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds() {
   CHECK(blue1->reactionOnStationary == ReactionRule::Shoot);
   CHECK(blue1->triggerAction == TriggerAction::None);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
-  CHECK(game.CurrentTeam() == Team::Blue);
   CHECK(game.RoundNumber() == 2);
 }
 

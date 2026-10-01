@@ -289,6 +289,62 @@ void DrawHighlight(const Shader& shader, const CubeMesh& cube, const glm::mat4& 
   DrawBox(shader, cube, viewProj, minCorner, glm::vec3(kHalf * 2.0f, 0.04f, kHalf * 2.0f), color);
 }
 
+// 3x5 digit glyphs, one row per entry, MSB = leftmost column.
+constexpr unsigned char kDigitGlyphs[10][5] = {
+    {7, 5, 5, 5, 7}, {2, 6, 2, 2, 7}, {7, 1, 7, 4, 7}, {7, 1, 7, 1, 7}, {5, 5, 7, 1, 1},
+    {7, 4, 7, 1, 7}, {7, 4, 7, 5, 7}, {7, 1, 1, 1, 1}, {7, 5, 7, 5, 7}, {7, 5, 7, 1, 7}};
+
+// Snaps a ground-plane direction to the nearest world axis.
+glm::vec3 SnapToAxis(const glm::vec3& v) {
+  if (std::abs(v.x) >= std::abs(v.z)) return glm::vec3(v.x < 0.0f ? -1.0f : 1.0f, 0.0f, 0.0f);
+  return glm::vec3(0.0f, 0.0f, v.z < 0.0f ? -1.0f : 1.0f);
+}
+
+// The selection square with the number `n` (1-99) cut out of it, so the
+// ground shows through in the shape of the digits. Built from a 9x9 grid of
+// flat cells; the digits are oriented to read upright for `view`'s camera
+// (snapped to the nearest world axis so cells stay axis-aligned).
+void DrawNumberedHighlight(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
+                           const glm::mat4& view, const glm::vec3& position,
+                           const glm::vec4& color, int n) {
+  constexpr int kGrid = 9;
+  n = std::clamp(n, 0, 99);
+  bool cut[kGrid][kGrid] = {};  // [row from top][col from left]
+  const int digitCount = n >= 10 ? 2 : 1;
+  const int textWidth = digitCount * 3 + (digitCount - 1);
+  const int col0 = (kGrid - textWidth) / 2;
+  for (int d = 0; d < digitCount; ++d) {
+    const int digit = digitCount == 2 ? (d == 0 ? n / 10 : n % 10) : n;
+    for (int row = 0; row < 5; ++row) {
+      for (int col = 0; col < 3; ++col) {
+        if (kDigitGlyphs[digit][row] & (4 >> col)) cut[2 + row][col0 + d * 4 + col] = true;
+      }
+    }
+  }
+  const glm::vec3 right = SnapToAxis(glm::vec3(view[0][0], 0.0f, view[2][0]));
+  const glm::vec3 up = SnapToAxis(glm::vec3(-view[0][2], 0.0f, -view[2][2]));
+  const float cell = 1.0f / kGrid;
+  for (int row = 0; row < kGrid; ++row) {
+    for (int col = 0; col < kGrid;) {
+      if (cut[row][col]) {
+        ++col;
+        continue;
+      }
+      int end = col;
+      while (end < kGrid && !cut[row][end]) ++end;  // Run of solid cells.
+      const float u0 = -0.5f + col * cell, u1 = -0.5f + end * cell;
+      const float v0 = 0.5f - (row + 1) * cell, v1 = 0.5f - row * cell;
+      const glm::vec3 a = position + right * u0 + up * v0;
+      const glm::vec3 b = position + right * u1 + up * v1;
+      const glm::vec3 lo = glm::min(a, b);
+      const glm::vec3 hi = glm::max(a, b);
+      DrawBox(shader, cube, viewProj, glm::vec3(lo.x, position.y + 0.01f, lo.z),
+              glm::vec3(hi.x - lo.x, 0.04f, hi.z - lo.z), color);
+      col = end;
+    }
+  }
+}
+
 // A [begin, end) stretch of ground along one sight ray, as horizontal
 // distances from the eye.
 struct GroundSpan {
@@ -746,15 +802,19 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         const bool chaining = game.Mode() == InputMode::AwaitingMoveDestination &&
                               game.SelectedUnitId() == unit.id;
         if (chaining || !unit.plan.queuedLegs.empty()) {
-          DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.plan.movePath.back(), yellow);
+          DrawNumberedHighlight(unlitShader_, cubeMesh_, viewProj, view, unit.plan.movePath.back(),
+                                yellow, 1);
         }
+        int legNumber = 1;
         for (const auto& leg : unit.plan.queuedLegs) {
+          ++legNumber;
           if (leg.size() < 2) continue;
           pathLine_.SetPoints(leg);
           unlitShader_.SetMat4("uMVP", viewProj);
           unlitShader_.SetVec4("uColor", yellow);
           pathLine_.Draw();
-          DrawHighlight(unlitShader_, cubeMesh_, viewProj, leg.back(), yellow);
+          DrawNumberedHighlight(unlitShader_, cubeMesh_, viewProj, view, leg.back(), yellow,
+                                legNumber);
         }
       } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
         if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {

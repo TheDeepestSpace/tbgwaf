@@ -21,6 +21,7 @@
 #include <GLES3/gl3.h>
 
 #include <algorithm>
+#include <optional>
 #include <array>
 #include <cctype>
 #include <cstdio>
@@ -259,14 +260,19 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   }
 
   const int paneWidth = kWindowWidth / 2;
-  auto renderBothPanes = [&](const GameLogic& game) {
+  // `frontierTeam` (video-only move-preview frames) shows the movement
+  // frontier in that team's pane, mirroring main.cpp's per-team overlays.
+  auto renderBothPanes = [&](const GameLogic& game,
+                             std::optional<Team> frontierTeam = std::nullopt) {
     const bool fogActive = game.Mode() != InputMode::GameOver;
     for (int pane = 0; pane < 2; ++pane) {
       const Team team = PaneTeam(pane);
       TeamVisibility visibility;
       if (fogActive) visibility = game.ComputeVisibility(team);
+      gfx::PaneOverlays overlays;
+      if (frontierTeam && *frontierTeam == team) overlays.moveFrontier = game.MoveFrontier();
       renderer.RenderPane(game, team, fogActive, visibility, cameras[pane], pane * paneWidth, 0,
-                          paneWidth, kWindowHeight);
+                          paneWidth, kWindowHeight, overlays);
     }
   };
 
@@ -291,6 +297,17 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     hooks.holdFramesAfterAction = kHoldFrames;
     hooks.onFrame = [&](const GameLogic& game) {
       renderBothPanes(game);
+      const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);
+      for (int pane = 0; pane < 2; ++pane) {
+        if (!encoders[pane].WriteFrame(CropColumns(frame, pane * paneWidth, paneWidth))) {
+          videoOk = false;
+        }
+      }
+    };
+  }
+  if (options.video && videoOk) {
+    hooks.onMoveFrontier = [&](const GameLogic& game, Team team) {
+      renderBothPanes(game, team);
       const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);
       for (int pane = 0; pane < 2; ++pane) {
         if (!encoders[pane].WriteFrame(CropColumns(frame, pane * paneWidth, paneWidth))) {

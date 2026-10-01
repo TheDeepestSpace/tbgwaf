@@ -134,8 +134,8 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
   hasLastUnitPosition_ = true;
 }
 
-void GameLogic::EnsureNavMeshFor(const Unit& mover) {
-  if (navMeshUnitId_ == mover.id && navMeshOrigin_ == mover.position) return;
+void GameLogic::EnsureNavMeshFor(const Unit& mover, const glm::vec3& origin) {
+  if (navMeshUnitId_ == mover.id && navMeshOrigin_ == origin) return;
 
   // Any path of length <= MoveBudget stays within Euclidean distance
   // MoveBudget of the start, hence inside this window, so the window's
@@ -148,13 +148,13 @@ void GameLogic::EnsureNavMeshFor(const Unit& mover) {
   const float reach = mover.MoveBudget() + 2.0f * constants::kAgentRadius;
   const float half = scene_.mapHalfExtent;
   NavRegion region;
-  region.xMin = std::max(-half, mover.position.x - reach);
-  region.xMax = std::min(half, mover.position.x + reach);
-  region.zMin = std::max(-half, mover.position.z - reach);
-  region.zMax = std::min(half, mover.position.z + reach);
+  region.xMin = std::max(-half, origin.x - reach);
+  region.xMax = std::min(half, origin.x + reach);
+  region.zMin = std::max(-half, origin.z - reach);
+  region.zMax = std::min(half, origin.z + reach);
   navMesh_.Build(scene_.obstacles, region, constants::kAgentRadius);
   navMeshUnitId_ = mover.id;
-  navMeshOrigin_ = mover.position;
+  navMeshOrigin_ = origin;
 }
 
 GameSnapshot GameLogic::ExportState() const {
@@ -387,7 +387,7 @@ void GameLogic::ClickGround(const glm::vec3& point, Team byTeam) {
   Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->team != byTeam) return;
 
-  EnsureNavMeshFor(*mover);
+  EnsureNavMeshFor(*mover, MoveChainEnd());
   const bool chaining = mover->plan.type == PlannedActionType::Move && !mover->plan.movePath.empty();
   std::vector<glm::vec3> path;
   if (!navMesh_.FindPath(MoveChainEnd(), point, &path)) return;
@@ -525,7 +525,7 @@ void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
   if (mode_ != InputMode::AwaitingMoveDestination) return;
   const Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->team != byTeam) return;
-  EnsureNavMeshFor(*mover);
+  EnsureNavMeshFor(*mover, MoveChainEnd());
   movePreviewValid_ = navMesh_.FindPath(MoveChainEnd(), point, &movePreviewPath_) &&
                       PathLength(movePreviewPath_) <= mover->MoveBudget();
 }

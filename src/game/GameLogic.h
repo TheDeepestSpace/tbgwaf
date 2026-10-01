@@ -256,12 +256,13 @@ class GameLogic {
   // watcher's trigger, and returns true so Update() can interrupt the move.
   bool TriggerOverwatch(Unit& mover);
 
-  // (Re)builds navMesh_ over the area `mover` can reach this round, unless
-  // the cached one already covers this figure at this position.
-  void EnsureNavMeshFor(const Unit& mover);
+  // (Re)builds navMesh_ over the area `mover` can reach from `origin` (its
+  // position, or the end of its planned move chain) in one leg, unless
+  // the cached one already covers this figure at this origin.
+  void EnsureNavMeshFor(const Unit& mover, const glm::vec3& origin);
 
   Scene scene_;
-  // Range-scoped: covers only [mover.position +/- (MoveBudget + margin)],
+  // Range-scoped: covers only [origin +/- (MoveBudget + margin)],
   // clipped to the map, not the whole map. Cached per (unit id, position).
   NavMesh navMesh_;
   int navMeshUnitId_ = -1;

@@ -260,17 +260,14 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   }
 
   const int paneWidth = kWindowWidth / 2;
-  // `frontierTeam` (video-only move-preview frames) shows the movement
-  // frontier in that team's pane, mirroring main.cpp's per-team overlays.
-  auto renderBothPanes = [&](const GameLogic& game,
-                             std::optional<Team> frontierTeam = std::nullopt) {
+  // Overlays come from the same BuildPaneOverlays the interactive app uses.
+  auto renderBothPanes = [&](const GameLogic& game) {
     const bool fogActive = game.Mode() != InputMode::GameOver;
     for (int pane = 0; pane < 2; ++pane) {
       const Team team = PaneTeam(pane);
       TeamVisibility visibility;
       if (fogActive) visibility = game.ComputeVisibility(team);
-      gfx::PaneOverlays overlays;
-      if (frontierTeam && *frontierTeam == team) overlays.moveFrontier = game.MoveFrontier();
+      const gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(game, team);
       renderer.RenderPane(game, team, fogActive, visibility, cameras[pane], pane * paneWidth, 0,
                           paneWidth, kWindowHeight, overlays);
     }
@@ -306,8 +303,8 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     };
   }
   if (options.video && videoOk) {
-    hooks.onMoveFrontier = [&](const GameLogic& game, Team team) {
-      renderBothPanes(game, team);
+    hooks.onMoveFrontier = [&](const GameLogic& game, Team) {
+      renderBothPanes(game);
       const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);
       for (int pane = 0; pane < 2; ++pane) {
         if (!encoders[pane].WriteFrame(CropColumns(frame, pane * paneWidth, paneWidth))) {

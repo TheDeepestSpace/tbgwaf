@@ -15,6 +15,25 @@ using tactics::TeamVisibility;
 using tactics::Unit;
 
 namespace gfx {
+
+PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team paneTeam,
+                               const std::optional<glm::vec3>& hoveredGroundPoint) {
+  PaneOverlays overlays;
+  const auto selectedId = game.SelectedUnitId();
+  if (!selectedId) return overlays;
+  const tactics::Unit* selected = game.FindUnit(*selectedId);
+  if (!selected || selected->team != paneTeam) return overlays;
+  overlays.selectionHighlight = selected->position;
+  if (game.Mode() == tactics::InputMode::AwaitingMoveDestination) {
+    overlays.moveFrontier = game.MoveFrontier();
+    if (game.MovePreviewValid()) {
+      overlays.movePreviewPath = &game.MovePreviewPath();
+    } else if (hoveredGroundPoint) {
+      overlays.invalidHoverHighlight = hoveredGroundPoint;
+    }
+  }
+  return overlays;
+}
 namespace {
 
 constexpr int kShadowMapSize = 2048;

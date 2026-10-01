@@ -277,7 +277,10 @@ int main() {
   bool forceBroadcast = false;
 
   bool quit = false;
+  constexpr float kClickDragThresholdPx = 5.0f;
   int leftDragPane = -1;  // -1 = not dragging; else the pane a left-drag (pan) started in.
+  int aimedUnitId = -1;  // Unit whose planned-move ghost is being dragged, or -1.
+  int aimedPane = -1;    // Pane the ghost grab started in.
   float leftDragDistance = 0.0f;  // Accumulated pixels moved during the current left-drag.
   int rightDragPane = -1;  // -1 = not dragging; else the pane a right-drag started in.
   glm::vec3 hoveredGroundPoint(0.0f);
@@ -380,13 +383,46 @@ int main() {
       } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
         leftDragPane = PaneForX(event.button.x, paneCount, windowWidth);
         leftDragDistance = 0.0f;
+        // Grabbing a planned move's wireframe ghost re-aims its final facing
+        // (instead of panning) until the button is released.
+        aimedUnitId = -1;
+        aimedPane = -1;
+        if (isPlanningMode(game.Mode()) && !awaitingPeerSync && !ImGui::GetIO().WantCaptureMouse) {
+          const PaneRect& grabRect = paneRects[leftDragPane];
+          const Team grabTeam = paneTeam(leftDragPane);
+          const gfx::Ray grabRay = cameras[leftDragPane].ScreenPointToRay(
+              static_cast<float>(event.button.x - grabRect.x), static_cast<float>(event.button.y),
+              static_cast<float>(grabRect.width), static_cast<float>(windowHeight));
+          if (std::fabs(grabRay.direction.y) > 1e-4f) {
+            constexpr float kGrabRadius = 0.7f;
+            for (const Unit& unit : game.GetScene().units) {
+              if (!unit.alive || unit.team != grabTeam ||
+                  unit.plan.type != tactics::PlannedActionType::Move || unit.plan.movePath.empty()) {
+                continue;
+              }
+              const glm::vec3 dest = unit.plan.movePath.back();
+              const float t = (dest.y + 0.9f - grabRay.origin.y) / grabRay.direction.y;
+              if (t <= 0.0f) continue;
+              const glm::vec3 hit = grabRay.origin + grabRay.direction * t;
+              if (glm::length(glm::vec2(hit.x - dest.x, hit.z - dest.z)) <= kGrabRadius) {
+                aimedUnitId = unit.id;
+                aimedPane = leftDragPane;
+                break;
+              }
+            }
+          }
+        }
       } else if (event.type == SDL_MOUSEMOTION) {
         mouseX = event.motion.x;
         mouseY = event.motion.y;
+        // While a ghost is grabbed, left-drag aims it (handled after the UI
+        // pass) instead of panning the camera.
         if (leftDragPane >= 0 && !ImGui::GetIO().WantCaptureMouse) {
-          constexpr float kPanSpeed = 0.0015f;
-          // Drag the world under the cursor: target moves opposite to the drag.
-          cameras[leftDragPane].Pan(-event.motion.xrel * kPanSpeed, event.motion.yrel * kPanSpeed);
+          if (aimedUnitId < 0) {
+            constexpr float kPanSpeed = 0.0015f;
+            // Drag the world under the cursor: target moves opposite to the drag.
+            cameras[leftDragPane].Pan(-event.motion.xrel * kPanSpeed, event.motion.yrel * kPanSpeed);
+          }
           leftDragDistance += std::hypot(static_cast<float>(event.motion.xrel),
                                           static_cast<float>(event.motion.yrel));
         }
@@ -409,10 +445,11 @@ int main() {
         }
       } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
         // A drag that panned the camera must not also fire a click.
-        constexpr float kClickDragThresholdPx = 5.0f;
         if (leftDragDistance < kClickDragThresholdPx) leftClickPending = true;
         leftDragPane = -1;
         leftDragDistance = 0.0f;
+        aimedUnitId = -1;
+        aimedPane = -1;
         leftClickX = event.button.x;
         leftClickY = event.button.y;
       } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
@@ -514,6 +551,25 @@ int main() {
           // Team-tagged: hovering over the *other* player's pane just clears
           // the preview instead of steering this pane's selected mover.
           game.HoverGround(hoverPoint, paneTeam(hoverPane));
+        }
+      }
+      if (aimedUnitId >= 0 && leftDragPane >= 0 && leftDragDistance >= kClickDragThresholdPx) {
+        // Aim the ghost at the cursor's point on the destination's plane.
+        const Unit* aimed = game.FindUnit(aimedUnitId);
+        const gfx::Ray aimRay =
+            cameras[aimedPane].ScreenPointToRay(
+                static_cast<float>(mouseX - paneRects[aimedPane].x), static_cast<float>(mouseY),
+                static_cast<float>(paneRects[aimedPane].width), static_cast<float>(windowHeight));
+        if (aimed && !aimed->plan.movePath.empty() && std::fabs(aimRay.direction.y) > 1e-4f) {
+          const glm::vec3 dest = aimed->plan.movePath.back();
+          const float t = (dest.y - aimRay.origin.y) / aimRay.direction.y;
+          if (t > 0.0f) {
+            const glm::vec3 hit = aimRay.origin + aimRay.direction * t;
+            if (glm::length(glm::vec2(hit.x - dest.x, hit.z - dest.z)) > 0.1f) {
+              game.SetPlannedMoveFacing(aimedUnitId, std::atan2(hit.z - dest.z, hit.x - dest.x),
+                                       paneTeam(aimedPane));
+            }
+          }
         }
       }
       if (leftClickPending) {

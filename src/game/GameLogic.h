@@ -118,6 +118,25 @@ class GameLogic {
     return tactics::ComputeTeamVisibility(team, scene_.units, obstacleBounds_);
   }
 
+  // One remembered glimpse of an enemy figure in `viewingTeam`'s FOV.
+  // moveDirection is a unit vector on the XZ plane, or zero if the figure
+  // was stationary when sighted.
+  struct EnemySighting {
+    glm::vec3 position{0.0f};
+    float facingYaw = 0.0f;
+    glm::vec3 moveDirection{0.0f};
+    float ageSeconds = 0.0f;
+  };
+  // Oldest-first samples of `targetUnitId` as seen by `viewingTeam`; empty
+  // once all have aged past kSightingMemoryDuration.
+  const std::vector<EnemySighting>& Sightings(Team viewingTeam, int targetUnitId) const;
+
+  // Ages sighting memory and samples newly visible enemies. Must be called
+  // every frame on every page regardless of mode or simulator/follower role
+  // (unlike Update(), a follower never runs the physics tick during
+  // Executing, yet still needs its own memory built from imported state).
+  void UpdateSightingMemory(float dtSeconds);
+
   // Input events, driven by the input/render layer after it has resolved a
   // screen click into either a unit id or a ground-plane world point.
   // `byTeam` is the side the input came from (in split-screen, the clicked
@@ -243,6 +262,13 @@ class GameLogic {
   // Ids of figures a simulating peer reports as mid-move (ImportState only;
   // a follower has no activeMoves_ of its own).
   std::vector<int> mirroredMoving_;
+
+  // Sighting memory, indexed [viewing team][target unit id].
+  std::vector<std::vector<EnemySighting>> sightings_[2];
+  std::vector<bool> sightedLastFrame_[2];
+  std::vector<float> sightingTimer_[2];
+  std::vector<glm::vec3> lastUnitPosition_;  // Previous frame's position per unit id.
+  bool hasLastUnitPosition_ = false;
 };
 
 }  // namespace tactics

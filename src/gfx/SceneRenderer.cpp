@@ -241,6 +241,36 @@ void DrawUnitWireframe(const Shader& shader, LineMesh& lines, const glm::mat4& v
   DrawWireBox(shader, lines, viewProj, GunModel(unit), color);
 }
 
+// Faded, team-colored wireframe of a remembered sighting plus a floor arrow
+// along its movement direction (if it was moving).
+void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
+                  const Unit& sighted, const GameLogic::EnemySighting& s, float alpha) {
+  const glm::vec4 base = sighted.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
+                                                    : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
+  const glm::vec4 color(base.r, base.g, base.b, alpha);
+  Unit ghost = sighted;
+  ghost.position = s.position;
+  ghost.facingYaw = s.facingYaw;
+  ghost.knockdownElapsed = -1.0f;
+  if (glm::length(s.moveDirection) > 0.0f) {
+    const glm::vec3 d = s.moveDirection;
+    const glm::vec3 side(-d.z, 0.0f, d.x);
+    const glm::vec3 tail = s.position + glm::vec3(0.0f, 0.02f, 0.0f);
+    const glm::vec3 tip = tail + d * 1.2f;
+    const std::vector<glm::vec3> arrow = {tail, tip, tip - d * 0.3f + side * 0.2f, tip,
+                                          tip - d * 0.3f - side * 0.2f};
+    lines.SetPoints(arrow);
+    shader.SetMat4("uMVP", viewProj);
+    shader.SetVec4("uColor", color);
+    lines.Draw();
+  }
+  glm::vec3 bodyMin, bodySize, headMin, headSize;
+  UnitBoxes(ghost, &bodyMin, &bodySize, &headMin, &headSize);
+  DrawWireBox(shader, lines, viewProj, BoxModel(bodyMin, bodySize), color);
+  DrawWireBox(shader, lines, viewProj, BoxModel(headMin, headSize), color);
+  DrawWireBox(shader, lines, viewProj, GunModel(ghost), color);
+}
+
 void DrawUnitDepth(const Shader& shader, const CubeMesh& cube, const glm::mat4& lightSpaceMatrix,
                    const Unit& unit) {
   glm::vec3 bodyMin, bodySize, headMin, headSize;
@@ -619,6 +649,25 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glDisable(GL_STENCIL_TEST);
   glDepthMask(GL_TRUE);
   glDisable(GL_BLEND);
+
+  // Enemy sighting memory: faint wireframe trail fading with age.
+  if (fogActive) {
+    constexpr float kSightingMaxAlpha = 0.35f;
+    unlitShader_.Use();
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    for (const Unit& unit : game.GetScene().units) {
+      if (unit.team == team) continue;
+      for (const auto& s : game.Sightings(team, unit.id)) {
+        const float life = 1.0f - s.ageSeconds / tactics::constants::kSightingMemoryDuration;
+        if (life <= 0.0f) continue;
+        DrawSighting(unlitShader_, pathLine_, viewProj, unit, s, life * kSightingMaxAlpha);
+      }
+    }
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+  }
 
   // WEGO planning: both teams plan concurrently, so during the planning
   // phase every pane highlights its own team's living figures (dim white =

@@ -56,6 +56,10 @@ constexpr float kRoundDuration = 5.0f;  // Seconds of execution per round.
 // so the cone reaches the map edge no matter where a unit stands or faces;
 // the renderer clips each ray at the map boundary.
 constexpr float kFovConeVisualRange = kShootRange;
+// Enemy sighting memory: a figure continuously in FOV leaves one sample per
+// interval (plus one on entry); samples are remembered for a few rounds.
+constexpr float kSightingSampleInterval = 0.5f;
+constexpr float kSightingMemoryDuration = 3.0f * kRoundDuration;
 }  // namespace constants
 
 }  // namespace tactics

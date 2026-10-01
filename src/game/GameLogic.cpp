@@ -48,6 +48,76 @@ void GameLogic::Reset(Scene scene) {
   activeMoves_.clear();
   pendingShots_.clear();
   mirroredMoving_.clear();
+
+  const size_t unitSlots = scene_.units.size();
+  for (int t = 0; t < 2; ++t) {
+    sightings_[t].assign(unitSlots, {});
+    sightedLastFrame_[t].assign(unitSlots, false);
+    sightingTimer_[t].assign(unitSlots, 0.0f);
+  }
+  lastUnitPosition_.assign(unitSlots, glm::vec3(0.0f));
+  hasLastUnitPosition_ = false;
+}
+
+const std::vector<GameLogic::EnemySighting>& GameLogic::Sightings(Team viewingTeam,
+                                                                  int targetUnitId) const {
+  static const std::vector<EnemySighting> kEmpty;
+  const auto& perUnit = sightings_[static_cast<int>(viewingTeam)];
+  if (targetUnitId < 0 || static_cast<size_t>(targetUnitId) >= perUnit.size()) return kEmpty;
+  return perUnit[targetUnitId];
+}
+
+void GameLogic::UpdateSightingMemory(float dtSeconds) {
+  for (int t = 0; t < 2; ++t) {
+    const Team viewer = static_cast<Team>(t);
+    for (auto& list : sightings_[t]) {
+      for (EnemySighting& s : list) s.ageSeconds += dtSeconds;
+      list.erase(std::remove_if(list.begin(), list.end(),
+                                [](const EnemySighting& s) {
+                                  return s.ageSeconds > constants::kSightingMemoryDuration;
+                                }),
+                 list.end());
+    }
+
+    const TeamVisibility visibility = ComputeVisibility(viewer);
+    for (const Unit& unit : scene_.units) {
+      if (unit.team == viewer || unit.id < 0 ||
+          static_cast<size_t>(unit.id) >= sightings_[t].size()) {
+        continue;
+      }
+      const bool visible = visibility.UnitVisible(unit.id);
+      bool sample = false;
+      if (visible && !sightedLastFrame_[t][unit.id]) {
+        sample = true;  // Just entered FOV: record immediately.
+        sightingTimer_[t][unit.id] = 0.0f;
+      } else if (visible) {
+        sightingTimer_[t][unit.id] += dtSeconds;
+        if (sightingTimer_[t][unit.id] >= constants::kSightingSampleInterval) {
+          sample = true;
+          sightingTimer_[t][unit.id] =
+              std::fmod(sightingTimer_[t][unit.id], constants::kSightingSampleInterval);
+        }
+      }
+      sightedLastFrame_[t][unit.id] = visible;
+      if (!sample) continue;
+
+      EnemySighting s;
+      s.position = unit.position;
+      s.facingYaw = unit.facingYaw;
+      if (hasLastUnitPosition_) {
+        glm::vec3 delta = unit.position - lastUnitPosition_[unit.id];
+        delta.y = 0.0f;
+        if (glm::length(delta) > 1e-4f) s.moveDirection = glm::normalize(delta);
+      }
+      sightings_[t][unit.id].push_back(s);
+    }
+  }
+  for (const Unit& unit : scene_.units) {
+    if (unit.id >= 0 && static_cast<size_t>(unit.id) < lastUnitPosition_.size()) {
+      lastUnitPosition_[unit.id] = unit.position;
+    }
+  }
+  hasLastUnitPosition_ = true;
 }
 
 GameSnapshot GameLogic::ExportState() const {

@@ -322,11 +322,33 @@ void DrawUnitDepth(const Shader& shader, const CubeMesh& cube, const glm::mat4& 
   cube.Draw();
 }
 
-void DrawHighlight(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
+// Flat ring (annulus) in the XZ plane, unit-sized and centred on the origin.
+std::vector<glm::vec3> BuildRingPoints() {
+  constexpr int kSegments = 32;
+  constexpr float kOuter = 0.5f;
+  constexpr float kInner = 0.35f;
+  constexpr float kTwoPi = 6.28318530717958647692f;
+  std::vector<glm::vec3> pts;
+  pts.reserve(kSegments * 6);
+  for (int i = 0; i < kSegments; ++i) {
+    const float a0 = kTwoPi * static_cast<float>(i) / kSegments;
+    const float a1 = kTwoPi * static_cast<float>(i + 1) / kSegments;
+    const glm::vec3 o0(kOuter * std::cos(a0), 0.0f, kOuter * std::sin(a0));
+    const glm::vec3 o1(kOuter * std::cos(a1), 0.0f, kOuter * std::sin(a1));
+    const glm::vec3 i0(kInner * std::cos(a0), 0.0f, kInner * std::sin(a0));
+    const glm::vec3 i1(kInner * std::cos(a1), 0.0f, kInner * std::sin(a1));
+    // Counter-clockwise seen from above (+Y).
+    pts.insert(pts.end(), {o0, o1, i0, i0, o1, i1});
+  }
+  return pts;
+}
+
+void DrawHighlight(const Shader& shader, const TriangleMesh& ring, const glm::mat4& viewProj,
                    const glm::vec3& position, const glm::vec4& color) {
-  constexpr float kHalf = 0.5f;
-  const glm::vec3 minCorner = position + glm::vec3(-kHalf, 0.01f, -kHalf);
-  DrawBox(shader, cube, viewProj, minCorner, glm::vec3(kHalf * 2.0f, 0.04f, kHalf * 2.0f), color);
+  const glm::mat4 model = glm::translate(glm::mat4(1.0f), position + glm::vec3(0.0f, 0.02f, 0.0f));
+  shader.SetMat4("uMVP", viewProj * model);
+  shader.SetVec4("uColor", color);
+  ring.Draw();
 }
 
 // A [begin, end) stretch of ground along one sight ray, as horizontal
@@ -596,6 +618,8 @@ bool SceneRenderer::Init() {
   frontierBorder_.Init();
   pathLine_.Init();
   fovConeMesh_.Init();
+  highlightRing_.Init();
+  highlightRing_.SetPoints(BuildRingPoints());
 
   // Stage-C: a single directional light (simulating overhead factory
   // lighting) casting a basic shadow map, single cascade, hard-edged. The
@@ -640,6 +664,7 @@ void SceneRenderer::Destroy() {
   frontierBorder_.Destroy();
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
+  highlightRing_.Destroy();
   cubeMesh_.Destroy();
   if (shadowDepthTex_) glDeleteTextures(1, &shadowDepthTex_);
   if (shadowFbo_) glDeleteFramebuffers(1, &shadowFbo_);
@@ -723,7 +748,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawUnit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, unit);
   }
 
-  // Squares sit on whatever flat slab (sidewalk) is under them, not inside it.
+  // Rings sit on whatever flat slab (sidewalk) is under them, not inside it.
   const auto DrawHighlightOnSurface = [&](glm::vec3 position, const glm::vec4& color) {
     for (const AABB& slab : game.GetScene().sidewalks) {
       if (position.x >= slab.min.x && position.x <= slab.max.x && position.z >= slab.min.z &&
@@ -731,7 +756,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         position.y = std::max(position.y, slab.max.y);
       }
     }
-    DrawHighlight(unlitShader_, cubeMesh_, viewProj, position, color);
+    DrawHighlight(unlitShader_, highlightRing_, viewProj, position, color);
   };
   // Each pane shows only its own team's FOV cones -- your own vision,
   // not intel about what the enemy can see. Translucent overlay: blend
@@ -949,7 +974,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.reactionOnStationary != tactics::ReactionRule::Shoot) continue;
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
-    DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position,
+    DrawHighlight(unlitShader_, highlightRing_, viewProj, unit.position,
                   glm::vec4(0.85f, 0.1f, 0.85f, 1.0f));
   }
   // Selection/move-preview overlays belong to whichever pane the input
@@ -973,7 +998,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     unlitShader_.SetMat4("uMVP", viewProj);
     unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
     pathLine_.Draw();
-    // Mark the final position with the same square used for selection.
+    // Mark the final position with the same ring used for selection.
     DrawHighlightOnSurface(overlays.movePreviewPath->back(),
                   glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
   } else if (overlays.invalidHoverHighlight) {

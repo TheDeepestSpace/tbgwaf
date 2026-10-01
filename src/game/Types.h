@@ -38,12 +38,12 @@ inline std::vector<AABB> ObstacleBounds(const std::vector<Obstacle>& obstacles) 
 
 // Map/world tuning constants shared across gameplay systems.
 namespace constants {
-constexpr float kMapHalfExtent = 15.0f;  // ~30x30 playable area centered on origin.
+constexpr float kMapHalfExtent = 15.0f;  // Default scene's half-size (~30x30); generated scenes set Scene::mapHalfExtent.
 constexpr float kAgentRadius = 0.4f;     // Padding used to inflate obstacles for the navmesh.
 constexpr float kUnitHalfWidth = 0.35f;
 constexpr float kUnitHeight = 1.8f;
 constexpr float kEyeHeight = 1.5f;
-constexpr float kShootRange = 45.0f;          // Effectively unlimited within the map.
+constexpr float kShootRange = 250.0f;         // Effectively unlimited: exceeds any generated map's diagonal.
 constexpr float kShootHalfFovDegrees = 75.0f;  // 150 degree total FOV cone.
 constexpr float kKnockdownDuration = 0.4f;  // Seconds for a hit unit to fall over.
 constexpr float kMoveSpeed = 4.0f;  // Default run speed, world units per second.
@@ -52,9 +52,9 @@ constexpr float kMoveSpeed = 4.0f;  // Default run speed, world units per second
 // runSpeed * kRoundDuration, so every move animation fits in the window.
 constexpr float kRoundDuration = 5.0f;  // Seconds of execution per round.
 // Visual length of the rendered FOV cone overlay. Sized off kShootRange
-// (already bigger than the map diagonal, 2*kMapHalfExtent*sqrt(2) ~= 42.4)
-// so the cone reaches the map edge no matter where a unit stands or faces;
-// the renderer clips each ray at the map boundary.
+// (bigger than any map's diagonal) so the cone reaches the map edge no matter
+// where a unit stands or faces; the renderer clips each ray at the map
+// boundary.
 constexpr float kFovConeVisualRange = kShootRange;
 // Enemy sighting memory: a figure continuously in FOV leaves one sample per
 // interval (plus one on entry). Samples fade per completed round (not in

@@ -8,6 +8,12 @@
 
 namespace tactics {
 
+// Axis-aligned XZ rectangle the navmesh covers.
+struct NavRegion {
+  float xMin = 0.0f, xMax = 0.0f;
+  float zMin = 0.0f, zMax = 0.0f;
+};
+
 // A convex, axis-aligned rectangular navmesh cell in the XZ plane, resting
 // at a fixed `elevation` (world-space Y). Ground cells have elevation 0;
 // "climb-top" cells (see NavMesh::Build) sit atop a climbable obstacle at
@@ -47,6 +53,11 @@ class NavMesh {
   // ground level up to their top surface.
   void Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent, float agentRadius);
 
+  // Windowed form: meshes only the XZ rectangle `region` (obstacles are
+  // clipped to it). Used by GameLogic to mesh just the area a figure can
+  // reach in one round instead of the whole map.
+  void Build(const std::vector<Obstacle>& obstacles, const NavRegion& region, float agentRadius);
+
   // Returns true and fills `outPath` with a smoothed path from `start` to
   // `goal` (XZ plus an elevation hint used to disambiguate overlapping
   // ground/climb-top cells) if a path exists. `outPath` always starts at
@@ -61,7 +72,7 @@ class NavMesh {
   const std::vector<NavCell>& Cells() const { return cells_; }
 
  private:
-  void BuildGroundMesh(const std::vector<AABB>& obstacles, float mapHalfExtent,
+  void BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegion& region,
                         float agentRadius);
   void AddClimbConnections(const std::vector<Obstacle>& obstacles, float agentRadius);
 
@@ -71,7 +82,7 @@ class NavMesh {
   std::vector<NavCell> cells_;
   std::vector<std::vector<int>> neighbors_;      // neighbors_[cellIndex] = adjacent cell indices.
   std::vector<AABB> paddedFootprints_;           // Agent-radius-inflated obstacle footprints.
-  float mapHalfExtent_ = 0.0f;
+  NavRegion region_;
 };
 
 }  // namespace tactics

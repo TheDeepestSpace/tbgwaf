@@ -50,6 +50,7 @@ struct GameSnapshot {
     glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
     float knockdownElapsed = -1.0f;
     bool moving = false;  // Has an in-flight move in the executing round.
+    ReactionRule reactionOnStationary = ReactionRule::DoNothing;
   };
   std::vector<UnitState> units;
   InputMode mode = InputMode::AwaitingSelection;
@@ -248,6 +249,14 @@ class GameLogic {
   // (Re)builds navMesh_ over the area `mover` can reach this round, unless
   // the cached one already covers this figure at this position.
   void EnsureNavMeshFor(const Unit& mover);
+
+  // Playbook reaction check, called after every per-frame position advance
+  // of a moving unit: resolves a shot from any living enemy `watcher` of
+  // `mover` with reactionOnStationary == Shoot that currently has `mover`
+  // in FOV+LOS. Returns true (and kills `mover`) on the first such hit.
+  // Unlike a one-shot trigger, the watcher's rule is never cleared here, so
+  // it stays armed for future moves/rounds.
+  bool CheckPlaybookReactions(Unit& mover);
 
   Scene scene_;
   // Range-scoped: covers only [mover.position +/- (MoveBudget + margin)],

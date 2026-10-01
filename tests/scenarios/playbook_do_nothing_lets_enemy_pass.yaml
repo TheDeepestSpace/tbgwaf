@@ -1,0 +1,25 @@
+# Default playbook rule (do_nothing): identical layout to
+# playbook_shoot_on_fov_entry, but blue0 has no standing reaction, so red1
+# walks out from behind the wall unharmed and reaches its destination.
+name: playbook_do_nothing_lets_enemy_pass
+
+map:
+  # Tall wall between blue0 and red1's start; red1 emerges from its end.
+  obstacles:
+    - {center: [-3, 0], half_extent: [0.3, 2], height: 3}
+
+units:
+  - {id: 0, team: blue, position: [-8, 0, 0], facing_degrees: 0, reaction_on_stationary: do_nothing}
+  - {id: 1, team: red, position: [-1, 0, 0], facing_degrees: 90}
+
+script:
+  - action: pass
+    actor: 0
+  - action: move
+    actor: 1
+    destination: [-1, 0, 5]
+  - action: commit
+  - assert: {unit: 0, alive: true}
+  - assert: {unit: 1, alive: true}
+  - assert: {unit: 1, position: [-1, 0, 5], tolerance: 0.05}
+  - assert: {round: 2}

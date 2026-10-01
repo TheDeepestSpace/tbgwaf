@@ -34,6 +34,7 @@ using tactics::GameLogic;
 using tactics::GameSnapshot;
 using tactics::InputMode;
 using tactics::Obstacle;
+using tactics::ReactionRule;
 using tactics::SerializeSnapshot;
 using tactics::Team;
 using tactics::TeamVisibility;
@@ -588,7 +589,7 @@ int main() {
       ImGui::End();
 
       if (const auto selectedId = game.SelectedUnitId(); selectedId && selectedTeam) {
-        const Unit* selected = game.FindUnit(*selectedId);
+        Unit* selected = game.FindUnit(*selectedId);
         if (selected && (game.Mode() == InputMode::ActionMenu ||
                           game.Mode() == InputMode::AwaitingMoveDestination ||
                           game.Mode() == InputMode::AwaitingShootTarget)) {
@@ -618,7 +619,26 @@ int main() {
             ImGui::SameLine();
             if (ImGui::Button("Overwatch")) game.ChooseOverwatch();
             ImGui::SameLine();
+            // Opening/using this popup is deliberately not routed through
+            // GameLogic at all: it's a standing config edit, not a turn
+            // action, so it must not end the figure's turn the way
+            // Move/Shoot/Pass do.
+            if (ImGui::Button("Playbook")) ImGui::OpenPopup("PlaybookConfig");
+            ImGui::SameLine();
             if (ImGui::Button("Pass")) game.ChoosePass();
+
+            if (ImGui::BeginPopup("PlaybookConfig")) {
+              ImGui::TextUnformatted("While stationary, on enemy FOV entry:");
+              int rule = static_cast<int>(selected->reactionOnStationary);
+              if (ImGui::RadioButton("Do Nothing", &rule, static_cast<int>(ReactionRule::DoNothing))) {
+                selected->reactionOnStationary = static_cast<ReactionRule>(rule);
+              }
+              ImGui::SameLine();
+              if (ImGui::RadioButton("Shoot", &rule, static_cast<int>(ReactionRule::Shoot))) {
+                selected->reactionOnStationary = static_cast<ReactionRule>(rule);
+              }
+              ImGui::EndPopup();
+            }
           } else {
             if (ImGui::Button("Cancel")) game.CancelAction();
           }

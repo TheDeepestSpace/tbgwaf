@@ -762,6 +762,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawHighlightOnSurface(unit.position,
                   glm::vec4(1.0f, 0.55f, 0.0f, 1.0f));
   }
+  // Playbook indicator: magenta ring on every figure with a standing
+  // shoot-on-FOV-entry rule (distinct from the orange one-shot overwatch ring).
+  for (const Unit& unit : game.GetScene().units) {
+    if (!unit.alive || unit.reactionOnStationary != tactics::ReactionRule::Shoot) continue;
+    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+    DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position,
+                  glm::vec4(0.85f, 0.1f, 0.85f, 1.0f));
+  }
   // Selection/move-preview overlays belong to whichever pane the input
   // layer says is acting; callers pass them only for that pane.
   if (overlays.selectionHighlight) {

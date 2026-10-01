@@ -152,6 +152,11 @@ else()
   target_link_libraries(tactics_map_generator_tests PRIVATE tactics_logic)
   add_test(NAME map_generator_tests COMMAND tactics_map_generator_tests)
 
+  add_executable(tactics_camera_tests tests/camera_tests.cpp src/gfx/Camera.cpp)
+  target_include_directories(tactics_camera_tests PRIVATE src)
+  target_link_libraries(tactics_camera_tests PRIVATE glm::glm)
+  add_test(NAME camera_tests COMMAND tactics_camera_tests)
+
   # YAML gameplay scenarios (issue #14): a native-only, test-only dependency,
   # so it's kept out of tactics_logic (which the WASM build also links) to
   # avoid cross-compiling yaml-cpp for Emscripten.

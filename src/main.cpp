@@ -410,7 +410,7 @@ int main() {
         }
       } else if (event.type == SDL_MOUSEWHEEL) {
         if (!ImGui::GetIO().WantCaptureMouse) {
-          constexpr float kZoomSpeed = 0.1f;  // Fraction of current distance per tick.
+          constexpr float kZoomSpeed = 0.25f;  // Fraction of current distance per tick.
           // preciseY carries fractional trackpad deltas; wheel.y is rounded to
           // whole ticks, which makes trackpad zoom steppy.
 #if SDL_VERSION_ATLEAST(2, 0, 18)

@@ -97,6 +97,15 @@ Scene ParseScene(const YAML::Node& root) {
     unit.position = ParseVec3(unitNode["position"], "units[].position");
     unit.facingYaw =
         unitNode["facing_degrees"] ? unitNode["facing_degrees"].as<float>() * kPi / 180.0f : 0.0f;
+    if (const YAML::Node rule = unitNode["reaction_on_stationary"]) {
+      const std::string name = rule.as<std::string>();
+      if (name == "shoot") {
+        unit.reactionOnStationary = ReactionRule::Shoot;
+      } else if (name != "do_nothing") {
+        throw std::runtime_error("units[].reaction_on_stationary must be 'shoot' or 'do_nothing', got '" +
+                                 name + "'");
+      }
+    }
     unit.alive = true;
     scene.units.push_back(unit);
   }

@@ -1,0 +1,30 @@
+# Standing playbook rule "shoot" (reaction_on_stationary: shoot): blue0 passes
+# (stays stationary) while red1 walks east across blue0's open lane. The
+# moment red1 enters blue0's FOV+LOS blue0 fires on its own, so red1 drops
+# short of its destination. Counterpart: playbook_do_nothing_lets_enemy_pass.
+# Mirrors TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds.
+name: playbook_shoot_on_fov_entry
+
+map:
+  obstacles: []
+
+units:
+  - {id: 0, team: blue, position: [-8, 0, 0], facing_degrees: 0, reaction_on_stationary: shoot}
+  # Starts behind blue0 (outside its cone) and walks through its lane.
+  - {id: 1, team: red, position: [-9.5, 0, 0], facing_degrees: 0}
+  # Keeps red alive so the game isn't over (round would stay 1 on a win).
+  - {id: 2, team: red, position: [9, 0, 9], facing_degrees: 180}
+
+script:
+  - assert: {unit: 1, visible_to: blue, visible: false}
+  - action: pass
+    actor: 0
+  - action: move
+    actor: 1
+    destination: [0, 0, 0]
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {unit: 0, alive: true}
+  - assert: {unit: 1, alive: false}
+  - assert: {round: 2}

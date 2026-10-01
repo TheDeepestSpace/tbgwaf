@@ -660,7 +660,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (const Unit& unit : game.GetScene().units) {
       if (unit.team == team) continue;
       for (const auto& s : game.Sightings(team, unit.id)) {
-        const float life = 1.0f - s.ageSeconds / tactics::constants::kSightingMemoryDuration;
+        const float life = 1.0f - s.ageRounds * tactics::constants::kSightingFadePerRound;
         if (life <= 0.0f) continue;
         DrawSighting(unlitShader_, pathLine_, viewProj, unit, s, life * kSightingMaxAlpha);
       }

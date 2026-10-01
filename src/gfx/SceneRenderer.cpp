@@ -646,6 +646,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawUnit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, unit);
   }
 
+  // Squares sit on whatever flat slab (sidewalk) is under them, not inside it.
+  const auto DrawHighlightOnSurface = [&](glm::vec3 position, const glm::vec4& color) {
+    for (const AABB& slab : game.GetScene().sidewalks) {
+      if (position.x >= slab.min.x && position.x <= slab.max.x && position.z >= slab.min.z &&
+          position.z <= slab.max.z) {
+        position.y = std::max(position.y, slab.max.y);
+      }
+    }
+    DrawHighlight(unlitShader_, cubeMesh_, viewProj, position, color);
+  };
   // Each pane shows only its own team's FOV cones -- your own vision,
   // not intel about what the enemy can see. Translucent overlay: blend
   // on, no depth writes (so it never occludes anything drawn after it).
@@ -692,7 +702,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       const bool planned = unit.plan.type != tactics::PlannedActionType::None;
       const glm::vec4 color = planned ? glm::vec4(0.25f, 0.9f, 0.35f, 1.0f)
                                         : glm::vec4(1.0f, 1.0f, 1.0f, 0.6f);
-      DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position, color);
+      DrawHighlightOnSurface(unit.position, color);
     }
   }
   // Overwatch indicator: a minimal PoC-grade ground marker (distinct from
@@ -701,13 +711,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.triggerAction != tactics::TriggerAction::Shoot) continue;
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
-    DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position,
+    DrawHighlightOnSurface(unit.position,
                   glm::vec4(1.0f, 0.55f, 0.0f, 1.0f));
   }
   // Selection/move-preview overlays belong to whichever pane the input
   // layer says is acting; callers pass them only for that pane.
   if (overlays.selectionHighlight) {
-    DrawHighlight(unlitShader_, cubeMesh_, viewProj, *overlays.selectionHighlight,
+    DrawHighlightOnSurface(*overlays.selectionHighlight,
                   glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
   }
   // An executing round animates both teams' planned moves at once; each
@@ -715,7 +725,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (game.Mode() == InputMode::Executing) {
     for (const Unit& unit : game.GetScene().units) {
       if (unit.team == team && game.IsUnitMoving(unit.id)) {
-        DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position,
+        DrawHighlightOnSurface(unit.position,
                       glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
       }
     }
@@ -726,10 +736,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
     pathLine_.Draw();
     // Mark the final position with the same square used for selection.
-    DrawHighlight(unlitShader_, cubeMesh_, viewProj, overlays.movePreviewPath->back(),
+    DrawHighlightOnSurface(overlays.movePreviewPath->back(),
                   glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
   } else if (overlays.invalidHoverHighlight) {
-    DrawHighlight(unlitShader_, cubeMesh_, viewProj, *overlays.invalidHoverHighlight,
+    DrawHighlightOnSurface(*overlays.invalidHoverHighlight,
                   glm::vec4(0.9f, 0.15f, 0.15f, 1.0f));
   }
   // Visual feedback for the whole squad's plan so far: a planned move reuses

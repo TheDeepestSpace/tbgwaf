@@ -502,6 +502,42 @@ void TestMutualEliminationIsDraw() {
   CHECK(!game.Winner().has_value());
 }
 
+void TestMoveFrontierRoutesAroundObstacle() {
+  std::vector<AABB> obstacles = {
+      AABB{glm::vec3(-1.0f, 0.0f, -4.0f), glm::vec3(1.0f, 2.0f, 4.0f)},
+  };
+  NavMesh nav;
+  nav.Build(obstacles, /*mapHalfExtent=*/10.0f, /*agentRadius=*/0.4f);
+  const glm::vec3 start(-3.0f, 0.0f, 0.0f);
+  const ReachField f = nav.ComputeReachField(start, 8.0f);
+  CHECK(f.nx > 0);
+
+  auto nodeAt = [&](float x, float z) {
+    return std::make_pair(static_cast<int>(std::lround((x - f.minX) / f.step)),
+                          static_cast<int>(std::lround((z - f.minZ) / f.step)));
+  };
+  const auto s = nodeAt(start.x, start.z);
+  CHECK(f.Reached(s.first, s.second));
+  CHECK(f.Dist(s.first, s.second) == 0.0f);
+  // Straight-line 6 away but behind the wall: routed distance exceeds budget.
+  const auto behind = nodeAt(3.0f, 0.0f);
+  CHECK(!f.Reached(behind.first, behind.second));
+  // Inside the padded obstacle is never reached.
+  const auto inside = nodeAt(0.0f, 0.0f);
+  CHECK(!f.Reached(inside.first, inside.second));
+  // Open ground to the left: distance ~ Euclidean.
+  const auto left = nodeAt(-6.0f, 0.0f);
+  CHECK(std::fabs(f.Dist(left.first, left.second) - 3.0f) < 0.1f);
+  // Frontier is cached when entering move mode and cleared on cancel.
+  GameLogic game(LegacyScene());
+  CHECK(game.MoveFrontier() == nullptr);
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  CHECK(game.MoveFrontier() != nullptr);
+  game.CancelAction();
+  CHECK(game.MoveFrontier() == nullptr);
+}
+
 void TestClickChainsLegsAcrossRounds() {
   GameLogic game(LegacyScene());
   game.ClickUnit(0, Team::Blue);
@@ -968,6 +1004,81 @@ void TestGameLogicOverwatchFiresOnEnemyEnteringFov() {
   CHECK(!game.Winner().has_value());  // Red still has id3 and id5 alive.
 }
 
+// Shared setup: blue passes while red4 -- repositioned due west of blue1,
+// behind its fixed +X facing -- plans a walk east through blue1's open
+// lane. Commits the round, leaving the move animating.
+void StartRed4WalkThroughBlue1Lane(GameLogic& game, const glm::vec3& destination) {
+  game.FindUnit(4)->position = glm::vec3(-9.5f, 0.0f, 0.0f);
+  for (int id : {0, 1, 2}) {
+    game.ClickUnit(id, Team::Blue);
+    game.ChoosePass();
+  }
+  game.ClickUnit(3, Team::Red);
+  game.ChoosePass();
+  game.ClickUnit(4, Team::Red);
+  game.ChooseMove();
+  game.ClickGround(destination, Team::Red);
+  game.FinishMovePlan();
+  game.ClickUnit(5, Team::Red);
+  game.ChoosePass();
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+  CHECK(game.Mode() == InputMode::Executing);
+}
+
+void TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds() {
+  GameLogic game(LegacyScene());
+  // Flipping the field directly mirrors what the config popup does; it
+  // doesn't touch turn state, so blue1's plan below is still just Pass.
+  Unit* blue1 = game.FindUnit(1);
+  blue1->reactionOnStationary = ReactionRule::Shoot;
+
+  const glm::vec3 destination(0.0f, 0.0f, 0.0f);
+  StartRed4WalkThroughBlue1Lane(game, destination);
+
+  int steps = 0;
+  while (game.Mode() == InputMode::Executing && steps < 10000) {
+    game.Update(0.02f);
+    ++steps;
+  }
+  CHECK(steps < 10000);
+  CHECK(!game.FindUnit(4)->alive);
+  CHECK(glm::distance(game.FindUnit(4)->position, destination) > 1.0f);
+  CHECK(game.FindUnit(4)->position.x > -9.5f + 1e-3f);
+  // Standing rule: not consumed like a one-shot overwatch trigger.
+  CHECK(blue1->reactionOnStationary == ReactionRule::Shoot);
+  CHECK(blue1->triggerAction == TriggerAction::None);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(game.RoundNumber() == 2);
+}
+
+void TestGameLogicPlaybookDefaultDoesNothing() {
+  GameLogic game(LegacyScene());
+  CHECK(game.FindUnit(1)->reactionOnStationary == ReactionRule::DoNothing);
+
+  const glm::vec3 destination(0.0f, 0.0f, 0.0f);
+  StartRed4WalkThroughBlue1Lane(game, destination);
+  game.Update(100.0f);  // Fast-forward: nothing should interrupt this move.
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(game.FindUnit(4)->alive);
+  CHECK(glm::distance(game.FindUnit(4)->position, destination) < 1e-3f);
+}
+
+// Regression: the Shoot rule only fires on enemies. Arms red3 (Shoot) and
+// walks red4 through its FOV; the teammate must be left alone.
+void TestGameLogicPlaybookIgnoresSameTeamMover() {
+  GameLogic game(LegacyScene());
+  game.FindUnit(3)->reactionOnStationary = ReactionRule::Shoot;
+  game.FindUnit(1)->reactionOnStationary = ReactionRule::DoNothing;
+
+  const glm::vec3 destination(0.0f, 0.0f, 0.0f);
+  StartRed4WalkThroughBlue1Lane(game, destination);
+  game.Update(100.0f);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(game.FindUnit(4)->alive);
+  CHECK(glm::distance(game.FindUnit(4)->position, destination) < 1e-3f);
+}
+
 void TestGameLogicWinCondition() {
   GameLogic game(LegacyScene());
   // Directly eliminate the Red team to drive the game-over transition
@@ -1193,6 +1304,7 @@ int main() {
   TestRoundExecutesBothTeamsMovesConcurrently();
   TestShootRowsResolveSimultaneouslyAcrossTeams();
   TestMutualEliminationIsDraw();
+  TestMoveFrontierRoutesAroundObstacle();
   TestClickChainsLegsAcrossRounds();
   TestManualReplanClearsQueuedLegs();
   TestQueuedLegsSnapshotRoundTrip();
@@ -1206,6 +1318,9 @@ int main() {
   TestGameLogicIgnoresInputWhileExecuting();
   TestGameLogicMoveCanClimbOntoObstacle();
   TestGameLogicOverwatchFiresOnEnemyEnteringFov();
+  TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds();
+  TestGameLogicPlaybookDefaultDoesNothing();
+  TestGameLogicPlaybookIgnoresSameTeamMover();
   TestGameLogicWinCondition();
   TestSnapshotMirrorsMatchAndTeamPlans();
   TestSightingRecordedImmediatelyOnEntry();

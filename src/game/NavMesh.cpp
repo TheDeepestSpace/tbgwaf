@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <queue>
+#include <utility>
 
 #include "game/Raycast.h"
 
@@ -247,6 +249,62 @@ void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float 
       neighbors_[topIdx].push_back(groundIdx);
     }
   }
+}
+
+ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, float step) const {
+  ReachField field;
+  field.step = step;
+  field.budget = budget;
+  if (budget <= 0.0f || step <= 0.0f || !IsWalkable(start.x, start.z)) return field;
+
+  // Align the grid so the source is exactly a node.
+  const int radius = static_cast<int>(std::ceil(budget / step));
+  field.minX = start.x - radius * step;
+  field.minZ = start.z - radius * step;
+  field.nx = field.nz = 2 * radius + 1;
+  const float inf = std::numeric_limits<float>::infinity();
+  field.dist.assign(static_cast<size_t>(field.nx) * field.nz, inf);
+
+  // 16-neighbour moves (8 king + 8 knight) keep grid distance close to
+  // Euclidean (< ~2% error) while still routing around obstacles.
+  static const int kMoves[16][2] = {{1, 0},  {-1, 0}, {0, 1},  {0, -1}, {1, 1},  {1, -1},
+                                    {-1, 1}, {-1, -1}, {2, 1},  {2, -1}, {-2, 1}, {-2, -1},
+                                    {1, 2},  {1, -2}, {-1, 2}, {-1, -2}};
+  std::vector<char> walkable(field.dist.size(), -1);  // -1 unknown, 0/1 cached.
+  auto nodeWalkable = [&](int ix, int iz) {
+    char& w = walkable[iz * field.nx + ix];
+    if (w < 0) {
+      const glm::vec3 p = field.Node(ix, iz);
+      w = IsWalkable(p.x, p.z) ? 1 : 0;
+    }
+    return w == 1;
+  };
+
+  using Entry = std::pair<float, int>;
+  std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+  const int startIdx = radius * field.nx + radius;
+  field.dist[startIdx] = 0.0f;
+  open.push({0.0f, startIdx});
+  while (!open.empty()) {
+    const auto [d, idx] = open.top();
+    open.pop();
+    if (d > field.dist[idx]) continue;
+    const int ix = idx % field.nx, iz = idx / field.nx;
+    const glm::vec3 from = field.Node(ix, iz);
+    for (const auto& m : kMoves) {
+      const int jx = ix + m[0], jz = iz + m[1];
+      if (jx < 0 || jz < 0 || jx >= field.nx || jz >= field.nz) continue;
+      if (!nodeWalkable(jx, jz)) continue;
+      const glm::vec3 to = field.Node(jx, jz);
+      const float nd = d + glm::distance(from, to);
+      const int jdx = jz * field.nx + jx;
+      if (nd > budget || nd >= field.dist[jdx]) continue;
+      if (!LineOfSightClear(from, to, paddedFootprints_)) continue;
+      field.dist[jdx] = nd;
+      open.push({nd, jdx});
+    }
+  }
+  return field;
 }
 
 bool NavMesh::IsWalkable(float x, float z) const { return FindCellContaining(x, z) >= 0; }

@@ -34,6 +34,14 @@ struct PlannedAction {
 // with more reactions later.
 enum class TriggerAction { None, Shoot };
 
+// Standing per-figure playbook rule: what a figure does, on its own,
+// whenever it is stationary (not itself the one moving) and an enemy enters
+// its FOV+LOS. Distinct from a one-shot action-menu trigger (e.g. an
+// Overwatch-style ability that costs a turn and is consumed on first use):
+// this is a persistent config set outside the turn economy, and it stays
+// armed across rounds until the player changes it.
+enum class ReactionRule { DoNothing, Shoot };
+
 struct Unit {
   int id = -1;
   Team team = Team::Blue;
@@ -47,6 +55,7 @@ struct Unit {
   float runSpeed = constants::kMoveSpeed;  // World units per second while moving.
   PlannedAction plan;  // This figure's plan for the current/upcoming round commit.
   TriggerAction triggerAction = TriggerAction::None;
+  ReactionRule reactionOnStationary = ReactionRule::DoNothing;
 
   // How far this figure can move in one round's fixed execution window --
   // the length of one planned leg (longer routes are chained leg by leg, see

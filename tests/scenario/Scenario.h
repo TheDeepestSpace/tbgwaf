@@ -109,6 +109,12 @@ struct PlaybackHooks {
   // post-action holds). The game state is mid-scenario; do not mutate it.
   std::function<void(const GameLogic&)> onFrame;
 
+  // Fired holdFramesAfterAction times (min 1) for each Move step, right after
+  // ChooseMove() while the game is in AwaitingMoveDestination, so a capture
+  // can show the mover's movement frontier. Team is the mover's. Only
+  // consumers that record video need set it; screenshots are unaffected.
+  std::function<void(const GameLogic&, Team)> onMoveFrontier;
+
   // Fired once at the initial state (completedActions == 0) and once after
   // each action step resolves (completedActions == 1, 2, ...). Assert-only
   // steps do not fire it: a "turn" for capture purposes is one executed

@@ -34,6 +34,7 @@ using tactics::GameLogic;
 using tactics::GameSnapshot;
 using tactics::InputMode;
 using tactics::Obstacle;
+using tactics::ReactionRule;
 using tactics::SerializeSnapshot;
 using tactics::Team;
 using tactics::TeamVisibility;
@@ -592,7 +593,7 @@ int main() {
       ImGui::End();
 
       if (const auto selectedId = game.SelectedUnitId(); selectedId && selectedTeam) {
-        const Unit* selected = game.FindUnit(*selectedId);
+        Unit* selected = game.FindUnit(*selectedId);
         if (selected && (game.Mode() == InputMode::ActionMenu ||
                           game.Mode() == InputMode::AwaitingMoveDestination ||
                           game.Mode() == InputMode::AwaitingShootTarget)) {
@@ -622,7 +623,26 @@ int main() {
             ImGui::SameLine();
             if (ImGui::Button("Overwatch")) game.ChooseOverwatch();
             ImGui::SameLine();
+            // Opening/using this popup is deliberately not routed through
+            // GameLogic at all: it's a standing config edit, not a turn
+            // action, so it must not end the figure's turn the way
+            // Move/Shoot/Pass do.
+            if (ImGui::Button("Playbook")) ImGui::OpenPopup("PlaybookConfig");
+            ImGui::SameLine();
             if (ImGui::Button("Pass")) game.ChoosePass();
+
+            if (ImGui::BeginPopup("PlaybookConfig")) {
+              ImGui::TextUnformatted("While stationary, on enemy FOV entry:");
+              int rule = static_cast<int>(selected->reactionOnStationary);
+              if (ImGui::RadioButton("Do Nothing", &rule, static_cast<int>(ReactionRule::DoNothing))) {
+                selected->reactionOnStationary = static_cast<ReactionRule>(rule);
+              }
+              ImGui::SameLine();
+              if (ImGui::RadioButton("Shoot", &rule, static_cast<int>(ReactionRule::Shoot))) {
+                selected->reactionOnStationary = static_cast<ReactionRule>(rule);
+              }
+              ImGui::EndPopup();
+            }
           } else {
             if (game.Mode() == InputMode::AwaitingMoveDestination) {
               if (ImGui::Button("Done")) game.FinishMovePlan();
@@ -727,21 +747,9 @@ int main() {
     // player's pane shows them (the other side must not see enemy plans). ---
     for (int pane = 0; pane < paneCount; ++pane) {
       const PaneRect& rect = paneRects[pane];
-      gfx::PaneOverlays overlays;
-      if (selectedTeam && *selectedTeam == paneTeam(pane)) {
-        if (const auto selectedId = game.SelectedUnitId()) {
-          if (const Unit* selected = game.FindUnit(*selectedId)) {
-            overlays.selectionHighlight = selected->position;
-          }
-        }
-        if (game.Mode() == InputMode::AwaitingMoveDestination) {
-          if (game.MovePreviewValid()) {
-            overlays.movePreviewPath = &game.MovePreviewPath();
-          } else if (hasHoveredGroundPoint) {
-            overlays.invalidHoverHighlight = hoveredGroundPoint;
-          }
-        }
-      }
+      std::optional<glm::vec3> hover;
+      if (hasHoveredGroundPoint) hover = hoveredGroundPoint;
+      const gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(game, paneTeam(pane), hover);
       renderer.RenderPane(game, paneTeam(pane), fogActive, paneVisibility[pane], cameras[pane],
                           rect.x, 0, rect.width, windowHeight, overlays);
     }

@@ -97,6 +97,15 @@ Scene ParseScene(const YAML::Node& root) {
     unit.position = ParseVec3(unitNode["position"], "units[].position");
     unit.facingYaw =
         unitNode["facing_degrees"] ? unitNode["facing_degrees"].as<float>() * kPi / 180.0f : 0.0f;
+    if (const YAML::Node rule = unitNode["reaction_on_stationary"]) {
+      const std::string name = rule.as<std::string>();
+      if (name == "shoot") {
+        unit.reactionOnStationary = ReactionRule::Shoot;
+      } else if (name != "do_nothing") {
+        throw std::runtime_error("units[].reaction_on_stationary must be 'shoot' or 'do_nothing', got '" +
+                                 name + "'");
+      }
+    }
     unit.alive = true;
     scene.units.push_back(unit);
   }
@@ -236,6 +245,11 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
   switch (action.kind) {
     case ScenarioAction::Kind::Move: {
       game.ChooseMove();
+      if (hooks.onMoveFrontier) {
+        for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
+          hooks.onMoveFrontier(game, actorTeam);
+        }
+      }
       game.ClickGround(action.destination, actorTeam);
       game.FinishMovePlan();
       if (game.Mode() != InputMode::AwaitingSelection) {

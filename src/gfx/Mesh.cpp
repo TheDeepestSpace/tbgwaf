@@ -1,6 +1,7 @@
 #include "gfx/Mesh.h"
 
 #include <cmath>
+#include <cstddef>
 #include <vector>
 
 namespace gfx {
@@ -148,6 +149,13 @@ void LineMesh::Draw() const {
   glBindVertexArray(0);
 }
 
+void LineMesh::DrawSegments() const {
+  if (pointCount_ < 2) return;
+  glBindVertexArray(vao_);
+  glDrawArrays(GL_LINES, 0, pointCount_);
+  glBindVertexArray(0);
+}
+
 void TriangleMesh::Init() {
   glGenVertexArrays(1, &vao_);
   glGenBuffers(1, &vbo_);
@@ -176,6 +184,41 @@ void TriangleMesh::Draw() const {
   if (pointCount_ < 3) return;
   glBindVertexArray(vao_);
   glDrawArrays(GL_TRIANGLES, 0, pointCount_);
+  glBindVertexArray(0);
+}
+
+void ColorTriangleMesh::Init() {
+  glGenVertexArrays(1, &vao_);
+  glGenBuffers(1, &vbo_);
+  glBindVertexArray(vao_);
+  glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+                        reinterpret_cast<void*>(offsetof(Vertex, pos)));
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+                        reinterpret_cast<void*>(offsetof(Vertex, color)));
+  glBindVertexArray(0);
+}
+
+void ColorTriangleMesh::Destroy() {
+  if (vbo_) glDeleteBuffers(1, &vbo_);
+  if (vao_) glDeleteVertexArrays(1, &vao_);
+  vao_ = vbo_ = 0;
+}
+
+void ColorTriangleMesh::SetVertices(const std::vector<Vertex>& vertices) {
+  vertexCount_ = static_cast<GLsizei>(vertices.size());
+  if (vertexCount_ == 0) return;
+  glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+  glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(),
+               GL_DYNAMIC_DRAW);
+}
+
+void ColorTriangleMesh::Draw() const {
+  if (vertexCount_ < 3) return;
+  glBindVertexArray(vao_);
+  glDrawArrays(GL_TRIANGLES, 0, vertexCount_);
   glBindVertexArray(0);
 }
 

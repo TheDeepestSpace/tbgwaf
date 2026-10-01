@@ -75,6 +75,11 @@ struct Scenario {
   std::string sourcePath;
   Scene scene;
   std::vector<ScenarioStep> steps;
+  // Optional visual-runner camera framing (both panes): orbit target on the
+  // ground plane, and zoom delta (positive = further out). Large generated
+  // maps need this to frame the action.
+  std::optional<glm::vec2> cameraTarget;
+  float cameraZoom = 10.0f;
 };
 
 // Throws std::runtime_error with a descriptive message on malformed YAML.
@@ -103,6 +108,12 @@ struct PlaybackHooks {
   // Fired for every playback frame (initial holds, each move tick, and
   // post-action holds). The game state is mid-scenario; do not mutate it.
   std::function<void(const GameLogic&)> onFrame;
+
+  // Fired holdFramesAfterAction times (min 1) for each Move step, right after
+  // ChooseMove() while the game is in AwaitingMoveDestination, so a capture
+  // can show the mover's movement frontier. Team is the mover's. Only
+  // consumers that record video need set it; screenshots are unaffected.
+  std::function<void(const GameLogic&, Team)> onMoveFrontier;
 
   // Fired once at the initial state (completedActions == 0) and once after
   // each action step resolves (completedActions == 1, 2, ...). Assert-only

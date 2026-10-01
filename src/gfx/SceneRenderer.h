@@ -24,14 +24,22 @@ namespace gfx {
 bool IsUnitVisibleForRender(const tactics::Unit& unit, tactics::Team viewingTeam, bool fogActive,
                             const tactics::TeamVisibility& visibility);
 
-// Interactive-only overlay state (selection ring, move-path preview) that
-// the input layer decides on per frame. Headless captures (visual scenario
-// tests) render with the defaults: none of it.
+// Per-pane overlay state (selection ring, movement frontier, move-path
+// preview). Always build it with BuildPaneOverlays so the interactive app
+// and the visual scenario harness show the same overlays.
 struct PaneOverlays {
   std::optional<glm::vec3> selectionHighlight;     // Yellow ring under the selected figure.
   std::optional<glm::vec3> invalidHoverHighlight;  // Red ring on an unreachable hover point.
   const std::vector<glm::vec3>* movePreviewPath = nullptr;  // Yellow preview polyline.
+  const tactics::ReachField* moveFrontier = nullptr;  // Reachable-area gradient + border.
 };
+
+// Overlays `pane` shows for the current game state. They belong to the team
+// of the selected figure, so only that player's pane gets them (the other
+// side must not see enemy plans). `hoveredGroundPoint` is the cursor's
+// ground hit, if any (interactive only; used for the invalid-move ring).
+PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team paneTeam,
+                               const std::optional<glm::vec3>& hoveredGroundPoint = std::nullopt);
 
 // Owns the GL resources (shaders, meshes, the shadow map) for the per-team
 // fog-of-war scene pass, and renders one team's view of the game into a
@@ -60,11 +68,18 @@ class SceneRenderer {
  private:
   Shader unlitShader_;
   Shader litShader_;
+  Shader colorShader_;
   Shader depthShader_;
   CubeMesh cubeMesh_;
   SphereMesh sphereMesh_;
   LineMesh pathLine_;
   TriangleMesh fovConeMesh_;
+  ColorTriangleMesh frontierFill_;
+  LineMesh frontierBorder_;
+  // Frontier geometry is rebuilt only when the field changes.
+  const tactics::ReachField* frontierKeyField_ = nullptr;
+  glm::vec2 frontierKeyOrigin_{0.0f};
+  float frontierKeyBudget_ = -1.0f;
   GLuint shadowFbo_ = 0;
   GLuint shadowDepthTex_ = 0;
   glm::vec3 lightDir_{0.0f, -1.0f, 0.0f};

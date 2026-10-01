@@ -8,6 +8,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include "game/MapGenerator.h"
 #include "game/GameLogic.h"
 
 namespace tactics::scenario {
@@ -51,7 +52,15 @@ glm::vec2 ParseVec2(const YAML::Node& node, const std::string& context) {
 Scene ParseScene(const YAML::Node& root) {
   Scene scene;
 
+  bool generated = false;
   if (const YAML::Node mapNode = root["map"]) {
+    // `generate: {seed: N}` builds a procedural city (units come from the
+    // generator unless the scenario lists its own).
+    if (const YAML::Node genNode = mapNode["generate"]) {
+      if (!genNode["seed"]) throw std::runtime_error("map.generate requires 'seed'");
+      scene = GenerateUrbanMap(genNode["seed"].as<uint32_t>());
+      generated = true;
+    }
     if (const YAML::Node obstaclesNode = mapNode["obstacles"]) {
       for (const auto& obsNode : obstaclesNode) {
         const glm::vec2 center = ParseVec2(obsNode["center"], "map.obstacles[].center");
@@ -73,6 +82,8 @@ Scene ParseScene(const YAML::Node& root) {
   }
 
   const YAML::Node unitsNode = root["units"];
+  if (generated && !unitsNode) return scene;
+  if (generated) scene.units.clear();
   if (!unitsNode || !unitsNode.IsSequence() || unitsNode.size() == 0) {
     throw std::runtime_error("scenario must declare at least one unit under 'units'");
   }
@@ -86,6 +97,15 @@ Scene ParseScene(const YAML::Node& root) {
     unit.position = ParseVec3(unitNode["position"], "units[].position");
     unit.facingYaw =
         unitNode["facing_degrees"] ? unitNode["facing_degrees"].as<float>() * kPi / 180.0f : 0.0f;
+    if (const YAML::Node rule = unitNode["reaction_on_stationary"]) {
+      const std::string name = rule.as<std::string>();
+      if (name == "shoot") {
+        unit.reactionOnStationary = ReactionRule::Shoot;
+      } else if (name != "do_nothing") {
+        throw std::runtime_error("units[].reaction_on_stationary must be 'shoot' or 'do_nothing', got '" +
+                                 name + "'");
+      }
+    }
     unit.alive = true;
     scene.units.push_back(unit);
   }
@@ -225,6 +245,11 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
   switch (action.kind) {
     case ScenarioAction::Kind::Move: {
       game.ChooseMove();
+      if (hooks.onMoveFrontier) {
+        for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
+          hooks.onMoveFrontier(game, actorTeam);
+        }
+      }
       game.ClickGround(action.destination, actorTeam);
       if (game.Mode() != InputMode::AwaitingSelection) {
         return Fail("has no path to destination " + ToString(action.destination) +
@@ -330,6 +355,10 @@ Scenario LoadScenarioFromFile(const std::string& path) {
   scenario.sourcePath = path;
   scenario.name = root["name"] ? root["name"].as<std::string>() : path;
   scenario.scene = ParseScene(root);
+  if (const YAML::Node cam = root["camera"]) {
+    if (cam["target"]) scenario.cameraTarget = ParseVec2(cam["target"], "camera.target");
+    if (cam["zoom"]) scenario.cameraZoom = cam["zoom"].as<float>();
+  }
 
   if (const YAML::Node scriptNode = root["script"]) {
     for (const auto& stepNode : scriptNode) {

@@ -17,6 +17,25 @@ using tactics::TeamVisibility;
 using tactics::Unit;
 
 namespace gfx {
+
+PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team paneTeam,
+                               const std::optional<glm::vec3>& hoveredGroundPoint) {
+  PaneOverlays overlays;
+  const auto selectedId = game.SelectedUnitId();
+  if (!selectedId) return overlays;
+  const tactics::Unit* selected = game.FindUnit(*selectedId);
+  if (!selected || selected->team != paneTeam) return overlays;
+  overlays.selectionHighlight = selected->position;
+  if (game.Mode() == tactics::InputMode::AwaitingMoveDestination) {
+    overlays.moveFrontier = game.MoveFrontier();
+    if (game.MovePreviewValid()) {
+      overlays.movePreviewPath = &game.MovePreviewPath();
+    } else if (hoveredGroundPoint) {
+      overlays.invalidHoverHighlight = hoveredGroundPoint;
+    }
+  }
+  return overlays;
+}
 namespace {
 
 constexpr int kShadowMapSize = 2048;
@@ -28,6 +47,27 @@ layout(location = 0) in vec3 aPos;
 uniform mat4 uMVP;
 void main() {
   gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)";
+
+// Unlit shader with a per-vertex color, for gradient overlays.
+const char* kColorVertexShaderSrc = R"(#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec4 aColor;
+uniform mat4 uMVP;
+out vec4 vColor;
+void main() {
+  vColor = aColor;
+  gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)";
+
+const char* kColorFragmentShaderSrc = R"(#version 300 es
+precision mediump float;
+in vec4 vColor;
+out vec4 FragColor;
+void main() {
+  FragColor = vColor;
 }
 )";
 
@@ -636,11 +676,10 @@ bool FootprintSpan(const glm::vec3& eye, const glm::vec2& dir, const AABB& box, 
 // `range` clipped to where the ray leaves the playable map footprint, so the
 // FOV cone stops at the boundary. Zero if the eye stands outside the map and
 // the ray never enters it.
-float ClipToMap(const glm::vec3& eye, const glm::vec2& dir, float range) {
-  constexpr float kHalf = tactics::constants::kMapHalfExtent;
+float ClipToMap(const glm::vec3& eye, const glm::vec2& dir, float range, float half) {
   AABB map;
-  map.min = glm::vec3(-kHalf, 0.0f, -kHalf);
-  map.max = glm::vec3(kHalf, 0.0f, kHalf);
+  map.min = glm::vec3(-half, 0.0f, -half);
+  map.max = glm::vec3(half, 0.0f, half);
   float enter = 0.0f;
   float exit = 0.0f;
   if (!FootprintSpan(eye, dir, map, &enter, &exit)) return 0.0f;
@@ -704,7 +743,8 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
 // eye level shadow everything behind them.
 // Caller is responsible for enabling blending around this call.
 void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& viewProj,
-                 const Unit& unit, const std::vector<tactics::Obstacle>& obstacles) {
+                 const Unit& unit, const std::vector<tactics::Obstacle>& obstacles,
+                 const std::vector<AABB>& sidewalks, float mapHalfExtent) {
   constexpr int kArcSegments = 24;
   constexpr float kGroundOffset = 0.015f;
   constexpr float kConeAlpha = 0.15f;
@@ -749,7 +789,7 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
     const float angle = unit.facingYaw + offset;
     const glm::vec2 dir(std::cos(angle), std::sin(angle));
     dirs.push_back(dir);
-    spansPerRay.push_back(VisibleGroundSpans(eye, dir, obstacles, ClipToMap(eye, dir, range)));
+    spansPerRay.push_back(VisibleGroundSpans(eye, dir, obstacles, ClipToMap(eye, dir, range, mapHalfExtent)));
   }
 
   // Stitch adjacent rays into quads, one per matching visible span. Corner
@@ -777,6 +817,52 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
       points.push_back(l0);
       points.push_back(r1);
       points.push_back(l1);
+    }
+  }
+  // Every walkable surface gets its own copy of the cone at its own height:
+  // the ground-level cone above is buried under raised sidewalk slabs, so
+  // clip the cone to each slab's footprint and lay that piece on its top.
+  const size_t groundPointCount = points.size();
+  for (const AABB& slab : sidewalks) {
+    for (size_t i = 0; i + 2 < groundPointCount; i += 3) {
+      std::vector<glm::vec2> poly = {{points[i].x, points[i].z},
+                                     {points[i + 1].x, points[i + 1].z},
+                                     {points[i + 2].x, points[i + 2].z}};
+      // Sutherland-Hodgman against the four slab edges.
+      for (int edge = 0; edge < 4 && !poly.empty(); ++edge) {
+        const auto inside = [&](const glm::vec2& v) {
+          switch (edge) {
+            case 0: return v.x >= slab.min.x;
+            case 1: return v.x <= slab.max.x;
+            case 2: return v.y >= slab.min.z;
+            default: return v.y <= slab.max.z;
+          }
+        };
+        const auto cross = [&](const glm::vec2& a, const glm::vec2& b) {
+          const float bound = edge == 0 ? slab.min.x : edge == 1 ? slab.max.x
+                              : edge == 2 ? slab.min.z : slab.max.z;
+          const float t = edge < 2 ? (bound - a.x) / (b.x - a.x) : (bound - a.y) / (b.y - a.y);
+          return a + (b - a) * t;
+        };
+        std::vector<glm::vec2> out;
+        for (size_t v = 0; v < poly.size(); ++v) {
+          const glm::vec2& cur = poly[v];
+          const glm::vec2& prev = poly[(v + poly.size() - 1) % poly.size()];
+          if (inside(cur)) {
+            if (!inside(prev)) out.push_back(cross(prev, cur));
+            out.push_back(cur);
+          } else if (inside(prev)) {
+            out.push_back(cross(prev, cur));
+          }
+        }
+        poly = std::move(out);
+      }
+      const float y = slab.max.y + kGroundOffset;
+      for (size_t v = 1; v + 1 < poly.size(); ++v) {
+        points.emplace_back(poly[0].x, y, poly[0].y);
+        points.emplace_back(poly[v].x, y, poly[v].y);
+        points.emplace_back(poly[v + 1].x, y, poly[v + 1].y);
+      }
     }
   }
   mesh.SetPoints(points);
@@ -810,8 +896,14 @@ bool SceneRenderer::Init() {
     std::fprintf(stderr, "Failed to compile the shadow depth shader\n");
     return false;
   }
+  if (!colorShader_.Compile(kColorVertexShaderSrc, kColorFragmentShaderSrc)) {
+    std::fprintf(stderr, "Failed to compile the vertex-color shader\n");
+    return false;
+  }
   cubeMesh_.Init();
   sphereMesh_.Init();
+  frontierFill_.Init();
+  frontierBorder_.Init();
   pathLine_.Init();
   fovConeMesh_.Init();
 
@@ -845,24 +937,17 @@ bool SceneRenderer::Init() {
   }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-  // The light and map geometry are both static, so the light-space matrix
-  // is fixed for the whole session.
+  // The light direction is fixed; the light-space matrix depends on the
+  // scene's map size and is recomputed per RenderPane.
   lightDir_ = glm::normalize(glm::vec3(0.35f, -1.0f, 0.25f));
-  const float mapHalfExtentForLight = tactics::constants::kMapHalfExtent;
-  const float lightDistance = mapHalfExtentForLight * 3.0f;
-  const glm::vec3 lightPos = -lightDir_ * lightDistance;
-  const glm::mat4 lightView = glm::lookAt(lightPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-  const float orthoHalfExtent = mapHalfExtentForLight * 1.5f;
-  const glm::mat4 lightProj =
-      glm::ortho(-orthoHalfExtent, orthoHalfExtent, -orthoHalfExtent, orthoHalfExtent, 0.1f,
-                 lightDistance * 2.0f);
-  lightSpaceMatrix_ = lightProj * lightView;
 
   glEnable(GL_DEPTH_TEST);
   return true;
 }
 
 void SceneRenderer::Destroy() {
+  frontierFill_.Destroy();
+  frontierBorder_.Destroy();
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
   sphereMesh_.Destroy();
@@ -878,6 +963,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                int y, int width, int height, const PaneOverlays& overlays,
                                GLuint targetFramebuffer) {
   const auto& obstacles = game.GetScene().obstacles;
+  const float mapHalfExtent = game.GetScene().mapHalfExtent;
+
+  // Light frustum sized to cover the whole map.
+  const float lightDistance = mapHalfExtent * 3.0f;
+  const glm::mat4 lightView = glm::lookAt(-lightDir_ * lightDistance, glm::vec3(0.0f),
+                                          glm::vec3(0.0f, 1.0f, 0.0f));
+  const float orthoHalfExtent = mapHalfExtent * 1.5f;
+  lightSpaceMatrix_ = glm::ortho(-orthoHalfExtent, orthoHalfExtent, -orthoHalfExtent,
+                                 orthoHalfExtent, 0.1f, lightDistance * 2.0f) *
+                      lightView;
 
   // Shadow pass: only casters this team can currently see.
   glDisable(GL_SCISSOR_TEST);
@@ -917,11 +1012,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
 
-  const float mapHalfExtent = tactics::constants::kMapHalfExtent;
   DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_,
              glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
              glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f),
              glm::vec4(0.16f, 0.18f, 0.20f, 1.0f));
+
+  for (const AABB& slab : game.GetScene().sidewalks) {
+    DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, slab.min, slab.max - slab.min,
+               glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
+  }
 
   for (size_t i = 0; i < obstacles.size(); ++i) {
     const AABB& bounds = obstacles[i].bounds;
@@ -935,6 +1034,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawUnit(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, unit);
   }
 
+  // Squares sit on whatever flat slab (sidewalk) is under them, not inside it.
+  const auto DrawHighlightOnSurface = [&](glm::vec3 position, const glm::vec4& color) {
+    for (const AABB& slab : game.GetScene().sidewalks) {
+      if (position.x >= slab.min.x && position.x <= slab.max.x && position.z >= slab.min.z &&
+          position.z <= slab.max.z) {
+        position.y = std::max(position.y, slab.max.y);
+      }
+    }
+    DrawHighlight(unlitShader_, cubeMesh_, viewProj, position, color);
+  };
   // Each pane shows only its own team's FOV cones -- your own vision,
   // not intel about what the enemy can see. Translucent overlay: blend
   // on, no depth writes (so it never occludes anything drawn after it).
@@ -953,11 +1062,152 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glEnable(GL_STENCIL_TEST);
   glStencilFunc(GL_EQUAL, 0, 0xFF);
   glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+  // The cone sits a hair above the ground; on a large map the depth buffer's
+  // resolution at distance exceeds that gap, so bias it toward the camera to
+  // avoid z-fighting speckle.
+  glEnable(GL_POLYGON_OFFSET_FILL);
+  glPolygonOffset(-2.0f, -4.0f);
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.team != team) continue;
-    DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit, obstacles);
+    DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit, obstacles,
+                game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
   }
+  glDisable(GL_POLYGON_OFFSET_FILL);
   glDisable(GL_STENCIL_TEST);
+
+  // Movement frontier: a glow hugging the reach boundary -- brightest at the
+  // boundary, fading to fully transparent within kFadeWidth inside it. The
+  // boundary is the zero contour of a blurred signed-distance field, so it
+  // is smooth rather than following the sampling grid.
+  if (overlays.moveFrontier && overlays.moveFrontier->nx > 0) {
+    const tactics::ReachField& f = *overlays.moveFrontier;
+    const glm::vec2 origin(f.minX, f.minZ);
+    if (frontierKeyField_ != &f || frontierKeyOrigin_ != origin ||
+        frontierKeyBudget_ != f.budget) {
+      frontierKeyField_ = &f;
+      frontierKeyOrigin_ = origin;
+      frontierKeyBudget_ = f.budget;
+      constexpr float kY = 0.03f;
+      constexpr float kFadeWidth = 0.8f;   // World units from boundary to transparent.
+      constexpr float kEdgeAlpha = 0.65f;  // Fill alpha right at the boundary.
+      const int nx = f.nx, nz = f.nz;
+      const float inf = std::numeric_limits<float>::infinity();
+
+      // Chamfer distance (in world units) from each node to the nearest node
+      // of the opposite reached/unreached class.
+      auto chamfer = [&](bool target) {
+        std::vector<float> d(static_cast<size_t>(nx) * nz, inf);
+        for (int iz = 0; iz < nz; ++iz)
+          for (int ix = 0; ix < nx; ++ix)
+            if (f.Reached(ix, iz) == target) d[iz * nx + ix] = 0.0f;
+        const float s = f.step, sd = f.step * 1.41421356f;
+        auto relax = [&](int ix, int iz, int dx, int dz, float w) {
+          const int jx = ix + dx, jz = iz + dz;
+          if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) return;
+          float& v = d[iz * nx + ix];
+          v = std::min(v, d[jz * nx + jx] + w);
+        };
+        for (int iz = 0; iz < nz; ++iz)
+          for (int ix = 0; ix < nx; ++ix) {
+            relax(ix, iz, -1, 0, s);
+            relax(ix, iz, 0, -1, s);
+            relax(ix, iz, -1, -1, sd);
+            relax(ix, iz, 1, -1, sd);
+          }
+        for (int iz = nz - 1; iz >= 0; --iz)
+          for (int ix = nx - 1; ix >= 0; --ix) {
+            relax(ix, iz, 1, 0, s);
+            relax(ix, iz, 0, 1, s);
+            relax(ix, iz, 1, 1, sd);
+            relax(ix, iz, -1, 1, sd);
+          }
+        return d;
+      };
+      const std::vector<float> dIn = chamfer(false);   // Distance to nearest unreached.
+      const std::vector<float> dOut = chamfer(true);   // Distance to nearest reached.
+      std::vector<float> g(dIn.size());
+      for (int iz = 0; iz < nz; ++iz)
+        for (int ix = 0; ix < nx; ++ix) {
+          const int i = iz * nx + ix;
+          // Signed depth: positive inside, zero contour half a step out.
+          g[i] = f.Reached(ix, iz) ? dIn[i] - 0.5f * f.step : -(dOut[i] - 0.5f * f.step);
+        }
+      // Separable box blur (radius 2, two passes) rounds off the grid steps.
+      std::vector<float> tmp(g.size());
+      for (int pass = 0; pass < 2; ++pass) {
+        for (int iz = 0; iz < nz; ++iz)
+          for (int ix = 0; ix < nx; ++ix) {
+            float sum = 0.0f;
+            for (int k = -2; k <= 2; ++k) sum += g[iz * nx + std::clamp(ix + k, 0, nx - 1)];
+            tmp[iz * nx + ix] = sum / 5.0f;
+          }
+        for (int iz = 0; iz < nz; ++iz)
+          for (int ix = 0; ix < nx; ++ix) {
+            float sum = 0.0f;
+            for (int k = -2; k <= 2; ++k) sum += tmp[std::clamp(iz + k, 0, nz - 1) * nx + ix];
+            g[iz * nx + ix] = sum / 5.0f;
+          }
+      }
+
+      struct Pt {
+        glm::vec3 p;
+        float g;
+      };
+      std::vector<ColorTriangleMesh::Vertex> fill;
+      std::vector<glm::vec3> border;
+      auto toVertex = [&](const Pt& q) {
+        const float a = kEdgeAlpha * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
+        return ColorTriangleMesh::Vertex{q.p, glm::vec4(0.2f, 0.9f, 0.3f, a)};
+      };
+      for (int iz = 0; iz + 1 < nz; ++iz) {
+        for (int ix = 0; ix + 1 < nx; ++ix) {
+          const int cx[4] = {ix, ix + 1, ix + 1, ix};
+          const int cz[4] = {iz, iz, iz + 1, iz + 1};
+          Pt quad[4];
+          bool anyIn = false;
+          for (int k = 0; k < 4; ++k) {
+            quad[k] = {f.Node(cx[k], cz[k]), g[cz[k] * nx + cx[k]]};
+            quad[k].p.y = kY;
+            anyIn |= quad[k].g > 0.0f;
+          }
+          if (!anyIn) continue;
+          // Clip the cell to g >= 0 (Sutherland-Hodgman against the field).
+          std::vector<Pt> poly;
+          std::vector<Pt> cut;  // Contour crossings, in polygon order.
+          for (int k = 0; k < 4; ++k) {
+            const Pt& a = quad[k];
+            const Pt& b = quad[(k + 1) % 4];
+            const bool ain = a.g >= 0.0f, bin = b.g >= 0.0f;
+            if (ain) poly.push_back(a);
+            if (ain != bin) {
+              const float t = a.g / (a.g - b.g);
+              const Pt c{a.p + (b.p - a.p) * t, 0.0f};
+              poly.push_back(c);
+              cut.push_back(c);
+            }
+          }
+          for (size_t k = 1; k + 1 < poly.size(); ++k) {
+            fill.push_back(toVertex(poly[0]));
+            fill.push_back(toVertex(poly[k]));
+            fill.push_back(toVertex(poly[k + 1]));
+          }
+          if (cut.size() == 2) {
+            border.push_back(cut[0].p);
+            border.push_back(cut[1].p);
+          }
+        }
+      }
+      frontierFill_.SetVertices(fill);
+      frontierBorder_.SetPoints(border);
+    }
+    colorShader_.Use();
+    colorShader_.SetMat4("uMVP", viewProj);
+    frontierFill_.Draw();
+    unlitShader_.Use();
+    unlitShader_.SetMat4("uMVP", viewProj);
+    unlitShader_.SetVec4("uColor", glm::vec4(0.2f, 1.0f, 0.3f, 1.0f));
+    frontierBorder_.DrawSegments();
+  }
   glDepthMask(GL_TRUE);
   glDisable(GL_BLEND);
 
@@ -993,7 +1243,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       const bool planned = unit.plan.type != tactics::PlannedActionType::None;
       const glm::vec4 color = planned ? glm::vec4(0.25f, 0.9f, 0.35f, 1.0f)
                                         : glm::vec4(1.0f, 1.0f, 1.0f, 0.6f);
-      DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position, color);
+      DrawHighlightOnSurface(unit.position, color);
     }
   }
   // Overwatch indicator: a minimal PoC-grade ground marker (distinct from
@@ -1002,13 +1252,21 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.triggerAction != tactics::TriggerAction::Shoot) continue;
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
-    DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position,
+    DrawHighlightOnSurface(unit.position,
                   glm::vec4(1.0f, 0.55f, 0.0f, 1.0f));
+  }
+  // Playbook indicator: magenta ring on every figure with a standing
+  // shoot-on-FOV-entry rule (distinct from the orange one-shot overwatch ring).
+  for (const Unit& unit : game.GetScene().units) {
+    if (!unit.alive || unit.reactionOnStationary != tactics::ReactionRule::Shoot) continue;
+    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+    DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position,
+                  glm::vec4(0.85f, 0.1f, 0.85f, 1.0f));
   }
   // Selection/move-preview overlays belong to whichever pane the input
   // layer says is acting; callers pass them only for that pane.
   if (overlays.selectionHighlight) {
-    DrawHighlight(unlitShader_, cubeMesh_, viewProj, *overlays.selectionHighlight,
+    DrawHighlightOnSurface(*overlays.selectionHighlight,
                   glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
   }
   // An executing round animates both teams' planned moves at once; each
@@ -1016,7 +1274,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (game.Mode() == InputMode::Executing) {
     for (const Unit& unit : game.GetScene().units) {
       if (unit.team == team && game.IsUnitMoving(unit.id)) {
-        DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position,
+        DrawHighlightOnSurface(unit.position,
                       glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
       }
     }
@@ -1027,10 +1285,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
     pathLine_.Draw();
     // Mark the final position with the same square used for selection.
-    DrawHighlight(unlitShader_, cubeMesh_, viewProj, overlays.movePreviewPath->back(),
+    DrawHighlightOnSurface(overlays.movePreviewPath->back(),
                   glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
   } else if (overlays.invalidHoverHighlight) {
-    DrawHighlight(unlitShader_, cubeMesh_, viewProj, *overlays.invalidHoverHighlight,
+    DrawHighlightOnSurface(*overlays.invalidHoverHighlight,
                   glm::vec4(0.9f, 0.15f, 0.15f, 1.0f));
   }
   // Visual feedback for the whole squad's plan so far: a planned move reuses

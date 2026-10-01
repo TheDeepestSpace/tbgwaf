@@ -46,7 +46,7 @@ struct GameSnapshot {
     PlannedActionType planType = PlannedActionType::None;
     int planShootTargetId = -1;
     std::vector<glm::vec3> planPath;
-    std::vector<glm::vec3> planQueuedPath;
+    std::vector<std::vector<glm::vec3>> planQueuedLegs;
     float planEndFacingYaw = 0.0f;
     glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
     float knockdownElapsed = -1.0f;
@@ -57,12 +57,6 @@ struct GameSnapshot {
   int roundNumber = 1;
   int winner = -1;  // -1 = none, else static_cast<int>(Team).
 };
-
-// Cuts a polyline into consecutive legs of at most `legLength` arc length
-// (interpolating a point at each cut); each leg starts where the previous
-// one ended. Returns {path} unchanged if it already fits in one leg.
-std::vector<std::vector<glm::vec3>> SplitPathByLength(const std::vector<glm::vec3>& path,
-                                                      float legLength);
 
 // Text encoding of a snapshot (for the page-level message bus). Deserialize
 // returns false on malformed input.
@@ -132,7 +126,16 @@ class GameLogic {
   // though both teams plan at once. These only ever record/modify a figure's
   // plan; nothing executes until CommitRound().
   void ClickUnit(int unitId, Team byTeam);
+  // In AwaitingMoveDestination each click adds one more leg (at most one
+  // round's MoveBudget() from the previous leg's end; farther clicks are
+  // ignored). The figure stays selected so the next click chains another leg,
+  // until FinishMovePlan().
   void ClickGround(const glm::vec3& point, Team byTeam);
+  // Ends the chaining started by ChooseMove(); a no-op unless a leg is planned.
+  void FinishMovePlan();
+  // End of the chain planned so far (the figure's position if none yet): the
+  // origin of the next leg.
+  glm::vec3 MoveChainEnd() const;
   void HoverGround(const glm::vec3& point, Team byTeam);
 
   // Advances the executing round (Mode() == InputMode::Executing) by
@@ -192,7 +195,7 @@ class GameLogic {
   bool ResolveShot(Unit& shooter, Unit& target);
 
  private:
-  void ClearQueuedPath(std::optional<int> unitId);
+  void ClearQueuedLegs(std::optional<int> unitId);
   // One figure's in-flight planned move; multiple can be active at once
   // since a commit animates both teams' planned moves concurrently.
   // path[segment] is the waypoint the mover last passed through;

@@ -370,6 +370,7 @@ int main() {
     bool leftClickPending = false;
     int leftClickX = 0, leftClickY = 0;
     bool escapePending = false;
+    bool enterPending = false;
     int mouseX = 0, mouseY = 0;
     SDL_GetMouseState(&mouseX, &mouseY);
 
@@ -457,6 +458,9 @@ int main() {
         leftClickY = event.button.y;
       } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
         escapePending = true;
+      } else if (event.type == SDL_KEYDOWN && (event.key.keysym.sym == SDLK_RETURN ||
+                                               event.key.keysym.sym == SDLK_KP_ENTER)) {
+        enterPending = true;
       }
     }
 
@@ -546,7 +550,7 @@ int main() {
           ImGui::TextWrapped("Choose an action to plan.");
           break;
         case InputMode::AwaitingMoveDestination:
-          ImGui::TextWrapped("Click a destination on the ground (Esc to cancel).");
+          ImGui::TextWrapped("Click ground within reach to plan this round's leg; each further click adds a leg for the next round. Enter or Done to finish, Esc to cancel.");
           break;
         case InputMode::AwaitingShootTarget:
           ImGui::TextWrapped("Click an enemy figure to plan a shot (Esc to cancel).");
@@ -606,6 +610,10 @@ int main() {
             ImGui::SameLine();
             if (ImGui::Button("Pass")) game.ChoosePass();
           } else {
+            if (game.Mode() == InputMode::AwaitingMoveDestination) {
+              if (ImGui::Button("Done")) game.FinishMovePlan();
+              ImGui::SameLine();
+            }
             if (ImGui::Button("Cancel")) game.CancelAction();
           }
           ImGui::End();
@@ -628,9 +636,39 @@ int main() {
                         TeamName(paneTeam(pane)));
     }
 
+    // "+N" next to the end of each planned move chain: N legs planned so far.
+    // Shown while a figure's chain is being built, and for any chain longer
+    // than one leg. Own team's plans only, drawn in that team's pane.
+    for (int pane = 0; pane < paneCount; ++pane) {
+      const PaneRect& rect = paneRects[pane];
+      const glm::mat4 paneView = cameras[pane].ViewMatrix();
+      const glm::mat4 paneProj = cameras[pane].ProjectionMatrix(
+          static_cast<float>(rect.width) / static_cast<float>(windowHeight));
+      const glm::vec4 paneViewport(static_cast<float>(rect.x), 0.0f,
+                                   static_cast<float>(rect.width),
+                                   static_cast<float>(windowHeight));
+      for (const Unit& unit : game.GetScene().units) {
+        if (!unit.alive || unit.team != paneTeam(pane) ||
+            unit.plan.type != tactics::PlannedActionType::Move || unit.plan.movePath.empty()) {
+          continue;
+        }
+        const bool chaining = game.Mode() == InputMode::AwaitingMoveDestination &&
+                              game.SelectedUnitId() == unit.id;
+        if (!chaining && unit.plan.queuedLegs.empty()) continue;
+        const glm::vec3 end = unit.plan.queuedLegs.empty() ? unit.plan.movePath.back()
+                                                           : unit.plan.queuedLegs.back().back();
+        const glm::vec3 screen = glm::project(end, paneView, paneProj, paneViewport);
+        char label[16];
+        std::snprintf(label, sizeof(label), "+%zu", 1 + unit.plan.queuedLegs.size());
+        overlay->AddText(ImVec2(screen.x + 12.0f, windowHeight - screen.y - 8.0f),
+                         IM_COL32(255, 217, 51, 255), label);
+      }
+    }
+
     // --- Dispatch deferred input, now that WantCaptureMouse reflects the UI
     // actually built this frame. ---
     if (escapePending) game.CancelAction();
+    if (enterPending) game.FinishMovePlan();
 
     const bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse;
     if (!uiWantsMouse && planning) {

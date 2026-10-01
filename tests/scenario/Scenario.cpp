@@ -190,12 +190,14 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
       int ticks = 0;
       while (game.Mode() == InputMode::Executing && ++ticks <= kMaxMoveTicks) {
         game.Update(hooks.tickSeconds);
+        game.UpdateSightingMemory(hooks.tickSeconds);
         if (hooks.onFrame) hooks.onFrame(game);
       }
       // Shots resolve at commit, so the fall may outlive (or entirely
       // precede) the round's execution; keep ticking until it lands.
       while (game.HasActiveKnockdown() && ++ticks <= kMaxMoveTicks) {
         game.Update(hooks.tickSeconds);
+        game.UpdateSightingMemory(hooks.tickSeconds);
         if (hooks.onFrame) hooks.onFrame(game);
       }
       if (game.Mode() == InputMode::Executing) {
@@ -203,7 +205,16 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
                     std::to_string(kMaxMoveTicks) + " ticks");
       }
     } else {
-      game.Update(1.0e6f);  // Fast-forward the executing round in one coarse tick.
+      // Fast-forward the executing round. Step coarsely (not one giant tick)
+      // so sighting memory still samples the figures along the way.
+      constexpr float kFastStepSeconds = 0.1f;
+      constexpr int kMaxFastSteps = 20000;
+      for (int i = 0; game.Mode() == InputMode::Executing && i < kMaxFastSteps; ++i) {
+        game.Update(kFastStepSeconds);
+        game.UpdateSightingMemory(kFastStepSeconds);
+      }
+      game.Update(1.0e6f);  // Settle anything still pending (e.g. knockdowns).
+      game.UpdateSightingMemory(0.0f);
     }
     return true;
   }
@@ -369,6 +380,8 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
     for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) hooks.onFrame(game);
   };
 
+  // Mirrors main.cpp's frame loop so captured frames include sighting memory.
+  game.UpdateSightingMemory(0.0f);
   EmitHoldFrames();
   if (hooks.onActionComplete) hooks.onActionComplete(game, 0);
 

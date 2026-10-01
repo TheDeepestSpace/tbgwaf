@@ -1,0 +1,30 @@
+# Showcases enemy sighting memory: red starts in blue's FOV, then runs out of
+# it. The faded wireframe trail and movement arrow of where blue last saw red
+# stay on screen in blue's pane (round 2 holds on them) while red itself is
+# hidden.
+name: enemy_sighting_memory_trail
+
+map:
+  obstacles: []
+
+units:
+  - {id: 0, team: blue, position: [-14, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [-4, 0, -2], facing_degrees: 180}
+
+script:
+  - assert: {unit: 1, visible_to: blue, visible: true}
+
+  - action: pass
+    actor: 0
+  - action: move
+    actor: 1
+    destination: [-12, 0, 14]       # Crosses blue's 150 degree cone edge near the end.
+  - action: commit
+  - assert: {unit: 1, visible_to: blue, visible: false}
+
+  # Round 2: nothing moves; the remembered trail is still drawn for blue.
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: commit

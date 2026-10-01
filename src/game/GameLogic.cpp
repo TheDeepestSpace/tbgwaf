@@ -491,6 +491,7 @@ void GameLogic::ChooseMove() {
   mode_ = InputMode::AwaitingMoveDestination;
   moveFrontier_ = ReachField();
   if (const Unit* mover = FindUnit(selectedUnitId_.value_or(-1))) {
+    EnsureNavMeshFor(*mover);
     moveFrontier_ = navMesh_.ComputeReachField(mover->position, mover->MoveBudget());
   }
   movePreviewPath_.clear();

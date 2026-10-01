@@ -197,6 +197,16 @@ else()
     PkgConfig::EGL
   )
 
+  # Map-only golden renders of seeded generated cities (no units/teams).
+  add_executable(tactics_map_visual_tests tests/visual/map_visual_main.cpp)
+  target_include_directories(tactics_map_visual_tests PRIVATE src tests ${stb_SOURCE_DIR})
+  target_link_libraries(tactics_map_visual_tests PRIVATE
+    tactics_logic
+    tactics_gfx
+    PkgConfig::SDL2
+    PkgConfig::EGL
+  )
+
   find_program(XVFB_RUN_EXECUTABLE xvfb-run)
   if(XVFB_RUN_EXECUTABLE)
     # Golden-screenshot regression run (no --video: ffmpeg isn't needed for
@@ -208,6 +218,16 @@ else()
       WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     )
     set_tests_properties(visual_tests PROPERTIES
+      TIMEOUT 300
+      ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
+    )
+    add_test(
+      NAME map_visual_tests
+      COMMAND ${XVFB_RUN_EXECUTABLE} --auto-servernum --server-args=-screen\ 0\ 1280x1024x24
+              $<TARGET_FILE:tactics_map_visual_tests> --out-dir ${CMAKE_BINARY_DIR}/map_visual_out
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    )
+    set_tests_properties(map_visual_tests PROPERTIES
       TIMEOUT 300
       ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
     )

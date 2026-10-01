@@ -27,6 +27,82 @@ glm::vec2 WorldToWindow(const glm::vec3& world, const gfx::OrbitCamera& camera,
   return glm::vec2(screen.x, windowHeight - screen.y);
 }
 
+namespace {
+
+bool& PlaybookOpen(Team team) {
+  static bool open[2] = {false, false};
+  return open[team == Team::Blue ? 0 : 1];
+}
+
+const char* ReactionName(tactics::ReactionAction a) {
+  static const char* names[] = {"Do Nothing", "Shoot", "Stop", "Continue", "Shoot + Stop",
+                                "Shoot + Continue"};
+  return names[static_cast<int>(a)];
+}
+
+// The squad-wide reaction table as its own centered view: one row per
+// (moving|stationary) x (seen|unseen) situation, one checkbox column per
+// reaction. Clicking a box selects that reaction for the row; boxes that make
+// no sense for the row (e.g. Stop for a stationary figure) are disabled.
+void DrawPlaybookView(const GameLogic& game, Team team, const PaneRect& rect, int windowHeight,
+                      const std::string& windowId, HudActions& actions) {
+  using tactics::ReactionAction;
+  ImGui::SetNextWindowPos(ImVec2(rect.x + rect.width * 0.5f, windowHeight * 0.5f),
+                          ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+  ImGui::Begin(windowId.c_str(), nullptr,
+               ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
+                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+  ImGui::Text("%s squad playbook (applies to every %s figure)", TeamName(team), TeamName(team));
+  ImGui::TextUnformatted("When a sighted enemy is in view, a figure will:");
+
+  struct Row { const char* label; bool moving; bool canSeeMe; };
+  const Row rows[] = {{"Moving, seen", true, true},
+                      {"Moving, unseen", true, false},
+                      {"Stationary, seen", false, true},
+                      {"Stationary, unseen", false, false}};
+  const ReactionAction columns[] = {ReactionAction::DoNothing,    ReactionAction::Shoot,
+                                    ReactionAction::Stop,         ReactionAction::Continue,
+                                    ReactionAction::ShootStop,    ReactionAction::ShootContinue};
+
+  tactics::SquadPlaybook edited = game.Playbook(team);
+  bool changed = false;
+  if (ImGui::BeginTable("playbook", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
+    ImGui::TableSetupColumn("");
+    for (ReactionAction c : columns) ImGui::TableSetupColumn(ReactionName(c));
+    ImGui::TableHeadersRow();
+    for (const Row& row : rows) {
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::TextUnformatted(row.label);
+      ReactionAction& slot = edited.At(row.moving, row.canSeeMe);
+      for (int i = 0; i < 6; ++i) {
+        const ReactionAction c = columns[i];
+        // Moving figures only get stop/continue variants; stationary only
+        // do-nothing / shoot.
+        const bool stationaryOnly = c == ReactionAction::DoNothing || c == ReactionAction::Shoot;
+        ImGui::TableSetColumnIndex(i + 1);
+        ImGui::PushID(&row - rows);
+        ImGui::PushID(i);
+        ImGui::BeginDisabled(stationaryOnly == row.moving);
+        bool checked = slot == c;
+        if (ImGui::Checkbox("##cell", &checked) && checked) {
+          slot = c;
+          changed = true;
+        }
+        ImGui::EndDisabled();
+        ImGui::PopID();
+        ImGui::PopID();
+      }
+    }
+    ImGui::EndTable();
+  }
+  if (changed) actions.playbook = edited;
+  if (ImGui::Button("Close")) PlaybookOpen(team) = false;
+  ImGui::End();
+}
+
+}  // namespace
+
 HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRect& rect,
                    int windowHeight, const gfx::OrbitCamera& camera, HudLayout* layout) {
   HudActions actions;
@@ -105,7 +181,13 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
     ImGui::BeginDisabled(!game.CanCommitRound());
     if (Button("Commit Round")) actions.commit = true;
     ImGui::EndDisabled();
+    // Squad-wide config, not tied to any figure: opens its own view.
+    ImGui::SameLine();
+    bool& playbookOpen = PlaybookOpen(team);
+    if (Button(playbookOpen ? "Close Playbook" : "Playbook")) playbookOpen = !playbookOpen;
     ImGui::End();
+
+    if (playbookOpen) DrawPlaybookView(game, team, rect, windowHeight, id("Playbook"), actions);
 
     // The shared selection belongs to one team's figure; only that team's
     // pane shows its action menu.
@@ -128,49 +210,7 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
           ImGui::SameLine();
           if (Button("Overwatch")) actions.overwatch = true;
           ImGui::SameLine();
-          // A standing config edit, not a turn action: reported via
-          // actions.reaction rather than routed through GameLogic's turn flow.
-          if (Button("Playbook")) ImGui::OpenPopup("PlaybookConfig");
-          ImGui::SameLine();
           if (Button("Pass")) actions.pass = true;
-
-          if (ImGui::BeginPopup("PlaybookConfig")) {
-            ImGui::TextUnformatted("Squad playbook, on enemy in FOV:");
-            tactics::SquadPlaybook edited = game.Playbook(selected->team);
-            struct Row { const char* label; bool moving; bool canSeeMe; };
-            const Row rows[] = {{"Moving, seen", true, true},
-                                {"Moving, unseen", true, false},
-                                {"Stationary, seen", false, true},
-                                {"Stationary, unseen", false, false}};
-            const char* movingNames[] = {"Do Nothing", "Shoot", "Stop", "Continue", "Shoot, Stop",
-                                         "Shoot, Continue"};
-            using tactics::ReactionAction;
-            const ReactionAction movingChoices[] = {ReactionAction::Stop, ReactionAction::Continue,
-                                                    ReactionAction::ShootStop,
-                                                    ReactionAction::ShootContinue};
-            const ReactionAction stationaryChoices[] = {ReactionAction::DoNothing,
-                                                        ReactionAction::Shoot};
-            bool changed = false;
-            for (const Row& row : rows) {
-              ReactionAction& slot = edited.At(row.moving, row.canSeeMe);
-              ImGui::PushID(row.label);
-              ImGui::SetNextItemWidth(150.0f);
-              if (ImGui::BeginCombo(row.label, movingNames[static_cast<int>(slot)])) {
-                const ReactionAction* begin = row.moving ? movingChoices : stationaryChoices;
-                const size_t n = row.moving ? 4 : 2;
-                for (size_t i = 0; i < n; ++i) {
-                  if (ImGui::Selectable(movingNames[static_cast<int>(begin[i])], slot == begin[i])) {
-                    slot = begin[i];
-                    changed = true;
-                  }
-                }
-                ImGui::EndCombo();
-              }
-              ImGui::PopID();
-            }
-            if (changed) actions.playbook = edited;
-            ImGui::EndPopup();
-          }
         } else {
           if (Button("Cancel")) actions.cancel = true;
         }

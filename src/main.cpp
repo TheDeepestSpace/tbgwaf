@@ -535,13 +535,7 @@ int main() {
       if (hud.overwatch) game.ChooseOverwatch();
       if (hud.pass) game.ChoosePass();
       if (hud.cancel) game.CancelAction();
-      if (hud.playbook) {
-        if (const auto selectedId = game.SelectedUnitId()) {
-          if (const Unit* selected = game.FindUnit(*selectedId)) {
-            game.SetPlaybook(selected->team, *hud.playbook);
-          }
-        }
-      }
+      if (hud.playbook) game.SetPlaybook(paneTeam(pane), *hud.playbook);
     }
 
     // Pane divider. Both teams plan at once, so there's no "inactive side"

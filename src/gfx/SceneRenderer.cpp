@@ -1321,10 +1321,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawHighlightOnSurface(unit.position,
                   glm::vec4(1.0f, 0.55f, 0.0f, 1.0f));
   }
-  // Playbook indicator: magenta ring on every figure with a standing
-  // shoot-on-FOV-entry rule (distinct from the orange one-shot overwatch ring).
+  // Playbook indicator: magenta ring on every figure whose squad playbook
+  // has any shoot reaction (distinct from the orange one-shot overwatch ring).
   for (const Unit& unit : game.GetScene().units) {
-    if (!unit.alive || unit.reactionOnStationary != tactics::ReactionRule::Shoot) continue;
+    const tactics::SquadPlaybook& pb = game.Playbook(unit.team);
+    bool shoots = false;
+    for (int m = 0; m < 2; ++m)
+      for (int s = 0; s < 2; ++s) shoots |= tactics::ReactionShoots(pb.table[m][s]);
+    if (!unit.alive || !shoots) continue;
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
     DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position,
                   glm::vec4(0.85f, 0.1f, 0.85f, 1.0f));

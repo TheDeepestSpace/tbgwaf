@@ -30,13 +30,45 @@ struct PlannedAction {
 // with more reactions later.
 enum class TriggerAction { None, Shoot };
 
-// Standing per-figure playbook rule: what a figure does, on its own,
-// whenever it is stationary (not itself the one moving) and an enemy enters
-// its FOV+LOS. Distinct from a one-shot action-menu trigger (e.g. an
-// Overwatch-style ability that costs a turn and is consumed on first use):
-// this is a persistent config set outside the turn economy, and it stays
-// armed across rounds until the player changes it.
-enum class ReactionRule { DoNothing, Shoot };
+// What a figure does, on its own, on a tick where at least one living enemy
+// is inside its FOV+LOS. A persistent config set outside the turn economy
+// (unlike a one-shot Overwatch trigger): it stays in force across rounds
+// until the player changes it. Stop/Continue/ShootStop/ShootContinue only
+// mean something to a moving figure -- "continue" just keeps executing the
+// already-committed path this round; for a stationary figure they behave as
+// DoNothing / Shoot.
+enum class ReactionAction { DoNothing, Shoot, Stop, Continue, ShootStop, ShootContinue };
+
+inline bool ReactionShoots(ReactionAction a) {
+  return a == ReactionAction::Shoot || a == ReactionAction::ShootStop ||
+         a == ReactionAction::ShootContinue;
+}
+inline bool ReactionStops(ReactionAction a) {
+  return a == ReactionAction::Stop || a == ReactionAction::ShootStop;
+}
+
+// Squad-wide reaction lookup: (moving | stationary) x (some sighted enemy can
+// see me back | none can) -> action. One table per team, shared by all of its
+// figures.
+struct SquadPlaybook {
+  ReactionAction table[2][2] = {
+      // [moving][canSeeMe]
+      {ReactionAction::DoNothing, ReactionAction::DoNothing},  // Stationary.
+      {ReactionAction::Continue, ReactionAction::Continue},    // Moving.
+  };
+
+  ReactionAction& At(bool moving, bool canSeeMe) { return table[moving ? 1 : 0][canSeeMe ? 1 : 0]; }
+  ReactionAction At(bool moving, bool canSeeMe) const {
+    return table[moving ? 1 : 0][canSeeMe ? 1 : 0];
+  }
+  bool operator==(const SquadPlaybook& o) const {
+    for (int m = 0; m < 2; ++m)
+      for (int s = 0; s < 2; ++s)
+        if (table[m][s] != o.table[m][s]) return false;
+    return true;
+  }
+  bool operator!=(const SquadPlaybook& o) const { return !(*this == o); }
+};
 
 struct Unit {
   int id = -1;
@@ -65,7 +97,6 @@ struct Unit {
   float runSpeed = constants::kMoveSpeed;  // World units per second while moving.
   PlannedAction plan;  // This figure's plan for the current/upcoming round commit.
   TriggerAction triggerAction = TriggerAction::None;
-  ReactionRule reactionOnStationary = ReactionRule::DoNothing;
 
   // How far this figure can move in one round's fixed execution window --
   // the plannable path-length cap enforced by GameLogic::ClickGround.

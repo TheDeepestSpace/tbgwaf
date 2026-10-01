@@ -57,9 +57,9 @@ struct GameSnapshot {
     float shootElapsed = -1.0f;
     float shootAimYaw = 0.0f;
     bool moving = false;  // Has an in-flight move in the executing round.
-    ReactionRule reactionOnStationary = ReactionRule::DoNothing;
   };
   std::vector<UnitState> units;
+  SquadPlaybook playbooks[2];  // Indexed by Team.
   InputMode mode = InputMode::AwaitingSelection;
   int roundNumber = 1;
   int winner = -1;  // -1 = none, else static_cast<int>(Team).
@@ -216,6 +216,12 @@ class GameLogic {
   // the executing round (figures from both teams can be animating at once).
   bool IsUnitMoving(int unitId) const;
 
+  // Squad-wide standing reaction table for `team` (see SquadPlaybook).
+  const SquadPlaybook& Playbook(Team team) const { return playbooks_[static_cast<int>(team)]; }
+  void SetPlaybook(Team team, const SquadPlaybook& playbook) {
+    playbooks_[static_cast<int>(team)] = playbook;
+  }
+
   // Deterministic hit resolution: FOV cone + clear line-of-sight, applied
   // immediately. Exposed directly so it can be unit tested without going
   // through the click flow; also the overwatch trigger path.
@@ -268,15 +274,16 @@ class GameLogic {
   // the cached one already covers this figure at this position.
   void EnsureNavMeshFor(const Unit& mover);
 
-  // Playbook reaction check, called after every per-frame position advance
-  // of a moving unit: resolves a shot from any living enemy `watcher` of
-  // `mover` with reactionOnStationary == Shoot that currently has `mover`
-  // in FOV+LOS. Returns true (and kills `mover`) on the first such hit.
-  // Unlike a one-shot trigger, the watcher's rule is never cleared here, so
-  // it stays armed for future moves/rounds.
-  bool CheckPlaybookReactions(Unit& mover);
+  // Squad-playbook pass, run once per executing tick after every mover has
+  // advanced: for each living figure with a living enemy in its FOV+LOS,
+  // looks up its team's table by (moving?, any sighted enemy sees it back?)
+  // and shoots the nearest sighted enemy and/or cuts the figure's move short.
+  // All reactions are judged against the same snapshot, then applied, so
+  // mutual shots both land.
+  void ApplyPlaybookReactions();
 
   Scene scene_;
+  SquadPlaybook playbooks_[2];  // Indexed by Team; survives Reset().
   // Range-scoped: covers only [mover.position +/- (MoveBudget + margin)],
   // clipped to the map, not the whole map. Cached per (unit id, position).
   NavMesh navMesh_;

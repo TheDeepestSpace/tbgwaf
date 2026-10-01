@@ -56,9 +56,9 @@ struct HudActions {
   bool overwatch = false;
   bool pass = false;
   bool cancel = false;
-  // Set when the Playbook popup changed the selected figure's standing
-  // reaction; a config edit, not a turn action.
-  std::optional<tactics::ReactionRule> reaction;
+  // Set when the Playbook popup edited the squad-wide reaction table; a
+  // config edit, not a turn action.
+  std::optional<tactics::SquadPlaybook> playbook;
 };
 
 // Window-space centers of the HUD buttons actually drawn this frame, keyed

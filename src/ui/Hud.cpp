@@ -135,15 +135,40 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
           if (Button("Pass")) actions.pass = true;
 
           if (ImGui::BeginPopup("PlaybookConfig")) {
-            ImGui::TextUnformatted("While stationary, on enemy FOV entry:");
-            int rule = static_cast<int>(selected->reactionOnStationary);
-            if (ImGui::RadioButton("Do Nothing", &rule, static_cast<int>(tactics::ReactionRule::DoNothing))) {
-              actions.reaction = tactics::ReactionRule::DoNothing;
+            ImGui::TextUnformatted("Squad playbook, on enemy in FOV:");
+            tactics::SquadPlaybook edited = game.Playbook(selected->team);
+            struct Row { const char* label; bool moving; bool canSeeMe; };
+            const Row rows[] = {{"Moving, seen", true, true},
+                                {"Moving, unseen", true, false},
+                                {"Stationary, seen", false, true},
+                                {"Stationary, unseen", false, false}};
+            const char* movingNames[] = {"Do Nothing", "Shoot", "Stop", "Continue", "Shoot, Stop",
+                                         "Shoot, Continue"};
+            using tactics::ReactionAction;
+            const ReactionAction movingChoices[] = {ReactionAction::Stop, ReactionAction::Continue,
+                                                    ReactionAction::ShootStop,
+                                                    ReactionAction::ShootContinue};
+            const ReactionAction stationaryChoices[] = {ReactionAction::DoNothing,
+                                                        ReactionAction::Shoot};
+            bool changed = false;
+            for (const Row& row : rows) {
+              ReactionAction& slot = edited.At(row.moving, row.canSeeMe);
+              ImGui::PushID(row.label);
+              ImGui::SetNextItemWidth(150.0f);
+              if (ImGui::BeginCombo(row.label, movingNames[static_cast<int>(slot)])) {
+                const ReactionAction* begin = row.moving ? movingChoices : stationaryChoices;
+                const size_t n = row.moving ? 4 : 2;
+                for (size_t i = 0; i < n; ++i) {
+                  if (ImGui::Selectable(movingNames[static_cast<int>(begin[i])], slot == begin[i])) {
+                    slot = begin[i];
+                    changed = true;
+                  }
+                }
+                ImGui::EndCombo();
+              }
+              ImGui::PopID();
             }
-            ImGui::SameLine();
-            if (ImGui::RadioButton("Shoot", &rule, static_cast<int>(tactics::ReactionRule::Shoot))) {
-              actions.reaction = tactics::ReactionRule::Shoot;
-            }
+            if (changed) actions.playbook = edited;
             ImGui::EndPopup();
           }
         } else {

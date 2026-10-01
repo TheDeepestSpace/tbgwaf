@@ -35,7 +35,6 @@ using tactics::GameLogic;
 using tactics::GameSnapshot;
 using tactics::InputMode;
 using tactics::Obstacle;
-using tactics::ReactionRule;
 using tactics::SerializeSnapshot;
 using tactics::Team;
 using tactics::TeamVisibility;
@@ -536,9 +535,11 @@ int main() {
       if (hud.overwatch) game.ChooseOverwatch();
       if (hud.pass) game.ChoosePass();
       if (hud.cancel) game.CancelAction();
-      if (hud.reaction) {
+      if (hud.playbook) {
         if (const auto selectedId = game.SelectedUnitId()) {
-          if (Unit* selected = game.FindUnit(*selectedId)) selected->reactionOnStationary = *hud.reaction;
+          if (const Unit* selected = game.FindUnit(*selectedId)) {
+            game.SetPlaybook(selected->team, *hud.playbook);
+          }
         }
       }
     }

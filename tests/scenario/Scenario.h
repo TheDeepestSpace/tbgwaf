@@ -74,6 +74,7 @@ struct Scenario {
   std::string name;
   std::string sourcePath;
   Scene scene;
+  SquadPlaybook playbooks[2];  // Indexed by Team; default table unless the YAML sets `playbook`.
   std::vector<ScenarioStep> steps;
   // Optional visual-runner camera framing (both panes): orbit target on the
   // ground plane, and zoom delta (positive = further out). Large generated

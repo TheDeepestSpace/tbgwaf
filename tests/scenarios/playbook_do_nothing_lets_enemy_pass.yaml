@@ -9,7 +9,7 @@ map:
     - {center: [-3, 0], half_extent: [0.3, 2], height: 3}
 
 units:
-  - {id: 0, team: blue, position: [-8, 0, 0], facing_degrees: 0, reaction_on_stationary: do_nothing}
+  - {id: 0, team: blue, position: [-8, 0, 0], facing_degrees: 0}
   - {id: 1, team: red, position: [-1, 0, 0], facing_degrees: 90}
 
 script:

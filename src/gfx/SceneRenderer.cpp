@@ -777,6 +777,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       frontierKeyOrigin_ = origin;
       frontierKeyBudget_ = f.budget;
       constexpr float kY = 0.03f;
+      constexpr float kSlabOffset = 0.015f;  // Above a sidewalk slab's top face.
       constexpr float kFadeWidth = 0.8f;   // World units from boundary to transparent.
       constexpr float kEdgeAlpha = 0.65f;  // Fill alpha right at the boundary.
       const int nx = f.nx, nz = f.nz;
@@ -844,6 +845,33 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       };
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
+      const std::vector<AABB>& slabs = game.GetScene().sidewalks;
+      // Clips a convex polygon to a slab's XZ footprint (Sutherland-Hodgman),
+      // interpolating the field value, and lifts it onto the slab's top.
+      auto clipToSlab = [&](const std::vector<Pt>& in, const AABB& slab) {
+        std::vector<Pt> poly = in;
+        for (int edge = 0; edge < 4 && !poly.empty(); ++edge) {
+          const float bound = edge == 0 ? slab.min.x : edge == 1 ? slab.max.x
+                              : edge == 2 ? slab.min.z : slab.max.z;
+          const auto coord = [&](const Pt& q) { return edge < 2 ? q.p.x : q.p.z; };
+          const auto inside = [&](const Pt& q) {
+            return edge % 2 == 0 ? coord(q) >= bound : coord(q) <= bound;
+          };
+          std::vector<Pt> out;
+          for (size_t v = 0; v < poly.size(); ++v) {
+            const Pt& cur = poly[v];
+            const Pt& prev = poly[(v + poly.size() - 1) % poly.size()];
+            if (inside(cur) != inside(prev)) {
+              const float t = (bound - coord(prev)) / (coord(cur) - coord(prev));
+              out.push_back({prev.p + (cur.p - prev.p) * t, prev.g + (cur.g - prev.g) * t});
+            }
+            if (inside(cur)) out.push_back(cur);
+          }
+          poly = std::move(out);
+        }
+        for (Pt& q : poly) q.p.y = slab.max.y + kSlabOffset;
+        return poly;
+      };
       auto toVertex = [&](const Pt& q) {
         const float a = kEdgeAlpha * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
         return ColorTriangleMesh::Vertex{q.p, glm::vec4(0.2f, 0.9f, 0.3f, a)};
@@ -884,11 +912,48 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             border.push_back(cut[0].p);
             border.push_back(cut[1].p);
           }
+          // The ground-level copy is buried under raised sidewalk slabs, so
+          // lay a clipped copy on top of each slab the cell overlaps.
+          for (const AABB& slab : slabs) {
+            const std::vector<Pt> piece = clipToSlab(poly, slab);
+            for (size_t k = 1; k + 1 < piece.size(); ++k) {
+              fill.push_back(toVertex(piece[0]));
+              fill.push_back(toVertex(piece[k]));
+              fill.push_back(toVertex(piece[k + 1]));
+            }
+            if (cut.size() == 2) {
+              // Liang-Barsky clip of the border segment to the slab footprint.
+              const glm::vec3 a = cut[0].p, d = cut[1].p - cut[0].p;
+              float t0 = 0.0f, t1 = 1.0f;
+              const float lo[2] = {slab.min.x, slab.min.z}, hi[2] = {slab.max.x, slab.max.z};
+              const float a2[2] = {a.x, a.z}, d2[2] = {d.x, d.z};
+              bool vis = true;
+              for (int ax = 0; ax < 2 && vis; ++ax) {
+                if (std::abs(d2[ax]) < 1e-9f) {
+                  vis = a2[ax] >= lo[ax] && a2[ax] <= hi[ax];
+                  continue;
+                }
+                float ta = (lo[ax] - a2[ax]) / d2[ax], tb = (hi[ax] - a2[ax]) / d2[ax];
+                if (ta > tb) std::swap(ta, tb);
+                t0 = std::max(t0, ta);
+                t1 = std::min(t1, tb);
+                vis = t0 < t1;
+              }
+              if (vis) {
+                const float y = slab.max.y + kSlabOffset;
+                border.emplace_back(a.x + d.x * t0, y, a.z + d.z * t0);
+                border.emplace_back(a.x + d.x * t1, y, a.z + d.z * t1);
+              }
+            }
+          }
         }
       }
       frontierFill_.SetVertices(fill);
       frontierBorder_.SetPoints(border);
     }
+    // Same depth bias as the FOV cone, against z-fighting at distance.
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(-2.0f, -4.0f);
     colorShader_.Use();
     colorShader_.SetMat4("uMVP", viewProj);
     frontierFill_.Draw();
@@ -896,6 +961,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     unlitShader_.SetMat4("uMVP", viewProj);
     unlitShader_.SetVec4("uColor", glm::vec4(0.2f, 1.0f, 0.3f, 1.0f));
     frontierBorder_.DrawSegments();
+    glDisable(GL_POLYGON_OFFSET_FILL);
   }
   glDepthMask(GL_TRUE);
   glDisable(GL_BLEND);

@@ -245,6 +245,11 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
   switch (action.kind) {
     case ScenarioAction::Kind::Move: {
       game.ChooseMove();
+      if (hooks.onMoveFrontier) {
+        for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
+          hooks.onMoveFrontier(game, actorTeam);
+        }
+      }
       game.ClickGround(action.destination, actorTeam);
       if (game.Mode() != InputMode::AwaitingSelection) {
         return Fail("has no path to destination " + ToString(action.destination) +

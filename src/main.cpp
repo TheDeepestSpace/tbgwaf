@@ -738,21 +738,9 @@ int main() {
     // player's pane shows them (the other side must not see enemy plans). ---
     for (int pane = 0; pane < paneCount; ++pane) {
       const PaneRect& rect = paneRects[pane];
-      gfx::PaneOverlays overlays;
-      if (selectedTeam && *selectedTeam == paneTeam(pane)) {
-        if (const auto selectedId = game.SelectedUnitId()) {
-          if (const Unit* selected = game.FindUnit(*selectedId)) {
-            overlays.selectionHighlight = selected->position;
-          }
-        }
-        if (game.Mode() == InputMode::AwaitingMoveDestination) {
-          if (game.MovePreviewValid()) {
-            overlays.movePreviewPath = &game.MovePreviewPath();
-          } else if (hasHoveredGroundPoint) {
-            overlays.invalidHoverHighlight = hoveredGroundPoint;
-          }
-        }
-      }
+      std::optional<glm::vec3> hover;
+      if (hasHoveredGroundPoint) hover = hoveredGroundPoint;
+      const gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(game, paneTeam(pane), hover);
       renderer.RenderPane(game, paneTeam(pane), fogActive, paneVisibility[pane], cameras[pane],
                           rect.x, 0, rect.width, windowHeight, overlays);
     }

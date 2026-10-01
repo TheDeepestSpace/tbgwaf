@@ -499,6 +499,42 @@ void TestMutualEliminationIsDraw() {
   CHECK(!game.Winner().has_value());
 }
 
+void TestMoveFrontierRoutesAroundObstacle() {
+  std::vector<AABB> obstacles = {
+      AABB{glm::vec3(-1.0f, 0.0f, -4.0f), glm::vec3(1.0f, 2.0f, 4.0f)},
+  };
+  NavMesh nav;
+  nav.Build(obstacles, /*mapHalfExtent=*/10.0f, /*agentRadius=*/0.4f);
+  const glm::vec3 start(-3.0f, 0.0f, 0.0f);
+  const ReachField f = nav.ComputeReachField(start, 8.0f);
+  CHECK(f.nx > 0);
+
+  auto nodeAt = [&](float x, float z) {
+    return std::make_pair(static_cast<int>(std::lround((x - f.minX) / f.step)),
+                          static_cast<int>(std::lround((z - f.minZ) / f.step)));
+  };
+  const auto s = nodeAt(start.x, start.z);
+  CHECK(f.Reached(s.first, s.second));
+  CHECK(f.Dist(s.first, s.second) == 0.0f);
+  // Straight-line 6 away but behind the wall: routed distance exceeds budget.
+  const auto behind = nodeAt(3.0f, 0.0f);
+  CHECK(!f.Reached(behind.first, behind.second));
+  // Inside the padded obstacle is never reached.
+  const auto inside = nodeAt(0.0f, 0.0f);
+  CHECK(!f.Reached(inside.first, inside.second));
+  // Open ground to the left: distance ~ Euclidean.
+  const auto left = nodeAt(-6.0f, 0.0f);
+  CHECK(std::fabs(f.Dist(left.first, left.second) - 3.0f) < 0.1f);
+  // Frontier is cached when entering move mode and cleared on cancel.
+  GameLogic game(LegacyScene());
+  CHECK(game.MoveFrontier() == nullptr);
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  CHECK(game.MoveFrontier() != nullptr);
+  game.CancelAction();
+  CHECK(game.MoveFrontier() == nullptr);
+}
+
 void TestMoveBudgetCapsPlannedPaths() {
   GameLogic game(LegacyScene());
   game.ClickUnit(0, Team::Blue);
@@ -1176,6 +1212,7 @@ int main() {
   TestRoundExecutesBothTeamsMovesConcurrently();
   TestShootRowsResolveSimultaneouslyAcrossTeams();
   TestMutualEliminationIsDraw();
+  TestMoveFrontierRoutesAroundObstacle();
   TestMoveBudgetCapsPlannedPaths();
   TestPendingShotFiresWhenTargetWalksIntoView();
   TestDefaultSceneSquadsStartHidden();

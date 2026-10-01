@@ -15,6 +15,25 @@ using tactics::TeamVisibility;
 using tactics::Unit;
 
 namespace gfx {
+
+PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team paneTeam,
+                               const std::optional<glm::vec3>& hoveredGroundPoint) {
+  PaneOverlays overlays;
+  const auto selectedId = game.SelectedUnitId();
+  if (!selectedId) return overlays;
+  const tactics::Unit* selected = game.FindUnit(*selectedId);
+  if (!selected || selected->team != paneTeam) return overlays;
+  overlays.selectionHighlight = selected->position;
+  if (game.Mode() == tactics::InputMode::AwaitingMoveDestination) {
+    overlays.moveFrontier = game.MoveFrontier();
+    if (game.MovePreviewValid()) {
+      overlays.movePreviewPath = &game.MovePreviewPath();
+    } else if (hoveredGroundPoint) {
+      overlays.invalidHoverHighlight = hoveredGroundPoint;
+    }
+  }
+  return overlays;
+}
 namespace {
 
 constexpr int kShadowMapSize = 2048;
@@ -26,6 +45,27 @@ layout(location = 0) in vec3 aPos;
 uniform mat4 uMVP;
 void main() {
   gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)";
+
+// Unlit shader with a per-vertex color, for gradient overlays.
+const char* kColorVertexShaderSrc = R"(#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec4 aColor;
+uniform mat4 uMVP;
+out vec4 vColor;
+void main() {
+  vColor = aColor;
+  gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)";
+
+const char* kColorFragmentShaderSrc = R"(#version 300 es
+precision mediump float;
+in vec4 vColor;
+out vec4 FragColor;
+void main() {
+  FragColor = vColor;
 }
 )";
 
@@ -547,7 +587,13 @@ bool SceneRenderer::Init() {
     std::fprintf(stderr, "Failed to compile the shadow depth shader\n");
     return false;
   }
+  if (!colorShader_.Compile(kColorVertexShaderSrc, kColorFragmentShaderSrc)) {
+    std::fprintf(stderr, "Failed to compile the vertex-color shader\n");
+    return false;
+  }
   cubeMesh_.Init();
+  frontierFill_.Init();
+  frontierBorder_.Init();
   pathLine_.Init();
   fovConeMesh_.Init();
 
@@ -590,6 +636,8 @@ bool SceneRenderer::Init() {
 }
 
 void SceneRenderer::Destroy() {
+  frontierFill_.Destroy();
+  frontierBorder_.Destroy();
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
   cubeMesh_.Destroy();
@@ -715,6 +763,140 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
   glDisable(GL_POLYGON_OFFSET_FILL);
   glDisable(GL_STENCIL_TEST);
+
+  // Movement frontier: a glow hugging the reach boundary -- brightest at the
+  // boundary, fading to fully transparent within kFadeWidth inside it. The
+  // boundary is the zero contour of a blurred signed-distance field, so it
+  // is smooth rather than following the sampling grid.
+  if (overlays.moveFrontier && overlays.moveFrontier->nx > 0) {
+    const tactics::ReachField& f = *overlays.moveFrontier;
+    const glm::vec2 origin(f.minX, f.minZ);
+    if (frontierKeyField_ != &f || frontierKeyOrigin_ != origin ||
+        frontierKeyBudget_ != f.budget) {
+      frontierKeyField_ = &f;
+      frontierKeyOrigin_ = origin;
+      frontierKeyBudget_ = f.budget;
+      constexpr float kY = 0.03f;
+      constexpr float kFadeWidth = 0.8f;   // World units from boundary to transparent.
+      constexpr float kEdgeAlpha = 0.65f;  // Fill alpha right at the boundary.
+      const int nx = f.nx, nz = f.nz;
+      const float inf = std::numeric_limits<float>::infinity();
+
+      // Chamfer distance (in world units) from each node to the nearest node
+      // of the opposite reached/unreached class.
+      auto chamfer = [&](bool target) {
+        std::vector<float> d(static_cast<size_t>(nx) * nz, inf);
+        for (int iz = 0; iz < nz; ++iz)
+          for (int ix = 0; ix < nx; ++ix)
+            if (f.Reached(ix, iz) == target) d[iz * nx + ix] = 0.0f;
+        const float s = f.step, sd = f.step * 1.41421356f;
+        auto relax = [&](int ix, int iz, int dx, int dz, float w) {
+          const int jx = ix + dx, jz = iz + dz;
+          if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) return;
+          float& v = d[iz * nx + ix];
+          v = std::min(v, d[jz * nx + jx] + w);
+        };
+        for (int iz = 0; iz < nz; ++iz)
+          for (int ix = 0; ix < nx; ++ix) {
+            relax(ix, iz, -1, 0, s);
+            relax(ix, iz, 0, -1, s);
+            relax(ix, iz, -1, -1, sd);
+            relax(ix, iz, 1, -1, sd);
+          }
+        for (int iz = nz - 1; iz >= 0; --iz)
+          for (int ix = nx - 1; ix >= 0; --ix) {
+            relax(ix, iz, 1, 0, s);
+            relax(ix, iz, 0, 1, s);
+            relax(ix, iz, 1, 1, sd);
+            relax(ix, iz, -1, 1, sd);
+          }
+        return d;
+      };
+      const std::vector<float> dIn = chamfer(false);   // Distance to nearest unreached.
+      const std::vector<float> dOut = chamfer(true);   // Distance to nearest reached.
+      std::vector<float> g(dIn.size());
+      for (int iz = 0; iz < nz; ++iz)
+        for (int ix = 0; ix < nx; ++ix) {
+          const int i = iz * nx + ix;
+          // Signed depth: positive inside, zero contour half a step out.
+          g[i] = f.Reached(ix, iz) ? dIn[i] - 0.5f * f.step : -(dOut[i] - 0.5f * f.step);
+        }
+      // Separable box blur (radius 2, two passes) rounds off the grid steps.
+      std::vector<float> tmp(g.size());
+      for (int pass = 0; pass < 2; ++pass) {
+        for (int iz = 0; iz < nz; ++iz)
+          for (int ix = 0; ix < nx; ++ix) {
+            float sum = 0.0f;
+            for (int k = -2; k <= 2; ++k) sum += g[iz * nx + std::clamp(ix + k, 0, nx - 1)];
+            tmp[iz * nx + ix] = sum / 5.0f;
+          }
+        for (int iz = 0; iz < nz; ++iz)
+          for (int ix = 0; ix < nx; ++ix) {
+            float sum = 0.0f;
+            for (int k = -2; k <= 2; ++k) sum += tmp[std::clamp(iz + k, 0, nz - 1) * nx + ix];
+            g[iz * nx + ix] = sum / 5.0f;
+          }
+      }
+
+      struct Pt {
+        glm::vec3 p;
+        float g;
+      };
+      std::vector<ColorTriangleMesh::Vertex> fill;
+      std::vector<glm::vec3> border;
+      auto toVertex = [&](const Pt& q) {
+        const float a = kEdgeAlpha * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
+        return ColorTriangleMesh::Vertex{q.p, glm::vec4(0.2f, 0.9f, 0.3f, a)};
+      };
+      for (int iz = 0; iz + 1 < nz; ++iz) {
+        for (int ix = 0; ix + 1 < nx; ++ix) {
+          const int cx[4] = {ix, ix + 1, ix + 1, ix};
+          const int cz[4] = {iz, iz, iz + 1, iz + 1};
+          Pt quad[4];
+          bool anyIn = false;
+          for (int k = 0; k < 4; ++k) {
+            quad[k] = {f.Node(cx[k], cz[k]), g[cz[k] * nx + cx[k]]};
+            quad[k].p.y = kY;
+            anyIn |= quad[k].g > 0.0f;
+          }
+          if (!anyIn) continue;
+          // Clip the cell to g >= 0 (Sutherland-Hodgman against the field).
+          std::vector<Pt> poly;
+          std::vector<Pt> cut;  // Contour crossings, in polygon order.
+          for (int k = 0; k < 4; ++k) {
+            const Pt& a = quad[k];
+            const Pt& b = quad[(k + 1) % 4];
+            const bool ain = a.g >= 0.0f, bin = b.g >= 0.0f;
+            if (ain) poly.push_back(a);
+            if (ain != bin) {
+              const float t = a.g / (a.g - b.g);
+              const Pt c{a.p + (b.p - a.p) * t, 0.0f};
+              poly.push_back(c);
+              cut.push_back(c);
+            }
+          }
+          for (size_t k = 1; k + 1 < poly.size(); ++k) {
+            fill.push_back(toVertex(poly[0]));
+            fill.push_back(toVertex(poly[k]));
+            fill.push_back(toVertex(poly[k + 1]));
+          }
+          if (cut.size() == 2) {
+            border.push_back(cut[0].p);
+            border.push_back(cut[1].p);
+          }
+        }
+      }
+      frontierFill_.SetVertices(fill);
+      frontierBorder_.SetPoints(border);
+    }
+    colorShader_.Use();
+    colorShader_.SetMat4("uMVP", viewProj);
+    frontierFill_.Draw();
+    unlitShader_.Use();
+    unlitShader_.SetMat4("uMVP", viewProj);
+    unlitShader_.SetVec4("uColor", glm::vec4(0.2f, 1.0f, 0.3f, 1.0f));
+    frontierBorder_.DrawSegments();
+  }
   glDepthMask(GL_TRUE);
   glDisable(GL_BLEND);
 

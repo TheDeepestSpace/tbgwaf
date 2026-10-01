@@ -31,6 +31,25 @@ struct NavCell {
   }
 };
 
+// Path-distance field from a single source, sampled on a regular XZ grid
+// (node (ix, iz) sits at (minX + ix*step, minZ + iz*step)). `dist` holds the
+// routed (around-obstacles) ground distance from the source, or infinity for
+// unreachable / out-of-budget / non-walkable nodes.
+struct ReachField {
+  float minX = 0.0f, minZ = 0.0f, step = 1.0f;
+  int nx = 0, nz = 0;
+  float budget = 0.0f;
+  std::vector<float> dist;
+
+  bool Reached(int ix, int iz) const {
+    return ix >= 0 && iz >= 0 && ix < nx && iz < nz && dist[iz * nx + ix] <= budget;
+  }
+  float Dist(int ix, int iz) const { return dist[iz * nx + ix]; }
+  glm::vec3 Node(int ix, int iz) const {
+    return glm::vec3(minX + ix * step, 0.0f, minZ + iz * step);
+  }
+};
+
 // Free-space navmesh for a flat ground plane with axis-aligned box obstacles,
 // built via vertical-slab decomposition. Cells form a graph searched with
 // A*; the resulting cell-to-cell corridor is then pulled taut with the
@@ -68,6 +87,11 @@ class NavMesh {
   // True if the given XZ point lies inside the walkable navmesh area at
   // ground level (elevation 0); climb-top surfaces are not considered.
   bool IsWalkable(float x, float z) const;
+
+  // Dijkstra flood fill over ground-level free space from `start`, covering
+  // everything within `budget` path distance. Climb-top surfaces are not
+  // included. Returns an empty field if `start` isn't on walkable ground.
+  ReachField ComputeReachField(const glm::vec3& start, float budget, float step = 0.25f) const;
 
   const std::vector<NavCell>& Cells() const { return cells_; }
 

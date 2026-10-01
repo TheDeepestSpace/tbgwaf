@@ -21,6 +21,7 @@
 #include <GLES3/gl3.h>
 
 #include <algorithm>
+#include <optional>
 #include <array>
 #include <cctype>
 #include <cstdio>
@@ -158,14 +159,16 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   }
 
   const int paneWidth = kWindowWidth / 2;
+  // Overlays come from the same BuildPaneOverlays the interactive app uses.
   auto renderBothPanes = [&](const GameLogic& game) {
     const bool fogActive = game.Mode() != InputMode::GameOver;
     for (int pane = 0; pane < 2; ++pane) {
       const Team team = PaneTeam(pane);
       TeamVisibility visibility;
       if (fogActive) visibility = game.ComputeVisibility(team);
+      const gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(game, team);
       renderer.RenderPane(game, team, fogActive, visibility, cameras[pane], pane * paneWidth, 0,
-                          paneWidth, kWindowHeight);
+                          paneWidth, kWindowHeight, overlays);
     }
   };
 
@@ -189,6 +192,17 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     hooks.tickSeconds = 1.0f / kVideoFps;
     hooks.holdFramesAfterAction = kHoldFrames;
     hooks.onFrame = [&](const GameLogic& game) {
+      renderBothPanes(game);
+      const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);
+      for (int pane = 0; pane < 2; ++pane) {
+        if (!encoders[pane].WriteFrame(CropColumns(frame, pane * paneWidth, paneWidth))) {
+          videoOk = false;
+        }
+      }
+    };
+  }
+  if (options.video && videoOk) {
+    hooks.onMoveFrontier = [&](const GameLogic& game, Team) {
       renderBothPanes(game);
       const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);
       for (int pane = 0; pane < 2; ++pane) {

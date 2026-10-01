@@ -128,7 +128,24 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
           ImGui::SameLine();
           if (Button("Overwatch")) actions.overwatch = true;
           ImGui::SameLine();
+          // A standing config edit, not a turn action: reported via
+          // actions.reaction rather than routed through GameLogic's turn flow.
+          if (Button("Playbook")) ImGui::OpenPopup("PlaybookConfig");
+          ImGui::SameLine();
           if (Button("Pass")) actions.pass = true;
+
+          if (ImGui::BeginPopup("PlaybookConfig")) {
+            ImGui::TextUnformatted("While stationary, on enemy FOV entry:");
+            int rule = static_cast<int>(selected->reactionOnStationary);
+            if (ImGui::RadioButton("Do Nothing", &rule, static_cast<int>(tactics::ReactionRule::DoNothing))) {
+              actions.reaction = tactics::ReactionRule::DoNothing;
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Shoot", &rule, static_cast<int>(tactics::ReactionRule::Shoot))) {
+              actions.reaction = tactics::ReactionRule::Shoot;
+            }
+            ImGui::EndPopup();
+          }
         } else {
           if (Button("Cancel")) actions.cancel = true;
         }

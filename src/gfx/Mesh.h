@@ -30,6 +30,8 @@ class LineMesh {
   void Destroy();
   void SetPoints(const std::vector<glm::vec3>& points);
   void Draw() const;
+  // Draws the points as independent segments (pairs) instead of a strip.
+  void DrawSegments() const;
 
  private:
   GLuint vao_ = 0;
@@ -51,6 +53,25 @@ class TriangleMesh {
   GLuint vao_ = 0;
   GLuint vbo_ = 0;
   GLsizei pointCount_ = 0;
+};
+
+// A triangle soup with a per-vertex RGBA color (location 1), for gradient
+// overlays. Vertices are interleaved as vec3 position + vec4 color.
+class ColorTriangleMesh {
+ public:
+  struct Vertex {
+    glm::vec3 pos;
+    glm::vec4 color;
+  };
+  void Init();
+  void Destroy();
+  void SetVertices(const std::vector<Vertex>& vertices);
+  void Draw() const;
+
+ private:
+  GLuint vao_ = 0;
+  GLuint vbo_ = 0;
+  GLsizei vertexCount_ = 0;
 };
 
 }  // namespace gfx

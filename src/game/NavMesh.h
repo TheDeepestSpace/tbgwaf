@@ -8,6 +8,12 @@
 
 namespace tactics {
 
+// Axis-aligned XZ rectangle the navmesh covers.
+struct NavRegion {
+  float xMin = 0.0f, xMax = 0.0f;
+  float zMin = 0.0f, zMax = 0.0f;
+};
+
 // A convex, axis-aligned rectangular navmesh cell in the XZ plane, resting
 // at a fixed `elevation` (world-space Y). Ground cells have elevation 0;
 // "climb-top" cells (see NavMesh::Build) sit atop a climbable obstacle at
@@ -22,6 +28,25 @@ struct NavCell {
   }
   glm::vec3 Center() const {
     return glm::vec3((xMin + xMax) * 0.5f, elevation, (zMin + zMax) * 0.5f);
+  }
+};
+
+// Path-distance field from a single source, sampled on a regular XZ grid
+// (node (ix, iz) sits at (minX + ix*step, minZ + iz*step)). `dist` holds the
+// routed (around-obstacles) ground distance from the source, or infinity for
+// unreachable / out-of-budget / non-walkable nodes.
+struct ReachField {
+  float minX = 0.0f, minZ = 0.0f, step = 1.0f;
+  int nx = 0, nz = 0;
+  float budget = 0.0f;
+  std::vector<float> dist;
+
+  bool Reached(int ix, int iz) const {
+    return ix >= 0 && iz >= 0 && ix < nx && iz < nz && dist[iz * nx + ix] <= budget;
+  }
+  float Dist(int ix, int iz) const { return dist[iz * nx + ix]; }
+  glm::vec3 Node(int ix, int iz) const {
+    return glm::vec3(minX + ix * step, 0.0f, minZ + iz * step);
   }
 };
 
@@ -47,6 +72,11 @@ class NavMesh {
   // ground level up to their top surface.
   void Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent, float agentRadius);
 
+  // Windowed form: meshes only the XZ rectangle `region` (obstacles are
+  // clipped to it). Used by GameLogic to mesh just the area a figure can
+  // reach in one round instead of the whole map.
+  void Build(const std::vector<Obstacle>& obstacles, const NavRegion& region, float agentRadius);
+
   // Returns true and fills `outPath` with a smoothed path from `start` to
   // `goal` (XZ plus an elevation hint used to disambiguate overlapping
   // ground/climb-top cells) if a path exists. `outPath` always starts at
@@ -58,10 +88,15 @@ class NavMesh {
   // ground level (elevation 0); climb-top surfaces are not considered.
   bool IsWalkable(float x, float z) const;
 
+  // Dijkstra flood fill over ground-level free space from `start`, covering
+  // everything within `budget` path distance. Climb-top surfaces are not
+  // included. Returns an empty field if `start` isn't on walkable ground.
+  ReachField ComputeReachField(const glm::vec3& start, float budget, float step = 0.25f) const;
+
   const std::vector<NavCell>& Cells() const { return cells_; }
 
  private:
-  void BuildGroundMesh(const std::vector<AABB>& obstacles, float mapHalfExtent,
+  void BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegion& region,
                         float agentRadius);
   void AddClimbConnections(const std::vector<Obstacle>& obstacles, float agentRadius);
 
@@ -71,7 +106,7 @@ class NavMesh {
   std::vector<NavCell> cells_;
   std::vector<std::vector<int>> neighbors_;      // neighbors_[cellIndex] = adjacent cell indices.
   std::vector<AABB> paddedFootprints_;           // Agent-radius-inflated obstacle footprints.
-  float mapHalfExtent_ = 0.0f;
+  NavRegion region_;
 };
 
 }  // namespace tactics

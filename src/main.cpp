@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "game/GameLogic.h"
+#include "game/MapGenerator.h"
 #include "game/Raycast.h"
 #include "game/Types.h"
 #include "game/Visibility.h"
@@ -34,6 +35,7 @@ using tactics::GameLogic;
 using tactics::GameSnapshot;
 using tactics::InputMode;
 using tactics::Obstacle;
+using tactics::ReactionRule;
 using tactics::SerializeSnapshot;
 using tactics::Team;
 using tactics::TeamVisibility;
@@ -136,8 +138,10 @@ int PickUnit(const gfx::Ray& ray, const std::vector<Unit>& units) {
 // finite planes from the ray's point of view, so pick whichever the ray
 // actually hits nearer the camera -- matches how the scene is rendered
 // (the ground plane is infinite but obstacles occlude it visually).
-bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const std::vector<Obstacle>& obstacles,
-                                glm::vec3* outPoint) {
+//
+// Any walkable surface counts, not just crates: climbable obstacles and the
+// scene's flat walkable slabs (sidewalks) are all picked by their top face.
+bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const tactics::Scene& scene, glm::vec3* outPoint) {
   bool found = false;
   float bestT = std::numeric_limits<float>::infinity();
   glm::vec3 bestPoint(0.0f);
@@ -151,18 +155,21 @@ bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const std::vector<Obstacle>&
   }
 
   constexpr float kTopFaceEpsilon = 1e-2f;
-  for (const auto& obstacle : obstacles) {
-    if (!obstacle.climbable) continue;
+  auto considerSurface = [&](const tactics::AABB& bounds) {
     float t = 0.0f;
-    if (!tactics::RayIntersectsAABB(ray.origin, ray.direction, obstacle.bounds, &t)) continue;
+    if (!tactics::RayIntersectsAABB(ray.origin, ray.direction, bounds, &t)) return;
     const glm::vec3 hit = ray.origin + ray.direction * t;
-    if (hit.y < obstacle.bounds.max.y - kTopFaceEpsilon) continue;  // Hit a side, not the top.
+    if (hit.y < bounds.max.y - kTopFaceEpsilon) return;  // Hit a side, not the top.
     if (t < bestT) {
       found = true;
       bestT = t;
       bestPoint = hit;
     }
+  };
+  for (const auto& obstacle : scene.obstacles) {
+    if (obstacle.climbable) considerSurface(obstacle.bounds);
   }
+  for (const tactics::AABB& slab : scene.sidewalks) considerSurface(slab);
 
   if (found && outPoint) *outPoint = bestPoint;
   return found;
@@ -241,11 +248,15 @@ int main() {
   // One independent orbit camera per pane, so each side can freely
   // rotate/zoom its own view without affecting the other's.
   std::array<gfx::OrbitCamera, kMaxPanes> cameras;
-  // Each pane only gets half the page's horizontal space, so the default
-  // zoom (tuned for a single full-width view) would clip the far edge of
-  // the map; start pulled back further so both spawns fit by default.
-  for (auto& camera : cameras) camera.Zoom(10.0f);
-  GameLogic game;
+  // Both web clients must build the same city, so the seed is fixed unless a
+  // native run overrides it via TBGWAF_MAP_SEED.
+  uint32_t mapSeed = 1;
+  if (const char* seedEnv = std::getenv("TBGWAF_MAP_SEED")) {
+    mapSeed = static_cast<uint32_t>(std::strtoul(seedEnv, nullptr, 10));
+  }
+  GameLogic game(tactics::GenerateUrbanMap(mapSeed));
+  // Start zoomed out far enough that the whole map is in view.
+  for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
 
   // Which team this client instance plays (web two-canvas mode); nullopt =
   // one window showing both teams.
@@ -324,7 +335,7 @@ int main() {
         } else if (msg == "C") {
           if (isSimulator && game.CanCommitRound()) game.CommitRound();
         } else if (msg == "N") {
-          if (isSimulator && game.Mode() == InputMode::GameOver) game.Reset();
+          if (isSimulator && game.Mode() == InputMode::GameOver) game.Reset(tactics::GenerateUrbanMap(mapSeed));
         } else if (msg.size() > 2 && (msg[0] == 'S' || msg[0] == 'P') && msg[1] == ' ') {
           GameSnapshot snap;
           if (!DeserializeSnapshot(msg.substr(2), &snap)) continue;
@@ -433,7 +444,7 @@ int main() {
         }
       } else if (event.type == SDL_MOUSEWHEEL) {
         if (!ImGui::GetIO().WantCaptureMouse) {
-          constexpr float kZoomSpeed = 8.0f;
+          constexpr float kZoomSpeed = 0.625f;  // Fraction of current distance per tick.
           // preciseY carries fractional trackpad deltas; wheel.y is rounded to
           // whole ticks, which makes trackpad zoom steppy.
 #if SDL_VERSION_ATLEAST(2, 0, 18)
@@ -441,7 +452,8 @@ int main() {
 #else
           const float wheelY = static_cast<float>(event.wheel.y);
 #endif
-          cameras[PaneForX(mouseX, paneCount, windowWidth)].Zoom(-wheelY * kZoomSpeed);
+          gfx::OrbitCamera& camera = cameras[PaneForX(mouseX, paneCount, windowWidth)];
+          camera.Zoom(-wheelY * kZoomSpeed * camera.TargetDistance());
         }
       } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
         // A drag that panned the camera must not also fire a click.
@@ -500,7 +512,7 @@ int main() {
                                              windowHeight, cameras[pane]);
       if (hud.newMatch) {
         if (isSimulator) {
-          game.Reset();
+          game.Reset(tactics::GenerateUrbanMap(mapSeed));
         } else {
 #ifdef __EMSCRIPTEN__
           tbgwaf_channel_post("N");
@@ -524,6 +536,11 @@ int main() {
       if (hud.overwatch) game.ChooseOverwatch();
       if (hud.pass) game.ChoosePass();
       if (hud.cancel) game.CancelAction();
+      if (hud.reaction) {
+        if (const auto selectedId = game.SelectedUnitId()) {
+          if (Unit* selected = game.FindUnit(*selectedId)) selected->reactionOnStationary = *hud.reaction;
+        }
+      }
     }
 
     // Pane divider. Both teams plan at once, so there's no "inactive side"
@@ -548,7 +565,7 @@ int main() {
             static_cast<float>(mouseX - rect.x), static_cast<float>(mouseY),
             static_cast<float>(rect.width), static_cast<float>(windowHeight));
         glm::vec3 hoverPoint;
-        if (IntersectGroundOrClimbTop(hoverRay, game.GetScene().obstacles, &hoverPoint)) {
+        if (IntersectGroundOrClimbTop(hoverRay, game.GetScene(), &hoverPoint)) {
           hoveredGroundPoint = hoverPoint;
           hasHoveredGroundPoint = true;
           // Team-tagged: hovering over the *other* player's pane just clears
@@ -598,7 +615,7 @@ int main() {
           game.ClickUnit(hitUnit, clickTeam);
         } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
           glm::vec3 point;
-          if (IntersectGroundOrClimbTop(clickRay, game.GetScene().obstacles, &point)) {
+          if (IntersectGroundOrClimbTop(clickRay, game.GetScene(), &point)) {
             game.ClickGround(point, clickTeam);
           }
         }
@@ -611,21 +628,9 @@ int main() {
     // player's pane shows them (the other side must not see enemy plans). ---
     for (int pane = 0; pane < paneCount; ++pane) {
       const PaneRect& rect = paneRects[pane];
-      gfx::PaneOverlays overlays;
-      if (selectedTeam && *selectedTeam == paneTeam(pane)) {
-        if (const auto selectedId = game.SelectedUnitId()) {
-          if (const Unit* selected = game.FindUnit(*selectedId)) {
-            overlays.selectionHighlight = selected->position;
-          }
-        }
-        if (game.Mode() == InputMode::AwaitingMoveDestination) {
-          if (game.MovePreviewValid()) {
-            overlays.movePreviewPath = &game.MovePreviewPath();
-          } else if (hasHoveredGroundPoint) {
-            overlays.invalidHoverHighlight = hoveredGroundPoint;
-          }
-        }
-      }
+      std::optional<glm::vec3> hover;
+      if (hasHoveredGroundPoint) hover = hoveredGroundPoint;
+      const gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(game, paneTeam(pane), hover);
       renderer.RenderPane(game, paneTeam(pane), fogActive, paneVisibility[pane], cameras[pane],
                           rect.x, 0, rect.width, windowHeight, overlays);
     }

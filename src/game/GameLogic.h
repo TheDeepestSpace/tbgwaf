@@ -50,6 +50,7 @@ struct GameSnapshot {
     glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
     float knockdownElapsed = -1.0f;
     bool moving = false;  // Has an in-flight move in the executing round.
+    ReactionRule reactionOnStationary = ReactionRule::DoNothing;
   };
   std::vector<UnitState> units;
   InputMode mode = InputMode::AwaitingSelection;
@@ -92,6 +93,8 @@ class GameLogic {
   void Reset(Scene scene);
 
   const Scene& GetScene() const { return scene_; }
+  // The navmesh currently in use: windowed around the figure most recently
+  // planned for (see EnsureNavMeshFor), empty until one has been.
   const NavMesh& GetNavMesh() const { return navMesh_; }
   InputMode Mode() const { return mode_; }
   std::optional<int> SelectedUnitId() const { return selectedUnitId_; }
@@ -106,6 +109,13 @@ class GameLogic {
 
   const std::vector<glm::vec3>& MovePreviewPath() const { return movePreviewPath_; }
   bool MovePreviewValid() const { return movePreviewValid_; }
+
+  // Reachable-area field for the selected figure's move budget, computed once
+  // when entering move-destination mode (null otherwise).
+  const ReachField* MoveFrontier() const {
+    return mode_ == InputMode::AwaitingMoveDestination && moveFrontier_.nx > 0 ? &moveFrontier_
+                                                                              : nullptr;
+  }
 
   Unit* FindUnit(int id);
   const Unit* FindUnit(int id) const;
@@ -243,8 +253,24 @@ class GameLogic {
   // watcher's trigger, and returns true so Update() can interrupt the move.
   bool TriggerOverwatch(Unit& mover);
 
+  // (Re)builds navMesh_ over the area `mover` can reach this round, unless
+  // the cached one already covers this figure at this position.
+  void EnsureNavMeshFor(const Unit& mover);
+
+  // Playbook reaction check, called after every per-frame position advance
+  // of a moving unit: resolves a shot from any living enemy `watcher` of
+  // `mover` with reactionOnStationary == Shoot that currently has `mover`
+  // in FOV+LOS. Returns true (and kills `mover`) on the first such hit.
+  // Unlike a one-shot trigger, the watcher's rule is never cleared here, so
+  // it stays armed for future moves/rounds.
+  bool CheckPlaybookReactions(Unit& mover);
+
   Scene scene_;
+  // Range-scoped: covers only [mover.position +/- (MoveBudget + margin)],
+  // clipped to the map, not the whole map. Cached per (unit id, position).
   NavMesh navMesh_;
+  int navMeshUnitId_ = -1;
+  glm::vec3 navMeshOrigin_{0.0f};
   int roundNumber_ = 1;
   std::vector<AABB> obstacleBounds_;  // Cached flat bounds of scene_.obstacles for LOS/FOV checks.
 
@@ -254,6 +280,7 @@ class GameLogic {
 
   std::vector<glm::vec3> movePreviewPath_;
   bool movePreviewValid_ = false;
+  ReachField moveFrontier_;
 
   // Every figure's in-flight planned move / not-yet-fired planned shot for
   // the executing round, valid only while mode_ == Executing; empty once

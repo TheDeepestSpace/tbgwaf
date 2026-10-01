@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <queue>
+#include <utility>
 
 #include "game/Raycast.h"
 
@@ -109,25 +111,33 @@ bool RectsAdjacent(const NavCell& cell, const AABB& rect) {
 
 }  // namespace
 
+namespace {
+NavRegion SquareRegion(float halfExtent) {
+  return NavRegion{-halfExtent, halfExtent, -halfExtent, halfExtent};
+}
+}  // namespace
+
 void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, float agentRadius) {
-  BuildGroundMesh(obstacles, mapHalfExtent, agentRadius);
+  BuildGroundMesh(obstacles, SquareRegion(mapHalfExtent), agentRadius);
 }
 
 void NavMesh::Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent,
                      float agentRadius) {
-  BuildGroundMesh(ObstacleBounds(obstacles), mapHalfExtent, agentRadius);
+  Build(obstacles, SquareRegion(mapHalfExtent), agentRadius);
+}
+
+void NavMesh::Build(const std::vector<Obstacle>& obstacles, const NavRegion& region,
+                     float agentRadius) {
+  BuildGroundMesh(ObstacleBounds(obstacles), region, agentRadius);
   AddClimbConnections(obstacles, agentRadius);
 }
 
-void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, float mapHalfExtent,
+void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegion& region,
                                float agentRadius) {
   cells_.clear();
   neighbors_.clear();
   paddedFootprints_.clear();
-  mapHalfExtent_ = mapHalfExtent;
-
-  const float mapMin = -mapHalfExtent;
-  const float mapMax = mapHalfExtent;
+  region_ = region;
 
   struct Footprint {
     float xMin, xMax, zMin, zMax;
@@ -136,10 +146,10 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, float mapHalfE
   footprints.reserve(obstacles.size());
   for (const auto& obstacle : obstacles) {
     Footprint fp;
-    fp.xMin = std::max(mapMin, obstacle.min.x - agentRadius);
-    fp.xMax = std::min(mapMax, obstacle.max.x + agentRadius);
-    fp.zMin = std::max(mapMin, obstacle.min.z - agentRadius);
-    fp.zMax = std::min(mapMax, obstacle.max.z + agentRadius);
+    fp.xMin = std::max(region.xMin, obstacle.min.x - agentRadius);
+    fp.xMax = std::min(region.xMax, obstacle.max.x + agentRadius);
+    fp.zMin = std::max(region.zMin, obstacle.min.z - agentRadius);
+    fp.zMax = std::min(region.zMax, obstacle.max.z + agentRadius);
     if (fp.xMax > fp.xMin + kEps && fp.zMax > fp.zMin + kEps) {
       footprints.push_back(fp);
       // Give the padded footprint a generous Y range so it can be reused
@@ -149,7 +159,7 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, float mapHalfE
     }
   }
 
-  std::vector<float> xs = {mapMin, mapMax};
+  std::vector<float> xs = {region.xMin, region.xMax};
   for (const auto& fp : footprints) {
     xs.push_back(fp.xMin);
     xs.push_back(fp.xMax);
@@ -175,7 +185,7 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, float mapHalfE
     }
     std::vector<ZInterval> merged = MergeIntervals(std::move(blocked));
 
-    float cursor = mapMin;
+    float cursor = region.zMin;
     for (const auto& iv : merged) {
       if (iv.lo - cursor > kEps) {
         cellsByStrip[i].push_back(static_cast<int>(cells_.size()));
@@ -183,9 +193,9 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, float mapHalfE
       }
       cursor = std::max(cursor, iv.hi);
     }
-    if (mapMax - cursor > kEps) {
+    if (region.zMax - cursor > kEps) {
       cellsByStrip[i].push_back(static_cast<int>(cells_.size()));
-      cells_.push_back(NavCell{stripXMin, stripXMax, cursor, mapMax, 0.0f});
+      cells_.push_back(NavCell{stripXMin, stripXMax, cursor, region.zMax, 0.0f});
     }
   }
 
@@ -211,6 +221,11 @@ void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float 
   for (const auto& obstacle : obstacles) {
     if (!obstacle.climbable) continue;
     const AABB& bounds = obstacle.bounds;
+    // Windowed builds: skip obstacles entirely outside the region.
+    if (bounds.max.x < region_.xMin || bounds.min.x > region_.xMax ||
+        bounds.max.z < region_.zMin || bounds.min.z > region_.zMax) {
+      continue;
+    }
 
     const float xMin = bounds.min.x + kClimbTopInset;
     const float xMax = bounds.max.x - kClimbTopInset;
@@ -223,10 +238,10 @@ void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float 
     neighbors_.emplace_back();
 
     const AABB padded{
-        glm::vec3(std::max(-mapHalfExtent_, bounds.min.x - agentRadius), bounds.min.y,
-                   std::max(-mapHalfExtent_, bounds.min.z - agentRadius)),
-        glm::vec3(std::min(mapHalfExtent_, bounds.max.x + agentRadius), bounds.min.y,
-                   std::min(mapHalfExtent_, bounds.max.z + agentRadius))};
+        glm::vec3(std::max(region_.xMin, bounds.min.x - agentRadius), bounds.min.y,
+                   std::max(region_.zMin, bounds.min.z - agentRadius)),
+        glm::vec3(std::min(region_.xMax, bounds.max.x + agentRadius), bounds.min.y,
+                   std::min(region_.zMax, bounds.max.z + agentRadius))};
 
     for (int groundIdx = 0; groundIdx < groundCellCount; ++groundIdx) {
       if (!RectsAdjacent(cells_[groundIdx], padded)) continue;
@@ -234,6 +249,62 @@ void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float 
       neighbors_[topIdx].push_back(groundIdx);
     }
   }
+}
+
+ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, float step) const {
+  ReachField field;
+  field.step = step;
+  field.budget = budget;
+  if (budget <= 0.0f || step <= 0.0f || !IsWalkable(start.x, start.z)) return field;
+
+  // Align the grid so the source is exactly a node.
+  const int radius = static_cast<int>(std::ceil(budget / step));
+  field.minX = start.x - radius * step;
+  field.minZ = start.z - radius * step;
+  field.nx = field.nz = 2 * radius + 1;
+  const float inf = std::numeric_limits<float>::infinity();
+  field.dist.assign(static_cast<size_t>(field.nx) * field.nz, inf);
+
+  // 16-neighbour moves (8 king + 8 knight) keep grid distance close to
+  // Euclidean (< ~2% error) while still routing around obstacles.
+  static const int kMoves[16][2] = {{1, 0},  {-1, 0}, {0, 1},  {0, -1}, {1, 1},  {1, -1},
+                                    {-1, 1}, {-1, -1}, {2, 1},  {2, -1}, {-2, 1}, {-2, -1},
+                                    {1, 2},  {1, -2}, {-1, 2}, {-1, -2}};
+  std::vector<char> walkable(field.dist.size(), -1);  // -1 unknown, 0/1 cached.
+  auto nodeWalkable = [&](int ix, int iz) {
+    char& w = walkable[iz * field.nx + ix];
+    if (w < 0) {
+      const glm::vec3 p = field.Node(ix, iz);
+      w = IsWalkable(p.x, p.z) ? 1 : 0;
+    }
+    return w == 1;
+  };
+
+  using Entry = std::pair<float, int>;
+  std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+  const int startIdx = radius * field.nx + radius;
+  field.dist[startIdx] = 0.0f;
+  open.push({0.0f, startIdx});
+  while (!open.empty()) {
+    const auto [d, idx] = open.top();
+    open.pop();
+    if (d > field.dist[idx]) continue;
+    const int ix = idx % field.nx, iz = idx / field.nx;
+    const glm::vec3 from = field.Node(ix, iz);
+    for (const auto& m : kMoves) {
+      const int jx = ix + m[0], jz = iz + m[1];
+      if (jx < 0 || jz < 0 || jx >= field.nx || jz >= field.nz) continue;
+      if (!nodeWalkable(jx, jz)) continue;
+      const glm::vec3 to = field.Node(jx, jz);
+      const float nd = d + glm::distance(from, to);
+      const int jdx = jz * field.nx + jx;
+      if (nd > budget || nd >= field.dist[jdx]) continue;
+      if (!LineOfSightClear(from, to, paddedFootprints_)) continue;
+      field.dist[jdx] = nd;
+      open.push({nd, jdx});
+    }
+  }
+  return field;
 }
 
 bool NavMesh::IsWalkable(float x, float z) const { return FindCellContaining(x, z) >= 0; }

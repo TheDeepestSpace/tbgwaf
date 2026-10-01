@@ -321,7 +321,8 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
 // eye level shadow everything behind them.
 // Caller is responsible for enabling blending around this call.
 void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& viewProj,
-                 const Unit& unit, const std::vector<tactics::Obstacle>& obstacles) {
+                 const Unit& unit, const std::vector<tactics::Obstacle>& obstacles,
+                 const std::vector<AABB>& sidewalks) {
   constexpr int kArcSegments = 24;
   constexpr float kGroundOffset = 0.015f;
   constexpr float kConeAlpha = 0.15f;
@@ -394,6 +395,52 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
       points.push_back(l0);
       points.push_back(r1);
       points.push_back(l1);
+    }
+  }
+  // Every walkable surface gets its own copy of the cone at its own height:
+  // the ground-level cone above is buried under raised sidewalk slabs, so
+  // clip the cone to each slab's footprint and lay that piece on its top.
+  const size_t groundPointCount = points.size();
+  for (const AABB& slab : sidewalks) {
+    for (size_t i = 0; i + 2 < groundPointCount; i += 3) {
+      std::vector<glm::vec2> poly = {{points[i].x, points[i].z},
+                                     {points[i + 1].x, points[i + 1].z},
+                                     {points[i + 2].x, points[i + 2].z}};
+      // Sutherland-Hodgman against the four slab edges.
+      for (int edge = 0; edge < 4 && !poly.empty(); ++edge) {
+        const auto inside = [&](const glm::vec2& v) {
+          switch (edge) {
+            case 0: return v.x >= slab.min.x;
+            case 1: return v.x <= slab.max.x;
+            case 2: return v.y >= slab.min.z;
+            default: return v.y <= slab.max.z;
+          }
+        };
+        const auto cross = [&](const glm::vec2& a, const glm::vec2& b) {
+          const float bound = edge == 0 ? slab.min.x : edge == 1 ? slab.max.x
+                              : edge == 2 ? slab.min.z : slab.max.z;
+          const float t = edge < 2 ? (bound - a.x) / (b.x - a.x) : (bound - a.y) / (b.y - a.y);
+          return a + (b - a) * t;
+        };
+        std::vector<glm::vec2> out;
+        for (size_t v = 0; v < poly.size(); ++v) {
+          const glm::vec2& cur = poly[v];
+          const glm::vec2& prev = poly[(v + poly.size() - 1) % poly.size()];
+          if (inside(cur)) {
+            if (!inside(prev)) out.push_back(cross(prev, cur));
+            out.push_back(cur);
+          } else if (inside(prev)) {
+            out.push_back(cross(prev, cur));
+          }
+        }
+        poly = std::move(out);
+      }
+      const float y = slab.max.y + kGroundOffset;
+      for (size_t v = 1; v + 1 < poly.size(); ++v) {
+        points.emplace_back(poly[0].x, y, poly[0].y);
+        points.emplace_back(poly[v].x, y, poly[v].y);
+        points.emplace_back(poly[v + 1].x, y, poly[v + 1].y);
+      }
     }
   }
   mesh.SetPoints(points);
@@ -581,7 +628,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glPolygonOffset(-2.0f, -4.0f);
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.team != team) continue;
-    DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit, obstacles);
+    DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit, obstacles,
+                game.GetScene().sidewalks);
   }
   glDisable(GL_POLYGON_OFFSET_FILL);
   glDisable(GL_STENCIL_TEST);

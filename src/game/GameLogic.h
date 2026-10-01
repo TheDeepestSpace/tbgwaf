@@ -107,6 +107,13 @@ class GameLogic {
   const std::vector<glm::vec3>& MovePreviewPath() const { return movePreviewPath_; }
   bool MovePreviewValid() const { return movePreviewValid_; }
 
+  // Reachable-area field for the selected figure's move budget, computed once
+  // when entering move-destination mode (null otherwise).
+  const ReachField* MoveFrontier() const {
+    return mode_ == InputMode::AwaitingMoveDestination && moveFrontier_.nx > 0 ? &moveFrontier_
+                                                                              : nullptr;
+  }
+
   Unit* FindUnit(int id);
   const Unit* FindUnit(int id) const;
 
@@ -234,6 +241,7 @@ class GameLogic {
 
   std::vector<glm::vec3> movePreviewPath_;
   bool movePreviewValid_ = false;
+  ReachField moveFrontier_;
 
   // Every figure's in-flight planned move / not-yet-fired planned shot for
   // the executing round, valid only while mode_ == Executing; empty once

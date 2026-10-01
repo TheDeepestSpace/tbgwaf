@@ -29,6 +29,27 @@ void main() {
 }
 )";
 
+// Unlit shader with a per-vertex color, for gradient overlays.
+const char* kColorVertexShaderSrc = R"(#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec4 aColor;
+uniform mat4 uMVP;
+out vec4 vColor;
+void main() {
+  vColor = aColor;
+  gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)";
+
+const char* kColorFragmentShaderSrc = R"(#version 300 es
+precision mediump float;
+in vec4 vColor;
+out vec4 FragColor;
+void main() {
+  FragColor = vColor;
+}
+)";
+
 const char* kUnlitFragmentShaderSrc = R"(#version 300 es
 precision mediump float;
 uniform vec4 uColor;
@@ -471,7 +492,13 @@ bool SceneRenderer::Init() {
     std::fprintf(stderr, "Failed to compile the shadow depth shader\n");
     return false;
   }
+  if (!colorShader_.Compile(kColorVertexShaderSrc, kColorFragmentShaderSrc)) {
+    std::fprintf(stderr, "Failed to compile the vertex-color shader\n");
+    return false;
+  }
   cubeMesh_.Init();
+  frontierFill_.Init();
+  frontierBorder_.Init();
   pathLine_.Init();
   fovConeMesh_.Init();
 
@@ -523,6 +550,8 @@ bool SceneRenderer::Init() {
 }
 
 void SceneRenderer::Destroy() {
+  frontierFill_.Destroy();
+  frontierBorder_.Destroy();
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
   cubeMesh_.Destroy();
@@ -617,6 +646,60 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit, obstacles);
   }
   glDisable(GL_STENCIL_TEST);
+
+  // Movement frontier: green fill fading from opaque at the unit to
+  // transparent at the budget edge (alpha = remaining budget), plus a solid
+  // border exactly at the frontier.
+  if (overlays.moveFrontier && overlays.moveFrontier->nx > 0) {
+    const tactics::ReachField& f = *overlays.moveFrontier;
+    const glm::vec2 origin(f.minX, f.minZ);
+    if (frontierKeyField_ != &f || frontierKeyOrigin_ != origin ||
+        frontierKeyBudget_ != f.budget) {
+      frontierKeyField_ = &f;
+      frontierKeyOrigin_ = origin;
+      frontierKeyBudget_ = f.budget;
+      constexpr float kY = 0.03f;
+      std::vector<ColorTriangleMesh::Vertex> fill;
+      std::vector<glm::vec3> border;
+      auto vertexAt = [&](int ix, int iz) {
+        const float remaining = 1.0f - f.Dist(ix, iz) / f.budget;
+        glm::vec3 p = f.Node(ix, iz);
+        p.y = kY;
+        return ColorTriangleMesh::Vertex{p, glm::vec4(0.2f, 0.9f, 0.3f, 0.12f + 0.5f * remaining)};
+      };
+      auto full = [&](int ix, int iz) {
+        return f.Reached(ix, iz) && f.Reached(ix + 1, iz) && f.Reached(ix, iz + 1) &&
+               f.Reached(ix + 1, iz + 1);
+      };
+      auto edge = [&](int ax, int az, int bx, int bz) {
+        glm::vec3 a = f.Node(ax, az), b = f.Node(bx, bz);
+        a.y = b.y = kY;
+        border.push_back(a);
+        border.push_back(b);
+      };
+      for (int iz = 0; iz + 1 < f.nz; ++iz) {
+        for (int ix = 0; ix + 1 < f.nx; ++ix) {
+          if (!full(ix, iz)) continue;
+          const auto v00 = vertexAt(ix, iz), v10 = vertexAt(ix + 1, iz);
+          const auto v01 = vertexAt(ix, iz + 1), v11 = vertexAt(ix + 1, iz + 1);
+          fill.insert(fill.end(), {v00, v01, v10, v10, v01, v11});
+          if (iz == 0 || !full(ix, iz - 1)) edge(ix, iz, ix + 1, iz);
+          if (!full(ix, iz + 1)) edge(ix, iz + 1, ix + 1, iz + 1);
+          if (ix == 0 || !full(ix - 1, iz)) edge(ix, iz, ix, iz + 1);
+          if (!full(ix + 1, iz)) edge(ix + 1, iz, ix + 1, iz + 1);
+        }
+      }
+      frontierFill_.SetVertices(fill);
+      frontierBorder_.SetPoints(border);
+    }
+    colorShader_.Use();
+    colorShader_.SetMat4("uMVP", viewProj);
+    frontierFill_.Draw();
+    unlitShader_.Use();
+    unlitShader_.SetMat4("uMVP", viewProj);
+    unlitShader_.SetVec4("uColor", glm::vec4(0.2f, 1.0f, 0.3f, 1.0f));
+    frontierBorder_.DrawSegments();
+  }
   glDepthMask(GL_TRUE);
   glDisable(GL_BLEND);
 

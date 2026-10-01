@@ -712,6 +712,7 @@ int main() {
           }
         }
         if (game.Mode() == InputMode::AwaitingMoveDestination) {
+          overlays.moveFrontier = game.MoveFrontier();
           if (game.MovePreviewValid()) {
             overlays.movePreviewPath = &game.MovePreviewPath();
           } else if (hasHoveredGroundPoint) {

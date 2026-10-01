@@ -388,6 +388,10 @@ void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
 void GameLogic::ChooseMove() {
   if (mode_ != InputMode::ActionMenu) return;
   mode_ = InputMode::AwaitingMoveDestination;
+  moveFrontier_ = ReachField();
+  if (const Unit* mover = FindUnit(selectedUnitId_.value_or(-1))) {
+    moveFrontier_ = navMesh_.ComputeReachField(mover->position, mover->MoveBudget());
+  }
   movePreviewPath_.clear();
   movePreviewValid_ = false;
 }
@@ -422,6 +426,7 @@ void GameLogic::ChooseOverwatch() {
 void GameLogic::CancelAction() {
   if (mode_ == InputMode::AwaitingMoveDestination || mode_ == InputMode::AwaitingShootTarget) {
     mode_ = InputMode::ActionMenu;
+    moveFrontier_ = ReachField();
     movePreviewPath_.clear();
     movePreviewValid_ = false;
   } else if (mode_ == InputMode::ActionMenu) {

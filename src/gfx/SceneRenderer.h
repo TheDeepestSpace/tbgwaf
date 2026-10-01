@@ -31,6 +31,7 @@ struct PaneOverlays {
   std::optional<glm::vec3> selectionHighlight;     // Yellow ring under the selected figure.
   std::optional<glm::vec3> invalidHoverHighlight;  // Red ring on an unreachable hover point.
   const std::vector<glm::vec3>* movePreviewPath = nullptr;  // Yellow preview polyline.
+  const tactics::ReachField* moveFrontier = nullptr;  // Reachable-area gradient + border.
 };
 
 // Owns the GL resources (shaders, meshes, the shadow map) for the per-team
@@ -60,10 +61,17 @@ class SceneRenderer {
  private:
   Shader unlitShader_;
   Shader litShader_;
+  Shader colorShader_;
   Shader depthShader_;
   CubeMesh cubeMesh_;
   LineMesh pathLine_;
   TriangleMesh fovConeMesh_;
+  ColorTriangleMesh frontierFill_;
+  LineMesh frontierBorder_;
+  // Frontier geometry is rebuilt only when the field changes.
+  const tactics::ReachField* frontierKeyField_ = nullptr;
+  glm::vec2 frontierKeyOrigin_{0.0f};
+  float frontierKeyBudget_ = -1.0f;
   GLuint shadowFbo_ = 0;
   GLuint shadowDepthTex_ = 0;
   glm::vec3 lightDir_{0.0f, -1.0f, 0.0f};

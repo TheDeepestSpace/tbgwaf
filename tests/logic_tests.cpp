@@ -1148,6 +1148,7 @@ void TestFollowerBuildsSightingsWithoutPhysicsUpdate() {
   sim.ClickUnit(4, Team::Red);
   sim.ChooseMove();
   sim.ClickGround(glm::vec3(-2.0f, 0.0f, 0.0f), Team::Red);
+  sim.FinishMovePlan();
   CHECK(sim.FindUnit(4)->plan.type == PlannedActionType::Move);
   PassEveryoneElse(sim, {4});
   CHECK(sim.CanCommitRound());

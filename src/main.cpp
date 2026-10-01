@@ -432,7 +432,7 @@ int main() {
         // pass) instead of panning the camera.
         if (leftDragPane >= 0 && !ImGui::GetIO().WantCaptureMouse) {
           if (aimedUnitId < 0) {
-            constexpr float kPanSpeed = 0.0015f;
+            constexpr float kPanSpeed = 0.00375f;
             // Drag the world under the cursor: target moves opposite to the drag.
             cameras[leftDragPane].Pan(-event.motion.xrel * kPanSpeed, event.motion.yrel * kPanSpeed);
           }
@@ -440,7 +440,7 @@ int main() {
                                           static_cast<float>(event.motion.yrel));
         }
         if (rightDragPane >= 0 && !ImGui::GetIO().WantCaptureMouse) {
-          constexpr float kRotateSpeed = 0.005f;
+          constexpr float kRotateSpeed = 0.0125f;
           cameras[rightDragPane].Rotate(-event.motion.xrel * kRotateSpeed,
                                          event.motion.yrel * kRotateSpeed);
         }

@@ -125,13 +125,14 @@ class GameLogic {
     glm::vec3 position{0.0f};
     float facingYaw = 0.0f;
     glm::vec3 moveDirection{0.0f};
-    float ageSeconds = 0.0f;
+    int ageRounds = 0;  // Completed rounds since the sample was taken.
   };
   // Oldest-first samples of `targetUnitId` as seen by `viewingTeam`; empty
-  // once all have aged past kSightingMemoryDuration.
+  // once all have aged past kSightingMemoryRounds.
   const std::vector<EnemySighting>& Sightings(Team viewingTeam, int targetUnitId) const;
 
-  // Ages sighting memory and samples newly visible enemies. Must be called
+  // Ages sighting memory by completed rounds (tracked via the round number, so
+  // followers age too) and samples newly visible enemies. Must be called
   // every frame on every page regardless of mode or simulator/follower role
   // (unlike Update(), a follower never runs the physics tick during
   // Executing, yet still needs its own memory built from imported state).
@@ -265,6 +266,7 @@ class GameLogic {
 
   // Sighting memory, indexed [viewing team][target unit id].
   std::vector<std::vector<EnemySighting>> sightings_[2];
+  int lastSightingRound_ = 1;
   std::vector<bool> sightedLastFrame_[2];
   std::vector<float> sightingTimer_[2];
   std::vector<glm::vec3> lastUnitPosition_;  // Previous frame's position per unit id.

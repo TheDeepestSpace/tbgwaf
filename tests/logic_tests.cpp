@@ -960,6 +960,15 @@ void StepSightings(GameLogic& game, float seconds, float dt = 0.05f) {
   for (int i = 0; i < steps; ++i) game.UpdateSightingMemory(dt);
 }
 
+// Simulates a round ending: bumps the round number the way a real round
+// transition would, then ticks memory once so it ages.
+void AdvanceRounds(GameLogic& game, int rounds) {
+  GameSnapshot snap = game.ExportState();
+  snap.roundNumber += rounds;
+  CHECK(game.ImportState(snap));
+  game.UpdateSightingMemory(0.0f);
+}
+
 void BlueLookAway(GameLogic& game, float yaw) {
   for (int id = 0; id <= 2; ++id) game.FindUnit(id)->facingYaw = yaw;
 }
@@ -982,8 +991,7 @@ void TestSightingSamplesAccumulateWhileInFov() {
   // Entry sample + one per 0.5s.
   CHECK(samples.size() >= 6 && samples.size() <= 7);
   for (size_t i = 0; i + 1 < samples.size(); ++i) {
-    CHECK(std::fabs((samples[i].ageSeconds - samples[i + 1].ageSeconds) -
-                    constants::kSightingSampleInterval) < 0.06f);
+    CHECK(samples[i].ageRounds == 0);  // No fading in real time.
   }
 }
 
@@ -1014,7 +1022,12 @@ void TestSightingsPersistAfterLeavingFovThenExpire() {
   BlueLookAway(game, kPi);
   StepSightings(game, 2.0f);
   CHECK(game.Sightings(Team::Blue, 4).size() == count);  // Not cleared, none added.
-  StepSightings(game, constants::kSightingMemoryDuration + 1.0f);
+  StepSightings(game, 60.0f);
+  CHECK(game.Sightings(Team::Blue, 4).size() == count);  // Real time doesn't expire.
+  AdvanceRounds(game, constants::kSightingMemoryRounds - 1);
+  CHECK(game.Sightings(Team::Blue, 4).size() == count);
+  CHECK(game.Sightings(Team::Blue, 4).front().ageRounds == constants::kSightingMemoryRounds - 1);
+  AdvanceRounds(game, 1);
   CHECK(game.Sightings(Team::Blue, 4).empty());
 }
 
@@ -1022,15 +1035,14 @@ void TestSightingReentryAppendsToAgingTrail() {
   GameLogic game(LegacyScene());
   StepSightings(game, 1.0f);
   const size_t before = game.Sightings(Team::Blue, 4).size();
-  const float oldestAge = game.Sightings(Team::Blue, 4).front().ageSeconds;
   BlueLookAway(game, kPi);
-  StepSightings(game, 3.0f);
+  AdvanceRounds(game, 3);
   BlueLookAway(game, 0.0f);
   game.UpdateSightingMemory(0.05f);
   const auto& samples = game.Sightings(Team::Blue, 4);
   CHECK(samples.size() == before + 1);
-  CHECK(samples.front().ageSeconds > oldestAge + 2.9f);  // Kept aging, not reset.
-  CHECK(samples.back().ageSeconds < 0.01f);
+  CHECK(samples.front().ageRounds == 3);  // Kept aging, not reset.
+  CHECK(samples.back().ageRounds == 0);
 }
 
 void TestResetClearsSightings() {

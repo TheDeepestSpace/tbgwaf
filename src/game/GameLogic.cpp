@@ -57,6 +57,7 @@ void GameLogic::Reset(Scene scene) {
   }
   lastUnitPosition_.assign(unitSlots, glm::vec3(0.0f));
   hasLastUnitPosition_ = false;
+  lastSightingRound_ = roundNumber_;
 }
 
 const std::vector<GameLogic::EnemySighting>& GameLogic::Sightings(Team viewingTeam,
@@ -68,15 +69,19 @@ const std::vector<GameLogic::EnemySighting>& GameLogic::Sightings(Team viewingTe
 }
 
 void GameLogic::UpdateSightingMemory(float dtSeconds) {
+  const int elapsedRounds = std::max(0, roundNumber_ - lastSightingRound_);
+  lastSightingRound_ = roundNumber_;
   for (int t = 0; t < 2; ++t) {
     const Team viewer = static_cast<Team>(t);
-    for (auto& list : sightings_[t]) {
-      for (EnemySighting& s : list) s.ageSeconds += dtSeconds;
-      list.erase(std::remove_if(list.begin(), list.end(),
-                                [](const EnemySighting& s) {
-                                  return s.ageSeconds > constants::kSightingMemoryDuration;
-                                }),
-                 list.end());
+    if (elapsedRounds > 0) {
+      for (auto& list : sightings_[t]) {
+        for (EnemySighting& s : list) s.ageRounds += elapsedRounds;
+        list.erase(std::remove_if(list.begin(), list.end(),
+                                  [](const EnemySighting& s) {
+                                    return s.ageRounds >= constants::kSightingMemoryRounds;
+                                  }),
+                   list.end());
+      }
     }
 
     const TeamVisibility visibility = ComputeVisibility(viewer);

@@ -297,11 +297,10 @@ bool FootprintSpan(const glm::vec3& eye, const glm::vec2& dir, const AABB& box, 
 // `range` clipped to where the ray leaves the playable map footprint, so the
 // FOV cone stops at the boundary. Zero if the eye stands outside the map and
 // the ray never enters it.
-float ClipToMap(const glm::vec3& eye, const glm::vec2& dir, float range) {
-  constexpr float kHalf = tactics::constants::kMapHalfExtent;
+float ClipToMap(const glm::vec3& eye, const glm::vec2& dir, float range, float half) {
   AABB map;
-  map.min = glm::vec3(-kHalf, 0.0f, -kHalf);
-  map.max = glm::vec3(kHalf, 0.0f, kHalf);
+  map.min = glm::vec3(-half, 0.0f, -half);
+  map.max = glm::vec3(half, 0.0f, half);
   float enter = 0.0f;
   float exit = 0.0f;
   if (!FootprintSpan(eye, dir, map, &enter, &exit)) return 0.0f;
@@ -366,7 +365,7 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
 // Caller is responsible for enabling blending around this call.
 void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& viewProj,
                  const Unit& unit, const std::vector<tactics::Obstacle>& obstacles,
-                 const std::vector<AABB>& sidewalks) {
+                 const std::vector<AABB>& sidewalks, float mapHalfExtent) {
   constexpr int kArcSegments = 24;
   constexpr float kGroundOffset = 0.015f;
   constexpr float kConeAlpha = 0.15f;
@@ -411,7 +410,7 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
     const float angle = unit.facingYaw + offset;
     const glm::vec2 dir(std::cos(angle), std::sin(angle));
     dirs.push_back(dir);
-    spansPerRay.push_back(VisibleGroundSpans(eye, dir, obstacles, ClipToMap(eye, dir, range)));
+    spansPerRay.push_back(VisibleGroundSpans(eye, dir, obstacles, ClipToMap(eye, dir, range, mapHalfExtent)));
   }
 
   // Stitch adjacent rays into quads, one per matching visible span. Corner
@@ -673,7 +672,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.team != team) continue;
     DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit, obstacles,
-                game.GetScene().sidewalks);
+                game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
   }
   glDisable(GL_POLYGON_OFFSET_FILL);
   glDisable(GL_STENCIL_TEST);

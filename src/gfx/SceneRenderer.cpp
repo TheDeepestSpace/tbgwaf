@@ -175,19 +175,27 @@ glm::mat4 KnockdownModel(const Unit& unit) {
 // right-hand side. Limbs hang from a pivot (hip / shoulder) and swing about
 // the local Z axis: a positive swing angle moves a hanging limb forward.
 // Proportions add up to kUnitHeight so the figure still fits Unit::Bounds().
+//
+// The silhouette is a chubby plush doll: the head is nearly half the total
+// height and wider than the torso, there is no neck (the head sits straight
+// on the torso), and the limbs are short, thick stubs with the arms splayed
+// out from under the head.
 
-constexpr float kLegLength = 0.8f;
-constexpr float kLegThickness = 0.18f;
-constexpr float kLegSideOffset = 0.11f;  // Leg center from the figure's midline.
+constexpr float kLegLength = 0.4f;
+constexpr float kLegThickness = 0.26f;
+constexpr float kLegSideOffset = 0.16f;  // Leg center from the figure's midline.
 constexpr float kHipHeight = kLegLength;
-constexpr float kTorsoHeight = 0.62f;
-constexpr float kTorsoWidth = 0.5f;   // Side to side (Z).
-constexpr float kTorsoDepth = 0.28f;  // Front to back (X).
-constexpr float kHeadSize = 0.3f;
-constexpr float kShoulderHeight = 1.38f;
-constexpr float kArmLength = 0.62f;
-constexpr float kArmThickness = 0.14f;
+constexpr float kTorsoHeight = 0.55f;
+constexpr float kTorsoWidth = 0.62f;  // Side to side (Z).
+constexpr float kTorsoDepth = 0.44f;  // Front to back (X).
+constexpr float kHeadHeight = 0.85f;
+constexpr float kHeadWidth = 0.95f;  // Overhangs the torso on both sides.
+constexpr float kHeadDepth = 0.7f;
+constexpr float kShoulderHeight = 0.92f;
+constexpr float kArmLength = 0.5f;
+constexpr float kArmThickness = 0.2f;
 constexpr float kArmSideOffset = kTorsoWidth * 0.5f + kArmThickness * 0.5f;
+constexpr float kArmSplay = glm::radians(25.0f);  // Arms angle outward, not straight down.
 constexpr float kGunLength = 0.36f;
 constexpr float kGunThickness = 0.08f;
 
@@ -260,10 +268,14 @@ glm::mat4 BoxModel(const glm::vec3& minCorner, const glm::vec3& size) {
 // by `swing` radians about the pivot, optionally twisted about the vertical
 // axis first (yaw, same sign convention as facingYaw). The limb's own box
 // then extends from the pivot down the frame's -Y axis.
+// `splay` tilts the hanging limb sideways about the forward (X) axis before
+// the swing: positive moves the limb toward the figure's left (-Z), so each
+// side negates it to splay outward.
 glm::mat4 LimbFrame(const glm::mat4& figure, const glm::vec3& pivot, float swing,
-                    float yawTwist = 0.0f) {
+                    float yawTwist = 0.0f, float splay = 0.0f) {
   return figure * glm::translate(glm::mat4(1.0f), pivot) *
          glm::rotate(glm::mat4(1.0f), yawTwist, glm::vec3(0.0f, -1.0f, 0.0f)) *
+         glm::rotate(glm::mat4(1.0f), splay, glm::vec3(1.0f, 0.0f, 0.0f)) *
          glm::rotate(glm::mat4(1.0f), swing, glm::vec3(0.0f, 0.0f, 1.0f));
 }
 
@@ -283,10 +295,9 @@ using FigureParts = std::array<FigurePart, kFigurePartCount>;
 // Poses the whole figure for the unit's current animation state and returns
 // each part's world model matrix (knockdown tip-over included) with its color.
 FigureParts BuildFigure(const Unit& unit) {
+  // Every body part shares the one flat team color; only the pistol differs.
   const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
                                                       : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
-  const glm::vec4 limbColor = teamColor * glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);
-  constexpr glm::vec4 kHeadColor(0.87f, 0.72f, 0.58f, 1.0f);
   constexpr glm::vec4 kGunColor(0.12f, 0.12f, 0.12f, 1.0f);
 
   // Walk cycle: right leg leads at phase 0; the arms counter-swing.
@@ -318,28 +329,31 @@ FigureParts BuildFigure(const Unit& unit) {
   parts[0] = {figure * BoxModel(glm::vec3(-kTorsoDepth * 0.5f, kHipHeight, -kTorsoWidth * 0.5f),
                                 glm::vec3(kTorsoDepth, kTorsoHeight, kTorsoWidth)),
               teamColor};
-  parts[1] = {figure * BoxModel(glm::vec3(-kHeadSize * 0.5f,
-                                          tactics::constants::kUnitHeight - kHeadSize,
-                                          -kHeadSize * 0.5f),
-                                glm::vec3(kHeadSize)),
-              kHeadColor};
+  parts[1] = {figure * BoxModel(glm::vec3(-kHeadDepth * 0.5f,
+                                          tactics::constants::kUnitHeight - kHeadHeight,
+                                          -kHeadWidth * 0.5f),
+                                glm::vec3(kHeadDepth, kHeadHeight, kHeadWidth)),
+              teamColor};
   // Legs, pivoting at the hips.
   parts[2] = {HangingBox(LimbFrame(figure, glm::vec3(0.0f, kHipHeight, -kLegSideOffset),
                                    leftLegSwing),
                          kLegLength, kLegThickness),
-              limbColor};
+              teamColor};
   parts[3] = {HangingBox(LimbFrame(figure, glm::vec3(0.0f, kHipHeight, kLegSideOffset),
                                    rightLegSwing),
                          kLegLength, kLegThickness),
-              limbColor};
-  // Arms, pivoting at the shoulders; the right one holds the pistol.
+              teamColor};
+  // Arms, pivoting at the shoulders; the right one holds the pistol. The gun
+  // arm's outward splay straightens as the aim comes up so the shot still
+  // points at the target.
   parts[4] = {HangingBox(LimbFrame(figure, glm::vec3(0.0f, kShoulderHeight, -kArmSideOffset),
-                                   leftArmWalkSwing),
+                                   leftArmWalkSwing, 0.0f, kArmSplay),
                          kArmLength, kArmThickness),
-              limbColor};
+              teamColor};
   const glm::mat4 gunArm = LimbFrame(figure, glm::vec3(0.0f, kShoulderHeight, kArmSideOffset),
-                                     gunArmSwing, shot.aimYawDelta);
-  parts[5] = {HangingBox(gunArm, kArmLength, kArmThickness), limbColor};
+                                     gunArmSwing, shot.aimYawDelta,
+                                     -kArmSplay * (1.0f - shot.raise));
+  parts[5] = {HangingBox(gunArm, kArmLength, kArmThickness), teamColor};
   // Pistol: gripped at the hand (end of the arm), barrel extending along the
   // hand frame's -Y once pitched, recoil sliding it back toward the hand.
   const glm::mat4 gun = gunArm *

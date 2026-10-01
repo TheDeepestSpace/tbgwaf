@@ -1146,12 +1146,12 @@ void TestSightingReentryAppendsToAgingTrail() {
   StepSightings(game, 1.0f);
   const size_t before = game.Sightings(Team::Blue, 4).size();
   BlueLookAway(game, kPi);
-  AdvanceRounds(game, 3);
+  AdvanceRounds(game, 2);
   BlueLookAway(game, 0.0f);
   game.UpdateSightingMemory(0.05f);
   const auto& samples = game.Sightings(Team::Blue, 4);
   CHECK(samples.size() == before + 1);
-  CHECK(samples.front().ageRounds == 3);  // Kept aging, not reset.
+  CHECK(samples.front().ageRounds == 2);  // Kept aging, not reset.
   CHECK(samples.back().ageRounds == 0);
 }
 

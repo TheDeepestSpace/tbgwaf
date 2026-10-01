@@ -72,6 +72,7 @@ class SceneRenderer {
   Shader colorShader_;
   Shader depthShader_;
   CubeMesh cubeMesh_;
+  SphereMesh sphereMesh_;
   LineMesh pathLine_;
   TriangleMesh fovConeMesh_;
   ColorTriangleMesh frontierFill_;

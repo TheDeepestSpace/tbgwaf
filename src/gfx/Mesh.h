@@ -22,6 +22,23 @@ class CubeMesh {
   GLsizei indexCount_ = 0;
 };
 
+// A smooth unit sphere centered at the origin. Callers turn it into heads,
+// torsos, joints, and rounded limb segments with non-uniform model scaling.
+// Positions and normals are both uploaded so ellipsoids shade smoothly even
+// though obstacles continue to use the hard-edged CubeMesh.
+class SphereMesh {
+ public:
+  void Init();
+  void Destroy();
+  void Draw() const;
+
+ private:
+  GLuint vao_ = 0;
+  GLuint vbo_ = 0;
+  GLuint ebo_ = 0;
+  GLsizei indexCount_ = 0;
+};
+
 // A dynamic polyline (GL_LINE_STRIP), rebuilt each frame from a point list.
 // Used for the move path preview.
 class LineMesh {

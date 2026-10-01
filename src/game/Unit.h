@@ -52,6 +52,20 @@ struct Unit {
   // around it topples the figure in the shot's direction of travel.
   glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
   float knockdownElapsed = -1.0f;  // Seconds since hit; <0 = not falling.
+  // Visual-only walk cycle: phase in radians (advances with distance moved,
+  // 2*pi per kWalkStrideLength) and a 0..1 blend of how much the walk pose
+  // overrides the rest pose (eases toward 1 while a planned move is in
+  // flight, back to 0 once it ends).
+  float walkPhase = 0.0f;
+  float walkBlend = 0.0f;
+  // Looping clock for the subtle standing pose. Stored per unit so mirrored
+  // clients render the same sampled rig pose during execution.
+  float idleElapsed = 0.0f;
+  // Visual-only quick-draw beat: seconds since this figure's shot resolved
+  // (<0 = idle) and the world yaw toward the target it fired at, so the gun
+  // arm can swing onto the target even when it sits off-center in the FOV.
+  float shootElapsed = -1.0f;
+  float shootAimYaw = 0.0f;
   float runSpeed = constants::kMoveSpeed;  // World units per second while moving.
   PlannedAction plan;  // This figure's plan for the current/upcoming round commit.
   TriggerAction triggerAction = TriggerAction::None;

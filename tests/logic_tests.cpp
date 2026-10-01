@@ -1105,6 +1105,79 @@ void TestGameLogicWinCondition() {
 
 }  // namespace
 
+// Walk cycle: phase advances with distance walked (2*pi per stride length)
+// and the blend eases in only for figures with an in-flight move, then
+// snaps back to rest when the round is fast-forwarded to completion.
+void TestWalkCycleTracksInFlightMove() {
+  GameLogic game(LegacyScene());
+  Unit* mover = game.FindUnit(0);
+  const glm::vec3 start = mover->position;
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(start + glm::vec3(4.0f, 0.0f, 0.0f), Team::Blue);
+  game.FinishMovePlan();
+  CHECK(mover->plan.type == PlannedActionType::Move);
+  for (int id : {1, 2, 3, 4, 5}) {
+    game.ClickUnit(id, id < 3 ? Team::Blue : Team::Red);
+    game.ChoosePass();
+  }
+  CHECK(mover->walkPhase == 0.0f && mover->walkBlend == 0.0f);
+
+  game.CommitRound();
+  CHECK(game.Mode() == InputMode::Executing);
+  game.Update(0.1f);
+  const float walked = glm::distance(start, mover->position);
+  CHECK(walked > 0.0f);
+  const float kTwoPi = 6.28318530717958647692f;
+  CHECK(std::fabs(mover->walkPhase - walked * kTwoPi / constants::kWalkStrideLength) < 1e-4f);
+  CHECK(mover->walkBlend > 0.0f && mover->walkBlend <= 1.0f);
+  // Figures standing still never pick up any walk pose.
+  for (int id : {1, 2, 3, 4, 5}) {
+    CHECK(game.FindUnit(id)->walkPhase == 0.0f);
+    CHECK(game.FindUnit(id)->walkBlend == 0.0f);
+  }
+
+  game.Update(1.0e6f);  // Fast-forward: the move finishes inside this tick.
+  CHECK(game.Mode() != InputMode::Executing);
+  CHECK(mover->walkBlend == 0.0f);  // Judged after the move step, so already at rest.
+  CHECK(mover->walkPhase >= 0.0f && mover->walkPhase < kTwoPi);
+}
+
+// A resolved (hitting) shot starts the shooter's quick-draw beat aimed at
+// the target's bearing; it times out back to idle. Hit resolution itself
+// is unchanged, and a blocked shot doesn't play anything.
+void TestResolvedShotStartsShootAnimation() {
+  GameLogic game(LegacyScene());
+  Unit* shooter = game.FindUnit(1);  // Open middle lane: blue1 <-> red4.
+  Unit* target = game.FindUnit(4);
+  // Aim the shooter a bit off the target so the aim yaw is distinguishable
+  // from its facing yaw (still well inside the 150 degree cone).
+  const glm::vec3 toTarget = target->position - shooter->position;
+  const float bearing = std::atan2(toTarget.z, toTarget.x);
+  shooter->facingYaw = bearing + 0.4f;
+  CHECK(shooter->shootElapsed < 0.0f);
+
+  CHECK(game.ResolveShot(*shooter, *target));
+  CHECK(!target->alive);
+  CHECK(target->knockdownElapsed == 0.0f);
+  CHECK(shooter->shootElapsed == 0.0f);
+  CHECK(std::fabs(shooter->shootAimYaw - bearing) < 1e-4f);
+  CHECK(target->shootElapsed < 0.0f);  // Only the shooter animates.
+
+  game.Update(0.1f);  // Advances in any mode, like the knockdown timer.
+  CHECK(std::fabs(shooter->shootElapsed - 0.1f) < 1e-5f);
+  game.Update(constants::kShootAnimDuration);
+  CHECK(shooter->shootElapsed < 0.0f);  // Beat over: back to idle.
+  CHECK(target->knockdownElapsed == constants::kKnockdownDuration);
+
+  // A shot that can't connect (target behind the shooter) fires nothing.
+  Unit* other = game.FindUnit(5);
+  shooter->facingYaw = bearing + 3.0f;
+  CHECK(!game.ResolveShot(*shooter, *other));
+  CHECK(other->alive);
+  CHECK(shooter->shootElapsed < 0.0f);
+}
+
 void TestSnapshotMirrorsMatchAndTeamPlans() {
   GameLogic blue, red;
   // Each canvas's instance plans only its own team.
@@ -1142,11 +1215,19 @@ void TestSnapshotMirrorsMatchAndTeamPlans() {
   CHECK(red.Mode() == blue.Mode());
   CHECK(red.RoundNumber() == blue.RoundNumber());
   CHECK(red.IsUnitMoving(3) == blue.IsUnitMoving(3));
+  // The mover has walked a stride by now, so the animation state being
+  // mirrored is non-trivial.
+  CHECK(blue.FindUnit(3)->walkPhase > 0.0f);
   for (const auto& unit : blue.GetScene().units) {
     const Unit* mirrored = red.FindUnit(unit.id);
     CHECK(mirrored && mirrored->position == unit.position);
     CHECK(mirrored && mirrored->facingYaw == unit.facingYaw);
     CHECK(mirrored && mirrored->plan.type == unit.plan.type);
+    CHECK(mirrored && mirrored->walkPhase == unit.walkPhase);
+    CHECK(mirrored && mirrored->walkBlend == unit.walkBlend);
+    CHECK(mirrored && mirrored->idleElapsed == unit.idleElapsed);
+    CHECK(mirrored && mirrored->shootElapsed == unit.shootElapsed);
+    CHECK(mirrored && mirrored->shootAimYaw == unit.shootAimYaw);
   }
 
   GameSnapshot bad;
@@ -1322,6 +1403,8 @@ int main() {
   TestGameLogicPlaybookDefaultDoesNothing();
   TestGameLogicPlaybookIgnoresSameTeamMover();
   TestGameLogicWinCondition();
+  TestWalkCycleTracksInFlightMove();
+  TestResolvedShotStartsShootAnimation();
   TestSnapshotMirrorsMatchAndTeamPlans();
   TestSightingRecordedImmediatelyOnEntry();
   TestSightingSamplesAccumulateWhileInFov();

@@ -180,10 +180,29 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
     return false;
   };
 
+  // Reports where the equivalent mouse click would land (a figure's head, to
+  // match the HUD's anchor point) before driving the state.
+  auto NotifyClick = [&](Team team, const glm::vec3& worldPoint) {
+    if (hooks.onClick) hooks.onClick(game, team, worldPoint);
+  };
+  auto ClickUnitAt = [&](int id, Team team) {
+    if (const Unit* unit = game.FindUnit(id)) {
+      NotifyClick(team, unit->position + glm::vec3(0.0f, 1.9f, 0.0f));
+    }
+    game.ClickUnit(id, team);
+  };
+  // Reports the HUD action-menu button the equivalent real player would
+  // press, while the pre-press state (menu included) is still showing.
+  auto NotifyMenuClick = [&](Team team, const char* button) {
+    if (hooks.onMenuClick) hooks.onMenuClick(game, team, button);
+  };
+
   if (action.kind == ScenarioAction::Kind::Commit) {
     if (!game.CanCommitRound()) {
       return Fail("cannot commit: not every living figure (on both teams) has a plan yet");
     }
+    // Either pane has the button; show the press in Blue's.
+    NotifyMenuClick(Team::Blue, "Commit Round");
     game.CommitRound();
     if (hooks.tickSeconds > 0.0f) {
       // Visual mode: advance in fixed ticks and let the observer capture
@@ -237,19 +256,21 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
   }
   const Team actorTeam = actorUnit->team;
 
-  game.ClickUnit(action.actor, actorTeam);
+  ClickUnitAt(action.actor, actorTeam);
   if (game.SelectedUnitId() != action.actor || game.Mode() != InputMode::ActionMenu) {
     return Fail("could not be selected (already game over?)");
   }
 
   switch (action.kind) {
     case ScenarioAction::Kind::Move: {
+      NotifyMenuClick(actorTeam, "Move");
       game.ChooseMove();
       if (hooks.onMoveFrontier) {
         for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
           hooks.onMoveFrontier(game, actorTeam);
         }
       }
+      NotifyClick(actorTeam, action.destination);
       game.ClickGround(action.destination, actorTeam);
       if (game.Mode() != InputMode::AwaitingSelection) {
         return Fail("has no path to destination " + ToString(action.destination) +
@@ -262,8 +283,9 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
       return true;
     }
     case ScenarioAction::Kind::Shoot: {
+      NotifyMenuClick(actorTeam, "Shoot");
       game.ChooseShoot();
-      game.ClickUnit(action.target, actorTeam);
+      ClickUnitAt(action.target, actorTeam);
       const bool planned = game.Mode() != InputMode::AwaitingShootTarget;
       if (action.expectNoop && planned) {
         return Fail("shot at " + std::to_string(action.target) +
@@ -273,10 +295,14 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
         return Fail("shot at " + std::to_string(action.target) +
                     " could not be planned (invalid target, or outside the shooter's team FOV?)");
       }
-      if (action.expectNoop) game.CancelAction();  // Return to ActionMenu, mirroring a real player.
+      if (action.expectNoop) {
+        NotifyMenuClick(actorTeam, "Cancel");
+        game.CancelAction();  // Return to ActionMenu, mirroring a real player.
+      }
       return true;
     }
     case ScenarioAction::Kind::Pass:
+      NotifyMenuClick(actorTeam, "Pass");
       game.ChoosePass();
       return true;
     case ScenarioAction::Kind::Cancel:

@@ -26,6 +26,9 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
   overlays.selectionHighlight = selected->position;
   if (game.Mode() == tactics::InputMode::AwaitingMoveDestination) {
     overlays.moveFrontier = game.MoveFrontier();
+    // A later leg's boundary is yellow, matching the selector; the first leg's stays green.
+    overlays.moveFrontierSubsequentLeg = selected->plan.type == tactics::PlannedActionType::Move &&
+                                         selected->plan.movePath.size() >= 2;
     if (game.MovePreviewValid()) {
       overlays.movePreviewPath = &game.MovePreviewPath();
     } else if (hoveredGroundPoint) {
@@ -950,7 +953,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     frontierFill_.Draw();
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
-    unlitShader_.SetVec4("uColor", glm::vec4(0.2f, 1.0f, 0.3f, 1.0f));
+    unlitShader_.SetVec4("uColor", overlays.moveFrontierSubsequentLeg
+                                       ? glm::vec4(1.0f, 0.9f, 0.15f, 1.0f)
+                                       : glm::vec4(0.2f, 1.0f, 0.3f, 1.0f));
     frontierBorder_.DrawSegments();
   }
   glDepthMask(GL_TRUE);

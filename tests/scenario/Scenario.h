@@ -109,6 +109,20 @@ struct PlaybackHooks {
   // post-action holds). The game state is mid-scenario; do not mutate it.
   std::function<void(const GameLogic&)> onFrame;
 
+  // Fired just before each scripted click is applied (unit selection, move
+  // destination, shoot target) by `team`'s player, with the world-space point the equivalent
+  // real mouse click would land on (unit head for figures, the ground point
+  // for destinations). Lets a renderer show the cursor landing before the
+  // state changes. The game state is the pre-click state; do not mutate it.
+  std::function<void(const GameLogic&, Team team, const glm::vec3& worldPoint)> onClick;
+
+  // Fired just before a scripted press of a HUD action-menu button ("Move",
+  // "Shoot", "Pass", "Cancel") by `team`'s player, after the actor has been
+  // selected. The game state is the pre-press state (so the menu the player
+  // would be clicking is actually visible); do not mutate it. `button` is
+  // the button's on-screen label.
+  std::function<void(const GameLogic&, Team team, const char* button)> onMenuClick;
+
   // Fired holdFramesAfterAction times (min 1) for each Move step, right after
   // ChooseMove() while the game is in AwaitingMoveDestination, so a capture
   // can show the mover's movement frontier. Team is the mover's. Only

@@ -470,6 +470,9 @@ int main() {
     // A follower mirrors execution from the simulator's snapshots; running
     // its own (empty) round would end it immediately.
     if (isSimulator || game.Mode() != InputMode::Executing) game.Update(dt);
+    // Sighting memory is per-page derived state: tick it unconditionally so
+    // a follower (which skips Update() while Executing) still builds it.
+    game.UpdateSightingMemory(dt);
     for (auto& camera : cameras) camera.Update(dt);
 
     // WEGO rounds: both teams plan simultaneously, so during the planning

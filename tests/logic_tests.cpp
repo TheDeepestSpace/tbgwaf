@@ -953,6 +953,126 @@ void TestSnapshotMirrorsMatchAndTeamPlans() {
   CHECK(!DeserializeSnapshot("", &bad));
 }
 
+// --- Enemy sighting memory ---------------------------------------------
+
+void StepSightings(GameLogic& game, float seconds, float dt = 0.05f) {
+  const int steps = static_cast<int>(std::lround(seconds / dt));
+  for (int i = 0; i < steps; ++i) game.UpdateSightingMemory(dt);
+}
+
+void BlueLookAway(GameLogic& game, float yaw) {
+  for (int id = 0; id <= 2; ++id) game.FindUnit(id)->facingYaw = yaw;
+}
+
+void TestSightingRecordedImmediatelyOnEntry() {
+  GameLogic game(LegacyScene());
+  BlueLookAway(game, kPi);
+  StepSightings(game, 1.0f);
+  CHECK(game.Sightings(Team::Blue, 4).empty());
+  BlueLookAway(game, 0.0f);
+  game.UpdateSightingMemory(0.05f);
+  CHECK(game.Sightings(Team::Blue, 4).size() == 1);
+  CHECK(game.Sightings(Team::Red, 4).empty());  // Own figures aren't "sighted".
+}
+
+void TestSightingSamplesAccumulateWhileInFov() {
+  GameLogic game(LegacyScene());
+  StepSightings(game, 3.0f);
+  const auto& samples = game.Sightings(Team::Blue, 4);
+  // Entry sample + one per 0.5s.
+  CHECK(samples.size() >= 6 && samples.size() <= 7);
+  for (size_t i = 0; i + 1 < samples.size(); ++i) {
+    CHECK(std::fabs((samples[i].ageSeconds - samples[i + 1].ageSeconds) -
+                    constants::kSightingSampleInterval) < 0.06f);
+  }
+}
+
+void TestSightingMoveDirectionOnlyWhenMoving() {
+  GameLogic game(LegacyScene());
+  StepSightings(game, 1.0f);
+  for (const auto& s : game.Sightings(Team::Blue, 4)) {
+    CHECK(glm::length(s.moveDirection) == 0.0f);
+  }
+  const size_t stationaryCount = game.Sightings(Team::Blue, 4).size();
+  Unit* red = game.FindUnit(4);
+  for (int i = 0; i < 20; ++i) {
+    red->position.x -= 0.1f;
+    game.UpdateSightingMemory(0.05f);
+  }
+  const auto& samples = game.Sightings(Team::Blue, 4);
+  CHECK(samples.size() > stationaryCount);
+  const auto& last = samples.back();
+  CHECK(std::fabs(last.moveDirection.x + 1.0f) < 1e-3f);
+  CHECK(std::fabs(last.moveDirection.z) < 1e-3f);
+}
+
+void TestSightingsPersistAfterLeavingFovThenExpire() {
+  GameLogic game(LegacyScene());
+  StepSightings(game, 2.0f);
+  const size_t count = game.Sightings(Team::Blue, 4).size();
+  CHECK(count > 0);
+  BlueLookAway(game, kPi);
+  StepSightings(game, 2.0f);
+  CHECK(game.Sightings(Team::Blue, 4).size() == count);  // Not cleared, none added.
+  StepSightings(game, constants::kSightingMemoryDuration + 1.0f);
+  CHECK(game.Sightings(Team::Blue, 4).empty());
+}
+
+void TestSightingReentryAppendsToAgingTrail() {
+  GameLogic game(LegacyScene());
+  StepSightings(game, 1.0f);
+  const size_t before = game.Sightings(Team::Blue, 4).size();
+  const float oldestAge = game.Sightings(Team::Blue, 4).front().ageSeconds;
+  BlueLookAway(game, kPi);
+  StepSightings(game, 3.0f);
+  BlueLookAway(game, 0.0f);
+  game.UpdateSightingMemory(0.05f);
+  const auto& samples = game.Sightings(Team::Blue, 4);
+  CHECK(samples.size() == before + 1);
+  CHECK(samples.front().ageSeconds > oldestAge + 2.9f);  // Kept aging, not reset.
+  CHECK(samples.back().ageSeconds < 0.01f);
+}
+
+void TestResetClearsSightings() {
+  GameLogic game(LegacyScene());
+  StepSightings(game, 1.0f);
+  CHECK(!game.Sightings(Team::Blue, 4).empty());
+  game.Reset(LegacyScene());
+  CHECK(game.Sightings(Team::Blue, 4).empty());
+}
+
+void TestFollowerBuildsSightingsWithoutPhysicsUpdate() {
+  GameLogic sim(LegacyScene()), follower(LegacyScene());
+  sim.ClickUnit(4, Team::Red);
+  sim.ChooseMove();
+  sim.ClickGround(glm::vec3(-2.0f, 0.0f, 0.0f), Team::Red);
+  CHECK(sim.FindUnit(4)->plan.type == PlannedActionType::Move);
+  PassEveryoneElse(sim, {4});
+  CHECK(sim.CanCommitRound());
+  sim.CommitRound();
+  CHECK(sim.Mode() == InputMode::Executing);
+
+  // Mirror main.cpp: only the simulator runs Update() while Executing; both
+  // pages tick sighting memory every frame.
+  int frames = 0;
+  while (sim.Mode() == InputMode::Executing && frames < 10000) {
+    sim.Update(0.05f);
+    CHECK(follower.ImportState(sim.ExportState()));
+    if (follower.Mode() != InputMode::Executing) follower.Update(0.05f);
+    sim.UpdateSightingMemory(0.05f);
+    follower.UpdateSightingMemory(0.05f);
+    ++frames;
+  }
+  CHECK(frames < 10000);
+  const auto& simSamples = sim.Sightings(Team::Blue, 4);
+  const auto& followerSamples = follower.Sightings(Team::Blue, 4);
+  CHECK(simSamples.size() >= 4);
+  CHECK(followerSamples.size() == simSamples.size());
+  bool anyMoving = false;
+  for (const auto& sample : followerSamples) anyMoving |= glm::length(sample.moveDirection) > 0.5f;
+  CHECK(anyMoving);
+}
+
 int main() {
   TestNavMeshRoutesAroundObstacle();
   TestNavMeshDirectPathWhenUnobstructed();
@@ -983,6 +1103,13 @@ int main() {
   TestGameLogicOverwatchFiresOnEnemyEnteringFov();
   TestGameLogicWinCondition();
   TestSnapshotMirrorsMatchAndTeamPlans();
+  TestSightingRecordedImmediatelyOnEntry();
+  TestSightingSamplesAccumulateWhileInFov();
+  TestSightingMoveDirectionOnlyWhenMoving();
+  TestSightingsPersistAfterLeavingFovThenExpire();
+  TestSightingReentryAppendsToAgingTrail();
+  TestResetClearsSightings();
+  TestFollowerBuildsSightingsWithoutPhysicsUpdate();
 
   if (g_failures == 0) {
     std::printf("All logic tests passed.\n");

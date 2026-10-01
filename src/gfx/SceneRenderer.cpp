@@ -692,6 +692,21 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         ghost.position = unit.plan.movePath.back();
         ghost.facingYaw = unit.plan.endFacingYaw;
         DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost);
+        // Future legs of a multi-round route: yellow, with a marker at each
+        // leg boundary so they read apart from the leg about to execute.
+        if (unit.plan.queuedPath.size() >= 2) {
+          pathLine_.SetPoints(unit.plan.queuedPath);
+          unlitShader_.SetMat4("uMVP", viewProj);
+          unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
+          pathLine_.Draw();
+          DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.plan.movePath.back(),
+                        glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
+          const auto legs = tactics::SplitPathByLength(unit.plan.queuedPath, unit.MoveBudget());
+          for (size_t i = 0; i + 1 < legs.size(); ++i) {
+            DrawHighlight(unlitShader_, cubeMesh_, viewProj, legs[i].back(),
+                          glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
+          }
+        }
       } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
         if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {
           const std::vector<glm::vec3> shotLine = {unit.EyePosition(), shotTarget->EyePosition()};

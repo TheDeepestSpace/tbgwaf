@@ -18,7 +18,55 @@ float PathLength(const std::vector<glm::vec3>& path) {
   return length;
 }
 
+float FinalYaw(const std::vector<glm::vec3>& path, float fallback) {
+  for (size_t i = path.size(); i-- > 1;) {
+    const glm::vec3 delta = path[i] - path[i - 1];
+    if (glm::length(glm::vec2(delta.x, delta.z)) > 1e-4f) return std::atan2(delta.z, delta.x);
+  }
+  return fallback;
+}
+
+// Concatenates legs back into one polyline (dropping each shared join point).
+std::vector<glm::vec3> JoinLegs(const std::vector<std::vector<glm::vec3>>& legs, size_t first) {
+  std::vector<glm::vec3> out;
+  for (size_t i = first; i < legs.size(); ++i) {
+    out.insert(out.end(), legs[i].begin() + (out.empty() ? 0 : 1), legs[i].end());
+  }
+  return out;
+}
+
 }  // namespace
+
+std::vector<std::vector<glm::vec3>> SplitPathByLength(const std::vector<glm::vec3>& path,
+                                                      float legLength) {
+  std::vector<std::vector<glm::vec3>> legs;
+  if (path.size() < 2 || legLength <= 1e-4f) {
+    legs.push_back(path);
+    return legs;
+  }
+  std::vector<glm::vec3> leg{path[0]};
+  float room = legLength;
+  glm::vec3 from = path[0];
+  for (size_t i = 1; i < path.size(); ++i) {
+    glm::vec3 to = path[i];
+    float segLen = glm::distance(from, to);
+    while (segLen > room + 1e-4f) {
+      const glm::vec3 cut = from + (to - from) * (room / segLen);
+      leg.push_back(cut);
+      legs.push_back(std::move(leg));
+      leg = {cut};
+      segLen -= room;
+      from = cut;
+      room = legLength;
+    }
+    leg.push_back(to);
+    room -= segLen;
+    from = to;
+  }
+  if (leg.size() >= 2) legs.push_back(std::move(leg));
+  if (legs.empty()) legs.push_back(path);
+  return legs;
+}
 
 std::optional<Team> CheckWinner(const std::vector<Unit>& units) {
   bool blueAlive = false, redAlive = false;
@@ -62,6 +110,7 @@ GameSnapshot GameLogic::ExportState() const {
     u.planType = unit.plan.type;
     u.planShootTargetId = unit.plan.shootTargetId;
     u.planPath = unit.plan.movePath;
+    u.planQueuedPath = unit.plan.queuedPath;
     u.planEndFacingYaw = unit.plan.endFacingYaw;
     u.knockdownAxis = unit.knockdownAxis;
     u.knockdownElapsed = unit.knockdownElapsed;
@@ -91,6 +140,7 @@ void ApplyPlan(const GameSnapshot::UnitState& u, Unit* unit) {
   unit->plan.type = u.planType;
   unit->plan.shootTargetId = u.planShootTargetId;
   unit->plan.movePath = u.planPath;
+  unit->plan.queuedPath = u.planQueuedPath;
   unit->plan.endFacingYaw = u.planEndFacingYaw;
 }
 
@@ -147,6 +197,8 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
         << u.knockdownAxis.x << ' ' << u.knockdownAxis.y << ' ' << u.knockdownAxis.z << ' '
         << u.knockdownElapsed << ' ' << (u.moving ? 1 : 0) << ' ' << u.planPath.size();
     for (const auto& p : u.planPath) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
+    out << ' ' << u.planQueuedPath.size();
+    for (const auto& p : u.planQueuedPath) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
   }
   return out.str();
 }
@@ -180,6 +232,12 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
     u.triggerAction = static_cast<TriggerAction>(trigger);
     u.planPath.resize(pathCount);
     for (auto& p : u.planPath) {
+      if (!(in >> p.x >> p.y >> p.z)) return false;
+    }
+    size_t queuedCount = 0;
+    if (!(in >> queuedCount) || queuedCount > kMaxEntries) return false;
+    u.planQueuedPath.resize(queuedCount);
+    for (auto& p : u.planQueuedPath) {
       if (!(in >> p.x >> p.y >> p.z)) return false;
     }
   }
@@ -241,6 +299,7 @@ void GameLogic::ClickUnit(int unitId, Team byTeam) {
     shooter->plan.type = PlannedActionType::Shoot;
     shooter->plan.shootTargetId = unit->id;
     shooter->plan.movePath.clear();
+    shooter->plan.queuedPath.clear();
     selectedUnitId_.reset();
     mode_ = InputMode::AwaitingSelection;
   }
@@ -253,27 +312,24 @@ void GameLogic::ClickGround(const glm::vec3& point, Team byTeam) {
 
   std::vector<glm::vec3> path;
   if (!navMesh_.FindPath(mover->position, point, &path)) return;
-  // The round executes over a fixed window, so a figure can only plan as far
-  // as it can actually run in that time.
-  if (PathLength(path) > mover->MoveBudget()) return;
+  // The round executes over a fixed window, so only the first MoveBudget()
+  // of the route becomes this round's leg; the rest is queued and auto-armed
+  // one leg per round (see FinishRound).
+  auto legs = SplitPathByLength(path, mover->MoveBudget());
+  std::vector<glm::vec3> queued = JoinLegs(legs, 1);
+  path = std::move(legs[0]);
 
-  // Default the final facing to the path's last non-degenerate segment
+  // Default the final facing to the leg's last non-degenerate segment
   // direction (what the walk animation would leave the figure facing), so an
   // untouched ghost costs nothing extra.
-  float yaw = mover->facingYaw;
-  for (size_t i = path.size(); i-- > 1;) {
-    const glm::vec3 delta = path[i] - path[i - 1];
-    if (glm::length(glm::vec2(delta.x, delta.z)) > 1e-4f) {
-      yaw = std::atan2(delta.z, delta.x);
-      break;
-    }
-  }
+  const float yaw = FinalYaw(path, mover->facingYaw);
 
   // Plan only: NavMesh::FindPath always returns at least [start, goal] on
   // success. Nothing moves until this plan is executed by CommitRound(); the
   // facing stays adjustable via SetPlannedMoveFacing() until then.
   mover->plan.type = PlannedActionType::Move;
   mover->plan.movePath = std::move(path);
+  mover->plan.queuedPath = std::move(queued);
   mover->plan.endFacingYaw = yaw;
   mover->plan.shootTargetId = -1;
   selectedUnitId_.reset();
@@ -381,12 +437,17 @@ void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
   if (mode_ != InputMode::AwaitingMoveDestination) return;
   const Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->team != byTeam) return;
-  movePreviewValid_ = navMesh_.FindPath(mover->position, point, &movePreviewPath_) &&
-                      PathLength(movePreviewPath_) <= mover->MoveBudget();
+  movePreviewValid_ = navMesh_.FindPath(mover->position, point, &movePreviewPath_);
+}
+
+// Any manual touch of a figure's plan drops its queued multi-round route.
+void GameLogic::ClearQueuedPath(std::optional<int> unitId) {
+  if (Unit* unit = FindUnit(unitId.value_or(-1))) unit->plan.queuedPath.clear();
 }
 
 void GameLogic::ChooseMove() {
   if (mode_ != InputMode::ActionMenu) return;
+  ClearQueuedPath(selectedUnitId_);
   mode_ = InputMode::AwaitingMoveDestination;
   movePreviewPath_.clear();
   movePreviewValid_ = false;
@@ -394,6 +455,7 @@ void GameLogic::ChooseMove() {
 
 void GameLogic::ChooseShoot() {
   if (mode_ != InputMode::ActionMenu) return;
+  ClearQueuedPath(selectedUnitId_);
   mode_ = InputMode::AwaitingShootTarget;
 }
 
@@ -403,6 +465,7 @@ void GameLogic::ChoosePass() {
   if (!unit) return;
   unit->plan.type = PlannedActionType::Pass;
   unit->plan.movePath.clear();
+  unit->plan.queuedPath.clear();
   unit->plan.shootTargetId = -1;
   selectedUnitId_.reset();
   mode_ = InputMode::AwaitingSelection;
@@ -414,12 +477,14 @@ void GameLogic::ChooseOverwatch() {
   if (!unit) return;
   unit->plan.type = PlannedActionType::Overwatch;
   unit->plan.movePath.clear();
+  unit->plan.queuedPath.clear();
   unit->plan.shootTargetId = -1;
   selectedUnitId_.reset();
   mode_ = InputMode::AwaitingSelection;
 }
 
 void GameLogic::CancelAction() {
+  ClearQueuedPath(selectedUnitId_);
   if (mode_ == InputMode::AwaitingMoveDestination || mode_ == InputMode::AwaitingShootTarget) {
     mode_ = InputMode::ActionMenu;
     movePreviewPath_.clear();
@@ -513,6 +578,9 @@ void GameLogic::CommitRound() {
     if (!unit.alive) continue;
     const PlannedAction plan = unit.plan;
     unit.plan = PlannedAction{};
+    // Carry the rest of a multi-round route across the commit; FinishRound
+    // arms its next leg.
+    if (plan.type == PlannedActionType::Move) unit.plan.queuedPath = plan.queuedPath;
 
     if (plan.type == PlannedActionType::Move) {
       activeMoves_.push_back(ActiveMove{unit.id, plan.movePath, 0, plan.endFacingYaw});
@@ -548,6 +616,22 @@ void GameLogic::FinishRound() {
   activeMoves_.clear();
   pendingShots_.clear();
   mode_ = InputMode::AwaitingSelection;
+
+  // Auto-arm the next leg of any multi-round route; the player can still
+  // replan (which clears the queue) before committing.
+  for (auto& unit : scene_.units) {
+    if (unit.plan.queuedPath.empty()) continue;
+    if (!unit.alive) {
+      unit.plan = PlannedAction{};
+      continue;
+    }
+    auto legs = SplitPathByLength(unit.plan.queuedPath, unit.MoveBudget());
+    std::vector<glm::vec3> rest = JoinLegs(legs, 1);
+    unit.plan.type = PlannedActionType::Move;
+    unit.plan.movePath = std::move(legs[0]);
+    unit.plan.queuedPath = std::move(rest);
+    unit.plan.endFacingYaw = FinalYaw(unit.plan.movePath, unit.facingYaw);
+  }
 
   const auto winner = CheckWinner(scene_.units);
   bool anyAlive = false;

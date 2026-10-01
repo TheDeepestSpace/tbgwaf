@@ -20,6 +20,9 @@ enum class PlannedActionType { None, Move, Shoot, Pass, Overwatch };
 struct PlannedAction {
   PlannedActionType type = PlannedActionType::None;
   std::vector<glm::vec3> movePath;  // Resolved via NavMesh::FindPath, for type == Move.
+  // Remaining route beyond this round's movePath leg: a polyline starting at
+  // movePath.back(), consumed one MoveBudget()-length leg per round turnover.
+  std::vector<glm::vec3> queuedPath;
   float endFacingYaw = 0.0f;        // Final facing once the path ends, for type == Move.
   int shootTargetId = -1;           // For type == Shoot.
 };
@@ -45,7 +48,8 @@ struct Unit {
   TriggerAction triggerAction = TriggerAction::None;
 
   // How far this figure can move in one round's fixed execution window --
-  // the plannable path-length cap enforced by GameLogic::ClickGround.
+  // the length of one planned leg (longer routes are queued, see
+  // PlannedAction::queuedPath).
   float MoveBudget() const { return runSpeed * constants::kRoundDuration; }
 
   glm::vec3 EyePosition() const {

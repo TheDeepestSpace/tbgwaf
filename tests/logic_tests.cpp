@@ -499,30 +499,86 @@ void TestMutualEliminationIsDraw() {
   CHECK(!game.Winner().has_value());
 }
 
-void TestMoveBudgetCapsPlannedPaths() {
+void TestFarDestinationQueuesLegsAcrossRounds() {
   GameLogic game(LegacyScene());
   game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
 
-  // blue0 can cover runSpeed * kRoundDuration world units per round. A far
-  // corner beyond that budget must be rejected at plan time -- the round's
-  // execution window is fixed, so the figure could never get there in time.
+  // A destination beyond one round's MoveBudget() is accepted: the first leg
+  // becomes the plan, the rest is queued.
   const Unit* mover = game.FindUnit(0);
-  const glm::vec3 tooFar(11.0f, 0.0f, 8.0f);
-  CHECK(glm::distance(mover->position, tooFar) > mover->MoveBudget());
-  game.HoverGround(tooFar, Team::Blue);
-  CHECK(!game.MovePreviewValid());
-  game.ClickGround(tooFar, Team::Blue);
-  CHECK(game.Mode() == InputMode::AwaitingMoveDestination);  // Rejected: no plan.
-  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::None);
-
-  // A destination inside the budget plans normally.
-  const glm::vec3 nearEnough(-3.0f, 0.0f, -4.0f);
-  game.HoverGround(nearEnough, Team::Blue);
+  const glm::vec3 far(11.0f, 0.0f, 8.0f);
+  CHECK(glm::distance(mover->position, far) > mover->MoveBudget());
+  game.HoverGround(far, Team::Blue);
   CHECK(game.MovePreviewValid());
-  game.ClickGround(nearEnough, Team::Blue);
+  game.ClickGround(far, Team::Blue);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
-  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Move);
+  CHECK(mover->plan.type == tactics::PlannedActionType::Move);
+  CHECK(!mover->plan.queuedPath.empty());
+  const auto legs = tactics::SplitPathByLength(mover->plan.movePath, mover->MoveBudget());
+  CHECK(legs.size() == 1);  // First leg fits the budget.
+
+  // Auto-continues across rounds with no re-clicking, ending at the goal.
+  for (int round = 0; round < 20 && game.FindUnit(0)->plan.type == tactics::PlannedActionType::Move;
+       ++round) {
+    for (const Unit& u : game.GetScene().units) {
+      if (u.id == 0 || u.plan.type != tactics::PlannedActionType::None) continue;
+      game.ClickUnit(u.id, u.team);
+      game.ChoosePass();
+    }
+    game.CommitRound();
+    while (game.Mode() == InputMode::Executing) game.Update(0.05f);
+  }
+  CHECK(glm::distance(game.FindUnit(0)->position, far) < 0.1f);
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::None);
+  CHECK(game.FindUnit(0)->plan.queuedPath.empty());
+}
+
+void TestManualReplanClearsQueuedPath() {
+  GameLogic game(LegacyScene());
+  const glm::vec3 far(11.0f, 0.0f, 8.0f);
+  auto planFar = [&] {
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseMove();
+    game.ClickGround(far, Team::Blue);
+    CHECK(!game.FindUnit(0)->plan.queuedPath.empty());
+  };
+
+  planFar();
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseOverwatch();
+  CHECK(game.FindUnit(0)->plan.queuedPath.empty());
+
+  planFar();
+  game.ClickUnit(0, Team::Blue);
+  game.ChoosePass();
+  CHECK(game.FindUnit(0)->plan.queuedPath.empty());
+
+  planFar();
+  game.ClickUnit(0, Team::Blue);
+  game.CancelAction();
+  CHECK(game.FindUnit(0)->plan.queuedPath.empty());
+
+  planFar();
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  CHECK(game.FindUnit(0)->plan.queuedPath.empty());
+  game.ClickGround(glm::vec3(-3.0f, 0.0f, -4.0f), Team::Blue);  // Short replan: nothing queued.
+  CHECK(game.FindUnit(0)->plan.queuedPath.empty());
+}
+
+void TestQueuedPathSnapshotRoundTrip() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(glm::vec3(11.0f, 0.0f, 8.0f), Team::Blue);
+  const auto& queued = game.FindUnit(0)->plan.queuedPath;
+  CHECK(!queued.empty());
+  tactics::GameSnapshot out;
+  CHECK(tactics::DeserializeSnapshot(tactics::SerializeSnapshot(game.ExportState()), &out));
+  GameLogic mirror(LegacyScene());
+  CHECK(mirror.ImportState(out));
+  CHECK(mirror.FindUnit(0)->plan.queuedPath.size() == queued.size());
 }
 
 void TestPendingShotFiresWhenTargetWalksIntoView() {
@@ -970,7 +1026,9 @@ int main() {
   TestRoundExecutesBothTeamsMovesConcurrently();
   TestShootRowsResolveSimultaneouslyAcrossTeams();
   TestMutualEliminationIsDraw();
-  TestMoveBudgetCapsPlannedPaths();
+  TestFarDestinationQueuesLegsAcrossRounds();
+  TestManualReplanClearsQueuedPath();
+  TestQueuedPathSnapshotRoundTrip();
   TestPendingShotFiresWhenTargetWalksIntoView();
   TestDefaultSceneSquadsStartHidden();
   TestGameLogicShootGatingRequiresTeamVisibility();

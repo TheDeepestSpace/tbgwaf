@@ -49,6 +49,13 @@ struct GameSnapshot {
     float planEndFacingYaw = 0.0f;
     glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
     float knockdownElapsed = -1.0f;
+    // Figure animation state (see Unit): a follower mirrors these rather
+    // than re-simulating, so its panes play the same walk/shoot beats.
+    float walkPhase = 0.0f;
+    float walkBlend = 0.0f;
+    float idleElapsed = 0.0f;
+    float shootElapsed = -1.0f;
+    float shootAimYaw = 0.0f;
     bool moving = false;  // Has an in-flight move in the executing round.
     ReactionRule reactionOnStationary = ReactionRule::DoNothing;
   };
@@ -246,6 +253,10 @@ class GameLogic {
   void ResolvePendingShots();
 
   void FinishRound();
+
+  // The Executing-mode body of Update(): advances every in-flight move,
+  // re-checks held shots, and finishes the round once nothing is in flight.
+  void AdvanceExecutingRound(float dtSeconds);
 
   // Checks every living enemy of `mover` armed with triggerAction == Shoot
   // for FOV+LOS on `mover`'s current (mid-move) position. On the first

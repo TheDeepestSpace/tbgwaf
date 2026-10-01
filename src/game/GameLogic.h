@@ -107,6 +107,8 @@ class GameLogic {
   // True once every living figure on *both* teams has a non-None plan,
   // i.e. CommitRound() is ready to be called.
   bool CanCommitRound() const;
+  // True while any killed unit is still mid-fall (knockdown animation running).
+  bool HasActiveKnockdown() const;
 
   const std::vector<glm::vec3>& MovePreviewPath() const { return movePreviewPath_; }
   bool MovePreviewValid() const { return movePreviewValid_; }

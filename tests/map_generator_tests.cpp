@@ -226,25 +226,19 @@ void TestBlocksAndStreetsVary() {
   }
 }
 
-void TestSidewalksLineEveryBlock() {
+void TestSidewalksCoverEveryBlock() {
   const MapGeneratorConfig c;
   for (uint32_t seed : kSeeds) {
     const Scene scene = GenerateUrbanMap(seed);
     const auto blocks = Lots(seed, c, /*buildingsOnly=*/false);
     size_t expected = 0;
-    for (const auto& l : UrbanLots(seed, c)) expected += l.notch ? 6 : 4;
+    for (const auto& l : UrbanLots(seed, c)) expected += l.notch ? 2 : 1;
     CHECK(scene.sidewalks.size() == expected);
     for (const AABB& s : scene.sidewalks) {
       CHECK(s.max.y > 0.0f && s.max.y < 0.3f);  // Curb, not a wall.
       bool inBlock = false;
       for (const auto& b : blocks) inBlock |= Inside(s, b, 0.0f);
       CHECK(inBlock);
-      // Never overlaps a building footprint.
-      for (const auto& o : scene.obstacles) {
-        const bool overlap = s.min.x < o.bounds.max.x - kEps && o.bounds.min.x < s.max.x - kEps &&
-                             s.min.z < o.bounds.max.z - kEps && o.bounds.min.z < s.max.z - kEps;
-        CHECK(!overlap);
-      }
     }
   }
 }
@@ -369,7 +363,7 @@ int main() {
   TestEveryBlockHasWallToWallAndGappedRuns();
   TestVariedHeightsWithFewTowers();
   TestBlocksAndStreetsVary();
-  TestSidewalksLineEveryBlock();
+  TestSidewalksCoverEveryBlock();
   TestLotVariety();
   TestNavMeshFullyReachableFromSpawns();
   TestWindowedNavMeshMatchesGlobalWithinBudget();

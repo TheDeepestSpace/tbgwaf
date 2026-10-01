@@ -250,18 +250,12 @@ Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     const float iu0 = U0 + sw, iu1 = U1 - sw, iv0 = V0 + sw, iv1 = V1 - sw;
     const float inu = lot.notch ? nu - sw : iu1, inv = lot.notch ? nv + sw : iv0;
 
+    // The whole block sits at curb height, buildings included.
     if (!lot.notch) {
-      walk(U0, V0, U1, iv0);
-      walk(U0, iv1, U1, V1);
-      walk(U0, iv0, iu0, iv1);
-      walk(iu1, iv0, U1, iv1);
+      walk(U0, V0, U1, V1);
     } else {
-      walk(U0, V0, nu, iv0);
-      walk(inu, iv0, nu, nv);
-      walk(inu, nv, U1, inv);
-      walk(iu1, inv, U1, iv1);
-      walk(U0, iv1, U1, V1);
-      walk(U0, iv0, iu0, iv1);
+      walk(U0, V0, nu, V1);
+      walk(nu, nv, U1, V1);
     }
     if (lot.empty) continue;
 

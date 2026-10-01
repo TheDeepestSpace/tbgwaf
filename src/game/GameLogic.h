@@ -1,6 +1,8 @@
 #pragma once
 
+#include <functional>
 #include <optional>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -88,6 +90,23 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* out);
 // against the same tick-start snapshot, so two figures shooting each other
 // simultaneously both die. The round ends once nothing is left in flight,
 // and the next round's planning begins.
+// Shape of a shooter's hit-probability cone. Only one profile is wired up
+// today (kDefaultShotProfile); the seam for per-role shapes (sniper: narrow,
+// long, accurate; infantry: wide, short, forgiving) is that ShotHitChance
+// takes its numbers from a profile rather than from the constants directly.
+struct ShotProfile {
+  float halfAngleDegrees;  // Hard cone edge; chance is 0 at and beyond it.
+  float range;             // Hard range cap; chance is 0 at and beyond it.
+  float maxChance;         // Chance at point-blank on the centerline.
+};
+inline constexpr ShotProfile kDefaultShotProfile{constants::kShootHalfFovDegrees,
+                                                 constants::kShootRange, 0.95f};
+
+// Pure falloff function. Chance = maxChance * angleFalloff * rangeFalloff:
+// cosine falloff on angle (1 on axis, 0 at the cone edge) times linear
+// falloff on distance (1 point-blank, 0 at range). Returns 0 outside the cone/range.
+float ShotProfileHitChance(const ShotProfile& profile, float angleDegrees, float distance);
+
 class GameLogic {
  public:
   GameLogic() { Reset(); }
@@ -216,10 +235,23 @@ class GameLogic {
   // the executing round (figures from both teams can be animating at once).
   bool IsUnitMoving(int unitId) const;
 
-  // Deterministic hit resolution: FOV cone + clear line-of-sight, applied
-  // immediately. Exposed directly so it can be unit tested without going
-  // through the click flow; also the overwatch trigger path.
-  bool ResolveShot(Unit& shooter, Unit& target);
+  // Probabilistic hit resolution, applied immediately: if the shot passes
+  // the hard gates (cone, range, LOS) it is fired (shooter animates) and a
+  // roll against ShotHitChance decides whether the target goes down.
+  // Returns true on a hit. If `fired` is non-null it is set to whether a
+  // shot was actually taken (gates passed), hit or miss. Exposed directly so
+  // it can be unit tested without going through the click flow; also the
+  // overwatch trigger path.
+  bool ResolveShot(Unit& shooter, Unit& target, bool* fired = nullptr);
+
+  // Hit probability in [0,1]; 0 for out-of-cone, out-of-range or LOS-blocked
+  // (the hard gates, unchanged). Otherwise ShotProfileHitChance of the
+  // shooter's profile at the target's bearing/distance.
+  float ShotHitChance(const Unit& shooter, const Unit& target) const;
+
+  // Test seam: replaces the uniform [0,1) roll used by ResolveShot. Pass an
+  // empty function to restore the default seeded RNG.
+  void SetShotRollSource(std::function<float()> source) { shotRollSource_ = std::move(source); }
 
  private:
   // One figure's in-flight planned move; multiple can be active at once
@@ -241,10 +273,14 @@ class GameLogic {
     int targetId = -1;
   };
 
-  // FOV+LOS check only, no side effects -- the "would ResolveShot hit"
-  // predicate, split out so a tick's simultaneous shots can all be judged
-  // against the same snapshot before any of them is applied.
+  // Gate check only, no side effects (ShotHitChance > 0): "can this shooter
+  // take the shot at all". Split out so a tick's simultaneous shots can all
+  // be judged against the same snapshot before any of them is applied.
   bool ShotConnects(const Unit& shooter, const Unit& target) const;
+
+  float RollShot();
+  // Applies a taken shot: shooter animation, plus knockdown if `hit`.
+  void ApplyShot(Unit& shooter, Unit& target, bool hit);
 
   // Judges every pending shot against the current (start-of-resolution)
   // state, then applies all connecting hits at once: mutual shots in the
@@ -298,6 +334,8 @@ class GameLogic {
   // the round finishes.
   std::vector<ActiveMove> activeMoves_;
   std::vector<PendingShot> pendingShots_;
+  std::mt19937 shotRng_{0x5eedu};
+  std::function<float()> shotRollSource_;
   // Ids of figures a simulating peer reports as mid-move (ImportState only;
   // a follower has no activeMoves_ of its own).
   std::vector<int> mirroredMoving_;

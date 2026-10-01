@@ -586,29 +586,69 @@ void GameLogic::CancelAction() {
   }
 }
 
-bool GameLogic::ShotConnects(const Unit& shooter, const Unit& target) const {
-  return InFovCone(shooter.EyePosition(), shooter.FacingDirection(), target.EyePosition(),
-                   constants::kShootHalfFovDegrees, constants::kShootRange) &&
-         LineOfSightClear(shooter.EyePosition(), target.EyePosition(), obstacleBounds_);
+float ShotProfileHitChance(const ShotProfile& profile, float angleDegrees, float distance) {
+  const float absAngle = std::fabs(angleDegrees);
+  if (absAngle >= profile.halfAngleDegrees || distance >= profile.range) return 0.0f;
+  constexpr float kHalfPi = 1.57079632679489661923f;
+  const float angleFalloff = std::cos(glm::radians(absAngle) / glm::radians(profile.halfAngleDegrees) * kHalfPi);
+  const float rangeFalloff = 1.0f - std::max(distance, 0.0f) / profile.range;
+  return profile.maxChance * angleFalloff * rangeFalloff;
 }
 
-bool GameLogic::ResolveShot(Unit& shooter, Unit& target) {
-  const bool hit = ShotConnects(shooter, target);
+float GameLogic::ShotHitChance(const Unit& shooter, const Unit& target) const {
+  const ShotProfile& profile = kDefaultShotProfile;  // Future: derive from shooter's role.
+  const glm::vec3 eye = shooter.EyePosition();
+  const glm::vec3 targetEye = target.EyePosition();
+  if (!InFovCone(eye, shooter.FacingDirection(), targetEye, profile.halfAngleDegrees, profile.range) ||
+      !LineOfSightClear(eye, targetEye, obstacleBounds_)) {
+    return 0.0f;
+  }
+  const glm::vec3 toTarget = targetEye - eye;
+  const float distance = glm::length(toTarget);
+  const glm::vec3 fwd = glm::normalize(glm::vec3(shooter.FacingDirection().x, 0.0f, shooter.FacingDirection().z));
+  float angle = 0.0f;
+  if (glm::length(glm::vec2(toTarget.x, toTarget.z)) > 1e-6f) {
+    const glm::vec3 dir = glm::normalize(glm::vec3(toTarget.x, 0.0f, toTarget.z));
+    angle = glm::degrees(std::acos(glm::clamp(glm::dot(fwd, dir), -1.0f, 1.0f)));
+  }
+  return ShotProfileHitChance(profile, angle, distance);
+}
+
+bool GameLogic::ShotConnects(const Unit& shooter, const Unit& target) const {
+  return ShotHitChance(shooter, target) > 0.0f;
+}
+
+float GameLogic::RollShot() {
+  if (shotRollSource_) return shotRollSource_();
+  // Drawn by hand: <random> distributions aren't specified across stdlibs.
+  return static_cast<float>(shotRng_() >> 8) / 16777216.0f;
+}
+
+bool GameLogic::ResolveShot(Unit& shooter, Unit& target, bool* fired) {
+  const float chance = ShotHitChance(shooter, target);
+  if (fired) *fired = chance > 0.0f;
+  if (chance <= 0.0f) return false;
+  const bool hit = RollShot() < chance;
+  ApplyShot(shooter, target, hit);
+  return hit;
+}
+
+void GameLogic::ApplyShot(Unit& shooter, Unit& target, bool hit) {
+  glm::vec3 dir = target.position - shooter.position;
+  dir.y = 0.0f;
+  if (glm::length(dir) < 1e-4f) dir = shooter.FacingDirection();
+  dir = glm::normalize(dir);
+  // Presentation only: start the shooter's quick-draw beat, aimed at the
+  // target's actual bearing (which may sit anywhere inside the FOV cone).
+  // Played for misses too -- the shot was taken.
+  shooter.shootElapsed = 0.0f;
+  shooter.shootAimYaw = std::atan2(dir.z, dir.x);
   if (hit) {
     target.alive = false;
-    glm::vec3 dir = target.position - shooter.position;
-    dir.y = 0.0f;
-    if (glm::length(dir) < 1e-4f) dir = shooter.FacingDirection();
-    dir = glm::normalize(dir);
     // up x dir: tipping around this axis leans the figure toward dir.
     target.knockdownAxis = glm::vec3(dir.z, 0.0f, -dir.x);
     target.knockdownElapsed = 0.0f;
-    // Presentation only: start the shooter's quick-draw beat, aimed at the
-    // target's actual bearing (which may sit anywhere inside the FOV cone).
-    shooter.shootElapsed = 0.0f;
-    shooter.shootAimYaw = std::atan2(dir.z, dir.x);
   }
-  return hit;
 }
 
 void GameLogic::ResolvePendingShots() {
@@ -617,6 +657,8 @@ void GameLogic::ResolvePendingShots() {
   // two figures whose shots connect on the same tick both fire: a mutual
   // kill downs both, rather than whichever happens to resolve first
   // silencing the other.
+  // A held shot is taken (and consumed, hit or miss) the first tick it
+  // passes the hard gates.
   std::vector<std::pair<Unit*, Unit*>> firing;
   for (const PendingShot& shot : pendingShots_) {
     Unit* shooter = FindUnit(shot.shooterId);
@@ -624,7 +666,11 @@ void GameLogic::ResolvePendingShots() {
     if (!shooter || !target || !shooter->alive || !target->alive) continue;
     if (ShotConnects(*shooter, *target)) firing.emplace_back(shooter, target);
   }
-  for (auto& [shooter, target] : firing) ResolveShot(*shooter, *target);
+  // Rolls are applied in order but each hit only flips the target's alive
+  // flag after all were judged gate-wise, so mutual shots still both fire.
+  std::vector<bool> hits;
+  for (auto& [shooter, target] : firing) hits.push_back(RollShot() < ShotHitChance(*shooter, *target));
+  for (size_t i = 0; i < firing.size(); ++i) ApplyShot(*firing[i].first, *firing[i].second, hits[i]);
 
   // Drop everything that fired or can no longer fire (dead shooter holds
   // its fire from here on; a downed target stops being worth a bullet).
@@ -652,9 +698,12 @@ bool GameLogic::TriggerOverwatch(Unit& mover) {
   for (auto& watcher : scene_.units) {
     if (!watcher.alive || watcher.team == mover.team) continue;
     if (watcher.triggerAction != TriggerAction::Shoot) continue;
-    if (ResolveShot(watcher, mover)) {
+    bool fired = false;
+    const bool hit = ResolveShot(watcher, mover, &fired);
+    if (fired) {
+      // The overwatch shot is spent whether or not it connected.
       watcher.triggerAction = TriggerAction::None;
-      return true;
+      if (hit) return true;
     }
   }
   return false;
@@ -667,7 +716,7 @@ bool GameLogic::CheckPlaybookReactions(Unit& mover) {
     if (watcher.reactionOnStationary != ReactionRule::Shoot) continue;
     // Stationary-only rule: a watcher that is itself mid-move doesn't react.
     if (IsUnitMoving(watcher.id)) continue;
-    if (ResolveShot(watcher, mover)) return true;
+    if (ResolveShot(watcher, mover)) return true;  // A miss lets it react again next step.
   }
   return false;
 }

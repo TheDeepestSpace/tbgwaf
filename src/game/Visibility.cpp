@@ -9,7 +9,7 @@ bool IsPointVisibleToTeam(Team team, const glm::vec3& point, const std::vector<U
   for (const auto& viewer : units) {
     if (!viewer.alive || viewer.team != team) continue;
     if (InFovCone(viewer.EyePosition(), viewer.FacingDirection(), point,
-                  constants::kShootHalfFovDegrees, constants::kShootRange) &&
+                  constants::kShootHalfFovDegrees, constants::kSightRange) &&
         LineOfSightClear(viewer.EyePosition(), point, obstacles)) {
       return true;
     }

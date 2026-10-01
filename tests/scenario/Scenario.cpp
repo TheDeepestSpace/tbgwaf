@@ -171,6 +171,11 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
     }
     game.ClickUnit(id, team);
   };
+  // Reports the HUD action-menu button the equivalent real player would
+  // press, while the pre-press state (menu included) is still showing.
+  auto NotifyMenuClick = [&](Team team, const char* button) {
+    if (hooks.onMenuClick) hooks.onMenuClick(game, team, button);
+  };
 
   if (action.kind == ScenarioAction::Kind::Commit) {
     if (!game.CanCommitRound()) {
@@ -225,6 +230,7 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
 
   switch (action.kind) {
     case ScenarioAction::Kind::Move: {
+      NotifyMenuClick(actorTeam, "Move");
       game.ChooseMove();
       NotifyClick(actorTeam, action.destination);
       game.ClickGround(action.destination, actorTeam);
@@ -239,6 +245,7 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
       return true;
     }
     case ScenarioAction::Kind::Shoot: {
+      NotifyMenuClick(actorTeam, "Shoot");
       game.ChooseShoot();
       ClickUnitAt(action.target, actorTeam);
       const bool planned = game.Mode() != InputMode::AwaitingShootTarget;
@@ -250,10 +257,14 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
         return Fail("shot at " + std::to_string(action.target) +
                     " could not be planned (invalid target, or outside the shooter's team FOV?)");
       }
-      if (action.expectNoop) game.CancelAction();  // Return to ActionMenu, mirroring a real player.
+      if (action.expectNoop) {
+        NotifyMenuClick(actorTeam, "Cancel");
+        game.CancelAction();  // Return to ActionMenu, mirroring a real player.
+      }
       return true;
     }
     case ScenarioAction::Kind::Pass:
+      NotifyMenuClick(actorTeam, "Pass");
       game.ChoosePass();
       return true;
     case ScenarioAction::Kind::Cancel:

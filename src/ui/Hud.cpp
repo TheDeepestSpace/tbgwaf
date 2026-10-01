@@ -28,13 +28,25 @@ glm::vec2 WorldToWindow(const glm::vec3& world, const gfx::OrbitCamera& camera,
 }
 
 HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRect& rect,
-                   int windowHeight, const gfx::OrbitCamera& camera) {
+                   int windowHeight, const gfx::OrbitCamera& camera, HudLayout* layout) {
   HudActions actions;
   // Window ids are suffixed with the team so two panes can share one ImGui
   // context (the visual runner) without their windows colliding.
   const std::string suffix = std::string("##") + TeamName(team);
   auto id = [&](const char* title) { return std::string(title) + suffix; };
   const float left = static_cast<float>(rect.x);
+  // All HUD buttons go through this wrapper so their on-screen positions can
+  // be reported back via `layout`.
+  auto Button = [&](const char* label) {
+    const bool pressed = ImGui::Button(label);
+    if (layout) {
+      const ImVec2 mn = ImGui::GetItemRectMin();
+      const ImVec2 mx = ImGui::GetItemRectMax();
+      layout->buttons.emplace_back(label,
+                                   glm::vec2((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f));
+    }
+    return pressed;
+  };
 
   if (game.Mode() == InputMode::GameOver) {
     ImGui::SetNextWindowPos(ImVec2(left + rect.width * 0.5f, windowHeight * 0.3f),
@@ -48,7 +60,7 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
       // the same instant.
       ImGui::Text("Mutual annihilation -- draw!");
     }
-    if (ImGui::Button("New Match")) actions.newMatch = true;
+    if (Button("New Match")) actions.newMatch = true;
     ImGui::End();
   } else {
     int plannedCount[2] = {0, 0}, totalCount[2] = {0, 0};
@@ -91,7 +103,7 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
         break;
     }
     ImGui::BeginDisabled(!game.CanCommitRound());
-    if (ImGui::Button("Commit Round")) actions.commit = true;
+    if (Button("Commit Round")) actions.commit = true;
     ImGui::EndDisabled();
     ImGui::End();
 
@@ -110,15 +122,15 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar);
         if (game.Mode() == InputMode::ActionMenu) {
-          if (ImGui::Button("Move")) actions.move = true;
+          if (Button("Move")) actions.move = true;
           ImGui::SameLine();
-          if (ImGui::Button("Shoot")) actions.shoot = true;
+          if (Button("Shoot")) actions.shoot = true;
           ImGui::SameLine();
-          if (ImGui::Button("Overwatch")) actions.overwatch = true;
+          if (Button("Overwatch")) actions.overwatch = true;
           ImGui::SameLine();
-          if (ImGui::Button("Pass")) actions.pass = true;
+          if (Button("Pass")) actions.pass = true;
         } else {
-          if (ImGui::Button("Cancel")) actions.cancel = true;
+          if (Button("Cancel")) actions.cancel = true;
         }
         ImGui::End();
       }

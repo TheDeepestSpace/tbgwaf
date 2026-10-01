@@ -7,6 +7,9 @@
 // via HudActions for the caller to apply.
 
 #include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include <glm/glm.hpp>
 #include <imgui.h>
@@ -55,11 +58,28 @@ struct HudActions {
   bool cancel = false;
 };
 
+// Window-space centers of the HUD buttons actually drawn this frame, keyed
+// by their visible label ("Move", "Shoot", "Cancel", "Commit Round", ...).
+// Lets the visual scenario runner aim its click marker at the real button a
+// player would press.
+struct HudLayout {
+  std::vector<std::pair<std::string, glm::vec2>> buttons;
+
+  const glm::vec2* FindButton(const char* label) const {
+    for (const auto& entry : buttons) {
+      if (entry.first == label) return &entry.second;
+    }
+    return nullptr;
+  }
+};
+
 // Draws `team`'s view of the HUD inside `rect`: the Round / Game Over panel,
 // the floating action menu (when `team` has a figure mid-selection), and the
 // team label. Both teams plan simultaneously, so every pane is always live;
 // `planning` is false while a round executes or the peer sync is pending.
+// When `layout` is non-null it is filled with this frame's button positions.
 HudActions DrawHud(const tactics::GameLogic& game, tactics::Team team, bool planning,
-                   const PaneRect& rect, int windowHeight, const gfx::OrbitCamera& camera);
+                   const PaneRect& rect, int windowHeight, const gfx::OrbitCamera& camera,
+                   HudLayout* layout = nullptr);
 
 }  // namespace ui

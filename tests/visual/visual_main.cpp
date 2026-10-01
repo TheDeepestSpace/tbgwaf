@@ -267,10 +267,14 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
 
   const int paneWidth = kWindowWidth / 2;
   // Optional cursor marker: `progress` runs 0 -> 1 as the ring closes in.
+  // Either a world-space click (figure/ground, projected through the pane's
+  // camera) or, when `button` is set, a press of the named HUD button at
+  // whatever screen position the HUD reports for it this frame.
   struct ClickMarker {
     Team team;
-    glm::vec3 world;
-    float progress;
+    glm::vec3 world{0.0f};
+    float progress = 0.0f;
+    const char* button = nullptr;
   };
   // Draws both 3D panes, then the same HUD the interactive app builds
   // (ui::DrawHud), then the click marker on the acting team's pane.
@@ -287,12 +291,16 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(static_cast<float>(kWindowWidth), static_cast<float>(kWindowHeight));
     io.DeltaTime = 1.0f / kVideoFps;
-    // Each team's pane gets its own HUD, as in its own browser tab.
+    // Each team's pane gets its own HUD, as in its own browser tab. Button
+    // positions are collected per pane so a menu-click marker can land on
+    // the actual button a player would press.
     const bool planning = game.Mode() != InputMode::Executing && game.Mode() != InputMode::GameOver;
+    std::array<ui::HudLayout, ui::kPaneCount> layouts;
     auto drawHud = [&](const GameLogic& g) {
       for (int pane = 0; pane < ui::kPaneCount; ++pane) {
+        layouts[pane] = ui::HudLayout{};
         ui::DrawHud(g, PaneTeam(pane), planning, ui::ComputePaneRect(pane, kWindowWidth),
-                    kWindowHeight, cameras[pane]);
+                    kWindowHeight, cameras[pane], &layouts[pane]);
       }
     };
     // Auto-resize windows need a couple of frames to settle on their content
@@ -308,11 +316,23 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     ImGui::NewFrame();
     drawHud(game);
     if (marker) {
-      {
-        const int pane = marker->team == Team::Blue ? 0 : 1;
-        const glm::vec2 p = ui::WorldToWindow(marker->world, cameras[pane],
-                                              ui::ComputePaneRect(pane, kWindowWidth),
-                                              kWindowHeight);
+      const int pane = marker->team == Team::Blue ? 0 : 1;
+      glm::vec2 p;
+      bool haveTarget = true;
+      if (marker->button) {
+        // HUD button press: use the position the HUD reported this frame.
+        // If the button is not on screen (unexpected), skip the marker but
+        // still emit the frame so timing stays intact.
+        if (const glm::vec2* center = layouts[pane].FindButton(marker->button)) {
+          p = *center;
+        } else {
+          haveTarget = false;
+        }
+      } else {
+        p = ui::WorldToWindow(marker->world, cameras[pane],
+                              ui::ComputePaneRect(pane, kWindowWidth), kWindowHeight);
+      }
+      if (haveTarget) {
         ImDrawList* draw = ImGui::GetForegroundDrawList();
         const ImVec2 c(p.x, p.y);
         const float radius = 18.0f + 60.0f * (1.0f - marker->progress);
@@ -368,6 +388,18 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
       for (int i = 0; i < kClickFrames; ++i) {
         const float progress = std::min(1.0f, static_cast<float>(i + 1) / (kClickFrames * 0.7f));
         const ClickMarker marker{team, worldPoint, progress};
+        writeVideoFrame(game, &marker);
+      }
+    };
+    // Same treatment for HUD action-menu presses (Move/Shoot/Pass/Cancel):
+    // the menu is visible in the pre-press state, so the marker closes in on
+    // the actual button before the choice takes effect.
+    hooks.onMenuClick = [&](const GameLogic& game, Team team, const char* button) {
+      for (int i = 0; i < kClickFrames; ++i) {
+        ClickMarker marker;
+        marker.team = team;
+        marker.progress = std::min(1.0f, static_cast<float>(i + 1) / (kClickFrames * 0.7f));
+        marker.button = button;
         writeVideoFrame(game, &marker);
       }
     };

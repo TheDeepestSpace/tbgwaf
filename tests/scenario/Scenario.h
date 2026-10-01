@@ -111,6 +111,13 @@ struct PlaybackHooks {
   // state changes. The game state is the pre-click state; do not mutate it.
   std::function<void(const GameLogic&, Team team, const glm::vec3& worldPoint)> onClick;
 
+  // Fired just before a scripted press of a HUD action-menu button ("Move",
+  // "Shoot", "Pass", "Cancel") by `team`'s player, after the actor has been
+  // selected. The game state is the pre-press state (so the menu the player
+  // would be clicking is actually visible); do not mutate it. `button` is
+  // the button's on-screen label.
+  std::function<void(const GameLogic&, Team team, const char* button)> onMenuClick;
+
   // Fired once at the initial state (completedActions == 0) and once after
   // each action step resolves (completedActions == 1, 2, ...). Assert-only
   // steps do not fire it: a "turn" for capture purposes is one executed

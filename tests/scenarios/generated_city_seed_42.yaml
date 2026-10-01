@@ -1,0 +1,8 @@
+# Seeded procedural city (seed 42), full-map view at game start. A change to
+# the generator's output for this seed shows up as a golden diff.
+name: generated_city_seed_42
+
+map:
+  generate: {seed: 42}
+
+camera: {target: [0, 0], zoom: 250}

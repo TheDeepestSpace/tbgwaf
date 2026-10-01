@@ -432,7 +432,7 @@ int main() {
         // pass) instead of panning the camera.
         if (leftDragPane >= 0 && !ImGui::GetIO().WantCaptureMouse) {
           if (aimedUnitId < 0) {
-            constexpr float kPanSpeed = 0.00375f;
+            constexpr float kPanSpeed = 0.0015f;
             // Drag the world under the cursor: target moves opposite to the drag.
             cameras[leftDragPane].Pan(-event.motion.xrel * kPanSpeed, event.motion.yrel * kPanSpeed);
           }
@@ -440,13 +440,13 @@ int main() {
                                           static_cast<float>(event.motion.yrel));
         }
         if (rightDragPane >= 0 && !ImGui::GetIO().WantCaptureMouse) {
-          constexpr float kRotateSpeed = 0.0125f;
+          constexpr float kRotateSpeed = 0.005f;
           cameras[rightDragPane].Rotate(-event.motion.xrel * kRotateSpeed,
                                          event.motion.yrel * kRotateSpeed);
         }
       } else if (event.type == SDL_MOUSEWHEEL) {
         if (!ImGui::GetIO().WantCaptureMouse) {
-          constexpr float kZoomSpeed = 0.25f;  // Fraction of current distance per tick.
+          constexpr float kZoomSpeed = 0.625f;  // Fraction of current distance per tick.
           // preciseY carries fractional trackpad deltas; wheel.y is rounded to
           // whole ticks, which makes trackpad zoom steppy.
 #if SDL_VERSION_ATLEAST(2, 0, 18)

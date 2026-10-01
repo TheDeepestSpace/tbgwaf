@@ -52,8 +52,9 @@ constexpr float kMoveSpeed = 4.0f;  // Default run speed, world units per second
 // runSpeed * kRoundDuration, so every move animation fits in the window.
 constexpr float kRoundDuration = 5.0f;  // Seconds of execution per round.
 // Visual length of the rendered FOV cone overlay. Sized off kShootRange
-// (bigger than any map's diagonal) so the cone visually reaches the map edge
-// no matter where a unit stands or faces; it's fine for the cone to overshoot.
+// (bigger than any map's diagonal) so the cone reaches the map edge no matter
+// where a unit stands or faces; the renderer clips each ray at the map
+// boundary.
 constexpr float kFovConeVisualRange = kShootRange;
 }  // namespace constants
 

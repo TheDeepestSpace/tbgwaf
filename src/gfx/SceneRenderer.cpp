@@ -194,9 +194,10 @@ constexpr float kHipHeight = 0.42f;
 constexpr float kTorsoHeight = 0.57f;
 constexpr float kTorsoWidth = 0.62f;  // Side to side (Z).
 constexpr float kTorsoDepth = 0.46f;  // Front to back (X).
-constexpr float kHeadHeight = 0.85f;
-constexpr float kHeadWidth = 0.95f;
-constexpr float kHeadDepth = 0.72f;
+// Keep the head centered where the old ellipsoid was, but use its smaller
+// front-to-back radius on every axis so the head is a true sphere.
+constexpr float kHeadCenterHeight = 1.375f;
+constexpr float kHeadRadius = 0.72f * 0.5f;
 constexpr float kShoulderHeight = 0.93f;
 constexpr float kUpperArmLength = 0.26f;
 constexpr float kLowerArmLength = 0.23f;
@@ -432,9 +433,7 @@ FigureParts BuildFigure(const Unit& unit) {
                                        kTorsoWidth * 0.5f)),
               teamColor};
   parts[1] = {EllipsoidModel(
-                  figure,
-                  glm::vec3(0.0f, tactics::constants::kUnitHeight - kHeadHeight * 0.5f, 0.0f),
-                  glm::vec3(kHeadDepth * 0.5f, kHeadHeight * 0.5f, kHeadWidth * 0.5f)),
+                  figure, glm::vec3(0.0f, kHeadCenterHeight, 0.0f), glm::vec3(kHeadRadius)),
               teamColor};
 
   const glm::mat4 leftThigh =

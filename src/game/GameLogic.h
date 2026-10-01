@@ -92,6 +92,8 @@ class GameLogic {
   void Reset(Scene scene);
 
   const Scene& GetScene() const { return scene_; }
+  // The navmesh currently in use: windowed around the figure most recently
+  // planned for (see EnsureNavMeshFor), empty until one has been.
   const NavMesh& GetNavMesh() const { return navMesh_; }
   InputMode Mode() const { return mode_; }
   std::optional<int> SelectedUnitId() const { return selectedUnitId_; }
@@ -243,8 +245,16 @@ class GameLogic {
   // watcher's trigger, and returns true so Update() can interrupt the move.
   bool TriggerOverwatch(Unit& mover);
 
+  // (Re)builds navMesh_ over the area `mover` can reach this round, unless
+  // the cached one already covers this figure at this position.
+  void EnsureNavMeshFor(const Unit& mover);
+
   Scene scene_;
+  // Range-scoped: covers only [mover.position +/- (MoveBudget + margin)],
+  // clipped to the map, not the whole map. Cached per (unit id, position).
   NavMesh navMesh_;
+  int navMeshUnitId_ = -1;
+  glm::vec3 navMeshOrigin_{0.0f};
   int roundNumber_ = 1;
   std::vector<AABB> obstacleBounds_;  // Cached flat bounds of scene_.obstacles for LOS/FOV checks.
 

@@ -142,6 +142,7 @@ GameSnapshot GameLogic::ExportState() const {
     u.knockdownElapsed = unit.knockdownElapsed;
     u.walkPhase = unit.walkPhase;
     u.walkBlend = unit.walkBlend;
+    u.idleElapsed = unit.idleElapsed;
     u.shootElapsed = unit.shootElapsed;
     u.shootAimYaw = unit.shootAimYaw;
     u.moving = IsUnitMoving(unit.id);
@@ -188,6 +189,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     unit->knockdownElapsed = u.knockdownElapsed;
     unit->walkPhase = u.walkPhase;
     unit->walkBlend = u.walkBlend;
+    unit->idleElapsed = u.idleElapsed;
     unit->shootElapsed = u.shootElapsed;
     unit->shootAimYaw = u.shootAimYaw;
     ApplyPlan(u, unit);
@@ -229,8 +231,8 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
         << ' ' << static_cast<int>(u.planType) << ' ' << u.planShootTargetId << ' ' << u.planEndFacingYaw << ' '
         << u.knockdownAxis.x << ' ' << u.knockdownAxis.y << ' ' << u.knockdownAxis.z << ' '
         << u.knockdownElapsed << ' ' << u.walkPhase << ' ' << u.walkBlend << ' '
-        << u.shootElapsed << ' ' << u.shootAimYaw << ' ' << (u.moving ? 1 : 0) << ' '
-        << u.planPath.size();
+        << u.idleElapsed << ' ' << u.shootElapsed << ' ' << u.shootAimYaw << ' '
+        << (u.moving ? 1 : 0) << ' ' << u.planPath.size();
     for (const auto& p : u.planPath) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
   }
   return out.str();
@@ -254,7 +256,8 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
     if (!(in >> u.id >> u.position.x >> u.position.y >> u.position.z >> u.facingYaw >> alive >>
           trigger >> plan >> u.planShootTargetId >> u.planEndFacingYaw >> u.knockdownAxis.x >>
           u.knockdownAxis.y >> u.knockdownAxis.z >> u.knockdownElapsed >> u.walkPhase >>
-          u.walkBlend >> u.shootElapsed >> u.shootAimYaw >> moving >> pathCount)) {
+          u.walkBlend >> u.idleElapsed >> u.shootElapsed >> u.shootAimYaw >> moving >>
+          pathCount)) {
       return false;
     }
     if (trigger < 0 || trigger > static_cast<int>(TriggerAction::Shoot)) return false;
@@ -391,6 +394,10 @@ void GameLogic::Update(float dtSeconds) {
   // purely visual and can outlast the round that caused them. A knockdown
   // holds its final pose; the shoot beat returns to idle (<0) once done.
   for (Unit& unit : scene_.units) {
+    if (unit.alive) {
+      unit.idleElapsed =
+          std::fmod(unit.idleElapsed + dtSeconds, constants::kIdleAnimDuration);
+    }
     if (!unit.alive && unit.knockdownElapsed >= 0.0f) {
       unit.knockdownElapsed =
           std::min(unit.knockdownElapsed + dtSeconds, constants::kKnockdownDuration);

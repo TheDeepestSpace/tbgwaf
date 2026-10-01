@@ -62,6 +62,7 @@ class SceneRenderer {
   Shader litShader_;
   Shader depthShader_;
   CubeMesh cubeMesh_;
+  SphereMesh sphereMesh_;
   LineMesh pathLine_;
   TriangleMesh fovConeMesh_;
   GLuint shadowFbo_ = 0;

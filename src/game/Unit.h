@@ -46,6 +46,9 @@ struct Unit {
   // flight, back to 0 once it ends).
   float walkPhase = 0.0f;
   float walkBlend = 0.0f;
+  // Looping clock for the subtle standing pose. Stored per unit so mirrored
+  // clients render the same sampled rig pose during execution.
+  float idleElapsed = 0.0f;
   // Visual-only quick-draw beat: seconds since this figure's shot resolved
   // (<0 = idle) and the world yaw toward the target it fired at, so the gun
   // arm can swing onto the target even when it sits off-center in the FOV.

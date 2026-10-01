@@ -54,6 +54,8 @@ constexpr float kKnockdownDuration = 0.4f;  // Seconds for a hit unit to fall ov
 // figure stopping mid-stride settles instead of snapping to rest.
 constexpr float kWalkStrideLength = 1.5f;
 constexpr float kWalkBlendRate = 12.0f;  // Per second; ~90% settled after 0.2 s.
+// Duration of the CC0 idle clip retargeted by the procedural figure rig.
+constexpr float kIdleAnimDuration = 3.3333333f;
 // Quick-draw pistol beat played by a shooter whose shot resolves: a short
 // draw/aim raise, then a recoil kick that decays back down. Purely
 // presentational; hit resolution itself stays instantaneous.

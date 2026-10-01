@@ -1,20 +1,28 @@
 #include "gfx/Mesh.h"
 
+#include <cmath>
+#include <vector>
+
 namespace gfx {
 
 void CubeMesh::Init() {
   // clang-format off
   static const float kVertices[] = {
-      0, 0, 0,  1, 0, 0,  1, 1, 0,  0, 1, 0,  // back  (z=0)
-      0, 0, 1,  1, 0, 1,  1, 1, 1,  0, 1, 1,  // front (z=1)
+      // position     normal
+      0, 0, 0,  0, 0,-1,  1, 0, 0,  0, 0,-1,  1, 1, 0,  0, 0,-1,  0, 1, 0,  0, 0,-1,
+      0, 0, 1,  0, 0, 1,  1, 0, 1,  0, 0, 1,  1, 1, 1,  0, 0, 1,  0, 1, 1,  0, 0, 1,
+      0, 0, 0, -1, 0, 0,  0, 1, 0, -1, 0, 0,  0, 1, 1, -1, 0, 0,  0, 0, 1, -1, 0, 0,
+      1, 0, 0,  1, 0, 0,  1, 0, 1,  1, 0, 0,  1, 1, 1,  1, 0, 0,  1, 1, 0,  1, 0, 0,
+      0, 1, 0,  0, 1, 0,  1, 1, 0,  0, 1, 0,  1, 1, 1,  0, 1, 0,  0, 1, 1,  0, 1, 0,
+      0, 0, 0,  0,-1, 0,  0, 0, 1,  0,-1, 0,  1, 0, 1,  0,-1, 0,  1, 0, 0,  0,-1, 0,
   };
   static const GLuint kIndices[] = {
       0, 1, 2, 2, 3, 0,  // back
       4, 6, 5, 6, 4, 7,  // front
-      0, 3, 7, 7, 4, 0,  // left
-      1, 5, 6, 6, 2, 1,  // right
-      3, 2, 6, 6, 7, 3,  // top
-      0, 4, 5, 5, 1, 0,  // bottom
+      8, 9,10,10,11, 8,  // left
+     12,13,14,14,15,12,  // right
+     16,17,18,18,19,16,  // top
+     20,21,22,22,23,20,  // bottom
   };
   // clang-format on
   indexCount_ = static_cast<GLsizei>(sizeof(kIndices) / sizeof(kIndices[0]));
@@ -30,7 +38,10 @@ void CubeMesh::Init() {
   glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(kIndices), kIndices, GL_STATIC_DRAW);
 
   glEnableVertexAttribArray(0);
-  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                        reinterpret_cast<void*>(3 * sizeof(float)));
   glBindVertexArray(0);
 }
 
@@ -42,6 +53,65 @@ void CubeMesh::Destroy() {
 }
 
 void CubeMesh::Draw() const {
+  glBindVertexArray(vao_);
+  glDrawElements(GL_TRIANGLES, indexCount_, GL_UNSIGNED_INT, nullptr);
+  glBindVertexArray(0);
+}
+
+void SphereMesh::Init() {
+  constexpr int kSlices = 20;
+  constexpr int kStacks = 14;
+  constexpr float kPi = 3.14159265358979323846f;
+  std::vector<float> vertices;
+  std::vector<GLuint> indices;
+  vertices.reserve((kStacks + 1) * (kSlices + 1) * 6);
+  indices.reserve(kStacks * kSlices * 6);
+
+  for (int stack = 0; stack <= kStacks; ++stack) {
+    const float theta = kPi * static_cast<float>(stack) / kStacks;
+    const float y = std::cos(theta);
+    const float ring = std::sin(theta);
+    for (int slice = 0; slice <= kSlices; ++slice) {
+      const float phi = 2.0f * kPi * static_cast<float>(slice) / kSlices;
+      const float x = ring * std::cos(phi);
+      const float z = ring * std::sin(phi);
+      vertices.insert(vertices.end(), {x, y, z, x, y, z});
+    }
+  }
+  for (int stack = 0; stack < kStacks; ++stack) {
+    for (int slice = 0; slice < kSlices; ++slice) {
+      const GLuint a = static_cast<GLuint>(stack * (kSlices + 1) + slice);
+      const GLuint b = a + kSlices + 1;
+      indices.insert(indices.end(), {a, b, a + 1, a + 1, b, b + 1});
+    }
+  }
+  indexCount_ = static_cast<GLsizei>(indices.size());
+
+  glGenVertexArrays(1, &vao_);
+  glGenBuffers(1, &vbo_);
+  glGenBuffers(1, &ebo_);
+  glBindVertexArray(vao_);
+  glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+  glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(GLuint), indices.data(),
+               GL_STATIC_DRAW);
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                        reinterpret_cast<void*>(3 * sizeof(float)));
+  glBindVertexArray(0);
+}
+
+void SphereMesh::Destroy() {
+  if (ebo_) glDeleteBuffers(1, &ebo_);
+  if (vbo_) glDeleteBuffers(1, &vbo_);
+  if (vao_) glDeleteVertexArrays(1, &vao_);
+  vao_ = vbo_ = ebo_ = 0;
+}
+
+void SphereMesh::Draw() const {
   glBindVertexArray(vao_);
   glDrawElements(GL_TRIANGLES, indexCount_, GL_UNSIGNED_INT, nullptr);
   glBindVertexArray(0);

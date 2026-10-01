@@ -42,19 +42,22 @@ void main() {
 
 // Lit shader used for the actual scene geometry (ground, obstacles,
 // figures): a single directional light with a basic shadow map, and a
-// per-face normal derived from screen-space position derivatives (GLSL ES
-// 3.00 has dFdx/dFdy as core, so every cube face gets a correct flat normal
-// without needing a dedicated per-face-vertex mesh).
+// vertex normals. CubeMesh duplicates its face vertices for hard edges while
+// SphereMesh shares smooth radial normals, so obstacles remain blocky and the
+// figures can have the soft silhouette of the concept sketch.
 const char* kLitVertexShaderSrc = R"(#version 300 es
 layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
 uniform mat4 uMVP;
 uniform mat4 uModel;
 uniform mat4 uLightSpaceMatrix;
 out vec3 vWorldPos;
+out vec3 vWorldNormal;
 out vec4 vLightSpacePos;
 void main() {
   vec4 world = uModel * vec4(aPos, 1.0);
   vWorldPos = world.xyz;
+  vWorldNormal = transpose(inverse(mat3(uModel))) * aNormal;
   vLightSpacePos = uLightSpaceMatrix * world;
   gl_Position = uMVP * vec4(aPos, 1.0);
 }
@@ -63,6 +66,7 @@ void main() {
 const char* kLitFragmentShaderSrc = R"(#version 300 es
 precision highp float;
 in vec3 vWorldPos;
+in vec3 vWorldNormal;
 in vec4 vLightSpacePos;
 uniform vec4 uColor;
 uniform vec3 uLightDir;  // Direction the light travels; surfaces face -uLightDir.
@@ -83,7 +87,7 @@ float ComputeShadow(vec3 normal) {
 }
 
 void main() {
-  vec3 normal = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
+  vec3 normal = normalize(vWorldNormal);
   vec3 viewDir = normalize(uViewPos - vWorldPos);
   if (dot(normal, viewDir) < 0.0) normal = -normal;
 
@@ -125,14 +129,21 @@ void DrawBox(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewPr
 // fragment shader) alongside the color. Light direction, view position, and
 // the shadow map itself are set once per pane, not per-object, since they
 // don't vary between draw calls.
-void DrawBoxLitModel(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
-                     const glm::mat4& lightSpaceMatrix, const glm::mat4& model,
-                     const glm::vec4& color) {
+template <typename Mesh>
+void DrawLitModel(const Shader& shader, const Mesh& mesh, const glm::mat4& viewProj,
+                  const glm::mat4& lightSpaceMatrix, const glm::mat4& model,
+                  const glm::vec4& color) {
   shader.SetMat4("uModel", model);
   shader.SetMat4("uMVP", viewProj * model);
   shader.SetMat4("uLightSpaceMatrix", lightSpaceMatrix);
   shader.SetVec4("uColor", color);
-  cube.Draw();
+  mesh.Draw();
+}
+
+void DrawBoxLitModel(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
+                     const glm::mat4& lightSpaceMatrix, const glm::mat4& model,
+                     const glm::vec4& color) {
+  DrawLitModel(shader, cube, viewProj, lightSpaceMatrix, model, color);
 }
 
 void DrawBoxLit(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
@@ -165,45 +176,84 @@ glm::mat4 KnockdownModel(const Unit& unit) {
 }
 
 // ---------------------------------------------------------------------------
-// Procedural humanoid figure. No mesh format or loader: every body part is
-// the same unit CubeMesh under its own model matrix, composed the way the
-// gun already was -- translate(position) * rotate(facingYaw) * local part
-// transform -- so the whole figure rides the unit's position/facing and the
-// KnockdownModel() tip-over exactly like the old two-box body did.
+// Procedural humanoid figure. The visible skin is assembled from overlapping
+// ellipsoids over a small hierarchical biped rig. Upper/lower limbs have
+// separate shoulder/elbow and hip/knee transforms, so the same rig can be
+// sampled by idle, locomotion, aim, recoil, and knockdown animation layers.
 //
 // Figure-local frame: +X forward (FacingDirection), +Y up, +Z the figure's
-// right-hand side. Limbs hang from a pivot (hip / shoulder) and swing about
-// the local Z axis: a positive swing angle moves a hanging limb forward.
-// Proportions add up to kUnitHeight so the figure still fits Unit::Bounds().
-//
-// The silhouette is a chubby plush doll: the head is nearly half the total
-// height and wider than the torso, there is no neck (the head sits straight
-// on the torso), and the limbs are short, thick stubs with the arms splayed
-// out from under the head.
+// right-hand side. A positive local-Z joint rotation moves a hanging bone
+// forward. The rounded segments overlap at every joint, hiding seams and
+// making the silhouette read as one soft body like the original sketch.
 
-constexpr float kLegLength = 0.4f;
-constexpr float kLegThickness = 0.26f;
-constexpr float kLegSideOffset = 0.16f;  // Leg center from the figure's midline.
-constexpr float kHipHeight = kLegLength;
-constexpr float kTorsoHeight = 0.55f;
+constexpr float kUpperLegLength = 0.22f;
+constexpr float kLowerLegLength = 0.22f;
+constexpr float kLegRadius = 0.14f;
+constexpr float kLegSideOffset = 0.16f;
+constexpr float kHipHeight = 0.42f;
+constexpr float kTorsoHeight = 0.57f;
 constexpr float kTorsoWidth = 0.62f;  // Side to side (Z).
-constexpr float kTorsoDepth = 0.44f;  // Front to back (X).
+constexpr float kTorsoDepth = 0.46f;  // Front to back (X).
 constexpr float kHeadHeight = 0.85f;
-constexpr float kHeadWidth = 0.95f;  // Overhangs the torso on both sides.
-constexpr float kHeadDepth = 0.7f;
-constexpr float kShoulderHeight = 0.92f;
-constexpr float kArmLength = 0.5f;
-constexpr float kArmThickness = 0.2f;
-constexpr float kArmSideOffset = kTorsoWidth * 0.5f + kArmThickness * 0.5f;
-constexpr float kArmSplay = glm::radians(25.0f);  // Arms angle outward, not straight down.
+constexpr float kHeadWidth = 0.95f;
+constexpr float kHeadDepth = 0.72f;
+constexpr float kShoulderHeight = 0.93f;
+constexpr float kUpperArmLength = 0.26f;
+constexpr float kLowerArmLength = 0.23f;
+constexpr float kArmRadius = 0.11f;
+constexpr float kArmSideOffset = kTorsoWidth * 0.48f;
+constexpr float kArmSplay = glm::radians(28.0f);
 constexpr float kGunLength = 0.36f;
 constexpr float kGunThickness = 0.08f;
 
-// Walk cycle (blended by unit.walkBlend): legs swing in antiphase, each arm
-// opposite its own side's leg, plus a small vertical bob twice per stride.
-constexpr float kLegSwingAmplitude = 0.6f;   // Radians, ~34 degrees.
-constexpr float kArmSwingAmplitude = 0.45f;  // Radians, ~26 degrees.
-constexpr float kWalkBobHeight = 0.025f;
+// Compact retarget of the Idle and Walking clips from RobotExpressive.glb
+// (Tomás Laulhé / Quaternius, CC0 1.0). The pinned source and extraction
+// details live in THIRD_PARTY.md. Eight samples per loop are enough for this
+// small on-screen figure; SampleLoop smooths between them. Angles are degrees
+// in the source rig's sagittal plane, then scaled below for the doll's very
+// short limbs.
+constexpr int kBipedKeyCount = 8;
+using BipedCurve = std::array<float, kBipedKeyCount>;
+constexpr BipedCurve kWalkLeftHip = {46.2f, 63.7f, 28.2f, -17.1f,
+                                     -6.6f, 16.4f, 64.4f, 69.2f};
+constexpr BipedCurve kWalkLeftKnee = {-24.6f, -61.1f, -36.6f, -6.7f,
+                                      -46.2f, -78.8f, -104.7f, -80.5f};
+constexpr BipedCurve kWalkRightHip = {-35.9f, -18.1f, 20.2f, 81.6f,
+                                      58.7f, 45.2f, -0.9f, -9.0f};
+constexpr BipedCurve kWalkRightKnee = {-34.6f, -66.8f, -97.7f, -110.8f,
+                                       -41.7f, -48.1f, -14.4f, -38.2f};
+constexpr BipedCurve kWalkLeftShoulder = {-21.6f, -20.4f, -12.2f, -0.7f,
+                                          6.6f, 4.3f, -3.8f, -11.8f};
+constexpr BipedCurve kWalkLeftElbow = {65.4f, 65.4f, 65.4f, 65.8f,
+                                       65.7f, 65.7f, 65.5f, 65.7f};
+constexpr BipedCurve kWalkRightShoulder = {-5.1f, -2.7f, -8.0f, -21.4f,
+                                           -29.8f, -35.9f, -28.2f, -14.6f};
+constexpr BipedCurve kWalkRightElbow = {60.0f, 60.4f, 58.3f, 56.8f,
+                                        56.1f, 56.2f, 56.6f, 57.5f};
+constexpr BipedCurve kWalkBob = {0.4f, 0.0f, 0.9f, 0.6f, 0.2f, 0.5f, 1.0f, 0.8f};
+constexpr BipedCurve kIdleLeftHip = {16.6f, 22.8f, 26.8f, 21.9f,
+                                     17.0f, 21.6f, 26.9f, 23.2f};
+constexpr BipedCurve kIdleLeftKnee = {-31.7f, -41.9f, -48.9f, -40.5f,
+                                      -31.7f, -39.9f, -48.7f, -42.7f};
+constexpr BipedCurve kIdleRightHip = {16.1f, 22.2f, 26.2f, 21.4f,
+                                      16.5f, 21.0f, 26.3f, 22.7f};
+constexpr BipedCurve kIdleRightKnee = {-31.0f, -41.0f, -47.8f, -39.6f,
+                                       -31.0f, -39.0f, -47.6f, -41.7f};
+constexpr BipedCurve kIdleBob = {1.0f, 0.4f, 0.0f, 0.5f, 1.0f, 0.6f, 0.0f, 0.4f};
+constexpr float kWalkBobHeight = 0.04f;
+constexpr float kIdleBobHeight = 0.008f;
+
+float SampleLoop(const BipedCurve& curve, float phase) {
+  constexpr float kTwoPi = 6.28318530717958647692f;
+  float wrapped = std::fmod(phase, kTwoPi);
+  if (wrapped < 0.0f) wrapped += kTwoPi;
+  const float cursor = wrapped * (kBipedKeyCount / kTwoPi);
+  const int current = static_cast<int>(std::floor(cursor)) % kBipedKeyCount;
+  const int next = (current + 1) % kBipedKeyCount;
+  float t = cursor - std::floor(cursor);
+  t = t * t * (3.0f - 2.0f * t);  // C1-continuous easing at each sampled key.
+  return glm::mix(curve[current], curve[next], t);
+}
 
 // Quick-draw pistol beat (unit.shootElapsed over kShootAnimDuration):
 //  stage 1, draw/aim: the gun arm snaps from hanging at the side up to a
@@ -264,6 +314,12 @@ glm::mat4 BoxModel(const glm::vec3& minCorner, const glm::vec3& size) {
   return glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
 }
 
+glm::mat4 EllipsoidModel(const glm::mat4& frame, const glm::vec3& center,
+                         const glm::vec3& radii) {
+  return frame * glm::translate(glm::mat4(1.0f), center) *
+         glm::scale(glm::mat4(1.0f), radii);
+}
+
 // Frame of a limb hanging from `pivot` (in the figure frame), swung forward
 // by `swing` radians about the pivot, optionally twisted about the vertical
 // axis first (yaw, same sign convention as facingYaw). The limb's own box
@@ -279,17 +335,35 @@ glm::mat4 LimbFrame(const glm::mat4& figure, const glm::vec3& pivot, float swing
          glm::rotate(glm::mat4(1.0f), swing, glm::vec3(0.0f, 0.0f, 1.0f));
 }
 
+glm::mat4 ChildBoneFrame(const glm::mat4& parent, float parentLength, float bend) {
+  return parent * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -parentLength, 0.0f)) *
+         glm::rotate(glm::mat4(1.0f), bend, glm::vec3(0.0f, 0.0f, 1.0f));
+}
+
+glm::mat4 RoundedSegment(const glm::mat4& bone, float length, float radius) {
+  // A little extra length makes adjacent ellipsoids overlap at the joint.
+  return EllipsoidModel(bone, glm::vec3(0.0f, -length * 0.5f, 0.0f),
+                        glm::vec3(radius, length * 0.56f, radius));
+}
+
+glm::mat4 JointBall(const glm::mat4& joint, float radius) {
+  return EllipsoidModel(joint, glm::vec3(0.0f), glm::vec3(radius));
+}
+
 glm::mat4 HangingBox(const glm::mat4& limb, float length, float thickness) {
   return limb * BoxModel(glm::vec3(-thickness * 0.5f, -length, -thickness * 0.5f),
                          glm::vec3(thickness, length, thickness));
 }
 
+enum class FigurePrimitive { Rounded, Box };
+
 struct FigurePart {
   glm::mat4 model{1.0f};
   glm::vec4 color{1.0f};
+  FigurePrimitive primitive = FigurePrimitive::Rounded;
 };
 
-constexpr int kFigurePartCount = 7;
+constexpr int kFigurePartCount = 15;
 using FigureParts = std::array<FigurePart, kFigurePartCount>;
 
 // Poses the whole figure for the unit's current animation state and returns
@@ -300,20 +374,48 @@ FigureParts BuildFigure(const Unit& unit) {
                                                       : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
   constexpr glm::vec4 kGunColor(0.12f, 0.12f, 0.12f, 1.0f);
 
-  // Walk cycle: right leg leads at phase 0; the arms counter-swing.
-  const float stride = std::sin(unit.walkPhase) * unit.walkBlend;
-  const float rightLegSwing = kLegSwingAmplitude * stride;
-  const float leftLegSwing = -rightLegSwing;
-  const float rightArmWalkSwing = -kArmSwingAmplitude * stride;
-  const float leftArmWalkSwing = -rightArmWalkSwing;
-  const float bob = kWalkBobHeight * (1.0f - std::cos(2.0f * unit.walkPhase)) * 0.5f *
-                    unit.walkBlend;
+  constexpr float kTwoPi = 6.28318530717958647692f;
+  const float idlePhase = unit.idleElapsed * (kTwoPi / tactics::constants::kIdleAnimDuration) +
+                          unit.id * 0.73f;
+  const float walk = unit.walkBlend;
+
+  // Retarget the source's human proportions onto the short plush rig. Idle
+  // deltas are intentionally tiny; they keep a standing figure alive without
+  // making it visibly shuffle. Locomotion preserves the captured asymmetry,
+  // knee flex, bent elbows, and double-support timing instead of reducing the
+  // motion to mirrored sine waves.
+  const float idleLeftHip = glm::radians((SampleLoop(kIdleLeftHip, idlePhase) - 21.9f) * 0.16f);
+  const float idleRightHip =
+      glm::radians((SampleLoop(kIdleRightHip, idlePhase) - 21.4f) * 0.16f);
+  const float idleLeftKnee =
+      glm::radians(-12.0f + (SampleLoop(kIdleLeftKnee, idlePhase) + 40.7f) * 0.12f);
+  const float idleRightKnee =
+      glm::radians(-12.0f + (SampleLoop(kIdleRightKnee, idlePhase) + 40.0f) * 0.12f);
+  const float leftHip =
+      glm::mix(idleLeftHip, glm::radians(SampleLoop(kWalkLeftHip, unit.walkPhase) * 0.55f), walk);
+  const float rightHip = glm::mix(
+      idleRightHip, glm::radians(SampleLoop(kWalkRightHip, unit.walkPhase) * 0.55f), walk);
+  const float leftKnee = glm::mix(
+      idleLeftKnee, glm::radians(SampleLoop(kWalkLeftKnee, unit.walkPhase) * 0.50f), walk);
+  const float rightKnee = glm::mix(
+      idleRightKnee, glm::radians(SampleLoop(kWalkRightKnee, unit.walkPhase) * 0.50f), walk);
+  const float leftShoulder =
+      glm::radians(SampleLoop(kWalkLeftShoulder, unit.walkPhase) * 0.75f) * walk;
+  const float rightShoulder =
+      glm::radians(SampleLoop(kWalkRightShoulder, unit.walkPhase) * 0.75f) * walk;
+  const float leftElbow = glm::mix(
+      glm::radians(48.0f), glm::radians(SampleLoop(kWalkLeftElbow, unit.walkPhase) * 0.75f), walk);
+  const float rightElbow = glm::mix(
+      glm::radians(45.0f), glm::radians(SampleLoop(kWalkRightElbow, unit.walkPhase) * 0.78f), walk);
+  const float bob = glm::mix(kIdleBobHeight * SampleLoop(kIdleBob, idlePhase),
+                             kWalkBobHeight * SampleLoop(kWalkBob, unit.walkPhase), walk);
 
   const ShootPose shot = SampleShootPose(unit);
-  // Gun arm: walk swing at rest, blended into the straight-forward aim
-  // (90 degrees) as the draw raises it, plus the recoil lift on top.
-  const float gunArmSwing = glm::mix(rightArmWalkSwing, glm::half_pi<float>(), shot.raise) +
+  // The right arm's two bones straighten into a single forward line while
+  // aiming; recoil layers on the shoulder after that blend.
+  const float gunArmSwing = glm::mix(rightShoulder, glm::half_pi<float>(), shot.raise) +
                             kRecoilArmKick * shot.recoil;
+  const float gunElbow = glm::mix(rightElbow, 0.0f, shot.raise);
   // Pistol in the hand: tilted 90 degrees so it points forward while the
   // arm hangs (low ready), aligning with the arm as the aim comes up, then
   // flipping up with the recoil.
@@ -325,50 +427,65 @@ FigureParts BuildFigure(const Unit& unit) {
       fall * YawFrame(unit.position + glm::vec3(0.0f, bob, 0.0f), unit.facingYaw);
 
   FigureParts parts;
-  // Torso and head.
-  parts[0] = {figure * BoxModel(glm::vec3(-kTorsoDepth * 0.5f, kHipHeight, -kTorsoWidth * 0.5f),
-                                glm::vec3(kTorsoDepth, kTorsoHeight, kTorsoWidth)),
+  parts[0] = {EllipsoidModel(figure, glm::vec3(0.0f, kHipHeight + kTorsoHeight * 0.5f, 0.0f),
+                             glm::vec3(kTorsoDepth * 0.5f, kTorsoHeight * 0.56f,
+                                       kTorsoWidth * 0.5f)),
               teamColor};
-  parts[1] = {figure * BoxModel(glm::vec3(-kHeadDepth * 0.5f,
-                                          tactics::constants::kUnitHeight - kHeadHeight,
-                                          -kHeadWidth * 0.5f),
-                                glm::vec3(kHeadDepth, kHeadHeight, kHeadWidth)),
+  parts[1] = {EllipsoidModel(
+                  figure,
+                  glm::vec3(0.0f, tactics::constants::kUnitHeight - kHeadHeight * 0.5f, 0.0f),
+                  glm::vec3(kHeadDepth * 0.5f, kHeadHeight * 0.5f, kHeadWidth * 0.5f)),
               teamColor};
-  // Legs, pivoting at the hips.
-  parts[2] = {HangingBox(LimbFrame(figure, glm::vec3(0.0f, kHipHeight, -kLegSideOffset),
-                                   leftLegSwing),
-                         kLegLength, kLegThickness),
-              teamColor};
-  parts[3] = {HangingBox(LimbFrame(figure, glm::vec3(0.0f, kHipHeight, kLegSideOffset),
-                                   rightLegSwing),
-                         kLegLength, kLegThickness),
-              teamColor};
-  // Arms, pivoting at the shoulders; the right one holds the pistol. The gun
-  // arm's outward splay straightens as the aim comes up so the shot still
-  // points at the target.
-  parts[4] = {HangingBox(LimbFrame(figure, glm::vec3(0.0f, kShoulderHeight, -kArmSideOffset),
-                                   leftArmWalkSwing, 0.0f, kArmSplay),
-                         kArmLength, kArmThickness),
-              teamColor};
-  const glm::mat4 gunArm = LimbFrame(figure, glm::vec3(0.0f, kShoulderHeight, kArmSideOffset),
-                                     gunArmSwing, shot.aimYawDelta,
-                                     -kArmSplay * (1.0f - shot.raise));
-  parts[5] = {HangingBox(gunArm, kArmLength, kArmThickness), teamColor};
+
+  const glm::mat4 leftThigh =
+      LimbFrame(figure, glm::vec3(0.0f, kHipHeight, -kLegSideOffset), leftHip);
+  const glm::mat4 leftShin = ChildBoneFrame(leftThigh, kUpperLegLength, leftKnee);
+  const glm::mat4 rightThigh =
+      LimbFrame(figure, glm::vec3(0.0f, kHipHeight, kLegSideOffset), rightHip);
+  const glm::mat4 rightShin = ChildBoneFrame(rightThigh, kUpperLegLength, rightKnee);
+  parts[2] = {RoundedSegment(leftThigh, kUpperLegLength, kLegRadius), teamColor};
+  parts[3] = {JointBall(leftShin, kLegRadius * 0.96f), teamColor};
+  parts[4] = {RoundedSegment(leftShin, kLowerLegLength, kLegRadius * 0.94f), teamColor};
+  parts[5] = {RoundedSegment(rightThigh, kUpperLegLength, kLegRadius), teamColor};
+  parts[6] = {JointBall(rightShin, kLegRadius * 0.96f), teamColor};
+  parts[7] = {RoundedSegment(rightShin, kLowerLegLength, kLegRadius * 0.94f), teamColor};
+
+  const glm::mat4 leftUpperArm =
+      LimbFrame(figure, glm::vec3(0.0f, kShoulderHeight, -kArmSideOffset), leftShoulder,
+                0.0f, kArmSplay);
+  const glm::mat4 leftForearm = ChildBoneFrame(leftUpperArm, kUpperArmLength, leftElbow);
+  parts[8] = {RoundedSegment(leftUpperArm, kUpperArmLength, kArmRadius), teamColor};
+  parts[9] = {JointBall(leftForearm, kArmRadius), teamColor};
+  parts[10] = {RoundedSegment(leftForearm, kLowerArmLength, kArmRadius * 0.92f), teamColor};
+
+  const glm::mat4 gunUpperArm =
+      LimbFrame(figure, glm::vec3(0.0f, kShoulderHeight, kArmSideOffset), gunArmSwing,
+                shot.aimYawDelta, -kArmSplay * (1.0f - shot.raise));
+  const glm::mat4 gunForearm = ChildBoneFrame(gunUpperArm, kUpperArmLength, gunElbow);
+  parts[11] = {RoundedSegment(gunUpperArm, kUpperArmLength, kArmRadius), teamColor};
+  parts[12] = {JointBall(gunForearm, kArmRadius), teamColor};
+  parts[13] = {RoundedSegment(gunForearm, kLowerArmLength, kArmRadius * 0.92f), teamColor};
+
   // Pistol: gripped at the hand (end of the arm), barrel extending along the
   // hand frame's -Y once pitched, recoil sliding it back toward the hand.
-  const glm::mat4 gun = gunArm *
-                        glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -kArmLength, 0.0f)) *
+  const glm::mat4 gun = gunForearm *
+                        glm::translate(glm::mat4(1.0f),
+                                       glm::vec3(0.0f, -kLowerArmLength, 0.0f)) *
                         glm::rotate(glm::mat4(1.0f), gunPitch, glm::vec3(0.0f, 0.0f, 1.0f)) *
                         glm::translate(glm::mat4(1.0f),
                                        glm::vec3(0.0f, kRecoilSlide * shot.recoil, 0.0f));
-  parts[6] = {HangingBox(gun, kGunLength, kGunThickness), kGunColor};
+  parts[14] = {HangingBox(gun, kGunLength, kGunThickness), kGunColor, FigurePrimitive::Box};
   return parts;
 }
 
-void DrawUnit(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
-              const glm::mat4& lightSpaceMatrix, const Unit& unit) {
+void DrawUnit(const Shader& shader, const CubeMesh& cube, const SphereMesh& sphere,
+              const glm::mat4& viewProj, const glm::mat4& lightSpaceMatrix, const Unit& unit) {
   for (const FigurePart& part : BuildFigure(unit)) {
-    DrawBoxLitModel(shader, cube, viewProj, lightSpaceMatrix, part.model, part.color);
+    if (part.primitive == FigurePrimitive::Rounded) {
+      DrawLitModel(shader, sphere, viewProj, lightSpaceMatrix, part.model, part.color);
+    } else {
+      DrawLitModel(shader, cube, viewProj, lightSpaceMatrix, part.model, part.color);
+    }
   }
 }
 
@@ -391,12 +508,47 @@ void DrawWireBox(const Shader& shader, LineMesh& lines, const glm::mat4& viewPro
   lines.Draw();
 }
 
+// Three great circles form a compact wire cage for an ellipsoid. This keeps
+// plan ghosts and remembered sightings faithful to the rounded live figure
+// without needing polygon-line mode (which GLES/WebGL2 do not expose).
+void DrawWireRounded(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
+                     const glm::mat4& model, const glm::vec4& color) {
+  constexpr int kSegments = 20;
+  constexpr float kTwoPi = 6.28318530717958647692f;
+  shader.SetMat4("uMVP", viewProj);
+  shader.SetVec4("uColor", color);
+  for (int plane = 0; plane < 3; ++plane) {
+    std::vector<glm::vec3> points;
+    points.reserve(kSegments + 1);
+    for (int i = 0; i <= kSegments; ++i) {
+      const float angle = kTwoPi * static_cast<float>(i) / kSegments;
+      const float c = std::cos(angle);
+      const float s = std::sin(angle);
+      const glm::vec3 local = plane == 0   ? glm::vec3(c, s, 0.0f)
+                              : plane == 1 ? glm::vec3(0.0f, c, s)
+                                           : glm::vec3(c, 0.0f, s);
+      points.push_back(glm::vec3(model * glm::vec4(local, 1.0f)));
+    }
+    lines.SetPoints(points);
+    lines.Draw();
+  }
+}
+
+void DrawFigureWirePart(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
+                        const FigurePart& part, const glm::vec4& color) {
+  if (part.primitive == FigurePrimitive::Rounded) {
+    DrawWireRounded(shader, lines, viewProj, part.model, color);
+  } else {
+    DrawWireBox(shader, lines, viewProj, part.model, color);
+  }
+}
+
 void DrawUnitWireframe(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
                        const Unit& unit) {
   // Common highlight green for both teams.
   const glm::vec4 color(0.3f, 0.9f, 0.4f, 1.0f);
   for (const FigurePart& part : BuildFigure(unit)) {
-    DrawWireBox(shader, lines, viewProj, part.model, color);
+    DrawFigureWirePart(shader, lines, viewProj, part, color);
   }
 }
 
@@ -424,15 +576,19 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
     lines.Draw();
   }
   for (const FigurePart& part : BuildFigure(ghost)) {
-    DrawWireBox(shader, lines, viewProj, part.model, color);
+    DrawFigureWirePart(shader, lines, viewProj, part, color);
   }
 }
 
-void DrawUnitDepth(const Shader& shader, const CubeMesh& cube, const glm::mat4& lightSpaceMatrix,
-                   const Unit& unit) {
+void DrawUnitDepth(const Shader& shader, const CubeMesh& cube, const SphereMesh& sphere,
+                   const glm::mat4& lightSpaceMatrix, const Unit& unit) {
   for (const FigurePart& part : BuildFigure(unit)) {
     shader.SetMat4("uLightMVP", lightSpaceMatrix * part.model);
-    cube.Draw();
+    if (part.primitive == FigurePrimitive::Rounded) {
+      sphere.Draw();
+    } else {
+      cube.Draw();
+    }
   }
 }
 
@@ -656,6 +812,7 @@ bool SceneRenderer::Init() {
     return false;
   }
   cubeMesh_.Init();
+  sphereMesh_.Init();
   pathLine_.Init();
   fovConeMesh_.Init();
 
@@ -709,6 +866,7 @@ bool SceneRenderer::Init() {
 void SceneRenderer::Destroy() {
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
+  sphereMesh_.Destroy();
   cubeMesh_.Destroy();
   if (shadowDepthTex_) glDeleteTextures(1, &shadowDepthTex_);
   if (shadowFbo_) glDeleteFramebuffers(1, &shadowFbo_);
@@ -734,7 +892,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
   for (const Unit& unit : game.GetScene().units) {
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
-    DrawUnitDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, unit);
+    DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
   }
   glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
 
@@ -775,7 +933,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
 
   for (const Unit& unit : game.GetScene().units) {
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
-    DrawUnit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, unit);
+    DrawUnit(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, unit);
   }
 
   // Each pane shows only its own team's FOV cones -- your own vision,

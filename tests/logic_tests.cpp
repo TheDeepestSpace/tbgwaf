@@ -1023,6 +1023,7 @@ void TestSnapshotMirrorsMatchAndTeamPlans() {
     CHECK(mirrored && mirrored->plan.type == unit.plan.type);
     CHECK(mirrored && mirrored->walkPhase == unit.walkPhase);
     CHECK(mirrored && mirrored->walkBlend == unit.walkBlend);
+    CHECK(mirrored && mirrored->idleElapsed == unit.idleElapsed);
     CHECK(mirrored && mirrored->shootElapsed == unit.shootElapsed);
     CHECK(mirrored && mirrored->shootAimYaw == unit.shootAimYaw);
   }

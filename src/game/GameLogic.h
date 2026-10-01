@@ -53,6 +53,7 @@ struct GameSnapshot {
     // than re-simulating, so its panes play the same walk/shoot beats.
     float walkPhase = 0.0f;
     float walkBlend = 0.0f;
+    float idleElapsed = 0.0f;
     float shootElapsed = -1.0f;
     float shootAimYaw = 0.0f;
     bool moving = false;  // Has an in-flight move in the executing round.

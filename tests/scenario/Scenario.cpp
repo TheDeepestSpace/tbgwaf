@@ -181,6 +181,8 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
     if (!game.CanCommitRound()) {
       return Fail("cannot commit: not every living figure (on both teams) has a plan yet");
     }
+    // Either pane has the button; show the press in Blue's.
+    NotifyMenuClick(Team::Blue, "Commit Round");
     game.CommitRound();
     if (hooks.tickSeconds > 0.0f) {
       // Visual mode: advance in fixed ticks and let the observer capture

@@ -18,6 +18,10 @@ class OrbitCamera {
   void Zoom(float deltaDistance);
   // Advances zoom smoothing by dt seconds (frame-rate independent).
   void Update(float dt);
+  // Snaps zoom (no glide) to the distance at which a square ground area of
+  // the given half-extent fits the view, even in a narrow split-screen pane.
+  void FitToExtent(float halfExtent);
+  float TargetDistance() const { return targetDistance_; }
 
   // Moves `target` along the ground-projected right/forward axes (derived
   // from yaw only, so pitch never tilts the pan plane). Deltas are scaled by
@@ -45,8 +49,8 @@ class OrbitCamera {
   float targetDistance_ = 18.0f;
   static constexpr float kMinPitch = 0.4363f;   // ~25 degrees.
   static constexpr float kMaxPitch = 1.4835f;   // ~85 degrees.
-  static constexpr float kMinDistance = 6.0f;
-  static constexpr float kMaxDistance = 35.0f;
+  static constexpr float kMinDistance = 3.0f;
+  static constexpr float kMaxDistance = 260.0f;
   static constexpr float kZoomDampingRate = 24.0f;  // 1/s; higher = snappier.
 };
 

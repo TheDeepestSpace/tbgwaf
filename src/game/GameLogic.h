@@ -92,6 +92,8 @@ class GameLogic {
   void Reset(Scene scene);
 
   const Scene& GetScene() const { return scene_; }
+  // The navmesh currently in use: windowed around the figure most recently
+  // planned for (see EnsureNavMeshFor), empty until one has been.
   const NavMesh& GetNavMesh() const { return navMesh_; }
   InputMode Mode() const { return mode_; }
   std::optional<int> SelectedUnitId() const { return selectedUnitId_; }
@@ -124,6 +126,26 @@ class GameLogic {
   TeamVisibility ComputeVisibility(Team team) const {
     return tactics::ComputeTeamVisibility(team, scene_.units, obstacleBounds_);
   }
+
+  // One remembered glimpse of an enemy figure in `viewingTeam`'s FOV.
+  // moveDirection is a unit vector on the XZ plane, or zero if the figure
+  // was stationary when sighted.
+  struct EnemySighting {
+    glm::vec3 position{0.0f};
+    float facingYaw = 0.0f;
+    glm::vec3 moveDirection{0.0f};
+    int ageRounds = 0;  // Completed rounds since the sample was taken.
+  };
+  // Oldest-first samples of `targetUnitId` as seen by `viewingTeam`; empty
+  // once all have aged past kSightingMemoryRounds.
+  const std::vector<EnemySighting>& Sightings(Team viewingTeam, int targetUnitId) const;
+
+  // Ages sighting memory by completed rounds (tracked via the round number, so
+  // followers age too) and samples newly visible enemies. Must be called
+  // every frame on every page regardless of mode or simulator/follower role
+  // (unlike Update(), a follower never runs the physics tick during
+  // Executing, yet still needs its own memory built from imported state).
+  void UpdateSightingMemory(float dtSeconds);
 
   // Input events, driven by the input/render layer after it has resolved a
   // screen click into either a unit id or a ground-plane world point.
@@ -230,8 +252,16 @@ class GameLogic {
   // watcher's trigger, and returns true so Update() can interrupt the move.
   bool TriggerOverwatch(Unit& mover);
 
+  // (Re)builds navMesh_ over the area `mover` can reach this round, unless
+  // the cached one already covers this figure at this position.
+  void EnsureNavMeshFor(const Unit& mover);
+
   Scene scene_;
+  // Range-scoped: covers only [mover.position +/- (MoveBudget + margin)],
+  // clipped to the map, not the whole map. Cached per (unit id, position).
   NavMesh navMesh_;
+  int navMeshUnitId_ = -1;
+  glm::vec3 navMeshOrigin_{0.0f};
   int roundNumber_ = 1;
   std::vector<AABB> obstacleBounds_;  // Cached flat bounds of scene_.obstacles for LOS/FOV checks.
 
@@ -251,6 +281,14 @@ class GameLogic {
   // Ids of figures a simulating peer reports as mid-move (ImportState only;
   // a follower has no activeMoves_ of its own).
   std::vector<int> mirroredMoving_;
+
+  // Sighting memory, indexed [viewing team][target unit id].
+  std::vector<std::vector<EnemySighting>> sightings_[2];
+  int lastSightingRound_ = 1;
+  std::vector<bool> sightedLastFrame_[2];
+  std::vector<float> sightingTimer_[2];
+  std::vector<glm::vec3> lastUnitPosition_;  // Previous frame's position per unit id.
+  bool hasLastUnitPosition_ = false;
 };
 
 }  // namespace tactics

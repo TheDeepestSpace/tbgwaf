@@ -37,7 +37,8 @@ void GameLogic::Reset() { Reset(BuildDefaultScene()); }
 void GameLogic::Reset(Scene scene) {
   scene_ = std::move(scene);
   obstacleBounds_ = ObstacleBounds(scene_.obstacles);
-  navMesh_.Build(scene_.obstacles, constants::kMapHalfExtent, constants::kAgentRadius);
+  navMesh_ = NavMesh();
+  navMeshUnitId_ = -1;
   roundNumber_ = 1;
 
   mode_ = InputMode::AwaitingSelection;
@@ -48,6 +49,104 @@ void GameLogic::Reset(Scene scene) {
   activeMoves_.clear();
   pendingShots_.clear();
   mirroredMoving_.clear();
+
+  const size_t unitSlots = scene_.units.size();
+  for (int t = 0; t < 2; ++t) {
+    sightings_[t].assign(unitSlots, {});
+    sightedLastFrame_[t].assign(unitSlots, false);
+    sightingTimer_[t].assign(unitSlots, 0.0f);
+  }
+  lastUnitPosition_.assign(unitSlots, glm::vec3(0.0f));
+  hasLastUnitPosition_ = false;
+  lastSightingRound_ = roundNumber_;
+}
+
+const std::vector<GameLogic::EnemySighting>& GameLogic::Sightings(Team viewingTeam,
+                                                                  int targetUnitId) const {
+  static const std::vector<EnemySighting> kEmpty;
+  const auto& perUnit = sightings_[static_cast<int>(viewingTeam)];
+  if (targetUnitId < 0 || static_cast<size_t>(targetUnitId) >= perUnit.size()) return kEmpty;
+  return perUnit[targetUnitId];
+}
+
+void GameLogic::UpdateSightingMemory(float dtSeconds) {
+  const int elapsedRounds = std::max(0, roundNumber_ - lastSightingRound_);
+  lastSightingRound_ = roundNumber_;
+  for (int t = 0; t < 2; ++t) {
+    const Team viewer = static_cast<Team>(t);
+    if (elapsedRounds > 0) {
+      for (auto& list : sightings_[t]) {
+        for (EnemySighting& s : list) s.ageRounds += elapsedRounds;
+        list.erase(std::remove_if(list.begin(), list.end(),
+                                  [](const EnemySighting& s) {
+                                    return s.ageRounds >= constants::kSightingMemoryRounds;
+                                  }),
+                   list.end());
+      }
+    }
+
+    const TeamVisibility visibility = ComputeVisibility(viewer);
+    for (const Unit& unit : scene_.units) {
+      if (unit.team == viewer || unit.id < 0 ||
+          static_cast<size_t>(unit.id) >= sightings_[t].size()) {
+        continue;
+      }
+      const bool visible = visibility.UnitVisible(unit.id);
+      bool sample = false;
+      if (visible && !sightedLastFrame_[t][unit.id]) {
+        sample = true;  // Just entered FOV: record immediately.
+        sightingTimer_[t][unit.id] = 0.0f;
+      } else if (visible) {
+        sightingTimer_[t][unit.id] += dtSeconds;
+        if (sightingTimer_[t][unit.id] >= constants::kSightingSampleInterval) {
+          sample = true;
+          sightingTimer_[t][unit.id] =
+              std::fmod(sightingTimer_[t][unit.id], constants::kSightingSampleInterval);
+        }
+      }
+      sightedLastFrame_[t][unit.id] = visible;
+      if (!sample) continue;
+
+      EnemySighting s;
+      s.position = unit.position;
+      s.facingYaw = unit.facingYaw;
+      if (hasLastUnitPosition_) {
+        glm::vec3 delta = unit.position - lastUnitPosition_[unit.id];
+        delta.y = 0.0f;
+        if (glm::length(delta) > 1e-4f) s.moveDirection = glm::normalize(delta);
+      }
+      sightings_[t][unit.id].push_back(s);
+    }
+  }
+  for (const Unit& unit : scene_.units) {
+    if (unit.id >= 0 && static_cast<size_t>(unit.id) < lastUnitPosition_.size()) {
+      lastUnitPosition_[unit.id] = unit.position;
+    }
+  }
+  hasLastUnitPosition_ = true;
+}
+
+void GameLogic::EnsureNavMeshFor(const Unit& mover) {
+  if (navMeshUnitId_ == mover.id && navMeshOrigin_ == mover.position) return;
+
+  // Any path of length <= MoveBudget stays within Euclidean distance
+  // MoveBudget of the start, hence inside this window, so the window's
+  // shortest path equals the global one whenever that one is affordable;
+  // when the global shortest exceeds the budget, the windowed result can only
+  // be longer or absent -- rejected by the budget check either way. So no
+  // margin is needed for correctness; the small one keeps the goal-side
+  // padded obstacle footprints from being clipped at the window edge and
+  // absorbs float error.
+  const float reach = mover.MoveBudget() + 2.0f * constants::kAgentRadius;
+  const float half = scene_.mapHalfExtent;
+  NavRegion region;
+  region.xMin = std::max(-half, mover.position.x - reach);
+  region.xMax = std::min(half, mover.position.x + reach);
+  region.zMin = std::max(-half, mover.position.z - reach);
+  region.zMax = std::min(half, mover.position.z + reach);
+  navMesh_.Build(scene_.obstacles, region, constants::kAgentRadius);
+  navMeshUnitId_ = mover.id;
+  navMeshOrigin_ = mover.position;
 }
 
 GameSnapshot GameLogic::ExportState() const {
@@ -251,6 +350,7 @@ void GameLogic::ClickGround(const glm::vec3& point, Team byTeam) {
   Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->team != byTeam) return;
 
+  EnsureNavMeshFor(*mover);
   std::vector<glm::vec3> path;
   if (!navMesh_.FindPath(mover->position, point, &path)) return;
   // The round executes over a fixed window, so a figure can only plan as far
@@ -381,6 +481,7 @@ void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
   if (mode_ != InputMode::AwaitingMoveDestination) return;
   const Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->team != byTeam) return;
+  EnsureNavMeshFor(*mover);
   movePreviewValid_ = navMesh_.FindPath(mover->position, point, &movePreviewPath_) &&
                       PathLength(movePreviewPath_) <= mover->MoveBudget();
 }

@@ -111,25 +111,33 @@ bool RectsAdjacent(const NavCell& cell, const AABB& rect) {
 
 }  // namespace
 
+namespace {
+NavRegion SquareRegion(float halfExtent) {
+  return NavRegion{-halfExtent, halfExtent, -halfExtent, halfExtent};
+}
+}  // namespace
+
 void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, float agentRadius) {
-  BuildGroundMesh(obstacles, mapHalfExtent, agentRadius);
+  BuildGroundMesh(obstacles, SquareRegion(mapHalfExtent), agentRadius);
 }
 
 void NavMesh::Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent,
                      float agentRadius) {
-  BuildGroundMesh(ObstacleBounds(obstacles), mapHalfExtent, agentRadius);
+  Build(obstacles, SquareRegion(mapHalfExtent), agentRadius);
+}
+
+void NavMesh::Build(const std::vector<Obstacle>& obstacles, const NavRegion& region,
+                     float agentRadius) {
+  BuildGroundMesh(ObstacleBounds(obstacles), region, agentRadius);
   AddClimbConnections(obstacles, agentRadius);
 }
 
-void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, float mapHalfExtent,
+void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegion& region,
                                float agentRadius) {
   cells_.clear();
   neighbors_.clear();
   paddedFootprints_.clear();
-  mapHalfExtent_ = mapHalfExtent;
-
-  const float mapMin = -mapHalfExtent;
-  const float mapMax = mapHalfExtent;
+  region_ = region;
 
   struct Footprint {
     float xMin, xMax, zMin, zMax;
@@ -138,10 +146,10 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, float mapHalfE
   footprints.reserve(obstacles.size());
   for (const auto& obstacle : obstacles) {
     Footprint fp;
-    fp.xMin = std::max(mapMin, obstacle.min.x - agentRadius);
-    fp.xMax = std::min(mapMax, obstacle.max.x + agentRadius);
-    fp.zMin = std::max(mapMin, obstacle.min.z - agentRadius);
-    fp.zMax = std::min(mapMax, obstacle.max.z + agentRadius);
+    fp.xMin = std::max(region.xMin, obstacle.min.x - agentRadius);
+    fp.xMax = std::min(region.xMax, obstacle.max.x + agentRadius);
+    fp.zMin = std::max(region.zMin, obstacle.min.z - agentRadius);
+    fp.zMax = std::min(region.zMax, obstacle.max.z + agentRadius);
     if (fp.xMax > fp.xMin + kEps && fp.zMax > fp.zMin + kEps) {
       footprints.push_back(fp);
       // Give the padded footprint a generous Y range so it can be reused
@@ -151,7 +159,7 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, float mapHalfE
     }
   }
 
-  std::vector<float> xs = {mapMin, mapMax};
+  std::vector<float> xs = {region.xMin, region.xMax};
   for (const auto& fp : footprints) {
     xs.push_back(fp.xMin);
     xs.push_back(fp.xMax);
@@ -177,7 +185,7 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, float mapHalfE
     }
     std::vector<ZInterval> merged = MergeIntervals(std::move(blocked));
 
-    float cursor = mapMin;
+    float cursor = region.zMin;
     for (const auto& iv : merged) {
       if (iv.lo - cursor > kEps) {
         cellsByStrip[i].push_back(static_cast<int>(cells_.size()));
@@ -185,9 +193,9 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, float mapHalfE
       }
       cursor = std::max(cursor, iv.hi);
     }
-    if (mapMax - cursor > kEps) {
+    if (region.zMax - cursor > kEps) {
       cellsByStrip[i].push_back(static_cast<int>(cells_.size()));
-      cells_.push_back(NavCell{stripXMin, stripXMax, cursor, mapMax, 0.0f});
+      cells_.push_back(NavCell{stripXMin, stripXMax, cursor, region.zMax, 0.0f});
     }
   }
 
@@ -213,6 +221,11 @@ void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float 
   for (const auto& obstacle : obstacles) {
     if (!obstacle.climbable) continue;
     const AABB& bounds = obstacle.bounds;
+    // Windowed builds: skip obstacles entirely outside the region.
+    if (bounds.max.x < region_.xMin || bounds.min.x > region_.xMax ||
+        bounds.max.z < region_.zMin || bounds.min.z > region_.zMax) {
+      continue;
+    }
 
     const float xMin = bounds.min.x + kClimbTopInset;
     const float xMax = bounds.max.x - kClimbTopInset;
@@ -225,10 +238,10 @@ void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float 
     neighbors_.emplace_back();
 
     const AABB padded{
-        glm::vec3(std::max(-mapHalfExtent_, bounds.min.x - agentRadius), bounds.min.y,
-                   std::max(-mapHalfExtent_, bounds.min.z - agentRadius)),
-        glm::vec3(std::min(mapHalfExtent_, bounds.max.x + agentRadius), bounds.min.y,
-                   std::min(mapHalfExtent_, bounds.max.z + agentRadius))};
+        glm::vec3(std::max(region_.xMin, bounds.min.x - agentRadius), bounds.min.y,
+                   std::max(region_.zMin, bounds.min.z - agentRadius)),
+        glm::vec3(std::min(region_.xMax, bounds.max.x + agentRadius), bounds.min.y,
+                   std::min(region_.zMax, bounds.max.z + agentRadius))};
 
     for (int groundIdx = 0; groundIdx < groundCellCount; ++groundIdx) {
       if (!RectsAdjacent(cells_[groundIdx], padded)) continue;

@@ -145,6 +145,14 @@ ScenarioAction ParseAction(const YAML::Node& node) {
   if (kind == "move") {
     action.kind = ScenarioAction::Kind::Move;
     action.destination = ParseVec3(node["destination"], "script[].destination");
+    if (const YAML::Node waypoints = node["waypoints"]) {
+      if (!waypoints.IsSequence()) {
+        throw std::runtime_error("script[].waypoints must be a list of [x, y, z]");
+      }
+      for (const auto& wp : waypoints) {
+        action.waypoints.push_back(ParseVec3(wp, "script[].waypoints[]"));
+      }
+    }
     if (node["final_facing_degrees"]) {
       action.finalFacingDegrees = node["final_facing_degrees"].as<float>();
     }
@@ -290,8 +298,16 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
           hooks.onMoveFrontier(game, actorTeam);
         }
       }
+      for (const glm::vec3& waypoint : action.waypoints) {
+        NotifyClick(actorTeam, waypoint);
+        game.ClickGround(waypoint, actorTeam);
+        if (glm::distance(game.MoveChainEnd(), waypoint) > 0.01f) {
+          return Fail("waypoint " + ToString(waypoint) + " was rejected (no path, or beyond one round's reach of the previous leg)");
+        }
+      }
       NotifyClick(actorTeam, action.destination);
       game.ClickGround(action.destination, actorTeam);
+      game.FinishMovePlan();
       if (game.Mode() != InputMode::AwaitingSelection) {
         return Fail("has no path to destination " + ToString(action.destination) +
                     " (unreachable, or beyond the mover's round move budget)");

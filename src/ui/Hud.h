@@ -56,6 +56,7 @@ struct HudActions {
   bool overwatch = false;
   bool pass = false;
   bool cancel = false;
+  bool done = false;
   // Set when the pane's Playbook view edited its team's squad-wide reaction
   // table; a config edit, not a turn action.
   std::optional<tactics::SquadPlaybook> playbook;

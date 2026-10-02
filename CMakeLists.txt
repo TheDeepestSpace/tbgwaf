@@ -26,13 +26,16 @@ FetchContent_MakeAvailable(imgui)
 # Mermaid diagram, which mermaid-cli (mmdc) renders to SVG when available.
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(FLOW_YAML ${CMAKE_SOURCE_DIR}/flow/app_flow.yaml)
+set(FLOW_TEMPLATES ${CMAKE_SOURCE_DIR}/flow/templates)
 set(FLOW_GEN_DIR ${CMAKE_BINARY_DIR}/generated)
 add_custom_command(
   OUTPUT ${FLOW_GEN_DIR}/AppFlow.h ${FLOW_GEN_DIR}/app_flow.mmd
   COMMAND ${CMAKE_COMMAND} -E make_directory ${FLOW_GEN_DIR}
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen_flow.py ${FLOW_YAML}
           --header ${FLOW_GEN_DIR}/AppFlow.h --mermaid ${FLOW_GEN_DIR}/app_flow.mmd
+          --templates ${FLOW_TEMPLATES}
   DEPENDS ${FLOW_YAML} ${CMAKE_SOURCE_DIR}/scripts/gen_flow.py
+          ${FLOW_TEMPLATES}/AppFlow.h.j2 ${FLOW_TEMPLATES}/app_flow.mmd.j2
 )
 add_custom_target(app_flow_gen DEPENDS ${FLOW_GEN_DIR}/AppFlow.h ${FLOW_GEN_DIR}/app_flow.mmd)
 find_program(MMDC_EXECUTABLE mmdc)

@@ -7,7 +7,7 @@ RUN apt update && apt upgrade -y && \
     apt install -y \
     build-essential cmake ninja-build git curl wget ca-certificates zip \
     software-properties-common dumb-init \
-    python3-pip unzip sudo pkg-config \
+    python3-pip python3-jinja2 python3-yaml unzip sudo pkg-config \
     libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev mesa-common-dev \
     xvfb && \
     apt-get clean && rm -rf /var/lib/apt/lists/*

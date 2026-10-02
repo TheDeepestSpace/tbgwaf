@@ -1,0 +1,8 @@
+stateDiagram-v2
+{% for s in states %}
+    state "{{ s.label }}" as {{ s.id }}
+{% endfor %}
+    [*] --> {{ initial }}
+{% for t in transitions %}
+    {{ t['from'] }} --> {{ t.to }}: {{ t.event }}
+{% endfor %}

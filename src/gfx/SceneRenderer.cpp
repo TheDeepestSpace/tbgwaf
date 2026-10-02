@@ -809,7 +809,8 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
   return visible;
 }
 
-// Renders a unit's FOV (or, with shotCone, its fading shot cone) as a flat,
+// Renders a unit's FOV (or, with shotCone, its narrow, fading shot-dispersion
+// cone of kShotConeHalfAngleDegrees at the gun tip) as a flat,
 // ground-level, lightly team-colored
 // translucent overlay spanning kShootHalfFovDegrees around
 // FacingDirection(), capped at kFovConeVisualRange (bigger than the map
@@ -828,7 +829,8 @@ void DrawFovCone(const Shader& shader, ColorTriangleMesh& mesh, const glm::mat4&
   // Angular nudge to either side of an obstacle corner: one ray lands on the
   // occluding face right at the corner, the other shoots past it.
   constexpr float kCornerEpsilon = 1e-3f;
-  const float halfFovRad = glm::radians(tactics::constants::kShootHalfFovDegrees);
+  const float halfFovRad = glm::radians(shotCone ? tactics::constants::kShotConeHalfAngleDegrees
+                                                 : tactics::constants::kShootHalfFovDegrees);
   // FOV overlay: fans out from the eye at a flat opacity. Shot cone (selected
   // figure only): fans out from the gun tip and fades out by the shot range,
   // so nothing past that needs geometry. The sightline height stays the eye's.

@@ -120,10 +120,17 @@ float ComputeShadow(vec3 normal) {
   if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z > 1.0) {
     return 0.0;  // Outside the light's frustum: treat as unshadowed.
   }
-  float closestDepth = texture(uShadowMap, proj.xy).r;
   float currentDepth = proj.z;
   float bias = max(0.003 * (1.0 - max(dot(normal, -uLightDir), 0.0)), 0.0008);
-  return (currentDepth - bias) > closestDepth ? 1.0 : 0.0;
+  vec2 texelSize = 1.0 / vec2(textureSize(uShadowMap, 0));
+  float shadow = 0.0;
+  for (int x = -1; x <= 1; ++x) {
+    for (int y = -1; y <= 1; ++y) {
+      float sampledDepth = texture(uShadowMap, proj.xy + vec2(x, y) * texelSize).r;
+      shadow += (currentDepth - bias) > sampledDepth ? 1.0 : 0.0;
+    }
+  }
+  return shadow / 9.0;
 }
 
 void main() {
@@ -601,6 +608,9 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
   Unit ghost = sighted;
   ghost.position = s.position;
   ghost.facingYaw = s.facingYaw;
+  ghost.walkPhase = s.walkPhase;
+  ghost.walkBlend = s.walkBlend;
+  ghost.idleElapsed = s.idleElapsed;
   ghost.knockdownElapsed = -1.0f;
   if (glm::length(s.moveDirection) > 0.0f) {
     const glm::vec3 d = s.moveDirection;
@@ -932,7 +942,7 @@ bool SceneRenderer::Init() {
   highlightRing_.SetPoints(BuildRingPoints());
 
   // Stage-C: a single directional light (simulating overhead factory
-  // lighting) casting a basic shadow map, single cascade, hard-edged. The
+  // lighting) casting a PCF-filtered shadow map. The
   // light and the static map geometry are shared by all panes; only the
   // *casters* (which units are drawn into it) change per pane, since each
   // team's shadow map must not leak the position of units hidden by their
@@ -962,7 +972,7 @@ bool SceneRenderer::Init() {
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
   // The light direction is fixed; the light-space matrix depends on the
-  // scene's map size and is recomputed per RenderPane.
+  // scene's map size and camera framing and is recomputed per RenderPane.
   lightDir_ = glm::normalize(glm::vec3(0.35f, -1.0f, 0.25f));
 
   glEnable(GL_DEPTH_TEST);
@@ -990,11 +1000,28 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const auto& obstacles = game.GetScene().obstacles;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;
 
-  // Light frustum sized to cover the whole map.
+  // Fit the light frustum to the camera's current zoom instead of spreading
+  // the shadow map over the whole scene. Cap it at the previous whole-map
+  // coverage so zoomed-out views retain the same bounds.
+  const float cameraDistance = glm::distance(camera.Position(), camera.target);
+  const float orthoHalfExtent = std::min(mapHalfExtent * 1.5f, cameraDistance);
+  const float shadowTexelWorldSize = orthoHalfExtent * 2.0f / kShadowMapSize;
+
+  // Keep the shadow texel grid fixed in world space while panning. Snap in
+  // the light's X/Y basis (rather than world X/Z), since those are the axes
+  // that map onto the shadow texture.
   const float lightDistance = mapHalfExtent * 3.0f;
-  const glm::mat4 lightView = glm::lookAt(-lightDir_ * lightDistance, glm::vec3(0.0f),
-                                          glm::vec3(0.0f, 1.0f, 0.0f));
-  const float orthoHalfExtent = mapHalfExtent * 1.5f;
+  const glm::mat4 lightBasis = glm::lookAt(-lightDir_, glm::vec3(0.0f),
+                                           glm::vec3(0.0f, 1.0f, 0.0f));
+  glm::vec4 centerInLightSpace = lightBasis * glm::vec4(camera.target, 1.0f);
+  centerInLightSpace.x = std::round(centerInLightSpace.x / shadowTexelWorldSize) *
+                         shadowTexelWorldSize;
+  centerInLightSpace.y = std::round(centerInLightSpace.y / shadowTexelWorldSize) *
+                         shadowTexelWorldSize;
+  const glm::vec3 snappedCenter = glm::vec3(glm::inverse(lightBasis) * centerInLightSpace);
+  const glm::mat4 lightView =
+      glm::lookAt(snappedCenter - lightDir_ * lightDistance, snappedCenter,
+                  glm::vec3(0.0f, 1.0f, 0.0f));
   lightSpaceMatrix_ = glm::ortho(-orthoHalfExtent, orthoHalfExtent, -orthoHalfExtent,
                                  orthoHalfExtent, 0.1f, lightDistance * 2.0f) *
                       lightView;

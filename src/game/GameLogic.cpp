@@ -110,6 +110,9 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
       EnemySighting s;
       s.position = unit.position;
       s.facingYaw = unit.facingYaw;
+      s.walkPhase = unit.walkPhase;
+      s.walkBlend = unit.walkBlend;
+      s.idleElapsed = unit.idleElapsed;
       if (hasLastUnitPosition_) {
         glm::vec3 delta = unit.position - lastUnitPosition_[unit.id];
         delta.y = 0.0f;

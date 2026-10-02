@@ -42,7 +42,6 @@ struct GameSnapshot {
     glm::vec3 position{0.0f};
     float facingYaw = 0.0f;
     bool alive = true;
-    TriggerAction triggerAction = TriggerAction::None;
     PlannedActionType planType = PlannedActionType::None;
     int planShootTargetId = -1;
     std::vector<glm::vec3> planPath;
@@ -76,7 +75,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* out);
 // dependency so it can be driven and verified headlessly.
 //
 // WEGO round model: each round has two phases. During *planning*, both teams
-// concurrently assign one plan (Move/Shoot/Pass/Overwatch) to each of their
+// concurrently assign one plan (Move/Shoot/Pass) to each of their
 // living figures -- nothing happens yet, and either team may revise its own
 // figures' plans at any time (input calls carry the acting team, so a player
 // can only ever plan their own side). Once every living figure on both teams
@@ -187,7 +186,7 @@ class GameLogic {
   // as misses -- with nobody moving, their geometry can no longer change).
   // A no-op in any other mode. `main.cpp`'s frame loop drives this with real
   // frame delta; tests can pass a large dt to fast-forward to completion,
-  // though mid-path events (overwatch, shots connecting mid-move) then only
+  // though mid-path events (shots connecting mid-move) then only
   // sample the coarse positions that dt steps through.
   void Update(float dtSeconds);
 
@@ -202,16 +201,12 @@ class GameLogic {
   // round is committed, by the unit's own team; no-op for units without a planned move.
   void SetPlannedMoveFacing(int unitId, float yaw, Team byTeam);
 
-  // Plans overwatch (triggerAction = Shoot, armed once this commits) on the
-  // acting unit, the same way ChoosePass() plans a pass.
-  void ChooseOverwatch();
-
   // Steps back one level: AwaitingMove/ShootTarget -> ActionMenu -> AwaitingSelection.
   void CancelAction();
 
   // Starts the round's executing phase: resolves every planned shot that
   // already connects at the pre-move positions, kicks off every planned
-  // move on both teams concurrently, and arms planned overwatches. Held
+  // move on both teams concurrently. Held
   // shots keep re-checking each Update() tick. Finishes immediately (in
   // this same call) if nobody planned a move. No-op unless CanCommitRound().
   void CommitRound();
@@ -238,7 +233,7 @@ class GameLogic {
 
   // Deterministic hit resolution: FOV cone + clear line-of-sight, applied
   // immediately. Exposed directly so it can be unit tested without going
-  // through the click flow; also the overwatch trigger path.
+  // through the click flow.
   bool ResolveShot(Unit& shooter, Unit& target);
 
  private:
@@ -278,12 +273,6 @@ class GameLogic {
   // The Executing-mode body of Update(): advances every in-flight move,
   // re-checks held shots, and finishes the round once nothing is in flight.
   void AdvanceExecutingRound(float dtSeconds);
-
-  // Checks every living enemy of `mover` armed with triggerAction == Shoot
-  // for FOV+LOS on `mover`'s current (mid-move) position. On the first
-  // watcher that has a shot, resolves it (killing `mover`), consumes that
-  // watcher's trigger, and returns true so Update() can interrupt the move.
-  bool TriggerOverwatch(Unit& mover);
 
   // (Re)builds navMesh_ over the area `mover` can reach from `origin` (its
   // position, or the end of its planned move chain) in one leg, unless

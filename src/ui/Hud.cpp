@@ -208,8 +208,6 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
           ImGui::SameLine();
           if (Button("Shoot")) actions.shoot = true;
           ImGui::SameLine();
-          if (Button("Overwatch")) actions.overwatch = true;
-          ImGui::SameLine();
           if (Button("Pass")) actions.pass = true;
         } else {
           if (game.Mode() == InputMode::AwaitingMoveDestination) {

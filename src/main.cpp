@@ -536,7 +536,6 @@ int main() {
       }
       if (hud.move) game.ChooseMove();
       if (hud.shoot) game.ChooseShoot();
-      if (hud.overwatch) game.ChooseOverwatch();
       if (hud.pass) game.ChoosePass();
       if (hud.cancel) game.CancelAction();
       if (hud.playbook) game.SetPlaybook(paneTeam(pane), *hud.playbook);

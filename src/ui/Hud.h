@@ -53,7 +53,6 @@ struct HudActions {
   bool commit = false;
   bool move = false;
   bool shoot = false;
-  bool overwatch = false;
   bool pass = false;
   bool cancel = false;
   bool done = false;

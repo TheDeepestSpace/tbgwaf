@@ -612,11 +612,6 @@ void TestManualReplanClearsQueuedLegs() {
 
   planChain();
   game.ClickUnit(0, Team::Blue);
-  game.ChooseOverwatch();
-  CHECK(game.FindUnit(0)->plan.queuedLegs.empty());
-
-  planChain();
-  game.ClickUnit(0, Team::Blue);
   game.ChoosePass();
   CHECK(game.FindUnit(0)->plan.queuedLegs.empty());
 
@@ -960,61 +955,6 @@ void TestGameLogicMoveCanClimbOntoObstacle() {
   CHECK(game.RoundNumber() == 2);  // Round advanced.
 }
 
-void TestGameLogicOverwatchFiresOnEnemyEnteringFov() {
-  GameLogic game(LegacyScene());
-
-  // Reposition red4 due west of blue1 -- squarely behind blue1's fixed +X
-  // facing, so it starts outside blue1's FOV cone regardless of LOS -- then
-  // send it walking east along the open z=0 lane, straight through blue1's
-  // position and into its watched cone. Under WEGO the overwatch arms and
-  // the enemy move it interrupts happen in the *same* round's commit.
-  game.FindUnit(4)->position = glm::vec3(-9.5f, 0.0f, 0.0f);
-
-  game.ClickUnit(1, Team::Blue);
-  game.ChooseOverwatch();
-  CHECK(game.FindUnit(1)->plan.type == tactics::PlannedActionType::Overwatch);
-  CHECK(game.FindUnit(1)->triggerAction == TriggerAction::None);  // Not armed until commit.
-
-  game.ClickUnit(4, Team::Red);
-  game.ChooseMove();
-  const glm::vec3 destination(0.0f, 0.0f, 0.0f);
-  game.ClickGround(destination, Team::Red);
-  game.FinishMovePlan();
-
-  PassEveryoneElse(game, {1, 4});
-  CHECK(game.CanCommitRound());
-  game.CommitRound();
-
-  // Committing arms blue1's trigger and kicks off red4's move concurrently.
-  CHECK(game.FindUnit(1)->triggerAction == TriggerAction::Shoot);
-  CHECK(game.Mode() == InputMode::Executing);
-
-  // Step frame-by-frame (rather than one huge fast-forward dt) so the
-  // overwatch check actually samples red4's position incrementally along
-  // the path -- a single giant dt would jump it straight from start to
-  // destination in one position update, skipping the mid-path FOV entry
-  // this test exists to catch. blue1 should spot red4 and fire the moment
-  // it crosses into FOV with clear LOS, interrupting the move well short of
-  // the destination.
-  int steps = 0;
-  while (game.Mode() == InputMode::Executing && steps < 10000) {
-    game.Update(0.02f);
-    ++steps;
-  }
-  CHECK(steps < 10000);  // Sanity: the loop above actually terminated.
-
-  CHECK(!game.FindUnit(4)->alive);
-  CHECK(game.FindUnit(1)->triggerAction == TriggerAction::None);  // One-shot: trigger consumed.
-  const glm::vec3 moverStop = game.FindUnit(4)->position;
-  CHECK(glm::distance(moverStop, destination) > 1.0f);  // Died mid-path, short of the destination.
-  CHECK(moverStop.x > -9.5f + 1e-3f);                    // But had actually started moving.
-
-  // The interrupted move still finishes the round.
-  CHECK(game.Mode() == InputMode::AwaitingSelection);
-  CHECK(game.RoundNumber() == 2);
-  CHECK(!game.Winner().has_value());  // Red still has id3 and id5 alive.
-}
-
 // Shared setup: blue passes while red4 -- repositioned due west of blue1,
 // behind its fixed +X facing -- plans a walk east through blue1's open
 // lane. Commits the round, leaving the move animating.
@@ -1101,9 +1041,8 @@ void TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds() {
   CHECK(!game.FindUnit(4)->alive);
   CHECK(glm::distance(game.FindUnit(4)->position, destination) > 1.0f);
   CHECK(game.FindUnit(4)->position.x > -9.5f + 1e-3f);
-  // Standing rule: not consumed like a one-shot overwatch trigger.
+  // Standing rule: stays in force after firing.
   CHECK(game.Playbook(Team::Blue).At(false, false) == ReactionAction::Shoot);
-  CHECK(blue1->triggerAction == TriggerAction::None);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(game.RoundNumber() == 2);
 }
@@ -1692,7 +1631,6 @@ int main() {
   TestGameLogicMoveFacingAdjustableBeforeCommit();
   TestGameLogicIgnoresInputWhileExecuting();
   TestGameLogicMoveCanClimbOntoObstacle();
-  TestGameLogicOverwatchFiresOnEnemyEnteringFov();
   TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds();
   TestGameLogicPlaybookDefaultTable();
   TestGameLogicPlaybookIgnoresSameTeamMover();

@@ -1414,17 +1414,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       DrawHighlightOnSurface(unit.position, color);
     }
   }
-  // Overwatch indicator: a minimal PoC-grade ground marker (distinct from
-  // the plan-then-commit ring and the yellow selection ring) under
-  // every figure currently armed to fire during an enemy's move.
-  for (const Unit& unit : game.GetScene().units) {
-    if (!unit.alive || unit.triggerAction != tactics::TriggerAction::Shoot) continue;
-    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
-    DrawHighlightOnSurface(unit.position,
-                  glm::vec4(1.0f, 0.55f, 0.0f, 1.0f));
-  }
   // Playbook indicator: magenta ring on every figure whose squad playbook
-  // has any shoot reaction (distinct from the orange one-shot overwatch ring).
+  // has any shoot reaction.
   for (const Unit& unit : game.GetScene().units) {
     const tactics::SquadPlaybook& pb = game.Playbook(unit.team);
     bool shoots = false;

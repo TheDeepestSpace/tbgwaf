@@ -74,6 +74,37 @@ void main() {
 }
 )";
 
+// Shot-cone footprint: drawn over world boxes (ground, slabs, obstacles); each
+// fragment is kept only if its world position lies inside the cone volume, so
+// the cone's true intersection with every surface shows up per pixel.
+const char* kConeSurfaceVertexShaderSrc = R"(#version 300 es
+layout(location = 0) in vec3 aPos;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+out vec3 vWorld;
+void main() {
+  vWorld = (uModel * vec4(aPos, 1.0)).xyz;
+  gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)";
+
+const char* kConeSurfaceFragmentShaderSrc = R"(#version 300 es
+precision highp float;
+in vec3 vWorld;
+uniform vec3 uApex;
+uniform vec3 uAxis;
+uniform vec4 uCone;   // x = tan(half angle), y = range, z = start alpha
+uniform vec3 uColor;
+out vec4 FragColor;
+void main() {
+  vec3 d = vWorld - uApex;
+  float t = dot(d, uAxis);
+  if (t <= 0.0 || t >= uCone.y) discard;
+  if (length(d - uAxis * t) > t * uCone.x) discard;
+  FragColor = vec4(uColor, uCone.z * (1.0 - t / uCone.y));
+}
+)";
+
 const char* kUnlitFragmentShaderSrc = R"(#version 300 es
 precision mediump float;
 uniform vec4 uColor;
@@ -809,9 +840,7 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
   return visible;
 }
 
-// Renders a unit's FOV (or, with shotCone, its narrow, fading shot-dispersion
-// cone of kShotConeHalfAngleDegrees at the gun tip) as a flat,
-// ground-level, lightly team-colored
+// Renders a unit's FOV as a flat, ground-level, lightly team-colored
 // translucent overlay spanning kShootHalfFovDegrees around
 // FacingDirection(), capped at kFovConeVisualRange (bigger than the map
 // diagonal) and clipped at the map boundary. Occlusion is 3D:
@@ -823,23 +852,15 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
 // Caller is responsible for enabling blending around this call.
 void DrawFovCone(const Shader& shader, ColorTriangleMesh& mesh, const glm::mat4& viewProj,
                  const Unit& unit, const std::vector<tactics::Obstacle>& obstacles,
-                 const std::vector<AABB>& sidewalks, float mapHalfExtent, bool shotCone) {
+                 const std::vector<AABB>& sidewalks, float mapHalfExtent) {
   constexpr int kArcSegments = 24;
   constexpr float kGroundOffset = 0.015f;
   // Angular nudge to either side of an obstacle corner: one ray lands on the
   // occluding face right at the corner, the other shoots past it.
   constexpr float kCornerEpsilon = 1e-3f;
-  const float halfFovRad = glm::radians(shotCone ? tactics::constants::kShotConeHalfAngleDegrees
-                                                 : tactics::constants::kShootHalfFovDegrees);
-  // FOV overlay: fans out from the eye at a flat opacity. Shot cone (selected
-  // figure only): fans out from the gun tip and fades out by the shot range,
-  // so nothing past that needs geometry. The sightline height stays the eye's.
-  const float range = shotCone ? std::min(tactics::constants::kFovConeVisualRange,
-                                          tactics::kDefaultShotProfile.range)
-                               : tactics::constants::kFovConeVisualRange;
-  const glm::vec3 muzzle = unit.MuzzlePosition();
-  const glm::vec3 eye = shotCone ? glm::vec3(muzzle.x, unit.EyePosition().y, muzzle.z)
-                                 : unit.EyePosition();
+  const float halfFovRad = glm::radians(tactics::constants::kShootHalfFovDegrees);
+  const float range = tactics::constants::kFovConeVisualRange;
+  const glm::vec3 eye = unit.EyePosition();
 
   // Boundary ray angles as offsets from facingYaw in [-halfFov, +halfFov].
   // A uniform fan alone puts the occlusion edge on a chord between the two
@@ -951,24 +972,86 @@ void DrawFovCone(const Shader& shader, ColorTriangleMesh& mesh, const glm::mat4&
       }
     }
   }
-  // Opacity per vertex: flat for FOV; the shot cone is strongest at the gun
-  // tip, fading linearly to nothing at the shot range.
   constexpr float kFovAlpha = 0.15f;
   const glm::vec3 baseColor = unit.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
                                                       : glm::vec3(0.9f, 0.25f, 0.22f);
   std::vector<ColorTriangleMesh::Vertex> vertices;
   vertices.reserve(points.size());
   for (const glm::vec3& p : points) {
-    float alpha = kFovAlpha;
-    if (shotCone) {
-      const float distance = glm::length(glm::vec2(p.x - muzzle.x, p.z - muzzle.z));
-      alpha = tactics::ShotConeAlpha(tactics::kDefaultShotProfile, distance);
-    }
-    vertices.push_back({p, glm::vec4(baseColor, alpha)});
+    vertices.push_back({p, glm::vec4(baseColor, kFovAlpha)});
   }
   mesh.SetVertices(vertices);
   shader.SetMat4("uMVP", viewProj);
   mesh.Draw();
+}
+
+// The selected figure's shot cone as a real 3D cone: apex at the gun tip, axis
+// along the aim, fading out by the shot range. The side surface is depth
+// tested, so ground and walls cut it off rather than receiving a projection;
+// where it meets them, the footprint pass lights up exactly the part of each
+// surface lying inside the cone volume.
+// Caller is responsible for blending, polygon offset and depth state.
+void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
+                  ColorTriangleMesh& mesh, const CubeMesh& cube, const glm::mat4& viewProj,
+                  const Unit& unit, const std::vector<tactics::Obstacle>& obstacles,
+                  const std::vector<AABB>& sidewalks, float mapHalfExtent) {
+  constexpr int kSegments = 40;
+  constexpr int kRings = 12;  // Along the axis, so the alpha fade interpolates smoothly.
+  constexpr float kSurfaceAlpha = 0.18f;
+  constexpr float kFootprintAlpha = 0.7f;
+  constexpr float kTwoPi = 6.28318530717958647692f;
+  const float tanHalf = std::tan(glm::radians(tactics::constants::kShotConeHalfAngleDegrees));
+  const float range = tactics::kDefaultShotProfile.range;
+  const glm::vec3 apex = unit.MuzzlePosition();
+  const glm::vec3 axis = unit.FacingDirection();
+  const glm::vec3 right(-axis.z, 0.0f, axis.x);
+  const glm::vec3 up(0.0f, 1.0f, 0.0f);
+  const glm::vec3 color = unit.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
+                                                  : glm::vec3(0.9f, 0.25f, 0.22f);
+
+  const auto vertex = [&](int ring, int seg) {
+    const float u = static_cast<float>(ring) / static_cast<float>(kRings);
+    const float a = kTwoPi * static_cast<float>(seg) / static_cast<float>(kSegments);
+    const float t = range * u;
+    const glm::vec3 p =
+        apex + axis * t + (right * std::cos(a) + up * std::sin(a)) * (t * tanHalf);
+    return ColorTriangleMesh::Vertex{p, glm::vec4(color, kSurfaceAlpha * (1.0f - u))};
+  };
+  std::vector<ColorTriangleMesh::Vertex> vertices;
+  vertices.reserve(static_cast<size_t>(kRings * kSegments * 6));
+  for (int ring = 0; ring < kRings; ++ring) {
+    for (int seg = 0; seg < kSegments; ++seg) {
+      vertices.push_back(vertex(ring, seg));
+      vertices.push_back(vertex(ring + 1, seg));
+      vertices.push_back(vertex(ring + 1, seg + 1));
+      vertices.push_back(vertex(ring, seg));
+      vertices.push_back(vertex(ring + 1, seg + 1));
+      vertices.push_back(vertex(ring, seg + 1));
+    }
+  }
+  colorShader.Use();
+  mesh.SetVertices(vertices);
+  colorShader.SetMat4("uMVP", viewProj);
+  mesh.Draw();
+
+  surfaceShader.Use();
+  surfaceShader.SetVec3("uApex", apex);
+  surfaceShader.SetVec3("uAxis", axis);
+  surfaceShader.SetVec4("uCone", glm::vec4(tanHalf, range, kFootprintAlpha, 0.0f));
+  surfaceShader.SetVec3("uColor", color);
+  const auto drawBox = [&](const glm::vec3& minCorner, const glm::vec3& size) {
+    const glm::mat4 model =
+        glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
+    surfaceShader.SetMat4("uModel", model);
+    surfaceShader.SetMat4("uMVP", viewProj * model);
+    cube.Draw();
+  };
+  drawBox(glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
+          glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f));
+  for (const AABB& slab : sidewalks) drawBox(slab.min, slab.max - slab.min);
+  for (const auto& obstacle : obstacles) {
+    drawBox(obstacle.bounds.min, obstacle.bounds.max - obstacle.bounds.min);
+  }
 }
 
 }  // namespace
@@ -997,12 +1080,17 @@ bool SceneRenderer::Init() {
     std::fprintf(stderr, "Failed to compile the vertex-color shader\n");
     return false;
   }
+  if (!coneSurfaceShader_.Compile(kConeSurfaceVertexShaderSrc, kConeSurfaceFragmentShaderSrc)) {
+    std::fprintf(stderr, "Failed to compile the shot-cone surface shader\n");
+    return false;
+  }
   cubeMesh_.Init();
   sphereMesh_.Init();
   frontierFill_.Init();
   frontierBorder_.Init();
   pathLine_.Init();
   fovConeMesh_.Init();
+  shotConeMesh_.Init();
   highlightRing_.Init();
   highlightRing_.SetPoints(BuildRingPoints());
 
@@ -1049,6 +1137,7 @@ void SceneRenderer::Destroy() {
   frontierBorder_.Destroy();
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
+  shotConeMesh_.Destroy();
   highlightRing_.Destroy();
   sphereMesh_.Destroy();
   cubeMesh_.Destroy();
@@ -1190,7 +1279,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.team != team) continue;
     DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, obstacles,
-                game.GetScene().sidewalks, game.GetScene().mapHalfExtent, /*shotCone=*/false);
+                game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
   }
   glDisable(GL_STENCIL_TEST);
   // Shot probability cone: only for this pane's selected figure, drawn over
@@ -1198,8 +1287,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (overlays.selectionHighlight) {
     if (const Unit* selected = game.FindUnit(*game.SelectedUnitId())) {
       if (selected->alive) {
-        DrawFovCone(colorShader_, fovConeMesh_, viewProj, *selected, obstacles,
-                    game.GetScene().sidewalks, game.GetScene().mapHalfExtent, /*shotCone=*/true);
+        // Depth-tested against the world so ground, slabs and walls cut the
+        // cone off; LEQUAL lets the footprint pass land on the very surfaces
+        // already in the depth buffer.
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, viewProj,
+                     *selected, obstacles, game.GetScene().sidewalks,
+                     game.GetScene().mapHalfExtent);
+        glDepthFunc(GL_LESS);
       }
     }
   }

@@ -361,6 +361,7 @@ void TestRoundCommitRequiresBothTeamsPlanned() {
   game.ChooseMove();
   const glm::vec3 destination(-3.0f, 0.0f, -4.0f);
   game.ClickGround(destination, Team::Blue);
+  game.FinishMovePlan();
   CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Move);
   game.ClickUnit(1, Team::Blue);
   game.ChooseShoot();
@@ -406,6 +407,7 @@ void TestRoundExecutesBothTeamsMovesConcurrently() {
   game.ChooseMove();
   const glm::vec3 blueDestination(-3.0f, 0.0f, -4.0f);
   game.ClickGround(blueDestination, Team::Blue);
+  game.FinishMovePlan();
   game.ClickUnit(1, Team::Blue);
   game.ChoosePass();
   game.ClickUnit(2, Team::Blue);
@@ -415,6 +417,7 @@ void TestRoundExecutesBothTeamsMovesConcurrently() {
   game.ChooseMove();
   const glm::vec3 redDestination(3.0f, 0.0f, 4.0f);
   game.ClickGround(redDestination, Team::Red);
+  game.FinishMovePlan();
   game.ClickUnit(3, Team::Red);
   game.ChoosePass();
   game.ClickUnit(4, Team::Red);
@@ -537,30 +540,108 @@ void TestMoveFrontierRoutesAroundObstacle() {
   CHECK(game.MoveFrontier() == nullptr);
 }
 
-void TestMoveBudgetCapsPlannedPaths() {
+void TestClickChainsLegsAcrossRounds() {
   GameLogic game(LegacyScene());
   game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
 
-  // blue0 can cover runSpeed * kRoundDuration world units per round. A far
-  // corner beyond that budget must be rejected at plan time -- the round's
-  // execution window is fixed, so the figure could never get there in time.
   const Unit* mover = game.FindUnit(0);
-  const glm::vec3 tooFar(11.0f, 0.0f, 8.0f);
-  CHECK(glm::distance(mover->position, tooFar) > mover->MoveBudget());
-  game.HoverGround(tooFar, Team::Blue);
-  CHECK(!game.MovePreviewValid());
-  game.ClickGround(tooFar, Team::Blue);
-  CHECK(game.Mode() == InputMode::AwaitingMoveDestination);  // Rejected: no plan.
-  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::None);
+  const float budget = mover->MoveBudget();
+  const glm::vec3 start = mover->position;
 
-  // A destination inside the budget plans normally.
-  const glm::vec3 nearEnough(-3.0f, 0.0f, -4.0f);
-  game.HoverGround(nearEnough, Team::Blue);
-  CHECK(game.MovePreviewValid());
-  game.ClickGround(nearEnough, Team::Blue);
+  // A click beyond one round's reach is rejected (no plan, still choosing).
+  const glm::vec3 far(11.0f, 0.0f, 8.0f);
+  CHECK(glm::distance(start, far) > budget);
+  game.HoverGround(far, Team::Blue);
+  CHECK(!game.MovePreviewValid());
+  game.ClickGround(far, Team::Blue);
+  CHECK(mover->plan.type == tactics::PlannedActionType::None);
+  CHECK(game.Mode() == InputMode::AwaitingMoveDestination);
+
+  // Each in-reach click adds a leg from the previous leg's end; the figure
+  // stays selected until the chain is finished.
+  const glm::vec3 first = start + glm::vec3(budget * 0.9f, 0.0f, 0.0f);
+  game.ClickGround(first, Team::Blue);
+  CHECK(mover->plan.type == tactics::PlannedActionType::Move);
+  CHECK(mover->plan.queuedLegs.empty());
+  CHECK(game.Mode() == InputMode::AwaitingMoveDestination);
+  CHECK(glm::distance(game.MoveChainEnd(), first) < 1e-3f);
+  const glm::vec3 second = first + glm::vec3(0.0f, 0.0f, budget * 0.9f);
+  game.ClickGround(second, Team::Blue);
+  CHECK(mover->plan.queuedLegs.size() == 1);
+  CHECK(glm::distance(mover->plan.queuedLegs[0].front(), first) < 1e-3f);
+  CHECK(glm::distance(game.MoveChainEnd(), second) < 1e-3f);
+  game.FinishMovePlan();
   CHECK(game.Mode() == InputMode::AwaitingSelection);
-  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Move);
+
+  // Legs auto-arm across rounds with no re-clicking, ending at the last click.
+  for (int round = 0; round < 5 && game.FindUnit(0)->plan.type == tactics::PlannedActionType::Move;
+       ++round) {
+    for (const Unit& u : game.GetScene().units) {
+      if (u.id == 0 || u.plan.type != tactics::PlannedActionType::None) continue;
+      game.ClickUnit(u.id, u.team);
+      game.ChoosePass();
+    }
+    game.CommitRound();
+    while (game.Mode() == InputMode::Executing) game.Update(0.05f);
+  }
+  CHECK(glm::distance(game.FindUnit(0)->position, second) < 0.1f);
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::None);
+  CHECK(game.FindUnit(0)->plan.queuedLegs.empty());
+}
+
+void TestManualReplanClearsQueuedLegs() {
+  GameLogic game(LegacyScene());
+  auto planChain = [&] {
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseMove();
+    const glm::vec3 start = game.FindUnit(0)->position;
+    const float budget = game.FindUnit(0)->MoveBudget();
+    game.ClickGround(start + glm::vec3(budget * 0.9f, 0.0f, 0.0f), Team::Blue);
+    game.ClickGround(game.MoveChainEnd() + glm::vec3(0.0f, 0.0f, budget * 0.9f), Team::Blue);
+    CHECK(!game.FindUnit(0)->plan.queuedLegs.empty());
+    game.FinishMovePlan();
+  };
+
+  planChain();
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseOverwatch();
+  CHECK(game.FindUnit(0)->plan.queuedLegs.empty());
+
+  planChain();
+  game.ClickUnit(0, Team::Blue);
+  game.ChoosePass();
+  CHECK(game.FindUnit(0)->plan.queuedLegs.empty());
+
+  // Choosing Move again starts a fresh chain; Esc abandons the one in progress.
+  planChain();
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::None);
+  game.ClickGround(game.FindUnit(0)->position + glm::vec3(1.0f, 0.0f, 0.0f), Team::Blue);
+  game.CancelAction();
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::None);
+  CHECK(game.FindUnit(0)->plan.queuedLegs.empty());
+}
+
+void TestQueuedLegsSnapshotRoundTrip() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  const glm::vec3 start = game.FindUnit(0)->position;
+  const float budget = game.FindUnit(0)->MoveBudget();
+  game.ClickGround(start + glm::vec3(budget * 0.9f, 0.0f, 0.0f), Team::Blue);
+  game.ClickGround(game.MoveChainEnd() + glm::vec3(0.0f, 0.0f, budget * 0.9f), Team::Blue);
+  game.ClickGround(game.MoveChainEnd() + glm::vec3(-budget * 0.5f, 0.0f, 0.0f), Team::Blue);
+  game.FinishMovePlan();
+  const auto& queued = game.FindUnit(0)->plan.queuedLegs;
+  CHECK(queued.size() == 2);
+  tactics::GameSnapshot out;
+  CHECK(tactics::DeserializeSnapshot(tactics::SerializeSnapshot(game.ExportState()), &out));
+  GameLogic mirror(LegacyScene());
+  CHECK(mirror.ImportState(out));
+  CHECK(mirror.FindUnit(0)->plan.queuedLegs.size() == queued.size());
+  CHECK(mirror.FindUnit(0)->plan.queuedLegs[1].size() == queued[1].size());
 }
 
 void TestPendingShotFiresWhenTargetWalksIntoView() {
@@ -591,6 +672,7 @@ void TestPendingShotFiresWhenTargetWalksIntoView() {
   game.ChooseMove();
   const glm::vec3 destination(5.0f, 0.0f, 0.0f);
   game.ClickGround(destination, Team::Red);
+  game.FinishMovePlan();
   game.ClickUnit(5, Team::Red);
   game.ChoosePass();
 
@@ -707,6 +789,7 @@ void TestGameLogicMoveUpdatesPositionAndFacing() {
 
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
   game.ClickGround(destination, Team::Blue);
+  game.FinishMovePlan();
   // Planning only: the click records blue0's plan and returns to unit
   // selection -- nothing moves and the round does not advance yet.
   CHECK(game.Mode() == InputMode::AwaitingSelection);
@@ -753,6 +836,7 @@ void TestGameLogicMoveAnimatesProgressively() {
   game.HoverGround(destination, Team::Blue);
   CHECK(game.MovePreviewValid());
   game.ClickGround(destination, Team::Blue);
+  game.FinishMovePlan();
   CHECK(game.Mode() == InputMode::AwaitingSelection);  // Planned only.
 
   PassEveryoneElse(game, {0});
@@ -788,6 +872,7 @@ void TestGameLogicMoveFacingAdjustableBeforeCommit() {
   game.ChooseMove();
   const glm::vec3 destination = game.FindUnit(id)->position + glm::vec3(3.0f, 0.0f, 0.0f);
   game.ClickGround(destination, Team::Blue);
+  game.FinishMovePlan();
   // Planned right away, defaulting to the natural direction (+X).
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(game.FindUnit(id)->plan.type == PlannedActionType::Move);
@@ -810,6 +895,7 @@ void TestGameLogicIgnoresInputWhileExecuting() {
   game.ChooseMove();
   const glm::vec3 destination(-3.0f, 0.0f, -4.0f);
   game.ClickGround(destination, Team::Blue);
+  game.FinishMovePlan();
   PassEveryoneElse(game, {0});
   game.CommitRound();
   CHECK(game.Mode() == InputMode::Executing);
@@ -823,6 +909,7 @@ void TestGameLogicIgnoresInputWhileExecuting() {
   game.ClickUnit(3, Team::Red);
   CHECK(game.Mode() == InputMode::Executing);
   game.ClickGround(glm::vec3(5.0f, 0.0f, 5.0f), Team::Blue);
+  game.FinishMovePlan();
   CHECK(game.Mode() == InputMode::Executing);
   game.CancelAction();
   CHECK(game.Mode() == InputMode::Executing);
@@ -850,6 +937,7 @@ void TestGameLogicMoveCanClimbOntoObstacle() {
   CHECK(game.MovePreviewValid());
 
   game.ClickGround(crateTop, Team::Blue);
+  game.FinishMovePlan();
   CHECK(game.Mode() == InputMode::AwaitingSelection);  // Planned only.
 
   PassEveryoneElse(game, {0});
@@ -884,6 +972,7 @@ void TestGameLogicOverwatchFiresOnEnemyEnteringFov() {
   game.ChooseMove();
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
   game.ClickGround(destination, Team::Red);
+  game.FinishMovePlan();
 
   PassEveryoneElse(game, {1, 4});
   CHECK(game.CanCommitRound());
@@ -933,6 +1022,7 @@ void StartRed4WalkThroughBlue1Lane(GameLogic& game, const glm::vec3& destination
   game.ClickUnit(4, Team::Red);
   game.ChooseMove();
   game.ClickGround(destination, Team::Red);
+  game.FinishMovePlan();
   game.ClickUnit(5, Team::Red);
   game.ChoosePass();
   CHECK(game.CanCommitRound());
@@ -1030,6 +1120,7 @@ void TestWalkCycleTracksInFlightMove() {
   game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
   game.ClickGround(start + glm::vec3(4.0f, 0.0f, 0.0f), Team::Blue);
+  game.FinishMovePlan();
   CHECK(mover->plan.type == PlannedActionType::Move);
   for (int id : {1, 2, 3, 4, 5}) {
     game.ClickUnit(id, id < 3 ? Team::Blue : Team::Red);
@@ -1216,6 +1307,7 @@ void TestSnapshotMirrorsMatchAndTeamPlans() {
   red.ClickUnit(3, Team::Red);
   red.ChooseMove();
   red.ClickGround(red.FindUnit(3)->position + glm::vec3(1.0f, 0.0f, 0.0f), Team::Red);
+  red.FinishMovePlan();
   CHECK(red.FindUnit(3)->plan.type == PlannedActionType::Move);
   red.SetPlannedMoveFacing(3, 1.25f, Team::Red);
   for (int id : {4, 5}) {
@@ -1323,6 +1415,27 @@ void TestSightingMoveDirectionOnlyWhenMoving() {
   CHECK(std::fabs(last.moveDirection.z) < 1e-3f);
 }
 
+void TestSightingCapturesAnimationPose() {
+  GameLogic game(LegacyScene());
+  Unit* red = game.FindUnit(4);
+  red->walkPhase = 1.25f;
+  red->walkBlend = 0.75f;
+  red->idleElapsed = 2.5f;
+  StepSightings(game, 1.0f);
+  const auto& samples = game.Sightings(Team::Blue, 4);
+  CHECK(!samples.empty());
+  const GameLogic::EnemySighting first = samples.front();
+  CHECK(first.walkPhase == 1.25f);
+  CHECK(first.walkBlend == 0.75f);
+  CHECK(first.idleElapsed == 2.5f);
+  red->walkPhase = 3.0f;
+  red->walkBlend = 0.1f;
+  red->idleElapsed = 9.0f;
+  CHECK(game.Sightings(Team::Blue, 4).front().walkPhase == 1.25f);
+  CHECK(game.Sightings(Team::Blue, 4).front().walkBlend == 0.75f);
+  CHECK(game.Sightings(Team::Blue, 4).front().idleElapsed == 2.5f);
+}
+
 void TestSightingsPersistAfterLeavingFovThenExpire() {
   GameLogic game(LegacyScene());
   StepSightings(game, 2.0f);
@@ -1345,12 +1458,12 @@ void TestSightingReentryAppendsToAgingTrail() {
   StepSightings(game, 1.0f);
   const size_t before = game.Sightings(Team::Blue, 4).size();
   BlueLookAway(game, kPi);
-  AdvanceRounds(game, 3);
+  AdvanceRounds(game, 2);
   BlueLookAway(game, 0.0f);
   game.UpdateSightingMemory(0.05f);
   const auto& samples = game.Sightings(Team::Blue, 4);
   CHECK(samples.size() == before + 1);
-  CHECK(samples.front().ageRounds == 3);  // Kept aging, not reset.
+  CHECK(samples.front().ageRounds == 2);  // Kept aging, not reset.
   CHECK(samples.back().ageRounds == 0);
 }
 
@@ -1367,6 +1480,7 @@ void TestFollowerBuildsSightingsWithoutPhysicsUpdate() {
   sim.ClickUnit(4, Team::Red);
   sim.ChooseMove();
   sim.ClickGround(glm::vec3(-2.0f, 0.0f, 0.0f), Team::Red);
+  sim.FinishMovePlan();
   CHECK(sim.FindUnit(4)->plan.type == PlannedActionType::Move);
   PassEveryoneElse(sim, {4});
   CHECK(sim.CanCommitRound());
@@ -1412,7 +1526,9 @@ int main() {
   TestShootRowsResolveSimultaneouslyAcrossTeams();
   TestMutualEliminationIsDraw();
   TestMoveFrontierRoutesAroundObstacle();
-  TestMoveBudgetCapsPlannedPaths();
+  TestClickChainsLegsAcrossRounds();
+  TestManualReplanClearsQueuedLegs();
+  TestQueuedLegsSnapshotRoundTrip();
   TestPendingShotFiresWhenTargetWalksIntoView();
   TestDefaultSceneSquadsStartHidden();
   TestGameLogicShootGatingRequiresTeamVisibility();
@@ -1437,6 +1553,7 @@ int main() {
   TestSightingRecordedImmediatelyOnEntry();
   TestSightingSamplesAccumulateWhileInFov();
   TestSightingMoveDirectionOnlyWhenMoving();
+  TestSightingCapturesAnimationPose();
   TestSightingsPersistAfterLeavingFovThenExpire();
   TestSightingReentryAppendsToAgingTrail();
   TestResetClearsSightings();

@@ -19,6 +19,9 @@
 
 #include <SDL.h>
 #include <GLES3/gl3.h>
+#include <glm/glm.hpp>
+#include <imgui.h>
+#include <backends/imgui_impl_opengl3.h>
 
 #include <algorithm>
 #include <optional>
@@ -39,6 +42,7 @@
 #include "gfx/Camera.h"
 #include "gfx/SceneRenderer.h"
 #include "scenario/Scenario.h"
+#include "ui/Hud.h"
 
 namespace fs = std::filesystem;
 
@@ -63,10 +67,13 @@ constexpr int kVideoFps = 30;
 // Frames held on the initial state and after each action so video viewers
 // can actually read each turn's outcome (0.5 s at kVideoFps).
 constexpr int kHoldFrames = 15;
+// Frames the click marker is shown before each scripted click lands (video
+// only): a ring contracting onto the click point, then a brief hold.
+constexpr int kClickFrames = 12;
 
 // Pane 0 is the left half (Blue), pane 1 the right half (Red) -- same
 // arbitrary-but-fixed assignment as the interactive app.
-Team PaneTeam(int pane) { return pane == 0 ? Team::Blue : Team::Red; }
+using ui::PaneTeam;
 const char* TeamName(Team team) { return team == Team::Blue ? "blue" : "red"; }
 
 struct Options {
@@ -151,7 +158,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   // Fixed default cameras, identical to the app's startup view (each pane
   // is half-width, so start zoomed out enough for both spawns to fit).
   // Nothing perturbs them at runtime, so captures are deterministic.
-  std::array<gfx::OrbitCamera, 2> cameras;
+  std::array<gfx::OrbitCamera, ui::kPaneCount> cameras;
   for (auto& camera : cameras) {
     camera.Zoom(scenario.cameraZoom);
     if (scenario.cameraTarget) camera.target = glm::vec3(scenario.cameraTarget->x, 0.0f, scenario.cameraTarget->y);
@@ -159,8 +166,20 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   }
 
   const int paneWidth = kWindowWidth / 2;
-  // Overlays come from the same BuildPaneOverlays the interactive app uses.
-  auto renderBothPanes = [&](const GameLogic& game) {
+  // Optional cursor marker: `progress` runs 0 -> 1 as the ring closes in.
+  // Either a world-space click (figure/ground, projected through the pane's
+  // camera) or, when `button` is set, a press of the named HUD button at
+  // whatever screen position the HUD reports for it this frame.
+  struct ClickMarker {
+    Team team;
+    glm::vec3 world{0.0f};
+    float progress = 0.0f;
+    const char* button = nullptr;
+  };
+  // Panes' overlays come from the same BuildPaneOverlays the interactive app
+  // uses. Draws both 3D panes, then the same HUD the interactive app builds
+  // (ui::DrawHud), then the click marker on the acting team's pane.
+  auto renderBothPanes = [&](const GameLogic& game, const ClickMarker* marker = nullptr) {
     const bool fogActive = game.Mode() != InputMode::GameOver;
     for (int pane = 0; pane < 2; ++pane) {
       const Team team = PaneTeam(pane);
@@ -170,6 +189,69 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
       renderer.RenderPane(game, team, fogActive, visibility, cameras[pane], pane * paneWidth, 0,
                           paneWidth, kWindowHeight, overlays);
     }
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(static_cast<float>(kWindowWidth), static_cast<float>(kWindowHeight));
+    io.DeltaTime = 1.0f / kVideoFps;
+    // Each team's pane gets its own HUD, as in its own browser tab. Button
+    // positions are collected per pane so a menu-click marker can land on
+    // the actual button a player would press.
+    const bool planning = game.Mode() != InputMode::Executing && game.Mode() != InputMode::GameOver;
+    std::array<ui::HudLayout, ui::kPaneCount> layouts;
+    auto drawHud = [&](const GameLogic& g) {
+      for (int pane = 0; pane < ui::kPaneCount; ++pane) {
+        layouts[pane] = ui::HudLayout{};
+        ui::DrawHud(g, PaneTeam(pane), planning, ui::ComputePaneRect(pane, kWindowWidth),
+                    kWindowHeight, cameras[pane], &layouts[pane]);
+      }
+    };
+    // Auto-resize windows need a couple of frames to settle on their content
+    // size (and stay hidden meanwhile), as they would in the live app; run
+    // throw-away frames first so every capture is fully laid out.
+    for (int warmup = 0; warmup < 3; ++warmup) {
+      ImGui_ImplOpenGL3_NewFrame();
+      ImGui::NewFrame();
+      drawHud(game);
+      ImGui::EndFrame();
+    }
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui::NewFrame();
+    drawHud(game);
+    if (marker) {
+      const int pane = marker->team == Team::Blue ? 0 : 1;
+      glm::vec2 p;
+      bool haveTarget = true;
+      if (marker->button) {
+        // HUD button press: use the position the HUD reported this frame.
+        // If the button is not on screen (unexpected), skip the marker but
+        // still emit the frame so timing stays intact.
+        if (const glm::vec2* center = layouts[pane].FindButton(marker->button)) {
+          p = *center;
+        } else {
+          haveTarget = false;
+        }
+      } else {
+        p = ui::WorldToWindow(marker->world, cameras[pane],
+                              ui::ComputePaneRect(pane, kWindowWidth), kWindowHeight);
+      }
+      if (haveTarget) {
+        ImDrawList* draw = ImGui::GetForegroundDrawList();
+        const ImVec2 c(p.x, p.y);
+        const float radius = 18.0f + 60.0f * (1.0f - marker->progress);
+        const int alpha = static_cast<int>(140 + 115 * marker->progress);
+        // Dark under-stroke keeps the ring readable against any background.
+        draw->AddCircle(c, radius, IM_COL32(0, 0, 0, alpha), 48, 9.0f);
+        draw->AddCircle(c, radius, IM_COL32(255, 220, 40, alpha), 48, 5.0f);
+        draw->AddCircleFilled(c, 7.0f, IM_COL32(0, 0, 0, 255));
+        draw->AddCircleFilled(c, 5.0f, IM_COL32(255, 220, 40, 255));
+        // Arrow cursor with its tip on the click point.
+        const ImVec2 b(c.x + 20, c.y + 36), r(c.x + 36, c.y + 24);
+        draw->AddTriangleFilled(c, b, r, IM_COL32(255, 255, 255, 255));
+        draw->AddTriangle(c, b, r, IM_COL32(0, 0, 0, 255), 2.5f);
+      }
+    }
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
   };
 
   std::array<VideoEncoder, 2> encoders;
@@ -188,16 +270,39 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
 
   int imageFailures = 0;
   tactics::scenario::PlaybackHooks hooks;
+  // Declared outside the `if`: the hooks below outlive its scope.
+  auto writeVideoFrame = [&](const GameLogic& game, const ClickMarker* marker) {
+    renderBothPanes(game, marker);
+    const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);
+    for (int pane = 0; pane < 2; ++pane) {
+      if (!encoders[pane].WriteFrame(CropColumns(frame, pane * paneWidth, paneWidth))) {
+        videoOk = false;
+      }
+    }
+  };
   if (options.video && videoOk) {
     hooks.tickSeconds = 1.0f / kVideoFps;
     hooks.holdFramesAfterAction = kHoldFrames;
-    hooks.onFrame = [&](const GameLogic& game) {
-      renderBothPanes(game);
-      const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);
-      for (int pane = 0; pane < 2; ++pane) {
-        if (!encoders[pane].WriteFrame(CropColumns(frame, pane * paneWidth, paneWidth))) {
-          videoOk = false;
-        }
+    hooks.onFrame = [&](const GameLogic& game) { writeVideoFrame(game, nullptr); };
+    // Show the cursor landing on the figure/ground point before the click
+    // takes effect, instead of jump-cutting between states.
+    hooks.onClick = [&](const GameLogic& game, Team team, const glm::vec3& worldPoint) {
+      for (int i = 0; i < kClickFrames; ++i) {
+        const float progress = std::min(1.0f, static_cast<float>(i + 1) / (kClickFrames * 0.7f));
+        const ClickMarker marker{team, worldPoint, progress};
+        writeVideoFrame(game, &marker);
+      }
+    };
+    // Same treatment for HUD action-menu presses (Move/Shoot/Pass/Cancel):
+    // the menu is visible in the pre-press state, so the marker closes in on
+    // the actual button before the choice takes effect.
+    hooks.onMenuClick = [&](const GameLogic& game, Team team, const char* button) {
+      for (int i = 0; i < kClickFrames; ++i) {
+        ClickMarker marker;
+        marker.team = team;
+        marker.progress = std::min(1.0f, static_cast<float>(i + 1) / (kClickFrames * 0.7f));
+        marker.button = button;
+        writeVideoFrame(game, &marker);
       }
     };
   }
@@ -403,6 +508,14 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // ImGui without the SDL backend: no input, we set DisplaySize/DeltaTime
+  // ourselves per frame, so the HUD renders deterministically.
+  IMGUI_CHECKVERSION();
+  ImGui::CreateContext();
+  ImGui::StyleColorsDark();
+  ImGui::GetIO().IniFilename = nullptr;
+  ImGui_ImplOpenGL3_Init("#version 300 es");
+
   gfx::SceneRenderer renderer;
   if (!renderer.Init()) return 1;
 
@@ -412,6 +525,8 @@ int main(int argc, char** argv) {
   }
 
   renderer.Destroy();
+  ImGui_ImplOpenGL3_Shutdown();
+  ImGui::DestroyContext();
   SDL_GL_DeleteContext(glContext);
   SDL_DestroyWindow(window);
   SDL_Quit();

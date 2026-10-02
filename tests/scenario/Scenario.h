@@ -37,7 +37,10 @@ struct ScenarioAction {
 
   int actor = -1;  // Unused (and not required in YAML) for Commit.
   Kind kind = Kind::Pass;
-  glm::vec3 destination{0.0f};  // Move only.
+  glm::vec3 destination{0.0f};  // Move only: the last leg's end.
+  std::vector<glm::vec3> waypoints;  // Move only: earlier leg ends, clicked in
+                                      // order before `destination` (multi-leg
+                                      // plan, one leg executes per round).
   std::optional<float> finalFacingDegrees;  // Move only: re-aims the planned
                                              // wireframe before commit.
   int target = -1;              // Shoot only.
@@ -61,6 +64,13 @@ struct ScenarioAssertion {
 
   bool checkWinner = false;
   std::optional<Team> expectedWinner;  // nullopt means "no winner yet".
+
+  // Sighting memory: `remembered_by` team has (remembered=true) or has no
+  // (false) remembered trail of `unit`; `memory_age` is the oldest sample's
+  // ageRounds (rounds completed since it was recorded).
+  std::optional<Team> rememberedByTeam;
+  std::optional<bool> remembered;
+  std::optional<int> memoryAge;
 
   std::optional<int> round;
 };
@@ -108,6 +118,20 @@ struct PlaybackHooks {
   // Fired for every playback frame (initial holds, each move tick, and
   // post-action holds). The game state is mid-scenario; do not mutate it.
   std::function<void(const GameLogic&)> onFrame;
+
+  // Fired just before each scripted click is applied (unit selection, move
+  // destination, shoot target) by `team`'s player, with the world-space point the equivalent
+  // real mouse click would land on (unit head for figures, the ground point
+  // for destinations). Lets a renderer show the cursor landing before the
+  // state changes. The game state is the pre-click state; do not mutate it.
+  std::function<void(const GameLogic&, Team team, const glm::vec3& worldPoint)> onClick;
+
+  // Fired just before a scripted press of a HUD action-menu button ("Move",
+  // "Shoot", "Pass", "Cancel") by `team`'s player, after the actor has been
+  // selected. The game state is the pre-press state (so the menu the player
+  // would be clicking is actually visible); do not mutate it. `button` is
+  // the button's on-screen label.
+  std::function<void(const GameLogic&, Team team, const char* button)> onMenuClick;
 
   // Fired holdFramesAfterAction times (min 1) for each Move step, right after
   // ChooseMove() while the game is in AwaitingMoveDestination, so a capture

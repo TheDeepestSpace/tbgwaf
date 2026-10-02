@@ -37,6 +37,7 @@ target_link_libraries(tactics_logic PUBLIC glm::glm)
 
 set(APP_GFX_SOURCES
   src/main.cpp
+  src/ui/Hud.cpp
   src/gfx/Shader.cpp
   src/gfx/Mesh.cpp
   src/gfx/Camera.cpp
@@ -128,11 +129,18 @@ else()
   target_include_directories(tactics_gfx PUBLIC src)
   target_link_libraries(tactics_gfx PUBLIC tactics_logic PkgConfig::GLESV2 glm::glm)
 
+  # Per-team HUD (Turn panel, action menu, team label), shared by the
+  # interactive app and the visual scenario runner.
+  add_library(tactics_ui STATIC src/ui/Hud.cpp)
+  target_include_directories(tactics_ui PUBLIC src)
+  target_link_libraries(tactics_ui PUBLIC tactics_logic tactics_gfx imgui glm::glm)
+
   add_executable(tactics_app src/main.cpp)
   target_include_directories(tactics_app PRIVATE src)
   target_link_libraries(tactics_app PRIVATE
     tactics_logic
     tactics_gfx
+    tactics_ui
     imgui
     PkgConfig::SDL2
     PkgConfig::EGL
@@ -198,6 +206,8 @@ else()
   target_link_libraries(tactics_visual_tests PRIVATE
     tactics_scenario
     tactics_gfx
+    tactics_ui
+    imgui
     PkgConfig::SDL2
     PkgConfig::EGL
   )

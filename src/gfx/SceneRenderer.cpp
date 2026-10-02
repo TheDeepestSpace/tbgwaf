@@ -28,6 +28,9 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
   overlays.selectionHighlight = selected->position;
   if (game.Mode() == tactics::InputMode::AwaitingMoveDestination) {
     overlays.moveFrontier = game.MoveFrontier();
+    // A later leg's boundary is yellow, matching the selector; the first leg's stays green.
+    overlays.moveFrontierSubsequentLeg = selected->plan.type == tactics::PlannedActionType::Move &&
+                                         selected->plan.movePath.size() >= 2;
     if (game.MovePreviewValid()) {
       overlays.movePreviewPath = &game.MovePreviewPath();
     } else if (hoveredGroundPoint) {
@@ -120,10 +123,17 @@ float ComputeShadow(vec3 normal) {
   if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z > 1.0) {
     return 0.0;  // Outside the light's frustum: treat as unshadowed.
   }
-  float closestDepth = texture(uShadowMap, proj.xy).r;
   float currentDepth = proj.z;
   float bias = max(0.003 * (1.0 - max(dot(normal, -uLightDir), 0.0)), 0.0008);
-  return (currentDepth - bias) > closestDepth ? 1.0 : 0.0;
+  vec2 texelSize = 1.0 / vec2(textureSize(uShadowMap, 0));
+  float shadow = 0.0;
+  for (int x = -1; x <= 1; ++x) {
+    for (int y = -1; y <= 1; ++y) {
+      float sampledDepth = texture(uShadowMap, proj.xy + vec2(x, y) * texelSize).r;
+      shadow += (currentDepth - bias) > sampledDepth ? 1.0 : 0.0;
+    }
+  }
+  return shadow / 9.0;
 }
 
 void main() {
@@ -601,6 +611,9 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
   Unit ghost = sighted;
   ghost.position = s.position;
   ghost.facingYaw = s.facingYaw;
+  ghost.walkPhase = s.walkPhase;
+  ghost.walkBlend = s.walkBlend;
+  ghost.idleElapsed = s.idleElapsed;
   ghost.knockdownElapsed = -1.0f;
   if (glm::length(s.moveDirection) > 0.0f) {
     const glm::vec3 d = s.moveDirection;
@@ -636,6 +649,62 @@ void DrawHighlight(const Shader& shader, const CubeMesh& cube, const glm::mat4& 
   constexpr float kHalf = 0.5f;
   const glm::vec3 minCorner = position + glm::vec3(-kHalf, 0.01f, -kHalf);
   DrawBox(shader, cube, viewProj, minCorner, glm::vec3(kHalf * 2.0f, 0.04f, kHalf * 2.0f), color);
+}
+
+// 3x5 digit glyphs, one row per entry, MSB = leftmost column.
+constexpr unsigned char kDigitGlyphs[10][5] = {
+    {7, 5, 5, 5, 7}, {2, 6, 2, 2, 7}, {7, 1, 7, 4, 7}, {7, 1, 7, 1, 7}, {5, 5, 7, 1, 1},
+    {7, 4, 7, 1, 7}, {7, 4, 7, 5, 7}, {7, 1, 1, 1, 1}, {7, 5, 7, 5, 7}, {7, 5, 7, 1, 7}};
+
+// Snaps a ground-plane direction to the nearest world axis.
+glm::vec3 SnapToAxis(const glm::vec3& v) {
+  if (std::abs(v.x) >= std::abs(v.z)) return glm::vec3(v.x < 0.0f ? -1.0f : 1.0f, 0.0f, 0.0f);
+  return glm::vec3(0.0f, 0.0f, v.z < 0.0f ? -1.0f : 1.0f);
+}
+
+// The selection square with the number `n` (1-99) cut out of it, so the
+// ground shows through in the shape of the digits. Built from a 9x9 grid of
+// flat cells; the digits are oriented to read upright for `view`'s camera
+// (snapped to the nearest world axis so cells stay axis-aligned).
+void DrawNumberedHighlight(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
+                           const glm::mat4& view, const glm::vec3& position,
+                           const glm::vec4& color, int n) {
+  constexpr int kGrid = 9;
+  n = std::clamp(n, 0, 99);
+  bool cut[kGrid][kGrid] = {};  // [row from top][col from left]
+  const int digitCount = n >= 10 ? 2 : 1;
+  const int textWidth = digitCount * 3 + (digitCount - 1);
+  const int col0 = (kGrid - textWidth) / 2;
+  for (int d = 0; d < digitCount; ++d) {
+    const int digit = digitCount == 2 ? (d == 0 ? n / 10 : n % 10) : n;
+    for (int row = 0; row < 5; ++row) {
+      for (int col = 0; col < 3; ++col) {
+        if (kDigitGlyphs[digit][row] & (4 >> col)) cut[2 + row][col0 + d * 4 + col] = true;
+      }
+    }
+  }
+  const glm::vec3 right = SnapToAxis(glm::vec3(view[0][0], 0.0f, view[2][0]));
+  const glm::vec3 up = SnapToAxis(glm::vec3(-view[0][2], 0.0f, -view[2][2]));
+  const float cell = 1.0f / kGrid;
+  for (int row = 0; row < kGrid; ++row) {
+    for (int col = 0; col < kGrid;) {
+      if (cut[row][col]) {
+        ++col;
+        continue;
+      }
+      int end = col;
+      while (end < kGrid && !cut[row][end]) ++end;  // Run of solid cells.
+      const float u0 = -0.5f + col * cell, u1 = -0.5f + end * cell;
+      const float v0 = 0.5f - (row + 1) * cell, v1 = 0.5f - row * cell;
+      const glm::vec3 a = position + right * u0 + up * v0;
+      const glm::vec3 b = position + right * u1 + up * v1;
+      const glm::vec3 lo = glm::min(a, b);
+      const glm::vec3 hi = glm::max(a, b);
+      DrawBox(shader, cube, viewProj, glm::vec3(lo.x, position.y + 0.01f, lo.z),
+              glm::vec3(hi.x - lo.x, 0.04f, hi.z - lo.z), color);
+      col = end;
+    }
+  }
 }
 
 // A [begin, end) stretch of ground along one sight ray, as horizontal
@@ -908,7 +977,7 @@ bool SceneRenderer::Init() {
   fovConeMesh_.Init();
 
   // Stage-C: a single directional light (simulating overhead factory
-  // lighting) casting a basic shadow map, single cascade, hard-edged. The
+  // lighting) casting a PCF-filtered shadow map. The
   // light and the static map geometry are shared by all panes; only the
   // *casters* (which units are drawn into it) change per pane, since each
   // team's shadow map must not leak the position of units hidden by their
@@ -938,7 +1007,7 @@ bool SceneRenderer::Init() {
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
   // The light direction is fixed; the light-space matrix depends on the
-  // scene's map size and is recomputed per RenderPane.
+  // scene's map size and camera framing and is recomputed per RenderPane.
   lightDir_ = glm::normalize(glm::vec3(0.35f, -1.0f, 0.25f));
 
   glEnable(GL_DEPTH_TEST);
@@ -965,11 +1034,28 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const auto& obstacles = game.GetScene().obstacles;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;
 
-  // Light frustum sized to cover the whole map.
+  // Fit the light frustum to the camera's current zoom instead of spreading
+  // the shadow map over the whole scene. Cap it at the previous whole-map
+  // coverage so zoomed-out views retain the same bounds.
+  const float cameraDistance = glm::distance(camera.Position(), camera.target);
+  const float orthoHalfExtent = std::min(mapHalfExtent * 1.5f, cameraDistance);
+  const float shadowTexelWorldSize = orthoHalfExtent * 2.0f / kShadowMapSize;
+
+  // Keep the shadow texel grid fixed in world space while panning. Snap in
+  // the light's X/Y basis (rather than world X/Z), since those are the axes
+  // that map onto the shadow texture.
   const float lightDistance = mapHalfExtent * 3.0f;
-  const glm::mat4 lightView = glm::lookAt(-lightDir_ * lightDistance, glm::vec3(0.0f),
-                                          glm::vec3(0.0f, 1.0f, 0.0f));
-  const float orthoHalfExtent = mapHalfExtent * 1.5f;
+  const glm::mat4 lightBasis = glm::lookAt(-lightDir_, glm::vec3(0.0f),
+                                           glm::vec3(0.0f, 1.0f, 0.0f));
+  glm::vec4 centerInLightSpace = lightBasis * glm::vec4(camera.target, 1.0f);
+  centerInLightSpace.x = std::round(centerInLightSpace.x / shadowTexelWorldSize) *
+                         shadowTexelWorldSize;
+  centerInLightSpace.y = std::round(centerInLightSpace.y / shadowTexelWorldSize) *
+                         shadowTexelWorldSize;
+  const glm::vec3 snappedCenter = glm::vec3(glm::inverse(lightBasis) * centerInLightSpace);
+  const glm::mat4 lightView =
+      glm::lookAt(snappedCenter - lightDir_ * lightDistance, snappedCenter,
+                  glm::vec3(0.0f, 1.0f, 0.0f));
   lightSpaceMatrix_ = glm::ortho(-orthoHalfExtent, orthoHalfExtent, -orthoHalfExtent,
                                  orthoHalfExtent, 0.1f, lightDistance * 2.0f) *
                       lightView;
@@ -1088,6 +1174,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       frontierKeyOrigin_ = origin;
       frontierKeyBudget_ = f.budget;
       constexpr float kY = 0.03f;
+      constexpr float kSlabOffset = 0.015f;  // Above a sidewalk slab's top face.
       constexpr float kFadeWidth = 0.8f;   // World units from boundary to transparent.
       constexpr float kEdgeAlpha = 0.65f;  // Fill alpha right at the boundary.
       const int nx = f.nx, nz = f.nz;
@@ -1155,6 +1242,33 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       };
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
+      const std::vector<AABB>& slabs = game.GetScene().sidewalks;
+      // Clips a convex polygon to a slab's XZ footprint (Sutherland-Hodgman),
+      // interpolating the field value, and lifts it onto the slab's top.
+      auto clipToSlab = [&](const std::vector<Pt>& in, const AABB& slab) {
+        std::vector<Pt> poly = in;
+        for (int edge = 0; edge < 4 && !poly.empty(); ++edge) {
+          const float bound = edge == 0 ? slab.min.x : edge == 1 ? slab.max.x
+                              : edge == 2 ? slab.min.z : slab.max.z;
+          const auto coord = [&](const Pt& q) { return edge < 2 ? q.p.x : q.p.z; };
+          const auto inside = [&](const Pt& q) {
+            return edge % 2 == 0 ? coord(q) >= bound : coord(q) <= bound;
+          };
+          std::vector<Pt> out;
+          for (size_t v = 0; v < poly.size(); ++v) {
+            const Pt& cur = poly[v];
+            const Pt& prev = poly[(v + poly.size() - 1) % poly.size()];
+            if (inside(cur) != inside(prev)) {
+              const float t = (bound - coord(prev)) / (coord(cur) - coord(prev));
+              out.push_back({prev.p + (cur.p - prev.p) * t, prev.g + (cur.g - prev.g) * t});
+            }
+            if (inside(cur)) out.push_back(cur);
+          }
+          poly = std::move(out);
+        }
+        for (Pt& q : poly) q.p.y = slab.max.y + kSlabOffset;
+        return poly;
+      };
       auto toVertex = [&](const Pt& q) {
         const float a = kEdgeAlpha * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
         return ColorTriangleMesh::Vertex{q.p, glm::vec4(0.2f, 0.9f, 0.3f, a)};
@@ -1195,18 +1309,58 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             border.push_back(cut[0].p);
             border.push_back(cut[1].p);
           }
+          // The ground-level copy is buried under raised sidewalk slabs, so
+          // lay a clipped copy on top of each slab the cell overlaps.
+          for (const AABB& slab : slabs) {
+            const std::vector<Pt> piece = clipToSlab(poly, slab);
+            for (size_t k = 1; k + 1 < piece.size(); ++k) {
+              fill.push_back(toVertex(piece[0]));
+              fill.push_back(toVertex(piece[k]));
+              fill.push_back(toVertex(piece[k + 1]));
+            }
+            if (cut.size() == 2) {
+              // Liang-Barsky clip of the border segment to the slab footprint.
+              const glm::vec3 a = cut[0].p, d = cut[1].p - cut[0].p;
+              float t0 = 0.0f, t1 = 1.0f;
+              const float lo[2] = {slab.min.x, slab.min.z}, hi[2] = {slab.max.x, slab.max.z};
+              const float a2[2] = {a.x, a.z}, d2[2] = {d.x, d.z};
+              bool vis = true;
+              for (int ax = 0; ax < 2 && vis; ++ax) {
+                if (std::abs(d2[ax]) < 1e-9f) {
+                  vis = a2[ax] >= lo[ax] && a2[ax] <= hi[ax];
+                  continue;
+                }
+                float ta = (lo[ax] - a2[ax]) / d2[ax], tb = (hi[ax] - a2[ax]) / d2[ax];
+                if (ta > tb) std::swap(ta, tb);
+                t0 = std::max(t0, ta);
+                t1 = std::min(t1, tb);
+                vis = t0 < t1;
+              }
+              if (vis) {
+                const float y = slab.max.y + kSlabOffset;
+                border.emplace_back(a.x + d.x * t0, y, a.z + d.z * t0);
+                border.emplace_back(a.x + d.x * t1, y, a.z + d.z * t1);
+              }
+            }
+          }
         }
       }
       frontierFill_.SetVertices(fill);
       frontierBorder_.SetPoints(border);
     }
+    // Same depth bias as the FOV cone, against z-fighting at distance.
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(-2.0f, -4.0f);
     colorShader_.Use();
     colorShader_.SetMat4("uMVP", viewProj);
     frontierFill_.Draw();
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
-    unlitShader_.SetVec4("uColor", glm::vec4(0.2f, 1.0f, 0.3f, 1.0f));
+    unlitShader_.SetVec4("uColor", overlays.moveFrontierSubsequentLeg
+                                       ? glm::vec4(1.0f, 0.9f, 0.15f, 1.0f)
+                                       : glm::vec4(0.2f, 1.0f, 0.3f, 1.0f));
     frontierBorder_.DrawSegments();
+    glDisable(GL_POLYGON_OFFSET_FILL);
   }
   glDepthMask(GL_TRUE);
   glDisable(GL_BLEND);
@@ -1309,6 +1463,26 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         ghost.position = unit.plan.movePath.back();
         ghost.facingYaw = unit.plan.endFacingYaw;
         DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost);
+        // Chained legs for later rounds: yellow, with a marker at each leg
+        // end so they read apart from the leg about to execute (green).
+        const glm::vec4 yellow(1.0f, 0.85f, 0.2f, 1.0f);
+        const bool chaining = game.Mode() == InputMode::AwaitingMoveDestination &&
+                              game.SelectedUnitId() == unit.id;
+        if (chaining || !unit.plan.queuedLegs.empty()) {
+          DrawNumberedHighlight(unlitShader_, cubeMesh_, viewProj, view, unit.plan.movePath.back(),
+                                yellow, 1);
+        }
+        int legNumber = 1;
+        for (const auto& leg : unit.plan.queuedLegs) {
+          ++legNumber;
+          if (leg.size() < 2) continue;
+          pathLine_.SetPoints(leg);
+          unlitShader_.SetMat4("uMVP", viewProj);
+          unlitShader_.SetVec4("uColor", yellow);
+          pathLine_.Draw();
+          DrawNumberedHighlight(unlitShader_, cubeMesh_, viewProj, view, leg.back(), yellow,
+                                legNumber);
+        }
       } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
         if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {
           const std::vector<glm::vec3> shotLine = {unit.EyePosition(), shotTarget->EyePosition()};

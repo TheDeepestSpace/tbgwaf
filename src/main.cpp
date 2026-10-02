@@ -28,6 +28,7 @@
 #include "game/Visibility.h"
 #include "gfx/Camera.h"
 #include "gfx/SceneRenderer.h"
+#include "ui/Hud.h"
 
 using tactics::DeserializeSnapshot;
 using tactics::GameLogic;
@@ -131,7 +132,6 @@ int PickUnit(const gfx::Ray& ray, const std::vector<Unit>& units) {
   return bestId;
 }
 
-const char* TeamName(Team team) { return team == Team::Blue ? "Blue" : "Red"; }
 
 // Stage-C climbing: a ground/move click can land either on the y=0 ground
 // plane or on top of a climbable obstacle (a crate's top face). Both are
@@ -175,10 +175,7 @@ bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const tactics::Scene& scene,
   return found;
 }
 
-struct PaneRect {
-  int x = 0;
-  int width = 0;
-};
+using ui::PaneRect;
 
 // One pane fills the window; two split it down the middle (pane 0 left).
 PaneRect ComputePaneRect(int pane, int paneCount, int windowWidth) {
@@ -385,6 +382,7 @@ int main() {
     bool leftClickPending = false;
     int leftClickX = 0, leftClickY = 0;
     bool escapePending = false;
+    bool enterPending = false;
     int mouseX = 0, mouseY = 0;
     SDL_GetMouseState(&mouseX, &mouseY);
 
@@ -473,6 +471,9 @@ int main() {
         leftClickY = event.button.y;
       } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
         escapePending = true;
+      } else if (event.type == SDL_KEYDOWN && (event.key.keysym.sym == SDLK_RETURN ||
+                                               event.key.keysym.sym == SDLK_KP_ENTER)) {
+        enterPending = true;
       }
     }
 
@@ -514,19 +515,10 @@ int main() {
     }
 
     // --- UI ---
-    if (game.Mode() == InputMode::GameOver) {
-      ImGui::SetNextWindowPos(ImVec2(windowWidth * 0.5f, windowHeight * 0.3f), ImGuiCond_Always,
-                               ImVec2(0.5f, 0.5f));
-      ImGui::Begin("Game Over", nullptr,
-                   ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize);
-      if (const auto winner = game.Winner()) {
-        ImGui::Text("%s team wins!", TeamName(*winner));
-      } else {
-        // Simultaneous execution can down the last figure on both sides in
-        // the same instant.
-        ImGui::Text("Mutual annihilation -- draw!");
-      }
-      if (ImGui::Button("New Match")) {
+    for (int pane = 0; pane < paneCount; ++pane) {
+      const ui::HudActions hud = ui::DrawHud(game, paneTeam(pane), planning, paneRects[pane],
+                                             windowHeight, cameras[pane]);
+      if (hud.newMatch) {
         if (isSimulator) {
           game.Reset(tactics::GenerateUrbanMap(mapSeed));
         } else {
@@ -535,49 +527,7 @@ int main() {
 #endif
         }
       }
-      ImGui::End();
-    } else {
-      int plannedCount[2] = {0, 0}, totalCount[2] = {0, 0};
-      for (const Unit& unit : game.GetScene().units) {
-        if (!unit.alive) continue;
-        const int pane = unit.team == Team::Blue ? 0 : 1;
-        ++totalCount[pane];
-        if (unit.plan.type != tactics::PlannedActionType::None) ++plannedCount[pane];
-      }
-
-      ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
-      ImGui::Begin("Round", nullptr,
-                   ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
-                       ImGuiWindowFlags_NoMove);
-      ImGui::Text("Round %d", game.RoundNumber());
-      if (planning) {
-        ImGui::Text("Both teams plan every figure, then commit the round.");
-        for (int team = 0; team < 2; ++team) {
-          ImGui::Text("%s planned: %d / %d", TeamName(static_cast<Team>(team)),
-                      plannedCount[team], totalCount[team]);
-        }
-      }
-      switch (game.Mode()) {
-        case InputMode::AwaitingSelection:
-          ImGui::TextWrapped("Click one of your figures (in your own pane) to plan its action.");
-          break;
-        case InputMode::ActionMenu:
-          ImGui::TextWrapped("Choose an action to plan.");
-          break;
-        case InputMode::AwaitingMoveDestination:
-          ImGui::TextWrapped("Click a destination on the ground (Esc to cancel).");
-          break;
-        case InputMode::AwaitingShootTarget:
-          ImGui::TextWrapped("Click an enemy figure to plan a shot (Esc to cancel).");
-          break;
-        case InputMode::Executing:
-          ImGui::TextWrapped("Round executing: both teams' plans are playing out...");
-          break;
-        default:
-          break;
-      }
-      ImGui::BeginDisabled(!game.CanCommitRound());
-      if (ImGui::Button("Commit Round")) {
+      if (hud.commit) {
         if (isSimulator) {
           game.CommitRound();
         } else {
@@ -589,86 +539,32 @@ int main() {
 #endif
         }
       }
-      ImGui::EndDisabled();
-      ImGui::End();
-
-      if (const auto selectedId = game.SelectedUnitId(); selectedId && selectedTeam) {
-        Unit* selected = game.FindUnit(*selectedId);
-        if (selected && (game.Mode() == InputMode::ActionMenu ||
-                          game.Mode() == InputMode::AwaitingMoveDestination ||
-                          game.Mode() == InputMode::AwaitingShootTarget)) {
-          const int activePane = networked || *selectedTeam == Team::Blue ? 0 : 1;
-          const PaneRect& activeRect = paneRects[activePane];
-          const glm::mat4 activeView = cameras[activePane].ViewMatrix();
-          const glm::mat4 activeProj = cameras[activePane].ProjectionMatrix(
-              static_cast<float>(activeRect.width) / static_cast<float>(windowHeight));
-          const glm::vec4 activeViewport(static_cast<float>(activeRect.x), 0.0f,
-                                          static_cast<float>(activeRect.width),
-                                          static_cast<float>(windowHeight));
-          const glm::vec3 headTop = selected->position + glm::vec3(0.0f, 1.9f, 0.0f);
-          const glm::vec3 screenPos =
-              glm::project(headTop, activeView, activeProj, activeViewport);
-          // glm::project assumes a bottom-left viewport origin; flip Y for
-          // ImGui's top-left screen space. X is already absolute window
-          // space since activeViewport.x carries the pane's own offset.
-          const ImVec2 windowPos(screenPos.x, windowHeight - screenPos.y);
-          ImGui::SetNextWindowPos(windowPos, ImGuiCond_Always, ImVec2(0.5f, 1.0f));
-          ImGui::Begin("Actions", nullptr,
-                       ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
-                           ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar);
-          if (game.Mode() == InputMode::ActionMenu) {
-            if (ImGui::Button("Move")) game.ChooseMove();
-            ImGui::SameLine();
-            if (ImGui::Button("Shoot")) game.ChooseShoot();
-            ImGui::SameLine();
-            if (ImGui::Button("Overwatch")) game.ChooseOverwatch();
-            ImGui::SameLine();
-            // Opening/using this popup is deliberately not routed through
-            // GameLogic at all: it's a standing config edit, not a turn
-            // action, so it must not end the figure's turn the way
-            // Move/Shoot/Pass do.
-            if (ImGui::Button("Playbook")) ImGui::OpenPopup("PlaybookConfig");
-            ImGui::SameLine();
-            if (ImGui::Button("Pass")) game.ChoosePass();
-
-            if (ImGui::BeginPopup("PlaybookConfig")) {
-              ImGui::TextUnformatted("While stationary, on enemy FOV entry:");
-              int rule = static_cast<int>(selected->reactionOnStationary);
-              if (ImGui::RadioButton("Do Nothing", &rule, static_cast<int>(ReactionRule::DoNothing))) {
-                selected->reactionOnStationary = static_cast<ReactionRule>(rule);
-              }
-              ImGui::SameLine();
-              if (ImGui::RadioButton("Shoot", &rule, static_cast<int>(ReactionRule::Shoot))) {
-                selected->reactionOnStationary = static_cast<ReactionRule>(rule);
-              }
-              ImGui::EndPopup();
-            }
-          } else {
-            if (ImGui::Button("Cancel")) game.CancelAction();
-          }
-          ImGui::End();
+      if (hud.move) game.ChooseMove();
+      if (hud.shoot) game.ChooseShoot();
+      if (hud.overwatch) game.ChooseOverwatch();
+      if (hud.pass) game.ChoosePass();
+      if (hud.cancel) game.CancelAction();
+      if (hud.done) game.FinishMovePlan();
+      if (hud.reaction) {
+        if (const auto selectedId = game.SelectedUnitId()) {
+          if (Unit* selected = game.FindUnit(*selectedId)) selected->reactionOnStationary = *hud.reaction;
         }
       }
     }
 
-    // Pane divider and per-pane team labels. Both teams plan at once, so
-    // there's no "inactive side" to dim any more -- each pane is always its
-    // own player's live view.
-    ImDrawList* overlay = ImGui::GetForegroundDrawList();
+    // Pane divider. Both teams plan at once, so there's no "inactive side"
+    // to dim -- each pane is always its own player's live view.
     if (paneCount == 2) {
-      overlay->AddLine(ImVec2(static_cast<float>(paneRects[1].x), 0.0f),
-                        ImVec2(static_cast<float>(paneRects[1].x), static_cast<float>(windowHeight)),
-                        IM_COL32(255, 255, 255, 60), 2.0f);
-    }
-    for (int pane = 0; pane < paneCount; ++pane) {
-      const PaneRect& rect = paneRects[pane];
-      overlay->AddText(ImVec2(rect.x + 10.0f, windowHeight - 24.0f), IM_COL32(255, 255, 255, 220),
-                        TeamName(paneTeam(pane)));
+      ImGui::GetForegroundDrawList()->AddLine(
+          ImVec2(static_cast<float>(paneRects[1].x), 0.0f),
+          ImVec2(static_cast<float>(paneRects[1].x), static_cast<float>(windowHeight)),
+          IM_COL32(255, 255, 255, 60), 2.0f);
     }
 
     // --- Dispatch deferred input, now that WantCaptureMouse reflects the UI
     // actually built this frame. ---
     if (escapePending) game.CancelAction();
+    if (enterPending) game.FinishMovePlan();
 
     const bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse;
     if (!uiWantsMouse && planning) {

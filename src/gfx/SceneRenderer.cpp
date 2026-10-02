@@ -604,13 +604,24 @@ void DrawUnitWireframe(const Shader& shader, LineMesh& lines, const glm::mat4& v
 // Faded, team-colored wireframe of a remembered sighting plus a floor arrow
 // along its movement direction (if it was moving).
 void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
-                  const Unit& sighted, const GameLogic::EnemySighting& s, float alpha,
+                  const Unit& sighted, const GameLogic::EnemySighting& s,
+                  const std::vector<AABB>& sidewalks, float alpha,
                   const tactics::HeightField& terrain) {
   const glm::vec4 base = sighted.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
                                                     : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
   const glm::vec4 color(base.r, base.g, base.b, alpha);
+  // Sidewalk slabs are raised but cosmetic (unit y stays 0), so lift the ghost
+  // and arrow onto whatever slab the remembered position stands over, else
+  // they render buried under it.
+  glm::vec3 position = s.position;
+  for (const AABB& slab : sidewalks) {
+    if (position.x >= slab.min.x && position.x <= slab.max.x && position.z >= slab.min.z &&
+        position.z <= slab.max.z) {
+      position.y = std::max(position.y, slab.max.y);
+    }
+  }
   Unit ghost = sighted;
-  ghost.position = s.position;
+  ghost.position = position;
   ghost.facingYaw = s.facingYaw;
   ghost.walkPhase = s.walkPhase;
   ghost.walkBlend = s.walkBlend;
@@ -625,9 +636,9 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
     const auto onGround = [&](const glm::vec3& p) {
       return glm::vec3(p.x, terrain.HeightAt(p.x, p.z) + 0.02f, p.z);
     };
-    const glm::vec3 tail = terrain.Empty() ? s.position + glm::vec3(0.0f, 0.02f, 0.0f)
-                                           : onGround(s.position);
-    const glm::vec3 flatTip = s.position + d * 1.2f;
+    const glm::vec3 tail = terrain.Empty() ? position + glm::vec3(0.0f, 0.02f, 0.0f)
+                                           : onGround(position);
+    const glm::vec3 flatTip = position + d * 1.2f;
     const glm::vec3 tip = terrain.Empty() ? tail + d * 1.2f : onGround(flatTip);
     const glm::vec3 wingBase = flatTip - d * 0.3f;
     const glm::vec3 wingA =
@@ -1560,8 +1571,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       for (const auto& s : game.Sightings(team, unit.id)) {
         const float life = 1.0f - s.ageRounds * tactics::constants::kSightingFadePerRound;
         if (life <= 0.0f) continue;
-        DrawSighting(unlitShader_, pathLine_, viewProj, unit, s, life * kSightingMaxAlpha,
-                     terrain);
+        DrawSighting(unlitShader_, pathLine_, viewProj, unit, s, game.GetScene().sidewalks,
+                     life * kSightingMaxAlpha, terrain);
       }
     }
     glDepthMask(GL_TRUE);

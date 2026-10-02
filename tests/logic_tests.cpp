@@ -1236,6 +1236,98 @@ void TestGameLogicPlaybookMultiEnemyTieBreak() {
   CHECK(RunTieBreakWalk(true) > 0.5f);
 }
 
+// Isolated run of one playbook checkbox: red4 walks a straight lane past a
+// stationary blue0 while every other cell of both teams' tables stays
+// passive. `movingRow` picks whose table holds the cell under test -- the
+// mover's (red) for the moving rows, the watcher's (blue) for the stationary
+// rows. Geometry pins the visibility column for the whole walk: the actor
+// always has the enemy in its own FOV (a reaction needs a sighted enemy),
+// and facing/walk direction decides whether that enemy sees it back.
+struct PlaybookCellOutcome {
+  float moverDistToDest;
+  bool moverAlive;
+  bool watcherAlive;
+};
+
+PlaybookCellOutcome RunPlaybookCell(bool movingRow, bool canSeeMe, ReactionAction action) {
+  GameLogic game(LegacyScene());
+  for (Unit& u : const_cast<std::vector<Unit>&>(game.GetScene().units)) {
+    // Park everyone uninvolved far away, facing nothing.
+    u.position = glm::vec3(u.team == Team::Blue ? -40.0f : 40.0f, 0.0f, 40.0f + u.id);
+    u.facingYaw = 3.14159265f;
+  }
+  const float kHalfPi = 1.57079632679f;
+  Unit* watcher = game.FindUnit(0);  // Blue; stationary all round.
+  watcher->position = glm::vec3(8.0f, 0.0f, 6.0f);
+  Unit* mover = game.FindUnit(4);  // Red; walks the x=8 lane.
+  glm::vec3 destination;
+  SquadPlaybook pb = SquadPlaybook::Passive();
+  pb.At(movingRow, canSeeMe) = action;
+  if (movingRow) {
+    // Mover's row: it walks toward the watcher (so the enemy stays sighted);
+    // the watcher faces the lane only in the "seen" column.
+    mover->position = glm::vec3(8.0f, 0.0f, 0.0f);
+    mover->facingYaw = kHalfPi;
+    destination = glm::vec3(8.0f, 0.0f, 3.0f);
+    watcher->facingYaw = canSeeMe ? -kHalfPi : kHalfPi;
+    game.SetPlaybook(Team::Red, pb);
+    game.SetPlaybook(Team::Blue, SquadPlaybook::Passive());
+  } else {
+    // Watcher's row: it always faces the lane; the mover walks toward it
+    // (the sighted enemy sees the watcher back: "seen") or away ("unseen").
+    watcher->facingYaw = -kHalfPi;
+    mover->position = glm::vec3(8.0f, 0.0f, canSeeMe ? 0.0f : 3.0f);
+    mover->facingYaw = canSeeMe ? kHalfPi : -kHalfPi;
+    destination = glm::vec3(8.0f, 0.0f, canSeeMe ? 3.0f : 0.0f);
+    game.SetPlaybook(Team::Blue, pb);
+    game.SetPlaybook(Team::Red, SquadPlaybook::Passive());
+  }
+
+  for (int id : {0, 1, 2}) {
+    game.ClickUnit(id, Team::Blue);
+    game.ChoosePass();
+  }
+  game.ClickUnit(3, Team::Red);
+  game.ChoosePass();
+  game.ClickUnit(4, Team::Red);
+  game.ChooseMove();
+  game.ClickGround(destination, Team::Red);
+  game.FinishMovePlan();
+  game.ClickUnit(5, Team::Red);
+  game.ChoosePass();
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+  RunRound(game);
+  return PlaybookCellOutcome{glm::distance(game.FindUnit(4)->position, destination),
+                             game.FindUnit(4)->alive, game.FindUnit(0)->alive};
+}
+
+// Regression sweep over the whole playbook grid: every checkbox the HUD
+// offers (moving rows: Stop/Continue/ShootStop/ShootContinue; stationary
+// rows: DoNothing/Shoot -- mirroring the enabled columns in Hud.cpp's
+// DrawPlaybookView), each selected on its own in an otherwise passive
+// table, must produce exactly its advertised effect and nothing else.
+void TestGameLogicPlaybookEveryCheckbox() {
+  for (bool canSeeMe : {false, true}) {
+    for (ReactionAction action : {ReactionAction::Stop, ReactionAction::Continue,
+                                  ReactionAction::ShootStop, ReactionAction::ShootContinue}) {
+      const PlaybookCellOutcome out = RunPlaybookCell(true, canSeeMe, action);
+      CHECK(out.moverAlive);  // The watcher's table is passive: nobody shoots back.
+      CHECK(out.watcherAlive != ReactionShoots(action));
+      if (ReactionStops(action)) CHECK(out.moverDistToDest > 0.5f);
+      else CHECK(out.moverDistToDest < 1e-3f);
+    }
+    for (ReactionAction action : {ReactionAction::DoNothing, ReactionAction::Shoot}) {
+      const PlaybookCellOutcome out = RunPlaybookCell(false, canSeeMe, action);
+      CHECK(out.watcherAlive);  // The mover's table is passive: it never shoots.
+      CHECK(out.moverAlive != ReactionShoots(action));
+      // A downed mover drops short of its destination; otherwise it arrives.
+      if (ReactionShoots(action)) CHECK(out.moverDistToDest > 0.5f);
+      else CHECK(out.moverDistToDest < 1e-3f);
+    }
+  }
+}
+
 void TestSnapshotCarriesSquadPlaybook() {
   GameLogic a(LegacyScene());
   SquadPlaybook pb;
@@ -1600,6 +1692,7 @@ int main() {
   TestGameLogicPlaybookMovingRows();
   TestGameLogicPlaybookVisibilityColumns();
   TestGameLogicPlaybookMultiEnemyTieBreak();
+  TestGameLogicPlaybookEveryCheckbox();
   TestSnapshotCarriesSquadPlaybook();
   TestGameLogicWinCondition();
   TestWalkCycleTracksInFlightMove();

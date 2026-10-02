@@ -1453,9 +1453,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                  glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
   }
   for (const tactics::WalkSurface& surface : game.GetScene().walkSurfaces) {
+    // Concrete, clearly lighter than the asphalt below: the elevated deck
+    // and its ramps must read as a bridge, not as more ground road.
     BuildSurfacePatch(surface.vertices, 0.45f, &geometryMesh_);
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(0.18f, 0.19f, 0.21f, 1.0f));
+                 glm::vec4(0.44f, 0.45f, 0.48f, 1.0f));
   }
 
   for (size_t i = 0; i < obstacles.size(); ++i) {

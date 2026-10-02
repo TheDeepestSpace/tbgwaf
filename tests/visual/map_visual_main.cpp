@@ -109,6 +109,7 @@ int main(int argc, char** argv) {
     float cameraZoom;
     bool showNavMesh;  // Hilly maps pin the navmesh boundary overlay too.
     float pitchOffset = 0.0f;
+    float yawOffset = 0.0f;
   };
   std::vector<MapCase> cases;
   for (const uint32_t seed : kCitySeeds) {
@@ -121,8 +122,10 @@ int main(int argc, char** argv) {
                    kCityCameraZoom, /*showNavMesh=*/false});
   tactics::MapGeneratorConfig elevatedConfig = mergeConfig;
   elevatedConfig.elevatedHighway = true;
+  // Framed low and from the side so the deck, both ramps, the on-ramp fork
+  // and the pier bents beneath all read clearly.
   cases.push_back({"city_elevated_seed_7", tactics::GenerateUrbanMap(7, elevatedConfig),
-                   kCityCameraZoom, /*showNavMesh=*/true, /*pitchOffset=*/-0.30f});
+                   180.0f, /*showNavMesh=*/false, /*pitchOffset=*/-0.55f, /*yawOffset=*/-1.6f});
   for (const uint32_t seed : kHillySeeds) {
     cases.push_back({"hilly_seed_" + std::to_string(seed), tactics::GenerateHillyMap(seed),
                      kHillyCameraZoom, /*showNavMesh=*/true});
@@ -134,7 +137,7 @@ int main(int argc, char** argv) {
     const fs::path goldenPath = options.goldensDir / (name + ".png");
 
     gfx::OrbitCamera camera;
-    camera.Rotate(0.0f, mapCase.pitchOffset);
+    camera.Rotate(mapCase.yawOffset, mapCase.pitchOffset);
     camera.Zoom(mapCase.cameraZoom);
     camera.target = glm::vec3(0.0f);
     camera.Update(1.0e3f);

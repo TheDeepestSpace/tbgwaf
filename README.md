@@ -31,10 +31,14 @@ Run the game with `./build/tactics_app`. `ctest` also runs a headless
 smoke test under `xvfb-run` if available.
 
 Environment knobs: `TBGWAF_MAP_SEED=<n>` reseeds the procedural map.
-`TBGWAF_MAP=urban-merge` selects the two-artery smooth merge,
-`TBGWAF_MAP=urban-elevated` adds its usable ramp and elevated through-deck,
-and `TBGWAF_MAP=hilly` selects rolling hills. Urban code/scenarios can also
-tune artery count/width, local-street width and elevation through
+The default urban map lays an oblique boundary-to-boundary artery with
+angled avenues/cross streets and polygon blocks whose buildings follow
+their frontage; `TBGWAF_MAP=urban-merge` adds a wide branching avenue that
+merges into the artery, `TBGWAF_MAP=urban-elevated` turns the artery into a
+true overpass (ramps up, crosses on pier bents with usable ground beneath,
+ramps back down; the branch becomes an on-ramp merging mid-deck), and
+`TBGWAF_MAP=hilly` selects rolling hills. Urban code/scenarios can also
+tune artery count/width, local-street width/skew and elevation through
 `MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
 overlay of the navmesh's walkable-cell boundaries.
 

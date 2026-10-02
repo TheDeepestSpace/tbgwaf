@@ -562,9 +562,30 @@ bool NavMesh::FindPolygonGroundPath(glm::vec3 start, glm::vec3 goal,
       }
     }
   }
+  // Broad-phase bounds keep the O(nodes^2) visibility sweep cheap on dense
+  // polygon scenes: most node pairs are nowhere near most footprints.
+  std::vector<glm::vec4> polygonBounds;  // (xMin, zMin, xMax, zMax)
+  polygonBounds.reserve(paddedPolygons_.size());
+  for (const auto& polygon : paddedPolygons_) {
+    glm::vec4 bounds(std::numeric_limits<float>::infinity(),
+                     std::numeric_limits<float>::infinity(),
+                     -std::numeric_limits<float>::infinity(),
+                     -std::numeric_limits<float>::infinity());
+    for (const glm::vec2& p : polygon) {
+      bounds.x = std::min(bounds.x, p.x);
+      bounds.y = std::min(bounds.y, p.y);
+      bounds.z = std::max(bounds.z, p.x);
+      bounds.w = std::max(bounds.w, p.y);
+    }
+    polygonBounds.push_back(bounds);
+  }
   auto clear = [&](glm::vec2 a, glm::vec2 b) {
-    for (const auto& polygon : paddedPolygons_) {
-      if (SegmentEntersConvexPolygon(a, b, polygon)) return false;
+    const float xMin = std::min(a.x, b.x), xMax = std::max(a.x, b.x);
+    const float zMin = std::min(a.y, b.y), zMax = std::max(a.y, b.y);
+    for (size_t i = 0; i < paddedPolygons_.size(); ++i) {
+      const glm::vec4& bounds = polygonBounds[i];
+      if (xMax < bounds.x || xMin > bounds.z || zMax < bounds.y || zMin > bounds.w) continue;
+      if (SegmentEntersConvexPolygon(a, b, paddedPolygons_[i])) return false;
     }
     return true;
   };

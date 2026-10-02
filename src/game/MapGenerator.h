@@ -29,15 +29,15 @@ struct MapGeneratorConfig {
   float gapWidth = 3.0f;        // Passable alley between two buildings (> 2 * kAgentRadius).
   float gapProbability = 0.45f; // Chance a junction between adjacent buildings is a gap.
   // Hierarchical street layout. Set arteryCount=0 for the original orthogonal
-  // grid generator; the default generates one substantially wider artery.
-  int arteryCount = 1;           // 1 straight through-road, or 2 with a smooth merging approach.
+  // grid generator; the default lays one oblique boundary-to-boundary artery.
+  int arteryCount = 1;           // 1 oblique through-road; >=2 adds a wide branching avenue.
   float arteryWidth = 14.0f;
   float localStreetWidth = 6.0f;
-  float obliqueStreetSlope = 0.16f;  // X shift per unit Z for local frontage lines.
-  bool elevatedHighway = false;
+  float localStreetSkew = 0.45f; // Max radians a cross street deviates from square to the artery.
+  bool elevatedHighway = false;  // Artery becomes an overpass: ramps up, crosses on piers, ramps down.
   float highwayElevation = 5.0f;
   float highwayThickness = 0.45f;
-  float supportSpacing = 18.0f;
+  float supportSpacing = 18.0f;  // Arc-length between pier bents under the deck.
   float minPolygonArea = 22.0f;  // Smaller inset/sliver regions remain open.
 };
 
@@ -55,22 +55,29 @@ struct UrbanRoad {
   bool elevated = false;
 };
 
-// Deterministic hierarchical city. The default lays a wide edge-to-edge
-// artery first, then oblique local streets and convex blocks whose building
-// rings follow their frontage. arteryCount=2 adds a cubic tangent-continuous
-// approach/merge; elevatedHighway turns that approach into a traversable
-// ramp and the through-road into a stacked deck with usable ground beneath.
-// Tiny/invalid inset wedges remain open instead of receiving a bounding-box
-// building. arteryCount=0 retains the original orthogonal generator for
-// compatibility. The same (seed, config) always yields an identical Scene.
+// Deterministic hierarchical city. The default cuts the map with one wide
+// oblique boundary-to-boundary artery, then angled avenues and oblique cross
+// streets on each side; the resulting convex polygon blocks all differ in
+// shape and their frontage-following building rows adjust to the angles
+// (acute corner wedges become real angled buildings; collapsed slivers stay
+// open). arteryCount>=2 adds a wide branching avenue that merges into the
+// artery. elevatedHighway turns the artery into a true overpass: it ramps up
+// from grade, crosses the city center as a bridge deck on paired pier
+// columns with usable ground beneath, and ramps back down to grade at the
+// far side, while the branch becomes an on-ramp that climbs and merges onto
+// the deck mid-span. arteryCount=0 retains the original orthogonal generator
+// for compatibility. The same (seed, config) always yields an identical Scene.
 Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& config = {});
 
-// Block footprints GenerateUrbanMap(seed, config) uses (x-major order).
+// Block footprints GenerateUrbanMap(seed, config) uses. The hierarchical
+// layout returns one convex polygon per block (artery-left side first);
+// arteryCount=0 returns the legacy grid rectangles in x-major order.
 std::vector<UrbanBlock> UrbanBlocks(uint32_t seed, const MapGeneratorConfig& config = {});
 
-// Centerlines used by the generated scene. Arteries are returned first;
-// their points extend to the map edge and the merging approach is sampled
-// from one cubic curve, making tangent continuity directly inspectable.
+// Centerlines used by the generated scene. The oblique artery is returned
+// first (sampled boundary-to-boundary, with its elevation profile when
+// elevatedHighway is set); the branching avenue follows, sampled from the
+// map boundary to its merge point on the artery.
 std::vector<UrbanRoad> UrbanRoads(uint32_t seed, const MapGeneratorConfig& config = {});
 
 // A city block as built: one or more grid cells joined with the streets

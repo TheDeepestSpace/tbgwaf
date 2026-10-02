@@ -33,6 +33,14 @@ using namespace tactics;
 constexpr float kEps = 1.0e-3f;
 const uint32_t kSeeds[] = {1u, 42u, 2024u};
 
+// The original orthogonal grid generator stays available behind
+// arteryCount=0; the structural grid/lot tests run against this config.
+MapGeneratorConfig LegacyConfig() {
+  MapGeneratorConfig c;
+  c.arteryCount = 0;
+  return c;
+}
+
 bool SameScene(const Scene& a, const Scene& b) {
   if (a.mapHalfExtent != b.mapHalfExtent || a.obstacles.size() != b.obstacles.size() ||
       a.units.size() != b.units.size()) {
@@ -87,7 +95,7 @@ void TestPinnedSeedFingerprints() {
   struct Expected { uint32_t seed; size_t buildings; };
   const Expected expected[] = {{1u, 115}, {42u, 120}, {2024u, 126}};
   for (const auto& e : expected) {
-    const Scene scene = GenerateUrbanMap(e.seed);
+    const Scene scene = GenerateUrbanMap(e.seed, LegacyConfig());
     if (scene.obstacles.size() != e.buildings) {
       std::fprintf(stderr, "seed %u: %zu buildings (expected %zu)\n", e.seed,
                    scene.obstacles.size(), e.buildings);
@@ -131,10 +139,10 @@ bool Inside(const AABB& b, const BlockRect& r, float inset) {
 }
 
 void TestStreetsAndSidewalksAreObstacleFree() {
-  const MapGeneratorConfig c;
+  const MapGeneratorConfig c = LegacyConfig();
   for (uint32_t seed : kSeeds) {
     const auto blocks = Lots(seed, c, /*buildingsOnly=*/true);
-    const Scene scene = GenerateUrbanMap(seed);
+    const Scene scene = GenerateUrbanMap(seed, LegacyConfig());
     size_t perBlock[16] = {};
     for (const auto& o : scene.obstacles) {
       int owner = -1;
@@ -173,10 +181,10 @@ float Separation(const AABB& a, const AABB& b) {
 }
 
 void TestEveryBlockHasWallToWallAndGappedRuns() {
-  const MapGeneratorConfig c;
+  const MapGeneratorConfig c = LegacyConfig();
   for (uint32_t seed : kSeeds) {
     const auto blocks = Lots(seed, c, /*buildingsOnly=*/true);
-    const Scene scene = GenerateUrbanMap(seed);
+    const Scene scene = GenerateUrbanMap(seed, LegacyConfig());
     for (const auto& block : blocks) {
       std::vector<AABB> in;
       for (const auto& o : scene.obstacles) {
@@ -218,7 +226,7 @@ void TestVariedHeightsWithFewTowers() {
 }
 
 void TestBlocksAndStreetsVary() {
-  const MapGeneratorConfig c;
+  const MapGeneratorConfig c = LegacyConfig();
   for (uint32_t seed : kSeeds) {
     const auto blocks = Blocks(seed, c);
     float minW = 1e9f, maxW = 0.0f, minGap = 1e9f, maxGap = 0.0f;
@@ -247,9 +255,9 @@ void TestBlocksAndStreetsVary() {
 }
 
 void TestSidewalksCoverEveryBlock() {
-  const MapGeneratorConfig c;
+  const MapGeneratorConfig c = LegacyConfig();
   for (uint32_t seed : kSeeds) {
-    const Scene scene = GenerateUrbanMap(seed);
+    const Scene scene = GenerateUrbanMap(seed, LegacyConfig());
     const auto blocks = Lots(seed, c, /*buildingsOnly=*/false);
     size_t expected = 0;
     for (const auto& l : UrbanLots(seed, c)) expected += l.notch ? 2 : 1;
@@ -266,7 +274,7 @@ void TestSidewalksCoverEveryBlock() {
 // Over many seeds the generator produces merged blocks, L-shapes and open
 // areas, and every lot stays within the grid of streets.
 void TestLotVariety() {
-  const MapGeneratorConfig c;
+  const MapGeneratorConfig c = LegacyConfig();
   int merged = 0, ls = 0, empties = 0, plain = 0;
   for (uint32_t seed = 1; seed <= 40; ++seed) {
     for (const auto& l : UrbanLots(seed, c)) {
@@ -278,7 +286,7 @@ void TestLotVariety() {
       else ++plain;
     }
     // Middle east-west street stays clear of buildings for the spawn rows.
-    const Scene scene = GenerateUrbanMap(seed);
+    const Scene scene = GenerateUrbanMap(seed, LegacyConfig());
     const Unit& blue = scene.units[1];
     for (const auto& o : scene.obstacles) {
       CHECK(!(o.bounds.min.z < blue.position.z + 0.5f && o.bounds.max.z > blue.position.z - 0.5f));
@@ -292,7 +300,7 @@ void TestLotVariety() {
 
 void TestNavMeshFullyReachableFromSpawns() {
   for (uint32_t seed : kSeeds) {
-    const Scene scene = GenerateUrbanMap(seed);
+    const Scene scene = GenerateUrbanMap(seed, LegacyConfig());
     NavMesh nav;
     nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius);
     const glm::vec3 blue = scene.units.front().position;
@@ -309,7 +317,7 @@ void TestNavMeshFullyReachableFromSpawns() {
 }
 
 void TestWindowedNavMeshMatchesGlobalWithinBudget() {
-  const Scene scene = GenerateUrbanMap(42);
+  const Scene scene = GenerateUrbanMap(42, LegacyConfig());
   NavMesh global;
   global.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius);
 
@@ -339,7 +347,7 @@ void TestWindowedNavMeshMatchesGlobalWithinBudget() {
 }
 
 void TestGameLogicUsesRangeScopedNavMesh() {
-  Scene scene = GenerateUrbanMap(42);
+  Scene scene = GenerateUrbanMap(42, LegacyConfig());
   NavMesh global;
   global.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius);
   GameLogic game(scene);
@@ -364,13 +372,14 @@ void TestGameLogicUsesRangeScopedNavMesh() {
 }
 
 void TestVisibilityStillSpansWholeMap() {
-  // Spawns sit on the same middle east-west street, ~128 units apart.
+  // Spawns face each other down the oblique artery, far apart with a clear
+  // corridor between them; LOS uses the real polygon prisms.
   const Scene scene = GenerateUrbanMap(42);
-  const Unit& blue = scene.units[1];  // Middle street row.
+  const Unit& blue = scene.units[1];  // Center of the spawn row.
   const Unit& red = scene.units[4];
   CHECK(glm::distance(blue.position, red.position) > 100.0f);
   CHECK(IsPointVisibleToTeam(Team::Blue, red.position + glm::vec3(0, 1.0f, 0), scene.units,
-                             ObstacleBounds(scene.obstacles)));
+                             scene.obstacles));
 }
 
 // --- Hilly terrain generator (issue #90). ---
@@ -490,7 +499,7 @@ void TestHillyGameLogicMoveLandsOnTerrain() {
   CHECK(std::fabs(end.y - game.GetScene().ground.HeightAt(end.x, end.z)) < kEps);
 }
 
-// --- Hierarchical polygon city (issue #92). ---
+// --- Hierarchical oblique polygon city (issue #92). ---
 
 float DistanceToSegment(glm::vec2 p, glm::vec2 a, glm::vec2 b) {
   const glm::vec2 ab = b - a;
@@ -500,42 +509,48 @@ float DistanceToSegment(glm::vec2 p, glm::vec2 a, glm::vec2 b) {
   return glm::distance(p, a + ab * t);
 }
 
-void TestArteriesAreFirstWideAndSmooth() {
+void TestObliqueArteryAndBranchMerge() {
   MapGeneratorConfig one;
   one.arteryCount = 1;
+  const float half = UrbanMapHalfExtent(one);
   const auto oneRoads = UrbanRoads(42, one);
   CHECK(oneRoads.size() == 1);
   CHECK(oneRoads[0].artery);
   CHECK(oneRoads[0].width > one.localStreetWidth * 1.8f);
-  const float half = UrbanMapHalfExtent(one);
-  CHECK(std::fabs(oneRoads[0].centerline.front().x + half) < kEps);
-  CHECK(std::fabs(oneRoads[0].centerline.back().x - half) < kEps);
+  auto onBoundary = [&](const glm::vec3& p) {
+    return std::fabs(std::fabs(p.x) - half) < kEps || std::fabs(std::fabs(p.z) - half) < kEps;
+  };
+  CHECK(onBoundary(oneRoads[0].centerline.front()));
+  CHECK(onBoundary(oneRoads[0].centerline.back()));
+  // A genuine diagonal (and straight), not an axis-aligned road.
+  const glm::vec2 a0(oneRoads[0].centerline.front().x, oneRoads[0].centerline.front().z);
+  const glm::vec2 a1(oneRoads[0].centerline.back().x, oneRoads[0].centerline.back().z);
+  const glm::vec2 arteryDir = glm::normalize(a1 - a0);
+  CHECK(std::fabs(arteryDir.x) > 0.05f && std::fabs(arteryDir.y) > 0.05f);
+  for (const glm::vec3& p : oneRoads[0].centerline) {
+    CHECK(DistanceToSegment(glm::vec2(p.x, p.z), a0, a1) < 1.0e-2f);
+    CHECK(p.y < 0.1f);  // No deck without elevatedHighway.
+  }
 
   MapGeneratorConfig two = one;
   two.arteryCount = 2;
   const auto roads = UrbanRoads(42, two);
   CHECK(roads.size() == 2);
-  CHECK(roads[1].centerline.size() > 10);
-  glm::vec2 primary = glm::normalize(glm::vec2(
-      roads[0].centerline.back().x - roads[0].centerline.front().x,
-      roads[0].centerline.back().z - roads[0].centerline.front().z));
-  const size_t n = roads[1].centerline.size();
-  glm::vec2 mergeTangent = glm::normalize(glm::vec2(
-      roads[1].centerline[n - 1].x - roads[1].centerline[n - 2].x,
-      roads[1].centerline[n - 1].z - roads[1].centerline[n - 2].z));
-  CHECK(glm::dot(primary, mergeTangent) > 0.995f);
-  for (size_t i = 1; i + 1 < n; ++i) {
-    const glm::vec2 a = glm::normalize(glm::vec2(
-        roads[1].centerline[i].x - roads[1].centerline[i - 1].x,
-        roads[1].centerline[i].z - roads[1].centerline[i - 1].z));
-    const glm::vec2 b = glm::normalize(glm::vec2(
-        roads[1].centerline[i + 1].x - roads[1].centerline[i].x,
-        roads[1].centerline[i + 1].z - roads[1].centerline[i].z));
-    CHECK(glm::dot(a, b) > 0.97f);
-  }
+  CHECK(roads[1].artery);
+  CHECK(roads[1].width > one.localStreetWidth);
+  // The branch runs from the map boundary to a merge point exactly on the
+  // artery centerline, meeting it at an oblique angle.
+  CHECK(onBoundary(roads[1].centerline.front()));
+  const glm::vec3 mergePoint = roads[1].centerline.back();
+  CHECK(DistanceToSegment(glm::vec2(mergePoint.x, mergePoint.z), a0, a1) < 1.0e-2f);
+  const glm::vec2 branchDir = glm::normalize(
+      glm::vec2(mergePoint.x - roads[1].centerline.front().x,
+                mergePoint.z - roads[1].centerline.front().z));
+  const float cosMerge = std::fabs(glm::dot(arteryDir, branchDir));
+  CHECK(cosMerge > 0.6f && cosMerge < 0.95f);  // ~30..44 degrees off the artery.
 }
 
-void TestPolygonBlocksBuildingsAndRoadClearance() {
+void TestPolygonBlocksAdaptToAngledStreets() {
   MapGeneratorConfig config;
   config.arteryCount = 2;
   const Scene scene = GenerateUrbanMap(42, config);
@@ -544,18 +559,27 @@ void TestPolygonBlocksBuildingsAndRoadClearance() {
   CHECK(!blocks.empty());
   CHECK(!scene.obstacles.empty());
   bool angledBlock = false;
-  bool angledBuilding = false;
-  bool acuteBuilding = false;
+  int triangles = 0, quads = 0, fivePlus = 0;
   for (const UrbanBlock& block : blocks) {
     CHECK(block.vertices.size() >= 3);
     CHECK(PolygonArea(block.vertices) >= config.minPolygonArea);
+    if (block.vertices.size() == 3) ++triangles;
+    else if (block.vertices.size() == 4) ++quads;
+    else ++fivePlus;
     for (size_t i = 0; i < block.vertices.size(); ++i) {
       const glm::vec2 edge = block.vertices[(i + 1) % block.vertices.size()] - block.vertices[i];
       angledBlock |= std::fabs(edge.x) > 0.1f && std::fabs(edge.y) > 0.1f;
     }
   }
+  CHECK(angledBlock);
+  // Genuine shape variety from the angled streets, not a uniform grid.
+  CHECK(triangles > 0);
+  CHECK(quads > 0);
+  CHECK(fivePlus > 0);
+  bool angledBuilding = false;
+  bool acuteBuilding = false;
   for (const Obstacle& obstacle : scene.obstacles) {
-    if (obstacle.footprint.empty()) continue;  // Elevated supports are boxes.
+    if (obstacle.footprint.empty()) continue;  // Elevated pier columns are boxes.
     CHECK(PolygonArea(obstacle.footprint) > 1.0f);
     CHECK(obstacle.bounds.min.x >= -scene.mapHalfExtent - kEps);
     CHECK(obstacle.bounds.max.x <= scene.mapHalfExtent + kEps);
@@ -590,7 +614,6 @@ void TestPolygonBlocksBuildingsAndRoadClearance() {
       }
     }
   }
-  CHECK(angledBlock);
   CHECK(angledBuilding);
   CHECK(acuteBuilding);
 }
@@ -611,39 +634,120 @@ void TestPolygonCollisionLosAndNavigationUseRealFootprint() {
   CHECK(path.size() == 2);
 }
 
-void TestElevatedRampDeckAndGroundRemainDistinct() {
+void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   MapGeneratorConfig config;
   config.arteryCount = 2;
   config.elevatedHighway = true;
   const Scene scene = GenerateUrbanMap(7, config);
+  const auto roads = UrbanRoads(7, config);
+
+  // Overpass profile: at grade on both map boundaries, at full elevation
+  // over the center, climbing/descending smoothly in between.
+  const auto& deck = roads[0].centerline;
+  CHECK(deck.front().y < 0.1f);
+  CHECK(deck.back().y < 0.1f);
+  float peak = 0.0f;
+  for (const glm::vec3& p : deck) peak = std::max(peak, p.y);
+  CHECK(std::fabs(peak - config.highwayElevation) < 0.1f);
+  for (size_t i = 0; i + 1 < deck.size(); ++i) {
+    CHECK(std::fabs(deck[i + 1].y - deck[i].y) < 1.0f);
+  }
+  // The branching on-ramp climbs from grade at the boundary to deck height
+  // at its merge point.
+  const auto& ramp = roads[1].centerline;
+  CHECK(ramp.front().y < 0.1f);
+  CHECK(std::fabs(ramp.back().y - config.highwayElevation) < 0.1f);
+
+  // Bridge stands: pier columns exist, stop below the slab above them, and
+  // stand under a highway corridor rather than inside a block.
+  int piers = 0;
+  for (const Obstacle& obstacle : scene.obstacles) {
+    if (!obstacle.footprint.empty()) continue;
+    ++piers;
+    CHECK(obstacle.bounds.max.y > 1.0f);
+    CHECK(obstacle.bounds.max.y <
+          config.highwayElevation - config.highwayThickness + kEps);
+    const glm::vec2 center(obstacle.bounds.Center().x, obstacle.bounds.Center().z);
+    float nearest = std::numeric_limits<float>::infinity();
+    for (const UrbanRoad& road : roads) {
+      for (size_t i = 0; i + 1 < road.centerline.size(); ++i) {
+        nearest = std::min(
+            nearest, DistanceToSegment(center,
+                                       glm::vec2(road.centerline[i].x, road.centerline[i].z),
+                                       glm::vec2(road.centerline[i + 1].x,
+                                                 road.centerline[i + 1].z)));
+      }
+    }
+    CHECK(nearest < config.arteryWidth * 0.5f);
+  }
+  CHECK(piers >= 6);
+
+  // Both artery ramp feet plus the on-ramp foot declare ground connections,
+  // and the on-ramp merges mid-deck (a span with a third neighbor).
   CHECK(scene.walkSurfaces.size() > 10);
-  CHECK(scene.walkSurfaces[1].connectsToGround);
-  CHECK(std::fabs(scene.walkSurfaces[0].vertices.front().x + scene.mapHalfExtent) < kEps);
-  CHECK(std::fabs(scene.walkSurfaces[0].vertices[2].x - scene.mapHalfExtent) < kEps);
+  int groundConnections = 0;
+  bool mergeNode = false;
+  for (const WalkSurface& surface : scene.walkSurfaces) {
+    groundConnections += surface.connectsToGround ? 1 : 0;
+    mergeNode |= surface.neighbors.size() >= 3;
+  }
+  CHECK(groundConnections == 3);
+  CHECK(mergeNode);
 
   NavMesh nav;
   nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
             &scene.walkSurfaces);
-  const WalkSurface& rampFoot = scene.walkSurfaces[1];
-  glm::vec3 start = (rampFoot.vertices[0] + rampFoot.vertices[1]) * 0.5f;
-  const glm::vec3 deckGoal = SurfaceCenter(scene.walkSurfaces[0]);
-  CHECK(!LineOfSightClear(glm::vec3(deckGoal.x, 1.0f, deckGoal.z),
-                          glm::vec3(deckGoal.x, 7.0f, deckGoal.z), scene.obstacles,
+
+  // The deck blocks LOS vertically; the air gap under the high span (away
+  // from the piers, by the merge) stays clear for ground shots.
+  glm::vec3 top(0.0f);
+  for (const WalkSurface& surface : scene.walkSurfaces) {
+    const glm::vec3 center = SurfaceCenter(surface);
+    if (center.y > top.y) top = center;
+  }
+  CHECK(!LineOfSightClear(glm::vec3(top.x, 1.0f, top.z),
+                          glm::vec3(top.x, top.y + 2.0f, top.z), scene.obstacles,
                           scene.walkSurfaces));
-  CHECK(LineOfSightClear(glm::vec3(deckGoal.x - 2.0f, 1.5f, deckGoal.z + 10.0f),
-                         glm::vec3(deckGoal.x + 2.0f, 1.5f, deckGoal.z + 10.0f), scene.obstacles,
+  const glm::vec2 a0(deck.front().x, deck.front().z);
+  const glm::vec2 a1(deck.back().x, deck.back().z);
+  const glm::vec2 arteryDir = glm::normalize(a1 - a0);
+  const glm::vec2 arteryNormal(-arteryDir.y, arteryDir.x);
+  const glm::vec2 merge(ramp.back().x, ramp.back().z);
+  const glm::vec2 underA = merge + arteryNormal * 3.0f;
+  const glm::vec2 underB = merge - arteryNormal * 3.0f;
+  CHECK(LineOfSightClear(glm::vec3(underA.x, 1.5f, underA.y),
+                         glm::vec3(underB.x, 1.5f, underB.y), scene.obstacles,
                          scene.walkSurfaces));
+
+  // Up the west ramp onto the deck: the path's Y climbs the ramp smoothly.
+  const WalkSurface& foot = scene.walkSurfaces[0];
+  CHECK(foot.connectsToGround);
+  float lowest = foot.vertices.front().y;
+  for (const glm::vec3& v : foot.vertices) lowest = std::min(lowest, v.y);
+  glm::vec3 connection(0.0f);
+  int lowCount = 0;
+  for (const glm::vec3& v : foot.vertices) {
+    if (v.y < lowest + 1.0e-3f) {
+      connection += v;
+      ++lowCount;
+    }
+  }
+  connection /= static_cast<float>(lowCount);
+  const glm::vec3 start(connection.x - arteryDir.x * 5.0f, 0.0f,
+                        connection.z - arteryDir.y * 5.0f);
   std::vector<glm::vec3> up;
-  CHECK(nav.FindPath(start, deckGoal, &up));
+  CHECK(nav.FindPath(start, top, &up));
   CHECK(up.size() > 3);
   CHECK(std::fabs(up.front().y) < kEps);
-  CHECK(std::fabs(up.back().y - config.highwayElevation) < kEps);
+  CHECK(std::fabs(up.back().y - config.highwayElevation) < 0.1f);
   for (size_t i = 0; i + 1 < up.size(); ++i) {
     CHECK(std::fabs(up[i + 1].y - up[i].y) < 1.5f);
   }
 
+  // Reaching the deck from the ground directly below takes a real route out
+  // to a ramp foot; XZ overlap alone never teleports between layers.
   std::vector<glm::vec3> noTeleport;
-  CHECK(nav.FindPath(glm::vec3(deckGoal.x, 0.0f, deckGoal.z), deckGoal, &noTeleport));
+  CHECK(nav.FindPath(glm::vec3(top.x, 0.0f, top.z), top, &noTeleport));
   float horizontalTravel = 0.0f;
   for (size_t i = 0; i + 1 < noTeleport.size(); ++i) {
     horizontalTravel += glm::length(glm::vec2(noTeleport[i + 1].x - noTeleport[i].x,
@@ -651,13 +755,16 @@ void TestElevatedRampDeckAndGroundRemainDistinct() {
   }
   CHECK(horizontalTravel > scene.mapHalfExtent * 0.5f);
 
-  // A route under the deck stays on ground; XZ overlap alone never snaps it
-  // onto the elevated surface.
+  // A ground route crossing beneath the high span stays on the ground layer.
   std::vector<glm::vec3> under;
-  CHECK(nav.FindPath(glm::vec3(-4.0f, 0.0f, -12.0f),
-                     glm::vec3(-4.0f, 0.0f, 12.0f), &under));
+  CHECK(nav.FindPath(glm::vec3(underA.x + arteryNormal.x * 3.0f, 0.0f,
+                               underA.y + arteryNormal.y * 3.0f),
+                     glm::vec3(underB.x - arteryNormal.x * 3.0f, 0.0f,
+                               underB.y - arteryNormal.y * 3.0f),
+                     &under));
   for (const glm::vec3& p : under) CHECK(std::fabs(p.y) < kEps);
 
+  // The movement frontier from the ramp foot climbs onto the ramp layer.
   const ReachField frontier = nav.ComputeReachField(start, 20.0f, 1.0f);
   bool frontierClimbs = false;
   for (int iz = 0; iz < frontier.nz; ++iz) {
@@ -667,13 +774,14 @@ void TestElevatedRampDeckAndGroundRemainDistinct() {
   }
   CHECK(frontierClimbs);
 
+  // A committed gameplay move lands exactly on a mid-ramp surface.
   Scene playable = scene;
   playable.units[0].position = start;
-  const glm::vec3 nearbyRampGoal = SurfaceCenter(playable.walkSurfaces[4]);
+  const glm::vec3 rampGoal = SurfaceCenter(playable.walkSurfaces[4]);
   GameLogic game(playable);
   game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
-  game.ClickGround(nearbyRampGoal, Team::Blue);
+  game.ClickGround(rampGoal, Team::Blue);
   game.FinishMovePlan();
   CHECK(game.FindUnit(0)->plan.type == PlannedActionType::Move);
   for (int id = 1; id < 6; ++id) {
@@ -682,7 +790,7 @@ void TestElevatedRampDeckAndGroundRemainDistinct() {
   }
   game.CommitRound();
   game.Update(1.0e6f);
-  CHECK(glm::distance(game.FindUnit(0)->position, nearbyRampGoal) < 0.05f);
+  CHECK(glm::distance(game.FindUnit(0)->position, rampGoal) < 0.05f);
 }
 
 void TestSpawnReachabilityAndSurfaceSnapshotSynchronization() {
@@ -711,13 +819,22 @@ void TestSpawnReachabilityAndSurfaceSnapshotSynchronization() {
 
 int main() {
   TestDeterminismAndVariety();
+  TestPinnedSeedFingerprints();
   TestMapIsMuchLargerThanDefault();
+  TestStreetsAndSidewalksAreObstacleFree();
+  TestEveryBlockHasWallToWallAndGappedRuns();
   TestVariedHeightsWithFewTowers();
+  TestBlocksAndStreetsVary();
+  TestSidewalksCoverEveryBlock();
+  TestLotVariety();
+  TestNavMeshFullyReachableFromSpawns();
+  TestWindowedNavMeshMatchesGlobalWithinBudget();
+  TestGameLogicUsesRangeScopedNavMesh();
   TestVisibilityStillSpansWholeMap();
-  TestArteriesAreFirstWideAndSmooth();
-  TestPolygonBlocksBuildingsAndRoadClearance();
+  TestObliqueArteryAndBranchMerge();
+  TestPolygonBlocksAdaptToAngledStreets();
   TestPolygonCollisionLosAndNavigationUseRealFootprint();
-  TestElevatedRampDeckAndGroundRemainDistinct();
+  TestElevatedOverpassRampsPiersAndDistinctLayers();
   TestSpawnReachabilityAndSurfaceSnapshotSynchronization();
   TestHillyDeterminismAndVariety();
   TestHillyTerrainIsGenuinelyUneven();

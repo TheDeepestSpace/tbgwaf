@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <limits>
 #include <optional>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -250,9 +251,13 @@ int main() {
   // One independent orbit camera per pane, so each side can freely
   // rotate/zoom its own view without affecting the other's.
   std::array<gfx::OrbitCamera, kMaxPanes> cameras;
-  // Both web clients must build the same city, so the seed is fixed unless a
-  // native run overrides it via TBGWAF_MAP_SEED.
+  // Both web clients must build the same city, so the web seed stays fixed.
+  // Native runs pick a random seed per launch (shown and editable on the Map
+  // Select screen); TBGWAF_MAP_SEED overrides it.
   uint32_t mapSeed = 1;
+#ifndef __EMSCRIPTEN__
+  mapSeed = std::random_device{}();
+#endif
   if (const char* seedEnv = std::getenv("TBGWAF_MAP_SEED")) {
     mapSeed = static_cast<uint32_t>(std::strtoul(seedEnv, nullptr, 10));
   }
@@ -485,7 +490,7 @@ int main() {
 
     if (screen != tbgwaf_flow::State::Gameplay) {
       std::optional<tbgwaf_flow::Event> flowEvent =
-          tactics::ui::DrawMenu(screen, windowWidth, windowHeight);
+          tactics::ui::DrawMenu(screen, windowWidth, windowHeight, &mapSeed);
       // Headless smoke run: walk the menu automatically so gameplay is exercised.
       if (isSmokeTest && !flowEvent) {
         flowEvent = screen == tbgwaf_flow::State::Splash ? tbgwaf_flow::Event::NewGame

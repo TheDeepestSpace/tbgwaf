@@ -2,12 +2,17 @@
 
 #include <imgui.h>
 
+#include <cstdio>
+#include <cstdlib>
+#include <random>
+
 namespace tactics::ui {
 
 using tbgwaf_flow::Event;
 using tbgwaf_flow::State;
 
-std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight) {
+std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
+                                  uint32_t* mapSeed) {
   if (state != State::Splash && state != State::MapSelect) return std::nullopt;
 
   const ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
@@ -28,6 +33,26 @@ std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight) {
     ImGui::End();
   } else {
     ImGui::Begin("Map Select", nullptr, flags);
+    // Edit buffer persists across frames; refreshed when the seed changes
+    // from outside the box (Random button, first show).
+    static char seedText[16] = "";
+    static uint32_t shownSeed = 0;
+    static bool seedShown = false;
+    if (!seedShown || shownSeed != *mapSeed) {
+      std::snprintf(seedText, sizeof seedText, "%u", static_cast<unsigned>(*mapSeed));
+      shownSeed = *mapSeed;
+      seedShown = true;
+    }
+    ImGui::TextUnformatted("Seed");
+    ImGui::SetNextItemWidth(button.x - 80.0f);
+    if (ImGui::InputText("##seed", seedText, sizeof seedText,
+                         ImGuiInputTextFlags_CharsDecimal)) {
+      *mapSeed = static_cast<uint32_t>(std::strtoull(seedText, nullptr, 10));
+      shownSeed = *mapSeed;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Random")) *mapSeed = std::random_device{}();
+    ImGui::Spacing();
     if (ImGui::Button("Urban", button)) fired = Event::SelectUrban;
     // Hills becomes selectable once the hilly-terrain generator (#90/#93) lands.
     ImGui::BeginDisabled();

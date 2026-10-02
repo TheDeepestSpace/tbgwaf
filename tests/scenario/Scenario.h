@@ -37,7 +37,10 @@ struct ScenarioAction {
 
   int actor = -1;  // Unused (and not required in YAML) for Commit.
   Kind kind = Kind::Pass;
-  glm::vec3 destination{0.0f};  // Move only.
+  glm::vec3 destination{0.0f};  // Move only: the last leg's end.
+  std::vector<glm::vec3> waypoints;  // Move only: earlier leg ends, clicked in
+                                      // order before `destination` (multi-leg
+                                      // plan, one leg executes per round).
   std::optional<float> finalFacingDegrees;  // Move only: re-aims the planned
                                              // wireframe before commit.
   int target = -1;              // Shoot only.
@@ -61,6 +64,13 @@ struct ScenarioAssertion {
 
   bool checkWinner = false;
   std::optional<Team> expectedWinner;  // nullopt means "no winner yet".
+
+  // Sighting memory: `remembered_by` team has (remembered=true) or has no
+  // (false) remembered trail of `unit`; `memory_age` is the oldest sample's
+  // ageRounds (rounds completed since it was recorded).
+  std::optional<Team> rememberedByTeam;
+  std::optional<bool> remembered;
+  std::optional<int> memoryAge;
 
   std::optional<int> round;
 };

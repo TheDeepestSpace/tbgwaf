@@ -32,6 +32,7 @@ struct PaneOverlays {
   std::optional<glm::vec3> invalidHoverHighlight;  // Red ring on an unreachable hover point.
   const std::vector<glm::vec3>* movePreviewPath = nullptr;  // Yellow preview polyline.
   const tactics::ReachField* moveFrontier = nullptr;  // Reachable-area gradient + border.
+  bool moveFrontierSubsequentLeg = false;             // Border drawn yellow instead of green.
 };
 
 // Overlays `pane` shows for the current game state. They belong to the team

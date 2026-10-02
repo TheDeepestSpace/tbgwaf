@@ -1,0 +1,44 @@
+# Sighting memory fades out completely: red is seen by blue once, runs out of
+# blue's FOV, then nobody moves. The remembered trail ages one round per
+# commit (33% opacity lost each) and is fully gone after kSightingMemoryRounds
+# (3) rounds.
+name: playbook_sighting_memory_fades_out
+
+map:
+  obstacles: []
+
+units:
+  - {id: 0, team: blue, position: [-14, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [-4, 0, -2], facing_degrees: 180}
+
+script:
+  - assert: {unit: 1, visible_to: blue, visible: true}
+
+  # Round 1: red leaves blue's FOV; the trail ages to 1 as the round completes.
+  - action: pass
+    actor: 0
+  - action: move
+    actor: 1
+    destination: [-12, 0, 14]
+  - action: commit
+  - assert: {unit: 1, visible_to: blue, visible: false}
+  - assert: {unit: 1, remembered_by: blue, remembered: true, memory_age: 1}
+  - assert: {round: 2}
+
+  # Round 2: nothing moves; trail is one more round old.
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 1, remembered_by: blue, remembered: true, memory_age: 2}
+
+  # Round 3: the third round completes and the trail is gone entirely.
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 1, visible_to: blue, visible: false}
+  - assert: {unit: 1, remembered_by: blue, remembered: false}
+  - assert: {round: 4}

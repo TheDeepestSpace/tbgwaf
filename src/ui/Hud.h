@@ -56,6 +56,7 @@ struct HudActions {
   bool overwatch = false;
   bool pass = false;
   bool cancel = false;
+  bool done = false;
   // Set when the Playbook popup changed the selected figure's standing
   // reaction; a config edit, not a turn action.
   std::optional<tactics::ReactionRule> reaction;

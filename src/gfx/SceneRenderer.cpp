@@ -684,47 +684,33 @@ glm::vec3 SnapToAxis(const glm::vec3& v) {
   return glm::vec3(0.0f, 0.0f, v.z < 0.0f ? -1.0f : 1.0f);
 }
 
-// The selection square with the number `n` (1-99) cut out of it, so the
-// ground shows through in the shape of the digits. Built from a 9x9 grid of
-// flat cells; the digits are oriented to read upright for `view`'s camera
-// (snapped to the nearest world axis so cells stay axis-aligned).
-void DrawNumberedHighlight(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
-                           const glm::mat4& view, const glm::vec3& position,
-                           const glm::vec4& color, int n) {
-  constexpr int kGrid = 9;
+// The thick-rim ring with the number `n` (1-99) drawn inside it as flat
+// yellow digits. Digits are built from axis-aligned cells and oriented to
+// read upright for `view`'s camera (snapped to the nearest world axis).
+void DrawNumberedHighlight(const Shader& shader, const TriangleMesh& ring, const CubeMesh& cube,
+                           const glm::mat4& viewProj, const glm::mat4& view,
+                           const glm::vec3& position, const glm::vec4& color, int n) {
+  DrawHighlight(shader, ring, viewProj, position, color);
   n = std::clamp(n, 0, 99);
-  bool cut[kGrid][kGrid] = {};  // [row from top][col from left]
   const int digitCount = n >= 10 ? 2 : 1;
-  const int textWidth = digitCount * 3 + (digitCount - 1);
-  const int col0 = (kGrid - textWidth) / 2;
+  const float cell = 0.07f;  // Two digits (7 cells wide) still fit inside the rim.
+  const float textWidth = (digitCount * 3 + (digitCount - 1)) * cell;
+  const glm::vec3 right = SnapToAxis(glm::vec3(view[0][0], 0.0f, view[2][0]));
+  const glm::vec3 up = SnapToAxis(glm::vec3(-view[0][2], 0.0f, -view[2][2]));
   for (int d = 0; d < digitCount; ++d) {
     const int digit = digitCount == 2 ? (d == 0 ? n / 10 : n % 10) : n;
     for (int row = 0; row < 5; ++row) {
       for (int col = 0; col < 3; ++col) {
-        if (kDigitGlyphs[digit][row] & (4 >> col)) cut[2 + row][col0 + d * 4 + col] = true;
+        if (!(kDigitGlyphs[digit][row] & (4 >> col))) continue;
+        const float u0 = -textWidth / 2 + (d * 4 + col) * cell;
+        const float v0 = 2.5f * cell - (row + 1) * cell;
+        const glm::vec3 a = position + right * u0 + up * v0;
+        const glm::vec3 b = position + right * (u0 + cell) + up * (v0 + cell);
+        const glm::vec3 lo = glm::min(a, b);
+        const glm::vec3 hi = glm::max(a, b);
+        DrawBox(shader, cube, viewProj, glm::vec3(lo.x, position.y + 0.01f, lo.z),
+                glm::vec3(hi.x - lo.x, 0.04f, hi.z - lo.z), color);
       }
-    }
-  }
-  const glm::vec3 right = SnapToAxis(glm::vec3(view[0][0], 0.0f, view[2][0]));
-  const glm::vec3 up = SnapToAxis(glm::vec3(-view[0][2], 0.0f, -view[2][2]));
-  const float cell = 1.0f / kGrid;
-  for (int row = 0; row < kGrid; ++row) {
-    for (int col = 0; col < kGrid;) {
-      if (cut[row][col]) {
-        ++col;
-        continue;
-      }
-      int end = col;
-      while (end < kGrid && !cut[row][end]) ++end;  // Run of solid cells.
-      const float u0 = -0.5f + col * cell, u1 = -0.5f + end * cell;
-      const float v0 = 0.5f - (row + 1) * cell, v1 = 0.5f - row * cell;
-      const glm::vec3 a = position + right * u0 + up * v0;
-      const glm::vec3 b = position + right * u1 + up * v1;
-      const glm::vec3 lo = glm::min(a, b);
-      const glm::vec3 hi = glm::max(a, b);
-      DrawBox(shader, cube, viewProj, glm::vec3(lo.x, position.y + 0.01f, lo.z),
-              glm::vec3(hi.x - lo.x, 0.04f, hi.z - lo.z), color);
-      col = end;
     }
   }
 }
@@ -1146,14 +1132,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   // Rings sit on whatever flat slab (sidewalk) is under them, not inside it.
-  const auto DrawHighlightOnSurface = [&](glm::vec3 position, const glm::vec4& color) {
+  const auto OnSurface = [&](glm::vec3 position) {
     for (const AABB& slab : game.GetScene().sidewalks) {
       if (position.x >= slab.min.x && position.x <= slab.max.x && position.z >= slab.min.z &&
           position.z <= slab.max.z) {
         position.y = std::max(position.y, slab.max.y);
       }
     }
-    DrawHighlight(unlitShader_, highlightRing_, viewProj, position, color);
+    return position;
+  };
+  const auto DrawHighlightOnSurface = [&](const glm::vec3& position, const glm::vec4& color) {
+    DrawHighlight(unlitShader_, highlightRing_, viewProj, OnSurface(position), color);
   };
   // Each pane shows only its own team's FOV cones -- your own vision,
   // not intel about what the enemy can see. Translucent overlay: blend
@@ -1494,8 +1483,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         const bool chaining = game.Mode() == InputMode::AwaitingMoveDestination &&
                               game.SelectedUnitId() == unit.id;
         if (chaining || !unit.plan.queuedLegs.empty()) {
-          DrawNumberedHighlight(unlitShader_, cubeMesh_, viewProj, view, unit.plan.movePath.back(),
-                                yellow, 1);
+          DrawNumberedHighlight(unlitShader_, highlightRing_, cubeMesh_, viewProj, view,
+                                OnSurface(unit.plan.movePath.back()), yellow, 1);
         }
         int legNumber = 1;
         for (const auto& leg : unit.plan.queuedLegs) {
@@ -1505,8 +1494,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           unlitShader_.SetMat4("uMVP", viewProj);
           unlitShader_.SetVec4("uColor", yellow);
           pathLine_.Draw();
-          DrawNumberedHighlight(unlitShader_, cubeMesh_, viewProj, view, leg.back(), yellow,
-                                legNumber);
+          DrawNumberedHighlight(unlitShader_, highlightRing_, cubeMesh_, viewProj, view,
+                                OnSurface(leg.back()), yellow, legNumber);
         }
       } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
         if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {

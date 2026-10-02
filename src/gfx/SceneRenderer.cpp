@@ -617,8 +617,16 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
     const glm::vec3 side(-d.z, 0.0f, d.x);
     const glm::vec3 tail = s.position + glm::vec3(0.0f, 0.02f, 0.0f);
     const glm::vec3 tip = tail + d * 1.2f;
-    const std::vector<glm::vec3> arrow = {tail, tip, tip - d * 0.3f + side * 0.2f, tip,
-                                          tip - d * 0.3f - side * 0.2f};
+    // Closed outline of a fat arrow (shaft + head), traced as a line strip.
+    const float kShaftHalfWidth = 0.08f;
+    const float kHeadHalfWidth = 0.22f;
+    const float kHeadLength = 0.4f;
+    const glm::vec3 headBase = tip - d * kHeadLength;
+    const std::vector<glm::vec3> arrow = {
+        tail + side * kShaftHalfWidth,    headBase + side * kShaftHalfWidth,
+        headBase + side * kHeadHalfWidth, tip,
+        headBase - side * kHeadHalfWidth, headBase - side * kShaftHalfWidth,
+        tail - side * kShaftHalfWidth,    tail + side * kShaftHalfWidth};
     lines.SetPoints(arrow);
     shader.SetMat4("uMVP", viewProj);
     shader.SetVec4("uColor", color);

@@ -801,7 +801,8 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
   return visible;
 }
 
-// Renders a unit's FOV as a flat, ground-level, lightly team-colored
+// Renders a unit's FOV (or, with shotCone, its fading shot cone) as a flat,
+// ground-level, lightly team-colored
 // translucent overlay spanning kShootHalfFovDegrees around
 // FacingDirection(), capped at kFovConeVisualRange (bigger than the map
 // diagonal) and clipped at the map boundary. Occlusion is 3D:
@@ -813,21 +814,22 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
 // Caller is responsible for enabling blending around this call.
 void DrawFovCone(const Shader& shader, ColorTriangleMesh& mesh, const glm::mat4& viewProj,
                  const Unit& unit, const std::vector<tactics::Obstacle>& obstacles,
-                 const std::vector<AABB>& sidewalks, float mapHalfExtent) {
+                 const std::vector<AABB>& sidewalks, float mapHalfExtent, bool shotCone) {
   constexpr int kArcSegments = 24;
   constexpr float kGroundOffset = 0.015f;
   // Angular nudge to either side of an obstacle corner: one ray lands on the
   // occluding face right at the corner, the other shoots past it.
   constexpr float kCornerEpsilon = 1e-3f;
   const float halfFovRad = glm::radians(tactics::constants::kShootHalfFovDegrees);
-  // The overlay is the shot cone: it fades out by the shot range, so nothing
-  // past that needs geometry.
-  const float range = std::min(tactics::constants::kFovConeVisualRange,
-                               tactics::kDefaultShotProfile.range);
-  // Rays fan out from the gun tip (not the head); the sightline height stays
-  // the eye's.
+  // FOV overlay: fans out from the eye at a flat opacity. Shot cone (selected
+  // figure only): fans out from the gun tip and fades out by the shot range,
+  // so nothing past that needs geometry. The sightline height stays the eye's.
+  const float range = shotCone ? std::min(tactics::constants::kFovConeVisualRange,
+                                          tactics::kDefaultShotProfile.range)
+                               : tactics::constants::kFovConeVisualRange;
   const glm::vec3 muzzle = unit.MuzzlePosition();
-  const glm::vec3 eye(muzzle.x, unit.EyePosition().y, muzzle.z);
+  const glm::vec3 eye = shotCone ? glm::vec3(muzzle.x, unit.EyePosition().y, muzzle.z)
+                                 : unit.EyePosition();
 
   // Boundary ray angles as offsets from facingYaw in [-halfFov, +halfFov].
   // A uniform fan alone puts the occlusion edge on a chord between the two
@@ -939,15 +941,20 @@ void DrawFovCone(const Shader& shader, ColorTriangleMesh& mesh, const glm::mat4&
       }
     }
   }
-  // Opacity per vertex: strongest at the gun tip, fading linearly to nothing
-  // at the shot range.
+  // Opacity per vertex: flat for FOV; the shot cone is strongest at the gun
+  // tip, fading linearly to nothing at the shot range.
+  constexpr float kFovAlpha = 0.15f;
   const glm::vec3 baseColor = unit.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
                                                       : glm::vec3(0.9f, 0.25f, 0.22f);
   std::vector<ColorTriangleMesh::Vertex> vertices;
   vertices.reserve(points.size());
   for (const glm::vec3& p : points) {
-    const float distance = glm::length(glm::vec2(p.x - muzzle.x, p.z - muzzle.z));
-    vertices.push_back({p, glm::vec4(baseColor, tactics::ShotConeAlpha(tactics::kDefaultShotProfile, distance))});
+    float alpha = kFovAlpha;
+    if (shotCone) {
+      const float distance = glm::length(glm::vec2(p.x - muzzle.x, p.z - muzzle.z));
+      alpha = tactics::ShotConeAlpha(tactics::kDefaultShotProfile, distance);
+    }
+    vertices.push_back({p, glm::vec4(baseColor, alpha)});
   }
   mesh.SetVertices(vertices);
   shader.SetMat4("uMVP", viewProj);
@@ -1167,10 +1174,20 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.team != team) continue;
     DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, obstacles,
-                game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
+                game.GetScene().sidewalks, game.GetScene().mapHalfExtent, /*shotCone=*/false);
+  }
+  glDisable(GL_STENCIL_TEST);
+  // Shot probability cone: only for this pane's selected figure, drawn over
+  // the FOV overlay.
+  if (overlays.selectionHighlight) {
+    if (const Unit* selected = game.FindUnit(*game.SelectedUnitId())) {
+      if (selected->alive) {
+        DrawFovCone(colorShader_, fovConeMesh_, viewProj, *selected, obstacles,
+                    game.GetScene().sidewalks, game.GetScene().mapHalfExtent, /*shotCone=*/true);
+      }
+    }
   }
   glDisable(GL_POLYGON_OFFSET_FILL);
-  glDisable(GL_STENCIL_TEST);
   unlitShader_.Use();
 
   // Movement frontier: a glow hugging the reach boundary -- brightest at the

@@ -80,6 +80,17 @@ class SceneRenderer {
   SphereMesh sphereMesh_;
   LineMesh pathLine_;
   TriangleMesh fovConeMesh_;
+  // Reuse the terrain-clipped geometry until the unit or map changes.
+  struct TerrainFovCache {
+    int unitId = -1;
+    glm::vec3 eye{0.0f};
+    float facingYaw = 0.0f;
+    std::vector<glm::vec3> points;
+  };
+  std::vector<TerrainFovCache> terrainFovCache_;
+  std::vector<tactics::Obstacle> fovKeyObstacles_;
+  std::vector<tactics::AABB> fovKeySidewalks_;
+  float fovKeyMapHalfExtent_ = 0.0f;
   TriangleMesh highlightRing_;
   ColorTriangleMesh frontierFill_;
   LineMesh frontierBorder_;

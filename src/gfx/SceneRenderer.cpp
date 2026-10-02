@@ -934,8 +934,97 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
   return visible;
 }
 
-// Renders a unit's FOV as a flat, ground-level, lightly team-colored
-// translucent overlay spanning kShootHalfFovDegrees around
+// Clip the terrain's actual triangles to an overlay footprint, retaining
+// their interpolated heights. Sampling only the footprint's vertices (even
+// with radial subdivisions) cuts across ridges, and bilinear HeightAt does
+// not match the rendered surface within a non-planar heightfield cell.
+void AppendTerrainOverlay(const tactics::HeightField& terrain,
+                          const std::array<glm::vec3, 3>& footprint,
+                          std::vector<glm::vec3>* points) {
+  constexpr float kTerrainLift = 0.08f;
+  const auto crossXZ = [](const glm::vec3& a, const glm::vec3& b) {
+    return a.x * b.z - a.z * b.x;
+  };
+  const float area = crossXZ(footprint[1] - footprint[0], footprint[2] - footprint[0]);
+  if (std::abs(area) < 1e-8f) return;  // The cone's tip can make a degenerate triangle.
+  const float winding = area > 0.0f ? 1.0f : -1.0f;
+  const glm::vec3 lo = glm::min(footprint[0], glm::min(footprint[1], footprint[2]));
+  const glm::vec3 hi = glm::max(footprint[0], glm::max(footprint[1], footprint[2]));
+  const auto cellIndex = [&](float value, float origin, int count) {
+    return std::clamp(static_cast<int>(std::floor((value - origin) / terrain.step)),
+                      0, count - 2);
+  };
+  const int z0 = cellIndex(lo.z, terrain.minZ, terrain.nz);
+  const int z1 = cellIndex(hi.z, terrain.minZ, terrain.nz);
+  const auto vertex = [&](int ix, int iz) {
+    return glm::vec3(terrain.minX + ix * terrain.step, terrain.At(ix, iz) + kTerrainLift,
+                     terrain.minZ + iz * terrain.step);
+  };
+  for (int iz = z0; iz <= z1; ++iz) {
+    // A narrow cone slice can have a huge bounding box. Restrict each grid
+    // row to the slice's X interval so we only clip nearby terrain cells.
+    const float rowMinZ = terrain.minZ + iz * terrain.step;
+    const float rowMaxZ = rowMinZ + terrain.step;
+    float minX = std::numeric_limits<float>::infinity();
+    float maxX = -std::numeric_limits<float>::infinity();
+    const auto includeX = [&](float x) {
+      minX = std::min(minX, x);
+      maxX = std::max(maxX, x);
+    };
+    for (int edge = 0; edge < 3; ++edge) {
+      const glm::vec3& p = footprint[edge];
+      const glm::vec3& q = footprint[(edge + 1) % 3];
+      if (p.z >= rowMinZ && p.z <= rowMaxZ) includeX(p.x);
+      if (p.z == q.z) continue;
+      for (float z : {rowMinZ, rowMaxZ}) {
+        if (z >= std::min(p.z, q.z) && z <= std::max(p.z, q.z)) {
+          includeX(glm::mix(p.x, q.x, (z - p.z) / (q.z - p.z)));
+        }
+      }
+    }
+    if (minX > maxX) continue;
+    const int x0 = cellIndex(minX, terrain.minX, terrain.nx);
+    const int x1 = cellIndex(maxX, terrain.minX, terrain.nx);
+    for (int ix = x0; ix <= x1; ++ix) {
+      const glm::vec3 a = vertex(ix, iz), b = vertex(ix + 1, iz);
+      const glm::vec3 c = vertex(ix, iz + 1), d = vertex(ix + 1, iz + 1);
+      // Same diagonal as BuildTerrainMesh: a-b-d and a-d-c.
+      for (const auto& triangle : {std::array{a, b, d}, std::array{a, d, c}}) {
+        // A triangle clipped by three half-planes has at most six vertices.
+        std::array<glm::vec3, 6> poly{}, clipped{};
+        std::copy(triangle.begin(), triangle.end(), poly.begin());
+        int count = 3;
+        for (int edge = 0; edge < 3 && count > 0; ++edge) {
+          const glm::vec3& origin = footprint[edge];
+          const glm::vec3 direction = footprint[(edge + 1) % 3] - origin;
+          const auto side = [&](const glm::vec3& p) {
+            return winding * crossXZ(direction, p - origin);
+          };
+          int clippedCount = 0;
+          glm::vec3 prev = poly[count - 1];
+          float prevSide = side(prev);
+          for (int v = 0; v < count; ++v) {
+            const glm::vec3 cur = poly[v];
+            const float curSide = side(cur);
+            if ((prevSide >= 0.0f) != (curSide >= 0.0f)) {
+              clipped[clippedCount++] = glm::mix(prev, cur, prevSide / (prevSide - curSide));
+            }
+            if (curSide >= 0.0f) clipped[clippedCount++] = cur;
+            prev = cur;
+            prevSide = curSide;
+          }
+          poly.swap(clipped);
+          count = clippedCount;
+        }
+        for (int v = 1; v + 1 < count; ++v) {
+          points->insert(points->end(), {poly[0], poly[v], poly[v + 1]});
+        }
+      }
+    }
+  }
+}
+
+// Builds a unit's ground-following FOV overlay spanning kShootHalfFovDegrees around
 // FacingDirection(), capped at kFovConeVisualRange (bigger than the map
 // diagonal) and clipped at the map boundary. Occlusion is 3D:
 // the cone's tip is the unit's eye, so an obstacle below eye level only
@@ -943,14 +1032,12 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
 // the sightline over its top edge lands, and only a target crouched at
 // ground level right behind the obstacle stays hidden. Obstacles at or above
 // eye level shadow everything behind them.
-// Caller is responsible for enabling blending around this call.
-void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& viewProj,
-                 const Unit& unit, const std::vector<tactics::Obstacle>& obstacles,
-                 const std::vector<AABB>& sidewalks, float mapHalfExtent,
-                 const tactics::HeightField& terrain) {
+std::vector<glm::vec3> BuildFovCone(const Unit& unit,
+                                  const std::vector<tactics::Obstacle>& obstacles,
+                                  const std::vector<AABB>& sidewalks, float mapHalfExtent,
+                                  const tactics::HeightField& terrain) {
   constexpr int kArcSegments = 24;
   constexpr float kGroundOffset = 0.015f;
-  constexpr float kConeAlpha = 0.15f;
   // Angular nudge to either side of an obstacle corner: one ray lands on the
   // occluding face right at the corner, the other shoots past it.
   constexpr float kCornerEpsilon = 1e-3f;
@@ -999,15 +1086,13 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
   // rays keep the span structure identical across a slice except in the
   // epsilon-thin slivers at corners, where dropping unmatched spans is
   // invisible. Shadow boundaries of straight box edges are straight lines on
-  // the ground, so the quads trace them exactly. Over terrain each vertex
-  // samples the heightfield, and long spans are subdivided radially so the
-  // overlay hugs the slopes instead of cutting through hills; the occlusion
-  // spans themselves are still computed against the flat ground plane.
-  const bool hasTerrain = !terrain.Empty();
+  // the ground, so the quads trace them exactly. Over terrain the footprint
+  // is clipped to the rendered ground triangles and lifted slightly above
+  // them; the occlusion spans are still computed against the flat ground plane.
   const auto groundPoint = [&](const glm::vec2& dir, float t) {
     const float x = eye.x + dir.x * t;
     const float z = eye.z + dir.y * t;
-    return glm::vec3(x, terrain.HeightAt(x, z) + kGroundOffset, z);
+    return glm::vec3(x, kGroundOffset, z);
   };
   std::vector<glm::vec3> points;
   points.reserve(offsets.size() * 6);
@@ -1016,28 +1101,15 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
     const auto& right = spansPerRay[i + 1];
     const size_t pairCount = std::min(left.size(), right.size());
     for (size_t k = 0; k < pairCount; ++k) {
-      int pieces = 1;
-      if (hasTerrain) {
-        constexpr float kSubdivStep = 2.0f;
-        const float maxLen =
-            std::max(left[k].end - left[k].begin, right[k].end - right[k].begin);
-        pieces = std::clamp(static_cast<int>(std::ceil(maxLen / kSubdivStep)), 1, 64);
-      }
-      for (int s = 0; s < pieces; ++s) {
-        const float f0 = static_cast<float>(s) / pieces;
-        const float f1 = static_cast<float>(s + 1) / pieces;
-        const glm::vec3 l0 = groundPoint(dirs[i], glm::mix(left[k].begin, left[k].end, f0));
-        const glm::vec3 l1 = groundPoint(dirs[i], glm::mix(left[k].begin, left[k].end, f1));
-        const glm::vec3 r0 =
-            groundPoint(dirs[i + 1], glm::mix(right[k].begin, right[k].end, f0));
-        const glm::vec3 r1 =
-            groundPoint(dirs[i + 1], glm::mix(right[k].begin, right[k].end, f1));
-        points.push_back(l0);
-        points.push_back(r0);
-        points.push_back(r1);
-        points.push_back(l0);
-        points.push_back(r1);
-        points.push_back(l1);
+      const glm::vec3 l0 = groundPoint(dirs[i], left[k].begin);
+      const glm::vec3 l1 = groundPoint(dirs[i], left[k].end);
+      const glm::vec3 r0 = groundPoint(dirs[i + 1], right[k].begin);
+      const glm::vec3 r1 = groundPoint(dirs[i + 1], right[k].end);
+      if (terrain.Empty()) {
+        points.insert(points.end(), {l0, r0, r1, l0, r1, l1});
+      } else {
+        AppendTerrainOverlay(terrain, {l0, r0, r1}, &points);
+        AppendTerrainOverlay(terrain, {l0, r1, l1}, &points);
       }
     }
   }
@@ -1087,10 +1159,16 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
       }
     }
   }
-  mesh.SetPoints(points);
+  return points;
+}
 
-  const glm::vec4 baseColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
-                                                      : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
+// Caller enables blending and caps overlapping cones with the stencil buffer.
+void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& viewProj,
+                 Team team, const std::vector<glm::vec3>& points) {
+  constexpr float kConeAlpha = 0.15f;
+  mesh.SetPoints(points);
+  const glm::vec4 baseColor = team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
+                                               : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
   shader.SetMat4("uMVP", viewProj);
   shader.SetVec4("uColor", glm::vec4(baseColor.r, baseColor.g, baseColor.b, kConeAlpha));
   mesh.Draw();
@@ -1175,6 +1253,10 @@ void SceneRenderer::Destroy() {
   frontierBorder_.Destroy();
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
+  terrainFovCache_.clear();
+  fovKeyObstacles_.clear();
+  fovKeySidewalks_.clear();
+  fovKeyMapHalfExtent_ = 0.0f;
   terrainMesh_.Destroy();
   terrainKey_ = tactics::HeightField{};
   highlightRing_.Destroy();
@@ -1191,15 +1273,35 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                int y, int width, int height, const PaneOverlays& overlays,
                                GLuint targetFramebuffer) {
   const auto& obstacles = game.GetScene().obstacles;
+  const auto& sidewalks = game.GetScene().sidewalks;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;
   const tactics::HeightField& terrain = game.GetScene().ground;
   // (Re)triangulate the terrain only when the scene's heightfield changes.
-  if (!terrain.Empty() &&
-      (terrainKey_.heights != terrain.heights || terrainKey_.nx != terrain.nx ||
-       terrainKey_.nz != terrain.nz || terrainKey_.minX != terrain.minX ||
-       terrainKey_.minZ != terrain.minZ || terrainKey_.step != terrain.step)) {
-    BuildTerrainMesh(terrain, &terrainMesh_);
+  const bool terrainChanged =
+      terrainKey_.heights != terrain.heights || terrainKey_.nx != terrain.nx ||
+      terrainKey_.nz != terrain.nz || terrainKey_.minX != terrain.minX ||
+      terrainKey_.minZ != terrain.minZ || terrainKey_.step != terrain.step;
+  if (terrainChanged) {
+    if (!terrain.Empty()) BuildTerrainMesh(terrain, &terrainMesh_);
     terrainKey_ = terrain;
+  }
+  // Terrain clipping is more expensive than the flat fan. Reuse each unit's
+  // geometry while it stands still, invalidating on map contents rather
+  // than scene addresses (which can be reused between scenarios).
+  const auto sameBox = [](const AABB& a, const AABB& b) {
+    return a.min == b.min && a.max == b.max;
+  };
+  if (terrainChanged || mapHalfExtent != fovKeyMapHalfExtent_ ||
+      !std::equal(obstacles.begin(), obstacles.end(), fovKeyObstacles_.begin(),
+                  fovKeyObstacles_.end(), [&](const auto& a, const auto& b) {
+                    return sameBox(a.bounds, b.bounds);
+                  }) ||
+      !std::equal(sidewalks.begin(), sidewalks.end(), fovKeySidewalks_.begin(),
+                  fovKeySidewalks_.end(), sameBox)) {
+    terrainFovCache_.clear();
+    fovKeyObstacles_ = obstacles;
+    fovKeySidewalks_ = sidewalks;
+    fovKeyMapHalfExtent_ = mapHalfExtent;
   }
   const bool drawTerrain = !terrain.Empty() && terrainMesh_.HasGeometry();
 
@@ -1346,8 +1448,24 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glPolygonOffset(-2.0f, -4.0f);
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.team != team) continue;
-    DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit, obstacles,
-                game.GetScene().sidewalks, game.GetScene().mapHalfExtent, terrain);
+    if (terrain.Empty()) {
+      DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit.team,
+                   BuildFovCone(unit, obstacles, sidewalks, mapHalfExtent, terrain));
+      continue;
+    }
+    auto cached = std::find_if(terrainFovCache_.begin(), terrainFovCache_.end(),
+                               [&](const auto& entry) { return entry.unitId == unit.id; });
+    const glm::vec3 eye = unit.EyePosition();
+    if (cached == terrainFovCache_.end()) {
+      terrainFovCache_.push_back({unit.id, eye, unit.facingYaw,
+                                  BuildFovCone(unit, obstacles, sidewalks, mapHalfExtent, terrain)});
+      cached = terrainFovCache_.end() - 1;
+    } else if (cached->eye != eye || cached->facingYaw != unit.facingYaw) {
+      cached->eye = eye;
+      cached->facingYaw = unit.facingYaw;
+      cached->points = BuildFovCone(unit, obstacles, sidewalks, mapHalfExtent, terrain);
+    }
+    DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit.team, cached->points);
   }
   glDisable(GL_POLYGON_OFFSET_FILL);
   glDisable(GL_STENCIL_TEST);

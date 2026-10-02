@@ -17,6 +17,33 @@ bool IsPointVisibleToTeam(Team team, const glm::vec3& point, const std::vector<U
   return false;
 }
 
+bool IsPointVisibleToTeam(Team team, const glm::vec3& point, const std::vector<Unit>& units,
+                          const std::vector<Obstacle>& obstacles) {
+  for (const auto& viewer : units) {
+    if (!viewer.alive || viewer.team != team) continue;
+    if (InFovCone(viewer.EyePosition(), viewer.FacingDirection(), point,
+                  constants::kShootHalfFovDegrees, constants::kShootRange) &&
+        LineOfSightClear(viewer.EyePosition(), point, obstacles)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IsPointVisibleToTeam(Team team, const glm::vec3& point, const std::vector<Unit>& units,
+                          const std::vector<Obstacle>& obstacles,
+                          const std::vector<WalkSurface>& walkSurfaces) {
+  for (const auto& viewer : units) {
+    if (!viewer.alive || viewer.team != team) continue;
+    if (InFovCone(viewer.EyePosition(), viewer.FacingDirection(), point,
+                  constants::kShootHalfFovDegrees, constants::kShootRange) &&
+        LineOfSightClear(viewer.EyePosition(), point, obstacles, walkSurfaces)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 namespace {
 
 // Obstacles are boxes, not points. Approximate "some part of this obstacle
@@ -59,6 +86,65 @@ TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
     }
   }
 
+  return result;
+}
+
+TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
+                                     const std::vector<Obstacle>& obstacles) {
+  TeamVisibility result;
+  result.visibleUnit.resize(units.size(), false);
+  result.visibleObstacle.resize(obstacles.size(), false);
+  for (const Unit& target : units) {
+    if (target.team == team) continue;
+    if (IsPointVisibleToTeam(team, target.EyePosition(), units, obstacles)) {
+      result.visibleUnit[target.id] = true;
+    }
+  }
+  std::vector<glm::vec3> samples;
+  for (size_t i = 0; i < obstacles.size(); ++i) {
+    samples.clear();
+    const Obstacle& obstacle = obstacles[i];
+    samples.push_back(obstacle.bounds.Center());
+    for (const glm::vec2& p : ObstacleFootprint(obstacle)) {
+      samples.emplace_back(p.x, obstacle.bounds.max.y, p.y);
+    }
+    for (const glm::vec3& point : samples) {
+      if (IsPointVisibleToTeam(team, point, units, obstacles)) {
+        result.visibleObstacle[i] = true;
+        break;
+      }
+    }
+  }
+  return result;
+}
+
+TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
+                                     const std::vector<Obstacle>& obstacles,
+                                     const std::vector<WalkSurface>& walkSurfaces) {
+  TeamVisibility result;
+  result.visibleUnit.resize(units.size(), false);
+  result.visibleObstacle.resize(obstacles.size(), false);
+  for (const Unit& target : units) {
+    if (target.team == team) continue;
+    if (IsPointVisibleToTeam(team, target.EyePosition(), units, obstacles, walkSurfaces)) {
+      result.visibleUnit[target.id] = true;
+    }
+  }
+  std::vector<glm::vec3> samples;
+  for (size_t i = 0; i < obstacles.size(); ++i) {
+    samples.clear();
+    const Obstacle& obstacle = obstacles[i];
+    samples.push_back(obstacle.bounds.Center());
+    for (const glm::vec2& p : ObstacleFootprint(obstacle)) {
+      samples.emplace_back(p.x, obstacle.bounds.max.y, p.y);
+    }
+    for (const glm::vec3& point : samples) {
+      if (IsPointVisibleToTeam(team, point, units, obstacles, walkSurfaces)) {
+        result.visibleObstacle[i] = true;
+        break;
+      }
+    }
+  }
   return result;
 }
 

@@ -108,12 +108,21 @@ int main(int argc, char** argv) {
     tactics::Scene scene;
     float cameraZoom;
     bool showNavMesh;  // Hilly maps pin the navmesh boundary overlay too.
+    float pitchOffset = 0.0f;
   };
   std::vector<MapCase> cases;
   for (const uint32_t seed : kCitySeeds) {
     cases.push_back({"city_seed_" + std::to_string(seed), tactics::GenerateUrbanMap(seed),
                      kCityCameraZoom, /*showNavMesh=*/false});
   }
+  tactics::MapGeneratorConfig mergeConfig;
+  mergeConfig.arteryCount = 2;
+  cases.push_back({"city_merge_seed_42", tactics::GenerateUrbanMap(42, mergeConfig),
+                   kCityCameraZoom, /*showNavMesh=*/false});
+  tactics::MapGeneratorConfig elevatedConfig = mergeConfig;
+  elevatedConfig.elevatedHighway = true;
+  cases.push_back({"city_elevated_seed_7", tactics::GenerateUrbanMap(7, elevatedConfig),
+                   kCityCameraZoom, /*showNavMesh=*/true, /*pitchOffset=*/-0.30f});
   for (const uint32_t seed : kHillySeeds) {
     cases.push_back({"hilly_seed_" + std::to_string(seed), tactics::GenerateHillyMap(seed),
                      kHillyCameraZoom, /*showNavMesh=*/true});
@@ -125,6 +134,7 @@ int main(int argc, char** argv) {
     const fs::path goldenPath = options.goldensDir / (name + ".png");
 
     gfx::OrbitCamera camera;
+    camera.Rotate(0.0f, mapCase.pitchOffset);
     camera.Zoom(mapCase.cameraZoom);
     camera.target = glm::vec3(0.0f);
     camera.Update(1.0e3f);
@@ -136,7 +146,8 @@ int main(int argc, char** argv) {
     gfx::PaneOverlays overlays;
     if (mapCase.showNavMesh) {
       navMesh.Build(game.GetScene().obstacles, game.GetScene().mapHalfExtent,
-                    tactics::constants::kAgentRadius, &game.GetScene().ground);
+                    tactics::constants::kAgentRadius, &game.GetScene().ground,
+                    &game.GetScene().walkSurfaces);
       overlays.navMeshDebug = &navMesh;
     }
     renderer.RenderPane(game, tactics::Team::Blue, /*fogActive=*/false, tactics::TeamVisibility{},

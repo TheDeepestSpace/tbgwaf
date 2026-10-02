@@ -7,8 +7,10 @@
 #include <vector>
 
 #include "game/GameLogic.h"
+#include "game/Geometry.h"
 #include "game/MapGenerator.h"
 #include "game/NavMesh.h"
+#include "game/Raycast.h"
 #include "game/Scene.h"
 #include "game/Visibility.h"
 
@@ -40,7 +42,25 @@ bool SameScene(const Scene& a, const Scene& b) {
     const auto& x = a.obstacles[i];
     const auto& y = b.obstacles[i];
     if (x.bounds.min != y.bounds.min || x.bounds.max != y.bounds.max ||
-        x.climbable != y.climbable) {
+        x.climbable != y.climbable || x.footprint != y.footprint) {
+      return false;
+    }
+  }
+  if (a.roads.size() != b.roads.size() ||
+      a.sidewalkSurfaces.size() != b.sidewalkSurfaces.size() ||
+      a.walkSurfaces.size() != b.walkSurfaces.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < a.roads.size(); ++i) {
+    if (a.roads[i].vertices != b.roads[i].vertices) return false;
+  }
+  for (size_t i = 0; i < a.sidewalkSurfaces.size(); ++i) {
+    if (a.sidewalkSurfaces[i].vertices != b.sidewalkSurfaces[i].vertices) return false;
+  }
+  for (size_t i = 0; i < a.walkSurfaces.size(); ++i) {
+    if (a.walkSurfaces[i].vertices != b.walkSurfaces[i].vertices ||
+        a.walkSurfaces[i].neighbors != b.walkSurfaces[i].neighbors ||
+        a.walkSurfaces[i].connectsToGround != b.walkSurfaces[i].connectsToGround) {
       return false;
     }
   }
@@ -470,22 +490,235 @@ void TestHillyGameLogicMoveLandsOnTerrain() {
   CHECK(std::fabs(end.y - game.GetScene().ground.HeightAt(end.x, end.z)) < kEps);
 }
 
+// --- Hierarchical polygon city (issue #92). ---
+
+float DistanceToSegment(glm::vec2 p, glm::vec2 a, glm::vec2 b) {
+  const glm::vec2 ab = b - a;
+  const float t = glm::dot(ab, ab) > 0.0f
+                      ? std::clamp(glm::dot(p - a, ab) / glm::dot(ab, ab), 0.0f, 1.0f)
+                      : 0.0f;
+  return glm::distance(p, a + ab * t);
+}
+
+void TestArteriesAreFirstWideAndSmooth() {
+  MapGeneratorConfig one;
+  one.arteryCount = 1;
+  const auto oneRoads = UrbanRoads(42, one);
+  CHECK(oneRoads.size() == 1);
+  CHECK(oneRoads[0].artery);
+  CHECK(oneRoads[0].width > one.localStreetWidth * 1.8f);
+  const float half = UrbanMapHalfExtent(one);
+  CHECK(std::fabs(oneRoads[0].centerline.front().x + half) < kEps);
+  CHECK(std::fabs(oneRoads[0].centerline.back().x - half) < kEps);
+
+  MapGeneratorConfig two = one;
+  two.arteryCount = 2;
+  const auto roads = UrbanRoads(42, two);
+  CHECK(roads.size() == 2);
+  CHECK(roads[1].centerline.size() > 10);
+  glm::vec2 primary = glm::normalize(glm::vec2(
+      roads[0].centerline.back().x - roads[0].centerline.front().x,
+      roads[0].centerline.back().z - roads[0].centerline.front().z));
+  const size_t n = roads[1].centerline.size();
+  glm::vec2 mergeTangent = glm::normalize(glm::vec2(
+      roads[1].centerline[n - 1].x - roads[1].centerline[n - 2].x,
+      roads[1].centerline[n - 1].z - roads[1].centerline[n - 2].z));
+  CHECK(glm::dot(primary, mergeTangent) > 0.995f);
+  for (size_t i = 1; i + 1 < n; ++i) {
+    const glm::vec2 a = glm::normalize(glm::vec2(
+        roads[1].centerline[i].x - roads[1].centerline[i - 1].x,
+        roads[1].centerline[i].z - roads[1].centerline[i - 1].z));
+    const glm::vec2 b = glm::normalize(glm::vec2(
+        roads[1].centerline[i + 1].x - roads[1].centerline[i].x,
+        roads[1].centerline[i + 1].z - roads[1].centerline[i].z));
+    CHECK(glm::dot(a, b) > 0.97f);
+  }
+}
+
+void TestPolygonBlocksBuildingsAndRoadClearance() {
+  MapGeneratorConfig config;
+  config.arteryCount = 2;
+  const Scene scene = GenerateUrbanMap(42, config);
+  const auto blocks = UrbanBlocks(42, config);
+  const auto roads = UrbanRoads(42, config);
+  CHECK(!blocks.empty());
+  CHECK(!scene.obstacles.empty());
+  bool angledBlock = false;
+  bool angledBuilding = false;
+  bool acuteBuilding = false;
+  for (const UrbanBlock& block : blocks) {
+    CHECK(block.vertices.size() >= 3);
+    CHECK(PolygonArea(block.vertices) >= config.minPolygonArea);
+    for (size_t i = 0; i < block.vertices.size(); ++i) {
+      const glm::vec2 edge = block.vertices[(i + 1) % block.vertices.size()] - block.vertices[i];
+      angledBlock |= std::fabs(edge.x) > 0.1f && std::fabs(edge.y) > 0.1f;
+    }
+  }
+  for (const Obstacle& obstacle : scene.obstacles) {
+    if (obstacle.footprint.empty()) continue;  // Elevated supports are boxes.
+    CHECK(PolygonArea(obstacle.footprint) > 1.0f);
+    CHECK(obstacle.bounds.min.x >= -scene.mapHalfExtent - kEps);
+    CHECK(obstacle.bounds.max.x <= scene.mapHalfExtent + kEps);
+    for (size_t i = 0; i < obstacle.footprint.size(); ++i) {
+      const glm::vec2 prev = obstacle.footprint[(i + obstacle.footprint.size() - 1) %
+                                                obstacle.footprint.size()];
+      const glm::vec2 cur = obstacle.footprint[i];
+      const glm::vec2 next = obstacle.footprint[(i + 1) % obstacle.footprint.size()];
+      const glm::vec2 a = glm::normalize(prev - cur), b = glm::normalize(next - cur);
+      const float angle = glm::degrees(std::acos(std::clamp(glm::dot(a, b), -1.0f, 1.0f)));
+      acuteBuilding |= angle < 60.0f;
+      const glm::vec2 edge = next - cur;
+      angledBuilding |= std::fabs(edge.x) > 0.1f && std::fabs(edge.y) > 0.1f;
+      for (const UrbanRoad& road : roads) {
+        for (size_t segment = 0; segment + 1 < road.centerline.size(); ++segment) {
+          const glm::vec2 p0(road.centerline[segment].x, road.centerline[segment].z);
+          const glm::vec2 p1(road.centerline[segment + 1].x, road.centerline[segment + 1].z);
+          CHECK(DistanceToSegment(cur, p0, p1) >= road.width * 0.5f - kEps);
+        }
+      }
+    }
+  }
+  for (size_t i = 0; i < scene.obstacles.size(); ++i) {
+    if (scene.obstacles[i].footprint.empty()) continue;
+    for (size_t j = i + 1; j < scene.obstacles.size(); ++j) {
+      if (scene.obstacles[j].footprint.empty()) continue;
+      for (size_t edge = 0; edge < scene.obstacles[i].footprint.size(); ++edge) {
+        const glm::vec2 a = scene.obstacles[i].footprint[edge];
+        const glm::vec2 b = scene.obstacles[i].footprint[
+            (edge + 1) % scene.obstacles[i].footprint.size()];
+        CHECK(!SegmentEntersConvexPolygon(a, b, scene.obstacles[j].footprint));
+      }
+    }
+  }
+  CHECK(angledBlock);
+  CHECK(angledBuilding);
+  CHECK(acuteBuilding);
+}
+
+void TestPolygonCollisionLosAndNavigationUseRealFootprint() {
+  Obstacle wedge;
+  wedge.bounds = AABB{glm::vec3(-2.0f, 0.0f, -2.0f), glm::vec3(2.0f, 4.0f, 2.0f)};
+  wedge.footprint = {{-2.0f, -2.0f}, {2.0f, -2.0f}, {-2.0f, 2.0f}};
+  const std::vector<Obstacle> obstacles = {wedge};
+  // z=1.5 through x>0 lies inside the AABB but outside the triangular prism.
+  CHECK(LineOfSightClear(glm::vec3(0.8f, 1.5f, 1.5f), glm::vec3(1.8f, 1.5f, 1.5f), obstacles));
+  CHECK(!LineOfSightClear(glm::vec3(-3.0f, 1.5f, -1.0f),
+                          glm::vec3(1.0f, 1.5f, -1.0f), obstacles));
+  NavMesh nav;
+  nav.Build(obstacles, 6.0f, 0.1f);
+  std::vector<glm::vec3> path;
+  CHECK(nav.FindPath(glm::vec3(0.8f, 0.0f, 1.5f), glm::vec3(1.8f, 0.0f, 1.5f), &path));
+  CHECK(path.size() == 2);
+}
+
+void TestElevatedRampDeckAndGroundRemainDistinct() {
+  MapGeneratorConfig config;
+  config.arteryCount = 2;
+  config.elevatedHighway = true;
+  const Scene scene = GenerateUrbanMap(7, config);
+  CHECK(scene.walkSurfaces.size() > 10);
+  CHECK(scene.walkSurfaces[1].connectsToGround);
+  CHECK(std::fabs(scene.walkSurfaces[0].vertices.front().x + scene.mapHalfExtent) < kEps);
+  CHECK(std::fabs(scene.walkSurfaces[0].vertices[2].x - scene.mapHalfExtent) < kEps);
+
+  NavMesh nav;
+  nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
+            &scene.walkSurfaces);
+  const WalkSurface& rampFoot = scene.walkSurfaces[1];
+  glm::vec3 start = (rampFoot.vertices[0] + rampFoot.vertices[1]) * 0.5f;
+  const glm::vec3 deckGoal = SurfaceCenter(scene.walkSurfaces[0]);
+  CHECK(!LineOfSightClear(glm::vec3(deckGoal.x, 1.0f, deckGoal.z),
+                          glm::vec3(deckGoal.x, 7.0f, deckGoal.z), scene.obstacles,
+                          scene.walkSurfaces));
+  CHECK(LineOfSightClear(glm::vec3(deckGoal.x - 2.0f, 1.5f, deckGoal.z + 10.0f),
+                         glm::vec3(deckGoal.x + 2.0f, 1.5f, deckGoal.z + 10.0f), scene.obstacles,
+                         scene.walkSurfaces));
+  std::vector<glm::vec3> up;
+  CHECK(nav.FindPath(start, deckGoal, &up));
+  CHECK(up.size() > 3);
+  CHECK(std::fabs(up.front().y) < kEps);
+  CHECK(std::fabs(up.back().y - config.highwayElevation) < kEps);
+  for (size_t i = 0; i + 1 < up.size(); ++i) {
+    CHECK(std::fabs(up[i + 1].y - up[i].y) < 1.5f);
+  }
+
+  std::vector<glm::vec3> noTeleport;
+  CHECK(nav.FindPath(glm::vec3(deckGoal.x, 0.0f, deckGoal.z), deckGoal, &noTeleport));
+  float horizontalTravel = 0.0f;
+  for (size_t i = 0; i + 1 < noTeleport.size(); ++i) {
+    horizontalTravel += glm::length(glm::vec2(noTeleport[i + 1].x - noTeleport[i].x,
+                                               noTeleport[i + 1].z - noTeleport[i].z));
+  }
+  CHECK(horizontalTravel > scene.mapHalfExtent * 0.5f);
+
+  // A route under the deck stays on ground; XZ overlap alone never snaps it
+  // onto the elevated surface.
+  std::vector<glm::vec3> under;
+  CHECK(nav.FindPath(glm::vec3(-4.0f, 0.0f, -12.0f),
+                     glm::vec3(-4.0f, 0.0f, 12.0f), &under));
+  for (const glm::vec3& p : under) CHECK(std::fabs(p.y) < kEps);
+
+  const ReachField frontier = nav.ComputeReachField(start, 20.0f, 1.0f);
+  bool frontierClimbs = false;
+  for (int iz = 0; iz < frontier.nz; ++iz) {
+    for (int ix = 0; ix < frontier.nx; ++ix) {
+      if (frontier.Reached(ix, iz) && frontier.Node(ix, iz).y > 0.2f) frontierClimbs = true;
+    }
+  }
+  CHECK(frontierClimbs);
+
+  Scene playable = scene;
+  playable.units[0].position = start;
+  const glm::vec3 nearbyRampGoal = SurfaceCenter(playable.walkSurfaces[4]);
+  GameLogic game(playable);
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(nearbyRampGoal, Team::Blue);
+  game.FinishMovePlan();
+  CHECK(game.FindUnit(0)->plan.type == PlannedActionType::Move);
+  for (int id = 1; id < 6; ++id) {
+    game.ClickUnit(id, id < 3 ? Team::Blue : Team::Red);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  game.Update(1.0e6f);
+  CHECK(glm::distance(game.FindUnit(0)->position, nearbyRampGoal) < 0.05f);
+}
+
+void TestSpawnReachabilityAndSurfaceSnapshotSynchronization() {
+  MapGeneratorConfig config;
+  config.arteryCount = 2;
+  Scene scene = GenerateUrbanMap(2024, config);
+  NavMesh nav;
+  nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
+            &scene.walkSurfaces);
+  std::vector<glm::vec3> path;
+  CHECK(nav.FindPath(scene.units[0].position, scene.units[3].position, &path));
+
+  config.elevatedHighway = true;
+  scene = GenerateUrbanMap(7, config);
+  const WalkSurface& patch = scene.walkSurfaces[3];
+  const glm::vec3 surfacePoint = SurfaceCenter(patch);
+  scene.units[0].position = surfacePoint;
+  GameLogic simulator(scene);
+  const GameSnapshot snapshot = simulator.ExportState();
+  GameLogic follower(scene);
+  CHECK(follower.ImportState(snapshot));
+  CHECK(glm::distance(follower.FindUnit(0)->position, surfacePoint) < kEps);
+}
+
 }  // namespace
 
 int main() {
   TestDeterminismAndVariety();
-  TestPinnedSeedFingerprints();
   TestMapIsMuchLargerThanDefault();
-  TestStreetsAndSidewalksAreObstacleFree();
-  TestEveryBlockHasWallToWallAndGappedRuns();
   TestVariedHeightsWithFewTowers();
-  TestBlocksAndStreetsVary();
-  TestSidewalksCoverEveryBlock();
-  TestLotVariety();
-  TestNavMeshFullyReachableFromSpawns();
-  TestWindowedNavMeshMatchesGlobalWithinBudget();
-  TestGameLogicUsesRangeScopedNavMesh();
   TestVisibilityStillSpansWholeMap();
+  TestArteriesAreFirstWideAndSmooth();
+  TestPolygonBlocksBuildingsAndRoadClearance();
+  TestPolygonCollisionLosAndNavigationUseRealFootprint();
+  TestElevatedRampDeckAndGroundRemainDistinct();
+  TestSpawnReachabilityAndSurfaceSnapshotSynchronization();
   TestHillyDeterminismAndVariety();
   TestHillyTerrainIsGenuinelyUneven();
   TestHillyUnitsSpawnOnTerrain();

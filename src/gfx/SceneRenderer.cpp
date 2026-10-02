@@ -9,6 +9,8 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "game/Geometry.h"
+
 using tactics::AABB;
 using tactics::GameLogic;
 using tactics::InputMode;
@@ -210,6 +212,92 @@ void DrawBoxDepth(const Shader& shader, const CubeMesh& cube, const glm::mat4& l
       glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
   shader.SetMat4("uLightMVP", lightSpaceMatrix * model);
   cube.Draw();
+}
+
+void BuildPolygonPrism(const tactics::Obstacle& obstacle, LitTriangleMesh* mesh) {
+  const std::vector<glm::vec2> polygon = tactics::ObstacleFootprint(obstacle);
+  std::vector<LitTriangleMesh::Vertex> vertices;
+  std::vector<GLuint> indices;
+  auto triangle = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 normal) {
+    const GLuint base = static_cast<GLuint>(vertices.size());
+    vertices.push_back({a, normal});
+    vertices.push_back({b, normal});
+    vertices.push_back({c, normal});
+    indices.insert(indices.end(), {base, base + 1, base + 2});
+  };
+  const float lo = obstacle.bounds.min.y, hi = obstacle.bounds.max.y;
+  for (size_t i = 1; i + 1 < polygon.size(); ++i) {
+    triangle({polygon[0].x, hi, polygon[0].y}, {polygon[i].x, hi, polygon[i].y},
+             {polygon[i + 1].x, hi, polygon[i + 1].y}, {0.0f, 1.0f, 0.0f});
+    triangle({polygon[0].x, lo, polygon[0].y}, {polygon[i + 1].x, lo, polygon[i + 1].y},
+             {polygon[i].x, lo, polygon[i].y}, {0.0f, -1.0f, 0.0f});
+  }
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    const glm::vec2 a = polygon[i], b = polygon[(i + 1) % polygon.size()];
+    const glm::vec2 edge = glm::normalize(b - a);
+    const glm::vec3 normal(edge.y, 0.0f, -edge.x);
+    const glm::vec3 a0(a.x, lo, a.y), a1(a.x, hi, a.y);
+    const glm::vec3 b0(b.x, lo, b.y), b1(b.x, hi, b.y);
+    triangle(a0, b0, b1, normal);
+    triangle(a0, b1, a1, normal);
+  }
+  mesh->SetMesh(vertices, indices);
+}
+
+void BuildSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
+                       LitTriangleMesh* mesh) {
+  std::vector<LitTriangleMesh::Vertex> vertices;
+  std::vector<GLuint> indices;
+  if (polygon.size() < 3) {
+    mesh->SetMesh(vertices, indices);
+    return;
+  }
+  glm::vec3 topNormal = glm::normalize(glm::cross(polygon[1] - polygon[0], polygon[2] - polygon[0]));
+  if (topNormal.y < 0.0f) topNormal = -topNormal;
+  auto triangle = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 normal) {
+    const GLuint base = static_cast<GLuint>(vertices.size());
+    vertices.push_back({a, normal});
+    vertices.push_back({b, normal});
+    vertices.push_back({c, normal});
+    indices.insert(indices.end(), {base, base + 1, base + 2});
+  };
+  for (size_t i = 1; i + 1 < polygon.size(); ++i) {
+    triangle(polygon[0], polygon[i], polygon[i + 1], topNormal);
+    if (thickness > 0.0f) {
+      triangle(polygon[0] - glm::vec3(0, thickness, 0),
+               polygon[i + 1] - glm::vec3(0, thickness, 0),
+               polygon[i] - glm::vec3(0, thickness, 0), -topNormal);
+    }
+  }
+  if (thickness > 0.0f) {
+    for (size_t i = 0; i < polygon.size(); ++i) {
+      const glm::vec3 a = polygon[i], b = polygon[(i + 1) % polygon.size()];
+      glm::vec3 normal = glm::cross(b - a, glm::vec3(0, -1, 0));
+      if (glm::length(normal) > 1e-6f) normal = glm::normalize(normal);
+      triangle(a, b - glm::vec3(0, thickness, 0), b, normal);
+      triangle(a, a - glm::vec3(0, thickness, 0), b - glm::vec3(0, thickness, 0), normal);
+    }
+  }
+  mesh->SetMesh(vertices, indices);
+}
+
+bool PatchContainsXZ(const tactics::RoadSurface& patch, float x, float z) {
+  if (patch.vertices.size() < 3) return false;
+  float area = 0.0f;
+  for (size_t i = 0; i < patch.vertices.size(); ++i) {
+    const glm::vec3& a = patch.vertices[i];
+    const glm::vec3& b = patch.vertices[(i + 1) % patch.vertices.size()];
+    area += a.x * b.z - a.z * b.x;
+  }
+  const float sign = area >= 0.0f ? 1.0f : -1.0f;
+  for (size_t i = 0; i < patch.vertices.size(); ++i) {
+    const glm::vec3& a = patch.vertices[i];
+    const glm::vec3& b = patch.vertices[(i + 1) % patch.vertices.size()];
+    if (sign * ((b.x - a.x) * (z - a.z) - (b.z - a.z) * (x - a.x)) < -1e-4f) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Tip-over transform pivoting at the feet (unit.position) around
@@ -819,6 +907,19 @@ void DrawNavMeshDebug(const Shader& shader, LineMesh& lines, const glm::mat4& vi
     lines.SetPoints(climbSegs);
     lines.DrawSegments();
   }
+  std::vector<glm::vec3> surfaceSegs;
+  for (const tactics::WalkSurface& surface : navmesh.WalkSurfaces()) {
+    for (size_t i = 0; i < surface.vertices.size(); ++i) {
+      surfaceSegs.push_back(surface.vertices[i] + glm::vec3(0, 0.03f, 0));
+      surfaceSegs.push_back(surface.vertices[(i + 1) % surface.vertices.size()] +
+                            glm::vec3(0, 0.03f, 0));
+    }
+  }
+  if (!surfaceSegs.empty()) {
+    shader.SetVec4("uColor", glm::vec4(0.95f, 0.25f, 0.9f, 1.0f));
+    lines.SetPoints(surfaceSegs);
+    lines.DrawSegments();
+  }
 }
 
 // A [begin, end) stretch of ground along one sight ray, as horizontal
@@ -856,6 +957,32 @@ bool FootprintSpan(const glm::vec3& eye, const glm::vec2& dir, const AABB& box, 
   return true;
 }
 
+bool FootprintSpan(const glm::vec3& eye, const glm::vec2& dir,
+                   const tactics::Obstacle& obstacle, float* outEnter, float* outExit) {
+  const std::vector<glm::vec2> polygon = tactics::ObstacleFootprint(obstacle);
+  float enter = 0.0f;
+  float exit = std::numeric_limits<float>::max();
+  const float orientation = tactics::PolygonSignedArea(polygon) >= 0.0f ? 1.0f : -1.0f;
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    const glm::vec2 a = polygon[i];
+    const glm::vec2 edge = polygon[(i + 1) % polygon.size()] - a;
+    const glm::vec2 rel(eye.x - a.x, eye.z - a.y);
+    const float value = orientation * (edge.x * rel.y - edge.y * rel.x);
+    const float rate = orientation * (edge.x * dir.y - edge.y * dir.x);
+    if (std::fabs(rate) < 1e-8f) {
+      if (value < 0.0f) return false;
+      continue;
+    }
+    const float t = -value / rate;
+    if (rate > 0.0f) enter = std::max(enter, t);
+    else exit = std::min(exit, t);
+    if (exit < enter) return false;
+  }
+  *outEnter = enter;
+  *outExit = exit;
+  return true;
+}
+
 // `range` clipped to where the ray leaves the playable map footprint, so the
 // FOV cone stops at the boundary. Zero if the eye stands outside the map and
 // the ray never enters it.
@@ -875,11 +1002,13 @@ float ClipToMap(const glm::vec3& eye, const glm::vec2& dir, float range, float h
 // so the box hides the ground from its near face until the sightline over
 // its top far edge lands: t = exit * eye.y / (eye.y - top). A box whose top
 // reaches eye level hides everything behind it.
-bool GroundShadow(const glm::vec3& eye, const glm::vec2& dir, const AABB& box, float range,
+bool GroundShadow(const glm::vec3& eye, const glm::vec2& dir,
+                  const tactics::Obstacle& obstacle, float range,
                   GroundSpan* outShadow) {
   float enter = 0.0f;
   float exit = 0.0f;
-  if (!FootprintSpan(eye, dir, box, &enter, &exit)) return false;
+  if (!FootprintSpan(eye, dir, obstacle, &enter, &exit)) return false;
+  const AABB& box = obstacle.bounds;
   if (box.min.y >= eye.y) return false;  // Sightlines only descend; a box above the eye never blocks.
   // A raised box bottom lets sightlines pass underneath: the shadow only
   // starts once the sightline through the bottom near edge lands.
@@ -899,7 +1028,7 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
   std::vector<GroundSpan> shadows;
   for (const auto& obstacle : obstacles) {
     GroundSpan shadow;
-    if (GroundShadow(eye, dir, obstacle.bounds, range, &shadow)) shadows.push_back(shadow);
+    if (GroundShadow(eye, dir, obstacle, range, &shadow)) shadows.push_back(shadow);
   }
   std::sort(shadows.begin(), shadows.end(),
             [](const GroundSpan& a, const GroundSpan& b) { return a.begin < b.begin; });
@@ -928,7 +1057,9 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
 void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& viewProj,
                  const Unit& unit, const std::vector<tactics::Obstacle>& obstacles,
                  const std::vector<AABB>& sidewalks, float mapHalfExtent,
-                 const tactics::HeightField& terrain) {
+                 const tactics::HeightField& terrain,
+                 const std::vector<tactics::RoadSurface>& polygonSidewalks,
+                 const std::vector<tactics::WalkSurface>& walkSurfaces) {
   constexpr int kArcSegments = 24;
   constexpr float kGroundOffset = 0.015f;
   constexpr float kConeAlpha = 0.15f;
@@ -938,6 +1069,21 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
   const float halfFovRad = glm::radians(tactics::constants::kShootHalfFovDegrees);
   const float range = tactics::constants::kFovConeVisualRange;
   const glm::vec3 eye = unit.EyePosition();
+  int unitSurface = -1;
+  for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+    if (!tactics::SurfaceContainsXZ(walkSurfaces[i], unit.position.x, unit.position.z)) continue;
+    if (std::fabs(tactics::SurfaceHeightAt(walkSurfaces[i], unit.position.x, unit.position.z) -
+                  unit.position.y) < 0.2f) {
+      unitSurface = static_cast<int>(i);
+      break;
+    }
+  }
+  tactics::Obstacle surfaceFootprint;
+  if (unitSurface >= 0) {
+    for (const glm::vec3& v : walkSurfaces[unitSurface].vertices) {
+      surfaceFootprint.footprint.emplace_back(v.x, v.z);
+    }
+  }
 
   // Boundary ray angles as offsets from facingYaw in [-halfFov, +halfFov].
   // A uniform fan alone puts the occlusion edge on a chord between the two
@@ -952,14 +1098,11 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
   }
   constexpr float kTwoPi = 6.28318530717958647692f;
   for (const auto& obstacle : obstacles) {
-    const AABB& b = obstacle.bounds;
-    for (const float x : {b.min.x, b.max.x}) {
-      for (const float z : {b.min.z, b.max.z}) {
-        const float delta =
-            std::remainder(std::atan2(z - eye.z, x - eye.x) - unit.facingYaw, kTwoPi);
-        for (const float nudged : {delta - kCornerEpsilon, delta, delta + kCornerEpsilon}) {
-          if (nudged >= -halfFovRad && nudged <= halfFovRad) offsets.push_back(nudged);
-        }
+    for (const glm::vec2& p : tactics::ObstacleFootprint(obstacle)) {
+      const float delta =
+          std::remainder(std::atan2(p.y - eye.z, p.x - eye.x) - unit.facingYaw, kTwoPi);
+      for (const float nudged : {delta - kCornerEpsilon, delta, delta + kCornerEpsilon}) {
+        if (nudged >= -halfFovRad && nudged <= halfFovRad) offsets.push_back(nudged);
       }
     }
   }
@@ -973,7 +1116,16 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
     const float angle = unit.facingYaw + offset;
     const glm::vec2 dir(std::cos(angle), std::sin(angle));
     dirs.push_back(dir);
-    spansPerRay.push_back(VisibleGroundSpans(eye, dir, obstacles, ClipToMap(eye, dir, range, mapHalfExtent)));
+    float clippedRange = ClipToMap(eye, dir, range, mapHalfExtent);
+    if (unitSurface >= 0) {
+      float enter = 0.0f, exit = 0.0f;
+      if (FootprintSpan(eye, dir, surfaceFootprint, &enter, &exit)) {
+        clippedRange = std::min(clippedRange, exit);
+      } else {
+        clippedRange = 0.0f;
+      }
+    }
+    spansPerRay.push_back(VisibleGroundSpans(eye, dir, obstacles, clippedRange));
   }
 
   // Stitch adjacent rays into quads, one per matching visible span. Corner
@@ -988,7 +1140,16 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
   const auto groundPoint = [&](const glm::vec2& dir, float t) {
     const float x = eye.x + dir.x * t;
     const float z = eye.z + dir.y * t;
-    return glm::vec3(x, terrain.HeightAt(x, z) + kGroundOffset, z);
+    float y = unitSurface >= 0 ? tactics::SurfaceHeightAt(walkSurfaces[unitSurface], x, z)
+                               : terrain.HeightAt(x, z);
+    if (unitSurface < 0) {
+      for (const tactics::RoadSurface& sidewalk : polygonSidewalks) {
+        if (PatchContainsXZ(sidewalk, x, z)) {
+          y = std::max(y, sidewalk.vertices.front().y);
+        }
+      }
+    }
+    return glm::vec3(x, y + kGroundOffset, z);
   };
   std::vector<glm::vec3> points;
   points.reserve(offsets.size() * 6);
@@ -1110,6 +1271,7 @@ bool SceneRenderer::Init() {
   pathLine_.Init();
   fovConeMesh_.Init();
   terrainMesh_.Init();
+  geometryMesh_.Init();
 
   // Stage-C: a single directional light (simulating overhead factory
   // lighting) casting a PCF-filtered shadow map. The
@@ -1155,6 +1317,7 @@ void SceneRenderer::Destroy() {
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
   terrainMesh_.Destroy();
+  geometryMesh_.Destroy();
   terrainKey_ = tactics::HeightField{};
   sphereMesh_.Destroy();
   cubeMesh_.Destroy();
@@ -1221,7 +1384,18 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
   for (const auto& obstacle : obstacles) {
     const AABB& bounds = obstacle.bounds;
-    DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min, bounds.max - bounds.min);
+    if (obstacle.footprint.empty()) {
+      DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min, bounds.max - bounds.min);
+    } else {
+      BuildPolygonPrism(obstacle, &geometryMesh_);
+      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+      geometryMesh_.Draw();
+    }
+  }
+  for (const tactics::WalkSurface& surface : game.GetScene().walkSurfaces) {
+    BuildSurfacePatch(surface.vertices, 0.45f, &geometryMesh_);
+    depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+    geometryMesh_.Draw();
   }
   for (const Unit& unit : game.GetScene().units) {
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
@@ -1267,11 +1441,33 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
   }
 
+  for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
+    BuildSurfacePatch(sidewalk.vertices, 0.10f, &geometryMesh_);
+    DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
+  }
+
+  for (const tactics::RoadSurface& road : game.GetScene().roads) {
+    BuildSurfacePatch(road.vertices, 0.0f, &geometryMesh_);
+    DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
+  }
+  for (const tactics::WalkSurface& surface : game.GetScene().walkSurfaces) {
+    BuildSurfacePatch(surface.vertices, 0.45f, &geometryMesh_);
+    DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(0.18f, 0.19f, 0.21f, 1.0f));
+  }
+
   for (size_t i = 0; i < obstacles.size(); ++i) {
     const AABB& bounds = obstacles[i].bounds;
     const glm::vec4 color(0.55f, 0.55f, 0.6f, 1.0f);
-    DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, bounds.min,
-               bounds.max - bounds.min, color);
+    if (obstacles[i].footprint.empty()) {
+      DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, bounds.min,
+                 bounds.max - bounds.min, color);
+    } else {
+      BuildPolygonPrism(obstacles[i], &geometryMesh_);
+      DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f), color);
+    }
   }
 
   for (const Unit& unit : game.GetScene().units) {
@@ -1292,6 +1488,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       if (position.x >= slab.min.x && position.x <= slab.max.x && position.z >= slab.min.z &&
           position.z <= slab.max.z) {
         position.y = std::max(position.y, slab.max.y);
+      }
+    }
+    for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
+      if (PatchContainsXZ(sidewalk, position.x, position.z)) {
+        position.y = std::max(position.y, sidewalk.vertices.front().y);
       }
     }
     DrawHighlight(unlitShader_, cubeMesh_, viewProj, position, color);
@@ -1322,7 +1523,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.team != team) continue;
     DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit, obstacles,
-                game.GetScene().sidewalks, game.GetScene().mapHalfExtent, terrain);
+                game.GetScene().sidewalks, game.GetScene().mapHalfExtent, terrain,
+                game.GetScene().sidewalkSurfaces,
+                game.GetScene().walkSurfaces);
   }
   glDisable(GL_POLYGON_OFFSET_FILL);
   glDisable(GL_STENCIL_TEST);
@@ -1450,7 +1653,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             // Each node rides the terrain under it (HeightAt is 0 on flat
             // maps); the 0.25-unit grid is fine enough that the linear
             // contour/edge interpolation below stays on the slope.
-            quad[k].p.y = terrain.HeightAt(quad[k].p.x, quad[k].p.z) + kY;
+            for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
+              if (PatchContainsXZ(sidewalk, quad[k].p.x, quad[k].p.z)) {
+                quad[k].p.y = std::max(quad[k].p.y, sidewalk.vertices.front().y);
+              }
+            }
+            quad[k].p.y += kY;
             anyIn |= quad[k].g > 0.0f;
           }
           if (!anyIn) continue;

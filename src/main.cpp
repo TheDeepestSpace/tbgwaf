@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "game/GameLogic.h"
+#include "game/Geometry.h"
 #include "game/MapGenerator.h"
 #include "game/Raycast.h"
 #include "game/Types.h"
@@ -206,6 +207,20 @@ bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const tactics::Scene& scene,
     if (obstacle.climbable) considerSurface(obstacle.bounds);
   }
   for (const tactics::AABB& slab : scene.sidewalks) considerSurface(slab);
+  for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
+    if (surface.vertices.size() < 3) continue;
+    const glm::vec3 normal = glm::cross(surface.vertices[1] - surface.vertices[0],
+                                        surface.vertices[2] - surface.vertices[0]);
+    const float denominator = glm::dot(normal, ray.direction);
+    if (std::fabs(denominator) < 1e-7f) continue;
+    const float t = glm::dot(normal, surface.vertices[0] - ray.origin) / denominator;
+    if (t < 0.0f || t >= bestT) continue;
+    const glm::vec3 hit = ray.origin + ray.direction * t;
+    if (!tactics::SurfaceContainsXZ(surface, hit.x, hit.z)) continue;
+    found = true;
+    bestT = t;
+    bestPoint = hit;
+  }
 
   if (found && outPoint) *outPoint = bestPoint;
   return found;
@@ -290,14 +305,16 @@ int main() {
   if (const char* seedEnv = std::getenv("TBGWAF_MAP_SEED")) {
     mapSeed = static_cast<uint32_t>(std::strtoul(seedEnv, nullptr, 10));
   }
-  // TBGWAF_MAP picks the generator ("urban" default, or "hilly" for the
-  // rolling-hills terrain map); both web clients must agree the same way
-  // they must agree on the seed.
+  // TBGWAF_MAP picks the generator/urban variant; both web clients must
+  // agree the same way they must agree on the seed.
   std::string mapType = "urban";
   if (const char* mapEnv = std::getenv("TBGWAF_MAP")) mapType = mapEnv;
   auto makeMap = [mapSeed, mapType]() {
-    return mapType == "hilly" ? tactics::GenerateHillyMap(mapSeed)
-                              : tactics::GenerateUrbanMap(mapSeed);
+    if (mapType == "hilly") return tactics::GenerateHillyMap(mapSeed);
+    tactics::MapGeneratorConfig config;
+    if (mapType == "urban-merge" || mapType == "urban-elevated") config.arteryCount = 2;
+    if (mapType == "urban-elevated") config.elevatedHighway = true;
+    return tactics::GenerateUrbanMap(mapSeed, config);
   };
   GameLogic game(makeMap());
   // Start zoomed out far enough that the whole map is in view.
@@ -531,7 +548,8 @@ int main() {
         showNavMeshDebug = !showNavMeshDebug;
         if (showNavMeshDebug && !navMeshDebugBuilt) {
           navMeshDebug.Build(game.GetScene().obstacles, game.GetScene().mapHalfExtent,
-                             tactics::constants::kAgentRadius, &game.GetScene().ground);
+                             tactics::constants::kAgentRadius, &game.GetScene().ground,
+                             &game.GetScene().walkSurfaces);
           navMeshDebugBuilt = true;
         }
       }

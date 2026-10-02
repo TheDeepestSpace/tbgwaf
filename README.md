@@ -30,10 +30,12 @@ ctest --test-dir build --output-on-failure
 Run the game with `./build/tactics_app`. `ctest` also runs a headless
 smoke test under `xvfb-run` if available.
 
-Environment knobs: `TBGWAF_MAP_SEED=<n>` reseeds the procedural map, and
-`TBGWAF_MAP=hilly` swaps the urban city for the rolling-hills terrain
-generator (continuous ground-height variation; units, pathing, and the
-overlays all follow the terrain). Press **N** in-game to toggle a debug
+Environment knobs: `TBGWAF_MAP_SEED=<n>` reseeds the procedural map.
+`TBGWAF_MAP=urban-merge` selects the two-artery smooth merge,
+`TBGWAF_MAP=urban-elevated` adds its usable ramp and elevated through-deck,
+and `TBGWAF_MAP=hilly` selects rolling hills. Urban code/scenarios can also
+tune artery count/width, local-street width and elevation through
+`MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
 overlay of the navmesh's walkable-cell boundaries.
 
 ### Gameplay scenario tests

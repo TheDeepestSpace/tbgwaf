@@ -91,6 +91,10 @@ class SceneRenderer {
   // reuse the same storage address (e.g. stack-allocated GameLogic
   // instances), which an address key would mistake for "unchanged".
   LitTriangleMesh terrainMesh_;
+  // Reused scratch mesh for polygon prisms and road/deck patches. Geometry
+  // is already in world space, so the same upload path works in shadow and
+  // lit passes without approximating wedges by their AABB.
+  LitTriangleMesh geometryMesh_;
   tactics::HeightField terrainKey_;
   GLuint shadowFbo_ = 0;
   GLuint shadowDepthTex_ = 0;

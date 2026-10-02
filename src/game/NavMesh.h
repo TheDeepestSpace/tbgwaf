@@ -45,13 +45,20 @@ struct ReachField {
   int nx = 0, nz = 0;
   float budget = 0.0f;
   std::vector<float> dist;
+  // World-space surface height selected for each reached node. This keeps a
+  // ramp/deck frontier on its own layer instead of snapping it to terrain.
+  std::vector<float> surfaceY;
 
   bool Reached(int ix, int iz) const {
     return ix >= 0 && iz >= 0 && ix < nx && iz < nz && dist[iz * nx + ix] <= budget;
   }
   float Dist(int ix, int iz) const { return dist[iz * nx + ix]; }
   glm::vec3 Node(int ix, int iz) const {
-    return glm::vec3(minX + ix * step, 0.0f, minZ + iz * step);
+    const int index = iz * nx + ix;
+    const float y = index >= 0 && static_cast<size_t>(index) < surfaceY.size()
+                        ? surfaceY[index]
+                        : 0.0f;
+    return glm::vec3(minX + ix * step, y, minZ + iz * step);
   }
 };
 
@@ -79,13 +86,15 @@ class NavMesh {
   // terrain instead of a flat y = 0 plane. The field is copied; the caller's
   // instance need not outlive the mesh.
   void Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent, float agentRadius,
-             const HeightField* ground = nullptr);
+             const HeightField* ground = nullptr,
+             const std::vector<WalkSurface>* walkSurfaces = nullptr);
 
   // Windowed form: meshes only the XZ rectangle `region` (obstacles are
   // clipped to it). Used by GameLogic to mesh just the area a figure can
   // reach in one round instead of the whole map.
   void Build(const std::vector<Obstacle>& obstacles, const NavRegion& region, float agentRadius,
-             const HeightField* ground = nullptr);
+             const HeightField* ground = nullptr,
+             const std::vector<WalkSurface>* walkSurfaces = nullptr);
 
   // Returns true and fills `outPath` with a smoothed path from `start` to
   // `goal` (XZ plus an elevation hint used to disambiguate overlapping
@@ -103,6 +112,10 @@ class NavMesh {
     return cell.climbTop ? cell.elevation : ground_.HeightAt(x, z);
   }
 
+  // Highest/nearest explicit surface at XZ for a supplied elevation hint;
+  // returns terrain height when no walk-surface is selected.
+  float ResolveSurfaceY(float x, float z, float yHint) const;
+
   // True if the given XZ point lies inside the walkable navmesh area at
   // ground level (elevation 0); climb-top surfaces are not considered.
   bool IsWalkable(float x, float z) const;
@@ -113,6 +126,7 @@ class NavMesh {
   ReachField ComputeReachField(const glm::vec3& start, float budget, float step = 0.25f) const;
 
   const std::vector<NavCell>& Cells() const { return cells_; }
+  const std::vector<WalkSurface>& WalkSurfaces() const { return walkSurfaces_; }
 
  private:
   void BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegion& region,
@@ -121,12 +135,23 @@ class NavMesh {
 
   int FindCellContaining(float x, float z) const;
   int FindCellContaining(float x, float z, float yHint) const;
+  int FindWalkSurfaceContaining(float x, float z, float yHint) const;
+  bool FindGroundPath(glm::vec3 start, glm::vec3 goal,
+                      std::vector<glm::vec3>* outPath) const;
+  bool FindPolygonGroundPath(glm::vec3 start, glm::vec3 goal,
+                             std::vector<glm::vec3>* outPath) const;
+  bool FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface,
+                       glm::vec3 goal, std::vector<glm::vec3>* outPath) const;
+  glm::vec3 GroundConnectionPoint(int surface) const;
 
   std::vector<NavCell> cells_;
   std::vector<std::vector<int>> neighbors_;      // neighbors_[cellIndex] = adjacent cell indices.
   std::vector<AABB> paddedFootprints_;           // Agent-radius-inflated obstacle footprints.
   NavRegion region_;
   HeightField ground_;                            // Empty = flat ground at y 0.
+  std::vector<WalkSurface> walkSurfaces_;
+  std::vector<std::vector<glm::vec2>> paddedPolygons_;
+  bool polygonMode_ = false;
 };
 
 }  // namespace tactics

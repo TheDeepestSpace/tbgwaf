@@ -62,7 +62,14 @@ Scene ParseScene(const YAML::Node& root) {
       const uint32_t seed = genNode["seed"].as<uint32_t>();
       const std::string type = genNode["type"] ? genNode["type"].as<std::string>() : "urban";
       if (type == "urban") {
-        scene = GenerateUrbanMap(seed);
+        MapGeneratorConfig config;
+        if (genNode["arteries"]) config.arteryCount = genNode["arteries"].as<int>();
+        if (genNode["artery_width"]) config.arteryWidth = genNode["artery_width"].as<float>();
+        if (genNode["local_street_width"]) {
+          config.localStreetWidth = genNode["local_street_width"].as<float>();
+        }
+        if (genNode["elevated"]) config.elevatedHighway = genNode["elevated"].as<bool>();
+        scene = GenerateUrbanMap(seed, config);
       } else if (type == "hilly") {
         scene = GenerateHillyMap(seed);
       } else {

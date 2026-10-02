@@ -24,6 +24,7 @@ FetchContent_MakeAvailable(imgui)
 # into both the playable app and the headless logic test binary.
 set(GAME_LOGIC_SOURCES
   src/game/Scene.cpp
+  src/game/Geometry.cpp
   src/game/MapGenerator.cpp
   src/game/NavMesh.cpp
   src/game/Raycast.cpp

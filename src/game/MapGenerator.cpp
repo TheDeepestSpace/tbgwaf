@@ -827,7 +827,7 @@ Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
       if (bx > 0) { sum += baseAt(bx - 1, bz); ++n; }
       if (bz > 0) { sum += baseAt(bx, bz - 1); ++n; }
       const float neighbors = n ? sum / static_cast<float>(n) : mediumHeight;
-      baseAt(bx, bz) = std::clamp(0.85f * neighbors + 0.15f * mediumHeight + rng.Float(-2.6f, 2.6f),
+      baseAt(bx, bz) = std::clamp(0.88f * neighbors + 0.12f * mediumHeight + rng.Float(-3.4f, 3.4f),
                                   c.minBuildingHeight, c.maxBuildingHeight);
     }
   }

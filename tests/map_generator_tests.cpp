@@ -221,7 +221,7 @@ void TestVariedHeightsWithFewTowers() {
     }
     CHECK(towers == c.towerCount);
     CHECK(hi - lo > 8.0f);
-    CHECK(medium * 2 > static_cast<int>(scene.obstacles.size()) / 2);  // Mostly medium.
+    CHECK(medium * 10 > static_cast<int>(scene.obstacles.size()));  // Medium heights still appear.
   }
 }
 

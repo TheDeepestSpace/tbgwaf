@@ -165,9 +165,11 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     action.kind = ScenarioAction::Kind::Pass;
   } else if (kind == "cancel") {
     action.kind = ScenarioAction::Kind::Cancel;
+  } else if (kind == "focus") {
+    action.kind = ScenarioAction::Kind::Focus;
   } else {
     throw std::runtime_error("unknown script action '" + kind +
-                              "' (expected move/shoot/pass/cancel/commit)");
+                              "' (expected move/shoot/pass/cancel/focus/commit)");
   }
   return action;
 }
@@ -349,6 +351,11 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
     case ScenarioAction::Kind::Pass:
       NotifyMenuClick(actorTeam, "Pass");
       game.ChoosePass();
+      return true;
+    case ScenarioAction::Kind::Focus:
+      // Double-click: the first click's selection already happened above;
+      // the camera easing is a rendering concern, so only observers act.
+      if (hooks.onFocus) hooks.onFocus(game, action.actor, actorTeam);
       return true;
     case ScenarioAction::Kind::Cancel:
     case ScenarioAction::Kind::Commit:

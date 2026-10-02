@@ -21,6 +21,10 @@ class OrbitCamera {
   // Snaps zoom (no glide) to the distance at which a square ground area of
   // the given half-extent fits the view, even in a narrow split-screen pane.
   void FitToExtent(float halfExtent);
+  // Starts an eased move that centers on `focusPoint`, tilts to the steepest
+  // allowed pitch, and zooms so a square ground area of the given half-extent
+  // fits the view. Any manual Pan()/Rotate() cancels the target/pitch glide.
+  void FocusOn(const glm::vec3& focusPoint, float halfExtent);
   float TargetDistance() const { return targetDistance_; }
 
   // Moves `target` along the ground-projected right/forward axes (derived
@@ -47,6 +51,9 @@ class OrbitCamera {
   float pitch_ = 0.9599f;                // ~55 degrees above horizon.
   float distance_ = 18.0f;
   float targetDistance_ = 18.0f;
+  bool focusing_ = false;
+  glm::vec3 focusTarget_{0.0f};
+  float focusPitch_ = 0.9599f;
   static constexpr float kMinPitch = 0.4363f;   // ~25 degrees.
   static constexpr float kMaxPitch = 1.4835f;   // ~85 degrees.
   static constexpr float kMinDistance = 3.0f;

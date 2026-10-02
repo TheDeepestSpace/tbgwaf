@@ -288,6 +288,10 @@ int main() {
 
   bool quit = false;
   constexpr float kClickDragThresholdPx = 5.0f;
+  constexpr Uint32 kDoubleClickMs = 400;
+  int lastClickUnitId = -1;  // Figure hit by the previous click, for double-click detection.
+  int lastClickPane = -1;
+  Uint32 lastClickTicks = 0;
   int leftDragPane = -1;  // -1 = not dragging; else the pane a left-drag (pan) started in.
   int aimedUnitId = -1;  // Unit whose planned-move ghost is being dragged, or -1.
   int aimedPane = -1;    // Pane the ghost grab started in.
@@ -611,8 +615,25 @@ int main() {
           }
         }
         const int hitUnit = PickUnit(clickRay, pickableUnits);
+        const Uint32 clickTicks = SDL_GetTicks();
+        const bool doubleClick = hitUnit >= 0 && hitUnit == lastClickUnitId &&
+                                 clickPane == lastClickPane &&
+                                 clickTicks - lastClickTicks <= kDoubleClickMs;
+        lastClickUnitId = doubleClick ? -1 : hitUnit;
+        lastClickPane = clickPane;
+        lastClickTicks = clickTicks;
         if (hitUnit >= 0) {
           game.ClickUnit(hitUnit, clickTeam);
+          if (doubleClick) {
+            // Drone-style focus: frame the unit's whole movement frontier
+            // (same reach as the reach-field query window).
+            for (const Unit& unit : game.GetScene().units) {
+              if (unit.id != hitUnit) continue;
+              cameras[clickPane].FocusOn(
+                  unit.position, unit.MoveBudget() + 2.0f * tactics::constants::kAgentRadius);
+              break;
+            }
+          }
         } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
           glm::vec3 point;
           if (IntersectGroundOrClimbTop(clickRay, game.GetScene(), &point)) {

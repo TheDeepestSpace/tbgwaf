@@ -1387,9 +1387,16 @@ void TestSightingRecordedImmediatelyOnEntry() {
 
 void TestSightingSamplesAccumulateWhileInFov() {
   GameLogic game(LegacyScene());
-  StepSightings(game, 3.0f);
+  StepSightings(game, 1.0f);
+  // Stationary figure: only the entry sample, no stacked duplicates.
+  CHECK(game.Sightings(Team::Blue, 4).size() == 1);
+  // Once it moves, a sample is taken per 0.5s interval.
+  Unit* enemy = game.FindUnit(4);
+  for (int i = 0; i < 60; ++i) {
+    enemy->position.x += 0.01f;
+    game.UpdateSightingMemory(0.05f);
+  }
   const auto& samples = game.Sightings(Team::Blue, 4);
-  // Entry sample + one per 0.5s.
   CHECK(samples.size() >= 6 && samples.size() <= 7);
   for (size_t i = 0; i + 1 < samples.size(); ++i) {
     CHECK(samples[i].ageRounds == 0);  // No fading in real time.

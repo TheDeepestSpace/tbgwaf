@@ -301,7 +301,7 @@ int main() {
   std::array<gfx::OrbitCamera, kMaxPanes> cameras;
   // Both web clients must build the same city, so the seed is fixed unless a
   // native run overrides it via TBGWAF_MAP_SEED.
-  uint32_t mapSeed = 1;
+  uint32_t mapSeed = 7;
   if (const char* seedEnv = std::getenv("TBGWAF_MAP_SEED")) {
     mapSeed = static_cast<uint32_t>(std::strtoul(seedEnv, nullptr, 10));
   }

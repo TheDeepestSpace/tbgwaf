@@ -307,7 +307,7 @@ int main() {
   }
   // TBGWAF_MAP picks the generator/urban variant; both web clients must
   // agree the same way they must agree on the seed.
-  std::string mapType = "urban";
+  std::string mapType = "urban-elevated";
   if (const char* mapEnv = std::getenv("TBGWAF_MAP")) mapType = mapEnv;
   auto makeMap = [mapSeed, mapType]() {
     if (mapType == "hilly") return tactics::GenerateHillyMap(mapSeed);

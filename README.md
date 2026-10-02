@@ -31,10 +31,10 @@ Run the game with `./build/tactics_app`. `ctest` also runs a headless
 smoke test under `xvfb-run` if available.
 
 Environment knobs: `TBGWAF_MAP_SEED=<n>` reseeds the procedural map.
-The default urban map lays an oblique boundary-to-boundary artery with
+The default map (also what the web build serves) is `urban-elevated`; the plain urban map lays an oblique boundary-to-boundary artery with
 angled avenues/cross streets and polygon blocks whose buildings follow
 their frontage; `TBGWAF_MAP=urban-merge` adds a wide branching avenue that
-merges into the artery, `TBGWAF_MAP=urban-elevated` turns the artery into a
+merges into the artery, `TBGWAF_MAP=urban-elevated` (default) turns the artery into a
 true overpass (ramps up, crosses on pier bents with usable ground beneath,
 ramps back down; the branch becomes an on-ramp merging mid-deck), and
 `TBGWAF_MAP=hilly` selects rolling hills. Urban code/scenarios can also

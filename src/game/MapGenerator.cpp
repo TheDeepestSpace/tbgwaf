@@ -582,6 +582,21 @@ void EmitBlockBuildings(Scene* scene, const UrbanBlock& block, size_t blockIndex
       bounds[i] += rng->Float(-0.12f, 0.12f) / static_cast<float>(count);
     }
     const float halfGapT = c.gapWidth * 0.5f / length;
+    // Party walls drop perpendicularly from the frontage onto the inner ring
+    // (instead of converging on the block centroid); an occasional wall gets
+    // a lateral skew, shared across the junction so alleys keep parallel
+    // walls. Corner pieces still clamp onto the inner ring's miter.
+    const glm::vec2 innerDelta = inner[next] - inner[e];
+    const float innerLen = glm::length(innerDelta);
+    const glm::vec2 innerDir = innerDelta / innerLen;
+    std::vector<float> wallSkew(count + 1, 0.0f);
+    for (int i = 1; i < count; ++i) {
+      if (rng->Chance(0.2f)) wallSkew[i] = rng->Float(-0.5f, 0.5f) * c.buildingDepth;
+    }
+    auto innerU = [&](float t, float skew) {
+      const glm::vec2 foot = glm::mix(outer[e], outer[next], t);
+      return std::clamp(glm::dot(foot - inner[e], innerDir) + skew, 0.0f, innerLen);
+    };
     for (int i = 0; i < count; ++i) {
       float ta = bounds[i], tb = bounds[i + 1];
       if (i == 0 && cornerGap[e]) ta += halfGapT;
@@ -594,9 +609,13 @@ void EmitBlockBuildings(Scene* scene, const UrbanBlock& block, size_t blockIndex
       // along one another, which exact-collinearity tests can't classify.
       ta = std::max(ta, 0.0005f);
       tb = std::min(tb, 0.9995f);
+      float ua = innerU(ta, wallSkew[i]), ub = innerU(tb, wallSkew[i + 1]);
+      if (ub < ua) ua = ub = (ua + ub) * 0.5f;
       std::vector<glm::vec2> footprint = {
           glm::mix(outer[e], outer[next], ta), glm::mix(outer[e], outer[next], tb),
-          glm::mix(inner[e], inner[next], tb), glm::mix(inner[e], inner[next], ta)};
+          inner[e] + innerDir * ub, inner[e] + innerDir * ua};
+      // A back wall pinched to a point becomes a (still convex) triangle.
+      if (ub - ua < 0.05f) footprint.pop_back();
       if (PolygonArea(footprint) < c.minPolygonArea * 0.18f) continue;
       AddPolygonBuilding(scene, std::move(footprint),
                          std::clamp(cluster + rng->Float(-1.2f, 1.2f), c.minBuildingHeight,

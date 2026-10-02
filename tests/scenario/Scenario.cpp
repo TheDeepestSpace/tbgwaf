@@ -125,6 +125,14 @@ ScenarioAction ParseAction(const YAML::Node& node) {
   if (kind == "move") {
     action.kind = ScenarioAction::Kind::Move;
     action.destination = ParseVec3(node["destination"], "script[].destination");
+    if (const YAML::Node waypoints = node["waypoints"]) {
+      if (!waypoints.IsSequence()) {
+        throw std::runtime_error("script[].waypoints must be a list of [x, y, z]");
+      }
+      for (const auto& wp : waypoints) {
+        action.waypoints.push_back(ParseVec3(wp, "script[].waypoints[]"));
+      }
+    }
     if (node["final_facing_degrees"]) {
       action.finalFacingDegrees = node["final_facing_degrees"].as<float>();
     }
@@ -155,6 +163,11 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
     assertion.visibleToTeam = ParseTeam(node["visible_to"].as<std::string>(), "assert.visible_to");
   }
   if (node["visible"]) assertion.visible = node["visible"].as<bool>();
+  if (node["remembered_by"]) {
+    assertion.rememberedByTeam = ParseTeam(node["remembered_by"].as<std::string>(), "assert.remembered_by");
+  }
+  if (node["remembered"]) assertion.remembered = node["remembered"].as<bool>();
+  if (node["memory_age"]) assertion.memoryAge = node["memory_age"].as<int>();
   if (node["round"]) assertion.round = node["round"].as<int>();
   if (node["winner"]) {
     assertion.checkWinner = true;
@@ -163,8 +176,12 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   }
 
   if ((assertion.alive || assertion.position || assertion.facingDegrees ||
-       assertion.visible) && !assertion.unit) {
-    throw std::runtime_error("assert checking alive/position/facing_degrees/visible requires 'unit'");
+       assertion.visible || assertion.remembered || assertion.memoryAge) && !assertion.unit) {
+    throw std::runtime_error(
+        "assert checking alive/position/facing_degrees/visible/remembered/memory_age requires 'unit'");
+  }
+  if ((assertion.remembered || assertion.memoryAge) && !assertion.rememberedByTeam) {
+    throw std::runtime_error("assert 'remembered'/'memory_age' require 'remembered_by'");
   }
   if (assertion.visible.has_value() != assertion.visibleToTeam.has_value()) {
     throw std::runtime_error("assert 'visible' and 'visible_to' must be set together");
@@ -270,8 +287,16 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
           hooks.onMoveFrontier(game, actorTeam);
         }
       }
+      for (const glm::vec3& waypoint : action.waypoints) {
+        NotifyClick(actorTeam, waypoint);
+        game.ClickGround(waypoint, actorTeam);
+        if (glm::distance(game.MoveChainEnd(), waypoint) > 0.01f) {
+          return Fail("waypoint " + ToString(waypoint) + " was rejected (no path, or beyond one round's reach of the previous leg)");
+        }
+      }
       NotifyClick(actorTeam, action.destination);
       game.ClickGround(action.destination, actorTeam);
+      game.FinishMovePlan();
       if (game.Mode() != InputMode::AwaitingSelection) {
         return Fail("has no path to destination " + ToString(action.destination) +
                     " (unreachable, or beyond the mover's round move budget)");
@@ -352,6 +377,23 @@ void CheckAssertion(const GameLogic& game, const ScenarioAssertion& a, int stepI
           Fail("unit " + std::to_string(*a.unit) + " expected visible_to " +
                ToString(a.visibleToTeam) + "=" + (*a.visible ? "true" : "false") + " but was " +
                (actual ? "true" : "false"));
+        }
+      }
+      if (a.rememberedByTeam) {
+        const auto& samples = game.Sightings(*a.rememberedByTeam, *a.unit);
+        if (a.remembered && samples.empty() == *a.remembered) {
+          Fail("unit " + std::to_string(*a.unit) + " expected remembered_by " +
+               ToString(a.rememberedByTeam) + "=" + (*a.remembered ? "true" : "false") + " but had " +
+               std::to_string(samples.size()) + " samples");
+        }
+        if (a.memoryAge) {
+          if (samples.empty()) {
+            Fail("unit " + std::to_string(*a.unit) + " expected memory_age " +
+                 std::to_string(*a.memoryAge) + " but has no remembered samples");
+          } else if (samples.front().ageRounds != *a.memoryAge) {
+            Fail("unit " + std::to_string(*a.unit) + " expected memory_age " +
+                 std::to_string(*a.memoryAge) + " but was " + std::to_string(samples.front().ageRounds));
+          }
         }
       }
     }

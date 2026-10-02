@@ -378,6 +378,7 @@ int main() {
     bool leftClickPending = false;
     int leftClickX = 0, leftClickY = 0;
     bool escapePending = false;
+    bool enterPending = false;
     int mouseX = 0, mouseY = 0;
     SDL_GetMouseState(&mouseX, &mouseY);
 
@@ -466,6 +467,9 @@ int main() {
         leftClickY = event.button.y;
       } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
         escapePending = true;
+      } else if (event.type == SDL_KEYDOWN && (event.key.keysym.sym == SDLK_RETURN ||
+                                               event.key.keysym.sym == SDLK_KP_ENTER)) {
+        enterPending = true;
       }
     }
 
@@ -536,6 +540,7 @@ int main() {
       if (hud.overwatch) game.ChooseOverwatch();
       if (hud.pass) game.ChoosePass();
       if (hud.cancel) game.CancelAction();
+      if (hud.done) game.FinishMovePlan();
       if (hud.reaction) {
         if (const auto selectedId = game.SelectedUnitId()) {
           if (Unit* selected = game.FindUnit(*selectedId)) selected->reactionOnStationary = *hud.reaction;
@@ -555,6 +560,7 @@ int main() {
     // --- Dispatch deferred input, now that WantCaptureMouse reflects the UI
     // actually built this frame. ---
     if (escapePending) game.CancelAction();
+    if (enterPending) game.FinishMovePlan();
 
     const bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse;
     if (!uiWantsMouse && planning) {

@@ -400,8 +400,16 @@ void TestRoundCommitRequiresBothTeamsPlanned() {
   CHECK(game.RoundNumber() == 2);  // One commit resolved the whole round.
 }
 
+// Neutral squad playbooks, so movement/visibility tests aren't affected by
+// the default table's shoot reactions.
+void MakePassive(GameLogic& game) {
+  game.SetPlaybook(Team::Blue, SquadPlaybook::Passive());
+  game.SetPlaybook(Team::Red, SquadPlaybook::Passive());
+}
+
 void TestRoundExecutesBothTeamsMovesConcurrently() {
   GameLogic game(LegacyScene());
+  MakePassive(game);
   game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
   const glm::vec3 blueDestination(-3.0f, 0.0f, -4.0f);
@@ -563,6 +571,7 @@ void TestMoveBudgetCapsPlannedPaths() {
 
 void TestPendingShotFiresWhenTargetWalksIntoView() {
   GameLogic game(LegacyScene());
+  MakePassive(game);
 
   // Park red4 behind the z=-4 wall from blue1's perspective: blue1's own
   // line of sight is blocked at plan time, but blue2's diagonal view is
@@ -740,6 +749,7 @@ void TestGameLogicMoveUpdatesPositionAndFacing() {
 
 void TestGameLogicMoveAnimatesProgressively() {
   GameLogic game(LegacyScene());
+  MakePassive(game);
   game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
   // Straight line, same row, short of the wall at x in [-1,1] so the path
@@ -1006,8 +1016,15 @@ void TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds() {
   CHECK(game.RoundNumber() == 2);
 }
 
-void TestGameLogicPlaybookDefaultDoesNothing() {
+void TestGameLogicPlaybookDefaultTable() {
   GameLogic game(LegacyScene());
+  for (Team t : {Team::Blue, Team::Red}) {
+    CHECK(game.Playbook(t).At(true, true) == ReactionAction::ShootContinue);
+    CHECK(game.Playbook(t).At(true, false) == ReactionAction::Continue);
+    CHECK(game.Playbook(t).At(false, true) == ReactionAction::Shoot);
+    CHECK(game.Playbook(t).At(false, false) == ReactionAction::DoNothing);
+  }
+  game.SetPlaybook(Team::Blue, SquadPlaybook::Passive());
   CHECK(game.Playbook(Team::Blue).At(false, true) == ReactionAction::DoNothing);
 
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
@@ -1171,6 +1188,7 @@ void TestGameLogicWinCondition() {
 // snaps back to rest when the round is fast-forwarded to completion.
 void TestWalkCycleTracksInFlightMove() {
   GameLogic game(LegacyScene());
+  MakePassive(game);
   Unit* mover = game.FindUnit(0);
   const glm::vec3 start = mover->position;
   game.ClickUnit(0, Team::Blue);
@@ -1396,6 +1414,8 @@ void TestResetClearsSightings() {
 
 void TestFollowerBuildsSightingsWithoutPhysicsUpdate() {
   GameLogic sim(LegacyScene()), follower(LegacyScene());
+  MakePassive(sim);
+  MakePassive(follower);
   sim.ClickUnit(4, Team::Red);
   sim.ChooseMove();
   sim.ClickGround(glm::vec3(-2.0f, 0.0f, 0.0f), Team::Red);
@@ -1456,7 +1476,7 @@ int main() {
   TestGameLogicMoveCanClimbOntoObstacle();
   TestGameLogicOverwatchFiresOnEnemyEnteringFov();
   TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds();
-  TestGameLogicPlaybookDefaultDoesNothing();
+  TestGameLogicPlaybookDefaultTable();
   TestGameLogicPlaybookIgnoresSameTeamMover();
   TestGameLogicPlaybookMovingRows();
   TestGameLogicPlaybookVisibilityColumns();

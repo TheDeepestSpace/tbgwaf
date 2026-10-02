@@ -53,9 +53,18 @@ inline bool ReactionStops(ReactionAction a) {
 struct SquadPlaybook {
   ReactionAction table[2][2] = {
       // [moving][canSeeMe]
-      {ReactionAction::DoNothing, ReactionAction::DoNothing},  // Stationary.
-      {ReactionAction::Continue, ReactionAction::Continue},    // Moving.
+      {ReactionAction::DoNothing, ReactionAction::Shoot},          // Stationary.
+      {ReactionAction::Continue, ReactionAction::ShootContinue},   // Moving.
   };
+
+  // All-neutral table (never shoots or stops); for tests/scenarios that
+  // aren't about reactions.
+  static SquadPlaybook Passive() {
+    SquadPlaybook pb;
+    pb.table[0][0] = pb.table[0][1] = ReactionAction::DoNothing;
+    pb.table[1][0] = pb.table[1][1] = ReactionAction::Continue;
+    return pb;
+  }
 
   ReactionAction& At(bool moving, bool canSeeMe) { return table[moving ? 1 : 0][canSeeMe ? 1 : 0]; }
   ReactionAction At(bool moving, bool canSeeMe) const {

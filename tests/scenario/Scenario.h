@@ -65,6 +65,13 @@ struct ScenarioAssertion {
   bool checkWinner = false;
   std::optional<Team> expectedWinner;  // nullopt means "no winner yet".
 
+  // Sighting memory: `remembered_by` team has (remembered=true) or has no
+  // (false) remembered trail of `unit`; `memory_age` is the oldest sample's
+  // ageRounds (rounds completed since it was recorded).
+  std::optional<Team> rememberedByTeam;
+  std::optional<bool> remembered;
+  std::optional<int> memoryAge;
+
   std::optional<int> round;
 };
 

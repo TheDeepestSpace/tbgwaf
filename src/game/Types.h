@@ -74,8 +74,8 @@ constexpr float kFovConeVisualRange = kShootRange;
 // interval (plus one on entry). Samples fade per completed round (not in
 // real time) and are forgotten once fully faded.
 constexpr float kSightingSampleInterval = 0.5f;
-constexpr float kSightingFadePerRound = 0.1f;  // Fraction of opacity lost each round.
-constexpr int kSightingMemoryRounds = 10;      // 1 / kSightingFadePerRound.
+constexpr float kSightingFadePerRound = 1.0f / 3.0f;  // Fraction of opacity lost each round.
+constexpr int kSightingMemoryRounds = 3;       // 1 / kSightingFadePerRound.
 }  // namespace constants
 
 }  // namespace tactics

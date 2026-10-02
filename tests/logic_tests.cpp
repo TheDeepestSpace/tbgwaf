@@ -1373,6 +1373,27 @@ void TestSightingMoveDirectionOnlyWhenMoving() {
   CHECK(std::fabs(last.moveDirection.z) < 1e-3f);
 }
 
+void TestSightingCapturesAnimationPose() {
+  GameLogic game(LegacyScene());
+  Unit* red = game.FindUnit(4);
+  red->walkPhase = 1.25f;
+  red->walkBlend = 0.75f;
+  red->idleElapsed = 2.5f;
+  StepSightings(game, 1.0f);
+  const auto& samples = game.Sightings(Team::Blue, 4);
+  CHECK(!samples.empty());
+  const GameLogic::EnemySighting first = samples.front();
+  CHECK(first.walkPhase == 1.25f);
+  CHECK(first.walkBlend == 0.75f);
+  CHECK(first.idleElapsed == 2.5f);
+  red->walkPhase = 3.0f;
+  red->walkBlend = 0.1f;
+  red->idleElapsed = 9.0f;
+  CHECK(game.Sightings(Team::Blue, 4).front().walkPhase == 1.25f);
+  CHECK(game.Sightings(Team::Blue, 4).front().walkBlend == 0.75f);
+  CHECK(game.Sightings(Team::Blue, 4).front().idleElapsed == 2.5f);
+}
+
 void TestSightingsPersistAfterLeavingFovThenExpire() {
   GameLogic game(LegacyScene());
   StepSightings(game, 2.0f);
@@ -1489,6 +1510,7 @@ int main() {
   TestSightingRecordedImmediatelyOnEntry();
   TestSightingSamplesAccumulateWhileInFov();
   TestSightingMoveDirectionOnlyWhenMoving();
+  TestSightingCapturesAnimationPose();
   TestSightingsPersistAfterLeavingFovThenExpire();
   TestSightingReentryAppendsToAgingTrail();
   TestResetClearsSightings();

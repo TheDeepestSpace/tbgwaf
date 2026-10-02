@@ -1,0 +1,34 @@
+# Any-enemy tie-break: red1 sights two blues; blue0 faces away but blue1 sees
+# red1 back, so red1 counts as "seen" (stop) rather than "unseen" (continue)
+# and halts mid-walk.
+# Mirrors TestGameLogicPlaybookMultiEnemyTieBreak.
+name: playbook_moving_multi_enemy_seen
+
+camera:
+  target: [8, 3]
+  zoom: 4
+
+playbook:
+  red: {moving_seen: stop, moving_unseen: continue}
+
+units:
+  # Faces away from red1: can't see it back.
+  - {id: 0, team: blue, position: [9, 0, 6], facing_degrees: 90}
+  # Faces red1: sees it back.
+  - {id: 1, team: blue, position: [8, 0, 6], facing_degrees: -90}
+  - {id: 2, team: red, position: [8, 0, 0], facing_degrees: 90}
+  - {id: 3, team: red, position: [9, 0, -9], facing_degrees: 0}
+
+script:
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: move
+    actor: 2
+    destination: [8, 0, 3]
+  - action: pass
+    actor: 3
+  - action: commit
+  - assert: {unit: 2, position: [8, 0, 0.4], tolerance: 0.1}
+  - assert: {unit: 2, alive: true}

@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "flow/game_flow.h"
 #include "game/GameLogic.h"
 #include "game/MapGenerator.h"
 #include "game/Raycast.h"
@@ -29,6 +30,7 @@
 #include "gfx/Camera.h"
 #include "gfx/SceneRenderer.h"
 #include "ui/Hud.h"
+#include "ui/Menu.h"
 
 using tactics::DeserializeSnapshot;
 using tactics::GameLogic;
@@ -304,6 +306,12 @@ int main() {
   constexpr int kSmokeTestMaxFrames = 60;
   Uint32 lastFrameTicks = SDL_GetTicks();
 
+  // App-level screen flow (Splash -> Map Select -> Playing), generated from
+  // src/flow/game_flow.yaml. Each client instance (including each web
+  // canvas) walks it locally; the smoke test has no user to click through.
+  flow::Screen screen = flow::kInitialScreen;
+  if (isSmokeTest) screen = flow::Screen::Playing;
+
   auto runFrame = [&]() {
 #ifdef __EMSCRIPTEN__
     // Track our own canvas element's CSS size (half the page per canvas).
@@ -476,6 +484,29 @@ int main() {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
+
+    if (screen != flow::Screen::Playing) {
+      if (const auto event = ui::DrawMenu(screen)) {
+        if (const auto next = flow::Next(screen, *event)) {
+          screen = *next;
+          if (*event == flow::Event::SelectUrban) {
+            game.Reset(tactics::GenerateUrbanMap(mapSeed));
+            for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
+            lastFrameTicks = SDL_GetTicks();
+          }
+        }
+      }
+      glViewport(0, 0, windowWidth, windowHeight);
+      glClearColor(0.08f, 0.09f, 0.11f, 1.0f);
+      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+      ImGui::Render();
+      ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+      SDL_GL_SwapWindow(window);
+#ifdef __EMSCRIPTEN__
+      if (quit) emscripten_cancel_main_loop();
+#endif
+      return;
+    }
 
     const Uint32 nowTicks = SDL_GetTicks();
     const float dt = static_cast<float>(nowTicks - lastFrameTicks) / 1000.0f;

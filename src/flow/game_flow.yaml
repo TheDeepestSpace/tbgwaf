@@ -1,0 +1,18 @@
+# Source of truth for the app-level screen flow (Splash -> Map Select ->
+# gameplay). Build-time only: scripts/gen_flow_cpp.py turns it into the C++
+# enum + transition table used by main.cpp, and scripts/gen_flow_mermaid.py
+# into a Mermaid stateDiagram-v2 (rendered to SVG via mermaid-cli).
+# The YAML is never parsed at runtime (so WASM doesn't need a YAML library).
+initial: Splash
+states:
+  - name: Splash
+    description: Title screen
+  - name: MapSelect
+    description: Choose a map
+  - name: Playing
+    description: Gameplay
+transitions:
+  - {from: Splash,    event: NewGame,     to: MapSelect}
+  - {from: MapSelect, event: Back,        to: Splash}
+  - {from: MapSelect, event: SelectUrban, to: Playing}
+  # SelectHills (-> Playing) is added once the hills generator lands (#90/#93).

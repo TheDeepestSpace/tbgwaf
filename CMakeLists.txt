@@ -35,9 +35,58 @@ add_library(tactics_logic STATIC ${GAME_LOGIC_SOURCES})
 target_include_directories(tactics_logic PUBLIC src)
 target_link_libraries(tactics_logic PUBLIC glm::glm)
 
+# Screen-flow codegen (issue #97): src/flow/game_flow.yaml is the source of
+# truth. Host-side Python (PyYAML) generates the C++ enum/transition table
+# and a Mermaid diagram at build time, so no YAML library is linked into the
+# app (native or WASM).
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(FLOW_YAML ${CMAKE_SOURCE_DIR}/src/flow/game_flow.yaml)
+set(FLOW_GEN_DIR ${CMAKE_BINARY_DIR}/generated)
+execute_process(
+  COMMAND ${Python3_EXECUTABLE} -c "import yaml"
+  RESULT_VARIABLE PYYAML_RESULT
+  OUTPUT_QUIET ERROR_QUIET
+)
+if(NOT PYYAML_RESULT EQUAL 0)
+  message(FATAL_ERROR "PyYAML is required for screen-flow codegen (pip install pyyaml / apt install python3-yaml)")
+endif()
+
+add_custom_command(
+  OUTPUT ${FLOW_GEN_DIR}/flow/game_flow.h
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${FLOW_GEN_DIR}/flow
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen_flow_cpp.py
+          ${FLOW_YAML} ${FLOW_GEN_DIR}/flow/game_flow.h
+  DEPENDS ${FLOW_YAML} ${CMAKE_SOURCE_DIR}/scripts/gen_flow_cpp.py
+)
+add_custom_target(flow_codegen DEPENDS ${FLOW_GEN_DIR}/flow/game_flow.h)
+
+# Diagram artifact: yaml -> Mermaid text -> mermaid-cli (mmdc) -> SVG. The
+# .mmd is always produced; the SVG only if mmdc is on PATH (it needs node +
+# a headless Chrome), otherwise a warning is printed and it is skipped.
+add_custom_command(
+  OUTPUT ${CMAKE_BINARY_DIR}/game_flow.mmd
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen_flow_mermaid.py
+          ${FLOW_YAML} ${CMAKE_BINARY_DIR}/game_flow.mmd
+  DEPENDS ${FLOW_YAML} ${CMAKE_SOURCE_DIR}/scripts/gen_flow_mermaid.py
+)
+find_program(MMDC_EXECUTABLE mmdc)
+if(MMDC_EXECUTABLE)
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/game_flow.svg
+    COMMAND ${MMDC_EXECUTABLE} -i ${CMAKE_BINARY_DIR}/game_flow.mmd
+            -o ${CMAKE_BINARY_DIR}/game_flow.svg
+    DEPENDS ${CMAKE_BINARY_DIR}/game_flow.mmd
+  )
+  add_custom_target(flow_diagram ALL DEPENDS ${CMAKE_BINARY_DIR}/game_flow.svg)
+else()
+  message(WARNING "mmdc (mermaid-cli) not found; only game_flow.mmd will be generated, no SVG")
+  add_custom_target(flow_diagram ALL DEPENDS ${CMAKE_BINARY_DIR}/game_flow.mmd)
+endif()
+
 set(APP_GFX_SOURCES
   src/main.cpp
   src/ui/Hud.cpp
+  src/ui/Menu.cpp
   src/gfx/Shader.cpp
   src/gfx/Mesh.cpp
   src/gfx/Camera.cpp
@@ -60,8 +109,10 @@ if(EMSCRIPTEN)
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
   )
+  add_dependencies(tactics_app_web flow_codegen)
   target_include_directories(tactics_app_web PRIVATE
     src
+    ${FLOW_GEN_DIR}
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
   )
@@ -135,8 +186,9 @@ else()
   target_include_directories(tactics_ui PUBLIC src)
   target_link_libraries(tactics_ui PUBLIC tactics_logic tactics_gfx imgui glm::glm)
 
-  add_executable(tactics_app src/main.cpp)
-  target_include_directories(tactics_app PRIVATE src)
+  add_executable(tactics_app src/main.cpp src/ui/Menu.cpp)
+  add_dependencies(tactics_app flow_codegen)
+  target_include_directories(tactics_app PRIVATE src ${FLOW_GEN_DIR})
   target_link_libraries(tactics_app PRIVATE
     tactics_logic
     tactics_gfx
@@ -149,6 +201,12 @@ else()
   )
 
   enable_testing()
+
+  # Screen-flow table sanity check (generated header, no GL needed).
+  add_executable(tactics_flow_tests tests/flow_tests.cpp)
+  add_dependencies(tactics_flow_tests flow_codegen)
+  target_include_directories(tactics_flow_tests PRIVATE ${FLOW_GEN_DIR})
+  add_test(NAME flow_tests COMMAND tactics_flow_tests)
 
   add_executable(tactics_logic_tests tests/logic_tests.cpp)
   target_include_directories(tactics_logic_tests PRIVATE src)

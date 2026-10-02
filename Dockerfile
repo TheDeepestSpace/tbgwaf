@@ -9,7 +9,7 @@ RUN apt update && apt upgrade -y && \
     software-properties-common dumb-init \
     python3-pip unzip sudo pkg-config \
     libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev mesa-common-dev \
-    xvfb && \
+    xvfb python3-yaml && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Create dev sudo user

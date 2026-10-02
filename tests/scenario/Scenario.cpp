@@ -61,6 +61,11 @@ Scene ParseScene(const YAML::Node& root) {
       scene = GenerateUrbanMap(genNode["seed"].as<uint32_t>());
       generated = true;
     }
+    // `half_extent: N` sizes the ground square (default 15); scenarios whose
+    // units sit far apart must grow the map so every figure stands on it.
+    if (const YAML::Node halfNode = mapNode["half_extent"]) {
+      scene.mapHalfExtent = halfNode.as<float>();
+    }
     if (const YAML::Node obstaclesNode = mapNode["obstacles"]) {
       for (const auto& obsNode : obstaclesNode) {
         const glm::vec2 center = ParseVec2(obsNode["center"], "map.obstacles[].center");
@@ -107,6 +112,12 @@ Scene ParseScene(const YAML::Node& root) {
       }
     }
     unit.alive = true;
+    if (std::abs(unit.position.x) > scene.mapHalfExtent ||
+        std::abs(unit.position.z) > scene.mapHalfExtent) {
+      throw std::runtime_error("units[] id " + std::to_string(unit.id) +
+                               " is outside the map; raise map.half_extent (currently " +
+                               std::to_string(scene.mapHalfExtent) + ")");
+    }
     scene.units.push_back(unit);
   }
   return scene;

@@ -4,7 +4,11 @@
 # survives, and the shooter never plays the draw animation.
 name: shot_beyond_range_never_fires
 
-# Zoomed out so both figures (80 units apart) are in frame in the goldens.
+# The default map is 30x30, so grow it (half_extent 50) to fit both figures
+# (80 units apart), and zoom out so both are in frame in the goldens.
+map:
+  half_extent: 50
+
 camera:
   target: [0, 0]
   zoom: 150

@@ -91,7 +91,7 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
         ImGui::TextWrapped("Choose an action to plan.");
         break;
       case InputMode::AwaitingMoveDestination:
-        ImGui::TextWrapped("Click a destination on the ground (Esc to cancel).");
+        ImGui::TextWrapped("Click ground within reach to plan this round's leg; each further click adds a leg for the next round. Enter or Done to finish, Esc to cancel.");
         break;
       case InputMode::AwaitingShootTarget:
         ImGui::TextWrapped("Click an enemy figure to plan a shot (Esc to cancel).");
@@ -147,6 +147,10 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
             ImGui::EndPopup();
           }
         } else {
+          if (game.Mode() == InputMode::AwaitingMoveDestination) {
+            if (Button("Done")) actions.done = true;
+            ImGui::SameLine();
+          }
           if (Button("Cancel")) actions.cancel = true;
         }
         ImGui::End();

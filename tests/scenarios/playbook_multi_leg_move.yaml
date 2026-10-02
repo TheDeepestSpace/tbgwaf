@@ -1,0 +1,41 @@
+# Multi-step move planning: blue0 chains three legs around a wall by
+# clicking a waypoint, another waypoint, then the destination (each within one
+# round's reach of the previous leg's end). One leg executes per round, so
+# blue0 reaches each leg end on successive commits while red1 holds.
+# The per-turn goldens show the yellow chained leg markers (numbered
+# cutouts) and the yellow reach boundary before the first commit.
+name: playbook_multi_leg_move
+
+camera:
+  target: [0, 0]
+  zoom: 22
+
+map:
+  obstacles:
+    - {center: [0, 0], half_extent: [0.5, 6], height: 3}
+
+units:
+  - {id: 0, team: blue, position: [-8, 0, -8], facing_degrees: 0}
+  - {id: 1, team: red, position: [12, 0, 0], facing_degrees: 180}
+
+script:
+  - action: move
+    actor: 0
+    waypoints:
+      - [-8, 0, 8]
+      - [8, 0, 8]
+    destination: [8, 0, -8]
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [-8, 0, 8], tolerance: 0.1}
+  - assert: {round: 2}
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [8, 0, 8], tolerance: 0.1}
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [8, 0, -8], tolerance: 0.1}
+  - assert: {round: 4}

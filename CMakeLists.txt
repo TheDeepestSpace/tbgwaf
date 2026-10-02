@@ -23,29 +23,33 @@ FetchContent_MakeAvailable(imgui)
 # App flow (Splash -> Map Select -> gameplay): flow/app_flow.yaml is the source
 # of truth. Build-time only -- a host Python script emits the C++ state enum +
 # transition table (so no YAML parser is linked into the app/WASM) and a
-# Mermaid diagram, which mermaid-cli (mmdc) renders to SVG when available.
+# Mermaid diagram, persisted as flow/app_flow.mmd (committed; plus .svg via
+# mermaid-cli (mmdc) when available).
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(FLOW_YAML ${CMAKE_SOURCE_DIR}/flow/app_flow.yaml)
 set(FLOW_TEMPLATES ${CMAKE_SOURCE_DIR}/flow/templates)
 set(FLOW_GEN_DIR ${CMAKE_BINARY_DIR}/generated)
+# The diagram is persisted next to the YAML that declares it (committed).
+set(FLOW_MMD ${CMAKE_SOURCE_DIR}/flow/app_flow.mmd)
+set(FLOW_SVG ${CMAKE_SOURCE_DIR}/flow/app_flow.svg)
 add_custom_command(
-  OUTPUT ${FLOW_GEN_DIR}/AppFlow.h ${FLOW_GEN_DIR}/app_flow.mmd
+  OUTPUT ${FLOW_GEN_DIR}/AppFlow.h ${FLOW_MMD}
   COMMAND ${CMAKE_COMMAND} -E make_directory ${FLOW_GEN_DIR}
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen_flow.py ${FLOW_YAML}
-          --header ${FLOW_GEN_DIR}/AppFlow.h --mermaid ${FLOW_GEN_DIR}/app_flow.mmd
+          --header ${FLOW_GEN_DIR}/AppFlow.h --mermaid ${FLOW_MMD}
           --templates ${FLOW_TEMPLATES}
   DEPENDS ${FLOW_YAML} ${CMAKE_SOURCE_DIR}/scripts/gen_flow.py
           ${FLOW_TEMPLATES}/AppFlow.h.j2 ${FLOW_TEMPLATES}/app_flow.mmd.j2
 )
-add_custom_target(app_flow_gen DEPENDS ${FLOW_GEN_DIR}/AppFlow.h ${FLOW_GEN_DIR}/app_flow.mmd)
+add_custom_target(app_flow_gen DEPENDS ${FLOW_GEN_DIR}/AppFlow.h ${FLOW_MMD})
 find_program(MMDC_EXECUTABLE mmdc)
 if(MMDC_EXECUTABLE)
   add_custom_command(
-    OUTPUT ${CMAKE_BINARY_DIR}/app_flow.svg
-    COMMAND ${MMDC_EXECUTABLE} -i ${FLOW_GEN_DIR}/app_flow.mmd -o ${CMAKE_BINARY_DIR}/app_flow.svg
-    DEPENDS ${FLOW_GEN_DIR}/app_flow.mmd
+    OUTPUT ${FLOW_SVG}
+    COMMAND ${MMDC_EXECUTABLE} -i ${FLOW_MMD} -o ${FLOW_SVG}
+    DEPENDS ${FLOW_MMD}
   )
-  add_custom_target(app_flow_diagram ALL DEPENDS ${CMAKE_BINARY_DIR}/app_flow.svg)
+  add_custom_target(app_flow_diagram ALL DEPENDS ${FLOW_SVG})
 else()
   message(STATUS "mmdc (mermaid-cli) not found: skipping app_flow.svg (Mermaid source still generated)")
 endif()

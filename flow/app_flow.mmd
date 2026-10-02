@@ -1,0 +1,8 @@
+stateDiagram-v2
+    state "Splash" as splash
+    state "Map Select" as map_select
+    state "Gameplay" as gameplay
+    [*] --> splash
+    splash --> map_select: new_game
+    map_select --> gameplay: select_urban
+    map_select --> splash: back

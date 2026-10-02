@@ -142,6 +142,10 @@ class GameLogic {
     glm::vec3 position{0.0f};
     float facingYaw = 0.0f;
     glm::vec3 moveDirection{0.0f};
+    // Animation state at sample time, so the ghost holds the captured pose.
+    float walkPhase = 0.0f;
+    float walkBlend = 0.0f;
+    float idleElapsed = 0.0f;
     int ageRounds = 0;  // Completed rounds since the sample was taken.
   };
   // Oldest-first samples of `targetUnitId` as seen by `viewingTeam`; empty

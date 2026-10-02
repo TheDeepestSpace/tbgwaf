@@ -107,9 +107,16 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
       } else if (visible) {
         sightingTimer_[t][unit.id] += dtSeconds;
         if (sightingTimer_[t][unit.id] >= constants::kSightingSampleInterval) {
-          sample = true;
           sightingTimer_[t][unit.id] =
               std::fmod(sightingTimer_[t][unit.id], constants::kSightingSampleInterval);
+          // Skip stationary figures: stacked identical ghosts brighten via blending.
+          const auto& existing = sightings_[t][unit.id];
+          sample = existing.empty();
+          if (!sample) {
+            glm::vec3 delta = unit.position - existing.back().position;
+            delta.y = 0.0f;
+            sample = glm::length(delta) > 1e-4f;
+          }
         }
       }
       sightedLastFrame_[t][unit.id] = visible;

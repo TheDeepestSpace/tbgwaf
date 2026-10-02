@@ -4,6 +4,11 @@
 # survives, and the shooter never plays the draw animation.
 name: shot_beyond_range_never_fires
 
+# Zoomed out so both figures (80 units apart) are in frame in the goldens.
+camera:
+  target: [0, 0]
+  zoom: 150
+
 units:
   - {id: 0, team: blue, position: [-40, 0, 0], facing_degrees: 0}
   - {id: 1, team: red, position: [40, 0, 0], facing_degrees: 180}

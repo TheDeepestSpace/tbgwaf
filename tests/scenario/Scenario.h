@@ -33,7 +33,7 @@ class GameLogic;
 namespace tactics::scenario {
 
 struct ScenarioAction {
-  enum class Kind { Move, Shoot, Pass, Cancel, Commit };
+  enum class Kind { Move, Shoot, Pass, Cancel, Commit, Focus };
 
   int actor = -1;  // Unused (and not required in YAML) for Commit.
   Kind kind = Kind::Pass;
@@ -120,6 +120,11 @@ struct PlaybackHooks {
   // steps do not fire it: a "turn" for capture purposes is one executed
   // action.
   std::function<void(const GameLogic&, int completedActions)> onActionComplete;
+
+  // Fired for a `focus` step (a double-click on a figure) right after the
+  // figure is selected. The visual runner eases the owning pane's camera
+  // over the figure's movement frontier here, emitting its own frames.
+  std::function<void(const GameLogic&, int unitId, Team team)> onFocus;
 };
 
 // Runs `scenario` against a fresh GameLogic instance built from its scene,

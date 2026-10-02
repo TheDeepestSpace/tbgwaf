@@ -105,6 +105,10 @@ inline constexpr ShotProfile kDefaultShotProfile{constants::kShootHalfFovDegrees
 // Pure falloff function. Chance = maxChance * angleFalloff * rangeFalloff:
 // cosine falloff on angle (1 on axis, 0 at the cone edge) times linear
 // falloff on distance (1 point-blank, 0 at range). Returns 0 outside the cone/range.
+// Opacity of the shot-cone overlay at `distance` from the gun tip: kConeStartAlpha
+// at the tip, falling linearly to 0 at the profile's range (and 0 beyond).
+float ShotConeAlpha(const ShotProfile& profile, float distance);
+
 float ShotProfileHitChance(const ShotProfile& profile, float angleDegrees, float distance);
 
 class GameLogic {

@@ -595,6 +595,11 @@ float ShotProfileHitChance(const ShotProfile& profile, float angleDegrees, float
   return profile.maxChance * angleFalloff * rangeFalloff;
 }
 
+float ShotConeAlpha(const ShotProfile& profile, float distance) {
+  const float t = glm::clamp(distance / profile.range, 0.0f, 1.0f);
+  return constants::kConeStartAlpha * (1.0f - t);
+}
+
 float GameLogic::ShotHitChance(const Unit& shooter, const Unit& target) const {
   const ShotProfile& profile = kDefaultShotProfile;  // Future: derive from shooter's role.
   const glm::vec3 eye = shooter.EyePosition();

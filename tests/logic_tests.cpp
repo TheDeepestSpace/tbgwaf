@@ -1174,6 +1174,38 @@ void TestShotHitChanceGatesAndRoll() {
   CHECK(g3.ShotHitChance(*s3, *t3) == 0.0f);
 }
 
+// Shot cone overlay: opaque-ish (50%) at the gun tip, fading to nothing at range.
+void TestShotConeAlphaFadesFromGunTip() {
+  const ShotProfile& p = kDefaultShotProfile;
+  CHECK(constants::kConeStartAlpha == 0.5f);
+  CHECK(std::fabs(ShotConeAlpha(p, 0.0f) - 0.5f) < 1e-6f);
+  CHECK(std::fabs(ShotConeAlpha(p, p.range * 0.5f) - 0.25f) < 1e-6f);
+  CHECK(ShotConeAlpha(p, p.range) == 0.0f);
+  CHECK(ShotConeAlpha(p, p.range * 2.0f) == 0.0f);
+  CHECK(ShotConeAlpha(p, -1.0f) == 0.5f);  // Behind the tip clamps, never exceeds the start.
+  CHECK(ShotConeAlpha(p, 10.0f) > ShotConeAlpha(p, 20.0f));
+}
+
+// The gun tip (where shots and the cone start) is out in front of the figure
+// at shoulder height, on its right-hand side -- not at the head.
+void TestMuzzleIsAtGunTipNotHead() {
+  Unit u;
+  u.position = glm::vec3(2.0f, 0.0f, -3.0f);
+  u.facingYaw = 0.0f;  // Facing +X; right-hand side is +Z.
+  glm::vec3 m = u.MuzzlePosition();
+  CHECK(std::fabs(m.x - (2.0f + constants::kMuzzleForward)) < 1e-5f);
+  CHECK(std::fabs(m.y - constants::kMuzzleHeight) < 1e-5f);
+  CHECK(std::fabs(m.z - (-3.0f + constants::kMuzzleSide)) < 1e-5f);
+  CHECK(m.y < u.EyePosition().y);
+  CHECK(glm::length(m - u.EyePosition()) > 0.5f);
+
+  // Turning to face +Z swings the tip around: forward is +Z, right is -X.
+  u.facingYaw = 1.57079632679f;
+  m = u.MuzzlePosition();
+  CHECK(std::fabs(m.x - (2.0f - constants::kMuzzleSide)) < 1e-4f);
+  CHECK(std::fabs(m.z - (-3.0f + constants::kMuzzleForward)) < 1e-4f);
+}
+
 void TestSnapshotMirrorsMatchAndTeamPlans() {
   GameLogic blue, red;
   // Each canvas's instance plans only its own team.
@@ -1399,6 +1431,8 @@ int main() {
   TestResolvedShotStartsShootAnimation();
   TestShotHitChanceProfile();
   TestShotHitChanceGatesAndRoll();
+  TestShotConeAlphaFadesFromGunTip();
+  TestMuzzleIsAtGunTipNotHead();
   TestSnapshotMirrorsMatchAndTeamPlans();
   TestSightingRecordedImmediatelyOnEntry();
   TestSightingSamplesAccumulateWhileInFov();

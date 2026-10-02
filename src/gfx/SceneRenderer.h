@@ -73,7 +73,7 @@ class SceneRenderer {
   CubeMesh cubeMesh_;
   SphereMesh sphereMesh_;
   LineMesh pathLine_;
-  TriangleMesh fovConeMesh_;
+  ColorTriangleMesh fovConeMesh_;
   ColorTriangleMesh frontierFill_;
   LineMesh frontierBorder_;
   // Frontier geometry is rebuilt only when the field changes.

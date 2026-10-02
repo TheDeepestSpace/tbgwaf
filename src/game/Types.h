@@ -48,6 +48,13 @@ constexpr float kEyeHeight = 1.5f;
 constexpr float kSightRange = 250.0f;
 // Shot range cap: 3x the 20-unit per-round walking distance (4.0 speed * 5.0 s).
 constexpr float kShootRange = 60.0f;
+// Gun tip while aiming (figure-local: forward / up / right of the feet): the
+// right arm and pistol extended level from the shoulder. Shots and the shot
+// cone start here, not at the head.
+constexpr float kMuzzleForward = 0.85f;
+constexpr float kMuzzleHeight = 0.93f;
+constexpr float kMuzzleSide = 0.30f;
+constexpr float kConeStartAlpha = 0.5f;  // Shot-cone opacity at the gun tip; fades to 0 at kShootRange.
 constexpr float kShootHalfFovDegrees = 75.0f;  // 150 degree total FOV cone.
 constexpr float kKnockdownDuration = 0.4f;  // Seconds for a hit unit to fall over.
 // Visual-only figure animation (procedural humanoid, see gfx/SceneRenderer):

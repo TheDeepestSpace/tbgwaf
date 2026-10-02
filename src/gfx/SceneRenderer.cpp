@@ -742,18 +742,23 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
 // ground level right behind the obstacle stays hidden. Obstacles at or above
 // eye level shadow everything behind them.
 // Caller is responsible for enabling blending around this call.
-void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& viewProj,
+void DrawFovCone(const Shader& shader, ColorTriangleMesh& mesh, const glm::mat4& viewProj,
                  const Unit& unit, const std::vector<tactics::Obstacle>& obstacles,
                  const std::vector<AABB>& sidewalks, float mapHalfExtent) {
   constexpr int kArcSegments = 24;
   constexpr float kGroundOffset = 0.015f;
-  constexpr float kConeAlpha = 0.15f;
   // Angular nudge to either side of an obstacle corner: one ray lands on the
   // occluding face right at the corner, the other shoots past it.
   constexpr float kCornerEpsilon = 1e-3f;
   const float halfFovRad = glm::radians(tactics::constants::kShootHalfFovDegrees);
-  const float range = tactics::constants::kFovConeVisualRange;
-  const glm::vec3 eye = unit.EyePosition();
+  // The overlay is the shot cone: it fades out by the shot range, so nothing
+  // past that needs geometry.
+  const float range = std::min(tactics::constants::kFovConeVisualRange,
+                               tactics::kDefaultShotProfile.range);
+  // Rays fan out from the gun tip (not the head); the sightline height stays
+  // the eye's.
+  const glm::vec3 muzzle = unit.MuzzlePosition();
+  const glm::vec3 eye(muzzle.x, unit.EyePosition().y, muzzle.z);
 
   // Boundary ray angles as offsets from facingYaw in [-halfFov, +halfFov].
   // A uniform fan alone puts the occlusion edge on a chord between the two
@@ -865,12 +870,18 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
       }
     }
   }
-  mesh.SetPoints(points);
-
-  const glm::vec4 baseColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
-                                                      : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
+  // Opacity per vertex: strongest at the gun tip, fading linearly to nothing
+  // at the shot range.
+  const glm::vec3 baseColor = unit.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
+                                                      : glm::vec3(0.9f, 0.25f, 0.22f);
+  std::vector<ColorTriangleMesh::Vertex> vertices;
+  vertices.reserve(points.size());
+  for (const glm::vec3& p : points) {
+    const float distance = glm::length(glm::vec2(p.x - muzzle.x, p.z - muzzle.z));
+    vertices.push_back({p, glm::vec4(baseColor, tactics::ShotConeAlpha(tactics::kDefaultShotProfile, distance))});
+  }
+  mesh.SetVertices(vertices);
   shader.SetMat4("uMVP", viewProj);
-  shader.SetVec4("uColor", glm::vec4(baseColor.r, baseColor.g, baseColor.b, kConeAlpha));
   mesh.Draw();
 }
 
@@ -1055,7 +1066,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // the first cone to touch a pixel blends and claims it (stencil
   // 0 -> 1), any later cone covering that same pixel is discarded, so
   // overlaps read as one flat shade instead of stacking.
-  unlitShader_.Use();
+  colorShader_.Use();
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glDepthMask(GL_FALSE);
@@ -1069,11 +1080,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glPolygonOffset(-2.0f, -4.0f);
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.team != team) continue;
-    DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit, obstacles,
+    DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, obstacles,
                 game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
   }
   glDisable(GL_POLYGON_OFFSET_FILL);
   glDisable(GL_STENCIL_TEST);
+  unlitShader_.Use();
 
   // Movement frontier: a glow hugging the reach boundary -- brightest at the
   // boundary, fading to fully transparent within kFadeWidth inside it. The
@@ -1377,7 +1389,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost);
       } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
         if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {
-          const std::vector<glm::vec3> shotLine = {unit.EyePosition(), shotTarget->EyePosition()};
+          const std::vector<glm::vec3> shotLine = {unit.MuzzlePosition(), shotTarget->EyePosition()};
           pathLine_.SetPoints(shotLine);
           unlitShader_.SetMat4("uMVP", viewProj);
           unlitShader_.SetVec4("uColor", glm::vec4(0.95f, 0.25f, 0.2f, 1.0f));

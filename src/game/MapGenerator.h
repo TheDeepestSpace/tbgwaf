@@ -94,13 +94,13 @@ std::vector<UrbanLot> UrbanLots(uint32_t seed, const MapGeneratorConfig& config 
 float UrbanMapHalfExtent(const MapGeneratorConfig& config);
 
 // Tuning for GenerateHillyMap. Defaults give an 80x80 field of rolling
-// hills (a few units of relief over ~24-unit wavelengths -- gentle enough
-// that every slope is walkable) with a scattering of impassable rocks.
+// hills (~10 units of relief over ~16-unit wavelengths -- steep, but
+// every slope is still walkable) with a scattering of impassable rocks.
 struct HillyMapConfig {
   float halfExtent = 40.0f;
   float cellSize = 1.0f;         // Heightfield sample spacing.
-  float hillAmplitude = 6.0f;    // Height scale of the base noise octave.
-  float hillWavelength = 20.0f;  // Size of the dominant hills.
+  float hillAmplitude = 12.0f;   // Height scale of the base noise octave.
+  float hillWavelength = 16.0f;  // Size of the dominant hills.
   int rockCount = 12;            // Impassable boulders scattered mid-field.
   float rockMinExtent = 1.2f;    // Half-extent range of a rock's footprint.
   float rockMaxExtent = 3.0f;

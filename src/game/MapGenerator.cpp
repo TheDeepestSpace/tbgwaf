@@ -413,7 +413,9 @@ std::vector<UrbanBlock> BuildCityBlocks(uint32_t seed, const MapGeneratorConfig&
   return blocks;
 }
 
-std::vector<glm::vec3> RibbonSide(const UrbanRoad& road, bool left) {
+// Ribbon edge; the two end vertices slide along the road direction onto the
+// map boundary so the oblique road is cut off flush with the edge.
+std::vector<glm::vec3> RibbonSide(const UrbanRoad& road, bool left, float half) {
   std::vector<glm::vec3> side;
   side.reserve(road.centerline.size());
   for (size_t i = 0; i < road.centerline.size(); ++i) {
@@ -425,8 +427,15 @@ std::vector<glm::vec3> RibbonSide(const UrbanRoad& road, bool left) {
     const glm::vec2 normal(-tangent.y, tangent.x);
     const float sign = left ? 1.0f : -1.0f;
     const glm::vec3& p = road.centerline[i];
-    side.emplace_back(p.x + sign * normal.x * road.width * 0.5f, p.y,
-                      p.z + sign * normal.y * road.width * 0.5f);
+    glm::vec2 q(p.x + sign * normal.x * road.width * 0.5f, p.z + sign * normal.y * road.width * 0.5f);
+    const bool first = i == 0, last = i + 1 == road.centerline.size();
+    const bool onEdge = std::max(std::fabs(p.x), std::fabs(p.z)) > half - 1e-2f;
+    if ((first || last) && onEdge) {
+      float tMin = 0.0f, tMax = 0.0f;
+      ClipLineToSquare(q, tangent, half, &tMin, &tMax);
+      q += tangent * (first ? tMin : tMax);
+    }
+    side.emplace_back(q.x, p.y, q.y);
   }
   return side;
 }
@@ -613,8 +622,8 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   std::vector<Chain> chains(roads.size());
   for (size_t roadIndex = 0; roadIndex < roads.size(); ++roadIndex) {
     const UrbanRoad& road = roads[roadIndex];
-    const auto left = RibbonSide(road, true);
-    const auto right = RibbonSide(road, false);
+    const auto left = RibbonSide(road, true, scene.mapHalfExtent);
+    const auto right = RibbonSide(road, false, scene.mapHalfExtent);
     const std::vector<float> params = roadIndex == 0
                                           ? SampleParams(plan.artery.sMin, plan.artery.sMax)
                                           : SampleParams(0.0f, plan.branch.length);

@@ -548,6 +548,7 @@ void TestMoveFrontierRoutesAroundObstacle() {
 
 void TestClickChainsLegsAcrossRounds() {
   GameLogic game(LegacyScene());
+  MakePassive(game);  // Blue0 crosses red lines of sight over several rounds.
   game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
 
@@ -1071,6 +1072,7 @@ float RunRed4Walk(const SquadPlaybook& redPb, bool* red4Alive, bool* blue1Alive,
   game.ClickUnit(4, Team::Red);
   game.ChooseMove();
   game.ClickGround(destination, Team::Red);
+  game.FinishMovePlan();
   game.ClickUnit(5, Team::Red);
   game.ChoosePass();
   game.CommitRound();
@@ -1219,6 +1221,7 @@ float RunTieBreakWalk(bool includeSeeingEnemy) {
   game.ClickUnit(4, Team::Red);
   game.ChooseMove();
   game.ClickGround(destination, Team::Red);
+  game.FinishMovePlan();
   game.ClickUnit(5, Team::Red);
   game.ChoosePass();
   game.CommitRound();

@@ -630,22 +630,30 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
   if (glm::length(s.moveDirection) > 0.0f) {
     const glm::vec3 d = s.moveDirection;
     const glm::vec3 side(-d.z, 0.0f, d.x);
+    // Centre the arrow's overall length on the ghost.
+    const float kLength = 1.2f;
+    const glm::vec3 tail = position - d * (kLength * 0.5f);
+    const glm::vec3 tip = tail + d * kLength;
+    // Closed outline of a fat arrow (shaft + head), traced as a line strip.
+    const float kShaftHalfWidth = 0.08f;
+    const float kHeadHalfWidth = 0.22f;
+    const float kHeadLength = 0.4f;
+    const glm::vec3 headBase = tip - d * kHeadLength;
     // Each arrow vertex sits a hair above the terrain under it (a no-op on
-    // flat maps), so the arrow drapes over slopes instead of burying into
+    // flat maps), so the outline drapes over slopes instead of burying into
     // them.
     const auto onGround = [&](const glm::vec3& p) {
+      if (terrain.Empty()) return p + glm::vec3(0.0f, 0.02f, 0.0f);
       return glm::vec3(p.x, terrain.HeightAt(p.x, p.z) + 0.02f, p.z);
     };
-    const glm::vec3 tail = terrain.Empty() ? position + glm::vec3(0.0f, 0.02f, 0.0f)
-                                           : onGround(position);
-    const glm::vec3 flatTip = position + d * 1.2f;
-    const glm::vec3 tip = terrain.Empty() ? tail + d * 1.2f : onGround(flatTip);
-    const glm::vec3 wingBase = flatTip - d * 0.3f;
-    const glm::vec3 wingA =
-        terrain.Empty() ? tip - d * 0.3f + side * 0.2f : onGround(wingBase + side * 0.2f);
-    const glm::vec3 wingB =
-        terrain.Empty() ? tip - d * 0.3f - side * 0.2f : onGround(wingBase - side * 0.2f);
-    const std::vector<glm::vec3> arrow = {tail, tip, wingA, tip, wingB};
+    const std::vector<glm::vec3> arrow = {
+        onGround(tail + side * kShaftHalfWidth),
+        onGround(headBase + side * kShaftHalfWidth),
+        onGround(headBase + side * kHeadHalfWidth), onGround(tip),
+        onGround(headBase - side * kHeadHalfWidth),
+        onGround(headBase - side * kShaftHalfWidth),
+        onGround(tail - side * kShaftHalfWidth),
+        onGround(tail + side * kShaftHalfWidth)};
     lines.SetPoints(arrow);
     shader.SetMat4("uMVP", viewProj);
     shader.SetVec4("uColor", color);

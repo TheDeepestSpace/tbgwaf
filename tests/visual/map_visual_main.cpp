@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "visual/ImageUtil.h"
@@ -30,8 +31,13 @@ constexpr int kWindowWidth = 1280;
 constexpr int kWindowHeight = 720;
 constexpr int kPixelThreshold = 25;
 constexpr double kMaxDiffFraction = 0.002;
-constexpr float kCameraZoom = 250.0f;
-const std::vector<uint32_t> kSeeds = {7, 42, 2024};
+constexpr float kCityCameraZoom = 250.0f;
+// Hilly maps are half the city's extent; zoom in proportionally.
+constexpr float kHillyCameraZoom = 115.0f;
+const std::vector<uint32_t> kCitySeeds = {7, 42, 2024};
+// Hilly goldens also pin the navmesh boundary debug overlay, so a terrain or
+// navmesh regression shows up as a visual diff.
+const std::vector<uint32_t> kHillySeeds = {7, 2024};
 
 struct Options {
   fs::path goldensDir = "tests/map_goldens";
@@ -97,21 +103,44 @@ int main(int argc, char** argv) {
   gfx::SceneRenderer renderer;
   if (!renderer.Init()) return 1;
 
-  gfx::OrbitCamera camera;
-  camera.Zoom(kCameraZoom);
-  camera.target = glm::vec3(0.0f);
-  camera.Update(1.0e3f);
+  struct MapCase {
+    std::string name;
+    tactics::Scene scene;
+    float cameraZoom;
+    bool showNavMesh;  // Hilly maps pin the navmesh boundary overlay too.
+  };
+  std::vector<MapCase> cases;
+  for (const uint32_t seed : kCitySeeds) {
+    cases.push_back({"city_seed_" + std::to_string(seed), tactics::GenerateUrbanMap(seed),
+                     kCityCameraZoom, /*showNavMesh=*/false});
+  }
+  for (const uint32_t seed : kHillySeeds) {
+    cases.push_back({"hilly_seed_" + std::to_string(seed), tactics::GenerateHillyMap(seed),
+                     kHillyCameraZoom, /*showNavMesh=*/true});
+  }
 
   int failures = 0;
-  for (const uint32_t seed : kSeeds) {
-    const std::string name = "city_seed_" + std::to_string(seed);
+  for (MapCase& mapCase : cases) {
+    const std::string& name = mapCase.name;
     const fs::path goldenPath = options.goldensDir / (name + ".png");
 
-    tactics::Scene scene = tactics::GenerateUrbanMap(seed);
+    gfx::OrbitCamera camera;
+    camera.Zoom(mapCase.cameraZoom);
+    camera.target = glm::vec3(0.0f);
+    camera.Update(1.0e3f);
+
+    tactics::Scene scene = std::move(mapCase.scene);
     scene.units.clear();  // Map only: no figures.
     tactics::GameLogic game(scene);
+    tactics::NavMesh navMesh;
+    gfx::PaneOverlays overlays;
+    if (mapCase.showNavMesh) {
+      navMesh.Build(game.GetScene().obstacles, game.GetScene().mapHalfExtent,
+                    tactics::constants::kAgentRadius, &game.GetScene().ground);
+      overlays.navMeshDebug = &navMesh;
+    }
     renderer.RenderPane(game, tactics::Team::Blue, /*fogActive=*/false, tactics::TeamVisibility{},
-                        camera, 0, 0, kWindowWidth, kWindowHeight);
+                        camera, 0, 0, kWindowWidth, kWindowHeight, overlays);
     const visual::Image image = visual::CaptureFramebuffer(kWindowWidth, kWindowHeight);
 
     if (options.updateBaselines) {
@@ -152,7 +181,7 @@ int main(int argc, char** argv) {
   SDL_Quit();
 
   if (failures > 0) {
-    std::fprintf(stderr, "%d of %zu map(s) failed.\n", failures, kSeeds.size());
+    std::fprintf(stderr, "%d of %zu map(s) failed.\n", failures, cases.size());
     return 1;
   }
   return 0;

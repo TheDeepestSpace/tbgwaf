@@ -604,7 +604,8 @@ void DrawUnitWireframe(const Shader& shader, LineMesh& lines, const glm::mat4& v
 // Faded, team-colored wireframe of a remembered sighting plus a floor arrow
 // along its movement direction (if it was moving).
 void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
-                  const Unit& sighted, const GameLogic::EnemySighting& s, float alpha) {
+                  const Unit& sighted, const GameLogic::EnemySighting& s, float alpha,
+                  const tactics::HeightField& terrain) {
   const glm::vec4 base = sighted.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
                                                     : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
   const glm::vec4 color(base.r, base.g, base.b, alpha);
@@ -618,10 +619,22 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
   if (glm::length(s.moveDirection) > 0.0f) {
     const glm::vec3 d = s.moveDirection;
     const glm::vec3 side(-d.z, 0.0f, d.x);
-    const glm::vec3 tail = s.position + glm::vec3(0.0f, 0.02f, 0.0f);
-    const glm::vec3 tip = tail + d * 1.2f;
-    const std::vector<glm::vec3> arrow = {tail, tip, tip - d * 0.3f + side * 0.2f, tip,
-                                          tip - d * 0.3f - side * 0.2f};
+    // Each arrow vertex sits a hair above the terrain under it (a no-op on
+    // flat maps), so the arrow drapes over slopes instead of burying into
+    // them.
+    const auto onGround = [&](const glm::vec3& p) {
+      return glm::vec3(p.x, terrain.HeightAt(p.x, p.z) + 0.02f, p.z);
+    };
+    const glm::vec3 tail = terrain.Empty() ? s.position + glm::vec3(0.0f, 0.02f, 0.0f)
+                                           : onGround(s.position);
+    const glm::vec3 flatTip = s.position + d * 1.2f;
+    const glm::vec3 tip = terrain.Empty() ? tail + d * 1.2f : onGround(flatTip);
+    const glm::vec3 wingBase = flatTip - d * 0.3f;
+    const glm::vec3 wingA =
+        terrain.Empty() ? tip - d * 0.3f + side * 0.2f : onGround(wingBase + side * 0.2f);
+    const glm::vec3 wingB =
+        terrain.Empty() ? tip - d * 0.3f - side * 0.2f : onGround(wingBase - side * 0.2f);
+    const std::vector<glm::vec3> arrow = {tail, tip, wingA, tip, wingB};
     lines.SetPoints(arrow);
     shader.SetMat4("uMVP", viewProj);
     shader.SetVec4("uColor", color);
@@ -704,6 +717,107 @@ void DrawNumberedHighlight(const Shader& shader, const CubeMesh& cube, const glm
               glm::vec3(hi.x - lo.x, 0.04f, hi.z - lo.z), color);
       col = end;
     }
+  }
+}
+
+// Triangulated terrain heightfield with central-difference normals, plus a
+// border skirt dropping below the lowest sample so the map edge reads as a
+// solid block instead of a paper-thin sheet.
+void BuildTerrainMesh(const tactics::HeightField& hf, LitTriangleMesh* mesh) {
+  const int nx = hf.nx, nz = hf.nz;
+  std::vector<LitTriangleMesh::Vertex> vertices;
+  std::vector<GLuint> indices;
+  vertices.reserve(static_cast<size_t>(nx) * nz);
+  float skirtBottom = 0.0f;
+  for (int iz = 0; iz < nz; ++iz) {
+    for (int ix = 0; ix < nx; ++ix) {
+      const float x = hf.minX + ix * hf.step;
+      const float z = hf.minZ + iz * hf.step;
+      const float y = hf.At(ix, iz);
+      skirtBottom = std::min(skirtBottom, y);
+      const float dx = (hf.At(ix + 1, iz) - hf.At(ix - 1, iz)) / (2.0f * hf.step);
+      const float dz = (hf.At(ix, iz + 1) - hf.At(ix, iz - 1)) / (2.0f * hf.step);
+      vertices.push_back({glm::vec3(x, y, z), glm::normalize(glm::vec3(-dx, 1.0f, -dz))});
+    }
+  }
+  indices.reserve(static_cast<size_t>(nx - 1) * (nz - 1) * 6);
+  for (int iz = 0; iz + 1 < nz; ++iz) {
+    for (int ix = 0; ix + 1 < nx; ++ix) {
+      const GLuint a = static_cast<GLuint>(iz * nx + ix);
+      const GLuint b = a + 1;
+      const GLuint c = a + nx;
+      const GLuint d = c + 1;
+      indices.insert(indices.end(), {a, b, d, a, d, c});
+    }
+  }
+  skirtBottom -= 0.5f;
+  // Skirt: one quad per border edge, with an outward horizontal normal.
+  auto skirtQuad = [&](int ix0, int iz0, int ix1, int iz1, const glm::vec3& normal) {
+    const GLuint base = static_cast<GLuint>(vertices.size());
+    const glm::vec3 a = vertices[iz0 * nx + ix0].pos;
+    const glm::vec3 b = vertices[iz1 * nx + ix1].pos;
+    vertices.push_back({a, normal});
+    vertices.push_back({b, normal});
+    vertices.push_back({glm::vec3(b.x, skirtBottom, b.z), normal});
+    vertices.push_back({glm::vec3(a.x, skirtBottom, a.z), normal});
+    indices.insert(indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+  };
+  for (int ix = 0; ix + 1 < nx; ++ix) {
+    skirtQuad(ix, 0, ix + 1, 0, glm::vec3(0.0f, 0.0f, -1.0f));
+    skirtQuad(ix, nz - 1, ix + 1, nz - 1, glm::vec3(0.0f, 0.0f, 1.0f));
+  }
+  for (int iz = 0; iz + 1 < nz; ++iz) {
+    skirtQuad(0, iz, 0, iz + 1, glm::vec3(-1.0f, 0.0f, 0.0f));
+    skirtQuad(nx - 1, iz, nx - 1, iz + 1, glm::vec3(1.0f, 0.0f, 0.0f));
+  }
+  mesh->SetMesh(vertices, indices);
+}
+
+// Debug overlay of the navmesh's walkable-cell boundaries: each cell's
+// rectangle drawn as line segments lifted a hair above its walkable surface
+// -- terrain-following for ground cells (edges subdivided so they hug the
+// slope), flat at the obstacle top for climb-top cells.
+void DrawNavMeshDebug(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
+                      const tactics::NavMesh& navmesh, const tactics::HeightField& terrain) {
+  // Lines can't use polygon offset in GLES, so they need a real lift above
+  // the drawn terrain. The drawn mesh triangulates each heightfield cell,
+  // which on a steep diagonal slope can bow above the bilinear HeightAt
+  // sampled here, so the lift must clear that bow (plus depth precision at
+  // distance), not just a z-fighting epsilon.
+  constexpr float kLift = 0.2f;
+  constexpr float kEdgeStep = 0.75f;  // Terrain-sampling interval along an edge.
+  std::vector<glm::vec3> groundSegs, climbSegs;
+  for (const tactics::NavCell& cell : navmesh.Cells()) {
+    const glm::vec2 corners[4] = {{cell.xMin, cell.zMin},
+                                  {cell.xMax, cell.zMin},
+                                  {cell.xMax, cell.zMax},
+                                  {cell.xMin, cell.zMax}};
+    std::vector<glm::vec3>& out = cell.climbTop ? climbSegs : groundSegs;
+    for (int e = 0; e < 4; ++e) {
+      const glm::vec2 a = corners[e];
+      const glm::vec2 b = corners[(e + 1) % 4];
+      const int pieces =
+          cell.climbTop || terrain.Empty()
+              ? 1
+              : std::max(1, static_cast<int>(std::ceil(glm::distance(a, b) / kEdgeStep)));
+      for (int k = 0; k < pieces; ++k) {
+        const glm::vec2 p = a + (b - a) * (static_cast<float>(k) / pieces);
+        const glm::vec2 q = a + (b - a) * (static_cast<float>(k + 1) / pieces);
+        const float py = cell.climbTop ? cell.elevation : terrain.HeightAt(p.x, p.y);
+        const float qy = cell.climbTop ? cell.elevation : terrain.HeightAt(q.x, q.y);
+        out.emplace_back(p.x, py + kLift, p.y);
+        out.emplace_back(q.x, qy + kLift, q.y);
+      }
+    }
+  }
+  shader.SetMat4("uMVP", viewProj);
+  shader.SetVec4("uColor", glm::vec4(0.25f, 0.9f, 0.95f, 1.0f));
+  lines.SetPoints(groundSegs);
+  lines.DrawSegments();
+  if (!climbSegs.empty()) {
+    shader.SetVec4("uColor", glm::vec4(1.0f, 0.6f, 0.1f, 1.0f));
+    lines.SetPoints(climbSegs);
+    lines.DrawSegments();
   }
 }
 
@@ -813,7 +927,8 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
 // Caller is responsible for enabling blending around this call.
 void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& viewProj,
                  const Unit& unit, const std::vector<tactics::Obstacle>& obstacles,
-                 const std::vector<AABB>& sidewalks, float mapHalfExtent) {
+                 const std::vector<AABB>& sidewalks, float mapHalfExtent,
+                 const tactics::HeightField& terrain) {
   constexpr int kArcSegments = 24;
   constexpr float kGroundOffset = 0.015f;
   constexpr float kConeAlpha = 0.15f;
@@ -865,9 +980,15 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
   // rays keep the span structure identical across a slice except in the
   // epsilon-thin slivers at corners, where dropping unmatched spans is
   // invisible. Shadow boundaries of straight box edges are straight lines on
-  // the ground, so the quads trace them exactly.
+  // the ground, so the quads trace them exactly. Over terrain each vertex
+  // samples the heightfield, and long spans are subdivided radially so the
+  // overlay hugs the slopes instead of cutting through hills; the occlusion
+  // spans themselves are still computed against the flat ground plane.
+  const bool hasTerrain = !terrain.Empty();
   const auto groundPoint = [&](const glm::vec2& dir, float t) {
-    return glm::vec3(eye.x + dir.x * t, kGroundOffset, eye.z + dir.y * t);
+    const float x = eye.x + dir.x * t;
+    const float z = eye.z + dir.y * t;
+    return glm::vec3(x, terrain.HeightAt(x, z) + kGroundOffset, z);
   };
   std::vector<glm::vec3> points;
   points.reserve(offsets.size() * 6);
@@ -876,16 +997,29 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
     const auto& right = spansPerRay[i + 1];
     const size_t pairCount = std::min(left.size(), right.size());
     for (size_t k = 0; k < pairCount; ++k) {
-      const glm::vec3 l0 = groundPoint(dirs[i], left[k].begin);
-      const glm::vec3 l1 = groundPoint(dirs[i], left[k].end);
-      const glm::vec3 r0 = groundPoint(dirs[i + 1], right[k].begin);
-      const glm::vec3 r1 = groundPoint(dirs[i + 1], right[k].end);
-      points.push_back(l0);
-      points.push_back(r0);
-      points.push_back(r1);
-      points.push_back(l0);
-      points.push_back(r1);
-      points.push_back(l1);
+      int pieces = 1;
+      if (hasTerrain) {
+        constexpr float kSubdivStep = 2.0f;
+        const float maxLen =
+            std::max(left[k].end - left[k].begin, right[k].end - right[k].begin);
+        pieces = std::clamp(static_cast<int>(std::ceil(maxLen / kSubdivStep)), 1, 64);
+      }
+      for (int s = 0; s < pieces; ++s) {
+        const float f0 = static_cast<float>(s) / pieces;
+        const float f1 = static_cast<float>(s + 1) / pieces;
+        const glm::vec3 l0 = groundPoint(dirs[i], glm::mix(left[k].begin, left[k].end, f0));
+        const glm::vec3 l1 = groundPoint(dirs[i], glm::mix(left[k].begin, left[k].end, f1));
+        const glm::vec3 r0 =
+            groundPoint(dirs[i + 1], glm::mix(right[k].begin, right[k].end, f0));
+        const glm::vec3 r1 =
+            groundPoint(dirs[i + 1], glm::mix(right[k].begin, right[k].end, f1));
+        points.push_back(l0);
+        points.push_back(r0);
+        points.push_back(r1);
+        points.push_back(l0);
+        points.push_back(r1);
+        points.push_back(l1);
+      }
     }
   }
   // Every walkable surface gets its own copy of the cone at its own height:
@@ -975,6 +1109,7 @@ bool SceneRenderer::Init() {
   frontierBorder_.Init();
   pathLine_.Init();
   fovConeMesh_.Init();
+  terrainMesh_.Init();
 
   // Stage-C: a single directional light (simulating overhead factory
   // lighting) casting a PCF-filtered shadow map. The
@@ -1019,6 +1154,8 @@ void SceneRenderer::Destroy() {
   frontierBorder_.Destroy();
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
+  terrainMesh_.Destroy();
+  terrainKey_ = tactics::HeightField{};
   sphereMesh_.Destroy();
   cubeMesh_.Destroy();
   if (shadowDepthTex_) glDeleteTextures(1, &shadowDepthTex_);
@@ -1033,6 +1170,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                GLuint targetFramebuffer) {
   const auto& obstacles = game.GetScene().obstacles;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;
+  const tactics::HeightField& terrain = game.GetScene().ground;
+  // (Re)triangulate the terrain only when the scene's heightfield changes.
+  if (!terrain.Empty() &&
+      (terrainKey_.heights != terrain.heights || terrainKey_.nx != terrain.nx ||
+       terrainKey_.nz != terrain.nz || terrainKey_.minX != terrain.minX ||
+       terrainKey_.minZ != terrain.minZ || terrainKey_.step != terrain.step)) {
+    BuildTerrainMesh(terrain, &terrainMesh_);
+    terrainKey_ = terrain;
+  }
+  const bool drawTerrain = !terrain.Empty() && terrainMesh_.HasGeometry();
 
   // Fit the light frustum to the camera's current zoom instead of spreading
   // the shadow map over the whole scene. Cap it at the previous whole-map
@@ -1066,6 +1213,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glViewport(0, 0, kShadowMapSize, kShadowMapSize);
   glClear(GL_DEPTH_BUFFER_BIT);
   depthShader_.Use();
+  // Hills cast shadows (into valleys, onto units); the flat ground never
+  // could, so flat scenes skip the extra caster exactly as before.
+  if (drawTerrain) {
+    depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+    terrainMesh_.Draw();
+  }
   for (const auto& obstacle : obstacles) {
     const AABB& bounds = obstacle.bounds;
     DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min, bounds.max - bounds.min);
@@ -1098,10 +1251,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
 
-  DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_,
-             glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
-             glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f),
-             glm::vec4(0.16f, 0.18f, 0.20f, 1.0f));
+  if (drawTerrain) {
+    // Earthy green-brown so the hills read as terrain rather than factory floor.
+    DrawLitModel(litShader_, terrainMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(0.30f, 0.36f, 0.22f, 1.0f));
+  } else {
+    DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_,
+               glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
+               glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f),
+               glm::vec4(0.16f, 0.18f, 0.20f, 1.0f));
+  }
 
   for (const AABB& slab : game.GetScene().sidewalks) {
     DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, slab.min, slab.max - slab.min,
@@ -1118,6 +1277,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   for (const Unit& unit : game.GetScene().units) {
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
     DrawUnit(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, unit);
+  }
+
+  // Navmesh boundary debug overlay (opaque lines, depth-tested like the
+  // scene geometry so cells hidden behind obstacles/hills read correctly).
+  if (overlays.navMeshDebug) {
+    unlitShader_.Use();
+    DrawNavMeshDebug(unlitShader_, pathLine_, viewProj, *overlays.navMeshDebug, terrain);
   }
 
   // Squares sit on whatever flat slab (sidewalk) is under them, not inside it.
@@ -1156,7 +1322,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.team != team) continue;
     DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit, obstacles,
-                game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
+                game.GetScene().sidewalks, game.GetScene().mapHalfExtent, terrain);
   }
   glDisable(GL_POLYGON_OFFSET_FILL);
   glDisable(GL_STENCIL_TEST);
@@ -1281,7 +1447,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           bool anyIn = false;
           for (int k = 0; k < 4; ++k) {
             quad[k] = {f.Node(cx[k], cz[k]), g[cz[k] * nx + cx[k]]};
-            quad[k].p.y = kY;
+            // Each node rides the terrain under it (HeightAt is 0 on flat
+            // maps); the 0.25-unit grid is fine enough that the linear
+            // contour/edge interpolation below stays on the slope.
+            quad[k].p.y = terrain.HeightAt(quad[k].p.x, quad[k].p.z) + kY;
             anyIn |= quad[k].g > 0.0f;
           }
           if (!anyIn) continue;
@@ -1377,7 +1546,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       for (const auto& s : game.Sightings(team, unit.id)) {
         const float life = 1.0f - s.ageRounds * tactics::constants::kSightingFadePerRound;
         if (life <= 0.0f) continue;
-        DrawSighting(unlitShader_, pathLine_, viewProj, unit, s, life * kSightingMaxAlpha);
+        DrawSighting(unlitShader_, pathLine_, viewProj, unit, s, life * kSightingMaxAlpha,
+                     terrain);
       }
     }
     glDepthMask(GL_TRUE);
@@ -1433,8 +1603,20 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
     }
   }
+  // Move-path polylines carry terrain-height waypoints, but the straight
+  // chord between two waypoints can still dip into the drawn surface (and
+  // GLES lines get no polygon offset), so over terrain they ride slightly
+  // above their sampled heights.
+  const auto liftedPath = [&](const std::vector<glm::vec3>& points) {
+    std::vector<glm::vec3> lifted = points;
+    if (!terrain.Empty()) {
+      constexpr float kPathLift = 0.2f;
+      for (glm::vec3& p : lifted) p.y += kPathLift;
+    }
+    return lifted;
+  };
   if (overlays.movePreviewPath && overlays.movePreviewPath->size() >= 2) {
-    pathLine_.SetPoints(*overlays.movePreviewPath);
+    pathLine_.SetPoints(liftedPath(*overlays.movePreviewPath));
     unlitShader_.SetMat4("uMVP", viewProj);
     unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
     pathLine_.Draw();
@@ -1453,7 +1635,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (const Unit& unit : game.GetScene().units) {
       if (!unit.alive || unit.team != team) continue;
       if (unit.plan.type == tactics::PlannedActionType::Move && unit.plan.movePath.size() >= 2) {
-        pathLine_.SetPoints(unit.plan.movePath);
+        pathLine_.SetPoints(liftedPath(unit.plan.movePath));
         unlitShader_.SetMat4("uMVP", viewProj);
         unlitShader_.SetVec4("uColor", glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
         pathLine_.Draw();
@@ -1476,7 +1658,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         for (const auto& leg : unit.plan.queuedLegs) {
           ++legNumber;
           if (leg.size() < 2) continue;
-          pathLine_.SetPoints(leg);
+          pathLine_.SetPoints(liftedPath(leg));
           unlitShader_.SetMat4("uMVP", viewProj);
           unlitShader_.SetVec4("uColor", yellow);
           pathLine_.Draw();

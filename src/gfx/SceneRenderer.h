@@ -33,6 +33,11 @@ struct PaneOverlays {
   const std::vector<glm::vec3>* movePreviewPath = nullptr;  // Yellow preview polyline.
   const tactics::ReachField* moveFrontier = nullptr;  // Reachable-area gradient + border.
   bool moveFrontierSubsequentLeg = false;             // Border drawn yellow instead of green.
+  // Debug: walkable-cell boundaries of this navmesh (ground cells cyan,
+  // climb-top cells orange), hugging the terrain. Not set by
+  // BuildPaneOverlays; the app's debug toggle / the map golden harness
+  // supply a mesh built over the whole scene.
+  const tactics::NavMesh* navMeshDebug = nullptr;
 };
 
 // Overlays `pane` shows for the current game state. They belong to the team
@@ -81,6 +86,12 @@ class SceneRenderer {
   const tactics::ReachField* frontierKeyField_ = nullptr;
   glm::vec2 frontierKeyOrigin_{0.0f};
   float frontierKeyBudget_ = -1.0f;
+  // Terrain ground mesh, rebuilt only when the scene's heightfield changes.
+  // Keyed on the field's contents, not its address: successive scenes can
+  // reuse the same storage address (e.g. stack-allocated GameLogic
+  // instances), which an address key would mistake for "unchanged".
+  LitTriangleMesh terrainMesh_;
+  tactics::HeightField terrainKey_;
   GLuint shadowFbo_ = 0;
   GLuint shadowDepthTex_ = 0;
   glm::vec3 lightDir_{0.0f, -1.0f, 0.0f};

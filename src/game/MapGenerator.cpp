@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -356,6 +357,111 @@ Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     red.id = 3 + i;
     red.team = Team::Red;
     red.position = glm::vec3(spawnX, 0.0f, rows[i]);
+    red.facingYaw = kPi;
+    scene.units.push_back(red);
+  }
+  return scene;
+}
+
+namespace {
+
+// Deterministic integer hash (SplitMix-style avalanche), so the terrain is
+// identical across platforms/standard libraries, like the Rng above.
+uint32_t HashU32(uint32_t x) {
+  x ^= x >> 16;
+  x *= 0x7feb352du;
+  x ^= x >> 15;
+  x *= 0x846ca68bu;
+  x ^= x >> 16;
+  return x;
+}
+
+// Lattice value in [0, 1) at integer noise coordinates.
+float LatticeValue(uint32_t seed, int ix, int iz) {
+  const uint32_t h = HashU32(seed ^ HashU32(static_cast<uint32_t>(ix) * 0x9e3779b9u) ^
+                             HashU32(static_cast<uint32_t>(iz) * 0x85ebca6bu));
+  return static_cast<float>(h >> 8) / 16777216.0f;
+}
+
+// Smoothstep-interpolated value noise in [0, 1), lattice spacing 1.
+float ValueNoise(uint32_t seed, float x, float z) {
+  const float fx = std::floor(x), fz = std::floor(z);
+  const int ix = static_cast<int>(fx), iz = static_cast<int>(fz);
+  float tx = x - fx, tz = z - fz;
+  tx = tx * tx * (3.0f - 2.0f * tx);
+  tz = tz * tz * (3.0f - 2.0f * tz);
+  const float v00 = LatticeValue(seed, ix, iz), v10 = LatticeValue(seed, ix + 1, iz);
+  const float v01 = LatticeValue(seed, ix, iz + 1), v11 = LatticeValue(seed, ix + 1, iz + 1);
+  const float v0 = v00 + (v10 - v00) * tx;
+  const float v1 = v01 + (v11 - v01) * tx;
+  return v0 + (v1 - v0) * tz;
+}
+
+}  // namespace
+
+Scene GenerateHillyMap(uint32_t seed, const HillyMapConfig& c) {
+  Scene scene;
+  scene.mapHalfExtent = c.halfExtent;
+
+  // Two octaves of value noise, both non-negative so the whole field sits at
+  // or above y = 0 (valleys bottom out at the map's base plane).
+  HeightField& ground = scene.ground;
+  ground.step = c.cellSize;
+  ground.minX = ground.minZ = -c.halfExtent;
+  ground.nx = ground.nz = static_cast<int>(std::round(2.0f * c.halfExtent / c.cellSize)) + 1;
+  ground.heights.resize(static_cast<size_t>(ground.nx) * ground.nz);
+  const float baseFreq = 1.0f / c.hillWavelength;
+  for (int iz = 0; iz < ground.nz; ++iz) {
+    for (int ix = 0; ix < ground.nx; ++ix) {
+      const float x = ground.minX + ix * ground.step;
+      const float z = ground.minZ + iz * ground.step;
+      const float coarse = ValueNoise(seed, x * baseFreq, z * baseFreq);
+      const float fine = ValueNoise(seed ^ 0x51ed270bu, x * baseFreq * 2.7f, z * baseFreq * 2.7f);
+      ground.heights[static_cast<size_t>(iz) * ground.nx + ix] =
+          c.hillAmplitude * (coarse + 0.3f * fine);
+    }
+  }
+
+  // Impassable rocks embedded in the slopes, kept out of the spawn strips.
+  // Each sinks below the lowest nearby terrain and tops out above the
+  // highest, so no slope exposes a floating base or a walk-over lip.
+  Rng rng(seed);
+  const float rockFieldMax = c.halfExtent - c.spawnMargin;
+  for (int i = 0; i < c.rockCount; ++i) {
+    const float hx = rng.Float(c.rockMinExtent, c.rockMaxExtent);
+    const float hz = rng.Float(c.rockMinExtent, c.rockMaxExtent);
+    const float cx = rng.Float(-rockFieldMax + hx, rockFieldMax - hx);
+    const float cz = rng.Float(-c.halfExtent + hx + 2.0f, c.halfExtent - hz - 2.0f);
+    float lo = std::numeric_limits<float>::infinity();
+    float hi = -std::numeric_limits<float>::infinity();
+    for (const float x : {cx - hx, cx, cx + hx}) {
+      for (const float z : {cz - hz, cz, cz + hz}) {
+        const float h = ground.HeightAt(x, z);
+        lo = std::min(lo, h);
+        hi = std::max(hi, h);
+      }
+    }
+    scene.obstacles.push_back(Obstacle{
+        AABB{glm::vec3(cx - hx, lo - 1.0f, cz - hz), glm::vec3(cx + hx, hi + c.rockHeight, cz + hz)},
+        /*climbable=*/false});
+  }
+
+  // Same 3v3 spawn rows as the urban generator, standing on the terrain.
+  const float spawnX = c.halfExtent - 3.0f;
+  const float rows[3] = {-6.0f, 0.0f, 6.0f};
+  for (int i = 0; i < 3; ++i) {
+    Unit blue;
+    blue.id = i;
+    blue.team = Team::Blue;
+    blue.position = glm::vec3(-spawnX, ground.HeightAt(-spawnX, rows[i]), rows[i]);
+    blue.facingYaw = 0.0f;
+    scene.units.push_back(blue);
+  }
+  for (int i = 0; i < 3; ++i) {
+    Unit red;
+    red.id = 3 + i;
+    red.team = Team::Red;
+    red.position = glm::vec3(spawnX, ground.HeightAt(spawnX, rows[i]), rows[i]);
     red.facingYaw = kPi;
     scene.units.push_back(red);
   }

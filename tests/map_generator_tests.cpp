@@ -353,6 +353,123 @@ void TestVisibilityStillSpansWholeMap() {
                              ObstacleBounds(scene.obstacles)));
 }
 
+// --- Hilly terrain generator (issue #90). ---
+
+bool SameHillyScene(const Scene& a, const Scene& b) {
+  return SameScene(a, b) && a.ground.heights == b.ground.heights && a.ground.nx == b.ground.nx &&
+         a.ground.nz == b.ground.nz && a.ground.step == b.ground.step;
+}
+
+void TestHillyDeterminismAndVariety() {
+  for (uint32_t seed : kSeeds) {
+    CHECK(SameHillyScene(GenerateHillyMap(seed), GenerateHillyMap(seed)));
+  }
+  CHECK(!SameHillyScene(GenerateHillyMap(1), GenerateHillyMap(42)));
+  CHECK(!SameHillyScene(GenerateHillyMap(42), GenerateHillyMap(2024)));
+}
+
+void TestHillyTerrainIsGenuinelyUneven() {
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateHillyMap(seed);
+    CHECK(!scene.ground.Empty());
+    float lo = scene.ground.heights[0], hi = scene.ground.heights[0];
+    for (float h : scene.ground.heights) {
+      lo = std::min(lo, h);
+      hi = std::max(hi, h);
+    }
+    // Real relief (several units), and nothing below the map's base plane.
+    CHECK(hi - lo > 3.0f);
+    CHECK(lo >= 0.0f);
+  }
+}
+
+void TestHillyUnitsSpawnOnTerrain() {
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateHillyMap(seed);
+    CHECK(scene.units.size() == 6);
+    for (const Unit& unit : scene.units) {
+      const float h = scene.ground.HeightAt(unit.position.x, unit.position.z);
+      CHECK(std::fabs(unit.position.y - h) < kEps);
+      // Spawns must not be buried inside a rock's padded footprint.
+      NavMesh nav;
+      nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground);
+      CHECK(nav.IsWalkable(unit.position.x, unit.position.z));
+    }
+  }
+}
+
+void TestHillyPathsFollowTerrain() {
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateHillyMap(seed);
+    NavMesh nav;
+    nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground);
+
+    // A cross-map path exists (west spawn to east spawn) and every waypoint
+    // sits on the terrain surface.
+    std::vector<glm::vec3> path;
+    CHECK(nav.FindPath(scene.units[0].position, scene.units[3].position, &path));
+    CHECK(path.size() >= 2);
+    float maxSegment = 0.0f;
+    for (size_t i = 0; i < path.size(); ++i) {
+      const float h = scene.ground.HeightAt(path[i].x, path[i].z);
+      CHECK(std::fabs(path[i].y - h) < kEps);
+      if (i + 1 < path.size()) maxSegment = std::max(maxSegment, glm::distance(path[i], path[i + 1]));
+    }
+    // Ground segments are densified so linear interpolation between
+    // waypoints hugs the slope.
+    CHECK(maxSegment < 1.5f);
+  }
+}
+
+void TestHillyReachFieldCostsIncludeSlope() {
+  // The frontier distance between two points on a slope is the 3D walked
+  // distance, so it exceeds the flat XZ distance.
+  const Scene scene = GenerateHillyMap(7);
+  NavMesh nav;
+  nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground);
+  const glm::vec3 start = scene.units[0].position;
+  const ReachField field = nav.ComputeReachField(start, /*budget=*/20.0f);
+  CHECK(field.nx > 0);
+  float best = 0.0f;
+  for (int iz = 0; iz < field.nz; ++iz) {
+    for (int ix = 0; ix < field.nx; ++ix) {
+      const float d = field.Dist(ix, iz);
+      if (d > field.budget) continue;
+      const glm::vec3 node = field.Node(ix, iz);
+      const float flat = glm::length(glm::vec2(node.x - start.x, node.z - start.z));
+      CHECK(d > flat - kEps);  // Routed 3D distance can't undercut straight-line XZ.
+      best = std::max(best, d);
+    }
+  }
+  CHECK(best > 15.0f);  // The field actually extends outward.
+}
+
+void TestHillyGameLogicMoveLandsOnTerrain() {
+  // Full click-flow move across a hillside through GameLogic: the mover must
+  // end at the destination standing on the terrain.
+  Scene scene = GenerateHillyMap(7);
+  GameLogic game(scene);
+  const glm::vec3 start = game.GetScene().units[0].position;
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  const glm::vec3 dest(start.x + 14.0f, 0.0f, start.z);
+  game.ClickGround(dest, Team::Blue);
+  game.FinishMovePlan();
+  const Unit* mover = game.FindUnit(0);
+  CHECK(mover->plan.type == PlannedActionType::Move);
+  CHECK(!mover->plan.movePath.empty());
+  for (int id = 1; id < 6; ++id) {
+    game.ClickUnit(id, id < 3 ? Team::Blue : Team::Red);
+    game.ChoosePass();
+  }
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+  game.Update(1.0e6f);
+  const glm::vec3 end = game.FindUnit(0)->position;
+  CHECK(std::fabs(end.x - dest.x) < 0.05f && std::fabs(end.z - dest.z) < 0.05f);
+  CHECK(std::fabs(end.y - game.GetScene().ground.HeightAt(end.x, end.z)) < kEps);
+}
+
 }  // namespace
 
 int main() {
@@ -369,6 +486,12 @@ int main() {
   TestWindowedNavMeshMatchesGlobalWithinBudget();
   TestGameLogicUsesRangeScopedNavMesh();
   TestVisibilityStillSpansWholeMap();
+  TestHillyDeterminismAndVariety();
+  TestHillyTerrainIsGenuinelyUneven();
+  TestHillyUnitsSpawnOnTerrain();
+  TestHillyPathsFollowTerrain();
+  TestHillyReachFieldCostsIncludeSlope();
+  TestHillyGameLogicMoveLandsOnTerrain();
   if (g_failures) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;

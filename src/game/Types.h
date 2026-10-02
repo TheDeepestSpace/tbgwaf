@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -27,6 +28,41 @@ struct AABB {
 struct Obstacle {
   AABB bounds;
   bool climbable = false;
+};
+
+// Sampled ground elevation over a regular XZ grid: sample (ix, iz) sits at
+// (minX + ix*step, minZ + iz*step). An empty field means flat ground at
+// y = 0 everywhere (the hand-authored and urban scenes), so every consumer
+// can sample unconditionally. Queries outside the grid clamp to the border.
+struct HeightField {
+  float minX = 0.0f, minZ = 0.0f;
+  float step = 1.0f;
+  int nx = 0, nz = 0;  // Samples (grid vertices) per axis.
+  std::vector<float> heights;  // nz rows of nx samples.
+
+  bool Empty() const { return heights.empty(); }
+
+  float At(int ix, int iz) const {
+    ix = ix < 0 ? 0 : (ix >= nx ? nx - 1 : ix);
+    iz = iz < 0 ? 0 : (iz >= nz ? nz - 1 : iz);
+    return heights[static_cast<size_t>(iz) * nx + ix];
+  }
+
+  // Bilinear ground height at an arbitrary XZ point; 0 when Empty().
+  float HeightAt(float x, float z) const {
+    if (Empty()) return 0.0f;
+    const float fx = (x - minX) / step;
+    const float fz = (z - minZ) / step;
+    const int ix = static_cast<int>(std::floor(fx));
+    const int iz = static_cast<int>(std::floor(fz));
+    const float tx = fx - std::floor(fx);
+    const float tz = fz - std::floor(fz);
+    const float h00 = At(ix, iz), h10 = At(ix + 1, iz);
+    const float h01 = At(ix, iz + 1), h11 = At(ix + 1, iz + 1);
+    const float h0 = h00 + (h10 - h00) * tx;
+    const float h1 = h01 + (h11 - h01) * tx;
+    return h0 + (h1 - h0) * tz;
+  }
 };
 
 inline std::vector<AABB> ObstacleBounds(const std::vector<Obstacle>& obstacles) {

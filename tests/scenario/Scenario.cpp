@@ -54,11 +54,21 @@ Scene ParseScene(const YAML::Node& root) {
 
   bool generated = false;
   if (const YAML::Node mapNode = root["map"]) {
-    // `generate: {seed: N}` builds a procedural city (units come from the
-    // generator unless the scenario lists its own).
+    // `generate: {seed: N, type: urban|hilly}` builds a procedural map
+    // (units come from the generator unless the scenario lists its own).
+    // `type` defaults to the urban city generator.
     if (const YAML::Node genNode = mapNode["generate"]) {
       if (!genNode["seed"]) throw std::runtime_error("map.generate requires 'seed'");
-      scene = GenerateUrbanMap(genNode["seed"].as<uint32_t>());
+      const uint32_t seed = genNode["seed"].as<uint32_t>();
+      const std::string type = genNode["type"] ? genNode["type"].as<std::string>() : "urban";
+      if (type == "urban") {
+        scene = GenerateUrbanMap(seed);
+      } else if (type == "hilly") {
+        scene = GenerateHillyMap(seed);
+      } else {
+        throw std::runtime_error("map.generate.type must be 'urban' or 'hilly', got '" + type +
+                                 "'");
+      }
       generated = true;
     }
     if (const YAML::Node obstaclesNode = mapNode["obstacles"]) {

@@ -45,6 +45,14 @@ void GameLogic::Reset() { Reset(BuildDefaultScene()); }
 void GameLogic::Reset(Scene scene) {
   scene_ = std::move(scene);
   obstacleBounds_ = ObstacleBounds(scene_.obstacles);
+  // On hilly terrain every figure stands on the sampled ground, so scenario
+  // files can place units by XZ alone. Flat scenes (empty field) keep their
+  // authored Y (e.g. crate-top starts).
+  if (!scene_.ground.Empty()) {
+    for (Unit& unit : scene_.units) {
+      unit.position.y = scene_.ground.HeightAt(unit.position.x, unit.position.z);
+    }
+  }
   navMesh_ = NavMesh();
   navMeshUnitId_ = -1;
   roundNumber_ = 1;
@@ -162,7 +170,7 @@ void GameLogic::EnsureNavMeshFor(const Unit& mover, const glm::vec3& origin) {
   region.xMax = std::min(half, origin.x + reach);
   region.zMin = std::max(-half, origin.z - reach);
   region.zMax = std::min(half, origin.z + reach);
-  navMesh_.Build(scene_.obstacles, region, constants::kAgentRadius);
+  navMesh_.Build(scene_.obstacles, region, constants::kAgentRadius, &scene_.ground);
   navMeshUnitId_ = mover.id;
   navMeshOrigin_ = origin;
 }

@@ -61,4 +61,26 @@ std::vector<UrbanLot> UrbanLots(uint32_t seed, const MapGeneratorConfig& config 
 // Half-extent of the generated map for `config` (independent of seed).
 float UrbanMapHalfExtent(const MapGeneratorConfig& config);
 
+// Tuning for GenerateHillyMap. Defaults give an 80x80 field of rolling
+// hills (a few units of relief over ~24-unit wavelengths -- gentle enough
+// that every slope is walkable) with a scattering of impassable rocks.
+struct HillyMapConfig {
+  float halfExtent = 40.0f;
+  float cellSize = 1.0f;         // Heightfield sample spacing.
+  float hillAmplitude = 6.0f;    // Height scale of the base noise octave.
+  float hillWavelength = 20.0f;  // Size of the dominant hills.
+  int rockCount = 12;            // Impassable boulders scattered mid-field.
+  float rockMinExtent = 1.2f;    // Half-extent range of a rock's footprint.
+  float rockMaxExtent = 3.0f;
+  float rockHeight = 2.8f;       // Rock top above the local terrain: blocks LOS.
+  float spawnMargin = 8.0f;      // Rock-free strip at the west/east spawn edges.
+};
+
+// Deterministic rolling-hills map: continuous ground-height variation
+// (Scene::ground is filled in) from seeded value noise, a handful of
+// impassable rocks embedded in the slopes, and the usual 3v3 spawn rows on
+// the west (Blue) and east (Red) edges, each figure standing on the terrain.
+// The same (seed, config) always yields an identical Scene.
+Scene GenerateHillyMap(uint32_t seed, const HillyMapConfig& config = {});
+
 }  // namespace tactics

@@ -1,0 +1,34 @@
+# Hilly-terrain generator (issue #90): a move across rolling ground must
+# follow the sampled terrain, not a flat y=0 plane. The generated hilly map
+# (seed 7) spawns figures on the slopes; blue0 runs ~16 units east along a
+# hillside and must end standing on the terrain surface there (y ~= 4.68,
+# the heightfield's value at the destination), proving spawn placement,
+# navmesh pathing, and the move itself are all terrain-aware. Units are
+# declared explicitly (XZ only -- GameLogic snaps Y onto the terrain) to
+# keep the round to two figures.
+name: hilly_terrain_move
+
+map:
+  generate: {type: hilly, seed: 7}
+
+units:
+  - {id: 0, team: blue, position: [-37, 0, -6], facing_degrees: 0}
+  - {id: 1, team: red, position: [37, 0, 6], facing_degrees: 180}
+
+camera:
+  target: [-29, -6]
+  zoom: 18
+
+script:
+  # Spawn placement: both figures start on the terrain, not at y=0.
+  - assert: {unit: 0, position: [-37, 5.916, -6], tolerance: 0.05}
+  - assert: {unit: 1, position: [37, 4.369, 6], tolerance: 0.05}
+  - action: move
+    actor: 0
+    destination: [-21, 4.68, -6]
+  - action: pass
+    actor: 1
+  - action: commit
+  # The mover ends on the hillside at the terrain's height there.
+  - assert: {unit: 0, position: [-21, 4.679, -6], tolerance: 0.05}
+  - assert: {round: 2}

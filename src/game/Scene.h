@@ -17,6 +17,10 @@ struct Scene {
   // Playable area is [-mapHalfExtent, mapHalfExtent]^2 in XZ. Defaults to the
   // hand-authored scene's size; MapGenerator sets a much larger value.
   float mapHalfExtent = constants::kMapHalfExtent;
+  // Sampled ground elevation. Empty (the default) means flat ground at
+  // y = 0; the hilly generator fills it in, and NavMesh / unit placement /
+  // rendering all sample it (see HeightField).
+  HeightField ground;
 };
 
 Scene BuildDefaultScene();

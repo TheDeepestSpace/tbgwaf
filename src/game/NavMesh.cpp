@@ -118,16 +118,18 @@ NavRegion SquareRegion(float halfExtent) {
 }  // namespace
 
 void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, float agentRadius) {
+  ground_ = HeightField{};
   BuildGroundMesh(obstacles, SquareRegion(mapHalfExtent), agentRadius);
 }
 
 void NavMesh::Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent,
-                     float agentRadius) {
-  Build(obstacles, SquareRegion(mapHalfExtent), agentRadius);
+                     float agentRadius, const HeightField* ground) {
+  Build(obstacles, SquareRegion(mapHalfExtent), agentRadius, ground);
 }
 
 void NavMesh::Build(const std::vector<Obstacle>& obstacles, const NavRegion& region,
-                     float agentRadius) {
+                     float agentRadius, const HeightField* ground) {
+  ground_ = ground ? *ground : HeightField{};
   BuildGroundMesh(ObstacleBounds(obstacles), region, agentRadius);
   AddClimbConnections(obstacles, agentRadius);
 }
@@ -234,7 +236,7 @@ void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float 
     if (xMax <= xMin + kEps || zMax <= zMin + kEps) continue;  // Too small to stand on.
 
     const int topIdx = static_cast<int>(cells_.size());
-    cells_.push_back(NavCell{xMin, xMax, zMin, zMax, bounds.max.y});
+    cells_.push_back(NavCell{xMin, xMax, zMin, zMax, bounds.max.y, /*climbTop=*/true});
     neighbors_.emplace_back();
 
     const AABB padded{
@@ -279,6 +281,13 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
     }
     return w == 1;
   };
+  // Node position on the walked surface: distances then include the vertical
+  // component over hilly terrain, matching FindPath's terrain-lifted paths.
+  auto nodeWorld = [&](int ix, int iz) {
+    glm::vec3 p = field.Node(ix, iz);
+    p.y = ground_.HeightAt(p.x, p.z);
+    return p;
+  };
 
   using Entry = std::pair<float, int>;
   std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
@@ -290,12 +299,12 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
     open.pop();
     if (d > field.dist[idx]) continue;
     const int ix = idx % field.nx, iz = idx / field.nx;
-    const glm::vec3 from = field.Node(ix, iz);
+    const glm::vec3 from = nodeWorld(ix, iz);
     for (const auto& m : kMoves) {
       const int jx = ix + m[0], jz = iz + m[1];
       if (jx < 0 || jz < 0 || jx >= field.nx || jz >= field.nz) continue;
       if (!nodeWalkable(jx, jz)) continue;
-      const glm::vec3 to = field.Node(jx, jz);
+      const glm::vec3 to = nodeWorld(jx, jz);
       const float nd = d + glm::distance(from, to);
       const int jdx = jz * field.nx + jx;
       if (nd > budget || nd >= field.dist[jdx]) continue;
@@ -309,14 +318,21 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
 
 bool NavMesh::IsWalkable(float x, float z) const { return FindCellContaining(x, z) >= 0; }
 
-int NavMesh::FindCellContaining(float x, float z) const { return FindCellContaining(x, z, 0.0f); }
+// Ground cells only, so IsWalkable matches its documented "ground level"
+// semantics regardless of the terrain height under (x, z).
+int NavMesh::FindCellContaining(float x, float z) const {
+  for (size_t i = 0; i < cells_.size(); ++i) {
+    if (!cells_[i].climbTop && cells_[i].Contains(x, z)) return static_cast<int>(i);
+  }
+  return -1;
+}
 
 int NavMesh::FindCellContaining(float x, float z, float yHint) const {
   int best = -1;
   float bestDy = std::numeric_limits<float>::infinity();
   for (size_t i = 0; i < cells_.size(); ++i) {
     if (!cells_[i].Contains(x, z)) continue;
-    const float dy = std::fabs(cells_[i].elevation - yHint);
+    const float dy = std::fabs(SurfaceY(cells_[i], x, z) - yHint);
     if (dy < bestDy) {
       bestDy = dy;
       best = static_cast<int>(i);
@@ -455,6 +471,37 @@ bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* 
     }
   }
   flush(goal);
+
+  // Lift the flat-space path onto the terrain: every ground-level waypoint
+  // (y == 0 in flat space; climb-top waypoints keep their obstacle height)
+  // gets its Y from the heightfield, and ground segments are densified so
+  // linear interpolation between waypoints tracks the slope.
+  if (!ground_.Empty()) {
+    constexpr float kTerrainPathStep = 1.0f;
+    std::vector<glm::vec3> lifted;
+    lifted.reserve(outPath->size() * 4);
+    const auto isGroundLevel = [](const glm::vec3& p) { return std::fabs(p.y) < kEps; };
+    const auto lift = [&](glm::vec3 p) {
+      if (isGroundLevel(p)) p.y = ground_.HeightAt(p.x, p.z);
+      return p;
+    };
+    for (size_t i = 0; i < outPath->size(); ++i) {
+      const glm::vec3& a = (*outPath)[i];
+      lifted.push_back(lift(a));
+      if (i + 1 >= outPath->size()) continue;
+      const glm::vec3& b = (*outPath)[i + 1];
+      if (!isGroundLevel(a) || !isGroundLevel(b)) continue;  // Climb steps stay two points.
+      const float len = glm::length(glm::vec2(b.x - a.x, b.z - a.z));
+      const int pieces = static_cast<int>(std::ceil(len / kTerrainPathStep));
+      for (int k = 1; k < pieces; ++k) {
+        const float t = static_cast<float>(k) / static_cast<float>(pieces);
+        glm::vec3 p = a + (b - a) * t;
+        p.y = ground_.HeightAt(p.x, p.z);
+        lifted.push_back(p);
+      }
+    }
+    *outPath = std::move(lifted);
+  }
   return true;
 }
 

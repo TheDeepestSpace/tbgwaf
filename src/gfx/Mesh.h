@@ -72,6 +72,29 @@ class TriangleMesh {
   GLsizei pointCount_ = 0;
 };
 
+// An indexed triangle mesh with per-vertex normals (location 1), uploaded
+// once per scene rather than per frame. Used for the terrain ground mesh,
+// which is drawn with the lit shader (so it needs normals, unlike the
+// dynamic overlay meshes above).
+class LitTriangleMesh {
+ public:
+  struct Vertex {
+    glm::vec3 pos;
+    glm::vec3 normal;
+  };
+  void Init();
+  void Destroy();
+  void SetMesh(const std::vector<Vertex>& vertices, const std::vector<GLuint>& indices);
+  void Draw() const;
+  bool HasGeometry() const { return indexCount_ > 0; }
+
+ private:
+  GLuint vao_ = 0;
+  GLuint vbo_ = 0;
+  GLuint ebo_ = 0;
+  GLsizei indexCount_ = 0;
+};
+
 // A triangle soup with a per-vertex RGBA color (location 1), for gradient
 // overlays. Vertices are interleaved as vec3 position + vec4 color.
 class ColorTriangleMesh {

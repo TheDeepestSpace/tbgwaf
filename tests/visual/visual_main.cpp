@@ -67,6 +67,9 @@ constexpr int kVideoFps = 30;
 // Frames held on the initial state and after each action so video viewers
 // can actually read each turn's outcome (0.5 s at kVideoFps).
 constexpr int kHoldFrames = 15;
+// Frames recorded while the camera eases over a double-clicked figure (2 s).
+constexpr int kFocusGlideFrames = 60;
+
 // Frames the click marker is shown before each scripted click lands (video
 // only): a ring contracting onto the click point, then a brief hold.
 constexpr int kClickFrames = 12;
@@ -317,6 +320,30 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
       }
     };
   }
+  // Double-click on a figure: ease that team's pane camera over the unit's
+  // movement frontier (same FocusOn call as main.cpp). Video mode records
+  // the glide; either way the camera is then settled so the post-action
+  // golden is the converged framing.
+  hooks.onFocus = [&](const GameLogic& game, int unitId, Team team) {
+    const tactics::Unit* unit = game.FindUnit(unitId);
+    if (!unit) return;
+    gfx::OrbitCamera& camera = cameras[team == Team::Blue ? 0 : 1];
+    camera.FocusOn(unit->position,
+                   unit->MoveBudget() + 2.0f * tactics::constants::kAgentRadius);
+    if (options.video && videoOk) {
+      for (int i = 0; i < kFocusGlideFrames; ++i) {
+        camera.Update(1.0f / kVideoFps);
+        renderBothPanes(game);
+        const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);
+        for (int pane = 0; pane < 2; ++pane) {
+          if (!encoders[pane].WriteFrame(CropColumns(frame, pane * paneWidth, paneWidth))) {
+            videoOk = false;
+          }
+        }
+      }
+    }
+    camera.Update(1.0e3f);
+  };
   hooks.onActionComplete = [&](const GameLogic& game, int turn) {
     renderBothPanes(game);
     const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);

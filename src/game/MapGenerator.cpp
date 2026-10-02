@@ -200,7 +200,7 @@ Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
 
   // Per-block base height: a random walk over the grid that blends the
   // already-assigned west/south neighbors with a medium default, so nearby
-  // blocks end up similar and most of the city sits at medium heights.
+  // blocks form broad hills and valleys spanning most of the height range.
   const float mediumHeight = 0.5f * (c.minBuildingHeight + c.maxBuildingHeight) - 0.5f;
   std::vector<float> baseHeight(static_cast<size_t>(c.blocksX) * c.blocksZ);
   auto baseAt = [&](int bx, int bz) -> float& { return baseHeight[bx * c.blocksZ + bz]; };
@@ -211,7 +211,7 @@ Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
       if (bx > 0) { sum += baseAt(bx - 1, bz); ++n; }
       if (bz > 0) { sum += baseAt(bx, bz - 1); ++n; }
       const float neighbors = n ? sum / static_cast<float>(n) : mediumHeight;
-      baseAt(bx, bz) = std::clamp(0.65f * neighbors + 0.35f * mediumHeight + rng.Float(-1.6f, 1.6f),
+      baseAt(bx, bz) = std::clamp(0.85f * neighbors + 0.15f * mediumHeight + rng.Float(-2.6f, 2.6f),
                                   c.minBuildingHeight, c.maxBuildingHeight);
     }
   }

@@ -1,0 +1,28 @@
+# Elevated urban variant (issue #92): blue starts at grade just before the
+# overpass's west ramp foot and moves several patches up the climbing deck.
+# The asserted Y proves the gameplay path follows the sloped ramp layer
+# rather than remaining on ground or teleporting onto the deck. The map
+# golden separately shows the full overpass: ramps at both ends, pier bents
+# with usable ground beneath, and the branching on-ramp merging mid-span.
+name: elevated_highway_ramp
+
+map:
+  generate: {type: urban, seed: 7, arteries: 2, elevated: true}
+
+units:
+  - {id: 0, team: blue, position: [-62.4210, 0, 15.8678], facing_degrees: -15}
+  - {id: 1, team: red, position: [60, 0, -18], facing_degrees: 180}
+
+camera:
+  target: [-52, 13]
+  zoom: 26
+
+script:
+  - action: move
+    actor: 0
+    destination: [-44.6400, 1.40745, 10.9775]
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [-44.6400, 1.40745, 10.9775], tolerance: 0.05}
+  - assert: {round: 2}

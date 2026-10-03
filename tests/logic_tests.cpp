@@ -2,6 +2,7 @@
 // WEGO round phases, and the click-driven game state machine. No SDL/GL/ImGui
 // dependency, so this runs in plain CI without a display.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <initializer_list>
@@ -293,6 +294,79 @@ void TestTeamVisibilityAggregatesAcrossFigures() {
   CHECK(visibility.UnitVisible(2));       // Visible via blueB even though blueA is blocked.
   CHECK(visibility.ObstacleVisible(0));   // The wall itself is in view.
   CHECK(!visibility.ObstacleVisible(1));  // Crate behind blueB: outside every cone.
+}
+
+void TestVisibilityMatchesShadowMapGroundProbe() {
+  std::vector<Unit> units(2);
+  units[0].id = 0;
+  units[0].team = Team::Blue;
+  units[0].position = glm::vec3(-4.0f, 0.0f, 0.0f);
+  units[0].facingYaw = 0.0f;
+  units[1].id = 1;
+  units[1].team = Team::Red;
+  units[1].position = glm::vec3(4.0f, 0.0f, 0.0f);
+
+  // The target's eye is visible over this low block, but the shadow-map FOV
+  // checks the ground under its feet. That ground point is still in shadow.
+  const std::vector<Obstacle> lowBlock = {
+      Obstacle{AABB{glm::vec3(-0.5f, 0.0f, -1.0f), glm::vec3(0.5f, 1.0f, 1.0f)}},
+  };
+  const std::vector<WalkSurface> noSurfaces;
+  const HeightField flat;
+  CHECK(LineOfSightClear(units[0].EyePosition(), units[1].EyePosition(), lowBlock,
+                         noSurfaces));
+  CHECK(!CanUnitSee(units[0], units[1], lowBlock, noSurfaces, flat));
+  CHECK(!ComputeTeamVisibility(Team::Blue, units, lowBlock, noSurfaces, flat).UnitVisible(1));
+
+  // Farther behind the same low block, the sightline reaches the ground
+  // after passing over it, matching the end of the rendered ground shadow.
+  units[1].position.x = 12.0f;
+  CHECK(CanUnitSee(units[0], units[1], lowBlock, noSurfaces, flat));
+}
+
+void TestTerrainOccludesVisibilityLikeShadowMap() {
+  HeightField ridge;
+  ridge.minX = -4.0f;
+  ridge.minZ = -1.0f;
+  ridge.step = 2.0f;
+  ridge.nx = 5;
+  ridge.nz = 2;
+  ridge.heights = {
+      0.0f, 0.0f, 3.0f, 0.0f, 0.0f,
+      0.0f, 0.0f, 3.0f, 0.0f, 0.0f,
+  };
+
+  std::vector<Unit> units(2);
+  units[0].id = 0;
+  units[0].team = Team::Blue;
+  units[0].position = glm::vec3(-4.0f, 0.0f, 0.0f);
+  units[0].facingYaw = 0.0f;
+  units[1].id = 1;
+  units[1].team = Team::Red;
+  units[1].position = glm::vec3(4.0f, 0.0f, 0.0f);
+
+  const std::vector<Obstacle> noObstacles;
+  const std::vector<WalkSurface> noSurfaces;
+  CHECK(!LineOfSightClear(units[0].EyePosition(), units[1].position, ridge));
+  CHECK(!CanUnitSee(units[0], units[1], noObstacles, noSurfaces, ridge));
+  CHECK(!ComputeTeamVisibility(Team::Blue, units, noObstacles, noSurfaces, ridge)
+             .UnitVisible(1));
+
+  Scene scene;
+  scene.mapHalfExtent = 4.0f;
+  scene.ground = ridge;
+  scene.units = units;
+  GameLogic game(scene);
+  CHECK(!game.ResolveShot(*game.FindUnit(0), *game.FindUnit(1)));
+  CHECK(game.FindUnit(1)->alive);
+
+  std::fill(ridge.heights.begin(), ridge.heights.end(), 0.0f);
+  CHECK(LineOfSightClear(units[0].EyePosition(), units[1].position, ridge));
+  CHECK(CanUnitSee(units[0], units[1], noObstacles, noSurfaces, ridge));
+  CHECK(LineOfSightClear(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, 0.0f, 0.0f),
+                         ridge));
+  CHECK(!LineOfSightClear(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, -2.0f, 0.0f),
+                          ridge));
 }
 
 void TestCheckWinner() {
@@ -1731,6 +1805,8 @@ int main() {
   TestElevatedEyePositionSeesOverObstacle();
   TestFovCone();
   TestTeamVisibilityAggregatesAcrossFigures();
+  TestVisibilityMatchesShadowMapGroundProbe();
+  TestTerrainOccludesVisibilityLikeShadowMap();
   TestCheckWinner();
   TestRoundPlanningTeamGating();
   TestRoundCommitRequiresBothTeamsPlanned();

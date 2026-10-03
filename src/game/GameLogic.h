@@ -155,7 +155,8 @@ class GameLogic {
   // the current scene state (cheap given the handful of units/obstacles
   // here), so callers always see a result consistent with the latest move.
   TeamVisibility ComputeVisibility(Team team) const {
-    return tactics::ComputeTeamVisibility(team, scene_.units, obstacleBounds_);
+    return tactics::ComputeTeamVisibility(team, scene_.units, scene_.obstacles,
+                                          scene_.walkSurfaces, scene_.ground);
   }
 
   // One remembered glimpse of an enemy figure in `viewingTeam`'s FOV.
@@ -336,7 +337,7 @@ class GameLogic {
   int navMeshUnitId_ = -1;
   glm::vec3 navMeshOrigin_{0.0f};
   int roundNumber_ = 1;
-  std::vector<AABB> obstacleBounds_;  // Cached flat bounds of scene_.obstacles for LOS/FOV checks.
+  std::vector<AABB> obstacleBounds_;  // Retained for compatibility/debug broad-phase inspection.
 
   InputMode mode_ = InputMode::AwaitingSelection;
   std::optional<int> selectedUnitId_;

@@ -55,6 +55,9 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .pane figcaption {{ margin-bottom: 0.3rem; font-weight: bold; }}
   .pane.blue figcaption {{ color: #6d9eeb; }}
   .pane.red figcaption {{ color: #e06666; }}
+  .frametimes {{ margin-top: 0.8rem; }}
+  .frametimes canvas {{ width: 100%; height: 140px; display: block; cursor: pointer;
+                       background: #1a1d22; border: 1px solid #3a3f47; }}
   video {{ width: 100%; background: #000; border: 1px solid #3a3f47; }}
   .note {{ color: #d0a24a; }}
   .empty {{ color: #8a919c; font-style: italic; }}
@@ -85,7 +88,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .transport .clock {{ font-family: monospace; font-size: 0.85rem; color: #8a919c; }}
 </style>
 </head>
-<body>
+<body data-baseline-url="{baseline_url}">
 <h1>Gameplay scenario review</h1>
 <p>Scenarios under <code>{scenario_dir}</code>, classified against this PR from
 git metadata on the YAML files. Every scenario present at the PR's head —
@@ -117,16 +120,30 @@ function init(sc) {
   const btn = sc.querySelector(".playpause");
   const seek = sc.querySelector(".seek");
   const clock = sc.querySelector(".clock");
+  const chart = sc.querySelector(".frametimes canvas");
   const master = vids[0];
   if (!master || !btn || !seek || !clock) return;
   const followers = vids.slice(1);
-  // timing.json: {fps, actions: [{index, frame, time}]}, `time` being the
+  // timing.json: {fps, actions: [{index, frame, time}], frames: [{frame, ms}]}
+  // (frames optional: no chart without it), `time` being the
   // exclusive end of that action's video segment (index 0 = initial state).
   let timing = null;
   fetch("media/" + sc.dataset.stem + "/timing.json")
     .then(r => (r.ok ? r.json() : null))
     .then(t => { timing = t; update(); })
     .catch(() => {});
+  // Optional master-baseline timing (same shape; only `fps` and `frames`
+  // are used), drawn as the red line. Absent/404 => PR line only.
+  let baseline = null;
+  const baseUrl = sc.closest("[data-baseline-url]");
+  if (baseUrl && baseUrl.dataset.baselineUrl) {
+    fetch(baseUrl.dataset.baselineUrl + "/" + sc.dataset.stem + ".json")
+      .then(r => (r.ok ? r.json() : null))
+      .then(b => {
+        if (b && b.fps && b.frames && b.frames.length) { baseline = b; update(); }
+      })
+      .catch(() => {});
+  }
   const playAll = () => { vids.forEach(v => v.play()); btn.textContent = "❚❚"; };
   const pauseAll = () => { vids.forEach(v => v.pause()); btn.textContent = "▶"; };
   const seekAll = t => { vids.forEach(v => { v.currentTime = t; }); update(); };
@@ -142,6 +159,7 @@ function init(sc) {
     followers.forEach(v => {
       if (!v.seeking && Math.abs(v.currentTime - t) > 0.08) v.currentTime = t;
     });
+    drawChart(t);
     if (!timing || !timing.actions || !timing.actions.length) return;
     const entry = timing.actions.find(e => t < e.time) ||
                   timing.actions[timing.actions.length - 1];
@@ -158,6 +176,90 @@ function init(sc) {
       }
       s.classList.toggle("active", active);
     });
+  }
+  // Frame-production cost (ms) vs video time, action boundaries as vertical
+  // lines and the playhead on top. Plain canvas, no libraries.
+  function chartDims() {
+    if (!chart || !timing || !timing.frames || !timing.frames.length || !timing.fps) return null;
+    const dur = master.duration || timing.frames[timing.frames.length - 1].frame / timing.fps;
+    const max = Math.max(1, ...timing.frames.map(f => f.ms),
+                         ...(baseline ? baseline.frames.map(f => f.ms) : [])) * 1.1;
+    return dur > 0 ? { dur, max } : null;
+  }
+  // Plot area spans exactly the seek slider: the left gutter (under the
+  // play button) holds the axis labels, the right gutter (under the clock) is empty.
+  function chartPads() {
+    const cr = chart.getBoundingClientRect(), sr = seek.getBoundingClientRect();
+    const padL = Math.max(36, sr.left - cr.left - chart.clientLeft);
+    const padR = Math.max(0, cr.right - chart.clientLeft - sr.right);
+    return { padL, padR };
+  }
+  function drawChart(t) {
+    const d = chartDims();
+    if (!d) return;
+    chart.parentElement.hidden = false;
+    const dpr = window.devicePixelRatio || 1;
+    const w = chart.clientWidth, h = chart.clientHeight;
+    if (!w || !h) return;
+    if (chart.width !== Math.round(w * dpr)) { chart.width = Math.round(w * dpr); chart.height = Math.round(h * dpr); }
+    const c = chart.getContext("2d");
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.clearRect(0, 0, w, h);
+    const { padL, padR } = chartPads();
+    const padB = 16, pw = w - padL - padR, ph = h - padB;
+    const X = s => padL + (s / d.dur) * pw, Y = ms => ph - (ms / d.max) * ph;
+    c.font = "10px system-ui, sans-serif";
+    c.fillStyle = "#8a919c";
+    c.strokeStyle = "#2a2f37";
+    c.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const ms = (d.max / 4) * i, y = Math.round(Y(ms)) + 0.5;
+      c.beginPath(); c.moveTo(padL, y); c.lineTo(w - padR, y); c.stroke();
+      c.fillText(ms.toFixed(ms < 10 ? 1 : 0) + "ms", 2, Math.min(y + 3, ph));
+    }
+    ((timing.actions) || []).forEach(a => {
+      const x = Math.round(X(a.time)) + 0.5;
+      c.strokeStyle = "#d0a24a55";
+      c.beginPath(); c.moveTo(x, 0); c.lineTo(x, ph); c.stroke();
+      c.fillStyle = "#d0a24a";
+      c.fillText(String(a.index), x + 2, h - 4);
+    });
+    const line = (tm, color) => {
+      c.strokeStyle = color;
+      c.lineWidth = 1.5;
+      c.beginPath();
+      tm.frames.forEach((f, i) => {
+        const x = X((f.frame - 1) / tm.fps), y = Y(f.ms);
+        if (i) c.lineTo(x, y); else c.moveTo(x, y);
+      });
+      c.stroke();
+    };
+    if (baseline) line(baseline, "#e05a5a");
+    line(timing, "#4fc36b");
+    c.font = "10px system-ui, sans-serif";
+    c.textAlign = "right";
+    let lx = w - padR - 4;
+    [["this PR", "#4fc36b"], ...(baseline ? [["master", "#e05a5a"]] : [])].forEach(([name, col]) => {
+      c.fillStyle = col;
+      c.fillText(name, lx, 10);
+      lx -= c.measureText(name).width + 12;
+    });
+    c.textAlign = "left";
+    c.strokeStyle = "#e8e8e8";
+    c.lineWidth = 1;
+    const px = Math.round(X(Math.min(t, d.dur))) + 0.5;
+    c.beginPath(); c.moveTo(px, 0); c.lineTo(px, ph); c.stroke();
+  }
+  if (chart) {
+    chart.addEventListener("click", e => {
+      const d = chartDims();
+      if (!d) return;
+      const r = chart.getBoundingClientRect(), { padL, padR } = chartPads();
+      const f = Math.min(1, Math.max(0, (e.clientX - r.left - chart.clientLeft - padL) /
+                                         (r.width - 2 * chart.clientLeft - padL - padR)));
+      seekAll(f * d.dur);
+    });
+    window.addEventListener("resize", () => update());
   }
   master.addEventListener("timeupdate", update);
   master.addEventListener("seeked", update);
@@ -652,7 +754,10 @@ def scenario_entry(path: str, info: dict | None,
             '<button class="playpause" aria-label="Play/pause both views">▶</button>'
             '<input class="seek" type="range" min="0" max="1000" value="0" step="1" '
             'aria-label="Seek both views">'
-            '<span class="clock">0:00 / 0:00</span></div>')
+            '<span class="clock">0:00 / 0:00</span></div>'
+            '<div class="frametimes" hidden><canvas role="img" aria-label="Per-frame '
+            'render time in ms over video time (this PR in green, master baseline in red), '
+            'with action markers"></canvas></div>')
     else:
         lines.append('<p class="note">⚠ No video could be recorded.</p>')
     lines.append("</div>")
@@ -682,6 +787,10 @@ def main() -> int:
     parser.add_argument("--out", required=True, type=Path,
                         help="Output directory for index.html + media/")
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
+    parser.add_argument("--baseline-url", default="",
+                        help="URL (relative to the page) of a directory holding "
+                             "<scenario>.json master timing baselines; enables the "
+                             "red baseline line in the frame-time graph")
     args = parser.parse_args()
 
     changes = classify_changes(args.base, args.head, args.repo_root)
@@ -708,7 +817,8 @@ def main() -> int:
 
     (args.out / "index.html").write_text(
         PAGE_TEMPLATE.format(scenario_dir=SCENARIO_DIR, sections=sections,
-                             page_js=PAGE_JS))
+                             page_js=PAGE_JS,
+                             baseline_url=html.escape(args.baseline_url, quote=True)))
     print(f"[scenario-review] wrote {args.out / 'index.html'} "
           f"({len(changes['A'])} new, {len(changes['M'])} modified, "
           f"{len(changes['U'])} unchanged, {len(changes['D'])} deleted)", file=sys.stderr)

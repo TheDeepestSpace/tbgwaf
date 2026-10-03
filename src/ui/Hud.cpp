@@ -28,7 +28,8 @@ glm::vec2 WorldToWindow(const glm::vec3& world, const gfx::OrbitCamera& camera,
 }
 
 HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRect& rect,
-                   int windowHeight, const gfx::OrbitCamera& camera, HudLayout* layout) {
+                   int windowHeight, const gfx::OrbitCamera& camera, HudLayout* layout,
+                   float* roundPanelBottom) {
   HudActions actions;
   // Window ids are suffixed with the team so two panes can share one ImGui
   // context (the visual runner) without their windows colliding.
@@ -105,6 +106,8 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
     ImGui::BeginDisabled(!game.CanCommitRound());
     if (Button("Commit Round")) actions.commit = true;
     ImGui::EndDisabled();
+    // Window height tracks collapse, so anything anchored below follows.
+    if (roundPanelBottom) *roundPanelBottom = ImGui::GetWindowPos().y + ImGui::GetWindowHeight();
     ImGui::End();
 
     // The shared selection belongs to one team's figure; only that team's
@@ -163,9 +166,11 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
   return actions;
 }
 
-void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float fps) {
-  ImGui::SetNextWindowPos(ImVec2(8.0f, 8.0f), ImGuiCond_FirstUseEver);
-  ImGui::Begin("Debug", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float fps,
+                    float top) {
+  ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
+  ImGui::Begin("Debug", nullptr,
+               ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove);
   ImGui::Checkbox("Disable FOV cones", &disableFov);
   ImGui::Checkbox("Disable shadows", &disableShadows);
   ImGui::Checkbox("Show FPS", &showFps);

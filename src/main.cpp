@@ -523,11 +523,11 @@ int main() {
     }
 
     // --- UI ---
-    ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, showFps,
-                       smoothedFps);
+    float roundPanelBottom = 2.0f;
     for (int pane = 0; pane < paneCount; ++pane) {
       const ui::HudActions hud = ui::DrawHud(game, paneTeam(pane), planning, paneRects[pane],
-                                             windowHeight, cameras[pane]);
+                                             windowHeight, cameras[pane], nullptr,
+                                             pane == 0 ? &roundPanelBottom : nullptr);
       if (hud.newMatch) {
         if (isSimulator) {
           game.Reset(tactics::GenerateUrbanMap(mapSeed));
@@ -658,6 +658,9 @@ int main() {
         }
       }
     }
+    // Anchored under the Round panel so it follows collapse/expand.
+    ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, showFps,
+                       smoothedFps, roundPanelBottom + 6.0f);
 
     // --- Render: one shadow pass + one color pass per pane, both inside
     // SceneRenderer::RenderPane. Selection/move-preview overlays belong to

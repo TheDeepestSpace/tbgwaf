@@ -33,7 +33,7 @@ struct PaneOverlays {
   const std::vector<glm::vec3>* movePreviewPath = nullptr;  // Yellow preview polyline.
   const tactics::ReachField* moveFrontier = nullptr;  // Reachable-area gradient + border.
   bool moveFrontierSubsequentLeg = false;             // Border drawn yellow instead of green.
-  bool showShotCone = false;                          // Aiming a shot, or a shot is already planned.
+  bool showShotCone = false;                          // Selected figure is actively choosing a target.
 };
 
 // Overlays `pane` shows for the current game state. They belong to the team

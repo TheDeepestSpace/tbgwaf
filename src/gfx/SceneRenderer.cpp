@@ -37,13 +37,13 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
       overlays.invalidHoverHighlight = hoveredGroundPoint;
     }
   }
-  overlays.showShotCone = game.Mode() == tactics::InputMode::AwaitingShootTarget ||
-                          selected->plan.type == tactics::PlannedActionType::Shoot;
+  overlays.showShotCone = game.Mode() == tactics::InputMode::AwaitingShootTarget;
   return overlays;
 }
 namespace {
 
 constexpr int kShadowMapSize = 2048;
+const glm::vec3 kSetupColor(0.2f, 1.0f, 0.3f);
 
 // Flat, unlit shader used for UI-ish overlays (selection highlights, the
 // move-path preview line) that should stay crisp regardless of shadowing.
@@ -1039,16 +1039,13 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
   }
   const glm::vec3 right(-axis.z, 0.0f, axis.x);
   const glm::vec3 up(0.0f, 1.0f, 0.0f);
-  // Setup color: same green as the movement frontier border.
-  const glm::vec3 color(0.2f, 1.0f, 0.3f);
-
   const auto vertex = [&](int ring, int seg) {
     const float u = static_cast<float>(ring) / static_cast<float>(kRings);
     const float a = kTwoPi * static_cast<float>(seg) / static_cast<float>(kSegments);
     const float t = range * u;
     const glm::vec3 p =
         apex + axis * t + (right * std::cos(a) + up * std::sin(a)) * (t * tanHalf);
-    return ColorTriangleMesh::Vertex{p, glm::vec4(color, kSurfaceAlpha * (1.0f - u))};
+    return ColorTriangleMesh::Vertex{p, glm::vec4(kSetupColor, kSurfaceAlpha * (1.0f - u))};
   };
   std::vector<ColorTriangleMesh::Vertex> vertices;
   vertices.reserve(static_cast<size_t>(kRings * kSegments * 6));
@@ -1071,7 +1068,7 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
   surfaceShader.SetVec3("uApex", apex);
   surfaceShader.SetVec3("uAxis", axis);
   surfaceShader.SetVec4("uCone", glm::vec4(tanHalf, range + 0.05f, kFootprintAlpha, 0.0f));
-  surfaceShader.SetVec3("uColor", color);
+  surfaceShader.SetVec3("uColor", kSetupColor);
   const auto drawBox = [&](const glm::vec3& minCorner, const glm::vec3& size) {
     const glm::mat4 model =
         glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
@@ -1315,8 +1312,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                 game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
   }
   glDisable(GL_STENCIL_TEST);
-  // Shot probability cone: only for this pane's selected figure, drawn over
-  // the FOV overlay.
+  // Shot probability cones are setup feedback, drawn over the FOV overlay:
+  // the selected figure gets one while choosing a target, and every planned
+  // shot keeps its cone until the round is committed (like a planned move's
+  // path and destination ghost).
+  const bool planning =
+      game.Mode() != InputMode::GameOver && game.Mode() != InputMode::Executing;
+  const Unit* aimingShooter = nullptr;
   if (overlays.selectionHighlight && overlays.showShotCone) {
     if (const Unit* selected = game.FindUnit(*game.SelectedUnitId())) {
       if (selected->alive) {
@@ -1329,7 +1331,22 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                      *selected, obstacles, game.GetScene().sidewalks,
                      game.GetScene().mapHalfExtent);
         glDepthFunc(GL_LESS);
+        aimingShooter = selected;
       }
+    }
+  }
+  if (planning) {
+    for (const Unit& unit : game.GetScene().units) {
+      if (!unit.alive || unit.team != team ||
+          unit.plan.type != tactics::PlannedActionType::Shoot || &unit == aimingShooter) {
+        continue;
+      }
+      glEnable(GL_DEPTH_TEST);
+      glDepthFunc(GL_LEQUAL);
+      DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, viewProj,
+                   unit, obstacles, game.GetScene().sidewalks,
+                   game.GetScene().mapHalfExtent);
+      glDepthFunc(GL_LESS);
     }
   }
   glDisable(GL_POLYGON_OFFSET_FILL);
@@ -1445,7 +1462,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       };
       auto toVertex = [&](const Pt& q) {
         const float a = kEdgeAlpha * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
-        return ColorTriangleMesh::Vertex{q.p, glm::vec4(0.2f, 0.9f, 0.3f, a)};
+        return ColorTriangleMesh::Vertex{q.p, glm::vec4(kSetupColor, a)};
       };
       for (int iz = 0; iz + 1 < nz; ++iz) {
         for (int ix = 0; ix + 1 < nx; ++ix) {
@@ -1532,7 +1549,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     unlitShader_.SetMat4("uMVP", viewProj);
     unlitShader_.SetVec4("uColor", overlays.moveFrontierSubsequentLeg
                                        ? glm::vec4(1.0f, 0.9f, 0.15f, 1.0f)
-                                       : glm::vec4(0.2f, 1.0f, 0.3f, 1.0f));
+                                       : glm::vec4(kSetupColor, 1.0f));
     frontierBorder_.DrawSegments();
     glDisable(GL_POLYGON_OFFSET_FILL);
   }
@@ -1563,8 +1580,6 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // phase every pane highlights its own team's living figures (dim white =
   // still needs a plan, green = plan set) -- this is squad-wide, not a
   // single actor.
-  const bool planning =
-      game.Mode() != InputMode::GameOver && game.Mode() != InputMode::Executing;
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
       if (!unit.alive || unit.team != team) continue;

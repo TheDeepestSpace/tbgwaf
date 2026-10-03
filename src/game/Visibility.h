@@ -34,6 +34,10 @@ struct TeamVisibility {
 bool IsPointVisibleToTeam(Team team, const glm::vec3& point, const std::vector<Unit>& units,
                            const std::vector<AABB>& obstacles);
 
+// True if `viewer` (alive) has `target`'s eye inside its FOV cone with clear
+// line of sight. Swap the arguments to ask "can the enemy see me back".
+bool CanUnitSee(const Unit& viewer, const Unit& target, const std::vector<AABB>& obstacles);
+
 // Computes the full per-team visibility set: which enemy figures (downed included) and
 // which obstacles are currently inside the combined FOV of `team`'s living
 // figures.

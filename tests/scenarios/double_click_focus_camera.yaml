@@ -1,0 +1,19 @@
+name: double_click_focus_camera
+description: >
+  Showcases double-clicking a figure: its team's camera eases over the figure's whole
+  movement frontier (top-down, zoomed to fit). Turn 0 is the default framing ("before");
+  turn 1 is the converged focus ("after"). Only the blue pane moves -- red's camera is
+  untouched. The video records the glide.
+
+map:
+  obstacles:
+    - {center: [3, -3], half_extent: [1.0, 1.0], height: 2.0, climbable: false}
+
+units:
+  - {id: 0, team: blue, position: [-6, 0, 3], facing_degrees: 0}
+  - {id: 1, team: red, position: [8, 0, -2], facing_degrees: 180}
+
+script:
+  - action: focus
+    actor: 0
+  - assert: {unit: 0, position: [-6, 0, 3], tolerance: 0.05}

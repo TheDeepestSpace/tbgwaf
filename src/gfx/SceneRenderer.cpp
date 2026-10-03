@@ -115,9 +115,11 @@ uniform vec4 uColor;
 uniform vec3 uLightDir;  // Direction the light travels; surfaces face -uLightDir.
 uniform vec3 uViewPos;
 uniform sampler2D uShadowMap;
+uniform int uDisableShadows;
 out vec4 FragColor;
 
 float ComputeShadow(vec3 normal) {
+  if (uDisableShadows != 0) return 0.0;
   vec3 proj = vLightSpacePos.xyz / vLightSpacePos.w;
   proj = proj * 0.5 + 0.5;
   if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z > 1.0) {
@@ -604,12 +606,23 @@ void DrawUnitWireframe(const Shader& shader, LineMesh& lines, const glm::mat4& v
 // Faded, team-colored wireframe of a remembered sighting plus a floor arrow
 // along its movement direction (if it was moving).
 void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
-                  const Unit& sighted, const GameLogic::EnemySighting& s, float alpha) {
+                  const Unit& sighted, const GameLogic::EnemySighting& s,
+                  const std::vector<AABB>& sidewalks, float alpha) {
   const glm::vec4 base = sighted.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
                                                     : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
   const glm::vec4 color(base.r, base.g, base.b, alpha);
+  // Sidewalk slabs are raised but cosmetic (unit y stays 0), so lift the ghost
+  // and arrow onto whatever slab the remembered position stands over, else
+  // they render buried under it.
+  glm::vec3 position = s.position;
+  for (const AABB& slab : sidewalks) {
+    if (position.x >= slab.min.x && position.x <= slab.max.x && position.z >= slab.min.z &&
+        position.z <= slab.max.z) {
+      position.y = std::max(position.y, slab.max.y);
+    }
+  }
   Unit ghost = sighted;
-  ghost.position = s.position;
+  ghost.position = position;
   ghost.facingYaw = s.facingYaw;
   ghost.walkPhase = s.walkPhase;
   ghost.walkBlend = s.walkBlend;
@@ -618,10 +631,20 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
   if (glm::length(s.moveDirection) > 0.0f) {
     const glm::vec3 d = s.moveDirection;
     const glm::vec3 side(-d.z, 0.0f, d.x);
-    const glm::vec3 tail = s.position + glm::vec3(0.0f, 0.02f, 0.0f);
-    const glm::vec3 tip = tail + d * 1.2f;
-    const std::vector<glm::vec3> arrow = {tail, tip, tip - d * 0.3f + side * 0.2f, tip,
-                                          tip - d * 0.3f - side * 0.2f};
+    // Centre the arrow's overall length on the ghost.
+    const float kLength = 1.2f;
+    const glm::vec3 tail = position - d * (kLength * 0.5f) + glm::vec3(0.0f, 0.02f, 0.0f);
+    const glm::vec3 tip = tail + d * kLength;
+    // Closed outline of a fat arrow (shaft + head), traced as a line strip.
+    const float kShaftHalfWidth = 0.08f;
+    const float kHeadHalfWidth = 0.22f;
+    const float kHeadLength = 0.4f;
+    const glm::vec3 headBase = tip - d * kHeadLength;
+    const std::vector<glm::vec3> arrow = {
+        tail + side * kShaftHalfWidth,    headBase + side * kShaftHalfWidth,
+        headBase + side * kHeadHalfWidth, tip,
+        headBase - side * kHeadHalfWidth, headBase - side * kShaftHalfWidth,
+        tail - side * kShaftHalfWidth,    tail + side * kShaftHalfWidth};
     lines.SetPoints(arrow);
     shader.SetMat4("uMVP", viewProj);
     shader.SetVec4("uColor", color);
@@ -644,11 +667,33 @@ void DrawUnitDepth(const Shader& shader, const CubeMesh& cube, const SphereMesh&
   }
 }
 
-void DrawHighlight(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
+// Flat ring (annulus) in the XZ plane, unit-sized and centred on the origin.
+std::vector<glm::vec3> BuildRingPoints() {
+  constexpr int kSegments = 32;
+  constexpr float kOuter = 0.5f;
+  constexpr float kInner = 0.35f;
+  constexpr float kTwoPi = 6.28318530717958647692f;
+  std::vector<glm::vec3> pts;
+  pts.reserve(kSegments * 6);
+  for (int i = 0; i < kSegments; ++i) {
+    const float a0 = kTwoPi * static_cast<float>(i) / kSegments;
+    const float a1 = kTwoPi * static_cast<float>(i + 1) / kSegments;
+    const glm::vec3 o0(kOuter * std::cos(a0), 0.0f, kOuter * std::sin(a0));
+    const glm::vec3 o1(kOuter * std::cos(a1), 0.0f, kOuter * std::sin(a1));
+    const glm::vec3 i0(kInner * std::cos(a0), 0.0f, kInner * std::sin(a0));
+    const glm::vec3 i1(kInner * std::cos(a1), 0.0f, kInner * std::sin(a1));
+    // Counter-clockwise seen from above (+Y).
+    pts.insert(pts.end(), {o0, o1, i0, i0, o1, i1});
+  }
+  return pts;
+}
+
+void DrawHighlight(const Shader& shader, const TriangleMesh& ring, const glm::mat4& viewProj,
                    const glm::vec3& position, const glm::vec4& color) {
-  constexpr float kHalf = 0.5f;
-  const glm::vec3 minCorner = position + glm::vec3(-kHalf, 0.01f, -kHalf);
-  DrawBox(shader, cube, viewProj, minCorner, glm::vec3(kHalf * 2.0f, 0.04f, kHalf * 2.0f), color);
+  const glm::mat4 model = glm::translate(glm::mat4(1.0f), position + glm::vec3(0.0f, 0.02f, 0.0f));
+  shader.SetMat4("uMVP", viewProj * model);
+  shader.SetVec4("uColor", color);
+  ring.Draw();
 }
 
 // 3x5 digit glyphs, one row per entry, MSB = leftmost column.
@@ -662,47 +707,33 @@ glm::vec3 SnapToAxis(const glm::vec3& v) {
   return glm::vec3(0.0f, 0.0f, v.z < 0.0f ? -1.0f : 1.0f);
 }
 
-// The selection square with the number `n` (1-99) cut out of it, so the
-// ground shows through in the shape of the digits. Built from a 9x9 grid of
-// flat cells; the digits are oriented to read upright for `view`'s camera
-// (snapped to the nearest world axis so cells stay axis-aligned).
-void DrawNumberedHighlight(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
-                           const glm::mat4& view, const glm::vec3& position,
-                           const glm::vec4& color, int n) {
-  constexpr int kGrid = 9;
+// The thick-rim ring with the number `n` (1-99) drawn inside it as flat
+// yellow digits. Digits are built from axis-aligned cells and oriented to
+// read upright for `view`'s camera (snapped to the nearest world axis).
+void DrawNumberedHighlight(const Shader& shader, const TriangleMesh& ring, const CubeMesh& cube,
+                           const glm::mat4& viewProj, const glm::mat4& view,
+                           const glm::vec3& position, const glm::vec4& color, int n) {
+  DrawHighlight(shader, ring, viewProj, position, color);
   n = std::clamp(n, 0, 99);
-  bool cut[kGrid][kGrid] = {};  // [row from top][col from left]
   const int digitCount = n >= 10 ? 2 : 1;
-  const int textWidth = digitCount * 3 + (digitCount - 1);
-  const int col0 = (kGrid - textWidth) / 2;
+  const float cell = 0.07f;  // Two digits (7 cells wide) still fit inside the rim.
+  const float textWidth = (digitCount * 3 + (digitCount - 1)) * cell;
+  const glm::vec3 right = SnapToAxis(glm::vec3(view[0][0], 0.0f, view[2][0]));
+  const glm::vec3 up = SnapToAxis(glm::vec3(-view[0][2], 0.0f, -view[2][2]));
   for (int d = 0; d < digitCount; ++d) {
     const int digit = digitCount == 2 ? (d == 0 ? n / 10 : n % 10) : n;
     for (int row = 0; row < 5; ++row) {
       for (int col = 0; col < 3; ++col) {
-        if (kDigitGlyphs[digit][row] & (4 >> col)) cut[2 + row][col0 + d * 4 + col] = true;
+        if (!(kDigitGlyphs[digit][row] & (4 >> col))) continue;
+        const float u0 = -textWidth / 2 + (d * 4 + col) * cell;
+        const float v0 = 2.5f * cell - (row + 1) * cell;
+        const glm::vec3 a = position + right * u0 + up * v0;
+        const glm::vec3 b = position + right * (u0 + cell) + up * (v0 + cell);
+        const glm::vec3 lo = glm::min(a, b);
+        const glm::vec3 hi = glm::max(a, b);
+        DrawBox(shader, cube, viewProj, glm::vec3(lo.x, position.y + 0.01f, lo.z),
+                glm::vec3(hi.x - lo.x, 0.04f, hi.z - lo.z), color);
       }
-    }
-  }
-  const glm::vec3 right = SnapToAxis(glm::vec3(view[0][0], 0.0f, view[2][0]));
-  const glm::vec3 up = SnapToAxis(glm::vec3(-view[0][2], 0.0f, -view[2][2]));
-  const float cell = 1.0f / kGrid;
-  for (int row = 0; row < kGrid; ++row) {
-    for (int col = 0; col < kGrid;) {
-      if (cut[row][col]) {
-        ++col;
-        continue;
-      }
-      int end = col;
-      while (end < kGrid && !cut[row][end]) ++end;  // Run of solid cells.
-      const float u0 = -0.5f + col * cell, u1 = -0.5f + end * cell;
-      const float v0 = 0.5f - (row + 1) * cell, v1 = 0.5f - row * cell;
-      const glm::vec3 a = position + right * u0 + up * v0;
-      const glm::vec3 b = position + right * u1 + up * v1;
-      const glm::vec3 lo = glm::min(a, b);
-      const glm::vec3 hi = glm::max(a, b);
-      DrawBox(shader, cube, viewProj, glm::vec3(lo.x, position.y + 0.01f, lo.z),
-              glm::vec3(hi.x - lo.x, 0.04f, hi.z - lo.z), color);
-      col = end;
     }
   }
 }
@@ -975,6 +1006,8 @@ bool SceneRenderer::Init() {
   frontierBorder_.Init();
   pathLine_.Init();
   fovConeMesh_.Init();
+  highlightRing_.Init();
+  highlightRing_.SetPoints(BuildRingPoints());
 
   // Stage-C: a single directional light (simulating overhead factory
   // lighting) casting a PCF-filtered shadow map. The
@@ -1019,6 +1052,7 @@ void SceneRenderer::Destroy() {
   frontierBorder_.Destroy();
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
+  highlightRing_.Destroy();
   sphereMesh_.Destroy();
   cubeMesh_.Destroy();
   if (shadowDepthTex_) glDeleteTextures(1, &shadowDepthTex_);
@@ -1030,7 +1064,7 @@ void SceneRenderer::Destroy() {
 void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                const TeamVisibility& visibility, const OrbitCamera& camera, int x,
                                int y, int width, int height, const PaneOverlays& overlays,
-                               GLuint targetFramebuffer) {
+                               GLuint targetFramebuffer, const RenderDebugOptions& debug) {
   const auto& obstacles = game.GetScene().obstacles;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;
 
@@ -1062,17 +1096,20 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
 
   // Shadow pass: only casters this team can currently see.
   glDisable(GL_SCISSOR_TEST);
-  glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo_);
-  glViewport(0, 0, kShadowMapSize, kShadowMapSize);
-  glClear(GL_DEPTH_BUFFER_BIT);
-  depthShader_.Use();
-  for (const auto& obstacle : obstacles) {
-    const AABB& bounds = obstacle.bounds;
-    DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min, bounds.max - bounds.min);
-  }
-  for (const Unit& unit : game.GetScene().units) {
-    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
-    DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
+  if (!debug.disableShadows) {
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo_);
+    glViewport(0, 0, kShadowMapSize, kShadowMapSize);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    depthShader_.Use();
+    for (const auto& obstacle : obstacles) {
+      const AABB& bounds = obstacle.bounds;
+      DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min,
+                   bounds.max - bounds.min);
+    }
+    for (const Unit& unit : game.GetScene().units) {
+      if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+      DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
+    }
   }
   glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
 
@@ -1095,6 +1132,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   litShader_.SetVec3("uLightDir", lightDir_);
   litShader_.SetVec3("uViewPos", camera.Position());
   litShader_.SetInt("uShadowMap", 0);
+  litShader_.SetInt("uDisableShadows", debug.disableShadows ? 1 : 0);
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
 
@@ -1120,15 +1158,18 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawUnit(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, unit);
   }
 
-  // Squares sit on whatever flat slab (sidewalk) is under them, not inside it.
-  const auto DrawHighlightOnSurface = [&](glm::vec3 position, const glm::vec4& color) {
+  // Rings sit on whatever flat slab (sidewalk) is under them, not inside it.
+  const auto OnSurface = [&](glm::vec3 position) {
     for (const AABB& slab : game.GetScene().sidewalks) {
       if (position.x >= slab.min.x && position.x <= slab.max.x && position.z >= slab.min.z &&
           position.z <= slab.max.z) {
         position.y = std::max(position.y, slab.max.y);
       }
     }
-    DrawHighlight(unlitShader_, cubeMesh_, viewProj, position, color);
+    return position;
+  };
+  const auto DrawHighlightOnSurface = [&](const glm::vec3& position, const glm::vec4& color) {
+    DrawHighlight(unlitShader_, highlightRing_, viewProj, OnSurface(position), color);
   };
   // Each pane shows only its own team's FOV cones -- your own vision,
   // not intel about what the enemy can see. Translucent overlay: blend
@@ -1154,7 +1195,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glEnable(GL_POLYGON_OFFSET_FILL);
   glPolygonOffset(-2.0f, -4.0f);
   for (const Unit& unit : game.GetScene().units) {
-    if (!unit.alive || unit.team != team) continue;
+    if (debug.disableFov || !unit.alive || unit.team != team) continue;
     DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit, obstacles,
                 game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
   }
@@ -1377,7 +1418,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       for (const auto& s : game.Sightings(team, unit.id)) {
         const float life = 1.0f - s.ageRounds * tactics::constants::kSightingFadePerRound;
         if (life <= 0.0f) continue;
-        DrawSighting(unlitShader_, pathLine_, viewProj, unit, s, life * kSightingMaxAlpha);
+        DrawSighting(unlitShader_, pathLine_, viewProj, unit, s, game.GetScene().sidewalks,
+                     life * kSightingMaxAlpha);
       }
     }
     glDepthMask(GL_TRUE);
@@ -1414,7 +1456,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   for (const Unit& unit : game.GetScene().units) {
     if (!unit.alive || unit.reactionOnStationary != tactics::ReactionRule::Shoot) continue;
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
-    DrawHighlight(unlitShader_, cubeMesh_, viewProj, unit.position,
+    DrawHighlight(unlitShader_, highlightRing_, viewProj, unit.position,
                   glm::vec4(0.85f, 0.1f, 0.85f, 1.0f));
   }
   // Selection/move-preview overlays belong to whichever pane the input
@@ -1438,7 +1480,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     unlitShader_.SetMat4("uMVP", viewProj);
     unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
     pathLine_.Draw();
-    // Mark the final position with the same square used for selection.
+    // Mark the final position with the same ring used for selection.
     DrawHighlightOnSurface(overlays.movePreviewPath->back(),
                   glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
   } else if (overlays.invalidHoverHighlight) {
@@ -1469,8 +1511,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         const bool chaining = game.Mode() == InputMode::AwaitingMoveDestination &&
                               game.SelectedUnitId() == unit.id;
         if (chaining || !unit.plan.queuedLegs.empty()) {
-          DrawNumberedHighlight(unlitShader_, cubeMesh_, viewProj, view, unit.plan.movePath.back(),
-                                yellow, 1);
+          DrawNumberedHighlight(unlitShader_, highlightRing_, cubeMesh_, viewProj, view,
+                                OnSurface(unit.plan.movePath.back()), yellow, 1);
         }
         int legNumber = 1;
         for (const auto& leg : unit.plan.queuedLegs) {
@@ -1480,8 +1522,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           unlitShader_.SetMat4("uMVP", viewProj);
           unlitShader_.SetVec4("uColor", yellow);
           pathLine_.Draw();
-          DrawNumberedHighlight(unlitShader_, cubeMesh_, viewProj, view, leg.back(), yellow,
-                                legNumber);
+          DrawNumberedHighlight(unlitShader_, highlightRing_, cubeMesh_, viewProj, view,
+                                OnSurface(leg.back()), yellow, legNumber);
         }
       } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
         if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {

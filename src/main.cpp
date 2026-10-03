@@ -296,6 +296,10 @@ int main() {
 
   bool quit = false;
   constexpr float kClickDragThresholdPx = 5.0f;
+  constexpr Uint32 kDoubleClickMs = 400;
+  int lastClickUnitId = -1;  // Figure hit by the previous click, for double-click detection.
+  int lastClickPane = -1;
+  Uint32 lastClickTicks = 0;
   int leftDragPane = -1;  // -1 = not dragging; else the pane a left-drag (pan) started in.
   int aimedUnitId = -1;  // Unit whose planned-move ghost is being dragged, or -1.
   int aimedPane = -1;    // Pane the ghost grab started in.
@@ -314,6 +318,10 @@ int main() {
   // flow/app_flow.yaml. Only Urban exists today, so every client builds the
   // same seeded city regardless of which screen path it took.
   tbgwaf_flow::State screen = tbgwaf_flow::kInitialState;
+  // Local-only debug panel state (defaults: FOV and shadows on, FPS shown).
+  gfx::RenderDebugOptions debugOptions;
+  bool showFps = true;
+  float smoothedFps = 0.0f;
 
   auto runFrame = [&]() {
 #ifdef __EMSCRIPTEN__
@@ -516,6 +524,10 @@ int main() {
     const Uint32 nowTicks = SDL_GetTicks();
     const float dt = static_cast<float>(nowTicks - lastFrameTicks) / 1000.0f;
     lastFrameTicks = nowTicks;
+    if (dt > 0.0f) {
+      const float instantFps = 1.0f / dt;
+      smoothedFps = smoothedFps == 0.0f ? instantFps : smoothedFps + (instantFps - smoothedFps) * 0.05f;
+    }
     // A follower mirrors execution from the simulator's snapshots; running
     // its own (empty) round would end it immediately.
     if (isSimulator || game.Mode() != InputMode::Executing) game.Update(dt);
@@ -547,9 +559,11 @@ int main() {
     }
 
     // --- UI ---
+    float roundPanelBottom = 2.0f;
     for (int pane = 0; pane < paneCount; ++pane) {
       const ui::HudActions hud = ui::DrawHud(game, paneTeam(pane), planning, paneRects[pane],
-                                             windowHeight, cameras[pane]);
+                                             windowHeight, cameras[pane], nullptr,
+                                             pane == 0 ? &roundPanelBottom : nullptr);
       if (hud.newMatch) {
         if (isSimulator) {
           game.Reset(tactics::GenerateUrbanMap(mapSeed));
@@ -653,8 +667,25 @@ int main() {
           }
         }
         const int hitUnit = PickUnit(clickRay, pickableUnits);
+        const Uint32 clickTicks = SDL_GetTicks();
+        const bool doubleClick = hitUnit >= 0 && hitUnit == lastClickUnitId &&
+                                 clickPane == lastClickPane &&
+                                 clickTicks - lastClickTicks <= kDoubleClickMs;
+        lastClickUnitId = doubleClick ? -1 : hitUnit;
+        lastClickPane = clickPane;
+        lastClickTicks = clickTicks;
         if (hitUnit >= 0) {
           game.ClickUnit(hitUnit, clickTeam);
+          if (doubleClick) {
+            // Drone-style focus: frame the unit's whole movement frontier
+            // (same reach as the reach-field query window).
+            for (const Unit& unit : game.GetScene().units) {
+              if (unit.id != hitUnit) continue;
+              cameras[clickPane].FocusOn(
+                  unit.position, unit.MoveBudget() + 2.0f * tactics::constants::kAgentRadius);
+              break;
+            }
+          }
         } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
           glm::vec3 point;
           if (IntersectGroundOrClimbTop(clickRay, game.GetScene(), &point)) {
@@ -663,6 +694,9 @@ int main() {
         }
       }
     }
+    // Anchored under the Round panel so it follows collapse/expand.
+    ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, showFps,
+                       smoothedFps, roundPanelBottom + 6.0f);
 
     // --- Render: one shadow pass + one color pass per pane, both inside
     // SceneRenderer::RenderPane. Selection/move-preview overlays belong to
@@ -674,7 +708,7 @@ int main() {
       if (hasHoveredGroundPoint) hover = hoveredGroundPoint;
       const gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(game, paneTeam(pane), hover);
       renderer.RenderPane(game, paneTeam(pane), fogActive, paneVisibility[pane], cameras[pane],
-                          rect.x, 0, rect.width, windowHeight, overlays);
+                          rect.x, 0, rect.width, windowHeight, overlays, 0, debugOptions);
     }
 
     ImGui::Render();

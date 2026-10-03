@@ -8,6 +8,7 @@
 namespace gfx {
 
 void OrbitCamera::Rotate(float deltaYawRadians, float deltaPitchRadians) {
+  focusing_ = false;
   yaw_ += deltaYawRadians;
   pitch_ = std::clamp(pitch_ + deltaPitchRadians, kMinPitch, kMaxPitch);
 }
@@ -17,7 +18,25 @@ void OrbitCamera::Zoom(float deltaDistance) {
 }
 
 void OrbitCamera::Update(float dt) {
-  distance_ += (targetDistance_ - distance_) * std::min(1.0f, kZoomDampingRate * dt);
+  const float blend = std::min(1.0f, kZoomDampingRate * dt);
+  distance_ += (targetDistance_ - distance_) * blend;
+  if (focusing_) {
+    target += (focusTarget_ - target) * blend;
+    pitch_ += (focusPitch_ - pitch_) * blend;
+    if (glm::length(focusTarget_ - target) < 0.01f && std::fabs(focusPitch_ - pitch_) < 1e-3f) {
+      target = focusTarget_;
+      pitch_ = focusPitch_;
+      focusing_ = false;
+    }
+  }
+}
+
+void OrbitCamera::FocusOn(const glm::vec3& focusPoint, float halfExtent) {
+  focusing_ = true;
+  focusTarget_ = glm::vec3(focusPoint.x, 0.0f, focusPoint.z);
+  focusPitch_ = kMaxPitch;
+  // Same margin as FitToExtent.
+  targetDistance_ = std::clamp(halfExtent * 2.4f, kMinDistance, kMaxDistance);
 }
 
 void OrbitCamera::FitToExtent(float halfExtent) {
@@ -26,6 +45,7 @@ void OrbitCamera::FitToExtent(float halfExtent) {
 }
 
 void OrbitCamera::Pan(float deltaRight, float deltaForward) {
+  focusing_ = false;
   const glm::vec3 forward(-std::cos(yaw_), 0.0f, -std::sin(yaw_));
   const glm::vec3 right(std::sin(yaw_), 0.0f, -std::cos(yaw_));
   target += (right * deltaRight + forward * deltaForward) * distance_;

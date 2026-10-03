@@ -112,7 +112,8 @@ jobs:
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           repo="${GITHUB_REPOSITORY#*/}"
           url="https://${owner}.github.io/${repo}/pr-preview/pr-${PR_NUMBER}/scenarios/"
-          body="$(printf '%s\n%s' "$marker" "🎬 [Gameplay scenario review page](${url}) — per-team videos of every scenario, grouped by how this PR changes it, refreshed at commit \`${HEAD_SHA:0:7}\` (updates with each push; may take a minute to go live after deploy).")"
+          gallery_url="https://${owner}.github.io/${repo}/pr-preview/pr-${PR_NUMBER}/gallery/"
+          body="$(printf '%s\n%s\n\n%s' "$marker" "🎬 [Gameplay scenario review page](${url}) — per-team videos of every scenario, grouped by how this PR changes it, refreshed at commit \`${HEAD_SHA:0:7}\` (updates with each push; may take a minute to go live after deploy)." "🖼️ [Asset gallery](${gallery_url}) — browse models and animations, including this PR's changes.")"
           existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             --paginate --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" | head -n1)
           if [ -n "$existing" ]; then

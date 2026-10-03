@@ -1,10 +1,11 @@
-# Default playbook rule (do_nothing): identical layout to
-# playbook_shoot_on_fov_entry, but blue0 has no standing reaction, so red1
-# walks out from behind the wall unharmed and reaches its destination.
 name: playbook_do_nothing_lets_enemy_pass
+description: >
+  Default playbook rule (do_nothing): identical layout to playbook_shoot_on_fov_entry, but
+  blue0 has no standing reaction, so red1 walks out from behind the wall unharmed and
+  reaches its destination. A tall wall sits between blue0 and red1's start; red1 emerges
+  from its end.
 
 map:
-  # Tall wall between blue0 and red1's start; red1 emerges from its end.
   obstacles:
     - {center: [-3, 0], half_extent: [0.3, 2], height: 3}
 

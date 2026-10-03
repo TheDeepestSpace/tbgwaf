@@ -102,11 +102,11 @@ Screen flow (Splash -> Map Select -> Gameplay), declared in
 that file's contents below if the flow changes.
 
 ```mermaid
-%%{init: {"flowchart": {"htmlLabels": false}}}%%
+%%{init: {"flowchart": {"htmlLabels": false}, "themeVariables": {"fontFamily": "Arial, sans-serif"}}}%%
 flowchart TD
-    splash("Splash")
-    map_select("Map Select")
-    gameplay("Gameplay")
+    splash("  Splash  ")
+    map_select("  Map Select  ")
+    gameplay("  Gameplay  ")
     splash -->|new_game| map_select
     map_select -->|select_urban| gameplay
     map_select -->|back| splash

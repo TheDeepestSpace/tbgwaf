@@ -1,7 +1,7 @@
-%%{init: {"flowchart": {"htmlLabels": false}}}%%
+%%{init: {"flowchart": {"htmlLabels": false}, "themeVariables": {"fontFamily": "Arial, sans-serif"}}}%%
 flowchart TD
 {% for s in states %}
-    {{ s.id }}("{{ s.label }}")
+    {{ s.id }}("  {{ s.label }}  ")
 {% endfor %}
 {% for t in transitions %}
     {{ t['from'] }} -->|{{ t.event }}| {{ t.to }}

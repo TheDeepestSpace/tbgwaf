@@ -7,6 +7,29 @@
 
 namespace gfx {
 
+// Read-only per-frame render counters for the interactive debug panel.
+// Draw() calls record into the sink installed by SceneRenderer::RenderPane
+// (see ScopedDrawStats); with no sink installed (e.g. the visual runner)
+// recording is a no-op.
+struct RenderFrameStats {
+  int drawCalls = 0;
+  long long vertices = 0;
+  long long triangles = 0;
+};
+
+void RecordDraw(long long vertices, long long triangles);
+
+class ScopedDrawStats {
+ public:
+  explicit ScopedDrawStats(RenderFrameStats* sink);
+  ~ScopedDrawStats();
+  ScopedDrawStats(const ScopedDrawStats&) = delete;
+  ScopedDrawStats& operator=(const ScopedDrawStats&) = delete;
+
+ private:
+  RenderFrameStats* previous_;
+};
+
 // A unit cube spanning [0,1]^3, drawn with glDrawElements. Callers scale and
 // translate it via the model matrix to represent obstacles, unit bodies, etc.
 class CubeMesh {
@@ -70,6 +93,29 @@ class TriangleMesh {
   GLuint vao_ = 0;
   GLuint vbo_ = 0;
   GLsizei pointCount_ = 0;
+};
+
+// An indexed triangle mesh with per-vertex normals (location 1), uploaded
+// once per scene rather than per frame. Used for the terrain ground mesh,
+// which is drawn with the lit shader (so it needs normals, unlike the
+// dynamic overlay meshes above).
+class LitTriangleMesh {
+ public:
+  struct Vertex {
+    glm::vec3 pos;
+    glm::vec3 normal;
+  };
+  void Init();
+  void Destroy();
+  void SetMesh(const std::vector<Vertex>& vertices, const std::vector<GLuint>& indices);
+  void Draw() const;
+  bool HasGeometry() const { return indexCount_ > 0; }
+
+ private:
+  GLuint vao_ = 0;
+  GLuint vbo_ = 0;
+  GLuint ebo_ = 0;
+  GLsizei indexCount_ = 0;
 };
 
 // A triangle soup with a per-vertex RGBA color (location 1), for gradient

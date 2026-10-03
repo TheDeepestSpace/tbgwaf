@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "game/Raycast.h"
+#include "game/Geometry.h"
 
 namespace tactics {
 namespace {
@@ -118,16 +119,30 @@ NavRegion SquareRegion(float halfExtent) {
 }  // namespace
 
 void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, float agentRadius) {
-  BuildGroundMesh(obstacles, SquareRegion(mapHalfExtent), agentRadius);
+  std::vector<Obstacle> typed;
+  typed.reserve(obstacles.size());
+  for (const AABB& bounds : obstacles) typed.push_back(Obstacle{bounds, false});
+  Build(typed, SquareRegion(mapHalfExtent), agentRadius, nullptr, nullptr);
 }
 
 void NavMesh::Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent,
-                     float agentRadius) {
-  Build(obstacles, SquareRegion(mapHalfExtent), agentRadius);
+                     float agentRadius, const HeightField* ground,
+                     const std::vector<WalkSurface>* walkSurfaces) {
+  Build(obstacles, SquareRegion(mapHalfExtent), agentRadius, ground, walkSurfaces);
 }
 
 void NavMesh::Build(const std::vector<Obstacle>& obstacles, const NavRegion& region,
-                     float agentRadius) {
+                     float agentRadius, const HeightField* ground,
+                     const std::vector<WalkSurface>* walkSurfaces) {
+  ground_ = ground ? *ground : HeightField{};
+  walkSurfaces_ = walkSurfaces ? *walkSurfaces : std::vector<WalkSurface>{};
+  polygonMode_ = false;
+  paddedPolygons_.clear();
+  paddedPolygons_.reserve(obstacles.size());
+  for (const Obstacle& obstacle : obstacles) {
+    polygonMode_ |= !obstacle.footprint.empty();
+    paddedPolygons_.push_back(ExpandConvexPolygon(ObstacleFootprint(obstacle), agentRadius));
+  }
   BuildGroundMesh(ObstacleBounds(obstacles), region, agentRadius);
   AddClimbConnections(obstacles, agentRadius);
 }
@@ -234,7 +249,7 @@ void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float 
     if (xMax <= xMin + kEps || zMax <= zMin + kEps) continue;  // Too small to stand on.
 
     const int topIdx = static_cast<int>(cells_.size());
-    cells_.push_back(NavCell{xMin, xMax, zMin, zMax, bounds.max.y});
+    cells_.push_back(NavCell{xMin, xMax, zMin, zMax, bounds.max.y, /*climbTop=*/true});
     neighbors_.emplace_back();
 
     const AABB padded{
@@ -255,7 +270,9 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
   ReachField field;
   field.step = step;
   field.budget = budget;
-  if (budget <= 0.0f || step <= 0.0f || !IsWalkable(start.x, start.z)) return field;
+  if (budget <= 0.0f || step <= 0.0f) return field;
+  const int startSurface = FindWalkSurfaceContaining(start.x, start.z, start.y);
+  if (startSurface < 0 && !IsWalkable(start.x, start.z)) return field;
 
   // Align the grid so the source is exactly a node.
   const int radius = static_cast<int>(std::ceil(budget / step));
@@ -264,6 +281,14 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
   field.nx = field.nz = 2 * radius + 1;
   const float inf = std::numeric_limits<float>::infinity();
   field.dist.assign(static_cast<size_t>(field.nx) * field.nz, inf);
+  field.surfaceY.resize(field.dist.size(), 0.0f);
+  for (int iz = 0; iz < field.nz; ++iz) {
+    for (int ix = 0; ix < field.nx; ++ix) {
+      const float x = field.minX + ix * field.step;
+      const float z = field.minZ + iz * field.step;
+      field.surfaceY[iz * field.nx + ix] = ground_.HeightAt(x, z);
+    }
+  }
 
   // 16-neighbour moves (8 king + 8 knight) keep grid distance close to
   // Euclidean (< ~2% error) while still routing around obstacles.
@@ -279,44 +304,132 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
     }
     return w == 1;
   };
+  // Node position on the walked surface: distances then include the vertical
+  // component over hilly terrain, matching FindPath's terrain-lifted paths.
+  auto nodeWorld = [&](int ix, int iz) {
+    glm::vec3 p = field.Node(ix, iz);
+    p.y = ground_.HeightAt(p.x, p.z);
+    return p;
+  };
 
-  using Entry = std::pair<float, int>;
-  std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
-  const int startIdx = radius * field.nx + radius;
-  field.dist[startIdx] = 0.0f;
-  open.push({0.0f, startIdx});
-  while (!open.empty()) {
-    const auto [d, idx] = open.top();
-    open.pop();
-    if (d > field.dist[idx]) continue;
-    const int ix = idx % field.nx, iz = idx / field.nx;
-    const glm::vec3 from = field.Node(ix, iz);
-    for (const auto& m : kMoves) {
-      const int jx = ix + m[0], jz = iz + m[1];
-      if (jx < 0 || jz < 0 || jx >= field.nx || jz >= field.nz) continue;
-      if (!nodeWalkable(jx, jz)) continue;
-      const glm::vec3 to = field.Node(jx, jz);
-      const float nd = d + glm::distance(from, to);
-      const int jdx = jz * field.nx + jx;
-      if (nd > budget || nd >= field.dist[jdx]) continue;
-      if (!LineOfSightClear(from, to, paddedFootprints_)) continue;
-      field.dist[jdx] = nd;
-      open.push({nd, jdx});
+  if (startSurface < 0) {
+    using Entry = std::pair<float, int>;
+    std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+    const int startIdx = radius * field.nx + radius;
+    field.dist[startIdx] = 0.0f;
+    open.push({0.0f, startIdx});
+    while (!open.empty()) {
+      const auto [d, idx] = open.top();
+      open.pop();
+      if (d > field.dist[idx]) continue;
+      const int ix = idx % field.nx, iz = idx / field.nx;
+      const glm::vec3 from = nodeWorld(ix, iz);
+      for (const auto& m : kMoves) {
+        const int jx = ix + m[0], jz = iz + m[1];
+        if (jx < 0 || jz < 0 || jx >= field.nx || jz >= field.nz) continue;
+        if (!nodeWalkable(jx, jz)) continue;
+        const glm::vec3 to = nodeWorld(jx, jz);
+        const float nd = d + glm::distance(from, to);
+        const int jdx = jz * field.nx + jx;
+        if (nd > budget || nd >= field.dist[jdx]) continue;
+        bool clear = true;
+        if (polygonMode_) {
+          for (const auto& polygon : paddedPolygons_) {
+            if (SegmentEntersConvexPolygon({from.x, from.z}, {to.x, to.z}, polygon)) {
+              clear = false;
+              break;
+            }
+          }
+        } else {
+          clear = LineOfSightClear(from, to, paddedFootprints_);
+        }
+        if (!clear) continue;
+        field.dist[jdx] = nd;
+        open.push({nd, jdx});
+      }
+    }
+  }
+
+  std::vector<float> entryCost(walkSurfaces_.size(), inf);
+  if (startSurface < 0) {
+    for (size_t entry = 0; entry < walkSurfaces_.size(); ++entry) {
+      if (!walkSurfaces_[entry].connectsToGround) continue;
+      const glm::vec3 connection = GroundConnectionPoint(static_cast<int>(entry));
+      glm::vec3 groundConnection = connection;
+      groundConnection.y = ground_.HeightAt(connection.x, connection.z);
+      std::vector<glm::vec3> path;
+      if (!FindGroundPath(start, groundConnection, &path)) continue;
+      float length = glm::distance(groundConnection, connection);
+      for (size_t i = 0; i + 1 < path.size(); ++i) length += glm::distance(path[i], path[i + 1]);
+      entryCost[entry] = length;
+    }
+  }
+
+  // Add the explicit stacked layer without ever connecting it merely because
+  // it overlaps ground in XZ. A ground start must first route to a declared
+  // ramp foot; a surface start remains on its connected surface component.
+  for (int iz = 0; iz < field.nz; ++iz) {
+    for (int ix = 0; ix < field.nx; ++ix) {
+      const int idx = iz * field.nx + ix;
+      const float x = field.minX + ix * field.step;
+      const float z = field.minZ + iz * field.step;
+      for (size_t surface = 0; surface < walkSurfaces_.size(); ++surface) {
+        if (!SurfaceContainsXZ(walkSurfaces_[surface], x, z)) continue;
+        glm::vec3 goal(x, SurfaceHeightAt(walkSurfaces_[surface], x, z), z);
+        std::vector<glm::vec3> path;
+        bool found = false;
+        float surfaceBaseCost = 0.0f;
+        if (startSurface >= 0) {
+          found = FindSurfacePath(startSurface, start, static_cast<int>(surface), goal, &path);
+        } else {
+          for (size_t entry = 0; entry < walkSurfaces_.size() && !found; ++entry) {
+            if (!std::isfinite(entryCost[entry])) continue;
+            const glm::vec3 connection = GroundConnectionPoint(static_cast<int>(entry));
+            if (!FindSurfacePath(static_cast<int>(entry), connection,
+                                 static_cast<int>(surface), goal, &path)) {
+              continue;
+            }
+            surfaceBaseCost = entryCost[entry];
+            found = true;
+          }
+        }
+        if (!found) continue;
+        float distance = surfaceBaseCost;
+        for (size_t i = 0; i + 1 < path.size(); ++i) distance += glm::distance(path[i], path[i + 1]);
+        if (distance <= budget && (startSurface >= 0 || distance < field.dist[idx] + 0.5f)) {
+          field.dist[idx] = distance;
+          field.surfaceY[idx] = goal.y;
+        }
+      }
     }
   }
   return field;
 }
 
-bool NavMesh::IsWalkable(float x, float z) const { return FindCellContaining(x, z) >= 0; }
+bool NavMesh::IsWalkable(float x, float z) const {
+  if (!polygonMode_) return FindCellContaining(x, z) >= 0;
+  if (x < region_.xMin || x > region_.xMax || z < region_.zMin || z > region_.zMax) return false;
+  for (const auto& polygon : paddedPolygons_) {
+    if (PointInConvexPolygon({x, z}, polygon)) return false;
+  }
+  return true;
+}
 
-int NavMesh::FindCellContaining(float x, float z) const { return FindCellContaining(x, z, 0.0f); }
+// Ground cells only, so IsWalkable matches its documented "ground level"
+// semantics regardless of the terrain height under (x, z).
+int NavMesh::FindCellContaining(float x, float z) const {
+  for (size_t i = 0; i < cells_.size(); ++i) {
+    if (!cells_[i].climbTop && cells_[i].Contains(x, z)) return static_cast<int>(i);
+  }
+  return -1;
+}
 
 int NavMesh::FindCellContaining(float x, float z, float yHint) const {
   int best = -1;
   float bestDy = std::numeric_limits<float>::infinity();
   for (size_t i = 0; i < cells_.size(); ++i) {
     if (!cells_[i].Contains(x, z)) continue;
-    const float dy = std::fabs(cells_[i].elevation - yHint);
+    const float dy = std::fabs(SurfaceY(cells_[i], x, z) - yHint);
     if (dy < bestDy) {
       bestDy = dy;
       best = static_cast<int>(i);
@@ -325,9 +438,307 @@ int NavMesh::FindCellContaining(float x, float z, float yHint) const {
   return best;
 }
 
+int NavMesh::FindWalkSurfaceContaining(float x, float z, float yHint) const {
+  int best = -1;
+  float bestDy = std::fabs(ground_.HeightAt(x, z) - yHint) + 1e-4f;
+  for (size_t i = 0; i < walkSurfaces_.size(); ++i) {
+    if (!SurfaceContainsXZ(walkSurfaces_[i], x, z)) continue;
+    const float dy = std::fabs(SurfaceHeightAt(walkSurfaces_[i], x, z) - yHint);
+    if (dy <= bestDy) {
+      bestDy = dy;
+      best = static_cast<int>(i);
+    }
+  }
+  return best;
+}
+
+float NavMesh::ResolveSurfaceY(float x, float z, float yHint) const {
+  const int surface = FindWalkSurfaceContaining(x, z, yHint);
+  return surface >= 0 ? SurfaceHeightAt(walkSurfaces_[surface], x, z) : ground_.HeightAt(x, z);
+}
+
+glm::vec3 NavMesh::GroundConnectionPoint(int surface) const {
+  if (surface < 0 || static_cast<size_t>(surface) >= walkSurfaces_.size()) return glm::vec3(0.0f);
+  const WalkSurface& patch = walkSurfaces_[surface];
+  if (patch.vertices.empty()) return glm::vec3(0.0f);
+  float lowest = patch.vertices.front().y;
+  for (const glm::vec3& v : patch.vertices) lowest = std::min(lowest, v.y);
+  glm::vec3 sum(0.0f);
+  int count = 0;
+  for (const glm::vec3& v : patch.vertices) {
+    if (std::fabs(v.y - lowest) < 1e-3f) {
+      sum += v;
+      ++count;
+    }
+  }
+  return count ? sum / static_cast<float>(count) : SurfaceCenter(patch);
+}
+
+bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface,
+                              glm::vec3 goal, std::vector<glm::vec3>* outPath) const {
+  outPath->clear();
+  if (startSurface < 0 || goalSurface < 0 ||
+      static_cast<size_t>(startSurface) >= walkSurfaces_.size() ||
+      static_cast<size_t>(goalSurface) >= walkSurfaces_.size()) {
+    return false;
+  }
+  const size_t n = walkSurfaces_.size();
+  std::vector<float> distance(n, std::numeric_limits<float>::infinity());
+  std::vector<int> parent(n, -1);
+  using Entry = std::pair<float, int>;
+  std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+  distance[startSurface] = 0.0f;
+  open.push({0.0f, startSurface});
+  while (!open.empty()) {
+    const auto [d, current] = open.top();
+    open.pop();
+    if (d != distance[current]) continue;
+    if (current == goalSurface) break;
+    for (int next : walkSurfaces_[current].neighbors) {
+      if (next < 0 || static_cast<size_t>(next) >= n) continue;
+      const float edge = glm::distance(SurfaceCenter(walkSurfaces_[current]),
+                                       SurfaceCenter(walkSurfaces_[next]));
+      if (d + edge < distance[next]) {
+        distance[next] = d + edge;
+        parent[next] = current;
+        open.push({distance[next], next});
+      }
+    }
+  }
+  if (!std::isfinite(distance[goalSurface])) return false;
+  std::vector<int> route;
+  for (int node = goalSurface; node >= 0; node = parent[node]) route.push_back(node);
+  std::reverse(route.begin(), route.end());
+
+  start.y = SurfaceHeightAt(walkSurfaces_[startSurface], start.x, start.z);
+  goal.y = SurfaceHeightAt(walkSurfaces_[goalSurface], goal.x, goal.z);
+
+  // Height on the corridor at (x, z): the first route surface containing the
+  // point. Bends sit on seam vertices shared by both neighbors, where the
+  // two planes agree, so "first containing" is unambiguous there.
+  auto corridorY = [&](float x, float z, float fallback) {
+    for (int node : route) {
+      if (SurfaceContainsXZ(walkSurfaces_[node], x, z)) {
+        return SurfaceHeightAt(walkSurfaces_[node], x, z);
+      }
+    }
+    return fallback;
+  };
+
+  // Walk the surface corridor. Runs of seam-adjacent surfaces are pulled
+  // taut with the funnel through the shared seam edges (instead of forcing
+  // every seam midpoint, which dog-legged paths via the deck centerline);
+  // transitions without a shared edge stay hard waypoints. Funneled segments
+  // are densified so the path tracks the deck's changing grade between
+  // seams rather than cutting straight through a crest or sag.
+  outPath->push_back(start);
+  glm::vec3 from = start;
+  std::vector<Portal> portals;
+  auto flush = [&](glm::vec3 to) {
+    std::vector<glm::vec2> pts;
+    Funnel({from.x, from.z}, {to.x, to.z}, portals, &pts);
+    constexpr float kSurfacePathStep = 1.5f;
+    glm::vec3 prev = from;
+    for (const glm::vec2& pt : pts) {
+      glm::vec3 p(pt.x, 0.0f, pt.y);
+      p.y = corridorY(p.x, p.z, prev.y);
+      const float len = glm::length(glm::vec2(p.x - prev.x, p.z - prev.z));
+      const int pieces = static_cast<int>(std::ceil(len / kSurfacePathStep));
+      for (int k = 1; k < pieces; ++k) {
+        const float t = static_cast<float>(k) / static_cast<float>(pieces);
+        glm::vec3 q = prev + (p - prev) * t;
+        q.y = corridorY(q.x, q.z, q.y);
+        if (glm::distance(q, outPath->back()) > kEps) outPath->push_back(q);
+      }
+      if (glm::distance(p, outPath->back()) > kEps) outPath->push_back(p);
+      prev = p;
+    }
+    outPath->back().y = to.y;
+    portals.clear();
+    from = to;
+  };
+  for (size_t i = 0; i + 1 < route.size(); ++i) {
+    const WalkSurface& a = walkSurfaces_[route[i]];
+    const WalkSurface& b = walkSurfaces_[route[i + 1]];
+    std::vector<glm::vec3> shared;
+    for (const glm::vec3& av : a.vertices) {
+      for (const glm::vec3& bv : b.vertices) {
+        if (glm::distance(av, bv) < 1e-3f) shared.push_back((av + bv) * 0.5f);
+      }
+    }
+    if (shared.size() == 2) {
+      // Full shared seam: a funnel portal, oriented left/right for the
+      // direction of travel (from the previous portal, or the funnel start).
+      const glm::vec2 u(shared[0].x, shared[0].z);
+      const glm::vec2 v(shared[1].x, shared[1].z);
+      const glm::vec2 mid = (u + v) * 0.5f;
+      const glm::vec2 ref = portals.empty()
+                                ? glm::vec2(from.x, from.z)
+                                : (portals.back().left + portals.back().right) * 0.5f;
+      glm::vec2 d = mid - ref;
+      if (glm::dot(d, d) < kEps * kEps) d = glm::vec2(goal.x, goal.z) - mid;
+      const float crossU = d.x * (u.y - mid.y) - d.y * (u.x - mid.x);
+      const float crossV = d.x * (v.y - mid.y) - d.y * (v.x - mid.x);
+      portals.push_back(crossU >= crossV ? Portal{u, v} : Portal{v, u});
+      continue;
+    }
+    glm::vec3 transition(0.0f);
+    if (!shared.empty()) {
+      for (const glm::vec3& s : shared) transition += s;
+      transition /= static_cast<float>(shared.size());
+    } else {
+      // A ramp may terminate in the interior of a wider deck. Prefer a
+      // vertex contained by both, then fall back to the midpoint of centers.
+      int contained = 0;
+      for (const glm::vec3& v : a.vertices) {
+        if (SurfaceContainsXZ(b, v.x, v.z)) {
+          transition += v;
+          ++contained;
+        }
+      }
+      if (contained) transition /= static_cast<float>(contained);
+      else transition = (SurfaceCenter(a) + SurfaceCenter(b)) * 0.5f;
+    }
+    transition.y = 0.5f * (SurfaceHeightAt(a, transition.x, transition.z) +
+                            SurfaceHeightAt(b, transition.x, transition.z));
+    flush(transition);
+  }
+  flush(goal);
+  return true;
+}
+
+bool NavMesh::FindPolygonGroundPath(glm::vec3 start, glm::vec3 goal,
+                                    std::vector<glm::vec3>* outPath) const {
+  outPath->clear();
+  if (!IsWalkable(start.x, start.z) || !IsWalkable(goal.x, goal.z)) return false;
+  std::vector<glm::vec2> nodes = {{start.x, start.z}, {goal.x, goal.z}};
+  for (const auto& polygon : paddedPolygons_) {
+    for (const glm::vec2& p : polygon) {
+      if (p.x >= region_.xMin - kEps && p.x <= region_.xMax + kEps &&
+          p.y >= region_.zMin - kEps && p.y <= region_.zMax + kEps) {
+        nodes.push_back(p);
+      }
+    }
+  }
+  // Broad-phase bounds keep the O(nodes^2) visibility sweep cheap on dense
+  // polygon scenes: most node pairs are nowhere near most footprints.
+  std::vector<glm::vec4> polygonBounds;  // (xMin, zMin, xMax, zMax)
+  polygonBounds.reserve(paddedPolygons_.size());
+  for (const auto& polygon : paddedPolygons_) {
+    glm::vec4 bounds(std::numeric_limits<float>::infinity(),
+                     std::numeric_limits<float>::infinity(),
+                     -std::numeric_limits<float>::infinity(),
+                     -std::numeric_limits<float>::infinity());
+    for (const glm::vec2& p : polygon) {
+      bounds.x = std::min(bounds.x, p.x);
+      bounds.y = std::min(bounds.y, p.y);
+      bounds.z = std::max(bounds.z, p.x);
+      bounds.w = std::max(bounds.w, p.y);
+    }
+    polygonBounds.push_back(bounds);
+  }
+  auto clear = [&](glm::vec2 a, glm::vec2 b) {
+    const float xMin = std::min(a.x, b.x), xMax = std::max(a.x, b.x);
+    const float zMin = std::min(a.y, b.y), zMax = std::max(a.y, b.y);
+    for (size_t i = 0; i < paddedPolygons_.size(); ++i) {
+      const glm::vec4& bounds = polygonBounds[i];
+      if (xMax < bounds.x || xMin > bounds.z || zMax < bounds.y || zMin > bounds.w) continue;
+      if (SegmentEntersConvexPolygon(a, b, paddedPolygons_[i])) return false;
+    }
+    return true;
+  };
+  const size_t n = nodes.size();
+  std::vector<float> distance(n, std::numeric_limits<float>::infinity());
+  std::vector<int> parent(n, -1);
+  std::vector<char> closed(n, false);
+  using Entry = std::pair<float, int>;
+  std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+  distance[0] = 0.0f;
+  open.push({0.0f, 0});
+  while (!open.empty()) {
+    const auto [d, current] = open.top();
+    open.pop();
+    if (closed[current]) continue;
+    closed[current] = true;
+    if (current == 1) break;
+    for (size_t next = 0; next < n; ++next) {
+      if (next == static_cast<size_t>(current) || closed[next] || !clear(nodes[current], nodes[next])) {
+        continue;
+      }
+      const float candidate = d + glm::distance(nodes[current], nodes[next]);
+      if (candidate < distance[next]) {
+        distance[next] = candidate;
+        parent[next] = current;
+        open.push({candidate, static_cast<int>(next)});
+      }
+    }
+  }
+  if (!std::isfinite(distance[1])) return false;
+  std::vector<int> route;
+  for (int node = 1; node >= 0; node = parent[node]) route.push_back(node);
+  std::reverse(route.begin(), route.end());
+  for (int node : route) {
+    const glm::vec2 p = nodes[node];
+    outPath->emplace_back(p.x, ground_.HeightAt(p.x, p.y), p.y);
+  }
+  return true;
+}
+
 bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* outPath) const {
   if (!outPath) return false;
   outPath->clear();
+  const int startSurface = FindWalkSurfaceContaining(start.x, start.z, start.y);
+  const int goalSurface = FindWalkSurfaceContaining(goal.x, goal.z, goal.y);
+  if (startSurface < 0 && goalSurface < 0) return FindGroundPath(start, goal, outPath);
+  if (startSurface >= 0 && goalSurface >= 0) {
+    return FindSurfacePath(startSurface, start, goalSurface, goal, outPath);
+  }
+
+  // The only ground/surface transition is a patch that explicitly declares
+  // a ramp foot. Try every such patch and retain the shortest complete route.
+  std::vector<glm::vec3> best;
+  float bestLength = std::numeric_limits<float>::infinity();
+  for (size_t entry = 0; entry < walkSurfaces_.size(); ++entry) {
+    if (!walkSurfaces_[entry].connectsToGround) continue;
+    const glm::vec3 connection = GroundConnectionPoint(static_cast<int>(entry));
+    glm::vec3 groundConnection = connection;
+    groundConnection.y = ground_.HeightAt(connection.x, connection.z);
+    std::vector<glm::vec3> groundPath, surfacePath, candidate;
+    bool found = false;
+    if (startSurface < 0) {
+      found = FindGroundPath(start, groundConnection, &groundPath) &&
+              FindSurfacePath(static_cast<int>(entry), connection, goalSurface, goal,
+                              &surfacePath);
+      candidate = std::move(groundPath);
+      candidate.insert(candidate.end(), surfacePath.begin(), surfacePath.end());
+    } else {
+      found = FindSurfacePath(startSurface, start, static_cast<int>(entry), connection,
+                              &surfacePath) &&
+              FindGroundPath(groundConnection, goal, &groundPath);
+      candidate = std::move(surfacePath);
+      candidate.insert(candidate.end(), groundPath.begin(), groundPath.end());
+    }
+    if (!found) continue;
+    float length = 0.0f;
+    for (size_t i = 0; i + 1 < candidate.size(); ++i) {
+      length += glm::distance(candidate[i], candidate[i + 1]);
+    }
+    if (length < bestLength) {
+      bestLength = length;
+      best = std::move(candidate);
+    }
+  }
+  if (best.empty()) return false;
+  *outPath = std::move(best);
+  return true;
+}
+
+bool NavMesh::FindGroundPath(glm::vec3 start, glm::vec3 goal,
+                             std::vector<glm::vec3>* outPath) const {
+  if (!outPath) return false;
+  outPath->clear();
+
+  if (polygonMode_) return FindPolygonGroundPath(start, goal, outPath);
 
   const int startCell = FindCellContaining(start.x, start.z, start.y);
   const int goalCell = FindCellContaining(goal.x, goal.z, goal.y);
@@ -338,6 +749,10 @@ bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* 
   if (startCell == goalCell) {
     outPath->push_back(start);
     outPath->push_back(goal);
+    // Same lift as the multi-cell exit below: without it a short move whose
+    // start and goal share one slab cell would stay at flat-space y = 0 and
+    // the figure would walk under the hills.
+    LiftGroundPathOntoTerrain(outPath);
     return true;
   }
 
@@ -455,7 +870,41 @@ bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* 
     }
   }
   flush(goal);
+
+  LiftGroundPathOntoTerrain(outPath);
   return true;
+}
+
+// Lift a flat-space ground path onto the terrain: every ground-level waypoint
+// (y == 0 in flat space; climb-top waypoints keep their obstacle height)
+// gets its Y from the heightfield, and ground segments are densified so
+// linear interpolation between waypoints tracks the slope.
+void NavMesh::LiftGroundPathOntoTerrain(std::vector<glm::vec3>* outPath) const {
+  if (ground_.Empty()) return;
+  constexpr float kTerrainPathStep = 1.0f;
+  std::vector<glm::vec3> lifted;
+  lifted.reserve(outPath->size() * 4);
+  const auto isGroundLevel = [](const glm::vec3& p) { return std::fabs(p.y) < kEps; };
+  const auto lift = [&](glm::vec3 p) {
+    if (isGroundLevel(p)) p.y = ground_.HeightAt(p.x, p.z);
+    return p;
+  };
+  for (size_t i = 0; i < outPath->size(); ++i) {
+    const glm::vec3& a = (*outPath)[i];
+    lifted.push_back(lift(a));
+    if (i + 1 >= outPath->size()) continue;
+    const glm::vec3& b = (*outPath)[i + 1];
+    if (!isGroundLevel(a) || !isGroundLevel(b)) continue;  // Climb steps stay two points.
+    const float len = glm::length(glm::vec2(b.x - a.x, b.z - a.z));
+    const int pieces = static_cast<int>(std::ceil(len / kTerrainPathStep));
+    for (int k = 1; k < pieces; ++k) {
+      const float t = static_cast<float>(k) / static_cast<float>(pieces);
+      glm::vec3 p = a + (b - a) * t;
+      p.y = ground_.HeightAt(p.x, p.z);
+      lifted.push_back(p);
+    }
+  }
+  *outPath = std::move(lifted);
 }
 
 }  // namespace tactics

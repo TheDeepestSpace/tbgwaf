@@ -54,10 +54,7 @@ std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
     if (ImGui::Button("Random")) *mapSeed = std::random_device{}();
     ImGui::Spacing();
     if (ImGui::Button("Urban", button)) fired = Event::SelectUrban;
-    // Hills becomes selectable once the hilly-terrain generator (#90/#93) lands.
-    ImGui::BeginDisabled();
-    ImGui::Button("Hills (coming soon)", button);
-    ImGui::EndDisabled();
+    if (ImGui::Button("Hills", button)) fired = Event::SelectHills;
     ImGui::Spacing();
     if (ImGui::Button("Back", ImVec2(100.0f, 0.0f))) fired = Event::Back;
     ImGui::End();

@@ -1,10 +1,10 @@
-# Replicates the original open-lane layout (not the current BuildDefaultScene()) and the same shot
-# outcomes as TestGameLogicShootRowsMatchLayout in tests/logic_tests.cpp:
-# the top/bottom lanes are wall-blocked (shots there must miss), the middle
-# lane is open (a clean shot must hit). Under WEGO rounds both teams plan the
-# same round, so the middle lane's mutual blue1 <-> red4 exchange resolves
-# simultaneously and downs both shooters.
 name: default_scene_shoot_rows
+description: >
+  Replicates the original open-lane layout (not the current BuildDefaultScene()) and the
+  same shot outcomes as TestGameLogicShootRowsMatchLayout in tests/logic_tests.cpp: the
+  top/bottom lanes are wall-blocked (shots there must miss), the middle lane is open (a
+  clean shot must hit). Under WEGO rounds both teams plan the same round, so the middle
+  lane's mutual blue1 <-> red4 exchange resolves simultaneously and downs both shooters.
 
 map:
   obstacles:
@@ -24,12 +24,8 @@ units:
   - {id: 5, team: red, position: [8, 0, 4], facing_degrees: 180}
 
 script:
-  # Both teams plan the same round: every figure shoots its opposite number,
-  # then a single commit resolves everything at once. Rows z=-4 and z=4 are
-  # behind walls (those four shots must all miss); row z=0 is the open middle
-  # lane, so blue1 and red4 shoot each other in the same instant -- judged
-  # against the same snapshot, both shots land and both figures drop.
   - action: shoot
+    description: "Both teams plan the same round: every figure shoots its opposite number, then a single commit resolves everything at once. Rows z=-4 and z=4 are behind walls (those four shots must all miss); row z=0 is the open middle lane, so blue1 and red4 shoot each other in the same instant -- judged against the same snapshot, both shots land and both figures drop."
     actor: 0
     target: 3
   - action: shoot
@@ -50,10 +46,10 @@ script:
   - action: commit
 
   - assert: {unit: 0, alive: true}
-  - assert: {unit: 1, alive: false}  # Mutual middle-lane exchange.
+  - assert: {unit: 1, alive: false, comment: Mutual middle-lane exchange}
   - assert: {unit: 2, alive: true}
   - assert: {unit: 3, alive: true}
-  - assert: {unit: 4, alive: false}  # Mutual middle-lane exchange.
+  - assert: {unit: 4, alive: false, comment: Mutual middle-lane exchange}
   - assert: {unit: 5, alive: true}
-  - assert: {winner: none}  # Both teams still have two survivors.
+  - assert: {winner: none, comment: Both teams still have two survivors}
   - assert: {round: 2}

@@ -11,12 +11,12 @@ render and are listed by name only. The page is deployed into the existing
 per-PR gh-pages preview by .github/workflows/pr-preview.yml.
 
 Each scenario additionally gets a third column: a human-readable breakdown
-of its YAML (description, setup, script), grouped into rounds (the steps between `action: commit`
+of its YAML (camera, script; the scenario `description` goes under its name), grouped into rounds (the steps between `action: commit`
 boundaries). The runner's --video mode emits a timing.json sidecar mapping
 each executed action to its frame/timestamp in the (frame-identical) blue
 and red videos; the page's JS drives both panes from one shared transport,
 highlights the breakdown step currently playing, and seeks both videos to a
-step's start when it is clicked. Setup, asserts and comments appear as inert
+step's start when it is clicked. The camera, asserts and YAML `description`/`comment` keys appear as inert
 italic prose so the page conveys everything the YAML does. The scenario YAML is parsed with a small
 built-in subset parser (block/flow mappings and sequences, plain scalars) so
 the script keeps its no-dependency footprint; a scenario whose YAML falls
@@ -71,7 +71,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .step.active {{ background: #2c3a55; box-shadow: inset 0 0 0 1px #4a6da8; }}
   .detail {{ font-style: italic; color: #8a919c; user-select: none;
             -webkit-user-select: none; padding: 0.05rem 0.4rem; }}
-  .detail.description {{ margin-bottom: 0.4rem; }}
+  .scenario .description {{ margin: 0.4rem 0 0; max-width: 90ch; color: #b8c0cc; }}
   .detail.indent {{ padding-left: 1.2rem; }}
   span.detail {{ padding: 0; }}
   .step .u {{ font-weight: bold; }}
@@ -278,7 +278,15 @@ def _parse_block_map(lines: list[tuple[int, str]], i: int, indent: int):
             raise ValueError(f"expected 'key: value', got: {text!r}")
         key = key.strip().strip("'\"")
         rest = rest.strip()
-        if rest:
+        if rest in (">", "|", ">-", "|-"):
+            # Block scalar: the deeper-indented lines, folded onto one line.
+            i += 1
+            body = []
+            while i < len(lines) and lines[i][0] > indent:
+                body.append(lines[i][1])
+                i += 1
+            out[key] = " ".join(body)
+        elif rest:
             out[key] = _parse_flow(rest, 0)[0] if rest[0] in "{[" else _scalar(rest)
             i += 1
         else:
@@ -434,60 +442,14 @@ def _assert_text(check: dict, units: dict) -> str:
     return text + _fmt_extras(check, set())
 
 
-def _comment_of(line: str) -> str:
-    code = _strip_comment(line)
-    return line[len(code):].strip().lstrip("#").strip() if len(code) < len(line) else ""
-
-
-def extract_comments(yaml_text: str) -> tuple[list[str], dict[int, tuple[list[str], list[str]]], list[str]]:
-    """Recovers what the YAML parser discards. Returns (description, notes,
-    trailing): `description` is the comment block above the first key;
-    `notes[i]` is (comment lines above, inline comments) for the i-th item of
-    the `script:` list (parallel to the parsed list); `trailing` is any
-    comment after the last item."""
-    description: list[str] = []
-    seen_key = False
-    in_script = False
-    dash_indent = None
-    item = -1
-    pending: list[str] = []
-    notes: dict[int, tuple[list[str], list[str]]] = {}
-    for raw in yaml_text.splitlines():
-        stripped = raw.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("#"):
-            text = stripped.lstrip("#").strip()
-            if not seen_key:
-                description.append(text)
-            elif in_script:
-                pending.append(text)
-            continue
-        indent = len(raw) - len(raw.lstrip(" "))
-        if indent == 0:
-            seen_key = True
-            in_script = stripped.startswith("script:")
-            continue
-        if not in_script:
-            continue
-        if stripped.startswith("-") and (dash_indent is None or indent == dash_indent):
-            dash_indent = indent
-            item += 1
-            notes[item] = (pending, [])
-            pending = []
-        if item >= 0:
-            inline = _comment_of(raw)
-            if inline:
-                notes[item][1].append(inline)
-    return description, notes, pending
-
-
 def _note(text: str) -> str:
     return f'<div class="detail">{html.escape(text)}</div>'
 
 
-def _setup_html(doc: dict, units: dict) -> list[str]:
-    """Non-interactive prose for everything the YAML sets up before the script."""
+def _setup_html(doc: dict) -> list[str]:
+    """Non-interactive prose for the setup the board itself doesn't make
+    obvious. Units and obstacles are deliberately omitted: they are visible in
+    the video."""
     out: list[str] = []
     camera = doc.get("camera")
     if isinstance(camera, dict):
@@ -496,99 +458,86 @@ def _setup_html(doc: dict, units: dict) -> list[str]:
         if "zoom" in camera:
             text += f", zoom {_fmt_value(camera['zoom'])}"
         out.append(f'<div class="detail">{text}{_fmt_extras(camera, {"target", "zoom"})}</div>')
-    obstacles = (doc.get("map") or {}).get("obstacles") or []
-    if obstacles:
-        out.append('<div class="detail">Obstacles:</div>')
-        for ob in obstacles:
-            if not isinstance(ob, dict):
-                out.append(f'<div class="detail indent">{_fmt_value(ob)}</div>')
-                continue
-            text = f"at {_fmt_value(ob.get('center'))}, half-extent {_fmt_value(ob.get('half_extent'))}"
-            if "height" in ob:
-                text += f", height {_fmt_value(ob['height'])}"
-            if "climbable" in ob:
-                text += ", climbable" if ob["climbable"] else ", not climbable"
-            text += _fmt_extras(ob, {"center", "half_extent", "height", "climbable"})
-            out.append(f'<div class="detail indent">{text}</div>')
-    else:
-        out.append('<div class="detail">No obstacles.</div>')
-    out.append('<div class="detail">Units:</div>')
-    for unit in doc.get("units") or []:
-        if not isinstance(unit, dict):
-            continue
-        text = f"{_unit_label(units, unit.get('id'))} at {_fmt_value(unit.get('position'))}"
-        if "facing_degrees" in unit:
-            text += f", facing {_fmt_num(unit['facing_degrees'])}°"
-        text += _fmt_extras(unit, {"id", "team", "position", "facing_degrees"})
-        out.append(f'<div class="detail indent">{text}</div>')
     return out
 
 
-def build_breakdown_html(yaml_text: str) -> str:
-    """Parses a scenario YAML into the rounds/steps HTML for the breakdown
-    pane. Each executed action (assert steps don't count) gets a clickable
+def build_breakdown_html(yaml_text: str) -> tuple[str, str]:
+    """Parses a scenario YAML into (description, breakdown HTML): the
+    scenario's `description` text (shown under its name) and the rounds/steps
+    HTML for the breakdown pane. Each executed action (assert steps don't count) gets a clickable
     .step with data-action set to its 1-based index — the same index the
     visual runner's timing.json keys its video segments by; index 0 is the
-    initial state. Everything else the YAML conveys (description comments,
-    camera, map, units, asserts, script comments) is rendered as inert
-    italic .detail prose. Raises ValueError on YAML outside the supported
+    initial state. Everything else the YAML conveys is rendered as inert
+    italic .detail prose: the camera, a step's
+    `description` (describes the round it opens), a step's or assert's
+    `comment`, and the asserts themselves. Units and obstacles are omitted
+    (visible in the video). Raises ValueError on YAML outside the supported
     subset."""
     doc = load_yaml_subset(yaml_text)
     if not isinstance(doc, dict):
         raise ValueError("scenario YAML is not a mapping")
-    description, notes, trailing = extract_comments(yaml_text)
     units: dict = {}
     for unit in doc.get("units") or []:
         if isinstance(unit, dict) and "id" in unit:
             units[unit["id"]] = unit.get("team")
-    rounds: list[list[str]] = []
+    rounds: list[tuple[list[str], list[str]]] = []  # (descriptions, steps)
     current: list[str] = []
+    current_desc: list[str] = []
     committed_rounds = 0
     action_index = 0
-    for i, step in enumerate(doc.get("script") or []):
-        above, inline = notes.get(i, ([], []))
-        if above:
-            current.extend(_note(c) for c in above)
-        suffix = "".join(f' <span class="detail">— {html.escape(c)}</span>' for c in inline)
-        if isinstance(step, dict) and "action" in step:
+    for step in doc.get("script") or []:
+        if not isinstance(step, dict):
+            continue
+        if step.get("description"):
+            current_desc.append(_note(str(step["description"])))
+        if "action" in step:
+            comment = step.get("comment")
+            suffix = f' <span class="detail">— {html.escape(str(comment))}</span>' if comment else ""
             action_index += 1
             current.append(f'<div class="step" data-action="{action_index}">'
                            f"{_action_text(step, units)}{suffix}</div>")
             if step["action"] == "commit":
-                rounds.append(current)
-                current = []
+                rounds.append((current_desc, current))
+                current, current_desc = [], []
                 committed_rounds += 1
-        elif isinstance(step, dict) and "assert" in step:
+        elif "assert" in step:
             # Asserts don't execute (and have no timing); show what they check.
             check = step["assert"]
-            text = _assert_text(check, units) if isinstance(check, dict) else _fmt_value(check)
+            comment = None
+            if isinstance(check, dict):
+                check = dict(check)
+                comment = check.pop("comment", None) or step.get("comment")
+                text = _assert_text(check, units)
+            else:
+                text = _fmt_value(check)
+            suffix = f" — {html.escape(str(comment))}" if comment else ""
             line = f'<div class="detail">Check: {text}{suffix}</div>'
             # Right after a commit, the check is about the round just resolved.
-            (current if current or not rounds else rounds[-1]).append(line)
+            (current if current or not rounds else rounds[-1][1]).append(line)
     if not action_index:
         raise ValueError("scenario script has no actions")
-    current.extend(_note(c) for c in trailing)
     out = ['<div class="rounds">']
-    if description:
-        out.append(f'<div class="detail description">{html.escape(" ".join(description))}</div>')
-    out.append('<div class="round-title">Setup</div>')
-    out.extend(_setup_html(doc, units))
+    setup = _setup_html(doc)
+    if setup:
+        out.append('<div class="round-title">Setup</div>')
+        out.extend(setup)
     out.append('<div class="step" data-action="0">Initial state</div>')
     if current:  # Trailing actions never committed still form a block.
-        rounds.append(current)
-    for number, steps in enumerate(rounds, start=1):
+        rounds.append((current_desc, current))
+    for number, (desc, steps) in enumerate(rounds, start=1):
         title = f"Round {number}"
         if number > committed_rounds:
             title += " (uncommitted)"
         out.append(f'<div class="round"><div class="round-title">{title}</div>')
+        out.extend(desc)
         out.extend(steps)
         out.append("</div>")
     out.append("</div>")
-    return "\n".join(out)
+    return str(doc.get("description") or ""), "\n".join(out)
 
 
-def build_breakdowns(paths: list[str], repo_root: Path) -> dict[str, str | None]:
-    breakdowns: dict[str, str | None] = {}
+def build_breakdowns(paths: list[str], repo_root: Path) -> dict[str, tuple[str, str] | None]:
+    breakdowns: dict[str, tuple[str, str] | None] = {}
     for path in paths:
         try:
             breakdowns[path] = build_breakdown_html((repo_root / path).read_text())
@@ -658,7 +607,9 @@ def record_videos(paths: list[str], runner: Path, repo_root: Path, media_dir: Pa
     return results
 
 
-def scenario_entry(path: str, info: dict | None, breakdown: str | None = None) -> str:
+def scenario_entry(path: str, info: dict | None,
+                   breakdown: tuple[str, str] | None = None) -> str:
+    description, breakdown = breakdown or ("", "")
     name = html.escape(Path(path).stem)
     if info is None:  # Deleted: nothing to render.
         return (f'<div class="scenario"><h3>{name}</h3>'
@@ -667,6 +618,8 @@ def scenario_entry(path: str, info: dict | None, breakdown: str | None = None) -
     classes = "scenario has-video" if info["have_video"] else "scenario"
     lines = [f'<div class="{classes}" data-stem="{stem}"><h3>{name}</h3>'
              f'<div class="path">{html.escape(path)}</div>']
+    if description:
+        lines.append(f'<p class="description">{html.escape(description)}</p>')
     if not info["ok"]:
         note = "scenario script failed during visual playback"
         if info["have_video"]:
@@ -698,7 +651,7 @@ def scenario_entry(path: str, info: dict | None, breakdown: str | None = None) -
 
 
 def build_section(title: str, paths: list[str], results: dict | None,
-                  breakdowns: dict[str, str | None] | None = None) -> str:
+                  breakdowns: dict[str, tuple[str, str] | None] | None = None) -> str:
     body = [f'<h2>{html.escape(title)} <span class="count">({len(paths)})</span></h2>']
     if not paths:
         body.append('<p class="empty">None.</p>')

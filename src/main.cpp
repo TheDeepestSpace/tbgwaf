@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <limits>
 #include <optional>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -28,7 +29,9 @@
 #include "game/Visibility.h"
 #include "gfx/Camera.h"
 #include "gfx/SceneRenderer.h"
+#include "AppFlow.h"
 #include "ui/Hud.h"
+#include "ui/Menu.h"
 
 using tactics::DeserializeSnapshot;
 using tactics::GameLogic;
@@ -247,9 +250,13 @@ int main() {
   // One independent orbit camera per pane, so each side can freely
   // rotate/zoom its own view without affecting the other's.
   std::array<gfx::OrbitCamera, kMaxPanes> cameras;
-  // Both web clients must build the same city, so the seed is fixed unless a
-  // native run overrides it via TBGWAF_MAP_SEED.
+  // Both web clients must build the same city, so the web seed stays fixed.
+  // Native runs pick a random seed per launch (shown and editable on the Map
+  // Select screen); TBGWAF_MAP_SEED overrides it.
   uint32_t mapSeed = 1;
+#ifndef __EMSCRIPTEN__
+  mapSeed = std::random_device{}();
+#endif
   if (const char* seedEnv = std::getenv("TBGWAF_MAP_SEED")) {
     mapSeed = static_cast<uint32_t>(std::strtoul(seedEnv, nullptr, 10));
   }
@@ -306,6 +313,10 @@ int main() {
   int frameCount = 0;
   constexpr int kSmokeTestMaxFrames = 60;
   Uint32 lastFrameTicks = SDL_GetTicks();
+  // App-level screen (Splash -> Map Select -> gameplay), generated from
+  // flow/app_flow.yaml. Only Urban exists today, so every client builds the
+  // same seeded city regardless of which screen path it took.
+  tbgwaf_flow::State screen = tbgwaf_flow::kInitialState;
   // Local-only debug panel state (defaults: FOV and shadows on, FPS shown).
   gfx::RenderDebugOptions debugOptions;
   bool showFps = true;
@@ -483,6 +494,31 @@ int main() {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
+
+    if (screen != tbgwaf_flow::State::Gameplay) {
+      std::optional<tbgwaf_flow::Event> flowEvent =
+          tactics::ui::DrawMenu(screen, windowWidth, windowHeight, &mapSeed);
+      // Headless smoke run: walk the menu automatically so gameplay is exercised.
+      if (isSmokeTest && !flowEvent) {
+        flowEvent = screen == tbgwaf_flow::State::Splash ? tbgwaf_flow::Event::NewGame
+                                                         : tbgwaf_flow::Event::SelectUrban;
+      }
+      if (flowEvent) {
+        if (*flowEvent == tbgwaf_flow::Event::SelectUrban) {
+          game.Reset(tactics::GenerateUrbanMap(mapSeed));
+          for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
+        }
+        screen = tbgwaf_flow::Next(screen, *flowEvent);
+        lastFrameTicks = SDL_GetTicks();
+      }
+      glViewport(0, 0, windowWidth, windowHeight);
+      glClearColor(0.08f, 0.09f, 0.11f, 1.0f);
+      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+      ImGui::Render();
+      ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+      SDL_GL_SwapWindow(window);
+      return;
+    }
 
     const Uint32 nowTicks = SDL_GetTicks();
     const float dt = static_cast<float>(nowTicks - lastFrameTicks) / 1000.0f;

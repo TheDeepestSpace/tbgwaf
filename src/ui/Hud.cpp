@@ -167,14 +167,20 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
 }
 
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float fps,
-                    float top) {
+                    float frameMs, float fovMs, int figureCount,
+                    const gfx::RenderFrameStats& stats, float top) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
   ImGui::Begin("Debug", nullptr,
                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove);
   ImGui::Checkbox("Disable FOV cones", &disableFov);
   ImGui::Checkbox("Disable shadows", &disableShadows);
   ImGui::Checkbox("Show FPS", &showFps);
-  if (showFps) ImGui::Text("%.1f FPS", fps);
+  if (showFps) ImGui::Text("%.1f FPS (%.2f ms)", fps, frameMs);
+  ImGui::Text("Draw calls: %d", stats.drawCalls);
+  ImGui::Text("Triangles: %lld", stats.triangles);
+  ImGui::Text("Vertices: %lld", stats.vertices);
+  ImGui::Text("FOV cones: %.2f ms", fovMs);
+  ImGui::Text("Figures on screen: %d", figureCount);
   ImGui::End();
 }
 

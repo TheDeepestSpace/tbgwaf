@@ -244,11 +244,13 @@ listed by name only.</p>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
 </div>
 <div class="scenario has-video" data-stem="playbook_shoot_on_fov_entry"><h3>playbook_shoot_on_fov_entry</h3><div class="path">tests/scenarios/playbook_shoot_on_fov_entry.yaml</div>
-<p class="description">Standing playbook rule &quot;shoot&quot; (reaction_on_stationary: shoot): blue0 passes (stays stationary) while red1 walks out from behind a wall into blue0&#x27;s view. The moment red1 enters blue0&#x27;s FOV+LOS blue0 fires on its own, so red1 drops short of its destination. Counterpart: playbook_do_nothing_lets_enemy_pass. Mirrors TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds. A tall wall sits between blue0 and red1&#x27;s start; red1 starts hidden behind it and walks out past its end into view. Red2 stays back to keep red alive so the game isn&#x27;t over (the round would stay 1 on a win).</p>
+<p class="description">Standing playbook rule &quot;shoot&quot; (playbook.blue.stationary_*: shoot): blue0 passes (stays stationary) while red1 walks out from behind a wall into blue0&#x27;s view. The moment red1 enters blue0&#x27;s FOV+LOS blue0 fires on its own, so red1 drops short of its destination. Counterpart: playbook_do_nothing_lets_enemy_pass. Mirrors TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds. A tall wall sits between blue0 and red1&#x27;s start; red1 starts hidden behind it and walks out past its end into view. Red2 stays back to keep red alive so the game isn&#x27;t over (the round would stay 1 on a win).</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_shoot_on_fov_entry/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_shoot_on_fov_entry/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Playbook (blue): stationary seen: shoot, stationary unseen: shoot</div>
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1</div>
 <div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>

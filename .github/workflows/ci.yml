@@ -25,12 +25,30 @@ jobs:
       target: ci
     secrets: inherit
 
-  build-and-test:
+  select_ci_image:
     needs: ci_image
-    if: ${{ !cancelled() && (needs.ci_image.result == 'success' || needs.ci_image.result == 'skipped') }}
+    if: always() # don't skip if ci_image is skipped
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.image.outputs.tag }}
+    steps:
+      - id: image
+        env:
+          BUILT_TAG: ${{ needs.ci_image.outputs.image-primary-tag }}
+          BUILD_RESULT: ${{ needs.ci_image.result }}
+        run: |
+          if [ "$BUILD_RESULT" != "success" ] && [ "$BUILD_RESULT" != "skipped" ]; then
+            echo "::error::ci_image $BUILD_RESULT"
+            exit 1
+          fi
+          echo "tag=${BUILT_TAG:-ghcr.io/thedeepestspace/tbgwaf-ci:latest}" >> "$GITHUB_OUTPUT"
+
+  build-and-test:
+    needs: select_ci_image
+    if: ${{ !cancelled() && needs.select_ci_image.result == 'success' }}
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/thedeepestspace/tbgwaf-ci:${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && format('pr-{0}', github.event.pull_request.number) || 'latest' }}
+      image: ${{ needs.select_ci_image.outputs.image-tag }}
       options: --user root
       credentials:
         username: ${{ github.actor }}

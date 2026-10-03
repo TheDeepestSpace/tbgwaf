@@ -100,6 +100,7 @@ set(APP_GFX_SOURCES
   src/gfx/Shader.cpp
   src/gfx/Mesh.cpp
   src/gfx/Camera.cpp
+  src/gfx/FigureRig.cpp
   src/gfx/SceneRenderer.cpp
 )
 
@@ -151,6 +152,36 @@ if(EMSCRIPTEN)
   # Keep a copy of the page next to the build output so the build dir can be
   # served as-is for local testing. TBGWAF_SERVER_URL is substituted in.
   configure_file(${CMAKE_SOURCE_DIR}/web/index.html ${CMAKE_BINARY_DIR}/index.html @ONLY)
+
+  # Asset & animation gallery (issue #126): a second, much smaller WASM
+  # module for web/gallery.html. No ImGui and no game logic -- just the
+  # shared figure/weapon rig and the gallery renderer; the page supplies
+  # the item list and playback UI through the exported C API.
+  add_executable(tactics_gallery_web
+    src/gallery/gallery_main.cpp
+    src/gallery/GalleryScene.cpp
+    src/gfx/Shader.cpp
+    src/gfx/Mesh.cpp
+    src/gfx/FigureRig.cpp
+  )
+  target_include_directories(tactics_gallery_web PRIVATE src)
+  target_link_libraries(tactics_gallery_web PRIVATE glm::glm)
+  target_compile_options(tactics_gallery_web PRIVATE -sUSE_SDL=2)
+  target_link_options(tactics_gallery_web PRIVATE
+    -sUSE_SDL=2
+    -sUSE_WEBGL2=1
+    -sFULL_ES3=1
+    -sALLOW_MEMORY_GROWTH=1
+    -sNO_EXIT_RUNTIME=1
+    -sMODULARIZE=1
+    -sEXPORT_NAME=createTbgwafGalleryModule
+    -sEXPORTED_RUNTIME_METHODS=ccall
+  )
+  set_target_properties(tactics_gallery_web PROPERTIES
+    OUTPUT_NAME "tactics_gallery"
+    SUFFIX ".js"
+  )
+  configure_file(${CMAKE_SOURCE_DIR}/web/gallery.html ${CMAKE_BINARY_DIR}/gallery.html COPYONLY)
 else()
   enable_testing()
 
@@ -259,6 +290,21 @@ else()
     target_include_directories(tactics_ui PUBLIC src ${FLOW_GEN_DIR})
     add_dependencies(tactics_ui app_flow_gen)
     target_link_libraries(tactics_ui PUBLIC tactics_logic tactics_gfx imgui glm::glm)
+
+    # Asset & animation gallery (issue #126): shared catalog/renderer, a
+    # native interactive viewer.
+    add_library(tactics_gallery STATIC src/gallery/GalleryScene.cpp)
+    target_include_directories(tactics_gallery PUBLIC src)
+    target_link_libraries(tactics_gallery PUBLIC tactics_gfx glm::glm)
+
+    add_executable(tactics_gallery_app src/gallery/gallery_main.cpp)
+    target_include_directories(tactics_gallery_app PRIVATE src)
+    target_link_libraries(tactics_gallery_app PRIVATE
+      tactics_gallery
+      PkgConfig::SDL2
+      PkgConfig::EGL
+      PkgConfig::GLESV2
+    )
 
     add_executable(tactics_app src/main.cpp)
     target_include_directories(tactics_app PRIVATE src ${FLOW_GEN_DIR})

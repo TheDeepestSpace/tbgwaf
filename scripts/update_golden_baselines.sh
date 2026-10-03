@@ -19,4 +19,5 @@ LIBGL_ALWAYS_SOFTWARE=1 SDL_VIDEODRIVER=x11 \
   xvfb-run --auto-servernum --server-args='-screen 0 1280x1024x24' \
   "$BUILD_DIR/tactics_map_visual_tests" --update-baselines
 
-echo "Done. Review the changed PNGs under tests/goldens/ and tests/map_goldens/ and commit them."
+echo "Done. Review the changed PNGs under tests/goldens/ and tests/map_goldens/" \
+     "and commit them."

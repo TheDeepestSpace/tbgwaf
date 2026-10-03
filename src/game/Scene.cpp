@@ -67,6 +67,7 @@ Scene BuildDefaultScene() {
     blue.team = Team::Blue;
     blue.position = glm::vec3(-spawnX, 0.0f, rows[i]);
     blue.facingYaw = 0.0f;  // Faces +X, toward the Red side.
+    blue.weapon = DefaultWeaponForUnit(blue.id);
     scene.units.push_back(blue);
   }
   for (int i = 0; i < 3; ++i) {
@@ -75,6 +76,7 @@ Scene BuildDefaultScene() {
     red.team = Team::Red;
     red.position = glm::vec3(spawnX, 0.0f, rows[i]);
     red.facingYaw = kPi;  // Faces -X, toward the Blue side.
+    red.weapon = DefaultWeaponForUnit(red.id);
     scene.units.push_back(red);
   }
 

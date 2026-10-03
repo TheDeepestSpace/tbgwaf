@@ -62,6 +62,36 @@ The runner (`build/tactics_visual_tests`) can also record a continuous
 per-team video of each scenario with `--video` (requires `ffmpeg`); see
 `--help` for the flags.
 
+### Weapons & the asset/animation gallery
+
+Figures carry one of three procedural blocky weapons (issue #126), assigned
+deterministically by unit id (`id % 3`): 0 = assault rifle, 1 = sniper
+rifle, 2 = Desert Eagle — so every squad of three fields one of each. The
+weapon sets the figure's animation class: rifles (AR + sniper) are carried
+two-handed across the chest (both arms IK-solved onto the weapon, no arm
+swing while running) and shoulder-aimed for shots; the Desert Eagle keeps
+the one-handed low-ready carry and quick-draw shot. Weapons are visual
+only — hit resolution is identical across them.
+
+Every weapon model and animation can be inspected on the **asset &
+animation gallery**, a standalone page built alongside the game:
+[live gallery](https://thedeepestspace.github.io/tbgwaf/gallery/) on Pages,
+and `pr-preview/pr-<number>/gallery/` in each PR preview. The page lists
+the three weapon turntables plus idle/run/shoot per weapon (drag to orbit,
+scroll to zoom, play/pause and scrub the loop). The catalog, framing, and
+renderer live in `src/gallery/GalleryScene.*`, shared verbatim between the
+web viewer (`src/gallery/gallery_main.cpp` + `web/gallery.html`) and the
+golden runner below; a native interactive build is available as
+`build/tactics_gallery_app` (left/right switch item, space pauses).
+
+The gallery is golden-tested like the scenarios (the
+`gallery_visual_tests` ctest target): each weapon turntable is snapshotted
+at two fixed rotations (30° and 210°, i.e. both sides) and each animation
+at three fixed loop times (0, ⅓ and ⅔ of the loop), 640×480 PNGs under
+`tests/gallery_goldens/`, compared with the same pixelmatch-style
+tolerance as the other visual tests. Regenerate them (together with the
+scenario and map goldens) with `scripts/update_golden_baselines.sh`.
+
 ### PR scenario review page
 
 Every pull request gets a **scenario review page** in its Pages preview:

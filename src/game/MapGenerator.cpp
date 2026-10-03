@@ -349,6 +349,7 @@ Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     blue.team = Team::Blue;
     blue.position = glm::vec3(-spawnX, 0.0f, rows[i]);
     blue.facingYaw = 0.0f;
+    blue.weapon = DefaultWeaponForUnit(blue.id);
     scene.units.push_back(blue);
   }
   for (int i = 0; i < 3; ++i) {
@@ -357,6 +358,7 @@ Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     red.team = Team::Red;
     red.position = glm::vec3(spawnX, 0.0f, rows[i]);
     red.facingYaw = kPi;
+    red.weapon = DefaultWeaponForUnit(red.id);
     scene.units.push_back(red);
   }
   return scene;

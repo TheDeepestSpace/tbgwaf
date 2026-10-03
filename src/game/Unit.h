@@ -6,6 +6,7 @@
 #include <glm/glm.hpp>
 
 #include "game/Types.h"
+#include "game/Weapon.h"
 
 namespace tactics {
 
@@ -101,6 +102,10 @@ struct Unit {
   float shootElapsed = -1.0f;
   float shootAimYaw = 0.0f;
   float runSpeed = constants::kMoveSpeed;  // World units per second while moving.
+  // Visual-only loadout (issue #126): the model in the figure's hands and
+  // the carry/aim animation class. Creation sites assign
+  // DefaultWeaponForUnit(id) once the id is known.
+  WeaponType weapon = WeaponType::AssaultRifle;
   PlannedAction plan;  // This figure's plan for the current/upcoming round commit.
 
   // How far this figure can move in one round's fixed execution window --

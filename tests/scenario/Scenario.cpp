@@ -127,6 +127,7 @@ Scene ParseScene(const YAML::Node& root) {
     unit.facingYaw =
         unitNode["facing_degrees"] ? unitNode["facing_degrees"].as<float>() * kPi / 180.0f : 0.0f;
     unit.alive = true;
+    unit.weapon = DefaultWeaponForUnit(unit.id);
     scene.units.push_back(unit);
   }
   return scene;

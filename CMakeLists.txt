@@ -76,6 +76,7 @@ set(APP_GFX_SOURCES
   src/gfx/Shader.cpp
   src/gfx/Mesh.cpp
   src/gfx/Camera.cpp
+  src/gfx/FigureRig.cpp
   src/gfx/SceneRenderer.cpp
 )
 
@@ -124,6 +125,35 @@ if(EMSCRIPTEN)
     OUTPUT_NAME "tactics_app"
     SUFFIX ".js"
   )
+
+  # Asset & animation gallery (issue #126): a second, much smaller WASM
+  # module for web/gallery.html. No ImGui and no game logic -- just the
+  # shared figure/weapon rig and the gallery renderer; the page supplies
+  # the item list and playback UI through the exported C API.
+  add_executable(tactics_gallery_web
+    src/gallery/gallery_main.cpp
+    src/gallery/GalleryScene.cpp
+    src/gfx/Shader.cpp
+    src/gfx/Mesh.cpp
+    src/gfx/FigureRig.cpp
+  )
+  target_include_directories(tactics_gallery_web PRIVATE src)
+  target_link_libraries(tactics_gallery_web PRIVATE glm::glm)
+  target_compile_options(tactics_gallery_web PRIVATE -sUSE_SDL=2)
+  target_link_options(tactics_gallery_web PRIVATE
+    -sUSE_SDL=2
+    -sUSE_WEBGL2=1
+    -sFULL_ES3=1
+    -sALLOW_MEMORY_GROWTH=1
+    -sNO_EXIT_RUNTIME=1
+    -sMODULARIZE=1
+    -sEXPORT_NAME=createTbgwafGalleryModule
+    -sEXPORTED_RUNTIME_METHODS=ccall
+  )
+  set_target_properties(tactics_gallery_web PROPERTIES
+    OUTPUT_NAME "tactics_gallery"
+    SUFFIX ".js"
+  )
   # The page is static; keep a copy next to the build output so the build
   # dir can be served as-is for local testing.
   add_custom_command(
@@ -132,7 +162,14 @@ if(EMSCRIPTEN)
             ${CMAKE_SOURCE_DIR}/web/index.html ${CMAKE_BINARY_DIR}/index.html
     DEPENDS ${CMAKE_SOURCE_DIR}/web/index.html
   )
-  add_custom_target(tactics_web_page ALL DEPENDS ${CMAKE_BINARY_DIR}/index.html)
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/gallery.html
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_SOURCE_DIR}/web/gallery.html ${CMAKE_BINARY_DIR}/gallery.html
+    DEPENDS ${CMAKE_SOURCE_DIR}/web/gallery.html
+  )
+  add_custom_target(tactics_web_page ALL
+    DEPENDS ${CMAKE_BINARY_DIR}/index.html ${CMAKE_BINARY_DIR}/gallery.html)
 else()
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
@@ -161,6 +198,7 @@ else()
     src/gfx/Shader.cpp
     src/gfx/Mesh.cpp
     src/gfx/Camera.cpp
+    src/gfx/FigureRig.cpp
     src/gfx/SceneRenderer.cpp
   )
   target_include_directories(tactics_gfx PUBLIC src)
@@ -252,6 +290,29 @@ else()
     PkgConfig::EGL
   )
 
+  # Asset & animation gallery (issue #126): shared catalog/renderer, a
+  # native interactive viewer, and the gallery golden-screenshot runner.
+  add_library(tactics_gallery STATIC src/gallery/GalleryScene.cpp)
+  target_include_directories(tactics_gallery PUBLIC src)
+  target_link_libraries(tactics_gallery PUBLIC tactics_gfx glm::glm)
+
+  add_executable(tactics_gallery_app src/gallery/gallery_main.cpp)
+  target_include_directories(tactics_gallery_app PRIVATE src)
+  target_link_libraries(tactics_gallery_app PRIVATE
+    tactics_gallery
+    PkgConfig::SDL2
+    PkgConfig::EGL
+    PkgConfig::GLESV2
+  )
+
+  add_executable(tactics_gallery_visual_tests tests/visual/gallery_visual_main.cpp)
+  target_include_directories(tactics_gallery_visual_tests PRIVATE src tests ${stb_SOURCE_DIR})
+  target_link_libraries(tactics_gallery_visual_tests PRIVATE
+    tactics_gallery
+    PkgConfig::SDL2
+    PkgConfig::EGL
+  )
+
   # Map-only golden renders of seeded generated cities (no units/teams).
   add_executable(tactics_map_visual_tests tests/visual/map_visual_main.cpp)
   target_include_directories(tactics_map_visual_tests PRIVATE src tests ${stb_SOURCE_DIR})
@@ -283,6 +344,17 @@ else()
       WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     )
     set_tests_properties(map_visual_tests PROPERTIES
+      TIMEOUT 300
+      ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
+    )
+    add_test(
+      NAME gallery_visual_tests
+      COMMAND ${XVFB_RUN_EXECUTABLE} --auto-servernum --server-args=-screen\ 0\ 1280x1024x24
+              $<TARGET_FILE:tactics_gallery_visual_tests>
+              --out-dir ${CMAKE_BINARY_DIR}/gallery_visual_out
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    )
+    set_tests_properties(gallery_visual_tests PROPERTIES
       TIMEOUT 300
       ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
     )

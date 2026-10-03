@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  packages: read
   pull-requests: write
 
 concurrency:
@@ -18,6 +19,12 @@ jobs:
     # limited to same-repo branches.
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/thedeepestspace/tbgwaf-dev:latest
+      options: --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -27,23 +34,17 @@ jobs:
           # the merge base to be present locally.
           fetch-depth: 0
 
-      - name: Set up Emscripten
-        if: github.event.action != 'closed'
-        uses: mymindstorm/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16
-        with:
-          version: latest
-
-      - name: Install Ninja
-        if: github.event.action != 'closed'
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
-
       - name: Configure (Emscripten)
         if: github.event.action != 'closed'
-        run: emcmake cmake -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: |
+          . /opt/emsdk/emsdk_env.sh > /dev/null
+          emcmake cmake -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build tactics_app (WASM/WebGL2)
         if: github.event.action != 'closed'
-        run: cmake --build build-web
+        run: |
+          . /opt/emsdk/emsdk_env.sh > /dev/null
+          cmake --build build-web
 
       - name: Assemble Pages site
         if: github.event.action != 'closed'
@@ -56,15 +57,6 @@ jobs:
       # --- Gameplay scenario review page (issue #14 stage 3): record a
       # per-team WebM video for every scenario at the PR's head and publish
       # them on an HTML page inside the same per-PR preview. ---
-      - name: Install native toolchain and video dependencies
-        if: github.event.action != 'closed'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev mesa-common-dev \
-            xvfb ffmpeg
-
       - name: Configure (native)
         if: github.event.action != 'closed'
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release

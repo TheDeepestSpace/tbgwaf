@@ -8,21 +8,20 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/thedeepestspace/tbgwaf-ci:latest
+      options: --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install toolchain and headless GLES3 dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            ninja-build pkg-config \
-            libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev mesa-common-dev \
-            xvfb
 
       - name: Configure
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release

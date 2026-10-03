@@ -44,6 +44,14 @@ bool IsPointVisibleToTeam(Team team, const glm::vec3& point, const std::vector<U
   return false;
 }
 
+bool CanUnitSee(const Unit& viewer, const Unit& target, const std::vector<Obstacle>& obstacles,
+                 const std::vector<WalkSurface>& walkSurfaces) {
+  return viewer.alive &&
+         InFovCone(viewer.EyePosition(), viewer.FacingDirection(), target.EyePosition(),
+                   constants::kShootHalfFovDegrees, constants::kShootRange) &&
+         LineOfSightClear(viewer.EyePosition(), target.EyePosition(), obstacles, walkSurfaces);
+}
+
 namespace {
 
 // Obstacles are boxes, not points. Approximate "some part of this obstacle

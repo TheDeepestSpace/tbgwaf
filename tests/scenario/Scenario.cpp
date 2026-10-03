@@ -49,6 +49,35 @@ glm::vec2 ParseVec2(const YAML::Node& node, const std::string& context) {
   return glm::vec2(node[0].as<float>(), node[1].as<float>());
 }
 
+ReactionAction ParseReaction(const std::string& name) {
+  if (name == "do_nothing") return ReactionAction::DoNothing;
+  if (name == "shoot") return ReactionAction::Shoot;
+  if (name == "stop") return ReactionAction::Stop;
+  if (name == "continue") return ReactionAction::Continue;
+  if (name == "shoot_stop") return ReactionAction::ShootStop;
+  if (name == "shoot_continue") return ReactionAction::ShootContinue;
+  throw std::runtime_error("unknown playbook action '" + name + "'");
+}
+
+// playbook: {blue: {moving_seen: stop, stationary_unseen: shoot, ...}}
+void ParsePlaybooks(const YAML::Node& root, SquadPlaybook (&out)[2]) {
+  const YAML::Node node = root["playbook"];
+  if (!node) return;
+  for (const auto& teamEntry : node) {
+    const Team team = ParseTeam(teamEntry.first.as<std::string>(), "playbook");
+    SquadPlaybook& pb = out[static_cast<int>(team)];
+    for (const auto& slot : teamEntry.second) {
+      const std::string key = slot.first.as<std::string>();
+      const ReactionAction action = ParseReaction(slot.second.as<std::string>());
+      if (key == "moving_seen") pb.At(true, true) = action;
+      else if (key == "moving_unseen") pb.At(true, false) = action;
+      else if (key == "stationary_seen") pb.At(false, true) = action;
+      else if (key == "stationary_unseen") pb.At(false, false) = action;
+      else throw std::runtime_error("unknown playbook slot '" + key + "'");
+    }
+  }
+}
+
 Scene ParseScene(const YAML::Node& root) {
   Scene scene;
 
@@ -114,15 +143,6 @@ Scene ParseScene(const YAML::Node& root) {
     unit.position = ParseVec3(unitNode["position"], "units[].position");
     unit.facingYaw =
         unitNode["facing_degrees"] ? unitNode["facing_degrees"].as<float>() * kPi / 180.0f : 0.0f;
-    if (const YAML::Node rule = unitNode["reaction_on_stationary"]) {
-      const std::string name = rule.as<std::string>();
-      if (name == "shoot") {
-        unit.reactionOnStationary = ReactionRule::Shoot;
-      } else if (name != "do_nothing") {
-        throw std::runtime_error("units[].reaction_on_stationary must be 'shoot' or 'do_nothing', got '" +
-                                 name + "'");
-      }
-    }
     unit.alive = true;
     scene.units.push_back(unit);
   }
@@ -162,9 +182,11 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     action.kind = ScenarioAction::Kind::Pass;
   } else if (kind == "cancel") {
     action.kind = ScenarioAction::Kind::Cancel;
+  } else if (kind == "focus") {
+    action.kind = ScenarioAction::Kind::Focus;
   } else {
     throw std::runtime_error("unknown script action '" + kind +
-                              "' (expected move/shoot/pass/cancel/commit)");
+                              "' (expected move/shoot/pass/cancel/focus/commit)");
   }
   return action;
 }
@@ -347,6 +369,11 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
       NotifyMenuClick(actorTeam, "Pass");
       game.ChoosePass();
       return true;
+    case ScenarioAction::Kind::Focus:
+      // Double-click: the first click's selection already happened above;
+      // the camera easing is a rendering concern, so only observers act.
+      if (hooks.onFocus) hooks.onFocus(game, action.actor, actorTeam);
+      return true;
     case ScenarioAction::Kind::Cancel:
     case ScenarioAction::Kind::Commit:
       break;  // Handled above.
@@ -440,6 +467,7 @@ Scenario LoadScenarioFromFile(const std::string& path) {
   scenario.sourcePath = path;
   scenario.name = root["name"] ? root["name"].as<std::string>() : path;
   scenario.scene = ParseScene(root);
+  ParsePlaybooks(root, scenario.playbooks);
   if (const YAML::Node cam = root["camera"]) {
     if (cam["target"]) scenario.cameraTarget = ParseVec2(cam["target"], "camera.target");
     if (cam["zoom"]) scenario.cameraZoom = cam["zoom"].as<float>();
@@ -480,6 +508,8 @@ Scenario LoadScenarioFromFile(const std::string& path) {
 ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks) {
   ScenarioResult result;
   GameLogic game(scenario.scene);
+  game.SetPlaybook(Team::Blue, scenario.playbooks[0]);
+  game.SetPlaybook(Team::Red, scenario.playbooks[1]);
 
   auto EmitHoldFrames = [&] {
     if (!hooks.onFrame) return;

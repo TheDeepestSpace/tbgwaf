@@ -113,10 +113,28 @@ subdirectory (`pr-preview/pr-<number>/`) on the `gh-pages` branch
 The workflow comments on the PR with a link to the preview once it's ready,
 and removes the preview automatically when the PR closes.
 
+## App flow
+
+Screen flow (Splash -> Map Select -> Gameplay), declared in
+`flow/app_flow.yaml`. The build regenerates `flow/app_flow.mmd` from it; paste
+that file's contents below if the flow changes.
+
+```mermaid
+%%{init: {"flowchart": {"htmlLabels": false}, "themeVariables": {"fontFamily": "Arial, sans-serif"}}}%%
+flowchart TD
+    splash("  Splash  ")
+    map_select("  Map Select  ")
+    gameplay("  Gameplay  ")
+    splash -->|new_game| map_select
+    map_select -->|select_urban| gameplay
+    map_select -->|select_hills| gameplay
+    map_select -->|back| splash
+```
+
 ## Controls
 
 - **Left click** one of your own figures (in your own viewport) to select
-  it, then choose **Move**, **Shoot**, **Overwatch**, or **Pass** from the
+  it, then choose **Move**, **Shoot**, or **Pass** from the
   action menu.
   - Move: click a destination on the ground; the figure paths around
     obstacles via its navmesh. A move can only reach as far as the figure

@@ -1,0 +1,15 @@
+# Source of truth for the app-level screen flow (Splash -> Map Select -> gameplay).
+# Consumed at build time only (never parsed at runtime) by scripts/gen_flow.py,
+# which emits the C++ state enum/transition table and a Mermaid/SVG diagram.
+# Keep to this restricted shape: top-level `initial`, `states` list and
+# `transitions` list of flow-style maps.
+initial: splash
+states:
+  - {id: splash, label: Splash}
+  - {id: map_select, label: Map Select}
+  - {id: gameplay, label: Gameplay}
+transitions:
+  - {from: splash, event: new_game, to: map_select}
+  - {from: map_select, event: select_urban, to: gameplay}
+  - {from: map_select, event: select_hills, to: gameplay}
+  - {from: map_select, event: back, to: splash}

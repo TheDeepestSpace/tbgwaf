@@ -24,6 +24,13 @@ namespace gfx {
 bool IsUnitVisibleForRender(const tactics::Unit& unit, tactics::Team viewingTeam, bool fogActive,
                             const tactics::TeamVisibility& visibility);
 
+// Local-only rendering toggles for the interactive app's debug panel. Not
+// game state: never synced. Defaults render normally (visual runner never sets it).
+struct RenderDebugOptions {
+  bool disableFov = false;
+  bool disableShadows = false;
+};
+
 // Per-pane overlay state (selection ring, movement frontier, move-path
 // preview). Always build it with BuildPaneOverlays so the interactive app
 // and the visual scenario harness show the same overlays.
@@ -82,6 +89,8 @@ class SceneRenderer {
   void SetFovProbeHeight(float height) { fovProbeHeight_ = height; }
   float GetFovProbeHeight() const { return fovProbeHeight_; }
 
+  // `debug` is a local-only dev toggle (interactive app); the default leaves
+  // output unchanged, which the visual runner relies on.
   // Renders `team`'s fog-of-war view into the rect [x, x+width) x
   // [y, y+height) of `targetFramebuffer` (0 = default framebuffer): shadow
   // pass with only that team's visible casters, then ground, obstacles,
@@ -92,7 +101,7 @@ class SceneRenderer {
   void RenderPane(const tactics::GameLogic& game, tactics::Team team, bool fogActive,
                   const tactics::TeamVisibility& visibility, const OrbitCamera& camera, int x,
                   int y, int width, int height, const PaneOverlays& overlays = {},
-                  GLuint targetFramebuffer = 0);
+                  GLuint targetFramebuffer = 0, const RenderDebugOptions& debug = {});
 
  private:
   Shader unlitShader_;
@@ -103,6 +112,17 @@ class SceneRenderer {
   SphereMesh sphereMesh_;
   LineMesh pathLine_;
   TriangleMesh fovConeMesh_;
+  // Reuse the terrain-clipped geometry until the unit or map changes.
+  struct TerrainFovCache {
+    int unitId = -1;
+    glm::vec3 eye{0.0f};
+    float facingYaw = 0.0f;
+    std::vector<glm::vec3> points;
+  };
+  std::vector<TerrainFovCache> terrainFovCache_;
+  std::vector<tactics::Obstacle> fovKeyObstacles_;
+  std::vector<tactics::AABB> fovKeySidewalks_;
+  float fovKeyMapHalfExtent_ = 0.0f;
   TriangleMesh highlightRing_;
   ColorTriangleMesh frontierFill_;
   LineMesh frontierBorder_;

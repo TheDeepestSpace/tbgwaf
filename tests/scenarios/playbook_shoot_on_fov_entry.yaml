@@ -1,20 +1,24 @@
-# Standing playbook rule "shoot" (reaction_on_stationary: shoot): blue0 passes
-# (stays stationary) while red1 walks out from behind a wall into blue0's view. The
-# moment red1 enters blue0's FOV+LOS blue0 fires on its own, so red1 drops
-# short of its destination. Counterpart: playbook_do_nothing_lets_enemy_pass.
-# Mirrors TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds.
 name: playbook_shoot_on_fov_entry
+description: >
+  Standing playbook rule "shoot" (playbook.blue.stationary_*: shoot): blue0 passes (stays
+  stationary) while red1 walks out from behind a wall into blue0's view. The moment red1
+  enters blue0's FOV+LOS blue0 fires on its own, so red1 drops short of its destination.
+  Counterpart: playbook_do_nothing_lets_enemy_pass. Mirrors
+  TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds. A tall wall sits between
+  blue0 and red1's start; red1 starts hidden behind it and walks out past its end into view.
+  Red2 stays back to keep red alive so the game isn't over (the round would stay 1 on a
+  win).
+
+playbook:
+  blue: {stationary_seen: shoot, stationary_unseen: shoot}
 
 map:
-  # Tall wall between blue0 and red1's start; red1 emerges from its end.
   obstacles:
     - {center: [-3, 0], half_extent: [0.3, 2], height: 3}
 
 units:
-  - {id: 0, team: blue, position: [-8, 0, 0], facing_degrees: 0, reaction_on_stationary: shoot}
-  # Starts hidden behind the wall and walks out past its end into view.
+  - {id: 0, team: blue, position: [-8, 0, 0], facing_degrees: 0}
   - {id: 1, team: red, position: [-1, 0, 0], facing_degrees: 90}
-  # Keeps red alive so the game isn't over (round would stay 1 on a win).
   - {id: 2, team: red, position: [9, 0, 9], facing_degrees: 180}
 
 script:

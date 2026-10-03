@@ -33,7 +33,7 @@ class GameLogic;
 namespace tactics::scenario {
 
 struct ScenarioAction {
-  enum class Kind { Move, Shoot, Pass, Cancel, Commit };
+  enum class Kind { Move, Shoot, Pass, Cancel, Commit, Focus };
 
   int actor = -1;  // Unused (and not required in YAML) for Commit.
   Kind kind = Kind::Pass;
@@ -84,12 +84,13 @@ struct Scenario {
   std::string name;
   std::string sourcePath;
   Scene scene;
+  SquadPlaybook playbooks[2] = {SquadPlaybook::Passive(), SquadPlaybook::Passive()};  // Indexed by Team; passive unless the YAML sets `playbook`.
   std::vector<ScenarioStep> steps;
-  // Optional visual-runner camera framing (both panes): orbit target on the
-  // ground plane, and zoom delta (positive = further out). Large generated
-  // maps need this to frame the action.
+  // Optional visual-runner camera adjustments (both panes), applied after
+  // the initial view is fitted to the map: orbit target on the ground plane,
+  // and zoom delta (positive = further out).
   std::optional<glm::vec2> cameraTarget;
-  float cameraZoom = 10.0f;
+  float cameraZoom = 0.0f;
   // Optional visual-runner render settings (`render:` section). Ignored by
   // the logic-only runner.
   //   fov_overlay: "cpu" (default) | "shadow_map" -- issue #110 prototype.
@@ -151,6 +152,11 @@ struct PlaybackHooks {
   // steps do not fire it: a "turn" for capture purposes is one executed
   // action.
   std::function<void(const GameLogic&, int completedActions)> onActionComplete;
+
+  // Fired for a `focus` step (a double-click on a figure) right after the
+  // figure is selected. The visual runner eases the owning pane's camera
+  // over the figure's movement frontier here, emitting its own frames.
+  std::function<void(const GameLogic&, int unitId, Team team)> onFocus;
 };
 
 // Runs `scenario` against a fresh GameLogic instance built from its scene,

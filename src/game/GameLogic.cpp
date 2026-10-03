@@ -189,7 +189,6 @@ GameSnapshot GameLogic::ExportState() const {
     u.position = unit.position;
     u.facingYaw = unit.facingYaw;
     u.alive = unit.alive;
-    u.triggerAction = unit.triggerAction;
     u.planType = unit.plan.type;
     u.planShootTargetId = unit.plan.shootTargetId;
     u.planPath = unit.plan.movePath;
@@ -203,9 +202,10 @@ GameSnapshot GameLogic::ExportState() const {
     u.shootElapsed = unit.shootElapsed;
     u.shootAimYaw = unit.shootAimYaw;
     u.moving = IsUnitMoving(unit.id);
-    u.reactionOnStationary = unit.reactionOnStationary;
     snap.units.push_back(std::move(u));
   }
+  snap.playbooks[0] = playbooks_[0];
+  snap.playbooks[1] = playbooks_[1];
   snap.mode = mode_;
   snap.roundNumber = roundNumber_;
   snap.winner = winner_ ? static_cast<int>(*winner_) : -1;
@@ -243,7 +243,6 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     unit->position = u.position;
     unit->facingYaw = u.facingYaw;
     unit->alive = u.alive;
-    unit->triggerAction = u.triggerAction;
     unit->knockdownAxis = u.knockdownAxis;
     unit->knockdownElapsed = u.knockdownElapsed;
     unit->walkPhase = u.walkPhase;
@@ -251,10 +250,11 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     unit->idleElapsed = u.idleElapsed;
     unit->shootElapsed = u.shootElapsed;
     unit->shootAimYaw = u.shootAimYaw;
-    unit->reactionOnStationary = u.reactionOnStationary;
     ApplyPlan(u, unit);
     if (u.moving) mirroredMoving_.push_back(u.id);
   }
+  playbooks_[0] = snap.playbooks[0];
+  playbooks_[1] = snap.playbooks[1];
   mode_ = snap.mode;
   roundNumber_ = snap.roundNumber;
   if (snap.winner >= 0) {
@@ -287,12 +287,12 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
       << snap.units.size();
   for (const auto& u : snap.units) {
     out << ' ' << u.id << ' ' << u.position.x << ' ' << u.position.y << ' ' << u.position.z << ' '
-        << u.facingYaw << ' ' << (u.alive ? 1 : 0) << ' ' << static_cast<int>(u.triggerAction)
-        << ' ' << static_cast<int>(u.planType) << ' ' << u.planShootTargetId << ' ' << u.planEndFacingYaw << ' '
+        << u.facingYaw << ' ' << (u.alive ? 1 : 0) << ' '
+        << static_cast<int>(u.planType) << ' ' << u.planShootTargetId << ' ' << u.planEndFacingYaw << ' '
         << u.knockdownAxis.x << ' ' << u.knockdownAxis.y << ' ' << u.knockdownAxis.z << ' '
         << u.knockdownElapsed << ' ' << u.walkPhase << ' ' << u.walkBlend << ' '
         << u.idleElapsed << ' ' << u.shootElapsed << ' ' << u.shootAimYaw << ' '
-        << (u.moving ? 1 : 0) << ' ' << static_cast<int>(u.reactionOnStationary) << ' '
+        << (u.moving ? 1 : 0) << ' '
         << u.planPath.size();
     for (const auto& p : u.planPath) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
     out << ' ' << u.planQueuedLegs.size();
@@ -301,6 +301,9 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
       for (const auto& p : leg) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
     }
   }
+  for (const auto& pb : snap.playbooks)
+    for (int m = 0; m < 2; ++m)
+      for (int s = 0; s < 2; ++s) out << ' ' << static_cast<int>(pb.table[m][s]);
   return out.str();
 }
 
@@ -317,23 +320,20 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
   snap.mode = static_cast<InputMode>(mode);
   snap.units.resize(unitCount);
   for (auto& u : snap.units) {
-    int alive = 0, trigger = 0, plan = 0, moving = 0, reaction = 0;
+    int alive = 0, plan = 0, moving = 0;
     size_t pathCount = 0;
     if (!(in >> u.id >> u.position.x >> u.position.y >> u.position.z >> u.facingYaw >> alive >>
-          trigger >> plan >> u.planShootTargetId >> u.planEndFacingYaw >> u.knockdownAxis.x >>
+          plan >> u.planShootTargetId >> u.planEndFacingYaw >> u.knockdownAxis.x >>
           u.knockdownAxis.y >> u.knockdownAxis.z >> u.knockdownElapsed >> u.walkPhase >>
           u.walkBlend >> u.idleElapsed >> u.shootElapsed >> u.shootAimYaw >> moving >>
-          reaction >> pathCount)) {
+          pathCount)) {
       return false;
     }
-    if (trigger < 0 || trigger > static_cast<int>(TriggerAction::Shoot)) return false;
-    if (reaction < 0 || reaction > static_cast<int>(ReactionRule::Shoot)) return false;
-    if (plan < 0 || plan > static_cast<int>(PlannedActionType::Overwatch)) return false;
+    if (plan < 0 || plan > static_cast<int>(PlannedActionType::Pass)) return false;
     if (pathCount > kMaxEntries) return false;
     u.planType = static_cast<PlannedActionType>(plan);
     u.alive = alive != 0;
     u.moving = moving != 0;
-    u.triggerAction = static_cast<TriggerAction>(trigger);
     u.planPath.resize(pathCount);
     for (auto& p : u.planPath) {
       if (!(in >> p.x >> p.y >> p.z)) return false;
@@ -349,7 +349,16 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
         if (!(in >> p.x >> p.y >> p.z)) return false;
       }
     }
-    u.reactionOnStationary = static_cast<ReactionRule>(reaction);
+  }
+  for (auto& pb : snap.playbooks) {
+    for (int m = 0; m < 2; ++m) {
+      for (int s = 0; s < 2; ++s) {
+        int action = 0;
+        if (!(in >> action)) return false;
+        if (action < 0 || action > static_cast<int>(ReactionAction::ShootContinue)) return false;
+        pb.table[m][s] = static_cast<ReactionAction>(action);
+      }
+    }
   }
   *outSnap = std::move(snap);
   return true;
@@ -527,7 +536,7 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
     Unit* mover = FindUnit(move.unitId);
     if (!mover || move.path.size() < 2) continue;
     if (!mover->alive) {
-      // Killed mid-round (pending shot or overwatch): the move stops where
+      // Killed mid-round (pending shot): the move stops where
       // the figure fell.
       move.segment = move.path.size();
       continue;
@@ -565,13 +574,9 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
     if (mover->alive && move.segment + 1 >= move.path.size()) {
       mover->facingYaw = move.endFacingYaw;
     }
-
-    if (TriggerOverwatch(*mover) || CheckPlaybookReactions(*mover)) {
-      // Force this mover's removal below without disturbing the others,
-      // which keep animating their own planned moves this round.
-      move.segment = move.path.size();
-    }
   }
+
+  ApplyPlaybookReactions();
 
   // Continuous shot resolution: with everyone's position advanced for this
   // tick, held shots get their per-tick FOV/LOS re-check -- this is what
@@ -643,18 +648,6 @@ void GameLogic::ChoosePass() {
   Unit* unit = FindUnit(selectedUnitId_.value_or(-1));
   if (!unit) return;
   unit->plan.type = PlannedActionType::Pass;
-  unit->plan.movePath.clear();
-  unit->plan.queuedLegs.clear();
-  unit->plan.shootTargetId = -1;
-  selectedUnitId_.reset();
-  mode_ = InputMode::AwaitingSelection;
-}
-
-void GameLogic::ChooseOverwatch() {
-  if (mode_ != InputMode::ActionMenu) return;
-  Unit* unit = FindUnit(selectedUnitId_.value_or(-1));
-  if (!unit) return;
-  unit->plan.type = PlannedActionType::Overwatch;
   unit->plan.movePath.clear();
   unit->plan.queuedLegs.clear();
   unit->plan.shootTargetId = -1;
@@ -743,28 +736,53 @@ bool GameLogic::IsUnitMoving(int unitId) const {
   return false;
 }
 
-bool GameLogic::TriggerOverwatch(Unit& mover) {
-  for (auto& watcher : scene_.units) {
-    if (!watcher.alive || watcher.team == mover.team) continue;
-    if (watcher.triggerAction != TriggerAction::Shoot) continue;
-    if (ResolveShot(watcher, mover)) {
-      watcher.triggerAction = TriggerAction::None;
-      return true;
+void GameLogic::ApplyPlaybookReactions() {
+  struct Reaction {
+    Unit* actor;
+    Unit* target;  // Nearest sighted enemy; only fired on when `shoot`.
+    bool shoot;
+    bool stop;
+  };
+  std::vector<Reaction> reactions;
+  for (Unit& unit : scene_.units) {
+    if (!unit.alive) continue;
+    auto isMidMove = [&](int id) {
+      return std::any_of(activeMoves_.begin(), activeMoves_.end(), [&](const ActiveMove& m) {
+        return m.unitId == id && m.path.size() >= 2 && m.segment + 1 < m.path.size();
+      });
+    };
+    const bool moving = isMidMove(unit.id);
+    Unit* nearest = nullptr;
+    float nearestDist = 0.0f;
+    bool canSeeMe = false;
+    for (Unit& enemy : scene_.units) {
+      if (!enemy.alive || enemy.team == unit.team) continue;
+      // A stationary figure reacts to enemies *moving* into its view (the
+      // watcher-on-mover case), not to everyone idling in its cone.
+      if (!moving && !isMidMove(enemy.id)) continue;
+      if (!CanUnitSee(unit, enemy, scene_.obstacles, scene_.walkSurfaces)) continue;
+      const float dist = glm::distance(unit.position, enemy.position);
+      if (!nearest || dist < nearestDist) {
+        nearest = &enemy;
+        nearestDist = dist;
+      }
+      // Most-cautious tie-break: any sighted enemy that sees back counts.
+      canSeeMe |= CanUnitSee(enemy, unit, scene_.obstacles, scene_.walkSurfaces);
+    }
+    if (!nearest) continue;
+    const ReactionAction action = Playbook(unit.team).At(moving, canSeeMe);
+    const bool shoot = ReactionShoots(action);
+    const bool stop = moving && ReactionStops(action);
+    if (shoot || stop) reactions.push_back(Reaction{&unit, nearest, shoot, stop});
+  }
+  for (const Reaction& r : reactions) {
+    if (r.shoot) ResolveShot(*r.actor, *r.target);
+    if (r.stop) {
+      for (ActiveMove& move : activeMoves_) {
+        if (move.unitId == r.actor->id) move.segment = move.path.size();
+      }
     }
   }
-  return false;
-}
-
-bool GameLogic::CheckPlaybookReactions(Unit& mover) {
-  for (auto& watcher : scene_.units) {
-    if (!watcher.alive || watcher.id == mover.id) continue;
-    if (watcher.team == mover.team) continue;
-    if (watcher.reactionOnStationary != ReactionRule::Shoot) continue;
-    // Stationary-only rule: a watcher that is itself mid-move doesn't react.
-    if (IsUnitMoving(watcher.id)) continue;
-    if (ResolveShot(watcher, mover)) return true;
-  }
-  return false;
 }
 
 void GameLogic::CommitRound() {
@@ -788,8 +806,6 @@ void GameLogic::CommitRound() {
       activeMoves_.push_back(ActiveMove{unit.id, plan.movePath, 0, plan.endFacingYaw});
     } else if (plan.type == PlannedActionType::Shoot) {
       pendingShots_.push_back(PendingShot{unit.id, plan.shootTargetId});
-    } else if (plan.type == PlannedActionType::Overwatch) {
-      unit.triggerAction = TriggerAction::Shoot;
     }
   }
 

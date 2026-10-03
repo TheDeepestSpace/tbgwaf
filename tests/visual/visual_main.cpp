@@ -34,6 +34,7 @@
 #include <exception>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "visual/ImageUtil.h"
@@ -68,6 +69,9 @@ constexpr int kVideoFps = 30;
 // Frames held on the initial state and after each action so video viewers
 // can actually read each turn's outcome (0.5 s at kVideoFps).
 constexpr int kHoldFrames = 15;
+// Frames recorded while the camera eases over a double-clicked figure (2 s).
+constexpr int kFocusGlideFrames = 60;
+
 // Frames the click marker is shown before each scripted click lands (video
 // only): a ring contracting onto the click point, then a brief hold.
 constexpr int kClickFrames = 12;
@@ -162,14 +166,17 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     return;
   }
 
-  // Fixed default cameras, identical to the app's startup view (each pane
-  // is half-width, so start zoomed out enough for both spawns to fit).
-  // Nothing perturbs them at runtime, so captures are deterministic.
+  // Start from the same map-fitted view as the app. Scenario camera fields
+  // are optional adjustments to that baseline. Nothing perturbs the cameras
+  // at runtime, so captures are deterministic.
   std::array<gfx::OrbitCamera, ui::kPaneCount> cameras;
   for (auto& camera : cameras) {
+    camera.FitToExtent(scenario.scene.mapHalfExtent);
+    if (scenario.cameraTarget) {
+      camera.target = glm::vec3(scenario.cameraTarget->x, 0.0f, scenario.cameraTarget->y);
+    }
     camera.Zoom(scenario.cameraZoom);
-    if (scenario.cameraTarget) camera.target = glm::vec3(scenario.cameraTarget->x, 0.0f, scenario.cameraTarget->y);
-    camera.Update(1.0e3f);  // Snap to the initial zoom (matches main.cpp).
+    camera.Update(1.0e3f);  // Snap any scenario zoom adjustment.
   }
 
   const int paneWidth = kWindowWidth / 2;
@@ -309,6 +316,12 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   }
 
   int imageFailures = 0;
+  // Frames fed to the (per-team, frame-identical) encoders so far, and the
+  // frame count at each completed action: both panes advance in lockstep, so
+  // one counter indexes either video. Written out as timing.json next to the
+  // webm files for the review page's breakdown sync / click-to-seek.
+  int framesWritten = 0;
+  std::vector<std::pair<int, int>> actionFrames;  // (completedActions, framesWritten)
   tactics::scenario::PlaybackHooks hooks;
   // Declared outside the `if`: the hooks below outlive its scope.
   auto writeVideoFrame = [&](const GameLogic& game, const ClickMarker* marker) {
@@ -319,6 +332,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
         videoOk = false;
       }
     }
+    ++framesWritten;
   };
   if (options.video && videoOk) {
     hooks.tickSeconds = 1.0f / kVideoFps;
@@ -347,17 +361,31 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     };
   }
   if (options.video && videoOk) {
-    hooks.onMoveFrontier = [&](const GameLogic& game, Team) {
-      renderBothPanes(game);
-      const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);
-      for (int pane = 0; pane < 2; ++pane) {
-        if (!encoders[pane].WriteFrame(CropColumns(frame, pane * paneWidth, paneWidth))) {
-          videoOk = false;
-        }
-      }
-    };
+    hooks.onMoveFrontier = [&](const GameLogic& game, Team) { writeVideoFrame(game, nullptr); };
   }
+  // Double-click on a figure: ease that team's pane camera over the unit's
+  // movement frontier (same FocusOn call as main.cpp). Video mode records
+  // the glide; either way the camera is then settled so the post-action
+  // golden is the converged framing.
+  hooks.onFocus = [&](const GameLogic& game, int unitId, Team team) {
+    const tactics::Unit* unit = game.FindUnit(unitId);
+    if (!unit) return;
+    gfx::OrbitCamera& camera = cameras[team == Team::Blue ? 0 : 1];
+    camera.FocusOn(unit->position,
+                   unit->MoveBudget() + 2.0f * tactics::constants::kAgentRadius);
+    if (options.video && videoOk) {
+      for (int i = 0; i < kFocusGlideFrames; ++i) {
+        camera.Update(1.0f / kVideoFps);
+        writeVideoFrame(game, nullptr);
+      }
+    }
+    camera.Update(1.0e3f);
+  };
   hooks.onActionComplete = [&](const GameLogic& game, int turn) {
+    // The holds for this action have already been emitted, so framesWritten
+    // is the exclusive end of the action's video segment (turn 0 = the
+    // initial-state hold).
+    if (options.video && videoOk) actionFrames.emplace_back(turn, framesWritten);
     renderBothPanes(game);
     const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);
     for (int pane = 0; pane < 2; ++pane) {
@@ -431,6 +459,26 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     if (!videoOk) {
       std::fprintf(stderr, "FAIL %s: video encoding failed (is ffmpeg installed?)\n",
                    stem.c_str());
+    } else {
+      // Sidecar mapping each completed action to its segment-end frame in
+      // either team's video (both are frame-identical in time). A missing or
+      // unwritable sidecar only degrades the review page's sync, so it does
+      // not fail the scenario.
+      const fs::path timingPath = options.outDir / stem / "timing.json";
+      fs::create_directories(timingPath.parent_path());
+      if (FILE* f = std::fopen(timingPath.string().c_str(), "w")) {
+        std::fprintf(f, "{\"fps\": %d, \"actions\": [", kVideoFps);
+        for (size_t i = 0; i < actionFrames.size(); ++i) {
+          std::fprintf(f, "%s{\"index\": %d, \"frame\": %d, \"time\": %.3f}", i ? ", " : "",
+                       actionFrames[i].first, actionFrames[i].second,
+                       static_cast<double>(actionFrames[i].second) / kVideoFps);
+        }
+        std::fprintf(f, "]}\n");
+        std::fclose(f);
+      } else {
+        std::fprintf(stderr, "WARN %s: could not write %s\n", stem.c_str(),
+                     timingPath.string().c_str());
+      }
     }
   }
 

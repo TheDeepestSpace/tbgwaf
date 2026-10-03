@@ -42,7 +42,6 @@ struct GameSnapshot {
     glm::vec3 position{0.0f};
     float facingYaw = 0.0f;
     bool alive = true;
-    TriggerAction triggerAction = TriggerAction::None;
     PlannedActionType planType = PlannedActionType::None;
     int planShootTargetId = -1;
     std::vector<glm::vec3> planPath;
@@ -58,9 +57,9 @@ struct GameSnapshot {
     float shootElapsed = -1.0f;
     float shootAimYaw = 0.0f;
     bool moving = false;  // Has an in-flight move in the executing round.
-    ReactionRule reactionOnStationary = ReactionRule::DoNothing;
   };
   std::vector<UnitState> units;
+  SquadPlaybook playbooks[2];  // Indexed by Team.
   InputMode mode = InputMode::AwaitingSelection;
   int roundNumber = 1;
   int winner = -1;  // -1 = none, else static_cast<int>(Team).
@@ -76,7 +75,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* out);
 // dependency so it can be driven and verified headlessly.
 //
 // WEGO round model: each round has two phases. During *planning*, both teams
-// concurrently assign one plan (Move/Shoot/Pass/Overwatch) to each of their
+// concurrently assign one plan (Move/Shoot/Pass) to each of their
 // living figures -- nothing happens yet, and either team may revise its own
 // figures' plans at any time (input calls carry the acting team, so a player
 // can only ever plan their own side). Once every living figure on both teams
@@ -188,7 +187,7 @@ class GameLogic {
   // as misses -- with nobody moving, their geometry can no longer change).
   // A no-op in any other mode. `main.cpp`'s frame loop drives this with real
   // frame delta; tests can pass a large dt to fast-forward to completion,
-  // though mid-path events (overwatch, shots connecting mid-move) then only
+  // though mid-path events (shots connecting mid-move) then only
   // sample the coarse positions that dt steps through.
   void Update(float dtSeconds);
 
@@ -203,16 +202,12 @@ class GameLogic {
   // round is committed, by the unit's own team; no-op for units without a planned move.
   void SetPlannedMoveFacing(int unitId, float yaw, Team byTeam);
 
-  // Plans overwatch (triggerAction = Shoot, armed once this commits) on the
-  // acting unit, the same way ChoosePass() plans a pass.
-  void ChooseOverwatch();
-
   // Steps back one level: AwaitingMove/ShootTarget -> ActionMenu -> AwaitingSelection.
   void CancelAction();
 
   // Starts the round's executing phase: resolves every planned shot that
   // already connects at the pre-move positions, kicks off every planned
-  // move on both teams concurrently, and arms planned overwatches. Held
+  // move on both teams concurrently. Held
   // shots keep re-checking each Update() tick. Finishes immediately (in
   // this same call) if nobody planned a move. No-op unless CanCommitRound().
   void CommitRound();
@@ -231,9 +226,15 @@ class GameLogic {
   // the executing round (figures from both teams can be animating at once).
   bool IsUnitMoving(int unitId) const;
 
+  // Squad-wide standing reaction table for `team` (see SquadPlaybook).
+  const SquadPlaybook& Playbook(Team team) const { return playbooks_[static_cast<int>(team)]; }
+  void SetPlaybook(Team team, const SquadPlaybook& playbook) {
+    playbooks_[static_cast<int>(team)] = playbook;
+  }
+
   // Deterministic hit resolution: FOV cone + clear line-of-sight, applied
   // immediately. Exposed directly so it can be unit tested without going
-  // through the click flow; also the overwatch trigger path.
+  // through the click flow.
   bool ResolveShot(Unit& shooter, Unit& target);
 
  private:
@@ -274,27 +275,22 @@ class GameLogic {
   // re-checks held shots, and finishes the round once nothing is in flight.
   void AdvanceExecutingRound(float dtSeconds);
 
-  // Checks every living enemy of `mover` armed with triggerAction == Shoot
-  // for FOV+LOS on `mover`'s current (mid-move) position. On the first
-  // watcher that has a shot, resolves it (killing `mover`), consumes that
-  // watcher's trigger, and returns true so Update() can interrupt the move.
-  bool TriggerOverwatch(Unit& mover);
-
   // (Re)builds navMesh_ over the area `mover` can reach from `origin` (its
   // position, or the end of its planned move chain) in one leg, unless
   // the cached one already covers this figure at this origin.
   void EnsureNavMeshFor(const Unit& mover, const glm::vec3& origin);
   void RefreshMoveFrontier();
 
-  // Playbook reaction check, called after every per-frame position advance
-  // of a moving unit: resolves a shot from any living enemy `watcher` of
-  // `mover` with reactionOnStationary == Shoot that currently has `mover`
-  // in FOV+LOS. Returns true (and kills `mover`) on the first such hit.
-  // Unlike a one-shot trigger, the watcher's rule is never cleared here, so
-  // it stays armed for future moves/rounds.
-  bool CheckPlaybookReactions(Unit& mover);
+  // Squad-playbook pass, run once per executing tick after every mover has
+  // advanced: for each living figure with a living enemy in its FOV+LOS,
+  // looks up its team's table by (moving?, any sighted enemy sees it back?)
+  // and shoots the nearest sighted enemy and/or cuts the figure's move short.
+  // All reactions are judged against the same snapshot, then applied, so
+  // mutual shots both land.
+  void ApplyPlaybookReactions();
 
   Scene scene_;
+  SquadPlaybook playbooks_[2];  // Indexed by Team; survives Reset().
   // Range-scoped: covers only [origin +/- (MoveBudget + margin)],
   // clipped to the map, not the whole map. Cached per (unit id, position).
   NavMesh navMesh_;

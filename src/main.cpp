@@ -301,7 +301,7 @@ int main() {
   // they must agree on the seed.
   std::string mapType = "urban";
   if (const char* mapEnv = std::getenv("TBGWAF_MAP")) mapType = mapEnv;
-  auto makeMap = [mapSeed, mapType]() {
+  auto makeMap = [&mapSeed, &mapType]() {
     return mapType == "hilly" ? tactics::GenerateHillyMap(mapSeed)
                               : tactics::GenerateUrbanMap(mapSeed);
   };
@@ -366,8 +366,7 @@ int main() {
   constexpr int kSmokeTestMaxFrames = 60;
   Uint32 lastFrameTicks = SDL_GetTicks();
   // App-level screen (Splash -> Map Select -> gameplay), generated from
-  // flow/app_flow.yaml. Only Urban exists today, so every client builds the
-  // same seeded city regardless of which screen path it took.
+  // flow/app_flow.yaml.
   tbgwaf_flow::State screen = tbgwaf_flow::kInitialState;
   // Local-only debug panel state (defaults: FOV and shadows on, FPS shown).
   gfx::RenderDebugOptions debugOptions;
@@ -568,8 +567,10 @@ int main() {
                                                          : tbgwaf_flow::Event::SelectUrban;
       }
       if (flowEvent) {
-        if (*flowEvent == tbgwaf_flow::Event::SelectUrban) {
-          game.Reset(tactics::GenerateUrbanMap(mapSeed));
+        if (*flowEvent == tbgwaf_flow::Event::SelectUrban ||
+            *flowEvent == tbgwaf_flow::Event::SelectHills) {
+          mapType = *flowEvent == tbgwaf_flow::Event::SelectHills ? "hilly" : "urban";
+          game.Reset(makeMap());
           for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
         }
         screen = tbgwaf_flow::Next(screen, *flowEvent);

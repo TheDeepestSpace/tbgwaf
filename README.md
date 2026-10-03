@@ -115,6 +115,7 @@ flowchart TD
     gameplay("  Gameplay  ")
     splash -->|new_game| map_select
     map_select -->|select_urban| gameplay
+    map_select -->|select_hills| gameplay
     map_select -->|back| splash
 ```
 

@@ -86,4 +86,8 @@ HudActions DrawHud(const tactics::GameLogic& game, tactics::Team team, bool plan
                    const PaneRect& rect, int windowHeight, const gfx::OrbitCamera& camera,
                    HudLayout* layout = nullptr);
 
+// Interactive-app-only debug panel (render toggles + FPS). Not called by the
+// visual runner. `fps` is a smoothed frames-per-second value.
+void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float fps);
+
 }  // namespace ui

@@ -163,4 +163,14 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
   return actions;
 }
 
+void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float fps) {
+  ImGui::SetNextWindowPos(ImVec2(8.0f, 8.0f), ImGuiCond_FirstUseEver);
+  ImGui::Begin("Debug", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+  ImGui::Checkbox("Disable FOV cones", &disableFov);
+  ImGui::Checkbox("Disable shadows", &disableShadows);
+  ImGui::Checkbox("Show FPS", &showFps);
+  if (showFps) ImGui::Text("%.1f FPS", fps);
+  ImGui::End();
+}
+
 }  // namespace ui

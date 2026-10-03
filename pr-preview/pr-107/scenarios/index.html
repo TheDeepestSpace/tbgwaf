@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Gameplay scenario review</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 1400px;
+         padding: 0 1rem; background: #14161a; color: #e8e8e8; }
+  h1 { font-size: 1.5rem; }
+  h2 { border-bottom: 1px solid #3a3f47; padding-bottom: 0.3rem; margin-top: 2.5rem; }
+  h2 .count { color: #8a919c; font-weight: normal; font-size: 1rem; }
+  .scenario { margin: 1.5rem 0; }
+  .scenario h3 { margin-bottom: 0.2rem; }
+  .scenario .path { color: #8a919c; font-size: 0.85rem; font-family: monospace; }
+  .panes { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.8rem; }
+  .pane { flex: 1; min-width: 320px; max-width: 640px; }
+  .pane figcaption { margin-bottom: 0.3rem; font-weight: bold; }
+  .pane.blue figcaption { color: #6d9eeb; }
+  .pane.red figcaption { color: #e06666; }
+  video { width: 100%; background: #000; border: 1px solid #3a3f47; }
+  .note { color: #d0a24a; }
+  .empty { color: #8a919c; font-style: italic; }
+  .pane.breakdown { flex: 0 1 360px; min-width: 280px; }
+  .pane.breakdown figcaption { color: #b8c0cc; }
+  .rounds { position: relative; border: 1px solid #3a3f47; background: #1a1d22;
+            padding: 0.4rem 0.6rem; max-height: 420px; overflow-y: auto;
+            font-size: 0.9rem; }
+  .round-title { color: #8a919c; font-size: 0.78rem; text-transform: uppercase;
+                 letter-spacing: 0.06em; margin: 0.5rem 0 0.15rem; }
+  .step { padding: 0.12rem 0.4rem; border-radius: 4px; }
+  .has-video .step { cursor: pointer; }
+  .has-video .step:hover { background: #262b33; }
+  .step.active { background: #2c3a55; box-shadow: inset 0 0 0 1px #4a6da8; }
+  .step .u { font-weight: bold; }
+  .step .u.blue { color: #6d9eeb; }
+  .step .u.red { color: #e06666; }
+  .transport { display: flex; align-items: center; gap: 0.7rem; margin-top: 0.6rem; }
+  .transport button { background: #262b33; color: #e8e8e8; border: 1px solid #3a3f47;
+                      border-radius: 4px; width: 2.6rem; height: 1.8rem;
+                      cursor: pointer; font-size: 0.8rem; }
+  .transport input[type="range"] { flex: 1; }
+  .transport .clock { font-family: monospace; font-size: 0.85rem; color: #8a919c; }
+</style>
+</head>
+<body>
+<h1>Gameplay scenario review</h1>
+<p>Scenarios under <code>tests/scenarios</code>, classified against this PR from
+git metadata on the YAML files. Every scenario present at the PR's head —
+new, modified, and unchanged — gets a video: the full scripted scenario as
+rendered for that team's fog-of-war pane, the PR's version (no base-branch
+comparison). Both panes play in lockstep from the shared transport below
+them; click a script step to jump both videos to it. Deleted scenarios are
+listed by name only.</p>
+<h2>New scenarios <span class="count">(0)</span></h2>
+<p class="empty">None.</p>
+<h2>Modified scenarios <span class="count">(0)</span></h2>
+<p class="empty">None.</p>
+<h2>Unchanged scenarios <span class="count">(10)</span></h2>
+<div class="scenario has-video" data-stem="default_scene_shoot_rows"><h3>default_scene_shoot_rows</h3><div class="path">tests/scenarios/default_scene_shoot_rows.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/default_scene_shoot_rows/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/default_scene_shoot_rows/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> shoots <span class="u red">red3</span></div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> shoots <span class="u red">red4</span></div>
+<div class="step" data-action="3"><span class="u blue">blue2</span> shoots <span class="u red">red5</span></div>
+<div class="step" data-action="4"><span class="u red">red3</span> shoots <span class="u blue">blue0</span></div>
+<div class="step" data-action="5"><span class="u red">red4</span> shoots <span class="u blue">blue1</span></div>
+<div class="step" data-action="6"><span class="u red">red5</span> shoots <span class="u blue">blue2</span></div>
+<div class="step" data-action="7">commit round</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
+<div class="scenario has-video" data-stem="double_click_focus_camera"><h3>double_click_focus_camera</h3><div class="path">tests/scenarios/double_click_focus_camera.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/double_click_focus_camera/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/double_click_focus_camera/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1 (uncommitted)</div>
+<div class="step" data-action="1">double-click focus on <span class="u blue">blue0</span></div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
+<div class="scenario has-video" data-stem="enemy_sighting_memory_trail"><h3>enemy_sighting_memory_trail</h3><div class="path">tests/scenarios/enemy_sighting_memory_trail.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/enemy_sighting_memory_trail/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/enemy_sighting_memory_trail/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (-12, 14)</div>
+<div class="step" data-action="3">commit round</div>
+</div>
+<div class="round"><div class="round-title">Round 2</div>
+<div class="step" data-action="4"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="5"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="6">commit round</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
+<div class="scenario has-video" data-stem="fov_gating_blocks_out_of_view_shot"><h3>fov_gating_blocks_out_of_view_shot</h3><div class="path">tests/scenarios/fov_gating_blocks_out_of_view_shot.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/fov_gating_blocks_out_of_view_shot/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/fov_gating_blocks_out_of_view_shot/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> shoots <span class="u red">red1</span> (expected no-op: target not visible)</div>
+<div class="step" data-action="2"><span class="u blue">blue0</span> cancels</div>
+<div class="step" data-action="3"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="4"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="5">commit round</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
+<div class="scenario has-video" data-stem="move_and_climb_crate"><h3>move_and_climb_crate</h3><div class="path">tests/scenarios/move_and_climb_crate.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/move_and_climb_crate/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/move_and_climb_crate/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (0, 1.2, 0)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (5, -5)</div>
+<div class="step" data-action="3">commit round</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
+<div class="scenario has-video" data-stem="move_final_facing"><h3>move_final_facing</h3><div class="path">tests/scenarios/move_final_facing.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/move_final_facing/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/move_final_facing/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (-5, 4), then faces 0°</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (5, 0)</div>
+<div class="step" data-action="3">commit round</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
+<div class="scenario has-video" data-stem="playbook_do_nothing_lets_enemy_pass"><h3>playbook_do_nothing_lets_enemy_pass</h3><div class="path">tests/scenarios/playbook_do_nothing_lets_enemy_pass.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_do_nothing_lets_enemy_pass/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_do_nothing_lets_enemy_pass/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (-1, 5)</div>
+<div class="step" data-action="3">commit round</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
+<div class="scenario has-video" data-stem="playbook_multi_leg_move"><h3>playbook_multi_leg_move</h3><div class="path">tests/scenarios/playbook_multi_leg_move.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_multi_leg_move/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_multi_leg_move/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (8, -8) via (-8, 8), (8, 8)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+</div>
+<div class="round"><div class="round-title">Round 2</div>
+<div class="step" data-action="4"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="5">commit round</div>
+</div>
+<div class="round"><div class="round-title">Round 3</div>
+<div class="step" data-action="6"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="7">commit round</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
+<div class="scenario has-video" data-stem="playbook_shoot_on_fov_entry"><h3>playbook_shoot_on_fov_entry</h3><div class="path">tests/scenarios/playbook_shoot_on_fov_entry.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_shoot_on_fov_entry/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_shoot_on_fov_entry/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (-1, 5)</div>
+<div class="step" data-action="3"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
+<div class="scenario has-video" data-stem="playbook_sighting_memory_fades_out"><h3>playbook_sighting_memory_fades_out</h3><div class="path">tests/scenarios/playbook_sighting_memory_fades_out.yaml</div>
+<p class="note">⚠ scenario script failed during visual playback; video below stops at the failing step.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_sighting_memory_fades_out/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_sighting_memory_fades_out/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (-12, 14)</div>
+<div class="step" data-action="3">commit round</div>
+</div>
+<div class="round"><div class="round-title">Round 2</div>
+<div class="step" data-action="4"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="5"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="6">commit round</div>
+</div>
+<div class="round"><div class="round-title">Round 3</div>
+<div class="step" data-action="7"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="8"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="9">commit round</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
+<h2>Deleted scenarios <span class="count">(0)</span></h2>
+<p class="empty">None.</p>
+<script>
+(() => {
+"use strict";
+function fmtTime(t) {
+  if (!isFinite(t) || t < 0) t = 0;
+  return Math.floor(t / 60) + ":" + String(Math.floor(t % 60)).padStart(2, "0");
+}
+function init(sc) {
+  const vids = Array.from(sc.querySelectorAll("video"));
+  const steps = Array.from(sc.querySelectorAll(".step"));
+  const btn = sc.querySelector(".playpause");
+  const seek = sc.querySelector(".seek");
+  const clock = sc.querySelector(".clock");
+  const master = vids[0];
+  if (!master || !btn || !seek || !clock) return;
+  const followers = vids.slice(1);
+  // timing.json: {fps, actions: [{index, frame, time}]}, `time` being the
+  // exclusive end of that action's video segment (index 0 = initial state).
+  let timing = null;
+  fetch("media/" + sc.dataset.stem + "/timing.json")
+    .then(r => (r.ok ? r.json() : null))
+    .then(t => { timing = t; update(); })
+    .catch(() => {});
+  const playAll = () => { vids.forEach(v => v.play()); btn.textContent = "❚❚"; };
+  const pauseAll = () => { vids.forEach(v => v.pause()); btn.textContent = "▶"; };
+  const seekAll = t => { vids.forEach(v => { v.currentTime = t; }); update(); };
+  btn.addEventListener("click", () => (master.paused ? playAll() : pauseAll()));
+  seek.addEventListener("input", () => {
+    if (master.duration) seekAll((seek.value / 1000) * master.duration);
+  });
+  master.addEventListener("ended", () => { seekAll(0); playAll(); });
+  function update() {
+    const t = master.currentTime || 0;
+    if (master.duration) seek.value = Math.round((t / master.duration) * 1000);
+    clock.textContent = fmtTime(t) + " / " + fmtTime(master.duration || 0);
+    followers.forEach(v => {
+      if (!v.seeking && Math.abs(v.currentTime - t) > 0.08) v.currentTime = t;
+    });
+    if (!timing || !timing.actions || !timing.actions.length) return;
+    const entry = timing.actions.find(e => t < e.time) ||
+                  timing.actions[timing.actions.length - 1];
+    steps.forEach(s => {
+      const active = Number(s.dataset.action) === entry.index;
+      if (active && !s.classList.contains("active")) {
+        // Keep the playing step in view, scrolling only the rounds box
+        // (scrollIntoView could also yank the page itself).
+        const box = s.closest(".rounds");
+        if (box && (s.offsetTop < box.scrollTop ||
+                    s.offsetTop + s.offsetHeight > box.scrollTop + box.clientHeight)) {
+          box.scrollTop = s.offsetTop - box.clientHeight / 2;
+        }
+      }
+      s.classList.toggle("active", active);
+    });
+  }
+  master.addEventListener("timeupdate", update);
+  master.addEventListener("seeked", update);
+  master.addEventListener("loadedmetadata", update);
+  steps.forEach(s => s.addEventListener("click", () => {
+    if (!timing || !timing.actions) return;
+    const n = Number(s.dataset.action);
+    // A step's segment starts where the previous action's ended. A step with
+    // no timing entry never played (the script failed earlier): don't seek.
+    const prev = timing.actions.find(e => e.index === n - 1);
+    if (n > 0 && !prev) return;
+    seekAll(prev ? prev.time : 0);
+  }));
+}
+document.querySelectorAll(".scenario.has-video").forEach(init);
+})();
+</script>
+</body>
+</html>

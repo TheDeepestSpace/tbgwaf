@@ -30,6 +30,24 @@ ctest --test-dir build --output-on-failure
 Run the game with `./build/tactics_app`. `ctest` also runs a headless
 smoke test under `xvfb-run` if available.
 
+Environment knobs: `TBGWAF_MAP_SEED=<n>` reseeds the procedural map.
+The default map (also what the web build serves) is `urban-elevated`; the plain urban map lays an oblique boundary-to-boundary artery with
+angled avenues/cross streets and polygon blocks whose buildings follow
+their frontage; `TBGWAF_MAP=urban-merge` adds a wide branching avenue that
+merges into the artery, `TBGWAF_MAP=urban-elevated` (default) turns the artery into a
+true overpass (ramps up, crosses on pier bents with usable ground beneath,
+ramps back down; the branch becomes an on-ramp merging mid-deck), and
+`TBGWAF_MAP=hilly` selects rolling hills. Urban code/scenarios can also
+tune artery count/width, local-street width/skew and elevation through
+`MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
+overlay of the navmesh's walkable-cell boundaries.
+The app defaults to the prototype per-unit shadow-map FOV mask (tints
+walls, roofs and deck sides too; see
+[docs/fov-shadow-map.md](docs/fov-shadow-map.md)); `TBGWAF_FOV_SHADOW_MAP=0`
+restores the analytic FOV-cone overlay. Visual scenarios still default to
+the analytic overlay and opt in
+with a `render: {fov_overlay: shadow_map}` block.
+
 ### Gameplay scenario tests
 
 `tests/scenarios/*.yaml` are state-only (no rendering) gameplay regression
@@ -130,6 +148,7 @@ flowchart TD
     gameplay("  Gameplay  ")
     splash -->|new_game| map_select
     map_select -->|select_urban| gameplay
+    map_select -->|select_hills| gameplay
     map_select -->|back| splash
 ```
 

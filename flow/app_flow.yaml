@@ -11,4 +11,5 @@ states:
 transitions:
   - {from: splash, event: new_game, to: map_select}
   - {from: map_select, event: select_urban, to: gameplay}
+  - {from: map_select, event: select_hills, to: gameplay}
   - {from: map_select, event: back, to: splash}

@@ -1,0 +1,32 @@
+# Issue #110: the elevated_highway_ramp scenario rendered with the
+# shadow-map projective FOV mask instead of the analytic CPU overlay
+# (render.fov_overlay). Same map, units, camera and script, so the two
+# golden sets can be compared side by side: the mask should land on the
+# ramp top, the deck sides, pier faces and nearby building walls, and the
+# far descending ramp past the crest should stay unlit (occluded by the
+# crest). Visual-only; the asserts just keep the scenario a valid state test.
+name: fov_shadow_map_elevated_highway_ramp
+
+map:
+  generate: {type: urban, seed: 7, arteries: 2, elevated: true}
+
+render:
+  fov_overlay: shadow_map
+
+units:
+  - {id: 0, team: blue, position: [-62.4210, 0, 15.8678], facing_degrees: -15}
+  - {id: 1, team: red, position: [60, 0, -18], facing_degrees: 180}
+
+camera:
+  target: [-52, 13]
+  zoom: 26
+
+script:
+  - action: move
+    actor: 0
+    destination: [-44.6400, 1.40745, 10.9775]
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [-44.6400, 1.40745, 10.9775], tolerance: 0.05}
+  - assert: {round: 2}

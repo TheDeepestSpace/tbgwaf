@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "game/GameLogic.h"
+#include "game/Geometry.h"
 #include "game/MapGenerator.h"
 #include "game/Raycast.h"
 #include "game/Types.h"
@@ -135,11 +136,40 @@ int PickUnit(const gfx::Ray& ray, const std::vector<Unit>& units) {
 }
 
 
-// Stage-C climbing: a ground/move click can land either on the y=0 ground
-// plane or on top of a climbable obstacle (a crate's top face). Both are
-// finite planes from the ray's point of view, so pick whichever the ray
-// actually hits nearer the camera -- matches how the scene is rendered
-// (the ground plane is infinite but obstacles occlude it visually).
+// Terrain picking: coarse ray-march against the heightfield, refined by
+// bisection once the ray first dips below the ground. Replaces the flat
+// y=0 plane intersection on scenes with sampled terrain, so a click on a
+// hillside lands on the slope the player actually pointed at (a flat-plane
+// hit would land several units past it at shallow camera angles).
+bool IntersectTerrain(const gfx::Ray& ray, const tactics::HeightField& ground, glm::vec3* outPoint,
+                      float* outT) {
+  constexpr float kCoarseStep = 0.5f;
+  constexpr float kMaxDistance = 2000.0f;
+  float prevT = 0.0f;
+  if (ray.origin.y - ground.HeightAt(ray.origin.x, ray.origin.z) <= 0.0f) return false;
+  for (float t = kCoarseStep; t <= kMaxDistance; t += kCoarseStep) {
+    const glm::vec3 p = ray.origin + ray.direction * t;
+    if (p.y - ground.HeightAt(p.x, p.z) <= 0.0f) {
+      float lo = prevT, hi = t;
+      for (int i = 0; i < 24; ++i) {
+        const float mid = 0.5f * (lo + hi);
+        const glm::vec3 q = ray.origin + ray.direction * mid;
+        (q.y - ground.HeightAt(q.x, q.z) <= 0.0f ? hi : lo) = mid;
+      }
+      *outT = 0.5f * (lo + hi);
+      *outPoint = ray.origin + ray.direction * *outT;
+      return true;
+    }
+    prevT = t;
+  }
+  return false;
+}
+
+// Stage-C climbing: a ground/move click can land either on the ground
+// surface (the y=0 plane, or the sampled terrain when the scene has one) or
+// on top of a climbable obstacle (a crate's top face). Pick whichever the
+// ray actually hits nearer the camera -- matches how the scene is rendered
+// (the ground is drawn everywhere but obstacles occlude it visually).
 //
 // Any walkable surface counts, not just crates: climbable obstacles and the
 // scene's flat walkable slabs (sidewalks) are all picked by their top face.
@@ -149,7 +179,14 @@ bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const tactics::Scene& scene,
   glm::vec3 bestPoint(0.0f);
 
   glm::vec3 groundPoint;
-  if (gfx::OrbitCamera::IntersectGroundPlane(ray, &groundPoint)) {
+  float terrainT = 0.0f;
+  if (!scene.ground.Empty()) {
+    if (IntersectTerrain(ray, scene.ground, &groundPoint, &terrainT)) {
+      found = true;
+      bestT = terrainT;
+      bestPoint = groundPoint;
+    }
+  } else if (gfx::OrbitCamera::IntersectGroundPlane(ray, &groundPoint)) {
     const float t = glm::dot(groundPoint - ray.origin, ray.direction);
     found = true;
     bestT = t;
@@ -172,6 +209,20 @@ bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const tactics::Scene& scene,
     if (obstacle.climbable) considerSurface(obstacle.bounds);
   }
   for (const tactics::AABB& slab : scene.sidewalks) considerSurface(slab);
+  for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
+    if (surface.vertices.size() < 3) continue;
+    const glm::vec3 normal = glm::cross(surface.vertices[1] - surface.vertices[0],
+                                        surface.vertices[2] - surface.vertices[0]);
+    const float denominator = glm::dot(normal, ray.direction);
+    if (std::fabs(denominator) < 1e-7f) continue;
+    const float t = glm::dot(normal, surface.vertices[0] - ray.origin) / denominator;
+    if (t < 0.0f || t >= bestT) continue;
+    const glm::vec3 hit = ray.origin + ray.direction * t;
+    if (!tactics::SurfaceContainsXZ(surface, hit.x, hit.z)) continue;
+    found = true;
+    bestT = t;
+    bestPoint = hit;
+  }
 
   if (found && outPoint) *outPoint = bestPoint;
   return found;
@@ -246,6 +297,19 @@ int main() {
   // (issue #14) draws through exactly the same code path as the app.
   gfx::SceneRenderer renderer;
   if (!renderer.Init()) return 1;
+  // Issue #110 prototype: the per-unit shadow-map FOV mask (walls/roofs/deck
+  // sides too) is the app default for now so deployments show it;
+  // TBGWAF_FOV_SHADOW_MAP=0 restores the analytic CPU overlay.
+  // TBGWAF_FOV_PROBE_HEIGHT=<units> tests ground visibility that high above
+  // the surface instead of at the surface (see SceneRenderer).
+  bool fovShadowMap = true;
+  if (const char* fovEnv = std::getenv("TBGWAF_FOV_SHADOW_MAP")) {
+    fovShadowMap = fovEnv[0] != '\0' && fovEnv[0] != '0';
+  }
+  if (fovShadowMap) renderer.SetFovOverlayMode(gfx::FovOverlayMode::ShadowMap);
+  if (const char* probeEnv = std::getenv("TBGWAF_FOV_PROBE_HEIGHT")) {
+    renderer.SetFovProbeHeight(static_cast<float>(std::atof(probeEnv)));
+  }
 
   // One independent orbit camera per pane, so each side can freely
   // rotate/zoom its own view without affecting the other's.
@@ -253,16 +317,34 @@ int main() {
   // Both web clients must build the same city, so the web seed stays fixed.
   // Native runs pick a random seed per launch (shown and editable on the Map
   // Select screen); TBGWAF_MAP_SEED overrides it.
-  uint32_t mapSeed = 1;
+  uint32_t mapSeed = 7;
 #ifndef __EMSCRIPTEN__
   mapSeed = std::random_device{}();
 #endif
   if (const char* seedEnv = std::getenv("TBGWAF_MAP_SEED")) {
     mapSeed = static_cast<uint32_t>(std::strtoul(seedEnv, nullptr, 10));
   }
-  GameLogic game(tactics::GenerateUrbanMap(mapSeed));
+  // TBGWAF_MAP picks the generator/urban variant; both web clients must
+  // agree the same way they must agree on the seed.
+  std::string mapType = "urban-elevated";
+  if (const char* mapEnv = std::getenv("TBGWAF_MAP")) mapType = mapEnv;
+  auto makeMap = [&mapSeed, &mapType]() {
+    if (mapType == "hilly") return tactics::GenerateHillyMap(mapSeed);
+    tactics::MapGeneratorConfig config;
+    if (mapType == "urban-merge" || mapType == "urban-elevated") config.arteryCount = 2;
+    if (mapType == "urban-elevated") config.elevatedHighway = true;
+    return tactics::GenerateUrbanMap(mapSeed, config);
+  };
+  GameLogic game(makeMap());
   // Start zoomed out far enough that the whole map is in view.
   for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
+
+  // Navmesh boundary debug overlay ('N' toggles it): a full-map navmesh
+  // built on first use (GameLogic's own is windowed per move, so the debug
+  // view meshes the whole scene itself).
+  bool showNavMeshDebug = false;
+  bool navMeshDebugBuilt = false;
+  tactics::NavMesh navMeshDebug;
 
   // Which team this client instance plays (web two-canvas mode); nullopt =
   // one window showing both teams.
@@ -314,8 +396,7 @@ int main() {
   constexpr int kSmokeTestMaxFrames = 60;
   Uint32 lastFrameTicks = SDL_GetTicks();
   // App-level screen (Splash -> Map Select -> gameplay), generated from
-  // flow/app_flow.yaml. Only Urban exists today, so every client builds the
-  // same seeded city regardless of which screen path it took.
+  // flow/app_flow.yaml.
   tbgwaf_flow::State screen = tbgwaf_flow::kInitialState;
   // Local-only debug panel state (defaults: FOV and shadows on, FPS shown).
   gfx::RenderDebugOptions debugOptions;
@@ -356,7 +437,11 @@ int main() {
         } else if (msg == "C") {
           if (isSimulator && game.CanCommitRound()) game.CommitRound();
         } else if (msg == "N") {
-          if (isSimulator && game.Mode() == InputMode::GameOver) game.Reset(tactics::GenerateUrbanMap(mapSeed));
+          if (isSimulator && game.Mode() == InputMode::GameOver) {
+            game.Reset(makeMap());
+            navMeshDebugBuilt = false;
+            showNavMeshDebug = false;
+          }
         } else if (msg.size() > 2 && (msg[0] == 'S' || msg[0] == 'P') && msg[1] == ' ') {
           GameSnapshot snap;
           if (!DeserializeSnapshot(msg.substr(2), &snap)) continue;
@@ -491,6 +576,15 @@ int main() {
       } else if (event.type == SDL_KEYDOWN && (event.key.keysym.sym == SDLK_RETURN ||
                                                event.key.keysym.sym == SDLK_KP_ENTER)) {
         enterPending = true;
+      } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_n &&
+                 !ImGui::GetIO().WantCaptureKeyboard) {
+        showNavMeshDebug = !showNavMeshDebug;
+        if (showNavMeshDebug && !navMeshDebugBuilt) {
+          navMeshDebug.Build(game.GetScene().obstacles, game.GetScene().mapHalfExtent,
+                             tactics::constants::kAgentRadius, &game.GetScene().ground,
+                             &game.GetScene().walkSurfaces);
+          navMeshDebugBuilt = true;
+        }
       }
     }
 
@@ -507,8 +601,10 @@ int main() {
                                                          : tbgwaf_flow::Event::SelectUrban;
       }
       if (flowEvent) {
-        if (*flowEvent == tbgwaf_flow::Event::SelectUrban) {
-          game.Reset(tactics::GenerateUrbanMap(mapSeed));
+        if (*flowEvent == tbgwaf_flow::Event::SelectUrban ||
+            *flowEvent == tbgwaf_flow::Event::SelectHills) {
+          mapType = *flowEvent == tbgwaf_flow::Event::SelectHills ? "hilly" : "urban";
+          game.Reset(makeMap());
           for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
         }
         screen = tbgwaf_flow::Next(screen, *flowEvent);
@@ -572,7 +668,9 @@ int main() {
                                              pane == 0 ? &roundPanelBottom : nullptr);
       if (hud.newMatch) {
         if (isSimulator) {
-          game.Reset(tactics::GenerateUrbanMap(mapSeed));
+          game.Reset(makeMap());
+          navMeshDebugBuilt = false;
+          showNavMeshDebug = false;
         } else {
 #ifdef __EMSCRIPTEN__
           tbgwaf_channel_post("N");
@@ -712,7 +810,8 @@ int main() {
       const PaneRect& rect = paneRects[pane];
       std::optional<glm::vec3> hover;
       if (hasHoveredGroundPoint) hover = hoveredGroundPoint;
-      const gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(game, paneTeam(pane), hover);
+      gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(game, paneTeam(pane), hover);
+      if (showNavMeshDebug) overlays.navMeshDebug = &navMeshDebug;
       renderer.RenderPane(game, paneTeam(pane), fogActive, paneVisibility[pane], cameras[pane],
                           rect.x, 0, rect.width, windowHeight, overlays, 0, debugOptions);
     }

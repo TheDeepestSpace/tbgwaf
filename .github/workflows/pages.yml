@@ -35,10 +35,13 @@ jobs:
 
       - name: Assemble Pages site
         run: |
-          mkdir -p site
+          mkdir -p site site/gallery
           cp build-web/index.html site/
           cp build-web/tactics_app.js site/
           cp build-web/tactics_app.wasm site/
+          cp build-web/gallery.html site/gallery/index.html
+          cp build-web/tactics_gallery.js site/gallery/
+          cp build-web/tactics_gallery.wasm site/gallery/
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0

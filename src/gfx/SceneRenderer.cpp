@@ -1012,13 +1012,33 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
   constexpr float kFootprintAlpha = 0.7f;
   constexpr float kTwoPi = 6.28318530717958647692f;
   const float tanHalf = std::tan(glm::radians(tactics::constants::kShotConeHalfAngleDegrees));
-  const float range = tactics::kDefaultShotProfile.range;
   const glm::vec3 apex = unit.MuzzlePosition();
   const glm::vec3 axis = unit.FacingDirection();
+  // The cone ends where its axis first meets an obstacle, so it never pokes
+  // out the far side of a wall.
+  float range = tactics::kDefaultShotProfile.range;
+  for (const auto& obstacle : obstacles) {
+    float tEnter = 0.0f;
+    float tExit = range;
+    bool hit = true;
+    for (int i = 0; i < 3 && hit; ++i) {
+      if (std::abs(axis[i]) < 1e-6f) {
+        hit = apex[i] >= obstacle.bounds.min[i] && apex[i] <= obstacle.bounds.max[i];
+        continue;
+      }
+      float t0 = (obstacle.bounds.min[i] - apex[i]) / axis[i];
+      float t1 = (obstacle.bounds.max[i] - apex[i]) / axis[i];
+      if (t0 > t1) std::swap(t0, t1);
+      tEnter = std::max(tEnter, t0);
+      tExit = std::min(tExit, t1);
+      hit = tEnter <= tExit;
+    }
+    if (hit && tEnter > 0.0f) range = tEnter;
+  }
   const glm::vec3 right(-axis.z, 0.0f, axis.x);
   const glm::vec3 up(0.0f, 1.0f, 0.0f);
-  const glm::vec3 color = unit.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
-                                                  : glm::vec3(0.9f, 0.25f, 0.22f);
+  // Setup color: same green as the movement frontier border.
+  const glm::vec3 color(0.2f, 1.0f, 0.3f);
 
   const auto vertex = [&](int ring, int seg) {
     const float u = static_cast<float>(ring) / static_cast<float>(kRings);
@@ -1048,7 +1068,7 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
   surfaceShader.Use();
   surfaceShader.SetVec3("uApex", apex);
   surfaceShader.SetVec3("uAxis", axis);
-  surfaceShader.SetVec4("uCone", glm::vec4(tanHalf, range, kFootprintAlpha, 0.0f));
+  surfaceShader.SetVec4("uCone", glm::vec4(tanHalf, range + 0.05f, kFootprintAlpha, 0.0f));
   surfaceShader.SetVec3("uColor", color);
   const auto drawBox = [&](const glm::vec3& minCorner, const glm::vec3& size) {
     const glm::mat4 model =

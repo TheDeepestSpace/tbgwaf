@@ -295,6 +295,19 @@ int main() {
   // (issue #14) draws through exactly the same code path as the app.
   gfx::SceneRenderer renderer;
   if (!renderer.Init()) return 1;
+  // Issue #110 prototype: the per-unit shadow-map FOV mask (walls/roofs/deck
+  // sides too) is the app default for now so deployments show it;
+  // TBGWAF_FOV_SHADOW_MAP=0 restores the analytic CPU overlay.
+  // TBGWAF_FOV_PROBE_HEIGHT=<units> tests ground visibility that high above
+  // the surface instead of at the surface (see SceneRenderer).
+  bool fovShadowMap = true;
+  if (const char* fovEnv = std::getenv("TBGWAF_FOV_SHADOW_MAP")) {
+    fovShadowMap = fovEnv[0] != '\0' && fovEnv[0] != '0';
+  }
+  if (fovShadowMap) renderer.SetFovOverlayMode(gfx::FovOverlayMode::ShadowMap);
+  if (const char* probeEnv = std::getenv("TBGWAF_FOV_PROBE_HEIGHT")) {
+    renderer.SetFovProbeHeight(static_cast<float>(std::atof(probeEnv)));
+  }
 
   // One independent orbit camera per pane, so each side can freely
   // rotate/zoom its own view without affecting the other's.

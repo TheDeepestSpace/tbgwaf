@@ -90,6 +90,13 @@ struct Scenario {
   // maps need this to frame the action.
   std::optional<glm::vec2> cameraTarget;
   float cameraZoom = 10.0f;
+  // Optional visual-runner render settings (`render:` section). Ignored by
+  // the logic-only runner.
+  //   fov_overlay: "cpu" (default) | "shadow_map" -- issue #110 prototype.
+  //   fov_probe_height: shadow_map only; see SceneRenderer::SetFovProbeHeight.
+  enum class FovOverlay { Cpu, ShadowMap };
+  FovOverlay fovOverlay = FovOverlay::Cpu;
+  float fovProbeHeight = 0.0f;
 };
 
 // Throws std::runtime_error with a descriptive message on malformed YAML.

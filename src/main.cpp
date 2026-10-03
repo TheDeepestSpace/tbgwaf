@@ -321,6 +321,9 @@ int main() {
   gfx::RenderDebugOptions debugOptions;
   bool showFps = true;
   float smoothedFps = 0.0f;
+  float frameMs = 0.0f;
+  float fovMs = 0.0f;
+  gfx::RenderFrameStats frameStats;
 
   auto runFrame = [&]() {
 #ifdef __EMSCRIPTEN__
@@ -523,6 +526,7 @@ int main() {
     const Uint32 nowTicks = SDL_GetTicks();
     const float dt = static_cast<float>(nowTicks - lastFrameTicks) / 1000.0f;
     lastFrameTicks = nowTicks;
+    frameMs = dt * 1000.0f;
     if (dt > 0.0f) {
       const float instantFps = 1.0f / dt;
       smoothedFps = smoothedFps == 0.0f ? instantFps : smoothedFps + (instantFps - smoothedFps) * 0.05f;
@@ -553,9 +557,12 @@ int main() {
     }
 
     std::array<TeamVisibility, kMaxPanes> paneVisibility;
+    const Uint64 fovStart = SDL_GetPerformanceCounter();
     for (int pane = 0; pane < paneCount; ++pane) {
       if (fogActive) paneVisibility[pane] = game.ComputeVisibility(paneTeam(pane));
     }
+    fovMs = static_cast<float>(SDL_GetPerformanceCounter() - fovStart) * 1000.0f /
+            static_cast<float>(SDL_GetPerformanceFrequency());
 
     // --- UI ---
     float roundPanelBottom = 2.0f;
@@ -690,12 +697,17 @@ int main() {
     }
     // Anchored under the Round panel so it follows collapse/expand.
     ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, showFps,
-                       smoothedFps, roundPanelBottom + 6.0f);
+                       smoothedFps, frameMs, fovMs, frameStats,
+                       roundPanelBottom + 6.0f);
 
     // --- Render: one shadow pass + one color pass per pane, both inside
     // SceneRenderer::RenderPane. Selection/move-preview overlays belong to
     // whichever team the currently selected figure is on, so only that
     // player's pane shows them (the other side must not see enemy plans). ---
+    // The panel above shows last frame's render counters (drawn before this
+    // frame's render pass).
+    frameStats = {};
+    debugOptions.stats = &frameStats;
     for (int pane = 0; pane < paneCount; ++pane) {
       const PaneRect& rect = paneRects[pane];
       std::optional<glm::vec3> hover;

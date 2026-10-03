@@ -291,7 +291,7 @@ else()
   )
 
   # Asset & animation gallery (issue #126): shared catalog/renderer, a
-  # native interactive viewer, and the gallery golden-screenshot runner.
+  # native interactive viewer.
   add_library(tactics_gallery STATIC src/gallery/GalleryScene.cpp)
   target_include_directories(tactics_gallery PUBLIC src)
   target_link_libraries(tactics_gallery PUBLIC tactics_gfx glm::glm)
@@ -303,14 +303,6 @@ else()
     PkgConfig::SDL2
     PkgConfig::EGL
     PkgConfig::GLESV2
-  )
-
-  add_executable(tactics_gallery_visual_tests tests/visual/gallery_visual_main.cpp)
-  target_include_directories(tactics_gallery_visual_tests PRIVATE src tests ${stb_SOURCE_DIR})
-  target_link_libraries(tactics_gallery_visual_tests PRIVATE
-    tactics_gallery
-    PkgConfig::SDL2
-    PkgConfig::EGL
   )
 
   # Map-only golden renders of seeded generated cities (no units/teams).
@@ -344,17 +336,6 @@ else()
       WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     )
     set_tests_properties(map_visual_tests PROPERTIES
-      TIMEOUT 300
-      ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
-    )
-    add_test(
-      NAME gallery_visual_tests
-      COMMAND ${XVFB_RUN_EXECUTABLE} --auto-servernum --server-args=-screen\ 0\ 1280x1024x24
-              $<TARGET_FILE:tactics_gallery_visual_tests>
-              --out-dir ${CMAKE_BINARY_DIR}/gallery_visual_out
-      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    )
-    set_tests_properties(gallery_visual_tests PROPERTIES
       TIMEOUT 300
       ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
     )

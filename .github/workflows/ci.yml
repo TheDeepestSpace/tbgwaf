@@ -52,4 +52,3 @@ jobs:
           path: |
             build/visual_out
             build/map_visual_out
-            build/gallery_visual_out

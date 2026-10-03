@@ -7,9 +7,7 @@
 // left/right switch item, space toggles playback.
 //
 // All actual content (catalog, framing, posing, rendering) comes from
-// gallery::* in src/gallery/GalleryScene.*, which the golden-screenshot
-// runner (tests/visual/gallery_visual_main.cpp) shares, so CI snapshots
-// exactly what this viewer shows.
+// gallery::* in src/gallery/GalleryScene.*.
 
 #include <SDL.h>
 #include <GLES3/gl3.h>

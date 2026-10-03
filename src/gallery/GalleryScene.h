@@ -14,8 +14,7 @@ namespace gallery {
 // Asset & animation gallery (issue #126): the catalog of viewable items and
 // a small self-contained renderer for one item at a time. Shared verbatim by
 // the interactive web viewer (web/gallery.html + gallery_main.cpp) and the
-// native golden-screenshot runner (tests/visual/gallery_visual_main.cpp), so
-// what CI snapshots is exactly what the page shows.
+// native viewer.
 
 enum class ItemKind {
   WeaponModel,  // The weapon alone on an auto-rotating turntable.

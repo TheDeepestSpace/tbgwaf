@@ -80,17 +80,8 @@ and `pr-preview/pr-<number>/gallery/` in each PR preview. The page lists
 the three weapon turntables plus idle/run/shoot per weapon (drag to orbit,
 scroll to zoom, play/pause and scrub the loop). The catalog, framing, and
 renderer live in `src/gallery/GalleryScene.*`, shared verbatim between the
-web viewer (`src/gallery/gallery_main.cpp` + `web/gallery.html`) and the
-golden runner below; a native interactive build is available as
-`build/tactics_gallery_app` (left/right switch item, space pauses).
-
-The gallery is golden-tested like the scenarios (the
-`gallery_visual_tests` ctest target): each weapon turntable is snapshotted
-at two fixed rotations (30° and 210°, i.e. both sides) and each animation
-at three fixed loop times (0, ⅓ and ⅔ of the loop), 640×480 PNGs under
-`tests/gallery_goldens/`, compared with the same pixelmatch-style
-tolerance as the other visual tests. Regenerate them (together with the
-scenario and map goldens) with `scripts/update_golden_baselines.sh`.
+web viewer (`src/gallery/gallery_main.cpp` + `web/gallery.html`) and a
+native interactive build, `build/tactics_gallery_app` (left/right switch item, space pauses).
 
 ### PR scenario review page
 

@@ -113,10 +113,10 @@ void main() {
   // World boxes keep showing every cone/surface intersection (including the ground).
   if (uRequireFacing != 0 && dot(normalize(vWorldNormal), -uAxis) <= 0.0) discard;
   // Brightness tracks ShotProfileHitChance: cosine falloff from the axis to
-  // the cone edge times linear falloff with range, so the brightest part of
+  // the cone edge times quartic falloff with range, so the brightest part of
   // the mask is where a shot is most likely to land.
   float angleFalloff = cos(atan(radial, t) / atan(uCone.x) * 1.57079632679);
-  float rangeFalloff = pow(max(1.0 - t / uCone.z, 0.0), 2.0);
+  float rangeFalloff = pow(max(1.0 - t / uCone.z, 0.0), 4.0);
   FragColor = vec4(uColor, uCone.w * angleFalloff * rangeFalloff);
 }
 )";
@@ -1027,10 +1027,10 @@ void DrawFovCone(const Shader& shader, ColorTriangleMesh& mesh, const glm::mat4&
   mesh.Draw();
 }
 
-// Quadratic falloff (matches the footprint shader) so the cone fades early.
+// Quartic falloff (matches the footprint shader) so the cone fades early.
 inline float ShotConeFade(float u) {
   const float k = std::max(1.0f - u, 0.0f);
-  return k * k;
+  return k * k * k * k;
 }
 
 // The selected figure's shot cone as a real 3D cone: apex at the gun tip, axis

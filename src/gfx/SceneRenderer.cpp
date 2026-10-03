@@ -115,9 +115,11 @@ uniform vec4 uColor;
 uniform vec3 uLightDir;  // Direction the light travels; surfaces face -uLightDir.
 uniform vec3 uViewPos;
 uniform sampler2D uShadowMap;
+uniform int uDisableShadows;
 out vec4 FragColor;
 
 float ComputeShadow(vec3 normal) {
+  if (uDisableShadows != 0) return 0.0;
   vec3 proj = vLightSpacePos.xyz / vLightSpacePos.w;
   proj = proj * 0.5 + 0.5;
   if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z > 1.0) {
@@ -629,10 +631,20 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
   if (glm::length(s.moveDirection) > 0.0f) {
     const glm::vec3 d = s.moveDirection;
     const glm::vec3 side(-d.z, 0.0f, d.x);
-    const glm::vec3 tail = position + glm::vec3(0.0f, 0.02f, 0.0f);
-    const glm::vec3 tip = tail + d * 1.2f;
-    const std::vector<glm::vec3> arrow = {tail, tip, tip - d * 0.3f + side * 0.2f, tip,
-                                          tip - d * 0.3f - side * 0.2f};
+    // Centre the arrow's overall length on the ghost.
+    const float kLength = 1.2f;
+    const glm::vec3 tail = position - d * (kLength * 0.5f) + glm::vec3(0.0f, 0.02f, 0.0f);
+    const glm::vec3 tip = tail + d * kLength;
+    // Closed outline of a fat arrow (shaft + head), traced as a line strip.
+    const float kShaftHalfWidth = 0.08f;
+    const float kHeadHalfWidth = 0.22f;
+    const float kHeadLength = 0.4f;
+    const glm::vec3 headBase = tip - d * kHeadLength;
+    const std::vector<glm::vec3> arrow = {
+        tail + side * kShaftHalfWidth,    headBase + side * kShaftHalfWidth,
+        headBase + side * kHeadHalfWidth, tip,
+        headBase - side * kHeadHalfWidth, headBase - side * kShaftHalfWidth,
+        tail - side * kShaftHalfWidth,    tail + side * kShaftHalfWidth};
     lines.SetPoints(arrow);
     shader.SetMat4("uMVP", viewProj);
     shader.SetVec4("uColor", color);
@@ -1052,7 +1064,7 @@ void SceneRenderer::Destroy() {
 void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                const TeamVisibility& visibility, const OrbitCamera& camera, int x,
                                int y, int width, int height, const PaneOverlays& overlays,
-                               GLuint targetFramebuffer) {
+                               GLuint targetFramebuffer, const RenderDebugOptions& debug) {
   const auto& obstacles = game.GetScene().obstacles;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;
 
@@ -1084,17 +1096,20 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
 
   // Shadow pass: only casters this team can currently see.
   glDisable(GL_SCISSOR_TEST);
-  glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo_);
-  glViewport(0, 0, kShadowMapSize, kShadowMapSize);
-  glClear(GL_DEPTH_BUFFER_BIT);
-  depthShader_.Use();
-  for (const auto& obstacle : obstacles) {
-    const AABB& bounds = obstacle.bounds;
-    DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min, bounds.max - bounds.min);
-  }
-  for (const Unit& unit : game.GetScene().units) {
-    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
-    DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
+  if (!debug.disableShadows) {
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo_);
+    glViewport(0, 0, kShadowMapSize, kShadowMapSize);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    depthShader_.Use();
+    for (const auto& obstacle : obstacles) {
+      const AABB& bounds = obstacle.bounds;
+      DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min,
+                   bounds.max - bounds.min);
+    }
+    for (const Unit& unit : game.GetScene().units) {
+      if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+      DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
+    }
   }
   glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
 
@@ -1117,6 +1132,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   litShader_.SetVec3("uLightDir", lightDir_);
   litShader_.SetVec3("uViewPos", camera.Position());
   litShader_.SetInt("uShadowMap", 0);
+  litShader_.SetInt("uDisableShadows", debug.disableShadows ? 1 : 0);
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
 
@@ -1179,7 +1195,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glEnable(GL_POLYGON_OFFSET_FILL);
   glPolygonOffset(-2.0f, -4.0f);
   for (const Unit& unit : game.GetScene().units) {
-    if (!unit.alive || unit.team != team) continue;
+    if (debug.disableFov || !unit.alive || unit.team != team) continue;
     DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit, obstacles,
                 game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
   }
@@ -1426,19 +1442,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       DrawHighlightOnSurface(unit.position, color);
     }
   }
-  // Overwatch indicator: a minimal PoC-grade ground marker (distinct from
-  // the plan-then-commit ring and the yellow selection ring) under
-  // every figure currently armed to fire during an enemy's move.
+  // Playbook indicator: magenta ring on every figure whose squad playbook
+  // has any shoot reaction.
   for (const Unit& unit : game.GetScene().units) {
-    if (!unit.alive || unit.triggerAction != tactics::TriggerAction::Shoot) continue;
-    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
-    DrawHighlightOnSurface(unit.position,
-                  glm::vec4(1.0f, 0.55f, 0.0f, 1.0f));
-  }
-  // Playbook indicator: magenta ring on every figure with a standing
-  // shoot-on-FOV-entry rule (distinct from the orange one-shot overwatch ring).
-  for (const Unit& unit : game.GetScene().units) {
-    if (!unit.alive || unit.reactionOnStationary != tactics::ReactionRule::Shoot) continue;
+    const tactics::SquadPlaybook& pb = game.Playbook(unit.team);
+    bool shoots = false;
+    for (int m = 0; m < 2; ++m)
+      for (int s = 0; s < 2; ++s) shoots |= tactics::ReactionShoots(pb.table[m][s]);
+    if (!unit.alive || !shoots) continue;
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
     DrawHighlight(unlitShader_, highlightRing_, viewProj, unit.position,
                   glm::vec4(0.85f, 0.1f, 0.85f, 1.0f));

@@ -53,13 +53,12 @@ struct HudActions {
   bool commit = false;
   bool move = false;
   bool shoot = false;
-  bool overwatch = false;
   bool pass = false;
   bool cancel = false;
   bool done = false;
-  // Set when the Playbook popup changed the selected figure's standing
-  // reaction; a config edit, not a turn action.
-  std::optional<tactics::ReactionRule> reaction;
+  // Set when the pane's Playbook view edited its team's squad-wide reaction
+  // table; a config edit, not a turn action.
+  std::optional<tactics::SquadPlaybook> playbook;
 };
 
 // Window-space centers of the HUD buttons actually drawn this frame, keyed
@@ -82,8 +81,16 @@ struct HudLayout {
 // team label. Both teams plan simultaneously, so every pane is always live;
 // `planning` is false while a round executes or the peer sync is pending.
 // When `layout` is non-null it is filled with this frame's button positions.
+// When `roundPanelBottom` is non-null it receives the Round panel's bottom edge
+// (follows collapse); untouched if the panel isn't drawn (game over).
 HudActions DrawHud(const tactics::GameLogic& game, tactics::Team team, bool planning,
                    const PaneRect& rect, int windowHeight, const gfx::OrbitCamera& camera,
-                   HudLayout* layout = nullptr);
+                   HudLayout* layout = nullptr, float* roundPanelBottom = nullptr);
+
+// Interactive-app-only debug panel (render toggles + FPS). Not called by the
+// visual runner. `fps` is a smoothed frames-per-second value; `top` is the
+// window-space y to place the panel at (just below the Round panel).
+void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float fps,
+                    float top);
 
 }  // namespace ui

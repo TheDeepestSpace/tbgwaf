@@ -104,7 +104,7 @@ class RemoteClient {
   std::optional<Playback> playback_;
   std::optional<Json> pendingPlans_;  // Arrived mid-playback; applied once it ends.
   std::map<int, std::string> syncedPlan_;   // Unit id -> last plan signature the server has.
-  std::map<int, tactics::ReactionRule> syncedReaction_;
+  std::optional<tactics::SquadPlaybook> syncedPlaybook_;
   bool selfReady_ = false;
   bool peerReady_ = false;
   bool matchStarted_ = false;

@@ -104,7 +104,7 @@ void RemoteClient::HandleStart(const Json& m) {
   playback_.reset();
   pendingPlans_.reset();
   syncedPlan_.clear();
-  syncedReaction_.clear();
+  syncedPlaybook_.reset();
   selfReady_ = peerReady_ = false;
   lastError_.clear();
   status_ = Status::Playing;
@@ -134,11 +134,11 @@ void RemoteClient::ApplyPlans(const Json& m) {
       ApplyPlanAction(*game_, *team_, action, &error);
     }
     syncedPlan_[unit->id] = wanted;
-    if (entry["reaction"].IsString()) {
-      unit->reactionOnStationary =
-          entry["reaction"].AsString() == "shoot" ? ReactionRule::Shoot : ReactionRule::DoNothing;
-      syncedReaction_[unit->id] = unit->reactionOnStationary;
-    }
+  }
+  SquadPlaybook playbook;
+  if (DecodePlaybook(m["playbook"], &playbook)) {
+    game_->SetPlaybook(*team_, playbook);
+    syncedPlaybook_ = playbook;
   }
 }
 
@@ -168,9 +168,6 @@ void RemoteClient::ApplyState(const Json& state) {
     if (!alive && u.alive) u.knockdownElapsed = constants::kKnockdownDuration;  // Already down.
     u.alive = alive;
     if (alive) u.knockdownElapsed = -1.0f;
-    if (own) {
-      u.triggerAction = (*entry)["overwatch"].AsBool() ? TriggerAction::Shoot : TriggerAction::None;
-    }
   }
   snap.roundNumber = static_cast<int>(state["round"].AsNumber(snap.roundNumber));
   if (state["over"].AsBool()) {
@@ -330,16 +327,14 @@ void RemoteClient::SyncPlans() {
       QueueAction(action);
       syncedPlan_[u.id] = sig;
     }
-    auto rit = syncedReaction_.find(u.id);
-    const ReactionRule knownRule = rit == syncedReaction_.end() ? ReactionRule::DoNothing : rit->second;
-    if (u.reactionOnStationary != knownRule) {
-      Action reaction;
-      reaction.kind = ActionKind::Reaction;
-      reaction.unit = u.id;
-      reaction.rule = u.reactionOnStationary;
-      QueueAction(reaction);
-      syncedReaction_[u.id] = u.reactionOnStationary;
-    }
+  }
+  const SquadPlaybook& playbook = game_->Playbook(*team_);
+  if (playbook != syncedPlaybook_.value_or(SquadPlaybook{})) {
+    Action reaction;
+    reaction.kind = ActionKind::Reaction;
+    reaction.playbook = playbook;
+    QueueAction(reaction);
+    syncedPlaybook_ = playbook;
   }
 }
 

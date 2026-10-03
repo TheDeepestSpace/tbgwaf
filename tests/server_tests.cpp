@@ -215,7 +215,6 @@ void TestSessionFogHidesEnemyPlansAndUnits() {
   for (const Json& u : state["units"].AsArray()) {
     const int id = static_cast<int>(u["id"].AsNumber());
     if (id >= 3) CHECK(s.game().ComputeVisibility(Team::Blue).UnitVisible(id));
-    if (id >= 3) CHECK(!u.Has("reaction"));  // Enemy rules aren't leaked.
   }
 }
 

@@ -65,8 +65,10 @@ void TestParseAction() {
   CHECK(ok && a.target == 4);
   a = Parse(R"({"t":"commit"})", &ok);
   CHECK(ok && a.kind == ActionKind::Commit);
-  a = Parse(R"({"t":"reaction","unit":1,"rule":"shoot"})", &ok);
-  CHECK(ok && a.rule == ReactionRule::Shoot);
+  a = Parse(R"({"t":"reaction","table":["none","shoot","stop","shoot_continue"]})", &ok);
+  CHECK(ok && a.kind == ActionKind::Reaction && a.playbook.At(false, true) == ReactionAction::Shoot &&
+        a.playbook.At(true, true) == ReactionAction::ShootContinue &&
+        a.playbook.At(true, false) == ReactionAction::Stop);
 
   // Structural validation.
   for (const char* bad : {
@@ -80,7 +82,8 @@ void TestParseAction() {
            R"({"t":"shoot","unit":1.5,"target":1})",                    // fractional id
            R"({"t":"pass"})",                                           // no unit
            R"({"t":"teleport","unit":1})",                              // unknown
-           R"({"t":"reaction","unit":1,"rule":"nuke"})",
+           R"({"t":"reaction","table":["nuke","none","none","none"]})",
+           R"({"t":"reaction","table":["none"]})",
            R"({"unit":1})",
            R"([1,2])"}) {
     Parse(bad, &ok);

@@ -37,16 +37,16 @@ bool ApplyPlanAction(GameLogic& game, Team team, const Action& action, std::stri
   if (game.Mode() == InputMode::Executing || game.Mode() == InputMode::GameOver) {
     return Fail("planning is closed");
   }
+  if (action.kind == ActionKind::Reaction) {
+    game.SetPlaybook(team, action.playbook);
+    return true;
+  }
   Unit* unit = game.FindUnit(action.unit);
   if (!unit) return Fail("no such unit");
   if (unit->team != team) return Fail("not your unit");
   if (!unit->alive) return Fail("unit is dead");
 
   if (action.kind == ActionKind::Focus) return true;
-  if (action.kind == ActionKind::Reaction) {
-    unit->reactionOnStationary = action.rule;
-    return true;
-  }
   if (action.kind == ActionKind::Cancel) {
     unit->plan = PlannedAction{};
     return true;
@@ -68,9 +68,6 @@ bool ApplyPlanAction(GameLogic& game, Team team, const Action& action, std::stri
   switch (action.kind) {
     case ActionKind::Pass:
       game.ChoosePass();
-      return true;
-    case ActionKind::Overwatch:
-      game.ChooseOverwatch();
       return true;
     case ActionKind::Shoot: {
       game.ChooseShoot();
@@ -116,7 +113,6 @@ Action PlanToAction(const Unit& unit) {
       a.target = unit.plan.shootTargetId;
       break;
     case PlannedActionType::Pass: a.kind = ActionKind::Pass; break;
-    case PlannedActionType::Overwatch: a.kind = ActionKind::Overwatch; break;
     case PlannedActionType::None: a.kind = ActionKind::Cancel; break;
   }
   return a;

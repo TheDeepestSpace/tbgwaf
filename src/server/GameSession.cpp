@@ -139,13 +139,10 @@ Json GameSession::StateBody(Team team) const {
     j.Set("pos", net::EncodeVec3(u.position));
     j.Set("yaw", Num(u.facingYaw));
     j.Set("alive", Json(u.alive));
-    if (own) {
-      j.Set("reaction", u.reactionOnStationary == ReactionRule::Shoot ? "shoot" : "none");
-      j.Set("overwatch", Json(u.triggerAction == TriggerAction::Shoot));
-    }
     list.Push(std::move(j));
   }
   body.Set("units", std::move(list));
+  body.Set("playbook", net::EncodePlaybook(game_.Playbook(team)));
   return body;
 }
 
@@ -163,11 +160,10 @@ Json GameSession::PlansMessage(Team team) const {
   Json list{Json::Array{}};
   for (const Unit& u : game_.GetScene().units) {
     if (u.team != team || !u.alive) continue;
-    Json plan = net::EncodeAction(net::PlanToAction(u));
-    plan.Set("reaction", u.reactionOnStationary == ReactionRule::Shoot ? "shoot" : "none");
-    list.Push(std::move(plan));
+    list.Push(net::EncodeAction(net::PlanToAction(u)));
   }
   msg.Set("plans", std::move(list));
+  msg.Set("playbook", net::EncodePlaybook(game_.Playbook(team)));
   return msg;
 }
 

@@ -20,10 +20,13 @@
 //   {"t":"join","room":"<name>"}                      first message
 //   {"t":"move","unit":3,"waypoints":[[x,y,z],...],"facing":yaw}
 //   {"t":"shoot","unit":3,"target":4}
-//   {"t":"pass","unit":3}      {"t":"overwatch","unit":3}
+//   {"t":"pass","unit":3}
 //   {"t":"cancel","unit":3}                           drop that unit's plan
 //   {"t":"focus","unit":3}                            validated no-op (camera is client-side)
-//   {"t":"reaction","unit":3,"rule":"shoot"|"none"}   standing playbook rule
+//   {"t":"reaction","table":[a,b,c,d]}               squad playbook, a..d = actions for
+//                                                     [stationary,unseen] [stationary,seen]
+//                                                     [moving,unseen] [moving,seen]; each one of
+//                                                     "none","shoot","stop","continue","shoot_stop","shoot_continue"
 //   {"t":"commit"}             this team is ready; the round runs once both are
 //   {"t":"new_match"}          only after game over
 //
@@ -31,7 +34,7 @@
 //   {"t":"waiting"}
 //   {"t":"start","team":"blue"|"red","seed":N,"protocol":1}
 //   {"t":"ack","seq":N,"ok":true|false,"error":"..."}
-//   {"t":"plans","round":N,"ready":bool,"plans":[<action + "reaction">...]}   own team only
+//   {"t":"plans","round":N,"ready":bool,"plans":[<action>...],"playbook":[a,b,c,d]}   own team only
 //   {"t":"peer","ready":bool}
 //   {"t":"round","round":N,"duration":s,"frames":[...],"shots":[...],"state":{...}}
 //   {"t":"state","round":N,"over":bool,"winner":"blue"|"red"|"none"|null,"units":[...]}
@@ -42,7 +45,7 @@ constexpr int kProtocolVersion = 1;
 constexpr size_t kMaxMessageBytes = 16 * 1024;
 constexpr size_t kMaxWaypoints = 32;
 
-enum class ActionKind { Move, Shoot, Pass, Overwatch, Cancel, Focus, Reaction, Commit, NewMatch };
+enum class ActionKind { Move, Shoot, Pass, Cancel, Focus, Reaction, Commit, NewMatch };
 
 struct Action {
   ActionKind kind = ActionKind::Pass;
@@ -50,7 +53,7 @@ struct Action {
   int target = -1;
   std::vector<glm::vec3> waypoints;
   std::optional<float> facing;
-  tactics::ReactionRule rule = tactics::ReactionRule::DoNothing;
+  tactics::SquadPlaybook playbook;  // Reaction only.
   int seq = 0;
 };
 
@@ -63,6 +66,9 @@ const char* TeamName(tactics::Team team);
 std::optional<tactics::Team> ParseTeamName(const std::string& name);
 const char* PlanName(tactics::PlannedActionType type);
 std::optional<tactics::PlannedActionType> ParsePlanName(const std::string& name);
+
+Json EncodePlaybook(const tactics::SquadPlaybook& playbook);
+bool DecodePlaybook(const Json& j, tactics::SquadPlaybook* out);
 
 Json EncodeVec3(const glm::vec3& v);
 bool DecodeVec3(const Json& j, glm::vec3* out);

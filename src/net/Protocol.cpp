@@ -20,10 +20,19 @@ struct KindName {
 };
 constexpr KindName kKinds[] = {
     {"move", ActionKind::Move},         {"shoot", ActionKind::Shoot},
-    {"pass", ActionKind::Pass},         {"overwatch", ActionKind::Overwatch},
-    {"cancel", ActionKind::Cancel},     {"focus", ActionKind::Focus},
-    {"reaction", ActionKind::Reaction}, {"commit", ActionKind::Commit},
-    {"new_match", ActionKind::NewMatch},
+    {"pass", ActionKind::Pass},         {"cancel", ActionKind::Cancel},
+    {"focus", ActionKind::Focus},       {"reaction", ActionKind::Reaction},
+    {"commit", ActionKind::Commit},     {"new_match", ActionKind::NewMatch},
+};
+
+struct ReactionName {
+  const char* name;
+  ReactionAction action;
+};
+constexpr ReactionName kReactions[] = {
+    {"none", ReactionAction::DoNothing},   {"shoot", ReactionAction::Shoot},
+    {"stop", ReactionAction::Stop},        {"continue", ReactionAction::Continue},
+    {"shoot_stop", ReactionAction::ShootStop}, {"shoot_continue", ReactionAction::ShootContinue},
 };
 
 }  // namespace
@@ -45,6 +54,37 @@ Json EncodeVec3(const glm::vec3& v) {
                           Json(static_cast<double>(v.z))});
 }
 
+Json EncodePlaybook(const SquadPlaybook& playbook) {
+  Json list{Json::Array{}};
+  for (int moving = 0; moving < 2; ++moving) {
+    for (int seen = 0; seen < 2; ++seen) {
+      for (const auto& r : kReactions) {
+        if (r.action == playbook.table[moving][seen]) list.Push(Json(std::string(r.name)));
+      }
+    }
+  }
+  return list;
+}
+
+bool DecodePlaybook(const Json& j, SquadPlaybook* out) {
+  if (!j.IsArray() || j.AsArray().size() != 4) return false;
+  SquadPlaybook pb;
+  for (int i = 0; i < 4; ++i) {
+    const Json& e = j.AsArray()[i];
+    if (!e.IsString()) return false;
+    bool found = false;
+    for (const auto& r : kReactions) {
+      if (e.AsString() == r.name) {
+        pb.table[i / 2][i % 2] = r.action;
+        found = true;
+      }
+    }
+    if (!found) return false;
+  }
+  *out = pb;
+  return true;
+}
+
 bool ParseAction(const Json& m, Action* out, std::string* error) {
   auto Fail = [&](const char* why) {
     *error = why;
@@ -64,7 +104,8 @@ bool ParseAction(const Json& m, Action* out, std::string* error) {
     if (!m["seq"].IsNumber()) return Fail("bad seq");
     a.seq = static_cast<int>(m["seq"].AsNumber());
   }
-  const bool needsUnit = a.kind != ActionKind::Commit && a.kind != ActionKind::NewMatch;
+  const bool needsUnit = a.kind != ActionKind::Commit && a.kind != ActionKind::NewMatch &&
+                         a.kind != ActionKind::Reaction;
   if (needsUnit && !ReadId(m["unit"], &a.unit)) return Fail("bad unit id");
 
   switch (a.kind) {
@@ -87,10 +128,7 @@ bool ParseAction(const Json& m, Action* out, std::string* error) {
       break;
     }
     case ActionKind::Reaction: {
-      const std::string rule = m["rule"].IsString() ? m["rule"].AsString() : "";
-      if (rule == "shoot") a.rule = ReactionRule::Shoot;
-      else if (rule == "none") a.rule = ReactionRule::DoNothing;
-      else return Fail("bad reaction rule");
+      if (!DecodePlaybook(m["table"], &a.playbook)) return Fail("bad reaction table");
       break;
     }
     default:
@@ -115,7 +153,7 @@ Json EncodeAction(const Action& a) {
     if (a.facing) j.Set("facing", static_cast<double>(*a.facing));
   }
   if (a.kind == ActionKind::Reaction) {
-    j.Set("rule", a.rule == ReactionRule::Shoot ? "shoot" : "none");
+    j.Set("table", EncodePlaybook(a.playbook));
   }
   return j;
 }
@@ -133,7 +171,6 @@ const char* PlanName(PlannedActionType type) {
     case PlannedActionType::Move: return "move";
     case PlannedActionType::Shoot: return "shoot";
     case PlannedActionType::Pass: return "pass";
-    case PlannedActionType::Overwatch: return "overwatch";
     case PlannedActionType::None: break;
   }
   return "none";
@@ -143,7 +180,6 @@ std::optional<PlannedActionType> ParsePlanName(const std::string& name) {
   if (name == "move") return PlannedActionType::Move;
   if (name == "shoot") return PlannedActionType::Shoot;
   if (name == "pass") return PlannedActionType::Pass;
-  if (name == "overwatch") return PlannedActionType::Overwatch;
   if (name == "none") return PlannedActionType::None;
   return std::nullopt;
 }

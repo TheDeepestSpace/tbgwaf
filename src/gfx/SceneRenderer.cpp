@@ -285,8 +285,10 @@ void main() {
   if (n.y > 0.7) p.y += uProbeHeight;
   float lit = SampleMap(uFovMap0, uFovMatrix0, p, slope);
   if (lit < 0.0) lit = SampleMap(uFovMap1, uFovMatrix1, p, slope);
-  if (lit <= 0.0) discard;
-  FragColor = vec4(uColor.rgb, uColor.a * lit);
+  // Binary edge: a partially lit fragment would claim the stencil with a
+  // faint alpha and block a teammate with a clearer view of the same pixel.
+  if (lit < 0.5) discard;
+  FragColor = uColor;
 }
 )";
 

@@ -173,3 +173,7 @@ the direction is right. Before it can replace the CPU path:
 
 Until then the mask is a prototype with its own goldens; the app defaults to it
 for now, while the CPU overlay remains the default for visual scenarios.
+
+Note: the mask edge is binary (PCF `lit >= 0.5`), not alpha-ramped. A ramped
+edge claimed the shared stencil at partial alpha and blocked a teammate with
+a clearer view of the same pixel (faint seams where cones overlap).

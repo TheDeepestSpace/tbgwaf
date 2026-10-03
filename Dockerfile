@@ -9,7 +9,7 @@ RUN apt update && apt upgrade -y && \
     software-properties-common dumb-init \
     python3-pip python3-jinja2 python3-yaml unzip sudo pkg-config \
     libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev mesa-common-dev \
-    xvfb ffmpeg && \
+    xvfb ffmpeg rsync && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Create dev sudo user

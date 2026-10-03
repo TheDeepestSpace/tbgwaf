@@ -74,10 +74,13 @@ jobs:
         run: cmake --build build --target tactics_visual_tests
 
       - name: Install ffmpeg and rsync
-        # ffmpeg encodes the scenario videos; rsync is required by the deploy
-        # action. Neither is guaranteed in the prebuilt dev image.
+        # Both are baked into the image (Dockerfile, ci stage); this only
+        # installs them while :latest predates that change, and is a no-op
+        # afterwards. Remove once the rebuilt image is published.
         if: github.event.action != 'closed'
-        run: apt-get update && apt-get install -y ffmpeg rsync
+        run: |
+          command -v ffmpeg >/dev/null && command -v rsync >/dev/null && exit 0
+          apt-get update && apt-get install -y ffmpeg rsync
 
       - name: Generate scenario review page
         if: github.event.action != 'closed'
@@ -94,7 +97,9 @@ jobs:
 
       - name: Install rsync
         if: github.event.action == 'closed'
-        run: apt-get update && apt-get install -y rsync
+        run: |
+          command -v rsync >/dev/null && exit 0
+          apt-get update && apt-get install -y rsync
 
       - name: Deploy PR preview
         uses: rossjrw/pr-preview-action@ffa7509e91a3ec8dfc2e5536c4d5c1acdf7a6de9 # v1.8.1

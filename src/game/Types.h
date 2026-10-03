@@ -58,7 +58,7 @@ constexpr float kConeStartAlpha = 0.5f;  // Shot-cone opacity at the gun tip; fa
 // Half-angle of the drawn shot-dispersion cone: a narrow wedge at the gun tip
 // showing where a shot may stray from the aim line. Overlay only; the hard
 // shot gate stays kShootHalfFovDegrees.
-constexpr float kShotConeHalfAngleDegrees = 6.0f;
+constexpr float kShotConeHalfAngleDegrees = 3.0f;
 constexpr float kShootHalfFovDegrees = 75.0f;  // 150 degree total FOV cone.
 constexpr float kKnockdownDuration = 0.4f;  // Seconds for a hit unit to fall over.
 // Visual-only figure animation (procedural humanoid, see gfx/SceneRenderer):

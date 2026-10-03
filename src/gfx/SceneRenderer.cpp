@@ -116,7 +116,7 @@ void main() {
   // the cone edge times linear falloff with range, so the brightest part of
   // the mask is where a shot is most likely to land.
   float angleFalloff = cos(atan(radial, t) / atan(uCone.x) * 1.57079632679);
-  float rangeFalloff = 1.0 - t / uCone.z;
+  float rangeFalloff = pow(max(1.0 - t / uCone.z, 0.0), 2.0);
   FragColor = vec4(uColor, uCone.w * angleFalloff * rangeFalloff);
 }
 )";
@@ -1027,6 +1027,12 @@ void DrawFovCone(const Shader& shader, ColorTriangleMesh& mesh, const glm::mat4&
   mesh.Draw();
 }
 
+// Quadratic falloff (matches the footprint shader) so the cone fades early.
+inline float ShotConeFade(float u) {
+  const float k = std::max(1.0f - u, 0.0f);
+  return k * k;
+}
+
 // The selected figure's shot cone as a real 3D cone: apex at the gun tip, axis
 // along the aim, fading out by the shot range. The side surface is depth
 // tested, so ground and walls cut it off rather than receiving a projection;
@@ -1080,7 +1086,7 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
     const glm::vec3 p =
         apex + axis * t + (right * std::cos(a) + up * std::sin(a)) * (t * tanHalf);
     return ColorTriangleMesh::Vertex{
-        p, glm::vec4(kSetupColor, kSurfaceAlpha * (1.0f - t / fadeRange))};
+        p, glm::vec4(kSetupColor, kSurfaceAlpha * ShotConeFade(t / fadeRange))};
   };
   std::vector<ColorTriangleMesh::Vertex> vertices;
   vertices.reserve(static_cast<size_t>(kRings * kSegments * 6));

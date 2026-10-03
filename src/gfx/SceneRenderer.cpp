@@ -1016,8 +1016,11 @@ void DrawFovCone(const Shader& shader, ColorTriangleMesh& mesh, const glm::mat4&
                                                       : glm::vec3(0.9f, 0.25f, 0.22f);
   std::vector<ColorTriangleMesh::Vertex> vertices;
   vertices.reserve(points.size());
+  // Alpha fades linearly from kFovAlpha at the unit to zero at full range.
   for (const glm::vec3& p : points) {
-    vertices.push_back({p, glm::vec4(baseColor, kFovAlpha)});
+    const float dist = glm::length(glm::vec2(p.x - eye.x, p.z - eye.z));
+    const float fade = std::clamp(1.0f - dist / range, 0.0f, 1.0f);
+    vertices.push_back({p, glm::vec4(baseColor, kFovAlpha * fade)});
   }
   mesh.SetVertices(vertices);
   shader.SetMat4("uMVP", viewProj);

@@ -41,6 +41,10 @@ ramps back down; the branch becomes an on-ramp merging mid-deck), and
 tune artery count/width, local-street width/skew and elevation through
 `MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
 overlay of the navmesh's walkable-cell boundaries.
+`TBGWAF_FOV_SHADOW_MAP=1` swaps the analytic FOV-cone overlay for the
+prototype per-unit shadow-map mask (tints walls, roofs and deck sides too;
+see [docs/fov-shadow-map.md](docs/fov-shadow-map.md)); scenarios opt in
+with a `render: {fov_overlay: shadow_map}` block.
 
 ### Gameplay scenario tests
 

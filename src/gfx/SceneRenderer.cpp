@@ -1344,7 +1344,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // the first cone to touch a pixel blends and claims it (stencil
   // 0 -> 1), any later cone covering that same pixel is discarded, so
   // overlaps read as one flat shade instead of stacking.
-  unlitShader_.Use();
+  colorShader_.Use();
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glDepthMask(GL_FALSE);
@@ -1358,7 +1358,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glPolygonOffset(-2.0f, -4.0f);
   for (const Unit& unit : game.GetScene().units) {
     if (debug.disableFov || !unit.alive || unit.team != team) continue;
-    DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit, obstacles,
+    DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, obstacles,
                 game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
   }
   glDisable(GL_STENCIL_TEST);

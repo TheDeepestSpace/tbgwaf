@@ -97,7 +97,24 @@ Scene ParseScene(const YAML::Node& root) {
         if (genNode["local_street_width"]) {
           config.localStreetWidth = genNode["local_street_width"].as<float>();
         }
-        if (genNode["elevated"]) config.elevatedHighway = genNode["elevated"].as<bool>();
+        // `elevated` forces the overpass on/off; omitted keeps the generator's
+        // seed-driven draw. `elevated_layout` pins one of the deck layouts.
+        if (genNode["elevated"]) {
+          config.elevatedHighway =
+              genNode["elevated"].as<bool>() ? OverpassMode::On : OverpassMode::Off;
+        }
+        if (genNode["elevated_layout"]) {
+          const std::string layout = genNode["elevated_layout"].as<std::string>();
+          if (layout == "ramp-up-ramp-down") config.overpassLayout = OverpassLayout::RampUpRampDown;
+          else if (layout == "through") config.overpassLayout = OverpassLayout::Through;
+          else if (layout == "enter-ramp-up") config.overpassLayout = OverpassLayout::EnterRampUp;
+          else if (layout == "enter-ramp-down") config.overpassLayout = OverpassLayout::EnterRampDown;
+          else {
+            throw std::runtime_error(
+                "map.generate.elevated_layout must be ramp-up-ramp-down/through/"
+                "enter-ramp-up/enter-ramp-down, got '" + layout + "'");
+          }
+        }
         scene = GenerateUrbanMap(seed, config);
       } else if (type == "hilly") {
         scene = GenerateHillyMap(seed);

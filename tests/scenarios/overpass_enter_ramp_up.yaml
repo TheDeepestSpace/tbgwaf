@@ -1,0 +1,27 @@
+# Issue #130: seed-driven overpass layouts. Pins the enter-ramp-up layout
+# for seed 7: the artery is at grade on-map, ramps up mid-map and exits
+# off-map elevated. Blue climbs the branch's connecting ramp onto the
+# elevated stretch; the asserted Y proves the ramp-off works, and the
+# goldens show the deck continuing past the far map edge.
+name: overpass_enter_ramp_up
+
+map:
+  generate: {type: urban, seed: 7, arteries: 2, elevated: true, elevated_layout: enter-ramp-up}
+
+units:
+  - {id: 0, team: blue, position: [-12.3168, 0.4285, -22.0727], facing_degrees: 21}
+  - {id: 1, team: red, position: [65.8291, 0, -19.4045], facing_degrees: 180}
+
+camera:
+  target: [-5.8, -19.6]
+  zoom: 34
+
+script:
+  - action: move
+    actor: 0
+    destination: [0.6810, 2.22997, -17.20115]
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [0.6810, 2.22997, -17.20115], tolerance: 0.05}
+  - assert: {round: 2}

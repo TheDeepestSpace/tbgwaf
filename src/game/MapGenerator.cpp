@@ -186,6 +186,24 @@ UrbanBlock MakeUrbanBlock(std::vector<glm::vec2> vertices) {
 
 constexpr float kGradeY = 0.025f;        // Pavement lift over the base plane (avoids z-fighting).
 constexpr float kRoadSampleStep = 3.0f;  // Centerline sampling; short enough for smooth ramps.
+// How far an elevated deck end that runs off-map continues past the map
+// bounds, so the edge shows a deck passing through rather than a cut stub.
+constexpr float kDeckOverhang = 12.0f;
+
+// Presence and layout draws (issue #130) use their own stream so forcing
+// either never reshuffles the rest of a seed's layout; both are drawn
+// unconditionally for the same reason.
+OverpassChoice ResolveOverpass(uint32_t seed, const MapGeneratorConfig& c) {
+  Rng rng(seed ^ 0x0ebe7a55u);
+  const bool drawnPresence = rng.Chance(c.overpassChance);
+  const auto drawnLayout = static_cast<OverpassLayout>(1 + rng.Int(0, 3));
+  OverpassChoice choice;
+  choice.elevated = c.elevatedHighway == OverpassMode::Auto ? drawnPresence
+                                                            : c.elevatedHighway == OverpassMode::On;
+  choice.layout =
+      c.overpassLayout == OverpassLayout::Auto ? drawnLayout : c.overpassLayout;
+  return choice;
+}
 
 glm::vec2 Rotate(glm::vec2 v, float radians) {
   const float c = std::cos(radians), s = std::sin(radians);
@@ -210,7 +228,10 @@ void ClipLineToSquare(glm::vec2 origin, glm::vec2 dir, float half, float* tMin, 
 // the street grid can carve convex blocks against them exactly.
 struct ArterySpec {
   glm::vec2 origin{0.0f}, dir{1.0f, 0.0f}, normal{0.0f, 1.0f};
-  float sMin = 0.0f, sMax = 0.0f;                              // Boundary-to-boundary params.
+  float sMin = 0.0f, sMax = 0.0f;  // Boundary-to-boundary params.
+  // Sampled range: equals [sMin, sMax] at grade; an elevated end that runs
+  // off-map extends kDeckOverhang past its boundary.
+  float s0 = 0.0f, s1 = 0.0f;
   float rise0 = 0.0f, rise1 = 0.0f, fall0 = 0.0f, fall1 = 0.0f;  // Overpass profile params.
 };
 
@@ -226,14 +247,32 @@ struct BranchSpec {
 
 struct HighwayPlan {
   ArterySpec artery;
+  bool elevated = false;
+  OverpassLayout layout = OverpassLayout::RampUpRampDown;
   bool hasBranch = false;
   BranchSpec branch;
 };
+
+// Where the branch meets the artery, as a fraction of the artery's on-map
+// length (mapped from one unit draw so layouts never shift the rng stream).
+// On an elevated artery the merge must land where the deck is at full
+// height, so the branch genuinely ramps between grade and deck.
+float MergeFraction(const HighwayPlan& plan, float t) {
+  if (!plan.elevated) return 0.30f + 0.14f * t;
+  switch (plan.layout) {
+    case OverpassLayout::EnterRampUp: return 0.62f + 0.12f * t;   // Deck from ~0.52 on.
+    case OverpassLayout::EnterRampDown: return 0.26f + 0.12f * t; // Deck until ~0.48.
+    default: return 0.46f + 0.08f * t;                            // Mid-span deck.
+  }
+}
 
 HighwayPlan BuildHighwayPlan(uint32_t seed, const MapGeneratorConfig& c) {
   Rng rng(seed ^ 0xa17e2d31u);
   const float half = UrbanMapHalfExtent(c);
   HighwayPlan plan;
+  const OverpassChoice overpass = ResolveOverpass(seed, c);
+  plan.elevated = overpass.elevated;
+  plan.layout = overpass.layout;
   ArterySpec& artery = plan.artery;
   const float angle = glm::radians(rng.Float(11.0f, 21.0f)) * (rng.Chance(0.5f) ? 1.0f : -1.0f);
   artery.dir = glm::vec2(std::cos(angle), std::sin(angle));
@@ -241,16 +280,50 @@ HighwayPlan BuildHighwayPlan(uint32_t seed, const MapGeneratorConfig& c) {
   artery.origin = artery.normal * (half * rng.Float(-0.12f, 0.12f));
   ClipLineToSquare(artery.origin, artery.dir, half, &artery.sMin, &artery.sMax);
   const float length = artery.sMax - artery.sMin;
+  artery.s0 = artery.sMin;
+  artery.s1 = artery.sMax;
+  // Deck profile per layout. A ramp a layout never takes is parked far
+  // outside the sampled range, so the shared smoothstep profile formula
+  // (rise minus fall) applies unchanged to every layout.
+  const float far = 100.0f * length;
   artery.rise0 = artery.sMin + 0.10f * length;
   artery.rise1 = artery.sMin + 0.36f * length;
   artery.fall0 = artery.sMin + 0.64f * length;
   artery.fall1 = artery.sMin + 0.90f * length;
+  if (plan.elevated) {
+    switch (plan.layout) {
+      case OverpassLayout::Auto:  // Resolved above; both ramps on-map.
+      case OverpassLayout::RampUpRampDown:
+        break;
+      case OverpassLayout::Through:
+        artery.s0 = artery.sMin - kDeckOverhang;
+        artery.s1 = artery.sMax + kDeckOverhang;
+        artery.rise0 = -far;
+        artery.rise1 = -far + 1.0f;
+        artery.fall0 = far;
+        artery.fall1 = far + 1.0f;
+        break;
+      case OverpassLayout::EnterRampUp:
+        artery.s1 = artery.sMax + kDeckOverhang;
+        artery.rise0 = artery.sMin + 0.22f * length;
+        artery.rise1 = artery.sMin + 0.52f * length;
+        artery.fall0 = far;
+        artery.fall1 = far + 1.0f;
+        break;
+      case OverpassLayout::EnterRampDown:
+        artery.s0 = artery.sMin - kDeckOverhang;
+        artery.rise0 = -far;
+        artery.rise1 = -far + 1.0f;
+        artery.fall0 = artery.sMin + 0.48f * length;
+        artery.fall1 = artery.sMin + 0.78f * length;
+        break;
+    }
+  }
 
-  plan.hasBranch = c.arteryCount >= 2 || c.elevatedHighway;
+  plan.hasBranch = c.arteryCount >= 2 || plan.elevated;
   // Branch draws happen unconditionally so toggling the branch or the deck
   // never reshuffles the rest of a seed's layout.
-  const float mergeFraction =
-      c.elevatedHighway ? rng.Float(0.46f, 0.54f) : rng.Float(0.30f, 0.44f);
+  const float mergeFraction = MergeFraction(plan, rng.Unit01());
   const int preferredTurn = rng.Chance(0.5f) ? 1 : -1;
   const float turn = glm::radians(rng.Float(30.0f, 44.0f));
   if (plan.hasBranch) {
@@ -277,10 +350,11 @@ float SmoothStep01(float t) {
   return t * t * (3.0f - 2.0f * t);
 }
 
-// Overpass profile: at grade off both map edges, up one smooth ramp, across
-// the city center at highwayElevation, back down the far ramp.
+// Overpass profile: the deck sits at highwayElevation between its rise and
+// fall ramps and at grade outside them; layouts park a ramp they never take
+// far outside the sampled range (through/off-map ends stay at deck height).
 float ArteryElevationAt(const HighwayPlan& plan, const MapGeneratorConfig& c, float s) {
-  if (!c.elevatedHighway) return kGradeY;
+  if (!plan.elevated) return kGradeY;
   const ArterySpec& a = plan.artery;
   const float profile = SmoothStep01((s - a.rise0) / (a.rise1 - a.rise0)) -
                         SmoothStep01((s - a.fall0) / (a.fall1 - a.fall0));
@@ -288,7 +362,7 @@ float ArteryElevationAt(const HighwayPlan& plan, const MapGeneratorConfig& c, fl
 }
 
 float BranchElevationAt(const HighwayPlan& plan, const MapGeneratorConfig& c, float u) {
-  if (!c.elevatedHighway) return kGradeY;
+  if (!plan.elevated) return kGradeY;
   const float top = ArteryElevationAt(plan, c, plan.branch.mergeS);
   const float run = std::max(1.0f, plan.branch.length - plan.branch.riseStart);
   return kGradeY + (top - kGradeY) * SmoothStep01((u - plan.branch.riseStart) / run);
@@ -309,8 +383,8 @@ std::vector<UrbanRoad> BuildUrbanRoads(uint32_t seed, const MapGeneratorConfig& 
   UrbanRoad artery;
   artery.width = c.arteryWidth;
   artery.artery = true;
-  artery.elevated = c.elevatedHighway;
-  for (const float s : SampleParams(plan.artery.sMin, plan.artery.sMax)) {
+  artery.elevated = plan.elevated;
+  for (const float s : SampleParams(plan.artery.s0, plan.artery.s1)) {
     const glm::vec2 p = plan.artery.origin + plan.artery.dir * s;
     artery.centerline.emplace_back(p.x, ArteryElevationAt(plan, c, s), p.y);
   }
@@ -319,7 +393,7 @@ std::vector<UrbanRoad> BuildUrbanRoads(uint32_t seed, const MapGeneratorConfig& 
     UrbanRoad branch;
     branch.width = plan.branch.width;
     branch.artery = true;
-    branch.elevated = c.elevatedHighway;
+    branch.elevated = plan.elevated;
     for (const float u : SampleParams(0.0f, plan.branch.length)) {
       const glm::vec2 p = plan.branch.start + plan.branch.dir * u;
       branch.centerline.emplace_back(p.x, BranchElevationAt(plan, c, u), p.y);
@@ -413,8 +487,10 @@ std::vector<UrbanBlock> BuildCityBlocks(uint32_t seed, const MapGeneratorConfig&
   return blocks;
 }
 
-// Ribbon edge; the two end vertices slide along the road direction onto the
-// map boundary so the oblique road is cut off flush with the edge.
+// Ribbon edge; an end vertex sitting exactly on the map boundary slides
+// along the road direction onto it so the oblique road is cut off flush
+// with the edge. Ends past the boundary (an elevated layout's off-map
+// overhang) keep their square cut beyond the map instead.
 std::vector<glm::vec3> RibbonSide(const UrbanRoad& road, bool left, float half) {
   std::vector<glm::vec3> side;
   side.reserve(road.centerline.size());
@@ -429,7 +505,7 @@ std::vector<glm::vec3> RibbonSide(const UrbanRoad& road, bool left, float half) 
     const glm::vec3& p = road.centerline[i];
     glm::vec2 q(p.x + sign * normal.x * road.width * 0.5f, p.z + sign * normal.y * road.width * 0.5f);
     const bool first = i == 0, last = i + 1 == road.centerline.size();
-    const bool onEdge = std::max(std::fabs(p.x), std::fabs(p.z)) > half - 1e-2f;
+    const bool onEdge = std::fabs(std::max(std::fabs(p.x), std::fabs(p.z)) - half) < 1e-2f;
     if ((first || last) && onEdge) {
       float tMin = 0.0f, tMax = 0.0f;
       ClipLineToSquare(q, tangent, half, &tMin, &tMax);
@@ -644,12 +720,12 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     const auto left = RibbonSide(road, true, scene.mapHalfExtent);
     const auto right = RibbonSide(road, false, scene.mapHalfExtent);
     const std::vector<float> params = roadIndex == 0
-                                          ? SampleParams(plan.artery.sMin, plan.artery.sMax)
+                                          ? SampleParams(plan.artery.s0, plan.artery.s1)
                                           : SampleParams(0.0f, plan.branch.length);
     Chain& chain = chains[roadIndex];
     for (size_t i = 0; i + 1 < road.centerline.size(); ++i) {
       const bool deck =
-          c.elevatedHighway &&
+          plan.elevated &&
           std::max(road.centerline[i].y, road.centerline[i + 1].y) > kGradeY + 0.05f;
       if (!deck) {
         scene.roads.push_back(RoadSurface{{left[i], right[i], right[i + 1], left[i + 1]}});
@@ -669,11 +745,16 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
       scene.walkSurfaces.push_back(std::move(surface));
     }
   }
-  if (c.elevatedHighway && chains[0].first >= 0) {
-    // The overpass returns to grade before both map edges, so both chain
-    // ends are legal ground transitions; so is the on-ramp's foot.
-    scene.walkSurfaces[chains[0].first].connectsToGround = true;
-    scene.walkSurfaces[chains[0].last].connectsToGround = true;
+  if (plan.elevated && chains[0].first >= 0) {
+    // A deck chain end is a legal ground transition only where the profile
+    // actually returns to grade on-map (an off-map elevated end never does);
+    // the connecting ramp's foot always starts at grade.
+    if (ArteryElevationAt(plan, c, plan.artery.s0) < kGradeY + 0.05f) {
+      scene.walkSurfaces[chains[0].first].connectsToGround = true;
+    }
+    if (ArteryElevationAt(plan, c, plan.artery.s1) < kGradeY + 0.05f) {
+      scene.walkSurfaces[chains[0].last].connectsToGround = true;
+    }
     if (roads.size() > 1 && chains[1].first >= 0) {
       scene.walkSurfaces[chains[1].first].connectsToGround = true;
       int deckAtMerge = -1;
@@ -694,7 +775,7 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   // Bridge stands: paired pier columns under the high spans, leaving broad
   // navigable ground between bents. None near the on-ramp's merge, where the
   // ramp slab sweeps below deck level.
-  if (c.elevatedHighway) {
+  if (plan.elevated) {
     // A column may only stand where it stays below every slab crossing it
     // (and never on at-grade pavement, whose slab sits at ground level).
     auto columnFits = [&](glm::vec2 foot, float top) {
@@ -720,6 +801,8 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
       for (const float lat : {1.0f, -1.0f}) {
         const glm::vec2 foot = center + across * (lat * halfSpan);
         const float top = deckY - c.highwayThickness - 0.05f;
+        // A column stands fully on the map even where the deck runs past it.
+        if (std::max(std::fabs(foot.x), std::fabs(foot.y)) > scene.mapHalfExtent - 0.75f) continue;
         if (!columnFits(foot, top)) continue;
         scene.obstacles.push_back(
             Obstacle{AABB{glm::vec3(foot.x - 0.7f, 0.0f, foot.y - 0.7f),
@@ -727,13 +810,15 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
                      false});
       }
     };
-    // Bents march outward from the deck's midpoint and continue down the
-    // ramps while there is still head clearance below the slab.
+    // Bents march outward from the map-spanning corridor's midpoint and
+    // continue down any ramps while there is still head clearance below the
+    // slab. Always on-map, even when the deck itself runs past the boundary.
     constexpr float kMinClearance = 2.2f;
-    const float mid = 0.5f * (plan.artery.rise0 + plan.artery.fall1);
-    for (float s = mid - std::floor((mid - plan.artery.rise0) / c.supportSpacing) *
-                             c.supportSpacing;
-         s <= plan.artery.fall1; s += c.supportSpacing) {
+    const float pierLo = plan.artery.sMin + 1.5f;
+    const float pierHi = plan.artery.sMax - 1.5f;
+    const float mid = 0.5f * (pierLo + pierHi);
+    for (float s = mid - std::floor((mid - pierLo) / c.supportSpacing) * c.supportSpacing;
+         s <= pierHi; s += c.supportSpacing) {
       const float deckY = ArteryElevationAt(plan, c, s);
       if (deckY < kMinClearance) continue;
       if (plan.hasBranch && std::fabs(s - plan.branch.mergeS) < c.supportSpacing * 0.6f) continue;
@@ -770,7 +855,8 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     candidates.erase(candidates.begin() + pick);
   }
 
-  // Squads spawn on the artery's at-grade ends, facing each other down it.
+  // Squads spawn at ground level on the artery's ends (beneath the deck
+  // where an elevated layout runs off-map), facing each other down it.
   const float spawnInset = std::max(c.streetWidth, c.localStreetWidth) * 0.8f;
   const float yawBlue = std::atan2(plan.artery.dir.y, plan.artery.dir.x);
   for (int i = 0; i < 6; ++i) {
@@ -806,6 +892,11 @@ std::vector<UrbanBlock> UrbanBlocks(uint32_t seed, const MapGeneratorConfig& c) 
 std::vector<UrbanRoad> UrbanRoads(uint32_t seed, const MapGeneratorConfig& c) {
   if (c.arteryCount <= 0) return {};
   return BuildUrbanRoads(seed, c);
+}
+
+OverpassChoice UrbanOverpass(uint32_t seed, const MapGeneratorConfig& c) {
+  if (c.arteryCount <= 0) return OverpassChoice{};
+  return ResolveOverpass(seed, c);
 }
 
 std::vector<UrbanLot> UrbanLots(uint32_t seed, const MapGeneratorConfig& c) {

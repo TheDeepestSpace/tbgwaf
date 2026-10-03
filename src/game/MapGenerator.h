@@ -7,6 +7,23 @@
 
 namespace tactics {
 
+// Overpass presence (issue #130). Auto lets the seed decide (overpassChance
+// of an overpass per map); Off/On force it, as the `urban`/`urban-elevated`
+// map types and the scenario `elevated:` key do.
+enum class OverpassMode { Auto, Off, On };
+
+// Deck profile of the overpass, when present. Auto draws one per seed;
+// forcing a concrete layout pins scenarios/goldens to one shape. Off-map
+// ends extend past the map bounds so the deck reads as continuing rather
+// than stopping in a stub at the edge.
+enum class OverpassLayout {
+  Auto,
+  RampUpRampDown,  // Both ramps on-map: up from grade, deck, back down.
+  Through,         // Enters and exits off-map at deck height; no artery ramps.
+  EnterRampUp,     // At grade on-map, ramps up, exits off-map elevated.
+  EnterRampDown,   // Enters off-map elevated, ramps down to grade on-map.
+};
+
 // Tuning for GenerateUrbanMap. Defaults give a 4x4 city of ~26-unit average
 // blocks (~144 units across, ~4.8x the default scene's 30). The overall
 // extent is fixed by (blocks, blockSize, streetWidth); per-seed variation
@@ -34,7 +51,11 @@ struct MapGeneratorConfig {
   float arteryWidth = 14.0f;
   float localStreetWidth = 6.0f;
   float localStreetSkew = 0.45f; // Max radians a cross street deviates from square to the artery.
-  bool elevatedHighway = false;  // Artery becomes an overpass: ramps up, crosses on piers, ramps down.
+  // Artery becomes an overpass crossing on piers. Auto draws presence per
+  // seed (overpassChance) and one of the four layouts; see the enums above.
+  OverpassMode elevatedHighway = OverpassMode::Auto;
+  float overpassChance = 0.5f;  // P(overpass) for an Auto seed: roughly 50/50.
+  OverpassLayout overpassLayout = OverpassLayout::Auto;
   float highwayElevation = 5.0f;
   float highwayThickness = 0.45f;
   float supportSpacing = 18.0f;  // Arc-length between pier bents under the deck.
@@ -61,12 +82,14 @@ struct UrbanRoad {
 // shape and their frontage-following building rows adjust to the angles
 // (acute corner wedges become real angled buildings; collapsed slivers stay
 // open). arteryCount>=2 adds a wide branching avenue that merges into the
-// artery. elevatedHighway turns the artery into a true overpass: it ramps up
-// from grade, crosses the city center as a bridge deck on paired pier
-// columns with usable ground beneath, and ramps back down to grade at the
-// far side, while the branch becomes an on-ramp that climbs and merges onto
-// the deck mid-span. arteryCount=0 retains the original orthogonal generator
-// for compatibility. The same (seed, config) always yields an identical Scene.
+// artery. An elevated seed (or elevatedHighway=On) turns the artery into a
+// true overpass: a bridge deck on paired pier columns with usable ground
+// beneath, shaped by one of the OverpassLayout profiles (both ramps on-map,
+// off-map through, or a single on-map ramp at either end), while the branch
+// becomes a connecting ramp that climbs from grade and merges onto the
+// elevated deck mid-span. arteryCount=0 retains the original orthogonal
+// generator for compatibility. The same (seed, config) always yields an
+// identical Scene.
 Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& config = {});
 
 // Block footprints GenerateUrbanMap(seed, config) uses. The hierarchical
@@ -75,10 +98,20 @@ Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& config = {});
 std::vector<UrbanBlock> UrbanBlocks(uint32_t seed, const MapGeneratorConfig& config = {});
 
 // Centerlines used by the generated scene. The oblique artery is returned
-// first (sampled boundary-to-boundary, with its elevation profile when
-// elevatedHighway is set); the branching avenue follows, sampled from the
-// map boundary to its merge point on the artery.
+// first (sampled end-to-end: boundary-to-boundary at grade, extended past
+// the bounds where an elevated layout runs off-map); the branching avenue
+// follows, sampled from the map boundary to its merge point on the artery.
 std::vector<UrbanRoad> UrbanRoads(uint32_t seed, const MapGeneratorConfig& config = {});
+
+// The overpass decision GenerateUrbanMap(seed, config) makes: whether the
+// artery is elevated and, if so, the deck layout used. Seed-driven under
+// the Auto config defaults, forced otherwise; arteryCount=0 (the legacy
+// grid) never has an overpass.
+struct OverpassChoice {
+  bool elevated = false;
+  OverpassLayout layout = OverpassLayout::RampUpRampDown;
+};
+OverpassChoice UrbanOverpass(uint32_t seed, const MapGeneratorConfig& config = {});
 
 // A city block as built: one or more grid cells joined with the streets
 // between them (`x0..x1` / `z0..z1` is the bounding box). `notch` marks an

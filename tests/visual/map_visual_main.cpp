@@ -118,20 +118,40 @@ int main(int argc, char** argv) {
     float frontierBudget = 0.0f;
   };
   std::vector<MapCase> cases;
+  // Overpass presence is seed-driven by default (issue #130); every golden
+  // here pins an explicit presence (and layout) so it tests one variant.
+  tactics::MapGeneratorConfig gradeConfig;
+  gradeConfig.elevatedHighway = tactics::OverpassMode::Off;
   for (const uint32_t seed : kCitySeeds) {
-    cases.push_back({"city_seed_" + std::to_string(seed), tactics::GenerateUrbanMap(seed),
-                     kCityCameraZoom, /*showNavMesh=*/false});
+    cases.push_back({"city_seed_" + std::to_string(seed),
+                     tactics::GenerateUrbanMap(seed, gradeConfig), kCityCameraZoom,
+                     /*showNavMesh=*/false});
   }
-  tactics::MapGeneratorConfig mergeConfig;
+  tactics::MapGeneratorConfig mergeConfig = gradeConfig;
   mergeConfig.arteryCount = 2;
   cases.push_back({"city_merge_seed_42", tactics::GenerateUrbanMap(42, mergeConfig),
                    kCityCameraZoom, /*showNavMesh=*/false});
   tactics::MapGeneratorConfig elevatedConfig = mergeConfig;
-  elevatedConfig.elevatedHighway = true;
+  elevatedConfig.elevatedHighway = tactics::OverpassMode::On;
+  elevatedConfig.overpassLayout = tactics::OverpassLayout::RampUpRampDown;
   // Framed low and from the side so the deck, both ramps, the on-ramp fork
   // and the pier bents beneath all read clearly.
   cases.push_back({"city_elevated_seed_7", tactics::GenerateUrbanMap(7, elevatedConfig),
                    180.0f, /*showNavMesh=*/false, /*pitchOffset=*/-0.55f, /*yawOffset=*/-1.6f});
+  // The off-map overpass layouts (issue #130), same framing: the deck must
+  // run past the map edge with no stub, and the branch still ramps between
+  // grade and the deck.
+  const std::pair<const char*, tactics::OverpassLayout> kOffMapLayouts[] = {
+      {"city_elevated_through_seed_7", tactics::OverpassLayout::Through},
+      {"city_elevated_enter_ramp_up_seed_7", tactics::OverpassLayout::EnterRampUp},
+      {"city_elevated_enter_ramp_down_seed_7", tactics::OverpassLayout::EnterRampDown},
+  };
+  for (const auto& [name, layout] : kOffMapLayouts) {
+    tactics::MapGeneratorConfig layoutConfig = elevatedConfig;
+    layoutConfig.overpassLayout = layout;
+    cases.push_back({name, tactics::GenerateUrbanMap(7, layoutConfig), 180.0f,
+                     /*showNavMesh=*/false, /*pitchOffset=*/-0.55f, /*yawOffset=*/-1.6f});
+  }
   // Frontier of a unit on the deck, framed low and side-on at the deck edge.
   {
     MapCase deckFrontier{"city_elevated_deck_frontier_seed_7",

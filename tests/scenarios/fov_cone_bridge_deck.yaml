@@ -5,7 +5,7 @@
 name: fov_cone_bridge_deck
 
 map:
-  generate: {type: urban, seed: 7, arteries: 2, elevated: true}
+  generate: {type: urban, seed: 7, arteries: 2, elevated: true, elevated_layout: ramp-up-ramp-down}
 
 units:
   - {id: 0, team: blue, position: [-72, 0, 14.5], facing_degrees: -10}

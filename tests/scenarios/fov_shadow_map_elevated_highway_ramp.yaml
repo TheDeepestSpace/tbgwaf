@@ -8,7 +8,7 @@
 name: fov_shadow_map_elevated_highway_ramp
 
 map:
-  generate: {type: urban, seed: 7, arteries: 2, elevated: true}
+  generate: {type: urban, seed: 7, arteries: 2, elevated: true, elevated_layout: ramp-up-ramp-down}
 
 render:
   fov_overlay: shadow_map

@@ -88,7 +88,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .transport .clock {{ font-family: monospace; font-size: 0.85rem; color: #8a919c; }}
 </style>
 </head>
-<body>
+<body data-baseline-url="{baseline_url}">
 <h1>Gameplay scenario review</h1>
 <p>Scenarios under <code>{scenario_dir}</code>, classified against this PR from
 git metadata on the YAML files. Every scenario present at the PR's head —
@@ -132,6 +132,18 @@ function init(sc) {
     .then(r => (r.ok ? r.json() : null))
     .then(t => { timing = t; update(); })
     .catch(() => {});
+  // Optional master-baseline timing (same shape; only `fps` and `frames`
+  // are used), drawn as the red line. Absent/404 => PR line only.
+  let baseline = null;
+  const baseUrl = sc.closest("[data-baseline-url]");
+  if (baseUrl && baseUrl.dataset.baselineUrl) {
+    fetch(baseUrl.dataset.baselineUrl + "/" + sc.dataset.stem + ".json")
+      .then(r => (r.ok ? r.json() : null))
+      .then(b => {
+        if (b && b.fps && b.frames && b.frames.length) { baseline = b; update(); }
+      })
+      .catch(() => {});
+  }
   const playAll = () => { vids.forEach(v => v.play()); btn.textContent = "❚❚"; };
   const pauseAll = () => { vids.forEach(v => v.pause()); btn.textContent = "▶"; };
   const seekAll = t => { vids.forEach(v => { v.currentTime = t; }); update(); };
@@ -170,7 +182,8 @@ function init(sc) {
   function chartDims() {
     if (!chart || !timing || !timing.frames || !timing.frames.length || !timing.fps) return null;
     const dur = master.duration || timing.frames[timing.frames.length - 1].frame / timing.fps;
-    const max = Math.max(1, ...timing.frames.map(f => f.ms)) * 1.1;
+    const max = Math.max(1, ...timing.frames.map(f => f.ms),
+                         ...(baseline ? baseline.frames.map(f => f.ms) : [])) * 1.1;
     return dur > 0 ? { dur, max } : null;
   }
   // Plot area spans exactly the seek slider: the left gutter (under the
@@ -211,14 +224,27 @@ function init(sc) {
       c.fillStyle = "#d0a24a";
       c.fillText(String(a.index), x + 2, h - 4);
     });
-    c.strokeStyle = "#6d9eeb";
-    c.lineWidth = 1.5;
-    c.beginPath();
-    timing.frames.forEach((f, i) => {
-      const x = X((f.frame - 1) / timing.fps), y = Y(f.ms);
-      if (i) c.lineTo(x, y); else c.moveTo(x, y);
+    const line = (tm, color) => {
+      c.strokeStyle = color;
+      c.lineWidth = 1.5;
+      c.beginPath();
+      tm.frames.forEach((f, i) => {
+        const x = X((f.frame - 1) / tm.fps), y = Y(f.ms);
+        if (i) c.lineTo(x, y); else c.moveTo(x, y);
+      });
+      c.stroke();
+    };
+    if (baseline) line(baseline, "#e05a5a");
+    line(timing, "#4fc36b");
+    c.font = "10px system-ui, sans-serif";
+    c.textAlign = "right";
+    let lx = w - padR - 4;
+    [["this PR", "#4fc36b"], ...(baseline ? [["master", "#e05a5a"]] : [])].forEach(([name, col]) => {
+      c.fillStyle = col;
+      c.fillText(name, lx, 10);
+      lx -= c.measureText(name).width + 12;
     });
-    c.stroke();
+    c.textAlign = "left";
     c.strokeStyle = "#e8e8e8";
     c.lineWidth = 1;
     const px = Math.round(X(Math.min(t, d.dur))) + 0.5;
@@ -721,7 +747,8 @@ def scenario_entry(path: str, info: dict | None,
             'aria-label="Seek both views">'
             '<span class="clock">0:00 / 0:00</span></div>'
             '<div class="frametimes" hidden><canvas role="img" aria-label="Per-frame '
-            'render time in ms over video time, with action markers"></canvas></div>')
+            'render time in ms over video time (this PR in green, master baseline in red), '
+            'with action markers"></canvas></div>')
     else:
         lines.append('<p class="note">⚠ No video could be recorded.</p>')
     lines.append("</div>")
@@ -751,6 +778,10 @@ def main() -> int:
     parser.add_argument("--out", required=True, type=Path,
                         help="Output directory for index.html + media/")
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
+    parser.add_argument("--baseline-url", default="",
+                        help="URL (relative to the page) of a directory holding "
+                             "<scenario>.json master timing baselines; enables the "
+                             "red baseline line in the frame-time graph")
     args = parser.parse_args()
 
     changes = classify_changes(args.base, args.head, args.repo_root)
@@ -777,7 +808,8 @@ def main() -> int:
 
     (args.out / "index.html").write_text(
         PAGE_TEMPLATE.format(scenario_dir=SCENARIO_DIR, sections=sections,
-                             page_js=PAGE_JS))
+                             page_js=PAGE_JS,
+                             baseline_url=html.escape(args.baseline_url, quote=True)))
     print(f"[scenario-review] wrote {args.out / 'index.html'} "
           f"({len(changes['A'])} new, {len(changes['M'])} modified, "
           f"{len(changes['U'])} unchanged, {len(changes['D'])} deleted)", file=sys.stderr)

@@ -26,6 +26,15 @@ bool LineOfSightClear(const glm::vec3& from, const glm::vec3& to,
 bool LineOfSightClear(const glm::vec3& from, const glm::vec3& to,
                       const std::vector<Obstacle>& obstacles,
                       const std::vector<WalkSurface>& walkSurfaces);
+// Terrain-aware form. It intersects the same two triangles per heightfield
+// cell as the rendered mesh, so ridgelines occlude gameplay FOV exactly
+// where they occlude the shadow-map FOV mask.
+bool LineOfSightClear(const glm::vec3& from, const glm::vec3& to,
+                      const HeightField& terrain);
+bool LineOfSightClear(const glm::vec3& from, const glm::vec3& to,
+                      const std::vector<Obstacle>& obstacles,
+                      const std::vector<WalkSurface>& walkSurfaces,
+                      const HeightField& terrain);
 
 // True if `target` lies within a cone from `origin` centered on `forward`
 // with the given half-angle (degrees) and max range.

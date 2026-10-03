@@ -153,6 +153,13 @@ prone there"), and it stays consistent with the obstacle-visibility
 sampling in `ComputeTeamVisibility`. Pure target-LOS is a one-line setting
 if the gameplay rule changes.
 
+Gameplay enemy visibility now uses that same zero-height surface probe:
+`ComputeTeamVisibility` and playbook reactions test the rendered surface
+under a target's feet rather than its eye. Their LOS also intersects the
+heightfield's actual triangles, so a terrain ridge hides an enemy wherever
+the shadow-map mask leaves the ground dark. Shot resolution still traces to
+the target's eye, but includes the same terrain occlusion.
+
 ### Recommendation on retiring the CPU path
 
 Not yet. The mask reproduces the CPU overlay on ground and deck tops to

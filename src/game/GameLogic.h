@@ -133,7 +133,7 @@ class GameLogic {
   // here), so callers always see a result consistent with the latest move.
   TeamVisibility ComputeVisibility(Team team) const {
     return tactics::ComputeTeamVisibility(team, scene_.units, scene_.obstacles,
-                                          scene_.walkSurfaces);
+                                          scene_.walkSurfaces, scene_.ground);
   }
 
   // One remembered glimpse of an enemy figure in `viewingTeam`'s FOV.

@@ -677,7 +677,7 @@ bool GameLogic::ShotConnects(const Unit& shooter, const Unit& target) const {
   return InFovCone(shooter.EyePosition(), shooter.FacingDirection(), target.EyePosition(),
                    constants::kShootHalfFovDegrees, constants::kShootRange) &&
          LineOfSightClear(shooter.EyePosition(), target.EyePosition(), scene_.obstacles,
-                          scene_.walkSurfaces);
+                          scene_.walkSurfaces, scene_.ground);
 }
 
 bool GameLogic::ResolveShot(Unit& shooter, Unit& target) {
@@ -760,14 +760,14 @@ void GameLogic::ApplyPlaybookReactions() {
       // A stationary figure reacts to enemies *moving* into its view (the
       // watcher-on-mover case), not to everyone idling in its cone.
       if (!moving && !isMidMove(enemy.id)) continue;
-      if (!CanUnitSee(unit, enemy, scene_.obstacles, scene_.walkSurfaces)) continue;
+      if (!CanUnitSee(unit, enemy, scene_.obstacles, scene_.walkSurfaces, scene_.ground)) continue;
       const float dist = glm::distance(unit.position, enemy.position);
       if (!nearest || dist < nearestDist) {
         nearest = &enemy;
         nearestDist = dist;
       }
       // Most-cautious tie-break: any sighted enemy that sees back counts.
-      canSeeMe |= CanUnitSee(enemy, unit, scene_.obstacles, scene_.walkSurfaces);
+      canSeeMe |= CanUnitSee(enemy, unit, scene_.obstacles, scene_.walkSurfaces, scene_.ground);
     }
     if (!nearest) continue;
     const ReactionAction action = Playbook(unit.team).At(moving, canSeeMe);

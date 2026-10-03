@@ -1,5 +1,8 @@
 #include "game/Visibility.h"
 
+#include <cmath>
+
+#include "game/Geometry.h"
 #include "game/Raycast.h"
 
 namespace tactics {
@@ -44,12 +47,59 @@ bool IsPointVisibleToTeam(Team team, const glm::vec3& point, const std::vector<U
   return false;
 }
 
+bool IsPointVisibleToTeam(Team team, const glm::vec3& point, const std::vector<Unit>& units,
+                          const std::vector<Obstacle>& obstacles,
+                          const std::vector<WalkSurface>& walkSurfaces,
+                          const HeightField& terrain) {
+  for (const auto& viewer : units) {
+    if (!viewer.alive || viewer.team != team) continue;
+    if (InFovCone(viewer.EyePosition(), viewer.FacingDirection(), point,
+                  constants::kShootHalfFovDegrees, constants::kShootRange) &&
+        LineOfSightClear(viewer.EyePosition(), point, obstacles, walkSurfaces, terrain)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+namespace {
+
+// The shadow-map overlay's default probe height is zero: it answers whether
+// the surface under a figure is in FOV, not whether the figure's eye is.
+// Ground figures are adjusted from the bilinear navigation height to the
+// renderer's triangulated height so the CPU test samples the same surface.
+glm::vec3 UnitFovProbe(const Unit& target, const std::vector<WalkSurface>& walkSurfaces,
+                       const HeightField& terrain) {
+  glm::vec3 probe = target.position;
+  for (const WalkSurface& surface : walkSurfaces) {
+    if (SurfaceContainsXZ(surface, probe.x, probe.z) &&
+        std::fabs(SurfaceHeightAt(surface, probe.x, probe.z) - probe.y) < 0.1f) {
+      return probe;
+    }
+  }
+  if (std::fabs(terrain.HeightAt(probe.x, probe.z) - probe.y) < 0.25f) {
+    probe.y = terrain.MeshHeightAt(probe.x, probe.z);
+  }
+  return probe;
+}
+
+}  // namespace
+
 bool CanUnitSee(const Unit& viewer, const Unit& target, const std::vector<Obstacle>& obstacles,
                  const std::vector<WalkSurface>& walkSurfaces) {
   return viewer.alive &&
-         InFovCone(viewer.EyePosition(), viewer.FacingDirection(), target.EyePosition(),
+         InFovCone(viewer.EyePosition(), viewer.FacingDirection(), target.position,
                    constants::kShootHalfFovDegrees, constants::kShootRange) &&
-         LineOfSightClear(viewer.EyePosition(), target.EyePosition(), obstacles, walkSurfaces);
+         LineOfSightClear(viewer.EyePosition(), target.position, obstacles, walkSurfaces);
+}
+
+bool CanUnitSee(const Unit& viewer, const Unit& target, const std::vector<Obstacle>& obstacles,
+                const std::vector<WalkSurface>& walkSurfaces, const HeightField& terrain) {
+  const glm::vec3 probe = UnitFovProbe(target, walkSurfaces, terrain);
+  return viewer.alive &&
+         InFovCone(viewer.EyePosition(), viewer.FacingDirection(), probe,
+                   constants::kShootHalfFovDegrees, constants::kShootRange) &&
+         LineOfSightClear(viewer.EyePosition(), probe, obstacles, walkSurfaces, terrain);
 }
 
 namespace {
@@ -77,7 +127,7 @@ TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
 
   for (const auto& target : units) {
     if (target.team == team) continue;  // Downed enemies stay visible while in FOV.
-    if (IsPointVisibleToTeam(team, target.EyePosition(), units, obstacles)) {
+    if (IsPointVisibleToTeam(team, target.position, units, obstacles)) {
       result.visibleUnit[target.id] = true;
     }
   }
@@ -104,7 +154,7 @@ TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
   result.visibleObstacle.resize(obstacles.size(), false);
   for (const Unit& target : units) {
     if (target.team == team) continue;
-    if (IsPointVisibleToTeam(team, target.EyePosition(), units, obstacles)) {
+    if (IsPointVisibleToTeam(team, target.position, units, obstacles)) {
       result.visibleUnit[target.id] = true;
     }
   }
@@ -134,7 +184,7 @@ TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
   result.visibleObstacle.resize(obstacles.size(), false);
   for (const Unit& target : units) {
     if (target.team == team) continue;
-    if (IsPointVisibleToTeam(team, target.EyePosition(), units, obstacles, walkSurfaces)) {
+    if (IsPointVisibleToTeam(team, target.position, units, obstacles, walkSurfaces)) {
       result.visibleUnit[target.id] = true;
     }
   }
@@ -148,6 +198,38 @@ TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
     }
     for (const glm::vec3& point : samples) {
       if (IsPointVisibleToTeam(team, point, units, obstacles, walkSurfaces)) {
+        result.visibleObstacle[i] = true;
+        break;
+      }
+    }
+  }
+  return result;
+}
+
+TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
+                                     const std::vector<Obstacle>& obstacles,
+                                     const std::vector<WalkSurface>& walkSurfaces,
+                                     const HeightField& terrain) {
+  TeamVisibility result;
+  result.visibleUnit.resize(units.size(), false);
+  result.visibleObstacle.resize(obstacles.size(), false);
+  for (const Unit& target : units) {
+    if (target.team == team) continue;
+    const glm::vec3 probe = UnitFovProbe(target, walkSurfaces, terrain);
+    if (IsPointVisibleToTeam(team, probe, units, obstacles, walkSurfaces, terrain)) {
+      result.visibleUnit[target.id] = true;
+    }
+  }
+  std::vector<glm::vec3> samples;
+  for (size_t i = 0; i < obstacles.size(); ++i) {
+    samples.clear();
+    const Obstacle& obstacle = obstacles[i];
+    samples.push_back(obstacle.bounds.Center());
+    for (const glm::vec2& p : ObstacleFootprint(obstacle)) {
+      samples.emplace_back(p.x, obstacle.bounds.max.y, p.y);
+    }
+    for (const glm::vec3& point : samples) {
+      if (IsPointVisibleToTeam(team, point, units, obstacles, walkSurfaces, terrain)) {
         result.visibleObstacle[i] = true;
         break;
       }

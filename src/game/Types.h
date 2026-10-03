@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -92,6 +93,30 @@ struct HeightField {
     const float h0 = h00 + (h10 - h00) * tx;
     const float h1 = h01 + (h11 - h01) * tx;
     return h0 + (h1 - h0) * tz;
+  }
+
+  // Height of the actual rendered terrain triangles at (x,z). The renderer
+  // splits every cell along its min/min -> max/max diagonal; this differs
+  // from bilinear HeightAt inside a non-planar cell. Visibility uses this
+  // form so its terrain occlusion agrees with the shadow-map FOV mask.
+  float MeshHeightAt(float x, float z) const {
+    if (Empty()) return 0.0f;
+    if (nx < 2 || nz < 2 || step <= 0.0f) return At(0, 0);
+    const float fx = std::clamp((x - minX) / step, 0.0f, static_cast<float>(nx - 1));
+    const float fz = std::clamp((z - minZ) / step, 0.0f, static_cast<float>(nz - 1));
+    const int ix = std::min(static_cast<int>(std::floor(fx)), nx - 2);
+    const int iz = std::min(static_cast<int>(std::floor(fz)), nz - 2);
+    const float tx = fx - ix;
+    const float tz = fz - iz;
+    const float a = At(ix, iz);
+    if (tx >= tz) {
+      const float b = At(ix + 1, iz);
+      const float d = At(ix + 1, iz + 1);
+      return a + (b - a) * tx + (d - b) * tz;
+    }
+    const float c = At(ix, iz + 1);
+    const float d = At(ix + 1, iz + 1);
+    return a + (d - c) * tx + (c - a) * tz;
   }
 };
 

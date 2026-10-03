@@ -5,13 +5,13 @@ corner rays and stitches ground quads around box/deck shadows; it covers
 ground and deck tops only and would go combinatorial with wall faces. This
 prototype replaces it with a per-unit projective mask: render scene depth
 from the unit's eye, then tint every fragment of the static scene that lies
-inside the cone and passes the depth test. It is **off by default**; the CPU
-path stays as it was.
+inside the cone and passes the depth test. The app currently defaults to it (so deployments show
+it); the CPU path stays available and is still the default for visual scenarios.
 
-## How to turn it on
+## How to select it
 
-- App: `TBGWAF_FOV_SHADOW_MAP=1 ./build/tactics_app` (optionally
-  `TBGWAF_FOV_PROBE_HEIGHT=<units>`, see "Ground semantics").
+- App: on by default; `TBGWAF_FOV_SHADOW_MAP=0 ./build/tactics_app` restores the
+  CPU overlay (optionally `TBGWAF_FOV_PROBE_HEIGHT=<units>`, see "Ground semantics").
 - Scenario YAML: a top-level `render: {fov_overlay: shadow_map}` block
   (plus optional `fov_probe_height`). Two scenarios use it and have goldens:
   `tests/scenarios/fov_shadow_map_elevated_highway_ramp.yaml` (identical to
@@ -171,5 +171,5 @@ the direction is right. Before it can replace the CPU path:
 4. Cover the feet disc and the >60-degree band (a third, downward map, or
    accept the gap).
 
-Until then the mask is a flag-gated prototype with its own goldens, and the
-CPU overlay remains the default.
+Until then the mask is a prototype with its own goldens; the app defaults to it
+for now, while the CPU overlay remains the default for visual scenarios.

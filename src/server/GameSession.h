@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "game/GameLogic.h"
@@ -16,6 +17,9 @@ namespace tactics::server {
 class GameSession {
  public:
   explicit GameSession(uint32_t seed);
+  // A match on a fixed, explicitly built scene (test control tap); `new_match`
+  // restarts on the same scene.
+  explicit GameSession(const Scene& scene);
 
   uint32_t seed() const { return seed_; }
   const GameLogic& game() const { return game_; }
@@ -42,15 +46,21 @@ class GameSession {
   net::Json StateMessage(Team team) const;
   net::Json PlansMessage(Team team) const;
 
+  // Unfiltered ground truth for tests: round/winner, every unit, and which
+  // units each team currently sees (so tests can check the fog the clients
+  // were given against what the server computed).
+  net::Json DumpState() const;
+
  private:
   net::Json StateBody(Team team) const;
 
   uint32_t seed_;
+  std::optional<Scene> fixedScene_;
   GameLogic game_;
   std::array<bool, 2> ready_{false, false};
 };
 
-constexpr float kSimStep = 1.0f / 30.0f;
+constexpr float kSimStep = constants::kSimStepSeconds;
 constexpr int kFrameEvery = 3;  // Timeline sampled at 10 Hz.
 
 }  // namespace tactics::server

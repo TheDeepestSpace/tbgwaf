@@ -18,6 +18,11 @@ struct ServerConfig {
   int handshakeTimeoutMs = 5000;
   int idleTimeoutMs = 60000;   // Dropped if silent this long (clients are pinged at half).
   int maxMessagesPerSecond = 60;
+  // Test-only control tap: a second loopback listener (same WebSocket
+  // framing) that lets a test runner load a scenario scene into a room, dump
+  // the server's unfiltered state and shut the server down. -1 = disabled
+  // (the shipped server never enables it), 0 = pick a free port.
+  int controlPort = -1;
 };
 
 // Single-threaded poll() WebSocket server feeding a Lobby. Also answers
@@ -30,6 +35,7 @@ class Server {
   // Binds and listens. Returns false (with *error set) on failure.
   bool Listen(std::string* error);
   uint16_t port() const { return port_; }
+  uint16_t control_port() const { return controlPortBound_; }
 
   // Runs one poll iteration (waits up to timeoutMs). Call in a loop.
   void RunOnce(int timeoutMs);
@@ -42,6 +48,7 @@ class Server {
     int fd = -1;
     bool open = false;      // Handshake complete.
     bool closing = false;   // Flush outbuf then drop.
+    bool control = false;   // Accepted on the control tap, not the game port.
     std::string inbuf, outbuf;
     std::unique_ptr<ws::FrameParser> parser;
     int64_t connectedMs = 0, lastActivityMs = 0, lastPingMs = 0;
@@ -49,7 +56,9 @@ class Server {
     int windowCount = 0;
   };
 
-  void Accept();
+  void Accept(int listenFd, bool control);
+  void HandleControl(Conn& c, const std::string& text);
+  bool BindListener(const std::string& address, int port, int* fd, uint16_t* bound, std::string* error);
   void OnReadable(int id, Conn& c, int64_t now);
   void ProcessHandshake(int id, Conn& c);
   void ProcessFrames(int id, Conn& c, int64_t now);
@@ -61,6 +70,8 @@ class Server {
   ServerConfig config_;
   int listenFd_ = -1;
   uint16_t port_ = 0;
+  int controlFd_ = -1;
+  uint16_t controlPortBound_ = 0;
   std::atomic<bool> stop_{false};
   int nextId_ = 1;
   std::map<int, Conn> conns_;

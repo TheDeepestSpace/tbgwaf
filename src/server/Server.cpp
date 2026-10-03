@@ -20,6 +20,7 @@ namespace tactics::server {
 
 namespace {
 constexpr size_t kMaxHandshakeBytes = 8192;
+constexpr size_t kMaxControlBytes = 1 << 20;
 
 void SetNonBlocking(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK); }
 
@@ -48,32 +49,42 @@ Server::Server(ServerConfig config)
 Server::~Server() {
   for (auto& [id, c] : conns_) close(c.fd);
   if (listenFd_ >= 0) close(listenFd_);
+  if (controlFd_ >= 0) close(controlFd_);
 }
 
-bool Server::Listen(std::string* error) {
-  listenFd_ = socket(AF_INET, SOCK_STREAM, 0);
-  if (listenFd_ < 0) {
+bool Server::BindListener(const std::string& address, int port, int* fd, uint16_t* bound,
+                          std::string* error) {
+  *fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (*fd < 0) {
     *error = std::string("socket: ") + std::strerror(errno);
     return false;
   }
   int one = 1;
-  setsockopt(listenFd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  setsockopt(*fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
-  addr.sin_port = htons(config_.port);
-  if (inet_pton(AF_INET, config_.bindAddress.c_str(), &addr.sin_addr) != 1) {
-    *error = "bad bind address: " + config_.bindAddress;
+  addr.sin_port = htons(static_cast<uint16_t>(port));
+  if (inet_pton(AF_INET, address.c_str(), &addr.sin_addr) != 1) {
+    *error = "bad bind address: " + address;
     return false;
   }
-  if (bind(listenFd_, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 ||
-      listen(listenFd_, 64) != 0) {
+  if (bind(*fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 || listen(*fd, 64) != 0) {
     *error = std::string("bind/listen: ") + std::strerror(errno);
     return false;
   }
   socklen_t len = sizeof addr;
-  getsockname(listenFd_, reinterpret_cast<sockaddr*>(&addr), &len);
-  port_ = ntohs(addr.sin_port);
-  SetNonBlocking(listenFd_);
+  getsockname(*fd, reinterpret_cast<sockaddr*>(&addr), &len);
+  *bound = ntohs(addr.sin_port);
+  SetNonBlocking(*fd);
+  return true;
+}
+
+bool Server::Listen(std::string* error) {
+  if (!BindListener(config_.bindAddress, config_.port, &listenFd_, &port_, error)) return false;
+  if (config_.controlPort >= 0 &&
+      !BindListener("127.0.0.1", config_.controlPort, &controlFd_, &controlPortBound_, error)) {
+    return false;
+  }
   return true;
 }
 
@@ -81,9 +92,9 @@ void Server::Run() {
   while (!stop_) RunOnce(250);
 }
 
-void Server::Accept() {
+void Server::Accept(int listenFd, bool control) {
   while (true) {
-    const int fd = accept(listenFd_, nullptr, nullptr);
+    const int fd = accept(listenFd, nullptr, nullptr);
     if (fd < 0) return;
     if (conns_.size() >= config_.maxConnections) {
       close(fd);
@@ -95,7 +106,8 @@ void Server::Accept() {
     Conn c;
     c.fd = fd;
     c.connectedMs = c.lastActivityMs = c.lastPingMs = c.windowStartMs = NowMs();
-    c.parser = std::make_unique<ws::FrameParser>(net::kMaxMessageBytes);
+    c.control = control;
+    c.parser = std::make_unique<ws::FrameParser>(control ? kMaxControlBytes : net::kMaxMessageBytes);
     conns_.emplace(nextId_++, std::move(c));
   }
 }
@@ -162,6 +174,10 @@ void Server::ProcessFrames(int id, Conn& c, int64_t now) {
         c.closing = true;
         return;
       case ws::Opcode::Text: {
+        if (c.control) {
+          HandleControl(c, msg->payload);
+          break;
+        }
         if (now - c.windowStartMs >= 1000) {
           c.windowStartMs = now;
           c.windowCount = 0;
@@ -184,6 +200,23 @@ void Server::ProcessFrames(int id, Conn& c, int64_t now) {
     Queue(c, ws::EncodeClose(c.parser->failure_code()));
     c.closing = true;
   }
+}
+
+void Server::HandleControl(Conn& c, const std::string& text) {
+  net::Json message;
+  net::Json reply;
+  if (!net::Json::Parse(text, &message) || !message.IsObject()) {
+    reply.Set("t", "control");
+    reply.Set("ok", net::Json(false));
+    reply.Set("error", "malformed message");
+  } else if (message["t"].IsString() && message["t"].AsString() == "shutdown") {
+    stop_ = true;
+    reply.Set("t", "control");
+    reply.Set("ok", net::Json(true));
+  } else {
+    reply = lobby_.OnControl(message);
+  }
+  Queue(c, ws::EncodeFrame(ws::Opcode::Text, reply.Dump()));
 }
 
 void Server::OnReadable(int id, Conn& c, int64_t now) {
@@ -219,6 +252,10 @@ void Server::RunOnce(int timeoutMs) {
   std::vector<int> ids;
   fds.push_back({listenFd_, POLLIN, 0});
   ids.push_back(0);
+  if (controlFd_ >= 0) {
+    fds.push_back({controlFd_, POLLIN, 0});
+    ids.push_back(-1);
+  }
   for (auto& [id, c] : conns_) {
     short events = c.closing ? 0 : POLLIN;
     if (!c.outbuf.empty()) events |= POLLOUT;
@@ -228,8 +265,13 @@ void Server::RunOnce(int timeoutMs) {
   poll(fds.data(), fds.size(), timeoutMs);
   const int64_t now = NowMs();
 
-  if (fds[0].revents & POLLIN) Accept();
-  for (size_t i = 1; i < fds.size(); ++i) {
+  if (fds[0].revents & POLLIN) Accept(listenFd_, false);
+  size_t first = 1;
+  if (controlFd_ >= 0) {
+    if (fds[1].revents & POLLIN) Accept(controlFd_, true);
+    first = 2;
+  }
+  for (size_t i = first; i < fds.size(); ++i) {
     auto it = conns_.find(ids[i]);
     if (it == conns_.end()) continue;
     Conn& c = it->second;

@@ -81,6 +81,74 @@ The runner (`build/tactics_visual_tests`) can also record a continuous
 per-team video of each scenario with `--video` (requires `ffmpeg`); see
 `--help` for the flags.
 
+### Networked scenario tests
+
+`net_scenario_tests` (`tests/net_scenario_tests.cpp`) replays the same YAML
+scenarios through a **real `tbgwaf_server` process**, so the room, protocol,
+serialization and fog-of-war paths are covered too. No GL; it runs headless
+(also with `-DTBGWAF_BUILD_CLIENT=OFF`).
+
+- The runner spawns `tbgwaf_server_testctl`: the server built with the
+  loopback-only **control tap** (`--control-port`) compiled in. The shipped
+  `tbgwaf_server` has no such flag. The tap speaks the same WebSocket framing as
+  the game port and accepts `load_scenario` (scene + units, the same spec the
+  YAML uses; clients receive it in `start`), `dump_state` (unfiltered server
+  state) and `shutdown`.
+- Per scenario it connects one headless client per team on the normal game port
+  (`GameLogic` mirror + `net::RemoteClient` over a small native WebSocket client
+  in `tests/net/`). Each scripted action runs through the **acting team's own
+  mirror** (the same `ClickUnit`/`ChooseMove`/... calls as the in-process
+  runner); `RemoteClient` ships the resulting plans, and a no-op `reaction` acts
+  as a barrier so the next step starts after the server has applied them.
+- Assertions run against the server's `dump_state` using the shared assertion
+  code, plus checks that the server's fog matches a recomputation and that
+  each client's mirror shows exactly what its team may see. Sighting-memory
+  assertions run on the owning client's mirror (age 0 only; older ones are
+  in-process only).
+- All three runners advance rounds in the same fixed step
+  (`constants::kSimStepSeconds`, 1/30 s), so reactions resolve identically.
+
+```mermaid
+flowchart LR
+  Y[("tests/scenarios/*.yaml")]
+
+  subgraph L["scenario_tests - in-process, logic only"]
+    LR1[Scenario runner] --> LG[GameLogic]
+  end
+
+  subgraph V["visual_tests - xvfb + software GL"]
+    VR[Visual runner] --> VG[GameLogic] --> SR[SceneRenderer]
+    SR --> PNG[PNG goldens diff]
+    SR --> VID[per-team videos]
+  end
+
+  subgraph N["net_scenario_tests - real server process, no GL"]
+    NR[Net runner]
+    NR -->|"click API, per acting team"| CB["Blue client: GameLogic + RemoteClient"]
+    NR -->|"click API, per acting team"| CR["Red client: GameLogic + RemoteClient"]
+    CB <-->|"WebSocket, game port"| SV
+    CR <-->|"WebSocket, game port"| SV
+    NR -->|"WebSocket, control tap: load_scenario, dump_state"| SV["tbgwaf_server_testctl<br/>Lobby + GameSession"]
+    NR --> AS["assert on server state<br/>+ client fog mirrors"]
+  end
+
+  Y --> LR1
+  Y --> VR
+  Y --> NR
+
+  subgraph U["Unit-level ctests"]
+    UT["logic_tests, map_generator_tests,<br/>camera_tests, net_tests,<br/>server_tests (incl. real-socket loopback)"]
+  end
+
+  SM["smoke_test: tactics_app under xvfb"]
+  CI["GitHub Actions ci.yml:<br/>flow sync check, full build + ctest,<br/>headless server-only build + ctest"]
+  CI --> L
+  CI --> V
+  CI --> N
+  CI --> U
+  CI --> SM
+```
+
 ### Weapons & the asset/animation gallery
 
 Figures carry one of three procedural blocky weapons (issue #126), assigned

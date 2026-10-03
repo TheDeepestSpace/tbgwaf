@@ -9,6 +9,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include "game/MapGenerator.h"
+#include "net/SceneSpec.h"
 #include "game/GameLogic.h"
 
 namespace tactics::scenario {
@@ -78,76 +79,40 @@ void ParsePlaybooks(const YAML::Node& root, SquadPlaybook (&out)[2]) {
   }
 }
 
-Scene ParseScene(const YAML::Node& root) {
-  Scene scene;
-
-  bool generated = false;
-  if (const YAML::Node mapNode = root["map"]) {
-    // `generate: {seed: N, type: urban|hilly}` builds a procedural map
-    // (units come from the generator unless the scenario lists its own).
-    // `type` defaults to the urban city generator.
-    if (const YAML::Node genNode = mapNode["generate"]) {
-      if (!genNode["seed"]) throw std::runtime_error("map.generate requires 'seed'");
-      const uint32_t seed = genNode["seed"].as<uint32_t>();
-      const std::string type = genNode["type"] ? genNode["type"].as<std::string>() : "urban";
-      if (type == "urban") {
-        MapGeneratorConfig config;
-        if (genNode["arteries"]) config.arteryCount = genNode["arteries"].as<int>();
-        if (genNode["artery_width"]) config.arteryWidth = genNode["artery_width"].as<float>();
-        if (genNode["local_street_width"]) {
-          config.localStreetWidth = genNode["local_street_width"].as<float>();
-        }
-        if (genNode["elevated"]) config.elevatedHighway = genNode["elevated"].as<bool>();
-        scene = GenerateUrbanMap(seed, config);
-      } else if (type == "hilly") {
-        scene = GenerateHillyMap(seed);
-      } else {
-        throw std::runtime_error("map.generate.type must be 'urban' or 'hilly', got '" + type +
-                                 "'");
+// Generic YAML -> JSON, so the scene description can be handed to
+// net::SceneFromSpec (the same builder the server's control tap uses).
+net::Json YamlToJson(const YAML::Node& node) {
+  switch (node.Type()) {
+    case YAML::NodeType::Sequence: {
+      net::Json::Array items;
+      for (const auto& child : node) items.push_back(YamlToJson(child));
+      return net::Json(std::move(items));
+    }
+    case YAML::NodeType::Map: {
+      net::Json::Object members;
+      for (const auto& kv : node) members[kv.first.as<std::string>()] = YamlToJson(kv.second);
+      return net::Json(std::move(members));
+    }
+    case YAML::NodeType::Scalar: {
+      const std::string& text = node.Scalar();
+      if (text == "true" || text == "false") return net::Json(text == "true");
+      try {
+        size_t used = 0;
+        const double value = std::stod(text, &used);
+        if (used == text.size()) return net::Json(value);
+      } catch (const std::exception&) {
       }
-      generated = true;
+      return net::Json(text);
     }
-    if (const YAML::Node obstaclesNode = mapNode["obstacles"]) {
-      for (const auto& obsNode : obstaclesNode) {
-        const glm::vec2 center = ParseVec2(obsNode["center"], "map.obstacles[].center");
-        const glm::vec2 halfExtent =
-            ParseVec2(obsNode["half_extent"], "map.obstacles[].half_extent");
-        if (!obsNode["height"]) {
-          throw std::runtime_error("map.obstacles[] requires 'height'");
-        }
-        const float height = obsNode["height"].as<float>();
+    default: return net::Json();
+  }
+}
 
-        Obstacle obstacle;
-        obstacle.bounds =
-            AABB{glm::vec3(center.x - halfExtent.x, 0.0f, center.y - halfExtent.y),
-                 glm::vec3(center.x + halfExtent.x, height, center.y + halfExtent.y)};
-        obstacle.climbable = obsNode["climbable"] ? obsNode["climbable"].as<bool>() : false;
-        scene.obstacles.push_back(obstacle);
-      }
-    }
-  }
-
-  const YAML::Node unitsNode = root["units"];
-  if (generated && !unitsNode) return scene;
-  if (generated) scene.units.clear();
-  if (!unitsNode || !unitsNode.IsSequence() || unitsNode.size() == 0) {
-    throw std::runtime_error("scenario must declare at least one unit under 'units'");
-  }
-  for (const auto& unitNode : unitsNode) {
-    if (!unitNode["id"] || !unitNode["team"] || !unitNode["position"]) {
-      throw std::runtime_error("units[] requires 'id', 'team', and 'position'");
-    }
-    Unit unit;
-    unit.id = unitNode["id"].as<int>();
-    unit.team = ParseTeam(unitNode["team"].as<std::string>(), "units[].team");
-    unit.position = ParseVec3(unitNode["position"], "units[].position");
-    unit.facingYaw =
-        unitNode["facing_degrees"] ? unitNode["facing_degrees"].as<float>() * kPi / 180.0f : 0.0f;
-    unit.alive = true;
-    unit.weapon = DefaultWeaponForUnit(unit.id);
-    scene.units.push_back(unit);
-  }
-  return scene;
+net::Json ParseSceneSpec(const YAML::Node& root) {
+  net::Json spec;
+  if (root["map"]) spec.Set("map", YamlToJson(root["map"]));
+  if (root["units"]) spec.Set("units", YamlToJson(root["units"]));
+  return spec;
 }
 
 ScenarioAction ParseAction(const YAML::Node& node) {
@@ -234,7 +199,7 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   return assertion;
 }
 
-bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& action,
+bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction& action,
                     int stepIndex, const PlaybackHooks& hooks, ScenarioResult* result) {
   auto Fail = [&](const std::string& msg) {
     result->failures.push_back("step " + std::to_string(stepIndex) + " (actor " +
@@ -291,7 +256,7 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
     } else {
       // Fast-forward the executing round. Step coarsely (not one giant tick)
       // so sighting memory still samples the figures along the way.
-      constexpr float kFastStepSeconds = 0.1f;
+      constexpr float kFastStepSeconds = constants::kSimStepSeconds;
       constexpr int kMaxFastSteps = 20000;
       for (int i = 0; game.Mode() == InputMode::Executing && i < kMaxFastSteps; ++i) {
         game.Update(kFastStepSeconds);
@@ -396,7 +361,7 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
   return true;
 }
 
-void CheckAssertion(const GameLogic& game, const ScenarioAssertion& a, int stepIndex,
+void CheckAssertionImpl(const GameLogic& game, const ScenarioAssertion& a, int stepIndex,
                      ScenarioResult* result) {
   auto Fail = [&](const std::string& msg) {
     result->failures.push_back("step " + std::to_string(stepIndex) + " (assert): " + msg);
@@ -470,6 +435,16 @@ void CheckAssertion(const GameLogic& game, const ScenarioAssertion& a, int stepI
 
 }  // namespace
 
+bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& action,
+                   int stepIndex, ScenarioResult* result) {
+  return ExecuteActionImpl(game, scene, action, stepIndex, {}, result);
+}
+
+void CheckAssertion(const GameLogic& game, const ScenarioAssertion& assertion, int stepIndex,
+                    ScenarioResult* result) {
+  CheckAssertionImpl(game, assertion, stepIndex, result);
+}
+
 Scenario LoadScenarioFromFile(const std::string& path) {
   YAML::Node root;
   try {
@@ -481,7 +456,11 @@ Scenario LoadScenarioFromFile(const std::string& path) {
   Scenario scenario;
   scenario.sourcePath = path;
   scenario.name = root["name"] ? root["name"].as<std::string>() : path;
-  scenario.scene = ParseScene(root);
+  scenario.sceneSpec = ParseSceneSpec(root);
+  std::string sceneError;
+  if (!net::SceneFromSpec(scenario.sceneSpec, &scenario.scene, &sceneError)) {
+    throw std::runtime_error(path + ": " + sceneError);
+  }
   ParsePlaybooks(root, scenario.playbooks);
   if (const YAML::Node cam = root["camera"]) {
     if (cam["target"]) scenario.cameraTarget = ParseVec2(cam["target"], "camera.target");
@@ -547,7 +526,7 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
   for (int i = 0; i < static_cast<int>(scenario.steps.size()); ++i) {
     const ScenarioStep& step = scenario.steps[i];
     if (step.action) {
-      if (!ExecuteAction(game, scenario.scene, *step.action, i, hooks, &result)) {
+      if (!ExecuteActionImpl(game, scenario.scene, *step.action, i, hooks, &result)) {
         break;  // The script's own preconditions were violated; state past this point is unreliable.
       }
       SyncFollower();
@@ -555,11 +534,11 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
       EmitHoldFrames();
       if (hooks.onActionComplete) hooks.onActionComplete(game, completedActions);
     } else {
-      CheckAssertion(game, *step.assertion, i, &result);
+      CheckAssertionImpl(game, *step.assertion, i, &result);
       if (step.assertion->rememberedByTeam &&
           (!step.assertion->memoryAge || *step.assertion->memoryAge == 0)) {
         ScenarioResult followerResult;
-        CheckAssertion(follower, *step.assertion, i, &followerResult);
+        CheckAssertionImpl(follower, *step.assertion, i, &followerResult);
         for (auto& f : followerResult.failures) result.failures.push_back("follower " + f);
       }
     }

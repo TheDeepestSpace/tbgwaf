@@ -22,6 +22,8 @@ bool Visible(const GameLogic& game, Team viewer, const Unit& unit, const TeamVis
 
 GameSession::GameSession(uint32_t seed) : seed_(seed), game_(GenerateUrbanMap(seed)) {}
 
+GameSession::GameSession(const Scene& scene) : seed_(0), fixedScene_(scene), game_(scene) {}
+
 GameSession::Result GameSession::Apply(Team team, const net::Action& action, uint32_t newSeed) {
   Result result;
   if (action.kind == net::ActionKind::Commit) {
@@ -39,7 +41,7 @@ GameSession::Result GameSession::Apply(Team team, const net::Action& action, uin
   if (action.kind == net::ActionKind::NewMatch) {
     if (game_.Mode() != InputMode::GameOver) return {false, "match is still running"};
     seed_ = newSeed;
-    game_.Reset(GenerateUrbanMap(seed_));
+    game_.Reset(fixedScene_ ? *fixedScene_ : GenerateUrbanMap(seed_));
     ready_ = {false, false};
     return result;
   }
@@ -144,6 +146,34 @@ Json GameSession::StateBody(Team team) const {
   body.Set("units", std::move(list));
   body.Set("playbook", net::EncodePlaybook(game_.Playbook(team)));
   return body;
+}
+
+Json GameSession::DumpState() const {
+  Json dump;
+  dump.Set("t", "state_dump");
+  dump.Set("round", Num(game_.RoundNumber()));
+  dump.Set("over", Json(game_.Mode() == InputMode::GameOver));
+  dump.Set("winner", game_.Winner() ? Json(net::TeamName(*game_.Winner())) : Json());
+  Json units{Json::Array{}};
+  for (const Unit& u : game_.GetScene().units) {
+    Json j;
+    j.Set("id", Num(u.id));
+    j.Set("team", net::TeamName(u.team));
+    j.Set("pos", net::EncodeVec3(u.position));
+    j.Set("yaw", Num(u.facingYaw));
+    j.Set("alive", Json(u.alive));
+    units.Push(std::move(j));
+  }
+  dump.Set("units", std::move(units));
+  for (Team team : {Team::Blue, Team::Red}) {
+    const TeamVisibility vis = game_.ComputeVisibility(team);
+    Json seen{Json::Array{}};
+    for (const Unit& u : game_.GetScene().units) {
+      if (vis.UnitVisible(u.id)) seen.Push(Num(u.id));
+    }
+    dump.Set(std::string("visible_") + net::TeamName(team), std::move(seen));
+  }
+  return dump;
 }
 
 Json GameSession::StateMessage(Team team) const {

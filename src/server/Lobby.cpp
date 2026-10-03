@@ -1,5 +1,7 @@
 #include "server/Lobby.h"
 
+#include "net/SceneSpec.h"
+
 namespace tactics::server {
 
 using net::Json;
@@ -70,7 +72,8 @@ void Lobby::Join(int conn, const Json& message) {
   }
   room.conns[1] = conn;
   members_[conn] = Member{name, Team::Red};
-  room.session = std::make_unique<GameSession>(seed_());
+  room.session = room.scene ? std::make_unique<GameSession>(*room.scene)
+                            : std::make_unique<GameSession>(seed_());
   StartMatch(room);
 }
 
@@ -80,6 +83,7 @@ void Lobby::StartMatch(Room& room) {
     Json start = Typed("start");
     start.Set("team", net::TeamName(team));
     start.Set("seed", static_cast<double>(room.session->seed()));
+    if (room.scene) start.Set("scene", room.sceneSpec);
     start.Set("protocol", net::kProtocolVersion);
     Send(room.conns[ti], start);
     Send(room.conns[ti], room.session->PlansMessage(team));
@@ -136,6 +140,34 @@ void Lobby::HandleAction(int conn, Member& member, const Json& message) {
       Send(room.conns[ti], Json(Json::Object{{"t", Json("peer")}, {"ready", Json(false)}}));
     }
   }
+}
+
+Json Lobby::OnControl(const Json& message) {
+  auto reply = [](bool ok, const std::string& error) {
+    Json j = Typed("control");
+    j.Set("ok", Json(ok));
+    if (!ok) j.Set("error", error);
+    return j;
+  };
+  const std::string type = message["t"].IsString() ? message["t"].AsString() : "";
+  const std::string name = message["room"].IsString() ? message["room"].AsString() : "";
+  if (!ValidRoomName(name)) return reply(false, "invalid room name");
+  if (type == "load_scenario") {
+    if (rooms_.count(name)) return reply(false, "room already exists");
+    Scene scene;
+    std::string error;
+    if (!net::SceneFromSpec(message["scene"], &scene, &error)) return reply(false, error);
+    Room& room = rooms_[name];
+    room.scene = std::move(scene);
+    room.sceneSpec = message["scene"];
+    return reply(true, "");
+  }
+  if (type == "dump_state") {
+    auto it = rooms_.find(name);
+    if (it == rooms_.end() || !it->second.session) return reply(false, "no running match in room");
+    return it->second.session->DumpState();
+  }
+  return reply(false, "unknown control message");
 }
 
 void Lobby::OnDisconnect(int conn) {

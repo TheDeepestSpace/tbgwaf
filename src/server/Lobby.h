@@ -3,6 +3,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "server/GameSession.h"
@@ -23,12 +24,19 @@ class Lobby {
   void OnMessage(int conn, const std::string& text);
   void OnDisconnect(int conn);
 
+  // Test-only control tap (see Server). `load_scenario` pre-registers a room
+  // whose match runs on an explicit scene; `dump_state` returns the room's
+  // unfiltered server-side state. Always returns the reply to send.
+  net::Json OnControl(const net::Json& message);
+
   size_t RoomCount() const { return rooms_.size(); }
 
  private:
   struct Room {
     int conns[2] = {-1, -1};  // Indexed by Team.
     std::unique_ptr<GameSession> session;
+    std::optional<Scene> scene;  // Set by load_scenario.
+    net::Json sceneSpec;         // The same scene, sent to clients in `start`.
   };
   struct Member {
     std::string room;

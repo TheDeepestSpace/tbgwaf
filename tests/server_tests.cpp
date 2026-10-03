@@ -17,6 +17,7 @@
 #include "game/MapGenerator.h"
 #include "net/ActionApply.h"
 #include "net/RemoteClient.h"
+#include "net/SceneSpec.h"
 #include "server/GameSession.h"
 #include "server/Lobby.h"
 #include "server/Server.h"
@@ -289,6 +290,47 @@ void TestLobbyPairing() {
   CHECK(Has(w.Drain(1), "waiting"));
 }
 
+// Test control tap: a scenario-loaded room runs on the explicit scene, the
+// start message carries it, and dump_state reports unfiltered ground truth.
+void TestControlTapScenarioRoom() {
+  const char* scene = R"({"map":{"obstacles":[]},"units":[
+    {"id":0,"team":"blue","position":[-5,0,0],"facing_degrees":0},
+    {"id":1,"team":"red","position":[5,0,0],"facing_degrees":180}]})";
+  Wire w;
+  Json load;
+  CHECK(Json::Parse(std::string(R"({"t":"load_scenario","room":"s1","scene":)") + scene + "}", &load));
+  CHECK(w.lobby.OnControl(load)["ok"].AsBool());
+  CHECK(!w.lobby.OnControl(load)["ok"].AsBool());  // Room already exists.
+  Json badScene;
+  CHECK(Json::Parse(R"({"t":"load_scenario","room":"s2","scene":{"units":[]}})", &badScene));
+  CHECK(!w.lobby.OnControl(badScene)["ok"].AsBool());
+
+  Json dumpReq;
+  CHECK(Json::Parse(R"({"t":"dump_state","room":"s1"})", &dumpReq));
+  CHECK(!w.lobby.OnControl(dumpReq)["ok"].AsBool());  // Nobody has joined yet.
+
+  w.Send(1, R"({"t":"join","room":"s1"})");
+  w.Send(2, R"({"t":"join","room":"s1"})");
+  const auto blue = w.Drain(1);
+  CHECK(Has(blue, "start"));
+  for (const Json& m : blue) {
+    if (m["t"].AsString() != "start") continue;
+    tactics::Scene built;
+    std::string error;
+    CHECK(net::SceneFromSpec(m["scene"], &built, &error));
+    CHECK(built.units.size() == 2);
+  }
+  const Json dump = w.lobby.OnControl(dumpReq);
+  CHECK(dump["t"].AsString() == "state_dump");
+  CHECK(dump["units"].AsArray().size() == 2);
+  CHECK(dump["round"].AsNumber() == 1);
+  CHECK(!dump["over"].AsBool());
+  // Both figures stand in the open facing each other, so each sees the other.
+  bool blueSeesRed = false;
+  for (const Json& id : dump["visible_blue"].AsArray()) blueSeesRed |= id.AsNumber() == 1;
+  CHECK(blueSeesRed);
+}
+
 // Drives a RemoteClient (with its own mirror game) through the lobby.
 struct ClientRig {
   GameLogic game;
@@ -528,6 +570,7 @@ int main() {
   TestSessionReadyAndRound();
   TestSessionFogHidesEnemyPlansAndUnits();
   TestLobbyPairing();
+  TestControlTapScenarioRoom();
   TestClientServerRound();
   TestRejectedActionResyncs();
   TestRealSocketLoopback();

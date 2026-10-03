@@ -32,7 +32,8 @@
 //
 // Server -> client:
 //   {"t":"waiting"}
-//   {"t":"start","team":"blue"|"red","seed":N,"protocol":1}
+//   {"t":"start","team":"blue"|"red","seed":N,"protocol":1[,"scene":<spec>]}   scene only in
+//                                                  test-control rooms (net/SceneSpec.h)
 //   {"t":"ack","seq":N,"ok":true|false,"error":"..."}
 //   {"t":"plans","round":N,"ready":bool,"plans":[<action>...],"playbook":[a,b,c,d]}   own team only
 //   {"t":"peer","ready":bool}

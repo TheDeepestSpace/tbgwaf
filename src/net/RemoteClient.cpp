@@ -5,6 +5,7 @@
 
 #include "game/MapGenerator.h"
 #include "net/ActionApply.h"
+#include "net/SceneSpec.h"
 
 namespace tactics::net {
 
@@ -100,7 +101,15 @@ void RemoteClient::HandleStart(const Json& m) {
   const auto team = ParseTeamName(m["team"].AsString());
   if (!team || !m["seed"].IsNumber()) return;
   team_ = team;
-  game_->Reset(tactics::GenerateUrbanMap(static_cast<uint32_t>(m["seed"].AsNumber())));
+  // Rooms loaded through the server's test control tap carry an explicit
+  // scene; ordinary matches are rebuilt from the shared deterministic seed.
+  tactics::Scene scene;
+  std::string sceneError;
+  if (m.Has("scene") && tactics::net::SceneFromSpec(m["scene"], &scene, &sceneError)) {
+    game_->Reset(scene);
+  } else {
+    game_->Reset(tactics::GenerateUrbanMap(static_cast<uint32_t>(m["seed"].AsNumber())));
+  }
   playback_.reset();
   pendingPlans_.reset();
   syncedPlan_.clear();

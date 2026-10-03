@@ -89,6 +89,7 @@ add_library(tactics_net STATIC
   src/net/Protocol.cpp
   src/net/ActionApply.cpp
   src/net/RemoteClient.cpp
+  src/net/SceneSpec.cpp
 )
 target_include_directories(tactics_net PUBLIC src)
 target_link_libraries(tactics_net PUBLIC tactics_logic glm::glm)
@@ -217,7 +218,7 @@ else()
 
   add_library(tactics_scenario STATIC tests/scenario/Scenario.cpp)
   target_include_directories(tactics_scenario PUBLIC src tests)
-  target_link_libraries(tactics_scenario PUBLIC tactics_logic yaml-cpp::yaml-cpp)
+  target_link_libraries(tactics_scenario PUBLIC tactics_logic tactics_net yaml-cpp::yaml-cpp)
 
   add_executable(tactics_scenario_tests tests/scenario_tests.cpp)
   target_include_directories(tactics_scenario_tests PRIVATE src tests)
@@ -244,6 +245,22 @@ else()
 
     add_executable(tbgwaf_server src/server/server_main.cpp)
     target_link_libraries(tbgwaf_server PRIVATE tactics_server_lib)
+
+    # Same server with the loopback-only test control tap compiled in (never
+    # shipped): drives the networked scenario tests.
+    add_executable(tbgwaf_server_testctl src/server/server_main.cpp)
+    target_compile_definitions(tbgwaf_server_testctl PRIVATE TBGWAF_TEST_CONTROL)
+    target_link_libraries(tbgwaf_server_testctl PRIVATE tactics_server_lib)
+
+    add_executable(tactics_net_scenario_tests tests/net_scenario_tests.cpp tests/net/WsClient.cpp)
+    target_include_directories(tactics_net_scenario_tests PRIVATE src tests tests/net)
+    target_link_libraries(tactics_net_scenario_tests PRIVATE tactics_scenario tactics_server_lib)
+    add_dependencies(tactics_net_scenario_tests tbgwaf_server_testctl)
+    add_test(
+      NAME net_scenario_tests
+      COMMAND tactics_net_scenario_tests $<TARGET_FILE:tbgwaf_server_testctl> tests/scenarios
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    )
 
     add_executable(tactics_server_tests tests/server_tests.cpp)
     target_link_libraries(tactics_server_tests PRIVATE tactics_server_lib)

@@ -79,7 +79,7 @@ listed by name only.</p>
 </div>
 <h2>Modified scenarios <span class="count">(0)</span></h2>
 <p class="empty">None.</p>
-<h2>Unchanged scenarios <span class="count">(10)</span></h2>
+<h2>Unchanged scenarios <span class="count">(16)</span></h2>
 <div class="scenario has-video" data-stem="default_scene_shoot_rows"><h3>default_scene_shoot_rows</h3><div class="path">tests/scenarios/default_scene_shoot_rows.yaml</div>
 <p class="description">Replicates the original open-lane layout (not the current BuildDefaultScene()) and the same shot outcomes as TestGameLogicShootRowsMatchLayout in tests/logic_tests.cpp: the top/bottom lanes are wall-blocked (shots there must miss), the middle lane is open (a clean shot must hit). Under WEGO rounds both teams plan the same round, so the middle lane&#x27;s mutual blue1 &lt;-&gt; red4 exchange resolves simultaneously and downs both shooters.</p>
 <div class="panes">
@@ -231,6 +231,144 @@ listed by name only.</p>
 </div>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
 </div>
+<div class="scenario has-video" data-stem="playbook_moving_continue_walks_through"><h3>playbook_moving_continue_walks_through</h3><div class="path">tests/scenarios/playbook_moving_continue_walks_through.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_continue_walks_through/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_continue_walks_through/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [8, 3], zoom 4</div>
+<div class="detail">Playbook (red): moving seen: continue, moving unseen: continue</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="3"><span class="u red">red2</span> moves to (8, 3)</div>
+<div class="step" data-action="4"><span class="u red">red3</span> passes</div>
+<div class="step" data-action="5">commit round</div>
+<div class="detail">Check: <span class="u red">red2</span> is at (8, 3) (tolerance 0.1)</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is alive</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
+<div class="scenario has-video" data-stem="playbook_moving_multi_enemy_seen"><h3>playbook_moving_multi_enemy_seen</h3><div class="path">tests/scenarios/playbook_moving_multi_enemy_seen.yaml</div>
+<p class="note">⚠ scenario script failed during visual playback; video below stops at the failing step.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_multi_enemy_seen/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_multi_enemy_seen/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [8, 3], zoom 4</div>
+<div class="detail">Playbook (red): moving seen: stop, moving unseen: continue</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="3"><span class="u red">red2</span> moves to (8, 3)</div>
+<div class="step" data-action="4"><span class="u red">red3</span> passes</div>
+<div class="step" data-action="5">commit round</div>
+<div class="detail">Check: <span class="u red">red2</span> is at (8, 0.4) (tolerance 0.1)</div>
+<div class="detail">Check: <span class="u red">red2</span> is alive</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
+<div class="scenario has-video" data-stem="playbook_moving_shoot_continue"><h3>playbook_moving_shoot_continue</h3><div class="path">tests/scenarios/playbook_moving_shoot_continue.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_shoot_continue/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_shoot_continue/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [8, 3], zoom 4</div>
+<div class="detail">Playbook (red): moving seen: shoot_continue, moving unseen: shoot_continue</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="3"><span class="u red">red2</span> moves to (8, 3)</div>
+<div class="step" data-action="4"><span class="u red">red3</span> passes</div>
+<div class="step" data-action="5">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is down</div>
+<div class="detail">Check: <span class="u red">red2</span> is at (8, 3) (tolerance 0.1)</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
+<div class="scenario has-video" data-stem="playbook_moving_shoot_stop"><h3>playbook_moving_shoot_stop</h3><div class="path">tests/scenarios/playbook_moving_shoot_stop.yaml</div>
+<p class="note">⚠ scenario script failed during visual playback; video below stops at the failing step.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_shoot_stop/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_shoot_stop/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [8, 3], zoom 4</div>
+<div class="detail">Playbook (red): moving seen: shoot_stop, moving unseen: shoot_stop</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="3"><span class="u red">red2</span> moves to (8, 3)</div>
+<div class="step" data-action="4"><span class="u red">red3</span> passes</div>
+<div class="step" data-action="5">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is down</div>
+<div class="detail">Check: <span class="u red">red2</span> is at (8, 0.4) (tolerance 0.1)</div>
+<div class="detail">Check: <span class="u red">red2</span> is alive</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
+<div class="scenario has-video" data-stem="playbook_moving_stop_halts_mid_walk"><h3>playbook_moving_stop_halts_mid_walk</h3><div class="path">tests/scenarios/playbook_moving_stop_halts_mid_walk.yaml</div>
+<p class="note">⚠ scenario script failed during visual playback; video below stops at the failing step.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_stop_halts_mid_walk/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_stop_halts_mid_walk/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [8, 3], zoom 4</div>
+<div class="detail">Playbook (red): moving seen: stop, moving unseen: stop</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="3"><span class="u red">red2</span> moves to (8, 3)</div>
+<div class="step" data-action="4"><span class="u red">red3</span> passes</div>
+<div class="step" data-action="5">commit round</div>
+<div class="detail">Check: <span class="u red">red2</span> is at (8, 0.4) (tolerance 0.1)</div>
+<div class="detail">Check: <span class="u red">red2</span> is alive</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is alive</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
+<div class="scenario has-video" data-stem="playbook_moving_unseen_column"><h3>playbook_moving_unseen_column</h3><div class="path">tests/scenarios/playbook_moving_unseen_column.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_unseen_column/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_unseen_column/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [8, 3], zoom 4</div>
+<div class="detail">Playbook (red): moving seen: stop, moving unseen: continue</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="3"><span class="u red">red2</span> moves to (8, 3)</div>
+<div class="step" data-action="4"><span class="u red">red3</span> passes</div>
+<div class="step" data-action="5">commit round</div>
+<div class="detail">Check: <span class="u red">red2</span> is at (8, 3) (tolerance 0.1)</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is alive</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
+</div>
 <div class="scenario has-video" data-stem="playbook_multi_leg_move"><h3>playbook_multi_leg_move</h3><div class="path">tests/scenarios/playbook_multi_leg_move.yaml</div>
 <p class="description">Multi-step move planning: blue0 chains three legs around a wall by clicking a waypoint, another waypoint, then the destination (each within one round&#x27;s reach of the previous leg&#x27;s end). One leg executes per round, so blue0 reaches each leg end on successive commits while red1 holds. The per-turn goldens show the yellow chained leg markers (numbered cutouts) and the yellow reach boundary before the first commit.</p>
 <div class="panes">
@@ -263,11 +401,13 @@ listed by name only.</p>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div>
 </div>
 <div class="scenario has-video" data-stem="playbook_shoot_on_fov_entry"><h3>playbook_shoot_on_fov_entry</h3><div class="path">tests/scenarios/playbook_shoot_on_fov_entry.yaml</div>
-<p class="description">Standing playbook rule &quot;shoot&quot; (reaction_on_stationary: shoot): blue0 passes (stays stationary) while red1 walks out from behind a wall into blue0&#x27;s view. The moment red1 enters blue0&#x27;s FOV+LOS blue0 fires on its own, so red1 drops short of its destination. Counterpart: playbook_do_nothing_lets_enemy_pass. Mirrors TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds. A tall wall sits between blue0 and red1&#x27;s start; red1 starts hidden behind it and walks out past its end into view. Red2 stays back to keep red alive so the game isn&#x27;t over (the round would stay 1 on a win).</p>
+<p class="description">Standing playbook rule &quot;shoot&quot; (playbook.blue.stationary_*: shoot): blue0 passes (stays stationary) while red1 walks out from behind a wall into blue0&#x27;s view. The moment red1 enters blue0&#x27;s FOV+LOS blue0 fires on its own, so red1 drops short of its destination. Counterpart: playbook_do_nothing_lets_enemy_pass. Mirrors TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds. A tall wall sits between blue0 and red1&#x27;s start; red1 starts hidden behind it and walks out past its end into view. Red2 stays back to keep red alive so the game isn&#x27;t over (the round would stay 1 on a win).</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_shoot_on_fov_entry/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_shoot_on_fov_entry/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Playbook (blue): stationary seen: shoot, stationary unseen: shoot</div>
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1</div>
 <div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>

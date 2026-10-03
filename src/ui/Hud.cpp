@@ -104,7 +104,8 @@ void DrawPlaybookView(const GameLogic& game, Team team, const PaneRect& rect, in
 }  // namespace
 
 HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRect& rect,
-                   int windowHeight, const gfx::OrbitCamera& camera, HudLayout* layout) {
+                   int windowHeight, const gfx::OrbitCamera& camera, HudLayout* layout,
+                   float* roundPanelBottom) {
   HudActions actions;
   // Window ids are suffixed with the team so two panes can share one ImGui
   // context (the visual runner) without their windows colliding.
@@ -185,6 +186,8 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
     ImGui::SameLine();
     bool& playbookOpen = PlaybookOpen(team);
     if (Button(playbookOpen ? "Close Playbook" : "Playbook")) playbookOpen = !playbookOpen;
+    // Window height tracks collapse, so anything anchored below follows.
+    if (roundPanelBottom) *roundPanelBottom = ImGui::GetWindowPos().y + ImGui::GetWindowHeight();
     ImGui::End();
 
     if (playbookOpen) DrawPlaybookView(game, team, rect, windowHeight, id("Playbook"), actions);
@@ -224,6 +227,18 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
   ImGui::GetForegroundDrawList()->AddText(ImVec2(left + 10.0f, windowHeight - 24.0f),
                                            IM_COL32(255, 255, 255, 220), TeamName(team));
   return actions;
+}
+
+void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float fps,
+                    float top) {
+  ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
+  ImGui::Begin("Debug", nullptr,
+               ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove);
+  ImGui::Checkbox("Disable FOV cones", &disableFov);
+  ImGui::Checkbox("Disable shadows", &disableShadows);
+  ImGui::Checkbox("Show FPS", &showFps);
+  if (showFps) ImGui::Text("%.1f FPS", fps);
+  ImGui::End();
 }
 
 }  // namespace ui

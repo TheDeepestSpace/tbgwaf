@@ -81,11 +81,14 @@ void main() {
 // the cone's true intersection with every surface shows up per pixel.
 const char* kConeSurfaceVertexShaderSrc = R"(#version 300 es
 layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
 uniform mat4 uMVP;
 uniform mat4 uModel;
 out vec3 vWorld;
+out vec3 vWorldNormal;
 void main() {
   vWorld = (uModel * vec4(aPos, 1.0)).xyz;
+  vWorldNormal = transpose(inverse(mat3(uModel))) * aNormal;
   gl_Position = uMVP * vec4(aPos, 1.0);
 }
 )";
@@ -93,17 +96,24 @@ void main() {
 const char* kConeSurfaceFragmentShaderSrc = R"(#version 300 es
 precision highp float;
 in vec3 vWorld;
+in vec3 vWorldNormal;
 uniform vec3 uApex;
 uniform vec3 uAxis;
-uniform vec4 uCone;   // x = tan(half angle), y = range, z = start alpha
+uniform vec4 uCone;   // x = tan(half angle), y = clipped range, z = fade range, w = start alpha
 uniform vec3 uColor;
+uniform int uRequireFacing;
+uniform int uFadeWithDistance;
 out vec4 FragColor;
 void main() {
   vec3 d = vWorld - uApex;
   float t = dot(d, uAxis);
   if (t <= 0.0 || t >= uCone.y) discard;
   if (length(d - uAxis * t) > t * uCone.x) discard;
-  FragColor = vec4(uColor, uCone.z * (1.0 - t / uCone.y));
+  // A figure receives the overlay only on the side the shot reaches first.
+  // World boxes keep showing every cone/surface intersection (including the ground).
+  if (uRequireFacing != 0 && dot(normalize(vWorldNormal), -uAxis) <= 0.0) discard;
+  float fade = uFadeWithDistance != 0 ? 1.0 - t / uCone.z : 1.0;
+  FragColor = vec4(uColor, uCone.w * fade);
 }
 )";
 
@@ -1005,8 +1015,9 @@ void DrawFovCone(const Shader& shader, ColorTriangleMesh& mesh, const glm::mat4&
 // surface lying inside the cone volume.
 // Caller is responsible for blending, polygon offset and depth state.
 void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
-                  ColorTriangleMesh& mesh, const CubeMesh& cube, const glm::mat4& viewProj,
-                  const Unit& unit, const std::vector<tactics::Obstacle>& obstacles,
+                  ColorTriangleMesh& mesh, const CubeMesh& cube, const SphereMesh& sphere,
+                  const glm::mat4& viewProj, const Unit& unit, const Unit* target,
+                  const std::vector<tactics::Obstacle>& obstacles,
                   const std::vector<AABB>& sidewalks, float mapHalfExtent) {
   constexpr int kSegments = 40;
   constexpr int kRings = 12;  // Along the axis, so the alpha fade interpolates smoothly.
@@ -1016,9 +1027,10 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
   const float tanHalf = std::tan(glm::radians(tactics::constants::kShotConeHalfAngleDegrees));
   const glm::vec3 apex = unit.MuzzlePosition();
   const glm::vec3 axis = unit.FacingDirection();
+  const float fadeRange = tactics::kDefaultShotProfile.range;
   // The cone ends where its axis first meets an obstacle, so it never pokes
   // out the far side of a wall.
-  float range = tactics::kDefaultShotProfile.range;
+  float range = fadeRange;
   for (const auto& obstacle : obstacles) {
     float tEnter = 0.0f;
     float tExit = range;
@@ -1045,7 +1057,8 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
     const float t = range * u;
     const glm::vec3 p =
         apex + axis * t + (right * std::cos(a) + up * std::sin(a)) * (t * tanHalf);
-    return ColorTriangleMesh::Vertex{p, glm::vec4(kSetupColor, kSurfaceAlpha * (1.0f - u))};
+    return ColorTriangleMesh::Vertex{
+        p, glm::vec4(kSetupColor, kSurfaceAlpha * (1.0f - t / fadeRange))};
   };
   std::vector<ColorTriangleMesh::Vertex> vertices;
   vertices.reserve(static_cast<size_t>(kRings * kSegments * 6));
@@ -1067,20 +1080,39 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
   surfaceShader.Use();
   surfaceShader.SetVec3("uApex", apex);
   surfaceShader.SetVec3("uAxis", axis);
-  surfaceShader.SetVec4("uCone", glm::vec4(tanHalf, range + 0.05f, kFootprintAlpha, 0.0f));
+  surfaceShader.SetVec4("uCone",
+                       glm::vec4(tanHalf, range + 0.05f, fadeRange, kFootprintAlpha));
   surfaceShader.SetVec3("uColor", kSetupColor);
-  const auto drawBox = [&](const glm::vec3& minCorner, const glm::vec3& size) {
-    const glm::mat4 model =
-        glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
+  const auto drawModel = [&](const glm::mat4& model, const auto& modelMesh, bool requireFacing,
+                             bool fadeWithDistance) {
     surfaceShader.SetMat4("uModel", model);
     surfaceShader.SetMat4("uMVP", viewProj * model);
-    cube.Draw();
+    surfaceShader.SetInt("uRequireFacing", requireFacing ? 1 : 0);
+    surfaceShader.SetInt("uFadeWithDistance", fadeWithDistance ? 1 : 0);
+    modelMesh.Draw();
+  };
+  const auto drawBox = [&](const glm::vec3& minCorner, const glm::vec3& size,
+                           bool fadeWithDistance) {
+    drawModel(glm::translate(glm::mat4(1.0f), minCorner) *
+                  glm::scale(glm::mat4(1.0f), size),
+              cube, false, fadeWithDistance);
   };
   drawBox(glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
-          glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f));
-  for (const AABB& slab : sidewalks) drawBox(slab.min, slab.max - slab.min);
+          glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f), true);
+  for (const AABB& slab : sidewalks) drawBox(slab.min, slab.max - slab.min, true);
   for (const auto& obstacle : obstacles) {
-    drawBox(obstacle.bounds.min, obstacle.bounds.max - obstacle.bounds.min);
+    // Keep the terminal impact footprint readable even after the cone body
+    // has faded substantially on its way to the obstacle.
+    drawBox(obstacle.bounds.min, obstacle.bounds.max - obstacle.bounds.min, false);
+  }
+  if (target) {
+    for (const FigurePart& part : BuildFigure(*target)) {
+      if (part.primitive == FigurePrimitive::Rounded) {
+        drawModel(part.model, sphere, true, false);
+      } else {
+        drawModel(part.model, cube, true, false);
+      }
+    }
   }
 }
 
@@ -1327,8 +1359,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         // already in the depth buffer.
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LEQUAL);
-        DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, viewProj,
-                     *selected, obstacles, game.GetScene().sidewalks,
+        const Unit* target = selected->plan.type == tactics::PlannedActionType::Shoot
+                                 ? game.FindUnit(selected->plan.shootTargetId)
+                                 : nullptr;
+        DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, sphereMesh_,
+                     viewProj, *selected, target, obstacles, game.GetScene().sidewalks,
                      game.GetScene().mapHalfExtent);
         glDepthFunc(GL_LESS);
         aimingShooter = selected;
@@ -1343,9 +1378,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
       glEnable(GL_DEPTH_TEST);
       glDepthFunc(GL_LEQUAL);
-      DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, viewProj,
-                   unit, obstacles, game.GetScene().sidewalks,
-                   game.GetScene().mapHalfExtent);
+      DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, sphereMesh_,
+                   viewProj, unit, game.FindUnit(unit.plan.shootTargetId), obstacles,
+                   game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
       glDepthFunc(GL_LESS);
     }
   }

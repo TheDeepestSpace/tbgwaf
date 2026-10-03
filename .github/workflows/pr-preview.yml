@@ -37,6 +37,11 @@ jobs:
           # the merge base to be present locally.
           fetch-depth: 0
 
+      - name: Trust workspace for git
+        # Container runs as root but the workspace is owned by the runner user;
+        # without this `git diff` falls back to --no-index and exits 129.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Configure (Emscripten)
         if: github.event.action != 'closed'
         run: |

@@ -158,14 +158,17 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     return;
   }
 
-  // Fixed default cameras, identical to the app's startup view (each pane
-  // is half-width, so start zoomed out enough for both spawns to fit).
-  // Nothing perturbs them at runtime, so captures are deterministic.
+  // Start from the same map-fitted view as the app. Scenario camera fields
+  // are optional adjustments to that baseline. Nothing perturbs the cameras
+  // at runtime, so captures are deterministic.
   std::array<gfx::OrbitCamera, ui::kPaneCount> cameras;
   for (auto& camera : cameras) {
+    camera.FitToExtent(scenario.scene.mapHalfExtent);
+    if (scenario.cameraTarget) {
+      camera.target = glm::vec3(scenario.cameraTarget->x, 0.0f, scenario.cameraTarget->y);
+    }
     camera.Zoom(scenario.cameraZoom);
-    if (scenario.cameraTarget) camera.target = glm::vec3(scenario.cameraTarget->x, 0.0f, scenario.cameraTarget->y);
-    camera.Update(1.0e3f);  // Snap to the initial zoom (matches main.cpp).
+    camera.Update(1.0e3f);  // Snap any scenario zoom adjustment.
   }
 
   const int paneWidth = kWindowWidth / 2;

@@ -85,11 +85,11 @@ struct Scenario {
   std::string sourcePath;
   Scene scene;
   std::vector<ScenarioStep> steps;
-  // Optional visual-runner camera framing (both panes): orbit target on the
-  // ground plane, and zoom delta (positive = further out). Large generated
-  // maps need this to frame the action.
+  // Optional visual-runner camera adjustments (both panes), applied after
+  // the initial view is fitted to the map: orbit target on the ground plane,
+  // and zoom delta (positive = further out).
   std::optional<glm::vec2> cameraTarget;
-  float cameraZoom = 10.0f;
+  float cameraZoom = 0.0f;
 };
 
 // Throws std::runtime_error with a descriptive message on malformed YAML.

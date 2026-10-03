@@ -15,10 +15,6 @@ units:
   - {id: 0, team: blue, position: [-37, 0, -6], facing_degrees: 0}
   - {id: 1, team: red, position: [37, 0, 6], facing_degrees: 180}
 
-camera:
-  target: [-29, -6]
-  zoom: 18
-
 script:
   # Spawn placement: both figures start on the terrain, not at y=0.
   - assert: {unit: 0, position: [-37, 11.337, -6], tolerance: 0.05}

@@ -512,22 +512,80 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
 
   start.y = SurfaceHeightAt(walkSurfaces_[startSurface], start.x, start.z);
   goal.y = SurfaceHeightAt(walkSurfaces_[goalSurface], goal.x, goal.z);
+
+  // Height on the corridor at (x, z): the first route surface containing the
+  // point. Bends sit on seam vertices shared by both neighbors, where the
+  // two planes agree, so "first containing" is unambiguous there.
+  auto corridorY = [&](float x, float z, float fallback) {
+    for (int node : route) {
+      if (SurfaceContainsXZ(walkSurfaces_[node], x, z)) {
+        return SurfaceHeightAt(walkSurfaces_[node], x, z);
+      }
+    }
+    return fallback;
+  };
+
+  // Walk the surface corridor. Runs of seam-adjacent surfaces are pulled
+  // taut with the funnel through the shared seam edges (instead of forcing
+  // every seam midpoint, which dog-legged paths via the deck centerline);
+  // transitions without a shared edge stay hard waypoints. Funneled segments
+  // are densified so the path tracks the deck's changing grade between
+  // seams rather than cutting straight through a crest or sag.
   outPath->push_back(start);
+  glm::vec3 from = start;
+  std::vector<Portal> portals;
+  auto flush = [&](glm::vec3 to) {
+    std::vector<glm::vec2> pts;
+    Funnel({from.x, from.z}, {to.x, to.z}, portals, &pts);
+    constexpr float kSurfacePathStep = 1.5f;
+    glm::vec3 prev = from;
+    for (const glm::vec2& pt : pts) {
+      glm::vec3 p(pt.x, 0.0f, pt.y);
+      p.y = corridorY(p.x, p.z, prev.y);
+      const float len = glm::length(glm::vec2(p.x - prev.x, p.z - prev.z));
+      const int pieces = static_cast<int>(std::ceil(len / kSurfacePathStep));
+      for (int k = 1; k < pieces; ++k) {
+        const float t = static_cast<float>(k) / static_cast<float>(pieces);
+        glm::vec3 q = prev + (p - prev) * t;
+        q.y = corridorY(q.x, q.z, q.y);
+        if (glm::distance(q, outPath->back()) > kEps) outPath->push_back(q);
+      }
+      if (glm::distance(p, outPath->back()) > kEps) outPath->push_back(p);
+      prev = p;
+    }
+    outPath->back().y = to.y;
+    portals.clear();
+    from = to;
+  };
   for (size_t i = 0; i + 1 < route.size(); ++i) {
     const WalkSurface& a = walkSurfaces_[route[i]];
     const WalkSurface& b = walkSurfaces_[route[i + 1]];
-    glm::vec3 transition(0.0f);
-    int shared = 0;
+    std::vector<glm::vec3> shared;
     for (const glm::vec3& av : a.vertices) {
       for (const glm::vec3& bv : b.vertices) {
-        if (glm::distance(av, bv) < 1e-3f) {
-          transition += (av + bv) * 0.5f;
-          ++shared;
-        }
+        if (glm::distance(av, bv) < 1e-3f) shared.push_back((av + bv) * 0.5f);
       }
     }
-    if (shared) {
-      transition /= static_cast<float>(shared);
+    if (shared.size() == 2) {
+      // Full shared seam: a funnel portal, oriented left/right for the
+      // direction of travel (from the previous portal, or the funnel start).
+      const glm::vec2 u(shared[0].x, shared[0].z);
+      const glm::vec2 v(shared[1].x, shared[1].z);
+      const glm::vec2 mid = (u + v) * 0.5f;
+      const glm::vec2 ref = portals.empty()
+                                ? glm::vec2(from.x, from.z)
+                                : (portals.back().left + portals.back().right) * 0.5f;
+      glm::vec2 d = mid - ref;
+      if (glm::dot(d, d) < kEps * kEps) d = glm::vec2(goal.x, goal.z) - mid;
+      const float crossU = d.x * (u.y - mid.y) - d.y * (u.x - mid.x);
+      const float crossV = d.x * (v.y - mid.y) - d.y * (v.x - mid.x);
+      portals.push_back(crossU >= crossV ? Portal{u, v} : Portal{v, u});
+      continue;
+    }
+    glm::vec3 transition(0.0f);
+    if (!shared.empty()) {
+      for (const glm::vec3& s : shared) transition += s;
+      transition /= static_cast<float>(shared.size());
     } else {
       // A ramp may terminate in the interior of a wider deck. Prefer a
       // vertex contained by both, then fall back to the midpoint of centers.
@@ -543,9 +601,9 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
     }
     transition.y = 0.5f * (SurfaceHeightAt(a, transition.x, transition.z) +
                             SurfaceHeightAt(b, transition.x, transition.z));
-    if (glm::distance(outPath->back(), transition) > kEps) outPath->push_back(transition);
+    flush(transition);
   }
-  if (glm::distance(outPath->back(), goal) > kEps) outPath->push_back(goal);
+  flush(goal);
   return true;
 }
 

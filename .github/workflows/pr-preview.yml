@@ -14,13 +14,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  preview:
+  # Build PR-specific images (tag pr-<number>) so Dockerfile changes are
+  # picked up without waiting for a merge to master. The dev stage builds on
+  # the ci stage, so build ci first to warm the cache.
+  ci_image:
     # Forked PRs don't get a token with write access, so previews are
     # limited to same-repo branches.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action != 'closed'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-image.yml
+    with:
+      image-name: ghcr.io/thedeepestspace/tbgwaf-ci
+      dockerfile: ./Dockerfile
+      target: ci
+    secrets: inherit
+
+  dev_image:
+    needs: ci_image
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action != 'closed'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-image.yml
+    with:
+      image-name: ghcr.io/thedeepestspace/tbgwaf-dev
+      dockerfile: ./Dockerfile
+      target: dev
+    secrets: inherit
+
+  preview:
+    needs: dev_image
+    # The closed action skips the image builds and only cleans up the preview.
+    if: ${{ !cancelled() && github.event.pull_request.head.repo.full_name == github.repository && (needs.dev_image.result == 'success' || needs.dev_image.result == 'skipped') }}
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/thedeepestspace/tbgwaf-dev:latest
+      image: ghcr.io/thedeepestspace/tbgwaf-dev:pr-${{ github.event.pull_request.number }}
       options: --user root
       credentials:
         username: ${{ github.actor }}
@@ -73,15 +103,6 @@ jobs:
         if: github.event.action != 'closed'
         run: cmake --build build --target tactics_visual_tests
 
-      - name: Install ffmpeg and rsync
-        # Both are baked into the image (Dockerfile, ci stage); this only
-        # installs them while :latest predates that change, and is a no-op
-        # afterwards. Remove once the rebuilt image is published.
-        if: github.event.action != 'closed'
-        run: |
-          command -v ffmpeg >/dev/null && command -v rsync >/dev/null && exit 0
-          apt-get update && apt-get install -y ffmpeg rsync
-
       - name: Generate scenario review page
         if: github.event.action != 'closed'
         env:
@@ -94,12 +115,6 @@ jobs:
               --head ${{ github.event.pull_request.head.sha }} \
               --runner build/tactics_visual_tests \
               --out site/scenarios
-
-      - name: Install rsync
-        if: github.event.action == 'closed'
-        run: |
-          command -v rsync >/dev/null && exit 0
-          apt-get update && apt-get install -y rsync
 
       - name: Deploy PR preview
         uses: rossjrw/pr-preview-action@ffa7509e91a3ec8dfc2e5536c4d5c1acdf7a6de9 # v1.8.1

@@ -11,10 +11,26 @@ permissions:
   packages: read
 
 jobs:
+  # Same-repo PRs build a PR-specific image (tag pr-<number>) so changes to
+  # the Dockerfile are tested immediately; everything else uses :latest.
+  ci_image:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-image.yml
+    with:
+      image-name: ghcr.io/thedeepestspace/tbgwaf-ci
+      dockerfile: ./Dockerfile
+      target: ci
+    secrets: inherit
+
   build-and-test:
+    needs: ci_image
+    if: ${{ !cancelled() && (needs.ci_image.result == 'success' || needs.ci_image.result == 'skipped') }}
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/thedeepestspace/tbgwaf-ci:latest
+      image: ghcr.io/thedeepestspace/tbgwaf-ci:${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && format('pr-{0}', github.event.pull_request.number) || 'latest' }}
       options: --user root
       credentials:
         username: ${{ github.actor }}

@@ -17,6 +17,7 @@
 #include "game/GameLogic.h"
 #include "game/Types.h"
 #include "gfx/Camera.h"
+#include "gfx/Mesh.h"
 
 namespace ui {
 
@@ -90,7 +91,11 @@ HudActions DrawHud(const tactics::GameLogic& game, tactics::Team team, bool plan
 // Interactive-app-only debug panel (render toggles + FPS). Not called by the
 // visual runner. `fps` is a smoothed frames-per-second value; `top` is the
 // window-space y to place the panel at (just below the Round panel).
+// The extra metrics: `frameMs` last frame time, `fovMs` time spent in the
+// visibility (FOV-cone) computation, and `stats`
+// draw-call/vertex/triangle counters for the frame.
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float fps,
-                    float top);
+                    float frameMs, float fovMs,
+                    const gfx::RenderFrameStats& stats, float top);
 
 }  // namespace ui

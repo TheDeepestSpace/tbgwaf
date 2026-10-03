@@ -6,6 +6,22 @@
 
 namespace gfx {
 
+namespace {
+RenderFrameStats* g_drawStatsSink = nullptr;
+}
+
+void RecordDraw(long long vertices, long long triangles) {
+  if (!g_drawStatsSink) return;
+  ++g_drawStatsSink->drawCalls;
+  g_drawStatsSink->vertices += vertices;
+  g_drawStatsSink->triangles += triangles;
+}
+
+ScopedDrawStats::ScopedDrawStats(RenderFrameStats* sink) : previous_(g_drawStatsSink) {
+  g_drawStatsSink = sink;
+}
+ScopedDrawStats::~ScopedDrawStats() { g_drawStatsSink = previous_; }
+
 void CubeMesh::Init() {
   // clang-format off
   static const float kVertices[] = {
@@ -56,6 +72,7 @@ void CubeMesh::Destroy() {
 void CubeMesh::Draw() const {
   glBindVertexArray(vao_);
   glDrawElements(GL_TRIANGLES, indexCount_, GL_UNSIGNED_INT, nullptr);
+  RecordDraw(indexCount_, indexCount_ / 3);
   glBindVertexArray(0);
 }
 
@@ -115,6 +132,7 @@ void SphereMesh::Destroy() {
 void SphereMesh::Draw() const {
   glBindVertexArray(vao_);
   glDrawElements(GL_TRIANGLES, indexCount_, GL_UNSIGNED_INT, nullptr);
+  RecordDraw(indexCount_, indexCount_ / 3);
   glBindVertexArray(0);
 }
 
@@ -146,6 +164,7 @@ void LineMesh::Draw() const {
   if (pointCount_ < 2) return;
   glBindVertexArray(vao_);
   glDrawArrays(GL_LINE_STRIP, 0, pointCount_);
+  RecordDraw(pointCount_, 0);
   glBindVertexArray(0);
 }
 
@@ -153,6 +172,7 @@ void LineMesh::DrawSegments() const {
   if (pointCount_ < 2) return;
   glBindVertexArray(vao_);
   glDrawArrays(GL_LINES, 0, pointCount_);
+  RecordDraw(pointCount_, 0);
   glBindVertexArray(0);
 }
 
@@ -184,6 +204,7 @@ void TriangleMesh::Draw() const {
   if (pointCount_ < 3) return;
   glBindVertexArray(vao_);
   glDrawArrays(GL_TRIANGLES, 0, pointCount_);
+  RecordDraw(pointCount_, pointCount_ / 3);
   glBindVertexArray(0);
 }
 
@@ -264,6 +285,7 @@ void ColorTriangleMesh::Draw() const {
   if (vertexCount_ < 3) return;
   glBindVertexArray(vao_);
   glDrawArrays(GL_TRIANGLES, 0, vertexCount_);
+  RecordDraw(vertexCount_, vertexCount_ / 3);
   glBindVertexArray(0);
 }
 

@@ -7,6 +7,29 @@
 
 namespace gfx {
 
+// Read-only per-frame render counters for the interactive debug panel.
+// Draw() calls record into the sink installed by SceneRenderer::RenderPane
+// (see ScopedDrawStats); with no sink installed (e.g. the visual runner)
+// recording is a no-op.
+struct RenderFrameStats {
+  int drawCalls = 0;
+  long long vertices = 0;
+  long long triangles = 0;
+};
+
+void RecordDraw(long long vertices, long long triangles);
+
+class ScopedDrawStats {
+ public:
+  explicit ScopedDrawStats(RenderFrameStats* sink);
+  ~ScopedDrawStats();
+  ScopedDrawStats(const ScopedDrawStats&) = delete;
+  ScopedDrawStats& operator=(const ScopedDrawStats&) = delete;
+
+ private:
+  RenderFrameStats* previous_;
+};
+
 // A unit cube spanning [0,1]^3, drawn with glDrawElements. Callers scale and
 // translate it via the model matrix to represent obstacles, unit bodies, etc.
 class CubeMesh {

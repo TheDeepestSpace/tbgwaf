@@ -322,11 +322,17 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   // webm files for the review page's breakdown sync / click-to-seek.
   int framesWritten = 0;
   std::vector<std::pair<int, int>> actionFrames;  // (completedActions, framesWritten)
+  // Wall-clock ms spent producing each captured frame (render + readback), in
+  // frame order: the encoded rate is constant, this is what varies.
+  std::vector<double> frameMs;
   tactics::scenario::PlaybackHooks hooks;
   // Declared outside the `if`: the hooks below outlive its scope.
   auto writeVideoFrame = [&](const GameLogic& game, const ClickMarker* marker) {
+    const Uint64 t0 = SDL_GetPerformanceCounter();
     renderBothPanes(game, marker);
     const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);
+    frameMs.push_back(1000.0 * static_cast<double>(SDL_GetPerformanceCounter() - t0) /
+                      static_cast<double>(SDL_GetPerformanceFrequency()));
     for (int pane = 0; pane < 2; ++pane) {
       if (!encoders[pane].WriteFrame(CropColumns(frame, pane * paneWidth, paneWidth))) {
         videoOk = false;
@@ -472,6 +478,11 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
           std::fprintf(f, "%s{\"index\": %d, \"frame\": %d, \"time\": %.3f}", i ? ", " : "",
                        actionFrames[i].first, actionFrames[i].second,
                        static_cast<double>(actionFrames[i].second) / kVideoFps);
+        }
+        // Per-frame production cost for the review page's timing graph.
+        std::fprintf(f, "], \"frames\": [");
+        for (size_t i = 0; i < frameMs.size(); ++i) {
+          std::fprintf(f, "%s{\"frame\": %zu, \"ms\": %.2f}", i ? ", " : "", i + 1, frameMs[i]);
         }
         std::fprintf(f, "]}\n");
         std::fclose(f);

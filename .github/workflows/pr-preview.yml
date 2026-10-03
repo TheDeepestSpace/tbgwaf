@@ -86,6 +86,10 @@ jobs:
               --runner build/tactics_visual_tests \
               --out site/scenarios
 
+      - name: Install rsync
+        # Required by the deploy action; not present in the dev image.
+        run: apt-get update && apt-get install -y rsync
+
       - name: Deploy PR preview
         uses: rossjrw/pr-preview-action@ffa7509e91a3ec8dfc2e5536c4d5c1acdf7a6de9 # v1.8.1
         with:

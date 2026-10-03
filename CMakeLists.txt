@@ -279,6 +279,7 @@ else()
       src/gfx/Shader.cpp
       src/gfx/Mesh.cpp
       src/gfx/Camera.cpp
+      src/gfx/FigureRig.cpp
       src/gfx/SceneRenderer.cpp
     )
     target_include_directories(tactics_gfx PUBLIC src)

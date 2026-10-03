@@ -11,12 +11,13 @@ render and are listed by name only. The page is deployed into the existing
 per-PR gh-pages preview by .github/workflows/pr-preview.yml.
 
 Each scenario additionally gets a third column: a human-readable breakdown
-of its script, grouped into rounds (the steps between `action: commit`
+of its YAML (description, setup, script), grouped into rounds (the steps between `action: commit`
 boundaries). The runner's --video mode emits a timing.json sidecar mapping
 each executed action to its frame/timestamp in the (frame-identical) blue
 and red videos; the page's JS drives both panes from one shared transport,
 highlights the breakdown step currently playing, and seeks both videos to a
-step's start when it is clicked. The scenario YAML is parsed with a small
+step's start when it is clicked. Setup, asserts and comments appear as inert
+italic prose so the page conveys everything the YAML does. The scenario YAML is parsed with a small
 built-in subset parser (block/flow mappings and sequences, plain scalars) so
 the script keeps its no-dependency footprint; a scenario whose YAML falls
 outside that subset just loses its breakdown column, never the page.
@@ -60,7 +61,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .pane.breakdown {{ flex: 0 1 360px; min-width: 280px; }}
   .pane.breakdown figcaption {{ color: #b8c0cc; }}
   .rounds {{ position: relative; border: 1px solid #3a3f47; background: #1a1d22;
-            padding: 0.4rem 0.6rem; max-height: 420px; overflow-y: auto;
+            padding: 0.4rem 0.6rem; max-height: 520px; overflow-y: auto;
             font-size: 0.9rem; }}
   .round-title {{ color: #8a919c; font-size: 0.78rem; text-transform: uppercase;
                  letter-spacing: 0.06em; margin: 0.5rem 0 0.15rem; }}
@@ -68,6 +69,11 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .has-video .step {{ cursor: pointer; }}
   .has-video .step:hover {{ background: #262b33; }}
   .step.active {{ background: #2c3a55; box-shadow: inset 0 0 0 1px #4a6da8; }}
+  .detail {{ font-style: italic; color: #8a919c; user-select: none;
+            -webkit-user-select: none; padding: 0.05rem 0.4rem; }}
+  .detail.description {{ margin-bottom: 0.4rem; }}
+  .detail.indent {{ padding-left: 1.2rem; }}
+  span.detail {{ padding: 0; }}
   .step .u {{ font-weight: bold; }}
   .step .u.blue {{ color: #6d9eeb; }}
   .step .u.red {{ color: #e06666; }}
@@ -383,15 +389,154 @@ def _action_text(step: dict, units: dict) -> str:
     return html.escape(f"{kind} (actor {step.get('actor')})")
 
 
+def _fmt_value(v) -> str:
+    if isinstance(v, list):
+        return _fmt_point(v) if all(isinstance(c, (int, float)) for c in v) else \
+            html.escape(", ".join(str(c) for c in v))
+    return html.escape(_fmt_num(v) if isinstance(v, (int, float)) else str(v))
+
+
+def _fmt_extras(d: dict, known: set) -> str:
+    """Keys the formatters don't know about, so no YAML detail is dropped."""
+    return "".join(f", {html.escape(k.replace('_', ' '))} {_fmt_value(v)}"
+                   for k, v in d.items() if k not in known)
+
+
+def _assert_text(check: dict, units: dict) -> str:
+    check = dict(check)
+    parts = []
+    if "unit" in check:
+        subject = _unit_label(units, check.pop("unit"))
+        tol = check.pop("tolerance", None)
+        if "alive" in check:
+            parts.append(f"{subject} is {'alive' if check.pop('alive') else 'down'}")
+        if "position" in check:
+            parts.append(f"{subject} is at {_fmt_point(check.pop('position'))}")
+        if "facing_degrees" in check:
+            parts.append(f"{subject} faces {_fmt_num(check.pop('facing_degrees'))}°")
+        if "visible" in check:
+            viewer = html.escape(str(check.pop("visible_to", "?")))
+            seen = "visible" if check.pop("visible") else "not visible"
+            parts.append(f"{subject} is {seen} to {viewer}")
+        if "remembered" in check:
+            viewer = html.escape(str(check.pop("remembered_by", "?")))
+            text = f"{viewer} {'remembers' if check.pop('remembered') else 'has no memory of'} {subject}"
+            if "memory_age" in check:
+                text += f" (memory age {_fmt_value(check.pop('memory_age'))})"
+            parts.append(text)
+        if tol is not None:
+            parts[-1:] = [parts[-1] + f" (tolerance {_fmt_num(tol)})"] if parts else []
+    if "winner" in check:
+        parts.append(f"winner: {html.escape(str(check.pop('winner')))}")
+    if "round" in check:
+        parts.append(f"round is {_fmt_value(check.pop('round'))}")
+    text = "; ".join(parts) or "check"
+    return text + _fmt_extras(check, set())
+
+
+def _comment_of(line: str) -> str:
+    code = _strip_comment(line)
+    return line[len(code):].strip().lstrip("#").strip() if len(code) < len(line) else ""
+
+
+def extract_comments(yaml_text: str) -> tuple[list[str], dict[int, tuple[list[str], list[str]]], list[str]]:
+    """Recovers what the YAML parser discards. Returns (description, notes,
+    trailing): `description` is the comment block above the first key;
+    `notes[i]` is (comment lines above, inline comments) for the i-th item of
+    the `script:` list (parallel to the parsed list); `trailing` is any
+    comment after the last item."""
+    description: list[str] = []
+    seen_key = False
+    in_script = False
+    dash_indent = None
+    item = -1
+    pending: list[str] = []
+    notes: dict[int, tuple[list[str], list[str]]] = {}
+    for raw in yaml_text.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            text = stripped.lstrip("#").strip()
+            if not seen_key:
+                description.append(text)
+            elif in_script:
+                pending.append(text)
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        if indent == 0:
+            seen_key = True
+            in_script = stripped.startswith("script:")
+            continue
+        if not in_script:
+            continue
+        if stripped.startswith("-") and (dash_indent is None or indent == dash_indent):
+            dash_indent = indent
+            item += 1
+            notes[item] = (pending, [])
+            pending = []
+        if item >= 0:
+            inline = _comment_of(raw)
+            if inline:
+                notes[item][1].append(inline)
+    return description, notes, pending
+
+
+def _note(text: str) -> str:
+    return f'<div class="detail">{html.escape(text)}</div>'
+
+
+def _setup_html(doc: dict, units: dict) -> list[str]:
+    """Non-interactive prose for everything the YAML sets up before the script."""
+    out: list[str] = []
+    camera = doc.get("camera")
+    if isinstance(camera, dict):
+        target = camera.get("target")
+        text = "Camera" + (f" centered on {_fmt_value(target)}" if target is not None else "")
+        if "zoom" in camera:
+            text += f", zoom {_fmt_value(camera['zoom'])}"
+        out.append(f'<div class="detail">{text}{_fmt_extras(camera, {"target", "zoom"})}</div>')
+    obstacles = (doc.get("map") or {}).get("obstacles") or []
+    if obstacles:
+        out.append('<div class="detail">Obstacles:</div>')
+        for ob in obstacles:
+            if not isinstance(ob, dict):
+                out.append(f'<div class="detail indent">{_fmt_value(ob)}</div>')
+                continue
+            text = f"at {_fmt_value(ob.get('center'))}, half-extent {_fmt_value(ob.get('half_extent'))}"
+            if "height" in ob:
+                text += f", height {_fmt_value(ob['height'])}"
+            if "climbable" in ob:
+                text += ", climbable" if ob["climbable"] else ", not climbable"
+            text += _fmt_extras(ob, {"center", "half_extent", "height", "climbable"})
+            out.append(f'<div class="detail indent">{text}</div>')
+    else:
+        out.append('<div class="detail">No obstacles.</div>')
+    out.append('<div class="detail">Units:</div>')
+    for unit in doc.get("units") or []:
+        if not isinstance(unit, dict):
+            continue
+        text = f"{_unit_label(units, unit.get('id'))} at {_fmt_value(unit.get('position'))}"
+        if "facing_degrees" in unit:
+            text += f", facing {_fmt_num(unit['facing_degrees'])}°"
+        text += _fmt_extras(unit, {"id", "team", "position", "facing_degrees"})
+        out.append(f'<div class="detail indent">{text}</div>')
+    return out
+
+
 def build_breakdown_html(yaml_text: str) -> str:
     """Parses a scenario YAML into the rounds/steps HTML for the breakdown
-    pane. Each executed action (assert steps don't count) gets a .step with
-    data-action set to its 1-based index — the same index the visual
-    runner's timing.json keys its video segments by; index 0 is the initial
-    state. Raises ValueError on YAML outside the supported subset."""
+    pane. Each executed action (assert steps don't count) gets a clickable
+    .step with data-action set to its 1-based index — the same index the
+    visual runner's timing.json keys its video segments by; index 0 is the
+    initial state. Everything else the YAML conveys (description comments,
+    camera, map, units, asserts, script comments) is rendered as inert
+    italic .detail prose. Raises ValueError on YAML outside the supported
+    subset."""
     doc = load_yaml_subset(yaml_text)
     if not isinstance(doc, dict):
         raise ValueError("scenario YAML is not a mapping")
+    description, notes, trailing = extract_comments(yaml_text)
     units: dict = {}
     for unit in doc.get("units") or []:
         if isinstance(unit, dict) and "id" in unit:
@@ -400,20 +545,35 @@ def build_breakdown_html(yaml_text: str) -> str:
     current: list[str] = []
     committed_rounds = 0
     action_index = 0
-    for step in doc.get("script") or []:
-        if not isinstance(step, dict) or "action" not in step:
-            continue  # Assert-only steps don't execute (and have no timing).
-        action_index += 1
-        current.append(f'<div class="step" data-action="{action_index}">'
-                       f"{_action_text(step, units)}</div>")
-        if step["action"] == "commit":
-            rounds.append(current)
-            current = []
-            committed_rounds += 1
+    for i, step in enumerate(doc.get("script") or []):
+        above, inline = notes.get(i, ([], []))
+        if above:
+            current.extend(_note(c) for c in above)
+        suffix = "".join(f' <span class="detail">— {html.escape(c)}</span>' for c in inline)
+        if isinstance(step, dict) and "action" in step:
+            action_index += 1
+            current.append(f'<div class="step" data-action="{action_index}">'
+                           f"{_action_text(step, units)}{suffix}</div>")
+            if step["action"] == "commit":
+                rounds.append(current)
+                current = []
+                committed_rounds += 1
+        elif isinstance(step, dict) and "assert" in step:
+            # Asserts don't execute (and have no timing); show what they check.
+            check = step["assert"]
+            text = _assert_text(check, units) if isinstance(check, dict) else _fmt_value(check)
+            line = f'<div class="detail">Check: {text}{suffix}</div>'
+            # Right after a commit, the check is about the round just resolved.
+            (current if current or not rounds else rounds[-1]).append(line)
     if not action_index:
         raise ValueError("scenario script has no actions")
-    out = ['<div class="rounds">',
-           '<div class="step" data-action="0">Initial state</div>']
+    current.extend(_note(c) for c in trailing)
+    out = ['<div class="rounds">']
+    if description:
+        out.append(f'<div class="detail description">{html.escape(" ".join(description))}</div>')
+    out.append('<div class="round-title">Setup</div>')
+    out.extend(_setup_html(doc, units))
+    out.append('<div class="step" data-action="0">Initial state</div>')
     if current:  # Trailing actions never committed still form a block.
         rounds.append(current)
     for number, steps in enumerate(rounds, start=1):

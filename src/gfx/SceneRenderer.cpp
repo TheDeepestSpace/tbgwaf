@@ -115,9 +115,11 @@ uniform vec4 uColor;
 uniform vec3 uLightDir;  // Direction the light travels; surfaces face -uLightDir.
 uniform vec3 uViewPos;
 uniform sampler2D uShadowMap;
+uniform int uDisableShadows;
 out vec4 FragColor;
 
 float ComputeShadow(vec3 normal) {
+  if (uDisableShadows != 0) return 0.0;
   vec3 proj = vLightSpacePos.xyz / vLightSpacePos.w;
   proj = proj * 0.5 + 0.5;
   if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z > 1.0) {
@@ -1279,7 +1281,7 @@ void SceneRenderer::Destroy() {
 void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                const TeamVisibility& visibility, const OrbitCamera& camera, int x,
                                int y, int width, int height, const PaneOverlays& overlays,
-                               GLuint targetFramebuffer) {
+                               GLuint targetFramebuffer, const RenderDebugOptions& debug) {
   const auto& obstacles = game.GetScene().obstacles;
   const auto& sidewalks = game.GetScene().sidewalks;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;
@@ -1341,23 +1343,26 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
 
   // Shadow pass: only casters this team can currently see.
   glDisable(GL_SCISSOR_TEST);
-  glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo_);
-  glViewport(0, 0, kShadowMapSize, kShadowMapSize);
-  glClear(GL_DEPTH_BUFFER_BIT);
-  depthShader_.Use();
-  // Hills cast shadows (into valleys, onto units); the flat ground never
-  // could, so flat scenes skip the extra caster exactly as before.
-  if (drawTerrain) {
-    depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
-    terrainMesh_.Draw();
-  }
-  for (const auto& obstacle : obstacles) {
-    const AABB& bounds = obstacle.bounds;
-    DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min, bounds.max - bounds.min);
-  }
-  for (const Unit& unit : game.GetScene().units) {
-    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
-    DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
+  if (!debug.disableShadows) {
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo_);
+    glViewport(0, 0, kShadowMapSize, kShadowMapSize);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    depthShader_.Use();
+    // Hills cast shadows (into valleys, onto units); the flat ground never
+    // could, so flat scenes skip the extra caster exactly as before.
+    if (drawTerrain) {
+      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+      terrainMesh_.Draw();
+    }
+    for (const auto& obstacle : obstacles) {
+      const AABB& bounds = obstacle.bounds;
+      DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min,
+                   bounds.max - bounds.min);
+    }
+    for (const Unit& unit : game.GetScene().units) {
+      if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+      DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
+    }
   }
   glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
 
@@ -1380,6 +1385,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   litShader_.SetVec3("uLightDir", lightDir_);
   litShader_.SetVec3("uViewPos", camera.Position());
   litShader_.SetInt("uShadowMap", 0);
+  litShader_.SetInt("uDisableShadows", debug.disableShadows ? 1 : 0);
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
 
@@ -1455,7 +1461,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glEnable(GL_POLYGON_OFFSET_FILL);
   glPolygonOffset(-2.0f, -4.0f);
   for (const Unit& unit : game.GetScene().units) {
-    if (!unit.alive || unit.team != team) continue;
+    if (debug.disableFov || !unit.alive || unit.team != team) continue;
     if (terrain.Empty()) {
       DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit.team,
                    BuildFovCone(unit, obstacles, sidewalks, mapHalfExtent, terrain));

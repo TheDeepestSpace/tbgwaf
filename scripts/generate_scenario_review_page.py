@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds the PR gameplay-scenario review page (issue #14 stage 3).
+"""Builds the PR gameplay-scenario review page (issue #14 stage 3, #105).
 
 Classifies the gameplay scenarios touched by a PR as new/modified/deleted
 purely from git metadata on the YAML files under tests/scenarios/ (never
@@ -9,6 +9,18 @@ via the tactics_visual_tests runner, and emits a static HTML page embedding
 the videos, grouped by classification. Deleted scenarios have nothing to
 render and are listed by name only. The page is deployed into the existing
 per-PR gh-pages preview by .github/workflows/pr-preview.yml.
+
+Each scenario additionally gets a third column: a human-readable breakdown
+of its YAML (camera, script; the scenario `description` goes under its name), grouped into rounds (the steps between `action: commit`
+boundaries). The runner's --video mode emits a timing.json sidecar mapping
+each executed action to its frame/timestamp in the (frame-identical) blue
+and red videos; the page's JS drives both panes from one shared transport,
+highlights the breakdown step currently playing, and seeks both videos to a
+step's start when it is clicked. The camera, asserts and YAML `description`/`comment` keys appear as inert
+italic prose so the page conveys everything the YAML does. The scenario YAML is parsed with a small
+built-in subset parser (block/flow mappings and sequences, plain scalars) so
+the script keeps its no-dependency footprint; a scenario whose YAML falls
+outside that subset just loses its breakdown column, never the page.
 
 Must run with a working X display (CI wraps it in xvfb-run) and ffmpeg on
 PATH. Always writes an index.html, even when the PR touches no scenarios.
@@ -46,6 +58,31 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   video {{ width: 100%; background: #000; border: 1px solid #3a3f47; }}
   .note {{ color: #d0a24a; }}
   .empty {{ color: #8a919c; font-style: italic; }}
+  .pane.breakdown {{ flex: 0 1 360px; min-width: 280px; }}
+  .pane.breakdown figcaption {{ color: #b8c0cc; }}
+  .rounds {{ position: relative; border: 1px solid #3a3f47; background: #1a1d22;
+            padding: 0.4rem 0.6rem; max-height: 520px; overflow-y: auto;
+            font-size: 0.9rem; }}
+  .round-title {{ color: #8a919c; font-size: 0.78rem; text-transform: uppercase;
+                 letter-spacing: 0.06em; margin: 0.5rem 0 0.15rem; }}
+  .step {{ padding: 0.12rem 0.4rem; border-radius: 4px; }}
+  .has-video .step {{ cursor: pointer; }}
+  .has-video .step:hover {{ background: #262b33; }}
+  .step.active {{ background: #2c3a55; box-shadow: inset 0 0 0 1px #4a6da8; }}
+  .detail {{ font-style: italic; color: #8a919c; user-select: none;
+            -webkit-user-select: none; padding: 0.05rem 0.4rem; }}
+  .scenario .description {{ margin: 0.4rem 0 0; max-width: 90ch; color: #b8c0cc; }}
+  .detail.indent {{ padding-left: 1.2rem; }}
+  span.detail {{ padding: 0; }}
+  .step .u {{ font-weight: bold; }}
+  .step .u.blue {{ color: #6d9eeb; }}
+  .step .u.red {{ color: #e06666; }}
+  .transport {{ display: flex; align-items: center; gap: 0.7rem; margin-top: 0.6rem; }}
+  .transport button {{ background: #262b33; color: #e8e8e8; border: 1px solid #3a3f47;
+                      border-radius: 4px; width: 2.6rem; height: 1.8rem;
+                      cursor: pointer; font-size: 0.8rem; }}
+  .transport input[type="range"] {{ flex: 1; }}
+  .transport .clock {{ font-family: monospace; font-size: 0.85rem; color: #8a919c; }}
 </style>
 </head>
 <body>
@@ -54,11 +91,460 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 git metadata on the YAML files. Every scenario present at the PR's head —
 new, modified, and unchanged — gets a video: the full scripted scenario as
 rendered for that team's fog-of-war pane, the PR's version (no base-branch
-comparison). Deleted scenarios are listed by name only.</p>
+comparison). Both panes play in lockstep from the shared transport below
+them; click a script step to jump both videos to it. Deleted scenarios are
+listed by name only.</p>
 {sections}
+{page_js}
 </body>
 </html>
 """
+
+# Plain string (not .format-ed), so the braces need no escaping. The blue
+# video is the master clock: the red pane is re-pinned to it on every
+# timeupdate (independent <video> elements drift if left to free-run, which
+# is also why the native controls are hidden in favor of the one transport).
+PAGE_JS = """<script>
+(() => {
+"use strict";
+function fmtTime(t) {
+  if (!isFinite(t) || t < 0) t = 0;
+  return Math.floor(t / 60) + ":" + String(Math.floor(t % 60)).padStart(2, "0");
+}
+function init(sc) {
+  const vids = Array.from(sc.querySelectorAll("video"));
+  const steps = Array.from(sc.querySelectorAll(".step"));
+  const btn = sc.querySelector(".playpause");
+  const seek = sc.querySelector(".seek");
+  const clock = sc.querySelector(".clock");
+  const master = vids[0];
+  if (!master || !btn || !seek || !clock) return;
+  const followers = vids.slice(1);
+  // timing.json: {fps, actions: [{index, frame, time}]}, `time` being the
+  // exclusive end of that action's video segment (index 0 = initial state).
+  let timing = null;
+  fetch("media/" + sc.dataset.stem + "/timing.json")
+    .then(r => (r.ok ? r.json() : null))
+    .then(t => { timing = t; update(); })
+    .catch(() => {});
+  const playAll = () => { vids.forEach(v => v.play()); btn.textContent = "❚❚"; };
+  const pauseAll = () => { vids.forEach(v => v.pause()); btn.textContent = "▶"; };
+  const seekAll = t => { vids.forEach(v => { v.currentTime = t; }); update(); };
+  btn.addEventListener("click", () => (master.paused ? playAll() : pauseAll()));
+  seek.addEventListener("input", () => {
+    if (master.duration) seekAll((seek.value / 1000) * master.duration);
+  });
+  master.addEventListener("ended", () => { seekAll(0); playAll(); });
+  function update() {
+    const t = master.currentTime || 0;
+    if (master.duration) seek.value = Math.round((t / master.duration) * 1000);
+    clock.textContent = fmtTime(t) + " / " + fmtTime(master.duration || 0);
+    followers.forEach(v => {
+      if (!v.seeking && Math.abs(v.currentTime - t) > 0.08) v.currentTime = t;
+    });
+    if (!timing || !timing.actions || !timing.actions.length) return;
+    const entry = timing.actions.find(e => t < e.time) ||
+                  timing.actions[timing.actions.length - 1];
+    steps.forEach(s => {
+      const active = Number(s.dataset.action) === entry.index;
+      if (active && !s.classList.contains("active")) {
+        // Keep the playing step in view, scrolling only the rounds box
+        // (scrollIntoView could also yank the page itself).
+        const box = s.closest(".rounds");
+        if (box && (s.offsetTop < box.scrollTop ||
+                    s.offsetTop + s.offsetHeight > box.scrollTop + box.clientHeight)) {
+          box.scrollTop = s.offsetTop - box.clientHeight / 2;
+        }
+      }
+      s.classList.toggle("active", active);
+    });
+  }
+  master.addEventListener("timeupdate", update);
+  master.addEventListener("seeked", update);
+  master.addEventListener("loadedmetadata", update);
+  steps.forEach(s => s.addEventListener("click", () => {
+    if (!timing || !timing.actions) return;
+    const n = Number(s.dataset.action);
+    // A step's segment starts where the previous action's ended. A step with
+    // no timing entry never played (the script failed earlier): don't seek.
+    const prev = timing.actions.find(e => e.index === n - 1);
+    if (n > 0 && !prev) return;
+    seekAll(prev ? prev.time : 0);
+  }));
+}
+document.querySelectorAll(".scenario.has-video").forEach(init);
+})();
+</script>"""
+
+
+# --- Minimal YAML-subset parser (just enough for tests/scenarios/*.yaml:
+# block mappings/sequences, flow mappings/sequences, plain scalars, comments).
+# Raises ValueError on anything outside the subset; callers degrade to "no
+# breakdown" rather than failing the page build.
+
+def _strip_comment(line: str) -> str:
+    in_single = in_double = False
+    for i, c in enumerate(line):
+        if c == "'" and not in_double:
+            in_single = not in_single
+        elif c == '"' and not in_single:
+            in_double = not in_double
+        elif c == "#" and not in_single and not in_double and (i == 0 or line[i - 1] in " \t"):
+            return line[:i]
+    return line
+
+
+def _scalar(token: str):
+    token = token.strip()
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"":
+        return token[1:-1]
+    if token in ("true", "True"):
+        return True
+    if token in ("false", "False"):
+        return False
+    if token in ("null", "~", ""):
+        return None
+    try:
+        return int(token)
+    except ValueError:
+        pass
+    try:
+        return float(token)
+    except ValueError:
+        pass
+    return token
+
+
+def _skip_ws(s: str, i: int) -> int:
+    while i < len(s) and s[i] in " \t":
+        i += 1
+    return i
+
+
+def _parse_flow_value(s: str, i: int):
+    i = _skip_ws(s, i)
+    if i < len(s) and s[i] in "{[":
+        return _parse_flow(s, i)
+    j = i
+    while j < len(s) and s[j] not in ",}]":
+        j += 1
+    return _scalar(s[i:j]), j
+
+
+def _parse_flow(s: str, i: int):
+    i = _skip_ws(s, i)
+    if i >= len(s) or s[i] not in "{[":
+        raise ValueError(f"expected flow collection at: {s[i:]!r}")
+    closer = "}" if s[i] == "{" else "]"
+    out = {} if closer == "}" else []
+    i = _skip_ws(s, i + 1)
+    if i < len(s) and s[i] == closer:
+        return out, i + 1
+    while True:
+        if closer == "}":
+            i = _skip_ws(s, i)
+            j = s.find(":", i)
+            if j < 0:
+                raise ValueError(f"missing ':' in flow mapping: {s[i:]!r}")
+            key = s[i:j].strip().strip("'\"")
+            value, i = _parse_flow_value(s, j + 1)
+            out[key] = value
+        else:
+            value, i = _parse_flow_value(s, i)
+            out.append(value)
+        i = _skip_ws(s, i)
+        if i >= len(s):
+            raise ValueError(f"unterminated flow collection: {s!r}")
+        if s[i] == ",":
+            i += 1
+            continue
+        if s[i] == closer:
+            return out, i + 1
+        raise ValueError(f"unexpected {s[i]!r} in flow collection: {s!r}")
+
+
+def _parse_block(lines: list[tuple[int, str]], i: int, indent: int):
+    if lines[i][1] == "-" or lines[i][1].startswith("- "):
+        return _parse_block_seq(lines, i, indent)
+    return _parse_block_map(lines, i, indent)
+
+
+def _parse_block_map(lines: list[tuple[int, str]], i: int, indent: int):
+    out: dict = {}
+    while i < len(lines) and lines[i][0] == indent and not lines[i][1].startswith("- "):
+        text = lines[i][1]
+        key, sep, rest = text.partition(":")
+        if not sep or " " in key.strip():
+            raise ValueError(f"expected 'key: value', got: {text!r}")
+        key = key.strip().strip("'\"")
+        rest = rest.strip()
+        if rest in (">", "|", ">-", "|-"):
+            # Block scalar: the deeper-indented lines, folded onto one line.
+            i += 1
+            body = []
+            while i < len(lines) and lines[i][0] > indent:
+                body.append(lines[i][1])
+                i += 1
+            out[key] = " ".join(body)
+        elif rest:
+            out[key] = _parse_flow(rest, 0)[0] if rest[0] in "{[" else _scalar(rest)
+            i += 1
+        else:
+            i += 1
+            if i < len(lines) and lines[i][0] > indent:
+                out[key], i = _parse_block(lines, i, lines[i][0])
+            else:
+                out[key] = None
+    return out, i
+
+
+def _parse_block_seq(lines: list[tuple[int, str]], i: int, indent: int):
+    out: list = []
+    while i < len(lines) and lines[i][0] == indent and (
+            lines[i][1] == "-" or lines[i][1].startswith("- ")):
+        rest = lines[i][1][2:].strip()
+        if not rest:
+            i += 1
+            if i < len(lines) and lines[i][0] > indent:
+                value, i = _parse_block(lines, i, lines[i][0])
+                out.append(value)
+            else:
+                out.append(None)
+        elif rest[0] in "{[":
+            out.append(_parse_flow(rest, 0)[0])
+            i += 1
+        elif ":" in rest:
+            # "- key: value" starts a mapping whose further keys sit two
+            # columns in (right where the text after "- " starts): rewrite
+            # this line without the dash and parse the mapping from there.
+            lines[i] = (indent + 2, rest)
+            value, i = _parse_block_map(lines, i, indent + 2)
+            out.append(value)
+        else:
+            out.append(_scalar(rest))
+            i += 1
+    return out, i
+
+
+def load_yaml_subset(text: str):
+    lines: list[tuple[int, str]] = []
+    for raw in text.splitlines():
+        if "\t" in raw:
+            raise ValueError("tabs are outside the supported YAML subset")
+        stripped = _strip_comment(raw).rstrip()
+        if not stripped.strip():
+            continue
+        lines.append((len(stripped) - len(stripped.lstrip(" ")), stripped.strip()))
+    if not lines:
+        return {}
+    value, i = _parse_block(lines, 0, lines[0][0])
+    if i != len(lines):
+        raise ValueError(f"trailing unparsed content at: {lines[i][1]!r}")
+    return value
+
+
+# --- Script breakdown: YAML -> per-round action blocks. ---
+
+def _fmt_num(v) -> str:
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _fmt_point(p) -> str:
+    """[x, y, z] world point as ground coords "(x, z)", keeping y when off
+    the ground (e.g. a destination on top of a crate)."""
+    if not (isinstance(p, list) and len(p) == 3 and
+            all(isinstance(c, (int, float)) for c in p)):
+        return html.escape(str(p))
+    x, y, z = p
+    if y:
+        return f"({_fmt_num(x)}, {_fmt_num(y)}, {_fmt_num(z)})"
+    return f"({_fmt_num(x)}, {_fmt_num(z)})"
+
+
+def _unit_label(units: dict, uid) -> str:
+    team = units.get(uid)
+    if team in ("blue", "red"):
+        return f'<span class="u {team}">{team}{uid}</span>'
+    return html.escape(f"unit {uid}")
+
+
+def _action_text(step: dict, units: dict) -> str:
+    kind = step.get("action")
+    actor = _unit_label(units, step.get("actor"))
+    if kind == "commit":
+        return "commit round"
+    if kind == "move":
+        text = f"{actor} moves to {_fmt_point(step.get('destination'))}"
+        waypoints = step.get("waypoints") or []
+        if waypoints:
+            text += " via " + ", ".join(_fmt_point(w) for w in waypoints)
+        if step.get("final_facing_degrees") is not None:
+            text += f", then faces {_fmt_num(step['final_facing_degrees'])}°"
+        return text
+    if kind == "shoot":
+        text = f"{actor} shoots {_unit_label(units, step.get('target'))}"
+        if step.get("expect_noop"):
+            text += " (expected no-op: target not visible)"
+        return text
+    if kind == "pass":
+        return f"{actor} passes"
+    if kind == "cancel":
+        return f"{actor} cancels"
+    if kind == "focus":
+        return f"double-click focus on {actor}"
+    return html.escape(f"{kind} (actor {step.get('actor')})")
+
+
+def _fmt_value(v) -> str:
+    if isinstance(v, list):
+        return _fmt_point(v) if all(isinstance(c, (int, float)) for c in v) else \
+            html.escape(", ".join(str(c) for c in v))
+    return html.escape(_fmt_num(v) if isinstance(v, (int, float)) else str(v))
+
+
+def _fmt_extras(d: dict, known: set) -> str:
+    """Keys the formatters don't know about, so no YAML detail is dropped."""
+    return "".join(f", {html.escape(k.replace('_', ' '))} {_fmt_value(v)}"
+                   for k, v in d.items() if k not in known)
+
+
+def _assert_text(check: dict, units: dict) -> str:
+    check = dict(check)
+    parts = []
+    if "unit" in check:
+        subject = _unit_label(units, check.pop("unit"))
+        tol = check.pop("tolerance", None)
+        if "alive" in check:
+            parts.append(f"{subject} is {'alive' if check.pop('alive') else 'down'}")
+        if "position" in check:
+            parts.append(f"{subject} is at {_fmt_point(check.pop('position'))}")
+        if "facing_degrees" in check:
+            parts.append(f"{subject} faces {_fmt_num(check.pop('facing_degrees'))}°")
+        if "visible" in check:
+            viewer = html.escape(str(check.pop("visible_to", "?")))
+            seen = "visible" if check.pop("visible") else "not visible"
+            parts.append(f"{subject} is {seen} to {viewer}")
+        if "remembered" in check:
+            viewer = html.escape(str(check.pop("remembered_by", "?")))
+            text = f"{viewer} {'remembers' if check.pop('remembered') else 'has no memory of'} {subject}"
+            if "memory_age" in check:
+                text += f" (memory age {_fmt_value(check.pop('memory_age'))})"
+            parts.append(text)
+        if tol is not None:
+            parts[-1:] = [parts[-1] + f" (tolerance {_fmt_num(tol)})"] if parts else []
+    if "winner" in check:
+        parts.append(f"winner: {html.escape(str(check.pop('winner')))}")
+    if "round" in check:
+        parts.append(f"round is {_fmt_value(check.pop('round'))}")
+    text = "; ".join(parts) or "check"
+    return text + _fmt_extras(check, set())
+
+
+def _note(text: str) -> str:
+    return f'<div class="detail">{html.escape(text)}</div>'
+
+
+def _setup_html(doc: dict) -> list[str]:
+    """Non-interactive prose for the setup the board itself doesn't make
+    obvious. Units and obstacles are deliberately omitted: they are visible in
+    the video."""
+    out: list[str] = []
+    camera = doc.get("camera")
+    if isinstance(camera, dict):
+        target = camera.get("target")
+        text = "Camera" + (f" centered on {_fmt_value(target)}" if target is not None else "")
+        if "zoom" in camera:
+            text += f", zoom {_fmt_value(camera['zoom'])}"
+        out.append(f'<div class="detail">{text}{_fmt_extras(camera, {"target", "zoom"})}</div>')
+    return out
+
+
+def build_breakdown_html(yaml_text: str) -> tuple[str, str]:
+    """Parses a scenario YAML into (description, breakdown HTML): the
+    scenario's `description` text (shown under its name) and the rounds/steps
+    HTML for the breakdown pane. Each executed action (assert steps don't count) gets a clickable
+    .step with data-action set to its 1-based index — the same index the
+    visual runner's timing.json keys its video segments by; index 0 is the
+    initial state. Everything else the YAML conveys is rendered as inert
+    italic .detail prose: the camera, a step's
+    `description` (describes the round it opens), a step's or assert's
+    `comment`, and the asserts themselves. Units and obstacles are omitted
+    (visible in the video). Raises ValueError on YAML outside the supported
+    subset."""
+    doc = load_yaml_subset(yaml_text)
+    if not isinstance(doc, dict):
+        raise ValueError("scenario YAML is not a mapping")
+    units: dict = {}
+    for unit in doc.get("units") or []:
+        if isinstance(unit, dict) and "id" in unit:
+            units[unit["id"]] = unit.get("team")
+    rounds: list[tuple[list[str], list[str]]] = []  # (descriptions, steps)
+    current: list[str] = []
+    current_desc: list[str] = []
+    committed_rounds = 0
+    action_index = 0
+    for step in doc.get("script") or []:
+        if not isinstance(step, dict):
+            continue
+        if step.get("description"):
+            current_desc.append(_note(str(step["description"])))
+        if "action" in step:
+            comment = step.get("comment")
+            suffix = f' <span class="detail">— {html.escape(str(comment))}</span>' if comment else ""
+            action_index += 1
+            current.append(f'<div class="step" data-action="{action_index}">'
+                           f"{_action_text(step, units)}{suffix}</div>")
+            if step["action"] == "commit":
+                rounds.append((current_desc, current))
+                current, current_desc = [], []
+                committed_rounds += 1
+        elif "assert" in step:
+            # Asserts don't execute (and have no timing); show what they check.
+            check = step["assert"]
+            comment = None
+            if isinstance(check, dict):
+                check = dict(check)
+                comment = check.pop("comment", None) or step.get("comment")
+                text = _assert_text(check, units)
+            else:
+                text = _fmt_value(check)
+            suffix = f" — {html.escape(str(comment))}" if comment else ""
+            line = f'<div class="detail">Check: {text}{suffix}</div>'
+            # Right after a commit, the check is about the round just resolved.
+            (current if current or not rounds else rounds[-1][1]).append(line)
+    if not action_index:
+        raise ValueError("scenario script has no actions")
+    out = ['<div class="rounds">']
+    setup = _setup_html(doc)
+    if setup:
+        out.append('<div class="round-title">Setup</div>')
+        out.extend(setup)
+    out.append('<div class="step" data-action="0">Initial state</div>')
+    if current:  # Trailing actions never committed still form a block.
+        rounds.append((current_desc, current))
+    for number, (desc, steps) in enumerate(rounds, start=1):
+        title = f"Round {number}"
+        if number > committed_rounds:
+            title += " (uncommitted)"
+        out.append(f'<div class="round"><div class="round-title">{title}</div>')
+        out.extend(desc)
+        out.extend(steps)
+        out.append("</div>")
+    out.append("</div>")
+    return str(doc.get("description") or ""), "\n".join(out)
+
+
+def build_breakdowns(paths: list[str], repo_root: Path) -> dict[str, tuple[str, str] | None]:
+    breakdowns: dict[str, tuple[str, str] | None] = {}
+    for path in paths:
+        try:
+            breakdowns[path] = build_breakdown_html((repo_root / path).read_text())
+        except (OSError, ValueError) as e:
+            print(f"[scenario-review] {path}: no script breakdown ({e})", file=sys.stderr)
+            breakdowns[path] = None
+    return breakdowns
 
 
 def classify_changes(base: str, head: str, repo_root: Path) -> dict[str, list[str]]:
@@ -109,6 +595,9 @@ def record_videos(paths: list[str], runner: Path, repo_root: Path, media_dir: Pa
                     if video.is_file():
                         shutil.copy2(video, dest / f"{team}.webm")
                         have_video = True
+                timing = src / "timing.json"
+                if have_video and timing.is_file():
+                    shutil.copy2(timing, dest / "timing.json")
             results[path] = {"stem": stem, "ok": ok, "have_video": have_video,
                              "detail": detail}
             status = "ok" if ok else "FAILED"
@@ -118,38 +607,60 @@ def record_videos(paths: list[str], runner: Path, repo_root: Path, media_dir: Pa
     return results
 
 
-def scenario_entry(path: str, info: dict | None) -> str:
+def scenario_entry(path: str, info: dict | None,
+                   breakdown: tuple[str, str] | None = None) -> str:
+    description, breakdown = breakdown or ("", "")
     name = html.escape(Path(path).stem)
-    lines = [f'<div class="scenario"><h3>{name}</h3>'
-             f'<div class="path">{html.escape(path)}</div>']
     if info is None:  # Deleted: nothing to render.
-        lines.append("</div>")
-        return "\n".join(lines)
+        return (f'<div class="scenario"><h3>{name}</h3>'
+                f'<div class="path">{html.escape(path)}</div></div>')
+    stem = html.escape(info["stem"])
+    classes = "scenario has-video" if info["have_video"] else "scenario"
+    lines = [f'<div class="{classes}" data-stem="{stem}"><h3>{name}</h3>'
+             f'<div class="path">{html.escape(path)}</div>']
+    if description:
+        lines.append(f'<p class="description">{html.escape(description)}</p>')
     if not info["ok"]:
         note = "scenario script failed during visual playback"
         if info["have_video"]:
             note += "; video below stops at the failing step"
         lines.append(f'<p class="note">⚠ {html.escape(note)}.</p>')
-    if info["have_video"]:
+    if info["have_video"] or breakdown:
         lines.append('<div class="panes">')
-        for team in ("blue", "red"):
-            lines.append(
-                f'<figure class="pane {team}"><figcaption>{team.capitalize()} view'
-                f'</figcaption><video controls muted loop '
-                f'src="media/{html.escape(info["stem"])}/{team}.webm"></video></figure>')
+        if info["have_video"]:
+            for team in ("blue", "red"):
+                lines.append(
+                    f'<figure class="pane {team}"><figcaption>{team.capitalize()} view'
+                    f'</figcaption><video muted playsinline preload="metadata" '
+                    f'src="media/{stem}/{team}.webm"></video></figure>')
+        if breakdown:
+            lines.append('<figure class="pane breakdown"><figcaption>Script'
+                         f'</figcaption>{breakdown}</figure>')
         lines.append("</div>")
+    if info["have_video"]:
+        lines.append(
+            '<div class="transport">'
+            '<button class="playpause" aria-label="Play/pause both views">▶</button>'
+            '<input class="seek" type="range" min="0" max="1000" value="0" step="1" '
+            'aria-label="Seek both views">'
+            '<span class="clock">0:00 / 0:00</span></div>')
     else:
         lines.append('<p class="note">⚠ No video could be recorded.</p>')
     lines.append("</div>")
     return "\n".join(lines)
 
 
-def build_section(title: str, paths: list[str], results: dict | None) -> str:
+def build_section(title: str, paths: list[str], results: dict | None,
+                  breakdowns: dict[str, tuple[str, str] | None] | None = None) -> str:
     body = [f'<h2>{html.escape(title)} <span class="count">({len(paths)})</span></h2>']
     if not paths:
         body.append('<p class="empty">None.</p>')
     for path in sorted(paths):
-        body.append(scenario_entry(path, results.get(path) if results is not None else None))
+        if results is None:
+            body.append(scenario_entry(path, None))
+        else:
+            body.append(scenario_entry(path, results.get(path),
+                                       (breakdowns or {}).get(path)))
     return "\n".join(body)
 
 
@@ -174,19 +685,21 @@ def main() -> int:
 
     renderable = changes["A"] + changes["M"] + changes["U"]
     results = record_videos(renderable, args.runner.resolve(), args.repo_root, media_dir)
+    breakdowns = build_breakdowns(renderable, args.repo_root)
 
     if not any(changes.values()):
         sections = '<p class="empty">This PR does not touch any gameplay scenarios.</p>'
     else:
         sections = "\n".join([
-            build_section("New scenarios", changes["A"], results),
-            build_section("Modified scenarios", changes["M"], results),
-            build_section("Unchanged scenarios", changes["U"], results),
+            build_section("New scenarios", changes["A"], results, breakdowns),
+            build_section("Modified scenarios", changes["M"], results, breakdowns),
+            build_section("Unchanged scenarios", changes["U"], results, breakdowns),
             build_section("Deleted scenarios", changes["D"], None),
         ])
 
     (args.out / "index.html").write_text(
-        PAGE_TEMPLATE.format(scenario_dir=SCENARIO_DIR, sections=sections))
+        PAGE_TEMPLATE.format(scenario_dir=SCENARIO_DIR, sections=sections,
+                             page_js=PAGE_JS))
     print(f"[scenario-review] wrote {args.out / 'index.html'} "
           f"({len(changes['A'])} new, {len(changes['M'])} modified, "
           f"{len(changes['U'])} unchanged, {len(changes['D'])} deleted)", file=sys.stderr)

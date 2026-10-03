@@ -167,7 +167,7 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
 }
 
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float fps,
-                    float top) {
+                    float top, std::optional<size_t> wasmHeapBytes) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
   ImGui::Begin("Debug", nullptr,
                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove);
@@ -175,6 +175,11 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float
   ImGui::Checkbox("Disable shadows", &disableShadows);
   ImGui::Checkbox("Show FPS", &showFps);
   if (showFps) ImGui::Text("%.1f FPS", fps);
+  if (wasmHeapBytes) {
+    ImGui::Text("WASM heap: %.1f MiB", static_cast<double>(*wasmHeapBytes) / (1024.0 * 1024.0));
+  } else {
+    ImGui::TextUnformatted("WASM heap: N/A (native)");
+  }
   ImGui::End();
 }
 

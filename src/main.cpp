@@ -659,8 +659,14 @@ int main() {
       }
     }
     // Anchored under the Round panel so it follows collapse/expand.
+    // emscripten_get_heap_size() just reads the current memory size, so it is
+    // cheap enough to call every frame.
+    std::optional<size_t> wasmHeapBytes;
+#ifdef __EMSCRIPTEN__
+    wasmHeapBytes = emscripten_get_heap_size();
+#endif
     ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, showFps,
-                       smoothedFps, roundPanelBottom + 6.0f);
+                       smoothedFps, roundPanelBottom + 6.0f, wasmHeapBytes);
 
     // --- Render: one shadow pass + one color pass per pane, both inside
     // SceneRenderer::RenderPane. Selection/move-preview overlays belong to

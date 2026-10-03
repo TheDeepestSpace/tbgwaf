@@ -43,6 +43,11 @@ struct PaneOverlays {
   const std::vector<glm::vec3>* movePreviewPath = nullptr;  // Yellow preview polyline.
   const tactics::ReachField* moveFrontier = nullptr;  // Reachable-area gradient + border.
   bool moveFrontierSubsequentLeg = false;             // Border drawn yellow instead of green.
+  // Debug: walkable-cell boundaries of this navmesh (ground cells cyan,
+  // climb-top cells orange), hugging the terrain. Not set by
+  // BuildPaneOverlays; the app's debug toggle / the map golden harness
+  // supply a mesh built over the whole scene.
+  const tactics::NavMesh* navMeshDebug = nullptr;
 };
 
 // Overlays `pane` shows for the current game state. They belong to the team
@@ -51,6 +56,18 @@ struct PaneOverlays {
 // ground hit, if any (interactive only; used for the invalid-move ring).
 PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team paneTeam,
                                const std::optional<glm::vec3>& hoveredGroundPoint = std::nullopt);
+
+// How a pane draws its own team's FOV cones (issue #110).
+//  - CpuAnalytic (default): the analytic ground overlay in DrawFovCone --
+//    corner rays, box/deck ground shadows, deck-top spans. Crisp edges, but
+//    it only covers ground and deck tops.
+//  - ShadowMap (prototype): per unit, the scene's depth is rendered from the
+//    eye into two perspective maps that together span the 150-degree cone;
+//    the main pass then re-draws the static geometry with a projective mask
+//    shader that flat-tints every fragment inside the cone whose eye
+//    sightline passes the depth test. Covers walls, roofs, deck sides and
+//    terrain as well as ground; edges are shadow-map-resolution limited.
+enum class FovOverlayMode { CpuAnalytic, ShadowMap };
 
 // Owns the GL resources (shaders, meshes, the shadow map) for the per-team
 // fog-of-war scene pass, and renders one team's view of the game into a
@@ -63,6 +80,17 @@ class SceneRenderer {
   // compile or the shadow framebuffer is incomplete.
   bool Init();
   void Destroy();
+
+  void SetFovOverlayMode(FovOverlayMode mode) { fovOverlayMode_ = mode; }
+  FovOverlayMode GetFovOverlayMode() const { return fovOverlayMode_; }
+  // ShadowMap mode only: height above an upward-facing fragment (ground,
+  // deck top, roof) at which its sightline is tested. 0 (default) tints
+  // ground wherever the ground point itself is visible -- the same "could a
+  // target crouched at ground level hide here" semantics the CPU overlay
+  // encodes. Setting it to e.g. kEyeHeight instead tints ground wherever a
+  // standing target's eye would be visible (pure target-LOS semantics).
+  void SetFovProbeHeight(float height) { fovProbeHeight_ = height; }
+  float GetFovProbeHeight() const { return fovProbeHeight_; }
 
   // `debug` is a local-only dev toggle (interactive app); the default leaves
   // output unchanged, which the visual runner relies on.
@@ -87,6 +115,17 @@ class SceneRenderer {
   SphereMesh sphereMesh_;
   LineMesh pathLine_;
   TriangleMesh fovConeMesh_;
+  // Reuse the terrain-clipped geometry until the unit or map changes.
+  struct TerrainFovCache {
+    int unitId = -1;
+    glm::vec3 eye{0.0f};
+    float facingYaw = 0.0f;
+    std::vector<glm::vec3> points;
+  };
+  std::vector<TerrainFovCache> terrainFovCache_;
+  std::vector<tactics::Obstacle> fovKeyObstacles_;
+  std::vector<tactics::AABB> fovKeySidewalks_;
+  float fovKeyMapHalfExtent_ = 0.0f;
   TriangleMesh highlightRing_;
   ColorTriangleMesh frontierFill_;
   LineMesh frontierBorder_;
@@ -94,10 +133,40 @@ class SceneRenderer {
   const tactics::ReachField* frontierKeyField_ = nullptr;
   glm::vec2 frontierKeyOrigin_{0.0f};
   float frontierKeyBudget_ = -1.0f;
+  // Terrain ground mesh, rebuilt only when the scene's heightfield changes.
+  // Keyed on the field's contents, not its address: successive scenes can
+  // reuse the same storage address (e.g. stack-allocated GameLogic
+  // instances), which an address key would mistake for "unchanged".
+  LitTriangleMesh terrainMesh_;
+  // Reused scratch mesh for polygon prisms and road/deck patches. Geometry
+  // is already in world space, so the same upload path works in shadow and
+  // lit passes without approximating wedges by their AABB.
+  LitTriangleMesh geometryMesh_;
+  tactics::HeightField terrainKey_;
   GLuint shadowFbo_ = 0;
   GLuint shadowDepthTex_ = 0;
   glm::vec3 lightDir_{0.0f, -1.0f, 0.0f};
   glm::mat4 lightSpaceMatrix_{1.0f};
+
+  // Issue #110 shadow-map FOV prototype. Two eye-space depth maps per unit
+  // (left/right halves of the cone), re-rendered for every unit of every
+  // pane, plus the projective mask shader and a static-geometry mesh
+  // (obstacles, decks, sidewalks, roads) built once per scene so the extra
+  // passes are a couple of draw calls rather than a re-tessellation.
+  FovOverlayMode fovOverlayMode_ = FovOverlayMode::CpuAnalytic;
+  float fovProbeHeight_ = 0.0f;
+  Shader fovMaskShader_;
+  GLuint fovFbo_[2] = {0, 0};
+  GLuint fovDepthTex_[2] = {0, 0};
+  LitTriangleMesh fovSceneMesh_;
+  unsigned long long fovSceneKey_ = 0;
+  // Renders the two depth maps for `unit`, then re-draws the static scene
+  // into the pane with the mask shader. Leaves the pane framebuffer,
+  // viewport, scissor and the FOV-overlay blend/stencil state as it found
+  // them.
+  void DrawFovShadowMask(const tactics::GameLogic& game, const tactics::Unit& unit,
+                         const glm::mat4& viewProj, bool drawTerrain, GLuint targetFramebuffer,
+                         int x, int y, int width, int height);
 };
 
 }  // namespace gfx

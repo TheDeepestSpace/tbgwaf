@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -27,6 +29,95 @@ struct AABB {
 struct Obstacle {
   AABB bounds;
   bool climbable = false;
+  // Optional convex XZ footprint in counter-clockwise order. Empty keeps the
+  // historical rectangular `bounds` footprint. `bounds` remains the broad
+  // phase and vertical extent; collision, LOS, navigation and rendering use
+  // these vertices when present.
+  std::vector<glm::vec2> footprint;
+};
+
+// A convex, planar walkable patch above (or sloping away from) the ground.
+// Patches form a separate navigation layer, so a deck never erases the
+// usable ground beneath it. Neighbour indices are explicit: overlapping XZ
+// alone must not connect vertically separated surfaces.
+struct WalkSurface {
+  std::vector<glm::vec3> vertices;  // Counter-clockwise when viewed from above.
+  std::vector<int> neighbors;
+  bool connectsToGround = false;    // The lowest edge is a legal ground transition.
+};
+
+// Visual road pavement. Elevated/ramp pavement is represented by
+// WalkSurface instead so its rendered geometry and gameplay surface are one
+// and the same.
+struct RoadSurface {
+  std::vector<glm::vec3> vertices;
+};
+
+inline std::vector<glm::vec2> ObstacleFootprint(const Obstacle& obstacle) {
+  if (!obstacle.footprint.empty()) return obstacle.footprint;
+  return {{obstacle.bounds.min.x, obstacle.bounds.min.z},
+          {obstacle.bounds.max.x, obstacle.bounds.min.z},
+          {obstacle.bounds.max.x, obstacle.bounds.max.z},
+          {obstacle.bounds.min.x, obstacle.bounds.max.z}};
+}
+
+// Sampled ground elevation over a regular XZ grid: sample (ix, iz) sits at
+// (minX + ix*step, minZ + iz*step). An empty field means flat ground at
+// y = 0 everywhere (the hand-authored and urban scenes), so every consumer
+// can sample unconditionally. Queries outside the grid clamp to the border.
+struct HeightField {
+  float minX = 0.0f, minZ = 0.0f;
+  float step = 1.0f;
+  int nx = 0, nz = 0;  // Samples (grid vertices) per axis.
+  std::vector<float> heights;  // nz rows of nx samples.
+
+  bool Empty() const { return heights.empty(); }
+
+  float At(int ix, int iz) const {
+    ix = ix < 0 ? 0 : (ix >= nx ? nx - 1 : ix);
+    iz = iz < 0 ? 0 : (iz >= nz ? nz - 1 : iz);
+    return heights[static_cast<size_t>(iz) * nx + ix];
+  }
+
+  // Bilinear ground height at an arbitrary XZ point; 0 when Empty().
+  float HeightAt(float x, float z) const {
+    if (Empty()) return 0.0f;
+    const float fx = (x - minX) / step;
+    const float fz = (z - minZ) / step;
+    const int ix = static_cast<int>(std::floor(fx));
+    const int iz = static_cast<int>(std::floor(fz));
+    const float tx = fx - std::floor(fx);
+    const float tz = fz - std::floor(fz);
+    const float h00 = At(ix, iz), h10 = At(ix + 1, iz);
+    const float h01 = At(ix, iz + 1), h11 = At(ix + 1, iz + 1);
+    const float h0 = h00 + (h10 - h00) * tx;
+    const float h1 = h01 + (h11 - h01) * tx;
+    return h0 + (h1 - h0) * tz;
+  }
+
+  // Height of the actual rendered terrain triangles at (x,z). The renderer
+  // splits every cell along its min/min -> max/max diagonal; this differs
+  // from bilinear HeightAt inside a non-planar cell. Visibility uses this
+  // form so its terrain occlusion agrees with the shadow-map FOV mask.
+  float MeshHeightAt(float x, float z) const {
+    if (Empty()) return 0.0f;
+    if (nx < 2 || nz < 2 || step <= 0.0f) return At(0, 0);
+    const float fx = std::clamp((x - minX) / step, 0.0f, static_cast<float>(nx - 1));
+    const float fz = std::clamp((z - minZ) / step, 0.0f, static_cast<float>(nz - 1));
+    const int ix = std::min(static_cast<int>(std::floor(fx)), nx - 2);
+    const int iz = std::min(static_cast<int>(std::floor(fz)), nz - 2);
+    const float tx = fx - ix;
+    const float tz = fz - iz;
+    const float a = At(ix, iz);
+    if (tx >= tz) {
+      const float b = At(ix + 1, iz);
+      const float d = At(ix + 1, iz + 1);
+      return a + (b - a) * tx + (d - b) * tz;
+    }
+    const float c = At(ix, iz + 1);
+    const float d = At(ix + 1, iz + 1);
+    return a + (d - c) * tx + (c - a) * tz;
+  }
 };
 
 inline std::vector<AABB> ObstacleBounds(const std::vector<Obstacle>& obstacles) {

@@ -19,6 +19,23 @@ bool RayIntersectsAABB(const glm::vec3& origin, const glm::vec3& direction, cons
 bool LineOfSightClear(const glm::vec3& from, const glm::vec3& to,
                        const std::vector<AABB>& obstacles);
 
+// Polygon-aware form used by Scene gameplay. Rectangular obstacles retain
+// identical behavior through their implicit four-corner footprint.
+bool LineOfSightClear(const glm::vec3& from, const glm::vec3& to,
+                      const std::vector<Obstacle>& obstacles);
+bool LineOfSightClear(const glm::vec3& from, const glm::vec3& to,
+                      const std::vector<Obstacle>& obstacles,
+                      const std::vector<WalkSurface>& walkSurfaces);
+// Terrain-aware form. It intersects the same two triangles per heightfield
+// cell as the rendered mesh, so ridgelines occlude gameplay FOV exactly
+// where they occlude the shadow-map FOV mask.
+bool LineOfSightClear(const glm::vec3& from, const glm::vec3& to,
+                      const HeightField& terrain);
+bool LineOfSightClear(const glm::vec3& from, const glm::vec3& to,
+                      const std::vector<Obstacle>& obstacles,
+                      const std::vector<WalkSurface>& walkSurfaces,
+                      const HeightField& terrain);
+
 // True if `target` lies within a cone from `origin` centered on `forward`
 // with the given half-angle (degrees) and max range.
 bool InFovCone(const glm::vec3& origin, const glm::vec3& forward, const glm::vec3& target,

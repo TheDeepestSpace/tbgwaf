@@ -1128,11 +1128,12 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
 // shadows the strip of ground it actually hides -- the overlay resumes where
 // the sightline over its top edge lands, and only a target crouched at
 // ground level right behind the obstacle stays hidden. Obstacles at or above
-// eye level shadow everything behind them. For a viewer on the ground, other
-// walk surfaces (decks/ramps) are thin slab occluders too, and the cone is laid
-// on the top faces the viewer looks down on. A viewer standing on a surface
-// keeps the cone confined to it. Top faces are not occluded by obstacles or
-// by other decks (approximation).
+// eye level shadow everything behind them. Walk surfaces (decks/ramps) are
+// thin slab occluders too, and the cone is laid on the top faces the viewer
+// looks down on -- including the deck underfoot when the viewer stands on
+// one, so the cone runs along the whole bridge chain and drops onto the
+// ground beyond its edges. Top faces are not occluded by obstacles or by
+// other decks (approximation).
 // Caller is responsible for enabling blending around this call.
 void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& viewProj,
                  const Unit& unit, const std::vector<tactics::Obstacle>& obstacles,
@@ -1149,32 +1150,15 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
   const float halfFovRad = glm::radians(tactics::constants::kShootHalfFovDegrees);
   const float range = tactics::constants::kFovConeVisualRange;
   const glm::vec3 eye = unit.EyePosition();
-  int unitSurface = -1;
-  for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-    if (!tactics::SurfaceContainsXZ(walkSurfaces[i], unit.position.x, unit.position.z)) continue;
-    if (std::fabs(tactics::SurfaceHeightAt(walkSurfaces[i], unit.position.x, unit.position.z) -
-                  unit.position.y) < 0.2f) {
-      unitSurface = static_cast<int>(i);
-      break;
-    }
-  }
-  tactics::Obstacle surfaceFootprint;
-  if (unitSurface >= 0) {
-    for (const glm::vec3& v : walkSurfaces[unitSurface].vertices) {
-      surfaceFootprint.footprint.emplace_back(v.x, v.z);
-    }
-  }
 
   std::vector<DeckOccluder> decks;
-  if (unitSurface < 0) {
-    for (const tactics::WalkSurface& surface : walkSurfaces) {
-      if (surface.vertices.size() < 3) continue;
-      DeckOccluder deck;
-      deck.surface = &surface;
-      for (const glm::vec3& v : surface.vertices) deck.footprint.footprint.emplace_back(v.x, v.z);
-      deck.topFacesEye = eye.y > tactics::SurfaceHeightAt(surface, eye.x, eye.z) + 1e-3f;
-      decks.push_back(std::move(deck));
-    }
+  for (const tactics::WalkSurface& surface : walkSurfaces) {
+    if (surface.vertices.size() < 3) continue;
+    DeckOccluder deck;
+    deck.surface = &surface;
+    for (const glm::vec3& v : surface.vertices) deck.footprint.footprint.emplace_back(v.x, v.z);
+    deck.topFacesEye = eye.y > tactics::SurfaceHeightAt(surface, eye.x, eye.z) + 1e-3f;
+    decks.push_back(std::move(deck));
   }
 
   // Boundary ray angles as offsets from facingYaw in [-halfFov, +halfFov].
@@ -1219,15 +1203,7 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
     const float angle = unit.facingYaw + offset;
     const glm::vec2 dir(std::cos(angle), std::sin(angle));
     dirs.push_back(dir);
-    float clippedRange = ClipToMap(eye, dir, range, mapHalfExtent);
-    if (unitSurface >= 0) {
-      float enter = 0.0f, exit = 0.0f;
-      if (FootprintSpan(eye, dir, surfaceFootprint, &enter, &exit)) {
-        clippedRange = std::min(clippedRange, exit);
-      } else {
-        clippedRange = 0.0f;
-      }
-    }
+    const float clippedRange = ClipToMap(eye, dir, range, mapHalfExtent);
     deckTopsPerRay.emplace_back();
     spansPerRay.push_back(VisibleGroundSpans(eye, dir, obstacles, decks, clippedRange,
                                              &deckTopsPerRay.back()));
@@ -1245,13 +1221,10 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
   const auto groundPoint = [&](const glm::vec2& dir, float t) {
     const float x = eye.x + dir.x * t;
     const float z = eye.z + dir.y * t;
-    float y = unitSurface >= 0 ? tactics::SurfaceHeightAt(walkSurfaces[unitSurface], x, z)
-                               : terrain.HeightAt(x, z);
-    if (unitSurface < 0) {
-      for (const tactics::RoadSurface& sidewalk : polygonSidewalks) {
-        if (PatchContainsXZ(sidewalk, x, z)) {
-          y = std::max(y, sidewalk.vertices.front().y);
-        }
+    float y = terrain.HeightAt(x, z);
+    for (const tactics::RoadSurface& sidewalk : polygonSidewalks) {
+      if (PatchContainsXZ(sidewalk, x, z)) {
+        y = std::max(y, sidewalk.vertices.front().y);
       }
     }
     return glm::vec3(x, y + kGroundOffset, z);

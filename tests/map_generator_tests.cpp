@@ -499,6 +499,49 @@ void TestHillyGameLogicMoveLandsOnTerrain() {
   CHECK(std::fabs(end.y - game.GetScene().ground.HeightAt(end.x, end.z)) < kEps);
 }
 
+void TestHillyShortSameCellMoveStaysOnTerrain() {
+  // Regression: a path whose start and goal share one navmesh slab cell took
+  // an early exit that skipped the terrain lift, so the figure's first short
+  // step on open hills walked a straight flat-space chord at y = 0 --
+  // underground. Short moves inside the rock-free spawn strip stay within a
+  // single cell, so they exercise exactly that early exit.
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateHillyMap(seed);
+    NavMesh nav;
+    nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground);
+    const glm::vec3 start = scene.units[0].position;
+    glm::vec3 goal = start + glm::vec3(3.0f, 0.0f, 1.0f);
+    goal.y = scene.ground.HeightAt(goal.x, goal.z);
+    std::vector<glm::vec3> path;
+    CHECK(nav.FindPath(start, goal, &path));
+    CHECK(path.size() >= 2);
+    for (size_t i = 0; i < path.size(); ++i) {
+      const float h = scene.ground.HeightAt(path[i].x, path[i].z);
+      CHECK(std::fabs(path[i].y - h) < kEps);
+      if (i + 1 < path.size()) CHECK(glm::distance(path[i], path[i + 1]) < 1.5f);
+    }
+  }
+
+  // Same thing through the full GameLogic click flow: after committing a
+  // short first-step move, the figure must still stand on the terrain.
+  GameLogic game(GenerateHillyMap(2024));
+  const glm::vec3 start = game.GetScene().units[0].position;
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(start + glm::vec3(3.0f, 0.0f, 1.0f), Team::Blue);
+  game.FinishMovePlan();
+  CHECK(game.FindUnit(0)->plan.type == PlannedActionType::Move);
+  for (int id = 1; id < 6; ++id) {
+    game.ClickUnit(id, id < 3 ? Team::Blue : Team::Red);
+    game.ChoosePass();
+  }
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+  game.Update(1.0e6f);
+  const glm::vec3 end = game.FindUnit(0)->position;
+  CHECK(std::fabs(end.y - game.GetScene().ground.HeightAt(end.x, end.z)) < kEps);
+}
+
 // --- Hierarchical oblique polygon city (issue #92). ---
 
 float DistanceToSegment(glm::vec2 p, glm::vec2 a, glm::vec2 b) {
@@ -842,6 +885,7 @@ int main() {
   TestHillyPathsFollowTerrain();
   TestHillyReachFieldCostsIncludeSlope();
   TestHillyGameLogicMoveLandsOnTerrain();
+  TestHillyShortSameCellMoveStaysOnTerrain();
   if (g_failures) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;

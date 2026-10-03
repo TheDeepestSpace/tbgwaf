@@ -749,6 +749,10 @@ bool NavMesh::FindGroundPath(glm::vec3 start, glm::vec3 goal,
   if (startCell == goalCell) {
     outPath->push_back(start);
     outPath->push_back(goal);
+    // Same lift as the multi-cell exit below: without it a short move whose
+    // start and goal share one slab cell would stay at flat-space y = 0 and
+    // the figure would walk under the hills.
+    LiftGroundPathOntoTerrain(outPath);
     return true;
   }
 
@@ -867,37 +871,40 @@ bool NavMesh::FindGroundPath(glm::vec3 start, glm::vec3 goal,
   }
   flush(goal);
 
-  // Lift the flat-space path onto the terrain: every ground-level waypoint
-  // (y == 0 in flat space; climb-top waypoints keep their obstacle height)
-  // gets its Y from the heightfield, and ground segments are densified so
-  // linear interpolation between waypoints tracks the slope.
-  if (!ground_.Empty()) {
-    constexpr float kTerrainPathStep = 1.0f;
-    std::vector<glm::vec3> lifted;
-    lifted.reserve(outPath->size() * 4);
-    const auto isGroundLevel = [](const glm::vec3& p) { return std::fabs(p.y) < kEps; };
-    const auto lift = [&](glm::vec3 p) {
-      if (isGroundLevel(p)) p.y = ground_.HeightAt(p.x, p.z);
-      return p;
-    };
-    for (size_t i = 0; i < outPath->size(); ++i) {
-      const glm::vec3& a = (*outPath)[i];
-      lifted.push_back(lift(a));
-      if (i + 1 >= outPath->size()) continue;
-      const glm::vec3& b = (*outPath)[i + 1];
-      if (!isGroundLevel(a) || !isGroundLevel(b)) continue;  // Climb steps stay two points.
-      const float len = glm::length(glm::vec2(b.x - a.x, b.z - a.z));
-      const int pieces = static_cast<int>(std::ceil(len / kTerrainPathStep));
-      for (int k = 1; k < pieces; ++k) {
-        const float t = static_cast<float>(k) / static_cast<float>(pieces);
-        glm::vec3 p = a + (b - a) * t;
-        p.y = ground_.HeightAt(p.x, p.z);
-        lifted.push_back(p);
-      }
-    }
-    *outPath = std::move(lifted);
-  }
+  LiftGroundPathOntoTerrain(outPath);
   return true;
+}
+
+// Lift a flat-space ground path onto the terrain: every ground-level waypoint
+// (y == 0 in flat space; climb-top waypoints keep their obstacle height)
+// gets its Y from the heightfield, and ground segments are densified so
+// linear interpolation between waypoints tracks the slope.
+void NavMesh::LiftGroundPathOntoTerrain(std::vector<glm::vec3>* outPath) const {
+  if (ground_.Empty()) return;
+  constexpr float kTerrainPathStep = 1.0f;
+  std::vector<glm::vec3> lifted;
+  lifted.reserve(outPath->size() * 4);
+  const auto isGroundLevel = [](const glm::vec3& p) { return std::fabs(p.y) < kEps; };
+  const auto lift = [&](glm::vec3 p) {
+    if (isGroundLevel(p)) p.y = ground_.HeightAt(p.x, p.z);
+    return p;
+  };
+  for (size_t i = 0; i < outPath->size(); ++i) {
+    const glm::vec3& a = (*outPath)[i];
+    lifted.push_back(lift(a));
+    if (i + 1 >= outPath->size()) continue;
+    const glm::vec3& b = (*outPath)[i + 1];
+    if (!isGroundLevel(a) || !isGroundLevel(b)) continue;  // Climb steps stay two points.
+    const float len = glm::length(glm::vec2(b.x - a.x, b.z - a.z));
+    const int pieces = static_cast<int>(std::ceil(len / kTerrainPathStep));
+    for (int k = 1; k < pieces; ++k) {
+      const float t = static_cast<float>(k) / static_cast<float>(pieces);
+      glm::vec3 p = a + (b - a) * t;
+      p.y = ground_.HeightAt(p.x, p.z);
+      lifted.push_back(p);
+    }
+  }
+  *outPath = std::move(lifted);
 }
 
 }  // namespace tactics

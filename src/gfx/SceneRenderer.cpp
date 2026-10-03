@@ -2462,8 +2462,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       for (int s = 0; s < 2; ++s) shoots |= tactics::ReactionShoots(pb.table[m][s]);
     if (!unit.alive || !shoots) continue;
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
-    DrawHighlight(unlitShader_, highlightRing_, viewProj, unit.position,
-                  glm::vec4(0.85f, 0.1f, 0.85f, 1.0f));
+    DrawHighlightOnSurface(unit.position, glm::vec4(0.85f, 0.1f, 0.85f, 1.0f));
   }
   // Selection/move-preview overlays belong to whichever pane the input
   // layer says is acting; callers pass them only for that pane.

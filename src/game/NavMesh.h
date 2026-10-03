@@ -138,6 +138,7 @@ class NavMesh {
   int FindWalkSurfaceContaining(float x, float z, float yHint) const;
   bool FindGroundPath(glm::vec3 start, glm::vec3 goal,
                       std::vector<glm::vec3>* outPath) const;
+  void LiftGroundPathOntoTerrain(std::vector<glm::vec3>* outPath) const;
   bool FindPolygonGroundPath(glm::vec3 start, glm::vec3 goal,
                              std::vector<glm::vec3>* outPath) const;
   bool FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface,

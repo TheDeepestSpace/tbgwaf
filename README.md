@@ -95,6 +95,23 @@ subdirectory (`pr-preview/pr-<number>/`) on the `gh-pages` branch
 The workflow comments on the PR with a link to the preview once it's ready,
 and removes the preview automatically when the PR closes.
 
+## App flow
+
+Screen flow (Splash -> Map Select -> Gameplay), declared in
+`flow/app_flow.yaml`. The build regenerates `flow/app_flow.mmd` from it; paste
+that file's contents below if the flow changes.
+
+```mermaid
+stateDiagram-v2
+    state "Splash" as splash
+    state "Map Select" as map_select
+    state "Gameplay" as gameplay
+    [*] --> splash
+    splash --> map_select: new_game
+    map_select --> gameplay: select_urban
+    map_select --> splash: back
+```
+
 ## Controls
 
 - **Left click** one of your own figures (in your own viewport) to select

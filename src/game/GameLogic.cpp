@@ -71,6 +71,10 @@ void GameLogic::Reset(Scene scene) {
   pendingShots_.clear();
   mirroredMoving_.clear();
 
+  ResetSightingMemory();
+}
+
+void GameLogic::ResetSightingMemory() {
   const size_t unitSlots = scene_.units.size();
   for (int t = 0; t < 2; ++t) {
     sightings_[t].assign(unitSlots, {});
@@ -255,8 +259,14 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   }
   playbooks_[0] = snap.playbooks[0];
   playbooks_[1] = snap.playbooks[1];
+  // A new game on the simulator arrives as a snapshot with the same unit ids,
+  // so it is not rejected above; detect it (round counter went backwards, or
+  // a finished match is back in play) and drop the previous game's memory.
+  const bool newGame = snap.roundNumber < roundNumber_ ||
+                       (mode_ == InputMode::GameOver && snap.mode != InputMode::GameOver);
   mode_ = snap.mode;
   roundNumber_ = snap.roundNumber;
+  if (newGame) ResetSightingMemory();
   if (snap.winner >= 0) {
     winner_ = static_cast<Team>(snap.winner);
   } else {

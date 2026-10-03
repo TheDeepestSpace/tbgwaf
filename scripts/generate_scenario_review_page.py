@@ -90,6 +90,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body data-baseline-url="{baseline_url}">
 <h1>Gameplay scenario review</h1>
+<p class="nav"><a href="../gallery/">Asset gallery &rarr;</a></p>
 <p>Scenarios under <code>{scenario_dir}</code>, classified against this PR from
 git metadata on the YAML files. Every scenario present at the PR's head —
 new, modified, and unchanged — gets a video: the full scripted scenario as

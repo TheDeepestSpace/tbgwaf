@@ -1,0 +1,106 @@
+name: finish_new_game_finish
+description: >
+  Regression for ghost wireframes (sighting-memory trails) surviving a new game. Game 1: blue
+  sights red1, red1 walks out of view (remembered trail, plus planned-move ghosts while
+  planning), then blue finishes both reds (GameOver). `new_game` then restarts the match the
+  way the UI does; the runner also mirrors every step into a follower page via ImportState
+  (the second pane), whose memory is checked as well. No old sightings may remain (only fresh age-0 ones from the opening view), and game 2 is
+  played to completion too.
+
+map:
+  obstacles: []
+
+units:
+  - {id: 0, team: blue, position: [-14, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [-4, 0, -2], facing_degrees: 180}
+  - {id: 2, team: red, position: [-6, 0, 2], facing_degrees: 180}
+
+script:
+  # ---- Game 1 ----
+  - assert: {unit: 1, visible_to: blue, visible: true}
+  - action: pass
+    actor: 0
+  - action: move
+    actor: 1
+    destination: [-12, 0, 14]
+    comment: Leaves blue's cone; blue remembers the trail.
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {unit: 1, remembered_by: blue, remembered: true}
+  - assert: {round: 2}
+
+  - action: shoot
+    actor: 0
+    target: 2
+  - action: move
+    actor: 1
+    destination: [-8, 0, 14]
+    comment: Planned-move ghost is on screen while the round is committed.
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {unit: 2, alive: false}
+
+  - action: move
+    actor: 0
+    destination: [-12, 0, 6]
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 1, visible_to: blue, visible: true}
+  - assert: {unit: 1, remembered_by: blue, remembered: true}
+
+  - action: shoot
+    actor: 0
+    target: 1
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {winner: blue}
+
+  # ---- Game 2 ----
+  - action: new_game
+  - assert: {winner: none}
+  - assert: {round: 1}
+  - assert: {unit: 0, position: [-14, 0, 0]}
+  - assert: {unit: 1, alive: true}
+  - assert: {unit: 1, remembered_by: blue, remembered: true, memory_age: 0}
+  - assert: {unit: 2, remembered_by: blue, remembered: true, memory_age: 0}
+  - assert: {unit: 0, remembered_by: red, remembered: true, memory_age: 0}
+
+  - action: pass
+    actor: 0
+  - action: move
+    actor: 1
+    destination: [-12, 0, 14]
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {unit: 1, remembered_by: blue, remembered: true, memory_age: 1}
+  - assert: {round: 2}
+
+  - action: shoot
+    actor: 0
+    target: 2
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {unit: 2, alive: false}
+
+  - action: move
+    actor: 0
+    destination: [-12, 0, 6]
+  - action: pass
+    actor: 1
+  - action: commit
+
+  - action: shoot
+    actor: 0
+    target: 1
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {winner: blue}

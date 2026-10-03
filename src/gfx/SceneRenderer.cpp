@@ -1039,15 +1039,72 @@ bool GroundShadow(const glm::vec3& eye, const glm::vec2& dir,
   return true;
 }
 
+// A walk surface as a thin occluder: its XZ footprint plus the slab beneath
+// the top plane. Thickness matches the gameplay LOS check (LineOfSightClear).
+struct DeckOccluder {
+  const tactics::WalkSurface* surface = nullptr;
+  tactics::Obstacle footprint;
+  // The eye is above the deck's plane, so its top face is the one in view.
+  bool topFacesEye = false;
+};
+constexpr float kDeckThickness = 0.45f;
+
+// The ground shadow a deck casts along one sight ray and, when the eye looks
+// down on it, the stretch of its top face the ray lands on. A sightline to
+// ground distance T is blocked if it crosses the slab somewhere in the
+// footprint span; the blocking distance T = s * eye.y / (eye.y - h) is
+// monotonic in s, so the extremes sit at the span ends. Slab faces at or
+// above eye level are never reached by (descending) ground sightlines.
+void DeckSpans(const glm::vec3& eye, const glm::vec2& dir, const DeckOccluder& deck,
+               float range, std::vector<GroundSpan>* shadows, GroundSpan* outTop,
+               bool* hasTop) {
+  *hasTop = false;
+  float enter = 0.0f;
+  float exit = 0.0f;
+  if (!FootprintSpan(eye, dir, deck.footprint, &enter, &exit)) return;
+  if (enter >= range) return;
+  if (deck.topFacesEye) {
+    *outTop = GroundSpan{enter, std::min(exit, range)};
+    *hasTop = outTop->begin < outTop->end;
+  }
+  const auto landing = [&](float s, float h) {
+    h = std::max(h, 0.0f);
+    return h >= eye.y - 1e-4f ? std::numeric_limits<float>::infinity()
+                              : s * eye.y / (eye.y - h);
+  };
+  float begin = std::numeric_limits<float>::infinity();
+  float end = 0.0f;
+  for (const float s : {enter, exit}) {
+    const float top = tactics::SurfaceHeightAt(*deck.surface, eye.x + dir.x * s,
+                                               eye.z + dir.y * s);
+    begin = std::min(begin, landing(s, top - kDeckThickness));
+    end = std::max(end, landing(s, top));
+  }
+  end = std::min(end, range);
+  if (begin < end) shadows->push_back(GroundSpan{begin, end});
+}
+
 // The visible stretches of ground along one sight ray within [0, range]:
-// the complement of the union of every obstacle's ground shadow.
+// the complement of the union of every obstacle's and deck's ground shadow.
+// Decks also report, via `deckTops`, the visible stretch of their top face.
+struct DeckTop {
+  int deck = 0;
+  GroundSpan span;
+};
 std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2& dir,
                                            const std::vector<tactics::Obstacle>& obstacles,
-                                           float range) {
+                                           const std::vector<DeckOccluder>& decks, float range,
+                                           std::vector<DeckTop>* deckTops) {
   std::vector<GroundSpan> shadows;
   for (const auto& obstacle : obstacles) {
     GroundSpan shadow;
     if (GroundShadow(eye, dir, obstacle, range, &shadow)) shadows.push_back(shadow);
+  }
+  for (size_t i = 0; i < decks.size(); ++i) {
+    GroundSpan top;
+    bool hasTop = false;
+    DeckSpans(eye, dir, decks[i], range, &shadows, &top, &hasTop);
+    if (hasTop) deckTops->push_back(DeckTop{static_cast<int>(i), top});
   }
   std::sort(shadows.begin(), shadows.end(),
             [](const GroundSpan& a, const GroundSpan& b) { return a.begin < b.begin; });
@@ -1071,7 +1128,11 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
 // shadows the strip of ground it actually hides -- the overlay resumes where
 // the sightline over its top edge lands, and only a target crouched at
 // ground level right behind the obstacle stays hidden. Obstacles at or above
-// eye level shadow everything behind them.
+// eye level shadow everything behind them. For a viewer on the ground, other
+// walk surfaces (decks/ramps) are thin slab occluders too, and the cone is laid
+// on the top faces the viewer looks down on. A viewer standing on a surface
+// keeps the cone confined to it. Top faces are not occluded by obstacles or
+// by other decks (approximation).
 // Caller is responsible for enabling blending around this call.
 void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& viewProj,
                  const Unit& unit, const std::vector<tactics::Obstacle>& obstacles,
@@ -1104,13 +1165,25 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
     }
   }
 
+  std::vector<DeckOccluder> decks;
+  if (unitSurface < 0) {
+    for (const tactics::WalkSurface& surface : walkSurfaces) {
+      if (surface.vertices.size() < 3) continue;
+      DeckOccluder deck;
+      deck.surface = &surface;
+      for (const glm::vec3& v : surface.vertices) deck.footprint.footprint.emplace_back(v.x, v.z);
+      deck.topFacesEye = eye.y > tactics::SurfaceHeightAt(surface, eye.x, eye.z) + 1e-3f;
+      decks.push_back(std::move(deck));
+    }
+  }
+
   // Boundary ray angles as offsets from facingYaw in [-halfFov, +halfFov].
   // A uniform fan alone puts the occlusion edge on a chord between the two
   // samples straddling an obstacle corner, which reads as a skewed edge that
   // misses the corner; casting extra rays at each obstacle
   // corner (nudged to either side) pins the edge exactly onto the corner.
   std::vector<float> offsets;
-  offsets.reserve(kArcSegments + 1 + obstacles.size() * 12);
+  offsets.reserve(kArcSegments + 1 + (obstacles.size() + walkSurfaces.size()) * 12);
   for (int i = 0; i <= kArcSegments; ++i) {
     const float t = static_cast<float>(i) / static_cast<float>(kArcSegments);
     offsets.push_back(-halfFovRad + 2.0f * halfFovRad * t);
@@ -1125,10 +1198,21 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
       }
     }
   }
+  for (const DeckOccluder& deck : decks) {
+    for (const glm::vec2& p : deck.footprint.footprint) {
+      const float delta =
+          std::remainder(std::atan2(p.y - eye.z, p.x - eye.x) - unit.facingYaw, kTwoPi);
+      for (const float nudged : {delta - kCornerEpsilon, delta, delta + kCornerEpsilon}) {
+        if (nudged >= -halfFovRad && nudged <= halfFovRad) offsets.push_back(nudged);
+      }
+    }
+  }
   std::sort(offsets.begin(), offsets.end());
 
   std::vector<glm::vec2> dirs;
   std::vector<std::vector<GroundSpan>> spansPerRay;
+  std::vector<std::vector<DeckTop>> deckTopsPerRay;
+  deckTopsPerRay.reserve(offsets.size());
   dirs.reserve(offsets.size());
   spansPerRay.reserve(offsets.size());
   for (const float offset : offsets) {
@@ -1144,7 +1228,9 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
         clippedRange = 0.0f;
       }
     }
-    spansPerRay.push_back(VisibleGroundSpans(eye, dir, obstacles, clippedRange));
+    deckTopsPerRay.emplace_back();
+    spansPerRay.push_back(VisibleGroundSpans(eye, dir, obstacles, decks, clippedRange,
+                                             &deckTopsPerRay.back()));
   }
 
   // Stitch adjacent rays into quads, one per matching visible span. Corner
@@ -1202,10 +1288,29 @@ void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& view
       }
     }
   }
+  const size_t groundPointCount = points.size();
+  // Deck/ramp tops in view: stitch matching decks across adjacent rays and
+  // lay the quad on the (planar) top face.
+  const auto deckPoint = [&](int deck, const glm::vec2& dir, float t) {
+    const float x = eye.x + dir.x * t;
+    const float z = eye.z + dir.y * t;
+    return glm::vec3(x, tactics::SurfaceHeightAt(*decks[deck].surface, x, z) + kGroundOffset, z);
+  };
+  for (size_t i = 0; i + 1 < offsets.size(); ++i) {
+    for (const DeckTop& left : deckTopsPerRay[i]) {
+      for (const DeckTop& right : deckTopsPerRay[i + 1]) {
+        if (right.deck != left.deck) continue;
+        const glm::vec3 l0 = deckPoint(left.deck, dirs[i], left.span.begin);
+        const glm::vec3 l1 = deckPoint(left.deck, dirs[i], left.span.end);
+        const glm::vec3 r0 = deckPoint(left.deck, dirs[i + 1], right.span.begin);
+        const glm::vec3 r1 = deckPoint(left.deck, dirs[i + 1], right.span.end);
+        for (const glm::vec3& p : {l0, r0, r1, l0, r1, l1}) points.push_back(p);
+      }
+    }
+  }
   // Every walkable surface gets its own copy of the cone at its own height:
   // the ground-level cone above is buried under raised sidewalk slabs, so
   // clip the cone to each slab's footprint and lay that piece on its top.
-  const size_t groundPointCount = points.size();
   for (const AABB& slab : sidewalks) {
     for (size_t i = 0; i + 2 < groundPointCount; i += 3) {
       std::vector<glm::vec2> poly = {{points[i].x, points[i].z},

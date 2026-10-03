@@ -20,6 +20,40 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
+# App flow (Splash -> Map Select -> gameplay): flow/app_flow.yaml is the source
+# of truth. Build-time only -- a host Python script emits the C++ state enum +
+# transition table (so no YAML parser is linked into the app/WASM) and a
+# Mermaid diagram, persisted as flow/app_flow.mmd (committed; plus .svg via
+# mermaid-cli (mmdc) when available).
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(FLOW_YAML ${CMAKE_SOURCE_DIR}/flow/app_flow.yaml)
+set(FLOW_TEMPLATES ${CMAKE_SOURCE_DIR}/flow/templates)
+set(FLOW_GEN_DIR ${CMAKE_BINARY_DIR}/generated)
+# The diagram is persisted next to the YAML that declares it (committed).
+set(FLOW_MMD ${CMAKE_SOURCE_DIR}/flow/app_flow.mmd)
+set(FLOW_SVG ${CMAKE_SOURCE_DIR}/flow/app_flow.svg)
+add_custom_command(
+  OUTPUT ${FLOW_GEN_DIR}/AppFlow.h ${FLOW_MMD}
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${FLOW_GEN_DIR}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen_flow.py ${FLOW_YAML}
+          --header ${FLOW_GEN_DIR}/AppFlow.h --mermaid ${FLOW_MMD}
+          --templates ${FLOW_TEMPLATES}
+  DEPENDS ${FLOW_YAML} ${CMAKE_SOURCE_DIR}/scripts/gen_flow.py
+          ${FLOW_TEMPLATES}/AppFlow.h.j2 ${FLOW_TEMPLATES}/app_flow.mmd.j2
+)
+add_custom_target(app_flow_gen DEPENDS ${FLOW_GEN_DIR}/AppFlow.h ${FLOW_MMD})
+find_program(MMDC_EXECUTABLE mmdc)
+if(MMDC_EXECUTABLE)
+  add_custom_command(
+    OUTPUT ${FLOW_SVG}
+    COMMAND ${MMDC_EXECUTABLE} -i ${FLOW_MMD} -o ${FLOW_SVG}
+    DEPENDS ${FLOW_MMD}
+  )
+  add_custom_target(app_flow_diagram ALL DEPENDS ${FLOW_SVG})
+else()
+  message(STATUS "mmdc (mermaid-cli) not found: skipping app_flow.svg (Mermaid source still generated)")
+endif()
+
 # Pure game-logic sources: no SDL/GL/ImGui dependency, so they can be linked
 # into both the playable app and the headless logic test binary.
 set(GAME_LOGIC_SOURCES
@@ -38,6 +72,7 @@ target_link_libraries(tactics_logic PUBLIC glm::glm)
 set(APP_GFX_SOURCES
   src/main.cpp
   src/ui/Hud.cpp
+  src/ui/Menu.cpp
   src/gfx/Shader.cpp
   src/gfx/Mesh.cpp
   src/gfx/Camera.cpp
@@ -66,6 +101,8 @@ if(EMSCRIPTEN)
     ${imgui_SOURCE_DIR}/backends
   )
   target_compile_definitions(tactics_app_web PRIVATE IMGUI_IMPL_OPENGL_ES3)
+  target_include_directories(tactics_app_web PRIVATE ${FLOW_GEN_DIR})
+  add_dependencies(tactics_app_web app_flow_gen)
   target_link_libraries(tactics_app_web PRIVATE tactics_logic glm::glm)
 
   # -sUSE_SDL=2 must apply at compile time too (it changes where SDL
@@ -131,12 +168,15 @@ else()
 
   # Per-team HUD (Turn panel, action menu, team label), shared by the
   # interactive app and the visual scenario runner.
-  add_library(tactics_ui STATIC src/ui/Hud.cpp)
+  add_library(tactics_ui STATIC src/ui/Hud.cpp src/ui/Menu.cpp)
   target_include_directories(tactics_ui PUBLIC src)
+  target_include_directories(tactics_ui PUBLIC ${FLOW_GEN_DIR})
+  add_dependencies(tactics_ui app_flow_gen)
   target_link_libraries(tactics_ui PUBLIC tactics_logic tactics_gfx imgui glm::glm)
 
   add_executable(tactics_app src/main.cpp)
-  target_include_directories(tactics_app PRIVATE src)
+  target_include_directories(tactics_app PRIVATE src ${FLOW_GEN_DIR})
+  add_dependencies(tactics_app app_flow_gen)
   target_link_libraries(tactics_app PRIVATE
     tactics_logic
     tactics_gfx

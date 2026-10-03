@@ -313,7 +313,6 @@ int main() {
   float smoothedFps = 0.0f;
   float frameMs = 0.0f;
   float fovMs = 0.0f;
-  int figureCount = 0;
   gfx::RenderFrameStats frameStats;
 
   auto runFrame = [&]() {
@@ -668,7 +667,7 @@ int main() {
     }
     // Anchored under the Round panel so it follows collapse/expand.
     ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, showFps,
-                       smoothedFps, frameMs, fovMs, figureCount, frameStats,
+                       smoothedFps, frameMs, fovMs, frameStats,
                        roundPanelBottom + 6.0f);
 
     // --- Render: one shadow pass + one color pass per pane, both inside
@@ -676,17 +675,10 @@ int main() {
     // whichever team the currently selected figure is on, so only that
     // player's pane shows them (the other side must not see enemy plans). ---
     // The panel above shows last frame's render counters (drawn before this
-    // frame's render pass); figure count is summed over all panes.
+    // frame's render pass).
     frameStats = {};
-    figureCount = 0;
     debugOptions.stats = &frameStats;
     for (int pane = 0; pane < paneCount; ++pane) {
-      for (const Unit& unit : game.GetScene().units) {
-        if (unit.alive && gfx::IsUnitVisibleForRender(unit, paneTeam(pane), fogActive,
-                                                        paneVisibility[pane])) {
-          ++figureCount;
-        }
-      }
       const PaneRect& rect = paneRects[pane];
       std::optional<glm::vec3> hover;
       if (hasHoveredGroundPoint) hover = hoveredGroundPoint;

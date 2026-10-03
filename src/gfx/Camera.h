@@ -54,7 +54,7 @@ class OrbitCamera {
   bool focusing_ = false;
   glm::vec3 focusTarget_{0.0f};
   float focusPitch_ = 0.9599f;
-  static constexpr float kMinPitch = 0.4363f;   // ~25 degrees.
+  static constexpr float kMinPitch = 0.0349f;   // ~2 degrees.
   static constexpr float kMaxPitch = 1.4835f;   // ~85 degrees.
   static constexpr float kMinDistance = 3.0f;
   static constexpr float kMaxDistance = 260.0f;

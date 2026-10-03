@@ -91,7 +91,14 @@ Scene ParseScene(const YAML::Node& root) {
       const uint32_t seed = genNode["seed"].as<uint32_t>();
       const std::string type = genNode["type"] ? genNode["type"].as<std::string>() : "urban";
       if (type == "urban") {
-        scene = GenerateUrbanMap(seed);
+        MapGeneratorConfig config;
+        if (genNode["arteries"]) config.arteryCount = genNode["arteries"].as<int>();
+        if (genNode["artery_width"]) config.arteryWidth = genNode["artery_width"].as<float>();
+        if (genNode["local_street_width"]) {
+          config.localStreetWidth = genNode["local_street_width"].as<float>();
+        }
+        if (genNode["elevated"]) config.elevatedHighway = genNode["elevated"].as<bool>();
+        scene = GenerateUrbanMap(seed, config);
       } else if (type == "hilly") {
         scene = GenerateHillyMap(seed);
       } else {
@@ -464,6 +471,22 @@ Scenario LoadScenarioFromFile(const std::string& path) {
   if (const YAML::Node cam = root["camera"]) {
     if (cam["target"]) scenario.cameraTarget = ParseVec2(cam["target"], "camera.target");
     if (cam["zoom"]) scenario.cameraZoom = cam["zoom"].as<float>();
+  }
+  if (const YAML::Node render = root["render"]) {
+    if (render["fov_overlay"]) {
+      const std::string mode = render["fov_overlay"].as<std::string>();
+      if (mode == "cpu") {
+        scenario.fovOverlay = Scenario::FovOverlay::Cpu;
+      } else if (mode == "shadow_map") {
+        scenario.fovOverlay = Scenario::FovOverlay::ShadowMap;
+      } else {
+        throw std::runtime_error("render.fov_overlay must be 'cpu' or 'shadow_map', got '" +
+                                 mode + "'");
+      }
+    }
+    if (render["fov_probe_height"]) {
+      scenario.fovProbeHeight = render["fov_probe_height"].as<float>();
+    }
   }
 
   if (const YAML::Node scriptNode = root["script"]) {

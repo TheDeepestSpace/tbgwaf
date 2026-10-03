@@ -28,7 +28,37 @@ struct AABB {
 struct Obstacle {
   AABB bounds;
   bool climbable = false;
+  // Optional convex XZ footprint in counter-clockwise order. Empty keeps the
+  // historical rectangular `bounds` footprint. `bounds` remains the broad
+  // phase and vertical extent; collision, LOS, navigation and rendering use
+  // these vertices when present.
+  std::vector<glm::vec2> footprint;
 };
+
+// A convex, planar walkable patch above (or sloping away from) the ground.
+// Patches form a separate navigation layer, so a deck never erases the
+// usable ground beneath it. Neighbour indices are explicit: overlapping XZ
+// alone must not connect vertically separated surfaces.
+struct WalkSurface {
+  std::vector<glm::vec3> vertices;  // Counter-clockwise when viewed from above.
+  std::vector<int> neighbors;
+  bool connectsToGround = false;    // The lowest edge is a legal ground transition.
+};
+
+// Visual road pavement. Elevated/ramp pavement is represented by
+// WalkSurface instead so its rendered geometry and gameplay surface are one
+// and the same.
+struct RoadSurface {
+  std::vector<glm::vec3> vertices;
+};
+
+inline std::vector<glm::vec2> ObstacleFootprint(const Obstacle& obstacle) {
+  if (!obstacle.footprint.empty()) return obstacle.footprint;
+  return {{obstacle.bounds.min.x, obstacle.bounds.min.z},
+          {obstacle.bounds.max.x, obstacle.bounds.min.z},
+          {obstacle.bounds.max.x, obstacle.bounds.max.z},
+          {obstacle.bounds.min.x, obstacle.bounds.max.z}};
+}
 
 // Sampled ground elevation over a regular XZ grid: sample (ix, iz) sits at
 // (minX + ix*step, minZ + iz*step). An empty field means flat ground at

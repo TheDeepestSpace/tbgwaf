@@ -50,7 +50,12 @@ void GameLogic::Reset(Scene scene) {
   // authored Y (e.g. crate-top starts).
   if (!scene_.ground.Empty()) {
     for (Unit& unit : scene_.units) {
-      unit.position.y = scene_.ground.HeightAt(unit.position.x, unit.position.z);
+      // Y=0 is the scenario shorthand for "place on terrain". Preserve an
+      // explicitly authored elevated Y so a stacked surface above hilly
+      // ground is not collapsed onto the heightfield during Reset/import.
+      if (std::fabs(unit.position.y) < 1e-4f) {
+        unit.position.y = scene_.ground.HeightAt(unit.position.x, unit.position.z);
+      }
     }
   }
   navMesh_ = NavMesh();
@@ -170,7 +175,8 @@ void GameLogic::EnsureNavMeshFor(const Unit& mover, const glm::vec3& origin) {
   region.xMax = std::min(half, origin.x + reach);
   region.zMin = std::max(-half, origin.z - reach);
   region.zMax = std::min(half, origin.z + reach);
-  navMesh_.Build(scene_.obstacles, region, constants::kAgentRadius, &scene_.ground);
+  navMesh_.Build(scene_.obstacles, region, constants::kAgentRadius, &scene_.ground,
+                 &scene_.walkSurfaces);
   navMeshUnitId_ = mover.id;
   navMeshOrigin_ = origin;
 }
@@ -670,7 +676,8 @@ void GameLogic::CancelAction() {
 bool GameLogic::ShotConnects(const Unit& shooter, const Unit& target) const {
   return InFovCone(shooter.EyePosition(), shooter.FacingDirection(), target.EyePosition(),
                    constants::kShootHalfFovDegrees, constants::kShootRange) &&
-         LineOfSightClear(shooter.EyePosition(), target.EyePosition(), obstacleBounds_);
+         LineOfSightClear(shooter.EyePosition(), target.EyePosition(), scene_.obstacles,
+                          scene_.walkSurfaces);
 }
 
 bool GameLogic::ResolveShot(Unit& shooter, Unit& target) {
@@ -753,14 +760,14 @@ void GameLogic::ApplyPlaybookReactions() {
       // A stationary figure reacts to enemies *moving* into its view (the
       // watcher-on-mover case), not to everyone idling in its cone.
       if (!moving && !isMidMove(enemy.id)) continue;
-      if (!CanUnitSee(unit, enemy, obstacleBounds_)) continue;
+      if (!CanUnitSee(unit, enemy, scene_.obstacles, scene_.walkSurfaces)) continue;
       const float dist = glm::distance(unit.position, enemy.position);
       if (!nearest || dist < nearestDist) {
         nearest = &enemy;
         nearestDist = dist;
       }
       // Most-cautious tie-break: any sighted enemy that sees back counts.
-      canSeeMe |= CanUnitSee(enemy, unit, obstacleBounds_);
+      canSeeMe |= CanUnitSee(enemy, unit, scene_.obstacles, scene_.walkSurfaces);
     }
     if (!nearest) continue;
     const ReactionAction action = Playbook(unit.team).At(moving, canSeeMe);

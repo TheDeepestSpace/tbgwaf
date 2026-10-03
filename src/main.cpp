@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "game/GameLogic.h"
+#include "game/Geometry.h"
 #include "game/MapGenerator.h"
 #include "game/Raycast.h"
 #include "game/Types.h"
@@ -208,6 +209,20 @@ bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const tactics::Scene& scene,
     if (obstacle.climbable) considerSurface(obstacle.bounds);
   }
   for (const tactics::AABB& slab : scene.sidewalks) considerSurface(slab);
+  for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
+    if (surface.vertices.size() < 3) continue;
+    const glm::vec3 normal = glm::cross(surface.vertices[1] - surface.vertices[0],
+                                        surface.vertices[2] - surface.vertices[0]);
+    const float denominator = glm::dot(normal, ray.direction);
+    if (std::fabs(denominator) < 1e-7f) continue;
+    const float t = glm::dot(normal, surface.vertices[0] - ray.origin) / denominator;
+    if (t < 0.0f || t >= bestT) continue;
+    const glm::vec3 hit = ray.origin + ray.direction * t;
+    if (!tactics::SurfaceContainsXZ(surface, hit.x, hit.z)) continue;
+    found = true;
+    bestT = t;
+    bestPoint = hit;
+  }
 
   if (found && outPoint) *outPoint = bestPoint;
   return found;
@@ -282,6 +297,19 @@ int main() {
   // (issue #14) draws through exactly the same code path as the app.
   gfx::SceneRenderer renderer;
   if (!renderer.Init()) return 1;
+  // Issue #110 prototype: the per-unit shadow-map FOV mask (walls/roofs/deck
+  // sides too) is the app default for now so deployments show it;
+  // TBGWAF_FOV_SHADOW_MAP=0 restores the analytic CPU overlay.
+  // TBGWAF_FOV_PROBE_HEIGHT=<units> tests ground visibility that high above
+  // the surface instead of at the surface (see SceneRenderer).
+  bool fovShadowMap = true;
+  if (const char* fovEnv = std::getenv("TBGWAF_FOV_SHADOW_MAP")) {
+    fovShadowMap = fovEnv[0] != '\0' && fovEnv[0] != '0';
+  }
+  if (fovShadowMap) renderer.SetFovOverlayMode(gfx::FovOverlayMode::ShadowMap);
+  if (const char* probeEnv = std::getenv("TBGWAF_FOV_PROBE_HEIGHT")) {
+    renderer.SetFovProbeHeight(static_cast<float>(std::atof(probeEnv)));
+  }
 
   // One independent orbit camera per pane, so each side can freely
   // rotate/zoom its own view without affecting the other's.
@@ -289,21 +317,23 @@ int main() {
   // Both web clients must build the same city, so the web seed stays fixed.
   // Native runs pick a random seed per launch (shown and editable on the Map
   // Select screen); TBGWAF_MAP_SEED overrides it.
-  uint32_t mapSeed = 1;
+  uint32_t mapSeed = 7;
 #ifndef __EMSCRIPTEN__
   mapSeed = std::random_device{}();
 #endif
   if (const char* seedEnv = std::getenv("TBGWAF_MAP_SEED")) {
     mapSeed = static_cast<uint32_t>(std::strtoul(seedEnv, nullptr, 10));
   }
-  // TBGWAF_MAP picks the generator ("urban" default, or "hilly" for the
-  // rolling-hills terrain map); both web clients must agree the same way
-  // they must agree on the seed.
-  std::string mapType = "urban";
+  // TBGWAF_MAP picks the generator/urban variant; both web clients must
+  // agree the same way they must agree on the seed.
+  std::string mapType = "urban-elevated";
   if (const char* mapEnv = std::getenv("TBGWAF_MAP")) mapType = mapEnv;
   auto makeMap = [&mapSeed, &mapType]() {
-    return mapType == "hilly" ? tactics::GenerateHillyMap(mapSeed)
-                              : tactics::GenerateUrbanMap(mapSeed);
+    if (mapType == "hilly") return tactics::GenerateHillyMap(mapSeed);
+    tactics::MapGeneratorConfig config;
+    if (mapType == "urban-merge" || mapType == "urban-elevated") config.arteryCount = 2;
+    if (mapType == "urban-elevated") config.elevatedHighway = true;
+    return tactics::GenerateUrbanMap(mapSeed, config);
   };
   GameLogic game(makeMap());
   // Start zoomed out far enough that the whole map is in view.
@@ -548,7 +578,8 @@ int main() {
         showNavMeshDebug = !showNavMeshDebug;
         if (showNavMeshDebug && !navMeshDebugBuilt) {
           navMeshDebug.Build(game.GetScene().obstacles, game.GetScene().mapHalfExtent,
-                             tactics::constants::kAgentRadius, &game.GetScene().ground);
+                             tactics::constants::kAgentRadius, &game.GetScene().ground,
+                             &game.GetScene().walkSurfaces);
           navMeshDebugBuilt = true;
         }
       }

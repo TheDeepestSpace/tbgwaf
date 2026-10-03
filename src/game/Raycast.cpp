@@ -4,6 +4,8 @@
 #include <cmath>
 #include <limits>
 
+#include "game/Geometry.h"
+
 namespace tactics {
 
 bool RayIntersectsAABB(const glm::vec3& origin, const glm::vec3& direction, const AABB& box,
@@ -47,6 +49,42 @@ bool LineOfSightClear(const glm::vec3& from, const glm::vec3& to,
       if (t > kEndpointEpsilon && t < segmentLength - kEndpointEpsilon) {
         return false;
       }
+    }
+  }
+  return true;
+}
+
+bool LineOfSightClear(const glm::vec3& from, const glm::vec3& to,
+                      const std::vector<Obstacle>& obstacles) {
+  const glm::vec3 segment = to - from;
+  const float segmentLength = glm::length(segment);
+  if (segmentLength < 1e-6f) return true;
+  const glm::vec3 direction = segment / segmentLength;
+  constexpr float kEndpointEpsilon = 1e-3f;
+  for (const Obstacle& obstacle : obstacles) {
+    float t = 0.0f;
+    if (RayIntersectsObstacle(from, direction, obstacle, &t) && t > kEndpointEpsilon &&
+        t < segmentLength - kEndpointEpsilon) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool LineOfSightClear(const glm::vec3& from, const glm::vec3& to,
+                      const std::vector<Obstacle>& obstacles,
+                      const std::vector<WalkSurface>& walkSurfaces) {
+  if (!LineOfSightClear(from, to, obstacles)) return false;
+  const glm::vec3 segment = to - from;
+  const float segmentLength = glm::length(segment);
+  if (segmentLength < 1e-6f) return true;
+  const glm::vec3 direction = segment / segmentLength;
+  constexpr float kEndpointEpsilon = 1e-3f;
+  for (const WalkSurface& surface : walkSurfaces) {
+    float t = 0.0f;
+    if (RayIntersectsWalkSurface(from, direction, surface, 0.45f, &t) &&
+        t > kEndpointEpsilon && t < segmentLength - kEndpointEpsilon) {
+      return false;
     }
   }
   return true;

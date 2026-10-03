@@ -27,6 +27,7 @@
 #include <optional>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -86,6 +87,12 @@ struct Options {
   bool updateBaselines = false;
   bool skipGoldens = false;
   bool video = false;
+  // Issue #110: force the shadow-map FOV mask for every scenario (normally
+  // only scenarios with `render: {fov_overlay: shadow_map}` use it), and/or
+  // print per-pane scene render timings (glFinish-bracketed, so they
+  // include GPU time -- under llvmpipe that is CPU rasterization time).
+  bool forceShadowMapFov = false;
+  bool profile = false;
   int pixelThreshold = 25;       // Max per-channel delta still considered "same".
   double maxDiffFraction = 0.002;  // Max fraction of differing pixels still passing.
   std::vector<fs::path> scenarios;
@@ -173,6 +180,24 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   }
 
   const int paneWidth = kWindowWidth / 2;
+
+  // Issue #110: the scenario (or --fov-shadow-map) picks the FOV overlay
+  // path; restored to the CPU default after the scenario.
+  const bool shadowMapFov =
+      options.forceShadowMapFov || scenario.fovOverlay == tactics::scenario::Scenario::FovOverlay::ShadowMap;
+  renderer.SetFovOverlayMode(shadowMapFov ? gfx::FovOverlayMode::ShadowMap
+                                          : gfx::FovOverlayMode::CpuAnalytic);
+  renderer.SetFovProbeHeight(scenario.fovProbeHeight);
+  // --profile: per-pane RenderPane wall time (glFinish before and after)
+  // and the number of own living units whose cones were drawn, so the cost
+  // per pane and per unit can be read off.
+  struct PaneProfile {
+    double totalMs = 0.0;
+    int frames = 0;
+    int unitCones = 0;
+  };
+  std::array<PaneProfile, ui::kPaneCount> profiles;
+
   // Optional cursor marker: `progress` runs 0 -> 1 as the ring closes in.
   // Either a world-space click (figure/ground, projected through the pane's
   // camera) or, when `button` is set, a press of the named HUD button at
@@ -193,8 +218,23 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
       TeamVisibility visibility;
       if (fogActive) visibility = game.ComputeVisibility(team);
       const gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(game, team);
-      renderer.RenderPane(game, team, fogActive, visibility, cameras[pane], pane * paneWidth, 0,
-                          paneWidth, kWindowHeight, overlays);
+      if (options.profile) {
+        glFinish();
+        const auto start = std::chrono::steady_clock::now();
+        renderer.RenderPane(game, team, fogActive, visibility, cameras[pane], pane * paneWidth,
+                            0, paneWidth, kWindowHeight, overlays);
+        glFinish();
+        const auto end = std::chrono::steady_clock::now();
+        PaneProfile& p = profiles[pane];
+        p.totalMs += std::chrono::duration<double, std::milli>(end - start).count();
+        ++p.frames;
+        for (const tactics::Unit& unit : game.GetScene().units) {
+          if (unit.alive && unit.team == team) ++p.unitCones;
+        }
+      } else {
+        renderer.RenderPane(game, team, fogActive, visibility, cameras[pane], pane * paneWidth, 0,
+                            paneWidth, kWindowHeight, overlays);
+      }
     }
 
     ImGuiIO& io = ImGui::GetIO();
@@ -400,6 +440,18 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
 
   const auto result = tactics::scenario::RunScenario(scenario, hooks);
 
+  if (options.profile) {
+    for (int pane = 0; pane < ui::kPaneCount; ++pane) {
+      const PaneProfile& p = profiles[pane];
+      if (p.frames == 0) continue;
+      std::printf("PROFILE %s %s fov=%s panes=%d avg_ms=%.2f avg_units=%.2f\n", stem.c_str(),
+                  TeamName(PaneTeam(pane)), shadowMapFov ? "shadow_map" : "cpu", p.frames,
+                  p.totalMs / p.frames, static_cast<double>(p.unitCones) / p.frames);
+    }
+  }
+  renderer.SetFovOverlayMode(gfx::FovOverlayMode::CpuAnalytic);
+  renderer.SetFovProbeHeight(0.0f);
+
   if (options.video) {
     for (auto& encoder : encoders) {
       if (!encoder.Close()) videoOk = false;
@@ -467,6 +519,10 @@ bool ParseArgs(int argc, char** argv, Options* options) {
       options->skipGoldens = true;
     } else if (arg == "--video") {
       options->video = true;
+    } else if (arg == "--fov-shadow-map") {
+      options->forceShadowMapFov = true;
+    } else if (arg == "--profile") {
+      options->profile = true;
     } else if (arg == "--pixel-threshold") {
       const char* v = NextValue("--pixel-threshold");
       if (!v) return false;
@@ -478,9 +534,13 @@ bool ParseArgs(int argc, char** argv, Options* options) {
     } else if (arg == "--help" || arg == "-h") {
       std::printf(
           "usage: tactics_visual_tests [--update-baselines] [--skip-goldens] [--video]\n"
+          "         [--fov-shadow-map] [--profile]\n"
           "         [--goldens-dir DIR] [--out-dir DIR] [--pixel-threshold N]\n"
           "         [--max-diff-fraction F] [scenario.yaml ...]\n"
-          "Runs all scenarios under tests/scenarios/ when none are listed.\n");
+          "Runs all scenarios under tests/scenarios/ when none are listed.\n"
+          "--fov-shadow-map forces the issue #110 shadow-map FOV mask for every\n"
+          "scenario (goldens then won't match); --profile prints per-pane render\n"
+          "timings.\n");
       return false;
     } else if (!arg.empty() && arg[0] == '-') {
       std::fprintf(stderr, "unknown flag %s (try --help)\n", arg.c_str());

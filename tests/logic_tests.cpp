@@ -1469,10 +1469,10 @@ void TestShotHitChanceProfile() {
   CHECK(std::fabs(ShotProfileHitChance(p, 0.0f, 0.0f) - p.maxChance) < 1e-5f);
   // Close and on-axis is a strong shot.
   CHECK(ShotProfileHitChance(p, 0.0f, 3.0f) > 0.85f);
-  // Exactly at / beyond range: hard zero.
-  CHECK(ShotProfileHitChance(p, 0.0f, 60.0f) == 0.0f);
-  CHECK(ShotProfileHitChance(p, 0.0f, 60.01f) == 0.0f);
-  CHECK(ShotProfileHitChance(p, 0.0f, 59.0f) > 0.0f);
+  // No hard range cap: half the falloff at `range`, still nonzero far beyond it.
+  CHECK(std::fabs(ShotProfileHitChance(p, 0.0f, 60.0f) - p.maxChance * 0.5f) < 1e-5f);
+  CHECK(ShotProfileHitChance(p, 0.0f, 600.0f) > 0.0f);
+  CHECK(ShotProfileHitChance(p, 0.0f, 600.0f) < ShotProfileHitChance(p, 0.0f, 60.0f));
   // Cone edge (either side) and just outside: hard zero.
   CHECK(ShotProfileHitChance(p, 75.0f, 5.0f) == 0.0f);
   CHECK(ShotProfileHitChance(p, -75.0f, 5.0f) == 0.0f);
@@ -1528,10 +1528,10 @@ void TestShotHitChanceGatesAndRoll() {
   CHECK(!fired);
   CHECK(t2->alive);
 
-  // Beyond kShootRange: zero even when dead ahead and unobstructed.
+  // Far beyond kShootRange: no cap, so dead ahead and unobstructed is still a (small) chance.
   s2->facingYaw = bearing;
   t2->position = s2->position + glm::vec3(std::cos(bearing), 0.0f, std::sin(bearing)) * 60.5f;
-  CHECK(g2.ShotHitChance(*s2, *t2) == 0.0f);
+  CHECK(g2.ShotHitChance(*s2, *t2) > 0.0f);
 
   // LOS-blocked within cone/range: zero (wall at z=+-4 between blue0 and a target behind it).
   GameLogic g3(LegacyScene());

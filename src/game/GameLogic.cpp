@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <sstream>
 
 #include "game/Raycast.h"
@@ -685,10 +686,10 @@ void GameLogic::CancelAction() {
 
 float ShotProfileHitChance(const ShotProfile& profile, float angleDegrees, float distance) {
   const float absAngle = std::fabs(angleDegrees);
-  if (absAngle >= profile.halfAngleDegrees || distance >= profile.range) return 0.0f;
+  if (absAngle >= profile.halfAngleDegrees) return 0.0f;
   constexpr float kHalfPi = 1.57079632679489661923f;
   const float angleFalloff = std::cos(glm::radians(absAngle) / glm::radians(profile.halfAngleDegrees) * kHalfPi);
-  const float rangeFalloff = 1.0f - std::max(distance, 0.0f) / profile.range;
+  const float rangeFalloff = 1.0f / (1.0f + std::max(distance, 0.0f) / profile.range);
   return profile.maxChance * angleFalloff * rangeFalloff;
 }
 
@@ -701,7 +702,8 @@ float GameLogic::ShotHitChance(const Unit& shooter, const Unit& target) const {
   const ShotProfile& profile = kDefaultShotProfile;  // Future: derive from shooter's role.
   const glm::vec3 eye = shooter.EyePosition();
   const glm::vec3 targetEye = target.EyePosition();
-  if (!InFovCone(eye, shooter.FacingDirection(), targetEye, profile.halfAngleDegrees, profile.range) ||
+  if (!InFovCone(eye, shooter.FacingDirection(), targetEye, profile.halfAngleDegrees,
+                 std::numeric_limits<float>::infinity()) ||
       !LineOfSightClear(eye, targetEye, scene_.obstacles, scene_.walkSurfaces, scene_.ground)) {
     return 0.0f;
   }

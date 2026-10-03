@@ -96,7 +96,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* out);
 // takes its numbers from a profile rather than from the constants directly.
 struct ShotProfile {
   float halfAngleDegrees;  // Hard cone edge; chance is 0 at and beyond it.
-  float range;             // Hard range cap; chance is 0 at and beyond it.
+  float range;             // Falloff scale, not a cap: distance falloff is 0.5 here, never 0.
   float maxChance;         // Chance at point-blank on the centerline.
 };
 inline constexpr ShotProfile kDefaultShotProfile{constants::kShootHalfFovDegrees,
@@ -104,7 +104,8 @@ inline constexpr ShotProfile kDefaultShotProfile{constants::kShootHalfFovDegrees
 
 // Pure falloff function. Chance = maxChance * angleFalloff * rangeFalloff:
 // cosine falloff on angle (1 on axis, 0 at the cone edge) times linear
-// falloff on distance (1 point-blank, 0 at range). Returns 0 outside the cone/range.
+// falloff on distance, 1/(1 + d/range): 1 point-blank, 0.5 at range, no hard cap.
+// Returns 0 outside the cone.
 // Opacity of the shot-cone overlay at `distance` from the gun tip: kConeStartAlpha
 // at the tip, falling linearly to 0 at the profile's range (and 0 beyond).
 float ShotConeAlpha(const ShotProfile& profile, float distance);
@@ -257,7 +258,7 @@ class GameLogic {
   }
 
   // Probabilistic hit resolution, applied immediately: if the shot passes
-  // the hard gates (cone, range, LOS) it is fired (shooter animates) and a
+  // the hard gates (cone, LOS) it is fired (shooter animates) and a
   // roll against ShotHitChance decides whether the target goes down.
   // Returns true on a hit. If `fired` is non-null it is set to whether a
   // shot was actually taken (gates passed), hit or miss. Exposed directly so
@@ -265,7 +266,7 @@ class GameLogic {
   // playbook reaction path.
   bool ResolveShot(Unit& shooter, Unit& target, bool* fired = nullptr);
 
-  // Hit probability in [0,1]; 0 for out-of-cone, out-of-range or LOS-blocked
+  // Hit probability in [0,1]; 0 for out-of-cone or LOS-blocked
   // (the hard gates, unchanged). Otherwise ShotProfileHitChance of the
   // shooter's profile at the target's bearing/distance.
   float ShotHitChance(const Unit& shooter, const Unit& target) const;

@@ -37,6 +37,8 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
       overlays.invalidHoverHighlight = hoveredGroundPoint;
     }
   }
+  overlays.showShotCone = game.Mode() == tactics::InputMode::AwaitingShootTarget ||
+                          selected->plan.type == tactics::PlannedActionType::Shoot;
   return overlays;
 }
 namespace {
@@ -1315,7 +1317,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glDisable(GL_STENCIL_TEST);
   // Shot probability cone: only for this pane's selected figure, drawn over
   // the FOV overlay.
-  if (overlays.selectionHighlight) {
+  if (overlays.selectionHighlight && overlays.showShotCone) {
     if (const Unit* selected = game.FindUnit(*game.SelectedUnitId())) {
       if (selected->alive) {
         // Depth-tested against the world so ground, slabs and walls cut the

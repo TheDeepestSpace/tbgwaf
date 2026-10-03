@@ -16,11 +16,22 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Check flow/app_flow.mmd is in sync with flow/app_flow.yaml
+        run: |
+          python3 -m pip install --quiet jinja2 pyyaml
+          python3 scripts/gen_flow.py flow/app_flow.yaml \
+            --header "$RUNNER_TEMP/AppFlow.h" --mermaid "$RUNNER_TEMP/app_flow.mmd" \
+            --templates flow/templates
+          diff -u flow/app_flow.mmd "$RUNNER_TEMP/app_flow.mmd" || {
+            echo "::error::flow/app_flow.mmd is stale; regenerate with scripts/gen_flow.py"
+            exit 1
+          }
+
       - name: Install toolchain and headless GLES3 dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            ninja-build pkg-config \
+            ninja-build pkg-config python3-jinja2 python3-yaml \
             libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev mesa-common-dev \
             xvfb
 

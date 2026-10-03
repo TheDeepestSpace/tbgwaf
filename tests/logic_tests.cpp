@@ -401,8 +401,16 @@ void TestRoundCommitRequiresBothTeamsPlanned() {
   CHECK(game.RoundNumber() == 2);  // One commit resolved the whole round.
 }
 
+// Neutral squad playbooks, so movement/visibility tests aren't affected by
+// the default table's shoot reactions.
+void MakePassive(GameLogic& game) {
+  game.SetPlaybook(Team::Blue, SquadPlaybook::Passive());
+  game.SetPlaybook(Team::Red, SquadPlaybook::Passive());
+}
+
 void TestRoundExecutesBothTeamsMovesConcurrently() {
   GameLogic game(LegacyScene());
+  MakePassive(game);
   game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
   const glm::vec3 blueDestination(-3.0f, 0.0f, -4.0f);
@@ -542,6 +550,7 @@ void TestMoveFrontierRoutesAroundObstacle() {
 
 void TestClickChainsLegsAcrossRounds() {
   GameLogic game(LegacyScene());
+  MakePassive(game);  // Blue0 crosses red lines of sight over several rounds.
   game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
 
@@ -605,11 +614,6 @@ void TestManualReplanClearsQueuedLegs() {
 
   planChain();
   game.ClickUnit(0, Team::Blue);
-  game.ChooseOverwatch();
-  CHECK(game.FindUnit(0)->plan.queuedLegs.empty());
-
-  planChain();
-  game.ClickUnit(0, Team::Blue);
   game.ChoosePass();
   CHECK(game.FindUnit(0)->plan.queuedLegs.empty());
 
@@ -647,6 +651,7 @@ void TestQueuedLegsSnapshotRoundTrip() {
 void TestPendingShotFiresWhenTargetWalksIntoView() {
   GameLogic game(LegacyScene());
   game.SetShotRollSource([] { return 0.0f; });  // Pin rolls to a hit.
+  MakePassive(game);
 
   // Park red4 behind the z=-4 wall from blue1's perspective: blue1's own
   // line of sight is blocked at plan time, but blue2's diagonal view is
@@ -827,6 +832,7 @@ void TestGameLogicMoveUpdatesPositionAndFacing() {
 
 void TestGameLogicMoveAnimatesProgressively() {
   GameLogic game(LegacyScene());
+  MakePassive(game);
   game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
   // Straight line, same row, short of the wall at x in [-1,1] so the path
@@ -953,61 +959,6 @@ void TestGameLogicMoveCanClimbOntoObstacle() {
   CHECK(game.RoundNumber() == 2);  // Round advanced.
 }
 
-void TestGameLogicOverwatchFiresOnEnemyEnteringFov() {
-  GameLogic game(LegacyScene());
-
-  // Reposition red4 due west of blue1 -- squarely behind blue1's fixed +X
-  // facing, so it starts outside blue1's FOV cone regardless of LOS -- then
-  // send it walking east along the open z=0 lane, straight through blue1's
-  // position and into its watched cone. Under WEGO the overwatch arms and
-  // the enemy move it interrupts happen in the *same* round's commit.
-  game.FindUnit(4)->position = glm::vec3(-9.5f, 0.0f, 0.0f);
-
-  game.ClickUnit(1, Team::Blue);
-  game.ChooseOverwatch();
-  CHECK(game.FindUnit(1)->plan.type == tactics::PlannedActionType::Overwatch);
-  CHECK(game.FindUnit(1)->triggerAction == TriggerAction::None);  // Not armed until commit.
-
-  game.ClickUnit(4, Team::Red);
-  game.ChooseMove();
-  const glm::vec3 destination(0.0f, 0.0f, 0.0f);
-  game.ClickGround(destination, Team::Red);
-  game.FinishMovePlan();
-
-  PassEveryoneElse(game, {1, 4});
-  CHECK(game.CanCommitRound());
-  game.CommitRound();
-
-  // Committing arms blue1's trigger and kicks off red4's move concurrently.
-  CHECK(game.FindUnit(1)->triggerAction == TriggerAction::Shoot);
-  CHECK(game.Mode() == InputMode::Executing);
-
-  // Step frame-by-frame (rather than one huge fast-forward dt) so the
-  // overwatch check actually samples red4's position incrementally along
-  // the path -- a single giant dt would jump it straight from start to
-  // destination in one position update, skipping the mid-path FOV entry
-  // this test exists to catch. blue1 should spot red4 and fire the moment
-  // it crosses into FOV with clear LOS, interrupting the move well short of
-  // the destination.
-  int steps = 0;
-  while (game.Mode() == InputMode::Executing && steps < 10000) {
-    game.Update(0.02f);
-    ++steps;
-  }
-  CHECK(steps < 10000);  // Sanity: the loop above actually terminated.
-
-  CHECK(!game.FindUnit(4)->alive);
-  CHECK(game.FindUnit(1)->triggerAction == TriggerAction::None);  // One-shot: trigger consumed.
-  const glm::vec3 moverStop = game.FindUnit(4)->position;
-  CHECK(glm::distance(moverStop, destination) > 1.0f);  // Died mid-path, short of the destination.
-  CHECK(moverStop.x > -9.5f + 1e-3f);                    // But had actually started moving.
-
-  // The interrupted move still finishes the round.
-  CHECK(game.Mode() == InputMode::AwaitingSelection);
-  CHECK(game.RoundNumber() == 2);
-  CHECK(!game.Winner().has_value());  // Red still has id3 and id5 alive.
-}
-
 // Shared setup: blue passes while red4 -- repositioned due west of blue1,
 // behind its fixed +X facing -- plans a walk east through blue1's open
 // lane. Commits the round, leaving the move animating.
@@ -1030,13 +981,58 @@ void StartRed4WalkThroughBlue1Lane(GameLogic& game, const glm::vec3& destination
   CHECK(game.Mode() == InputMode::Executing);
 }
 
+void SetStationaryShoot(GameLogic& game, Team team) {
+  SquadPlaybook pb = game.Playbook(team);
+  pb.At(false, true) = ReactionAction::Shoot;
+  pb.At(false, false) = ReactionAction::Shoot;
+  game.SetPlaybook(team, pb);
+}
+
+// Runs the committed round to completion.
+void RunRound(GameLogic& game) {
+  int steps = 0;
+  while (game.Mode() == InputMode::Executing && steps < 10000) {
+    game.Update(0.02f);
+    ++steps;
+  }
+  CHECK(steps < 10000);
+}
+
+// Red4 walks east from behind blue1 (which faces +X). Applies `redPb` to red
+// and runs the round; returns red4's final distance to the destination.
+float RunRed4Walk(const SquadPlaybook& redPb, bool* red4Alive, bool* blue1Alive,
+                  bool blueShoots) {
+  GameLogic game(LegacyScene());
+  game.SetPlaybook(Team::Red, redPb);
+  if (blueShoots) SetStationaryShoot(game, Team::Blue);
+  const glm::vec3 destination(0.0f, 0.0f, 0.0f);
+  game.FindUnit(4)->position = glm::vec3(-9.5f, 0.0f, 0.0f);
+  for (int id : {0, 1, 2}) {
+    game.ClickUnit(id, Team::Blue);
+    game.ChoosePass();
+  }
+  game.ClickUnit(3, Team::Red);
+  game.ChoosePass();
+  game.ClickUnit(4, Team::Red);
+  game.ChooseMove();
+  game.ClickGround(destination, Team::Red);
+  game.FinishMovePlan();
+  game.ClickUnit(5, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  RunRound(game);
+  *red4Alive = game.FindUnit(4)->alive;
+  *blue1Alive = game.FindUnit(1)->alive;
+  return glm::distance(game.FindUnit(4)->position, destination);
+}
+
 void TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds() {
   GameLogic game(LegacyScene());
   game.SetShotRollSource([] { return 0.0f; });  // Pin rolls to a hit.
   // Flipping the field directly mirrors what the config popup does; it
   // doesn't touch turn state, so blue1's plan below is still just Pass.
   Unit* blue1 = game.FindUnit(1);
-  blue1->reactionOnStationary = ReactionRule::Shoot;
+  SetStationaryShoot(game, Team::Blue);
 
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
   StartRed4WalkThroughBlue1Lane(game, destination);
@@ -1050,16 +1046,22 @@ void TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds() {
   CHECK(!game.FindUnit(4)->alive);
   CHECK(glm::distance(game.FindUnit(4)->position, destination) > 1.0f);
   CHECK(game.FindUnit(4)->position.x > -9.5f + 1e-3f);
-  // Standing rule: not consumed like a one-shot overwatch trigger.
-  CHECK(blue1->reactionOnStationary == ReactionRule::Shoot);
-  CHECK(blue1->triggerAction == TriggerAction::None);
+  // Standing rule: stays in force after firing.
+  CHECK(game.Playbook(Team::Blue).At(false, false) == ReactionAction::Shoot);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(game.RoundNumber() == 2);
 }
 
-void TestGameLogicPlaybookDefaultDoesNothing() {
+void TestGameLogicPlaybookDefaultTable() {
   GameLogic game(LegacyScene());
-  CHECK(game.FindUnit(1)->reactionOnStationary == ReactionRule::DoNothing);
+  for (Team t : {Team::Blue, Team::Red}) {
+    CHECK(game.Playbook(t).At(true, true) == ReactionAction::ShootContinue);
+    CHECK(game.Playbook(t).At(true, false) == ReactionAction::Continue);
+    CHECK(game.Playbook(t).At(false, true) == ReactionAction::Shoot);
+    CHECK(game.Playbook(t).At(false, false) == ReactionAction::DoNothing);
+  }
+  game.SetPlaybook(Team::Blue, SquadPlaybook::Passive());
+  CHECK(game.Playbook(Team::Blue).At(false, true) == ReactionAction::DoNothing);
 
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
   StartRed4WalkThroughBlue1Lane(game, destination);
@@ -1073,8 +1075,7 @@ void TestGameLogicPlaybookDefaultDoesNothing() {
 // walks red4 through its FOV; the teammate must be left alone.
 void TestGameLogicPlaybookIgnoresSameTeamMover() {
   GameLogic game(LegacyScene());
-  game.FindUnit(3)->reactionOnStationary = ReactionRule::Shoot;
-  game.FindUnit(1)->reactionOnStationary = ReactionRule::DoNothing;
+  SetStationaryShoot(game, Team::Red);
 
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
   StartRed4WalkThroughBlue1Lane(game, destination);
@@ -1082,6 +1083,207 @@ void TestGameLogicPlaybookIgnoresSameTeamMover() {
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(game.FindUnit(4)->alive);
   CHECK(glm::distance(game.FindUnit(4)->position, destination) < 1e-3f);
+}
+
+void TestGameLogicPlaybookMovingRows() {
+  bool red4Alive = false, blue1Alive = false;
+  SquadPlaybook pb;
+
+  // Moving + continue: finishes the walk uninterrupted.
+  float dist = RunRed4Walk(pb, &red4Alive, &blue1Alive, false);
+  CHECK(red4Alive && dist < 1e-3f);
+
+  // Moving + stop (both visibility columns): halts mid-path, alive.
+  pb.At(true, true) = ReactionAction::Stop;
+  pb.At(true, false) = ReactionAction::Stop;
+  dist = RunRed4Walk(pb, &red4Alive, &blue1Alive, false);
+  CHECK(red4Alive && dist > 1.0f);
+
+  // Moving + shoot->continue: blue1 is downed, red4 still completes its move.
+  pb.At(true, true) = ReactionAction::ShootContinue;
+  pb.At(true, false) = ReactionAction::ShootContinue;
+  dist = RunRed4Walk(pb, &red4Alive, &blue1Alive, false);
+  CHECK(!blue1Alive && red4Alive && dist < 1e-3f);
+
+  // Moving + shoot->stop: shoots and halts.
+  pb.At(true, true) = ReactionAction::ShootStop;
+  pb.At(true, false) = ReactionAction::ShootStop;
+  dist = RunRed4Walk(pb, &red4Alive, &blue1Alive, false);
+  CHECK(!blue1Alive && red4Alive && dist > 1.0f);
+}
+
+// The visibility axis selects the column: red4 walks away from blue1's gaze
+// and can't be seen by it only if blue1 faces away; here blue1 faces +X and
+// red4 starts west of it, so blue1 sees red4 only once red4 is ahead of it,
+// while red4 (moving east) sees blue1 first. Setting only one column to Stop
+// shows which column applies on each side of that crossing.
+void TestGameLogicPlaybookVisibilityColumns() {
+  bool red4Alive = false, blue1Alive = false;
+  SquadPlaybook seenOnly;
+  seenOnly.At(true, true) = ReactionAction::Stop;
+  SquadPlaybook unseenOnly;
+  unseenOnly.At(true, false) = ReactionAction::Stop;
+  const float seenDist = RunRed4Walk(seenOnly, &red4Alive, &blue1Alive, false);
+  const float unseenDist = RunRed4Walk(unseenOnly, &red4Alive, &blue1Alive, false);
+  // Exactly one of the two columns governs this walk.
+  CHECK((seenDist < 1e-3f) != (unseenDist < 1e-3f));
+}
+
+// Red4 walks +Z toward two blue figures at z=6 (clear of the scene's obstacles). `blueA` faces red4 (sees it
+// back); `blueB` faces away. With "seen" = Stop and "unseen" = Continue, the
+// walk halts only if the any-enemy-sees-back tie-break treats red4 as seen.
+float RunTieBreakWalk(bool includeSeeingEnemy) {
+  GameLogic game(LegacyScene());
+  for (Unit& u : const_cast<std::vector<Unit>&>(game.GetScene().units)) {
+    // Park everyone else far away; blue faces away so it can't see red4.
+    u.position = glm::vec3(u.team == Team::Blue ? -40.0f : 40.0f, 0.0f, 40.0f + u.id);
+    u.facingYaw = 3.14159265f;
+  }
+  const float kHalfPi = 1.57079632679f;
+  Unit* red4 = game.FindUnit(4);
+  red4->position = glm::vec3(8.0f, 0.0f, 0.0f);
+  red4->facingYaw = kHalfPi;
+  Unit* blueA = game.FindUnit(0);
+  blueA->position = glm::vec3(8.0f, 0.0f, 6.0f);
+  blueA->facingYaw = includeSeeingEnemy ? -kHalfPi : kHalfPi;
+  Unit* blueB = game.FindUnit(1);
+  blueB->position = glm::vec3(9.0f, 0.0f, 6.0f);
+  blueB->facingYaw = kHalfPi;
+
+  SquadPlaybook pb;
+  pb.At(true, true) = ReactionAction::Stop;
+  pb.At(true, false) = ReactionAction::Continue;
+  game.SetPlaybook(Team::Red, pb);
+
+  const glm::vec3 destination(8.0f, 0.0f, 3.0f);
+  for (int id : {0, 1, 2}) {
+    game.ClickUnit(id, Team::Blue);
+    game.ChoosePass();
+  }
+  game.ClickUnit(3, Team::Red);
+  game.ChoosePass();
+  game.ClickUnit(4, Team::Red);
+  game.ChooseMove();
+  game.ClickGround(destination, Team::Red);
+  game.FinishMovePlan();
+  game.ClickUnit(5, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  RunRound(game);
+  return glm::distance(game.FindUnit(4)->position, destination);
+}
+
+void TestGameLogicPlaybookMultiEnemyTieBreak() {
+  // Only an enemy that can't see back: "unseen" column -> continue.
+  CHECK(RunTieBreakWalk(false) < 1e-3f);
+  // One enemy sees back, the other doesn't: treated as seen -> stop.
+  CHECK(RunTieBreakWalk(true) > 0.5f);
+}
+
+// Isolated run of one playbook checkbox: red4 walks a straight lane past a
+// stationary blue0 while every other cell of both teams' tables stays
+// passive. `movingRow` picks whose table holds the cell under test -- the
+// mover's (red) for the moving rows, the watcher's (blue) for the stationary
+// rows. Geometry pins the visibility column for the whole walk: the actor
+// always has the enemy in its own FOV (a reaction needs a sighted enemy),
+// and facing/walk direction decides whether that enemy sees it back.
+struct PlaybookCellOutcome {
+  float moverDistToDest;
+  bool moverAlive;
+  bool watcherAlive;
+};
+
+PlaybookCellOutcome RunPlaybookCell(bool movingRow, bool canSeeMe, ReactionAction action) {
+  GameLogic game(LegacyScene());
+  for (Unit& u : const_cast<std::vector<Unit>&>(game.GetScene().units)) {
+    // Park everyone uninvolved far away, facing nothing.
+    u.position = glm::vec3(u.team == Team::Blue ? -40.0f : 40.0f, 0.0f, 40.0f + u.id);
+    u.facingYaw = 3.14159265f;
+  }
+  const float kHalfPi = 1.57079632679f;
+  Unit* watcher = game.FindUnit(0);  // Blue; stationary all round.
+  watcher->position = glm::vec3(8.0f, 0.0f, 6.0f);
+  Unit* mover = game.FindUnit(4);  // Red; walks the x=8 lane.
+  glm::vec3 destination;
+  SquadPlaybook pb = SquadPlaybook::Passive();
+  pb.At(movingRow, canSeeMe) = action;
+  if (movingRow) {
+    // Mover's row: it walks toward the watcher (so the enemy stays sighted);
+    // the watcher faces the lane only in the "seen" column.
+    mover->position = glm::vec3(8.0f, 0.0f, 0.0f);
+    mover->facingYaw = kHalfPi;
+    destination = glm::vec3(8.0f, 0.0f, 3.0f);
+    watcher->facingYaw = canSeeMe ? -kHalfPi : kHalfPi;
+    game.SetPlaybook(Team::Red, pb);
+    game.SetPlaybook(Team::Blue, SquadPlaybook::Passive());
+  } else {
+    // Watcher's row: it always faces the lane; the mover walks toward it
+    // (the sighted enemy sees the watcher back: "seen") or away ("unseen").
+    watcher->facingYaw = -kHalfPi;
+    mover->position = glm::vec3(8.0f, 0.0f, canSeeMe ? 0.0f : 3.0f);
+    mover->facingYaw = canSeeMe ? kHalfPi : -kHalfPi;
+    destination = glm::vec3(8.0f, 0.0f, canSeeMe ? 3.0f : 0.0f);
+    game.SetPlaybook(Team::Blue, pb);
+    game.SetPlaybook(Team::Red, SquadPlaybook::Passive());
+  }
+
+  for (int id : {0, 1, 2}) {
+    game.ClickUnit(id, Team::Blue);
+    game.ChoosePass();
+  }
+  game.ClickUnit(3, Team::Red);
+  game.ChoosePass();
+  game.ClickUnit(4, Team::Red);
+  game.ChooseMove();
+  game.ClickGround(destination, Team::Red);
+  game.FinishMovePlan();
+  game.ClickUnit(5, Team::Red);
+  game.ChoosePass();
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+  RunRound(game);
+  return PlaybookCellOutcome{glm::distance(game.FindUnit(4)->position, destination),
+                             game.FindUnit(4)->alive, game.FindUnit(0)->alive};
+}
+
+// Regression sweep over the whole playbook grid: every checkbox the HUD
+// offers (moving rows: Stop/Continue/ShootStop/ShootContinue; stationary
+// rows: DoNothing/Shoot -- mirroring the enabled columns in Hud.cpp's
+// DrawPlaybookView), each selected on its own in an otherwise passive
+// table, must produce exactly its advertised effect and nothing else.
+void TestGameLogicPlaybookEveryCheckbox() {
+  for (bool canSeeMe : {false, true}) {
+    for (ReactionAction action : {ReactionAction::Stop, ReactionAction::Continue,
+                                  ReactionAction::ShootStop, ReactionAction::ShootContinue}) {
+      const PlaybookCellOutcome out = RunPlaybookCell(true, canSeeMe, action);
+      CHECK(out.moverAlive);  // The watcher's table is passive: nobody shoots back.
+      CHECK(out.watcherAlive != ReactionShoots(action));
+      if (ReactionStops(action)) CHECK(out.moverDistToDest > 0.5f);
+      else CHECK(out.moverDistToDest < 1e-3f);
+    }
+    for (ReactionAction action : {ReactionAction::DoNothing, ReactionAction::Shoot}) {
+      const PlaybookCellOutcome out = RunPlaybookCell(false, canSeeMe, action);
+      CHECK(out.watcherAlive);  // The mover's table is passive: it never shoots.
+      CHECK(out.moverAlive != ReactionShoots(action));
+      // A downed mover drops short of its destination; otherwise it arrives.
+      if (ReactionShoots(action)) CHECK(out.moverDistToDest > 0.5f);
+      else CHECK(out.moverDistToDest < 1e-3f);
+    }
+  }
+}
+
+void TestSnapshotCarriesSquadPlaybook() {
+  GameLogic a(LegacyScene());
+  SquadPlaybook pb;
+  pb.At(true, true) = ReactionAction::ShootStop;
+  pb.At(false, false) = ReactionAction::Shoot;
+  a.SetPlaybook(Team::Red, pb);
+  GameSnapshot snap;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(a.ExportState()), &snap));
+  GameLogic b(LegacyScene());
+  CHECK(b.ImportState(snap));
+  CHECK(b.Playbook(Team::Red) == pb);
+  CHECK(b.Playbook(Team::Blue) == SquadPlaybook{});
 }
 
 void TestGameLogicWinCondition() {
@@ -1115,6 +1317,7 @@ void TestGameLogicWinCondition() {
 // snaps back to rest when the round is fast-forwarded to completion.
 void TestWalkCycleTracksInFlightMove() {
   GameLogic game(LegacyScene());
+  MakePassive(game);
   Unit* mover = game.FindUnit(0);
   const glm::vec3 start = mover->position;
   game.ClickUnit(0, Team::Blue);
@@ -1484,6 +1687,8 @@ void TestResetClearsSightings() {
 
 void TestFollowerBuildsSightingsWithoutPhysicsUpdate() {
   GameLogic sim(LegacyScene()), follower(LegacyScene());
+  MakePassive(sim);
+  MakePassive(follower);
   sim.ClickUnit(4, Team::Red);
   sim.ChooseMove();
   sim.ClickGround(glm::vec3(-2.0f, 0.0f, 0.0f), Team::Red);
@@ -1545,10 +1750,14 @@ int main() {
   TestGameLogicMoveFacingAdjustableBeforeCommit();
   TestGameLogicIgnoresInputWhileExecuting();
   TestGameLogicMoveCanClimbOntoObstacle();
-  TestGameLogicOverwatchFiresOnEnemyEnteringFov();
   TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds();
-  TestGameLogicPlaybookDefaultDoesNothing();
+  TestGameLogicPlaybookDefaultTable();
   TestGameLogicPlaybookIgnoresSameTeamMover();
+  TestGameLogicPlaybookMovingRows();
+  TestGameLogicPlaybookVisibilityColumns();
+  TestGameLogicPlaybookMultiEnemyTieBreak();
+  TestGameLogicPlaybookEveryCheckbox();
+  TestSnapshotCarriesSquadPlaybook();
   TestGameLogicWinCondition();
   TestWalkCycleTracksInFlightMove();
   TestResolvedShotStartsShootAnimation();

@@ -35,7 +35,6 @@ using tactics::GameLogic;
 using tactics::GameSnapshot;
 using tactics::InputMode;
 using tactics::Obstacle;
-using tactics::ReactionRule;
 using tactics::SerializeSnapshot;
 using tactics::Team;
 using tactics::TeamVisibility;
@@ -551,15 +550,10 @@ int main() {
       }
       if (hud.move) game.ChooseMove();
       if (hud.shoot) game.ChooseShoot();
-      if (hud.overwatch) game.ChooseOverwatch();
       if (hud.pass) game.ChoosePass();
       if (hud.cancel) game.CancelAction();
+      if (hud.playbook) game.SetPlaybook(paneTeam(pane), *hud.playbook);
       if (hud.done) game.FinishMovePlan();
-      if (hud.reaction) {
-        if (const auto selectedId = game.SelectedUnitId()) {
-          if (Unit* selected = game.FindUnit(*selectedId)) selected->reactionOnStationary = *hud.reaction;
-        }
-      }
     }
 
     // Pane divider. Both teams plan at once, so there's no "inactive side"

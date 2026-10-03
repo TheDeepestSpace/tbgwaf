@@ -1,9 +1,8 @@
-flowchart LR
-    start(( )):::start --> {{ initial }}
+%%{init: {"flowchart": {"htmlLabels": false}}}%%
+flowchart TD
 {% for s in states %}
     {{ s.id }}("{{ s.label }}")
 {% endfor %}
 {% for t in transitions %}
     {{ t['from'] }} -->|{{ t.event }}| {{ t.to }}
 {% endfor %}
-    classDef start fill:#333,stroke:#333

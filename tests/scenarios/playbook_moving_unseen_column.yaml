@@ -1,0 +1,33 @@
+# Visibility column selects the playbook cell: the watcher faces away, so it can't
+# see red1 back ("unseen"). Only the "seen" cell is Stop, so it doesn't apply
+# and red1 walks on; compare playbook_moving_stop_halts_mid_walk.
+# Mirrors TestGameLogicPlaybookVisibilityColumns.
+name: playbook_moving_unseen_column
+
+camera:
+  target: [8, 3]
+  zoom: 4
+
+playbook:
+  red: {moving_seen: stop, moving_unseen: continue}
+
+units:
+  # Faces away (+Z) from red1, so it cannot see red1 back.
+  - {id: 0, team: blue, position: [8, 0, 6], facing_degrees: 90}
+  - {id: 1, team: blue, position: [-9, 0, 9], facing_degrees: 180}
+  - {id: 2, team: red, position: [8, 0, 0], facing_degrees: 90}
+  - {id: 3, team: red, position: [9, 0, -9], facing_degrees: 0}
+
+script:
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: move
+    actor: 2
+    destination: [8, 0, 3]
+  - action: pass
+    actor: 3
+  - action: commit
+  - assert: {unit: 2, position: [8, 0, 3], tolerance: 0.1}
+  - assert: {unit: 0, alive: true}

@@ -13,9 +13,8 @@ namespace tactics {
 // choose an action for each of their figures, which only records what the
 // figure *will* do -- nothing executes until the whole round is committed
 // (see GameLogic::CommitRound), at which point every plan on both teams
-// plays out together. Overwatch doesn't act immediately either: it just
-// arms triggerAction below as part of the same commit.
-enum class PlannedActionType { None, Move, Shoot, Pass, Overwatch };
+// plays out together.
+enum class PlannedActionType { None, Move, Shoot, Pass };
 
 struct PlannedAction {
   PlannedActionType type = PlannedActionType::None;
@@ -28,19 +27,54 @@ struct PlannedAction {
   int shootTargetId = -1;           // For type == Shoot.
 };
 
-// A standing order a figure can arm on its turn, to react automatically
-// during an enemy's move instead of acting immediately. `None` is the
-// default (no reaction); `Shoot` is the overwatch PoC. Left room to extend
-// with more reactions later.
-enum class TriggerAction { None, Shoot };
+// What a figure does, on its own, on a tick where at least one living enemy
+// is inside its FOV+LOS. A persistent config set outside the turn economy
+// it stays in force across rounds
+// until the player changes it. Stop/Continue/ShootStop/ShootContinue only
+// mean something to a moving figure -- "continue" just keeps executing the
+// already-committed path this round; for a stationary figure they behave as
+// DoNothing / Shoot.
+enum class ReactionAction { DoNothing, Shoot, Stop, Continue, ShootStop, ShootContinue };
 
-// Standing per-figure playbook rule: what a figure does, on its own,
-// whenever it is stationary (not itself the one moving) and an enemy enters
-// its FOV+LOS. Distinct from a one-shot action-menu trigger (e.g. an
-// Overwatch-style ability that costs a turn and is consumed on first use):
-// this is a persistent config set outside the turn economy, and it stays
-// armed across rounds until the player changes it.
-enum class ReactionRule { DoNothing, Shoot };
+inline bool ReactionShoots(ReactionAction a) {
+  return a == ReactionAction::Shoot || a == ReactionAction::ShootStop ||
+         a == ReactionAction::ShootContinue;
+}
+inline bool ReactionStops(ReactionAction a) {
+  return a == ReactionAction::Stop || a == ReactionAction::ShootStop;
+}
+
+// Squad-wide reaction lookup: (moving | stationary) x (some sighted enemy can
+// see me back | none can) -> action. One table per team, shared by all of its
+// figures.
+struct SquadPlaybook {
+  ReactionAction table[2][2] = {
+      // [moving][canSeeMe]
+      {ReactionAction::DoNothing, ReactionAction::Shoot},          // Stationary.
+      {ReactionAction::Continue, ReactionAction::ShootContinue},   // Moving.
+  };
+
+  // All-neutral table (never shoots or stops); for tests/scenarios that
+  // aren't about reactions.
+  static SquadPlaybook Passive() {
+    SquadPlaybook pb;
+    pb.table[0][0] = pb.table[0][1] = ReactionAction::DoNothing;
+    pb.table[1][0] = pb.table[1][1] = ReactionAction::Continue;
+    return pb;
+  }
+
+  ReactionAction& At(bool moving, bool canSeeMe) { return table[moving ? 1 : 0][canSeeMe ? 1 : 0]; }
+  ReactionAction At(bool moving, bool canSeeMe) const {
+    return table[moving ? 1 : 0][canSeeMe ? 1 : 0];
+  }
+  bool operator==(const SquadPlaybook& o) const {
+    for (int m = 0; m < 2; ++m)
+      for (int s = 0; s < 2; ++s)
+        if (table[m][s] != o.table[m][s]) return false;
+    return true;
+  }
+  bool operator!=(const SquadPlaybook& o) const { return !(*this == o); }
+};
 
 struct Unit {
   int id = -1;
@@ -68,8 +102,6 @@ struct Unit {
   float shootAimYaw = 0.0f;
   float runSpeed = constants::kMoveSpeed;  // World units per second while moving.
   PlannedAction plan;  // This figure's plan for the current/upcoming round commit.
-  TriggerAction triggerAction = TriggerAction::None;
-  ReactionRule reactionOnStationary = ReactionRule::DoNothing;
 
   // How far this figure can move in one round's fixed execution window --
   // the length of one planned leg (longer routes are chained leg by leg, see

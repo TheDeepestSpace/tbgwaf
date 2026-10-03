@@ -84,6 +84,7 @@ struct Scenario {
   std::string name;
   std::string sourcePath;
   Scene scene;
+  SquadPlaybook playbooks[2] = {SquadPlaybook::Passive(), SquadPlaybook::Passive()};  // Indexed by Team; passive unless the YAML sets `playbook`.
   std::vector<ScenarioStep> steps;
   // Optional visual-runner camera adjustments (both panes), applied after
   // the initial view is fitted to the map: orbit target on the ground plane,

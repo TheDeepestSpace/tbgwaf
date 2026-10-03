@@ -104,7 +104,7 @@ and removes the preview automatically when the PR closes.
 ## Controls
 
 - **Left click** one of your own figures (in your own viewport) to select
-  it, then choose **Move**, **Shoot**, **Overwatch**, or **Pass** from the
+  it, then choose **Move**, **Shoot**, or **Pass** from the
   action menu.
   - Move: click a destination on the ground; the figure paths around
     obstacles via its navmesh. A move can only reach as far as the figure

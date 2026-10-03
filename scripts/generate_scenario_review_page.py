@@ -448,7 +448,7 @@ def _note(text: str) -> str:
 
 def _setup_html(doc: dict) -> list[str]:
     """Non-interactive prose for the setup the board itself doesn't make
-    obvious. Units and obstacles are deliberately omitted: they are visible in
+    obvious (camera, squad playbooks). Units and obstacles are deliberately omitted: they are visible in
     the video."""
     out: list[str] = []
     camera = doc.get("camera")
@@ -458,6 +458,15 @@ def _setup_html(doc: dict) -> list[str]:
         if "zoom" in camera:
             text += f", zoom {_fmt_value(camera['zoom'])}"
         out.append(f'<div class="detail">{text}{_fmt_extras(camera, {"target", "zoom"})}</div>')
+    playbook = doc.get("playbook")
+    if isinstance(playbook, dict):
+        for team, rules in playbook.items():
+            if not isinstance(rules, dict):
+                continue
+            slots = ", ".join(f"{html.escape(str(slot).replace('_', ' '))}: {_fmt_value(action)}"
+                              for slot, action in rules.items())
+            out.append(f'<div class="detail">Playbook ({html.escape(str(team))}): '
+                       f'{slots}</div>')
     return out
 
 

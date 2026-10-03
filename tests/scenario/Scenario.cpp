@@ -444,6 +444,22 @@ Scenario LoadScenarioFromFile(const std::string& path) {
     if (cam["target"]) scenario.cameraTarget = ParseVec2(cam["target"], "camera.target");
     if (cam["zoom"]) scenario.cameraZoom = cam["zoom"].as<float>();
   }
+  if (const YAML::Node render = root["render"]) {
+    if (render["fov_overlay"]) {
+      const std::string mode = render["fov_overlay"].as<std::string>();
+      if (mode == "cpu") {
+        scenario.fovOverlay = Scenario::FovOverlay::Cpu;
+      } else if (mode == "shadow_map") {
+        scenario.fovOverlay = Scenario::FovOverlay::ShadowMap;
+      } else {
+        throw std::runtime_error("render.fov_overlay must be 'cpu' or 'shadow_map', got '" +
+                                 mode + "'");
+      }
+    }
+    if (render["fov_probe_height"]) {
+      scenario.fovProbeHeight = render["fov_probe_height"].as<float>();
+    }
+  }
 
   if (const YAML::Node scriptNode = root["script"]) {
     for (const auto& stepNode : scriptNode) {

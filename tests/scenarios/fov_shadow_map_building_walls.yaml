@@ -1,0 +1,41 @@
+# Issue #110: hand-authored "buildings" exercising what the shadow-map FOV
+# mask covers that the CPU ground overlay cannot. Blue 0 stands at ground
+# level (eye 1.5 high) on the camera's side of the scene facing -X, so the
+# building faces turned toward it are the ones the fixed camera sees:
+#   - the tall block (height 4): its east wall is tinted, its roof is not
+#     (above the eye), and the ground behind it is shadowed;
+#   - the low block (height 1.0): its roof is tinted (the eye looks down on
+#     it) and only a short ground strip behind it is shadowed, exactly as
+#     the CPU overlay would shadow it;
+#   - the mid block (height 2.5): east wall tinted, roof not.
+# Red 1 then moves across the open lane so the last turn shows figures
+# neither casting nor receiving the mask. Blue 0 passes.
+name: fov_shadow_map_building_walls
+
+map:
+  obstacles:
+    - {center: [-1, 2], half_extent: [2.0, 2.5], height: 4.0, climbable: false}
+    - {center: [2, -5], half_extent: [1.5, 1.5], height: 1.0, climbable: false}
+    - {center: [-5, -7], half_extent: [1.5, 2.0], height: 2.5, climbable: false}
+    - {center: [3, 7], half_extent: [0.6, 0.6], height: 1.2, climbable: true}
+
+render:
+  fov_overlay: shadow_map
+
+units:
+  - {id: 0, team: blue, position: [9, 0, 0], facing_degrees: 180}
+  - {id: 1, team: red, position: [-10, 0, -10], facing_degrees: 0}
+
+camera:
+  target: [2, -1]
+  zoom: 4
+
+script:
+  - action: pass
+    actor: 0
+  - action: move
+    actor: 1
+    destination: [-10, 0, -2]
+  - action: commit
+  - assert: {unit: 1, position: [-10, 0, -2], tolerance: 0.05}
+  - assert: {round: 2}

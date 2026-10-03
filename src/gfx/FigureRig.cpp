@@ -109,8 +109,29 @@ constexpr float kRecoilArmKick = glm::radians(18.0f);  // Whole-arm lift (handgu
 constexpr float kRecoilMuzzleFlip = glm::radians(22.0f);
 constexpr float kRecoilSlide = 0.07f;  // Weapon pushed back along its barrel.
 // Rifles are braced with both hands and the shoulder, so their kick is a
-// fraction of the one-handed hand-cannon's.
+// fraction of the two-handed hand-cannon's.
 constexpr float kRifleRecoilScale = 0.4f;
+
+// Aiming a rifle blades the upper body (right shoulder back) around the
+// vertical axis: it reads as shouldering the stock and brings the left
+// shoulder forward far enough that the short support arm can reach the
+// handguard.
+constexpr float kRifleAimBlade = glm::radians(35.0f);
+// Where the head leans at full rifle aim (figure-local, before the twist
+// onto the target bearing): back over the stock and down to the sight line,
+// so the eyepiece/rear sight meets the front of the face and the figure
+// reads as looking through the scope / down the sights.
+const glm::vec3 kRifleAimHeadCenter(-0.14f, 1.30f, 0.03f);
+// The pistol's gun arm angles inward as the aim comes up (the wrist
+// counter-yaws so the barrel stays on the target bearing); together with
+// the support hand joining the grip this makes a two-handed firing stance.
+constexpr float kPistolAimInward = glm::radians(30.0f);
+// The palm wraps the pistol grip this far below the grip top, so the fist
+// reads as holding the grip rather than clamped around the slide.
+constexpr float kPistolGripDrop = 0.12f;
+// Where the support (left) hand clasps the pistol at full aim, in the
+// weapon-local frame: front of the grip, slightly on the left side.
+const glm::vec3 kPistolSupportHandLocal(0.02f, -0.10f, -0.05f);
 
 float EaseOutQuad(float t) {
   t = glm::clamp(t, 0.0f, 1.0f);
@@ -292,10 +313,11 @@ void AppendWeapon(FigureParts* parts, const glm::mat4& frame, WeaponType type,
 }
 
 // Where the supporting (left) hand wraps the weapon, in the weapon-local
-// frame. Kept close to the receiver: the doll's arms are short.
+// frame: on the handguard (AR) / barrel ahead of the magazine (sniper), not
+// back at the receiver.
 glm::vec3 WeaponLeftHandLocal(WeaponType type) {
-  return type == WeaponType::SniperRifle ? glm::vec3(0.18f, 0.01f, 0.0f)
-                                         : glm::vec3(0.16f, 0.03f, 0.0f);
+  return type == WeaponType::SniperRifle ? glm::vec3(0.22f, 0.02f, 0.0f)
+                                         : glm::vec3(0.26f, 0.03f, 0.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -424,15 +446,29 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
   const glm::mat4 figure =
       fall * YawFrame(unit.position + glm::vec3(0.0f, bob, 0.0f), unit.facingYaw);
 
+  // Rifle aim blades the torso/shoulders onto the target bearing plus
+  // kRifleAimBlade and leans the head to the sight line; both follow
+  // shot.raise so idle/run/knockdown are untouched.
+  const bool rifleCarry = ClassOf(unit.weapon) != WeaponClass::Handgun;
+  const float torsoYaw =
+      rifleCarry ? shot.aimYawDelta + kRifleAimBlade * shot.raise : 0.0f;
+  const glm::mat3 aimRot = glm::mat3(
+      glm::rotate(glm::mat4(1.0f), shot.aimYawDelta, glm::vec3(0.0f, -1.0f, 0.0f)));
+  glm::vec3 headCenter(0.0f, kHeadCenterHeight, 0.0f);
+  if (rifleCarry) {
+    headCenter = glm::mix(headCenter, aimRot * kRifleAimHeadCenter, shot.raise);
+  }
+
   FigureParts parts;
   parts.reserve(28);
-  parts.push_back({EllipsoidModel(figure, glm::vec3(0.0f, kHipHeight + kTorsoHeight * 0.5f, 0.0f),
-                                  glm::vec3(kTorsoDepth * 0.5f, kTorsoHeight * 0.56f,
-                                            kTorsoWidth * 0.5f)),
+  parts.push_back({EllipsoidModel(
+                       figure * glm::rotate(glm::mat4(1.0f), torsoYaw,
+                                            glm::vec3(0.0f, -1.0f, 0.0f)),
+                       glm::vec3(0.0f, kHipHeight + kTorsoHeight * 0.5f, 0.0f),
+                       glm::vec3(kTorsoDepth * 0.5f, kTorsoHeight * 0.56f,
+                                 kTorsoWidth * 0.5f)),
                    teamColor});
-  parts.push_back({EllipsoidModel(figure, glm::vec3(0.0f, kHeadCenterHeight, 0.0f),
-                                  glm::vec3(kHeadRadius)),
-                   teamColor});
+  parts.push_back({EllipsoidModel(figure, headCenter, glm::vec3(kHeadRadius)), teamColor});
 
   const glm::mat4 leftThigh =
       LimbFrame(figure, glm::vec3(0.0f, kHipHeight, -kLegSideOffset), leftHip);
@@ -474,35 +510,61 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
     const float gunPitch =
         glm::half_pi<float>() * (1.0f - shot.raise) + kRecoilMuzzleFlip * shot.recoil;
 
+    // Arm frames are built figure-local (identity base) so the weapon frame
+    // can double as the IK target space for the support hand below.
+    const glm::vec3 leftShoulderPivot(0.0f, kShoulderHeight, -kArmSideOffset);
     const glm::mat4 leftUpperArm =
-        LimbFrame(figure, glm::vec3(0.0f, kShoulderHeight, -kArmSideOffset), leftShoulder,
-                  0.0f, kArmSplay);
+        LimbFrame(glm::mat4(1.0f), leftShoulderPivot, leftShoulder, 0.0f, kArmSplay);
     const glm::mat4 leftForearm = ChildBoneFrame(leftUpperArm, kUpperArmLength, leftElbow);
-    parts.push_back({RoundedSegment(leftUpperArm, kUpperArmLength, kArmRadius), teamColor});
-    parts.push_back({JointBall(leftForearm, kArmRadius), teamColor});
-    parts.push_back({RoundedSegment(leftForearm, kLowerArmLength, kArmRadius * 0.92f),
-                     teamColor});
 
+    // The gun arm angles inward as the aim comes up so the support hand can
+    // reach the grip; negative yawTwist turns it toward the body's center.
+    const float inward = -kPistolAimInward * shot.raise;
     const glm::mat4 gunUpperArm =
-        LimbFrame(figure, glm::vec3(0.0f, kShoulderHeight, kArmSideOffset), gunArmSwing,
-                  shot.aimYawDelta, -kArmSplay * (1.0f - shot.raise));
+        LimbFrame(glm::mat4(1.0f), glm::vec3(0.0f, kShoulderHeight, kArmSideOffset),
+                  gunArmSwing, shot.aimYawDelta + inward, -kArmSplay * (1.0f - shot.raise));
     const glm::mat4 gunForearm = ChildBoneFrame(gunUpperArm, kUpperArmLength, gunElbow);
-    parts.push_back({RoundedSegment(gunUpperArm, kUpperArmLength, kArmRadius), teamColor});
-    parts.push_back({JointBall(gunForearm, kArmRadius), teamColor});
-    parts.push_back({RoundedSegment(gunForearm, kLowerArmLength, kArmRadius * 0.92f),
+    parts.push_back({RoundedSegment(figure * gunUpperArm, kUpperArmLength, kArmRadius),
+                     teamColor});
+    parts.push_back({JointBall(figure * gunForearm, kArmRadius), teamColor});
+    parts.push_back({RoundedSegment(figure * gunForearm, kLowerArmLength, kArmRadius * 0.92f),
                      teamColor});
 
     // Pistol gripped at the hand (end of the arm). The weapon-local +X
     // (barrel) must run along the pitched hand frame's -Y, which
-    // rotate(-90 deg about Z) provides; recoil slides it back along the
-    // barrel.
+    // rotate(-90 deg about Z) provides; the wrist counter-yaws the inward
+    // arm angle so the barrel stays on the aim bearing, the grip drops so
+    // the fist wraps it below the slide, and recoil slides the gun back
+    // along the barrel.
     const glm::mat4 weaponFrame =
         gunForearm *
         glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -kLowerArmLength, 0.0f)) *
         glm::rotate(glm::mat4(1.0f), gunPitch, glm::vec3(0.0f, 0.0f, 1.0f)) *
         glm::rotate(glm::mat4(1.0f), -glm::half_pi<float>(), glm::vec3(0.0f, 0.0f, 1.0f)) *
-        glm::translate(glm::mat4(1.0f), glm::vec3(-kRecoilSlide * shot.recoil, 0.0f, 0.0f));
-    AppendWeapon(&parts, weaponFrame, unit.weapon, compactWeapon);
+        glm::rotate(glm::mat4(1.0f), -inward, glm::vec3(0.0f, -1.0f, 0.0f)) *
+        glm::translate(glm::mat4(1.0f),
+                       glm::vec3(-kRecoilSlide * shot.recoil, kPistolGripDrop, 0.0f));
+    AppendWeapon(&parts, figure * weaponFrame, unit.weapon, compactWeapon);
+
+    if (unit.shootElapsed >= 0.0f) {
+      // Two-handed firing stance: the support hand leaves its gait swing and
+      // clasps the front of the grip as the gun comes up (and rides the
+      // recoil with it, since the target lives in the weapon frame).
+      const glm::vec3 swingHand =
+          glm::vec3(leftForearm * glm::vec4(0.0f, -kLowerArmLength, 0.0f, 1.0f));
+      const glm::vec3 supportHand =
+          glm::vec3(weaponFrame * glm::vec4(kPistolSupportHandLocal, 1.0f));
+      AppendArmIK(&parts, figure, leftShoulderPivot,
+                  glm::mix(swingHand, supportHand, shot.raise),
+                  glm::vec3(-0.6f, -0.8f, -0.3f), teamColor);
+    } else {
+      parts.push_back({RoundedSegment(figure * leftUpperArm, kUpperArmLength, kArmRadius),
+                       teamColor});
+      parts.push_back({JointBall(figure * leftForearm, kArmRadius), teamColor});
+      parts.push_back({RoundedSegment(figure * leftForearm, kLowerArmLength,
+                                      kArmRadius * 0.92f),
+                       teamColor});
+    }
   } else {
     // Two-handed rifle carry: the weapon frame is posed from the torso
     // (low-ready across the chest, blending up to a level chest-height aim
@@ -510,8 +572,10 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
     // they never swing with the gait -- the distinct "run with rifle" look.
     // A slight yaw sway while running keeps the carry from looking welded.
     const float sway = glm::radians(5.0f) * std::sin(unit.walkPhase) * walk;
-    const glm::vec3 gripLow(0.30f, 0.74f, 0.0f);
-    const glm::vec3 gripAim(0.30f, 0.90f, 0.03f);
+    // Low carry sits slightly left of center so the support hand reaches the
+    // handguard; the aim grip rises toward the leaned head's sight line.
+    const glm::vec3 gripLow(0.26f, 0.75f, -0.02f);
+    const glm::vec3 gripAim(0.22f, 1.02f, 0.03f);
     const glm::vec3 grip = glm::mix(gripLow, gripAim, shot.raise);
     // rotate(+angle, +Y) yaws the muzzle toward the figure's left (-Z);
     // rotate(+angle, Z) pitches it up.
@@ -532,9 +596,15 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
     const glm::vec3 rightHand = glm::vec3(weaponFig * glm::vec4(0.0f, -0.03f, 0.0f, 1.0f));
     const glm::vec3 leftHand =
         glm::vec3(weaponFig * glm::vec4(WeaponLeftHandLocal(unit.weapon), 1.0f));
-    AppendArmIK(&parts, figure, glm::vec3(0.0f, kShoulderHeight, kArmSideOffset), rightHand,
+    // The IK shoulders ride the bladed torso (torsoYaw), which swings the
+    // left shoulder forward toward the handguard while aiming.
+    const glm::mat3 shoulderRot = glm::mat3(
+        glm::rotate(glm::mat4(1.0f), torsoYaw, glm::vec3(0.0f, -1.0f, 0.0f)));
+    AppendArmIK(&parts, figure,
+                shoulderRot * glm::vec3(0.0f, kShoulderHeight, kArmSideOffset), rightHand,
                 glm::vec3(-0.2f, -1.0f, 0.5f), teamColor);
-    AppendArmIK(&parts, figure, glm::vec3(0.0f, kShoulderHeight, -kArmSideOffset), leftHand,
+    AppendArmIK(&parts, figure,
+                shoulderRot * glm::vec3(0.0f, kShoulderHeight, -kArmSideOffset), leftHand,
                 glm::vec3(-0.2f, -1.0f, -0.5f), teamColor);
   }
   return parts;

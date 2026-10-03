@@ -274,7 +274,16 @@ void AppendSniperRifle(FigureParts* parts, const glm::mat4& frame) {
   AddBox(parts, frame, {0.055f, -0.105f, -0.022f}, {0.090f, 0.085f, 0.044f}, kBlackMetal);  // Magazine.
 }
 
-void AppendWeapon(FigureParts* parts, const glm::mat4& frame, WeaponType type) {
+void AppendWeapon(FigureParts* parts, const glm::mat4& frame, WeaponType type,
+                  bool compact) {
+  if (compact) {
+    // Single bounding box stand-in for wireframe ghosts (see
+    // BuildFigureWireframe).
+    glm::vec3 lo, hi;
+    WeaponLocalBounds(type, &lo, &hi);
+    parts->push_back({frame * BoxModel(lo, hi - lo), kGunMetal, FigurePrimitive::Box});
+    return;
+  }
   switch (type) {
     case WeaponType::DesertEagle: AppendDesertEagle(parts, frame); break;
     case WeaponType::AssaultRifle: AppendAssaultRifle(parts, frame); break;
@@ -349,8 +358,24 @@ void AppendArmIK(FigureParts* parts, const glm::mat4& figure, const glm::vec3& s
 
 FigureParts BuildWeaponParts(WeaponType type) {
   FigureParts parts;
-  AppendWeapon(&parts, glm::mat4(1.0f), type);
+  AppendWeapon(&parts, glm::mat4(1.0f), type, /*compact=*/false);
   return parts;
+}
+
+void WeaponLocalBounds(WeaponType type, glm::vec3* outMin, glm::vec3* outMax) {
+  const FigureParts parts = BuildWeaponParts(type);
+  glm::vec3 lo(1e9f), hi(-1e9f);
+  for (const FigurePart& part : parts) {
+    for (int corner = 0; corner < 8; ++corner) {
+      const glm::vec4 local(corner & 1 ? 1.0f : 0.0f, corner & 2 ? 1.0f : 0.0f,
+                            corner & 4 ? 1.0f : 0.0f, 1.0f);
+      const glm::vec3 p = glm::vec3(part.model * local);
+      lo = glm::min(lo, p);
+      hi = glm::max(hi, p);
+    }
+  }
+  *outMin = lo;
+  *outMax = hi;
 }
 
 float WeaponLength(WeaponType type) {
@@ -362,7 +387,7 @@ float WeaponLength(WeaponType type) {
   return 1.0f;
 }
 
-FigureParts BuildFigure(const Unit& unit) {
+FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
   // Every body part shares the one flat team color; only the weapon differs.
   const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
                                                       : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
@@ -477,7 +502,7 @@ FigureParts BuildFigure(const Unit& unit) {
         glm::rotate(glm::mat4(1.0f), gunPitch, glm::vec3(0.0f, 0.0f, 1.0f)) *
         glm::rotate(glm::mat4(1.0f), -glm::half_pi<float>(), glm::vec3(0.0f, 0.0f, 1.0f)) *
         glm::translate(glm::mat4(1.0f), glm::vec3(-kRecoilSlide * shot.recoil, 0.0f, 0.0f));
-    AppendWeapon(&parts, weaponFrame, unit.weapon);
+    AppendWeapon(&parts, weaponFrame, unit.weapon, compactWeapon);
   } else {
     // Two-handed rifle carry: the weapon frame is posed from the torso
     // (low-ready across the chest, blending up to a level chest-height aim
@@ -502,7 +527,7 @@ FigureParts BuildFigure(const Unit& unit) {
         glm::rotate(glm::mat4(1.0f), weaponPitch, glm::vec3(0.0f, 0.0f, 1.0f)) *
         glm::translate(glm::mat4(1.0f),
                        glm::vec3(-kRecoilSlide * kRifleRecoilScale * shot.recoil, 0.0f, 0.0f));
-    AppendWeapon(&parts, figure * weaponFig, unit.weapon);
+    AppendWeapon(&parts, figure * weaponFig, unit.weapon, compactWeapon);
 
     const glm::vec3 rightHand = glm::vec3(weaponFig * glm::vec4(0.0f, -0.03f, 0.0f, 1.0f));
     const glm::vec3 leftHand =
@@ -514,5 +539,9 @@ FigureParts BuildFigure(const Unit& unit) {
   }
   return parts;
 }
+
+FigureParts BuildFigure(const Unit& unit) { return BuildFigureImpl(unit, false); }
+
+FigureParts BuildFigureWireframe(const Unit& unit) { return BuildFigureImpl(unit, true); }
 
 }  // namespace gfx

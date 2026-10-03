@@ -34,6 +34,13 @@ using FigureParts = std::vector<FigurePart>;
 // one-handed at low ready with both arms swinging while running.
 FigureParts BuildFigure(const tactics::Unit& unit);
 
+// Like BuildFigure, but with the carried weapon collapsed to its single
+// bounding box. Wireframe ghosts (plan previews, sighting memory) draw
+// every part as thin line work, and a dozen per-weapon boxes there is
+// sub-pixel detail that only adds driver-dependent rasterization noise to
+// the golden screenshots -- one box reads just as well at ghost fidelity.
+FigureParts BuildFigureWireframe(const tactics::Unit& unit);
+
 // The weapon alone, in its local frame: origin at the top of the grip
 // (where the hand wraps), +X toward the muzzle, +Y up, +Z the weapon's
 // right-hand side. Used by the gallery's weapon turntables; BuildFigure
@@ -42,5 +49,8 @@ FigureParts BuildWeaponParts(tactics::WeaponType type);
 
 // Overall muzzle-to-butt length of a weapon model, for gallery framing.
 float WeaponLength(tactics::WeaponType type);
+
+// Axis-aligned bounds of BuildWeaponParts(type) in the weapon-local frame.
+void WeaponLocalBounds(tactics::WeaponType type, glm::vec3* outMin, glm::vec3* outMax);
 
 }  // namespace gfx

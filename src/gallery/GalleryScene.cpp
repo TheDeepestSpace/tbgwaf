@@ -62,24 +62,6 @@ void main() {
 const glm::vec3 kLightDir = glm::normalize(glm::vec3(0.35f, -1.0f, 0.25f));
 const glm::vec4 kGroundColor(0.16f, 0.18f, 0.20f, 1.0f);
 
-// Axis-aligned bounds of a weapon's parts (every part is a transformed unit
-// cube), for deterministic turntable framing.
-void WeaponBounds(WeaponType type, glm::vec3* outMin, glm::vec3* outMax) {
-  const gfx::FigureParts parts = gfx::BuildWeaponParts(type);
-  glm::vec3 lo(1e9f), hi(-1e9f);
-  for (const gfx::FigurePart& part : parts) {
-    for (int corner = 0; corner < 8; ++corner) {
-      const glm::vec4 local(corner & 1 ? 1.0f : 0.0f, corner & 2 ? 1.0f : 0.0f,
-                            corner & 4 ? 1.0f : 0.0f, 1.0f);
-      const glm::vec3 p = glm::vec3(part.model * local);
-      lo = glm::min(lo, p);
-      hi = glm::max(hi, p);
-    }
-  }
-  *outMin = lo;
-  *outMax = hi;
-}
-
 }  // namespace
 
 const std::vector<GalleryItem>& Catalog() {
@@ -144,7 +126,7 @@ ViewState DefaultView(int itemIndex) {
   ViewState view;
   if (item.kind == ItemKind::WeaponModel) {
     glm::vec3 lo, hi;
-    WeaponBounds(item.weapon, &lo, &hi);
+    gfx::WeaponLocalBounds(item.weapon, &lo, &hi);
     view.target = (lo + hi) * 0.5f;
     // Side profile (+X muzzle pointing screen-right), close enough to fill
     // the frame at any weapon length.
@@ -221,7 +203,7 @@ void GalleryRenderer::Render(int itemIndex, double t, const ViewState& view, int
     // through the weapon's center.
     const float yaw = static_cast<float>(kTwoPi * t / item.duration);
     glm::vec3 lo, hi;
-    WeaponBounds(item.weapon, &lo, &hi);
+    gfx::WeaponLocalBounds(item.weapon, &lo, &hi);
     const glm::vec3 center = (lo + hi) * 0.5f;
     const glm::mat4 spin = glm::translate(glm::mat4(1.0f), center) *
                            glm::rotate(glm::mat4(1.0f), yaw, glm::vec3(0.0f, 1.0f, 0.0f)) *

@@ -285,7 +285,7 @@ void DrawUnitWireframe(const Shader& shader, LineMesh& lines, const glm::mat4& v
                        const Unit& unit) {
   // Common highlight green for both teams.
   const glm::vec4 color(0.3f, 0.9f, 0.4f, 1.0f);
-  for (const FigurePart& part : BuildFigure(unit)) {
+  for (const FigurePart& part : BuildFigureWireframe(unit)) {
     DrawFigureWirePart(shader, lines, viewProj, part, color);
   }
 }
@@ -337,7 +337,7 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
     shader.SetVec4("uColor", color);
     lines.Draw();
   }
-  for (const FigurePart& part : BuildFigure(ghost)) {
+  for (const FigurePart& part : BuildFigureWireframe(ghost)) {
     DrawFigureWirePart(shader, lines, viewProj, part, color);
   }
 }

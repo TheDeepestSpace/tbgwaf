@@ -23,7 +23,7 @@
   .pane.breakdown { flex: 0 1 360px; min-width: 280px; }
   .pane.breakdown figcaption { color: #b8c0cc; }
   .rounds { position: relative; border: 1px solid #3a3f47; background: #1a1d22;
-            padding: 0.4rem 0.6rem; max-height: 420px; overflow-y: auto;
+            padding: 0.4rem 0.6rem; max-height: 520px; overflow-y: auto;
             font-size: 0.9rem; }
   .round-title { color: #8a919c; font-size: 0.78rem; text-transform: uppercase;
                  letter-spacing: 0.06em; margin: 0.5rem 0 0.15rem; }
@@ -31,6 +31,11 @@
   .has-video .step { cursor: pointer; }
   .has-video .step:hover { background: #262b33; }
   .step.active { background: #2c3a55; box-shadow: inset 0 0 0 1px #4a6da8; }
+  .detail { font-style: italic; color: #8a919c; user-select: none;
+            -webkit-user-select: none; padding: 0.05rem 0.4rem; }
+  .detail.description { margin-bottom: 0.4rem; }
+  .detail.indent { padding-left: 1.2rem; }
+  span.detail { padding: 0; }
   .step .u { font-weight: bold; }
   .step .u.blue { color: #6d9eeb; }
   .step .u.red { color: #e06666; }
@@ -61,8 +66,29 @@ listed by name only.</p>
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/default_scene_shoot_rows/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/default_scene_shoot_rows/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="detail description">Replicates the original open-lane layout (not the current BuildDefaultScene()) and the same shot outcomes as TestGameLogicShootRowsMatchLayout in tests/logic_tests.cpp: the top/bottom lanes are wall-blocked (shots there must miss), the middle lane is open (a clean shot must hit). Under WEGO rounds both teams plan the same round, so the middle lane&#x27;s mutual blue1 &lt;-&gt; red4 exchange resolves simultaneously and downs both shooters.</div>
+<div class="round-title">Setup</div>
+<div class="detail">Obstacles:</div>
+<div class="detail indent">at [0, -4], half-extent [1.0, 2.0], height 2, not climbable</div>
+<div class="detail indent">at [0, 4], half-extent [1.0, 2.0], height 2, not climbable</div>
+<div class="detail indent">at [-4, 6.5], half-extent [0.6, 0.6], height 1.2, climbable</div>
+<div class="detail indent">at [4, -6.5], half-extent [0.6, 0.6], height 1.2, climbable</div>
+<div class="detail indent">at [-3.5, -7.5], half-extent [0.6, 0.6], height 1.2, climbable</div>
+<div class="detail indent">at [3.5, 7.5], half-extent [0.6, 0.6], height 1.2, climbable</div>
+<div class="detail">Units:</div>
+<div class="detail indent"><span class="u blue">blue0</span> at (-8, -4), facing 0°</div>
+<div class="detail indent"><span class="u blue">blue1</span> at (-8, 0), facing 0°</div>
+<div class="detail indent"><span class="u blue">blue2</span> at (-8, 4), facing 0°</div>
+<div class="detail indent"><span class="u red">red3</span> at (8, -4), facing 180°</div>
+<div class="detail indent"><span class="u red">red4</span> at (8, 0), facing 180°</div>
+<div class="detail indent"><span class="u red">red5</span> at (8, 4), facing 180°</div>
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Both teams plan the same round: every figure shoots its opposite number,</div>
+<div class="detail">then a single commit resolves everything at once. Rows z=-4 and z=4 are</div>
+<div class="detail">behind walls (those four shots must all miss); row z=0 is the open middle</div>
+<div class="detail">lane, so blue1 and red4 shoot each other in the same instant -- judged</div>
+<div class="detail">against the same snapshot, both shots land and both figures drop.</div>
 <div class="step" data-action="1"><span class="u blue">blue0</span> shoots <span class="u red">red3</span></div>
 <div class="step" data-action="2"><span class="u blue">blue1</span> shoots <span class="u red">red4</span></div>
 <div class="step" data-action="3"><span class="u blue">blue2</span> shoots <span class="u red">red5</span></div>
@@ -70,6 +96,14 @@ listed by name only.</p>
 <div class="step" data-action="5"><span class="u red">red4</span> shoots <span class="u blue">blue1</span></div>
 <div class="step" data-action="6"><span class="u red">red5</span> shoots <span class="u blue">blue2</span></div>
 <div class="step" data-action="7">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is alive</div>
+<div class="detail">Check: <span class="u blue">blue1</span> is down <span class="detail">— Mutual middle-lane exchange.</span></div>
+<div class="detail">Check: <span class="u blue">blue2</span> is alive</div>
+<div class="detail">Check: <span class="u red">red3</span> is alive</div>
+<div class="detail">Check: <span class="u red">red4</span> is down <span class="detail">— Mutual middle-lane exchange.</span></div>
+<div class="detail">Check: <span class="u red">red5</span> is alive</div>
+<div class="detail">Check: winner: none <span class="detail">— Both teams still have two survivors.</span></div>
+<div class="detail">Check: round is 2</div>
 </div>
 </div></figure>
 </div>
@@ -80,9 +114,17 @@ listed by name only.</p>
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/double_click_focus_camera/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/double_click_focus_camera/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="detail description">Showcases double-clicking a figure: its team&#x27;s camera eases over the figure&#x27;s whole movement frontier (top-down, zoomed to fit). Turn 0 is the default framing (&quot;before&quot;); turn 1 is the converged focus (&quot;after&quot;). Only the blue pane moves -- red&#x27;s camera is untouched. The video records the glide.</div>
+<div class="round-title">Setup</div>
+<div class="detail">Obstacles:</div>
+<div class="detail indent">at [3, -3], half-extent [1.0, 1.0], height 2, not climbable</div>
+<div class="detail">Units:</div>
+<div class="detail indent"><span class="u blue">blue0</span> at (-6, 3), facing 0°</div>
+<div class="detail indent"><span class="u red">red1</span> at (8, -2), facing 180°</div>
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1 (uncommitted)</div>
 <div class="step" data-action="1">double-click focus on <span class="u blue">blue0</span></div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-6, 3) (tolerance 0.05)</div>
 </div>
 </div></figure>
 </div>
@@ -93,13 +135,22 @@ listed by name only.</p>
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/enemy_sighting_memory_trail/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/enemy_sighting_memory_trail/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="detail description">Showcases enemy sighting memory: red starts in blue&#x27;s FOV, then runs out of it. The faded wireframe trail and movement arrow of where blue last saw red stay on screen in blue&#x27;s pane (round 2 holds on them) while red itself is hidden.</div>
+<div class="round-title">Setup</div>
+<div class="detail">No obstacles.</div>
+<div class="detail">Units:</div>
+<div class="detail indent"><span class="u blue">blue0</span> at (-14, 0), facing 0°</div>
+<div class="detail indent"><span class="u red">red1</span> at (-4, -2), facing 180°</div>
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Check: <span class="u red">red1</span> is visible to blue</div>
 <div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
-<div class="step" data-action="2"><span class="u red">red1</span> moves to (-12, 14)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (-12, 14) <span class="detail">— Crosses blue&#x27;s 150 degree cone edge near the end.</span></div>
 <div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
 </div>
 <div class="round"><div class="round-title">Round 2</div>
+<div class="detail">Round 2: nothing moves; the remembered trail is still drawn for blue.</div>
 <div class="step" data-action="4"><span class="u blue">blue0</span> passes</div>
 <div class="step" data-action="5"><span class="u red">red1</span> passes</div>
 <div class="step" data-action="6">commit round</div>
@@ -113,13 +164,26 @@ listed by name only.</p>
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/fov_gating_blocks_out_of_view_shot/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/fov_gating_blocks_out_of_view_shot/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="detail description">Regression coverage for the fog-of-war shoot gating exercised by TestGameLogicShootGatingRequiresTeamVisibility in tests/logic_tests.cpp: a living enemy outside the shooter&#x27;s team FOV must not be a clickable target at all (the click is a no-op, not a guaranteed miss), and a no-op must not record a plan.</div>
+<div class="round-title">Setup</div>
+<div class="detail">No obstacles.</div>
+<div class="detail">Units:</div>
+<div class="detail indent"><span class="u blue">blue0</span> at (-5, 0), facing 180°</div>
+<div class="detail indent"><span class="u red">red1</span> at (5, 0), facing 0°</div>
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
 <div class="step" data-action="1"><span class="u blue">blue0</span> shoots <span class="u red">red1</span> (expected no-op: target not visible)</div>
+<div class="detail">Check: <span class="u red">red1</span> is alive</div>
+<div class="detail">The gated no-op recorded no plan, so blue0 still needs one before the</div>
+<div class="detail">round can commit; both figures pass and the round resolves with no shots.</div>
 <div class="step" data-action="2"><span class="u blue">blue0</span> cancels</div>
 <div class="step" data-action="3"><span class="u blue">blue0</span> passes</div>
 <div class="step" data-action="4"><span class="u red">red1</span> passes</div>
 <div class="step" data-action="5">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is alive</div>
+<div class="detail">Check: <span class="u red">red1</span> is alive</div>
+<div class="detail">Check: round is 2</div>
 </div>
 </div></figure>
 </div>
@@ -130,11 +194,21 @@ listed by name only.</p>
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/move_and_climb_crate/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/move_and_climb_crate/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="detail description">Regression coverage for climbable-obstacle pathfinding, matching TestGameLogicMoveCanClimbOntoObstacle in tests/logic_tests.cpp: a move destination on top of a climbable crate should route up onto it rather than being rejected as unreachable. Both figures act in the same WEGO round: blue0 climbs while red1 crosses the open ground concurrently.</div>
+<div class="round-title">Setup</div>
+<div class="detail">Obstacles:</div>
+<div class="detail indent">at [0, 0], half-extent [0.6, 0.6], height 1.2, climbable</div>
+<div class="detail">Units:</div>
+<div class="detail indent"><span class="u blue">blue0</span> at (-5, 0), facing 0°</div>
+<div class="detail indent"><span class="u red">red1</span> at (5, 0), facing 180°</div>
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1</div>
-<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (0, 1.2, 0)</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (0, 1.2, 0) <span class="detail">— The crate&#x27;s top surface.</span></div>
 <div class="step" data-action="2"><span class="u red">red1</span> moves to (5, -5)</div>
 <div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 1.2, 0) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u red">red1</span> is at (5, -5) (tolerance 0.05)</div>
+<div class="detail">Check: round is 2</div>
 </div>
 </div></figure>
 </div>
@@ -145,11 +219,21 @@ listed by name only.</p>
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/move_final_facing/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/move_final_facing/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="detail description">Showcases choosing a move&#x27;s final facing: the wireframe ghost defaults to the direction of travel, can be re-aimed any time before the round is committed (final_facing_degrees, mirroring a drag of the wireframe), and the unit ends the move facing that way. Unit 1 (same round) keeps the default facing. The per-turn goldens show the wireframe at the destination before commit.</div>
+<div class="round-title">Setup</div>
+<div class="detail">No obstacles.</div>
+<div class="detail">Units:</div>
+<div class="detail indent"><span class="u blue">blue0</span> at (-5, 0), facing 0°</div>
+<div class="detail indent"><span class="u red">red1</span> at (5, 5), facing 180°</div>
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1</div>
-<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (-5, 4), then faces 0°</div>
-<div class="step" data-action="2"><span class="u red">red1</span> moves to (5, 0)</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (-5, 4), then faces 0° <span class="detail">— Travel direction is +Z (90 deg).</span> <span class="detail">— Re-aimed toward +X before commit.</span></div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (5, 0) <span class="detail">— Travel direction is -Z (-90 deg).</span></div>
 <div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-5, 4) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u blue">blue0</span> faces 0° (tolerance 0.5)</div>
+<div class="detail">Check: <span class="u red">red1</span> is at (5, 0) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u red">red1</span> faces -90° (tolerance 0.5)</div>
 </div>
 </div></figure>
 </div>
@@ -160,11 +244,22 @@ listed by name only.</p>
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_do_nothing_lets_enemy_pass/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_do_nothing_lets_enemy_pass/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="detail description">Default playbook rule (do_nothing): identical layout to playbook_shoot_on_fov_entry, but blue0 has no standing reaction, so red1 walks out from behind the wall unharmed and reaches its destination.</div>
+<div class="round-title">Setup</div>
+<div class="detail">Obstacles:</div>
+<div class="detail indent">at [-3, 0], half-extent [0.3, 2], height 3</div>
+<div class="detail">Units:</div>
+<div class="detail indent"><span class="u blue">blue0</span> at (-8, 0), facing 0°, reaction on stationary do_nothing</div>
+<div class="detail indent"><span class="u red">red1</span> at (-1, 0), facing 90°</div>
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1</div>
 <div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
 <div class="step" data-action="2"><span class="u red">red1</span> moves to (-1, 5)</div>
 <div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is alive</div>
+<div class="detail">Check: <span class="u red">red1</span> is alive</div>
+<div class="detail">Check: <span class="u red">red1</span> is at (-1, 5) (tolerance 0.05)</div>
+<div class="detail">Check: round is 2</div>
 </div>
 </div></figure>
 </div>
@@ -175,19 +270,32 @@ listed by name only.</p>
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_multi_leg_move/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_multi_leg_move/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="detail description">Multi-step move planning: blue0 chains three legs around a wall by clicking a waypoint, another waypoint, then the destination (each within one round&#x27;s reach of the previous leg&#x27;s end). One leg executes per round, so blue0 reaches each leg end on successive commits while red1 holds. The per-turn goldens show the yellow chained leg markers (numbered cutouts) and the yellow reach boundary before the first commit.</div>
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [0, 0], zoom 22</div>
+<div class="detail">Obstacles:</div>
+<div class="detail indent">at [0, 0], half-extent [0.5, 6], height 3</div>
+<div class="detail">Units:</div>
+<div class="detail indent"><span class="u blue">blue0</span> at (-8, -8), facing 0°</div>
+<div class="detail indent"><span class="u red">red1</span> at (12, 0), facing 180°</div>
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1</div>
 <div class="step" data-action="1"><span class="u blue">blue0</span> moves to (8, -8) via (-8, 8), (8, 8)</div>
 <div class="step" data-action="2"><span class="u red">red1</span> passes</div>
 <div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-8, 8) (tolerance 0.1)</div>
+<div class="detail">Check: round is 2</div>
 </div>
 <div class="round"><div class="round-title">Round 2</div>
 <div class="step" data-action="4"><span class="u red">red1</span> passes</div>
 <div class="step" data-action="5">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (8, 8) (tolerance 0.1)</div>
 </div>
 <div class="round"><div class="round-title">Round 3</div>
 <div class="step" data-action="6"><span class="u red">red1</span> passes</div>
 <div class="step" data-action="7">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (8, -8) (tolerance 0.1)</div>
+<div class="detail">Check: round is 4</div>
 </div>
 </div></figure>
 </div>
@@ -198,12 +306,24 @@ listed by name only.</p>
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_shoot_on_fov_entry/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_shoot_on_fov_entry/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="detail description">Standing playbook rule &quot;shoot&quot; (reaction_on_stationary: shoot): blue0 passes (stays stationary) while red1 walks out from behind a wall into blue0&#x27;s view. The moment red1 enters blue0&#x27;s FOV+LOS blue0 fires on its own, so red1 drops short of its destination. Counterpart: playbook_do_nothing_lets_enemy_pass. Mirrors TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds.</div>
+<div class="round-title">Setup</div>
+<div class="detail">Obstacles:</div>
+<div class="detail indent">at [-3, 0], half-extent [0.3, 2], height 3</div>
+<div class="detail">Units:</div>
+<div class="detail indent"><span class="u blue">blue0</span> at (-8, 0), facing 0°, reaction on stationary shoot</div>
+<div class="detail indent"><span class="u red">red1</span> at (-1, 0), facing 90°</div>
+<div class="detail indent"><span class="u red">red2</span> at (9, 9), facing 180°</div>
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
 <div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
 <div class="step" data-action="2"><span class="u red">red1</span> moves to (-1, 5)</div>
 <div class="step" data-action="3"><span class="u red">red2</span> passes</div>
 <div class="step" data-action="4">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is alive</div>
+<div class="detail">Check: <span class="u red">red1</span> is down</div>
+<div class="detail">Check: round is 2</div>
 </div>
 </div></figure>
 </div>
@@ -215,21 +335,38 @@ listed by name only.</p>
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_sighting_memory_fades_out/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_sighting_memory_fades_out/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="detail description">Sighting memory fades out completely: red is seen by blue once, runs out of blue&#x27;s FOV, then nobody moves. The remembered trail ages one round per commit (33% opacity lost each) and is fully gone after kSightingMemoryRounds (3) rounds.</div>
+<div class="round-title">Setup</div>
+<div class="detail">No obstacles.</div>
+<div class="detail">Units:</div>
+<div class="detail indent"><span class="u blue">blue0</span> at (-14, 0), facing 0°</div>
+<div class="detail indent"><span class="u red">red1</span> at (-4, -2), facing 180°</div>
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Check: <span class="u red">red1</span> is visible to blue</div>
+<div class="detail">Round 1: red leaves blue&#x27;s FOV; the trail ages to 1 as the round completes.</div>
 <div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
 <div class="step" data-action="2"><span class="u red">red1</span> moves to (-12, 14)</div>
 <div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
+<div class="detail">Check: blue remembers <span class="u red">red1</span> (memory age 1)</div>
+<div class="detail">Check: round is 2</div>
 </div>
 <div class="round"><div class="round-title">Round 2</div>
+<div class="detail">Round 2: nothing moves; trail is one more round old.</div>
 <div class="step" data-action="4"><span class="u blue">blue0</span> passes</div>
 <div class="step" data-action="5"><span class="u red">red1</span> passes</div>
 <div class="step" data-action="6">commit round</div>
+<div class="detail">Check: blue remembers <span class="u red">red1</span> (memory age 2)</div>
 </div>
 <div class="round"><div class="round-title">Round 3</div>
+<div class="detail">Round 3: the third round completes and the trail is gone entirely.</div>
 <div class="step" data-action="7"><span class="u blue">blue0</span> passes</div>
 <div class="step" data-action="8"><span class="u red">red1</span> passes</div>
 <div class="step" data-action="9">commit round</div>
+<div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
+<div class="detail">Check: blue has no memory of <span class="u red">red1</span></div>
+<div class="detail">Check: round is 4</div>
 </div>
 </div></figure>
 </div>

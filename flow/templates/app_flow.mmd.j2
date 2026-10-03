@@ -1,8 +1,9 @@
-stateDiagram-v2
+flowchart LR
+    start(( )):::start --> {{ initial }}
 {% for s in states %}
-    state "{{ s.label }}" as {{ s.id }}
+    {{ s.id }}("{{ s.label }}")
 {% endfor %}
-    [*] --> {{ initial }}
 {% for t in transitions %}
-    {{ t['from'] }} --> {{ t.to }}: {{ t.event }}
+    {{ t['from'] }} -->|{{ t.event }}| {{ t.to }}
 {% endfor %}
+    classDef start fill:#333,stroke:#333

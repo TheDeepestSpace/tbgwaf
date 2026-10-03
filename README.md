@@ -102,14 +102,15 @@ Screen flow (Splash -> Map Select -> Gameplay), declared in
 that file's contents below if the flow changes.
 
 ```mermaid
-stateDiagram-v2
-    state "Splash" as splash
-    state "Map Select" as map_select
-    state "Gameplay" as gameplay
-    [*] --> splash
-    splash --> map_select: new_game
-    map_select --> gameplay: select_urban
-    map_select --> splash: back
+flowchart LR
+    start(( )):::start --> splash
+    splash("Splash")
+    map_select("Map Select")
+    gameplay("Gameplay")
+    splash -->|new_game| map_select
+    map_select -->|select_urban| gameplay
+    map_select -->|back| splash
+    classDef start fill:#333,stroke:#333
 ```
 
 ## Controls

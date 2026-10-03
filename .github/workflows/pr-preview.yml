@@ -84,7 +84,8 @@ jobs:
               --base ${{ github.event.pull_request.base.sha }} \
               --head ${{ github.event.pull_request.head.sha }} \
               --runner build/tactics_visual_tests \
-              --out site/scenarios
+              --out site/scenarios \
+              --baseline-url ../../../scenario-baseline
 
       - name: Deploy PR preview
         uses: rossjrw/pr-preview-action@ffa7509e91a3ec8dfc2e5536c4d5c1acdf7a6de9 # v1.8.1

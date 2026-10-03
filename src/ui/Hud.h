@@ -18,6 +18,7 @@
 #include "game/GameLogic.h"
 #include "game/Types.h"
 #include "gfx/Camera.h"
+#include "gfx/Mesh.h"
 
 namespace ui {
 
@@ -54,13 +55,12 @@ struct HudActions {
   bool commit = false;
   bool move = false;
   bool shoot = false;
-  bool overwatch = false;
   bool pass = false;
   bool cancel = false;
   bool done = false;
-  // Set when the Playbook popup changed the selected figure's standing
-  // reaction; a config edit, not a turn action.
-  std::optional<tactics::ReactionRule> reaction;
+  // Set when the pane's Playbook view edited its team's squad-wide reaction
+  // table; a config edit, not a turn action.
+  std::optional<tactics::SquadPlaybook> playbook;
 };
 
 // Window-space centers of the HUD buttons actually drawn this frame, keyed
@@ -92,9 +92,14 @@ HudActions DrawHud(const tactics::GameLogic& game, tactics::Team team, bool plan
 // Interactive-app-only debug panel (render toggles + FPS). Not called by the
 // visual runner. `fps` is a smoothed frames-per-second value; `top` is the
 // window-space y to place the panel at (just below the Round panel).
+// The extra metrics: `frameMs` last frame time, `fovMs` time spent in the
+// visibility (FOV-cone) computation, and `stats`
+// draw-call/vertex/triangle counters for the frame.
 // `wasmHeapBytes` is the WASM linear-memory size (nullopt on native builds,
 // shown as N/A). WASM memory never shrinks, so this is also the peak.
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float fps,
-                    float top, std::optional<size_t> wasmHeapBytes);
+                    float frameMs, float fovMs,
+                    const gfx::RenderFrameStats& stats, float top,
+                    std::optional<size_t> wasmHeapBytes);
 
 }  // namespace ui

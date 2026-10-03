@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <limits>
 #include <optional>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -29,14 +30,15 @@
 #include "game/Visibility.h"
 #include "gfx/Camera.h"
 #include "gfx/SceneRenderer.h"
+#include "AppFlow.h"
 #include "ui/Hud.h"
+#include "ui/Menu.h"
 
 using tactics::DeserializeSnapshot;
 using tactics::GameLogic;
 using tactics::GameSnapshot;
 using tactics::InputMode;
 using tactics::Obstacle;
-using tactics::ReactionRule;
 using tactics::SerializeSnapshot;
 using tactics::Team;
 using tactics::TeamVisibility;
@@ -249,9 +251,13 @@ int main() {
   // One independent orbit camera per pane, so each side can freely
   // rotate/zoom its own view without affecting the other's.
   std::array<gfx::OrbitCamera, kMaxPanes> cameras;
-  // Both web clients must build the same city, so the seed is fixed unless a
-  // native run overrides it via TBGWAF_MAP_SEED.
+  // Both web clients must build the same city, so the web seed stays fixed.
+  // Native runs pick a random seed per launch (shown and editable on the Map
+  // Select screen); TBGWAF_MAP_SEED overrides it.
   uint32_t mapSeed = 1;
+#ifndef __EMSCRIPTEN__
+  mapSeed = std::random_device{}();
+#endif
   if (const char* seedEnv = std::getenv("TBGWAF_MAP_SEED")) {
     mapSeed = static_cast<uint32_t>(std::strtoul(seedEnv, nullptr, 10));
   }
@@ -308,10 +314,17 @@ int main() {
   int frameCount = 0;
   constexpr int kSmokeTestMaxFrames = 60;
   Uint32 lastFrameTicks = SDL_GetTicks();
+  // App-level screen (Splash -> Map Select -> gameplay), generated from
+  // flow/app_flow.yaml. Only Urban exists today, so every client builds the
+  // same seeded city regardless of which screen path it took.
+  tbgwaf_flow::State screen = tbgwaf_flow::kInitialState;
   // Local-only debug panel state (defaults: FOV and shadows on, FPS shown).
   gfx::RenderDebugOptions debugOptions;
   bool showFps = true;
   float smoothedFps = 0.0f;
+  float frameMs = 0.0f;
+  float fovMs = 0.0f;
+  gfx::RenderFrameStats frameStats;
 
   auto runFrame = [&]() {
 #ifdef __EMSCRIPTEN__
@@ -486,9 +499,35 @@ int main() {
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
 
+    if (screen != tbgwaf_flow::State::Gameplay) {
+      std::optional<tbgwaf_flow::Event> flowEvent =
+          tactics::ui::DrawMenu(screen, windowWidth, windowHeight, &mapSeed);
+      // Headless smoke run: walk the menu automatically so gameplay is exercised.
+      if (isSmokeTest && !flowEvent) {
+        flowEvent = screen == tbgwaf_flow::State::Splash ? tbgwaf_flow::Event::NewGame
+                                                         : tbgwaf_flow::Event::SelectUrban;
+      }
+      if (flowEvent) {
+        if (*flowEvent == tbgwaf_flow::Event::SelectUrban) {
+          game.Reset(tactics::GenerateUrbanMap(mapSeed));
+          for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
+        }
+        screen = tbgwaf_flow::Next(screen, *flowEvent);
+        lastFrameTicks = SDL_GetTicks();
+      }
+      glViewport(0, 0, windowWidth, windowHeight);
+      glClearColor(0.08f, 0.09f, 0.11f, 1.0f);
+      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+      ImGui::Render();
+      ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+      SDL_GL_SwapWindow(window);
+      return;
+    }
+
     const Uint32 nowTicks = SDL_GetTicks();
     const float dt = static_cast<float>(nowTicks - lastFrameTicks) / 1000.0f;
     lastFrameTicks = nowTicks;
+    frameMs = dt * 1000.0f;
     if (dt > 0.0f) {
       const float instantFps = 1.0f / dt;
       smoothedFps = smoothedFps == 0.0f ? instantFps : smoothedFps + (instantFps - smoothedFps) * 0.05f;
@@ -519,9 +558,12 @@ int main() {
     }
 
     std::array<TeamVisibility, kMaxPanes> paneVisibility;
+    const Uint64 fovStart = SDL_GetPerformanceCounter();
     for (int pane = 0; pane < paneCount; ++pane) {
       if (fogActive) paneVisibility[pane] = game.ComputeVisibility(paneTeam(pane));
     }
+    fovMs = static_cast<float>(SDL_GetPerformanceCounter() - fovStart) * 1000.0f /
+            static_cast<float>(SDL_GetPerformanceFrequency());
 
     // --- UI ---
     float roundPanelBottom = 2.0f;
@@ -552,15 +594,10 @@ int main() {
       }
       if (hud.move) game.ChooseMove();
       if (hud.shoot) game.ChooseShoot();
-      if (hud.overwatch) game.ChooseOverwatch();
       if (hud.pass) game.ChoosePass();
       if (hud.cancel) game.CancelAction();
+      if (hud.playbook) game.SetPlaybook(paneTeam(pane), *hud.playbook);
       if (hud.done) game.FinishMovePlan();
-      if (hud.reaction) {
-        if (const auto selectedId = game.SelectedUnitId()) {
-          if (Unit* selected = game.FindUnit(*selectedId)) selected->reactionOnStationary = *hud.reaction;
-        }
-      }
     }
 
     // Pane divider. Both teams plan at once, so there's no "inactive side"
@@ -667,12 +704,17 @@ int main() {
     wasmHeapBytes = emscripten_get_heap_size();
 #endif
     ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, showFps,
-                       smoothedFps, roundPanelBottom + 6.0f, wasmHeapBytes);
+                       smoothedFps, frameMs, fovMs, frameStats,
+                       roundPanelBottom + 6.0f, wasmHeapBytes);
 
     // --- Render: one shadow pass + one color pass per pane, both inside
     // SceneRenderer::RenderPane. Selection/move-preview overlays belong to
     // whichever team the currently selected figure is on, so only that
     // player's pane shows them (the other side must not see enemy plans). ---
+    // The panel above shows last frame's render counters (drawn before this
+    // frame's render pass).
+    frameStats = {};
+    debugOptions.stats = &frameStats;
     for (int pane = 0; pane < paneCount; ++pane) {
       const PaneRect& rect = paneRects[pane];
       std::optional<glm::vec3> hover;

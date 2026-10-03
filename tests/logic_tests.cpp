@@ -1566,6 +1566,18 @@ void TestResetClearsSightings() {
   CHECK(game.Sightings(Team::Blue, 4).empty());
 }
 
+void TestImportStateOfNewGameClearsFollowerSightings() {
+  GameLogic sim(LegacyScene()), follower(LegacyScene());
+  GameSnapshot lateRound = sim.ExportState();
+  lateRound.roundNumber = 3;
+  CHECK(follower.ImportState(lateRound));
+  StepSightings(follower, 1.0f);
+  CHECK(!follower.Sightings(Team::Blue, 4).empty());
+  sim.Reset(LegacyScene());  // New game: same unit ids, round back to 1.
+  CHECK(follower.ImportState(sim.ExportState()));
+  CHECK(follower.Sightings(Team::Blue, 4).empty());
+}
+
 void TestFollowerBuildsSightingsWithoutPhysicsUpdate() {
   GameLogic sim(LegacyScene()), follower(LegacyScene());
   MakePassive(sim);
@@ -1650,6 +1662,7 @@ int main() {
   TestSightingsPersistAfterLeavingFovThenExpire();
   TestSightingReentryAppendsToAgingTrail();
   TestResetClearsSightings();
+  TestImportStateOfNewGameClearsFollowerSightings();
   TestFollowerBuildsSightingsWithoutPhysicsUpdate();
 
   if (g_failures == 0) {

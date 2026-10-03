@@ -158,6 +158,7 @@ class GameLogic {
   // (unlike Update(), a follower never runs the physics tick during
   // Executing, yet still needs its own memory built from imported state).
   void UpdateSightingMemory(float dtSeconds);
+  void ResetSightingMemory();
 
   // Input events, driven by the input/render layer after it has resolved a
   // screen click into either a unit id or a ground-plane world point.

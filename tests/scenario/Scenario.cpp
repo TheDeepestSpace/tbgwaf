@@ -140,6 +140,11 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     return action;
   }
 
+  if (kind == "new_game") {
+    action.kind = ScenarioAction::Kind::NewGame;
+    return action;
+  }
+
   if (!node["actor"]) throw std::runtime_error("script action step requires 'actor'");
   action.actor = node["actor"].as<int>();
   if (kind == "move") {
@@ -169,7 +174,7 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     action.kind = ScenarioAction::Kind::Focus;
   } else {
     throw std::runtime_error("unknown script action '" + kind +
-                              "' (expected move/shoot/pass/cancel/focus/commit)");
+                              "' (expected move/shoot/pass/cancel/focus/commit/new_game)");
   }
   return action;
 }
@@ -211,8 +216,8 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   return assertion;
 }
 
-bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
-                    const PlaybackHooks& hooks, ScenarioResult* result) {
+bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& action,
+                    int stepIndex, const PlaybackHooks& hooks, ScenarioResult* result) {
   auto Fail = [&](const std::string& msg) {
     result->failures.push_back("step " + std::to_string(stepIndex) + " (actor " +
                                 std::to_string(action.actor) + "): " + msg);
@@ -277,6 +282,14 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
       game.Update(1.0e6f);  // Settle anything still pending (e.g. knockdowns).
       game.UpdateSightingMemory(0.0f);
     }
+    return true;
+  }
+
+  if (action.kind == ScenarioAction::Kind::NewGame) {
+    // Same call the UI's new-game paths make (playbooks survive it).
+    NotifyMenuClick(Team::Blue, "New Match");
+    game.Reset(scene);
+    game.UpdateSightingMemory(0.0f);
     return true;
   }
 
@@ -359,6 +372,7 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
       return true;
     case ScenarioAction::Kind::Cancel:
     case ScenarioAction::Kind::Commit:
+    case ScenarioAction::Kind::NewGame:
       break;  // Handled above.
   }
   return true;
@@ -477,6 +491,13 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
   GameLogic game(scenario.scene);
   game.SetPlaybook(Team::Blue, scenario.playbooks[0]);
   game.SetPlaybook(Team::Red, scenario.playbooks[1]);
+  // A second page that only mirrors the simulator's snapshots, like the
+  // networked follower pane. Its sighting memory is checked too.
+  GameLogic follower(scenario.scene);
+  auto SyncFollower = [&] {
+    follower.ImportState(game.ExportState());
+    follower.UpdateSightingMemory(0.0f);
+  };
 
   auto EmitHoldFrames = [&] {
     if (!hooks.onFrame) return;
@@ -492,14 +513,21 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
   for (int i = 0; i < static_cast<int>(scenario.steps.size()); ++i) {
     const ScenarioStep& step = scenario.steps[i];
     if (step.action) {
-      if (!ExecuteAction(game, *step.action, i, hooks, &result)) {
+      if (!ExecuteAction(game, scenario.scene, *step.action, i, hooks, &result)) {
         break;  // The script's own preconditions were violated; state past this point is unreliable.
       }
+      SyncFollower();
       ++completedActions;
       EmitHoldFrames();
       if (hooks.onActionComplete) hooks.onActionComplete(game, completedActions);
     } else {
       CheckAssertion(game, *step.assertion, i, &result);
+      if (step.assertion->rememberedByTeam &&
+          (!step.assertion->memoryAge || *step.assertion->memoryAge == 0)) {
+        ScenarioResult followerResult;
+        CheckAssertion(follower, *step.assertion, i, &followerResult);
+        for (auto& f : followerResult.failures) result.failures.push_back("follower " + f);
+      }
     }
   }
   return result;

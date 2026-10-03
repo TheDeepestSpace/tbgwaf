@@ -33,9 +33,9 @@ class GameLogic;
 namespace tactics::scenario {
 
 struct ScenarioAction {
-  enum class Kind { Move, Shoot, Pass, Cancel, Commit, Focus };
+  enum class Kind { Move, Shoot, Pass, Cancel, Commit, Focus, NewGame };
 
-  int actor = -1;  // Unused (and not required in YAML) for Commit.
+  int actor = -1;  // Unused (and not required in YAML) for Commit/NewGame.
   Kind kind = Kind::Pass;
   glm::vec3 destination{0.0f};  // Move only: the last leg's end.
   std::vector<glm::vec3> waypoints;  // Move only: earlier leg ends, clicked in

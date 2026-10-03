@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -110,6 +111,11 @@ int main(int argc, char** argv) {
     bool showNavMesh;  // Hilly maps pin the navmesh boundary overlay too.
     float pitchOffset = 0.0f;
     float yawOffset = 0.0f;
+    glm::vec3 cameraTarget = glm::vec3(0.0f);
+    // When set, pins the move-frontier overlay of a unit standing here
+    // (issue #102: it must stay on the deck, not spill over its edges).
+    std::optional<glm::vec3> frontierFrom;
+    float frontierBudget = 0.0f;
   };
   std::vector<MapCase> cases;
   for (const uint32_t seed : kCitySeeds) {
@@ -126,6 +132,16 @@ int main(int argc, char** argv) {
   // and the pier bents beneath all read clearly.
   cases.push_back({"city_elevated_seed_7", tactics::GenerateUrbanMap(7, elevatedConfig),
                    180.0f, /*showNavMesh=*/false, /*pitchOffset=*/-0.55f, /*yawOffset=*/-1.6f});
+  // Frontier of a unit on the deck, framed low and side-on at the deck edge.
+  {
+    MapCase deckFrontier{"city_elevated_deck_frontier_seed_7",
+                         tactics::GenerateUrbanMap(7, elevatedConfig), 28.0f,
+                         /*showNavMesh=*/false, /*pitchOffset=*/-0.35f, /*yawOffset=*/-1.2f};
+    deckFrontier.cameraTarget = glm::vec3(-11.52f, 5.0f, 1.869f);
+    deckFrontier.frontierFrom = glm::vec3(-11.52f, 5.0f, 1.869f);
+    deckFrontier.frontierBudget = 12.0f;
+    cases.push_back(std::move(deckFrontier));
+  }
   for (const uint32_t seed : kHillySeeds) {
     cases.push_back({"hilly_seed_" + std::to_string(seed), tactics::GenerateHillyMap(seed),
                      kHillyCameraZoom, /*showNavMesh=*/true});
@@ -139,7 +155,7 @@ int main(int argc, char** argv) {
     gfx::OrbitCamera camera;
     camera.Rotate(mapCase.yawOffset, mapCase.pitchOffset);
     camera.Zoom(mapCase.cameraZoom);
-    camera.target = glm::vec3(0.0f);
+    camera.target = mapCase.cameraTarget;
     camera.Update(1.0e3f);
 
     tactics::Scene scene = std::move(mapCase.scene);
@@ -147,6 +163,14 @@ int main(int argc, char** argv) {
     tactics::GameLogic game(scene);
     tactics::NavMesh navMesh;
     gfx::PaneOverlays overlays;
+    tactics::ReachField reach;
+    if (mapCase.frontierFrom) {
+      navMesh.Build(game.GetScene().obstacles, game.GetScene().mapHalfExtent,
+                    tactics::constants::kAgentRadius, &game.GetScene().ground,
+                    &game.GetScene().walkSurfaces);
+      reach = navMesh.ComputeReachField(*mapCase.frontierFrom, mapCase.frontierBudget);
+      overlays.moveFrontier = &reach;
+    }
     if (mapCase.showNavMesh) {
       navMesh.Build(game.GetScene().obstacles, game.GetScene().mapHalfExtent,
                     tactics::constants::kAgentRadius, &game.GetScene().ground,

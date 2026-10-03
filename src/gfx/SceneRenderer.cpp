@@ -980,9 +980,16 @@ std::vector<glm::vec3> BuildRingPoints() {
   return pts;
 }
 
+// `normal` is the unit surface normal the ring lies flat against (a ring on a
+// ramp or hillside tilts with it instead of poking into the slope).
 void DrawHighlight(const Shader& shader, const TriangleMesh& ring, const glm::mat4& viewProj,
-                   const glm::vec3& position, const glm::vec4& color) {
-  const glm::mat4 model = glm::translate(glm::mat4(1.0f), position + glm::vec3(0.0f, 0.02f, 0.0f));
+                   const glm::vec3& position, const glm::vec4& color,
+                   const glm::vec3& normal = glm::vec3(0.0f, 1.0f, 0.0f)) {
+  glm::mat4 model = glm::translate(glm::mat4(1.0f), position + normal * 0.02f);
+  const glm::vec3 axis = glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), normal);
+  if (glm::length(axis) > 1e-5f) {
+    model = glm::rotate(model, std::acos(std::clamp(normal.y, -1.0f, 1.0f)), glm::normalize(axis));
+  }
   shader.SetMat4("uMVP", viewProj * model);
   shader.SetVec4("uColor", color);
   ring.Draw();
@@ -1004,8 +1011,9 @@ glm::vec3 SnapToAxis(const glm::vec3& v) {
 // read upright for `view`'s camera (snapped to the nearest world axis).
 void DrawNumberedHighlight(const Shader& shader, const TriangleMesh& ring, const CubeMesh& cube,
                            const glm::mat4& viewProj, const glm::mat4& view,
-                           const glm::vec3& position, const glm::vec4& color, int n) {
-  DrawHighlight(shader, ring, viewProj, position, color);
+                           const glm::vec3& position, const glm::vec4& color, int n,
+                           const glm::vec3& normal) {
+  DrawHighlight(shader, ring, viewProj, position, color, normal);
   n = std::clamp(n, 0, 99);
   const int digitCount = n >= 10 ? 2 : 1;
   const float cell = 0.07f;  // Two digits (7 cells wide) still fit inside the rim.
@@ -1023,7 +1031,10 @@ void DrawNumberedHighlight(const Shader& shader, const TriangleMesh& ring, const
         const glm::vec3 b = position + right * (u0 + cell) + up * (v0 + cell);
         const glm::vec3 lo = glm::min(a, b);
         const glm::vec3 hi = glm::max(a, b);
-        DrawBox(shader, cube, viewProj, glm::vec3(lo.x, position.y + 0.01f, lo.z),
+        // Lift each cell onto the ring's plane so digits don't sink into slopes.
+        const glm::vec3 mid = 0.5f * (lo + hi) - position;
+        const float planeY = position.y - (normal.x * mid.x + normal.z * mid.z) / normal.y;
+        DrawBox(shader, cube, viewProj, glm::vec3(lo.x, planeY + 0.01f, lo.z),
                 glm::vec3(hi.x - lo.x, 0.04f, hi.z - lo.z), color);
       }
     }
@@ -1952,8 +1963,32 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
     return position;
   };
+  // Unit normal of the walk surface under `position`: a ramp/deck plane, the
+  // terrain slope, or straight up on flat slabs and ground.
+  const auto SurfaceNormal = [&](const glm::vec3& position) {
+    for (const tactics::WalkSurface& surface : game.GetScene().walkSurfaces) {
+      if (surface.vertices.size() < 3) continue;
+      if (!tactics::SurfaceContainsXZ(surface, position.x, position.z)) continue;
+      if (std::fabs(tactics::SurfaceHeightAt(surface, position.x, position.z) - position.y) > 0.3f)
+        continue;
+      glm::vec3 n = glm::cross(surface.vertices[1] - surface.vertices[0],
+                               surface.vertices[2] - surface.vertices[0]);
+      if (glm::length(n) < 1e-6f) continue;
+      n = glm::normalize(n);
+      return n.y < 0.0f ? -n : n;
+    }
+    const tactics::HeightField& ground = game.GetScene().ground;
+    if (!ground.Empty() && std::fabs(ground.HeightAt(position.x, position.z) - position.y) < 0.3f) {
+      const float h = 0.5f * ground.step;
+      const float dx = ground.HeightAt(position.x + h, position.z) - ground.HeightAt(position.x - h, position.z);
+      const float dz = ground.HeightAt(position.x, position.z + h) - ground.HeightAt(position.x, position.z - h);
+      return glm::normalize(glm::vec3(-dx / (2.0f * h), 1.0f, -dz / (2.0f * h)));
+    }
+    return glm::vec3(0.0f, 1.0f, 0.0f);
+  };
   const auto DrawHighlightOnSurface = [&](const glm::vec3& position, const glm::vec4& color) {
-    DrawHighlight(unlitShader_, highlightRing_, viewProj, OnSurface(position), color);
+    DrawHighlight(unlitShader_, highlightRing_, viewProj, OnSurface(position), color,
+                  SurfaceNormal(position));
   };
   // Each pane shows only its own team's FOV cones -- your own vision,
   // not intel about what the enemy can see. Translucent overlay: blend
@@ -2022,17 +2057,41 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       const int nx = f.nx, nz = f.nz;
       const float inf = std::numeric_limits<float>::infinity();
 
+      // Nodes whose surface heights differ by more than a step belong to
+      // different walk layers (deck vs. ground, or either side of a deck
+      // edge). Nothing -- distance, blur, triangles -- may span them, or the
+      // frontier hangs off the deck edge as vertical curtains.
+      constexpr float kLayerStep = 0.6f;
+      constexpr float kMaxDepth = 4.0f;  // Caps distance when no same-layer boundary exists.
+      const auto sameLayer = [&](int ax, int az, int bx, int bz) {
+        if (f.surfaceY.size() != static_cast<size_t>(nx) * nz) return true;
+        return std::abs(f.surfaceY[az * nx + ax] - f.surfaceY[bz * nx + bx]) <= kLayerStep;
+      };
+      // A node on its layer's edge counts as touching the unreached class.
+      const auto onLayerEdge = [&](int ix, int iz) {
+        constexpr int kDx[4] = {-1, 1, 0, 0}, kDz[4] = {0, 0, -1, 1};
+        for (int k = 0; k < 4; ++k) {
+          const int jx = ix + kDx[k], jz = iz + kDz[k];
+          if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) continue;
+          if (!sameLayer(ix, iz, jx, jz)) return true;
+        }
+        return false;
+      };
+
       // Chamfer distance (in world units) from each node to the nearest node
-      // of the opposite reached/unreached class.
+      // of the opposite reached/unreached class, within its own layer.
       auto chamfer = [&](bool target) {
         std::vector<float> d(static_cast<size_t>(nx) * nz, inf);
         for (int iz = 0; iz < nz; ++iz)
           for (int ix = 0; ix < nx; ++ix)
-            if (f.Reached(ix, iz) == target) d[iz * nx + ix] = 0.0f;
+            if (f.Reached(ix, iz) == target ||
+                (!target && f.Reached(ix, iz) && onLayerEdge(ix, iz)))
+              d[iz * nx + ix] = 0.0f;
         const float s = f.step, sd = f.step * 1.41421356f;
         auto relax = [&](int ix, int iz, int dx, int dz, float w) {
           const int jx = ix + dx, jz = iz + dz;
           if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) return;
+          if (!sameLayer(ix, iz, jx, jz)) return;
           float& v = d[iz * nx + ix];
           v = std::min(v, d[jz * nx + jx] + w);
         };
@@ -2059,7 +2118,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         for (int ix = 0; ix < nx; ++ix) {
           const int i = iz * nx + ix;
           // Signed depth: positive inside, zero contour half a step out.
-          g[i] = f.Reached(ix, iz) ? dIn[i] - 0.5f * f.step : -(dOut[i] - 0.5f * f.step);
+          g[i] = f.Reached(ix, iz) ? std::min(dIn[i], kMaxDepth) - 0.5f * f.step
+                                   : -(std::min(dOut[i], kMaxDepth) - 0.5f * f.step);
         }
       // Separable box blur (radius 2, two passes) rounds off the grid steps.
       std::vector<float> tmp(g.size());
@@ -2067,13 +2127,19 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         for (int iz = 0; iz < nz; ++iz)
           for (int ix = 0; ix < nx; ++ix) {
             float sum = 0.0f;
-            for (int k = -2; k <= 2; ++k) sum += g[iz * nx + std::clamp(ix + k, 0, nx - 1)];
+            for (int k = -2; k <= 2; ++k) {
+              const int jx = std::clamp(ix + k, 0, nx - 1);
+              sum += sameLayer(ix, iz, jx, iz) ? g[iz * nx + jx] : g[iz * nx + ix];
+            }
             tmp[iz * nx + ix] = sum / 5.0f;
           }
         for (int iz = 0; iz < nz; ++iz)
           for (int ix = 0; ix < nx; ++ix) {
             float sum = 0.0f;
-            for (int k = -2; k <= 2; ++k) sum += tmp[std::clamp(iz + k, 0, nz - 1) * nx + ix];
+            for (int k = -2; k <= 2; ++k) {
+              const int jz = std::clamp(iz + k, 0, nz - 1);
+              sum += sameLayer(ix, iz, ix, jz) ? tmp[jz * nx + ix] : tmp[iz * nx + ix];
+            }
             g[iz * nx + ix] = sum / 5.0f;
           }
       }
@@ -2135,6 +2201,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             anyIn |= quad[k].g > 0.0f;
           }
           if (!anyIn) continue;
+          // Never triangulate across a layer step (deck edge).
+          if (!sameLayer(cx[0], cz[0], cx[1], cz[1]) || !sameLayer(cx[1], cz[1], cx[2], cz[2]) ||
+              !sameLayer(cx[2], cz[2], cx[3], cz[3]) || !sameLayer(cx[3], cz[3], cx[0], cz[0]))
+            continue;
           // Clip the cell to g >= 0 (Sutherland-Hodgman against the field).
           std::vector<Pt> poly;
           std::vector<Pt> cut;  // Contour crossings, in polygon order.
@@ -2333,7 +2403,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                               game.SelectedUnitId() == unit.id;
         if (chaining || !unit.plan.queuedLegs.empty()) {
           DrawNumberedHighlight(unlitShader_, highlightRing_, cubeMesh_, viewProj, view,
-                                OnSurface(unit.plan.movePath.back()), yellow, 1);
+                                OnSurface(unit.plan.movePath.back()), yellow, 1,
+                                SurfaceNormal(unit.plan.movePath.back()));
         }
         int legNumber = 1;
         for (const auto& leg : unit.plan.queuedLegs) {
@@ -2344,7 +2415,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           unlitShader_.SetVec4("uColor", yellow);
           pathLine_.Draw();
           DrawNumberedHighlight(unlitShader_, highlightRing_, cubeMesh_, viewProj, view,
-                                OnSurface(leg.back()), yellow, legNumber);
+                                OnSurface(leg.back()), yellow, legNumber,
+                                SurfaceNormal(leg.back()));
         }
       } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
         if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {

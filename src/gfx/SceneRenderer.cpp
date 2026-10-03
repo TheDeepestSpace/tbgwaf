@@ -777,9 +777,16 @@ std::vector<glm::vec3> BuildRingPoints() {
   return pts;
 }
 
+// `normal` is the unit surface normal the ring lies flat against (a ring on a
+// ramp or hillside tilts with it instead of poking into the slope).
 void DrawHighlight(const Shader& shader, const TriangleMesh& ring, const glm::mat4& viewProj,
-                   const glm::vec3& position, const glm::vec4& color) {
-  const glm::mat4 model = glm::translate(glm::mat4(1.0f), position + glm::vec3(0.0f, 0.02f, 0.0f));
+                   const glm::vec3& position, const glm::vec4& color,
+                   const glm::vec3& normal = glm::vec3(0.0f, 1.0f, 0.0f)) {
+  glm::mat4 model = glm::translate(glm::mat4(1.0f), position + normal * 0.02f);
+  const glm::vec3 axis = glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), normal);
+  if (glm::length(axis) > 1e-5f) {
+    model = glm::rotate(model, std::acos(std::clamp(normal.y, -1.0f, 1.0f)), glm::normalize(axis));
+  }
   shader.SetMat4("uMVP", viewProj * model);
   shader.SetVec4("uColor", color);
   ring.Draw();
@@ -801,8 +808,9 @@ glm::vec3 SnapToAxis(const glm::vec3& v) {
 // read upright for `view`'s camera (snapped to the nearest world axis).
 void DrawNumberedHighlight(const Shader& shader, const TriangleMesh& ring, const CubeMesh& cube,
                            const glm::mat4& viewProj, const glm::mat4& view,
-                           const glm::vec3& position, const glm::vec4& color, int n) {
-  DrawHighlight(shader, ring, viewProj, position, color);
+                           const glm::vec3& position, const glm::vec4& color, int n,
+                           const glm::vec3& normal) {
+  DrawHighlight(shader, ring, viewProj, position, color, normal);
   n = std::clamp(n, 0, 99);
   const int digitCount = n >= 10 ? 2 : 1;
   const float cell = 0.07f;  // Two digits (7 cells wide) still fit inside the rim.
@@ -820,7 +828,10 @@ void DrawNumberedHighlight(const Shader& shader, const TriangleMesh& ring, const
         const glm::vec3 b = position + right * (u0 + cell) + up * (v0 + cell);
         const glm::vec3 lo = glm::min(a, b);
         const glm::vec3 hi = glm::max(a, b);
-        DrawBox(shader, cube, viewProj, glm::vec3(lo.x, position.y + 0.01f, lo.z),
+        // Lift each cell onto the ring's plane so digits don't sink into slopes.
+        const glm::vec3 mid = 0.5f * (lo + hi) - position;
+        const float planeY = position.y - (normal.x * mid.x + normal.z * mid.z) / normal.y;
+        DrawBox(shader, cube, viewProj, glm::vec3(lo.x, planeY + 0.01f, lo.z),
                 glm::vec3(hi.x - lo.x, 0.04f, hi.z - lo.z), color);
       }
     }
@@ -1521,8 +1532,32 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
     return position;
   };
+  // Unit normal of the walk surface under `position`: a ramp/deck plane, the
+  // terrain slope, or straight up on flat slabs and ground.
+  const auto SurfaceNormal = [&](const glm::vec3& position) {
+    for (const tactics::WalkSurface& surface : game.GetScene().walkSurfaces) {
+      if (surface.vertices.size() < 3) continue;
+      if (!tactics::SurfaceContainsXZ(surface, position.x, position.z)) continue;
+      if (std::fabs(tactics::SurfaceHeightAt(surface, position.x, position.z) - position.y) > 0.3f)
+        continue;
+      glm::vec3 n = glm::cross(surface.vertices[1] - surface.vertices[0],
+                               surface.vertices[2] - surface.vertices[0]);
+      if (glm::length(n) < 1e-6f) continue;
+      n = glm::normalize(n);
+      return n.y < 0.0f ? -n : n;
+    }
+    const tactics::HeightField& ground = game.GetScene().ground;
+    if (!ground.Empty() && std::fabs(ground.HeightAt(position.x, position.z) - position.y) < 0.3f) {
+      const float h = 0.5f * ground.step;
+      const float dx = ground.HeightAt(position.x + h, position.z) - ground.HeightAt(position.x - h, position.z);
+      const float dz = ground.HeightAt(position.x, position.z + h) - ground.HeightAt(position.x, position.z - h);
+      return glm::normalize(glm::vec3(-dx / (2.0f * h), 1.0f, -dz / (2.0f * h)));
+    }
+    return glm::vec3(0.0f, 1.0f, 0.0f);
+  };
   const auto DrawHighlightOnSurface = [&](const glm::vec3& position, const glm::vec4& color) {
-    DrawHighlight(unlitShader_, highlightRing_, viewProj, OnSurface(position), color);
+    DrawHighlight(unlitShader_, highlightRing_, viewProj, OnSurface(position), color,
+                  SurfaceNormal(position));
   };
   // Each pane shows only its own team's FOV cones -- your own vision,
   // not intel about what the enemy can see. Translucent overlay: blend
@@ -1922,7 +1957,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                               game.SelectedUnitId() == unit.id;
         if (chaining || !unit.plan.queuedLegs.empty()) {
           DrawNumberedHighlight(unlitShader_, highlightRing_, cubeMesh_, viewProj, view,
-                                OnSurface(unit.plan.movePath.back()), yellow, 1);
+                                OnSurface(unit.plan.movePath.back()), yellow, 1,
+                                SurfaceNormal(unit.plan.movePath.back()));
         }
         int legNumber = 1;
         for (const auto& leg : unit.plan.queuedLegs) {
@@ -1933,7 +1969,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           unlitShader_.SetVec4("uColor", yellow);
           pathLine_.Draw();
           DrawNumberedHighlight(unlitShader_, highlightRing_, cubeMesh_, viewProj, view,
-                                OnSurface(leg.back()), yellow, legNumber);
+                                OnSurface(leg.back()), yellow, legNumber,
+                                SurfaceNormal(leg.back()));
         }
       } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
         if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {

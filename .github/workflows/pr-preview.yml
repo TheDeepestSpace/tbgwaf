@@ -73,6 +73,12 @@ jobs:
         if: github.event.action != 'closed'
         run: cmake --build build --target tactics_visual_tests
 
+      - name: Install ffmpeg and rsync
+        # ffmpeg encodes the scenario videos; rsync is required by the deploy
+        # action. Neither is guaranteed in the prebuilt dev image.
+        if: github.event.action != 'closed'
+        run: apt-get update && apt-get install -y ffmpeg rsync
+
       - name: Generate scenario review page
         if: github.event.action != 'closed'
         env:
@@ -87,7 +93,7 @@ jobs:
               --out site/scenarios
 
       - name: Install rsync
-        # Required by the deploy action; not present in the dev image.
+        if: github.event.action == 'closed'
         run: apt-get update && apt-get install -y rsync
 
       - name: Deploy PR preview

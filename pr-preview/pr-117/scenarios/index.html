@@ -373,6 +373,14 @@ function init(sc) {
     const max = Math.max(1, ...timing.frames.map(f => f.ms)) * 1.1;
     return dur > 0 ? { dur, max } : null;
   }
+  // Plot area spans exactly the seek slider: the left gutter (under the
+  // play button) holds the axis labels, the right gutter (under the clock) is empty.
+  function chartPads() {
+    const cr = chart.getBoundingClientRect(), sr = seek.getBoundingClientRect();
+    const padL = Math.max(36, sr.left - cr.left - chart.clientLeft);
+    const padR = Math.max(0, cr.right - chart.clientLeft - sr.right);
+    return { padL, padR };
+  }
   function drawChart(t) {
     const d = chartDims();
     if (!d) return;
@@ -384,7 +392,8 @@ function init(sc) {
     const c = chart.getContext("2d");
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
     c.clearRect(0, 0, w, h);
-    const padL = 36, padB = 16, pw = w - padL, ph = h - padB;
+    const { padL, padR } = chartPads();
+    const padB = 16, pw = w - padL - padR, ph = h - padB;
     const X = s => padL + (s / d.dur) * pw, Y = ms => ph - (ms / d.max) * ph;
     c.font = "10px system-ui, sans-serif";
     c.fillStyle = "#8a919c";
@@ -392,7 +401,7 @@ function init(sc) {
     c.lineWidth = 1;
     for (let i = 0; i <= 4; i++) {
       const ms = (d.max / 4) * i, y = Math.round(Y(ms)) + 0.5;
-      c.beginPath(); c.moveTo(padL, y); c.lineTo(w, y); c.stroke();
+      c.beginPath(); c.moveTo(padL, y); c.lineTo(w - padR, y); c.stroke();
       c.fillText(ms.toFixed(ms < 10 ? 1 : 0) + "ms", 2, Math.min(y + 3, ph));
     }
     ((timing.actions) || []).forEach(a => {
@@ -419,8 +428,9 @@ function init(sc) {
     chart.addEventListener("click", e => {
       const d = chartDims();
       if (!d) return;
-      const r = chart.getBoundingClientRect(), padL = 36;
-      const f = Math.min(1, Math.max(0, (e.clientX - r.left - padL) / (r.width - padL)));
+      const r = chart.getBoundingClientRect(), { padL, padR } = chartPads();
+      const f = Math.min(1, Math.max(0, (e.clientX - r.left - chart.clientLeft - padL) /
+                                         (r.width - 2 * chart.clientLeft - padL - padR)));
       seekAll(f * d.dur);
     });
     window.addEventListener("resize", () => update());

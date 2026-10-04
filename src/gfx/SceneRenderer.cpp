@@ -2483,8 +2483,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // shot briefly overlays the dots with a full white-hot line.
   {
     constexpr float kTracerMaxAlpha = 0.9f;
-    constexpr float kTracerDotLength = 0.16f;
-    constexpr float kTracerDotStride = 0.5f;
+    constexpr float kTracerDotLength = 0.04f;
+    constexpr float kTracerDotStride = 0.2f;
     unlitShader_.Use();
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);

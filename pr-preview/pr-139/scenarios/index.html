@@ -100,7 +100,7 @@ listed by name only.</p>
 </div>
 <h2>Modified scenarios <span class="count">(0)</span></h2>
 <p class="empty">None.</p>
-<h2>Unchanged scenarios <span class="count">(26)</span></h2>
+<h2>Unchanged scenarios <span class="count">(27)</span></h2>
 <div class="scenario has-video" data-stem="default_scene_shoot_rows"><h3>default_scene_shoot_rows</h3><div class="path">tests/scenarios/default_scene_shoot_rows.yaml</div>
 <p class="description">Replicates the original open-lane layout (not the current BuildDefaultScene()) and the same shot outcomes as TestGameLogicShootRowsMatchLayout in tests/logic_tests.cpp: the top/bottom lanes are wall-blocked (shots there must miss), the middle lane is open (a clean shot must hit). Under WEGO rounds both teams plan the same round, so the middle lane&#x27;s mutual blue1 &lt;-&gt; red4 exchange resolves simultaneously and downs both shooters.</p>
 <div class="panes">
@@ -395,6 +395,29 @@ listed by name only.</p>
 <div class="detail">Check: <span class="u blue">blue0</span> faces 0° (tolerance 0.5)</div>
 <div class="detail">Check: <span class="u red">red1</span> is at (5, 0) (tolerance 0.05)</div>
 <div class="detail">Check: <span class="u red">red1</span> faces -90° (tolerance 0.5)</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="overpass_deck_edge_sighting"><h3>overpass_deck_edge_sighting</h3><div class="path">tests/scenarios/overpass_deck_edge_sighting.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/overpass_deck_edge_sighting/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/overpass_deck_edge_sighting/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [19, 5], zoom -128</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">The street figure can target the deck figure: the click is gated on team visibility and used to be a silent no-op here.</div>
+<div class="detail">Check: <span class="u red">red1</span> is visible to blue — Deck figure sighted from the street</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is visible to red — Street figure sighted from the deck</div>
+<div class="detail">Check: <span class="u red">red2</span> is not visible to blue</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> shoots <span class="u red">red1</span></div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: round is 2</div>
 </div>
 </div></figure>
 </div>

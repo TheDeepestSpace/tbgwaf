@@ -29,7 +29,8 @@ struct TeamVisibility {
 
 // True if `point` lies inside at least one living `team` figure's FOV cone
 // with clear line of sight, reusing Stage-A's InFovCone/LineOfSightClear
-// raycast helpers and the same cone angle/range as the shoot action. Enemy
+// raycast helpers and the same cone angle as the shoot action (range is the
+// longer kSightRange, so a target can be seen beyond the shot range cap). Enemy
 // visibility calls this with the surface under the target's feet, matching
 // the shadow-map overlay's zero-height probe; shots still aim at the eye.
 bool IsPointVisibleToTeam(Team team, const glm::vec3& point, const std::vector<Unit>& units,

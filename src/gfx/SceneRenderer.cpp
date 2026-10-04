@@ -41,11 +41,13 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
       overlays.invalidHoverHighlight = hoveredGroundPoint;
     }
   }
+  overlays.showShotCone = game.Mode() == tactics::InputMode::AwaitingShootTarget;
   return overlays;
 }
 namespace {
 
 constexpr int kShadowMapSize = 2048;
+const glm::vec3 kSetupColor(0.2f, 1.0f, 0.3f);
 
 // Flat, unlit shader used for UI-ish overlays (selection highlights, the
 // move-path preview line) that should stay crisp regardless of shadowing.
@@ -75,6 +77,51 @@ in vec4 vColor;
 out vec4 FragColor;
 void main() {
   FragColor = vColor;
+}
+)";
+
+// Shot-cone footprint: drawn over world boxes (ground, slabs, obstacles); each
+// fragment is kept only if its world position lies inside the cone volume, so
+// the cone's true intersection with every surface shows up per pixel.
+const char* kConeSurfaceVertexShaderSrc = R"(#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+out vec3 vWorld;
+out vec3 vWorldNormal;
+void main() {
+  vWorld = (uModel * vec4(aPos, 1.0)).xyz;
+  vWorldNormal = transpose(inverse(mat3(uModel))) * aNormal;
+  gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)";
+
+const char* kConeSurfaceFragmentShaderSrc = R"(#version 300 es
+precision highp float;
+in vec3 vWorld;
+in vec3 vWorldNormal;
+uniform vec3 uApex;
+uniform vec3 uAxis;
+uniform vec4 uCone;   // x = tan(half angle), y = clipped range, z = fade range, w = start alpha
+uniform vec3 uColor;
+uniform int uRequireFacing;
+out vec4 FragColor;
+void main() {
+  vec3 d = vWorld - uApex;
+  float t = dot(d, uAxis);
+  if (t <= 0.0 || t >= uCone.y) discard;
+  float radial = length(d - uAxis * t);
+  if (radial > t * uCone.x) discard;
+  // A figure receives the overlay only on the side the shot reaches first.
+  // World boxes keep showing every cone/surface intersection (including the ground).
+  if (uRequireFacing != 0 && dot(normalize(vWorldNormal), -uAxis) <= 0.0) discard;
+  // Brightness tracks ShotProfileHitChance: cosine falloff from the axis to
+  // the cone edge times quartic falloff with range, so the brightest part of
+  // the mask is where a shot is most likely to land.
+  float angleFalloff = cos(atan(radial, t) / atan(uCone.x) * 1.57079632679);
+  float rangeFalloff = pow(max(1.0 - t / uCone.z, 0.0), 4.0);
+  FragColor = vec4(uColor, uCone.w * angleFalloff * rangeFalloff);
 }
 )";
 
@@ -1317,15 +1364,136 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
 }
 
 // Caller enables blending and caps overlapping cones with the stencil buffer.
-void DrawFovCone(const Shader& shader, TriangleMesh& mesh, const glm::mat4& viewProj,
-                 Team team, const std::vector<glm::vec3>& points) {
-  constexpr float kConeAlpha = 0.15f;
-  mesh.SetPoints(points);
-  const glm::vec4 baseColor = team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
-                                               : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
+// Alpha fades linearly from kFovAlpha at the unit to zero at the visual range.
+void DrawFovCone(const Shader& shader, ColorTriangleMesh& mesh, const glm::mat4& viewProj,
+                 const Unit& unit, const std::vector<glm::vec3>& points) {
+  constexpr float kFovAlpha = 0.15f;
+  const glm::vec3 eye = unit.EyePosition();
+  const float range = tactics::constants::kFovConeVisualRange;
+  const glm::vec3 baseColor = unit.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
+                                                      : glm::vec3(0.9f, 0.25f, 0.22f);
+  std::vector<ColorTriangleMesh::Vertex> vertices;
+  vertices.reserve(points.size());
+  for (const glm::vec3& p : points) {
+    const float dist = glm::length(glm::vec2(p.x - eye.x, p.z - eye.z));
+    const float fade = std::clamp(1.0f - dist / range, 0.0f, 1.0f);
+    vertices.push_back({p, glm::vec4(baseColor, kFovAlpha * fade)});
+  }
+  mesh.SetVertices(vertices);
   shader.SetMat4("uMVP", viewProj);
-  shader.SetVec4("uColor", glm::vec4(baseColor.r, baseColor.g, baseColor.b, kConeAlpha));
   mesh.Draw();
+}
+
+// Quartic falloff (matches the footprint shader) so the cone fades early.
+inline float ShotConeFade(float u) {
+  const float k = std::max(1.0f - u, 0.0f);
+  return k * k * k * k;
+}
+
+// The selected figure's shot cone as a real 3D cone: apex at the gun tip, axis
+// along the aim, fading out by the shot range. The side surface is depth
+// tested, so ground and walls cut it off rather than receiving a projection;
+// where it meets them, the footprint pass lights up exactly the part of each
+// surface lying inside the cone volume, bright where the hit probability is
+// high. Every figure standing in the cone (`litUnits`) catches the light,
+// so a would-be target reads as highlighted before it is ever clicked.
+// Caller is responsible for blending, polygon offset and depth state.
+void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
+                  ColorTriangleMesh& mesh, const CubeMesh& cube, const SphereMesh& sphere,
+                  const glm::mat4& viewProj, const Unit& unit,
+                  const std::vector<const Unit*>& litUnits,
+                  const std::vector<tactics::Obstacle>& obstacles,
+                  const std::vector<AABB>& sidewalks, float mapHalfExtent) {
+  constexpr int kSegments = 40;
+  constexpr int kRings = 12;  // Along the axis, so the alpha fade interpolates smoothly.
+  constexpr float kSurfaceAlpha = 0.18f;
+  constexpr float kFootprintAlpha = 0.7f;
+  constexpr float kTwoPi = 6.28318530717958647692f;
+  const float tanHalf = std::tan(glm::radians(tactics::constants::kShotConeHalfAngleDegrees));
+  const glm::vec3 apex = unit.MuzzlePosition();
+  const glm::vec3 axis = unit.FacingDirection();
+  const float fadeRange = tactics::kDefaultShotProfile.range;
+  // The cone ends where its axis first meets an obstacle, so it never pokes
+  // out the far side of a wall.
+  float range = fadeRange;
+  for (const auto& obstacle : obstacles) {
+    float tEnter = 0.0f;
+    float tExit = range;
+    bool hit = true;
+    for (int i = 0; i < 3 && hit; ++i) {
+      if (std::abs(axis[i]) < 1e-6f) {
+        hit = apex[i] >= obstacle.bounds.min[i] && apex[i] <= obstacle.bounds.max[i];
+        continue;
+      }
+      float t0 = (obstacle.bounds.min[i] - apex[i]) / axis[i];
+      float t1 = (obstacle.bounds.max[i] - apex[i]) / axis[i];
+      if (t0 > t1) std::swap(t0, t1);
+      tEnter = std::max(tEnter, t0);
+      tExit = std::min(tExit, t1);
+      hit = tEnter <= tExit;
+    }
+    if (hit && tEnter > 0.0f) range = tEnter;
+  }
+  const glm::vec3 right(-axis.z, 0.0f, axis.x);
+  const glm::vec3 up(0.0f, 1.0f, 0.0f);
+  const auto vertex = [&](int ring, int seg) {
+    const float u = static_cast<float>(ring) / static_cast<float>(kRings);
+    const float a = kTwoPi * static_cast<float>(seg) / static_cast<float>(kSegments);
+    const float t = range * u;
+    const glm::vec3 p =
+        apex + axis * t + (right * std::cos(a) + up * std::sin(a)) * (t * tanHalf);
+    return ColorTriangleMesh::Vertex{
+        p, glm::vec4(kSetupColor, kSurfaceAlpha * ShotConeFade(t / fadeRange))};
+  };
+  std::vector<ColorTriangleMesh::Vertex> vertices;
+  vertices.reserve(static_cast<size_t>(kRings * kSegments * 6));
+  for (int ring = 0; ring < kRings; ++ring) {
+    for (int seg = 0; seg < kSegments; ++seg) {
+      vertices.push_back(vertex(ring, seg));
+      vertices.push_back(vertex(ring + 1, seg));
+      vertices.push_back(vertex(ring + 1, seg + 1));
+      vertices.push_back(vertex(ring, seg));
+      vertices.push_back(vertex(ring + 1, seg + 1));
+      vertices.push_back(vertex(ring, seg + 1));
+    }
+  }
+  colorShader.Use();
+  mesh.SetVertices(vertices);
+  colorShader.SetMat4("uMVP", viewProj);
+  mesh.Draw();
+
+  surfaceShader.Use();
+  surfaceShader.SetVec3("uApex", apex);
+  surfaceShader.SetVec3("uAxis", axis);
+  surfaceShader.SetVec4("uCone",
+                       glm::vec4(tanHalf, range + 0.05f, fadeRange, kFootprintAlpha));
+  surfaceShader.SetVec3("uColor", kSetupColor);
+  const auto drawModel = [&](const glm::mat4& model, const auto& modelMesh, bool requireFacing) {
+    surfaceShader.SetMat4("uModel", model);
+    surfaceShader.SetMat4("uMVP", viewProj * model);
+    surfaceShader.SetInt("uRequireFacing", requireFacing ? 1 : 0);
+    modelMesh.Draw();
+  };
+  const auto drawBox = [&](const glm::vec3& minCorner, const glm::vec3& size) {
+    drawModel(glm::translate(glm::mat4(1.0f), minCorner) *
+                  glm::scale(glm::mat4(1.0f), size),
+              cube, false);
+  };
+  drawBox(glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
+          glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f));
+  for (const AABB& slab : sidewalks) drawBox(slab.min, slab.max - slab.min);
+  for (const auto& obstacle : obstacles) {
+    drawBox(obstacle.bounds.min, obstacle.bounds.max - obstacle.bounds.min);
+  }
+  for (const Unit* lit : litUnits) {
+    for (const FigurePart& part : BuildFigure(*lit)) {
+      if (part.primitive == FigurePrimitive::Rounded) {
+        drawModel(part.model, sphere, true);
+      } else {
+        drawModel(part.model, cube, true);
+      }
+    }
+  }
 }
 
 }  // namespace
@@ -1354,6 +1522,10 @@ bool SceneRenderer::Init() {
     std::fprintf(stderr, "Failed to compile the vertex-color shader\n");
     return false;
   }
+  if (!coneSurfaceShader_.Compile(kConeSurfaceVertexShaderSrc, kConeSurfaceFragmentShaderSrc)) {
+    std::fprintf(stderr, "Failed to compile the shot-cone surface shader\n");
+    return false;
+  }
   if (!fovMaskShader_.Compile(kFovMaskVertexShaderSrc, kFovMaskFragmentShaderSrc)) {
     std::fprintf(stderr, "Failed to compile the FOV mask shader\n");
     return false;
@@ -1364,6 +1536,7 @@ bool SceneRenderer::Init() {
   frontierBorder_.Init();
   pathLine_.Init();
   fovConeMesh_.Init();
+  shotConeMesh_.Init();
   terrainMesh_.Init();
   geometryMesh_.Init();
   fovSceneMesh_.Init();
@@ -1439,6 +1612,7 @@ void SceneRenderer::Destroy() {
   frontierBorder_.Destroy();
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
+  shotConeMesh_.Destroy();
   terrainFovCache_.clear();
   fovKeyObstacles_.clear();
   fovKeySidewalks_.clear();
@@ -1809,7 +1983,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // the first cone to touch a pixel blends and claims it (stencil
   // 0 -> 1), any later cone covering that same pixel is discarded, so
   // overlaps read as one flat shade instead of stacking.
-  unlitShader_.Use();
+  colorShader_.Use();
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glDepthMask(GL_FALSE);
@@ -1833,7 +2007,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       if (debug.disableFov || !unit.alive || unit.team != team) continue;
       DrawFovShadowMask(game, unit, viewProj, drawTerrain, targetFramebuffer, x, y, width, height);
     }
-    unlitShader_.Use();
+    colorShader_.Use();
   } else {
     const auto build = [&](const Unit& unit) {
       return BuildFovCone(unit, obstacles, sidewalks, mapHalfExtent, terrain,
@@ -1842,7 +2016,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (const Unit& unit : game.GetScene().units) {
       if (debug.disableFov || !unit.alive || unit.team != team) continue;
       if (terrain.Empty()) {
-        DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit.team, build(unit));
+        DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, build(unit));
         continue;
       }
       auto cached = std::find_if(terrainFovCache_.begin(), terrainFovCache_.end(),
@@ -1856,11 +2030,60 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         cached->facingYaw = unit.facingYaw;
         cached->points = build(unit);
       }
-      DrawFovCone(unlitShader_, fovConeMesh_, viewProj, unit.team, cached->points);
+      DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, cached->points);
+    }
+  }
+  glDisable(GL_STENCIL_TEST);
+  // Shot probability cones are setup feedback, drawn over the FOV overlay:
+  // the selected figure gets one while choosing a target, and every planned
+  // shot keeps its cone until the round is committed (like a planned move's
+  // path and destination ghost).
+  const bool planning =
+      game.Mode() != InputMode::GameOver && game.Mode() != InputMode::Executing;
+  // Every rendered figure other than the shooter can catch the cone's light,
+  // so anything standing in the beam is highlighted before it is targeted.
+  const auto coneLitUnits = [&](const Unit& shooter) {
+    std::vector<const Unit*> lit;
+    for (const Unit& other : game.GetScene().units) {
+      if (other.id == shooter.id) continue;
+      if (!IsUnitVisibleForRender(other, team, fogActive, visibility)) continue;
+      lit.push_back(&other);
+    }
+    return lit;
+  };
+  const Unit* aimingShooter = nullptr;
+  if (overlays.selectionHighlight && overlays.showShotCone) {
+    if (const Unit* selected = game.FindUnit(*game.SelectedUnitId())) {
+      if (selected->alive) {
+        // Depth-tested against the world so ground, slabs and walls cut the
+        // cone off; LEQUAL lets the footprint pass land on the very surfaces
+        // already in the depth buffer.
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, sphereMesh_,
+                     viewProj, *selected, coneLitUnits(*selected), obstacles,
+                     game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
+        glDepthFunc(GL_LESS);
+        aimingShooter = selected;
+      }
+    }
+  }
+  if (planning) {
+    for (const Unit& unit : game.GetScene().units) {
+      if (!unit.alive || unit.team != team ||
+          unit.plan.type != tactics::PlannedActionType::Shoot || &unit == aimingShooter) {
+        continue;
+      }
+      glEnable(GL_DEPTH_TEST);
+      glDepthFunc(GL_LEQUAL);
+      DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, sphereMesh_,
+                   viewProj, unit, coneLitUnits(unit), obstacles,
+                   game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
+      glDepthFunc(GL_LESS);
     }
   }
   glDisable(GL_POLYGON_OFFSET_FILL);
-  glDisable(GL_STENCIL_TEST);
+  unlitShader_.Use();
 
   // Movement frontier: a glow hugging the reach boundary -- brightest at the
   // boundary, fading to fully transparent within kFadeWidth inside it. The
@@ -2003,7 +2226,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       };
       auto toVertex = [&](const Pt& q) {
         const float a = kEdgeAlpha * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
-        return ColorTriangleMesh::Vertex{q.p, glm::vec4(0.2f, 0.9f, 0.3f, a)};
+        return ColorTriangleMesh::Vertex{q.p, glm::vec4(kSetupColor, a)};
       };
       for (int iz = 0; iz + 1 < nz; ++iz) {
         for (int ix = 0; ix + 1 < nx; ++ix) {
@@ -2102,7 +2325,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     unlitShader_.SetMat4("uMVP", viewProj);
     unlitShader_.SetVec4("uColor", overlays.moveFrontierSubsequentLeg
                                        ? glm::vec4(1.0f, 0.9f, 0.15f, 1.0f)
-                                       : glm::vec4(0.2f, 1.0f, 0.3f, 1.0f));
+                                       : glm::vec4(kSetupColor, 1.0f));
     frontierBorder_.DrawSegments();
     glDisable(GL_POLYGON_OFFSET_FILL);
   }
@@ -2133,8 +2356,6 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // phase every pane highlights its own team's living figures (dim white =
   // still needs a plan, green = plan set) -- this is squad-wide, not a
   // single actor.
-  const bool planning =
-      game.Mode() != InputMode::GameOver && game.Mode() != InputMode::Executing;
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
       if (!unit.alive || unit.team != team) continue;
@@ -2238,7 +2459,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         }
       } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
         if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {
-          const std::vector<glm::vec3> shotLine = {unit.EyePosition(), shotTarget->EyePosition()};
+          const std::vector<glm::vec3> shotLine = {unit.MuzzlePosition(), shotTarget->EyePosition()};
           pathLine_.SetPoints(shotLine);
           unlitShader_.SetMat4("uMVP", viewProj);
           unlitShader_.SetVec4("uColor", glm::vec4(0.95f, 0.25f, 0.2f, 1.0f));

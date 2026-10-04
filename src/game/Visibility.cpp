@@ -12,7 +12,7 @@ bool IsPointVisibleToTeam(Team team, const glm::vec3& point, const std::vector<U
   for (const auto& viewer : units) {
     if (!viewer.alive || viewer.team != team) continue;
     if (InFovCone(viewer.EyePosition(), viewer.FacingDirection(), point,
-                  constants::kShootHalfFovDegrees, constants::kShootRange) &&
+                  constants::kShootHalfFovDegrees, constants::kSightRange) &&
         LineOfSightClear(viewer.EyePosition(), point, obstacles)) {
       return true;
     }
@@ -25,7 +25,7 @@ bool IsPointVisibleToTeam(Team team, const glm::vec3& point, const std::vector<U
   for (const auto& viewer : units) {
     if (!viewer.alive || viewer.team != team) continue;
     if (InFovCone(viewer.EyePosition(), viewer.FacingDirection(), point,
-                  constants::kShootHalfFovDegrees, constants::kShootRange) &&
+                  constants::kShootHalfFovDegrees, constants::kSightRange) &&
         LineOfSightClear(viewer.EyePosition(), point, obstacles)) {
       return true;
     }
@@ -39,7 +39,7 @@ bool IsPointVisibleToTeam(Team team, const glm::vec3& point, const std::vector<U
   for (const auto& viewer : units) {
     if (!viewer.alive || viewer.team != team) continue;
     if (InFovCone(viewer.EyePosition(), viewer.FacingDirection(), point,
-                  constants::kShootHalfFovDegrees, constants::kShootRange) &&
+                  constants::kShootHalfFovDegrees, constants::kSightRange) &&
         LineOfSightClear(viewer.EyePosition(), point, obstacles, walkSurfaces)) {
       return true;
     }
@@ -54,7 +54,7 @@ bool IsPointVisibleToTeam(Team team, const glm::vec3& point, const std::vector<U
   for (const auto& viewer : units) {
     if (!viewer.alive || viewer.team != team) continue;
     if (InFovCone(viewer.EyePosition(), viewer.FacingDirection(), point,
-                  constants::kShootHalfFovDegrees, constants::kShootRange) &&
+                  constants::kShootHalfFovDegrees, constants::kSightRange) &&
         LineOfSightClear(viewer.EyePosition(), point, obstacles, walkSurfaces, terrain)) {
       return true;
     }
@@ -89,7 +89,7 @@ bool CanUnitSee(const Unit& viewer, const Unit& target, const std::vector<Obstac
                  const std::vector<WalkSurface>& walkSurfaces) {
   return viewer.alive &&
          InFovCone(viewer.EyePosition(), viewer.FacingDirection(), target.position,
-                   constants::kShootHalfFovDegrees, constants::kShootRange) &&
+                   constants::kShootHalfFovDegrees, constants::kSightRange) &&
          LineOfSightClear(viewer.EyePosition(), target.position, obstacles, walkSurfaces);
 }
 
@@ -98,7 +98,7 @@ bool CanUnitSee(const Unit& viewer, const Unit& target, const std::vector<Obstac
   const glm::vec3 probe = UnitFovProbe(target, walkSurfaces, terrain);
   return viewer.alive &&
          InFovCone(viewer.EyePosition(), viewer.FacingDirection(), probe,
-                   constants::kShootHalfFovDegrees, constants::kShootRange) &&
+                   constants::kShootHalfFovDegrees, constants::kSightRange) &&
          LineOfSightClear(viewer.EyePosition(), probe, obstacles, walkSurfaces, terrain);
 }
 

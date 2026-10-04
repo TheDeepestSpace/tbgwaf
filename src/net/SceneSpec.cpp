@@ -1,5 +1,8 @@
 #include "net/SceneSpec.h"
 
+#include <cmath>
+#include <string>
+
 #include "game/MapGenerator.h"
 #include "game/Weapon.h"
 #include "net/Protocol.h"
@@ -74,6 +77,11 @@ bool SceneFromSpec(const Json& spec, tactics::Scene* out, std::string* error) {
     }
     generated = true;
   }
+  // `half_extent: N` sizes the ground square (default 15); scenarios whose
+  // units sit far apart must grow the map so every figure stands on it.
+  if (map["half_extent"].IsNumber()) {
+    scene.mapHalfExtent = static_cast<float>(map["half_extent"].AsNumber());
+  }
   for (const Json& o : map["obstacles"].AsArray()) {
     glm::vec2 center, half;
     if (!DecodeVec2(o["center"], &center)) return Fail(error, "map.obstacles[].center must be a 2-element [x, z] list");
@@ -109,6 +117,12 @@ bool SceneFromSpec(const Json& spec, tactics::Scene* out, std::string* error) {
     }
     unit.facingYaw = static_cast<float>(u["facing_degrees"].AsNumber()) * kPi / 180.0f;
     unit.alive = true;
+    if (std::abs(unit.position.x) > scene.mapHalfExtent ||
+        std::abs(unit.position.z) > scene.mapHalfExtent) {
+      return Fail(error, "units[] id " + std::to_string(unit.id) +
+                             " is outside the map; raise map.half_extent (currently " +
+                             std::to_string(scene.mapHalfExtent) + ")");
+    }
     unit.weapon = DefaultWeaponForUnit(unit.id);
     scene.units.push_back(unit);
   }

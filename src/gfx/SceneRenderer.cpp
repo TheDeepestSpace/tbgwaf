@@ -1426,7 +1426,11 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
   constexpr float kSurfaceAlpha = 0.18f;
   constexpr float kFootprintAlpha = 0.7f;
   constexpr float kTwoPi = 6.28318530717958647692f;
-  const float tanHalf = std::tan(glm::radians(tactics::constants::kShotConeHalfAngleDegrees));
+  // Keep the setup preview identical to the trajectory scatter used when
+  // the action executes.  In particular, the sniper and Deagle must not
+  // inherit the AR's 3-degree cone.
+  const float tanHalf =
+      std::tan(glm::radians(tactics::StatsOf(unit.weapon).scatterHalfAngleDegrees));
   // Free-aim (issue #129): the cone leaves the muzzle of the figure as it
   // will stand when it fires -- turned toward the aim point -- and its axis
   // may pitch up/down (sky or elevated aim).
@@ -2169,10 +2173,23 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
       glEnable(GL_DEPTH_TEST);
       glDepthFunc(GL_LEQUAL);
+      // A committed lock-on still needs the selected target bearing.  With
+      // no aim point, DrawShotCone falls back to the figure's old facing,
+      // which made the setup cone disagree with the shot/tracer whenever a
+      // target was on a different row (burst_stops_on_early_death exposed
+      // this clearly).  Point at the same torso marker used while staging
+      // the lock so committing the plan does not move its cone.
+      std::optional<glm::vec3> lockedAimPoint;
+      const glm::vec3* aimPoint = nullptr;
+      if (unit.plan.hasAimPoint) {
+        aimPoint = &unit.plan.aimPoint;
+      } else if (const Unit* target = game.FindUnit(unit.plan.shootTargetId)) {
+        lockedAimPoint = target->position + glm::vec3(0.0f, 0.9f, 0.0f);
+        aimPoint = &*lockedAimPoint;
+      }
       DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, sphereMesh_,
                    viewProj, unit, coneLitUnits(unit), obstacles,
-                   game.GetScene().sidewalks, game.GetScene().mapHalfExtent,
-                   unit.plan.hasAimPoint ? &unit.plan.aimPoint : nullptr);
+                   game.GetScene().sidewalks, game.GetScene().mapHalfExtent, aimPoint);
       glDepthFunc(GL_LESS);
       // A planned free-aim shot keeps its "+" selector until the commit,
       // like a planned move keeps its destination ghost.

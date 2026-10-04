@@ -2063,7 +2063,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   // Issue #136: alpha-blended re-draw of the occluders marked above, sorted
-  // back-to-front, with depth writes off -- the figures already drawn and
+  // front-to-back and stencil-capped so each pixel is blended exactly once
+  // (the nearest occluder): stacked buildings read as one flat
+  // kOccluderFadeOpacity instead of compounding toward opaque. Depth writes off -- the figures already drawn and
   // the depth-tested overlays drawn later (frontier fill, FOV cones, paths)
   // all show through them. Shadow casting and the FOV depth maps are left
   // untouched: a faded block is still physically there and still blocks
@@ -2089,11 +2091,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
     }
     std::sort(faded.begin(), faded.end(), [](const FadedOccluder& a, const FadedOccluder& b) {
-      return a.viewDistance > b.viewDistance;
+      return a.viewDistance < b.viewDistance;
     });
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
+    glEnable(GL_STENCIL_TEST);
+    glStencilFunc(GL_EQUAL, 0, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
     for (const FadedOccluder& f : faded) {
       if (f.obstacle >= 0) {
         const tactics::Obstacle& obstacle = obstacles[f.obstacle];
@@ -2112,6 +2117,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                      glm::vec4(kDeckColor, kOccluderFadeOpacity));
       }
     }
+    glDisable(GL_STENCIL_TEST);
+    glClear(GL_STENCIL_BUFFER_BIT);  // Later passes expect a clean stencil.
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
   }

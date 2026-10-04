@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <set>
 #include <vector>
 
 #include "game/GameLogic.h"
@@ -212,6 +213,7 @@ void TestVariedHeightsWithFewTowers() {
     int towers = 0, medium = 0;
     float lo = 1e9f, hi = 0.0f;
     for (const auto& o : scene.obstacles) {
+      if (o.footprint.empty()) continue;  // Pier columns (elevated seeds), not buildings.
       const float h = o.bounds.max.y;
       lo = std::min(lo, h);
       hi = std::max(hi, h);
@@ -555,6 +557,7 @@ float DistanceToSegment(glm::vec2 p, glm::vec2 a, glm::vec2 b) {
 void TestObliqueArteryAndBranchMerge() {
   MapGeneratorConfig one;
   one.arteryCount = 1;
+  one.elevatedHighway = OverpassMode::Off;
   const float half = UrbanMapHalfExtent(one);
   const auto oneRoads = UrbanRoads(42, one);
   CHECK(oneRoads.size() == 1);
@@ -596,6 +599,7 @@ void TestObliqueArteryAndBranchMerge() {
 void TestPolygonBlocksAdaptToAngledStreets() {
   MapGeneratorConfig config;
   config.arteryCount = 2;
+  config.elevatedHighway = OverpassMode::Off;
   const Scene scene = GenerateUrbanMap(42, config);
   const auto blocks = UrbanBlocks(42, config);
   const auto roads = UrbanRoads(42, config);
@@ -680,7 +684,8 @@ void TestPolygonCollisionLosAndNavigationUseRealFootprint() {
 void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   MapGeneratorConfig config;
   config.arteryCount = 2;
-  config.elevatedHighway = true;
+  config.elevatedHighway = OverpassMode::On;
+  config.overpassLayout = OverpassLayout::RampUpRampDown;
   const Scene scene = GenerateUrbanMap(7, config);
   const auto roads = UrbanRoads(7, config);
 
@@ -836,9 +841,239 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   CHECK(glm::distance(game.FindUnit(0)->position, rampGoal) < 0.05f);
 }
 
+// --- Random overpass presence and off-map layouts (issue #130). ---
+
+void TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable() {
+  const MapGeneratorConfig autoConfig;  // Auto presence + Auto layout.
+  int present = 0, absent = 0, layoutCounts[4] = {};
+  for (uint32_t seed = 1; seed <= 120; ++seed) {
+    const OverpassChoice choice = UrbanOverpass(seed, autoConfig);
+    const OverpassChoice again = UrbanOverpass(seed, autoConfig);
+    CHECK(choice.elevated == again.elevated);
+    CHECK(choice.layout == again.layout);
+    // The generated scene agrees with the reported choice.
+    if (seed <= 8) {
+      const auto roads = UrbanRoads(seed, autoConfig);
+      CHECK(roads[0].elevated == choice.elevated);
+      float peak = 0.0f;
+      for (const glm::vec3& p : roads[0].centerline) peak = std::max(peak, p.y);
+      CHECK((peak > 1.0f) == choice.elevated);
+    }
+    if (!choice.elevated) {
+      ++absent;
+      continue;
+    }
+    ++present;
+    ++layoutCounts[static_cast<int>(choice.layout) - 1];
+  }
+  CHECK(present > 30 && absent > 30);               // Roughly 50/50 presence.
+  for (int count : layoutCounts) CHECK(count > 0);  // Every layout occurs.
+
+  // Forcing presence works both ways, a forced layout is honored, and the
+  // legacy grid never has an overpass.
+  MapGeneratorConfig off = autoConfig;
+  off.elevatedHighway = OverpassMode::Off;
+  MapGeneratorConfig on = autoConfig;
+  on.elevatedHighway = OverpassMode::On;
+  for (uint32_t seed : kSeeds) {
+    CHECK(!UrbanOverpass(seed, off).elevated);
+    CHECK(UrbanOverpass(seed, on).elevated);
+  }
+  on.overpassLayout = OverpassLayout::Through;
+  CHECK(UrbanOverpass(7, on).layout == OverpassLayout::Through);
+  CHECK(!UrbanOverpass(7, LegacyConfig()).elevated);
+
+  // The seeds the overpass goldens/scenarios use produce their layout
+  // naturally under the default (Auto) config, and seed 7 has no overpass.
+  MapGeneratorConfig twoArteries;
+  twoArteries.arteryCount = 2;
+  const std::pair<uint32_t, OverpassLayout> kNatural[] = {
+      {33, OverpassLayout::RampUpRampDown}, {4, OverpassLayout::Through},
+      {16, OverpassLayout::EnterRampUp},    {22, OverpassLayout::EnterRampDown},
+      {26, OverpassLayout::RampUpRampDown},
+  };
+  for (const auto& [seed, layout] : kNatural) {
+    const OverpassChoice choice = UrbanOverpass(seed, twoArteries);
+    CHECK(choice.elevated);
+    CHECK(choice.layout == layout);
+  }
+  CHECK(!UrbanOverpass(7, twoArteries).elevated);
+}
+
+void TestOverpassLayoutGeometryAndBranchRampOff() {
+  const struct {
+    OverpassLayout layout;
+    bool gradeStart, gradeEnd;
+  } cases[] = {
+      {OverpassLayout::RampUpRampDown, true, true},
+      {OverpassLayout::Through, false, false},
+      {OverpassLayout::EnterRampUp, true, false},
+      {OverpassLayout::EnterRampDown, false, true},
+  };
+  MapGeneratorConfig config;
+  config.elevatedHighway = OverpassMode::On;
+  config.branchEnd = BranchEnd::Ramp;
+  const float half = UrbanMapHalfExtent(config);
+  for (const auto& tc : cases) {
+    config.overpassLayout = tc.layout;
+    for (uint32_t seed : kSeeds) {
+      CHECK(UrbanOverpass(seed, config).layout == tc.layout);
+      const Scene scene = GenerateUrbanMap(seed, config);
+      const auto roads = UrbanRoads(seed, config);
+      const auto& deck = roads[0].centerline;
+
+      // Both end kinds are cut off exactly at the map boundary; an elevated
+      // end stays at deck height there.
+      auto checkEnd = [&](const glm::vec3& p, bool grade) {
+        if (grade) {
+          CHECK(std::fabs(std::max(std::fabs(p.x), std::fabs(p.z)) - half) < kEps);
+          CHECK(p.y < 0.1f);
+        } else {
+          CHECK(std::fabs(std::max(std::fabs(p.x), std::fabs(p.z)) - half) < kEps);
+          CHECK(std::fabs(p.y - config.highwayElevation) < 0.1f);
+        }
+      };
+      checkEnd(deck.front(), tc.gradeStart);
+      checkEnd(deck.back(), tc.gradeEnd);
+      float peak = 0.0f;
+      for (size_t i = 0; i < deck.size(); ++i) {
+        peak = std::max(peak, deck[i].y);
+        if (i) CHECK(std::fabs(deck[i].y - deck[i - 1].y) < 1.0f);  // Smooth profile.
+      }
+      CHECK(std::fabs(peak - config.highwayElevation) < 0.1f);
+
+      // Each off-map end's deck surfaces straddle the boundary, so the
+      // geometry is continuous across the map edge (no gap at the rim).
+      int straddling = 0;
+      for (const WalkSurface& surface : scene.walkSurfaces) {
+        bool inside = false, outside = false;
+        for (const glm::vec3& v : surface.vertices) {
+          (std::max(std::fabs(v.x), std::fabs(v.z)) < half ? inside : outside) = true;
+        }
+        straddling += inside && outside ? 1 : 0;
+      }
+      const int elevatedEnds = (tc.gradeStart ? 0 : 1) + (tc.gradeEnd ? 0 : 1);
+      CHECK(straddling >= elevatedEnds);
+      if (elevatedEnds == 0) CHECK(straddling == 0);
+
+      // Pier columns stay on the map even when the deck runs past it.
+      for (const Obstacle& o : scene.obstacles) {
+        if (!o.footprint.empty()) continue;
+        CHECK(std::max({std::fabs(o.bounds.min.x), std::fabs(o.bounds.max.x),
+                        std::fabs(o.bounds.min.z), std::fabs(o.bounds.max.z)}) < half);
+      }
+
+      // Ground transitions: one per on-map ramp foot plus the branch's foot.
+      int groundConnections = 0;
+      for (const WalkSurface& surface : scene.walkSurfaces) {
+        groundConnections += surface.connectsToGround ? 1 : 0;
+      }
+      CHECK(groundConnections == 1 + (tc.gradeStart ? 1 : 0) + (tc.gradeEnd ? 1 : 0));
+
+      // The branch ramps off the elevated artery down to grade: it starts at
+      // grade on the boundary, tops out at deck height on the artery, and a
+      // ground unit can walk up it onto the deck in every layout (for
+      // `through` it is the only way up).
+      CHECK(roads.size() == 2);
+      const auto& ramp = roads[1].centerline;
+      CHECK(ramp.front().y < 0.1f);
+      CHECK(std::fabs(ramp.back().y - config.highwayElevation) < 0.1f);
+
+      // The ramp tops out before its slab reaches the artery's edge, so the
+      // junction sits entirely at deck height and the descent only starts
+      // clear of the deck (no wedge cutting under the artery slab).
+      const glm::vec2 arteryOrigin(deck.front().x, deck.front().z);
+      const glm::vec2 arteryDir = glm::normalize(
+          glm::vec2(deck.back().x, deck.back().z) - arteryOrigin);
+      const glm::vec2 arteryNormal(-arteryDir.y, arteryDir.x);
+      const float junctionBand = config.arteryWidth * 0.5f + roads[1].width * 0.5f;
+      for (const glm::vec3& p : ramp) {
+        const float lateral =
+            std::fabs(glm::dot(glm::vec2(p.x, p.z) - arteryOrigin, arteryNormal));
+        if (lateral < junctionBand) {
+          CHECK(std::fabs(p.y - config.highwayElevation) < 0.1f);
+        }
+      }
+
+      NavMesh nav;
+      nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
+                &scene.walkSurfaces);
+      glm::vec3 top(0.0f);  // Highest deck surface center still on the map.
+      for (const WalkSurface& surface : scene.walkSurfaces) {
+        const glm::vec3 center = SurfaceCenter(surface);
+        if (std::max(std::fabs(center.x), std::fabs(center.z)) > half - 2.0f) continue;
+        if (center.y > top.y) top = center;
+      }
+      const glm::vec2 inward =
+          glm::normalize(glm::vec2(ramp[1].x - ramp[0].x, ramp[1].z - ramp[0].z));
+      const glm::vec3 start(ramp.front().x + inward.x * 4.0f, 0.0f,
+                            ramp.front().z + inward.y * 4.0f);
+      std::vector<glm::vec3> up;
+      CHECK(nav.FindPath(start, top, &up));
+      if (!up.empty()) {
+        CHECK(std::fabs(up.front().y) < 0.1f);
+        CHECK(std::fabs(up.back().y - top.y) < 0.1f);
+      }
+    }
+  }
+}
+
+void TestBranchMayRunOffMapWithoutRamp() {
+  MapGeneratorConfig config;
+  config.elevatedHighway = OverpassMode::On;
+  const float half = UrbanMapHalfExtent(config);
+
+  // Auto draws both endings across seeds, never off-map under `through`,
+  // and ramp lengths vary per seed.
+  int offMap = 0, ramp = 0;
+  std::set<int> rampLengths;
+  for (uint32_t seed = 1; seed <= 60; ++seed) {
+    for (const OverpassLayout layout :
+         {OverpassLayout::RampUpRampDown, OverpassLayout::Through}) {
+      config.overpassLayout = layout;
+      const auto roads = UrbanRoads(seed, config);
+      const auto& branch = roads[1].centerline;
+      const bool flat = std::fabs(branch.front().y - config.highwayElevation) < 0.1f;
+      if (layout == OverpassLayout::Through) CHECK(!flat);
+      if (layout != OverpassLayout::RampUpRampDown) continue;
+      (flat ? offMap : ramp) += 1;
+      if (!flat) {
+        size_t flatFrom = 0;
+        while (flatFrom < branch.size() && branch[flatFrom].y < 0.1f) ++flatFrom;
+        rampLengths.insert(static_cast<int>(flatFrom));
+      }
+    }
+  }
+  CHECK(offMap > 5 && ramp > 5);
+  CHECK(rampLengths.size() > 3);
+
+  // Forced off-map: deck height from end to end, past the boundary, no
+  // ground connection, and still a walkable deck connected to the artery.
+  config.overpassLayout = OverpassLayout::RampUpRampDown;
+  config.branchEnd = BranchEnd::OffMap;
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed, config);
+    const auto roads = UrbanRoads(seed, config);
+    const auto& branch = roads[1].centerline;
+    for (const glm::vec3& p : branch) CHECK(std::fabs(p.y - config.highwayElevation) < 0.1f);
+    CHECK(std::fabs(std::max(std::fabs(branch.front().x), std::fabs(branch.front().z)) - half) < kEps);
+    int groundConnections = 0;
+    for (const WalkSurface& surface : scene.walkSurfaces) {
+      groundConnections += surface.connectsToGround ? 1 : 0;
+    }
+    CHECK(groundConnections == 2);  // The artery's two ramp feet only.
+    for (const Obstacle& o : scene.obstacles) {
+      if (!o.footprint.empty()) continue;
+      CHECK(std::max({std::fabs(o.bounds.min.x), std::fabs(o.bounds.max.x),
+                      std::fabs(o.bounds.min.z), std::fabs(o.bounds.max.z)}) < half);
+    }
+  }
+}
+
 void TestSpawnReachabilityAndSurfaceSnapshotSynchronization() {
   MapGeneratorConfig config;
   config.arteryCount = 2;
+  config.elevatedHighway = OverpassMode::Off;
   Scene scene = GenerateUrbanMap(2024, config);
   NavMesh nav;
   nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
@@ -846,7 +1081,8 @@ void TestSpawnReachabilityAndSurfaceSnapshotSynchronization() {
   std::vector<glm::vec3> path;
   CHECK(nav.FindPath(scene.units[0].position, scene.units[3].position, &path));
 
-  config.elevatedHighway = true;
+  config.elevatedHighway = OverpassMode::On;
+  config.overpassLayout = OverpassLayout::RampUpRampDown;
   scene = GenerateUrbanMap(7, config);
   const WalkSurface& patch = scene.walkSurfaces[3];
   const glm::vec3 surfacePoint = SurfaceCenter(patch);
@@ -878,6 +1114,9 @@ int main() {
   TestPolygonBlocksAdaptToAngledStreets();
   TestPolygonCollisionLosAndNavigationUseRealFootprint();
   TestElevatedOverpassRampsPiersAndDistinctLayers();
+  TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable();
+  TestOverpassLayoutGeometryAndBranchRampOff();
+  TestBranchMayRunOffMapWithoutRamp();
   TestSpawnReachabilityAndSurfaceSnapshotSynchronization();
   TestHillyDeterminismAndVariety();
   TestHillyTerrainIsGenuinelyUneven();

@@ -49,6 +49,7 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
     if (const auto& preview = game.GetAimPreview()) {
       overlays.aimMarker = preview->point;
     }
+    overlays.aimConeTarget = overlays.aimMarker ? overlays.aimMarker : hoveredGroundPoint;
   }
   return overlays;
 }
@@ -2149,7 +2150,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, sphereMesh_,
                      viewProj, *selected, coneLitUnits(*selected), obstacles,
                      game.GetScene().sidewalks, game.GetScene().mapHalfExtent,
-                     overlays.aimMarker ? &*overlays.aimMarker : nullptr);
+                     overlays.aimConeTarget ? &*overlays.aimConeTarget : nullptr);
         glDepthFunc(GL_LESS);
         aimingShooter = selected;
       }

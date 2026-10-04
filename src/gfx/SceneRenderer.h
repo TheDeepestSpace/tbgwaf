@@ -50,6 +50,9 @@ struct PaneOverlays {
   // placed-but-unconfirmed "+" selector.
   const tactics::Unit* aimShooter = nullptr;
   std::optional<glm::vec3> aimMarker;
+  // Where the preview cone points: the placed marker, else the hovered
+  // point, so it never sticks to the facing left by an earlier round's shot.
+  std::optional<glm::vec3> aimConeTarget;
   // Debug: walkable-cell boundaries of this navmesh (ground cells cyan,
   // climb-top cells orange), hugging the terrain. Not set by
   // BuildPaneOverlays; the app's debug toggle / the map golden harness

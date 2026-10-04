@@ -715,7 +715,18 @@ int main() {
     const bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse;
     if (!uiWantsMouse && planning) {
       const int hoverPane = PaneForX(mouseX, paneCount, windowWidth);
-      if (game.Mode() == InputMode::AwaitingMoveDestination) {
+      if (game.Mode() == InputMode::AwaitingShootTarget) {
+        // The preview cone follows the cursor until an aim point is placed.
+        const PaneRect& rect = paneRects[hoverPane];
+        const gfx::Ray hoverRay = cameras[hoverPane].ScreenPointToRay(
+            static_cast<float>(mouseX - rect.x), static_cast<float>(mouseY),
+            static_cast<float>(rect.width), static_cast<float>(windowHeight));
+        glm::vec3 hoverPoint;
+        if (IntersectGroundOrClimbTop(hoverRay, game.GetScene(), &hoverPoint)) {
+          hoveredGroundPoint = hoverPoint;
+          hasHoveredGroundPoint = true;
+        }
+      } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
         const PaneRect& rect = paneRects[hoverPane];
         const gfx::Ray hoverRay = cameras[hoverPane].ScreenPointToRay(
             static_cast<float>(mouseX - rect.x), static_cast<float>(mouseY),

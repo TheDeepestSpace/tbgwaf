@@ -54,6 +54,6 @@ script:
 
   - assert: {unit: 3, alive: true, comment: All 30 clamped AR shots were pinned misses -- and no 31st shot reached the tripwire hit roll}
   - assert: {unit: 4, alive: false, comment: "The clamped-to-1 sniper shot got the 2nd roll, a hit"}
-  - assert: {unit: 5, alive: false, comment: The default single shot got the 3rd roll, a hit}
+  - assert: {unit: 5, alive: false, comment: "The default single shot got the 3rd roll, a hit"}
   - assert: {winner: none}
   - assert: {round: 2}

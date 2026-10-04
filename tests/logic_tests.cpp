@@ -427,6 +427,9 @@ void TestRoundPlanningTeamGating() {
 
 void TestRoundCommitRequiresBothTeamsPlanned() {
   GameLogic game(LegacyScene());
+  // Locked shots scatter like free-aim ones now; the sniper's tight cone is
+  // the one geometrically certain to intersect a figure across the lane.
+  game.FindUnit(1)->weapon = WeaponType::SniperRifle;
 
   const glm::vec3 blue0Start = game.FindUnit(0)->position;
 
@@ -535,6 +538,11 @@ void TestRoundExecutesBothTeamsMovesConcurrently() {
 void TestShootRowsResolveSimultaneouslyAcrossTeams() {
   GameLogic game(LegacyScene());
   game.SetShotRollSource([] { return 0.0f; });  // Pin rolls to a hit.
+  // The open-lane duelists get snipers: a pinned roll decides the hit only
+  // once the scattered bullet actually crosses the figure, and only the
+  // sniper's cone guarantees that geometrically at this distance.
+  game.FindUnit(1)->weapon = WeaponType::SniperRifle;
+  game.FindUnit(4)->weapon = WeaponType::SniperRifle;
   // Every figure shoots its opposite number in the same round. Rows z=-4 and
   // z=4 are behind the walls (all four of those shots must miss); row z=0 is
   // the open lane, so blue1 and red4 fire at each other simultaneously --
@@ -567,6 +575,10 @@ void TestShootRowsResolveSimultaneouslyAcrossTeams() {
 void TestMutualEliminationIsDraw() {
   GameLogic game(LegacyScene());
   game.SetShotRollSource([] { return 0.0f; });  // Pin rolls to a hit.
+  // Snipers: tight enough scatter that both opening bullets are
+  // geometrically certain to cross their figure (see the rows test above).
+  game.FindUnit(1)->weapon = WeaponType::SniperRifle;
+  game.FindUnit(4)->weapon = WeaponType::SniperRifle;
   // Leave only the open middle lane's pair alive, shooting each other.
   for (int id : {0, 2, 3, 5}) game.FindUnit(id)->alive = false;
 
@@ -740,16 +752,20 @@ void TestPendingShotFiresWhenTargetWalksIntoView() {
   game.ChoosePass();
   game.ClickUnit(1, Team::Blue);
   game.ChooseShoot();
+  // Full magazine: individual bullets scatter and the first few may clip
+  // the wall corner red4 is just clearing, but a 30-round burst across the
+  // walk is certain to connect while red4 is still far from its goal.
+  game.SetPlannedShotCount(30, Team::Blue);
   game.ClickUnit(4, Team::Blue);
   game.ClickUnit(2, Team::Blue);
   game.ChoosePass();
 
-  // Red sends red4 out of cover, north along x=5 into the open lane.
+  // Red sends red4 out of cover, north along x=5 across the open lane.
   game.ClickUnit(3, Team::Red);
   game.ChoosePass();
   game.ClickUnit(4, Team::Red);
   game.ChooseMove();
-  const glm::vec3 destination(5.0f, 0.0f, 0.0f);
+  const glm::vec3 destination(5.0f, 0.0f, 4.0f);
   game.ClickGround(destination, Team::Red);
   game.FinishMovePlan();
   game.ClickUnit(5, Team::Red);
@@ -1124,6 +1140,25 @@ void TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds() {
   CHECK(game.Playbook(Team::Blue).At(false, false) == ReactionAction::Shoot);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(game.RoundNumber() == 2);
+}
+
+// Shoot-on-sight is a magazine-long burst at the normal odds, not one
+// guaranteed shot: with every roll a miss the watcher keeps firing (several
+// rolls), the walker survives and keeps walking to its destination.
+void TestGameLogicPlaybookShootOnSightFiresWholeMagAtNormalOdds() {
+  GameLogic game(LegacyScene());
+  int rolls = 0;
+  game.SetShotRollSource([&rolls] {
+    ++rolls;
+    return 0.999f;  // Always a miss.
+  });
+  SetStationaryShoot(game, Team::Blue);
+  const glm::vec3 destination(0.0f, 0.0f, 0.0f);
+  StartRed4WalkThroughBlue1Lane(game, destination);
+  RunRound(game);
+  CHECK(game.FindUnit(4)->alive);
+  CHECK(glm::distance(game.FindUnit(4)->position, destination) < 1e-3f);
+  CHECK(rolls > 1);
 }
 
 void TestGameLogicPlaybookDefaultTable() {
@@ -1806,6 +1841,603 @@ void TestFollowerBuildsSightingsWithoutPhysicsUpdate() {
   CHECK(anyMoving);
 }
 
+// Minimal flat scene for the free-aim tests: unit ids are sequential from 0
+// so sighting memory indexes line up.
+tactics::Scene AimScene(const std::vector<std::pair<Team, glm::vec3>>& layout,
+                        std::initializer_list<tactics::Obstacle> obstacles = {}) {
+  tactics::Scene scene;
+  scene.mapHalfExtent = 30.0f;
+  for (const tactics::Obstacle& obstacle : obstacles) scene.obstacles.push_back(obstacle);
+  int id = 0;
+  for (const auto& [team, position] : layout) {
+    tactics::Unit unit;
+    unit.id = id++;
+    unit.team = team;
+    unit.position = position;
+    scene.units.push_back(unit);
+  }
+  return scene;
+}
+
+void TestAimRayResolvesUnitAndSurface() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+
+  // Camera ray onto open ground in the shooter's LOS: a surface aim.
+  auto down = [](float x, float z) {
+    return std::make_pair(glm::vec3(x, 20.0f, z), glm::vec3(0.0f, -1.0f, 0.0f));
+  };
+  auto [o1, d1] = down(0.0f, 0.0f);
+  GameLogic::AimRayResult aim = game.ResolveAimRay(o1, d1);
+  CHECK(aim.kind == GameLogic::AimRayResult::Kind::Surface);
+  CHECK(glm::distance(aim.point, glm::vec3(0.0f)) < 0.05f);
+
+  // Ground hidden behind the z=-4 wall: not aimable directly, so nothing.
+  auto [o2, d2] = down(4.0f, -4.0f);
+  aim = game.ResolveAimRay(o2, d2);
+  CHECK(aim.kind == GameLogic::AimRayResult::Kind::None);
+
+  // A visible enemy under the cursor beats the surface behind it.
+  auto [o3, d3] = down(8.0f, 0.0f);
+  aim = game.ResolveAimRay(o3, d3);
+  CHECK(aim.kind == GameLogic::AimRayResult::Kind::Unit);
+  CHECK(aim.unitId == 4);
+
+  // A sky ray has no aimable surface: nothing is placed.
+  const Unit* shooter = game.FindUnit(1);
+  aim = game.ResolveAimRay(shooter->EyePosition() + glm::vec3(0.0f, 0.5f, 0.0f),
+                           glm::vec3(0.3f, 1.0f, 0.0f));
+  CHECK(aim.kind == GameLogic::AimRayResult::Kind::None);
+  game.ClickAimRay(shooter->EyePosition() + glm::vec3(0.0f, 0.5f, 0.0f),
+                   glm::vec3(0.3f, 1.0f, 0.0f), Team::Blue);
+  CHECK(!game.GetAimPreview().has_value());
+}
+
+void TestFreeAimPreviewPlaceConfirmAndCancel() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+
+  // Confirm with nothing placed: no-op.
+  game.ConfirmAim(Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+
+  // Tap-to-place via the ray path, then cancel drops the marker.
+  game.ClickAimRay(glm::vec3(0.0f, 20.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), Team::Blue);
+  CHECK(game.GetAimPreview().has_value());
+  game.CancelAction();
+  CHECK(!game.GetAimPreview().has_value());
+  CHECK(game.Mode() == InputMode::ActionMenu);
+
+  // Place again, confirm: the plan is a free-aim shot, no locked target.
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(2.0f, 0.0f, 1.0f), Team::Blue);
+  // Only the shooter's own side can place/confirm.
+  game.ConfirmAim(Team::Red);
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+  game.ConfirmAim(Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  const Unit* shooter = game.FindUnit(1);
+  CHECK(shooter->plan.type == PlannedActionType::Shoot);
+  CHECK(shooter->plan.hasAimPoint);
+  CHECK(shooter->plan.shootTargetId == -1);
+  CHECK(glm::distance(shooter->plan.aimPoint, glm::vec3(2.0f, 0.0f, 1.0f)) < 1e-5f);
+
+  // Locking onto a figure instead clears any placed marker and the aim flag.
+  GameLogic g2(LegacyScene());
+  g2.ClickUnit(1, Team::Blue);
+  g2.ChooseShoot();
+  g2.PlaceAimPoint(glm::vec3(2.0f, 0.0f, 1.0f), Team::Blue);
+  CHECK(g2.GetAimPreview().has_value());
+  g2.ClickUnit(4, Team::Blue);
+  CHECK(!g2.GetAimPreview().has_value());
+  const Unit* locked = g2.FindUnit(1);
+  CHECK(locked->plan.shootTargetId == 4);
+  CHECK(!locked->plan.hasAimPoint);
+}
+
+void TestFreeAimShotFiresBehindShooterAndFacesAimPoint() {
+  // The shooter starts facing *away* from its aim point: a locked shot
+  // could never fire (hard cone gate), but a free-aim shot turns the figure.
+  GameLogic game(AimScene({{Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(10.0f, 0.0f, 0.0f)}}));
+  Unit* shooter = game.FindUnit(0);
+  shooter->facingYaw = kPi;  // Facing -X; red1 is at +X and unseen.
+  CHECK(!game.ComputeVisibility(Team::Blue).UnitVisible(1));
+
+  game.SetShotRollSource([] { return 0.0f; });
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
+  game.ConfirmAim(Team::Blue);
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  game.Update(10.0f);
+
+  CHECK(!game.FindUnit(1)->alive);
+  // After the shot the figure faces its aim point, feeding the next rounds'
+  // FOV/overwatch.
+  CHECK(std::fabs(game.FindUnit(0)->facingYaw) < 1e-3f);
+  CHECK(game.Winner() == Team::Blue);
+}
+
+void TestFreeAimBlindHitRevealsMissDoesNot() {
+  const auto layout = std::vector<std::pair<Team, glm::vec3>>{
+      {Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(12.0f, 0.0f, 0.0f)}};
+  // Hit: the one bit of info a connecting blind shot earns is a sighting
+  // sample of the figure it downed.
+  {
+    GameLogic game(AimScene(layout));
+    game.FindUnit(0)->facingYaw = kPi;  // Red1 is unseen throughout.
+    game.SetShotRollSource([] { return 0.0f; });
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseShoot();
+    game.PlaceAimPoint(glm::vec3(12.0f, 0.9f, 0.0f), Team::Blue);
+    game.ConfirmAim(Team::Blue);
+    game.ClickUnit(1, Team::Red);
+    game.ChoosePass();
+    game.CommitRound();
+    game.Update(10.0f);
+    CHECK(!game.FindUnit(1)->alive);
+    CHECK(!game.Sightings(Team::Blue, 1).empty());
+  }
+  // Miss: nothing is revealed -- the shooter learns nothing from a shot
+  // into the dark that doesn't connect.
+  {
+    GameLogic game(AimScene(layout));
+    game.FindUnit(0)->facingYaw = kPi;
+    game.SetShotRollSource([] { return 0.999999f; });
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseShoot();
+    game.PlaceAimPoint(glm::vec3(12.0f, 0.9f, 0.0f), Team::Blue);
+    game.ConfirmAim(Team::Blue);
+    game.ClickUnit(1, Team::Red);
+    game.ChoosePass();
+    game.CommitRound();
+    game.Update(10.0f);
+    CHECK(game.FindUnit(1)->alive);
+    CHECK(game.Sightings(Team::Blue, 1).empty());
+    // The shot was still taken: animation beat played and the figure turned.
+    CHECK(std::fabs(game.FindUnit(0)->facingYaw) < 1e-3f);
+  }
+}
+
+void TestFreeAimTraceStopsAtWalls() {
+  const tactics::Obstacle wall{
+      tactics::AABB{glm::vec3(5.0f, 0.0f, -2.0f), glm::vec3(6.0f, 2.5f, 2.0f)}, false};
+  GameLogic game(AimScene(
+      {{Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(10.0f, 0.0f, 0.0f)}}, {wall}));
+  game.SetShotRollSource([] { return 0.0f; });
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
+  game.ConfirmAim(Team::Blue);
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  game.Update(10.0f);
+  // Even a guaranteed roll can't reach through the wall; nothing is revealed.
+  CHECK(game.FindUnit(1)->alive);
+  CHECK(game.Sightings(Team::Blue, 1).empty());
+}
+
+void TestFreeAimFriendlyFireFlag() {
+  const auto layout = std::vector<std::pair<Team, glm::vec3>>{
+      {Team::Blue, glm::vec3(0.0f)},
+      {Team::Blue, glm::vec3(5.0f, 0.0f, 0.0f)},   // Teammate in the bullet's path.
+      {Team::Red, glm::vec3(10.0f, 0.0f, 0.0f)}};
+  // Friendly fire on (the default): the teammate absorbs the trace first.
+  {
+    GameLogic game(AimScene(layout));
+    CHECK(game.FriendlyFireEnabled());
+    game.SetShotRollSource([] { return 0.0f; });
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseShoot();
+    game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
+    game.ConfirmAim(Team::Blue);
+    game.ClickUnit(1, Team::Blue);
+    game.ChoosePass();
+    game.ClickUnit(2, Team::Red);
+    game.ChoosePass();
+    game.CommitRound();
+    game.Update(10.0f);
+    CHECK(!game.FindUnit(1)->alive);
+    CHECK(game.FindUnit(2)->alive);
+  }
+  // Flag off: teammates are transparent to the trace; the bullet flies on
+  // and takes the enemy behind them.
+  {
+    GameLogic game(AimScene(layout));
+    game.SetFriendlyFireEnabled(false);
+    game.SetShotRollSource([] { return 0.0f; });
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseShoot();
+    game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
+    game.ConfirmAim(Team::Blue);
+    game.ClickUnit(1, Team::Blue);
+    game.ChoosePass();
+    game.ClickUnit(2, Team::Red);
+    game.ChoosePass();
+    game.CommitRound();
+    game.Update(10.0f);
+    CHECK(game.FindUnit(1)->alive);
+    CHECK(!game.FindUnit(2)->alive);
+  }
+}
+
+void TestFreeAimAreaDenialShotLeaksNothing() {
+  GameLogic game(AimScene(
+      {{Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(12.0f, 0.0f, 12.0f)}}));
+  game.FindUnit(0)->facingYaw = kPi;
+  game.SetShotRollSource([] { return 0.0f; });  // Even a guaranteed roll hits nobody.
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(8.0f, 0.0f, 0.0f), Team::Blue);  // Empty lane.
+  game.ConfirmAim(Team::Blue);
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  game.Update(10.0f);
+  CHECK(game.FindUnit(1)->alive);
+  CHECK(game.Sightings(Team::Blue, 1).empty());
+  CHECK(game.RoundNumber() == 2);
+  // The bluff still swings the figure toward the point it covered.
+  CHECK(std::fabs(game.FindUnit(0)->facingYaw) < 1e-3f);
+}
+
+void TestFollowerMirrorsBlindHitReveal() {
+  // The reveal a blind hit earns is recorded by the simulating instance in
+  // ResolvePendingShots; a mirroring follower (snapshots carry no sighting
+  // memory) must reconstruct it from the death arriving out of its FOV.
+  const auto layout = std::vector<std::pair<Team, glm::vec3>>{
+      {Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(12.0f, 0.0f, 0.0f)}};
+  GameLogic simulator(AimScene(layout));
+  GameLogic follower(AimScene(layout));
+  simulator.FindUnit(0)->facingYaw = kPi;  // Red1 stays unseen by Blue.
+  CHECK(follower.ImportState(simulator.ExportState()));
+
+  simulator.SetShotRollSource([] { return 0.0f; });
+  simulator.ClickUnit(0, Team::Blue);
+  simulator.ChooseShoot();
+  simulator.PlaceAimPoint(glm::vec3(12.0f, 0.9f, 0.0f), Team::Blue);
+  simulator.ConfirmAim(Team::Blue);
+  simulator.ClickUnit(1, Team::Red);
+  simulator.ChoosePass();
+  simulator.CommitRound();
+  // The shooter turned toward +X, so the downed red is now inside its live
+  // FOV; reposition the body out of the cone before mirroring so the
+  // follower really is learning about an unseen death. (In the live game
+  // this is the around-cover case, where the body stays hidden.)
+  simulator.FindUnit(0)->facingYaw = kPi;
+  CHECK(!simulator.FindUnit(1)->alive);
+  CHECK(follower.ImportState(simulator.ExportState()));
+  CHECK(!follower.Sightings(Team::Blue, 1).empty());
+}
+
+void TestFreeAimPlanSnapshotAndProtocolRoundTrip() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(3.25f, 0.5f, -2.75f), Team::Blue);
+  game.ConfirmAim(Team::Blue);
+
+  // Export -> text protocol -> import lands the identical free-aim plan on
+  // a mirroring peer (the two-canvas page ships plans this way).
+  const GameSnapshot snapshot = game.ExportState();
+  const std::string wire = SerializeSnapshot(snapshot);
+  GameSnapshot decoded;
+  CHECK(DeserializeSnapshot(wire, &decoded));
+  bool checked = false;
+  for (const auto& u : decoded.units) {
+    if (u.id != 1) continue;
+    checked = true;
+    CHECK(u.planType == PlannedActionType::Shoot);
+    CHECK(u.planHasAimPoint);
+    CHECK(u.planShootTargetId == -1);
+    CHECK(glm::distance(u.planAimPoint, glm::vec3(3.25f, 0.5f, -2.75f)) < 1e-4f);
+  }
+  CHECK(checked);
+
+  GameLogic follower(LegacyScene());
+  CHECK(follower.ImportState(decoded));
+  const Unit* mirrored = follower.FindUnit(1);
+  CHECK(mirrored->plan.type == PlannedActionType::Shoot);
+  CHECK(mirrored->plan.hasAimPoint);
+  CHECK(glm::distance(mirrored->plan.aimPoint, glm::vec3(3.25f, 0.5f, -2.75f)) < 1e-4f);
+
+  // ImportTeamPlans (the mid-planning sync path) carries it too.
+  GameLogic peer(LegacyScene());
+  CHECK(peer.ImportTeamPlans(decoded, Team::Blue));
+  CHECK(peer.FindUnit(1)->plan.hasAimPoint);
+}
+
+// A resolved shot leaves a tracer from the muzzle toward the target; it
+// survives the snapshot round trip (followers) and expires after
+// kTracerMemoryRounds completed rounds.
+void TestShotLeavesFadingTracer() {
+  GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.0f; });
+  Unit* shooter = game.FindUnit(1);
+  Unit* target = game.FindUnit(4);
+  CHECK(game.Tracers().empty());
+  CHECK(game.ResolveShot(*shooter, *target));
+  CHECK(game.Tracers().size() == 1);
+  const Tracer tracer = game.Tracers().front();
+  CHECK(tracer.team == Team::Blue);
+  CHECK(tracer.birthRound == game.RoundNumber());
+  CHECK(glm::length(tracer.to - target->EyePosition()) < 1e-4f);
+
+  GameSnapshot snap;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &snap));
+  GameLogic follower(LegacyScene());
+  CHECK(follower.ImportState(snap));
+  CHECK(follower.Tracers().size() == 1);
+  CHECK(glm::length(follower.Tracers().front().from - tracer.from) < 1e-4f);
+
+  // Recording another shot after the memory window drops the stale tracer.
+  GameSnapshot later = game.ExportState();
+  later.roundNumber += constants::kTracerMemoryRounds;
+  CHECK(game.ImportState(later));
+  game.FindUnit(4)->alive = true;
+  CHECK(game.ResolveShot(*game.FindUnit(1), *game.FindUnit(4)));
+  CHECK(game.Tracers().size() == 1);
+  CHECK(game.Tracers().front().birthRound == game.RoundNumber());
+}
+
+// Multi-shot bursts (issue #138): the per-weapon magazine and fire interval
+// cap how many shots one shooting action may fire within the round window.
+void TestWeaponBurstCaps() {
+  CHECK(StatsOf(WeaponType::DesertEagle).magazineSize == 8);
+  CHECK(StatsOf(WeaponType::AssaultRifle).magazineSize == 30);
+  CHECK(StatsOf(WeaponType::SniperRifle).magazineSize == 5);
+  // At the 5 s round: the Deagle's 8-round magazine binds (10 shots at its
+  // 0.5 s interval would fit), the AR's 30-round magazine binds before its
+  // interval (~31 shots fit), and the sniper bolt-cycles 5 times.
+  CHECK(MaxShotsPerAction(WeaponType::DesertEagle, constants::kRoundDuration) == 8);
+  CHECK(MaxShotsPerAction(WeaponType::AssaultRifle, constants::kRoundDuration) == 30);
+  CHECK(MaxShotsPerAction(WeaponType::SniperRifle, constants::kRoundDuration) == 5);
+  // A shorter window makes the fire interval the binding cap instead.
+  CHECK(MaxShotsPerAction(WeaponType::AssaultRifle, 1.0f) == 6);
+  CHECK(MaxShotsPerAction(WeaponType::DesertEagle, 1.0f) == 2);
+  // Never below 1: an action always gets its one shot.
+  CHECK(MaxShotsPerAction(WeaponType::SniperRifle, 0.25f) == 1);
+}
+
+void TestPlannedShotCountClampsToWeaponCap() {
+  GameLogic game(LegacyScene());
+  game.FindUnit(1)->weapon = WeaponType::DesertEagle;  // Cap 8.
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  CHECK(game.MaxShotsForSelected() == 8);
+  CHECK(game.PlannedShotCount() == 1);  // Default burst of 1 keeps old behavior.
+  game.SetPlannedShotCount(99, Team::Blue);  // Over-cap clamps to the magazine.
+  CHECK(game.PlannedShotCount() == 8);
+  game.SetPlannedShotCount(0, Team::Blue);  // Never 0: the minimum is one shot.
+  CHECK(game.PlannedShotCount() == 1);
+  game.SetPlannedShotCount(5, Team::Red);  // Only the shooter's own side sets it.
+  CHECK(game.PlannedShotCount() == 1);
+  game.SetPlannedShotCount(5, Team::Blue);
+  game.ClickUnit(4, Team::Blue);  // Lock on: the plan carries the level.
+  CHECK(game.FindUnit(1)->plan.shots == 5);
+  // The next aim starts back at the 1-shot default.
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  CHECK(game.PlannedShotCount() == 1);
+}
+
+// A locked-target burst fires every requested shot, paced at the weapon's
+// interval across the round window (issue #140): the round keeps executing
+// until the last scheduled shot, rolls run per shot while the target
+// stands, and a kill stops the rolling but not the trigger -- the rest of
+// the magazine still fires into the body.
+// True when no two tracers share both endpoints.
+bool AllTracersDistinct(const std::vector<Tracer>& tracers) {
+  for (size_t i = 0; i < tracers.size(); ++i) {
+    for (size_t j = i + 1; j < tracers.size(); ++j) {
+      if (glm::length(tracers[i].to - tracers[j].to) < 1e-3f) return false;
+    }
+  }
+  return true;
+}
+
+void TestLockedBurstFiresAllShotsOverTime() {
+  GameLogic game(LegacyScene());
+  int rolls = 0;
+  const float sequence[] = {0.9f, 0.9f, 0.0f, 0.0f};
+  game.SetShotRollSource([&rolls, &sequence] { return sequence[rolls++ % 4]; });
+  game.FindUnit(1)->weapon = WeaponType::SniperRifle;  // 1 s bolt interval.
+  game.ClickUnit(1, Team::Blue);  // Open middle lane: blue1 bursts 4 at red4.
+  game.ChooseShoot();
+  game.SetPlannedShotCount(4, Team::Blue);
+  game.ClickUnit(4, Team::Blue);
+  for (int id : {0, 2}) {
+    game.ClickUnit(id, Team::Blue);
+    game.ChoosePass();
+  }
+  for (int id : {3, 4, 5}) {
+    game.ClickUnit(id, Team::Red);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  // Only shot 0 has fired at commit; the sniper's 1 s bolt interval paces
+  // the rest, so the round is still executing with one roll consumed.
+  CHECK(game.Mode() == InputMode::Executing);
+  CHECK(rolls == 1);
+  game.Update(0.5f);  // Shot 1 is scheduled at t=1.0: not due yet.
+  CHECK(game.Mode() == InputMode::Executing);
+  CHECK(rolls == 1);
+  game.Update(10.0f);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(game.RoundNumber() == 2);
+  CHECK(!game.FindUnit(4)->alive);
+  // Two misses, then the 3rd shot kills; the 4th still fires (the mag
+  // level is honored) but has nothing left to roll against.
+  CHECK(rolls == 3);
+  // One tracer per bullet, every one a different line; the first three
+  // (two scattered misses + the kill) came out one per second, the 4th
+  // fired into the body.
+  CHECK(game.Tracers().size() == 4);
+  CHECK(AllTracersDistinct(game.Tracers()));
+}
+
+// Free-aim bursts (point-target shots): every bullet flies its own scattered
+// line from the muzzle (issue #140) and only bullets whose line crosses the
+// figure roll; the downed figure is skipped by later bullets.
+void TestFreeAimBurstHitsPointTarget() {
+  GameLogic game(
+      AimScene({{Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(10.0f, 0.0f, 0.0f)}}));
+  int rolls = 0;
+  game.SetShotRollSource([&rolls] {
+    ++rolls;
+    return 0.0f;  // Every roll hits.
+  });
+  game.FindUnit(0)->weapon = WeaponType::DesertEagle;
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  game.SetPlannedShotCount(8, Team::Blue);
+  game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
+  game.ConfirmAim(Team::Blue);
+  CHECK(game.FindUnit(0)->plan.shots == 8);
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  game.Update(10.0f);
+  CHECK(!game.FindUnit(1)->alive);
+  // The figure only rolls until it drops: at most the bullets up to and
+  // including the kill, never all 8.
+  CHECK(rolls >= 1 && rolls < 8);
+  // Every one of the 8 bullets left its own tracer, no two the same line,
+  // all from the muzzle.
+  CHECK(game.Tracers().size() == 8);
+  CHECK(AllTracersDistinct(game.Tracers()));
+  for (const Tracer& t : game.Tracers()) {
+    CHECK(glm::length(t.from - game.Tracers().front().from) < 1e-4f);
+  }
+}
+
+// A full assault-rifle magazine dumped at a locked target (issue #140):
+// 30 bullets, 30 distinct tracer lines, each fired 0.16 s after the last --
+// the tracer ages in the snapshot show them spread over the round, not
+// piled into one tick.
+void TestFullMagDumpLeavesThirtyTracers() {
+  GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.99f; });  // Everything misses.
+  game.FindUnit(1)->weapon = WeaponType::AssaultRifle;
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.SetPlannedShotCount(30, Team::Blue);
+  game.ClickUnit(4, Team::Blue);
+  for (int id : {0, 2}) {
+    game.ClickUnit(id, Team::Blue);
+    game.ChoosePass();
+  }
+  for (int id : {3, 4, 5}) {
+    game.ClickUnit(id, Team::Red);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  // Stepped at the live frame rate: shots appear one at a time.
+  size_t previous = game.Tracers().size();
+  int steps = 0;
+  while (game.Mode() == InputMode::Executing && steps++ < 1000) {
+    game.Update(1.0f / 60.0f);
+    CHECK(game.Tracers().size() >= previous);
+    CHECK(game.Tracers().size() <= previous + 1);  // Never two bullets in one frame.
+    previous = game.Tracers().size();
+  }
+  CHECK(game.Tracers().size() == 30);
+  CHECK(AllTracersDistinct(game.Tracers()));
+  // Spread across the 4.64 s the magazine takes (30 shots at 0.16 s).
+  CHECK(steps > 4.5f * 60.0f && steps < 5.2f * 60.0f);
+}
+
+void TestLockOnStagesUntilFireAndKeepsShotCount() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  // Clicking an enemy figure stages the lock; the mode (and bar) stay up.
+  game.ClickAimRay(glm::vec3(8.0f, 20.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+  CHECK(game.GetLockPreview() == std::optional<int>(4));
+  CHECK(game.FindUnit(1)->plan.type != PlannedActionType::Shoot);
+  game.SetPlannedShotCount(7, Team::Blue);
+  game.ConfirmAim(Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(!game.GetLockPreview().has_value());
+  CHECK(game.FindUnit(1)->plan.shootTargetId == 4);
+  CHECK(game.FindUnit(1)->plan.shots == 7);
+
+  // Placing a surface aim point replaces a staged lock.
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.ClickAimRay(glm::vec3(8.0f, 20.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), Team::Blue);
+  game.ClickAimRay(glm::vec3(0.0f, 20.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), Team::Blue);
+  CHECK(!game.GetLockPreview().has_value());
+  CHECK(game.GetAimPreview().has_value());
+}
+
+void TestBulletsFlyToMapEdgeNotWeaponRange() {
+  GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.99f; });
+  game.FindUnit(1)->weapon = WeaponType::SniperRifle;
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(8.0f, 0.0f, 0.0f), Team::Blue);
+  game.ConfirmAim(Team::Blue);
+  for (int id : {0, 2}) {
+    game.ClickUnit(id, Team::Blue);
+    game.ChoosePass();
+  }
+  for (int id : {3, 4, 5}) {
+    game.ClickUnit(id, Team::Red);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  for (int i = 0; i < 1000 && game.Mode() == InputMode::Executing; ++i) game.Update(1.0f / 60.0f);
+  CHECK(!game.Tracers().empty());
+  const float half = game.GetScene().mapHalfExtent;
+  for (const Tracer& t : game.Tracers()) {
+    CHECK(std::fabs(t.to.x) <= half + 1e-3f && std::fabs(t.to.z) <= half + 1e-3f);
+  }
+}
+
+void TestBurstPlanSurvivesSnapshotAndClampsOnImport() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.SetPlannedShotCount(12, Team::Blue);  // LegacyScene units carry ARs (cap 30).
+  game.ClickUnit(4, Team::Blue);
+  CHECK(game.FindUnit(1)->plan.shots == 12);
+
+  GameSnapshot decoded;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &decoded));
+  bool checked = false;
+  for (const auto& u : decoded.units) {
+    if (u.id != 1) continue;
+    checked = true;
+    CHECK(u.planShots == 12);
+  }
+  CHECK(checked);
+
+  GameLogic follower(LegacyScene());
+  CHECK(follower.ImportState(decoded));
+  CHECK(follower.FindUnit(1)->plan.shots == 12);
+
+  GameLogic peer(LegacyScene());
+  CHECK(peer.ImportTeamPlans(decoded, Team::Blue));
+  CHECK(peer.FindUnit(1)->plan.shots == 12);
+
+  // A peer can't ship a plan past the weapon's cap: import re-clamps.
+  for (auto& u : decoded.units) {
+    if (u.id == 1) u.planShots = 200;
+  }
+  GameLogic clamped(LegacyScene());
+  CHECK(clamped.ImportState(decoded));
+  CHECK(clamped.FindUnit(1)->plan.shots == 30);
+}
+
 int main() {
   TestNavMeshRoutesAroundObstacle();
   TestNavMeshDirectPathWhenUnobstructed();
@@ -1839,6 +2471,7 @@ int main() {
   TestGameLogicIgnoresInputWhileExecuting();
   TestGameLogicMoveCanClimbOntoObstacle();
   TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds();
+  TestGameLogicPlaybookShootOnSightFiresWholeMagAtNormalOdds();
   TestGameLogicPlaybookDefaultTable();
   TestGameLogicPlaybookIgnoresSameTeamMover();
   TestGameLogicPlaybookMovingRows();
@@ -1863,6 +2496,24 @@ int main() {
   TestResetClearsSightings();
   TestImportStateOfNewGameClearsFollowerSightings();
   TestFollowerBuildsSightingsWithoutPhysicsUpdate();
+  TestAimRayResolvesUnitAndSurface();
+  TestFreeAimPreviewPlaceConfirmAndCancel();
+  TestFreeAimShotFiresBehindShooterAndFacesAimPoint();
+  TestFreeAimBlindHitRevealsMissDoesNot();
+  TestFreeAimTraceStopsAtWalls();
+  TestFreeAimFriendlyFireFlag();
+  TestFreeAimAreaDenialShotLeaksNothing();
+  TestFollowerMirrorsBlindHitReveal();
+  TestFreeAimPlanSnapshotAndProtocolRoundTrip();
+  TestShotLeavesFadingTracer();
+  TestWeaponBurstCaps();
+  TestPlannedShotCountClampsToWeaponCap();
+  TestLockedBurstFiresAllShotsOverTime();
+  TestFreeAimBurstHitsPointTarget();
+  TestFullMagDumpLeavesThirtyTracers();
+  TestLockOnStagesUntilFireAndKeepsShotCount();
+  TestBulletsFlyToMapEdgeNotWeaponRange();
+  TestBurstPlanSurvivesSnapshotAndClampsOnImport();
 
   if (g_failures == 0) {
     std::printf("All logic tests passed.\n");

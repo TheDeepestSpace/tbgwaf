@@ -210,6 +210,7 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     if (action.target >= 0 && freeAim) {
       throw std::runtime_error("script 'shoot' cannot mix 'target' with a free-aim point/ray");
     }
+    if (node["shots"]) action.shots = node["shots"].as<int>();
     action.expectNoop = node["expect_noop"] && node["expect_noop"].as<bool>();
   } else if (kind == "pass") {
     action.kind = ScenarioAction::Kind::Pass;
@@ -401,6 +402,10 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
         NotifyMenuClick(actorTeam, "Shoot");
         game.ChooseShoot();
       }
+      // Burst size (issue #138): the step's `shots` is the level the player
+      // dragged the shot bar to before picking the target; the same clamped
+      // setter the bar uses.
+      if (action.shots) game.SetPlannedShotCount(*action.shots, actorTeam);
 
       // Locked-on figure target: the pre-#129 flow, unchanged.
       if (action.target >= 0) {
@@ -428,12 +433,22 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
         const tactics::GameLogic::AimRayResult aim =
             game.ResolveAimRay(*action.aimRayFrom, *action.aimRayDir);
         if (aim.kind == tactics::GameLogic::AimRayResult::Kind::Unit) {
-          // Unit under the cursor beats the surface behind it: the ray click
-          // becomes the existing lock-on plan.
-          ClickUnitAt(aim.unitId, actorTeam);
-          if (game.Mode() == InputMode::AwaitingShootTarget) {
-            return Fail("aim ray locked onto unit " + std::to_string(aim.unitId) +
-                        " but the shot could not be planned");
+          // Unit under the cursor beats the surface behind it. Like the
+          // interactive click (issue #140), this stages the lock-on -- the
+          // shot-level bar stays up -- and Fire commits it.
+          game.ClickAimRay(*action.aimRayFrom, *action.aimRayDir, actorTeam);
+          if (!game.GetLockPreview()) {
+            return Fail("aim ray over unit " + std::to_string(aim.unitId) +
+                        " did not stage a lock-on");
+          }
+          if (action.kind == ScenarioAction::Kind::Aim) {
+            return true;  // Staged only; a later step confirms or cancels.
+          }
+          NotifyMenuClick(actorTeam, "Fire");
+          game.ConfirmAim(actorTeam);
+          if (game.Mode() != InputMode::AwaitingSelection) {
+            return Fail("staged lock-on onto unit " + std::to_string(aim.unitId) +
+                        " could not be confirmed");
           }
           return true;
         }
@@ -445,7 +460,7 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
         NotifyClick(actorTeam, *action.shootAt);
         game.PlaceAimPoint(*action.shootAt, actorTeam);
       }
-      if (!game.GetAimPreview()) {
+      if (!game.GetAimPreview() && !game.GetLockPreview()) {
         return Fail("free-aim point could not be placed (actor not aiming?)");
       }
       if (action.kind == ScenarioAction::Kind::Aim) {

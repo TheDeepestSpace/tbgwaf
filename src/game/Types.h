@@ -134,6 +134,10 @@ constexpr float kAgentRadius = 0.4f;     // Padding used to inflate obstacles fo
 constexpr float kUnitHalfWidth = 0.35f;
 constexpr float kUnitHeight = 1.8f;
 constexpr float kEyeHeight = 1.5f;
+// Where a locked-on shot aims on the target figure: torso center height.
+// Shared by the ballistics (burst aim point), the staged-lock "+" marker and
+// the planned-shot cone, so what the cone shader shows is what gets shot at.
+constexpr float kTorsoAimHeight = 0.9f;
 // Sighting range: effectively unlimited (exceeds any generated map's diagonal).
 // Visibility stays on this so capping the shot range doesn't shrink what a team sees.
 constexpr float kSightRange = 250.0f;
@@ -146,10 +150,6 @@ constexpr float kMuzzleForward = 0.85f;
 constexpr float kMuzzleHeight = 0.93f;
 constexpr float kMuzzleSide = 0.30f;
 constexpr float kConeStartAlpha = 0.5f;  // Shot-cone opacity at the gun tip; fades to 0 at kShootRange.
-// Half-angle of the drawn shot-dispersion cone: a narrow wedge at the gun tip
-// showing where a shot may stray from the aim line. Overlay only; the hard
-// shot gate stays kShootHalfFovDegrees.
-constexpr float kShotConeHalfAngleDegrees = 3.0f;
 constexpr float kShootHalfFovDegrees = 75.0f;  // 150 degree total FOV cone.
 constexpr float kKnockdownDuration = 0.4f;  // Seconds for a hit unit to fall over.
 // Visual-only figure animation (procedural humanoid, see gfx/SceneRenderer):
@@ -166,6 +166,11 @@ constexpr float kIdleAnimDuration = 3.3333333f;
 // draw/aim raise, then a recoil kick that decays back down. Purely
 // presentational; hit resolution itself stays instantaneous.
 constexpr float kShootAnimDuration = 0.7f;
+// Time into the shot beat at which the draw/raise ends and the muzzle
+// fires (the recoil kick starts). Follow-up shots of a burst (issue #140)
+// re-trigger the beat from here while it is still playing, so the weapon
+// stays shouldered between shots instead of re-drawing every time.
+constexpr float kShootRecoilStart = 0.12f;
 constexpr float kMoveSpeed = 4.0f;  // Default run speed, world units per second.
 // WEGO rounds: both teams' committed plans execute together over one
 // fixed-length window. A figure's plannable move distance is bounded by

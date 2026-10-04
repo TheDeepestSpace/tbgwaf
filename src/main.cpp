@@ -696,6 +696,7 @@ int main() {
       if (hud.playbook) game.SetPlaybook(paneTeam(pane), *hud.playbook);
       if (hud.done) game.FinishMovePlan();
       if (hud.fire) game.ConfirmAim(paneTeam(pane));
+      if (hud.shots) game.SetPlannedShotCount(*hud.shots, paneTeam(pane));
     }
 
     // Pane divider. Both teams plan at once, so there's no "inactive side"
@@ -785,7 +786,13 @@ int main() {
         lastClickUnitId = doubleClick ? -1 : hitUnit;
         lastClickPane = clickPane;
         lastClickTicks = clickTicks;
-        if (hitUnit >= 0) {
+        if (game.Mode() == InputMode::AwaitingShootTarget) {
+          // Aiming: every click goes through the aim ray, which picks a
+          // figure first (staging the lock-on; the shot-level bar stays up
+          // and Fire commits) and otherwise places/moves the free-aim "+"
+          // selector on a surface in the shooter's 360-degree LOS.
+          game.ClickAimRay(clickRay.origin, clickRay.direction, clickTeam);
+        } else if (hitUnit >= 0) {
           game.ClickUnit(hitUnit, clickTeam);
           if (doubleClick) {
             // Drone-style focus: frame the unit's whole movement frontier
@@ -802,11 +809,6 @@ int main() {
           if (IntersectGroundOrClimbTop(clickRay, game.GetScene(), &point)) {
             game.ClickGround(point, clickTeam);
           }
-        } else if (game.Mode() == InputMode::AwaitingShootTarget) {
-          // Free-aim (issue #129): a non-figure click places/moves the "+"
-          // aim selector on a surface in the shooter's 360-degree LOS. The
-          // HUD's Fire button confirms it.
-          game.ClickAimRay(clickRay.origin, clickRay.direction, clickTeam);
         }
       }
     }

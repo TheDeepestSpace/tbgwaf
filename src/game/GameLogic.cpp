@@ -73,6 +73,9 @@ void GameLogic::Reset(Scene scene) {
   pendingShots_.clear();
   mirroredMoving_.clear();
   aimPreview_.reset();
+  lockPreviewId_.reset();
+  plannedShots_ = 1;
+  executionElapsed_ = 0.0f;
 
   ResetSightingMemory();
 }
@@ -90,14 +93,15 @@ void GameLogic::ResetSightingMemory() {
   tracers_.clear();
 }
 
-void GameLogic::RecordTracer(const Unit& shooter, const glm::vec3& from, const glm::vec3& to) {
+void GameLogic::RecordTracer(const Unit& shooter, const glm::vec3& from, const glm::vec3& to,
+                             float age) {
   tracers_.erase(std::remove_if(tracers_.begin(), tracers_.end(),
                                 [this](const Tracer& t) {
                                   return roundNumber_ - t.birthRound >=
                                          constants::kTracerMemoryRounds;
                                 }),
                  tracers_.end());
-  tracers_.push_back(Tracer{shooter.team, from, to, roundNumber_});
+  tracers_.push_back(Tracer{shooter.team, from, to, roundNumber_, age});
 }
 
 const std::vector<GameLogic::EnemySighting>& GameLogic::Sightings(Team viewingTeam,
@@ -211,6 +215,7 @@ GameSnapshot GameLogic::ExportState() const {
     u.planShootTargetId = unit.plan.shootTargetId;
     u.planHasAimPoint = unit.plan.hasAimPoint;
     u.planAimPoint = unit.plan.aimPoint;
+    u.planShots = unit.plan.shots;
     u.planPath = unit.plan.movePath;
     u.planQueuedLegs = unit.plan.queuedLegs;
     u.planEndFacingYaw = unit.plan.endFacingYaw;
@@ -251,6 +256,10 @@ void ApplyPlan(const GameSnapshot::UnitState& u, Unit* unit) {
   unit->plan.shootTargetId = u.planShootTargetId;
   unit->plan.hasAimPoint = u.planHasAimPoint;
   unit->plan.aimPoint = u.planAimPoint;
+  // Re-clamped against this unit's own weapon so a peer can never ship a
+  // plan that fires past the magazine/round-window cap.
+  unit->plan.shots =
+      std::clamp(u.planShots, 1, MaxShotsPerAction(unit->weapon, constants::kRoundDuration));
   unit->plan.movePath = u.planPath;
   unit->plan.queuedLegs = u.planQueuedLegs;
   unit->plan.endFacingYaw = u.planEndFacingYaw;
@@ -323,6 +332,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   activeMoves_.clear();
   pendingShots_.clear();
   aimPreview_.reset();
+  lockPreviewId_.reset();
   return true;
 }
 
@@ -346,7 +356,7 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
         << u.facingYaw << ' ' << (u.alive ? 1 : 0) << ' '
         << static_cast<int>(u.planType) << ' ' << u.planShootTargetId << ' '
         << (u.planHasAimPoint ? 1 : 0) << ' ' << u.planAimPoint.x << ' ' << u.planAimPoint.y
-        << ' ' << u.planAimPoint.z << ' ' << u.planEndFacingYaw << ' '
+        << ' ' << u.planAimPoint.z << ' ' << u.planShots << ' ' << u.planEndFacingYaw << ' '
         << u.knockdownAxis.x << ' ' << u.knockdownAxis.y << ' ' << u.knockdownAxis.z << ' '
         << u.knockdownElapsed << ' ' << u.walkPhase << ' ' << u.walkBlend << ' '
         << u.idleElapsed << ' ' << u.shootElapsed << ' ' << u.shootAimYaw << ' '
@@ -362,7 +372,7 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
   out << ' ' << snap.tracers.size();
   for (const Tracer& t : snap.tracers) {
     out << ' ' << static_cast<int>(t.team) << ' ' << t.from.x << ' ' << t.from.y << ' ' << t.from.z
-        << ' ' << t.to.x << ' ' << t.to.y << ' ' << t.to.z << ' ' << t.birthRound;
+        << ' ' << t.to.x << ' ' << t.to.y << ' ' << t.to.z << ' ' << t.birthRound << ' ' << t.age;
   }
   for (const auto& pb : snap.playbooks)
     for (int m = 0; m < 2; ++m)
@@ -387,13 +397,14 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
     size_t pathCount = 0;
     if (!(in >> u.id >> u.position.x >> u.position.y >> u.position.z >> u.facingYaw >> alive >>
           plan >> u.planShootTargetId >> hasAim >> u.planAimPoint.x >> u.planAimPoint.y >>
-          u.planAimPoint.z >> u.planEndFacingYaw >> u.knockdownAxis.x >>
+          u.planAimPoint.z >> u.planShots >> u.planEndFacingYaw >> u.knockdownAxis.x >>
           u.knockdownAxis.y >> u.knockdownAxis.z >> u.knockdownElapsed >> u.walkPhase >>
           u.walkBlend >> u.idleElapsed >> u.shootElapsed >> u.shootAimYaw >> moving >>
           pathCount)) {
       return false;
     }
     if (plan < 0 || plan > static_cast<int>(PlannedActionType::Pass)) return false;
+    if (u.planShots < 1 || u.planShots > static_cast<int>(kMaxEntries)) return false;
     if (pathCount > kMaxEntries) return false;
     u.planType = static_cast<PlannedActionType>(plan);
     u.alive = alive != 0;
@@ -421,7 +432,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
   for (Tracer& t : snap.tracers) {
     int team = 0;
     if (!(in >> team >> t.from.x >> t.from.y >> t.from.z >> t.to.x >> t.to.y >> t.to.z >>
-          t.birthRound) ||
+          t.birthRound >> t.age) ||
         team < 0 || team > 1) {
       return false;
     }
@@ -492,15 +503,22 @@ void GameLogic::ClickUnit(int unitId, Team byTeam) {
     // guaranteed miss) -- distinct from an in-FOV shot that misses due to
     // the shooter's own cone/LOS once the round executes.
     if (!ComputeVisibility(shooter->team).UnitVisible(unit->id)) return;
-    shooter->plan.type = PlannedActionType::Shoot;
-    shooter->plan.shootTargetId = unit->id;
-    shooter->plan.hasAimPoint = false;
-    shooter->plan.movePath.clear();
-    shooter->plan.queuedLegs.clear();
-    aimPreview_.reset();
-    selectedUnitId_.reset();
-    mode_ = InputMode::AwaitingSelection;
+    CommitLockedShot(*shooter, unit->id);
   }
+}
+
+void GameLogic::CommitLockedShot(Unit& shooter, int targetId) {
+  shooter.plan.type = PlannedActionType::Shoot;
+  shooter.plan.shootTargetId = targetId;
+  shooter.plan.hasAimPoint = false;
+  shooter.plan.shots = plannedShots_;
+  shooter.plan.movePath.clear();
+  shooter.plan.queuedLegs.clear();
+  aimPreview_.reset();
+  lockPreviewId_.reset();
+  plannedShots_ = 1;
+  selectedUnitId_.reset();
+  mode_ = InputMode::AwaitingSelection;
 }
 
 glm::vec3 GameLogic::MoveChainEnd() const {
@@ -597,6 +615,8 @@ void GameLogic::Update(float dtSeconds) {
     }
   }
 
+  for (Tracer& tracer : tracers_) tracer.age = std::min(tracer.age + dtSeconds, 60.0f);
+
   if (mode_ == InputMode::Executing) AdvanceExecutingRound(dtSeconds);
 
   // Walk-cycle blend, judged *after* the movement step so a move that
@@ -612,6 +632,7 @@ void GameLogic::Update(float dtSeconds) {
 }
 
 void GameLogic::AdvanceExecutingRound(float dtSeconds) {
+  executionElapsed_ += dtSeconds;
   for (ActiveMove& move : activeMoves_) {
     Unit* mover = FindUnit(move.unitId);
     if (!mover || move.path.size() < 2) continue;
@@ -664,9 +685,10 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
   ResolvePendingShots();
 
   // Every mover advances together above; drop whichever ones just finished
-  // their path (or died to a shot this tick), and once none are left the
-  // whole round is done -- any still-pending shot's geometry can no longer
-  // change, so it expires.
+  // their path (or died to a shot this tick). Once none are left, a shot
+  // still waiting on its gates can never pass them (its geometry is
+  // frozen), so it expires -- but a burst already firing keeps the round
+  // executing until its last scheduled shot.
   activeMoves_.erase(std::remove_if(activeMoves_.begin(), activeMoves_.end(),
                                      [this](const ActiveMove& move) {
                                        const Unit* mover = FindUnit(move.unitId);
@@ -676,7 +698,12 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
                                      }),
                       activeMoves_.end());
 
-  if (activeMoves_.empty()) FinishRound();
+  if (activeMoves_.empty()) {
+    pendingShots_.erase(std::remove_if(pendingShots_.begin(), pendingShots_.end(),
+                                       [](const PendingShot& shot) { return !shot.started; }),
+                        pendingShots_.end());
+    if (pendingShots_.empty()) FinishRound();
+  }
 }
 
 void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
@@ -721,7 +748,24 @@ void GameLogic::ChooseShoot() {
   if (mode_ != InputMode::ActionMenu) return;
   ClearQueuedLegs(selectedUnitId_);
   aimPreview_.reset();
+  lockPreviewId_.reset();
+  plannedShots_ = 1;
   mode_ = InputMode::AwaitingShootTarget;
+}
+
+int GameLogic::MaxShotsForSelected() const {
+  const Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
+  if (!shooter) return 1;
+  return MaxShotsPerAction(shooter->weapon, constants::kRoundDuration);
+}
+
+void GameLogic::SetPlannedShotCount(int count, Team byTeam) {
+  if (mode_ != InputMode::AwaitingShootTarget) return;
+  const Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
+  if (!shooter || shooter->team != byTeam) return;
+  // Clamp: never 0 (an action always fires at least one shot), never past
+  // the weapon's magazine/round-window cap.
+  plannedShots_ = std::clamp(count, 1, MaxShotsForSelected());
 }
 
 void GameLogic::ChoosePass() {
@@ -750,6 +794,8 @@ void GameLogic::CancelAction() {
     movePreviewPath_.clear();
     movePreviewValid_ = false;
     aimPreview_.reset();
+    lockPreviewId_.reset();
+    plannedShots_ = 1;
   } else if (mode_ == InputMode::ActionMenu) {
     mode_ = InputMode::AwaitingSelection;
     selectedUnitId_.reset();
@@ -809,27 +855,34 @@ bool GameLogic::ResolveShot(Unit& shooter, Unit& target, bool* fired) {
   return hit;
 }
 
+void GameLogic::PlayShootBeat(Unit& shooter, float aimYaw, float sinceShot) {
+  // Presentation only: the shooter's quick-draw beat, aimed at the actual
+  // bearing (which may sit anywhere inside the FOV cone). Played for misses
+  // too -- the shot was taken. A follow-up shot of a burst lands while the
+  // beat is still playing: it re-triggers just the recoil kick (the weapon
+  // stays shouldered) instead of re-drawing from the carry pose.
+  shooter.shootElapsed =
+      (shooter.shootElapsed >= 0.0f ? constants::kShootRecoilStart : 0.0f) + sinceShot;
+  shooter.shootAimYaw = aimYaw;
+}
+
+void GameLogic::KnockDown(Unit& target, const glm::vec3& dir) {
+  target.alive = false;
+  // up x dir: tipping around this axis leans the figure toward dir.
+  target.knockdownAxis = glm::vec3(dir.z, 0.0f, -dir.x);
+  target.knockdownElapsed = 0.0f;
+}
+
 void GameLogic::ApplyShot(Unit& shooter, Unit& target, bool hit) {
   glm::vec3 dir = target.position - shooter.position;
   dir.y = 0.0f;
   if (glm::length(dir) < 1e-4f) dir = shooter.FacingDirection();
   dir = glm::normalize(dir);
-  // Presentation only: start the shooter's quick-draw beat, aimed at the
-  // target's actual bearing (which may sit anywhere inside the FOV cone).
-  // Played for misses too -- the shot was taken.
-  shooter.shootElapsed = 0.0f;
-  shooter.shootAimYaw = std::atan2(dir.z, dir.x);
-  {
-    Unit aimed = shooter;
-    aimed.facingYaw = shooter.shootAimYaw;
-    RecordTracer(shooter, aimed.MuzzlePosition(), target.EyePosition());
-  }
-  if (hit) {
-    target.alive = false;
-    // up x dir: tipping around this axis leans the figure toward dir.
-    target.knockdownAxis = glm::vec3(dir.z, 0.0f, -dir.x);
-    target.knockdownElapsed = 0.0f;
-  }
+  PlayShootBeat(shooter, std::atan2(dir.z, dir.x));
+  Unit aimed = shooter;
+  aimed.facingYaw = shooter.shootAimYaw;
+  RecordTracer(shooter, aimed.MuzzlePosition(), target.EyePosition());
+  if (hit) KnockDown(target, dir);
 }
 
 namespace {
@@ -962,7 +1015,9 @@ void GameLogic::ClickAimRay(const glm::vec3& origin, const glm::vec3& direction,
   if (!shooter || shooter->team != byTeam) return;
   const AimRayResult aim = ResolveAimRay(origin, direction);
   if (aim.kind == AimRayResult::Kind::Unit) {
-    ClickUnit(aim.unitId, byTeam);
+    // Stage the lock; the shot-level bar stays up until Fire confirms.
+    aimPreview_.reset();
+    lockPreviewId_ = aim.unitId;
     return;
   }
   if (aim.kind == AimRayResult::Kind::Surface) PlaceAimPoint(aim.point, byTeam);
@@ -972,31 +1027,49 @@ void GameLogic::PlaceAimPoint(const glm::vec3& point, Team byTeam) {
   if (mode_ != InputMode::AwaitingShootTarget) return;
   const Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
   if (!shooter || shooter->team != byTeam) return;
+  lockPreviewId_.reset();
   aimPreview_ = AimPreview{point};
 }
 
 void GameLogic::ConfirmAim(Team byTeam) {
-  if (mode_ != InputMode::AwaitingShootTarget || !aimPreview_) return;
+  if (mode_ != InputMode::AwaitingShootTarget || (!aimPreview_ && !lockPreviewId_)) return;
   Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
   if (!shooter || shooter->team != byTeam) return;
+  if (lockPreviewId_) {
+    const Unit* target = FindUnit(*lockPreviewId_);
+    if (!target || !target->alive) {
+      lockPreviewId_.reset();
+      return;
+    }
+    CommitLockedShot(*shooter, *lockPreviewId_);
+    return;
+  }
   shooter->plan.type = PlannedActionType::Shoot;
   shooter->plan.shootTargetId = -1;
   shooter->plan.hasAimPoint = true;
   shooter->plan.aimPoint = aimPreview_->point;
+  shooter->plan.shots = plannedShots_;
   shooter->plan.movePath.clear();
   shooter->plan.queuedLegs.clear();
   aimPreview_.reset();
+  lockPreviewId_.reset();
+  plannedShots_ = 1;
   selectedUnitId_.reset();
   mode_ = InputMode::AwaitingSelection;
 }
 
+Unit GameLogic::AimedAt(const Unit& shooter, const glm::vec3& point) {
+  // The shot leaves the muzzle of the figure already turned to its aim
+  // point.
+  Unit aimed = shooter;
+  const glm::vec3 flat(point.x - shooter.position.x, 0.0f, point.z - shooter.position.z);
+  if (glm::length(flat) > 1e-4f) aimed.facingYaw = std::atan2(flat.z, flat.x);
+  return aimed;
+}
+
 std::vector<GameLogic::AimTraceCandidate> GameLogic::AimTraceCandidates(
     const Unit& shooter, const glm::vec3& aimPoint) const {
-  // The shot leaves the muzzle of the figure already turned to its aim
-  // point, and keeps flying past it until something stops it.
-  Unit aimed = shooter;
-  const glm::vec3 flat(aimPoint.x - shooter.position.x, 0.0f, aimPoint.z - shooter.position.z);
-  if (glm::length(flat) > 1e-4f) aimed.facingYaw = std::atan2(flat.z, flat.x);
+  const Unit aimed = AimedAt(shooter, aimPoint);
   const glm::vec3 muzzle = aimed.MuzzlePosition();
   glm::vec3 dir = aimPoint - muzzle;
   if (glm::length(dir) < 1e-4f) {
@@ -1004,8 +1077,12 @@ std::vector<GameLogic::AimTraceCandidate> GameLogic::AimTraceCandidates(
   } else {
     dir = glm::normalize(dir);
   }
-  const glm::vec3 fwd = aimed.FacingDirection();
+  return RayTraceCandidates(shooter, muzzle, dir, aimed.FacingDirection());
+}
 
+std::vector<GameLogic::AimTraceCandidate> GameLogic::RayTraceCandidates(
+    const Unit& shooter, const glm::vec3& muzzle, const glm::vec3& dir,
+    const glm::vec3& fwd) const {
   std::vector<AimTraceCandidate> candidates;
   for (const Unit& unit : scene_.units) {
     if (!unit.alive || unit.id == shooter.id) continue;
@@ -1039,12 +1116,51 @@ std::vector<GameLogic::AimTraceCandidate> GameLogic::AimTraceCandidates(
   return candidates;
 }
 
-void GameLogic::ApplyAimShot(Unit& shooter, Unit* hitTarget, const glm::vec3& aimPoint) {
+float GameLogic::RayReach(const glm::vec3& muzzle, const glm::vec3& ray) const {
+  // No weapon range cap: a bullet flies until an obstacle, the ground or the
+  // map edge stops it (kAimTraceRange only bounds a ray that never does).
+  float reach = constants::kAimTraceRange;
+  const float half = scene_.mapHalfExtent;
+  for (const auto [origin, d] : {std::pair{muzzle.x, ray.x}, std::pair{muzzle.z, ray.z}}) {
+    if (d > 1e-6f) reach = std::min(reach, (half - origin) / d);
+    if (d < -1e-6f) reach = std::min(reach, (-half - origin) / d);
+  }
+  reach = std::max(reach, 0.0f);
+  for (const Obstacle& obstacle : scene_.obstacles) {
+    float t = 0.0f;
+    if (RayIntersectsObstacle(muzzle, ray, obstacle, &t) && t > 0.0f) reach = std::min(reach, t);
+  }
+  for (const WalkSurface& surface : scene_.walkSurfaces) {
+    float t = 0.0f;
+    if (RayIntersectsWalkSurface(muzzle, ray, surface, 0.45f, &t) && t > 0.0f) {
+      reach = std::min(reach, t);
+    }
+  }
+  if (ray.y < -1e-4f && muzzle.y > 0.0f) reach = std::min(reach, -muzzle.y / ray.y);
+  return reach;
+}
+
+namespace {
+
+// `dir` turned by yaw/pitch offsets (radians).
+glm::vec3 Deflect(const glm::vec3& dir, float yawOffset, float pitchOffset) {
+  const float yaw = std::atan2(dir.z, dir.x) + yawOffset;
+  const float pitch =
+      glm::clamp(std::asin(glm::clamp(dir.y, -1.0f, 1.0f)) + pitchOffset, -1.5f, 1.5f);
+  return glm::vec3(std::cos(pitch) * std::cos(yaw), std::sin(pitch), std::cos(pitch) * std::sin(yaw));
+}
+
+// Half-width a deflected bullet must clear to visibly pass beside a figure.
+constexpr float kBodyClearance = 0.6f;
+
+}  // namespace
+
+void GameLogic::ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets,
+                             const glm::vec3& aimPoint, float sinceShot) {
   // The one bit of fog-of-war info a blind shot earns: a connecting hit on a
   // figure unseen *when the trigger was pulled* (before the turn below)
   // records a sighting. Misses reveal nothing.
-  const bool wasVisible =
-      hitTarget && ComputeVisibility(shooter.team).UnitVisible(hitTarget->id);
+  const TeamVisibility visibility = ComputeVisibility(shooter.team);
 
   glm::vec3 dir(aimPoint.x - shooter.position.x, 0.0f, aimPoint.z - shooter.position.z);
   if (glm::length(dir) < 1e-4f) dir = shooter.FacingDirection();
@@ -1053,128 +1169,195 @@ void GameLogic::ApplyAimShot(Unit& shooter, Unit* hitTarget, const glm::vec3& ai
   // The turn outlives the shot: it is this figure's facing for the next
   // rounds' FOV and overwatch reactions.
   shooter.facingYaw = aimYaw;
-  shooter.shootElapsed = 0.0f;
-  shooter.shootAimYaw = aimYaw;
+  PlayShootBeat(shooter, aimYaw, sinceShot);
 
-  // The bullet flies from the muzzle along the aim ray until it strikes the
-  // hit figure, a wall/deck, the ground, or runs out of range.
-  const glm::vec3 muzzle = shooter.MuzzlePosition();
-  glm::vec3 ray = aimPoint - muzzle;
-  ray = glm::length(ray) < 1e-4f ? shooter.FacingDirection() : glm::normalize(ray);
-  float reach = constants::kAimTraceRange;
-  if (hitTarget) {
-    float t = 0.0f;
-    if (RayIntersectsAABB(muzzle, ray, hitTarget->Bounds(), &t)) reach = t;
-  } else {
-    for (const Obstacle& obstacle : scene_.obstacles) {
-      float t = 0.0f;
-      if (RayIntersectsObstacle(muzzle, ray, obstacle, &t) && t > 0.0f) reach = std::min(reach, t);
+  for (Unit* hitTarget : hitTargets) {
+    const bool wasVisible = visibility.UnitVisible(hitTarget->id);
+    glm::vec3 fall(hitTarget->position.x - shooter.position.x, 0.0f,
+                   hitTarget->position.z - shooter.position.z);
+    fall = glm::length(fall) < 1e-4f ? dir : glm::normalize(fall);
+    KnockDown(*hitTarget, fall);
+
+    const int viewerIndex = static_cast<int>(shooter.team);
+    if (!wasVisible && hitTarget->id >= 0 &&
+        static_cast<size_t>(hitTarget->id) < sightings_[viewerIndex].size()) {
+      EnemySighting s;
+      s.position = hitTarget->position;
+      s.facingYaw = hitTarget->facingYaw;
+      s.walkPhase = hitTarget->walkPhase;
+      s.walkBlend = hitTarget->walkBlend;
+      s.idleElapsed = hitTarget->idleElapsed;
+      sightings_[viewerIndex][hitTarget->id].push_back(s);
     }
-    for (const WalkSurface& surface : scene_.walkSurfaces) {
-      float t = 0.0f;
-      if (RayIntersectsWalkSurface(muzzle, ray, surface, 0.45f, &t) && t > 0.0f) {
-        reach = std::min(reach, t);
-      }
-    }
-    if (ray.y < -1e-4f && muzzle.y > 0.0f) reach = std::min(reach, -muzzle.y / ray.y);
-  }
-  RecordTracer(shooter, muzzle, muzzle + ray * reach);
-  if (!hitTarget) return;
-
-  glm::vec3 fall(hitTarget->position.x - shooter.position.x, 0.0f,
-                 hitTarget->position.z - shooter.position.z);
-  fall = glm::length(fall) < 1e-4f ? dir : glm::normalize(fall);
-  hitTarget->alive = false;
-  hitTarget->knockdownAxis = glm::vec3(fall.z, 0.0f, -fall.x);
-  hitTarget->knockdownElapsed = 0.0f;
-
-  const int viewerIndex = static_cast<int>(shooter.team);
-  if (!wasVisible && hitTarget->id >= 0 &&
-      static_cast<size_t>(hitTarget->id) < sightings_[viewerIndex].size()) {
-    EnemySighting s;
-    s.position = hitTarget->position;
-    s.facingYaw = hitTarget->facingYaw;
-    s.walkPhase = hitTarget->walkPhase;
-    s.walkBlend = hitTarget->walkBlend;
-    s.idleElapsed = hitTarget->idleElapsed;
-    sightings_[viewerIndex][hitTarget->id].push_back(s);
   }
 }
 
 void GameLogic::ResolvePendingShots() {
-  // Judge every held shot against the same snapshot (positions don't change
-  // during resolution, and hits are applied only after all are judged), so
-  // two figures whose shots connect on the same tick both fire: a mutual
-  // kill downs both, rather than whichever happens to resolve first
-  // silencing the other.
-  // A held locked-target shot is taken (and consumed, hit or miss) the first
-  // tick it passes the hard gates. A free-aim shot has no gates at all --
-  // the figure turns to the point and fires on its first resolution tick;
-  // the ballistic trace decides what (if anything) the bullet meets.
-  struct Firing {
-    Unit* shooter = nullptr;
-    Unit* target = nullptr;  // Locked target; null for a free-aim shot.
-    bool aim = false;
-    glm::vec3 aimPoint{0.0f};
-    std::vector<AimTraceCandidate> trace;
-  };
-  std::vector<Firing> firing;
-  for (const PendingShot& shot : pendingShots_) {
+  // A held locked-target burst opens fire the first tick it passes the hard
+  // gates; a free-aim burst has no gates at all and opens fire on its first
+  // resolution tick. From then on the burst is paced in real time (issue
+  // #140): shot k is scheduled at startTime + k * the weapon's interval,
+  // and every requested shot is taken -- a kill does not cut the burst
+  // short -- until the magazine level is spent or the round window closes.
+  for (PendingShot& shot : pendingShots_) {
+    if (shot.started) continue;
     Unit* shooter = FindUnit(shot.shooterId);
     if (!shooter || !shooter->alive) continue;
-    if (shot.hasAimPoint) {
-      Firing f;
-      f.shooter = shooter;
-      f.aim = true;
-      f.aimPoint = shot.aimPoint;
-      f.trace = AimTraceCandidates(*shooter, shot.aimPoint);
-      firing.push_back(std::move(f));
-      continue;
-    }
-    Unit* target = FindUnit(shot.targetId);
-    if (!target || !target->alive) continue;
-    if (ShotConnects(*shooter, *target)) firing.push_back(Firing{shooter, target});
-  }
-  // Rolls are applied in order but each hit only flips the target's alive
-  // flag after all were judged gate-wise, so mutual shots still both fire.
-  // A free-aim trace rolls once per figure in the bullet's path, nearest
-  // first; the first success absorbs the bullet.
-  struct Outcome {
-    Unit* traceHit = nullptr;
-    bool lockedHit = false;
-  };
-  std::vector<Outcome> outcomes;
-  for (const Firing& f : firing) {
-    Outcome o;
-    if (f.aim) {
-      for (const AimTraceCandidate& c : f.trace) {
-        if (RollShot() < c.chance) {
-          o.traceHit = FindUnit(c.unitId);
-          break;
-        }
+    if (!shot.hasAimPoint) {
+      Unit* target = FindUnit(shot.targetId);
+      if (!target || !target->alive) continue;
+      if (!ShotConnects(*shooter, *target)) continue;
+      // The bullets fly muzzle -> torso, so the hold-fire gate waits for
+      // that very line too: a burst must not open up while chest-high cover
+      // still blocks the trajectory the eyes already see over.
+      const glm::vec3 aimPoint =
+          target->position + glm::vec3(0.0f, constants::kTorsoAimHeight, 0.0f);
+      const Unit aimed = AimedAt(*shooter, aimPoint);
+      if (!LineOfSightClear(aimed.MuzzlePosition(), aimPoint, scene_.obstacles,
+                            scene_.walkSurfaces, scene_.ground)) {
+        continue;
       }
-    } else {
-      o.lockedHit = RollShot() < ShotHitChance(*f.shooter, *f.target);
     }
-    outcomes.push_back(o);
-  }
-  for (size_t i = 0; i < firing.size(); ++i) {
-    if (firing[i].aim) {
-      ApplyAimShot(*firing[i].shooter, outcomes[i].traceHit, firing[i].aimPoint);
-    } else {
-      ApplyShot(*firing[i].shooter, *firing[i].target, outcomes[i].lockedHit);
-    }
+    shot.started = true;
+    shot.startTime = executionElapsed_;
   }
 
-  // Drop everything that fired or can no longer fire (dead shooter holds
-  // its fire from here on; a downed target stops being worth a bullet).
+  // Everything with at least one bullet due at the current execution clock.
+  struct Burst {
+    PendingShot* shot = nullptr;
+    Unit* shooter = nullptr;
+    Unit* target = nullptr;  // Locked target; null for a free-aim burst.
+    int bulletsDue = 0;
+    // Judged against this tick's snapshot, lazily on the burst's first due
+    // bullet (positions don't change during resolution).
+    bool judged = false;
+    // Where this tick's bullets are aimed: the staged free-aim point, or --
+    // for a locked target -- its torso wherever the figure stands this tick.
+    glm::vec3 aimPoint{0.0f};
+    // Outcome of this tick's bullets, applied only after every due bullet
+    // (across all bursts) was judged: mutual shots in a tick both land.
+    std::vector<Unit*> traceHits;
+    float lastAt = 0.0f;
+  };
+  std::vector<Burst> bursts;
+  // One entry per due bullet; judged in schedule order below so the roll
+  // stream does not depend on how time is sliced into ticks.
+  struct Bullet {
+    size_t burst;
+    float at;
+    int index;  // Position within the burst (0-based).
+    glm::vec3 from{0.0f};
+    glm::vec3 to{0.0f};  // Where this bullet's own trajectory ends.
+  };
+  std::vector<Bullet> bullets;
+  for (PendingShot& shot : pendingShots_) {
+    if (!shot.started || shot.shotsFired >= shot.shots) continue;
+    Unit* shooter = FindUnit(shot.shooterId);
+    if (!shooter || !shooter->alive) continue;
+    const float interval = StatsOf(shooter->weapon).shotIntervalSeconds;
+    Burst burst;
+    burst.shot = &shot;
+    burst.shooter = shooter;
+    burst.target = shot.hasAimPoint ? nullptr : FindUnit(shot.targetId);
+    for (int k = shot.shotsFired; k < shot.shots; ++k) {
+      const float at = shot.startTime + k * interval;
+      if (at > executionElapsed_ + 1e-4f || at >= constants::kRoundDuration) break;
+      bullets.push_back(Bullet{bursts.size(), at, k});
+      burst.lastAt = at;
+      ++burst.bulletsDue;
+    }
+    if (burst.bulletsDue > 0) bursts.push_back(std::move(burst));
+  }
+  std::stable_sort(bullets.begin(), bullets.end(),
+                   [](const Bullet& a, const Bullet& b) { return a.at < b.at; });
+
+  // Judge each bullet in schedule order; every bullet flies its own line,
+  // scattered inside the weapon's cone (a pure hash, see ScatterUnit), and
+  // its ray traces the figures in its path nearest first (the first success
+  // absorbs the bullet; figures already downed by an earlier bullet of the
+  // same burst are skipped), so one burst can drop several figures. A bullet
+  // that connects with nobody flies on to the first wall/deck/ground it
+  // meets, bent clear of any figure whose roll it just won. A locked target
+  // only aims the burst -- at its torso, wherever the figure stands this
+  // tick -- the bullets themselves fly exactly like free-aim ones (the
+  // weapon's precision does not change with what is under the cursor), and
+  // once the target is down the rest of the magazine still fires, scattered
+  // around the body.
+  for (Bullet& bullet : bullets) {
+    Burst& b = bursts[bullet.burst];
+    const int sid = b.shooter->id;
+    const float scatter = glm::radians(StatsOf(b.shooter->weapon).scatterHalfAngleDegrees);
+    if (!b.judged) {
+      b.judged = true;
+      b.aimPoint = b.target ? b.target->position +
+                                  glm::vec3(0.0f, constants::kTorsoAimHeight, 0.0f)
+                            : b.shot->aimPoint;
+    }
+    const Unit aimed = AimedAt(*b.shooter, b.aimPoint);
+    bullet.from = aimed.MuzzlePosition();
+    glm::vec3 base = b.aimPoint - bullet.from;
+    base = glm::length(base) < 1e-4f ? aimed.FacingDirection() : glm::normalize(base);
+    const float radius = std::sqrt(ScatterUnit(sid, roundNumber_, bullet.index, 1)) * scatter;
+    const float theta = 6.2831853f * ScatterUnit(sid, roundNumber_, bullet.index, 2);
+    glm::vec3 ray = Deflect(base, radius * std::cos(theta), radius * std::sin(theta));
+    bool absorbed = false;
+    float nearestMiss = 0.0f;
+    for (const AimTraceCandidate& c :
+         RayTraceCandidates(*b.shooter, bullet.from, ray, aimed.FacingDirection())) {
+      Unit* unit = FindUnit(c.unitId);
+      if (std::find(b.traceHits.begin(), b.traceHits.end(), unit) != b.traceHits.end()) {
+        continue;  // Downed by an earlier bullet of this burst.
+      }
+      if (RollShot() < c.chance) {
+        b.traceHits.push_back(unit);
+        bullet.to = bullet.from + ray * c.rayT;
+        absorbed = true;
+        break;
+      }
+      if (nearestMiss == 0.0f) nearestMiss = c.rayT;
+    }
+    if (absorbed) continue;
+    if (nearestMiss > 0.0f) {
+      // Rolled a miss on a figure the line passes through: bend it clear.
+      const float sign = ScatterUnit(sid, roundNumber_, bullet.index, 3) < 0.5f ? -1.0f : 1.0f;
+      ray = Deflect(ray, sign * std::atan(kBodyClearance / std::max(nearestMiss, 1.0f)), 0.0f);
+    }
+    bullet.to = bullet.from + ray * RayReach(bullet.from, ray);
+  }
+
+  // Apply: every bullet leaves its own tracer (aged by how long ago within
+  // this tick it left the barrel), then each burst's shooter plays the beat
+  // and its hits go down.
+  for (const Bullet& bullet : bullets) {
+    RecordTracer(*bursts[bullet.burst].shooter, bullet.from, bullet.to,
+                 std::max(0.0f, executionElapsed_ - bullet.at));
+  }
+  for (Burst& b : bursts) {
+    const float sinceShot = std::max(0.0f, executionElapsed_ - b.lastAt);
+    ApplyAimShot(*b.shooter, b.traceHits, b.aimPoint, sinceShot);
+    b.shot->shotsFired += b.bulletsDue;
+    if (b.shot->reaction) reactionAmmo_[b.shooter->id] -= b.bulletsDue;
+  }
+
+  // Drop every burst that finished (magazine level spent, or the round
+  // window closed on its remaining shots) or can no longer fire: a dead
+  // shooter releases the trigger, and a locked target that dies before the
+  // burst could start stops being worth a bullet.
   pendingShots_.erase(
       std::remove_if(pendingShots_.begin(), pendingShots_.end(),
                      [this](const PendingShot& shot) {
-                       if (shot.hasAimPoint) return true;  // Fired above, hit or miss.
                        const Unit* shooter = FindUnit(shot.shooterId);
+                       if (!shooter || !shooter->alive) return true;
+                       if (shot.started) {
+                         if (shot.shotsFired >= shot.shots) return true;
+                         const float next =
+                             shot.startTime +
+                             shot.shotsFired * StatsOf(shooter->weapon).shotIntervalSeconds;
+                         return next >= constants::kRoundDuration;
+                       }
+                       if (shot.hasAimPoint) return false;
                        const Unit* target = FindUnit(shot.targetId);
-                       return !shooter || !target || !shooter->alive || !target->alive;
+                       return !target || !target->alive;
                      }),
       pendingShots_.end());
 }
@@ -1190,6 +1373,21 @@ bool GameLogic::IsUnitMoving(int unitId) const {
 }
 
 void GameLogic::ApplyPlaybookReactions() {
+  // A reaction burst keeps firing only while its target stays in the
+  // shooter's FOV+LOS; the unspent rounds stay in reactionAmmo_ for when the
+  // enemy is sighted again.
+  pendingShots_.erase(
+      std::remove_if(pendingShots_.begin(), pendingShots_.end(),
+                     [this](const PendingShot& shot) {
+                       if (!shot.reaction) return false;
+                       const Unit* shooter = FindUnit(shot.shooterId);
+                       const Unit* target = FindUnit(shot.targetId);
+                       return !shooter || !target || !shooter->alive || !target->alive ||
+                              !CanUnitSee(*shooter, *target, scene_.obstacles,
+                                          scene_.walkSurfaces, scene_.ground);
+                     }),
+      pendingShots_.end());
+
   struct Reaction {
     Unit* actor;
     Unit* target;  // Nearest sighted enemy; only fired on when `shoot`.
@@ -1229,7 +1427,7 @@ void GameLogic::ApplyPlaybookReactions() {
     if (shoot || stop) reactions.push_back(Reaction{&unit, nearest, shoot, stop});
   }
   for (const Reaction& r : reactions) {
-    if (r.shoot) ResolveShot(*r.actor, *r.target);
+    if (r.shoot) StartReactionBurst(*r.actor, *r.target);
     if (r.stop) {
       for (ActiveMove& move : activeMoves_) {
         if (move.unitId == r.actor->id) move.segment = move.path.size();
@@ -1238,8 +1436,25 @@ void GameLogic::ApplyPlaybookReactions() {
   }
 }
 
+void GameLogic::StartReactionBurst(const Unit& shooter, const Unit& target) {
+  for (const PendingShot& shot : pendingShots_) {
+    if (shot.reaction && shot.shooterId == shooter.id) return;  // Already firing.
+  }
+  auto ammo = reactionAmmo_.find(shooter.id);
+  if (ammo == reactionAmmo_.end()) {
+    ammo = reactionAmmo_.emplace(shooter.id, StatsOf(shooter.weapon).magazineSize).first;
+  }
+  if (ammo->second <= 0) return;  // Magazine spent this round.
+  PendingShot shot{shooter.id, target.id, false, glm::vec3(0.0f), ammo->second};
+  shot.reaction = true;
+  shot.started = true;
+  shot.startTime = executionElapsed_;
+  pendingShots_.push_back(shot);
+}
+
 void GameLogic::CommitRound() {
   if (!CanCommitRound()) return;
+  reactionAmmo_.clear();
 
   selectedUnitId_.reset();
   movePreviewPath_.clear();
@@ -1259,16 +1474,19 @@ void GameLogic::CommitRound() {
       activeMoves_.push_back(ActiveMove{unit.id, plan.movePath, 0, plan.endFacingYaw});
     } else if (plan.type == PlannedActionType::Shoot) {
       pendingShots_.push_back(
-          PendingShot{unit.id, plan.shootTargetId, plan.hasAimPoint, plan.aimPoint});
+          PendingShot{unit.id, plan.shootTargetId, plan.hasAimPoint, plan.aimPoint, plan.shots});
     }
   }
   aimPreview_.reset();
+  lockPreviewId_.reset();
 
   mode_ = InputMode::Executing;
+  executionElapsed_ = 0.0f;
 
-  // Tick 0: shots whose FOV/LOS is already valid at the pre-move positions
-  // fire the instant the round starts (simultaneously, snapshot-judged);
-  // blocked ones stay pending and re-check as the round's movement unfolds.
+  // Tick 0: bursts whose FOV/LOS is already valid at the pre-move positions
+  // open fire the instant the round starts (simultaneously,
+  // snapshot-judged); blocked ones stay pending and re-check as the round's
+  // movement unfolds.
   ResolvePendingShots();
 
   // Anyone killed at tick 0 never starts walking.
@@ -1280,8 +1498,14 @@ void GameLogic::CommitRound() {
                       activeMoves_.end());
 
   // With no movement in flight, nothing can change a still-blocked shot's
-  // geometry: the round is already over.
-  if (activeMoves_.empty()) FinishRound();
+  // geometry: it expires now. The round stays executing while any opened
+  // burst still has shots scheduled; otherwise it is already over.
+  if (activeMoves_.empty()) {
+    pendingShots_.erase(std::remove_if(pendingShots_.begin(), pendingShots_.end(),
+                                       [](const PendingShot& shot) { return !shot.started; }),
+                        pendingShots_.end());
+    if (pendingShots_.empty()) FinishRound();
+  }
 }
 
 void GameLogic::FinishRound() {

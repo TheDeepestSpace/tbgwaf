@@ -48,6 +48,14 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
     overlays.aimShooter = selected;
     if (const auto& preview = game.GetAimPreview()) {
       overlays.aimMarker = preview->point;
+    } else if (const auto& lock = game.GetLockPreview()) {
+      // A staged lock-on shows the cone and "+" on the locked figure's
+      // torso -- the exact point the burst will be aimed at, so the cone
+      // footprint the shader paints on the figure is the real hit odds.
+      if (const tactics::Unit* target = game.FindUnit(*lock)) {
+        overlays.aimMarker =
+            target->position + glm::vec3(0.0f, tactics::constants::kTorsoAimHeight, 0.0f);
+      }
     }
     overlays.aimConeTarget = overlays.aimMarker ? overlays.aimMarker : hoveredGroundPoint;
   }
@@ -1421,7 +1429,11 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
   constexpr float kSurfaceAlpha = 0.18f;
   constexpr float kFootprintAlpha = 0.7f;
   constexpr float kTwoPi = 6.28318530717958647692f;
-  const float tanHalf = std::tan(glm::radians(tactics::constants::kShotConeHalfAngleDegrees));
+  // Keep the setup preview identical to the trajectory scatter used when
+  // the action executes.  In particular, the sniper and Deagle must not
+  // inherit the AR's 3-degree cone.
+  const float tanHalf =
+      std::tan(glm::radians(tactics::StatsOf(unit.weapon).scatterHalfAngleDegrees));
   // Free-aim (issue #129): the cone leaves the muzzle of the figure as it
   // will stand when it fires -- turned toward the aim point -- and its axis
   // may pitch up/down (sky or elevated aim).
@@ -2162,17 +2174,29 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           unit.plan.type != tactics::PlannedActionType::Shoot || &unit == aimingShooter) {
         continue;
       }
+      // A planned locked shot aims its cone at the target's torso -- the
+      // same point the burst's bullets will be aimed at (and the same
+      // marker used while staging the lock), so the footprint shader keeps
+      // painting the hit odds on the figure until the commit instead of
+      // falling back to the figure's old facing.
+      std::optional<glm::vec3> coneAim;
+      if (unit.plan.hasAimPoint) {
+        coneAim = unit.plan.aimPoint;
+      } else if (const Unit* lockTarget = game.FindUnit(unit.plan.shootTargetId)) {
+        coneAim = lockTarget->position +
+                  glm::vec3(0.0f, tactics::constants::kTorsoAimHeight, 0.0f);
+      }
       glEnable(GL_DEPTH_TEST);
       glDepthFunc(GL_LEQUAL);
       DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, sphereMesh_,
                    viewProj, unit, coneLitUnits(unit), obstacles,
                    game.GetScene().sidewalks, game.GetScene().mapHalfExtent,
-                   unit.plan.hasAimPoint ? &unit.plan.aimPoint : nullptr);
+                   coneAim ? &*coneAim : nullptr);
       glDepthFunc(GL_LESS);
-      // A planned free-aim shot keeps its "+" selector until the commit,
-      // like a planned move keeps its destination ghost.
-      if (unit.plan.hasAimPoint) {
-        DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, unit.plan.aimPoint);
+      // A planned shot keeps its "+" selector until the commit, like a
+      // planned move keeps its destination ghost.
+      if (coneAim) {
+        DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, *coneAim);
       }
     }
   }
@@ -2454,10 +2478,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glDisable(GL_BLEND);
   }
 
-  // Bullet tracers: team-colored line from the muzzle to where the shot
-  // ended, fading per completed round like the sighting ghosts.
+  // Bullet tracers: a team-colored dotted path from the muzzle to where the
+  // shot ended, fading per completed round like the sighting ghosts.  A new
+  // shot briefly overlays the dots with a full white-hot line.
   {
     constexpr float kTracerMaxAlpha = 0.9f;
+    constexpr float kTracerDotLength = 0.04f;
+    constexpr float kTracerDotStride = 0.2f;
     unlitShader_.Use();
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -2466,12 +2493,32 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       const int age = game.RoundNumber() - tracer.birthRound;
       const float life = 1.0f - static_cast<float>(age) / tactics::constants::kTracerMemoryRounds;
       if (life <= 0.0f) continue;
-      const glm::vec3 base = tracer.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
-                                                       : glm::vec3(0.9f, 0.25f, 0.22f);
-      pathLine_.SetPoints({tracer.from, tracer.to});
+      const glm::vec3 teamColor = tracer.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
+                                                            : glm::vec3(0.9f, 0.25f, 0.22f);
+      const glm::vec3 delta = tracer.to - tracer.from;
+      const float length = glm::length(delta);
+      if (length <= 1e-4f) continue;
+      const glm::vec3 direction = delta / length;
+      std::vector<glm::vec3> dots;
+      dots.reserve(static_cast<size_t>(std::ceil(length / kTracerDotStride)) * 2);
+      for (float start = 0.0f; start < length; start += kTracerDotStride) {
+        dots.push_back(tracer.from + direction * start);
+        dots.push_back(tracer.from + direction * std::min(start + kTracerDotLength, length));
+      }
+      pathLine_.SetPoints(dots);
       unlitShader_.SetMat4("uMVP", viewProj);
-      unlitShader_.SetVec4("uColor", glm::vec4(base, life * kTracerMaxAlpha));
-      pathLine_.Draw();
+      unlitShader_.SetVec4("uColor", glm::vec4(teamColor, life * kTracerMaxAlpha));
+      pathLine_.DrawSegments();
+
+      // Each shot of a burst still pops as a full white-hot line, but that
+      // continuous overlay disappears quickly and leaves only the dots.
+      constexpr float kTracerFlashSeconds = 0.25f;
+      const float flash = glm::clamp(1.0f - tracer.age / kTracerFlashSeconds, 0.0f, 1.0f);
+      if (flash > 0.0f) {
+        pathLine_.SetPoints({tracer.from, tracer.to});
+        unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.97f, 0.8f, flash));
+        pathLine_.Draw();
+      }
     }
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
@@ -2582,15 +2629,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                 OnSurface(leg.back()), yellow, legNumber,
                                 SurfaceNormal(leg.back()));
         }
-      } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
-        if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {
-          const std::vector<glm::vec3> shotLine = {unit.MuzzlePosition(), shotTarget->EyePosition()};
-          pathLine_.SetPoints(shotLine);
-          unlitShader_.SetMat4("uMVP", viewProj);
-          unlitShader_.SetVec4("uColor", glm::vec4(0.95f, 0.25f, 0.2f, 1.0f));
-          pathLine_.Draw();
-        }
       }
+      // Planned locked shots draw no line here: the shot cone aimed at the
+      // target's torso (plus the "+" marker) is the whole preview, same as
+      // a planned free-aim shot.
     }
   }
   glDisable(GL_SCISSOR_TEST);

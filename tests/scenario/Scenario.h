@@ -62,6 +62,13 @@ struct ScenarioAction {
   std::optional<glm::vec3> shootAt;
   std::optional<glm::vec3> aimRayFrom;
   std::optional<glm::vec3> aimRayDir;
+  // Shoot/Aim only (issue #138): burst size dialed in on the shot-level bar
+  // before the target click / Fire press. Routed through
+  // GameLogic::SetPlannedShotCount, so it clamps exactly like the UI
+  // (never below 1, never past the weapon's magazine/round-window cap).
+  // Absent means "bar untouched": the plan keeps whatever level is dialed in
+  // (1 unless an earlier step of the same aim set it).
+  std::optional<int> shots;
 };
 
 // Every field is optional; only the ones present in the YAML step are

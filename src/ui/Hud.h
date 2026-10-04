@@ -6,6 +6,7 @@
 // ImGui::Render(). Const w.r.t. the game: button presses are reported back
 // via HudActions for the caller to apply.
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <utility>
@@ -94,8 +95,11 @@ HudActions DrawHud(const tactics::GameLogic& game, tactics::Team team, bool plan
 // The extra metrics: `frameMs` last frame time, `fovMs` time spent in the
 // visibility (FOV-cone) computation, and `stats`
 // draw-call/vertex/triangle counters for the frame.
+// `wasmHeapBytes` is the WASM linear-memory size (nullopt on native builds,
+// shown as N/A). WASM memory never shrinks, so this is also the peak.
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float fps,
                     float frameMs, float fovMs,
-                    const gfx::RenderFrameStats& stats, float top);
+                    const gfx::RenderFrameStats& stats, float top,
+                    std::optional<size_t> wasmHeapBytes);
 
 }  // namespace ui

@@ -48,6 +48,11 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
     overlays.aimShooter = selected;
     if (const auto& preview = game.GetAimPreview()) {
       overlays.aimMarker = preview->point;
+    } else if (const auto& lock = game.GetLockPreview()) {
+      // A staged lock-on shows the cone and "+" on the locked figure's torso.
+      if (const tactics::Unit* target = game.FindUnit(*lock)) {
+        overlays.aimMarker = target->position + glm::vec3(0.0f, 0.9f, 0.0f);
+      }
     }
     overlays.aimConeTarget = overlays.aimMarker ? overlays.aimMarker : hoveredGroundPoint;
   }

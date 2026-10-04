@@ -236,7 +236,7 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
       case InputMode::AwaitingShootTarget:
         ImGui::TextWrapped(
             "Click an enemy figure to lock on, or any surface point in the green area to place "
-            "a free-aim shot ('+', Fire confirms). Esc cancels.");
+            "a free-aim shot ('+'). Set the shot count with the bar, then Fire. Esc cancels.");
         break;
       case InputMode::Executing:
         ImGui::TextWrapped("Round executing: both teams' plans are playing out...");
@@ -284,7 +284,8 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
           }
           // Free-aim: a placed "+" gets its confirm button (the touch flow's
           // tap-to-place -> confirm) -- no hover reliance.
-          if (game.Mode() == InputMode::AwaitingShootTarget && game.GetAimPreview()) {
+          if (game.Mode() == InputMode::AwaitingShootTarget &&
+              (game.GetAimPreview() || game.GetLockPreview())) {
             if (Button("Fire")) actions.fire = true;
             ImGui::SameLine();
           }

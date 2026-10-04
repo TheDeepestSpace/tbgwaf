@@ -2318,6 +2318,56 @@ void TestFullMagDumpLeavesThirtyTracers() {
   CHECK(steps > 4.5f * 60.0f && steps < 5.2f * 60.0f);
 }
 
+void TestLockOnStagesUntilFireAndKeepsShotCount() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  // Clicking an enemy figure stages the lock; the mode (and bar) stay up.
+  game.ClickAimRay(glm::vec3(8.0f, 20.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+  CHECK(game.GetLockPreview() == std::optional<int>(4));
+  CHECK(game.FindUnit(1)->plan.type != PlannedActionType::Shoot);
+  game.SetPlannedShotCount(7, Team::Blue);
+  game.ConfirmAim(Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(!game.GetLockPreview().has_value());
+  CHECK(game.FindUnit(1)->plan.shootTargetId == 4);
+  CHECK(game.FindUnit(1)->plan.shots == 7);
+
+  // Placing a surface aim point replaces a staged lock.
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.ClickAimRay(glm::vec3(8.0f, 20.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), Team::Blue);
+  game.ClickAimRay(glm::vec3(0.0f, 20.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), Team::Blue);
+  CHECK(!game.GetLockPreview().has_value());
+  CHECK(game.GetAimPreview().has_value());
+}
+
+void TestBulletsFlyToMapEdgeNotWeaponRange() {
+  GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.99f; });
+  game.FindUnit(1)->weapon = WeaponType::SniperRifle;
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(8.0f, 0.0f, 0.0f), Team::Blue);
+  game.ConfirmAim(Team::Blue);
+  for (int id : {0, 2}) {
+    game.ClickUnit(id, Team::Blue);
+    game.ChoosePass();
+  }
+  for (int id : {3, 4, 5}) {
+    game.ClickUnit(id, Team::Red);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  for (int i = 0; i < 1000 && game.Mode() == InputMode::Executing; ++i) game.Update(1.0f / 60.0f);
+  CHECK(!game.Tracers().empty());
+  const float half = game.GetScene().mapHalfExtent;
+  for (const Tracer& t : game.Tracers()) {
+    CHECK(std::fabs(t.to.x) <= half + 1e-3f && std::fabs(t.to.z) <= half + 1e-3f);
+  }
+}
+
 void TestBurstPlanSurvivesSnapshotAndClampsOnImport() {
   GameLogic game(LegacyScene());
   game.ClickUnit(1, Team::Blue);
@@ -2425,6 +2475,8 @@ int main() {
   TestLockedBurstFiresAllShotsOverTime();
   TestFreeAimBurstHitsPointTarget();
   TestFullMagDumpLeavesThirtyTracers();
+  TestLockOnStagesUntilFireAndKeepsShotCount();
+  TestBulletsFlyToMapEdgeNotWeaponRange();
   TestBurstPlanSurvivesSnapshotAndClampsOnImport();
 
   if (g_failures == 0) {

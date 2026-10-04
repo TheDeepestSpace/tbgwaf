@@ -73,6 +73,7 @@ void GameLogic::Reset(Scene scene) {
   pendingShots_.clear();
   mirroredMoving_.clear();
   aimPreview_.reset();
+  lockPreviewId_.reset();
   plannedShots_ = 1;
   executionElapsed_ = 0.0f;
 
@@ -331,6 +332,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   activeMoves_.clear();
   pendingShots_.clear();
   aimPreview_.reset();
+  lockPreviewId_.reset();
   return true;
 }
 
@@ -501,17 +503,22 @@ void GameLogic::ClickUnit(int unitId, Team byTeam) {
     // guaranteed miss) -- distinct from an in-FOV shot that misses due to
     // the shooter's own cone/LOS once the round executes.
     if (!ComputeVisibility(shooter->team).UnitVisible(unit->id)) return;
-    shooter->plan.type = PlannedActionType::Shoot;
-    shooter->plan.shootTargetId = unit->id;
-    shooter->plan.hasAimPoint = false;
-    shooter->plan.shots = plannedShots_;
-    shooter->plan.movePath.clear();
-    shooter->plan.queuedLegs.clear();
-    aimPreview_.reset();
-    plannedShots_ = 1;
-    selectedUnitId_.reset();
-    mode_ = InputMode::AwaitingSelection;
+    CommitLockedShot(*shooter, unit->id);
   }
+}
+
+void GameLogic::CommitLockedShot(Unit& shooter, int targetId) {
+  shooter.plan.type = PlannedActionType::Shoot;
+  shooter.plan.shootTargetId = targetId;
+  shooter.plan.hasAimPoint = false;
+  shooter.plan.shots = plannedShots_;
+  shooter.plan.movePath.clear();
+  shooter.plan.queuedLegs.clear();
+  aimPreview_.reset();
+  lockPreviewId_.reset();
+  plannedShots_ = 1;
+  selectedUnitId_.reset();
+  mode_ = InputMode::AwaitingSelection;
 }
 
 glm::vec3 GameLogic::MoveChainEnd() const {
@@ -741,6 +748,7 @@ void GameLogic::ChooseShoot() {
   if (mode_ != InputMode::ActionMenu) return;
   ClearQueuedLegs(selectedUnitId_);
   aimPreview_.reset();
+  lockPreviewId_.reset();
   plannedShots_ = 1;
   mode_ = InputMode::AwaitingShootTarget;
 }
@@ -786,6 +794,7 @@ void GameLogic::CancelAction() {
     movePreviewPath_.clear();
     movePreviewValid_ = false;
     aimPreview_.reset();
+    lockPreviewId_.reset();
     plannedShots_ = 1;
   } else if (mode_ == InputMode::ActionMenu) {
     mode_ = InputMode::AwaitingSelection;
@@ -1006,7 +1015,9 @@ void GameLogic::ClickAimRay(const glm::vec3& origin, const glm::vec3& direction,
   if (!shooter || shooter->team != byTeam) return;
   const AimRayResult aim = ResolveAimRay(origin, direction);
   if (aim.kind == AimRayResult::Kind::Unit) {
-    ClickUnit(aim.unitId, byTeam);
+    // Stage the lock; the shot-level bar stays up until Fire confirms.
+    aimPreview_.reset();
+    lockPreviewId_ = aim.unitId;
     return;
   }
   if (aim.kind == AimRayResult::Kind::Surface) PlaceAimPoint(aim.point, byTeam);
@@ -1016,13 +1027,23 @@ void GameLogic::PlaceAimPoint(const glm::vec3& point, Team byTeam) {
   if (mode_ != InputMode::AwaitingShootTarget) return;
   const Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
   if (!shooter || shooter->team != byTeam) return;
+  lockPreviewId_.reset();
   aimPreview_ = AimPreview{point};
 }
 
 void GameLogic::ConfirmAim(Team byTeam) {
-  if (mode_ != InputMode::AwaitingShootTarget || !aimPreview_) return;
+  if (mode_ != InputMode::AwaitingShootTarget || (!aimPreview_ && !lockPreviewId_)) return;
   Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
   if (!shooter || shooter->team != byTeam) return;
+  if (lockPreviewId_) {
+    const Unit* target = FindUnit(*lockPreviewId_);
+    if (!target || !target->alive) {
+      lockPreviewId_.reset();
+      return;
+    }
+    CommitLockedShot(*shooter, *lockPreviewId_);
+    return;
+  }
   shooter->plan.type = PlannedActionType::Shoot;
   shooter->plan.shootTargetId = -1;
   shooter->plan.hasAimPoint = true;
@@ -1031,6 +1052,7 @@ void GameLogic::ConfirmAim(Team byTeam) {
   shooter->plan.movePath.clear();
   shooter->plan.queuedLegs.clear();
   aimPreview_.reset();
+  lockPreviewId_.reset();
   plannedShots_ = 1;
   selectedUnitId_.reset();
   mode_ = InputMode::AwaitingSelection;
@@ -1095,7 +1117,15 @@ std::vector<GameLogic::AimTraceCandidate> GameLogic::RayTraceCandidates(
 }
 
 float GameLogic::RayReach(const glm::vec3& muzzle, const glm::vec3& ray) const {
-  float reach = constants::kShootRange;  // Tracers stop drawing at weapon range.
+  // No weapon range cap: a bullet flies until an obstacle, the ground or the
+  // map edge stops it (kAimTraceRange only bounds a ray that never does).
+  float reach = constants::kAimTraceRange;
+  const float half = scene_.mapHalfExtent;
+  for (const auto [origin, d] : {std::pair{muzzle.x, ray.x}, std::pair{muzzle.z, ray.z}}) {
+    if (d > 1e-6f) reach = std::min(reach, (half - origin) / d);
+    if (d < -1e-6f) reach = std::min(reach, (-half - origin) / d);
+  }
+  reach = std::max(reach, 0.0f);
   for (const Obstacle& obstacle : scene_.obstacles) {
     float t = 0.0f;
     if (RayIntersectsObstacle(muzzle, ray, obstacle, &t) && t > 0.0f) reach = std::min(reach, t);
@@ -1444,6 +1474,7 @@ void GameLogic::CommitRound() {
     }
   }
   aimPreview_.reset();
+  lockPreviewId_.reset();
 
   mode_ = InputMode::Executing;
   executionElapsed_ = 0.0f;

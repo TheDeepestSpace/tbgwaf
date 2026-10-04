@@ -260,6 +260,9 @@ class GameLogic {
   // may set it, and only while that figure is picking its shot.
   void SetPlannedShotCount(int count, Team byTeam);
   int PlannedShotCount() const { return plannedShots_; }
+  // Enemy figure staged by a click (UI path) while AwaitingShootTarget; Fire
+  // (ConfirmAim) commits it with the chosen shot count.
+  const std::optional<int>& GetLockPreview() const { return lockPreviewId_; }
 
   // Friendly fire config flag: when off, same-team figures are transparent
   // to the free-aim ballistic trace. On by default.
@@ -495,6 +498,8 @@ class GameLogic {
   // Free-aim state: the unconfirmed "+" marker (planning-local, never
   // serialized -- like the selection) and the friendly fire config flag.
   std::optional<AimPreview> aimPreview_;
+  std::optional<int> lockPreviewId_;  // Staged lock-on target, not yet confirmed.
+  void CommitLockedShot(Unit& shooter, int targetId);
   // Burst size the shot-level bar has dialed in for the aim in progress
   // (planning-local, like aimPreview_); folded into the plan on record.
   int plannedShots_ = 1;

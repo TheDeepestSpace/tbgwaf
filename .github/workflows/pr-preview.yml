@@ -55,6 +55,8 @@ jobs:
           cp build-web/gallery.html site/gallery/index.html
           cp build-web/tactics_gallery.js site/gallery/
           cp build-web/tactics_gallery.wasm site/gallery/
+          cp build-web/map_seeds.js site/gallery/
+          cp -r build-web/map_goldens site/gallery/
 
       # --- Gameplay scenario review page (issue #14 stage 3): record a
       # per-team WebM video for every scenario at the PR's head and publish

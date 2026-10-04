@@ -48,6 +48,8 @@ jobs:
           cp build-web/gallery.html site/gallery/index.html
           cp build-web/tactics_gallery.js site/gallery/
           cp build-web/tactics_gallery.wasm site/gallery/
+          cp build-web/map_seeds.js site/gallery/
+          cp -r build-web/map_goldens site/gallery/
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0

@@ -1,0 +1,26 @@
+# Issue #130: seed-driven overpass layouts. Nothing is forced: seed 16's
+# default draw naturally yields the enter-ramp-up layout (the artery is at grade on-map, ramps up mid-map and exits off-map elevated).
+# Blue climbs the branch's connecting ramp; the asserted Y proves the
+# ramp-off works, and the goldens show the deck cut off flush at the far map edge.
+name: overpass_enter_ramp_up
+
+map:
+  generate: {type: urban, seed: 16, arteries: 2}
+
+units:
+  - {id: 0, team: blue, position: [-1.6459, 0.621, 38.0182], facing_degrees: 0}
+  - {id: 1, team: red, position: [-18.5437, 0.025, 62.2909], facing_degrees: 180}
+
+camera:
+  target: [1.7, 33.2]
+  zoom: 34
+
+script:
+  - action: move
+    actor: 0
+    destination: [5.1133, 2.3199, 28.3091]
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [5.1133, 2.3199, 28.3091], tolerance: 0.05}
+  - assert: {round: 2}

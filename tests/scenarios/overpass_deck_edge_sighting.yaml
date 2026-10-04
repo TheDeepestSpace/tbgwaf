@@ -1,0 +1,38 @@
+# A figure at the edge of the overpass deck is in plain view of a figure on
+# the street below facing it (its whole body shows above the deck edge), and
+# the deck figure sees the street figure back. Gameplay visibility used to
+# probe only the surface under the target's feet; from the street that deck
+# top is hidden by the deck's own slab, so the street figure never sighted
+# the deck figure (and could not target it) while the deck figure saw and
+# could shoot it. Seed 7's deck, as in fov_cone_bridge_deck. A second Red
+# figure idles far away at grade, out of everyone's view, so the round
+# completes whether or not the shot lands.
+name: overpass_deck_edge_sighting
+
+map:
+  generate: {type: urban, seed: 7, arteries: 2, elevated: true, elevated_layout: ramp-up-ramp-down}
+
+units:
+  - {id: 0, team: blue, position: [20.08, 0, 9.77], facing_degrees: -105.4}
+  - {id: 1, team: red, position: [17.56, 5.0, 0.61], facing_degrees: 74.6}
+  - {id: 2, team: red, position: [-66, 0, 17], facing_degrees: 0}
+
+camera:
+  target: [19, 5]
+  zoom: -128
+
+script:
+  - assert: {unit: 1, visible_to: blue, visible: true, comment: Deck figure sighted from the street}
+  - assert: {unit: 0, visible_to: red, visible: true, comment: Street figure sighted from the deck}
+  - assert: {unit: 2, visible_to: blue, visible: false}
+
+  - action: shoot
+    description: "The street figure can target the deck figure: the click is gated on team visibility and used to be a silent no-op here."
+    actor: 0
+    target: 1
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {round: 2}

@@ -1094,6 +1094,155 @@ void TestSpawnReachabilityAndSurfaceSnapshotSynchronization() {
   CHECK(glm::distance(follower.FindUnit(0)->position, surfacePoint) < kEps);
 }
 
+// Issue #135: a figure on the elevated deck near the junction must see the
+// branch ramp inside its movement frontier. The on-ramp rides level with the
+// deck across the whole junction overlap, so cells a few meters away on the
+// branch cost roughly their straight-line distance -- never a detour through
+// a single merge-span waypoint that prices them out of the budget.
+void TestMoveFrontierCoversBranchRampAtJunction() {
+  MapGeneratorConfig config;
+  config.arteryCount = 2;
+  config.elevatedHighway = OverpassMode::On;
+  config.overpassLayout = OverpassLayout::RampUpRampDown;
+  Scene scene = GenerateUrbanMap(7, config);
+  const auto roads = UrbanRoads(7, config);
+  const auto& deck = roads[0].centerline;
+  const auto& ramp = roads[1].centerline;
+  const glm::vec3 merge = ramp.back();
+  const glm::vec2 arteryDir =
+      glm::normalize(glm::vec2(deck.back().x - deck.front().x, deck.back().z - deck.front().z));
+  const glm::vec2 arteryNormal(-arteryDir.y, arteryDir.x);
+  // The deck side opposite the branch, so the start never sits on a branch
+  // span itself.
+  const glm::vec2 toBranchFoot(ramp.front().x - merge.x, ramp.front().z - merge.z);
+  const float branchSide = glm::dot(arteryNormal, toBranchFoot) > 0.0f ? 1.0f : -1.0f;
+  const glm::vec2 start2 =
+      glm::vec2(merge.x, merge.z) - arteryDir * 10.0f - arteryNormal * (branchSide * 3.0f);
+  const glm::vec3 start(start2.x, merge.y, start2.y);
+
+  NavMesh nav;
+  nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
+            &scene.walkSurfaces);
+  CHECK(nav.ResolveSurfaceY(start.x, start.z, start.y) > 2.0f);  // Really on the deck.
+  const float budget = 20.0f;
+  const ReachField frontier = nav.ComputeReachField(start, budget, 0.5f);
+  int rampNodes = 0;
+  for (size_t i = 0; i + 1 < ramp.size(); ++i) {
+    const glm::vec3 p = (ramp[i] + ramp[i + 1]) * 0.5f;
+    const float straight = glm::length(glm::vec2(p.x - start.x, p.z - start.z));
+    if (straight > budget * 0.7f) continue;
+    const int ix = static_cast<int>(std::round((p.x - frontier.minX) / frontier.step));
+    const int iz = static_cast<int>(std::round((p.z - frontier.minZ) / frontier.step));
+    CHECK(frontier.Reached(ix, iz));
+    CHECK(std::fabs(frontier.surfaceY[iz * frontier.nx + ix] - p.y) < 0.6f);
+    CHECK(frontier.Dist(ix, iz) < straight * 1.8f + 2.0f);
+    ++rampNodes;
+  }
+  CHECK(rampNodes >= 4);
+
+  // The same holds through gameplay (windowed navmesh): selecting the figure
+  // and entering move mode must put those branch cells inside the frontier.
+  scene.units[0].position = start;
+  GameLogic game(scene);
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  const ReachField* gameFrontier = game.MoveFrontier();
+  CHECK(gameFrontier != nullptr);
+  if (gameFrontier) {
+    int gameRampNodes = 0;
+    for (size_t i = 0; i + 1 < ramp.size(); ++i) {
+      const glm::vec3 p = (ramp[i] + ramp[i + 1]) * 0.5f;
+      const float straight = glm::length(glm::vec2(p.x - start.x, p.z - start.z));
+      if (straight > game.FindUnit(0)->MoveBudget() * 0.6f) continue;
+      const int ix = static_cast<int>(std::round((p.x - gameFrontier->minX) / gameFrontier->step));
+      const int iz = static_cast<int>(std::round((p.z - gameFrontier->minZ) / gameFrontier->step));
+      if (gameFrontier->Reached(ix, iz) &&
+          std::fabs(gameFrontier->surfaceY[iz * gameFrontier->nx + ix] - p.y) < 0.6f) {
+        ++gameRampNodes;
+      }
+    }
+    CHECK(gameRampNodes >= 4);
+  }
+
+  // From the ground near the branch ramp's foot, the frontier climbs the
+  // branch -- the reach field must cost surface cells via the cheapest ramp
+  // foot, not whichever ground connection comes first in surface order.
+  glm::vec3 groundStart(0.0f);
+  bool haveGroundStart = false;
+  for (size_t i = 0; i + 1 < ramp.size(); ++i) {
+    if (ramp[i + 1].y > 0.05f) {  // Last at-grade sample before the climb.
+      groundStart = ramp[i];
+      haveGroundStart = true;
+      break;
+    }
+  }
+  CHECK(haveGroundStart);
+  const ReachField climb = nav.ComputeReachField(groundStart, budget, 0.5f);
+  int climbedNodes = 0;
+  for (size_t i = 0; i + 1 < ramp.size(); ++i) {
+    const glm::vec3 p = (ramp[i] + ramp[i + 1]) * 0.5f;
+    if (p.y < 0.5f) continue;
+    const float straight = glm::length(glm::vec2(p.x - groundStart.x, p.z - groundStart.z));
+    if (straight > budget * 0.6f) continue;
+    const int ix = static_cast<int>(std::round((p.x - climb.minX) / climb.step));
+    const int iz = static_cast<int>(std::round((p.z - climb.minZ) / climb.step));
+    CHECK(climb.Reached(ix, iz));
+    CHECK(std::fabs(climb.surfaceY[iz * climb.nx + ix] - p.y) < 0.6f);
+    ++climbedNodes;
+  }
+  CHECK(climbedNodes >= 2);
+}
+
+// Issue #135 across the #130 seed/layout mix: wherever an elevated artery has
+// a branch, a short hop from the deck by the merge onto the nearby branch top
+// stays a short path (no detour through a lone junction link).
+void TestBranchJunctionCrossingsStayLocalAcrossLayouts() {
+  for (uint32_t seed = 1; seed <= 12; ++seed) {
+    MapGeneratorConfig config;
+    config.arteryCount = 2;
+    config.elevatedHighway = OverpassMode::On;
+    const Scene scene = GenerateUrbanMap(seed, config);
+    const auto roads = UrbanRoads(seed, config);
+    if (roads.size() < 2) continue;
+    const auto& deck = roads[0].centerline;
+    const auto& ramp = roads[1].centerline;
+    const glm::vec3 merge = ramp.back();
+    const glm::vec2 arteryDir =
+        glm::normalize(glm::vec2(deck.back().x - deck.front().x, deck.back().z - deck.front().z));
+    const glm::vec2 arteryNormal(-arteryDir.y, arteryDir.x);
+    const glm::vec2 toBranchFoot(ramp.front().x - merge.x, ramp.front().z - merge.z);
+    const float branchSide = glm::dot(arteryNormal, toBranchFoot) > 0.0f ? 1.0f : -1.0f;
+
+    NavMesh nav;
+    nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
+              &scene.walkSurfaces);
+    // Deck point shortly "upstream" of the merge on the far side of the deck,
+    // and a branch-top point a few meters down the branch.
+    const glm::vec2 from2 =
+        glm::vec2(merge.x, merge.z) - arteryDir * 8.0f - arteryNormal * (branchSide * 3.0f);
+    glm::vec3 from(from2.x, merge.y, from2.y);
+    glm::vec3 to(0.0f);
+    bool haveTo = false;
+    for (size_t i = ramp.size(); i-- > 0;) {
+      const float d = glm::length(glm::vec2(ramp[i].x - merge.x, ramp[i].z - merge.z));
+      if (d >= 6.0f && std::fabs(ramp[i].y - merge.y) < 0.3f) {
+        to = ramp[i];
+        haveTo = true;
+        break;
+      }
+    }
+    if (!haveTo) continue;
+    if (nav.ResolveSurfaceY(from.x, from.z, from.y) < merge.y - 0.6f) continue;
+    from.y = nav.ResolveSurfaceY(from.x, from.z, from.y);
+    std::vector<glm::vec3> path;
+    CHECK(nav.FindPath(from, to, &path));
+    float length = 0.0f;
+    for (size_t i = 0; i + 1 < path.size(); ++i) length += glm::distance(path[i], path[i + 1]);
+    const float straight = glm::distance(from, to);
+    CHECK(length < straight * 2.0f + 4.0f);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1117,6 +1266,8 @@ int main() {
   TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable();
   TestOverpassLayoutGeometryAndBranchRampOff();
   TestBranchMayRunOffMapWithoutRamp();
+  TestMoveFrontierCoversBranchRampAtJunction();
+  TestBranchJunctionCrossingsStayLocalAcrossLayouts();
   TestSpawnReachabilityAndSurfaceSnapshotSynchronization();
   TestHillyDeterminismAndVariety();
   TestHillyTerrainIsGenuinelyUneven();

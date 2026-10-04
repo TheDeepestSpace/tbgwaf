@@ -92,15 +92,18 @@ HudActions DrawHud(const tactics::GameLogic& game, tactics::Team team, bool plan
 // Button presses on the turn-timeline strip (issue #143); like HudActions,
 // reported back for the caller to apply to its TimelinePlayback.
 struct TimelineActions {
-  std::optional<int> seekTick;  // Slider snapped to this tick: restore it.
+  std::optional<int> seekTick;  // Unused by the HUD (scenarios seek by tick).
+  std::optional<size_t> seekFrame;  // Handle dragged here: show that frame.
   bool togglePlay = false;      // Play/Pause pressed.
-  bool live = false;            // "Live" pressed: back to the live view.
+  bool live = false;            // Back to live (Live pressed / handle at right end).
 };
 
 // Draws the turn-timeline strip (issue #143) bottom-centered in `rect`: a
-// Play/Pause button plus a slider with one stop per timeline tick (Start,
-// T1, T2, ...) that snaps to ticks, and -- while a replay is being viewed --
-// a "Live" button. Touch-friendly (tall frame padding, wide grab), and
+// Play/Pause button, a line with a circle at each turn boundary (Start, T1,
+// T2, ...) and a draggable handle that moves freely along it but magnetizes
+// to a circle when released/dragged near one, and a "Live" toggle that shows
+// pushed in while the live game is showing (handle parked at the right end).
+// Dragging the handle to the right end locks Live. Touch-friendly (tall frame padding, wide grab), and
 // anchored to the pane's bottom edge so it stays clear of the floating
 // action menu and the Round panel. Const w.r.t. the timeline/playback:
 // presses are reported back via TimelineActions.

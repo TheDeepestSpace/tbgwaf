@@ -65,6 +65,12 @@ int TurnTimeline::TickForFrame(size_t frame) const {
   return tick;
 }
 
+size_t TurnTimeline::FrameAtTime(float t) const {
+  size_t index = 0;
+  while (index + 1 < frames_.size() && frames_[index + 1].time <= t) ++index;
+  return index;
+}
+
 void TimelinePlayback::ShowFrame(const TurnTimeline& timeline, const GameLogic& live,
                                  size_t index) {
   const GameSnapshot& snapshot = timeline.FrameSnapshot(index);
@@ -93,6 +99,13 @@ bool TimelinePlayback::SeekTick(const TurnTimeline& timeline, const GameLogic& l
     return true;
   }
   ShowFrame(timeline, live, ticks[tickIndex].frame);
+  return active_;
+}
+
+bool TimelinePlayback::SeekFrame(const TurnTimeline& timeline, const GameLogic& live,
+                                 size_t index) {
+  if (index >= timeline.FrameCount()) return false;
+  ShowFrame(timeline, live, index);
   return active_;
 }
 

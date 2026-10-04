@@ -69,6 +69,10 @@ class TurnTimeline {
   // Index of the last tick at or before `frame` (the tick a scrubber shows
   // while playback is between ticks). 0 when there is no history yet.
   int TickForFrame(size_t frame) const;
+  // Index of the last frame captured at or before game time `t` (clamped).
+  size_t FrameAtTime(float t) const;
+  // Game time of the newest frame (the timeline's right edge); 0 if empty.
+  float EndTime() const { return frames_.empty() ? 0.0f : frames_.back().time; }
 
  private:
   struct Frame {
@@ -108,6 +112,10 @@ class TimelinePlayback {
   // paused returns to the live view (the natural "scrub back to now").
   // Returns false for an out-of-range tick.
   bool SeekTick(const TurnTimeline& timeline, const GameLogic& live, int tickIndex);
+
+  // Shows recorded frame `index` (free scrubbing between ticks). Keeps
+  // playing/paused as-is. Returns false for an out-of-range frame.
+  bool SeekFrame(const TurnTimeline& timeline, const GameLogic& live, size_t index);
 
   // Starts (or resumes) playback from the current position; from the live
   // view it starts a replay of the whole match from the Start tick.

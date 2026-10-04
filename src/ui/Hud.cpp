@@ -1,6 +1,7 @@
 #include "ui/Hud.h"
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -262,30 +263,81 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
                ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar);
 
-  // Play is pointless with nothing recorded beyond the start state.
-  ImGui::BeginDisabled(timeline.FrameCount() <= 1);
+  const bool live = !playback.Active();
+  // Play only makes sense from a replay position (live has nothing ahead).
+  ImGui::BeginDisabled(live || timeline.FrameCount() <= 1);
   if (Button(playback.Playing() ? "Pause" : "Play")) actions.togglePlay = true;
   ImGui::EndDisabled();
 
-  // The slider sits on the viewed tick: the replay's position, or the
-  // newest tick while the live game is showing. SliderInt snaps to whole
-  // ticks by construction; the current tick's label is the slider text.
-  int tick = playback.Active() ? playback.CurrentTick(timeline) : tickCount - 1;
-  tick = std::max(0, std::min(tick, tickCount - 1));
+  // Track: a line with a circle per turn boundary and a draggable handle.
+  // Positions are proportional to recorded game time; the handle sits at the
+  // right end while live.
+  const float endTime = timeline.EndTime();
+  const float trackW = std::max(140.0f, std::min(static_cast<float>(rect.width) - 280.0f, 420.0f));
+  const float trackH = 52.0f;
+  const float pad = 14.0f;  // Room for end circles and the handle.
   ImGui::SameLine();
-  ImGui::SetNextItemWidth(
-      std::max(120.0f, std::min(static_cast<float>(rect.width) - 260.0f, 420.0f)));
-  ImGui::BeginDisabled(tickCount <= 1);
-  if (ImGui::SliderInt(("##turns" + suffix).c_str(), &tick, 0, std::max(1, tickCount - 1),
-                       ticks[tick].label.c_str(), ImGuiSliderFlags_AlwaysClamp)) {
-    actions.seekTick = tick;
-  }
-  ImGui::EndDisabled();
+  const ImVec2 origin = ImGui::GetCursorScreenPos();
+  ImGui::InvisibleButton(("##track" + suffix).c_str(), ImVec2(trackW, trackH));
+  const bool dragging = ImGui::IsItemActive();
+  const float x0 = origin.x + pad;
+  const float x1 = origin.x + trackW - pad;
+  const float lineY = origin.y + 18.0f;
+  auto XForTime = [&](float t) {
+    return endTime > 0.0f ? x0 + (x1 - x0) * std::min(t / endTime, 1.0f) : x0;
+  };
+  auto TickX = [&](int i) { return XForTime(timeline.FrameTime(ticks[i].frame)); };
 
-  if (playback.Active()) {
-    ImGui::SameLine();
-    if (Button("Live")) actions.live = true;
+  float handleX = live ? x1 : XForTime(timeline.FrameTime(playback.FrameIndex()));
+  if (dragging && endTime > 0.0f) {
+    constexpr float kMagnetPx = 14.0f;
+    float mx = std::max(x0, std::min(ImGui::GetIO().MousePos.x, x1));
+    float best = kMagnetPx;
+    float snapped = mx;
+    for (int i = 0; i < tickCount; ++i) {
+      const float d = std::fabs(TickX(i) - mx);
+      if (d < best) {
+        best = d;
+        snapped = TickX(i);
+      }
+    }
+    handleX = snapped;
+    if (handleX >= x1 - 0.5f) {
+      if (!live) actions.live = true;
+      handleX = x1;
+    } else {
+      const size_t frame = timeline.FrameAtTime((handleX - x0) / (x1 - x0) * endTime);
+      if (live || frame != playback.FrameIndex()) actions.seekFrame = frame;
+    }
   }
+
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const ImU32 lineCol = IM_COL32(200, 200, 210, 200);
+  const ImU32 playedCol = IM_COL32(110, 190, 255, 255);
+  dl->AddLine(ImVec2(x0, lineY), ImVec2(x1, lineY), lineCol, 3.0f);
+  dl->AddLine(ImVec2(x0, lineY), ImVec2(handleX, lineY), playedCol, 3.0f);
+  for (int i = 0; i < tickCount; ++i) {
+    const float tx = TickX(i);
+    dl->AddCircleFilled(ImVec2(tx, lineY), 6.0f,
+                        tx <= handleX + 0.5f ? playedCol : IM_COL32(60, 60, 70, 255));
+    dl->AddCircle(ImVec2(tx, lineY), 6.0f, IM_COL32(235, 235, 245, 255), 0, 2.0f);
+    const char* label = ticks[i].label.c_str();
+    const ImVec2 ts = ImGui::CalcTextSize(label);
+    dl->AddText(ImVec2(tx - ts.x * 0.5f, lineY + 12.0f), IM_COL32(230, 230, 240, 230), label);
+  }
+  dl->AddCircleFilled(ImVec2(handleX, lineY), 10.0f,
+                      dragging ? IM_COL32(255, 255, 255, 255) : IM_COL32(245, 245, 250, 255));
+  dl->AddCircle(ImVec2(handleX, lineY), 10.0f, playedCol, 0, 3.0f);
+
+  // Live toggle: pushed in while the live game is showing; pressing it while
+  // replaying returns to live (and it stays pushed in -- it is a lock).
+  ImGui::SameLine();
+  if (live) {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+  }
+  if (Button("Live") && !live) actions.live = true;
+  if (live) ImGui::PopStyleColor(2);
 
   ImGui::End();
   ImGui::PopStyleVar(2);

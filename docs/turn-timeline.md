@@ -5,14 +5,16 @@ from the start or from any completed round ("turn" = one WEGO round).
 
 ## UI
 
-- **Slider** with one stop per timeline tick: `Start` (game start) plus
-  `T1, T2, ...` (each round's end). It snaps to ticks and shows the current
-  tick's label; selecting a tick restores the state at that point.
-- **Play / Pause** replays forward from the selected tick at replay speed
-  (`TimelinePlayback::kReplaySpeed`, currently 1x) and pauses when it
-  reaches the live end.
-- **Live** (shown only while a replay is being viewed) returns to the live
-  game. Scrubbing the slider to the newest tick while paused does the same.
+- **Timeline line** with a circle at each turn boundary: `Start` (game
+  start) plus `T1, T2, ...` (each round's end), spaced by recorded game
+  time. A draggable handle moves freely along it (any recorded frame, not
+  just boundaries) but **magnetizes** to a circle within ~14 px.
+- **Play / Pause** replays forward from wherever the handle is
+  (`TimelinePlayback::kReplaySpeed`, currently 1x) and pauses at the live
+  end. Disabled while live (nothing ahead to play).
+- **Live** is a lock-style toggle, shown pushed in while the live game is
+  showing (handle parked at the right end). Dragging the handle to the right
+  end locks Live; pressing Live while replaying returns to it.
 - Widgets use tall frame padding and a wide slider grab so the strip is
   touch-friendly; it is anchored to the pane's bottom edge, clear of the
   Round panel (top-left), the team label (bottom-left corner) and the

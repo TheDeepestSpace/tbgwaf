@@ -743,6 +743,7 @@ int main() {
       const ui::TimelineActions timelineUi = ui::DrawTimeline(
           timeline, timelinePlayback, paneTeam(pane), paneRects[pane], windowHeight);
       if (timelineUi.seekTick) timelinePlayback.SeekTick(timeline, game, *timelineUi.seekTick);
+      if (timelineUi.seekFrame) timelinePlayback.SeekFrame(timeline, game, *timelineUi.seekFrame);
       if (timelineUi.togglePlay) timelinePlayback.TogglePlay(timeline, game);
       if (timelineUi.live) timelinePlayback.Deactivate();
     }

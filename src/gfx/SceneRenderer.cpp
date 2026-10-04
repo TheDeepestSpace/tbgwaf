@@ -49,9 +49,12 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
     if (const auto& preview = game.GetAimPreview()) {
       overlays.aimMarker = preview->point;
     } else if (const auto& lock = game.GetLockPreview()) {
-      // A staged lock-on shows the cone and "+" on the locked figure's torso.
+      // A staged lock-on shows the cone and "+" on the locked figure's
+      // torso -- the exact point the burst will be aimed at, so the cone
+      // footprint the shader paints on the figure is the real hit odds.
       if (const tactics::Unit* target = game.FindUnit(*lock)) {
-        overlays.aimMarker = target->position + glm::vec3(0.0f, 0.9f, 0.0f);
+        overlays.aimMarker =
+            target->position + glm::vec3(0.0f, tactics::constants::kTorsoAimHeight, 0.0f);
       }
     }
     overlays.aimConeTarget = overlays.aimMarker ? overlays.aimMarker : hoveredGroundPoint;
@@ -2171,30 +2174,29 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           unit.plan.type != tactics::PlannedActionType::Shoot || &unit == aimingShooter) {
         continue;
       }
+      // A planned locked shot aims its cone at the target's torso -- the
+      // same point the burst's bullets will be aimed at (and the same
+      // marker used while staging the lock), so the footprint shader keeps
+      // painting the hit odds on the figure until the commit instead of
+      // falling back to the figure's old facing.
+      std::optional<glm::vec3> coneAim;
+      if (unit.plan.hasAimPoint) {
+        coneAim = unit.plan.aimPoint;
+      } else if (const Unit* lockTarget = game.FindUnit(unit.plan.shootTargetId)) {
+        coneAim = lockTarget->position +
+                  glm::vec3(0.0f, tactics::constants::kTorsoAimHeight, 0.0f);
+      }
       glEnable(GL_DEPTH_TEST);
       glDepthFunc(GL_LEQUAL);
-      // A committed lock-on still needs the selected target bearing.  With
-      // no aim point, DrawShotCone falls back to the figure's old facing,
-      // which made the setup cone disagree with the shot/tracer whenever a
-      // target was on a different row (burst_stops_on_early_death exposed
-      // this clearly).  Point at the same torso marker used while staging
-      // the lock so committing the plan does not move its cone.
-      std::optional<glm::vec3> lockedAimPoint;
-      const glm::vec3* aimPoint = nullptr;
-      if (unit.plan.hasAimPoint) {
-        aimPoint = &unit.plan.aimPoint;
-      } else if (const Unit* target = game.FindUnit(unit.plan.shootTargetId)) {
-        lockedAimPoint = target->position + glm::vec3(0.0f, 0.9f, 0.0f);
-        aimPoint = &*lockedAimPoint;
-      }
       DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, sphereMesh_,
                    viewProj, unit, coneLitUnits(unit), obstacles,
-                   game.GetScene().sidewalks, game.GetScene().mapHalfExtent, aimPoint);
+                   game.GetScene().sidewalks, game.GetScene().mapHalfExtent,
+                   coneAim ? &*coneAim : nullptr);
       glDepthFunc(GL_LESS);
-      // A planned free-aim shot keeps its "+" selector until the commit,
-      // like a planned move keeps its destination ghost.
-      if (unit.plan.hasAimPoint) {
-        DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, unit.plan.aimPoint);
+      // A planned shot keeps its "+" selector until the commit, like a
+      // planned move keeps its destination ghost.
+      if (coneAim) {
+        DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, *coneAim);
       }
     }
   }
@@ -2627,15 +2629,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                 OnSurface(leg.back()), yellow, legNumber,
                                 SurfaceNormal(leg.back()));
         }
-      } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
-        if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {
-          const std::vector<glm::vec3> shotLine = {unit.MuzzlePosition(), shotTarget->EyePosition()};
-          pathLine_.SetPoints(shotLine);
-          unlitShader_.SetMat4("uMVP", viewProj);
-          unlitShader_.SetVec4("uColor", glm::vec4(0.95f, 0.25f, 0.2f, 1.0f));
-          pathLine_.Draw();
-        }
       }
+      // Planned locked shots draw no line here: the shot cone aimed at the
+      // target's torso (plus the "+" marker) is the whole preview, same as
+      // a planned free-aim shot.
     }
   }
   glDisable(GL_SCISSOR_TEST);

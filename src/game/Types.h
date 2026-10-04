@@ -134,6 +134,10 @@ constexpr float kAgentRadius = 0.4f;     // Padding used to inflate obstacles fo
 constexpr float kUnitHalfWidth = 0.35f;
 constexpr float kUnitHeight = 1.8f;
 constexpr float kEyeHeight = 1.5f;
+// Where a locked-on shot aims on the target figure: torso center height.
+// Shared by the ballistics (burst aim point), the staged-lock "+" marker and
+// the planned-shot cone, so what the cone shader shows is what gets shot at.
+constexpr float kTorsoAimHeight = 0.9f;
 // Sighting range: effectively unlimited (exceeds any generated map's diagonal).
 // Visibility stays on this so capping the shot range doesn't shrink what a team sees.
 constexpr float kSightRange = 250.0f;

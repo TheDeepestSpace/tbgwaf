@@ -7,15 +7,17 @@ description: >
   once. The pinned rolls make every shot miss except the very last one of each burst, so
   each red figure only drops if its attacker fired *exactly* its weapon's cap on exactly
   its weapon's schedule: any missing shot or timing drift pulls the hit rolls out of
-  alignment.
+  alignment. The duelists stand close (5 apart) so every scattered bullet is
+  geometrically certain to cross its figure -- a bullet that misses the body outright
+  would consume no roll and break the alignment.
 
 units:
-  - {id: 0, team: blue, position: [-8, 0, -4], facing_degrees: 0}  # Assault rifle, cap 30.
-  - {id: 1, team: blue, position: [-8, 0, 0], facing_degrees: 0}   # Sniper rifle, cap 5.
-  - {id: 2, team: blue, position: [-8, 0, 4], facing_degrees: 0}   # Desert Eagle, cap 8.
-  - {id: 3, team: red, position: [8, 0, -4], facing_degrees: 180}
-  - {id: 4, team: red, position: [8, 0, 0], facing_degrees: 180}
-  - {id: 5, team: red, position: [8, 0, 4], facing_degrees: 180}
+  - {id: 0, team: blue, position: [-2.5, 0, -4], facing_degrees: 0}  # Assault rifle, cap 30.
+  - {id: 1, team: blue, position: [-2.5, 0, 0], facing_degrees: 0}   # Sniper rifle, cap 5.
+  - {id: 2, team: blue, position: [-2.5, 0, 4], facing_degrees: 0}   # Desert Eagle, cap 8.
+  - {id: 3, team: red, position: [2.5, 0, -4], facing_degrees: 180}
+  - {id: 4, team: red, position: [2.5, 0, 0], facing_degrees: 180}
+  - {id: 5, team: red, position: [2.5, 0, 4], facing_degrees: 180}
 
 # Consumed in shot-schedule order (time, then unit order on ties): the three
 # bursts interleave, with hits landing on the Deagle's 8th shot (t=3.5, roll

@@ -427,6 +427,9 @@ void TestRoundPlanningTeamGating() {
 
 void TestRoundCommitRequiresBothTeamsPlanned() {
   GameLogic game(LegacyScene());
+  // Locked shots scatter like free-aim ones now; the sniper's tight cone is
+  // the one geometrically certain to intersect a figure across the lane.
+  game.FindUnit(1)->weapon = WeaponType::SniperRifle;
 
   const glm::vec3 blue0Start = game.FindUnit(0)->position;
 
@@ -535,6 +538,11 @@ void TestRoundExecutesBothTeamsMovesConcurrently() {
 void TestShootRowsResolveSimultaneouslyAcrossTeams() {
   GameLogic game(LegacyScene());
   game.SetShotRollSource([] { return 0.0f; });  // Pin rolls to a hit.
+  // The open-lane duelists get snipers: a pinned roll decides the hit only
+  // once the scattered bullet actually crosses the figure, and only the
+  // sniper's cone guarantees that geometrically at this distance.
+  game.FindUnit(1)->weapon = WeaponType::SniperRifle;
+  game.FindUnit(4)->weapon = WeaponType::SniperRifle;
   // Every figure shoots its opposite number in the same round. Rows z=-4 and
   // z=4 are behind the walls (all four of those shots must miss); row z=0 is
   // the open lane, so blue1 and red4 fire at each other simultaneously --
@@ -567,6 +575,10 @@ void TestShootRowsResolveSimultaneouslyAcrossTeams() {
 void TestMutualEliminationIsDraw() {
   GameLogic game(LegacyScene());
   game.SetShotRollSource([] { return 0.0f; });  // Pin rolls to a hit.
+  // Snipers: tight enough scatter that both opening bullets are
+  // geometrically certain to cross their figure (see the rows test above).
+  game.FindUnit(1)->weapon = WeaponType::SniperRifle;
+  game.FindUnit(4)->weapon = WeaponType::SniperRifle;
   // Leave only the open middle lane's pair alive, shooting each other.
   for (int id : {0, 2, 3, 5}) game.FindUnit(id)->alive = false;
 
@@ -740,16 +752,20 @@ void TestPendingShotFiresWhenTargetWalksIntoView() {
   game.ChoosePass();
   game.ClickUnit(1, Team::Blue);
   game.ChooseShoot();
+  // Full magazine: individual bullets scatter and the first few may clip
+  // the wall corner red4 is just clearing, but a 30-round burst across the
+  // walk is certain to connect while red4 is still far from its goal.
+  game.SetPlannedShotCount(30, Team::Blue);
   game.ClickUnit(4, Team::Blue);
   game.ClickUnit(2, Team::Blue);
   game.ChoosePass();
 
-  // Red sends red4 out of cover, north along x=5 into the open lane.
+  // Red sends red4 out of cover, north along x=5 across the open lane.
   game.ClickUnit(3, Team::Red);
   game.ChoosePass();
   game.ClickUnit(4, Team::Red);
   game.ChooseMove();
-  const glm::vec3 destination(5.0f, 0.0f, 0.0f);
+  const glm::vec3 destination(5.0f, 0.0f, 4.0f);
   game.ClickGround(destination, Team::Red);
   game.FinishMovePlan();
   game.ClickUnit(5, Team::Red);

@@ -1207,6 +1207,16 @@ void GameLogic::ResolvePendingShots() {
       Unit* target = FindUnit(shot.targetId);
       if (!target || !target->alive) continue;
       if (!ShotConnects(*shooter, *target)) continue;
+      // The bullets fly muzzle -> torso, so the hold-fire gate waits for
+      // that very line too: a burst must not open up while chest-high cover
+      // still blocks the trajectory the eyes already see over.
+      const glm::vec3 aimPoint =
+          target->position + glm::vec3(0.0f, constants::kTorsoAimHeight, 0.0f);
+      const Unit aimed = AimedAt(*shooter, aimPoint);
+      if (!LineOfSightClear(aimed.MuzzlePosition(), aimPoint, scene_.obstacles,
+                            scene_.walkSurfaces, scene_.ground)) {
+        continue;
+      }
     }
     shot.started = true;
     shot.startTime = executionElapsed_;
@@ -1221,11 +1231,12 @@ void GameLogic::ResolvePendingShots() {
     // Judged against this tick's snapshot, lazily on the burst's first due
     // bullet (positions don't change during resolution).
     bool judged = false;
-    float chance = 0.0f;  // Locked target.
+    // Where this tick's bullets are aimed: the staged free-aim point, or --
+    // for a locked target -- its torso wherever the figure stands this tick.
+    glm::vec3 aimPoint{0.0f};
     // Outcome of this tick's bullets, applied only after every due bullet
     // (across all bursts) was judged: mutual shots in a tick both land.
     std::vector<Unit*> traceHits;
-    bool lockedHit = false;
     float lastAt = 0.0f;
   };
   std::vector<Burst> bursts;
@@ -1261,62 +1272,30 @@ void GameLogic::ResolvePendingShots() {
                    [](const Bullet& a, const Bullet& b) { return a.at < b.at; });
 
   // Judge each bullet in schedule order; every bullet flies its own line,
-  // scattered inside the weapon's cone (a pure hash, see ScatterUnit).
-  //  - Free-aim: the bullet's scattered ray traces the figures in its path
-  //    nearest first (the first success absorbs the bullet; figures already
-  //    downed by an earlier bullet of the same burst are skipped), so one
-  //    burst can drop several figures. A bullet that connects with nobody
-  //    flies on to the first wall/deck/ground it meets, bent clear of any
-  //    figure whose roll it just won.
-  //  - Locked target: the roll against the shooter's current hit chance
-  //    decides; a hit lands in the body, a miss is deflected past it. Once
-  //    the target is down (this burst's own kill, an earlier tick's, or
-  //    someone else's), the rest of the magazine still fires -- into the
-  //    body, with nothing left to roll against.
-  const auto bodyPoint = [](const Unit& u, int shooterId, int round, int index) {
-    return u.position + glm::vec3((ScatterUnit(shooterId, round, index, 4) - 0.5f) * 0.3f,
-                                  0.35f + ScatterUnit(shooterId, round, index, 5) * 0.9f,
-                                  (ScatterUnit(shooterId, round, index, 6) - 0.5f) * 0.3f);
-  };
+  // scattered inside the weapon's cone (a pure hash, see ScatterUnit), and
+  // its ray traces the figures in its path nearest first (the first success
+  // absorbs the bullet; figures already downed by an earlier bullet of the
+  // same burst are skipped), so one burst can drop several figures. A bullet
+  // that connects with nobody flies on to the first wall/deck/ground it
+  // meets, bent clear of any figure whose roll it just won. A locked target
+  // only aims the burst -- at its torso, wherever the figure stands this
+  // tick -- the bullets themselves fly exactly like free-aim ones (the
+  // weapon's precision does not change with what is under the cursor), and
+  // once the target is down the rest of the magazine still fires, scattered
+  // around the body.
   for (Bullet& bullet : bullets) {
     Burst& b = bursts[bullet.burst];
     const int sid = b.shooter->id;
     const float scatter = glm::radians(StatsOf(b.shooter->weapon).scatterHalfAngleDegrees);
     if (!b.judged) {
       b.judged = true;
-      if (b.target) {
-        b.chance = b.target->alive ? ShotHitChance(*b.shooter, *b.target) : 0.0f;
-      }
+      b.aimPoint = b.target ? b.target->position +
+                                  glm::vec3(0.0f, constants::kTorsoAimHeight, 0.0f)
+                            : b.shot->aimPoint;
     }
-    if (b.target) {
-      const Unit aimed = AimedAt(*b.shooter, b.target->position);
-      bullet.from = aimed.MuzzlePosition();
-      if (!b.target->alive || b.lockedHit) {
-        bullet.to = bodyPoint(*b.target, sid, roundNumber_, bullet.index);
-        continue;
-      }
-      if (RollShot() < b.chance) {
-        b.lockedHit = true;
-        bullet.to = bodyPoint(*b.target, sid, roundNumber_, bullet.index);
-        continue;
-      }
-      // Miss: aimed at the eye, bent far enough sideways to clear the body.
-      const glm::vec3 eye = b.target->EyePosition();
-      const glm::vec3 base = glm::normalize(eye - bullet.from);
-      const float dist = glm::distance(eye, bullet.from);
-      const float sign = ScatterUnit(sid, roundNumber_, bullet.index, 1) < 0.5f ? -1.0f : 1.0f;
-      const float yawOff =
-          sign * (std::atan(kBodyClearance / std::max(dist, 1.0f)) +
-                  ScatterUnit(sid, roundNumber_, bullet.index, 2) * scatter);
-      const float pitchOff = (ScatterUnit(sid, roundNumber_, bullet.index, 3) - 0.5f) * scatter;
-      const glm::vec3 ray = Deflect(base, yawOff, pitchOff);
-      bullet.to = bullet.from + ray * RayReach(bullet.from, ray);
-      continue;
-    }
-
-    const Unit aimed = AimedAt(*b.shooter, b.shot->aimPoint);
+    const Unit aimed = AimedAt(*b.shooter, b.aimPoint);
     bullet.from = aimed.MuzzlePosition();
-    glm::vec3 base = b.shot->aimPoint - bullet.from;
+    glm::vec3 base = b.aimPoint - bullet.from;
     base = glm::length(base) < 1e-4f ? aimed.FacingDirection() : glm::normalize(base);
     const float radius = std::sqrt(ScatterUnit(sid, roundNumber_, bullet.index, 1)) * scatter;
     const float theta = 6.2831853f * ScatterUnit(sid, roundNumber_, bullet.index, 2);
@@ -1355,15 +1334,7 @@ void GameLogic::ResolvePendingShots() {
   }
   for (Burst& b : bursts) {
     const float sinceShot = std::max(0.0f, executionElapsed_ - b.lastAt);
-    if (b.target) {
-      glm::vec3 dir = b.target->position - b.shooter->position;
-      dir.y = 0.0f;
-      dir = glm::length(dir) < 1e-4f ? b.shooter->FacingDirection() : glm::normalize(dir);
-      PlayShootBeat(*b.shooter, std::atan2(dir.z, dir.x), sinceShot);
-      if (b.lockedHit && b.target->alive) KnockDown(*b.target, dir);
-    } else {
-      ApplyAimShot(*b.shooter, b.traceHits, b.shot->aimPoint, sinceShot);
-    }
+    ApplyAimShot(*b.shooter, b.traceHits, b.aimPoint, sinceShot);
     b.shot->shotsFired += b.bulletsDue;
   }
 

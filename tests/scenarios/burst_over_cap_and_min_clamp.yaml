@@ -7,15 +7,17 @@ description: >
   first (rolls 2 and 3, both pinned hits), then the AR's remaining 29 shots pace out at
   0.16 s. The proofs: a 0-shot sniper action would hand its hit roll to the Deagle one
   slot early (unit 4 would survive), and an unclamped 31st AR shot at t=4.8 would consume
-  the trailing pinned hit roll and down unit 3.
+  the trailing pinned hit roll and down unit 3. The duelists stand close (5 apart) so
+  every scattered bullet is geometrically certain to cross its figure -- a bullet that
+  misses the body outright would consume no roll and break the alignment.
 
 units:
-  - {id: 0, team: blue, position: [-8, 0, -4], facing_degrees: 0}  # Assault rifle, cap 30.
-  - {id: 1, team: blue, position: [-8, 0, 0], facing_degrees: 0}   # Sniper rifle.
-  - {id: 2, team: blue, position: [-8, 0, 4], facing_degrees: 0}   # Desert Eagle.
-  - {id: 3, team: red, position: [8, 0, -4], facing_degrees: 180}
-  - {id: 4, team: red, position: [8, 0, 0], facing_degrees: 180}
-  - {id: 5, team: red, position: [8, 0, 4], facing_degrees: 180}
+  - {id: 0, team: blue, position: [-2.5, 0, -4], facing_degrees: 0}  # Assault rifle, cap 30.
+  - {id: 1, team: blue, position: [-2.5, 0, 0], facing_degrees: 0}   # Sniper rifle.
+  - {id: 2, team: blue, position: [-2.5, 0, 4], facing_degrees: 0}   # Desert Eagle.
+  - {id: 3, team: red, position: [2.5, 0, -4], facing_degrees: 180}
+  - {id: 4, team: red, position: [2.5, 0, 0], facing_degrees: 180}
+  - {id: 5, team: red, position: [2.5, 0, 4], facing_degrees: 180}
 
 # Schedule order: AR shot 1 (t=0, miss), sniper's clamped single shot (t=0,
 # hit), Deagle's default single shot (t=0, hit), then the AR's 29 remaining

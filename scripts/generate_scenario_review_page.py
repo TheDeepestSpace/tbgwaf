@@ -429,6 +429,11 @@ def _parse_block_seq(lines: list[tuple[int, str]], i: int, indent: int):
     return out, i
 
 
+def _open_flow(text: str) -> bool:
+    """True when a line opens a [...] / {...} flow collection it doesn't close."""
+    return (text.count("[") + text.count("{")) > (text.count("]") + text.count("}"))
+
+
 def load_yaml_subset(text: str):
     lines: list[tuple[int, str]] = []
     for raw in text.splitlines():
@@ -436,6 +441,10 @@ def load_yaml_subset(text: str):
             raise ValueError("tabs are outside the supported YAML subset")
         stripped = _strip_comment(raw).rstrip()
         if not stripped.strip():
+            continue
+        if lines and _open_flow(lines[-1][1]):
+            # Continuation of a flow collection wrapped over several lines.
+            lines[-1] = (lines[-1][0], lines[-1][1] + " " + stripped.strip())
             continue
         lines.append((len(stripped) - len(stripped.lstrip(" ")), stripped.strip()))
     if not lines:

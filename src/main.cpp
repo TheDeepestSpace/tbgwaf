@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <random>
 #include <string>
@@ -30,6 +31,7 @@
 #include "game/Visibility.h"
 #include "gfx/Camera.h"
 #include "gfx/SceneRenderer.h"
+#include "net/RemoteClient.h"
 #include "AppFlow.h"
 #include "ui/Hud.h"
 #include "ui/Menu.h"
@@ -102,6 +104,54 @@ EM_JS(void, tbgwaf_channel_post, (const char* msg), {
 EM_JS(char*, tbgwaf_channel_next, (), {
   if (!Module.tbgwafInbox || Module.tbgwafInbox.length === 0) return 0;
   const msg = Module.tbgwafInbox.shift();
+  const size = lengthBytesUTF8(msg) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(msg, ptr, size);
+  return ptr;
+});
+
+// Server mode (real networking, as opposed to the in-page bus above): the
+// page passes the WebSocket URL as Module.tbgwafServer (and optionally a
+// room name as Module.tbgwafRoom). Returns a malloc'd string (caller frees),
+// empty when unset.
+EM_JS(char*, tbgwaf_server_url, (), {
+  const text = Module.tbgwafServer || "";
+  const size = lengthBytesUTF8(text) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(text, ptr, size);
+  return ptr;
+});
+EM_JS(char*, tbgwaf_server_room, (), {
+  const text = Module.tbgwafRoom || "";
+  const size = lengthBytesUTF8(text) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(text, ptr, size);
+  return ptr;
+});
+
+// WebSocket plumbing: events are queued as "O" (open), "C" (closed) and
+// "M<text frame>" and drained by the frame loop.
+EM_JS(void, tbgwaf_ws_open, (const char* url), {
+  const queue = [];
+  Module.tbgwafWsQueue = queue;
+  const ws = new WebSocket(UTF8ToString(url));
+  Module.tbgwafWs = ws;
+  ws.onopen = () => queue.push("O");
+  ws.onclose = () => queue.push("C");
+  ws.onerror = () => {};
+  ws.onmessage = (e) => { if (typeof e.data === "string") queue.push("M" + e.data); };
+});
+
+EM_JS(void, tbgwaf_ws_send, (const char* msg), {
+  const ws = Module.tbgwafWs;
+  if (ws && ws.readyState === 1) ws.send(UTF8ToString(msg));
+});
+
+// Returns a malloc'd event (caller frees) or null if none are queued.
+EM_JS(char*, tbgwaf_ws_next, (), {
+  const queue = Module.tbgwafWsQueue;
+  if (!queue || queue.length === 0) return 0;
+  const msg = queue.shift();
   const size = lengthBytesUTF8(msg) + 1;
   const ptr = _malloc(size);
   stringToUTF8(msg, ptr, size);
@@ -368,10 +418,31 @@ int main() {
     peerSyncDeadline = SDL_GetTicks() + kPeerSyncTimeoutMs;
   }
 #endif
+  // Server mode: this client plays against a remote opponent through the
+  // authoritative server (src/server). The local GameLogic is only a
+  // presentation mirror driven by net::RemoteClient; our team is assigned by
+  // the server once an opponent has joined.
+  std::unique_ptr<tactics::net::RemoteClient> remote;
+#ifdef __EMSCRIPTEN__
+  {
+    char* urlRaw = tbgwaf_server_url();
+    const std::string serverUrl(urlRaw);
+    std::free(urlRaw);
+    if (!serverUrl.empty()) {
+      char* roomRaw = tbgwaf_server_room();
+      remote = std::make_unique<tactics::net::RemoteClient>(&game, roomRaw);
+      std::free(roomRaw);
+      fixedTeam = Team::Blue;  // Placeholder until the server's "start".
+      tbgwaf_ws_open(serverUrl.c_str());
+    }
+  }
+#endif
+  const bool remoteMode = remote != nullptr;
   const bool networked = fixedTeam.has_value();
   // The Blue instance (or the lone native window) simulates rounds; the Red
-  // instance mirrors it during execution.
-  const bool isSimulator = !networked || *fixedTeam == Team::Blue;
+  // instance mirrors it during execution. A server-mode client never
+  // simulates: the server is the only authority.
+  const bool isSimulator = !remoteMode && (!networked || *fixedTeam == Team::Blue);
   const int paneCount = networked ? 1 : kMaxPanes;
   auto paneTeam = [&](int pane) {
     if (networked) return *fixedTeam;
@@ -433,7 +504,19 @@ int main() {
       return mode != InputMode::Executing && mode != InputMode::GameOver;
     };
 #ifdef __EMSCRIPTEN__
-    if (networked) {
+    if (remoteMode) {
+      while (char* raw = tbgwaf_ws_next()) {
+        const std::string event(raw);
+        std::free(raw);
+        if (event == "O") remote->OnOpen();
+        else if (event == "C") remote->OnClose();
+        else if (event.size() > 1 && event[0] == 'M') remote->OnMessage(event.substr(1));
+      }
+      if (remote->team()) fixedTeam = remote->team();
+      if (remote->ConsumeMatchStarted()) {
+        for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
+      }
+    } else if (networked) {
       while (char* raw = tbgwaf_channel_next()) {
         const std::string msg(raw);
         std::free(raw);
@@ -638,6 +721,7 @@ int main() {
     if (isSimulator || game.Mode() != InputMode::Executing) game.Update(dt);
     // Sighting memory is per-page derived state: tick it unconditionally so
     // a follower (which skips Update() while Executing) still builds it.
+    if (remoteMode) remote->Update(dt);
     game.UpdateSightingMemory(dt);
     for (auto& camera : cameras) camera.Update(dt);
 
@@ -649,7 +733,8 @@ int main() {
     // after game over) neither pane takes action input. Camera
     // orbit/zoom/pan is never gated -- either player can look around their
     // own pane at any time.
-    const bool planning = isPlanningMode(game.Mode()) && !awaitingPeerSync;
+    const bool planning = isPlanningMode(game.Mode()) && !awaitingPeerSync &&
+                          (!remoteMode || remote->status() == tactics::net::RemoteClient::Status::Playing);
     const bool fogActive = game.Mode() != InputMode::GameOver;
     // The team whose plan the shared selection/preview overlays currently
     // belong to (only one figure is ever mid-selection at a time).
@@ -673,7 +758,9 @@ int main() {
                                              windowHeight, cameras[pane], nullptr,
                                              pane == 0 ? &roundPanelBottom : nullptr);
       if (hud.newMatch) {
-        if (isSimulator) {
+        if (remoteMode) {
+          remote->RequestNewMatch();
+        } else if (isSimulator) {
           game.Reset(makeMap());
           navMeshDebugBuilt = false;
           showNavMeshDebug = false;
@@ -684,7 +771,9 @@ int main() {
         }
       }
       if (hud.commit) {
-        if (isSimulator) {
+        if (remoteMode) {
+          remote->RequestCommit();
+        } else if (isSimulator) {
           game.CommitRound();
         } else {
 #ifdef __EMSCRIPTEN__
@@ -710,6 +799,22 @@ int main() {
           ImVec2(static_cast<float>(paneRects[1].x), 0.0f),
           ImVec2(static_cast<float>(paneRects[1].x), static_cast<float>(windowHeight)),
           IM_COL32(255, 255, 255, 60), 2.0f);
+    }
+
+    if (remoteMode) {
+      const std::string statusText = remote->StatusText();
+      if (!statusText.empty()) {
+        ImGui::SetNextWindowPos(
+            ImVec2(static_cast<float>(paneRects[0].x + paneRects[0].width / 2),
+                   static_cast<float>(windowHeight) - 12.0f),
+            ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+        ImGui::SetNextWindowBgAlpha(0.7f);
+        ImGui::Begin("##netstatus", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::TextUnformatted(statusText.c_str());
+        ImGui::End();
+      }
     }
 
     // --- Dispatch deferred input, now that WantCaptureMouse reflects the UI
@@ -830,7 +935,9 @@ int main() {
 #ifdef __EMSCRIPTEN__
     // Publish state changes: the simulator ships the whole match, the
     // follower just its plans (only while planning).
-    if (networked && !awaitingPeerSync && (isSimulator || isPlanningMode(game.Mode()))) {
+    if (remoteMode) {
+      for (const std::string& frame : remote->TakeOutgoing()) tbgwaf_ws_send(frame.c_str());
+    } else if (networked && !awaitingPeerSync && (isSimulator || isPlanningMode(game.Mode()))) {
       std::string state = SerializeSnapshot(game.ExportState());
       if (forceBroadcast || state != lastSentState) {
         tbgwaf_channel_post(((isSimulator ? "S " : "P ") + state).c_str());

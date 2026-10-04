@@ -53,7 +53,7 @@
       </div>
     </div>
     <div id="hud">
-      <div>Blue plans in the left canvas, Red in the right; both plan at once.</div>
+      <div id="hint">Blue plans in the left canvas, Red in the right; both plan at once.</div>
       <div id="status">Loading...</div>
     </div>
     <script src="tactics_app.js"></script>
@@ -62,29 +62,63 @@
       window.onerror = function () {
         statusEl.innerText = "Failed to load -- check the browser console.";
       };
-      // Both teams play on this one page: the module is instantiated twice,
-      // one client per team, each rendering into its own canvas. The two
-      // instances keep one shared match by exchanging state over this bus
-      // (a list of per-instance inboxes): Blue simulates rounds, Red sends
-      // its plans/commit requests to Blue and mirrors Blue's snapshots.
-      var bus = { inboxes: [] };
+
+      // Two ways to play:
+      //  * Server mode: one canvas, talking to the authoritative server over
+      //    a WebSocket. The URL comes from ?server=ws://host:port (a bare
+      //    port such as ?server=8080 means ws://localhost:8080), else from
+      //    the build-time default (cmake -DTBGWAF_SERVER_URL=...). ?room=NAME
+      //    picks which room to pair in (default: one shared room).
+      //  * Local demo (no server): both teams on this page, one canvas per
+      //    team, exchanging state over an in-page bus. Used when no server is
+      //    configured, or forced with ?local=1.
+      var BUILD_DEFAULT_SERVER = "@TBGWAF_SERVER_URL@"; // Left as-is when served from source.
+      function resolveServerUrl() {
+        var params = new URLSearchParams(window.location.search);
+        if (params.has("local")) return "";
+        var url = params.get("server");
+        if (url === null) url = BUILD_DEFAULT_SERVER.charAt(0) === "@" ? "" : BUILD_DEFAULT_SERVER;
+        url = url.trim();
+        if (/^\d+$/.test(url)) url = "ws://localhost:" + url;
+        return url;
+      }
+      var serverUrl = resolveServerUrl();
+      var room = new URLSearchParams(window.location.search).get("room") || "";
+
       // The factory promise only settles when main() exits, which an
       // infinite main loop never does -- so readiness is tracked via
       // onRuntimeInitialized instead.
-      var pending = 2;
-      function spawnClient(player) {
-        var pane = document.getElementById("pane-" + player);
-        createTbgwafModule({
-          canvas: pane.querySelector("canvas"),
-          tbgwafPlayer: player,
-          tbgwafBus: bus,
-          onRuntimeInitialized: function () {
-            if (--pending === 0) statusEl.innerText = "";
-          },
-        });
+      var pending = serverUrl ? 1 : 2;
+      function ready() {
+        if (--pending === 0) statusEl.innerText = "";
       }
-      spawnClient("blue");
-      spawnClient("red");
+
+      if (serverUrl) {
+        document.getElementById("pane-red").remove();
+        document.getElementById("hint").innerText = "Online match via " + serverUrl;
+        createTbgwafModule({
+          canvas: document.querySelector("#pane-blue canvas"),
+          tbgwafServer: serverUrl,
+          tbgwafRoom: room,
+          onRuntimeInitialized: ready,
+        });
+      } else {
+        // Both teams on this one page: the module is instantiated twice, one
+        // client per team, each rendering into its own canvas. Blue
+        // simulates rounds; Red sends its plans/commit requests to Blue and
+        // mirrors Blue's snapshots (a list of per-instance inboxes).
+        var bus = { inboxes: [] };
+        var spawnClient = function (player) {
+          createTbgwafModule({
+            canvas: document.getElementById("pane-" + player).querySelector("canvas"),
+            tbgwafPlayer: player,
+            tbgwafBus: bus,
+            onRuntimeInitialized: ready,
+          });
+        };
+        spawnClient("blue");
+        spawnClient("red");
+      }
     </script>
   </body>
 </html>

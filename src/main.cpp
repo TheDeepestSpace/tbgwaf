@@ -695,6 +695,8 @@ int main() {
       if (hud.cancel) game.CancelAction();
       if (hud.playbook) game.SetPlaybook(paneTeam(pane), *hud.playbook);
       if (hud.done) game.FinishMovePlan();
+      if (hud.fire) game.ConfirmAim(paneTeam(pane));
+      if (hud.aimSphereRadius) game.SetAimSphereRadius(*hud.aimSphereRadius);
     }
 
     // Pane divider. Both teams plan at once, so there's no "inactive side"
@@ -790,6 +792,13 @@ int main() {
           if (IntersectGroundOrClimbTop(clickRay, game.GetScene(), &point)) {
             game.ClickGround(point, clickTeam);
           }
+        } else if (game.Mode() == InputMode::AwaitingShootTarget) {
+          // Free-aim (issue #129): a non-figure click places/moves the "+"
+          // aim selector (surface in the shooter's 360-degree LOS, else the
+          // aiming sphere; Shift forces the sphere). The HUD's Fire button
+          // confirms it.
+          const bool forceSphere = (SDL_GetModState() & KMOD_SHIFT) != 0;
+          game.ClickAimRay(clickRay.origin, clickRay.direction, forceSphere, clickTeam);
         }
       }
     }

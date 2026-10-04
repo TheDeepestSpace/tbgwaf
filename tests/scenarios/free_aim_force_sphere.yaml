@@ -1,0 +1,25 @@
+name: free_aim_force_sphere
+description: >
+  Issue #129 modifier: force_sphere (the Shift modifier / touch toggle) skips the surface
+  stage outright, so a ray that would have landed on aimable open ground resolves onto the
+  aiming sphere instead.
+
+units:
+  - {id: 0, team: blue, position: [0, 0, 0], facing_degrees: 180}
+  - {id: 1, team: red, position: [10, 0, 5], facing_degrees: 180}
+
+script:
+  - action: shoot
+    description: The downward ray hits open ground at [4, 0, 4] (in LOS), but the forced sphere (radius 5) wins; the resolved point sits on the sphere at a 45-degree bearing.
+    actor: 0
+    aim_from: [4, 20, 4]
+    aim_dir: [0, -1, 0]
+    force_sphere: true
+    sphere_radius: 5
+  - action: pass
+    actor: 1
+  - action: commit
+
+  - assert: {unit: 0, facing_degrees: 45, tolerance: 1.5, comment: Turned from 180 to the sphere point's bearing}
+  - assert: {unit: 1, alive: true}
+  - assert: {round: 2}

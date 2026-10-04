@@ -44,6 +44,15 @@ struct PaneOverlays {
   const tactics::ReachField* moveFrontier = nullptr;  // Reachable-area gradient + border.
   bool moveFrontierSubsequentLeg = false;             // Border drawn yellow instead of green.
   bool showShotCone = false;                          // Selected figure is actively choosing a target.
+  // Free-aim (issue #129), set while this pane's selected figure is choosing
+  // a target: aimShooter gets the acid-green 360-degree LOS surface
+  // highlight (everything it could aim at directly). aimMarker is the
+  // placed-but-unconfirmed "+" selector; when it sits on the aiming sphere
+  // (sky/off-surface aim) the translucent sphere is drawn too.
+  const tactics::Unit* aimShooter = nullptr;
+  std::optional<glm::vec3> aimMarker;
+  bool aimSphere = false;
+  float aimSphereRadius = 0.0f;
   // Debug: walkable-cell boundaries of this navmesh (ground cells cyan,
   // climb-top cells orange), hugging the terrain. Not set by
   // BuildPaneOverlays; the app's debug toggle / the map golden harness
@@ -118,6 +127,16 @@ class SceneRenderer {
   LineMesh pathLine_;
   ColorTriangleMesh fovConeMesh_;
   ColorTriangleMesh shotConeMesh_;
+  ColorTriangleMesh aimOverlayMesh_;  // "+" aim selector / free-aim markers.
+  // 360-degree aim-LOS highlight geometry, rebuilt only when the aiming
+  // figure (or its eye position) changes -- i.e. once per selection, since
+  // nothing moves during planning.
+  struct AimLosCache {
+    int unitId = -1;
+    glm::vec3 eye{0.0f};
+    std::vector<glm::vec3> points;
+  };
+  AimLosCache aimLosCache_;
   // Reuse the terrain-clipped geometry until the unit or map changes.
   struct TerrainFovCache {
     int unitId = -1;

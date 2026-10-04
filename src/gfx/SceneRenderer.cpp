@@ -42,6 +42,17 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
     }
   }
   overlays.showShotCone = game.Mode() == tactics::InputMode::AwaitingShootTarget;
+  if (overlays.showShotCone) {
+    // Free-aim (issue #129): the aiming figure gets its 360-degree LOS
+    // highlight, and a placed aim point shows as the "+" selector (plus the
+    // aiming sphere for sky/off-surface aim).
+    overlays.aimShooter = selected;
+    if (const auto& preview = game.GetAimPreview()) {
+      overlays.aimMarker = preview->point;
+      overlays.aimSphere = preview->onSphere;
+    }
+    overlays.aimSphereRadius = game.AimSphereRadius();
+  }
   return overlays;
 }
 namespace {
@@ -1190,13 +1201,17 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
                                     const std::vector<AABB>& sidewalks, float mapHalfExtent,
                                     const tactics::HeightField& terrain,
                                     const std::vector<tactics::RoadSurface>& polygonSidewalks,
-                                    const std::vector<tactics::WalkSurface>& walkSurfaces) {
-  constexpr int kArcSegments = 24;
+                                    const std::vector<tactics::WalkSurface>& walkSurfaces,
+                                    float halfFovDegrees = tactics::constants::kShootHalfFovDegrees) {
+  // Keep the fan density constant per degree: the free-aim 360-degree LOS
+  // highlight (halfFovDegrees == 180) sweeps the full circle.
+  const int kArcSegments = std::max(
+      24, static_cast<int>(24.0f * halfFovDegrees / tactics::constants::kShootHalfFovDegrees));
   constexpr float kGroundOffset = 0.015f;
   // Angular nudge to either side of an obstacle corner: one ray lands on the
   // occluding face right at the corner, the other shoots past it.
   constexpr float kCornerEpsilon = 1e-3f;
-  const float halfFovRad = glm::radians(tactics::constants::kShootHalfFovDegrees);
+  const float halfFovRad = glm::radians(halfFovDegrees);
   const float range = tactics::constants::kFovConeVisualRange;
   const glm::vec3 eye = unit.EyePosition();
 
@@ -1366,12 +1381,14 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
 // Caller enables blending and caps overlapping cones with the stencil buffer.
 // Alpha fades linearly from kFovAlpha at the unit to zero at the visual range.
 void DrawFovCone(const Shader& shader, ColorTriangleMesh& mesh, const glm::mat4& viewProj,
-                 const Unit& unit, const std::vector<glm::vec3>& points) {
-  constexpr float kFovAlpha = 0.15f;
+                 const Unit& unit, const std::vector<glm::vec3>& points,
+                 const glm::vec3* colorOverride = nullptr, float alpha = 0.15f) {
+  const float kFovAlpha = alpha;
   const glm::vec3 eye = unit.EyePosition();
   const float range = tactics::constants::kFovConeVisualRange;
-  const glm::vec3 baseColor = unit.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
-                                                      : glm::vec3(0.9f, 0.25f, 0.22f);
+  const glm::vec3 baseColor = colorOverride ? *colorOverride
+                              : unit.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
+                                                        : glm::vec3(0.9f, 0.25f, 0.22f);
   std::vector<ColorTriangleMesh::Vertex> vertices;
   vertices.reserve(points.size());
   for (const glm::vec3& p : points) {
@@ -1403,15 +1420,27 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
                   const glm::mat4& viewProj, const Unit& unit,
                   const std::vector<const Unit*>& litUnits,
                   const std::vector<tactics::Obstacle>& obstacles,
-                  const std::vector<AABB>& sidewalks, float mapHalfExtent) {
+                  const std::vector<AABB>& sidewalks, float mapHalfExtent,
+                  const glm::vec3* aimPoint = nullptr) {
   constexpr int kSegments = 40;
   constexpr int kRings = 12;  // Along the axis, so the alpha fade interpolates smoothly.
   constexpr float kSurfaceAlpha = 0.18f;
   constexpr float kFootprintAlpha = 0.7f;
   constexpr float kTwoPi = 6.28318530717958647692f;
   const float tanHalf = std::tan(glm::radians(tactics::constants::kShotConeHalfAngleDegrees));
-  const glm::vec3 apex = unit.MuzzlePosition();
-  const glm::vec3 axis = unit.FacingDirection();
+  // Free-aim (issue #129): the cone leaves the muzzle of the figure as it
+  // will stand when it fires -- turned toward the aim point -- and its axis
+  // may pitch up/down (sky or elevated aim).
+  Unit aimed = unit;
+  if (aimPoint) {
+    const glm::vec2 flat(aimPoint->x - unit.position.x, aimPoint->z - unit.position.z);
+    if (glm::length(flat) > 1e-4f) aimed.facingYaw = std::atan2(flat.y, flat.x);
+  }
+  const glm::vec3 apex = aimed.MuzzlePosition();
+  glm::vec3 axis = aimed.FacingDirection();
+  if (aimPoint && glm::distance(*aimPoint, apex) > 1e-4f) {
+    axis = glm::normalize(*aimPoint - apex);
+  }
   const float fadeRange = tactics::kDefaultShotProfile.range;
   // The cone ends where its axis first meets an obstacle, so it never pokes
   // out the far side of a wall.
@@ -1434,8 +1463,10 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
     }
     if (hit && tEnter > 0.0f) range = tEnter;
   }
-  const glm::vec3 right(-axis.z, 0.0f, axis.x);
-  const glm::vec3 up(0.0f, 1.0f, 0.0f);
+  // Basis perpendicular to the (possibly pitched) axis.
+  glm::vec3 right = glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), axis);
+  right = glm::length(right) < 1e-5f ? glm::vec3(1.0f, 0.0f, 0.0f) : glm::normalize(right);
+  const glm::vec3 up = glm::normalize(glm::cross(axis, right));
   const auto vertex = [&](int ring, int seg) {
     const float u = static_cast<float>(ring) / static_cast<float>(kRings);
     const float a = kTwoPi * static_cast<float>(seg) / static_cast<float>(kSegments);
@@ -1496,6 +1527,40 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
   }
 }
 
+// Acid-green overlays for the free-aim flow (issue #129).
+const glm::vec3 kAimColor(0.55f, 1.0f, 0.1f);
+
+// The "+" aim selector: a 3D plus sign (three thin axis-aligned bars) so a
+// point placed on a surface or in the sky reads from any camera angle.
+void DrawAimMarker(const Shader& colorShader, ColorTriangleMesh& mesh,
+                   const glm::mat4& viewProj, const glm::vec3& point) {
+  constexpr float kArm = 0.55f;
+  constexpr float kThick = 0.06f;
+  constexpr float kAlpha = 0.95f;
+  std::vector<ColorTriangleMesh::Vertex> vertices;
+  const glm::vec4 color(kAimColor, kAlpha);
+  const auto appendBox = [&](const glm::vec3& halfExtents) {
+    const glm::vec3 mn = point - halfExtents;
+    const glm::vec3 mx = point + halfExtents;
+    const glm::vec3 corners[8] = {
+        {mn.x, mn.y, mn.z}, {mx.x, mn.y, mn.z}, {mx.x, mx.y, mn.z}, {mn.x, mx.y, mn.z},
+        {mn.x, mn.y, mx.z}, {mx.x, mn.y, mx.z}, {mx.x, mx.y, mx.z}, {mn.x, mx.y, mx.z}};
+    static const int faces[6][4] = {{0, 1, 2, 3}, {5, 4, 7, 6}, {4, 0, 3, 7},
+                                    {1, 5, 6, 2}, {3, 2, 6, 7}, {4, 5, 1, 0}};
+    for (const auto& face : faces) {
+      const int quad[6] = {face[0], face[1], face[2], face[0], face[2], face[3]};
+      for (int index : quad) vertices.push_back({corners[index], color});
+    }
+  };
+  appendBox(glm::vec3(kArm, kThick, kThick));
+  appendBox(glm::vec3(kThick, kArm, kThick));
+  appendBox(glm::vec3(kThick, kThick, kArm));
+  colorShader.Use();
+  mesh.SetVertices(vertices);
+  colorShader.SetMat4("uMVP", viewProj);
+  mesh.Draw();
+}
+
 }  // namespace
 
 bool IsUnitVisibleForRender(const Unit& unit, Team viewingTeam, bool fogActive,
@@ -1537,6 +1602,7 @@ bool SceneRenderer::Init() {
   pathLine_.Init();
   fovConeMesh_.Init();
   shotConeMesh_.Init();
+  aimOverlayMesh_.Init();
   terrainMesh_.Init();
   geometryMesh_.Init();
   fovSceneMesh_.Init();
@@ -1613,6 +1679,8 @@ void SceneRenderer::Destroy() {
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
   shotConeMesh_.Destroy();
+  aimOverlayMesh_.Destroy();
+  aimLosCache_ = AimLosCache{};
   terrainFovCache_.clear();
   fovKeyObstacles_.clear();
   fovKeySidewalks_.clear();
@@ -2034,6 +2102,22 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   }
   glDisable(GL_STENCIL_TEST);
+  // Free-aim (issue #129): the aiming figure's acid-green 360-degree LOS
+  // highlight -- every surface it could aim at directly (the figure turns to
+  // shoot, so its facing doesn't gate the sweep). Cached per (unit, eye):
+  // nothing moves during planning, so this is one rebuild per selection.
+  if (overlays.aimShooter && overlays.aimShooter->alive && !debug.disableFov) {
+    const Unit& shooter = *overlays.aimShooter;
+    if (aimLosCache_.unitId != shooter.id || aimLosCache_.eye != shooter.EyePosition()) {
+      aimLosCache_.unitId = shooter.id;
+      aimLosCache_.eye = shooter.EyePosition();
+      aimLosCache_.points =
+          BuildFovCone(shooter, obstacles, sidewalks, mapHalfExtent, terrain,
+                       game.GetScene().sidewalkSurfaces, game.GetScene().walkSurfaces, 180.0f);
+    }
+    DrawFovCone(colorShader_, fovConeMesh_, viewProj, shooter, aimLosCache_.points, &kAimColor,
+                0.22f);
+  }
   // Shot probability cones are setup feedback, drawn over the FOV overlay:
   // the selected figure gets one while choosing a target, and every planned
   // shot keeps its cone until the round is committed (like a planned move's
@@ -2060,9 +2144,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         // already in the depth buffer.
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LEQUAL);
+        // With a free-aim point placed, the cone previews that shot: it
+        // leaves the turned figure and may pitch toward a sky/elevated aim.
         DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, sphereMesh_,
                      viewProj, *selected, coneLitUnits(*selected), obstacles,
-                     game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
+                     game.GetScene().sidewalks, game.GetScene().mapHalfExtent,
+                     overlays.aimMarker ? &*overlays.aimMarker : nullptr);
         glDepthFunc(GL_LESS);
         aimingShooter = selected;
       }
@@ -2078,9 +2165,34 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       glDepthFunc(GL_LEQUAL);
       DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, sphereMesh_,
                    viewProj, unit, coneLitUnits(unit), obstacles,
-                   game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
+                   game.GetScene().sidewalks, game.GetScene().mapHalfExtent,
+                   unit.plan.hasAimPoint ? &unit.plan.aimPoint : nullptr);
       glDepthFunc(GL_LESS);
+      // A planned free-aim shot keeps its "+" selector until the commit,
+      // like a planned move keeps its destination ghost.
+      if (unit.plan.hasAimPoint) {
+        DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, unit.plan.aimPoint);
+      }
     }
+  }
+  // The unconfirmed "+" selector the aiming player has placed, plus the
+  // adjustable aiming sphere when the point sits on it (sky/off-surface
+  // aim). Both acid green, matching the LOS highlight.
+  if (overlays.aimMarker) {
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, *overlays.aimMarker);
+    if (overlays.aimSphere && overlays.aimShooter && overlays.aimShooter->alive) {
+      const glm::vec3 center = overlays.aimShooter->EyePosition();
+      const glm::mat4 model = glm::translate(glm::mat4(1.0f), center) *
+                              glm::scale(glm::mat4(1.0f), glm::vec3(overlays.aimSphereRadius));
+      unlitShader_.Use();
+      unlitShader_.SetMat4("uMVP", viewProj * model);
+      unlitShader_.SetVec4("uColor", glm::vec4(kAimColor, 0.08f));
+      sphereMesh_.Draw();
+      colorShader_.Use();
+    }
+    glDepthFunc(GL_LESS);
   }
   glDisable(GL_POLYGON_OFFSET_FILL);
   unlitShader_.Use();

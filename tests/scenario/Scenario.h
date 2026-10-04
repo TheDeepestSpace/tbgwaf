@@ -35,7 +35,10 @@ class GameLogic;
 namespace tactics::scenario {
 
 struct ScenarioAction {
-  enum class Kind { Move, Shoot, Pass, Cancel, Commit, Focus, NewGame };
+  // BeginMove opens move planning (select + Move) and deliberately stops
+  // there, leaving the movement frontier up for the visual runner's
+  // post-action capture; no destination is clicked and no plan is recorded.
+  enum class Kind { Move, BeginMove, Shoot, Pass, Cancel, Commit, Focus, NewGame };
 
   int actor = -1;  // Unused (and not required in YAML) for Commit/NewGame.
   Kind kind = Kind::Pass;

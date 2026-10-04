@@ -29,6 +29,9 @@ bool IsUnitVisibleForRender(const tactics::Unit& unit, tactics::Team viewingTeam
 struct RenderDebugOptions {
   bool disableFov = false;
   bool disableShadows = false;
+  // Issue #136: skip the camera-occlusion see-through pass (occluding
+  // blocks/decks are then always drawn fully opaque).
+  bool disableOcclusionFade = false;
   // Optional sink for per-frame draw counters; accumulates across panes, so
   // the caller zeroes it once per frame. Null (default) = not collected.
   RenderFrameStats* stats = nullptr;

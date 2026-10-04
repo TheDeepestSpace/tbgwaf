@@ -1,0 +1,27 @@
+name: occlusion_fade_frontier_behind_overpass
+description: >
+  Issue #136 camera-occlusion see-through on the elevated map (same seed-7
+  overpass as elevated_highway_ramp): Blue stands at grade beside the
+  mid-span deck, and begin_move leaves its movement frontier up. The
+  reachable area continues under and past the overpass, so the deck slabs
+  hiding parts of the frontier (and any buildings clipping Blue's
+  sightlines) are drawn see-through in Blue's pane while everything stays
+  opaque where nothing important is hidden.
+
+map:
+  generate: {type: urban, seed: 7, arteries: 2, elevated: true, elevated_layout: ramp-up-ramp-down}
+
+units:
+  - {id: 0, team: blue, position: [-11.5, 0, 9], facing_degrees: -90}
+  - {id: 1, team: red, position: [60, 0, -18], facing_degrees: 180}
+
+camera:
+  target: [-11.5, 4]
+  zoom: -100
+
+script:
+  - action: begin_move
+    actor: 0
+    comment: Frontier spreads under the mid-span deck; the deck must fade, not hide it.
+  - assert: {unit: 0, position: [-11.5, 0, 9], tolerance: 0.05}
+  - assert: {round: 1}

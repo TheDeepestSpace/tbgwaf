@@ -48,6 +48,20 @@ namespace {
 
 constexpr int kShadowMapSize = 2048;
 const glm::vec3 kSetupColor(0.2f, 1.0f, 0.3f);
+// Scene geometry base colors, shared by the opaque pass and the issue #136
+// see-through pass so a faded block keeps its normal tint.
+const glm::vec3 kObstacleColor(0.55f, 0.55f, 0.6f);
+const glm::vec3 kDeckColor(0.44f, 0.45f, 0.48f);
+
+// Issue #136 camera-occlusion see-through: map geometry (buildings, deck/
+// ramp slabs) standing between the camera and something the player needs to
+// see is drawn at this opacity instead of fully opaque. First guess per the
+// issue; tune freely.
+constexpr float kOccluderFadeOpacity = 0.5f;
+// Spacing of the visibility probes laid along paths and across the movement
+// frontier. Finer spacing catches narrower slivers of hidden overlay at the
+// cost of more camera raycasts per frame.
+constexpr float kOcclusionProbeSpacing = 1.0f;
 
 // Flat, unlit shader used for UI-ish overlays (selection highlights, the
 // move-path preview line) that should stay crisp regardless of shadowing.
@@ -1496,6 +1510,76 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
   }
 }
 
+// Issue #136: everything `team`'s pane must keep visible this frame -- the
+// team's own living figures, the movement-frontier overlay, movement
+// indicators (preview/planned paths, destination ghosts) and remembered-
+// sighting ghosts/arrows -- as world-space probe points. Any obstacle or
+// deck slab crossing a camera->probe segment is drawn see-through.
+std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team, bool fogActive,
+                                               const PaneOverlays& overlays) {
+  // Probes hover slightly above their surface so grazing contact with the
+  // ground/deck they sit on never reads as occlusion.
+  constexpr float kSurfaceLift = 0.3f;
+  constexpr float kGhostLift = 0.9f;  // Mid-torso of a ghost/figure wireframe.
+  std::vector<glm::vec3> probes;
+  for (const Unit& unit : game.GetScene().units) {
+    if (!unit.alive || unit.team != team) continue;
+    probes.push_back(unit.EyePosition());
+    probes.push_back(unit.position + glm::vec3(0.0f, kSurfaceLift, 0.0f));
+  }
+  const auto addPolyline = [&](const std::vector<glm::vec3>& path) {
+    for (size_t i = 0; i < path.size(); ++i) {
+      probes.push_back(path[i] + glm::vec3(0.0f, kSurfaceLift, 0.0f));
+      if (i + 1 == path.size()) continue;
+      // Subdivide long chords so a stretch hidden mid-segment still probes.
+      const int pieces = static_cast<int>(glm::distance(path[i], path[i + 1]) /
+                                          kOcclusionProbeSpacing);
+      for (int k = 1; k <= pieces; ++k) {
+        probes.push_back(glm::mix(path[i], path[i + 1],
+                                  static_cast<float>(k) / static_cast<float>(pieces + 1)) +
+                         glm::vec3(0.0f, kSurfaceLift, 0.0f));
+      }
+    }
+  };
+  if (overlays.movePreviewPath) addPolyline(*overlays.movePreviewPath);
+  if (overlays.moveFrontier && overlays.moveFrontier->nx > 0) {
+    const tactics::ReachField& f = *overlays.moveFrontier;
+    const int stride =
+        std::max(1, static_cast<int>(std::round(kOcclusionProbeSpacing / f.step)));
+    for (int iz = 0; iz < f.nz; iz += stride) {
+      for (int ix = 0; ix < f.nx; ix += stride) {
+        if (f.Reached(ix, iz)) {
+          probes.push_back(f.Node(ix, iz) + glm::vec3(0.0f, kSurfaceLift, 0.0f));
+        }
+      }
+    }
+  }
+  const bool planning =
+      game.Mode() != InputMode::GameOver && game.Mode() != InputMode::Executing;
+  if (planning) {
+    for (const Unit& unit : game.GetScene().units) {
+      if (!unit.alive || unit.team != team) continue;
+      if (unit.plan.type != tactics::PlannedActionType::Move || unit.plan.movePath.size() < 2) {
+        continue;
+      }
+      addPolyline(unit.plan.movePath);
+      probes.push_back(unit.plan.movePath.back() +
+                       glm::vec3(0.0f, kGhostLift, 0.0f));  // Destination ghost.
+      for (const auto& leg : unit.plan.queuedLegs) addPolyline(leg);
+    }
+  }
+  if (fogActive) {
+    for (const Unit& unit : game.GetScene().units) {
+      if (unit.team == team) continue;
+      for (const auto& s : game.Sightings(team, unit.id)) {
+        if (1.0f - s.ageRounds * tactics::constants::kSightingFadePerRound <= 0.0f) continue;
+        probes.push_back(s.position + glm::vec3(0.0f, kGhostLift, 0.0f));  // Ghost + arrow.
+      }
+    }
+  }
+  return probes;
+}
+
 }  // namespace
 
 bool IsUnitVisibleForRender(const Unit& unit, Team viewingTeam, bool fogActive,
@@ -1863,6 +1947,59 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       camera.ProjectionMatrix(static_cast<float>(width) / static_cast<float>(height));
   const glm::mat4 viewProj = proj * view;
 
+  // Issue #136 camera-occlusion see-through: per frame, raycast from the
+  // camera to every point the player needs to see (own figures, movement
+  // frontier, move paths/ghosts, sighting ghosts) and mark each obstacle or
+  // deck slab actually crossing a sightline. Marked occluders are skipped by
+  // the opaque pass below and re-drawn translucent after the figures.
+  const auto& walkSurfaces = game.GetScene().walkSurfaces;
+  std::vector<char> fadeObstacle(obstacles.size(), 0);
+  std::vector<char> fadeSurface(walkSurfaces.size(), 0);
+  bool anyFaded = false;
+  if (!debug.disableOcclusionFade) {
+    const std::vector<glm::vec3> probes =
+        CollectSeeThroughProbes(game, team, fogActive, overlays);
+    const glm::vec3 cameraPos = camera.Position();
+    struct ProbeRay {
+      glm::vec3 direction;
+      float length;
+    };
+    std::vector<ProbeRay> rays;
+    rays.reserve(probes.size());
+    for (const glm::vec3& probe : probes) {
+      const glm::vec3 segment = probe - cameraPos;
+      const float length = glm::length(segment);
+      if (length > 1e-4f) rays.push_back({segment / length, length});
+    }
+    // Same endpoint handling as LineOfSightClear: a hit at (or essentially
+    // at) the probe itself does not count, so a figure hugging a wall does
+    // not fade that wall.
+    constexpr float kEndpointEpsilon = 1e-2f;
+    for (size_t i = 0; i < obstacles.size(); ++i) {
+      for (const ProbeRay& ray : rays) {
+        float t = 0.0f;
+        if (tactics::RayIntersectsObstacle(cameraPos, ray.direction, obstacles[i], &t) &&
+            t > kEndpointEpsilon && t < ray.length - kEndpointEpsilon) {
+          fadeObstacle[i] = 1;
+          anyFaded = true;
+          break;
+        }
+      }
+    }
+    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+      for (const ProbeRay& ray : rays) {
+        float t = 0.0f;
+        if (tactics::RayIntersectsWalkSurface(cameraPos, ray.direction, walkSurfaces[i],
+                                              kDeckThickness, &t) &&
+            t > kEndpointEpsilon && t < ray.length - kEndpointEpsilon) {
+          fadeSurface[i] = 1;
+          anyFaded = true;
+          break;
+        }
+      }
+    }
+  }
+
   litShader_.Use();
   litShader_.SetVec3("uLightDir", lightDir_);
   litShader_.SetVec3("uViewPos", camera.Position());
@@ -1898,17 +2035,19 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
   }
-  for (const tactics::WalkSurface& surface : game.GetScene().walkSurfaces) {
+  for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+    if (fadeSurface[i]) continue;  // Re-drawn translucent below.
     // Concrete, clearly lighter than the asphalt below: the elevated deck
     // and its ramps must read as a bridge, not as more ground road.
-    BuildSurfacePatch(surface.vertices, 0.45f, &geometryMesh_);
+    BuildSurfacePatch(walkSurfaces[i].vertices, kDeckThickness, &geometryMesh_);
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(0.44f, 0.45f, 0.48f, 1.0f));
+                 glm::vec4(kDeckColor, 1.0f));
   }
 
   for (size_t i = 0; i < obstacles.size(); ++i) {
+    if (fadeObstacle[i]) continue;  // Re-drawn translucent below.
     const AABB& bounds = obstacles[i].bounds;
-    const glm::vec4 color(0.55f, 0.55f, 0.6f, 1.0f);
+    const glm::vec4 color(kObstacleColor, 1.0f);
     if (obstacles[i].footprint.empty()) {
       DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, bounds.min,
                  bounds.max - bounds.min, color);
@@ -1921,6 +2060,60 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   for (const Unit& unit : game.GetScene().units) {
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
     DrawUnit(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, unit);
+  }
+
+  // Issue #136: alpha-blended re-draw of the occluders marked above, sorted
+  // back-to-front, with depth writes off -- the figures already drawn and
+  // the depth-tested overlays drawn later (frontier fill, FOV cones, paths)
+  // all show through them. Shadow casting and the FOV depth maps are left
+  // untouched: a faded block is still physically there and still blocks
+  // unit sightlines; only the camera gets to see through it.
+  if (anyFaded) {
+    struct FadedOccluder {
+      float viewDistance;
+      int obstacle;  // Index into obstacles, or -1 when `surface` is set.
+      int surface;   // Index into walkSurfaces, or -1.
+    };
+    const glm::vec3 cameraPos = camera.Position();
+    std::vector<FadedOccluder> faded;
+    for (size_t i = 0; i < obstacles.size(); ++i) {
+      if (fadeObstacle[i]) {
+        faded.push_back({glm::distance(cameraPos, obstacles[i].bounds.Center()),
+                         static_cast<int>(i), -1});
+      }
+    }
+    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+      if (fadeSurface[i]) {
+        faded.push_back({glm::distance(cameraPos, tactics::SurfaceCenter(walkSurfaces[i])), -1,
+                         static_cast<int>(i)});
+      }
+    }
+    std::sort(faded.begin(), faded.end(), [](const FadedOccluder& a, const FadedOccluder& b) {
+      return a.viewDistance > b.viewDistance;
+    });
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    for (const FadedOccluder& f : faded) {
+      if (f.obstacle >= 0) {
+        const tactics::Obstacle& obstacle = obstacles[f.obstacle];
+        const glm::vec4 color(kObstacleColor, kOccluderFadeOpacity);
+        if (obstacle.footprint.empty()) {
+          DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, obstacle.bounds.min,
+                     obstacle.bounds.max - obstacle.bounds.min, color);
+        } else {
+          BuildPolygonPrism(obstacle, &geometryMesh_);
+          DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                       color);
+        }
+      } else {
+        BuildSurfacePatch(walkSurfaces[f.surface].vertices, kDeckThickness, &geometryMesh_);
+        DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                     glm::vec4(kDeckColor, kOccluderFadeOpacity));
+      }
+    }
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
   }
 
   // Navmesh boundary debug overlay (opaque lines, depth-tested like the

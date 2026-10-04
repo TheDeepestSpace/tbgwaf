@@ -182,6 +182,19 @@ constexpr float kFovConeVisualRange = kSightRange;
 constexpr float kSightingSampleInterval = 0.5f;
 constexpr float kSightingFadePerRound = 1.0f / 3.0f;  // Fraction of opacity lost each round.
 constexpr int kSightingMemoryRounds = 3;       // 1 / kSightingFadePerRound.
+// Free-aim shooting (issue #129). Friendly fire is on by default; the single
+// flag below (mirrored per GameLogic instance, settable from scenarios) is
+// the one switch that disables it, making friendlies transparent to the
+// ballistic trace.
+constexpr bool kFriendlyFireDefault = true;
+// A free-aim trace flies until it hits something, capped at the sight range
+// (chance has long since fallen off by then; there is no hard shot range cap).
+constexpr float kAimTraceRange = kSightRange;
+// Adjustable aiming sphere around the figure, used when the camera ray hits
+// no aimable surface (sky shots) or when the player forces sphere aim.
+constexpr float kAimSphereDefaultRadius = 12.0f;
+constexpr float kAimSphereMinRadius = 2.0f;
+constexpr float kAimSphereMaxRadius = 60.0f;
 }  // namespace constants
 
 }  // namespace tactics

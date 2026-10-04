@@ -1806,6 +1806,331 @@ void TestFollowerBuildsSightingsWithoutPhysicsUpdate() {
   CHECK(anyMoving);
 }
 
+// Minimal flat scene for the free-aim tests: unit ids are sequential from 0
+// so sighting memory indexes line up.
+tactics::Scene AimScene(const std::vector<std::pair<Team, glm::vec3>>& layout,
+                        std::initializer_list<tactics::Obstacle> obstacles = {}) {
+  tactics::Scene scene;
+  scene.mapHalfExtent = 30.0f;
+  for (const tactics::Obstacle& obstacle : obstacles) scene.obstacles.push_back(obstacle);
+  int id = 0;
+  for (const auto& [team, position] : layout) {
+    tactics::Unit unit;
+    unit.id = id++;
+    unit.team = team;
+    unit.position = position;
+    scene.units.push_back(unit);
+  }
+  return scene;
+}
+
+void TestAimRayResolvesUnitSurfaceAndSphere() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+
+  // Camera ray onto open ground in the shooter's LOS: a surface aim.
+  auto down = [](float x, float z) {
+    return std::make_pair(glm::vec3(x, 20.0f, z), glm::vec3(0.0f, -1.0f, 0.0f));
+  };
+  auto [o1, d1] = down(0.0f, 0.0f);
+  GameLogic::AimRayResult aim = game.ResolveAimRay(o1, d1, false);
+  CHECK(aim.kind == GameLogic::AimRayResult::Kind::Surface);
+  CHECK(glm::distance(aim.point, glm::vec3(0.0f)) < 0.05f);
+
+  // Ground hidden behind the z=-4 wall: not aimable directly, so the ray
+  // falls through to the sphere.
+  auto [o2, d2] = down(4.0f, -4.0f);
+  aim = game.ResolveAimRay(o2, d2, false);
+  CHECK(aim.kind == GameLogic::AimRayResult::Kind::Sphere);
+
+  // The modifier forces the sphere even over aimable ground.
+  aim = game.ResolveAimRay(o1, d1, true);
+  CHECK(aim.kind == GameLogic::AimRayResult::Kind::Sphere);
+
+  // A visible enemy under the cursor beats the surface behind it.
+  auto [o3, d3] = down(8.0f, 0.0f);
+  aim = game.ResolveAimRay(o3, d3, false);
+  CHECK(aim.kind == GameLogic::AimRayResult::Kind::Unit);
+  CHECK(aim.unitId == 4);
+
+  // A sky ray lands on the aiming sphere, at its radius from the eye.
+  const Unit* shooter = game.FindUnit(1);
+  aim = game.ResolveAimRay(shooter->EyePosition() + glm::vec3(0.0f, 0.5f, 0.0f),
+                           glm::vec3(0.3f, 1.0f, 0.0f), false);
+  CHECK(aim.kind == GameLogic::AimRayResult::Kind::Sphere);
+  CHECK(std::fabs(glm::distance(aim.point, shooter->EyePosition()) - game.AimSphereRadius()) <
+        1e-3f);
+
+  // The sphere radius is adjustable and clamped.
+  game.SetAimSphereRadius(20.0f);
+  CHECK(game.AimSphereRadius() == 20.0f);
+  game.SetAimSphereRadius(0.1f);
+  CHECK(game.AimSphereRadius() == constants::kAimSphereMinRadius);
+  game.SetAimSphereRadius(1.0e6f);
+  CHECK(game.AimSphereRadius() == constants::kAimSphereMaxRadius);
+}
+
+void TestFreeAimPreviewPlaceConfirmAndCancel() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+
+  // Confirm with nothing placed: no-op.
+  game.ConfirmAim(Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+
+  // Tap-to-place via the ray path, then cancel drops the marker.
+  game.ClickAimRay(glm::vec3(0.0f, 20.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), false, Team::Blue);
+  CHECK(game.GetAimPreview().has_value());
+  CHECK(!game.GetAimPreview()->onSphere);
+  game.CancelAction();
+  CHECK(!game.GetAimPreview().has_value());
+  CHECK(game.Mode() == InputMode::ActionMenu);
+
+  // Place again, confirm: the plan is a free-aim shot, no locked target.
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(2.0f, 0.0f, 1.0f), false, Team::Blue);
+  // Only the shooter's own side can place/confirm.
+  game.ConfirmAim(Team::Red);
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+  game.ConfirmAim(Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  const Unit* shooter = game.FindUnit(1);
+  CHECK(shooter->plan.type == PlannedActionType::Shoot);
+  CHECK(shooter->plan.hasAimPoint);
+  CHECK(shooter->plan.shootTargetId == -1);
+  CHECK(glm::distance(shooter->plan.aimPoint, glm::vec3(2.0f, 0.0f, 1.0f)) < 1e-5f);
+
+  // Locking onto a figure instead clears any placed marker and the aim flag.
+  GameLogic g2(LegacyScene());
+  g2.ClickUnit(1, Team::Blue);
+  g2.ChooseShoot();
+  g2.PlaceAimPoint(glm::vec3(2.0f, 0.0f, 1.0f), true, Team::Blue);
+  CHECK(g2.GetAimPreview().has_value());
+  g2.ClickUnit(4, Team::Blue);
+  CHECK(!g2.GetAimPreview().has_value());
+  const Unit* locked = g2.FindUnit(1);
+  CHECK(locked->plan.shootTargetId == 4);
+  CHECK(!locked->plan.hasAimPoint);
+}
+
+void TestFreeAimShotFiresBehindShooterAndFacesAimPoint() {
+  // The shooter starts facing *away* from its aim point: a locked shot
+  // could never fire (hard cone gate), but a free-aim shot turns the figure.
+  GameLogic game(AimScene({{Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(10.0f, 0.0f, 0.0f)}}));
+  Unit* shooter = game.FindUnit(0);
+  shooter->facingYaw = kPi;  // Facing -X; red1 is at +X and unseen.
+  CHECK(!game.ComputeVisibility(Team::Blue).UnitVisible(1));
+
+  game.SetShotRollSource([] { return 0.0f; });
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), false, Team::Blue);
+  game.ConfirmAim(Team::Blue);
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  game.Update(10.0f);
+
+  CHECK(!game.FindUnit(1)->alive);
+  // After the shot the figure faces its aim point, feeding the next rounds'
+  // FOV/overwatch.
+  CHECK(std::fabs(game.FindUnit(0)->facingYaw) < 1e-3f);
+  CHECK(game.Winner() == Team::Blue);
+}
+
+void TestFreeAimBlindHitRevealsMissDoesNot() {
+  const auto layout = std::vector<std::pair<Team, glm::vec3>>{
+      {Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(12.0f, 0.0f, 0.0f)}};
+  // Hit: the one bit of info a connecting blind shot earns is a sighting
+  // sample of the figure it downed.
+  {
+    GameLogic game(AimScene(layout));
+    game.FindUnit(0)->facingYaw = kPi;  // Red1 is unseen throughout.
+    game.SetShotRollSource([] { return 0.0f; });
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseShoot();
+    game.PlaceAimPoint(glm::vec3(12.0f, 0.9f, 0.0f), false, Team::Blue);
+    game.ConfirmAim(Team::Blue);
+    game.ClickUnit(1, Team::Red);
+    game.ChoosePass();
+    game.CommitRound();
+    game.Update(10.0f);
+    CHECK(!game.FindUnit(1)->alive);
+    CHECK(!game.Sightings(Team::Blue, 1).empty());
+  }
+  // Miss: nothing is revealed -- the shooter learns nothing from a shot
+  // into the dark that doesn't connect.
+  {
+    GameLogic game(AimScene(layout));
+    game.FindUnit(0)->facingYaw = kPi;
+    game.SetShotRollSource([] { return 0.999999f; });
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseShoot();
+    game.PlaceAimPoint(glm::vec3(12.0f, 0.9f, 0.0f), false, Team::Blue);
+    game.ConfirmAim(Team::Blue);
+    game.ClickUnit(1, Team::Red);
+    game.ChoosePass();
+    game.CommitRound();
+    game.Update(10.0f);
+    CHECK(game.FindUnit(1)->alive);
+    CHECK(game.Sightings(Team::Blue, 1).empty());
+    // The shot was still taken: animation beat played and the figure turned.
+    CHECK(std::fabs(game.FindUnit(0)->facingYaw) < 1e-3f);
+  }
+}
+
+void TestFreeAimTraceStopsAtWalls() {
+  const tactics::Obstacle wall{
+      tactics::AABB{glm::vec3(5.0f, 0.0f, -2.0f), glm::vec3(6.0f, 2.5f, 2.0f)}, false};
+  GameLogic game(AimScene(
+      {{Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(10.0f, 0.0f, 0.0f)}}, {wall}));
+  game.SetShotRollSource([] { return 0.0f; });
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), false, Team::Blue);
+  game.ConfirmAim(Team::Blue);
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  game.Update(10.0f);
+  // Even a guaranteed roll can't reach through the wall; nothing is revealed.
+  CHECK(game.FindUnit(1)->alive);
+  CHECK(game.Sightings(Team::Blue, 1).empty());
+}
+
+void TestFreeAimFriendlyFireFlag() {
+  const auto layout = std::vector<std::pair<Team, glm::vec3>>{
+      {Team::Blue, glm::vec3(0.0f)},
+      {Team::Blue, glm::vec3(5.0f, 0.0f, 0.0f)},   // Teammate in the bullet's path.
+      {Team::Red, glm::vec3(10.0f, 0.0f, 0.0f)}};
+  // Friendly fire on (the default): the teammate absorbs the trace first.
+  {
+    GameLogic game(AimScene(layout));
+    CHECK(game.FriendlyFireEnabled());
+    game.SetShotRollSource([] { return 0.0f; });
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseShoot();
+    game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), false, Team::Blue);
+    game.ConfirmAim(Team::Blue);
+    game.ClickUnit(1, Team::Blue);
+    game.ChoosePass();
+    game.ClickUnit(2, Team::Red);
+    game.ChoosePass();
+    game.CommitRound();
+    game.Update(10.0f);
+    CHECK(!game.FindUnit(1)->alive);
+    CHECK(game.FindUnit(2)->alive);
+  }
+  // Flag off: teammates are transparent to the trace; the bullet flies on
+  // and takes the enemy behind them.
+  {
+    GameLogic game(AimScene(layout));
+    game.SetFriendlyFireEnabled(false);
+    game.SetShotRollSource([] { return 0.0f; });
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseShoot();
+    game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), false, Team::Blue);
+    game.ConfirmAim(Team::Blue);
+    game.ClickUnit(1, Team::Blue);
+    game.ChoosePass();
+    game.ClickUnit(2, Team::Red);
+    game.ChoosePass();
+    game.CommitRound();
+    game.Update(10.0f);
+    CHECK(game.FindUnit(1)->alive);
+    CHECK(!game.FindUnit(2)->alive);
+  }
+}
+
+void TestFreeAimAreaDenialShotLeaksNothing() {
+  GameLogic game(AimScene(
+      {{Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(12.0f, 0.0f, 12.0f)}}));
+  game.FindUnit(0)->facingYaw = kPi;
+  game.SetShotRollSource([] { return 0.0f; });  // Even a guaranteed roll hits nobody.
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(8.0f, 0.0f, 0.0f), false, Team::Blue);  // Empty lane.
+  game.ConfirmAim(Team::Blue);
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  game.Update(10.0f);
+  CHECK(game.FindUnit(1)->alive);
+  CHECK(game.Sightings(Team::Blue, 1).empty());
+  CHECK(game.RoundNumber() == 2);
+  // The bluff still swings the figure toward the point it covered.
+  CHECK(std::fabs(game.FindUnit(0)->facingYaw) < 1e-3f);
+}
+
+void TestFollowerMirrorsBlindHitReveal() {
+  // The reveal a blind hit earns is recorded by the simulating instance in
+  // ResolvePendingShots; a mirroring follower (snapshots carry no sighting
+  // memory) must reconstruct it from the death arriving out of its FOV.
+  const auto layout = std::vector<std::pair<Team, glm::vec3>>{
+      {Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(12.0f, 0.0f, 0.0f)}};
+  GameLogic simulator(AimScene(layout));
+  GameLogic follower(AimScene(layout));
+  simulator.FindUnit(0)->facingYaw = kPi;  // Red1 stays unseen by Blue.
+  CHECK(follower.ImportState(simulator.ExportState()));
+
+  simulator.SetShotRollSource([] { return 0.0f; });
+  simulator.ClickUnit(0, Team::Blue);
+  simulator.ChooseShoot();
+  simulator.PlaceAimPoint(glm::vec3(12.0f, 0.9f, 0.0f), false, Team::Blue);
+  simulator.ConfirmAim(Team::Blue);
+  simulator.ClickUnit(1, Team::Red);
+  simulator.ChoosePass();
+  simulator.CommitRound();
+  // The shooter turned toward +X, so the downed red is now inside its live
+  // FOV; reposition the body out of the cone before mirroring so the
+  // follower really is learning about an unseen death. (In the live game
+  // this is the around-cover case, where the body stays hidden.)
+  simulator.FindUnit(0)->facingYaw = kPi;
+  CHECK(!simulator.FindUnit(1)->alive);
+  CHECK(follower.ImportState(simulator.ExportState()));
+  CHECK(!follower.Sightings(Team::Blue, 1).empty());
+}
+
+void TestFreeAimPlanSnapshotAndProtocolRoundTrip() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(3.25f, 0.5f, -2.75f), false, Team::Blue);
+  game.ConfirmAim(Team::Blue);
+
+  // Export -> text protocol -> import lands the identical free-aim plan on
+  // a mirroring peer (the two-canvas page ships plans this way).
+  const GameSnapshot snapshot = game.ExportState();
+  const std::string wire = SerializeSnapshot(snapshot);
+  GameSnapshot decoded;
+  CHECK(DeserializeSnapshot(wire, &decoded));
+  bool checked = false;
+  for (const auto& u : decoded.units) {
+    if (u.id != 1) continue;
+    checked = true;
+    CHECK(u.planType == PlannedActionType::Shoot);
+    CHECK(u.planHasAimPoint);
+    CHECK(u.planShootTargetId == -1);
+    CHECK(glm::distance(u.planAimPoint, glm::vec3(3.25f, 0.5f, -2.75f)) < 1e-4f);
+  }
+  CHECK(checked);
+
+  GameLogic follower(LegacyScene());
+  CHECK(follower.ImportState(decoded));
+  const Unit* mirrored = follower.FindUnit(1);
+  CHECK(mirrored->plan.type == PlannedActionType::Shoot);
+  CHECK(mirrored->plan.hasAimPoint);
+  CHECK(glm::distance(mirrored->plan.aimPoint, glm::vec3(3.25f, 0.5f, -2.75f)) < 1e-4f);
+
+  // ImportTeamPlans (the mid-planning sync path) carries it too.
+  GameLogic peer(LegacyScene());
+  CHECK(peer.ImportTeamPlans(decoded, Team::Blue));
+  CHECK(peer.FindUnit(1)->plan.hasAimPoint);
+}
+
 int main() {
   TestNavMeshRoutesAroundObstacle();
   TestNavMeshDirectPathWhenUnobstructed();
@@ -1863,6 +2188,15 @@ int main() {
   TestResetClearsSightings();
   TestImportStateOfNewGameClearsFollowerSightings();
   TestFollowerBuildsSightingsWithoutPhysicsUpdate();
+  TestAimRayResolvesUnitSurfaceAndSphere();
+  TestFreeAimPreviewPlaceConfirmAndCancel();
+  TestFreeAimShotFiresBehindShooterAndFacesAimPoint();
+  TestFreeAimBlindHitRevealsMissDoesNot();
+  TestFreeAimTraceStopsAtWalls();
+  TestFreeAimFriendlyFireFlag();
+  TestFreeAimAreaDenialShotLeaksNothing();
+  TestFollowerMirrorsBlindHitReveal();
+  TestFreeAimPlanSnapshotAndProtocolRoundTrip();
 
   if (g_failures == 0) {
     std::printf("All logic tests passed.\n");

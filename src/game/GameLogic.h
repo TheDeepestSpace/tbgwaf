@@ -46,6 +46,8 @@ struct GameSnapshot {
     bool alive = true;
     PlannedActionType planType = PlannedActionType::None;
     int planShootTargetId = -1;
+    bool planHasAimPoint = false;  // Free-aim shot plan (issue #129).
+    glm::vec3 planAimPoint{0.0f};
     std::vector<glm::vec3> planPath;
     std::vector<std::vector<glm::vec3>> planQueuedLegs;
     float planEndFacingYaw = 0.0f;
@@ -185,6 +187,63 @@ class GameLogic {
   void UpdateSightingMemory(float dtSeconds);
   void ResetSightingMemory();
 
+  // --- Free-aim shooting (issue #129). While AwaitingShootTarget, the
+  // player may point-target any world position instead of locking onto a
+  // figure: the camera ray resolves to a surface point in the selected
+  // figure's 360-degree LOS (the figure turns to shoot, so its current
+  // facing doesn't gate the aim), else to a point on an adjustable sphere
+  // around the figure (sky/off-surface aim). A unit under the cursor beats
+  // the surface behind it, keeping the existing lock-on flow. Placing an aim
+  // point is a two-step plan (tap-to-place, then confirm), touch-friendly
+  // and shared by the scenario scripts. ---
+
+  // Where a camera ray would aim for the currently selected shooter.
+  struct AimRayResult {
+    enum class Kind { Unit, Surface, Sphere };
+    Kind kind = Kind::Sphere;
+    int unitId = -1;       // Kind::Unit: the enemy figure to lock onto.
+    glm::vec3 point{0.0f};  // Kind::Surface/Sphere: the resolved aim point.
+  };
+  // Applies the aim-point rule for the selected figure: nearest enemy figure
+  // the ray hits (visible to the shooter's team) wins; else the nearest
+  // surface hit (ground/terrain, walk surfaces, slab tops, obstacle faces)
+  // within the shooter's 360-degree LOS and sight range; else the ray's
+  // intersection with the aiming sphere. `forceSphere` (the modifier key /
+  // toggle) skips the unit and surface stages outright.
+  AimRayResult ResolveAimRay(const glm::vec3& origin, const glm::vec3& direction,
+                             bool forceSphere) const;
+
+  // True if the selected shooter has clear 360-degree line of sight to this
+  // surface point within sight range (the acid-green aimable region).
+  bool IsAimSurfaceVisible(const glm::vec3& point) const;
+
+  // Click while AwaitingShootTarget: resolves the ray and either locks onto
+  // the hit unit (plans immediately, as before) or places/moves the aim
+  // preview marker. ConfirmAim records the planned `shoot at` action.
+  void ClickAimRay(const glm::vec3& origin, const glm::vec3& direction, bool forceSphere,
+                   Team byTeam);
+  // Direct placement used by scenario scripts / the protocol action's replay
+  // (the already-resolved form of a click): no LOS gate, so deliberate blind
+  // fire at any world point is possible.
+  void PlaceAimPoint(const glm::vec3& point, bool onSphere, Team byTeam);
+  void ConfirmAim(Team byTeam);
+
+  // The placed-but-unconfirmed aim marker ("+" selector / sphere point).
+  struct AimPreview {
+    glm::vec3 point{0.0f};
+    bool onSphere = false;  // Placed on the aiming sphere, not a surface.
+  };
+  const std::optional<AimPreview>& GetAimPreview() const { return aimPreview_; }
+
+  // Adjustable sky-aim sphere radius (slider/handle in the HUD).
+  float AimSphereRadius() const { return aimSphereRadius_; }
+  void SetAimSphereRadius(float radius);
+
+  // Friendly fire config flag: when off, same-team figures are transparent
+  // to the free-aim ballistic trace. On by default.
+  bool FriendlyFireEnabled() const { return friendlyFire_; }
+  void SetFriendlyFireEnabled(bool enabled) { friendlyFire_ = enabled; }
+
   // Input events, driven by the input/render layer after it has resolved a
   // screen click into either a unit id or a ground-plane world point.
   // `byTeam` is the side the input came from (in split-screen, the clicked
@@ -290,11 +349,33 @@ class GameLogic {
 
   // A planned shot waiting for its first tick with valid FOV+LOS. Expires
   // (as a miss / hold-fire) if the shooter or target dies first, or if the
-  // round ends with it still blocked.
+  // round ends with it still blocked. Free-aim shots (hasAimPoint) have no
+  // gates: they fire on the first resolution tick, hit or miss.
   struct PendingShot {
     int shooterId = -1;
     int targetId = -1;
+    bool hasAimPoint = false;
+    glm::vec3 aimPoint{0.0f};
   };
+
+  // One figure the free-aim ballistic trace can reach, in ray order.
+  struct AimTraceCandidate {
+    int unitId = -1;
+    float chance = 0.0f;
+    float rayT = 0.0f;
+  };
+  // Every figure the trace from `shooter` toward `aimPoint` would pass
+  // through, nearest first: ray intersects the figure's bounds, the path up
+  // to it is unobstructed, and (unless friendly fire is on) it is an enemy.
+  // Unseen figures are included -- the bullet doesn't care about fog.
+  std::vector<AimTraceCandidate> AimTraceCandidates(const Unit& shooter,
+                                                    const glm::vec3& aimPoint) const;
+  // Applies a taken free-aim shot: the shooter turns to face the aim point
+  // (persisting into later rounds' FOV/overwatch), plays the shoot beat, and
+  // the hit figure (if any) goes down. A hit on a figure the shooter's team
+  // cannot currently see records a sighting sample -- the one bit of info a
+  // connecting blind shot reveals; misses reveal nothing.
+  void ApplyAimShot(Unit& shooter, Unit* hitTarget, const glm::vec3& aimPoint);
 
   // Gate check only, no side effects (ShotHitChance > 0): "can this shooter
   // take the shot at all". Split out so a tick's simultaneous shots can all
@@ -356,6 +437,12 @@ class GameLogic {
   std::vector<PendingShot> pendingShots_;
   std::mt19937 shotRng_{0x5eedu};
   std::function<float()> shotRollSource_;
+  // Free-aim state: the unconfirmed "+" marker (planning-local, never
+  // serialized -- like the selection), the sphere radius, and the friendly
+  // fire config flag.
+  std::optional<AimPreview> aimPreview_;
+  float aimSphereRadius_ = constants::kAimSphereDefaultRadius;
+  bool friendlyFire_ = constants::kFriendlyFireDefault;
   // Ids of figures a simulating peer reports as mid-move (ImportState only;
   // a follower has no activeMoves_ of its own).
   std::vector<int> mirroredMoving_;

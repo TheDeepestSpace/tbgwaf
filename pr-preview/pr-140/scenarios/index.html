@@ -62,7 +62,7 @@ them; click a script step to jump both videos to it. Deleted scenarios are
 listed by name only.</p>
 <h2>New scenarios <span class="count">(4)</span></h2>
 <div class="scenario has-video" data-stem="burst_free_aim_point_target"><h3>burst_free_aim_point_target</h3><div class="path">tests/scenarios/burst_free_aim_point_target.yaml</div>
-<p class="description">Bursts work for free-aim point-target shots too (issues places a blind-fire aim point on the enemy&#x27;s torso and fires a 5-shot burst at it. Each bullet traces the ray and rolls independently; the pinned rolls miss twice, then the 3rd bullet connects and downs the figure (the rest of the burst flies on with nobody left in the ray).</p>
+<p class="description">Bursts work for free-aim point-target shots too (issues places a blind-fire aim point on the enemy&#x27;s torso and fires a 5-shot burst at it. Every bullet flies its own scattered line inside the weapon&#x27;s cone; only bullets whose line actually crosses the figure roll against the hit chance (the pinned roll always hits), so the burst downs the figure with one of the bullets that land on the body.</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/burst_free_aim_point_target/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/burst_free_aim_point_target/red.webm"></video></figure>
@@ -73,7 +73,7 @@ listed by name only.</p>
 <div class="step" data-action="1"><span class="u blue">blue0</span> shoots unit None</div>
 <div class="step" data-action="2"><span class="u red">red1</span> passes</div>
 <div class="step" data-action="3">commit round</div>
-<div class="detail">Check: <span class="u red">red1</span> is down — The burst&#x27;s 3rd bullet connected</div>
+<div class="detail">Check: <span class="u red">red1</span> is down — A bullet of the burst connected</div>
 <div class="detail">Check: <span class="u blue">blue0</span> faces 0° (tolerance 1) — Turned onto the aim point</div>
 <div class="detail">Check: winner: blue</div>
 </div>

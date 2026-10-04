@@ -187,8 +187,8 @@ UrbanBlock MakeUrbanBlock(std::vector<glm::vec2> vertices) {
 constexpr float kGradeY = 0.025f;        // Pavement lift over the base plane (avoids z-fighting).
 constexpr float kRoadSampleStep = 3.0f;  // Centerline sampling; short enough for smooth ramps.
 // How far an elevated deck end that runs off-map continues past the map
-// bounds, so the edge shows a deck passing through rather than a cut stub.
-constexpr float kDeckOverhang = 12.0f;
+// bounds. Zero: the deck is cut off flush with the map edge.
+constexpr float kDeckOverhang = 0.0f;
 
 // Presence and layout draws (issue #130) use their own stream so forcing
 // either never reshuffles the rest of a seed's layout; both are drawn
@@ -506,8 +506,7 @@ std::vector<UrbanBlock> BuildCityBlocks(uint32_t seed, const MapGeneratorConfig&
 
 // Ribbon edge; an end vertex sitting exactly on the map boundary slides
 // along the road direction onto it so the oblique road is cut off flush
-// with the edge. Ends past the boundary (an elevated layout's off-map
-// overhang) keep their square cut beyond the map instead.
+// with the edge, elevated off-map deck ends included.
 std::vector<glm::vec3> RibbonSide(const UrbanRoad& road, bool left, float half) {
   std::vector<glm::vec3> side;
   side.reserve(road.centerline.size());

@@ -906,14 +906,14 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
       const auto roads = UrbanRoads(seed, config);
       const auto& deck = roads[0].centerline;
 
-      // A grade end sits exactly on the map boundary; an elevated end
-      // continues well past it at deck height instead of stopping in a stub.
+      // Both end kinds are cut off exactly at the map boundary; an elevated
+      // end stays at deck height there.
       auto checkEnd = [&](const glm::vec3& p, bool grade) {
         if (grade) {
           CHECK(std::fabs(std::max(std::fabs(p.x), std::fabs(p.z)) - half) < kEps);
           CHECK(p.y < 0.1f);
         } else {
-          CHECK(std::max(std::fabs(p.x), std::fabs(p.z)) > half + 5.0f);
+          CHECK(std::fabs(std::max(std::fabs(p.x), std::fabs(p.z)) - half) < kEps);
           CHECK(std::fabs(p.y - config.highwayElevation) < 0.1f);
         }
       };
@@ -1024,7 +1024,7 @@ void TestBranchMayRunOffMapWithoutRamp() {
     const auto roads = UrbanRoads(seed, config);
     const auto& branch = roads[1].centerline;
     for (const glm::vec3& p : branch) CHECK(std::fabs(p.y - config.highwayElevation) < 0.1f);
-    CHECK(std::max(std::fabs(branch.front().x), std::fabs(branch.front().z)) > half + 5.0f);
+    CHECK(std::fabs(std::max(std::fabs(branch.front().x), std::fabs(branch.front().z)) - half) < kEps);
     int groundConnections = 0;
     for (const WalkSurface& surface : scene.walkSurfaces) {
       groundConnections += surface.connectsToGround ? 1 : 0;

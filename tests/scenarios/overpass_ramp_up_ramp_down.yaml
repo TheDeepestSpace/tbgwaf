@@ -8,19 +8,19 @@ map:
   generate: {type: urban, seed: 33, arteries: 2}
 
 units:
-  - {id: 0, team: blue, position: [-33.1497, 0.529, 5.3773], facing_degrees: 0}
+  - {id: 0, team: blue, position: [-44.2498, 0.7042, 9.6928], facing_degrees: 0}
   - {id: 1, team: red, position: [-66.45, 0.025, 18.3239], facing_degrees: 180}
 
 camera:
-  target: [-27.6, 3.2]
+  target: [-40.1, 8.1]
   zoom: 34
 
 script:
   - action: move
     actor: 0
-    destination: [-22.0497, 2.4312, 1.0617]
+    destination: [-35.9248, 2.8771, 6.4562]
   - action: pass
     actor: 1
   - action: commit
-  - assert: {unit: 0, position: [-22.0497, 2.4312, 1.0617], tolerance: 0.05}
+  - assert: {unit: 0, position: [-35.9248, 2.8771, 6.4562], tolerance: 0.05}
   - assert: {round: 2}

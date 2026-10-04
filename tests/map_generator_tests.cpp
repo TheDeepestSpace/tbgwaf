@@ -979,6 +979,22 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
       CHECK(ramp.front().y < 0.1f);
       CHECK(std::fabs(ramp.back().y - config.highwayElevation) < 0.1f);
 
+      // The ramp tops out before its slab reaches the artery's edge, so the
+      // junction sits entirely at deck height and the descent only starts
+      // clear of the deck (no wedge cutting under the artery slab).
+      const glm::vec2 arteryOrigin(deck.front().x, deck.front().z);
+      const glm::vec2 arteryDir = glm::normalize(
+          glm::vec2(deck.back().x, deck.back().z) - arteryOrigin);
+      const glm::vec2 arteryNormal(-arteryDir.y, arteryDir.x);
+      const float junctionBand = config.arteryWidth * 0.5f + roads[1].width * 0.5f;
+      for (const glm::vec3& p : ramp) {
+        const float lateral =
+            std::fabs(glm::dot(glm::vec2(p.x, p.z) - arteryOrigin, arteryNormal));
+        if (lateral < junctionBand) {
+          CHECK(std::fabs(p.y - config.highwayElevation) < 0.1f);
+        }
+      }
+
       NavMesh nav;
       nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
                 &scene.walkSurfaces);

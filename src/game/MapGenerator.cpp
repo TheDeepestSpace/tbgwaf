@@ -242,6 +242,7 @@ struct BranchSpec {
   float width = 0.0f;
   float mergeS = 0.0f;         // Artery parameter of the merge point.
   float riseStart = 0.0f;      // Branch parameter where the on-ramp starts climbing.
+  float riseEnd = 0.0f;        // Branch parameter where the on-ramp reaches deck height.
   bool offMap = false;         // Stays at deck height and runs off-map; no ramp.
   float u0 = 0.0f;             // First sampled param; -kDeckOverhang when off-map.
   int side = 1;                // Sign of dot(artery normal, branch - artery origin).
@@ -352,9 +353,17 @@ HighwayPlan BuildHighwayPlan(uint32_t seed, const MapGeneratorConfig& c) {
     const bool canOffMap = plan.elevated && plan.layout != OverpassLayout::Through;
     branch.offMap = canOffMap && (c.branchEnd == BranchEnd::Auto ? drawnOffMap
                                                                  : c.branchEnd == BranchEnd::OffMap);
-    branch.riseStart = branch.length - std::min(branch.length * rampFraction, rampMax);
+    // The ramp tops out before the branch slab crosses the deck's edge, so
+    // the whole junction sits at deck height and the branch only starts its
+    // descent once clear of the artery (no wedge cutting under the deck).
+    const float sinTurn =
+        std::max(0.2f, std::fabs(artery.dir.x * branch.dir.y - artery.dir.y * branch.dir.x));
+    const float junctionClear = (c.arteryWidth * 0.5f + branch.width * 0.5f + 2.0f) / sinTurn;
+    branch.riseEnd = std::max(branch.length * 0.5f, branch.length - junctionClear);
+    branch.riseStart = branch.riseEnd - std::min(branch.riseEnd * rampFraction, rampMax);
     if (branch.offMap) {
       branch.riseStart = 0.0f;
+      branch.riseEnd = 0.0f;
       branch.u0 = -kDeckOverhang;
     }
   }
@@ -381,7 +390,7 @@ float BranchElevationAt(const HighwayPlan& plan, const MapGeneratorConfig& c, fl
   if (!plan.elevated) return kGradeY;
   const float top = ArteryElevationAt(plan, c, plan.branch.mergeS);
   if (plan.branch.offMap) return top;
-  const float run = std::max(1.0f, plan.branch.length - plan.branch.riseStart);
+  const float run = std::max(1.0f, plan.branch.riseEnd - plan.branch.riseStart);
   return kGradeY + (top - kGradeY) * SmoothStep01((u - plan.branch.riseStart) / run);
 }
 
@@ -790,7 +799,7 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
 
   // Bridge stands: paired pier columns under the high spans, leaving broad
   // navigable ground between bents. None near the on-ramp's merge, where the
-  // ramp slab sweeps below deck level.
+  // two slabs overlap.
   if (plan.elevated) {
     // A column may only stand where it stays below every slab crossing it
     // (and never on at-grade pavement, whose slab sits at ground level).

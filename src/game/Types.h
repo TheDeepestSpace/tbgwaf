@@ -134,7 +134,22 @@ constexpr float kAgentRadius = 0.4f;     // Padding used to inflate obstacles fo
 constexpr float kUnitHalfWidth = 0.35f;
 constexpr float kUnitHeight = 1.8f;
 constexpr float kEyeHeight = 1.5f;
-constexpr float kShootRange = 250.0f;         // Effectively unlimited: exceeds any generated map's diagonal.
+// Sighting range: effectively unlimited (exceeds any generated map's diagonal).
+// Visibility stays on this so capping the shot range doesn't shrink what a team sees.
+constexpr float kSightRange = 250.0f;
+// Shot range cap: 3x the 20-unit per-round walking distance (4.0 speed * 5.0 s).
+constexpr float kShootRange = 60.0f;
+// Gun tip while aiming (figure-local: forward / up / right of the feet): the
+// right arm and pistol extended level from the shoulder. Shots and the shot
+// cone start here, not at the head.
+constexpr float kMuzzleForward = 0.85f;
+constexpr float kMuzzleHeight = 0.93f;
+constexpr float kMuzzleSide = 0.30f;
+constexpr float kConeStartAlpha = 0.5f;  // Shot-cone opacity at the gun tip; fades to 0 at kShootRange.
+// Half-angle of the drawn shot-dispersion cone: a narrow wedge at the gun tip
+// showing where a shot may stray from the aim line. Overlay only; the hard
+// shot gate stays kShootHalfFovDegrees.
+constexpr float kShotConeHalfAngleDegrees = 3.0f;
 constexpr float kShootHalfFovDegrees = 75.0f;  // 150 degree total FOV cone.
 constexpr float kKnockdownDuration = 0.4f;  // Seconds for a hit unit to fall over.
 // Visual-only figure animation (procedural humanoid, see gfx/SceneRenderer):
@@ -156,11 +171,11 @@ constexpr float kMoveSpeed = 4.0f;  // Default run speed, world units per second
 // fixed-length window. A figure's plannable move distance is bounded by
 // runSpeed * kRoundDuration, so every move animation fits in the window.
 constexpr float kRoundDuration = 5.0f;  // Seconds of execution per round.
-// Visual length of the rendered FOV cone overlay. Sized off kShootRange
+// Visual length of the rendered FOV cone overlay. Sized off kSightRange
 // (bigger than any map's diagonal) so the cone reaches the map edge no matter
 // where a unit stands or faces; the renderer clips each ray at the map
 // boundary.
-constexpr float kFovConeVisualRange = kShootRange;
+constexpr float kFovConeVisualRange = kSightRange;
 // Enemy sighting memory: a figure continuously in FOV leaves one sample per
 // interval (plus one on entry). Samples fade per completed round (not in
 // real time) and are forgotten once fully faded.

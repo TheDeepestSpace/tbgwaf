@@ -13,6 +13,8 @@
 // `action: commit` step, which mirrors clicking "Commit Round" and plays
 // out every figure's plan on both teams simultaneously.
 //
+// `map.half_extent` sizes the ground square; units must start inside it.
+//
 // See tests/scenarios/*.yaml for the file format by example, and
 // tests/scenario_tests.cpp for how these are run in CI.
 

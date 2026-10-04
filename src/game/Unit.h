@@ -117,6 +117,14 @@ struct Unit {
     return position + glm::vec3(0.0f, constants::kEyeHeight, 0.0f);
   }
 
+  // World position of the gun tip when aiming (see constants::kMuzzle*).
+  glm::vec3 MuzzlePosition() const {
+    const glm::vec3 fwd = FacingDirection();
+    const glm::vec3 right(-fwd.z, 0.0f, fwd.x);
+    return position + fwd * constants::kMuzzleForward + right * constants::kMuzzleSide +
+           glm::vec3(0.0f, constants::kMuzzleHeight, 0.0f);
+  }
+
   glm::vec3 FacingDirection() const {
     return glm::vec3(std::cos(facingYaw), 0.0f, std::sin(facingYaw));
   }

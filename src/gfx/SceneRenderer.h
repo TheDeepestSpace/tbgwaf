@@ -43,6 +43,7 @@ struct PaneOverlays {
   const std::vector<glm::vec3>* movePreviewPath = nullptr;  // Yellow preview polyline.
   const tactics::ReachField* moveFrontier = nullptr;  // Reachable-area gradient + border.
   bool moveFrontierSubsequentLeg = false;             // Border drawn yellow instead of green.
+  bool showShotCone = false;                          // Selected figure is actively choosing a target.
   // Debug: walkable-cell boundaries of this navmesh (ground cells cyan,
   // climb-top cells orange), hugging the terrain. Not set by
   // BuildPaneOverlays; the app's debug toggle / the map golden harness
@@ -110,11 +111,13 @@ class SceneRenderer {
   Shader unlitShader_;
   Shader litShader_;
   Shader colorShader_;
+  Shader coneSurfaceShader_;
   Shader depthShader_;
   CubeMesh cubeMesh_;
   SphereMesh sphereMesh_;
   LineMesh pathLine_;
-  TriangleMesh fovConeMesh_;
+  ColorTriangleMesh fovConeMesh_;
+  ColorTriangleMesh shotConeMesh_;
   // Reuse the terrain-clipped geometry until the unit or map changes.
   struct TerrainFovCache {
     int unitId = -1;

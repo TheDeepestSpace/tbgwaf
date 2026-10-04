@@ -725,6 +725,46 @@ void EmitBlockBuildings(Scene* scene, const UrbanBlock& block, size_t blockIndex
   }
 }
 
+// True when two deck spans overlap in plan at matching height, i.e. a figure
+// standing on either could step straight onto the other. The height check
+// runs at a representative overlap point so a span crossing beneath an
+// elevated one never counts as touching it.
+bool SpansTouchAtSameHeight(const WalkSurface& a, const WalkSurface& b) {
+  std::vector<glm::vec2> fa, fb;
+  fa.reserve(a.vertices.size());
+  fb.reserve(b.vertices.size());
+  for (const glm::vec3& v : a.vertices) fa.emplace_back(v.x, v.z);
+  for (const glm::vec3& v : b.vertices) fb.emplace_back(v.x, v.z);
+  glm::vec2 probe(0.0f);
+  int contained = 0;
+  for (const glm::vec2& v : fa) {
+    if (PointInConvexPolygon(v, fb)) {
+      probe += v;
+      ++contained;
+    }
+  }
+  for (const glm::vec2& v : fb) {
+    if (PointInConvexPolygon(v, fa)) {
+      probe += v;
+      ++contained;
+    }
+  }
+  if (contained) {
+    probe /= static_cast<float>(contained);
+  } else {
+    // Quads can also cross edge-through-edge with no corner contained.
+    bool crosses = false;
+    for (size_t i = 0; i < fa.size() && !crosses; ++i) {
+      crosses = SegmentEntersConvexPolygon(fa[i], fa[(i + 1) % fa.size()], fb);
+    }
+    if (!crosses) return false;
+    const glm::vec3 ca = SurfaceCenter(a), cb = SurfaceCenter(b);
+    probe = glm::vec2((ca.x + cb.x) * 0.5f, (ca.z + cb.z) * 0.5f);
+  }
+  return std::fabs(SurfaceHeightAt(a, probe.x, probe.y) -
+                   SurfaceHeightAt(b, probe.x, probe.y)) < 0.6f;
+}
+
 Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   Rng rng(seed);
   Scene scene;
@@ -782,17 +822,35 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     }
     if (roads.size() > 1 && chains[1].first >= 0) {
       if (!plan.branch.offMap) scene.walkSurfaces[chains[1].first].connectsToGround = true;
-      int deckAtMerge = -1;
-      for (size_t i = 0; i < chains[0].loS.size(); ++i) {
-        if (plan.branch.mergeS >= chains[0].loS[i] - 1e-3f &&
-            plan.branch.mergeS <= chains[0].hiS[i] + 1e-3f) {
-          deckAtMerge = chains[0].first + static_cast<int>(i);
+      // The on-ramp rides level with the deck across the whole junction
+      // overlap (its profile only starts descending once clear of the
+      // artery), so every overlapping same-height deck/branch span pair is a
+      // legal crossing. A single link at the merge span would funnel every
+      // deck<->branch route through that one waypoint, pricing branch cells
+      // right next to a mover out of its move budget (issue #135).
+      bool linked = false;
+      for (int bi = chains[1].first; bi <= chains[1].last; ++bi) {
+        for (int di = chains[0].first; di <= chains[0].last; ++di) {
+          if (!SpansTouchAtSameHeight(scene.walkSurfaces[di], scene.walkSurfaces[bi])) continue;
+          scene.walkSurfaces[bi].neighbors.push_back(di);
+          scene.walkSurfaces[di].neighbors.push_back(bi);
+          linked = true;
         }
       }
-      if (deckAtMerge >= 0) {
-        // The on-ramp's top merges onto the deck span holding its merge point.
-        scene.walkSurfaces[chains[1].last].neighbors.push_back(deckAtMerge);
-        scene.walkSurfaces[deckAtMerge].neighbors.push_back(chains[1].last);
+      if (!linked) {
+        // Degenerate junction (no detectable overlap): fall back to linking
+        // the on-ramp's top to the deck span holding its merge point.
+        int deckAtMerge = -1;
+        for (size_t i = 0; i < chains[0].loS.size(); ++i) {
+          if (plan.branch.mergeS >= chains[0].loS[i] - 1e-3f &&
+              plan.branch.mergeS <= chains[0].hiS[i] + 1e-3f) {
+            deckAtMerge = chains[0].first + static_cast<int>(i);
+          }
+        }
+        if (deckAtMerge >= 0) {
+          scene.walkSurfaces[chains[1].last].neighbors.push_back(deckAtMerge);
+          scene.walkSurfaces[deckAtMerge].neighbors.push_back(chains[1].last);
+        }
       }
     }
   }

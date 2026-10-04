@@ -375,14 +375,19 @@ int main() {
     mapSeed = static_cast<uint32_t>(std::strtoul(seedEnv, nullptr, 10));
   }
   // TBGWAF_MAP picks the generator/urban variant; both web clients must
-  // agree the same way they must agree on the seed.
-  std::string mapType = "urban-elevated";
+  // agree the same way they must agree on the seed. The urban-auto default
+  // lets the seed decide whether the city gets an overpass (and which layout,
+  // issue #130); TBGWAF_MAP=urban forces it off, urban-elevated forces it on.
+  std::string mapType = "urban-auto";
   if (const char* mapEnv = std::getenv("TBGWAF_MAP")) mapType = mapEnv;
   auto makeMap = [&mapSeed, &mapType]() {
     if (mapType == "hilly") return tactics::GenerateHillyMap(mapSeed);
     tactics::MapGeneratorConfig config;
     if (mapType == "urban-merge" || mapType == "urban-elevated") config.arteryCount = 2;
-    if (mapType == "urban-elevated") config.elevatedHighway = true;
+    if (mapType == "urban" || mapType == "urban-merge") {
+      config.elevatedHighway = tactics::OverpassMode::Off;
+    }
+    if (mapType == "urban-elevated") config.elevatedHighway = tactics::OverpassMode::On;
     return tactics::GenerateUrbanMap(mapSeed, config);
   };
   GameLogic game(makeMap());
@@ -686,7 +691,8 @@ int main() {
       if (flowEvent) {
         if (*flowEvent == tbgwaf_flow::Event::SelectUrban ||
             *flowEvent == tbgwaf_flow::Event::SelectHills) {
-          mapType = *flowEvent == tbgwaf_flow::Event::SelectHills ? "hilly" : "urban";
+          // The menu's Urban entry uses the seed-driven random overpass mode.
+          mapType = *flowEvent == tbgwaf_flow::Event::SelectHills ? "hilly" : "urban-auto";
           game.Reset(makeMap());
           for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
         }

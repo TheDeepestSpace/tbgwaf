@@ -118,20 +118,44 @@ int main(int argc, char** argv) {
     float frontierBudget = 0.0f;
   };
   std::vector<MapCase> cases;
+  // Overpass presence is seed-driven by default (issue #130); every golden
+  // here pins an explicit presence (and layout) so it tests one variant.
+  tactics::MapGeneratorConfig gradeConfig;
+  gradeConfig.elevatedHighway = tactics::OverpassMode::Off;
   for (const uint32_t seed : kCitySeeds) {
-    cases.push_back({"city_seed_" + std::to_string(seed), tactics::GenerateUrbanMap(seed),
-                     kCityCameraZoom, /*showNavMesh=*/false});
+    cases.push_back({"city_seed_" + std::to_string(seed),
+                     tactics::GenerateUrbanMap(seed, gradeConfig), kCityCameraZoom,
+                     /*showNavMesh=*/false});
   }
-  tactics::MapGeneratorConfig mergeConfig;
+  tactics::MapGeneratorConfig mergeConfig = gradeConfig;
   mergeConfig.arteryCount = 2;
   cases.push_back({"city_merge_seed_42", tactics::GenerateUrbanMap(42, mergeConfig),
                    kCityCameraZoom, /*showNavMesh=*/false});
+  tactics::MapGeneratorConfig mergeConfigAuto;  // Seed-driven overpass presence and layout.
+  mergeConfigAuto.arteryCount = 2;
   tactics::MapGeneratorConfig elevatedConfig = mergeConfig;
-  elevatedConfig.elevatedHighway = true;
+  elevatedConfig.elevatedHighway = tactics::OverpassMode::On;
+  elevatedConfig.overpassLayout = tactics::OverpassLayout::RampUpRampDown;
+  elevatedConfig.branchEnd = tactics::BranchEnd::Ramp;
   // Framed low and from the side so the deck, both ramps, the on-ramp fork
   // and the pier bents beneath all read clearly.
   cases.push_back({"city_elevated_seed_7", tactics::GenerateUrbanMap(7, elevatedConfig),
                    180.0f, /*showNavMesh=*/false, /*pitchOffset=*/-0.55f, /*yawOffset=*/-1.6f});
+  // The overpass layouts (issue #130) come from seeds whose default (Auto)
+  // draw naturally yields them: nothing is forced. Same framing as above;
+  // elevated ends are cut off flush at the map edge and the branch ramps
+  // between grade and the deck, or (seed 26) runs off-map with no ramp.
+  const std::pair<const char*, uint32_t> kNaturalOverpasses[] = {
+      {"city_overpass_ramp_up_ramp_down_seed_33", 33},
+      {"city_overpass_through_seed_4", 4},
+      {"city_overpass_enter_ramp_up_seed_16", 16},
+      {"city_overpass_enter_ramp_down_seed_22", 22},
+      {"city_overpass_branch_off_map_seed_26", 26},
+  };
+  for (const auto& [name, seed] : kNaturalOverpasses) {
+    cases.push_back({name, tactics::GenerateUrbanMap(seed, mergeConfigAuto), 180.0f,
+                     /*showNavMesh=*/false, /*pitchOffset=*/-0.55f, /*yawOffset=*/-1.6f});
+  }
   // Frontier of a unit on the deck, framed low and side-on at the deck edge.
   {
     MapCase deckFrontier{"city_elevated_deck_frontier_seed_7",

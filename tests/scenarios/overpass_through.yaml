@@ -1,0 +1,27 @@
+# Issue #130: seed-driven overpass layouts. Nothing is forced: seed 4's
+# default draw naturally yields the through layout (the deck enters and exits off-map at full height (no artery ramps), so the branch
+# ramp is the only way between grade and the deck).
+# Blue climbs the branch's connecting ramp; the asserted Y proves the
+# ramp-off works, and the goldens show the deck crossing the whole map and cut off flush at both edges.
+name: overpass_through
+
+map:
+  generate: {type: urban, seed: 4, arteries: 2}
+
+units:
+  - {id: 0, team: blue, position: [-26.5064, 0.6495, 43.6518], facing_degrees: 0}
+  - {id: 1, team: red, position: [-39.5514, 0.025, 66.8458], facing_degrees: 180}
+
+camera:
+  target: [-23.6, 38.5]
+  zoom: 34
+
+script:
+  - action: move
+    actor: 0
+    destination: [-20.7085, 2.1273, 33.3434]
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [-20.7085, 2.1273, 33.3434], tolerance: 0.05}
+  - assert: {round: 2}

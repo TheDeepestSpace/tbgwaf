@@ -39,7 +39,33 @@ bool SceneFromSpec(const Json& spec, tactics::Scene* out, std::string* error) {
       if (gen.Has("local_street_width")) {
         config.localStreetWidth = static_cast<float>(gen["local_street_width"].AsNumber());
       }
-      if (gen.Has("elevated")) config.elevatedHighway = gen["elevated"].AsBool();
+      // `elevated` forces the overpass on/off; omitted keeps the generator's
+      // seed-driven draw. `elevated_layout` pins one of the deck layouts.
+      if (gen.Has("elevated")) {
+        config.elevatedHighway = gen["elevated"].AsBool() ? OverpassMode::On : OverpassMode::Off;
+      }
+      if (gen["elevated_layout"].IsString()) {
+        const std::string layout = gen["elevated_layout"].AsString();
+        if (layout == "ramp-up-ramp-down") config.overpassLayout = OverpassLayout::RampUpRampDown;
+        else if (layout == "through") config.overpassLayout = OverpassLayout::Through;
+        else if (layout == "enter-ramp-up") config.overpassLayout = OverpassLayout::EnterRampUp;
+        else if (layout == "enter-ramp-down") config.overpassLayout = OverpassLayout::EnterRampDown;
+        else {
+          return Fail(error, "map.generate.elevated_layout must be ramp-up-ramp-down/through/"
+                             "enter-ramp-up/enter-ramp-down, got '" + layout + "'");
+        }
+      }
+      // `elevated_branch` pins the branch's map-edge end (`ramp`/`off-map`);
+      // scenarios that force the overpass default to a ramp.
+      if (gen.Has("elevated")) config.branchEnd = BranchEnd::Ramp;
+      if (gen["elevated_branch"].IsString()) {
+        const std::string end = gen["elevated_branch"].AsString();
+        if (end == "ramp") config.branchEnd = BranchEnd::Ramp;
+        else if (end == "off-map") config.branchEnd = BranchEnd::OffMap;
+        else {
+          return Fail(error, "map.generate.elevated_branch must be ramp/off-map, got '" + end + "'");
+        }
+      }
       scene = GenerateUrbanMap(seed, config);
     } else if (type == "hilly") {
       scene = GenerateHillyMap(seed);

@@ -7,7 +7,7 @@
 name: elevated_highway_ramp
 
 map:
-  generate: {type: urban, seed: 7, arteries: 2, elevated: true}
+  generate: {type: urban, seed: 7, arteries: 2, elevated: true, elevated_layout: ramp-up-ramp-down}
 
 units:
   - {id: 0, team: blue, position: [-62.4210, 0, 15.8678], facing_degrees: -15}

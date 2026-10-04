@@ -452,8 +452,12 @@ void BuildPolygonPrism(const tactics::Obstacle& obstacle, LitTriangleMesh* mesh)
   mesh->SetMesh(vertices, indices);
 }
 
+// `hiddenEdges[i]` (optional) skips the side wall under polygon edge i, for
+// edges butted against a neighbouring slab: the wall would only show as a
+// seam, most visibly through the faded see-through pass.
 void AppendSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
-                        LitVertices* vertices, std::vector<GLuint>* indices) {
+                        LitVertices* vertices, std::vector<GLuint>* indices,
+                        const std::vector<char>* hiddenEdges = nullptr) {
   if (polygon.size() < 3) return;
   glm::vec3 topNormal = glm::normalize(glm::cross(polygon[1] - polygon[0], polygon[2] - polygon[0]));
   if (topNormal.y < 0.0f) topNormal = -topNormal;
@@ -470,6 +474,7 @@ void AppendSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
   }
   if (thickness > 0.0f) {
     for (size_t i = 0; i < polygon.size(); ++i) {
+      if (hiddenEdges && (*hiddenEdges)[i]) continue;
       const glm::vec3 a = polygon[i], b = polygon[(i + 1) % polygon.size()];
       glm::vec3 normal = glm::cross(b - a, glm::vec3(0, -1, 0));
       if (glm::length(normal) > 1e-6f) normal = glm::normalize(normal);
@@ -480,11 +485,33 @@ void AppendSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
 }
 
 void BuildSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
-                       LitTriangleMesh* mesh) {
+                       LitTriangleMesh* mesh, const std::vector<char>* hiddenEdges = nullptr) {
   LitVertices vertices;
   std::vector<GLuint> indices;
-  AppendSurfacePatch(polygon, thickness, &vertices, &indices);
+  AppendSurfacePatch(polygon, thickness, &vertices, &indices, hiddenEdges);
   mesh->SetMesh(vertices, indices);
+}
+
+// Edges of `surface` shared (same endpoints, either direction) with one of its
+// chain neighbours, i.e. the joints between consecutive deck/ramp slabs.
+std::vector<char> SharedEdges(const std::vector<tactics::WalkSurface>& surfaces,
+                              const tactics::WalkSurface& surface) {
+  const std::vector<glm::vec3>& v = surface.vertices;
+  std::vector<char> shared(v.size(), 0);
+  auto same = [](const glm::vec3& p, const glm::vec3& q) { return glm::distance(p, q) < 1e-3f; };
+  for (int neighbor : surface.neighbors) {
+    const std::vector<glm::vec3>& w = surfaces[neighbor].vertices;
+    for (size_t i = 0; i < v.size(); ++i) {
+      const glm::vec3& a = v[i];
+      const glm::vec3& b = v[(i + 1) % v.size()];
+      for (size_t j = 0; j < w.size(); ++j) {
+        const glm::vec3& c = w[j];
+        const glm::vec3& d = w[(j + 1) % w.size()];
+        if ((same(a, c) && same(b, d)) || (same(a, d) && same(b, c))) shared[i] = 1;
+      }
+    }
+  }
+  return shared;
 }
 
 // Axis-aligned box with outward normals (same faces as CubeMesh, in world
@@ -1921,7 +1948,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
     }
     for (const tactics::WalkSurface& surface : game.GetScene().walkSurfaces) {
-      BuildSurfacePatch(surface.vertices, 0.45f, &geometryMesh_);
+      const std::vector<char> hidden = SharedEdges(game.GetScene().walkSurfaces, surface);
+      BuildSurfacePatch(surface.vertices, 0.45f, &geometryMesh_, &hidden);
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
       geometryMesh_.Draw();
     }
@@ -2039,7 +2067,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     if (fadeSurface[i]) continue;  // Re-drawn translucent below.
     // Concrete, clearly lighter than the asphalt below: the elevated deck
     // and its ramps must read as a bridge, not as more ground road.
-    BuildSurfacePatch(walkSurfaces[i].vertices, kDeckThickness, &geometryMesh_);
+    const std::vector<char> hidden = SharedEdges(walkSurfaces, walkSurfaces[i]);
+    BuildSurfacePatch(walkSurfaces[i].vertices, kDeckThickness, &geometryMesh_, &hidden);
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(kDeckColor, 1.0f));
   }
@@ -2112,7 +2141,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                        color);
         }
       } else {
-        BuildSurfacePatch(walkSurfaces[f.surface].vertices, kDeckThickness, &geometryMesh_);
+        const std::vector<char> hidden = SharedEdges(walkSurfaces, walkSurfaces[f.surface]);
+        BuildSurfacePatch(walkSurfaces[f.surface].vertices, kDeckThickness, &geometryMesh_,
+                          &hidden);
         DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                      glm::vec4(kDeckColor, kOccluderFadeOpacity));
       }

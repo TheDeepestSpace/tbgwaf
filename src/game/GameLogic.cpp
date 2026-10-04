@@ -1336,6 +1336,7 @@ void GameLogic::ResolvePendingShots() {
     const float sinceShot = std::max(0.0f, executionElapsed_ - b.lastAt);
     ApplyAimShot(*b.shooter, b.traceHits, b.aimPoint, sinceShot);
     b.shot->shotsFired += b.bulletsDue;
+    if (b.shot->reaction) reactionAmmo_[b.shooter->id] -= b.bulletsDue;
   }
 
   // Drop every burst that finished (magazine level spent, or the round
@@ -1372,6 +1373,21 @@ bool GameLogic::IsUnitMoving(int unitId) const {
 }
 
 void GameLogic::ApplyPlaybookReactions() {
+  // A reaction burst keeps firing only while its target stays in the
+  // shooter's FOV+LOS; the unspent rounds stay in reactionAmmo_ for when the
+  // enemy is sighted again.
+  pendingShots_.erase(
+      std::remove_if(pendingShots_.begin(), pendingShots_.end(),
+                     [this](const PendingShot& shot) {
+                       if (!shot.reaction) return false;
+                       const Unit* shooter = FindUnit(shot.shooterId);
+                       const Unit* target = FindUnit(shot.targetId);
+                       return !shooter || !target || !shooter->alive || !target->alive ||
+                              !CanUnitSee(*shooter, *target, scene_.obstacles,
+                                          scene_.walkSurfaces, scene_.ground);
+                     }),
+      pendingShots_.end());
+
   struct Reaction {
     Unit* actor;
     Unit* target;  // Nearest sighted enemy; only fired on when `shoot`.
@@ -1411,7 +1427,7 @@ void GameLogic::ApplyPlaybookReactions() {
     if (shoot || stop) reactions.push_back(Reaction{&unit, nearest, shoot, stop});
   }
   for (const Reaction& r : reactions) {
-    if (r.shoot) ResolveShot(*r.actor, *r.target);
+    if (r.shoot) StartReactionBurst(*r.actor, *r.target);
     if (r.stop) {
       for (ActiveMove& move : activeMoves_) {
         if (move.unitId == r.actor->id) move.segment = move.path.size();
@@ -1420,8 +1436,25 @@ void GameLogic::ApplyPlaybookReactions() {
   }
 }
 
+void GameLogic::StartReactionBurst(const Unit& shooter, const Unit& target) {
+  for (const PendingShot& shot : pendingShots_) {
+    if (shot.reaction && shot.shooterId == shooter.id) return;  // Already firing.
+  }
+  auto ammo = reactionAmmo_.find(shooter.id);
+  if (ammo == reactionAmmo_.end()) {
+    ammo = reactionAmmo_.emplace(shooter.id, StatsOf(shooter.weapon).magazineSize).first;
+  }
+  if (ammo->second <= 0) return;  // Magazine spent this round.
+  PendingShot shot{shooter.id, target.id, false, glm::vec3(0.0f), ammo->second};
+  shot.reaction = true;
+  shot.started = true;
+  shot.startTime = executionElapsed_;
+  pendingShots_.push_back(shot);
+}
+
 void GameLogic::CommitRound() {
   if (!CanCommitRound()) return;
+  reactionAmmo_.clear();
 
   selectedUnitId_.reset();
   movePreviewPath_.clear();

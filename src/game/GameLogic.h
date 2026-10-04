@@ -5,6 +5,7 @@
 #include <random>
 #include <string>
 #include <utility>
+#include <map>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -392,6 +393,10 @@ class GameLogic {
     bool started = false;    // Gates passed; the schedule below is armed.
     float startTime = 0.0f;  // Execution-clock time of the burst's shot 0.
     int shotsFired = 0;
+    // Standing-reaction burst (shoot-on-sight): spends the whole magazine at
+    // the normal hit odds while the target stays in view; see
+    // ApplyPlaybookReactions.
+    bool reaction = false;
   };
 
   // One figure the free-aim ballistic trace can reach, in ray order.
@@ -465,6 +470,9 @@ class GameLogic {
   // All reactions are judged against the same snapshot, then applied, so
   // mutual shots both land.
   void ApplyPlaybookReactions();
+  // Opens a magazine-long burst at `target` unless `shooter` is already
+  // firing a reaction burst or has no rounds left this round.
+  void StartReactionBurst(const Unit& shooter, const Unit& target);
 
   Scene scene_;
   SquadPlaybook playbooks_[2];  // Indexed by Team; survives Reset().
@@ -489,6 +497,8 @@ class GameLogic {
   // the round finishes.
   std::vector<ActiveMove> activeMoves_;
   std::vector<PendingShot> pendingShots_;
+  // Rounds left in each figure's magazine for reaction fire this round.
+  std::map<int, int> reactionAmmo_;
   // Execution clock: seconds since the executing round's commit. Bursts
   // schedule their shots against it; only the [0, kRoundDuration) window
   // fires (issue #140).

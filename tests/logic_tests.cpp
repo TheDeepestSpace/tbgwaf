@@ -1142,6 +1142,25 @@ void TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds() {
   CHECK(game.RoundNumber() == 2);
 }
 
+// Shoot-on-sight is a magazine-long burst at the normal odds, not one
+// guaranteed shot: with every roll a miss the watcher keeps firing (several
+// rolls), the walker survives and keeps walking to its destination.
+void TestGameLogicPlaybookShootOnSightFiresWholeMagAtNormalOdds() {
+  GameLogic game(LegacyScene());
+  int rolls = 0;
+  game.SetShotRollSource([&rolls] {
+    ++rolls;
+    return 0.999f;  // Always a miss.
+  });
+  SetStationaryShoot(game, Team::Blue);
+  const glm::vec3 destination(0.0f, 0.0f, 0.0f);
+  StartRed4WalkThroughBlue1Lane(game, destination);
+  RunRound(game);
+  CHECK(game.FindUnit(4)->alive);
+  CHECK(glm::distance(game.FindUnit(4)->position, destination) < 1e-3f);
+  CHECK(rolls > 1);
+}
+
 void TestGameLogicPlaybookDefaultTable() {
   GameLogic game(LegacyScene());
   for (Team t : {Team::Blue, Team::Red}) {
@@ -2452,6 +2471,7 @@ int main() {
   TestGameLogicIgnoresInputWhileExecuting();
   TestGameLogicMoveCanClimbOntoObstacle();
   TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds();
+  TestGameLogicPlaybookShootOnSightFiresWholeMagAtNormalOdds();
   TestGameLogicPlaybookDefaultTable();
   TestGameLogicPlaybookIgnoresSameTeamMover();
   TestGameLogicPlaybookMovingRows();

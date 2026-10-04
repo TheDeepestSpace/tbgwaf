@@ -2466,11 +2466,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       const int age = game.RoundNumber() - tracer.birthRound;
       const float life = 1.0f - static_cast<float>(age) / tactics::constants::kTracerMemoryRounds;
       if (life <= 0.0f) continue;
-      const glm::vec3 base = tracer.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
-                                                       : glm::vec3(0.9f, 0.25f, 0.22f);
+      const glm::vec3 teamColor = tracer.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
+                                                            : glm::vec3(0.9f, 0.25f, 0.22f);
+      // A just-fired bullet flashes white-hot and fully opaque, then settles
+      // into its team-colored fading line: each shot of a burst pops on its own.
+      constexpr float kTracerFlashSeconds = 0.25f;
+      const float flash = glm::clamp(1.0f - tracer.age / kTracerFlashSeconds, 0.0f, 1.0f);
+      const glm::vec3 base = glm::mix(teamColor, glm::vec3(1.0f, 0.97f, 0.8f), flash);
       pathLine_.SetPoints({tracer.from, tracer.to});
       unlitShader_.SetMat4("uMVP", viewProj);
-      unlitShader_.SetVec4("uColor", glm::vec4(base, life * kTracerMaxAlpha));
+      unlitShader_.SetVec4("uColor", glm::vec4(base, glm::mix(life * kTracerMaxAlpha, 1.0f, flash)));
       pathLine_.Draw();
     }
     glDepthMask(GL_TRUE);

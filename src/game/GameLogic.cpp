@@ -92,14 +92,15 @@ void GameLogic::ResetSightingMemory() {
   tracers_.clear();
 }
 
-void GameLogic::RecordTracer(const Unit& shooter, const glm::vec3& from, const glm::vec3& to) {
+void GameLogic::RecordTracer(const Unit& shooter, const glm::vec3& from, const glm::vec3& to,
+                             float age) {
   tracers_.erase(std::remove_if(tracers_.begin(), tracers_.end(),
                                 [this](const Tracer& t) {
                                   return roundNumber_ - t.birthRound >=
                                          constants::kTracerMemoryRounds;
                                 }),
                  tracers_.end());
-  tracers_.push_back(Tracer{shooter.team, from, to, roundNumber_});
+  tracers_.push_back(Tracer{shooter.team, from, to, roundNumber_, age});
 }
 
 const std::vector<GameLogic::EnemySighting>& GameLogic::Sightings(Team viewingTeam,
@@ -369,7 +370,7 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
   out << ' ' << snap.tracers.size();
   for (const Tracer& t : snap.tracers) {
     out << ' ' << static_cast<int>(t.team) << ' ' << t.from.x << ' ' << t.from.y << ' ' << t.from.z
-        << ' ' << t.to.x << ' ' << t.to.y << ' ' << t.to.z << ' ' << t.birthRound;
+        << ' ' << t.to.x << ' ' << t.to.y << ' ' << t.to.z << ' ' << t.birthRound << ' ' << t.age;
   }
   for (const auto& pb : snap.playbooks)
     for (int m = 0; m < 2; ++m)
@@ -429,7 +430,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
   for (Tracer& t : snap.tracers) {
     int team = 0;
     if (!(in >> team >> t.from.x >> t.from.y >> t.from.z >> t.to.x >> t.to.y >> t.to.z >>
-          t.birthRound) ||
+          t.birthRound >> t.age) ||
         team < 0 || team > 1) {
       return false;
     }
@@ -606,6 +607,8 @@ void GameLogic::Update(float dtSeconds) {
       if (unit.shootElapsed >= constants::kShootAnimDuration) unit.shootElapsed = -1.0f;
     }
   }
+
+  for (Tracer& tracer : tracers_) tracer.age = std::min(tracer.age + dtSeconds, 60.0f);
 
   if (mode_ == InputMode::Executing) AdvanceExecutingRound(dtSeconds);
 
@@ -843,30 +846,34 @@ bool GameLogic::ResolveShot(Unit& shooter, Unit& target, bool* fired) {
   return hit;
 }
 
-void GameLogic::ApplyShot(Unit& shooter, Unit& target, bool hit, bool recordTracer) {
+void GameLogic::PlayShootBeat(Unit& shooter, float aimYaw, float sinceShot) {
+  // Presentation only: the shooter's quick-draw beat, aimed at the actual
+  // bearing (which may sit anywhere inside the FOV cone). Played for misses
+  // too -- the shot was taken. A follow-up shot of a burst lands while the
+  // beat is still playing: it re-triggers just the recoil kick (the weapon
+  // stays shouldered) instead of re-drawing from the carry pose.
+  shooter.shootElapsed =
+      (shooter.shootElapsed >= 0.0f ? constants::kShootRecoilStart : 0.0f) + sinceShot;
+  shooter.shootAimYaw = aimYaw;
+}
+
+void GameLogic::KnockDown(Unit& target, const glm::vec3& dir) {
+  target.alive = false;
+  // up x dir: tipping around this axis leans the figure toward dir.
+  target.knockdownAxis = glm::vec3(dir.z, 0.0f, -dir.x);
+  target.knockdownElapsed = 0.0f;
+}
+
+void GameLogic::ApplyShot(Unit& shooter, Unit& target, bool hit) {
   glm::vec3 dir = target.position - shooter.position;
   dir.y = 0.0f;
   if (glm::length(dir) < 1e-4f) dir = shooter.FacingDirection();
   dir = glm::normalize(dir);
-  // Presentation only: the shooter's quick-draw beat, aimed at the target's
-  // actual bearing (which may sit anywhere inside the FOV cone). Played for
-  // misses too -- the shot was taken. A follow-up shot of a burst lands
-  // while the beat is still playing: it re-triggers just the recoil kick
-  // (the weapon stays shouldered) instead of re-drawing from the carry pose.
-  shooter.shootElapsed =
-      shooter.shootElapsed >= 0.0f ? constants::kShootRecoilStart : 0.0f;
-  shooter.shootAimYaw = std::atan2(dir.z, dir.x);
-  if (recordTracer) {
-    Unit aimed = shooter;
-    aimed.facingYaw = shooter.shootAimYaw;
-    RecordTracer(shooter, aimed.MuzzlePosition(), target.EyePosition());
-  }
-  if (hit) {
-    target.alive = false;
-    // up x dir: tipping around this axis leans the figure toward dir.
-    target.knockdownAxis = glm::vec3(dir.z, 0.0f, -dir.x);
-    target.knockdownElapsed = 0.0f;
-  }
+  PlayShootBeat(shooter, std::atan2(dir.z, dir.x));
+  Unit aimed = shooter;
+  aimed.facingYaw = shooter.shootAimYaw;
+  RecordTracer(shooter, aimed.MuzzlePosition(), target.EyePosition());
+  if (hit) KnockDown(target, dir);
 }
 
 namespace {
@@ -1029,13 +1036,18 @@ void GameLogic::ConfirmAim(Team byTeam) {
   mode_ = InputMode::AwaitingSelection;
 }
 
+Unit GameLogic::AimedAt(const Unit& shooter, const glm::vec3& point) {
+  // The shot leaves the muzzle of the figure already turned to its aim
+  // point.
+  Unit aimed = shooter;
+  const glm::vec3 flat(point.x - shooter.position.x, 0.0f, point.z - shooter.position.z);
+  if (glm::length(flat) > 1e-4f) aimed.facingYaw = std::atan2(flat.z, flat.x);
+  return aimed;
+}
+
 std::vector<GameLogic::AimTraceCandidate> GameLogic::AimTraceCandidates(
     const Unit& shooter, const glm::vec3& aimPoint) const {
-  // The shot leaves the muzzle of the figure already turned to its aim
-  // point, and keeps flying past it until something stops it.
-  Unit aimed = shooter;
-  const glm::vec3 flat(aimPoint.x - shooter.position.x, 0.0f, aimPoint.z - shooter.position.z);
-  if (glm::length(flat) > 1e-4f) aimed.facingYaw = std::atan2(flat.z, flat.x);
+  const Unit aimed = AimedAt(shooter, aimPoint);
   const glm::vec3 muzzle = aimed.MuzzlePosition();
   glm::vec3 dir = aimPoint - muzzle;
   if (glm::length(dir) < 1e-4f) {
@@ -1043,8 +1055,12 @@ std::vector<GameLogic::AimTraceCandidate> GameLogic::AimTraceCandidates(
   } else {
     dir = glm::normalize(dir);
   }
-  const glm::vec3 fwd = aimed.FacingDirection();
+  return RayTraceCandidates(shooter, muzzle, dir, aimed.FacingDirection());
+}
 
+std::vector<GameLogic::AimTraceCandidate> GameLogic::RayTraceCandidates(
+    const Unit& shooter, const glm::vec3& muzzle, const glm::vec3& dir,
+    const glm::vec3& fwd) const {
   std::vector<AimTraceCandidate> candidates;
   for (const Unit& unit : scene_.units) {
     if (!unit.alive || unit.id == shooter.id) continue;
@@ -1078,8 +1094,39 @@ std::vector<GameLogic::AimTraceCandidate> GameLogic::AimTraceCandidates(
   return candidates;
 }
 
+float GameLogic::RayReach(const glm::vec3& muzzle, const glm::vec3& ray) const {
+  float reach = constants::kShootRange;  // Tracers stop drawing at weapon range.
+  for (const Obstacle& obstacle : scene_.obstacles) {
+    float t = 0.0f;
+    if (RayIntersectsObstacle(muzzle, ray, obstacle, &t) && t > 0.0f) reach = std::min(reach, t);
+  }
+  for (const WalkSurface& surface : scene_.walkSurfaces) {
+    float t = 0.0f;
+    if (RayIntersectsWalkSurface(muzzle, ray, surface, 0.45f, &t) && t > 0.0f) {
+      reach = std::min(reach, t);
+    }
+  }
+  if (ray.y < -1e-4f && muzzle.y > 0.0f) reach = std::min(reach, -muzzle.y / ray.y);
+  return reach;
+}
+
+namespace {
+
+// `dir` turned by yaw/pitch offsets (radians).
+glm::vec3 Deflect(const glm::vec3& dir, float yawOffset, float pitchOffset) {
+  const float yaw = std::atan2(dir.z, dir.x) + yawOffset;
+  const float pitch =
+      glm::clamp(std::asin(glm::clamp(dir.y, -1.0f, 1.0f)) + pitchOffset, -1.5f, 1.5f);
+  return glm::vec3(std::cos(pitch) * std::cos(yaw), std::sin(pitch), std::cos(pitch) * std::sin(yaw));
+}
+
+// Half-width a deflected bullet must clear to visibly pass beside a figure.
+constexpr float kBodyClearance = 0.6f;
+
+}  // namespace
+
 void GameLogic::ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets,
-                             bool recordMissLine, const glm::vec3& aimPoint) {
+                             const glm::vec3& aimPoint, float sinceShot) {
   // The one bit of fog-of-war info a blind shot earns: a connecting hit on a
   // figure unseen *when the trigger was pulled* (before the turn below)
   // records a sighting. Misses reveal nothing.
@@ -1092,50 +1139,14 @@ void GameLogic::ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets
   // The turn outlives the shot: it is this figure's facing for the next
   // rounds' FOV and overwatch reactions.
   shooter.facingYaw = aimYaw;
-  // Re-triggering mid-beat keeps the weapon shouldered between a burst's
-  // shots and plays a fresh recoil kick per shot (same rule as ApplyShot).
-  shooter.shootElapsed =
-      shooter.shootElapsed >= 0.0f ? constants::kShootRecoilStart : 0.0f;
-  shooter.shootAimYaw = aimYaw;
-
-  // Each bullet flies from the muzzle along the aim ray until it strikes its
-  // hit figure, a wall/deck, the ground, or runs out of range. One tracer
-  // per distinct trajectory end: every hit figure's entry point, plus a
-  // single full-length line shared by all the burst's bullets that struck
-  // nothing (recorded on the first tick one misses).
-  const glm::vec3 muzzle = shooter.MuzzlePosition();
-  glm::vec3 ray = aimPoint - muzzle;
-  ray = glm::length(ray) < 1e-4f ? shooter.FacingDirection() : glm::normalize(ray);
-  for (Unit* hitTarget : hitTargets) {
-    float t = 0.0f;
-    if (RayIntersectsAABB(muzzle, ray, hitTarget->Bounds(), &t)) {
-      RecordTracer(shooter, muzzle, muzzle + ray * t);
-    }
-  }
-  if (recordMissLine) {
-    float reach = constants::kAimTraceRange;
-    for (const Obstacle& obstacle : scene_.obstacles) {
-      float t = 0.0f;
-      if (RayIntersectsObstacle(muzzle, ray, obstacle, &t) && t > 0.0f) reach = std::min(reach, t);
-    }
-    for (const WalkSurface& surface : scene_.walkSurfaces) {
-      float t = 0.0f;
-      if (RayIntersectsWalkSurface(muzzle, ray, surface, 0.45f, &t) && t > 0.0f) {
-        reach = std::min(reach, t);
-      }
-    }
-    if (ray.y < -1e-4f && muzzle.y > 0.0f) reach = std::min(reach, -muzzle.y / ray.y);
-    RecordTracer(shooter, muzzle, muzzle + ray * reach);
-  }
+  PlayShootBeat(shooter, aimYaw, sinceShot);
 
   for (Unit* hitTarget : hitTargets) {
     const bool wasVisible = visibility.UnitVisible(hitTarget->id);
     glm::vec3 fall(hitTarget->position.x - shooter.position.x, 0.0f,
                    hitTarget->position.z - shooter.position.z);
     fall = glm::length(fall) < 1e-4f ? dir : glm::normalize(fall);
-    hitTarget->alive = false;
-    hitTarget->knockdownAxis = glm::vec3(fall.z, 0.0f, -fall.x);
-    hitTarget->knockdownElapsed = 0.0f;
+    KnockDown(*hitTarget, fall);
 
     const int viewerIndex = static_cast<int>(shooter.team);
     if (!wasVisible && hitTarget->id >= 0 &&
@@ -1180,13 +1191,12 @@ void GameLogic::ResolvePendingShots() {
     // Judged against this tick's snapshot, lazily on the burst's first due
     // bullet (positions don't change during resolution).
     bool judged = false;
-    float chance = 0.0f;                    // Locked target.
-    std::vector<AimTraceCandidate> trace;   // Free-aim.
+    float chance = 0.0f;  // Locked target.
     // Outcome of this tick's bullets, applied only after every due bullet
     // (across all bursts) was judged: mutual shots in a tick both land.
     std::vector<Unit*> traceHits;
-    int missedShots = 0;
     bool lockedHit = false;
+    float lastAt = 0.0f;
   };
   std::vector<Burst> bursts;
   // One entry per due bullet; judged in schedule order below so the roll
@@ -1194,6 +1204,9 @@ void GameLogic::ResolvePendingShots() {
   struct Bullet {
     size_t burst;
     float at;
+    int index;  // Position within the burst (0-based).
+    glm::vec3 from{0.0f};
+    glm::vec3 to{0.0f};  // Where this bullet's own trajectory ends.
   };
   std::vector<Bullet> bullets;
   for (PendingShot& shot : pendingShots_) {
@@ -1208,7 +1221,8 @@ void GameLogic::ResolvePendingShots() {
     for (int k = shot.shotsFired; k < shot.shots; ++k) {
       const float at = shot.startTime + k * interval;
       if (at > executionElapsed_ + 1e-4f || at >= constants::kRoundDuration) break;
-      bullets.push_back(Bullet{bursts.size(), at});
+      bullets.push_back(Bullet{bursts.size(), at, k});
+      burst.lastAt = at;
       ++burst.bulletsDue;
     }
     if (burst.bulletsDue > 0) bursts.push_back(std::move(burst));
@@ -1216,59 +1230,109 @@ void GameLogic::ResolvePendingShots() {
   std::stable_sort(bullets.begin(), bullets.end(),
                    [](const Bullet& a, const Bullet& b) { return a.at < b.at; });
 
-  // Judge each bullet in schedule order. A free-aim bullet traces the
-  // figures in the ray's path nearest first (the first success absorbs the
-  // bullet; figures already downed by an earlier bullet of the same burst
-  // are skipped), so one burst can drop several figures along the ray. A
-  // locked-target bullet rolls against the shooter's current hit chance;
-  // once the target is down (this burst's own kill, an earlier tick's, or
-  // someone else's), the rest of the magazine still fires -- into the body,
-  // with nothing left to roll against.
-  for (const Bullet& bullet : bullets) {
+  // Judge each bullet in schedule order; every bullet flies its own line,
+  // scattered inside the weapon's cone (a pure hash, see ScatterUnit).
+  //  - Free-aim: the bullet's scattered ray traces the figures in its path
+  //    nearest first (the first success absorbs the bullet; figures already
+  //    downed by an earlier bullet of the same burst are skipped), so one
+  //    burst can drop several figures. A bullet that connects with nobody
+  //    flies on to the first wall/deck/ground it meets, bent clear of any
+  //    figure whose roll it just won.
+  //  - Locked target: the roll against the shooter's current hit chance
+  //    decides; a hit lands in the body, a miss is deflected past it. Once
+  //    the target is down (this burst's own kill, an earlier tick's, or
+  //    someone else's), the rest of the magazine still fires -- into the
+  //    body, with nothing left to roll against.
+  const auto bodyPoint = [](const Unit& u, int shooterId, int round, int index) {
+    return u.position + glm::vec3((ScatterUnit(shooterId, round, index, 4) - 0.5f) * 0.3f,
+                                  0.35f + ScatterUnit(shooterId, round, index, 5) * 0.9f,
+                                  (ScatterUnit(shooterId, round, index, 6) - 0.5f) * 0.3f);
+  };
+  for (Bullet& bullet : bullets) {
     Burst& b = bursts[bullet.burst];
+    const int sid = b.shooter->id;
+    const float scatter = glm::radians(StatsOf(b.shooter->weapon).scatterHalfAngleDegrees);
     if (!b.judged) {
       b.judged = true;
       if (b.target) {
         b.chance = b.target->alive ? ShotHitChance(*b.shooter, *b.target) : 0.0f;
-      } else {
-        b.trace = AimTraceCandidates(*b.shooter, b.shot->aimPoint);
       }
     }
     if (b.target) {
-      if (b.target->alive && !b.lockedHit) b.lockedHit = RollShot() < b.chance;
+      const Unit aimed = AimedAt(*b.shooter, b.target->position);
+      bullet.from = aimed.MuzzlePosition();
+      if (!b.target->alive || b.lockedHit) {
+        bullet.to = bodyPoint(*b.target, sid, roundNumber_, bullet.index);
+        continue;
+      }
+      if (RollShot() < b.chance) {
+        b.lockedHit = true;
+        bullet.to = bodyPoint(*b.target, sid, roundNumber_, bullet.index);
+        continue;
+      }
+      // Miss: aimed at the eye, bent far enough sideways to clear the body.
+      const glm::vec3 eye = b.target->EyePosition();
+      const glm::vec3 base = glm::normalize(eye - bullet.from);
+      const float dist = glm::distance(eye, bullet.from);
+      const float sign = ScatterUnit(sid, roundNumber_, bullet.index, 1) < 0.5f ? -1.0f : 1.0f;
+      const float yawOff =
+          sign * (std::atan(kBodyClearance / std::max(dist, 1.0f)) +
+                  ScatterUnit(sid, roundNumber_, bullet.index, 2) * scatter);
+      const float pitchOff = (ScatterUnit(sid, roundNumber_, bullet.index, 3) - 0.5f) * scatter;
+      const glm::vec3 ray = Deflect(base, yawOff, pitchOff);
+      bullet.to = bullet.from + ray * RayReach(bullet.from, ray);
       continue;
     }
+
+    const Unit aimed = AimedAt(*b.shooter, b.shot->aimPoint);
+    bullet.from = aimed.MuzzlePosition();
+    glm::vec3 base = b.shot->aimPoint - bullet.from;
+    base = glm::length(base) < 1e-4f ? aimed.FacingDirection() : glm::normalize(base);
+    const float radius = std::sqrt(ScatterUnit(sid, roundNumber_, bullet.index, 1)) * scatter;
+    const float theta = 6.2831853f * ScatterUnit(sid, roundNumber_, bullet.index, 2);
+    glm::vec3 ray = Deflect(base, radius * std::cos(theta), radius * std::sin(theta));
     bool absorbed = false;
-    for (const AimTraceCandidate& c : b.trace) {
+    float nearestMiss = 0.0f;
+    for (const AimTraceCandidate& c :
+         RayTraceCandidates(*b.shooter, bullet.from, ray, aimed.FacingDirection())) {
       Unit* unit = FindUnit(c.unitId);
       if (std::find(b.traceHits.begin(), b.traceHits.end(), unit) != b.traceHits.end()) {
         continue;  // Downed by an earlier bullet of this burst.
       }
       if (RollShot() < c.chance) {
         b.traceHits.push_back(unit);
+        bullet.to = bullet.from + ray * c.rayT;
         absorbed = true;
         break;
       }
+      if (nearestMiss == 0.0f) nearestMiss = c.rayT;
     }
-    if (!absorbed) ++b.missedShots;
+    if (absorbed) continue;
+    if (nearestMiss > 0.0f) {
+      // Rolled a miss on a figure the line passes through: bend it clear.
+      const float sign = ScatterUnit(sid, roundNumber_, bullet.index, 3) < 0.5f ? -1.0f : 1.0f;
+      ray = Deflect(ray, sign * std::atan(kBodyClearance / std::max(nearestMiss, 1.0f)), 0.0f);
+    }
+    bullet.to = bullet.from + ray * RayReach(bullet.from, ray);
   }
 
+  // Apply: every bullet leaves its own tracer (aged by how long ago within
+  // this tick it left the barrel), then each burst's shooter plays the beat
+  // and its hits go down.
+  for (const Bullet& bullet : bullets) {
+    RecordTracer(*bursts[bullet.burst].shooter, bullet.from, bullet.to,
+                 std::max(0.0f, executionElapsed_ - bullet.at));
+  }
   for (Burst& b : bursts) {
+    const float sinceShot = std::max(0.0f, executionElapsed_ - b.lastAt);
     if (b.target) {
-      // One tracer per distinct line: follow-up shots re-record it only
-      // once the target has moved since the last recorded one.
-      const bool recordTracer =
-          !b.shot->targetTracerRecorded ||
-          glm::distance(b.target->position, b.shot->lastTracerTargetPos) > 1e-3f;
-      ApplyShot(*b.shooter, *b.target, b.lockedHit && b.target->alive, recordTracer);
-      if (recordTracer) {
-        b.shot->targetTracerRecorded = true;
-        b.shot->lastTracerTargetPos = b.target->position;
-      }
+      glm::vec3 dir = b.target->position - b.shooter->position;
+      dir.y = 0.0f;
+      dir = glm::length(dir) < 1e-4f ? b.shooter->FacingDirection() : glm::normalize(dir);
+      PlayShootBeat(*b.shooter, std::atan2(dir.z, dir.x), sinceShot);
+      if (b.lockedHit && b.target->alive) KnockDown(*b.target, dir);
     } else {
-      const bool recordMissLine = b.missedShots > 0 && !b.shot->missTracerRecorded;
-      ApplyAimShot(*b.shooter, b.traceHits, recordMissLine, b.shot->aimPoint);
-      if (recordMissLine) b.shot->missTracerRecorded = true;
+      ApplyAimShot(*b.shooter, b.traceHits, b.shot->aimPoint, sinceShot);
     }
     b.shot->shotsFired += b.bulletsDue;
   }

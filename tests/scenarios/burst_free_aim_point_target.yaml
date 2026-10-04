@@ -1,16 +1,16 @@
 name: burst_free_aim_point_target
 description: >
-  Bursts work for free-aim point-target shots too (issues #138 + #129): the shooter
-  places a blind-fire aim point on the enemy's torso and fires a 5-shot burst at it.
-  Each bullet traces the ray and rolls independently; the pinned rolls miss twice, then
-  the 3rd bullet connects and downs the figure (the rest of the burst flies on with
-  nobody left in the ray).
+  Bursts work for free-aim point-target shots too (issues #138 + #129 + #140): the shooter
+  places a blind-fire aim point on the enemy's torso and fires a 5-shot burst at it. Every
+  bullet flies its own scattered line inside the weapon's cone; only bullets whose line
+  actually crosses the figure roll against the hit chance (the pinned roll always hits),
+  so the burst downs the figure with one of the bullets that land on the body.
 
 units:
   - {id: 0, team: blue, position: [-8, 0, 0], facing_degrees: 0}
   - {id: 1, team: red, position: [8, 0, 0], facing_degrees: 180}
 
-shot_rolls: [0.9, 0.9, 0.05, 0.9, 0.9, 0.9]
+shot_rolls: [0.05, 0.05, 0.05, 0.05, 0.05]
 
 script:
   - action: shoot
@@ -22,6 +22,6 @@ script:
     actor: 1
   - action: commit
 
-  - assert: {unit: 1, alive: false, comment: The burst's 3rd bullet connected}
+  - assert: {unit: 1, alive: false, comment: A bullet of the burst connected}
   - assert: {unit: 0, facing_degrees: 0, tolerance: 1.0, comment: Turned onto the aim point}
   - assert: {winner: blue}

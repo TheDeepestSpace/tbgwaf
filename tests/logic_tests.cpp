@@ -2197,6 +2197,16 @@ void TestPlannedShotCountClampsToWeaponCap() {
 // until the last scheduled shot, rolls run per shot while the target
 // stands, and a kill stops the rolling but not the trigger -- the rest of
 // the magazine still fires into the body.
+// True when no two tracers share both endpoints.
+bool AllTracersDistinct(const std::vector<Tracer>& tracers) {
+  for (size_t i = 0; i < tracers.size(); ++i) {
+    for (size_t j = i + 1; j < tracers.size(); ++j) {
+      if (glm::length(tracers[i].to - tracers[j].to) < 1e-3f) return false;
+    }
+  }
+  return true;
+}
+
 void TestLockedBurstFiresAllShotsOverTime() {
   GameLogic game(LegacyScene());
   int rolls = 0;
@@ -2230,33 +2240,82 @@ void TestLockedBurstFiresAllShotsOverTime() {
   // Two misses, then the 3rd shot kills; the 4th still fires (the mag
   // level is honored) but has nothing left to roll against.
   CHECK(rolls == 3);
+  // One tracer per bullet, every one a different line; the first three
+  // (two scattered misses + the kill) came out one per second, the 4th
+  // fired into the body.
+  CHECK(game.Tracers().size() == 4);
+  CHECK(AllTracersDistinct(game.Tracers()));
 }
 
-// Free-aim bursts (point-target shots) roll per bullet along the ballistic
-// trace; bullets after a kill skip the downed figure instead of re-rolling it.
+// Free-aim bursts (point-target shots): every bullet flies its own scattered
+// line from the muzzle (issue #140) and only bullets whose line crosses the
+// figure roll; the downed figure is skipped by later bullets.
 void TestFreeAimBurstHitsPointTarget() {
   GameLogic game(
       AimScene({{Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(10.0f, 0.0f, 0.0f)}}));
   int rolls = 0;
-  const float sequence[] = {0.9f, 0.9f, 0.0f, 0.9f, 0.9f};
-  game.SetShotRollSource([&rolls, &sequence] { return sequence[rolls++ % 5]; });
+  game.SetShotRollSource([&rolls] {
+    ++rolls;
+    return 0.0f;  // Every roll hits.
+  });
   game.FindUnit(0)->weapon = WeaponType::DesertEagle;
   game.ClickUnit(0, Team::Blue);
   game.ChooseShoot();
-  game.SetPlannedShotCount(5, Team::Blue);
+  game.SetPlannedShotCount(8, Team::Blue);
   game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
   game.ConfirmAim(Team::Blue);
-  CHECK(game.FindUnit(0)->plan.shots == 5);
+  CHECK(game.FindUnit(0)->plan.shots == 8);
   game.ClickUnit(1, Team::Red);
   game.ChoosePass();
   game.CommitRound();
   game.Update(10.0f);
-  CHECK(!game.FindUnit(1)->alive);  // The third bullet connected.
-  CHECK(rolls == 3);  // Bullets 4 and 5 had nobody left in the ray: no rolls.
-  // Tracers: one into the hit figure, one full-length line shared by the
-  // bullets that struck nothing -- recorded once for the whole burst, not
-  // per bullet, even though the shots now fire spread over the round.
-  CHECK(game.Tracers().size() == 2);
+  CHECK(!game.FindUnit(1)->alive);
+  // The figure only rolls until it drops: at most the bullets up to and
+  // including the kill, never all 8.
+  CHECK(rolls >= 1 && rolls < 8);
+  // Every one of the 8 bullets left its own tracer, no two the same line,
+  // all from the muzzle.
+  CHECK(game.Tracers().size() == 8);
+  CHECK(AllTracersDistinct(game.Tracers()));
+  for (const Tracer& t : game.Tracers()) {
+    CHECK(glm::length(t.from - game.Tracers().front().from) < 1e-4f);
+  }
+}
+
+// A full assault-rifle magazine dumped at a locked target (issue #140):
+// 30 bullets, 30 distinct tracer lines, each fired 0.16 s after the last --
+// the tracer ages in the snapshot show them spread over the round, not
+// piled into one tick.
+void TestFullMagDumpLeavesThirtyTracers() {
+  GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.99f; });  // Everything misses.
+  game.FindUnit(1)->weapon = WeaponType::AssaultRifle;
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.SetPlannedShotCount(30, Team::Blue);
+  game.ClickUnit(4, Team::Blue);
+  for (int id : {0, 2}) {
+    game.ClickUnit(id, Team::Blue);
+    game.ChoosePass();
+  }
+  for (int id : {3, 4, 5}) {
+    game.ClickUnit(id, Team::Red);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  // Stepped at the live frame rate: shots appear one at a time.
+  size_t previous = game.Tracers().size();
+  int steps = 0;
+  while (game.Mode() == InputMode::Executing && steps++ < 1000) {
+    game.Update(1.0f / 60.0f);
+    CHECK(game.Tracers().size() >= previous);
+    CHECK(game.Tracers().size() <= previous + 1);  // Never two bullets in one frame.
+    previous = game.Tracers().size();
+  }
+  CHECK(game.Tracers().size() == 30);
+  CHECK(AllTracersDistinct(game.Tracers()));
+  // Spread across the 4.64 s the magazine takes (30 shots at 0.16 s).
+  CHECK(steps > 4.5f * 60.0f && steps < 5.2f * 60.0f);
 }
 
 void TestBurstPlanSurvivesSnapshotAndClampsOnImport() {
@@ -2365,6 +2424,7 @@ int main() {
   TestPlannedShotCountClampsToWeaponCap();
   TestLockedBurstFiresAllShotsOverTime();
   TestFreeAimBurstHitsPointTarget();
+  TestFullMagDumpLeavesThirtyTracers();
   TestBurstPlanSurvivesSnapshotAndClampsOnImport();
 
   if (g_failures == 0) {

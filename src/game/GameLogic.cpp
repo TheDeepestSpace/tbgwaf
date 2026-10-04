@@ -74,6 +74,7 @@ void GameLogic::Reset(Scene scene) {
   mirroredMoving_.clear();
   aimPreview_.reset();
   plannedShots_ = 1;
+  executionElapsed_ = 0.0f;
 
   ResetSightingMemory();
 }
@@ -621,6 +622,7 @@ void GameLogic::Update(float dtSeconds) {
 }
 
 void GameLogic::AdvanceExecutingRound(float dtSeconds) {
+  executionElapsed_ += dtSeconds;
   for (ActiveMove& move : activeMoves_) {
     Unit* mover = FindUnit(move.unitId);
     if (!mover || move.path.size() < 2) continue;
@@ -673,9 +675,10 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
   ResolvePendingShots();
 
   // Every mover advances together above; drop whichever ones just finished
-  // their path (or died to a shot this tick), and once none are left the
-  // whole round is done -- any still-pending shot's geometry can no longer
-  // change, so it expires.
+  // their path (or died to a shot this tick). Once none are left, a shot
+  // still waiting on its gates can never pass them (its geometry is
+  // frozen), so it expires -- but a burst already firing keeps the round
+  // executing until its last scheduled shot.
   activeMoves_.erase(std::remove_if(activeMoves_.begin(), activeMoves_.end(),
                                      [this](const ActiveMove& move) {
                                        const Unit* mover = FindUnit(move.unitId);
@@ -685,7 +688,12 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
                                      }),
                       activeMoves_.end());
 
-  if (activeMoves_.empty()) FinishRound();
+  if (activeMoves_.empty()) {
+    pendingShots_.erase(std::remove_if(pendingShots_.begin(), pendingShots_.end(),
+                                       [](const PendingShot& shot) { return !shot.started; }),
+                        pendingShots_.end());
+    if (pendingShots_.empty()) FinishRound();
+  }
 }
 
 void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
@@ -835,17 +843,20 @@ bool GameLogic::ResolveShot(Unit& shooter, Unit& target, bool* fired) {
   return hit;
 }
 
-void GameLogic::ApplyShot(Unit& shooter, Unit& target, bool hit) {
+void GameLogic::ApplyShot(Unit& shooter, Unit& target, bool hit, bool recordTracer) {
   glm::vec3 dir = target.position - shooter.position;
   dir.y = 0.0f;
   if (glm::length(dir) < 1e-4f) dir = shooter.FacingDirection();
   dir = glm::normalize(dir);
-  // Presentation only: start the shooter's quick-draw beat, aimed at the
-  // target's actual bearing (which may sit anywhere inside the FOV cone).
-  // Played for misses too -- the shot was taken.
-  shooter.shootElapsed = 0.0f;
+  // Presentation only: the shooter's quick-draw beat, aimed at the target's
+  // actual bearing (which may sit anywhere inside the FOV cone). Played for
+  // misses too -- the shot was taken. A follow-up shot of a burst lands
+  // while the beat is still playing: it re-triggers just the recoil kick
+  // (the weapon stays shouldered) instead of re-drawing from the carry pose.
+  shooter.shootElapsed =
+      shooter.shootElapsed >= 0.0f ? constants::kShootRecoilStart : 0.0f;
   shooter.shootAimYaw = std::atan2(dir.z, dir.x);
-  {
+  if (recordTracer) {
     Unit aimed = shooter;
     aimed.facingYaw = shooter.shootAimYaw;
     RecordTracer(shooter, aimed.MuzzlePosition(), target.EyePosition());
@@ -1067,8 +1078,8 @@ std::vector<GameLogic::AimTraceCandidate> GameLogic::AimTraceCandidates(
   return candidates;
 }
 
-void GameLogic::ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets, int missedShots,
-                             const glm::vec3& aimPoint) {
+void GameLogic::ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets,
+                             bool recordMissLine, const glm::vec3& aimPoint) {
   // The one bit of fog-of-war info a blind shot earns: a connecting hit on a
   // figure unseen *when the trigger was pulled* (before the turn below)
   // records a sighting. Misses reveal nothing.
@@ -1081,13 +1092,17 @@ void GameLogic::ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets
   // The turn outlives the shot: it is this figure's facing for the next
   // rounds' FOV and overwatch reactions.
   shooter.facingYaw = aimYaw;
-  shooter.shootElapsed = 0.0f;
+  // Re-triggering mid-beat keeps the weapon shouldered between a burst's
+  // shots and plays a fresh recoil kick per shot (same rule as ApplyShot).
+  shooter.shootElapsed =
+      shooter.shootElapsed >= 0.0f ? constants::kShootRecoilStart : 0.0f;
   shooter.shootAimYaw = aimYaw;
 
   // Each bullet flies from the muzzle along the aim ray until it strikes its
   // hit figure, a wall/deck, the ground, or runs out of range. One tracer
   // per distinct trajectory end: every hit figure's entry point, plus a
-  // single full-length line if any bullet of the burst struck nothing.
+  // single full-length line shared by all the burst's bullets that struck
+  // nothing (recorded on the first tick one misses).
   const glm::vec3 muzzle = shooter.MuzzlePosition();
   glm::vec3 ray = aimPoint - muzzle;
   ray = glm::length(ray) < 1e-4f ? shooter.FacingDirection() : glm::normalize(ray);
@@ -1097,7 +1112,7 @@ void GameLogic::ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets
       RecordTracer(shooter, muzzle, muzzle + ray * t);
     }
   }
-  if (hitTargets.empty() || missedShots > 0) {
+  if (recordMissLine) {
     float reach = constants::kAimTraceRange;
     for (const Obstacle& obstacle : scene_.obstacles) {
       float t = 0.0f;
@@ -1137,102 +1152,146 @@ void GameLogic::ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets
 }
 
 void GameLogic::ResolvePendingShots() {
-  // Judge every held shot against the same snapshot (positions don't change
-  // during resolution, and hits are applied only after all are judged), so
-  // two figures whose shots connect on the same tick both fire: a mutual
-  // kill downs both, rather than whichever happens to resolve first
-  // silencing the other.
-  // A held locked-target shot is taken (and consumed, hit or miss) the first
-  // tick it passes the hard gates. A free-aim shot has no gates at all --
-  // the figure turns to the point and fires on its first resolution tick;
-  // the ballistic trace decides what (if anything) the bullet meets.
-  struct Firing {
-    Unit* shooter = nullptr;
-    Unit* target = nullptr;  // Locked target; null for a free-aim shot.
-    bool aim = false;
-    glm::vec3 aimPoint{0.0f};
-    std::vector<AimTraceCandidate> trace;
-    int shots = 1;  // Burst size (issue #138).
-  };
-  std::vector<Firing> firing;
-  for (const PendingShot& shot : pendingShots_) {
+  // A held locked-target burst opens fire the first tick it passes the hard
+  // gates; a free-aim burst has no gates at all and opens fire on its first
+  // resolution tick. From then on the burst is paced in real time (issue
+  // #140): shot k is scheduled at startTime + k * the weapon's interval,
+  // and every requested shot is taken -- a kill does not cut the burst
+  // short -- until the magazine level is spent or the round window closes.
+  for (PendingShot& shot : pendingShots_) {
+    if (shot.started) continue;
     Unit* shooter = FindUnit(shot.shooterId);
     if (!shooter || !shooter->alive) continue;
-    if (shot.hasAimPoint) {
-      Firing f;
-      f.shooter = shooter;
-      f.aim = true;
-      f.aimPoint = shot.aimPoint;
-      f.trace = AimTraceCandidates(*shooter, shot.aimPoint);
-      f.shots = shot.shots;
-      firing.push_back(std::move(f));
-      continue;
+    if (!shot.hasAimPoint) {
+      Unit* target = FindUnit(shot.targetId);
+      if (!target || !target->alive) continue;
+      if (!ShotConnects(*shooter, *target)) continue;
     }
-    Unit* target = FindUnit(shot.targetId);
-    if (!target || !target->alive) continue;
-    if (ShotConnects(*shooter, *target)) {
-      firing.push_back(Firing{shooter, target, false, glm::vec3(0.0f), {}, shot.shots});
-    }
+    shot.started = true;
+    shot.startTime = executionElapsed_;
   }
-  // Rolls are applied in order but each hit only flips the target's alive
-  // flag after all were judged gate-wise, so mutual shots still both fire.
-  // A burst (issue #138) rolls each of its shots independently against the
-  // same snapshot geometry (nobody moves during resolution): a locked-target
-  // burst stops at the first hit -- the target is down, the rest of the
-  // magazine stays unspent -- while a free-aim burst's bullets each trace
-  // the figures in the ray's path nearest first (the first success absorbs
-  // that bullet; figures already downed by an earlier bullet of the same
-  // burst are skipped), so one burst can drop several figures along the ray.
-  struct Outcome {
+
+  // Everything with at least one bullet due at the current execution clock.
+  struct Burst {
+    PendingShot* shot = nullptr;
+    Unit* shooter = nullptr;
+    Unit* target = nullptr;  // Locked target; null for a free-aim burst.
+    int bulletsDue = 0;
+    // Judged against this tick's snapshot, lazily on the burst's first due
+    // bullet (positions don't change during resolution).
+    bool judged = false;
+    float chance = 0.0f;                    // Locked target.
+    std::vector<AimTraceCandidate> trace;   // Free-aim.
+    // Outcome of this tick's bullets, applied only after every due bullet
+    // (across all bursts) was judged: mutual shots in a tick both land.
     std::vector<Unit*> traceHits;
     int missedShots = 0;
     bool lockedHit = false;
   };
-  std::vector<Outcome> outcomes;
-  for (const Firing& f : firing) {
-    Outcome o;
-    if (f.aim) {
-      for (int shot = 0; shot < f.shots; ++shot) {
-        bool absorbed = false;
-        for (const AimTraceCandidate& c : f.trace) {
-          Unit* unit = FindUnit(c.unitId);
-          if (std::find(o.traceHits.begin(), o.traceHits.end(), unit) != o.traceHits.end()) {
-            continue;  // Downed by an earlier bullet of this burst.
-          }
-          if (RollShot() < c.chance) {
-            o.traceHits.push_back(unit);
-            absorbed = true;
-            break;
-          }
-        }
-        if (!absorbed) ++o.missedShots;
-      }
-    } else {
-      const float chance = ShotHitChance(*f.shooter, *f.target);
-      for (int shot = 0; shot < f.shots && !o.lockedHit; ++shot) {
-        o.lockedHit = RollShot() < chance;
-      }
+  std::vector<Burst> bursts;
+  // One entry per due bullet; judged in schedule order below so the roll
+  // stream does not depend on how time is sliced into ticks.
+  struct Bullet {
+    size_t burst;
+    float at;
+  };
+  std::vector<Bullet> bullets;
+  for (PendingShot& shot : pendingShots_) {
+    if (!shot.started || shot.shotsFired >= shot.shots) continue;
+    Unit* shooter = FindUnit(shot.shooterId);
+    if (!shooter || !shooter->alive) continue;
+    const float interval = StatsOf(shooter->weapon).shotIntervalSeconds;
+    Burst burst;
+    burst.shot = &shot;
+    burst.shooter = shooter;
+    burst.target = shot.hasAimPoint ? nullptr : FindUnit(shot.targetId);
+    for (int k = shot.shotsFired; k < shot.shots; ++k) {
+      const float at = shot.startTime + k * interval;
+      if (at > executionElapsed_ + 1e-4f || at >= constants::kRoundDuration) break;
+      bullets.push_back(Bullet{bursts.size(), at});
+      ++burst.bulletsDue;
     }
-    outcomes.push_back(std::move(o));
+    if (burst.bulletsDue > 0) bursts.push_back(std::move(burst));
   }
-  for (size_t i = 0; i < firing.size(); ++i) {
-    if (firing[i].aim) {
-      ApplyAimShot(*firing[i].shooter, outcomes[i].traceHits, outcomes[i].missedShots,
-                   firing[i].aimPoint);
-    } else {
-      ApplyShot(*firing[i].shooter, *firing[i].target, outcomes[i].lockedHit);
+  std::stable_sort(bullets.begin(), bullets.end(),
+                   [](const Bullet& a, const Bullet& b) { return a.at < b.at; });
+
+  // Judge each bullet in schedule order. A free-aim bullet traces the
+  // figures in the ray's path nearest first (the first success absorbs the
+  // bullet; figures already downed by an earlier bullet of the same burst
+  // are skipped), so one burst can drop several figures along the ray. A
+  // locked-target bullet rolls against the shooter's current hit chance;
+  // once the target is down (this burst's own kill, an earlier tick's, or
+  // someone else's), the rest of the magazine still fires -- into the body,
+  // with nothing left to roll against.
+  for (const Bullet& bullet : bullets) {
+    Burst& b = bursts[bullet.burst];
+    if (!b.judged) {
+      b.judged = true;
+      if (b.target) {
+        b.chance = b.target->alive ? ShotHitChance(*b.shooter, *b.target) : 0.0f;
+      } else {
+        b.trace = AimTraceCandidates(*b.shooter, b.shot->aimPoint);
+      }
     }
+    if (b.target) {
+      if (b.target->alive && !b.lockedHit) b.lockedHit = RollShot() < b.chance;
+      continue;
+    }
+    bool absorbed = false;
+    for (const AimTraceCandidate& c : b.trace) {
+      Unit* unit = FindUnit(c.unitId);
+      if (std::find(b.traceHits.begin(), b.traceHits.end(), unit) != b.traceHits.end()) {
+        continue;  // Downed by an earlier bullet of this burst.
+      }
+      if (RollShot() < c.chance) {
+        b.traceHits.push_back(unit);
+        absorbed = true;
+        break;
+      }
+    }
+    if (!absorbed) ++b.missedShots;
   }
 
-  // Drop everything that fired or can no longer fire (dead shooter holds
-  // its fire from here on; a downed target stops being worth a bullet).
+  for (Burst& b : bursts) {
+    if (b.target) {
+      // One tracer per distinct line: follow-up shots re-record it only
+      // once the target has moved since the last recorded one.
+      const bool recordTracer =
+          !b.shot->targetTracerRecorded ||
+          glm::distance(b.target->position, b.shot->lastTracerTargetPos) > 1e-3f;
+      ApplyShot(*b.shooter, *b.target, b.lockedHit && b.target->alive, recordTracer);
+      if (recordTracer) {
+        b.shot->targetTracerRecorded = true;
+        b.shot->lastTracerTargetPos = b.target->position;
+      }
+    } else {
+      const bool recordMissLine = b.missedShots > 0 && !b.shot->missTracerRecorded;
+      ApplyAimShot(*b.shooter, b.traceHits, recordMissLine, b.shot->aimPoint);
+      if (recordMissLine) b.shot->missTracerRecorded = true;
+    }
+    b.shot->shotsFired += b.bulletsDue;
+  }
+
+  // Drop every burst that finished (magazine level spent, or the round
+  // window closed on its remaining shots) or can no longer fire: a dead
+  // shooter releases the trigger, and a locked target that dies before the
+  // burst could start stops being worth a bullet.
   pendingShots_.erase(
       std::remove_if(pendingShots_.begin(), pendingShots_.end(),
                      [this](const PendingShot& shot) {
-                       if (shot.hasAimPoint) return true;  // Fired above, hit or miss.
                        const Unit* shooter = FindUnit(shot.shooterId);
+                       if (!shooter || !shooter->alive) return true;
+                       if (shot.started) {
+                         if (shot.shotsFired >= shot.shots) return true;
+                         const float next =
+                             shot.startTime +
+                             shot.shotsFired * StatsOf(shooter->weapon).shotIntervalSeconds;
+                         return next >= constants::kRoundDuration;
+                       }
+                       if (shot.hasAimPoint) return false;
                        const Unit* target = FindUnit(shot.targetId);
-                       return !shooter || !target || !shooter->alive || !target->alive;
+                       return !target || !target->alive;
                      }),
       pendingShots_.end());
 }
@@ -1323,10 +1382,12 @@ void GameLogic::CommitRound() {
   aimPreview_.reset();
 
   mode_ = InputMode::Executing;
+  executionElapsed_ = 0.0f;
 
-  // Tick 0: shots whose FOV/LOS is already valid at the pre-move positions
-  // fire the instant the round starts (simultaneously, snapshot-judged);
-  // blocked ones stay pending and re-check as the round's movement unfolds.
+  // Tick 0: bursts whose FOV/LOS is already valid at the pre-move positions
+  // open fire the instant the round starts (simultaneously,
+  // snapshot-judged); blocked ones stay pending and re-check as the round's
+  // movement unfolds.
   ResolvePendingShots();
 
   // Anyone killed at tick 0 never starts walking.
@@ -1338,8 +1399,14 @@ void GameLogic::CommitRound() {
                       activeMoves_.end());
 
   // With no movement in flight, nothing can change a still-blocked shot's
-  // geometry: the round is already over.
-  if (activeMoves_.empty()) FinishRound();
+  // geometry: it expires now. The round stays executing while any opened
+  // burst still has shots scheduled; otherwise it is already over.
+  if (activeMoves_.empty()) {
+    pendingShots_.erase(std::remove_if(pendingShots_.begin(), pendingShots_.end(),
+                                       [](const PendingShot& shot) { return !shot.started; }),
+                        pendingShots_.end());
+    if (pendingShots_.empty()) FinishRound();
+  }
 }
 
 void GameLogic::FinishRound() {

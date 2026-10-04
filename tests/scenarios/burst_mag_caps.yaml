@@ -1,11 +1,13 @@
 name: burst_mag_caps
 description: >
   Multi-shot bursts (issue #138), each weapon at its cap: one shooting action may fire up
-  to min(magazine, round window / fire interval) shots -- AR 30, sniper 5, Deagle 8. The
-  pinned rolls make every shot of each burst miss except the very last one, so each red
-  figure only drops if its attacker fired *exactly* its weapon's cap: fewer shots never
-  reach the hit roll, and the three bursts' rolls would fall out of alignment if any cap
-  were off.
+  to min(magazine, round window / fire interval) shots -- AR 30, sniper 5, Deagle 8. Since
+  issue #140 the bursts are paced in real time (AR 0.16 s, sniper 1.0 s, Deagle 0.5 s
+  between shots), so rolls are consumed in shot-schedule order across all three bursts at
+  once. The pinned rolls make every shot miss except the very last one of each burst, so
+  each red figure only drops if its attacker fired *exactly* its weapon's cap on exactly
+  its weapon's schedule: any missing shot or timing drift pulls the hit rolls out of
+  alignment.
 
 units:
   - {id: 0, team: blue, position: [-8, 0, -4], facing_degrees: 0}  # Assault rifle, cap 30.
@@ -15,13 +17,12 @@ units:
   - {id: 4, team: red, position: [8, 0, 0], facing_degrees: 180}
   - {id: 5, team: red, position: [8, 0, 4], facing_degrees: 180}
 
-# Consumed in unit-id order at commit: 29 misses + hit (AR), 4 misses + hit
-# (sniper), 7 misses + hit (Deagle).
-shot_rolls: [0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9,
-             0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9,
-             0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.05,
-             0.9, 0.9, 0.9, 0.9, 0.05,
-             0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.05]
+# Consumed in shot-schedule order (time, then unit order on ties): the three
+# bursts interleave, with hits landing on the Deagle's 8th shot (t=3.5, roll
+# 34), the sniper's 5th (t=4.0, roll 39) and the AR's 30th (t=4.64, roll 43).
+shot_rolls: [0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9,
+             0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9,
+             0.9, 0.9, 0.9, 0.05, 0.9, 0.9, 0.9, 0.9, 0.05, 0.9, 0.9, 0.9, 0.05]
 
 script:
   - action: shoot

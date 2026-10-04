@@ -166,6 +166,11 @@ constexpr float kIdleAnimDuration = 3.3333333f;
 // draw/aim raise, then a recoil kick that decays back down. Purely
 // presentational; hit resolution itself stays instantaneous.
 constexpr float kShootAnimDuration = 0.7f;
+// Time into the shot beat at which the draw/raise ends and the muzzle
+// fires (the recoil kick starts). Follow-up shots of a burst (issue #140)
+// re-trigger the beat from here while it is still playing, so the weapon
+// stays shouldered between shots instead of re-drawing every time.
+constexpr float kShootRecoilStart = 0.12f;
 constexpr float kMoveSpeed = 4.0f;  // Default run speed, world units per second.
 // WEGO rounds: both teams' committed plans execute together over one
 // fixed-length window. A figure's plannable move distance is bounded by

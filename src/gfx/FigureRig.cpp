@@ -102,7 +102,7 @@ float SampleLoop(const BipedCurve& curve, float phase) {
 //    kicks (muzzle flip + rearward slide), decaying exponentially (same
 //    decay form as the camera zoom damping) -- and over the last
 //    kLowerDuration everything eases back down to the carry pose.
-constexpr float kAimRaiseDuration = 0.12f;
+constexpr float kAimRaiseDuration = tactics::constants::kShootRecoilStart;
 constexpr float kLowerDuration = 0.25f;
 constexpr float kRecoilDecayRate = 12.0f;              // Per second.
 constexpr float kRecoilArmKick = glm::radians(18.0f);  // Whole-arm lift (handgun).

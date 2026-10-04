@@ -369,13 +369,28 @@ class GameLogic {
   // A planned shot waiting for its first tick with valid FOV+LOS. Expires
   // (as a miss / hold-fire) if the shooter or target dies first, or if the
   // round ends with it still blocked. Free-aim shots (hasAimPoint) have no
-  // gates: they fire on the first resolution tick, hit or miss.
+  // gates: they open fire on the first resolution tick, hit or miss.
+  //
+  // Once a burst opens fire it is paced in real time (issue #140): shot k
+  // fires at startTime + k * the weapon's shot interval, and every
+  // requested shot is taken -- a kill does not cut the burst short -- until
+  // the magazine level is spent, the round window closes (a burst that
+  // starts late fires only the shots that still fit), or the shooter dies.
   struct PendingShot {
     int shooterId = -1;
     int targetId = -1;
     bool hasAimPoint = false;
     glm::vec3 aimPoint{0.0f};
     int shots = 1;  // Burst size (issue #138): independent rolls per shot.
+    // Burst runtime state, meaningful only while mode_ == Executing.
+    bool started = false;    // Gates passed; the schedule below is armed.
+    float startTime = 0.0f;  // Execution-clock time of the burst's shot 0.
+    int shotsFired = 0;
+    // Tracer dedup across the burst's ticks: bullets along an unchanged
+    // line re-use the already-recorded tracer instead of stacking copies.
+    bool missTracerRecorded = false;        // Free-aim full-length line.
+    bool targetTracerRecorded = false;      // Locked-target line...
+    glm::vec3 lastTracerTargetPos{0.0f};    // ...re-recorded if the target moved.
   };
 
   // One figure the free-aim ballistic trace can reach, in ray order.
@@ -390,15 +405,15 @@ class GameLogic {
   // Unseen figures are included -- the bullet doesn't care about fog.
   std::vector<AimTraceCandidate> AimTraceCandidates(const Unit& shooter,
                                                     const glm::vec3& aimPoint) const;
-  // Applies a taken free-aim burst: the shooter turns to face the aim point
-  // (persisting into later rounds' FOV/overwatch), plays the shoot beat, and
-  // every hit figure goes down (`hitTargets`, nearest-first; a burst can down
-  // several figures along the ray). A hit on a figure the shooter's team
-  // cannot currently see records a sighting sample -- the one bit of info a
-  // connecting blind shot reveals; misses reveal nothing. `missedShots` is
-  // how many of the burst's bullets struck no figure at all (they fly on to
-  // the first wall/deck/ground and leave that full-length tracer).
-  void ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets, int missedShots,
+  // Applies one tick's fired free-aim bullets: the shooter turns to face
+  // the aim point (persisting into later rounds' FOV/overwatch), (re)plays
+  // the shoot beat, and every hit figure goes down (`hitTargets`,
+  // nearest-first; a burst can down several figures along the ray). A hit
+  // on a figure the shooter's team cannot currently see records a sighting
+  // sample -- the one bit of info a connecting blind shot reveals; misses
+  // reveal nothing. `recordMissLine` records the full-length tracer of the
+  // bullets that struck no figure (the caller dedups it per burst).
+  void ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets, bool recordMissLine,
                     const glm::vec3& aimPoint);
 
   // Gate check only, no side effects (ShotHitChance > 0): "can this shooter
@@ -408,12 +423,15 @@ class GameLogic {
 
   float RollShot();
   // Applies a taken shot: shooter animation, plus knockdown if `hit`.
-  void ApplyShot(Unit& shooter, Unit& target, bool hit);
+  // `recordTracer` is false for a burst's follow-up shots along an
+  // unchanged line (the first shot's tracer already marks it).
+  void ApplyShot(Unit& shooter, Unit& target, bool hit, bool recordTracer = true);
 
-  // Judges every pending shot against the current (start-of-resolution)
-  // state, then applies all connecting hits at once: mutual shots in the
-  // same tick both land. Fired shots and shots whose shooter/target died
-  // are removed from pendingShots_.
+  // Fires every bullet due at the current execution clock -- across all
+  // bursts, in schedule order, judged against the same snapshot before any
+  // hit is applied (mutual shots in the same tick both land). Finished
+  // bursts and shots whose shooter died (or whose locked target died
+  // before the burst could start) are removed from pendingShots_.
   void ResolvePendingShots();
 
   void FinishRound();
@@ -459,6 +477,10 @@ class GameLogic {
   // the round finishes.
   std::vector<ActiveMove> activeMoves_;
   std::vector<PendingShot> pendingShots_;
+  // Execution clock: seconds since the executing round's commit. Bursts
+  // schedule their shots against it; only the [0, kRoundDuration) window
+  // fires (issue #140).
+  float executionElapsed_ = 0.0f;
   std::mt19937 shotRng_{0x5eedu};
   std::function<float()> shotRollSource_;
   // Free-aim state: the unconfirmed "+" marker (planning-local, never

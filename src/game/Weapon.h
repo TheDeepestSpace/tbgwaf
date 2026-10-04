@@ -30,12 +30,13 @@ struct WeaponStats {
   float shotIntervalSeconds;  // Time between aimed shots within one action.
 };
 
-// Intervals are aimed fire, not cyclic rate, sized against the 5 s round
-// (constants::kRoundDuration): Deagle 8 rounds at 0.625 s (8 shots fill the
-// window exactly), AR 30 rounds at 0.16 s (~31 fit, so the magazine is the
-// binding cap), sniper 5 rounds at 1.0 s of bolt work per shot.
+// Intervals are aimed fire, not cyclic rate, and pace the burst in real
+// time during the round's execution (issue #140): Deagle 8 rounds at 0.5 s
+// (10 would fit the 5 s window, so the 8-round magazine binds), AR 30
+// rounds at 0.16 s (~31 fit, the magazine binds again), sniper 5 rounds at
+// 1.0 s of bolt work per shot.
 inline const WeaponStats& StatsOf(WeaponType type) {
-  static constexpr WeaponStats kDeagle{8, 0.625f};
+  static constexpr WeaponStats kDeagle{8, 0.5f};
   static constexpr WeaponStats kAssaultRifle{30, 0.16f};
   static constexpr WeaponStats kSniper{5, 1.0f};
   switch (type) {

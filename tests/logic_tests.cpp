@@ -2157,15 +2157,15 @@ void TestWeaponBurstCaps() {
   CHECK(StatsOf(WeaponType::DesertEagle).magazineSize == 8);
   CHECK(StatsOf(WeaponType::AssaultRifle).magazineSize == 30);
   CHECK(StatsOf(WeaponType::SniperRifle).magazineSize == 5);
-  // At the 5 s round: the Deagle's 8 rounds fill the window exactly, the
-  // AR's 30-round magazine binds before its interval (~31 shots fit), and
-  // the sniper bolt-cycles 5 times.
+  // At the 5 s round: the Deagle's 8-round magazine binds (10 shots at its
+  // 0.5 s interval would fit), the AR's 30-round magazine binds before its
+  // interval (~31 shots fit), and the sniper bolt-cycles 5 times.
   CHECK(MaxShotsPerAction(WeaponType::DesertEagle, constants::kRoundDuration) == 8);
   CHECK(MaxShotsPerAction(WeaponType::AssaultRifle, constants::kRoundDuration) == 30);
   CHECK(MaxShotsPerAction(WeaponType::SniperRifle, constants::kRoundDuration) == 5);
   // A shorter window makes the fire interval the binding cap instead.
   CHECK(MaxShotsPerAction(WeaponType::AssaultRifle, 1.0f) == 6);
-  CHECK(MaxShotsPerAction(WeaponType::DesertEagle, 1.0f) == 1);
+  CHECK(MaxShotsPerAction(WeaponType::DesertEagle, 1.0f) == 2);
   // Never below 1: an action always gets its one shot.
   CHECK(MaxShotsPerAction(WeaponType::SniperRifle, 0.25f) == 1);
 }
@@ -2192,13 +2192,17 @@ void TestPlannedShotCountClampsToWeaponCap() {
   CHECK(game.PlannedShotCount() == 1);
 }
 
-// A locked-target burst rolls each shot independently and stops at the
-// first hit: the target is down, the rest of the magazine stays unspent.
-void TestLockedBurstRollsPerShotAndStopsOnHit() {
+// A locked-target burst fires every requested shot, paced at the weapon's
+// interval across the round window (issue #140): the round keeps executing
+// until the last scheduled shot, rolls run per shot while the target
+// stands, and a kill stops the rolling but not the trigger -- the rest of
+// the magazine still fires into the body.
+void TestLockedBurstFiresAllShotsOverTime() {
   GameLogic game(LegacyScene());
   int rolls = 0;
   const float sequence[] = {0.9f, 0.9f, 0.0f, 0.0f};
   game.SetShotRollSource([&rolls, &sequence] { return sequence[rolls++ % 4]; });
+  game.FindUnit(1)->weapon = WeaponType::SniperRifle;  // 1 s bolt interval.
   game.ClickUnit(1, Team::Blue);  // Open middle lane: blue1 bursts 4 at red4.
   game.ChooseShoot();
   game.SetPlannedShotCount(4, Team::Blue);
@@ -2212,9 +2216,20 @@ void TestLockedBurstRollsPerShotAndStopsOnHit() {
     game.ChoosePass();
   }
   game.CommitRound();
+  // Only shot 0 has fired at commit; the sniper's 1 s bolt interval paces
+  // the rest, so the round is still executing with one roll consumed.
+  CHECK(game.Mode() == InputMode::Executing);
+  CHECK(rolls == 1);
+  game.Update(0.5f);  // Shot 1 is scheduled at t=1.0: not due yet.
+  CHECK(game.Mode() == InputMode::Executing);
+  CHECK(rolls == 1);
   game.Update(10.0f);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(game.RoundNumber() == 2);
   CHECK(!game.FindUnit(4)->alive);
-  CHECK(rolls == 3);  // Two misses, one hit; the 4th shot was never fired.
+  // Two misses, then the 3rd shot kills; the 4th still fires (the mag
+  // level is honored) but has nothing left to roll against.
+  CHECK(rolls == 3);
 }
 
 // Free-aim bursts (point-target shots) roll per bullet along the ballistic
@@ -2239,7 +2254,8 @@ void TestFreeAimBurstHitsPointTarget() {
   CHECK(!game.FindUnit(1)->alive);  // The third bullet connected.
   CHECK(rolls == 3);  // Bullets 4 and 5 had nobody left in the ray: no rolls.
   // Tracers: one into the hit figure, one full-length line shared by the
-  // bullets that struck nothing.
+  // bullets that struck nothing -- recorded once for the whole burst, not
+  // per bullet, even though the shots now fire spread over the round.
   CHECK(game.Tracers().size() == 2);
 }
 
@@ -2347,7 +2363,7 @@ int main() {
   TestShotLeavesFadingTracer();
   TestWeaponBurstCaps();
   TestPlannedShotCountClampsToWeaponCap();
-  TestLockedBurstRollsPerShotAndStopsOnHit();
+  TestLockedBurstFiresAllShotsOverTime();
   TestFreeAimBurstHitsPointTarget();
   TestBurstPlanSurvivesSnapshotAndClampsOnImport();
 

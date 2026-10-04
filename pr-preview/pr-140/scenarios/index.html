@@ -96,24 +96,25 @@ listed by name only.</p>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
 <div class="scenario has-video" data-stem="burst_stops_on_early_death"><h3>burst_stops_on_early_death</h3><div class="path">tests/scenarios/burst_stops_on_early_death.yaml</div>
-<p class="description">A burst stops as soon as its target goes down (issue shots but its 2nd is a pinned hit, so the remaining 3 stay unspent. Roll alignment proves it -- the Deagle shooter resolving right after must land the 4th roll (a hit); had the sniper kept rolling through its whole burst, the Deagle would instead draw the 7th roll (a miss) and unit 5 would survive.</p>
+<p class="description">A burst keeps firing after its target goes down (the whole requested magazine level is taken, issue 30-shot AR mag dump, fires its first shot at t=0 (simultaneous with the red sniper&#x27;s pinned hit that kills it), and the remaining 29 shots are never taken. Roll alignment proves it: the red Deagle&#x27;s 2-shot burst fires its second shot at t=0.5, and only because blue 0&#x27;s trigger went silent does that shot draw the 4th pinned roll (a hit, downing blue 1). Had blue 0 kept firing, its shots at t=0.16/0.32/0.48 would consume the rolls in between and blue 1 would survive (and the wrapped roll list would down red 3, failing that assert too).</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/burst_stops_on_early_death/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/burst_stops_on_early_death/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1</div>
-<div class="detail">Full 5-shot burst planned; the pinned 2nd-shot hit cuts it short.</div>
+<div class="detail">Full 30-shot mag dump planned; only shot 1 is ever taken -- the shooter dies to the simultaneous t=0 sniper shot.</div>
+<div class="detail">2-shot Deagle burst; its 0.5 s-later second shot is the roll-alignment probe.</div>
 <div class="step" data-action="1"><span class="u blue">blue0</span> shoots <span class="u red">red3</span></div>
-<div class="step" data-action="2"><span class="u blue">blue1</span> shoots <span class="u red">red4</span></div>
-<div class="step" data-action="3"><span class="u blue">blue2</span> shoots <span class="u red">red5</span></div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="3"><span class="u blue">blue2</span> passes</div>
 <div class="step" data-action="4"><span class="u red">red3</span> passes</div>
-<div class="step" data-action="5"><span class="u red">red4</span> passes</div>
-<div class="step" data-action="6"><span class="u red">red5</span> passes</div>
+<div class="step" data-action="5"><span class="u red">red4</span> shoots <span class="u blue">blue0</span></div>
+<div class="step" data-action="6"><span class="u red">red5</span> shoots <span class="u blue">blue1</span></div>
 <div class="step" data-action="7">commit round</div>
-<div class="detail">Check: <span class="u red">red3</span> is alive — The AR&#x27;s single shot missed</div>
-<div class="detail">Check: <span class="u red">red4</span> is down — Down on the burst&#x27;s 2nd shot</div>
-<div class="detail">Check: <span class="u red">red5</span> is down — Got the 4th roll -- proof the sniper stopped after 2</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is down — Killed at t=0 by the red sniper</div>
+<div class="detail">Check: <span class="u red">red3</span> is alive — Blue 0&#x27;s single taken shot was a pinned miss</div>
+<div class="detail">Check: <span class="u blue">blue1</span> is down — Down to the Deagle&#x27;s 2nd shot drawing the 4th roll -- proof blue 0 stopped at 1</div>
 <div class="detail">Check: winner: none</div>
 <div class="detail">Check: round is 2</div>
 </div>

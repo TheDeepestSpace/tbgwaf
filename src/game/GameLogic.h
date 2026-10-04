@@ -57,6 +57,7 @@ struct GameSnapshot {
     int planShootTargetId = -1;
     bool planHasAimPoint = false;  // Free-aim shot plan (issue #129).
     glm::vec3 planAimPoint{0.0f};
+    int planShots = 1;  // Burst size of a Shoot plan (issue #138).
     std::vector<glm::vec3> planPath;
     std::vector<std::vector<glm::vec3>> planQueuedLegs;
     float planEndFacingYaw = 0.0f;
@@ -244,6 +245,19 @@ class GameLogic {
   };
   const std::optional<AimPreview>& GetAimPreview() const { return aimPreview_; }
 
+  // --- Multi-shot bursts (issue #138). While AwaitingShootTarget the
+  // shot-level bar next to the shooter sets how many shots the planned
+  // action will fire; the count is folded into the plan when it is recorded
+  // (lock-on click or ConfirmAim) and resets to 1 for the next aim. ---
+
+  // Burst cap for the currently selected shooter's weapon over one round
+  // window (min(magazine, round time / fire interval)); 1 with no selection.
+  int MaxShotsForSelected() const;
+  // Clamps to [1, MaxShotsForSelected()]. Only the aiming figure's own team
+  // may set it, and only while that figure is picking its shot.
+  void SetPlannedShotCount(int count, Team byTeam);
+  int PlannedShotCount() const { return plannedShots_; }
+
   // Friendly fire config flag: when off, same-team figures are transparent
   // to the free-aim ballistic trace. On by default.
   bool FriendlyFireEnabled() const { return friendlyFire_; }
@@ -361,6 +375,7 @@ class GameLogic {
     int targetId = -1;
     bool hasAimPoint = false;
     glm::vec3 aimPoint{0.0f};
+    int shots = 1;  // Burst size (issue #138): independent rolls per shot.
   };
 
   // One figure the free-aim ballistic trace can reach, in ray order.
@@ -375,12 +390,16 @@ class GameLogic {
   // Unseen figures are included -- the bullet doesn't care about fog.
   std::vector<AimTraceCandidate> AimTraceCandidates(const Unit& shooter,
                                                     const glm::vec3& aimPoint) const;
-  // Applies a taken free-aim shot: the shooter turns to face the aim point
+  // Applies a taken free-aim burst: the shooter turns to face the aim point
   // (persisting into later rounds' FOV/overwatch), plays the shoot beat, and
-  // the hit figure (if any) goes down. A hit on a figure the shooter's team
+  // every hit figure goes down (`hitTargets`, nearest-first; a burst can down
+  // several figures along the ray). A hit on a figure the shooter's team
   // cannot currently see records a sighting sample -- the one bit of info a
-  // connecting blind shot reveals; misses reveal nothing.
-  void ApplyAimShot(Unit& shooter, Unit* hitTarget, const glm::vec3& aimPoint);
+  // connecting blind shot reveals; misses reveal nothing. `missedShots` is
+  // how many of the burst's bullets struck no figure at all (they fly on to
+  // the first wall/deck/ground and leave that full-length tracer).
+  void ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets, int missedShots,
+                    const glm::vec3& aimPoint);
 
   // Gate check only, no side effects (ShotHitChance > 0): "can this shooter
   // take the shot at all". Split out so a tick's simultaneous shots can all
@@ -445,6 +464,9 @@ class GameLogic {
   // Free-aim state: the unconfirmed "+" marker (planning-local, never
   // serialized -- like the selection) and the friendly fire config flag.
   std::optional<AimPreview> aimPreview_;
+  // Burst size the shot-level bar has dialed in for the aim in progress
+  // (planning-local, like aimPreview_); folded into the plan on record.
+  int plannedShots_ = 1;
   bool friendlyFire_ = constants::kFriendlyFireDefault;
   // Ids of figures a simulating peer reports as mid-move (ImportState only;
   // a follower has no activeMoves_ of its own).

@@ -210,6 +210,7 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     if (action.target >= 0 && freeAim) {
       throw std::runtime_error("script 'shoot' cannot mix 'target' with a free-aim point/ray");
     }
+    if (node["shots"]) action.shots = node["shots"].as<int>();
     action.expectNoop = node["expect_noop"] && node["expect_noop"].as<bool>();
   } else if (kind == "pass") {
     action.kind = ScenarioAction::Kind::Pass;
@@ -401,6 +402,10 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
         NotifyMenuClick(actorTeam, "Shoot");
         game.ChooseShoot();
       }
+      // Burst size (issue #138): the step's `shots` is the level the player
+      // dragged the shot bar to before picking the target; the same clamped
+      // setter the bar uses.
+      if (action.shots) game.SetPlannedShotCount(*action.shots, actorTeam);
 
       // Locked-on figure target: the pre-#129 flow, unchanged.
       if (action.target >= 0) {

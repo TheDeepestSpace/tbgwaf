@@ -696,6 +696,7 @@ int main() {
       if (hud.playbook) game.SetPlaybook(paneTeam(pane), *hud.playbook);
       if (hud.done) game.FinishMovePlan();
       if (hud.fire) game.ConfirmAim(paneTeam(pane));
+      if (hud.shots) game.SetPlannedShotCount(*hud.shots, paneTeam(pane));
     }
 
     // Pane divider. Both teams plan at once, so there's no "inactive side"

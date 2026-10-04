@@ -2151,6 +2151,133 @@ void TestShotLeavesFadingTracer() {
   CHECK(game.Tracers().front().birthRound == game.RoundNumber());
 }
 
+// Multi-shot bursts (issue #138): the per-weapon magazine and fire interval
+// cap how many shots one shooting action may fire within the round window.
+void TestWeaponBurstCaps() {
+  CHECK(StatsOf(WeaponType::DesertEagle).magazineSize == 8);
+  CHECK(StatsOf(WeaponType::AssaultRifle).magazineSize == 30);
+  CHECK(StatsOf(WeaponType::SniperRifle).magazineSize == 5);
+  // At the 5 s round: the Deagle's 8 rounds fill the window exactly, the
+  // AR's 30-round magazine binds before its interval (~31 shots fit), and
+  // the sniper bolt-cycles 5 times.
+  CHECK(MaxShotsPerAction(WeaponType::DesertEagle, constants::kRoundDuration) == 8);
+  CHECK(MaxShotsPerAction(WeaponType::AssaultRifle, constants::kRoundDuration) == 30);
+  CHECK(MaxShotsPerAction(WeaponType::SniperRifle, constants::kRoundDuration) == 5);
+  // A shorter window makes the fire interval the binding cap instead.
+  CHECK(MaxShotsPerAction(WeaponType::AssaultRifle, 1.0f) == 6);
+  CHECK(MaxShotsPerAction(WeaponType::DesertEagle, 1.0f) == 1);
+  // Never below 1: an action always gets its one shot.
+  CHECK(MaxShotsPerAction(WeaponType::SniperRifle, 0.25f) == 1);
+}
+
+void TestPlannedShotCountClampsToWeaponCap() {
+  GameLogic game(LegacyScene());
+  game.FindUnit(1)->weapon = WeaponType::DesertEagle;  // Cap 8.
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  CHECK(game.MaxShotsForSelected() == 8);
+  CHECK(game.PlannedShotCount() == 1);  // Default burst of 1 keeps old behavior.
+  game.SetPlannedShotCount(99, Team::Blue);  // Over-cap clamps to the magazine.
+  CHECK(game.PlannedShotCount() == 8);
+  game.SetPlannedShotCount(0, Team::Blue);  // Never 0: the minimum is one shot.
+  CHECK(game.PlannedShotCount() == 1);
+  game.SetPlannedShotCount(5, Team::Red);  // Only the shooter's own side sets it.
+  CHECK(game.PlannedShotCount() == 1);
+  game.SetPlannedShotCount(5, Team::Blue);
+  game.ClickUnit(4, Team::Blue);  // Lock on: the plan carries the level.
+  CHECK(game.FindUnit(1)->plan.shots == 5);
+  // The next aim starts back at the 1-shot default.
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  CHECK(game.PlannedShotCount() == 1);
+}
+
+// A locked-target burst rolls each shot independently and stops at the
+// first hit: the target is down, the rest of the magazine stays unspent.
+void TestLockedBurstRollsPerShotAndStopsOnHit() {
+  GameLogic game(LegacyScene());
+  int rolls = 0;
+  const float sequence[] = {0.9f, 0.9f, 0.0f, 0.0f};
+  game.SetShotRollSource([&rolls, &sequence] { return sequence[rolls++ % 4]; });
+  game.ClickUnit(1, Team::Blue);  // Open middle lane: blue1 bursts 4 at red4.
+  game.ChooseShoot();
+  game.SetPlannedShotCount(4, Team::Blue);
+  game.ClickUnit(4, Team::Blue);
+  for (int id : {0, 2}) {
+    game.ClickUnit(id, Team::Blue);
+    game.ChoosePass();
+  }
+  for (int id : {3, 4, 5}) {
+    game.ClickUnit(id, Team::Red);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  game.Update(10.0f);
+  CHECK(!game.FindUnit(4)->alive);
+  CHECK(rolls == 3);  // Two misses, one hit; the 4th shot was never fired.
+}
+
+// Free-aim bursts (point-target shots) roll per bullet along the ballistic
+// trace; bullets after a kill skip the downed figure instead of re-rolling it.
+void TestFreeAimBurstHitsPointTarget() {
+  GameLogic game(
+      AimScene({{Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(10.0f, 0.0f, 0.0f)}}));
+  int rolls = 0;
+  const float sequence[] = {0.9f, 0.9f, 0.0f, 0.9f, 0.9f};
+  game.SetShotRollSource([&rolls, &sequence] { return sequence[rolls++ % 5]; });
+  game.FindUnit(0)->weapon = WeaponType::DesertEagle;
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  game.SetPlannedShotCount(5, Team::Blue);
+  game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
+  game.ConfirmAim(Team::Blue);
+  CHECK(game.FindUnit(0)->plan.shots == 5);
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  game.Update(10.0f);
+  CHECK(!game.FindUnit(1)->alive);  // The third bullet connected.
+  CHECK(rolls == 3);  // Bullets 4 and 5 had nobody left in the ray: no rolls.
+  // Tracers: one into the hit figure, one full-length line shared by the
+  // bullets that struck nothing.
+  CHECK(game.Tracers().size() == 2);
+}
+
+void TestBurstPlanSurvivesSnapshotAndClampsOnImport() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.SetPlannedShotCount(12, Team::Blue);  // LegacyScene units carry ARs (cap 30).
+  game.ClickUnit(4, Team::Blue);
+  CHECK(game.FindUnit(1)->plan.shots == 12);
+
+  GameSnapshot decoded;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &decoded));
+  bool checked = false;
+  for (const auto& u : decoded.units) {
+    if (u.id != 1) continue;
+    checked = true;
+    CHECK(u.planShots == 12);
+  }
+  CHECK(checked);
+
+  GameLogic follower(LegacyScene());
+  CHECK(follower.ImportState(decoded));
+  CHECK(follower.FindUnit(1)->plan.shots == 12);
+
+  GameLogic peer(LegacyScene());
+  CHECK(peer.ImportTeamPlans(decoded, Team::Blue));
+  CHECK(peer.FindUnit(1)->plan.shots == 12);
+
+  // A peer can't ship a plan past the weapon's cap: import re-clamps.
+  for (auto& u : decoded.units) {
+    if (u.id == 1) u.planShots = 200;
+  }
+  GameLogic clamped(LegacyScene());
+  CHECK(clamped.ImportState(decoded));
+  CHECK(clamped.FindUnit(1)->plan.shots == 30);
+}
+
 int main() {
   TestNavMeshRoutesAroundObstacle();
   TestNavMeshDirectPathWhenUnobstructed();
@@ -2218,6 +2345,11 @@ int main() {
   TestFollowerMirrorsBlindHitReveal();
   TestFreeAimPlanSnapshotAndProtocolRoundTrip();
   TestShotLeavesFadingTracer();
+  TestWeaponBurstCaps();
+  TestPlannedShotCountClampsToWeaponCap();
+  TestLockedBurstRollsPerShotAndStopsOnHit();
+  TestFreeAimBurstHitsPointTarget();
+  TestBurstPlanSurvivesSnapshotAndClampsOnImport();
 
   if (g_failures == 0) {
     std::printf("All logic tests passed.\n");

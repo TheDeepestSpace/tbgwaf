@@ -1,0 +1,44 @@
+name: burst_stops_on_early_death
+description: >
+  A burst stops as soon as its target goes down (issue #138): the sniper plans all 5
+  shots but its 2nd is a pinned hit, so the remaining 3 stay unspent. Roll alignment
+  proves it -- the Deagle shooter resolving right after must land the 4th roll (a hit);
+  had the sniper kept rolling through its whole burst, the Deagle would instead draw the
+  7th roll (a miss) and unit 5 would survive.
+
+units:
+  - {id: 0, team: blue, position: [-8, 0, -4], facing_degrees: 0}  # Assault rifle.
+  - {id: 1, team: blue, position: [-8, 0, 0], facing_degrees: 0}   # Sniper rifle, bursts 5.
+  - {id: 2, team: blue, position: [-8, 0, 4], facing_degrees: 0}   # Desert Eagle.
+  - {id: 3, team: red, position: [8, 0, -4], facing_degrees: 180}
+  - {id: 4, team: red, position: [8, 0, 0], facing_degrees: 180}
+  - {id: 5, team: red, position: [8, 0, 4], facing_degrees: 180}
+
+# AR single miss; sniper miss then hit (stops, 3 shots unspent); Deagle hit.
+shot_rolls: [0.9, 0.9, 0.05, 0.05, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9]
+
+script:
+  - action: shoot
+    actor: 0
+    target: 3
+  - action: shoot
+    description: Full 5-shot burst planned; the pinned 2nd-shot hit cuts it short.
+    actor: 1
+    target: 4
+    shots: 5
+  - action: shoot
+    actor: 2
+    target: 5
+  - action: pass
+    actor: 3
+  - action: pass
+    actor: 4
+  - action: pass
+    actor: 5
+  - action: commit
+
+  - assert: {unit: 3, alive: true, comment: The AR's single shot missed}
+  - assert: {unit: 4, alive: false, comment: Down on the burst's 2nd shot}
+  - assert: {unit: 5, alive: false, comment: Got the 4th roll -- proof the sniper stopped after 2}
+  - assert: {winner: none}
+  - assert: {round: 2}

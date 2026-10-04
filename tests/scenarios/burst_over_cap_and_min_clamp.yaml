@@ -1,0 +1,53 @@
+name: burst_over_cap_and_min_clamp
+description: >
+  Burst-size clamping (issue #138): shots above the weapon's cap clamp down to it (the AR
+  asks for 99 but fires exactly 30), and shots below 1 clamp up to the single-shot minimum
+  (the sniper asks for 0 but still fires once). The proof is roll alignment -- the AR's 30
+  misses leave the 31st and 32nd pinned hit rolls for the next two shooters, so both their
+  targets drop. An unclamped 31st AR shot would steal a hit roll (downing unit 3 and
+  leaving unit 4 alive); a 0-shot sniper action would leave unit 4 alive and feed the hit
+  roll to unit 2 one slot early.
+
+units:
+  - {id: 0, team: blue, position: [-8, 0, -4], facing_degrees: 0}  # Assault rifle, cap 30.
+  - {id: 1, team: blue, position: [-8, 0, 0], facing_degrees: 0}   # Sniper rifle.
+  - {id: 2, team: blue, position: [-8, 0, 4], facing_degrees: 0}   # Desert Eagle.
+  - {id: 3, team: red, position: [8, 0, -4], facing_degrees: 180}
+  - {id: 4, team: red, position: [8, 0, 0], facing_degrees: 180}
+  - {id: 5, team: red, position: [8, 0, 4], facing_degrees: 180}
+
+# 30 misses for the clamped AR burst, then one hit each for the sniper's
+# clamped single shot and the Deagle's default single shot.
+shot_rolls: [0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9,
+             0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9,
+             0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9,
+             0.05, 0.05]
+
+script:
+  - action: shoot
+    description: Asks for 99 shots; the bar/setter clamps to the AR's 30-shot cap.
+    actor: 0
+    target: 3
+    shots: 99
+  - action: shoot
+    description: Asks for 0 shots; clamps up to the 1-shot minimum (never 0).
+    actor: 1
+    target: 4
+    shots: 0
+  - action: shoot
+    description: No shots key at all keeps the pre-burst default of 1.
+    actor: 2
+    target: 5
+  - action: pass
+    actor: 3
+  - action: pass
+    actor: 4
+  - action: pass
+    actor: 5
+  - action: commit
+
+  - assert: {unit: 3, alive: true, comment: All 30 clamped AR shots were pinned misses}
+  - assert: {unit: 4, alive: false, comment: The clamped-to-1 sniper shot got the 31st roll, a hit}
+  - assert: {unit: 5, alive: false, comment: The default single shot got the 32nd roll, a hit}
+  - assert: {winner: none}
+  - assert: {round: 2}

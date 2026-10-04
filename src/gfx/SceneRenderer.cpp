@@ -2476,10 +2476,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glDisable(GL_BLEND);
   }
 
-  // Bullet tracers: team-colored line from the muzzle to where the shot
-  // ended, fading per completed round like the sighting ghosts.
+  // Bullet tracers: a team-colored dotted path from the muzzle to where the
+  // shot ended, fading per completed round like the sighting ghosts.  A new
+  // shot briefly overlays the dots with a full white-hot line.
   {
     constexpr float kTracerMaxAlpha = 0.9f;
+    constexpr float kTracerDotLength = 0.16f;
+    constexpr float kTracerDotStride = 0.5f;
     unlitShader_.Use();
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -2490,15 +2493,30 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       if (life <= 0.0f) continue;
       const glm::vec3 teamColor = tracer.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
                                                             : glm::vec3(0.9f, 0.25f, 0.22f);
-      // A just-fired bullet flashes white-hot and fully opaque, then settles
-      // into its team-colored fading line: each shot of a burst pops on its own.
+      const glm::vec3 delta = tracer.to - tracer.from;
+      const float length = glm::length(delta);
+      if (length <= 1e-4f) continue;
+      const glm::vec3 direction = delta / length;
+      std::vector<glm::vec3> dots;
+      dots.reserve(static_cast<size_t>(std::ceil(length / kTracerDotStride)) * 2);
+      for (float start = 0.0f; start < length; start += kTracerDotStride) {
+        dots.push_back(tracer.from + direction * start);
+        dots.push_back(tracer.from + direction * std::min(start + kTracerDotLength, length));
+      }
+      pathLine_.SetPoints(dots);
+      unlitShader_.SetMat4("uMVP", viewProj);
+      unlitShader_.SetVec4("uColor", glm::vec4(teamColor, life * kTracerMaxAlpha));
+      pathLine_.DrawSegments();
+
+      // Each shot of a burst still pops as a full white-hot line, but that
+      // continuous overlay disappears quickly and leaves only the dots.
       constexpr float kTracerFlashSeconds = 0.25f;
       const float flash = glm::clamp(1.0f - tracer.age / kTracerFlashSeconds, 0.0f, 1.0f);
-      const glm::vec3 base = glm::mix(teamColor, glm::vec3(1.0f, 0.97f, 0.8f), flash);
-      pathLine_.SetPoints({tracer.from, tracer.to});
-      unlitShader_.SetMat4("uMVP", viewProj);
-      unlitShader_.SetVec4("uColor", glm::vec4(base, glm::mix(life * kTracerMaxAlpha, 1.0f, flash)));
-      pathLine_.Draw();
+      if (flash > 0.0f) {
+        pathLine_.SetPoints({tracer.from, tracer.to});
+        unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.97f, 0.8f, flash));
+        pathLine_.Draw();
+      }
     }
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);

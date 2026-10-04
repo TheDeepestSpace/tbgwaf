@@ -328,6 +328,10 @@ def _parse_flow_value(s: str, i: int):
     i = _skip_ws(s, i)
     if i < len(s) and s[i] in "{[":
         return _parse_flow(s, i)
+    if i < len(s) and s[i] in "'\"":
+        end = s.find(s[i], i + 1)
+        if end >= 0:
+            return s[i + 1:end], end + 1
     j = i
     while j < len(s) and s[j] not in ",}]":
         j += 1

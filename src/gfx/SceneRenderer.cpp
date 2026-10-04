@@ -44,14 +44,11 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
   overlays.showShotCone = game.Mode() == tactics::InputMode::AwaitingShootTarget;
   if (overlays.showShotCone) {
     // Free-aim (issue #129): the aiming figure gets its 360-degree LOS
-    // highlight, and a placed aim point shows as the "+" selector (plus the
-    // aiming sphere for sky/off-surface aim).
+    // highlight, and a placed aim point shows as the "+" selector.
     overlays.aimShooter = selected;
     if (const auto& preview = game.GetAimPreview()) {
       overlays.aimMarker = preview->point;
-      overlays.aimSphere = preview->onSphere;
     }
-    overlays.aimSphereRadius = game.AimSphereRadius();
   }
   return overlays;
 }
@@ -1201,17 +1198,13 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
                                     const std::vector<AABB>& sidewalks, float mapHalfExtent,
                                     const tactics::HeightField& terrain,
                                     const std::vector<tactics::RoadSurface>& polygonSidewalks,
-                                    const std::vector<tactics::WalkSurface>& walkSurfaces,
-                                    float halfFovDegrees = tactics::constants::kShootHalfFovDegrees) {
-  // Keep the fan density constant per degree: the free-aim 360-degree LOS
-  // highlight (halfFovDegrees == 180) sweeps the full circle.
-  const int kArcSegments = std::max(
-      24, static_cast<int>(24.0f * halfFovDegrees / tactics::constants::kShootHalfFovDegrees));
+                                    const std::vector<tactics::WalkSurface>& walkSurfaces) {
+  constexpr int kArcSegments = 24;
   constexpr float kGroundOffset = 0.015f;
   // Angular nudge to either side of an obstacle corner: one ray lands on the
   // occluding face right at the corner, the other shoots past it.
   constexpr float kCornerEpsilon = 1e-3f;
-  const float halfFovRad = glm::radians(halfFovDegrees);
+  const float halfFovRad = glm::radians(tactics::constants::kShootHalfFovDegrees);
   const float range = tactics::constants::kFovConeVisualRange;
   const glm::vec3 eye = unit.EyePosition();
 
@@ -1680,7 +1673,6 @@ void SceneRenderer::Destroy() {
   fovConeMesh_.Destroy();
   shotConeMesh_.Destroy();
   aimOverlayMesh_.Destroy();
-  aimLosCache_ = AimLosCache{};
   terrainFovCache_.clear();
   fovKeyObstacles_.clear();
   fovKeySidewalks_.clear();
@@ -1703,7 +1695,8 @@ void SceneRenderer::Destroy() {
   fovFbo_[0] = fovFbo_[1] = 0;
 }
 
-void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit,
+void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, float facingYaw,
+                                      float halfFovDegrees, const glm::vec4& color,
                                       const glm::mat4& viewProj, bool drawTerrain,
                                       GLuint targetFramebuffer, int x, int y, int width,
                                       int height) {
@@ -1721,7 +1714,7 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit,
                                           aspect, kFovMapNear, far);
   glm::mat4 mapMatrix[2];
   for (int half = 0; half < 2; ++half) {
-    const float yaw = unit.facingYaw + glm::radians(kFovMapHalfSplitDegrees) * (half == 0 ? -1.0f : 1.0f);
+    const float yaw = facingYaw + glm::radians(kFovMapHalfSplitDegrees) * (half == 0 ? -1.0f : 1.0f);
     const glm::vec3 dir(std::cos(yaw), 0.0f, std::sin(yaw));
     mapMatrix[half] = proj * glm::lookAt(eye, eye + dir, glm::vec3(0.0f, 1.0f, 0.0f));
   }
@@ -1771,14 +1764,10 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit,
   glEnable(GL_POLYGON_OFFSET_FILL);
   glPolygonOffset(-1.0f, -2.0f);
 
-  constexpr float kConeAlpha = 0.15f;
-  const glm::vec4 baseColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
-                                                      : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
   fovMaskShader_.Use();
   fovMaskShader_.SetVec3("uEye", eye);
-  fovMaskShader_.SetVec3("uFacing", unit.FacingDirection());
-  fovMaskShader_.SetFloat("uCosHalfFov",
-                          std::cos(glm::radians(tactics::constants::kShootHalfFovDegrees)));
+  fovMaskShader_.SetVec3("uFacing", glm::vec3(std::cos(facingYaw), 0.0f, std::sin(facingYaw)));
+  fovMaskShader_.SetFloat("uCosHalfFov", std::cos(glm::radians(halfFovDegrees)));
   fovMaskShader_.SetFloat("uRange", range);
   fovMaskShader_.SetMat4("uFovMatrix0", mapMatrix[0]);
   fovMaskShader_.SetMat4("uFovMatrix1", mapMatrix[1]);
@@ -1792,7 +1781,7 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit,
                                    2.0f * std::tan(glm::radians(kFovMapHalfAzimuthDegrees)) /
                                        kFovMapWidth));
   fovMaskShader_.SetFloat("uProbeHeight", fovProbeHeight_);
-  fovMaskShader_.SetVec4("uColor", glm::vec4(baseColor.r, baseColor.g, baseColor.b, kConeAlpha));
+  fovMaskShader_.SetVec4("uColor", color);
   fovMaskShader_.SetInt("uFovMap0", 1);
   fovMaskShader_.SetInt("uFovMap1", 2);
   glActiveTexture(GL_TEXTURE1);
@@ -2063,17 +2052,24 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // avoid z-fighting speckle.
   glEnable(GL_POLYGON_OFFSET_FILL);
   glPolygonOffset(-2.0f, -4.0f);
-  if (fovOverlayMode_ == FovOverlayMode::ShadowMap) {
-    // Issue #110 prototype: projective per-unit mask instead of the
-    // analytic ground overlay. Static receivers/casters are cached per scene.
+  // Static receivers/casters for the shadow-map mask, cached per scene. Needed
+  // by the prototype FOV mode and by the free-aim highlight (always masked).
+  if (fovOverlayMode_ == FovOverlayMode::ShadowMap || overlays.aimShooter) {
     const unsigned long long sceneKey = FovSceneFingerprint(game.GetScene());
     if (sceneKey != fovSceneKey_) {
       BuildFovSceneMesh(game.GetScene(), &fovSceneMesh_);
       fovSceneKey_ = sceneKey;
     }
+  }
+  if (fovOverlayMode_ == FovOverlayMode::ShadowMap) {
+    // Issue #110 prototype: projective per-unit mask instead of the
+    // analytic ground overlay.
     for (const Unit& unit : game.GetScene().units) {
       if (debug.disableFov || !unit.alive || unit.team != team) continue;
-      DrawFovShadowMask(game, unit, viewProj, drawTerrain, targetFramebuffer, x, y, width, height);
+      const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 0.15f)
+                                                          : glm::vec4(0.9f, 0.25f, 0.22f, 0.15f);
+      DrawFovShadowMask(game, unit, unit.facingYaw, tactics::constants::kShootHalfFovDegrees,
+                        teamColor, viewProj, drawTerrain, targetFramebuffer, x, y, width, height);
     }
     colorShader_.Use();
   } else {
@@ -2103,21 +2099,25 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
   glDisable(GL_STENCIL_TEST);
   // Free-aim (issue #129): the aiming figure's acid-green 360-degree LOS
-  // highlight -- every surface it could aim at directly (the figure turns to
-  // shoot, so its facing doesn't gate the sweep). Cached per (unit, eye):
-  // nothing moves during planning, so this is one rebuild per selection.
+  // highlight -- the shadow-map mask shader, so it tints every surface the
+  // figure could aim at directly (building walls and roofs included, not
+  // just the ground). The figure turns to shoot, so its facing doesn't gate
+  // the sweep: three 120-degree sectors (each within the two depth maps'
+  // reach) tile the full circle. Own stencil pass so it layers over the
+  // team's FOV tint, while the sectors' seams still blend only once.
   if (overlays.aimShooter && overlays.aimShooter->alive && !debug.disableFov) {
     const Unit& shooter = *overlays.aimShooter;
-    if (aimLosCache_.unitId != shooter.id || aimLosCache_.eye != shooter.EyePosition()) {
-      aimLosCache_.unitId = shooter.id;
-      aimLosCache_.eye = shooter.EyePosition();
-      aimLosCache_.points =
-          BuildFovCone(shooter, obstacles, sidewalks, mapHalfExtent, terrain,
-                       game.GetScene().sidewalkSurfaces, game.GetScene().walkSurfaces, 180.0f);
+    glEnable(GL_STENCIL_TEST);
+    glStencilMask(0xFF);
+    glClear(GL_STENCIL_BUFFER_BIT);
+    for (int sector = 0; sector < 3; ++sector) {
+      DrawFovShadowMask(game, shooter, shooter.facingYaw + glm::radians(120.0f * sector), 61.0f,
+                        glm::vec4(kAimColor, 0.22f), viewProj, drawTerrain, targetFramebuffer, x,
+                        y, width, height);
     }
-    DrawFovCone(colorShader_, fovConeMesh_, viewProj, shooter, aimLosCache_.points, &kAimColor,
-                0.22f);
+    colorShader_.Use();
   }
+  glDisable(GL_STENCIL_TEST);
   // Shot probability cones are setup feedback, drawn over the FOV overlay:
   // the selected figure gets one while choosing a target, and every planned
   // shot keeps its cone until the round is committed (like a planned move's
@@ -2175,23 +2175,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
     }
   }
-  // The unconfirmed "+" selector the aiming player has placed, plus the
-  // adjustable aiming sphere when the point sits on it (sky/off-surface
-  // aim). Both acid green, matching the LOS highlight.
+  // The unconfirmed "+" selector the aiming player has placed, acid green
+  // like the LOS highlight.
   if (overlays.aimMarker) {
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
     DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, *overlays.aimMarker);
-    if (overlays.aimSphere && overlays.aimShooter && overlays.aimShooter->alive) {
-      const glm::vec3 center = overlays.aimShooter->EyePosition();
-      const glm::mat4 model = glm::translate(glm::mat4(1.0f), center) *
-                              glm::scale(glm::mat4(1.0f), glm::vec3(overlays.aimSphereRadius));
-      unlitShader_.Use();
-      unlitShader_.SetMat4("uMVP", viewProj * model);
-      unlitShader_.SetVec4("uColor", glm::vec4(kAimColor, 0.08f));
-      sphereMesh_.Draw();
-      colorShader_.Use();
-    }
     glDepthFunc(GL_LESS);
   }
   glDisable(GL_POLYGON_OFFSET_FILL);

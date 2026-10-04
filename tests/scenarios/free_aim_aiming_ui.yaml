@@ -3,8 +3,7 @@ description: >
   Issue #129 aiming UI captures, driven through the same touch-friendly flow a player
   uses (tap-to-place, re-tap to adjust, confirm): the acid-green 360-degree LOS highlight
   with obstacle shadows, the "+" selector with the spread-only cone over empty ground,
-  the cone lighting up a figure standing inside it, the forced aiming sphere with its
-  radius slider, and the planned shot's persisting marker after confirmation.
+  the cone lighting up a figure standing inside it, and the planned shot's persisting marker after confirmation.
 
 map:
   obstacles:
@@ -25,13 +24,6 @@ script:
     description: "Re-placing adjusts the aim (the drag-adjust gesture): the cone now passes over red1, which catches the cone's light -- hit probability feedback appears only on figures inside the cone."
     actor: 0
     at: [8, 0.9, 0]
-  - action: aim
-    description: "Forced sphere aim: the translucent adjustable sphere and its radius slider (no hover needed)."
-    actor: 0
-    aim_from: [-8, 2, 0]
-    aim_dir: [-0.3, 1, 0]
-    force_sphere: true
-    sphere_radius: 10
   - action: cancel
     actor: 0
   - action: pass

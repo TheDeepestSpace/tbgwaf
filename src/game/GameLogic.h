@@ -191,27 +191,24 @@ class GameLogic {
   // player may point-target any world position instead of locking onto a
   // figure: the camera ray resolves to a surface point in the selected
   // figure's 360-degree LOS (the figure turns to shoot, so its current
-  // facing doesn't gate the aim), else to a point on an adjustable sphere
-  // around the figure (sky/off-surface aim). A unit under the cursor beats
+  // facing doesn't gate the aim); rays with no aimable surface place
+  // nothing. A unit under the cursor beats
   // the surface behind it, keeping the existing lock-on flow. Placing an aim
   // point is a two-step plan (tap-to-place, then confirm), touch-friendly
   // and shared by the scenario scripts. ---
 
   // Where a camera ray would aim for the currently selected shooter.
   struct AimRayResult {
-    enum class Kind { Unit, Surface, Sphere };
-    Kind kind = Kind::Sphere;
+    enum class Kind { Unit, Surface, None };
+    Kind kind = Kind::None;
     int unitId = -1;       // Kind::Unit: the enemy figure to lock onto.
-    glm::vec3 point{0.0f};  // Kind::Surface/Sphere: the resolved aim point.
+    glm::vec3 point{0.0f};  // Kind::Surface: the resolved aim point.
   };
   // Applies the aim-point rule for the selected figure: nearest enemy figure
   // the ray hits (visible to the shooter's team) wins; else the nearest
   // surface hit (ground/terrain, walk surfaces, slab tops, obstacle faces)
-  // within the shooter's 360-degree LOS and sight range; else the ray's
-  // intersection with the aiming sphere. `forceSphere` (the modifier key /
-  // toggle) skips the unit and surface stages outright.
-  AimRayResult ResolveAimRay(const glm::vec3& origin, const glm::vec3& direction,
-                             bool forceSphere) const;
+  // within the shooter's 360-degree LOS and sight range; else nothing.
+  AimRayResult ResolveAimRay(const glm::vec3& origin, const glm::vec3& direction) const;
 
   // True if the selected shooter has clear 360-degree line of sight to this
   // surface point within sight range (the acid-green aimable region).
@@ -220,24 +217,18 @@ class GameLogic {
   // Click while AwaitingShootTarget: resolves the ray and either locks onto
   // the hit unit (plans immediately, as before) or places/moves the aim
   // preview marker. ConfirmAim records the planned `shoot at` action.
-  void ClickAimRay(const glm::vec3& origin, const glm::vec3& direction, bool forceSphere,
-                   Team byTeam);
+  void ClickAimRay(const glm::vec3& origin, const glm::vec3& direction, Team byTeam);
   // Direct placement used by scenario scripts / the protocol action's replay
   // (the already-resolved form of a click): no LOS gate, so deliberate blind
   // fire at any world point is possible.
-  void PlaceAimPoint(const glm::vec3& point, bool onSphere, Team byTeam);
+  void PlaceAimPoint(const glm::vec3& point, Team byTeam);
   void ConfirmAim(Team byTeam);
 
-  // The placed-but-unconfirmed aim marker ("+" selector / sphere point).
+  // The placed-but-unconfirmed aim marker ("+" selector).
   struct AimPreview {
     glm::vec3 point{0.0f};
-    bool onSphere = false;  // Placed on the aiming sphere, not a surface.
   };
   const std::optional<AimPreview>& GetAimPreview() const { return aimPreview_; }
-
-  // Adjustable sky-aim sphere radius (slider/handle in the HUD).
-  float AimSphereRadius() const { return aimSphereRadius_; }
-  void SetAimSphereRadius(float radius);
 
   // Friendly fire config flag: when off, same-team figures are transparent
   // to the free-aim ballistic trace. On by default.
@@ -438,10 +429,8 @@ class GameLogic {
   std::mt19937 shotRng_{0x5eedu};
   std::function<float()> shotRollSource_;
   // Free-aim state: the unconfirmed "+" marker (planning-local, never
-  // serialized -- like the selection), the sphere radius, and the friendly
-  // fire config flag.
+  // serialized -- like the selection) and the friendly fire config flag.
   std::optional<AimPreview> aimPreview_;
-  float aimSphereRadius_ = constants::kAimSphereDefaultRadius;
   bool friendlyFire_ = constants::kFriendlyFireDefault;
   // Ids of figures a simulating peer reports as mid-move (ImportState only;
   // a follower has no activeMoves_ of its own).

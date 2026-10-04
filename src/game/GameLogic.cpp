@@ -883,15 +883,14 @@ bool GameLogic::IsAimSurfaceVisible(const glm::vec3& point) const {
 }
 
 GameLogic::AimRayResult GameLogic::ResolveAimRay(const glm::vec3& origin,
-                                                 const glm::vec3& direction,
-                                                 bool forceSphere) const {
+                                                 const glm::vec3& direction) const {
   AimRayResult result;
   const Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
   if (!shooter) return result;
   if (glm::length(direction) < 1e-6f) return result;
   const glm::vec3 dir = glm::normalize(direction);
 
-  if (!forceSphere) {
+  {
     // A figure under the cursor beats the surface behind it, keeping the
     // existing lock-on flow. Only enemies the shooter's team can currently
     // see are pickable -- the same fog rule as rendering.
@@ -918,50 +917,27 @@ GameLogic::AimRayResult GameLogic::ResolveAimRay(const glm::vec3& origin,
     }
   }
 
-  // Sky / off-surface / forced: intersect the ray with the aiming sphere
-  // around the figure. A ray that misses the sphere entirely snaps to the
-  // sphere point nearest the ray, so the aim marker never vanishes.
-  result.kind = AimRayResult::Kind::Sphere;
-  const glm::vec3 center = shooter->EyePosition();
-  const float radius = aimSphereRadius_;
-  const glm::vec3 oc = origin - center;
-  const float b = glm::dot(oc, dir);
-  const float c = glm::dot(oc, oc) - radius * radius;
-  const float disc = b * b - c;
-  if (disc >= 0.0f) {
-    const float root = std::sqrt(disc);
-    float t = -b - root;              // Entry point.
-    if (t < 0.0f) t = -b + root;      // Origin inside the sphere: exit point.
-    if (t >= 0.0f) {
-      result.point = origin + dir * t;
-      return result;
-    }
-  }
-  const glm::vec3 closest = origin + dir * std::max(-b, 0.0f);
-  glm::vec3 radial = closest - center;
-  if (glm::length(radial) < 1e-5f) radial = glm::vec3(0.0f, 1.0f, 0.0f);
-  result.point = center + glm::normalize(radial) * radius;
+  // Nothing aimable under the cursor (sky, or ground the shooter can't see).
   return result;
 }
 
-void GameLogic::ClickAimRay(const glm::vec3& origin, const glm::vec3& direction, bool forceSphere,
-                            Team byTeam) {
+void GameLogic::ClickAimRay(const glm::vec3& origin, const glm::vec3& direction, Team byTeam) {
   if (mode_ != InputMode::AwaitingShootTarget) return;
   const Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
   if (!shooter || shooter->team != byTeam) return;
-  const AimRayResult aim = ResolveAimRay(origin, direction, forceSphere);
+  const AimRayResult aim = ResolveAimRay(origin, direction);
   if (aim.kind == AimRayResult::Kind::Unit) {
     ClickUnit(aim.unitId, byTeam);
     return;
   }
-  PlaceAimPoint(aim.point, aim.kind == AimRayResult::Kind::Sphere, byTeam);
+  if (aim.kind == AimRayResult::Kind::Surface) PlaceAimPoint(aim.point, byTeam);
 }
 
-void GameLogic::PlaceAimPoint(const glm::vec3& point, bool onSphere, Team byTeam) {
+void GameLogic::PlaceAimPoint(const glm::vec3& point, Team byTeam) {
   if (mode_ != InputMode::AwaitingShootTarget) return;
   const Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
   if (!shooter || shooter->team != byTeam) return;
-  aimPreview_ = AimPreview{point, onSphere};
+  aimPreview_ = AimPreview{point};
 }
 
 void GameLogic::ConfirmAim(Team byTeam) {
@@ -977,11 +953,6 @@ void GameLogic::ConfirmAim(Team byTeam) {
   aimPreview_.reset();
   selectedUnitId_.reset();
   mode_ = InputMode::AwaitingSelection;
-}
-
-void GameLogic::SetAimSphereRadius(float radius) {
-  aimSphereRadius_ = glm::clamp(radius, constants::kAimSphereMinRadius,
-                                constants::kAimSphereMaxRadius);
 }
 
 std::vector<GameLogic::AimTraceCandidate> GameLogic::AimTraceCandidates(

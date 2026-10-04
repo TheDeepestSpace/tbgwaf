@@ -190,11 +190,6 @@ constexpr bool kFriendlyFireDefault = true;
 // A free-aim trace flies until it hits something, capped at the sight range
 // (chance has long since fallen off by then; there is no hard shot range cap).
 constexpr float kAimTraceRange = kSightRange;
-// Adjustable aiming sphere around the figure, used when the camera ray hits
-// no aimable surface (sky shots) or when the player forces sphere aim.
-constexpr float kAimSphereDefaultRadius = 12.0f;
-constexpr float kAimSphereMinRadius = 2.0f;
-constexpr float kAimSphereMaxRadius = 60.0f;
 }  // namespace constants
 
 }  // namespace tactics

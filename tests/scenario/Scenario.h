@@ -57,13 +57,11 @@ struct ScenarioAction {
   // either the already-resolved world aim point (`at`, the protocol form --
   // deliberate blind fire at any point), or a camera-style ray
   // (`aim_from`/`aim_dir`) run through GameLogic::ResolveAimRay exactly like
-  // a real click, so unit-under-cursor/surface/sphere precedence is what the
-  // player would get. `force_sphere` mirrors the modifier key/toggle.
+  // a real click, so unit-under-cursor/surface precedence is what the
+  // player would get; a ray with no aimable surface places nothing.
   std::optional<glm::vec3> shootAt;
   std::optional<glm::vec3> aimRayFrom;
   std::optional<glm::vec3> aimRayDir;
-  bool forceSphere = false;
-  std::optional<float> sphereRadius;  // Adjusts the aiming sphere first.
 };
 
 // Every field is optional; only the ones present in the YAML step are

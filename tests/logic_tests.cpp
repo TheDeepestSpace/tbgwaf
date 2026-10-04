@@ -1824,7 +1824,7 @@ tactics::Scene AimScene(const std::vector<std::pair<Team, glm::vec3>>& layout,
   return scene;
 }
 
-void TestAimRayResolvesUnitSurfaceAndSphere() {
+void TestAimRayResolvesUnitAndSurface() {
   GameLogic game(LegacyScene());
   game.ClickUnit(1, Team::Blue);
   game.ChooseShoot();
@@ -1835,41 +1835,29 @@ void TestAimRayResolvesUnitSurfaceAndSphere() {
     return std::make_pair(glm::vec3(x, 20.0f, z), glm::vec3(0.0f, -1.0f, 0.0f));
   };
   auto [o1, d1] = down(0.0f, 0.0f);
-  GameLogic::AimRayResult aim = game.ResolveAimRay(o1, d1, false);
+  GameLogic::AimRayResult aim = game.ResolveAimRay(o1, d1);
   CHECK(aim.kind == GameLogic::AimRayResult::Kind::Surface);
   CHECK(glm::distance(aim.point, glm::vec3(0.0f)) < 0.05f);
 
-  // Ground hidden behind the z=-4 wall: not aimable directly, so the ray
-  // falls through to the sphere.
+  // Ground hidden behind the z=-4 wall: not aimable directly, so nothing.
   auto [o2, d2] = down(4.0f, -4.0f);
-  aim = game.ResolveAimRay(o2, d2, false);
-  CHECK(aim.kind == GameLogic::AimRayResult::Kind::Sphere);
-
-  // The modifier forces the sphere even over aimable ground.
-  aim = game.ResolveAimRay(o1, d1, true);
-  CHECK(aim.kind == GameLogic::AimRayResult::Kind::Sphere);
+  aim = game.ResolveAimRay(o2, d2);
+  CHECK(aim.kind == GameLogic::AimRayResult::Kind::None);
 
   // A visible enemy under the cursor beats the surface behind it.
   auto [o3, d3] = down(8.0f, 0.0f);
-  aim = game.ResolveAimRay(o3, d3, false);
+  aim = game.ResolveAimRay(o3, d3);
   CHECK(aim.kind == GameLogic::AimRayResult::Kind::Unit);
   CHECK(aim.unitId == 4);
 
-  // A sky ray lands on the aiming sphere, at its radius from the eye.
+  // A sky ray has no aimable surface: nothing is placed.
   const Unit* shooter = game.FindUnit(1);
   aim = game.ResolveAimRay(shooter->EyePosition() + glm::vec3(0.0f, 0.5f, 0.0f),
-                           glm::vec3(0.3f, 1.0f, 0.0f), false);
-  CHECK(aim.kind == GameLogic::AimRayResult::Kind::Sphere);
-  CHECK(std::fabs(glm::distance(aim.point, shooter->EyePosition()) - game.AimSphereRadius()) <
-        1e-3f);
-
-  // The sphere radius is adjustable and clamped.
-  game.SetAimSphereRadius(20.0f);
-  CHECK(game.AimSphereRadius() == 20.0f);
-  game.SetAimSphereRadius(0.1f);
-  CHECK(game.AimSphereRadius() == constants::kAimSphereMinRadius);
-  game.SetAimSphereRadius(1.0e6f);
-  CHECK(game.AimSphereRadius() == constants::kAimSphereMaxRadius);
+                           glm::vec3(0.3f, 1.0f, 0.0f));
+  CHECK(aim.kind == GameLogic::AimRayResult::Kind::None);
+  game.ClickAimRay(shooter->EyePosition() + glm::vec3(0.0f, 0.5f, 0.0f),
+                   glm::vec3(0.3f, 1.0f, 0.0f), Team::Blue);
+  CHECK(!game.GetAimPreview().has_value());
 }
 
 void TestFreeAimPreviewPlaceConfirmAndCancel() {
@@ -1882,16 +1870,15 @@ void TestFreeAimPreviewPlaceConfirmAndCancel() {
   CHECK(game.Mode() == InputMode::AwaitingShootTarget);
 
   // Tap-to-place via the ray path, then cancel drops the marker.
-  game.ClickAimRay(glm::vec3(0.0f, 20.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), false, Team::Blue);
+  game.ClickAimRay(glm::vec3(0.0f, 20.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), Team::Blue);
   CHECK(game.GetAimPreview().has_value());
-  CHECK(!game.GetAimPreview()->onSphere);
   game.CancelAction();
   CHECK(!game.GetAimPreview().has_value());
   CHECK(game.Mode() == InputMode::ActionMenu);
 
   // Place again, confirm: the plan is a free-aim shot, no locked target.
   game.ChooseShoot();
-  game.PlaceAimPoint(glm::vec3(2.0f, 0.0f, 1.0f), false, Team::Blue);
+  game.PlaceAimPoint(glm::vec3(2.0f, 0.0f, 1.0f), Team::Blue);
   // Only the shooter's own side can place/confirm.
   game.ConfirmAim(Team::Red);
   CHECK(game.Mode() == InputMode::AwaitingShootTarget);
@@ -1907,7 +1894,7 @@ void TestFreeAimPreviewPlaceConfirmAndCancel() {
   GameLogic g2(LegacyScene());
   g2.ClickUnit(1, Team::Blue);
   g2.ChooseShoot();
-  g2.PlaceAimPoint(glm::vec3(2.0f, 0.0f, 1.0f), true, Team::Blue);
+  g2.PlaceAimPoint(glm::vec3(2.0f, 0.0f, 1.0f), Team::Blue);
   CHECK(g2.GetAimPreview().has_value());
   g2.ClickUnit(4, Team::Blue);
   CHECK(!g2.GetAimPreview().has_value());
@@ -1927,7 +1914,7 @@ void TestFreeAimShotFiresBehindShooterAndFacesAimPoint() {
   game.SetShotRollSource([] { return 0.0f; });
   game.ClickUnit(0, Team::Blue);
   game.ChooseShoot();
-  game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), false, Team::Blue);
+  game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
   game.ConfirmAim(Team::Blue);
   game.ClickUnit(1, Team::Red);
   game.ChoosePass();
@@ -1952,7 +1939,7 @@ void TestFreeAimBlindHitRevealsMissDoesNot() {
     game.SetShotRollSource([] { return 0.0f; });
     game.ClickUnit(0, Team::Blue);
     game.ChooseShoot();
-    game.PlaceAimPoint(glm::vec3(12.0f, 0.9f, 0.0f), false, Team::Blue);
+    game.PlaceAimPoint(glm::vec3(12.0f, 0.9f, 0.0f), Team::Blue);
     game.ConfirmAim(Team::Blue);
     game.ClickUnit(1, Team::Red);
     game.ChoosePass();
@@ -1969,7 +1956,7 @@ void TestFreeAimBlindHitRevealsMissDoesNot() {
     game.SetShotRollSource([] { return 0.999999f; });
     game.ClickUnit(0, Team::Blue);
     game.ChooseShoot();
-    game.PlaceAimPoint(glm::vec3(12.0f, 0.9f, 0.0f), false, Team::Blue);
+    game.PlaceAimPoint(glm::vec3(12.0f, 0.9f, 0.0f), Team::Blue);
     game.ConfirmAim(Team::Blue);
     game.ClickUnit(1, Team::Red);
     game.ChoosePass();
@@ -1990,7 +1977,7 @@ void TestFreeAimTraceStopsAtWalls() {
   game.SetShotRollSource([] { return 0.0f; });
   game.ClickUnit(0, Team::Blue);
   game.ChooseShoot();
-  game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), false, Team::Blue);
+  game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
   game.ConfirmAim(Team::Blue);
   game.ClickUnit(1, Team::Red);
   game.ChoosePass();
@@ -2013,7 +2000,7 @@ void TestFreeAimFriendlyFireFlag() {
     game.SetShotRollSource([] { return 0.0f; });
     game.ClickUnit(0, Team::Blue);
     game.ChooseShoot();
-    game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), false, Team::Blue);
+    game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
     game.ConfirmAim(Team::Blue);
     game.ClickUnit(1, Team::Blue);
     game.ChoosePass();
@@ -2032,7 +2019,7 @@ void TestFreeAimFriendlyFireFlag() {
     game.SetShotRollSource([] { return 0.0f; });
     game.ClickUnit(0, Team::Blue);
     game.ChooseShoot();
-    game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), false, Team::Blue);
+    game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
     game.ConfirmAim(Team::Blue);
     game.ClickUnit(1, Team::Blue);
     game.ChoosePass();
@@ -2052,7 +2039,7 @@ void TestFreeAimAreaDenialShotLeaksNothing() {
   game.SetShotRollSource([] { return 0.0f; });  // Even a guaranteed roll hits nobody.
   game.ClickUnit(0, Team::Blue);
   game.ChooseShoot();
-  game.PlaceAimPoint(glm::vec3(8.0f, 0.0f, 0.0f), false, Team::Blue);  // Empty lane.
+  game.PlaceAimPoint(glm::vec3(8.0f, 0.0f, 0.0f), Team::Blue);  // Empty lane.
   game.ConfirmAim(Team::Blue);
   game.ClickUnit(1, Team::Red);
   game.ChoosePass();
@@ -2079,7 +2066,7 @@ void TestFollowerMirrorsBlindHitReveal() {
   simulator.SetShotRollSource([] { return 0.0f; });
   simulator.ClickUnit(0, Team::Blue);
   simulator.ChooseShoot();
-  simulator.PlaceAimPoint(glm::vec3(12.0f, 0.9f, 0.0f), false, Team::Blue);
+  simulator.PlaceAimPoint(glm::vec3(12.0f, 0.9f, 0.0f), Team::Blue);
   simulator.ConfirmAim(Team::Blue);
   simulator.ClickUnit(1, Team::Red);
   simulator.ChoosePass();
@@ -2098,7 +2085,7 @@ void TestFreeAimPlanSnapshotAndProtocolRoundTrip() {
   GameLogic game(LegacyScene());
   game.ClickUnit(1, Team::Blue);
   game.ChooseShoot();
-  game.PlaceAimPoint(glm::vec3(3.25f, 0.5f, -2.75f), false, Team::Blue);
+  game.PlaceAimPoint(glm::vec3(3.25f, 0.5f, -2.75f), Team::Blue);
   game.ConfirmAim(Team::Blue);
 
   // Export -> text protocol -> import lands the identical free-aim plan on
@@ -2188,7 +2175,7 @@ int main() {
   TestResetClearsSightings();
   TestImportStateOfNewGameClearsFollowerSightings();
   TestFollowerBuildsSightingsWithoutPhysicsUpdate();
-  TestAimRayResolvesUnitSurfaceAndSphere();
+  TestAimRayResolvesUnitAndSurface();
   TestFreeAimPreviewPlaceConfirmAndCancel();
   TestFreeAimShotFiresBehindShooterAndFacesAimPoint();
   TestFreeAimBlindHitRevealsMissDoesNot();

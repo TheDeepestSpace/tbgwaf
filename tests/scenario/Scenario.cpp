@@ -197,8 +197,6 @@ ScenarioAction ParseAction(const YAML::Node& node) {
       action.aimRayFrom = ParseVec3(node["aim_from"], "script[].aim_from");
       action.aimRayDir = ParseVec3(node["aim_dir"], "script[].aim_dir");
     }
-    action.forceSphere = node["force_sphere"] && node["force_sphere"].as<bool>();
-    if (node["sphere_radius"]) action.sphereRadius = node["sphere_radius"].as<float>();
     if (node["target"]) action.target = node["target"].as<int>();
     const bool freeAim = action.shootAt || action.aimRayFrom;
     if (kind == "aim" && (action.target >= 0 || !freeAim)) {
@@ -403,7 +401,6 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
         NotifyMenuClick(actorTeam, "Shoot");
         game.ChooseShoot();
       }
-      if (action.sphereRadius) game.SetAimSphereRadius(*action.sphereRadius);
 
       // Locked-on figure target: the pre-#129 flow, unchanged.
       if (action.target >= 0) {
@@ -429,7 +426,7 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
       // ResolveAimRay the interactive click uses.
       if (action.aimRayFrom) {
         const tactics::GameLogic::AimRayResult aim =
-            game.ResolveAimRay(*action.aimRayFrom, *action.aimRayDir, action.forceSphere);
+            game.ResolveAimRay(*action.aimRayFrom, *action.aimRayDir);
         if (aim.kind == tactics::GameLogic::AimRayResult::Kind::Unit) {
           // Unit under the cursor beats the surface behind it: the ray click
           // becomes the existing lock-on plan.
@@ -440,12 +437,13 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
           }
           return true;
         }
-        NotifyClick(actorTeam, aim.point);
-        game.PlaceAimPoint(aim.point, aim.kind == tactics::GameLogic::AimRayResult::Kind::Sphere,
-                           actorTeam);
+        if (aim.kind == tactics::GameLogic::AimRayResult::Kind::Surface) {
+          NotifyClick(actorTeam, aim.point);
+          game.PlaceAimPoint(aim.point, actorTeam);
+        }
       } else if (action.shootAt) {
         NotifyClick(actorTeam, *action.shootAt);
-        game.PlaceAimPoint(*action.shootAt, false, actorTeam);
+        game.PlaceAimPoint(*action.shootAt, actorTeam);
       }
       if (!game.GetAimPreview()) {
         return Fail("free-aim point could not be placed (actor not aiming?)");

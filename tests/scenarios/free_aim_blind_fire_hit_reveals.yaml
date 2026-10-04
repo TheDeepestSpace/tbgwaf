@@ -1,0 +1,35 @@
+name: free_aim_blind_fire_hit_reveals
+description: >
+  Issue #129 blind fire: red1 hides behind crouch-height cover, so blue can never *see* it
+  (eye-to-ground LOS is blocked no matter which way blue faces) -- but a free-aim shot at
+  chest height flies flat over the low wall. The real ballistic trace hits the unseen
+  figure, and the connecting hit is the one thing that reveals it: a sighting-memory ghost
+  for blue, while the body itself stays outside blue's live FOV.
+
+shot_rolls: [0.0]
+
+map:
+  obstacles:
+    - {center: [2.5, 0], half_extent: [0.5, 2], height: 0.8}
+
+units:
+  - {id: 0, team: blue, position: [-6, 0, 0], facing_degrees: -90}
+  - {id: 1, team: red, position: [6, 0, 0], facing_degrees: 180}
+
+script:
+  - assert: {unit: 1, visible_to: blue, visible: false, comment: Hidden behind the low cover}
+  - assert: {unit: 1, remembered_by: blue, remembered: false}
+
+  - action: shoot
+    description: Blue fires blind at a chest-height point over the cover -- a full 360-degree aim, since blue starts facing the other way.
+    actor: 0
+    at: [6, 0.9, 0]
+  - action: pass
+    actor: 1
+  - action: commit
+
+  - assert: {unit: 1, alive: false, comment: The trace met the unseen figure and the pinned roll hit}
+  - assert: {unit: 0, facing_degrees: 0, tolerance: 1.0, comment: Turned to the aim point}
+  - assert: {unit: 1, remembered_by: blue, remembered: true, comment: Only the hit reveals it}
+  - assert: {unit: 1, visible_to: blue, visible: false, comment: The body still is not in live FOV}
+  - assert: {winner: blue}

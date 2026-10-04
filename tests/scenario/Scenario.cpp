@@ -219,10 +219,26 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     if (node["final_facing_degrees"]) {
       action.finalFacingDegrees = node["final_facing_degrees"].as<float>();
     }
-  } else if (kind == "shoot") {
-    action.kind = ScenarioAction::Kind::Shoot;
-    if (!node["target"]) throw std::runtime_error("script 'shoot' action requires 'target'");
-    action.target = node["target"].as<int>();
+  } else if (kind == "shoot" || kind == "aim") {
+    action.kind = kind == "aim" ? ScenarioAction::Kind::Aim : ScenarioAction::Kind::Shoot;
+    if (node["at"]) action.shootAt = ParseVec3(node["at"], "script[].at");
+    if (node["aim_from"] || node["aim_dir"]) {
+      action.aimRayFrom = ParseVec3(node["aim_from"], "script[].aim_from");
+      action.aimRayDir = ParseVec3(node["aim_dir"], "script[].aim_dir");
+    }
+    if (node["target"]) action.target = node["target"].as<int>();
+    const bool freeAim = action.shootAt || action.aimRayFrom;
+    if (kind == "aim" && (action.target >= 0 || !freeAim)) {
+      throw std::runtime_error("script 'aim' action requires 'at' or 'aim_from'/'aim_dir'");
+    }
+    if (kind == "shoot" && action.target < 0 && !freeAim &&
+        !(node["confirm"] && node["confirm"].as<bool>())) {
+      throw std::runtime_error(
+          "script 'shoot' action requires 'target', 'at', 'aim_from'/'aim_dir', or 'confirm'");
+    }
+    if (action.target >= 0 && freeAim) {
+      throw std::runtime_error("script 'shoot' cannot mix 'target' with a free-aim point/ray");
+    }
     action.expectNoop = node["expect_noop"] && node["expect_noop"].as<bool>();
   } else if (kind == "pass") {
     action.kind = ScenarioAction::Kind::Pass;
@@ -232,7 +248,7 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     action.kind = ScenarioAction::Kind::Focus;
   } else {
     throw std::runtime_error("unknown script action '" + kind +
-                              "' (expected move/shoot/pass/cancel/focus/commit/new_game)");
+                              "' (expected move/shoot/aim/pass/cancel/focus/commit/new_game)");
   }
   return action;
 }
@@ -366,9 +382,17 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
   }
   const Team actorTeam = actorUnit->team;
 
-  ClickUnitAt(action.actor, actorTeam);
-  if (game.SelectedUnitId() != action.actor || game.Mode() != InputMode::ActionMenu) {
-    return Fail("could not be selected (already game over?)");
+  // A shoot/aim step may continue an earlier `aim` step's unfinished
+  // placement: the actor is then already selected and mid-aim, so no fresh
+  // selection click happens (the real player is still in the same flow).
+  const bool continuingAim =
+      (action.kind == ScenarioAction::Kind::Shoot || action.kind == ScenarioAction::Kind::Aim) &&
+      game.Mode() == InputMode::AwaitingShootTarget && game.SelectedUnitId() == action.actor;
+  if (!continuingAim) {
+    ClickUnitAt(action.actor, actorTeam);
+    if (game.SelectedUnitId() != action.actor || game.Mode() != InputMode::ActionMenu) {
+      return Fail("could not be selected (already game over?)");
+    }
   }
 
   switch (action.kind) {
@@ -400,22 +424,66 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
       }
       return true;
     }
-    case ScenarioAction::Kind::Shoot: {
-      NotifyMenuClick(actorTeam, "Shoot");
-      game.ChooseShoot();
-      ClickUnitAt(action.target, actorTeam);
-      const bool planned = game.Mode() != InputMode::AwaitingShootTarget;
-      if (action.expectNoop && planned) {
-        return Fail("shot at " + std::to_string(action.target) +
-                    " was expected to be a gated no-op, but it was planned");
+    case ScenarioAction::Kind::Shoot:
+    case ScenarioAction::Kind::Aim: {
+      if (!continuingAim) {
+        NotifyMenuClick(actorTeam, "Shoot");
+        game.ChooseShoot();
       }
-      if (!action.expectNoop && !planned) {
-        return Fail("shot at " + std::to_string(action.target) +
-                    " could not be planned (invalid target, or outside the shooter's team FOV?)");
+
+      // Locked-on figure target: the pre-#129 flow, unchanged.
+      if (action.target >= 0) {
+        ClickUnitAt(action.target, actorTeam);
+        const bool planned = game.Mode() != InputMode::AwaitingShootTarget;
+        if (action.expectNoop && planned) {
+          return Fail("shot at " + std::to_string(action.target) +
+                      " was expected to be a gated no-op, but it was planned");
+        }
+        if (!action.expectNoop && !planned) {
+          return Fail("shot at " + std::to_string(action.target) +
+                      " could not be planned (invalid target, or outside the shooter's team FOV?)");
+        }
+        if (action.expectNoop) {
+          NotifyMenuClick(actorTeam, "Cancel");
+          game.CancelAction();  // Return to ActionMenu, mirroring a real player.
+        }
+        return true;
       }
-      if (action.expectNoop) {
-        NotifyMenuClick(actorTeam, "Cancel");
-        game.CancelAction();  // Return to ActionMenu, mirroring a real player.
+
+      // Free-aim: place the "+" marker, either from the already-resolved
+      // world point (`at`) or by running a camera-style ray through the same
+      // ResolveAimRay the interactive click uses.
+      if (action.aimRayFrom) {
+        const tactics::GameLogic::AimRayResult aim =
+            game.ResolveAimRay(*action.aimRayFrom, *action.aimRayDir);
+        if (aim.kind == tactics::GameLogic::AimRayResult::Kind::Unit) {
+          // Unit under the cursor beats the surface behind it: the ray click
+          // becomes the existing lock-on plan.
+          ClickUnitAt(aim.unitId, actorTeam);
+          if (game.Mode() == InputMode::AwaitingShootTarget) {
+            return Fail("aim ray locked onto unit " + std::to_string(aim.unitId) +
+                        " but the shot could not be planned");
+          }
+          return true;
+        }
+        if (aim.kind == tactics::GameLogic::AimRayResult::Kind::Surface) {
+          NotifyClick(actorTeam, aim.point);
+          game.PlaceAimPoint(aim.point, actorTeam);
+        }
+      } else if (action.shootAt) {
+        NotifyClick(actorTeam, *action.shootAt);
+        game.PlaceAimPoint(*action.shootAt, actorTeam);
+      }
+      if (!game.GetAimPreview()) {
+        return Fail("free-aim point could not be placed (actor not aiming?)");
+      }
+      if (action.kind == ScenarioAction::Kind::Aim) {
+        return true;  // Tap-to-place only; a later step confirms or cancels.
+      }
+      NotifyMenuClick(actorTeam, "Fire");
+      game.ConfirmAim(actorTeam);
+      if (game.Mode() != InputMode::AwaitingSelection) {
+        return Fail("free-aim shot could not be confirmed");
       }
       return true;
     }
@@ -523,6 +591,13 @@ Scenario LoadScenarioFromFile(const std::string& path) {
   scenario.name = root["name"] ? root["name"].as<std::string>() : path;
   scenario.scene = ParseScene(root);
   ParsePlaybooks(root, scenario.playbooks);
+  if (root["friendly_fire"]) scenario.friendlyFire = root["friendly_fire"].as<bool>();
+  if (const YAML::Node rolls = root["shot_rolls"]) {
+    if (!rolls.IsSequence() || rolls.size() == 0) {
+      throw std::runtime_error("shot_rolls must be a non-empty list of [0,1) rolls");
+    }
+    for (const auto& roll : rolls) scenario.shotRolls.push_back(roll.as<float>());
+  }
   if (const YAML::Node cam = root["camera"]) {
     if (cam["target"]) scenario.cameraTarget = ParseVec2(cam["target"], "camera.target");
     if (cam["zoom"]) scenario.cameraZoom = cam["zoom"].as<float>();
@@ -565,6 +640,15 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
   GameLogic game(scenario.scene);
   game.SetPlaybook(Team::Blue, scenario.playbooks[0]);
   game.SetPlaybook(Team::Red, scenario.playbooks[1]);
+  game.SetFriendlyFireEnabled(scenario.friendlyFire);
+  // Pinned rolls make probabilistic shots deterministic: consumed in
+  // resolution order, repeating the list when it runs out.
+  size_t nextRoll = 0;
+  if (!scenario.shotRolls.empty()) {
+    game.SetShotRollSource([&scenario, &nextRoll]() {
+      return scenario.shotRolls[nextRoll++ % scenario.shotRolls.size()];
+    });
+  }
   // A second page that only mirrors the simulator's snapshots, like the
   // networked follower pane. Its sighting memory is checked too.
   GameLogic follower(scenario.scene);

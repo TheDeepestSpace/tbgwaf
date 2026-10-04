@@ -171,7 +171,9 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
         ImGui::TextWrapped("Click ground within reach to plan this round's leg; each further click adds a leg for the next round. Enter or Done to finish, Esc to cancel.");
         break;
       case InputMode::AwaitingShootTarget:
-        ImGui::TextWrapped("Click an enemy figure to plan a shot (Esc to cancel).");
+        ImGui::TextWrapped(
+            "Click an enemy figure to lock on, or any surface point in the green area to place "
+            "a free-aim shot ('+', Fire confirms). Esc cancels.");
         break;
       case InputMode::Executing:
         ImGui::TextWrapped("Round executing: both teams' plans are playing out...");
@@ -215,6 +217,12 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
         } else {
           if (game.Mode() == InputMode::AwaitingMoveDestination) {
             if (Button("Done")) actions.done = true;
+            ImGui::SameLine();
+          }
+          // Free-aim: a placed "+" gets its confirm button (the touch flow's
+          // tap-to-place -> confirm) -- no hover reliance.
+          if (game.Mode() == InputMode::AwaitingShootTarget && game.GetAimPreview()) {
+            if (Button("Fire")) actions.fire = true;
             ImGui::SameLine();
           }
           if (Button("Cancel")) actions.cancel = true;

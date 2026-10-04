@@ -25,7 +25,12 @@ struct PlannedAction {
   // the previous leg (movePath for the first) ends; FinishRound arms the next.
   std::vector<std::vector<glm::vec3>> queuedLegs;
   float endFacingYaw = 0.0f;        // Final facing once the path ends, for type == Move.
-  int shootTargetId = -1;           // For type == Shoot.
+  int shootTargetId = -1;           // For type == Shoot at a locked-on figure.
+  // Free-aim shot (issue #129): type == Shoot with hasAimPoint fires a real
+  // ballistic trace from the muzzle toward aimPoint instead of resolving
+  // against a locked target. shootTargetId stays -1 for these.
+  bool hasAimPoint = false;
+  glm::vec3 aimPoint{0.0f};
 };
 
 // What a figure does, on its own, on a tick where at least one living enemy

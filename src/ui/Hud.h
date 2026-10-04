@@ -57,6 +57,8 @@ struct HudActions {
   bool pass = false;
   bool cancel = false;
   bool done = false;
+  // Free-aim (issue #129): Fire confirms the placed aim point.
+  bool fire = false;
   // Set when the pane's Playbook view edited its team's squad-wide reaction
   // table; a config edit, not a turn action.
   std::optional<tactics::SquadPlaybook> playbook;

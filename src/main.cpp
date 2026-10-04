@@ -701,6 +701,7 @@ int main() {
       if (hud.cancel) game.CancelAction();
       if (hud.playbook) game.SetPlaybook(paneTeam(pane), *hud.playbook);
       if (hud.done) game.FinishMovePlan();
+      if (hud.fire) game.ConfirmAim(paneTeam(pane));
     }
 
     // Pane divider. Both teams plan at once, so there's no "inactive side"
@@ -720,7 +721,18 @@ int main() {
     const bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse;
     if (!uiWantsMouse && planning) {
       const int hoverPane = PaneForX(mouseX, paneCount, windowWidth);
-      if (game.Mode() == InputMode::AwaitingMoveDestination) {
+      if (game.Mode() == InputMode::AwaitingShootTarget) {
+        // The preview cone follows the cursor until an aim point is placed.
+        const PaneRect& rect = paneRects[hoverPane];
+        const gfx::Ray hoverRay = cameras[hoverPane].ScreenPointToRay(
+            static_cast<float>(mouseX - rect.x), static_cast<float>(mouseY),
+            static_cast<float>(rect.width), static_cast<float>(windowHeight));
+        glm::vec3 hoverPoint;
+        if (IntersectGroundOrClimbTop(hoverRay, game.GetScene(), &hoverPoint)) {
+          hoveredGroundPoint = hoverPoint;
+          hasHoveredGroundPoint = true;
+        }
+      } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
         const PaneRect& rect = paneRects[hoverPane];
         const gfx::Ray hoverRay = cameras[hoverPane].ScreenPointToRay(
             static_cast<float>(mouseX - rect.x), static_cast<float>(mouseY),
@@ -796,6 +808,11 @@ int main() {
           if (IntersectGroundOrClimbTop(clickRay, game.GetScene(), &point)) {
             game.ClickGround(point, clickTeam);
           }
+        } else if (game.Mode() == InputMode::AwaitingShootTarget) {
+          // Free-aim (issue #129): a non-figure click places/moves the "+"
+          // aim selector on a surface in the shooter's 360-degree LOS. The
+          // HUD's Fire button confirms it.
+          game.ClickAimRay(clickRay.origin, clickRay.direction, clickTeam);
         }
       }
     }

@@ -182,6 +182,8 @@ constexpr float kFovConeVisualRange = kSightRange;
 constexpr float kSightingSampleInterval = 0.5f;
 constexpr float kSightingFadePerRound = 1.0f / 3.0f;  // Fraction of opacity lost each round.
 constexpr int kSightingMemoryRounds = 3;       // 1 / kSightingFadePerRound.
+// Bullet tracers fade on the same schedule as sighting ghosts.
+constexpr int kTracerMemoryRounds = kSightingMemoryRounds;
 // Free-aim shooting (issue #129). Friendly fire is on by default; the single
 // flag below (mirrored per GameLogic instance, settable from scenarios) is
 // the one switch that disables it, making friendlies transparent to the

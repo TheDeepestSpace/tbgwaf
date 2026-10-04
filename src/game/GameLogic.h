@@ -38,6 +38,15 @@ std::optional<Team> CheckWinner(const std::vector<Unit>& units);
 // (it alone commits and executes rounds); the Red instance mirrors its
 // snapshots instead of re-simulating so float divergence can't desync the
 // two. During planning each side only ships its own team's plans.
+// One fired bullet's path, kept for kTracerMemoryRounds rounds as a fading
+// line. Age is derived from birthRound, so it needs no per-peer ticking.
+struct Tracer {
+  Team team = Team::Blue;
+  glm::vec3 from{0.0f};
+  glm::vec3 to{0.0f};
+  int birthRound = 1;
+};
+
 struct GameSnapshot {
   struct UnitState {
     int id = -1;
@@ -63,6 +72,7 @@ struct GameSnapshot {
     bool moving = false;  // Has an in-flight move in the executing round.
   };
   std::vector<UnitState> units;
+  std::vector<Tracer> tracers;
   SquadPlaybook playbooks[2];  // Indexed by Team.
   InputMode mode = InputMode::AwaitingSelection;
   int roundNumber = 1;
@@ -186,6 +196,10 @@ class GameLogic {
   // Executing, yet still needs its own memory built from imported state).
   void UpdateSightingMemory(float dtSeconds);
   void ResetSightingMemory();
+
+  // Bullet lines of recent rounds (see Tracer); those older than
+  // kTracerMemoryRounds are dropped as new ones are recorded.
+  const std::vector<Tracer>& Tracers() const { return tracers_; }
 
   // --- Free-aim shooting (issue #129). While AwaitingShootTarget, the
   // player may point-target any world position instead of locking onto a
@@ -438,6 +452,8 @@ class GameLogic {
 
   // Sighting memory, indexed [viewing team][target unit id].
   std::vector<std::vector<EnemySighting>> sightings_[2];
+  std::vector<Tracer> tracers_;
+  void RecordTracer(const Unit& shooter, const glm::vec3& from, const glm::vec3& to);
   int lastSightingRound_ = 1;
   std::vector<bool> sightedLastFrame_[2];
   std::vector<float> sightingTimer_[2];

@@ -2118,6 +2118,39 @@ void TestFreeAimPlanSnapshotAndProtocolRoundTrip() {
   CHECK(peer.FindUnit(1)->plan.hasAimPoint);
 }
 
+// A resolved shot leaves a tracer from the muzzle toward the target; it
+// survives the snapshot round trip (followers) and expires after
+// kTracerMemoryRounds completed rounds.
+void TestShotLeavesFadingTracer() {
+  GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.0f; });
+  Unit* shooter = game.FindUnit(1);
+  Unit* target = game.FindUnit(4);
+  CHECK(game.Tracers().empty());
+  CHECK(game.ResolveShot(*shooter, *target));
+  CHECK(game.Tracers().size() == 1);
+  const Tracer tracer = game.Tracers().front();
+  CHECK(tracer.team == Team::Blue);
+  CHECK(tracer.birthRound == game.RoundNumber());
+  CHECK(glm::length(tracer.to - target->EyePosition()) < 1e-4f);
+
+  GameSnapshot snap;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &snap));
+  GameLogic follower(LegacyScene());
+  CHECK(follower.ImportState(snap));
+  CHECK(follower.Tracers().size() == 1);
+  CHECK(glm::length(follower.Tracers().front().from - tracer.from) < 1e-4f);
+
+  // Recording another shot after the memory window drops the stale tracer.
+  GameSnapshot later = game.ExportState();
+  later.roundNumber += constants::kTracerMemoryRounds;
+  CHECK(game.ImportState(later));
+  game.FindUnit(4)->alive = true;
+  CHECK(game.ResolveShot(*game.FindUnit(1), *game.FindUnit(4)));
+  CHECK(game.Tracers().size() == 1);
+  CHECK(game.Tracers().front().birthRound == game.RoundNumber());
+}
+
 int main() {
   TestNavMeshRoutesAroundObstacle();
   TestNavMeshDirectPathWhenUnobstructed();
@@ -2184,6 +2217,7 @@ int main() {
   TestFreeAimAreaDenialShotLeaksNothing();
   TestFollowerMirrorsBlindHitReveal();
   TestFreeAimPlanSnapshotAndProtocolRoundTrip();
+  TestShotLeavesFadingTracer();
 
   if (g_failures == 0) {
     std::printf("All logic tests passed.\n");

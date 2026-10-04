@@ -87,6 +87,17 @@ void GameLogic::ResetSightingMemory() {
   lastUnitPosition_.assign(unitSlots, glm::vec3(0.0f));
   hasLastUnitPosition_ = false;
   lastSightingRound_ = roundNumber_;
+  tracers_.clear();
+}
+
+void GameLogic::RecordTracer(const Unit& shooter, const glm::vec3& from, const glm::vec3& to) {
+  tracers_.erase(std::remove_if(tracers_.begin(), tracers_.end(),
+                                [this](const Tracer& t) {
+                                  return roundNumber_ - t.birthRound >=
+                                         constants::kTracerMemoryRounds;
+                                }),
+                 tracers_.end());
+  tracers_.push_back(Tracer{shooter.team, from, to, roundNumber_});
 }
 
 const std::vector<GameLogic::EnemySighting>& GameLogic::Sightings(Team viewingTeam,
@@ -213,6 +224,7 @@ GameSnapshot GameLogic::ExportState() const {
     u.moving = IsUnitMoving(unit.id);
     snap.units.push_back(std::move(u));
   }
+  snap.tracers = tracers_;
   snap.playbooks[0] = playbooks_[0];
   snap.playbooks[1] = playbooks_[1];
   snap.mode = mode_;
@@ -299,6 +311,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   mode_ = snap.mode;
   roundNumber_ = snap.roundNumber;
   if (newGame) ResetSightingMemory();
+  tracers_ = snap.tracers;
   if (snap.winner >= 0) {
     winner_ = static_cast<Team>(snap.winner);
   } else {
@@ -345,6 +358,11 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
       out << ' ' << leg.size();
       for (const auto& p : leg) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
     }
+  }
+  out << ' ' << snap.tracers.size();
+  for (const Tracer& t : snap.tracers) {
+    out << ' ' << static_cast<int>(t.team) << ' ' << t.from.x << ' ' << t.from.y << ' ' << t.from.z
+        << ' ' << t.to.x << ' ' << t.to.y << ' ' << t.to.z << ' ' << t.birthRound;
   }
   for (const auto& pb : snap.playbooks)
     for (int m = 0; m < 2; ++m)
@@ -396,6 +414,18 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
         if (!(in >> p.x >> p.y >> p.z)) return false;
       }
     }
+  }
+  size_t tracerCount = 0;
+  if (!(in >> tracerCount) || tracerCount > kMaxEntries) return false;
+  snap.tracers.resize(tracerCount);
+  for (Tracer& t : snap.tracers) {
+    int team = 0;
+    if (!(in >> team >> t.from.x >> t.from.y >> t.from.z >> t.to.x >> t.to.y >> t.to.z >>
+          t.birthRound) ||
+        team < 0 || team > 1) {
+      return false;
+    }
+    t.team = static_cast<Team>(team);
   }
   for (auto& pb : snap.playbooks) {
     for (int m = 0; m < 2; ++m) {
@@ -789,6 +819,11 @@ void GameLogic::ApplyShot(Unit& shooter, Unit& target, bool hit) {
   // Played for misses too -- the shot was taken.
   shooter.shootElapsed = 0.0f;
   shooter.shootAimYaw = std::atan2(dir.z, dir.x);
+  {
+    Unit aimed = shooter;
+    aimed.facingYaw = shooter.shootAimYaw;
+    RecordTracer(shooter, aimed.MuzzlePosition(), target.EyePosition());
+  }
   if (hit) {
     target.alive = false;
     // up x dir: tipping around this axis leans the figure toward dir.
@@ -1020,6 +1055,30 @@ void GameLogic::ApplyAimShot(Unit& shooter, Unit* hitTarget, const glm::vec3& ai
   shooter.facingYaw = aimYaw;
   shooter.shootElapsed = 0.0f;
   shooter.shootAimYaw = aimYaw;
+
+  // The bullet flies from the muzzle along the aim ray until it strikes the
+  // hit figure, a wall/deck, the ground, or runs out of range.
+  const glm::vec3 muzzle = shooter.MuzzlePosition();
+  glm::vec3 ray = aimPoint - muzzle;
+  ray = glm::length(ray) < 1e-4f ? shooter.FacingDirection() : glm::normalize(ray);
+  float reach = constants::kAimTraceRange;
+  if (hitTarget) {
+    float t = 0.0f;
+    if (RayIntersectsAABB(muzzle, ray, hitTarget->Bounds(), &t)) reach = t;
+  } else {
+    for (const Obstacle& obstacle : scene_.obstacles) {
+      float t = 0.0f;
+      if (RayIntersectsObstacle(muzzle, ray, obstacle, &t) && t > 0.0f) reach = std::min(reach, t);
+    }
+    for (const WalkSurface& surface : scene_.walkSurfaces) {
+      float t = 0.0f;
+      if (RayIntersectsWalkSurface(muzzle, ray, surface, 0.45f, &t) && t > 0.0f) {
+        reach = std::min(reach, t);
+      }
+    }
+    if (ray.y < -1e-4f && muzzle.y > 0.0f) reach = std::min(reach, -muzzle.y / ray.y);
+  }
+  RecordTracer(shooter, muzzle, muzzle + ray * reach);
   if (!hitTarget) return;
 
   glm::vec3 fall(hitTarget->position.x - shooter.position.x, 0.0f,

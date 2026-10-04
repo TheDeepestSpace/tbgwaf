@@ -2454,6 +2454,29 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glDisable(GL_BLEND);
   }
 
+  // Bullet tracers: team-colored line from the muzzle to where the shot
+  // ended, fading per completed round like the sighting ghosts.
+  {
+    constexpr float kTracerMaxAlpha = 0.9f;
+    unlitShader_.Use();
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    for (const tactics::Tracer& tracer : game.Tracers()) {
+      const int age = game.RoundNumber() - tracer.birthRound;
+      const float life = 1.0f - static_cast<float>(age) / tactics::constants::kTracerMemoryRounds;
+      if (life <= 0.0f) continue;
+      const glm::vec3 base = tracer.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
+                                                       : glm::vec3(0.9f, 0.25f, 0.22f);
+      pathLine_.SetPoints({tracer.from, tracer.to});
+      unlitShader_.SetMat4("uMVP", viewProj);
+      unlitShader_.SetVec4("uColor", glm::vec4(base, life * kTracerMaxAlpha));
+      pathLine_.Draw();
+    }
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+  }
+
   // WEGO planning: both teams plan concurrently, so during the planning
   // phase every pane highlights its own team's living figures (dim white =
   // still needs a plan, green = plan set) -- this is squad-wide, not a

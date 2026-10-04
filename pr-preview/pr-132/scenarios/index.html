@@ -60,9 +60,9 @@ rendered for that team's fog-of-war pane, the PR's version (no base-branch
 comparison). Both panes play in lockstep from the shared transport below
 them; click a script step to jump both videos to it. Deleted scenarios are
 listed by name only.</p>
-<h2>New scenarios <span class="count">(11)</span></h2>
+<h2>New scenarios <span class="count">(9)</span></h2>
 <div class="scenario has-video" data-stem="free_aim_aiming_ui"><h3>free_aim_aiming_ui</h3><div class="path">tests/scenarios/free_aim_aiming_ui.yaml</div>
-<p class="description">Issue uses (tap-to-place, re-tap to adjust, confirm): the acid-green 360-degree LOS highlight with obstacle shadows, the &quot;+&quot; selector with the spread-only cone over empty ground, the cone lighting up a figure standing inside it, the forced aiming sphere with its radius slider, and the planned shot&#x27;s persisting marker after confirmation.</p>
+<p class="description">Issue uses (tap-to-place, re-tap to adjust, confirm): the acid-green 360-degree LOS highlight with obstacle shadows, the &quot;+&quot; selector with the spread-only cone over empty ground, the cone lighting up a figure standing inside it, and the planned shot&#x27;s persisting marker after confirmation.</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_aiming_ui/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_aiming_ui/red.webm"></video></figure>
@@ -71,14 +71,12 @@ listed by name only.</p>
 <div class="round"><div class="round-title">Round 1</div>
 <div class="detail">Tap-to-place on empty ground: 360-degree LOS highlight (note the obstacle shadows), &#x27;+&#x27; selector, and a spread-only cone with no unit target.</div>
 <div class="detail">Re-placing adjusts the aim (the drag-adjust gesture): the cone now passes over red1, which catches the cone&#x27;s light -- hit probability feedback appears only on figures inside the cone.</div>
-<div class="detail">Forced sphere aim: the translucent adjustable sphere and its radius slider (no hover needed).</div>
 <div class="step" data-action="1">aim (actor 0)</div>
 <div class="step" data-action="2">aim (actor 0)</div>
-<div class="step" data-action="3">aim (actor 0)</div>
-<div class="step" data-action="4"><span class="u blue">blue0</span> cancels</div>
-<div class="step" data-action="5"><span class="u blue">blue0</span> passes</div>
-<div class="step" data-action="6"><span class="u red">red1</span> passes</div>
-<div class="step" data-action="7">commit round</div>
+<div class="step" data-action="3"><span class="u blue">blue0</span> cancels</div>
+<div class="step" data-action="4"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="5"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="6">commit round</div>
 <div class="detail">Check: <span class="u blue">blue0</span> is alive</div>
 <div class="detail">Check: <span class="u red">red1</span> is alive</div>
 <div class="detail">Check: round is 2</div>
@@ -156,26 +154,6 @@ listed by name only.</p>
 </div>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
-<div class="scenario has-video" data-stem="free_aim_force_sphere"><h3>free_aim_force_sphere</h3><div class="path">tests/scenarios/free_aim_force_sphere.yaml</div>
-<p class="description">Issue stage outright, so a ray that would have landed on aimable open ground resolves onto the aiming sphere instead.</p>
-<div class="panes">
-<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_force_sphere/blue.webm"></video></figure>
-<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_force_sphere/red.webm"></video></figure>
-<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
-<div class="step" data-action="0">Initial state</div>
-<div class="round"><div class="round-title">Round 1</div>
-<div class="detail">The downward ray hits open ground at [4, 0, 4] (in LOS), but the forced sphere (radius 5) wins; the resolved point sits on the sphere at a 45-degree bearing.</div>
-<div class="step" data-action="1"><span class="u blue">blue0</span> shoots unit None</div>
-<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
-<div class="step" data-action="3">commit round</div>
-<div class="detail">Check: <span class="u blue">blue0</span> faces 45° (tolerance 1.5) — Turned from 180 to the sphere point&#x27;s bearing</div>
-<div class="detail">Check: <span class="u red">red1</span> is alive</div>
-<div class="detail">Check: round is 2</div>
-</div>
-</div></figure>
-</div>
-<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
-</div>
 <div class="scenario has-video" data-stem="free_aim_friendly_fire"><h3>free_aim_friendly_fire</h3><div class="path">tests/scenarios/free_aim_friendly_fire.yaml</div>
 <p class="description">Issue in the bullet&#x27;s path -- a teammate between the shooter and its aim point absorbs the shot first, and the enemy behind survives.</p>
 <div class="panes">
@@ -244,27 +222,6 @@ listed by name only.</p>
 <div class="step" data-action="6">commit round</div>
 <div class="detail">Check: <span class="u red">red1</span> is down — The overwatch reaction fired under the new facing</div>
 <div class="detail">Check: winner: blue</div>
-</div>
-</div></figure>
-</div>
-<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
-</div>
-<div class="scenario has-video" data-stem="free_aim_sphere_sky"><h3>free_aim_sphere_sky</h3><div class="path">tests/scenarios/free_aim_sphere_sky.yaml</div>
-<p class="description">Issue adjustable sphere around the figure. The aim step captures the sphere + &quot;+&quot; selector + radius slider UI; confirming and committing fires the (harmless) sky shot and leaves the figure facing the aim direction.</p>
-<div class="panes">
-<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_sphere_sky/blue.webm"></video></figure>
-<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_sphere_sky/red.webm"></video></figure>
-<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
-<div class="step" data-action="0">Initial state</div>
-<div class="round"><div class="round-title">Round 1</div>
-<div class="detail">An upward ray misses every surface, so the point lands on the aiming sphere (radius pinned at 12).</div>
-<div class="step" data-action="1">aim (actor 0)</div>
-<div class="step" data-action="2"><span class="u blue">blue0</span> shoots unit None</div>
-<div class="step" data-action="3"><span class="u red">red1</span> passes</div>
-<div class="step" data-action="4">commit round</div>
-<div class="detail">Check: <span class="u blue">blue0</span> faces 45° (tolerance 1.5) — Faces the sky point&#x27;s bearing</div>
-<div class="detail">Check: <span class="u red">red1</span> is alive</div>
-<div class="detail">Check: round is 2</div>
 </div>
 </div></figure>
 </div>

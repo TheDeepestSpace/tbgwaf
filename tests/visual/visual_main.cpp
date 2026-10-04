@@ -39,6 +39,7 @@
 
 #include "visual/ImageUtil.h"
 #include "game/GameLogic.h"
+#include "game/TurnTimeline.h"
 #include "game/Types.h"
 #include "game/Visibility.h"
 #include "gfx/Camera.h"
@@ -181,6 +182,22 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
 
   const int paneWidth = kWindowWidth / 2;
 
+  // Turn timeline (issue #143): scenarios that script `timeline_*` steps get
+  // the HUD timeline strip drawn into their captures (RunScenario hands over
+  // its recorder/replay controller via hooks.onTimeline below). Scenarios
+  // that don't are rendered exactly as before, keeping their goldens stable.
+  using tactics::scenario::ScenarioAction;
+  bool usesTimeline = false;
+  for (const auto& step : scenario.steps) {
+    if (step.action && (step.action->kind == ScenarioAction::Kind::TimelineSeek ||
+                        step.action->kind == ScenarioAction::Kind::TimelinePlay ||
+                        step.action->kind == ScenarioAction::Kind::TimelinePause)) {
+      usesTimeline = true;
+    }
+  }
+  const tactics::TurnTimeline* timelineView = nullptr;
+  const tactics::TimelinePlayback* timelinePlayback = nullptr;
+
   // Issue #110: the scenario (or --fov-shadow-map) picks the FOV overlay
   // path; restored to the CPU default after the scenario.
   const bool shadowMapFov =
@@ -250,6 +267,11 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
         layouts[pane] = ui::HudLayout{};
         ui::DrawHud(g, PaneTeam(pane), planning, ui::ComputePaneRect(pane, kWindowWidth),
                     kWindowHeight, cameras[pane], &layouts[pane]);
+        if (timelineView && timelinePlayback) {
+          ui::DrawTimeline(*timelineView, *timelinePlayback, PaneTeam(pane),
+                           ui::ComputePaneRect(pane, kWindowWidth), kWindowHeight,
+                           &layouts[pane]);
+        }
       }
     };
     // Auto-resize windows need a couple of frames to settle on their content
@@ -387,6 +409,13 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     }
     camera.Update(1.0e3f);
   };
+  if (usesTimeline) {
+    hooks.onTimeline = [&](const tactics::TurnTimeline& timeline,
+                           const tactics::TimelinePlayback& playback) {
+      timelineView = &timeline;
+      timelinePlayback = &playback;
+    };
+  }
   hooks.onActionComplete = [&](const GameLogic& game, int turn) {
     // The holds for this action have already been emitted, so framesWritten
     // is the exclusive end of the action's video segment (turn 0 = the

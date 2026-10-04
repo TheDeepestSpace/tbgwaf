@@ -15,6 +15,7 @@
 #include <imgui.h>
 
 #include "game/GameLogic.h"
+#include "game/TurnTimeline.h"
 #include "game/Types.h"
 #include "gfx/Camera.h"
 #include "gfx/Mesh.h"
@@ -87,6 +88,26 @@ struct HudLayout {
 HudActions DrawHud(const tactics::GameLogic& game, tactics::Team team, bool planning,
                    const PaneRect& rect, int windowHeight, const gfx::OrbitCamera& camera,
                    HudLayout* layout = nullptr, float* roundPanelBottom = nullptr);
+
+// Button presses on the turn-timeline strip (issue #143); like HudActions,
+// reported back for the caller to apply to its TimelinePlayback.
+struct TimelineActions {
+  std::optional<int> seekTick;  // Slider snapped to this tick: restore it.
+  bool togglePlay = false;      // Play/Pause pressed.
+  bool live = false;            // "Live" pressed: back to the live view.
+};
+
+// Draws the turn-timeline strip (issue #143) bottom-centered in `rect`: a
+// Play/Pause button plus a slider with one stop per timeline tick (Start,
+// T1, T2, ...) that snaps to ticks, and -- while a replay is being viewed --
+// a "Live" button. Touch-friendly (tall frame padding, wide grab), and
+// anchored to the pane's bottom edge so it stays clear of the floating
+// action menu and the Round panel. Const w.r.t. the timeline/playback:
+// presses are reported back via TimelineActions.
+TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
+                             const tactics::TimelinePlayback& playback, tactics::Team team,
+                             const PaneRect& rect, int windowHeight,
+                             HudLayout* layout = nullptr);
 
 // Interactive-app-only debug panel (render toggles + FPS). Not called by the
 // visual runner. `fps` is a smoothed frames-per-second value; `top` is the

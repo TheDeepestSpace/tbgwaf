@@ -1,5 +1,6 @@
 #include "ui/Hud.h"
 
+#include <algorithm>
 #include <string>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -226,6 +227,68 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
 
   ImGui::GetForegroundDrawList()->AddText(ImVec2(left + 10.0f, windowHeight - 24.0f),
                                            IM_COL32(255, 255, 255, 220), TeamName(team));
+  return actions;
+}
+
+TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
+                             const tactics::TimelinePlayback& playback, Team team,
+                             const PaneRect& rect, int windowHeight, HudLayout* layout) {
+  TimelineActions actions;
+  const auto& ticks = timeline.Ticks();
+  if (ticks.empty()) return actions;  // No history yet (first frame).
+  const int tickCount = static_cast<int>(ticks.size());
+
+  const std::string suffix = std::string("##") + TeamName(team);
+  auto Button = [&](const char* label) {
+    const bool pressed = ImGui::Button(label);
+    if (layout) {
+      const ImVec2 mn = ImGui::GetItemRectMin();
+      const ImVec2 mx = ImGui::GetItemRectMax();
+      layout->buttons.emplace_back(label,
+                                   glm::vec2((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f));
+    }
+    return pressed;
+  };
+
+  // Taller frames and a wide slider grab so the strip works with a finger,
+  // not just a mouse pointer.
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f, 10.0f));
+  ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 22.0f);
+  // Bottom-centered, above the pane's bottom edge; auto-resize keeps it
+  // narrow enough to leave the corners (team label, Round panel) free.
+  ImGui::SetNextWindowPos(ImVec2(rect.x + rect.width * 0.5f, windowHeight - 10.0f),
+                          ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+  ImGui::Begin(("Timeline" + suffix).c_str(), nullptr,
+               ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
+                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar);
+
+  // Play is pointless with nothing recorded beyond the start state.
+  ImGui::BeginDisabled(timeline.FrameCount() <= 1);
+  if (Button(playback.Playing() ? "Pause" : "Play")) actions.togglePlay = true;
+  ImGui::EndDisabled();
+
+  // The slider sits on the viewed tick: the replay's position, or the
+  // newest tick while the live game is showing. SliderInt snaps to whole
+  // ticks by construction; the current tick's label is the slider text.
+  int tick = playback.Active() ? playback.CurrentTick(timeline) : tickCount - 1;
+  tick = std::max(0, std::min(tick, tickCount - 1));
+  ImGui::SameLine();
+  ImGui::SetNextItemWidth(
+      std::max(120.0f, std::min(static_cast<float>(rect.width) - 260.0f, 420.0f)));
+  ImGui::BeginDisabled(tickCount <= 1);
+  if (ImGui::SliderInt(("##turns" + suffix).c_str(), &tick, 0, std::max(1, tickCount - 1),
+                       ticks[tick].label.c_str(), ImGuiSliderFlags_AlwaysClamp)) {
+    actions.seekTick = tick;
+  }
+  ImGui::EndDisabled();
+
+  if (playback.Active()) {
+    ImGui::SameLine();
+    if (Button("Live")) actions.live = true;
+  }
+
+  ImGui::End();
+  ImGui::PopStyleVar(2);
   return actions;
 }
 

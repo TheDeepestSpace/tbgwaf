@@ -882,6 +882,22 @@ void TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable() {
   on.overpassLayout = OverpassLayout::Through;
   CHECK(UrbanOverpass(7, on).layout == OverpassLayout::Through);
   CHECK(!UrbanOverpass(7, LegacyConfig()).elevated);
+
+  // The seeds the overpass goldens/scenarios use produce their layout
+  // naturally under the default (Auto) config, and seed 7 has no overpass.
+  MapGeneratorConfig twoArteries;
+  twoArteries.arteryCount = 2;
+  const std::pair<uint32_t, OverpassLayout> kNatural[] = {
+      {33, OverpassLayout::RampUpRampDown}, {4, OverpassLayout::Through},
+      {16, OverpassLayout::EnterRampUp},    {22, OverpassLayout::EnterRampDown},
+      {26, OverpassLayout::RampUpRampDown},
+  };
+  for (const auto& [seed, layout] : kNatural) {
+    const OverpassChoice choice = UrbanOverpass(seed, twoArteries);
+    CHECK(choice.elevated);
+    CHECK(choice.layout == layout);
+  }
+  CHECK(!UrbanOverpass(7, twoArteries).elevated);
 }
 
 void TestOverpassLayoutGeometryAndBranchRampOff() {

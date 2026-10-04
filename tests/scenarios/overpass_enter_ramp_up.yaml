@@ -1,27 +1,26 @@
-# Issue #130: seed-driven overpass layouts. Pins the enter-ramp-up layout
-# for seed 7: the artery is at grade on-map, ramps up mid-map and exits
-# off-map elevated. Blue climbs the branch's connecting ramp onto the
-# elevated stretch; the asserted Y proves the ramp-off works, and the
-# goldens show the deck continuing past the far map edge.
+# Issue #130: seed-driven overpass layouts. Nothing is forced: seed 16's
+# default draw naturally yields the enter-ramp-up layout (the artery is at grade on-map, ramps up mid-map and exits off-map elevated).
+# Blue climbs the branch's connecting ramp; the asserted Y proves the
+# ramp-off works, and the goldens show the deck cut off flush at the far map edge.
 name: overpass_enter_ramp_up
 
 map:
-  generate: {type: urban, seed: 7, arteries: 2, elevated: true, elevated_layout: enter-ramp-up}
+  generate: {type: urban, seed: 16, arteries: 2}
 
 units:
-  - {id: 0, team: blue, position: [-12.3168, 0.4285, -22.0727], facing_degrees: 21}
-  - {id: 1, team: red, position: [65.8291, 0, -19.4045], facing_degrees: 180}
+  - {id: 0, team: blue, position: [8.4928, 0.4515, 23.4546], facing_degrees: 0}
+  - {id: 1, team: red, position: [-18.5437, 0.025, 62.2909], facing_degrees: 180}
 
 camera:
-  target: [-5.8, -19.6]
+  target: [11.9, 18.6]
   zoom: 34
 
 script:
   - action: move
     actor: 0
-    destination: [0.6810, 1.223, -17.20115]
+    destination: [15.252, 2.0116, 13.7455]
   - action: pass
     actor: 1
   - action: commit
-  - assert: {unit: 0, position: [0.6810, 1.223, -17.20115], tolerance: 0.05}
+  - assert: {unit: 0, position: [15.252, 2.0116, 13.7455], tolerance: 0.05}
   - assert: {round: 2}

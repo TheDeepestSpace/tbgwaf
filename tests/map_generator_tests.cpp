@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <set>
 #include <vector>
 
 #include "game/GameLogic.h"
@@ -895,6 +896,7 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
   };
   MapGeneratorConfig config;
   config.elevatedHighway = OverpassMode::On;
+  config.branchEnd = BranchEnd::Ramp;
   const float half = UrbanMapHalfExtent(config);
   for (const auto& tc : cases) {
     config.overpassLayout = tc.layout;
@@ -984,6 +986,58 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
   }
 }
 
+void TestBranchMayRunOffMapWithoutRamp() {
+  MapGeneratorConfig config;
+  config.elevatedHighway = OverpassMode::On;
+  const float half = UrbanMapHalfExtent(config);
+
+  // Auto draws both endings across seeds, never off-map under `through`,
+  // and ramp lengths vary per seed.
+  int offMap = 0, ramp = 0;
+  std::set<int> rampLengths;
+  for (uint32_t seed = 1; seed <= 60; ++seed) {
+    for (const OverpassLayout layout :
+         {OverpassLayout::RampUpRampDown, OverpassLayout::Through}) {
+      config.overpassLayout = layout;
+      const auto roads = UrbanRoads(seed, config);
+      const auto& branch = roads[1].centerline;
+      const bool flat = std::fabs(branch.front().y - config.highwayElevation) < 0.1f;
+      if (layout == OverpassLayout::Through) CHECK(!flat);
+      if (layout != OverpassLayout::RampUpRampDown) continue;
+      (flat ? offMap : ramp) += 1;
+      if (!flat) {
+        size_t flatFrom = 0;
+        while (flatFrom < branch.size() && branch[flatFrom].y < 0.1f) ++flatFrom;
+        rampLengths.insert(static_cast<int>(flatFrom));
+      }
+    }
+  }
+  CHECK(offMap > 5 && ramp > 5);
+  CHECK(rampLengths.size() > 3);
+
+  // Forced off-map: deck height from end to end, past the boundary, no
+  // ground connection, and still a walkable deck connected to the artery.
+  config.overpassLayout = OverpassLayout::RampUpRampDown;
+  config.branchEnd = BranchEnd::OffMap;
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed, config);
+    const auto roads = UrbanRoads(seed, config);
+    const auto& branch = roads[1].centerline;
+    for (const glm::vec3& p : branch) CHECK(std::fabs(p.y - config.highwayElevation) < 0.1f);
+    CHECK(std::max(std::fabs(branch.front().x), std::fabs(branch.front().z)) > half + 5.0f);
+    int groundConnections = 0;
+    for (const WalkSurface& surface : scene.walkSurfaces) {
+      groundConnections += surface.connectsToGround ? 1 : 0;
+    }
+    CHECK(groundConnections == 2);  // The artery's two ramp feet only.
+    for (const Obstacle& o : scene.obstacles) {
+      if (!o.footprint.empty()) continue;
+      CHECK(std::max({std::fabs(o.bounds.min.x), std::fabs(o.bounds.max.x),
+                      std::fabs(o.bounds.min.z), std::fabs(o.bounds.max.z)}) < half);
+    }
+  }
+}
+
 void TestSpawnReachabilityAndSurfaceSnapshotSynchronization() {
   MapGeneratorConfig config;
   config.arteryCount = 2;
@@ -1030,6 +1084,7 @@ int main() {
   TestElevatedOverpassRampsPiersAndDistinctLayers();
   TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable();
   TestOverpassLayoutGeometryAndBranchRampOff();
+  TestBranchMayRunOffMapWithoutRamp();
   TestSpawnReachabilityAndSurfaceSnapshotSynchronization();
   TestHillyDeterminismAndVariety();
   TestHillyTerrainIsGenuinelyUneven();

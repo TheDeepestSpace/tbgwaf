@@ -115,6 +115,18 @@ Scene ParseScene(const YAML::Node& root) {
                 "enter-ramp-up/enter-ramp-down, got '" + layout + "'");
           }
         }
+        // `elevated_branch` pins the branch's map-edge end (`ramp`/`off-map`);
+        // scenarios that force the overpass default to a ramp.
+        if (genNode["elevated"]) config.branchEnd = BranchEnd::Ramp;
+        if (genNode["elevated_branch"]) {
+          const std::string end = genNode["elevated_branch"].as<std::string>();
+          if (end == "ramp") config.branchEnd = BranchEnd::Ramp;
+          else if (end == "off-map") config.branchEnd = BranchEnd::OffMap;
+          else {
+            throw std::runtime_error(
+                "map.generate.elevated_branch must be ramp/off-map, got '" + end + "'");
+          }
+        }
         scene = GenerateUrbanMap(seed, config);
       } else if (type == "hilly") {
         scene = GenerateHillyMap(seed);

@@ -24,6 +24,12 @@ enum class OverpassLayout {
   EnterRampDown,   // Enters off-map elevated, ramps down to grade on-map.
 };
 
+// How the overpass's branching avenue ends at its map-edge side. Auto draws
+// per seed; Ramp climbs from grade at the boundary up to the deck, OffMap
+// stays at deck height and runs off the map with no ramp (never drawn for
+// the Through layout, where the branch is the only way up).
+enum class BranchEnd { Auto, Ramp, OffMap };
+
 // Tuning for GenerateUrbanMap. Defaults give a 4x4 city of ~26-unit average
 // blocks (~144 units across, ~4.8x the default scene's 30). The overall
 // extent is fixed by (blocks, blockSize, streetWidth); per-seed variation
@@ -56,6 +62,8 @@ struct MapGeneratorConfig {
   OverpassMode elevatedHighway = OverpassMode::Auto;
   float overpassChance = 0.5f;  // P(overpass) for an Auto seed: roughly 50/50.
   OverpassLayout overpassLayout = OverpassLayout::Auto;
+  BranchEnd branchEnd = BranchEnd::Auto;
+  float branchOffMapChance = 0.35f;  // P(off-map branch) for an Auto seed that allows one.
   float highwayElevation = 5.0f;
   float highwayThickness = 0.45f;
   float supportSpacing = 18.0f;  // Arc-length between pier bents under the deck.

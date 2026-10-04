@@ -134,6 +134,7 @@ int main(int argc, char** argv) {
   tactics::MapGeneratorConfig elevatedConfig = mergeConfig;
   elevatedConfig.elevatedHighway = tactics::OverpassMode::On;
   elevatedConfig.overpassLayout = tactics::OverpassLayout::RampUpRampDown;
+  elevatedConfig.branchEnd = tactics::BranchEnd::Ramp;
   // Framed low and from the side so the deck, both ramps, the on-ramp fork
   // and the pier bents beneath all read clearly.
   cases.push_back({"city_elevated_seed_7", tactics::GenerateUrbanMap(7, elevatedConfig),
@@ -150,6 +151,14 @@ int main(int argc, char** argv) {
     tactics::MapGeneratorConfig layoutConfig = elevatedConfig;
     layoutConfig.overpassLayout = layout;
     cases.push_back({name, tactics::GenerateUrbanMap(7, layoutConfig), 180.0f,
+                     /*showNavMesh=*/false, /*pitchOffset=*/-0.55f, /*yawOffset=*/-1.6f});
+  }
+  // A branch with no ramp: it stays at deck height and runs off-map.
+  {
+    tactics::MapGeneratorConfig offMapConfig = elevatedConfig;
+    offMapConfig.branchEnd = tactics::BranchEnd::OffMap;
+    cases.push_back({"city_elevated_branch_off_map_seed_7",
+                     tactics::GenerateUrbanMap(7, offMapConfig), 180.0f,
                      /*showNavMesh=*/false, /*pitchOffset=*/-0.55f, /*yawOffset=*/-1.6f});
   }
   // Frontier of a unit on the deck, framed low and side-on at the deck edge.

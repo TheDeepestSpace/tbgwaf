@@ -242,6 +242,8 @@ struct BranchSpec {
   float width = 0.0f;
   float mergeS = 0.0f;         // Artery parameter of the merge point.
   float riseStart = 0.0f;      // Branch parameter where the on-ramp starts climbing.
+  bool offMap = false;         // Stays at deck height and runs off-map; no ramp.
+  float u0 = 0.0f;             // First sampled param; -kDeckOverhang when off-map.
   int side = 1;                // Sign of dot(artery normal, branch - artery origin).
 };
 
@@ -340,7 +342,21 @@ HighwayPlan BuildHighwayPlan(uint32_t seed, const MapGeneratorConfig& c) {
     }
     branch.start = merge - branch.dir * branch.length;
     branch.side = glm::dot(artery.normal, branch.start - artery.origin) > 0.0f ? 1 : -1;
-    branch.riseStart = branch.length - std::min(branch.length * 0.55f, 48.0f);
+    // Ramp shape and off-map ending draw from their own stream so they never
+    // reshuffle the rest of a seed's layout. The off-map branch never ramps
+    // down to grade, so it needs the artery to offer a way up (not Through).
+    Rng branchRng(seed ^ 0x5b2a9c47u);
+    const bool drawnOffMap = branchRng.Chance(c.branchOffMapChance);
+    const float rampFraction = branchRng.Float(0.30f, 0.75f);
+    const float rampMax = branchRng.Float(30.0f, 70.0f);
+    const bool canOffMap = plan.elevated && plan.layout != OverpassLayout::Through;
+    branch.offMap = canOffMap && (c.branchEnd == BranchEnd::Auto ? drawnOffMap
+                                                                 : c.branchEnd == BranchEnd::OffMap);
+    branch.riseStart = branch.length - std::min(branch.length * rampFraction, rampMax);
+    if (branch.offMap) {
+      branch.riseStart = 0.0f;
+      branch.u0 = -kDeckOverhang;
+    }
   }
   return plan;
 }
@@ -364,6 +380,7 @@ float ArteryElevationAt(const HighwayPlan& plan, const MapGeneratorConfig& c, fl
 float BranchElevationAt(const HighwayPlan& plan, const MapGeneratorConfig& c, float u) {
   if (!plan.elevated) return kGradeY;
   const float top = ArteryElevationAt(plan, c, plan.branch.mergeS);
+  if (plan.branch.offMap) return top;
   const float run = std::max(1.0f, plan.branch.length - plan.branch.riseStart);
   return kGradeY + (top - kGradeY) * SmoothStep01((u - plan.branch.riseStart) / run);
 }
@@ -394,7 +411,7 @@ std::vector<UrbanRoad> BuildUrbanRoads(uint32_t seed, const MapGeneratorConfig& 
     branch.width = plan.branch.width;
     branch.artery = true;
     branch.elevated = plan.elevated;
-    for (const float u : SampleParams(0.0f, plan.branch.length)) {
+    for (const float u : SampleParams(plan.branch.u0, plan.branch.length)) {
       const glm::vec2 p = plan.branch.start + plan.branch.dir * u;
       branch.centerline.emplace_back(p.x, BranchElevationAt(plan, c, u), p.y);
     }
@@ -721,7 +738,7 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     const auto right = RibbonSide(road, false, scene.mapHalfExtent);
     const std::vector<float> params = roadIndex == 0
                                           ? SampleParams(plan.artery.s0, plan.artery.s1)
-                                          : SampleParams(0.0f, plan.branch.length);
+                                          : SampleParams(plan.branch.u0, plan.branch.length);
     Chain& chain = chains[roadIndex];
     for (size_t i = 0; i + 1 < road.centerline.size(); ++i) {
       const bool deck =
@@ -756,7 +773,7 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
       scene.walkSurfaces[chains[0].last].connectsToGround = true;
     }
     if (roads.size() > 1 && chains[1].first >= 0) {
-      scene.walkSurfaces[chains[1].first].connectsToGround = true;
+      if (!plan.branch.offMap) scene.walkSurfaces[chains[1].first].connectsToGround = true;
       int deckAtMerge = -1;
       for (size_t i = 0; i < chains[0].loS.size(); ++i) {
         if (plan.branch.mergeS >= chains[0].loS[i] - 1e-3f &&
@@ -826,7 +843,7 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
               c.arteryWidth * 0.5f - 1.1f, deckY);
     }
     if (plan.hasBranch) {
-      for (float u = plan.branch.riseStart; u < plan.branch.length - 8.0f;
+      for (float u = std::max(0.0f, plan.branch.riseStart); u < plan.branch.length - 8.0f;
            u += c.supportSpacing * 0.75f) {
         const float deckY = BranchElevationAt(plan, c, u);
         if (deckY < kMinClearance) continue;

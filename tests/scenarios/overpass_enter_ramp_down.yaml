@@ -19,9 +19,9 @@ camera:
 script:
   - action: move
     actor: 0
-    destination: [-38.0196, 2.91370, 19.90393]
+    destination: [-38.0196, 2.461, 19.90393]
   - action: pass
     actor: 1
   - action: commit
-  - assert: {unit: 0, position: [-38.0196, 2.91370, 19.90393], tolerance: 0.05}
+  - assert: {unit: 0, position: [-38.0196, 2.461, 19.90393], tolerance: 0.05}
   - assert: {round: 2}

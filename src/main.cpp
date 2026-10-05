@@ -19,6 +19,7 @@
 #include <limits>
 #include <optional>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -732,8 +733,10 @@ int main() {
                                                          : split - 2);
       if (requestId != pendingJevRequest->id) continue;
       if (message[0] == 'D' && split != std::string::npos) {
-        const std::string choice = message.substr(split + 1);
-        if (!tactics::ai::ApplyJevChoice(&game, *pendingJevRequest, choice)) {
+        std::vector<std::string> choices;
+        std::stringstream list(message.substr(split + 1));
+        for (std::string item; std::getline(list, item, ',');) choices.push_back(item);
+        if (!tactics::ai::ApplyJevChoice(&game, *pendingJevRequest, choices)) {
           jevErrorHold = true;
           tbgwaf_ai_local_error("selected action became invalid; retry required");
         }
@@ -755,9 +758,9 @@ int main() {
           jevBuilder.reset();
           if (pendingJevRequest) {
             if (tbgwaf_ai_fallback()) {
-              const std::string choice =
+              const std::vector<std::string> choices =
                   tactics::ai::DeterministicFallbackChoice(*pendingJevRequest);
-              if (!tactics::ai::ApplyJevChoice(&game, *pendingJevRequest, choice)) {
+              if (!tactics::ai::ApplyJevChoice(&game, *pendingJevRequest, choices)) {
                 jevErrorHold = true;
                 tbgwaf_ai_local_error("deterministic fallback action became invalid; retry required");
               }

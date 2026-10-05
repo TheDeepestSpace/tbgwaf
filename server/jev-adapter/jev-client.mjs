@@ -7,23 +7,40 @@ export class JevUpstreamError extends Error {
   }
 }
 
+const MAX_CANDIDATES_PER_FIGURE = 32;
+const MAX_CANDIDATES = 200;
+
+// Candidates are grouped by `figure`; each figure gets its own Choice question
+// and all of them are answered in one upstream request. Returns
+// Map<figure, Set<candidate id>>.
 function validateCandidates(candidates) {
-  if (!Array.isArray(candidates) || candidates.length < 1 || candidates.length > 24) {
-    throw new TypeError("candidates must contain 1 to 24 legal actions");
+  if (!Array.isArray(candidates) || candidates.length < 1 || candidates.length > MAX_CANDIDATES) {
+    throw new TypeError(`candidates must contain 1 to ${MAX_CANDIDATES} legal actions`);
   }
   const ids = new Set();
+  const figures = new Map();
   for (const candidate of candidates) {
     if (!candidate || typeof candidate.id !== "string" ||
         !/^[A-Za-z0-9_-]{1,64}$/.test(candidate.id) || ids.has(candidate.id)) {
       throw new TypeError("candidate ids must be unique URL-safe strings");
+    }
+    if (!Number.isInteger(candidate.figure) || candidate.figure < 0 || candidate.figure > 999) {
+      throw new TypeError("candidates must name the acting figure");
     }
     if (typeof candidate.description !== "string" || !candidate.description.trim() ||
         candidate.description.length > 512) {
       throw new TypeError("candidate descriptions must contain 1 to 512 characters");
     }
     ids.add(candidate.id);
+    if (!figures.has(candidate.figure)) figures.set(candidate.figure, new Set());
+    figures.get(candidate.figure).add(candidate.id);
   }
-  return ids;
+  for (const group of figures.values()) {
+    if (group.size > MAX_CANDIDATES_PER_FIGURE) {
+      throw new TypeError(`each figure may have at most ${MAX_CANDIDATES_PER_FIGURE} actions`);
+    }
+  }
+  return figures;
 }
 
 function boundedRetryDelay(response) {
@@ -40,7 +57,7 @@ export async function chooseWithJev({
   fetchImpl = globalThis.fetch,
   endpoint = "https://api.typesafe.ai/v1/systemone",
   model = "jev-latest",
-  timeoutMs = 8000,
+  timeoutMs = 15000,
   retries = 1,
   onAttempt = () => {},
 }) {
@@ -48,26 +65,30 @@ export async function chooseWithJev({
   if (!state || typeof state !== "object" || Array.isArray(state)) {
     throw new TypeError("state must be an object");
   }
-  const candidateIds = validateCandidates(candidates);
+  const figures = validateCandidates(candidates);
 
-  // No model judgment is needed when game code found exactly one legal
-  // action. This also avoids spending a paid request on a forced move.
-  if (candidates.length === 1) {
-    return { choice: candidates[0].id, confidence: 1, model: "forced-legal-choice", attempts: 0 };
+  // A figure with exactly one legal action needs no model judgment; if every
+  // figure is forced, skip the paid request entirely.
+  const choices = {};
+  const questions = {};
+  for (const [figure, group] of figures) {
+    if (group.size === 1) {
+      choices[figure] = [...group][0];
+      continue;
+    }
+    const criteria = Object.fromEntries(candidates
+      .filter((candidate) => candidate.figure === figure)
+      .map(({ id, description }) => [id, description]));
+    questions[`figure_${figure}`] = {
+      type: "choice",
+      instructions: `Select the action for figure ${figure}. You are planning the whole squad at once: the other figures' questions are answered in the same request, so coordinate. Prefer useful shots, cover for each other, focus fire, stagger exposure, and avoid lines of fire through allies; otherwise make progress toward eliminating the opposing squad. Shot options fire a scattered burst; weigh the stated per-shot hit chance (it falls with distance and off-axis angle) and the weapon details in state.allies. Use state.map (grid, obstacles), state.ghosts and state.playbook to hide from enemy line of sight, take cover options when exposed, and hunt options to chase ghosts; move options state whether the destination is hidden or exposed. Return exactly one supplied option.`,
+      criteria,
+    };
   }
-
-  const criteria = Object.fromEntries(candidates.map(({ id, description }) => [id, description]));
-  const payload = {
-    state,
-    model,
-    questions: {
-      action: {
-        type: "choice",
-        instructions: "Select the strongest legal action for the acting figure. Prefer a useful visible shot; otherwise make progress toward eliminating the opposing squad. Shot options fire a scattered burst; weigh the stated per-shot hit chance (it falls with distance and off-axis angle) and the weapon details in state.allies. Use state.map (grid, obstacles), state.ghosts and state.playbook to hide from enemy line of sight, take cover_N options when exposed, and hunt_N options to chase ghosts; move options state whether the destination is hidden or exposed. Return exactly one supplied option.",
-        criteria,
-      },
-    },
-  };
+  if (Object.keys(questions).length === 0) {
+    return { choices, confidence: 1, model: "forced-legal-choice", attempts: 0 };
+  }
+  const payload = { state, model, questions };
 
   let lastError;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -96,13 +117,20 @@ export async function chooseWithJev({
         continue;
       }
       const body = await response.json();
-      const answer = body?.answers?.action;
-      if (answer?.type !== "choice" || !candidateIds.has(answer.choice)) {
-        throw new JevUpstreamError("TypeSafe returned an invalid Choice answer");
+      const answered = { ...choices };
+      const confidences = [];
+      for (const figure of Object.keys(questions).map((name) => Number(name.slice(7)))) {
+        const answer = body?.answers?.[`figure_${figure}`];
+        if (answer?.type !== "choice" || !figures.get(figure).has(answer.choice)) {
+          throw new JevUpstreamError("TypeSafe returned an invalid Choice answer");
+        }
+        answered[figure] = answer.choice;
+        confidences.push(answer.confidence);
       }
+      const confidence = confidences.every(Number.isFinite) ? Math.min(...confidences) : null;
       return {
-        choice: answer.choice,
-        confidence: Number.isFinite(answer.confidence) ? answer.confidence : null,
+        choices: answered,
+        confidence,
         model: typeof body.model === "string" ? body.model : model,
         attempts: attempt + 1,
       };

@@ -15,15 +15,15 @@ const result = await chooseWithJev({
     visible_enemies: [{ id: 3, position: [4, 0, 0] }],
   },
   candidates: [
-    { id: "shoot_3", description: "Shoot the visible opposing figure." },
-    { id: "wait", description: "Wait in place despite a visible target." },
+    { id: "f0_shoot_3", figure: 0, description: "Shoot the visible opposing figure." },
+    { id: "f0_wait", figure: 0, description: "Wait in place despite a visible target." },
   ],
   retries: 0,
   timeoutMs: 8000,
   onAttempt: () => { apiRequests += 1; },
 });
 
-if (!["shoot_3", "wait"].includes(result.choice) || apiRequests !== 1) {
+if (!["f0_shoot_3", "f0_wait"].includes(result.choices[0]) || apiRequests !== 1) {
   throw new Error("live smoke returned an invalid or unbounded result");
 }
-console.log(`Jev live smoke passed; api_requests=${apiRequests}; model=${result.model}; choice=${result.choice}`);
+console.log(`Jev live smoke passed; api_requests=${apiRequests}; model=${result.model}; choice=${result.choices[0]}`);

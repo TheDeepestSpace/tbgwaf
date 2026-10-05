@@ -17,11 +17,12 @@ async function withServer(options, callback) {
 }
 
 const requestBody = {
-  requestId: "r1-t0-u0-n1",
+  requestId: "r1-t0-n1",
   state: { round: 1, team: "blue", visible_enemies: [] },
   candidates: [
-    { id: "move_0", description: "Advance." },
-    { id: "wait", description: "Wait." },
+    { id: "f0_move_0", figure: 0, description: "Advance." },
+    { id: "f0_wait", figure: 0, description: "Wait." },
+    { id: "f1_wait", figure: 1, description: "Wait." },
   ],
 };
 
@@ -31,7 +32,7 @@ test("adapts a browser request without returning the secret", async () => {
     choose: async ({ apiKey, candidates, onAttempt }) => {
       assert.equal(apiKey, "never-return-this");
       onAttempt();
-      return { choice: candidates[0].id, confidence: 0.8, model: "jev-test" };
+      return { choices: { 0: candidates[0].id, 1: "f1_wait" }, confidence: 0.8, model: "jev-test" };
     },
   }, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/v1/choice`, {
@@ -44,7 +45,7 @@ test("adapts a browser request without returning the secret", async () => {
     const text = await response.text();
     assert.equal(text.includes("never-return-this"), false);
     const body = JSON.parse(text);
-    assert.equal(body.choice, "move_0");
+    assert.deepEqual(body.choices, { 0: "f0_move_0", 1: "f1_wait" });
     assert.equal(body.upstreamRequests, 1);
   });
 });
@@ -72,7 +73,7 @@ test("rate limits before exceeding the configured paid-request budget", async ()
     choose: async ({ onAttempt }) => {
       calls += 1;
       onAttempt();
-      return { choice: "wait", confidence: 1, model: "stub" };
+      return { choices: { 0: "f0_wait", 1: "f1_wait" }, confidence: 1, model: "stub" };
     },
   }, async (baseUrl) => {
     const first = await fetch(`${baseUrl}/v1/choice`, {

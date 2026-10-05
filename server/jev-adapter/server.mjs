@@ -2,7 +2,7 @@ import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { chooseWithJev, JevUpstreamError, validateCandidates } from "./jev-client.mjs";
 
-const MAX_BODY_BYTES = 16 * 1024;
+const MAX_BODY_BYTES = 128 * 1024;
 
 function integerEnv(env, name, fallback, minimum, maximum) {
   const parsed = Number.parseInt(env[name] || "", 10);
@@ -103,7 +103,7 @@ export function createJevAdapter({ env = process.env, choose = chooseWithJev, lo
     daily: integerEnv(env, "TBGWAF_JEV_DAILY_LIMIT", 500, 1, 100000),
   });
   const concurrencyLimit = integerEnv(env, "TBGWAF_JEV_MAX_CONCURRENCY", 2, 1, 16);
-  const timeoutMs = integerEnv(env, "TBGWAF_JEV_TIMEOUT_MS", 8000, 500, 30000);
+  const timeoutMs = integerEnv(env, "TBGWAF_JEV_TIMEOUT_MS", 15000, 500, 30000);
   const retries = integerEnv(env, "TBGWAF_JEV_RETRIES", 1, 0, 2);
   const trustProxy = env.TBGWAF_JEV_TRUST_PROXY === "1";
   let active = 0;
@@ -182,7 +182,7 @@ export function createJevAdapter({ env = process.env, choose = chooseWithJev, lo
       });
       sendJson(response, 200, {
         requestId,
-        choice: result.choice,
+        choices: result.choices,
         confidence: result.confidence,
         model: result.model,
         upstreamRequests,

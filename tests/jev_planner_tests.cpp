@@ -68,7 +68,7 @@ void TestBoundedCandidatesUseNormalLegalPath() {
     foundMove |= candidate.kind == JevActionKind::Move;
     foundWait |= candidate.kind == JevActionKind::Wait;
     GameLogic copy = game;
-    CHECK(ApplyJevChoice(&copy, *request, candidate.id));
+    CHECK(ApplyJevChoice(&copy, *request, {candidate.id}));
     CHECK(copy.FindUnit(0)->plan.type != PlannedActionType::None);
   }
   CHECK(foundMove);
@@ -88,7 +88,7 @@ void TestShootCandidateIsFullBurstAndStateDescribesWeapons() {
     CHECK(shoot->shots > 1);
     CHECK(shoot->description.find("hit chance") != std::string::npos);
     GameLogic copy = game;
-    CHECK(ApplyJevChoice(&copy, *request, shoot->id));
+    CHECK(ApplyJevChoice(&copy, *request, {shoot->id}));
     CHECK(copy.FindUnit(0)->plan.shots == shoot->shots);
   }
   CHECK(request->json.find("scatter_half_angle_deg") != std::string::npos);
@@ -113,13 +113,52 @@ void TestMapGhostsAndTacticalMovesAreCommunicated() {
   CHECK(request->json.find("\"playbook\"") != std::string::npos);
   CHECK(request->json.find("visible_enemies\":[]") != std::string::npos);
   bool hunt = false;
-  for (const auto& c : request->candidates) hunt |= c.id == "hunt_1";
+  for (const auto& c : request->candidates) hunt |= c.id == "f0_hunt_1";
   CHECK(hunt);
   bool cover = false;
-  for (const auto& c : request->candidates) cover |= c.id == "cover_0";
+  for (const auto& c : request->candidates) cover |= c.id == "f0_cover_0";
   CHECK(cover);
   CHECK(request->json.find("exposure") != std::string::npos ||
         request->json.find("no enemy is currently visible") != std::string::npos);
+}
+
+void TestWholeSquadIsPlannedAtOnce() {
+  Scene scene = TwoUnitScene(24.0f, false);
+  Unit second;
+  second.id = 2;
+  second.team = Team::Blue;
+  second.position = {-12.0f, 0.0f, 6.0f};
+  scene.units.push_back(second);
+  tactics::Obstacle wall;
+  wall.bounds.min = {-1.0f, 0.0f, 2.0f};
+  wall.bounds.max = {1.0f, 3.0f, 4.0f};
+  scene.obstacles.push_back(wall);
+  GameLogic game(scene);
+
+  const auto request = BuildJevRequest(game, Team::Blue, 9);
+  CHECK(request.has_value());
+  CHECK(request->actorIds.size() == 2);
+  CHECK(request->json.find("\"acting_figures\":[0,2]") != std::string::npos);
+  CHECK(request->json.find("\"figure\":2") != std::string::npos);
+  // Higher-res map: 0.75-unit cells (rounded to the map), with cell size given.
+  CHECK(request->json.find("\"grid_cells\":80") != std::string::npos);
+  CHECK(request->json.find("\"cell_size\":") != std::string::npos);
+
+  const auto fallback = DeterministicFallbackChoice(*request);
+  CHECK(fallback.size() == 2);
+  GameLogic copy = game;
+  CHECK(ApplyJevChoice(&copy, *request, fallback));
+  CHECK(copy.FindUnit(0)->plan.type != PlannedActionType::None);
+  CHECK(copy.FindUnit(2)->plan.type != PlannedActionType::None);
+  CHECK(copy.CanCommitRound() == false);  // Red is not planned yet.
+
+  // Incomplete, duplicate-figure and unknown plans change nothing.
+  GameLogic untouched = game;
+  CHECK(!ApplyJevChoice(&untouched, *request, {fallback[0]}));
+  CHECK(!ApplyJevChoice(&untouched, *request, {fallback[0], fallback[0]}));
+  CHECK(!ApplyJevChoice(&untouched, *request, {fallback[0], "f2_teleport"}));
+  CHECK(untouched.FindUnit(0)->plan.type == PlannedActionType::None);
+  CHECK(untouched.FindUnit(2)->plan.type == PlannedActionType::None);
 }
 
 void TestHiddenEnemyNeverSerialized() {
@@ -137,7 +176,7 @@ void TestInvalidAndStaleResponsesDoNotMutate() {
   GameLogic game(TwoUnitScene(8.0f, true));
   const auto request = BuildJevRequest(game, Team::Blue, 3);
   CHECK(request.has_value());
-  CHECK(!ApplyJevChoice(&game, *request, "invented_action"));
+  CHECK(!ApplyJevChoice(&game, *request, {"invented_action"}));
   CHECK(game.FindUnit(0)->plan.type == PlannedActionType::None);
 
   GameLogic advanced = game;
@@ -194,6 +233,7 @@ int main() {
   TestBoundedCandidatesUseNormalLegalPath();
   TestShootCandidateIsFullBurstAndStateDescribesWeapons();
   TestMapGhostsAndTacticalMovesAreCommunicated();
+  TestWholeSquadIsPlannedAtOnce();
   TestHiddenEnemyNeverSerialized();
   TestInvalidAndStaleResponsesDoNotMutate();
   TestPlayerVsAiTurnAutomaticallyBecomesCommittable();

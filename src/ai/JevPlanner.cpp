@@ -11,8 +11,10 @@ namespace tactics::ai {
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
-constexpr int kGridCells = 32;
-constexpr size_t kMaxListedObstacles = 24;
+constexpr float kGridCellSize = 0.75f;  // World units per ASCII cell.
+constexpr int kMinGridCells = 32;
+constexpr int kMaxGridCells = 96;
+constexpr size_t kMaxListedObstacles = 48;
 
 std::string JsonString(const std::string& value) {
   std::ostringstream out;
@@ -299,9 +301,30 @@ bool ValidateCandidate(const GameLogic& game, Team team, JevCandidate* candidate
 
 std::string TeamName(Team team) { return team == Team::Blue ? "blue" : "red"; }
 
-// Coarse top-down overview: row 0 is the most negative Z, column 0 the most
-// negative X. '#' obstacle, '.' open; allies are their id digit, visible
-// enemies lowercase 'e', remembered (ghost) enemies '?'.
+int GridCells(const Scene& scene) {
+  return std::clamp(static_cast<int>(std::ceil(2.0f * scene.mapHalfExtent / kGridCellSize)),
+                    kMinGridCells, kMaxGridCells);
+}
+
+// Orientation-agnostic point-in-convex-polygon test on the XZ plane.
+bool InsideFootprint(const std::vector<glm::vec2>& poly, float x, float z) {
+  bool positive = false;
+  bool negative = false;
+  for (size_t i = 0; i < poly.size(); ++i) {
+    const glm::vec2& a = poly[i];
+    const glm::vec2& b = poly[(i + 1) % poly.size()];
+    const float cross = (b.x - a.x) * (z - a.y) - (b.y - a.y) * (x - a.x);
+    positive |= cross > 0.0f;
+    negative |= cross < 0.0f;
+  }
+  return !(positive && negative);
+}
+
+// Top-down overview: row 0 is the most negative Z, column 0 the most negative
+// X. Each cell is sampled at its centre against the exact obstacle footprint
+// (obstacles smaller than a cell still mark the cell holding their centre).
+// '#' obstacle, '+' climbable obstacle, '.' open; allies are their id digit,
+// visible enemies lowercase 'e', remembered (ghost) enemies '?'.
 std::vector<std::string> BuildGrid(const GameLogic& game, Team team,
                                    const TeamVisibility& visibility,
                                    const std::vector<Ghost>& ghosts, int cells) {
@@ -314,11 +337,17 @@ std::vector<std::string> BuildGrid(const GameLogic& game, Team team,
   };
   for (const Obstacle& obstacle : scene.obstacles) {
     if (obstacle.bounds.max.y - obstacle.bounds.min.y < 1.0f) continue;
+    const char mark = obstacle.climbable ? '+' : '#';
+    const std::vector<glm::vec2> poly = ObstacleFootprint(obstacle);
     for (int z = toCell(obstacle.bounds.min.z); z <= toCell(obstacle.bounds.max.z); ++z) {
       for (int x = toCell(obstacle.bounds.min.x); x <= toCell(obstacle.bounds.max.x); ++x) {
-        rows[z][x] = '#';
+        if (InsideFootprint(poly, -half + (x + 0.5f) * cell, -half + (z + 0.5f) * cell)) {
+          rows[z][x] = mark;
+        }
       }
     }
+    const glm::vec3 c = obstacle.bounds.Center();
+    rows[toCell(c.z)][toCell(c.x)] = mark;
   }
   for (const Ghost& ghost : ghosts) {
     rows[toCell(ghost.sighting->position.z)][toCell(ghost.sighting->position.x)] = '?';
@@ -335,13 +364,19 @@ std::vector<std::string> BuildGrid(const GameLogic& game, Team team,
   return rows;
 }
 
-std::string BuildVisibleState(const GameLogic& game, Team team, int actorId) {
+std::string BuildVisibleState(const GameLogic& game, Team team,
+                              const std::vector<int>& actorIds) {
   const TeamVisibility visibility = game.ComputeVisibility(team);
   const std::vector<Ghost> ghosts = HiddenEnemyGhosts(game, team, visibility);
+  const int cells = GridCells(game.GetScene());
   std::ostringstream out;
   out << "{\"round\":" << game.RoundNumber() << ",\"team\":" << JsonString(TeamName(team))
       << ",\"objective\":"
       << JsonString("Eliminate the opposing squad. Blue generally advances toward +X; Red toward -X. "
+                    "You plan every listed acting figure at once, one option each, as a single "
+                    "coordinated squad plan: all plans execute simultaneously. Cover each other, "
+                    "focus fire, stagger exposure instead of exposing everyone, and keep "
+                    "allies out of each other's lines of fire. "
                     "Prefer a useful visible shot, otherwise advance while keeping options open. "
                     "Shooting: a Shoot action fires a burst of up to the weapon's magazine "
                     "(capped by shots fitting the 5 s round at its fire interval) at one "
@@ -355,27 +390,34 @@ std::string BuildVisibleState(const GameLogic& game, Team team, int actorId) {
                     "Bullets can hit any figure in their path, including allies (friendly "
                     "fire). A figure that sights an enemy while idle or moving may also "
                     "react and fire on its own. There is no ammo pool across rounds.")
-      << ",\"actor_id\":" << actorId << ",\"map_half_extent\":" << std::fixed
+      << ",\"acting_figures\":[";
+  for (size_t i = 0; i < actorIds.size(); ++i) out << (i ? "," : "") << actorIds[i];
+  out << "],\"map_half_extent\":" << std::fixed
       << std::setprecision(2) << game.GetScene().mapHalfExtent
       << ",\"fov_half_angle_deg\":" << constants::kShootHalfFovDegrees
-      << ",\"shoot_range\":" << constants::kShootRange << ",\"move_budget\":"
-      << game.FindUnit(actorId)->MoveBudget() << ",\"playbook\":{";
+      << ",\"shoot_range\":" << constants::kShootRange << ",\"playbook\":{";
   const SquadPlaybook& playbook = game.Playbook(team);
   out << "\"stationary_unseen\":" << JsonString(ReactionName(playbook.At(false, false)))
       << ",\"stationary_seen\":" << JsonString(ReactionName(playbook.At(false, true)))
       << ",\"moving_unseen\":" << JsonString(ReactionName(playbook.At(true, false)))
       << ",\"moving_seen\":" << JsonString(ReactionName(playbook.At(true, true)))
       << "},\"map\":{\"half_extent\":" << game.GetScene().mapHalfExtent
-      << ",\"grid_cells\":" << kGridCells << ",\"grid_legend\":"
-      << JsonString("rows run -Z to +Z, columns -X to +X; # obstacle, . open, digit = your "
-                    "figure id, e = visible enemy, ? = ghost (last known enemy position)")
+      << ",\"grid_cells\":" << cells << ",\"cell_size\":"
+      << 2.0f * game.GetScene().mapHalfExtent / static_cast<float>(cells)
+      << ",\"grid_legend\":"
+      << JsonString("cell (row r, column c) covers x from -half_extent + c*cell_size and z from "
+                    "-half_extent + r*cell_size; rows run -Z to +Z, columns -X to +X; # obstacle, "
+                    "+ climbable obstacle, . open, digit = your figure id, e = visible enemy, "
+                    "? = ghost (last known enemy position)")
       << ",\"grid\":[";
-  const std::vector<std::string> grid = BuildGrid(game, team, visibility, ghosts, kGridCells);
+  const std::vector<std::string> grid = BuildGrid(game, team, visibility, ghosts, cells);
   for (size_t i = 0; i < grid.size(); ++i) out << (i ? "," : "") << JsonString(grid[i]);
   out << "],\"obstacles\":[";
   {
     const Scene& scene = game.GetScene();
-    const glm::vec3 from = game.FindUnit(actorId)->position;
+    glm::vec3 from{0.0f};
+    for (const int id : actorIds) from += game.FindUnit(id)->position;
+    if (!actorIds.empty()) from /= static_cast<float>(actorIds.size());
     std::vector<size_t> order;
     for (size_t i = 0; i < scene.obstacles.size(); ++i) order.push_back(i);
     std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
@@ -406,6 +448,7 @@ std::string BuildVisibleState(const GameLogic& game, Team team, int actorId) {
         << std::setprecision(2) << StatsOf(unit.weapon).shotIntervalSeconds
         << ",\"scatter_half_angle_deg\":" << StatsOf(unit.weapon).scatterHalfAngleDegrees
         << ",\"max_burst\":" << MaxShotsPerAction(unit.weapon, constants::kRoundDuration)
+        << ",\"move_budget\":" << unit.MoveBudget()
         << ",\"planned\":"
         << (unit.plan.type == PlannedActionType::None ? "false" : "true") << "}";
   }
@@ -440,22 +483,25 @@ std::string BuildVisibleState(const GameLogic& game, Team team, int actorId) {
 JevRequestBuilder::JevRequestBuilder(const GameLogic& game, Team team, unsigned requestNonce)
     : game_(game), team_(team) {
   if (!IsPlanning(game) || game.Mode() != InputMode::AwaitingSelection) return;
-  const Unit* actor = nullptr;
+  std::vector<int> actors;
   for (const Unit& unit : game.GetScene().units) {
-    if (unit.team == team && unit.alive && unit.plan.type == PlannedActionType::None &&
-        (!actor || unit.id < actor->id)) {
-      actor = &unit;
+    if (unit.team == team && unit.alive && unit.plan.type == PlannedActionType::None) {
+      actors.push_back(unit.id);
     }
   }
-  if (!actor) return;
+  if (actors.empty()) return;
+  std::sort(actors.begin(), actors.end());
 
   request_.team = team;
   request_.round = game.RoundNumber();
-  request_.actorId = actor->id;
   request_.id = "r" + std::to_string(request_.round) + "-t" +
-                std::to_string(static_cast<int>(team)) + "-u" + std::to_string(actor->id) + "-n" +
-                std::to_string(requestNonce);
-  pending_ = GenerateCandidateSpecs(game, team, actor->id);
+                std::to_string(static_cast<int>(team)) + "-n" + std::to_string(requestNonce);
+  for (const int actorId : actors) {
+    for (JevCandidate& candidate : GenerateCandidateSpecs(game, team, actorId)) {
+      candidate.id = "f" + std::to_string(actorId) + "_" + candidate.id;
+      pending_.push_back(std::move(candidate));
+    }
+  }
   valid_ = true;
 }
 
@@ -474,12 +520,20 @@ bool JevRequestBuilder::Step(double budgetMs) {
 
 std::optional<JevRequest> JevRequestBuilder::Finish() {
   if (!valid_ || next_ < pending_.size() || request_.candidates.empty()) return std::nullopt;
+  // Only figures that kept at least one legal option take part in the plan.
+  for (const JevCandidate& candidate : request_.candidates) {
+    if (std::find(request_.actorIds.begin(), request_.actorIds.end(), candidate.actorId) ==
+        request_.actorIds.end()) {
+      request_.actorIds.push_back(candidate.actorId);
+    }
+  }
   std::ostringstream out;
   out << "{\"requestId\":" << JsonString(request_.id) << ",\"state\":"
-      << BuildVisibleState(game_, team_, request_.actorId) << ",\"candidates\":[";
+      << BuildVisibleState(game_, team_, request_.actorIds) << ",\"candidates\":[";
   for (size_t i = 0; i < request_.candidates.size(); ++i) {
     if (i) out << ',';
-    out << "{\"id\":" << JsonString(request_.candidates[i].id) << ",\"description\":"
+    out << "{\"id\":" << JsonString(request_.candidates[i].id) << ",\"figure\":"
+        << request_.candidates[i].actorId << ",\"description\":"
         << JsonString(request_.candidates[i].description) << "}";
   }
   out << "]}";
@@ -496,41 +550,57 @@ std::optional<JevRequest> BuildJevRequest(const GameLogic& game, Team team,
   return builder.Finish();
 }
 
-bool ApplyJevChoice(GameLogic* game, const JevRequest& request, const std::string& choice) {
+bool ApplyJevChoice(GameLogic* game, const JevRequest& request,
+                    const std::vector<std::string>& choices) {
   if (!game || game->RoundNumber() != request.round || !IsPlanning(*game) ||
-      game->Mode() != InputMode::AwaitingSelection) {
+      game->Mode() != InputMode::AwaitingSelection ||
+      choices.size() != request.actorIds.size()) {
     return false;
   }
-  const Unit* actor = game->FindUnit(request.actorId);
-  if (!actor || !actor->alive || actor->team != request.team ||
-      actor->plan.type != PlannedActionType::None) {
-    return false;
+  // Exactly one known option per acting figure.
+  std::vector<const JevCandidate*> picked;
+  for (const std::string& choice : choices) {
+    const auto candidate = std::find_if(request.candidates.begin(), request.candidates.end(),
+                                        [&](const JevCandidate& c) { return c.id == choice; });
+    if (candidate == request.candidates.end()) return false;
+    for (const JevCandidate* other : picked) {
+      if (other->actorId == candidate->actorId) return false;
+    }
+    picked.push_back(&*candidate);
   }
-  const auto candidate = std::find_if(request.candidates.begin(), request.candidates.end(),
-                                      [&](const JevCandidate& c) { return c.id == choice; });
-  if (candidate == request.candidates.end()) return false;
 
-  GameLogic validated;
-  if (!CandidateApplied(*game, request.team, *candidate, &validated)) return false;
+  // Plans are applied in turn to a copy, so the whole squad plan lands or
+  // none of it does.
+  GameLogic validated = *game;
+  for (const JevCandidate* candidate : picked) {
+    GameLogic next;
+    if (!CandidateApplied(validated, request.team, *candidate, &next)) return false;
+    validated = std::move(next);
+  }
   *game = std::move(validated);
   return true;
 }
 
-std::string DeterministicFallbackChoice(const JevRequest& request) {
-  for (const JevCandidate& candidate : request.candidates) {
-    if (candidate.kind == JevActionKind::Shoot) return candidate.id;
-  }
+std::vector<std::string> DeterministicFallbackChoice(const JevRequest& request) {
+  std::vector<std::string> choices;
   const float sign = request.team == Team::Blue ? 1.0f : -1.0f;
-  const JevCandidate* best = nullptr;
-  for (const JevCandidate& candidate : request.candidates) {
-    if (candidate.kind != JevActionKind::Move) continue;
-    if (!best || sign * candidate.destination.x > sign * best->destination.x) best = &candidate;
+  for (const int actorId : request.actorIds) {
+    const JevCandidate* shoot = nullptr;
+    const JevCandidate* best = nullptr;
+    const JevCandidate* wait = nullptr;
+    for (const JevCandidate& candidate : request.candidates) {
+      if (candidate.actorId != actorId) continue;
+      if (candidate.kind == JevActionKind::Shoot && !shoot) shoot = &candidate;
+      if (candidate.kind == JevActionKind::Wait && !wait) wait = &candidate;
+      if (candidate.kind == JevActionKind::Move &&
+          (!best || sign * candidate.destination.x > sign * best->destination.x)) {
+        best = &candidate;
+      }
+    }
+    const JevCandidate* pick = shoot ? shoot : best ? best : wait;
+    if (pick) choices.push_back(pick->id);
   }
-  if (best) return best->id;
-  for (const JevCandidate& candidate : request.candidates) {
-    if (candidate.kind == JevActionKind::Wait) return candidate.id;
-  }
-  return {};
+  return choices;
 }
 
 }  // namespace tactics::ai

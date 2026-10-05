@@ -9,11 +9,17 @@ The browser preview has three modes on the same page and uses the same WASM
 - **Jev vs Jev** (`?mode=ai-v-ai`) starts paused. Start, pause, restart, camera
   orbit, and camera zoom remain available to the spectator.
 
-Game code builds a bounded set of legal actions (about 25 at most) for one figure at a time (visible
-shots, navmesh-validated moves incl. cover/hunt moves, and wait). The request state contains all
-friendlies and only enemies in that team's current FOV. The adapter asks Jev
-one TypeSafe `Choice`; the returned id is checked against the original set and
-replayed through the normal click/plan path. Jev does not generate commands.
+Game code builds a bounded set of legal actions (about 25 per figure) for every
+unplanned figure on the team (visible shots, navmesh-validated moves incl.
+cover/hunt moves, and wait). Candidate ids are prefixed with the figure
+(`f0_move_3`) and carry a `figure` field. The request state contains all
+friendlies and only enemies in that team's current FOV. The adapter sends one
+TypeSafe request with one `Choice` question per figure (`figure_<id>`), so Jev
+plans the whole squad at once and can coordinate cover, focus fire and staggered
+exposure. The returned ids (exactly one per figure) are checked against the
+original set and replayed in turn on a copy of the game through the normal
+click/plan path; if any one is invalid, none is applied. Jev does not generate
+commands. A figure with a single legal option is not put to the model.
 
 Shooting mechanics Jev is told: shot options fire a full burst (the weapon's
 magazine, capped by shots that fit the 5 s round), each bullet scattered in a
@@ -21,9 +27,11 @@ cone; the option text carries the current per-shot hit chance, and the state
 lists each ally's weapon, magazine, fire interval, scatter and max burst. The
 objective text also covers FOV/LOS gating, friendly fire, and reaction fire.
 
-Environment Jev is told: a 32x32 ASCII top-down map (`state.map.grid`, with own
-figures, visible enemies and ghosts marked), the nearest 24 obstacles with
-exact footprints, FOV half-angle, shoot range, move budget, the team's
+Environment Jev is told: an ASCII top-down map (`state.map.grid`, 0.75-unit cells,
+up to 96x96, sampled at cell centres against the exact obstacle footprints; `#`
+obstacle, `+` climbable, own figures, visible enemies and ghosts marked, with
+`cell_size` and the coordinate mapping in the legend), the nearest 48 obstacles with
+exact footprints, FOV half-angle, shoot range, each figure's move budget, the team's
 reaction playbook, and `ghosts` (last-known enemy positions, rounds ago,
 movement direction). Move options say whether the destination is hidden from
 or exposed to the currently visible enemies; `cover_N` moves hide behind
@@ -85,9 +93,9 @@ Set `TBGWAF_JEV_ALLOWED_ORIGINS` to a comma-separated exact origin list. For
 this repository, production Pages and PR previews share the
 `https://thedeepestspace.github.io` origin. Do not use `*`.
 
-The adapter limits input to 16 KiB and 24 candidates, defaults to 12 requests
+The adapter limits input to 128 KiB, 32 candidates per figure (200 total), defaults to 12 requests
 per client per minute, two concurrent upstream requests, and a hard 500-request
-in-memory daily budget. Each upstream attempt times out after 8 seconds and at
+in-memory daily budget. Each upstream attempt times out after 15 seconds and at
 most one retry is made. These values are configurable with
 `TBGWAF_JEV_RATE_PER_MINUTE`, `TBGWAF_JEV_DAILY_LIMIT`,
 `TBGWAF_JEV_MAX_CONCURRENCY`, `TBGWAF_JEV_TIMEOUT_MS`, and

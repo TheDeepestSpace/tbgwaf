@@ -30,13 +30,14 @@ struct JevRequest {
   std::string json;
   Team team = Team::Blue;
   int round = 0;
-  int actorId = -1;
-  std::vector<JevCandidate> candidates;
+  std::vector<int> actorIds;  // Every figure planned by this request.
+  std::vector<JevCandidate> candidates;  // Ids are unique across figures.
 };
 
-// Builds one atomic Choice request for the first living, unplanned figure on
-// `team`. State contains all friendly figures but only currently-visible
-// enemies. Every option has already been accepted by a copy of GameLogic.
+// Builds one request that plans every living, unplanned figure on `team` at
+// once (one Choice per figure, answered together). State contains all friendly
+// figures but only currently-visible enemies. Every option has already been
+// accepted by a copy of GameLogic.
 std::optional<JevRequest> BuildJevRequest(const GameLogic& game, Team team,
                                           unsigned requestNonce);
 
@@ -62,13 +63,16 @@ class JevRequestBuilder {
   size_t next_ = 0;
 };
 
-// Rechecks the response against the current round/unit and applies it through
-// ClickUnit/Choose*/ClickGround. Unknown, stale, or newly-illegal choices are
-// rejected without changing the game.
-bool ApplyJevChoice(GameLogic* game, const JevRequest& request, const std::string& choice);
+// Rechecks the response (exactly one option id per acting figure) against the
+// current round/units and applies it through ClickUnit/Choose*/ClickGround.
+// Unknown, stale, incomplete, or newly-illegal choices are rejected without
+// changing the game, so a squad plan is applied whole or not at all.
+bool ApplyJevChoice(GameLogic* game, const JevRequest& request,
+                    const std::vector<std::string>& choices);
 
 // Explicit non-Jev fallback used only after the user opts in. It prefers a
-// visible shot, then progress toward the opposing deployment edge, then wait.
-std::string DeterministicFallbackChoice(const JevRequest& request);
+// visible shot, then progress toward the opposing deployment edge, then wait,
+// independently for each figure.
+std::vector<std::string> DeterministicFallbackChoice(const JevRequest& request);
 
 }  // namespace tactics::ai

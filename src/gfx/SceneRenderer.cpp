@@ -2179,7 +2179,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                  foot + glm::vec3(-kPostHalf, 0.0f, -kPostHalf),
                  glm::vec3(2.0f * kPostHalf, tactics::constants::kZiplinePostHeight,
                            2.0f * kPostHalf),
-                 glm::vec4(0.42f, 0.30f, 0.18f, 1.0f));
+                 glm::vec4(kObstacleColor, 1.0f));
     }
   }
 

@@ -818,8 +818,12 @@ void PlaceZiplines(Scene* scene, const std::vector<UrbanBlock>& blocks, uint32_t
   Rng rng(seed ^ 0x21b1e5a7u);
   constexpr float kClearance = 0.7f;     // Street anchor stays this far from any obstacle.
   constexpr float kCableClearance = 0.5f;  // Cable passes this far (XZ) / above (Y) obstacles.
-  constexpr float kRoofSlabInset = 0.25f;  // Roof slab pulled in from the building footprint.
-  constexpr float kRoofAnchorInset = 0.5f;  // Roof anchor's distance in from the footprint edge.
+  constexpr float kRoofAnchorInset = 0.3f;  // Roof anchor's distance in from the footprint edge.
+  // The street anchor stands on the sidewalk strip: mid-strip, never nearer
+  // the block edge (the road) than kSidewalkMin nor farther than kSidewalkMax.
+  constexpr float kSidewalkMid = 0.75f;
+  constexpr float kSidewalkMin = 0.3f;
+  constexpr float kSidewalkMax = 1.2f;
   constexpr float kMinRoofHeight = 2.5f;
   constexpr float kLineSpacing = 2.5f;  // Min gap between two ziplines (and from a spawn).
   constexpr int kAttempts = 60;
@@ -834,12 +838,31 @@ void PlaceZiplines(Scene* scene, const std::vector<UrbanBlock>& blocks, uint32_t
   NavMesh nav;
   nav.Build(scene->obstacles, scene->mapHalfExtent, constants::kAgentRadius);
   const float post = constants::kZiplinePostHeight;
+  // Existing decks and ramps (the roof slabs added below come after): the
+  // cable and street anchor must stay clear of them.
+  const size_t deckCount = scene->walkSurfaces.size();
 
   // The street anchor keeps clear of every obstacle; the cable (post tops)
   // stays out of every obstacle's footprint+margin unless it is above it.
-  auto clear = [&](glm::vec3 roof, glm::vec3 ground) {
+  auto clear = [&](glm::vec3 roof, glm::vec3 ground, size_t owner) {
     if (!nav.IsWalkable(ground.x, ground.z)) return false;
     const glm::vec2 g(ground.x, ground.z);
+    for (size_t i = 0; i < deckCount; ++i) {
+      const WalkSurface& deck = scene->walkSurfaces[i];
+      std::vector<glm::vec2> deckXZ;
+      for (const glm::vec3& v : deck.vertices) deckXZ.emplace_back(v.x, v.z);
+      if (DistanceToPolygon(g, deckXZ) < kClearance) return false;
+      const glm::vec3 t0 = roof + glm::vec3(0.0f, post, 0.0f);
+      const glm::vec3 t1 = ground + glm::vec3(0.0f, post, 0.0f);
+      for (int s = 0; s <= 40; ++s) {
+        const glm::vec3 p = glm::mix(t0, t1, static_cast<float>(s) / 40.0f);
+        const glm::vec2 pxz(p.x, p.z);
+        if (DistanceToPolygon(pxz, deckXZ) >= kCableClearance) continue;
+        const float deckY = SurfaceHeightAt(deck, p.x, p.z);
+        // Fine only if it passes beneath the slab's underside.
+        if (p.y > deckY - c.highwayThickness - 0.2f) return false;
+      }
+    }
     for (size_t i = 0; i < footprints.size(); ++i) {
       const glm::vec4& bb = footprintBounds[i];
       if (g.x < bb.x - kClearance || g.x > bb.z + kClearance || g.y < bb.y - kClearance ||
@@ -854,13 +877,16 @@ void PlaceZiplines(Scene* scene, const std::vector<UrbanBlock>& blocks, uint32_t
     for (size_t i = 0; i < footprints.size(); ++i) {
       const glm::vec4& bb = footprintBounds[i];
       const float roofTop = scene->obstacles[i].bounds.max.y;
+      // The cable leaves its own building at the roof edge, so it only has
+      // to clear the roof itself; every other obstacle also gets a margin.
+      const float margin = i == owner ? 0.0f : kCableClearance;
       for (int s = 0; s <= steps; ++s) {
         const glm::vec3 p = glm::mix(top0, top1, static_cast<float>(s) / steps);
-        if (p.x < bb.x - kCableClearance || p.x > bb.z + kCableClearance ||
-            p.z < bb.y - kCableClearance || p.z > bb.w + kCableClearance) {
+        if (p.x < bb.x - margin || p.x > bb.z + margin || p.z < bb.y - margin ||
+            p.z > bb.w + margin) {
           continue;
         }
-        if (DistanceToPolygon(glm::vec2(p.x, p.z), footprints[i]) < kCableClearance &&
+        if (DistanceToPolygon(glm::vec2(p.x, p.z), footprints[i]) <= margin &&
             p.y < roofTop + 0.3f) {
           return false;
         }
@@ -894,10 +920,9 @@ void PlaceZiplines(Scene* scene, const std::vector<UrbanBlock>& blocks, uint32_t
       const size_t building = roofs[static_cast<size_t>(rng.Int(0, static_cast<int>(roofs.size()) - 1))];
       const float edgePick = rng.Unit01();
       const float bearing = rng.Float(-1.0f, 1.0f) * 1.0472f;  // +-60 deg off the edge's outward normal.
-      const float length = rng.Float(c.ziplineMinLength, c.ziplineMaxLength);
       if (hasLine[building]) continue;
 
-      // Roof anchor: just inside a footprint edge, the cable heading out over it.
+      // Roof anchor: right at a footprint edge, the cable heading out over it.
       const std::vector<glm::vec2>& fp = footprints[building];
       const size_t edge = std::min(fp.size() - 1, static_cast<size_t>(edgePick * fp.size()));
       const glm::vec2 e0 = fp[edge], e1 = fp[(edge + 1) % fp.size()];
@@ -919,21 +944,33 @@ void PlaceZiplines(Scene* scene, const std::vector<UrbanBlock>& blocks, uint32_t
 
       const float cs = std::cos(bearing), sn = std::sin(bearing);
       const glm::vec2 heading(outward.x * cs - outward.y * sn, outward.x * sn + outward.y * cs);
-      // Street anchor: `length` along the cable, so the horizontal run is
-      // what is left after the drop.
-      const glm::vec2 probe = anchor + heading * (length * 0.8f);
-      const float streetY = scene->ground.HeightAt(probe.x, probe.y);
-      const float drop = roofY - streetY;
-      if (length <= drop + 1.0f) continue;
-      const float run = std::sqrt(length * length - drop * drop);
-      const glm::vec2 street2 = anchor + heading * run;
+      // Street anchor: on the block's sidewalk strip, where the ray from the
+      // roof anchor leaves the block (pulled back to mid-sidewalk).
+      float exitT = std::numeric_limits<float>::infinity();
+      for (size_t i = 0; i < poly.size(); ++i) {
+        const glm::vec2 p0 = poly[i], p1 = poly[(i + 1) % poly.size()];
+        const glm::vec2 seg = p1 - p0;
+        const float denom = heading.x * seg.y - heading.y * seg.x;
+        if (std::fabs(denom) < 1e-5f) continue;
+        const glm::vec2 rel = p0 - anchor;
+        const float t = (rel.x * seg.y - rel.y * seg.x) / denom;
+        const float u = (rel.x * heading.y - rel.y * heading.x) / denom;
+        if (t > 0.0f && u >= 0.0f && u <= 1.0f) exitT = std::min(exitT, t);
+      }
+      if (!std::isfinite(exitT)) continue;
+      const glm::vec2 street2 = anchor + heading * (exitT - kSidewalkMid);
+      const float edgeDist = DistanceToPolygonEdges(street2, poly);
+      if (!PointInConvexPolygon(street2, poly) || edgeDist < kSidewalkMin ||
+          edgeDist > kSidewalkMax) {
+        continue;
+      }
       if (std::fabs(street2.x) >= scene->mapHalfExtent - 1.0f ||
           std::fabs(street2.y) >= scene->mapHalfExtent - 1.0f) {
         continue;
       }
       const glm::vec3 roofFoot(anchor.x, roofY, anchor.y);
       const glm::vec3 streetFoot(street2.x, scene->ground.HeightAt(street2.x, street2.y), street2.y);
-      if (!clear(roofFoot, streetFoot)) continue;
+      if (!clear(roofFoot, streetFoot, building)) continue;
       const float actual = glm::distance(roofFoot, streetFoot);
       if (actual < c.ziplineMinLength || actual > c.ziplineMaxLength) continue;
 
@@ -948,15 +985,10 @@ void PlaceZiplines(Scene* scene, const std::vector<UrbanBlock>& blocks, uint32_t
       }
       if (!ok) continue;
 
-      // Roof slab: the footprint pulled in a little, wound counter-clockwise
-      // seen from above, at the anchor's height (flush with the roof top).
+      // Roof slab: the footprint, wound counter-clockwise seen from above,
+      // at the anchor's height (flush with the roof top).
       WalkSurface slab;
-      for (const glm::vec2& v : fp) {
-        const glm::vec2 toCentre = centre - v;
-        const float d = glm::length(toCentre);
-        const glm::vec2 q = d > kRoofSlabInset ? v + toCentre / d * kRoofSlabInset : centre;
-        slab.vertices.emplace_back(q.x, roofY, q.y);
-      }
+      for (const glm::vec2& v : fp) slab.vertices.emplace_back(v.x, roofY, v.y);
       const glm::vec3 n = glm::cross(slab.vertices[1] - slab.vertices[0],
                                      slab.vertices[2] - slab.vertices[0]);
       if (n.y < 0.0f) std::reverse(slab.vertices.begin(), slab.vertices.end());

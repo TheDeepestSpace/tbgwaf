@@ -74,7 +74,7 @@ struct MapGeneratorConfig {
   // stream, so they never shift the layout. Lengths are cable lengths.
   // Set maxZiplinesPerBlock = 0 to disable.
   int maxZiplinesPerBlock = 2;
-  float ziplineMinLength = 8.0f;
+  float ziplineMinLength = 4.0f;
   float ziplineMaxLength = 22.0f;
 };
 

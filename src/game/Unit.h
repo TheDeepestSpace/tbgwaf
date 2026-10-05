@@ -37,7 +37,17 @@ struct PlannedAction {
   // the previous leg (movePath for the first) ends; FinishRound arms the next.
   std::vector<std::vector<glm::vec3>> queuedLegs;
   float endFacingYaw = 0.0f;        // Final facing once the path ends, for type == Move.
-  int shootTargetId = -1;           // For type == Shoot.
+  int shootTargetId = -1;           // For type == Shoot at a locked-on figure.
+  // Free-aim shot (issue #129): type == Shoot with hasAimPoint fires a real
+  // ballistic trace from the muzzle toward aimPoint instead of resolving
+  // against a locked target. shootTargetId stays -1 for these.
+  bool hasAimPoint = false;
+  glm::vec3 aimPoint{0.0f};
+  // Burst size for type == Shoot (issue #138): how many shots this one
+  // action fires, clamped to [1, MaxShotsPerAction(weapon, kRoundDuration)]
+  // wherever a plan is recorded or imported. Default 1 keeps every
+  // pre-burst scenario/golden unchanged.
+  int shots = 1;
 };
 
 // What a figure does, on its own, on a tick where at least one living enemy
@@ -120,8 +130,9 @@ struct Unit {
   float rideLength = 0.0f;
   float rideSlope = 0.0f;
   float runSpeed = constants::kMoveSpeed;  // World units per second while moving.
-  // Visual-only loadout (issue #126): the model in the figure's hands and
-  // the carry/aim animation class. Creation sites assign
+  // Loadout (issue #126): the model in the figure's hands and the carry/aim
+  // animation class; since issue #138 also the magazine/fire-interval cap on
+  // one shooting action's burst (see WeaponStats). Creation sites assign
   // DefaultWeaponForUnit(id) once the id is known.
   WeaponType weapon = WeaponType::AssaultRifle;
   PlannedAction plan;  // This figure's plan for the current/upcoming round commit.

@@ -102,7 +102,7 @@ float SampleLoop(const BipedCurve& curve, float phase) {
 //    kicks (muzzle flip + rearward slide), decaying exponentially (same
 //    decay form as the camera zoom damping) -- and over the last
 //    kLowerDuration everything eases back down to the carry pose.
-constexpr float kAimRaiseDuration = 0.12f;
+constexpr float kAimRaiseDuration = tactics::constants::kShootRecoilStart;
 constexpr float kLowerDuration = 0.25f;
 constexpr float kRecoilDecayRate = 12.0f;              // Per second.
 constexpr float kRecoilArmKick = glm::radians(18.0f);  // Whole-arm lift (handgun).
@@ -356,6 +356,22 @@ void AppendWeapon(FigureParts* parts, const glm::mat4& frame, WeaponType type,
     case WeaponType::AssaultRifle: AppendAssaultRifle(parts, frame); break;
     case WeaponType::SniperRifle: AppendSniperRifle(parts, frame); break;
   }
+}
+
+// Muzzle flash: a small bright blob just past the barrel tip for the first
+// instants of each shot's recoil, so every shot of a burst reads as its own
+// bang rather than one long carry pose.
+constexpr float kMuzzleFlashRecoilThreshold = 0.35f;  // ~0.09 s after the shot.
+
+void AppendMuzzleFlash(FigureParts* parts, const glm::mat4& frame, WeaponType type,
+                       float recoil, bool compact) {
+  if (compact || recoil < kMuzzleFlashRecoilThreshold) return;
+  glm::vec3 lo, hi;
+  WeaponLocalBounds(type, &lo, &hi);
+  const float size = type == WeaponType::DesertEagle ? 0.045f : 0.055f;
+  const glm::vec3 center(hi.x + 0.5f * size, lo.y + 0.65f * (hi.y - lo.y), 0.5f * (lo.z + hi.z));
+  parts->push_back({EllipsoidModel(frame, center, glm::vec3(size * 1.6f, size, size)),
+                    glm::vec4(1.0f, 0.85f, 0.35f, 1.0f), FigurePrimitive::Rounded});
 }
 
 // Where the supporting (left) hand wraps the weapon, in the weapon-local
@@ -630,6 +646,7 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
     // Riding: the pistol goes to the hip holster while both hands grip the handle.
     weaponFrame[3] = glm::mix(weaponFrame[3], glm::vec4(0.05f, 0.5f, 0.34f, 1.0f), ride.armsUp);
     AppendWeapon(&parts, figure * weaponFrame, unit.weapon, compactWeapon);
+    AppendMuzzleFlash(&parts, figure * weaponFrame, unit.weapon, shot.recoil, compactWeapon);
 
     if (ride.armsUp > 0.0f) {
       const glm::vec3 gunHand =
@@ -691,6 +708,7 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
         glm::translate(glm::mat4(1.0f),
                        glm::vec3(-kRecoilSlide * kRifleRecoilScale * shot.recoil, 0.0f, 0.0f));
     AppendWeapon(&parts, figure * weaponFig, unit.weapon, compactWeapon);
+    AppendMuzzleFlash(&parts, figure * weaponFig, unit.weapon, shot.recoil, compactWeapon);
 
     const glm::vec3 rightHand =
         glm::mix(glm::vec3(weaponFig * glm::vec4(0.0f, -0.03f, 0.0f, 1.0f)), handleRight,

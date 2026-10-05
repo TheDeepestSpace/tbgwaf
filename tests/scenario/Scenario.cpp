@@ -127,6 +127,25 @@ Scene ParseScene(const YAML::Node& root) {
                 "map.generate.elevated_branch must be ramp/off-map, got '" + end + "'");
           }
         }
+        // `features: {lanes: on, curbs: {mode: auto, chance: 0.3}, ...}`
+        // sets the optional urban detail layers (see UrbanFeatures).
+        if (const YAML::Node featNode = genNode["features"]) {
+          for (const auto& entry : featNode) {
+            const std::string name = entry.first.as<std::string>();
+            FeatureToggle* toggle = UrbanFeatureByName(&config.features, name);
+            if (!toggle) {
+              throw std::runtime_error("map.generate.features: unknown feature '" + name + "'");
+            }
+            const YAML::Node value = entry.second;
+            const std::string mode = value.IsMap() ? value["mode"].as<std::string>("auto")
+                                                   : value.as<std::string>();
+            if (!ParseFeatureMode(mode, &toggle->mode)) {
+              throw std::runtime_error("map.generate.features." + name +
+                                       " must be auto/off/on, got '" + mode + "'");
+            }
+            if (value.IsMap() && value["chance"]) toggle->chance = value["chance"].as<float>();
+          }
+        }
         scene = GenerateUrbanMap(seed, config);
       } else if (type == "hilly") {
         scene = GenerateHillyMap(seed);

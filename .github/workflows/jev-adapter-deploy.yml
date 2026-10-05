@@ -1,6 +1,12 @@
 name: Deploy Jev adapter
 
 on:
+  # TEMP: deploy on every push to this branch while iterating; remove before merge
+  push:
+    branches: [jev-prototype-165]
+    paths:
+      - server/jev-adapter/**
+      - .github/workflows/jev-adapter-deploy.yml
   workflow_dispatch:
     inputs:
       app:
@@ -24,8 +30,8 @@ jobs:
     env:
       FLY_API_TOKEN: ${{ secrets.TBGWAF_FLYIO_TBGWAF_ORG_TOKEN }}
       TBGWAF_JEV_API_KEY: ${{ secrets.TBGWAF_JEV_API_KEY }}
-      FLY_APP: ${{ inputs.app }}
-      FLY_ORG: ${{ inputs.org }}
+      FLY_APP: ${{ inputs.app || 'tbgwaf-jev-adapter' }}
+      FLY_ORG: ${{ inputs.org || 'tbgwaf' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

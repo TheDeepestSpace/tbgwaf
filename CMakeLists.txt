@@ -57,6 +57,7 @@ endif()
 # Pure game-logic sources: no SDL/GL/ImGui dependency, so they can be linked
 # into both the playable app and the headless logic test binary.
 set(GAME_LOGIC_SOURCES
+  src/ai/JevPlanner.cpp
   src/game/Scene.cpp
   src/game/Geometry.cpp
   src/game/MapGenerator.cpp
@@ -169,8 +170,15 @@ if(EMSCRIPTEN)
             ${CMAKE_SOURCE_DIR}/web/gallery.html ${CMAKE_BINARY_DIR}/gallery.html
     DEPENDS ${CMAKE_SOURCE_DIR}/web/gallery.html
   )
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/jev-preview.js
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_SOURCE_DIR}/web/jev-preview.js ${CMAKE_BINARY_DIR}/jev-preview.js
+    DEPENDS ${CMAKE_SOURCE_DIR}/web/jev-preview.js
+  )
   add_custom_target(tactics_web_page ALL
-    DEPENDS ${CMAKE_BINARY_DIR}/index.html ${CMAKE_BINARY_DIR}/gallery.html)
+    DEPENDS ${CMAKE_BINARY_DIR}/index.html ${CMAKE_BINARY_DIR}/gallery.html
+            ${CMAKE_BINARY_DIR}/jev-preview.js)
   # Map-seed goldens (issue #133): the gallery's "Map seeds" section is
   # driven by whatever PNGs sit under tests/map_goldens/. The script globs
   # at build time, so re-run it every build and a new golden shows up in
@@ -243,6 +251,11 @@ else()
   target_include_directories(tactics_logic_tests PRIVATE src)
   target_link_libraries(tactics_logic_tests PRIVATE tactics_logic)
   add_test(NAME logic_tests COMMAND tactics_logic_tests)
+
+  add_executable(tactics_jev_planner_tests tests/jev_planner_tests.cpp)
+  target_include_directories(tactics_jev_planner_tests PRIVATE src)
+  target_link_libraries(tactics_jev_planner_tests PRIVATE tactics_logic)
+  add_test(NAME jev_planner_tests COMMAND tactics_jev_planner_tests)
 
   add_executable(tactics_map_generator_tests tests/map_generator_tests.cpp)
   target_include_directories(tactics_map_generator_tests PRIVATE src)

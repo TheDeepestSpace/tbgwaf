@@ -35,10 +35,14 @@ class GameLogic;
 namespace tactics::scenario {
 
 struct ScenarioAction {
+  // Aim (issue #129) is the tap-to-place half of a free-aim shot: it enters
+  // shoot-target mode and places the "+" aim marker without confirming, so
+  // the step ends mid-aim (for visual captures of the aiming UI). A
+  // following `shoot` step by the same actor confirms it (the Fire button).
   // BeginMove opens move planning (select + Move) and deliberately stops
   // there, leaving the movement frontier up for the visual runner's
   // post-action capture; no destination is clicked and no plan is recorded.
-  enum class Kind { Move, BeginMove, Shoot, Pass, Cancel, Commit, Focus, NewGame };
+  enum class Kind { Move, BeginMove, Shoot, Aim, Pass, Cancel, Commit, Focus, NewGame };
 
   int actor = -1;  // Unused (and not required in YAML) for Commit/NewGame.
   Kind kind = Kind::Pass;
@@ -48,10 +52,26 @@ struct ScenarioAction {
                                       // plan, one leg executes per round).
   std::optional<float> finalFacingDegrees;  // Move only: re-aims the planned
                                              // wireframe before commit.
-  int target = -1;              // Shoot only.
+  int target = -1;              // Shoot only: locked-on figure target.
   bool expectNoop = false;      // Shoot only: the click is expected not to
                                  // resolve (e.g. target outside the
                                  // shooter's team FOV) and not record a plan.
+  // Shoot/Aim free-aim forms (issue #129), mutually exclusive with `target`:
+  // either the already-resolved world aim point (`at`, the protocol form --
+  // deliberate blind fire at any point), or a camera-style ray
+  // (`aim_from`/`aim_dir`) run through GameLogic::ResolveAimRay exactly like
+  // a real click, so unit-under-cursor/surface precedence is what the
+  // player would get; a ray with no aimable surface places nothing.
+  std::optional<glm::vec3> shootAt;
+  std::optional<glm::vec3> aimRayFrom;
+  std::optional<glm::vec3> aimRayDir;
+  // Shoot/Aim only (issue #138): burst size dialed in on the shot-level bar
+  // before the target click / Fire press. Routed through
+  // GameLogic::SetPlannedShotCount, so it clamps exactly like the UI
+  // (never below 1, never past the weapon's magazine/round-window cap).
+  // Absent means "bar untouched": the plan keeps whatever level is dialed in
+  // (1 unless an earlier step of the same aim set it).
+  std::optional<int> shots;
 };
 
 // Every field is optional; only the ones present in the YAML step are
@@ -90,6 +110,13 @@ struct Scenario {
   std::string sourcePath;
   Scene scene;
   SquadPlaybook playbooks[2] = {SquadPlaybook::Passive(), SquadPlaybook::Passive()};  // Indexed by Team; passive unless the YAML sets `playbook`.
+  // `friendly_fire: false` flips the single config flag that makes
+  // same-team figures transparent to free-aim ballistic traces.
+  bool friendlyFire = true;
+  // `shot_rolls: [0.1, 0.9, ...]`: pins the shot RNG for deterministic
+  // outcomes -- rolls are consumed in resolution order and the list repeats
+  // when exhausted. Empty keeps the default seeded RNG.
+  std::vector<float> shotRolls;
   std::vector<ScenarioStep> steps;
   // Optional visual-runner camera adjustments (both panes), applied after
   // the initial view is fitted to the map: orbit target on the ground plane,

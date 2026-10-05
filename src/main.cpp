@@ -847,6 +847,8 @@ int main() {
       if (hud.cancel) game.CancelAction();
       if (hud.playbook) game.SetPlaybook(paneTeam(pane), *hud.playbook);
       if (hud.done) game.FinishMovePlan();
+      if (hud.fire) game.ConfirmAim(paneTeam(pane));
+      if (hud.shots) game.SetPlannedShotCount(*hud.shots, paneTeam(pane));
     }
 
     // Pane divider. Both teams plan at once, so there's no "inactive side"
@@ -866,7 +868,18 @@ int main() {
     const bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse;
     if (!uiWantsMouse && humanPlanning) {
       const int hoverPane = PaneForX(mouseX, paneCount, windowWidth);
-      if (game.Mode() == InputMode::AwaitingMoveDestination) {
+      if (game.Mode() == InputMode::AwaitingShootTarget) {
+        // The preview cone follows the cursor until an aim point is placed.
+        const PaneRect& rect = paneRects[hoverPane];
+        const gfx::Ray hoverRay = cameras[hoverPane].ScreenPointToRay(
+            static_cast<float>(mouseX - rect.x), static_cast<float>(mouseY),
+            static_cast<float>(rect.width), static_cast<float>(windowHeight));
+        glm::vec3 hoverPoint;
+        if (IntersectGroundOrClimbTop(hoverRay, game.GetScene(), &hoverPoint)) {
+          hoveredGroundPoint = hoverPoint;
+          hasHoveredGroundPoint = true;
+        }
+      } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
         const PaneRect& rect = paneRects[hoverPane];
         const gfx::Ray hoverRay = cameras[hoverPane].ScreenPointToRay(
             static_cast<float>(mouseX - rect.x), static_cast<float>(mouseY),
@@ -925,7 +938,13 @@ int main() {
         lastClickUnitId = doubleClick ? -1 : hitUnit;
         lastClickPane = clickPane;
         lastClickTicks = clickTicks;
-        if (hitUnit >= 0) {
+        if (game.Mode() == InputMode::AwaitingShootTarget) {
+          // Aiming: every click goes through the aim ray, which picks a
+          // figure first (staging the lock-on; the shot-level bar stays up
+          // and Fire commits) and otherwise places/moves the free-aim "+"
+          // selector on a surface in the shooter's 360-degree LOS.
+          game.ClickAimRay(clickRay.origin, clickRay.direction, clickTeam);
+        } else if (hitUnit >= 0) {
           game.ClickUnit(hitUnit, clickTeam);
           if (doubleClick) {
             // Drone-style focus: frame the unit's whole movement frontier

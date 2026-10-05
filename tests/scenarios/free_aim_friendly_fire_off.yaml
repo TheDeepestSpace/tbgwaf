@@ -1,0 +1,27 @@
+name: free_aim_friendly_fire_off
+description: >
+  Issue #129 friendly fire, flag off: with the single config flag disabled, teammates are
+  transparent to the ballistic trace -- the identical shot flies through blue1 untouched
+  and downs the enemy behind it.
+
+friendly_fire: false
+shot_rolls: [0.0]
+
+units:
+  - {id: 0, team: blue, position: [0, 0, 0], facing_degrees: 0}
+  - {id: 1, team: blue, position: [5, 0, 0], facing_degrees: 0}
+  - {id: 2, team: red, position: [10, 0, 0], facing_degrees: 180}
+
+script:
+  - action: shoot
+    actor: 0
+    at: [10, 0.9, 0]
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: commit
+
+  - assert: {unit: 1, alive: true, comment: Transparent to the trace with the flag off}
+  - assert: {unit: 2, alive: false}
+  - assert: {winner: blue}

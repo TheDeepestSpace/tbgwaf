@@ -233,21 +233,64 @@ when every wall is present, so goldens stay the same up to roof rendering.
 A wall segment may have a gap `u-range` at ground level: implement as splitting the wall
 obstacle into pieces around the opening (exactly how `SplitRun`/gaps already produce alleys),
 so navmesh and LOS get doorways with **zero** new engine semantics. Door width ≥ `gapWidth`
-rule reused. The entrance records from 3.4 drive where.
+rule reused. The entrance records from 3.4 drive where. The lintel over the door is a wall
+piece with `bounds.min.y` at head height (obstacles already support a raised base: the hilly
+rocks use one), which needs the one navmesh rule below.
 
-### 5.3 Windows: "see-through, not walk-through" obstacles
-New `Obstacle::losTransparent` (or a separate `Opening` list): blocks movement, lets rays pass
-within a vertical band (sill to head height). `Raycast.cpp` prism test gets a per-obstacle
-Y-band exclusion; the shadow-map FOV static mesh omits window panes. Logic tests: figure
-behind a window is visible at eye probe but not at foot probe; shots through windows resolve.
-Also unlocks railings and fences with gaps.
+**One navmesh rule:** an obstacle whose `bounds.min.y` is at or above `kUnitHeight` does not
+block movement (figures walk under it). Today every obstacle footprint is inflated into the
+ground mesh regardless of height. This is a one-line filter in `NavMesh::Build` plus a logic
+test, and it is what makes lintels, window heads, awnings, skybridge undersides and signs
+on posts all work without special cases.
+
+### 5.3 Windows as real cutouts in the walls
+Decided: a window is a hole in the wall, not a flag. The wall segment is split into four
+plain `Obstacle` pieces: the two flanking full-height jambs, a **sill** piece from the floor
+up to sill height, and a **head** piece from head height up to the ceiling. Nothing new is
+needed in `Raycast.cpp`, the shadow-map FOV mesh or the renderer: rays pass through the gap
+geometrically, the prism renderer already draws from `bounds.min.y` to `max.y` so the hole is
+visible, and the sill blocks movement while the head piece is ignored by the navmesh (5.2
+rule). Resulting gameplay, all from existing probes:
+
+- A figure inside at the window has an FOV cone out through the opening (a sniper covering an
+  intersection from a second-floor window) and is seen from outside at the **eye probe** when
+  standing, while the **foot probe** is hidden by the sill. Crouching is not modelled, so a
+  figure that steps back from the window is hidden by the jambs.
+- A figure outside can see in through the same hole, and later free-aim/ballistic shots
+  ([#129](https://github.com/TheDeepestSpace/tbgwaf/issues/129)) and thrown grenades go
+  through the opening for free, because every trace is a geometric ray/arc against the same
+  pieces. The roadmap does not add grenades; it just guarantees openings will not block them.
+- Sill and head heights per archetype (shopfront glazing: sill near the floor, so it hides
+  nothing; apartment window: sill ~0.9, head ~2.1; office ribbon windows: sill ~0.8 along the
+  whole facade).
+
+Same mechanism gives railings, fences with gaps, parapets and arrow slits. Logic tests: eye
+visible/foot hidden through a window; nothing visible through the jamb; a shot through the
+window resolves; a figure cannot path through a window.
 
 ### 5.4 Floors as `WalkSurface`s with ceilings
-Each upper floor is a convex `WalkSurface` (or several for non-convex plans), one per storey,
-at `floorIndex * floorHeight`. Ceilings/floors need to occlude LOS vertically: today a
-`WalkSurface` already acts as a `highwayThickness` slab in `RayIntersectsWalkSurface`, which
-is exactly a floor slab. Ground-floor interior is just ground inside walls. Floors are only
-reachable through 5.5.
+Each upper floor is one or more convex `WalkSurface`s per storey at `floorIndex * floorHeight`.
+Ceilings/floors need to occlude LOS vertically: a `WalkSurface` already acts as a
+`highwayThickness` slab in `RayIntersectsWalkSurface`, which is exactly a floor slab. The
+ground-floor interior is just ground inside walls. Floors are only reachable through 5.5.
+
+**Convex vs. non-convex, and why it matters here.** A polygon is *convex* when every corner
+bends the same way and any straight line between two points inside it stays inside: rectangles,
+triangles, trapezoids, the wedge blocks the street cutter produces. It is *non-convex* when it
+has an inward corner or a hole: an L or U shaped floor, a floor with a stairwell cut out, a
+corridor with rooms off it. Almost every geometry helper in the engine assumes convex input
+(`PointInConvexPolygon`, `InsetConvexPolygon`, `KeepSide`, `SurfaceContainsXZ`,
+`Obstacle::footprint`), because for convex shapes those tests are exact and a handful of dot
+products. The navmesh also treats each `WalkSurface` as one node a figure can cross in a
+straight line, so an L-shaped floor stored as one surface would let figures walk straight
+through the missing corner, and an inset of it could fold over itself.
+
+Decided: keep every surface convex and **decompose** non-convex floors into convex pieces
+joined by `neighbors` links, exactly as the overpass deck is already a chain of quads. A floor
+with a stairwell is four rectangles around the hole; an L is two rectangles; the room-splitting
+in 6.1 produces convex rooms by construction. `FindSurfacePath` already walks these links, so
+no engine change is needed, only a small `DecomposeToConvex(polygon) -> pieces + links` helper
+with its own unit tests.
 
 ### 5.5 Stairs
 A stair is a short steep `WalkSurface` chain (reuse the ramp machinery with
@@ -288,10 +331,24 @@ Generator-only work on the model from stage 5.
 - Warehouse/garage: single volume, roll-up door (wide doorway), mezzanine.
 Plans are templated room-splitting of the footprint (BSP along the long axis), fully seeded.
 
-### 6.2 Which buildings are enterable
-Not every building needs an interior; a per-seed `interiorChance` by kind and a hard rule that
-every block has at least one enterable building and every artery frontage has a few. Solid
-buildings keep stage 3 massing. This bounds navmesh cost and keeps maps readable.
+### 6.2 Which buildings are enterable (staged rollout, FPS-permitting)
+Decided: start with a random subset and grow it as the performance budget allows. Each
+building draws `enterable` from a per-kind `interiorChance` (its own seed sub-stream, so
+changing the chance later never reshuffles layouts), with a hard rule that every block has
+at least one enterable building and every artery frontage a few. Solid buildings keep the
+stage 3 massing. The rollout is three config presets, each gated on the reach-field benchmark
+(1.3) and the scenario frame-cost tracking
+([#119](https://github.com/TheDeepestSpace/tbgwaf/issues/119)) staying within budget on the
+web build:
+
+| Preset | Enterable share | Floors opened | When |
+|---|---|---|---|
+| `sparse` (default after 5.x) | ~1 per block | ground floor + roof | first ship |
+| `mixed` | ~40% | all floors, stairs | once 1.3 + per-floor culling in the renderer are in |
+| `dense` | ~80%, every mixed-use/office | all floors, bridges, fire escapes | if budget allows |
+
+The preset is a `MapGeneratorConfig` field and a scenario key, so tests can pin `dense` on
+one seed regardless of the shipped default.
 
 ### 6.3 Vertical variety
 Fire escapes (external stair `WalkSurface` chain on an alley wall → rooftop), basements
@@ -384,14 +441,14 @@ so the two tracks can proceed in parallel once the stage 1 refactor is in.
 
 ---
 
-## Open decisions to settle before stage 5
+## Decisions taken
 
-1. **Window representation:** a flag on `Obstacle` (simplest, matches the current ray tests)
-   versus a separate `Opening` list cut out of walls (cleaner for rendering holes). The plan
-   assumes the flag; revisit if rendering real holes matters more than LOS fidelity.
-2. **Non-convex floors:** `WalkSurface` is convex. Either split floor plans into convex pieces
-   with `neighbors` links (works today) or extend `WalkSurface` to simple polygons. The plan
-   assumes splitting.
-3. **How much of a building a seed opens:** full interiors everywhere is the most "complete
-   city" but the most expensive for the reach field and the hardest to read on screen; the plan
-   assumes a per-kind chance with at-least-one-per-block.
+1. **Windows are real cutouts** (5.3): a wall is split into jambs, sill and head pieces, so
+   figures peep in or out, snipers cover a street from an upper window, and future free-aim
+   shots or grenades pass through the opening geometrically. Cost: one navmesh rule that
+   obstacles starting above head height do not block movement (5.2).
+2. **Floors stay convex and are decomposed** (5.4): non-convex plans become linked convex
+   pieces, the same pattern the overpass deck already uses, so no navmesh change is needed.
+3. **Interiors roll out by preset** (6.2): `sparse` first (about one enterable building per
+   block, ground floor and roof), then `mixed` and `dense` as the reach-field benchmark and
+   frame-cost tracking allow.

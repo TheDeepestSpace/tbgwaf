@@ -2,6 +2,7 @@
 // WEGO round phases, and the click-driven game state machine. No SDL/GL/ImGui
 // dependency, so this runs in plain CI without a display.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <initializer_list>
@@ -295,6 +296,169 @@ void TestTeamVisibilityAggregatesAcrossFigures() {
   CHECK(!visibility.ObstacleVisible(1));  // Crate behind blueB: outside every cone.
 }
 
+void TestVisibilitySightsFeetSurfaceOrEye() {
+  std::vector<Unit> units(2);
+  units[0].id = 0;
+  units[0].team = Team::Blue;
+  units[0].position = glm::vec3(-4.0f, 0.0f, 0.0f);
+  units[0].facingYaw = 0.0f;
+  units[1].id = 1;
+  units[1].team = Team::Red;
+  units[1].position = glm::vec3(4.0f, 0.0f, 0.0f);
+
+  const std::vector<WalkSurface> noSurfaces;
+  const HeightField flat;
+
+  // A low block hides the ground under the target's feet (the shadow-map
+  // overlay leaves that strip untinted) but not the target's eye: the
+  // figure's body shows above the block, so it is sighted through its eye.
+  const std::vector<Obstacle> lowBlock = {
+      Obstacle{AABB{glm::vec3(-0.5f, 0.0f, -1.0f), glm::vec3(0.5f, 1.0f, 1.0f)}},
+  };
+  CHECK(!LineOfSightClear(units[0].EyePosition(), units[1].position, lowBlock, noSurfaces));
+  CHECK(LineOfSightClear(units[0].EyePosition(), units[1].EyePosition(), lowBlock,
+                         noSurfaces));
+  CHECK(CanUnitSee(units[0], units[1], lowBlock, noSurfaces, flat));
+  CHECK(ComputeTeamVisibility(Team::Blue, units, lowBlock, noSurfaces, flat).UnitVisible(1));
+
+  // An eye-high block hides both probes: nothing of the figure shows.
+  const std::vector<Obstacle> tallBlock = {
+      Obstacle{AABB{glm::vec3(-0.5f, 0.0f, -1.0f), glm::vec3(0.5f, 2.0f, 1.0f)}},
+  };
+  CHECK(!CanUnitSee(units[0], units[1], tallBlock, noSurfaces, flat));
+  CHECK(!ComputeTeamVisibility(Team::Blue, units, tallBlock, noSurfaces, flat).UnitVisible(1));
+
+  // Farther behind the low block, the sightline reaches the ground after
+  // passing over it, matching the end of the rendered ground shadow.
+  units[1].position.x = 12.0f;
+  CHECK(LineOfSightClear(units[0].EyePosition(), units[1].position, lowBlock, noSurfaces));
+  CHECK(CanUnitSee(units[0], units[1], lowBlock, noSurfaces, flat));
+  units[1].position.x = 4.0f;
+
+  // The reverse case: a head-height overhang hides the eye but not the
+  // ground under the feet. A figure standing on tinted ground is always
+  // seen.
+  const std::vector<Obstacle> overhang = {
+      Obstacle{AABB{glm::vec3(0.0f, 1.2f, -1.0f), glm::vec3(8.0f, 2.0f, 1.0f)}},
+  };
+  CHECK(!LineOfSightClear(units[0].EyePosition(), units[1].EyePosition(), overhang,
+                          noSurfaces));
+  CHECK(LineOfSightClear(units[0].EyePosition(), units[1].position, overhang, noSurfaces));
+  CHECK(CanUnitSee(units[0], units[1], overhang, noSurfaces, flat));
+  CHECK(ComputeTeamVisibility(Team::Blue, units, overhang, noSurfaces, flat).UnitVisible(1));
+}
+
+// A flat 0.45-thick deck with its top at y=5 (the generated overpass
+// height) seen from the street. A figure near the deck edge shows its whole
+// body above the edge, but the deck top under its feet faces away from a
+// street-level eye and the sightline to it enters the deck's own slab, so
+// the feet probe alone never sighted it (one-way visibility: the deck
+// figure saw, and could shoot, the street figure).
+void TestDeckEdgeFigureSightedFromBelow() {
+  WalkSurface deck;
+  deck.vertices = {glm::vec3(-10.0f, 5.0f, -4.0f), glm::vec3(-10.0f, 5.0f, 4.0f),
+                   glm::vec3(10.0f, 5.0f, 4.0f), glm::vec3(10.0f, 5.0f, -4.0f)};
+  const std::vector<WalkSurface> surfaces = {deck};
+  const std::vector<Obstacle> noObstacles;
+  const HeightField flat;
+
+  std::vector<Unit> units(2);
+  units[0].id = 0;
+  units[0].team = Team::Blue;
+  units[0].position = glm::vec3(0.0f, 0.0f, -14.0f);
+  units[0].facingYaw = kPi / 2.0f;  // Faces +Z, toward the deck.
+  units[1].id = 1;
+  units[1].team = Team::Red;
+  units[1].position = glm::vec3(0.0f, 5.0f, -3.6f);  // kAgentRadius inside the near edge.
+  units[1].facingYaw = -kPi / 2.0f;  // Faces -Z, down at the street figure.
+
+  CHECK(!LineOfSightClear(units[0].EyePosition(), units[1].position, noObstacles, surfaces));
+  CHECK(LineOfSightClear(units[0].EyePosition(), units[1].EyePosition(), noObstacles,
+                         surfaces));
+  CHECK(CanUnitSee(units[0], units[1], noObstacles, surfaces, flat));
+  CHECK(CanUnitSee(units[1], units[0], noObstacles, surfaces, flat));
+  CHECK(ComputeTeamVisibility(Team::Blue, units, noObstacles, surfaces, flat).UnitVisible(1));
+  CHECK(ComputeTeamVisibility(Team::Red, units, noObstacles, surfaces, flat).UnitVisible(0));
+
+  // Deep on the deck, the slab hides the whole figure from this close.
+  units[1].position.z = 3.0f;
+  CHECK(!LineOfSightClear(units[0].EyePosition(), units[1].EyePosition(), noObstacles,
+                          surfaces));
+  CHECK(!CanUnitSee(units[0], units[1], noObstacles, surfaces, flat));
+  CHECK(!ComputeTeamVisibility(Team::Blue, units, noObstacles, surfaces, flat).UnitVisible(1));
+  units[1].position.z = -3.6f;
+
+  // End to end: the street figure can plan a shot at the deck figure (the
+  // target click is gated on team visibility) and the shot can land.
+  Scene scene;
+  scene.mapHalfExtent = 20.0f;
+  scene.walkSurfaces = surfaces;
+  scene.units = units;
+  GameLogic game(scene);
+  CHECK(game.ComputeVisibility(Team::Blue).UnitVisible(1));
+  CHECK(game.ComputeVisibility(Team::Red).UnitVisible(0));
+  CHECK(game.ShotHitChance(*game.FindUnit(0), *game.FindUnit(1)) > 0.0f);
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  game.ClickUnit(1, Team::Blue);
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Shoot);
+  CHECK(game.FindUnit(0)->plan.shootTargetId == 1);
+}
+
+void TestTerrainOccludesVisibilityLikeShadowMap() {
+  HeightField ridge;
+  ridge.minX = -4.0f;
+  ridge.minZ = -1.0f;
+  ridge.step = 2.0f;
+  ridge.nx = 5;
+  ridge.nz = 2;
+  ridge.heights = {
+      0.0f, 0.0f, 3.0f, 0.0f, 0.0f,
+      0.0f, 0.0f, 3.0f, 0.0f, 0.0f,
+  };
+
+  std::vector<Unit> units(2);
+  units[0].id = 0;
+  units[0].team = Team::Blue;
+  units[0].position = glm::vec3(-4.0f, 0.0f, 0.0f);
+  units[0].facingYaw = 0.0f;
+  units[1].id = 1;
+  units[1].team = Team::Red;
+  units[1].position = glm::vec3(4.0f, 0.0f, 0.0f);
+
+  const std::vector<Obstacle> noObstacles;
+  const std::vector<WalkSurface> noSurfaces;
+  CHECK(!LineOfSightClear(units[0].EyePosition(), units[1].position, ridge));
+  CHECK(!CanUnitSee(units[0], units[1], noObstacles, noSurfaces, ridge));
+  CHECK(!ComputeTeamVisibility(Team::Blue, units, noObstacles, noSurfaces, ridge)
+             .UnitVisible(1));
+
+  Scene scene;
+  scene.mapHalfExtent = 4.0f;
+  scene.ground = ridge;
+  scene.units = units;
+  GameLogic game(scene);
+  CHECK(!game.ResolveShot(*game.FindUnit(0), *game.FindUnit(1)));
+  CHECK(game.FindUnit(1)->alive);
+
+  // A lower crest still hides the ground under the far figure's feet, but
+  // its eye clears the crest: the figure shows over it and is sighted.
+  ridge.heights[2] = ridge.heights[7] = 1.2f;
+  CHECK(!LineOfSightClear(units[0].EyePosition(), units[1].position, ridge));
+  CHECK(LineOfSightClear(units[0].EyePosition(), units[1].EyePosition(), ridge));
+  CHECK(CanUnitSee(units[0], units[1], noObstacles, noSurfaces, ridge));
+  CHECK(ComputeTeamVisibility(Team::Blue, units, noObstacles, noSurfaces, ridge)
+            .UnitVisible(1));
+
+  std::fill(ridge.heights.begin(), ridge.heights.end(), 0.0f);
+  CHECK(LineOfSightClear(units[0].EyePosition(), units[1].position, ridge));
+  CHECK(CanUnitSee(units[0], units[1], noObstacles, noSurfaces, ridge));
+  CHECK(LineOfSightClear(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, 0.0f, 0.0f),
+                         ridge));
+  CHECK(!LineOfSightClear(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, -2.0f, 0.0f),
+                          ridge));
+}
+
 void TestCheckWinner() {
   std::vector<Unit> units(2);
   units[0].id = 0;
@@ -460,6 +624,7 @@ void TestRoundExecutesBothTeamsMovesConcurrently() {
 
 void TestShootRowsResolveSimultaneouslyAcrossTeams() {
   GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.0f; });  // Pin rolls to a hit.
   // Every figure shoots its opposite number in the same round. Rows z=-4 and
   // z=4 are behind the walls (all four of those shots must miss); row z=0 is
   // the open lane, so blue1 and red4 fire at each other simultaneously --
@@ -491,6 +656,7 @@ void TestShootRowsResolveSimultaneouslyAcrossTeams() {
 
 void TestMutualEliminationIsDraw() {
   GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.0f; });  // Pin rolls to a hit.
   // Leave only the open middle lane's pair alive, shooting each other.
   for (int id : {0, 2, 3, 5}) game.FindUnit(id)->alive = false;
 
@@ -648,6 +814,7 @@ void TestQueuedLegsSnapshotRoundTrip() {
 
 void TestPendingShotFiresWhenTargetWalksIntoView() {
   GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.0f; });  // Pin rolls to a hit.
   MakePassive(game);
 
   // Park red4 behind the z=-4 wall from blue1's perspective: blue1's own
@@ -717,6 +884,7 @@ void TestDefaultSceneSquadsStartHidden() {
 
 void TestGameLogicShootGatingRequiresTeamVisibility() {
   GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.0f; });  // Pin rolls to a hit.
 
   // Turn every living Blue figure to face away from Red (-X instead of +X):
   // Red is now entirely outside Blue's combined FOV, regardless of LOS.
@@ -1024,6 +1192,7 @@ float RunRed4Walk(const SquadPlaybook& redPb, bool* red4Alive, bool* blue1Alive,
 
 void TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds() {
   GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.0f; });  // Pin rolls to a hit.
   // Flipping the field directly mirrors what the config popup does; it
   // doesn't touch turn state, so blue1's plan below is still just Pass.
   Unit* blue1 = game.FindUnit(1);
@@ -1351,6 +1520,7 @@ void TestWalkCycleTracksInFlightMove() {
 // is unchanged, and a blocked shot doesn't play anything.
 void TestResolvedShotStartsShootAnimation() {
   GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.0f; });  // Pin rolls to a hit.
   Unit* shooter = game.FindUnit(1);  // Open middle lane: blue1 <-> red4.
   Unit* target = game.FindUnit(4);
   // Aim the shooter a bit off the target so the aim yaw is distinguishable
@@ -1379,6 +1549,119 @@ void TestResolvedShotStartsShootAnimation() {
   CHECK(!game.ResolveShot(*shooter, *other));
   CHECK(other->alive);
   CHECK(shooter->shootElapsed < 0.0f);
+}
+
+// Probability-cone shots: pure falloff function plus the ResolveShot roll.
+void TestShotHitChanceProfile() {
+  const ShotProfile& p = kDefaultShotProfile;
+  CHECK(constants::kShootRange == 60.0f);
+  // Point-blank, dead centerline: maximum.
+  CHECK(std::fabs(ShotProfileHitChance(p, 0.0f, 0.0f) - p.maxChance) < 1e-5f);
+  // Close and on-axis is a strong shot.
+  CHECK(ShotProfileHitChance(p, 0.0f, 3.0f) > 0.85f);
+  // No hard range cap: half the falloff at `range`, still nonzero far beyond it.
+  CHECK(std::fabs(ShotProfileHitChance(p, 0.0f, 60.0f) - p.maxChance * 0.5f) < 1e-5f);
+  CHECK(ShotProfileHitChance(p, 0.0f, 600.0f) > 0.0f);
+  CHECK(ShotProfileHitChance(p, 0.0f, 600.0f) < ShotProfileHitChance(p, 0.0f, 60.0f));
+  // Cone edge (either side) and just outside: hard zero.
+  CHECK(ShotProfileHitChance(p, 75.0f, 5.0f) == 0.0f);
+  CHECK(ShotProfileHitChance(p, -75.0f, 5.0f) == 0.0f);
+  CHECK(ShotProfileHitChance(p, 75.5f, 5.0f) == 0.0f);
+  CHECK(ShotProfileHitChance(p, 74.0f, 5.0f) > 0.0f);
+  // Tapers with angle and distance.
+  CHECK(ShotProfileHitChance(p, 40.0f, 20.0f) < ShotProfileHitChance(p, 10.0f, 20.0f));
+  CHECK(ShotProfileHitChance(p, 10.0f, 40.0f) < ShotProfileHitChance(p, 10.0f, 20.0f));
+  // A different profile (future role) changes the shape without new logic.
+  const ShotProfile sniper{10.0f, 120.0f, 1.0f};
+  CHECK(ShotProfileHitChance(sniper, 5.0f, 100.0f) > 0.0f);
+  CHECK(ShotProfileHitChance(sniper, 20.0f, 10.0f) == 0.0f);
+}
+
+void TestShotHitChanceGatesAndRoll() {
+  GameLogic game(LegacyScene());
+  Unit* shooter = game.FindUnit(1);  // Open middle lane: blue1 <-> red4.
+  Unit* target = game.FindUnit(4);
+  const glm::vec3 toTarget = target->position - shooter->position;
+  const float bearing = std::atan2(toTarget.z, toTarget.x);
+
+  // On-axis at moderate range: probabilistic, strictly between 0 and 1.
+  shooter->facingYaw = bearing;
+  const float chance = game.ShotHitChance(*shooter, *target);
+  CHECK(chance > 0.0f && chance < 1.0f);
+
+  // Forced miss: target survives, nothing knocked down, but the shot played.
+  game.SetShotRollSource([] { return 0.999999f; });
+  CHECK(!game.ResolveShot(*shooter, *target));
+  CHECK(target->alive);
+  CHECK(target->knockdownElapsed < 0.0f);
+  CHECK(shooter->shootElapsed == 0.0f);
+
+  // Forced hit: existing knockdown/animation state.
+  shooter->shootElapsed = -1.0f;
+  game.SetShotRollSource([] { return 0.0f; });
+  bool fired = false;
+  CHECK(game.ResolveShot(*shooter, *target, &fired));
+  CHECK(fired);
+  CHECK(!target->alive);
+  CHECK(target->knockdownElapsed == 0.0f);
+  CHECK(shooter->shootElapsed == 0.0f);
+
+  // Hard gates: behind the shooter is a zero chance and never fires, even on a 0 roll.
+  GameLogic g2(LegacyScene());
+  Unit* s2 = g2.FindUnit(1);
+  Unit* t2 = g2.FindUnit(4);
+  g2.SetShotRollSource([] { return 0.0f; });
+  s2->facingYaw = bearing + 3.0f;
+  CHECK(g2.ShotHitChance(*s2, *t2) == 0.0f);
+  fired = true;
+  CHECK(!g2.ResolveShot(*s2, *t2, &fired));
+  CHECK(!fired);
+  CHECK(t2->alive);
+
+  // Far beyond kShootRange: no cap, so dead ahead and unobstructed is still a (small) chance.
+  s2->facingYaw = bearing;
+  t2->position = s2->position + glm::vec3(std::cos(bearing), 0.0f, std::sin(bearing)) * 60.5f;
+  CHECK(g2.ShotHitChance(*s2, *t2) > 0.0f);
+
+  // LOS-blocked within cone/range: zero (wall at z=+-4 between blue0 and a target behind it).
+  GameLogic g3(LegacyScene());
+  Unit* s3 = g3.FindUnit(0);
+  Unit* t3 = g3.FindUnit(3);
+  t3->position = glm::vec3(0.0f, 0.0f, -4.0f);  // Inside the obstacle's footprint line of fire.
+  s3->facingYaw = std::atan2(t3->position.z - s3->position.z, t3->position.x - s3->position.x);
+  CHECK(g3.ShotHitChance(*s3, *t3) == 0.0f);
+}
+
+// Shot cone overlay: opaque-ish (50%) at the gun tip, fading to nothing at range.
+void TestShotConeAlphaFadesFromGunTip() {
+  const ShotProfile& p = kDefaultShotProfile;
+  CHECK(constants::kConeStartAlpha == 0.5f);
+  CHECK(std::fabs(ShotConeAlpha(p, 0.0f) - 0.5f) < 1e-6f);
+  CHECK(std::fabs(ShotConeAlpha(p, p.range * 0.5f) - 0.25f) < 1e-6f);
+  CHECK(ShotConeAlpha(p, p.range) == 0.0f);
+  CHECK(ShotConeAlpha(p, p.range * 2.0f) == 0.0f);
+  CHECK(ShotConeAlpha(p, -1.0f) == 0.5f);  // Behind the tip clamps, never exceeds the start.
+  CHECK(ShotConeAlpha(p, 10.0f) > ShotConeAlpha(p, 20.0f));
+}
+
+// The gun tip (where shots and the cone start) is out in front of the figure
+// at shoulder height, on its right-hand side -- not at the head.
+void TestMuzzleIsAtGunTipNotHead() {
+  Unit u;
+  u.position = glm::vec3(2.0f, 0.0f, -3.0f);
+  u.facingYaw = 0.0f;  // Facing +X; right-hand side is +Z.
+  glm::vec3 m = u.MuzzlePosition();
+  CHECK(std::fabs(m.x - (2.0f + constants::kMuzzleForward)) < 1e-5f);
+  CHECK(std::fabs(m.y - constants::kMuzzleHeight) < 1e-5f);
+  CHECK(std::fabs(m.z - (-3.0f + constants::kMuzzleSide)) < 1e-5f);
+  CHECK(m.y < u.EyePosition().y);
+  CHECK(glm::length(m - u.EyePosition()) > 0.5f);
+
+  // Turning to face +Z swings the tip around: forward is +Z, right is -X.
+  u.facingYaw = 1.57079632679f;
+  m = u.MuzzlePosition();
+  CHECK(std::fabs(m.x - (2.0f - constants::kMuzzleSide)) < 1e-4f);
+  CHECK(std::fabs(m.z - (-3.0f + constants::kMuzzleForward)) < 1e-4f);
 }
 
 void TestSnapshotMirrorsMatchAndTeamPlans() {
@@ -1566,6 +1849,18 @@ void TestResetClearsSightings() {
   CHECK(game.Sightings(Team::Blue, 4).empty());
 }
 
+void TestImportStateOfNewGameClearsFollowerSightings() {
+  GameLogic sim(LegacyScene()), follower(LegacyScene());
+  GameSnapshot lateRound = sim.ExportState();
+  lateRound.roundNumber = 3;
+  CHECK(follower.ImportState(lateRound));
+  StepSightings(follower, 1.0f);
+  CHECK(!follower.Sightings(Team::Blue, 4).empty());
+  sim.Reset(LegacyScene());  // New game: same unit ids, round back to 1.
+  CHECK(follower.ImportState(sim.ExportState()));
+  CHECK(follower.Sightings(Team::Blue, 4).empty());
+}
+
 void TestFollowerBuildsSightingsWithoutPhysicsUpdate() {
   GameLogic sim(LegacyScene()), follower(LegacyScene());
   MakePassive(sim);
@@ -1612,6 +1907,9 @@ int main() {
   TestElevatedEyePositionSeesOverObstacle();
   TestFovCone();
   TestTeamVisibilityAggregatesAcrossFigures();
+  TestVisibilitySightsFeetSurfaceOrEye();
+  TestDeckEdgeFigureSightedFromBelow();
+  TestTerrainOccludesVisibilityLikeShadowMap();
   TestCheckWinner();
   TestRoundPlanningTeamGating();
   TestRoundCommitRequiresBothTeamsPlanned();
@@ -1642,6 +1940,10 @@ int main() {
   TestGameLogicWinCondition();
   TestWalkCycleTracksInFlightMove();
   TestResolvedShotStartsShootAnimation();
+  TestShotHitChanceProfile();
+  TestShotHitChanceGatesAndRoll();
+  TestShotConeAlphaFadesFromGunTip();
+  TestMuzzleIsAtGunTipNotHead();
   TestSnapshotMirrorsMatchAndTeamPlans();
   TestSightingRecordedImmediatelyOnEntry();
   TestSightingSamplesAccumulateWhileInFov();
@@ -1650,6 +1952,7 @@ int main() {
   TestSightingsPersistAfterLeavingFovThenExpire();
   TestSightingReentryAppendsToAgingTrail();
   TestResetClearsSightings();
+  TestImportStateOfNewGameClearsFollowerSightings();
   TestFollowerBuildsSightingsWithoutPhysicsUpdate();
 
   if (g_failures == 0) {

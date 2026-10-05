@@ -97,8 +97,8 @@ HudActions DrawHud(const tactics::GameLogic& game, tactics::Team team, bool plan
 // draw-call/vertex/triangle counters for the frame.
 // `wasmHeapBytes` is the WASM linear-memory size (nullopt on native builds,
 // shown as N/A). WASM memory never shrinks, so this is also the peak.
-void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float fps,
-                    float frameMs, float fovMs,
+void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& disableOcclusionFade,
+                    bool& showFps, float fps, float frameMs, float fovMs,
                     const gfx::RenderFrameStats& stats, float top,
                     std::optional<size_t> wasmHeapBytes);
 

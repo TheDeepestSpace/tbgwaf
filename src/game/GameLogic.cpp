@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <sstream>
 
 #include "game/Raycast.h"
@@ -45,6 +46,19 @@ void GameLogic::Reset() { Reset(BuildDefaultScene()); }
 void GameLogic::Reset(Scene scene) {
   scene_ = std::move(scene);
   obstacleBounds_ = ObstacleBounds(scene_.obstacles);
+  // On hilly terrain every figure stands on the sampled ground, so scenario
+  // files can place units by XZ alone. Flat scenes (empty field) keep their
+  // authored Y (e.g. crate-top starts).
+  if (!scene_.ground.Empty()) {
+    for (Unit& unit : scene_.units) {
+      // Y=0 is the scenario shorthand for "place on terrain". Preserve an
+      // explicitly authored elevated Y so a stacked surface above hilly
+      // ground is not collapsed onto the heightfield during Reset/import.
+      if (std::fabs(unit.position.y) < 1e-4f) {
+        unit.position.y = scene_.ground.HeightAt(unit.position.x, unit.position.z);
+      }
+    }
+  }
   navMesh_ = NavMesh();
   navMeshUnitId_ = -1;
   roundNumber_ = 1;
@@ -58,6 +72,10 @@ void GameLogic::Reset(Scene scene) {
   pendingShots_.clear();
   mirroredMoving_.clear();
 
+  ResetSightingMemory();
+}
+
+void GameLogic::ResetSightingMemory() {
   const size_t unitSlots = scene_.units.size();
   for (int t = 0; t < 2; ++t) {
     sightings_[t].assign(unitSlots, {});
@@ -162,7 +180,8 @@ void GameLogic::EnsureNavMeshFor(const Unit& mover, const glm::vec3& origin) {
   region.xMax = std::min(half, origin.x + reach);
   region.zMin = std::max(-half, origin.z - reach);
   region.zMax = std::min(half, origin.z + reach);
-  navMesh_.Build(scene_.obstacles, region, constants::kAgentRadius);
+  navMesh_.Build(scene_.obstacles, region, constants::kAgentRadius, &scene_.ground,
+                 &scene_.walkSurfaces);
   navMeshUnitId_ = mover.id;
   navMeshOrigin_ = origin;
 }
@@ -241,8 +260,14 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   }
   playbooks_[0] = snap.playbooks[0];
   playbooks_[1] = snap.playbooks[1];
+  // A new game on the simulator arrives as a snapshot with the same unit ids,
+  // so it is not rejected above; detect it (round counter went backwards, or
+  // a finished match is back in play) and drop the previous game's memory.
+  const bool newGame = snap.roundNumber < roundNumber_ ||
+                       (mode_ == InputMode::GameOver && snap.mode != InputMode::GameOver);
   mode_ = snap.mode;
   roundNumber_ = snap.roundNumber;
+  if (newGame) ResetSightingMemory();
   if (snap.winner >= 0) {
     winner_ = static_cast<Team>(snap.winner);
   } else {
@@ -659,29 +684,75 @@ void GameLogic::CancelAction() {
   }
 }
 
-bool GameLogic::ShotConnects(const Unit& shooter, const Unit& target) const {
-  return InFovCone(shooter.EyePosition(), shooter.FacingDirection(), target.EyePosition(),
-                   constants::kShootHalfFovDegrees, constants::kShootRange) &&
-         LineOfSightClear(shooter.EyePosition(), target.EyePosition(), obstacleBounds_);
+float ShotProfileHitChance(const ShotProfile& profile, float angleDegrees, float distance) {
+  const float absAngle = std::fabs(angleDegrees);
+  if (absAngle >= profile.halfAngleDegrees) return 0.0f;
+  constexpr float kHalfPi = 1.57079632679489661923f;
+  const float angleFalloff = std::cos(glm::radians(absAngle) / glm::radians(profile.halfAngleDegrees) * kHalfPi);
+  const float rangeFalloff = 1.0f / (1.0f + std::max(distance, 0.0f) / profile.range);
+  return profile.maxChance * angleFalloff * rangeFalloff;
 }
 
-bool GameLogic::ResolveShot(Unit& shooter, Unit& target) {
-  const bool hit = ShotConnects(shooter, target);
+float ShotConeAlpha(const ShotProfile& profile, float distance) {
+  const float t = glm::clamp(distance / profile.range, 0.0f, 1.0f);
+  return constants::kConeStartAlpha * (1.0f - t);
+}
+
+float GameLogic::ShotHitChance(const Unit& shooter, const Unit& target) const {
+  const ShotProfile& profile = kDefaultShotProfile;  // Future: derive from shooter's role.
+  const glm::vec3 eye = shooter.EyePosition();
+  const glm::vec3 targetEye = target.EyePosition();
+  if (!InFovCone(eye, shooter.FacingDirection(), targetEye, profile.halfAngleDegrees,
+                 std::numeric_limits<float>::infinity()) ||
+      !LineOfSightClear(eye, targetEye, scene_.obstacles, scene_.walkSurfaces, scene_.ground)) {
+    return 0.0f;
+  }
+  const glm::vec3 toTarget = targetEye - eye;
+  const float distance = glm::length(toTarget);
+  const glm::vec3 fwd = glm::normalize(glm::vec3(shooter.FacingDirection().x, 0.0f, shooter.FacingDirection().z));
+  float angle = 0.0f;
+  if (glm::length(glm::vec2(toTarget.x, toTarget.z)) > 1e-6f) {
+    const glm::vec3 dir = glm::normalize(glm::vec3(toTarget.x, 0.0f, toTarget.z));
+    angle = glm::degrees(std::acos(glm::clamp(glm::dot(fwd, dir), -1.0f, 1.0f)));
+  }
+  return ShotProfileHitChance(profile, angle, distance);
+}
+
+bool GameLogic::ShotConnects(const Unit& shooter, const Unit& target) const {
+  return ShotHitChance(shooter, target) > 0.0f;
+}
+
+float GameLogic::RollShot() {
+  if (shotRollSource_) return shotRollSource_();
+  // Drawn by hand: <random> distributions aren't specified across stdlibs.
+  return static_cast<float>(shotRng_() >> 8) / 16777216.0f;
+}
+
+bool GameLogic::ResolveShot(Unit& shooter, Unit& target, bool* fired) {
+  const float chance = ShotHitChance(shooter, target);
+  if (fired) *fired = chance > 0.0f;
+  if (chance <= 0.0f) return false;
+  const bool hit = RollShot() < chance;
+  ApplyShot(shooter, target, hit);
+  return hit;
+}
+
+void GameLogic::ApplyShot(Unit& shooter, Unit& target, bool hit) {
+  glm::vec3 dir = target.position - shooter.position;
+  dir.y = 0.0f;
+  if (glm::length(dir) < 1e-4f) dir = shooter.FacingDirection();
+  dir = glm::normalize(dir);
+  // Presentation only: start the shooter's quick-draw beat, aimed at the
+  // target's actual bearing (which may sit anywhere inside the FOV cone).
+  // Played for misses too -- the shot was taken.
+  shooter.shootElapsed = 0.0f;
+  shooter.shootAimYaw = std::atan2(dir.z, dir.x);
   if (hit) {
     target.alive = false;
-    glm::vec3 dir = target.position - shooter.position;
-    dir.y = 0.0f;
-    if (glm::length(dir) < 1e-4f) dir = shooter.FacingDirection();
-    dir = glm::normalize(dir);
     // up x dir: tipping around this axis leans the figure toward dir.
     target.knockdownAxis = glm::vec3(dir.z, 0.0f, -dir.x);
     target.knockdownElapsed = 0.0f;
-    // Presentation only: start the shooter's quick-draw beat, aimed at the
-    // target's actual bearing (which may sit anywhere inside the FOV cone).
-    shooter.shootElapsed = 0.0f;
-    shooter.shootAimYaw = std::atan2(dir.z, dir.x);
   }
-  return hit;
 }
 
 void GameLogic::ResolvePendingShots() {
@@ -690,6 +761,8 @@ void GameLogic::ResolvePendingShots() {
   // two figures whose shots connect on the same tick both fire: a mutual
   // kill downs both, rather than whichever happens to resolve first
   // silencing the other.
+  // A held shot is taken (and consumed, hit or miss) the first tick it
+  // passes the hard gates.
   std::vector<std::pair<Unit*, Unit*>> firing;
   for (const PendingShot& shot : pendingShots_) {
     Unit* shooter = FindUnit(shot.shooterId);
@@ -697,7 +770,11 @@ void GameLogic::ResolvePendingShots() {
     if (!shooter || !target || !shooter->alive || !target->alive) continue;
     if (ShotConnects(*shooter, *target)) firing.emplace_back(shooter, target);
   }
-  for (auto& [shooter, target] : firing) ResolveShot(*shooter, *target);
+  // Rolls are applied in order but each hit only flips the target's alive
+  // flag after all were judged gate-wise, so mutual shots still both fire.
+  std::vector<bool> hits;
+  for (auto& [shooter, target] : firing) hits.push_back(RollShot() < ShotHitChance(*shooter, *target));
+  for (size_t i = 0; i < firing.size(); ++i) ApplyShot(*firing[i].first, *firing[i].second, hits[i]);
 
   // Drop everything that fired or can no longer fire (dead shooter holds
   // its fire from here on; a downed target stops being worth a bullet).
@@ -745,14 +822,14 @@ void GameLogic::ApplyPlaybookReactions() {
       // A stationary figure reacts to enemies *moving* into its view (the
       // watcher-on-mover case), not to everyone idling in its cone.
       if (!moving && !isMidMove(enemy.id)) continue;
-      if (!CanUnitSee(unit, enemy, obstacleBounds_)) continue;
+      if (!CanUnitSee(unit, enemy, scene_.obstacles, scene_.walkSurfaces, scene_.ground)) continue;
       const float dist = glm::distance(unit.position, enemy.position);
       if (!nearest || dist < nearestDist) {
         nearest = &enemy;
         nearestDist = dist;
       }
       // Most-cautious tie-break: any sighted enemy that sees back counts.
-      canSeeMe |= CanUnitSee(enemy, unit, obstacleBounds_);
+      canSeeMe |= CanUnitSee(enemy, unit, scene_.obstacles, scene_.walkSurfaces, scene_.ground);
     }
     if (!nearest) continue;
     const ReactionAction action = Playbook(unit.team).At(moving, canSeeMe);

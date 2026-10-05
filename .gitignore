@@ -4,3 +4,5 @@ imgui.ini
 # Default --out-dir of tactics_visual_tests (failed-diff artifacts, videos).
 visual_out/
 
+# Default --out-dir of the map visual runner.
+map_visual_out/

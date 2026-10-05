@@ -30,6 +30,24 @@ ctest --test-dir build --output-on-failure
 Run the game with `./build/tactics_app`. `ctest` also runs a headless
 smoke test under `xvfb-run` if available.
 
+Environment knobs: `TBGWAF_MAP_SEED=<n>` reseeds the procedural map.
+The default map (also what the web build serves) is `urban-elevated`; the plain urban map lays an oblique boundary-to-boundary artery with
+angled avenues/cross streets and polygon blocks whose buildings follow
+their frontage; `TBGWAF_MAP=urban-merge` adds a wide branching avenue that
+merges into the artery, `TBGWAF_MAP=urban-elevated` (default) turns the artery into a
+true overpass (ramps up, crosses on pier bents with usable ground beneath,
+ramps back down; the branch becomes an on-ramp merging mid-deck), and
+`TBGWAF_MAP=hilly` selects rolling hills. Urban code/scenarios can also
+tune artery count/width, local-street width/skew and elevation through
+`MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
+overlay of the navmesh's walkable-cell boundaries.
+The app defaults to the prototype per-unit shadow-map FOV mask (tints
+walls, roofs and deck sides too; see
+[docs/fov-shadow-map.md](docs/fov-shadow-map.md)); `TBGWAF_FOV_SHADOW_MAP=0`
+restores the analytic FOV-cone overlay. Visual scenarios still default to
+the analytic overlay and opt in
+with a `render: {fov_overlay: shadow_map}` block.
+
 ### Gameplay scenario tests
 
 `tests/scenarios/*.yaml` are state-only (no rendering) gameplay regression
@@ -61,6 +79,27 @@ scripts/update_golden_baselines.sh
 The runner (`build/tactics_visual_tests`) can also record a continuous
 per-team video of each scenario with `--video` (requires `ffmpeg`); see
 `--help` for the flags.
+
+### Weapons & the asset/animation gallery
+
+Figures carry one of three procedural blocky weapons (issue #126), assigned
+deterministically by unit id (`id % 3`): 0 = assault rifle, 1 = sniper
+rifle, 2 = Desert Eagle — so every squad of three fields one of each. The
+weapon sets the figure's animation class: rifles (AR + sniper) are carried
+two-handed across the chest (both arms IK-solved onto the weapon, no arm
+swing while running) and shoulder-aimed for shots; the Desert Eagle keeps
+the one-handed low-ready carry and quick-draw shot. Weapons are visual
+only — hit resolution is identical across them.
+
+Every weapon model and animation can be inspected on the **asset &
+animation gallery**, a standalone page built alongside the game:
+[live gallery](https://thedeepestspace.github.io/tbgwaf/gallery/) on Pages,
+and `pr-preview/pr-<number>/gallery/` in each PR preview. The page lists
+the three weapon turntables plus idle/run/shoot per weapon (drag to orbit,
+scroll to zoom, play/pause and scrub the loop). The catalog, framing, and
+renderer live in `src/gallery/GalleryScene.*`, shared verbatim between the
+web viewer (`src/gallery/gallery_main.cpp` + `web/gallery.html`) and a
+native interactive build, `build/tactics_gallery_app` (left/right switch item, space pauses).
 
 ### PR scenario review page
 
@@ -109,6 +148,7 @@ flowchart TD
     gameplay("  Gameplay  ")
     splash -->|new_game| map_select
     map_select -->|select_urban| gameplay
+    map_select -->|select_hills| gameplay
     map_select -->|back| splash
 ```
 

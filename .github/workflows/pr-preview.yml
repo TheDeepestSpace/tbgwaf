@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  packages: read
   pull-requests: write
 
 concurrency:
@@ -13,11 +14,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  preview:
+  # Build PR-specific images (tag pr-<number>) so Dockerfile changes are
+  # picked up without waiting for a merge to master. The dev stage builds on
+  # the ci stage, so build ci first to warm the cache.
+  ci_image:
     # Forked PRs don't get a token with write access, so previews are
     # limited to same-repo branches.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action != 'closed'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-image.yml
+    with:
+      image-name: ghcr.io/thedeepestspace/tbgwaf-ci
+      dockerfile: ./Dockerfile
+      target: ci
+    secrets: inherit
+
+  dev_image:
+    needs: ci_image
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action != 'closed'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-image.yml
+    with:
+      image-name: ghcr.io/thedeepestspace/tbgwaf-dev
+      dockerfile: ./Dockerfile
+      target: dev
+    secrets: inherit
+
+  preview:
+    needs: dev_image
+    # The closed action skips the image builds and only cleans up the preview.
+    if: ${{ !cancelled() && github.event.pull_request.head.repo.full_name == github.repository && (needs.dev_image.result == 'success' || needs.dev_image.result == 'skipped') }}
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/thedeepestspace/tbgwaf-dev:pr-${{ github.event.pull_request.number }}
+      options: --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -27,44 +67,39 @@ jobs:
           # the merge base to be present locally.
           fetch-depth: 0
 
-      - name: Set up Emscripten
-        if: github.event.action != 'closed'
-        uses: mymindstorm/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16
-        with:
-          version: latest
-
-      - name: Install Ninja
-        if: github.event.action != 'closed'
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Trust workspace for git
+        # Container runs as root but the workspace is owned by the runner user;
+        # without this `git diff` falls back to --no-index and exits 129.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Configure (Emscripten)
         if: github.event.action != 'closed'
-        run: emcmake cmake -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: |
+          . /opt/emsdk/emsdk_env.sh > /dev/null
+          emcmake cmake -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build tactics_app (WASM/WebGL2)
         if: github.event.action != 'closed'
-        run: cmake --build build-web
+        run: |
+          . /opt/emsdk/emsdk_env.sh > /dev/null
+          cmake --build build-web
 
       - name: Assemble Pages site
         if: github.event.action != 'closed'
         run: |
-          mkdir -p site
+          mkdir -p site site/gallery
           cp build-web/index.html site/
           cp build-web/tactics_app.js site/
           cp build-web/tactics_app.wasm site/
+          cp build-web/gallery.html site/gallery/index.html
+          cp build-web/tactics_gallery.js site/gallery/
+          cp build-web/tactics_gallery.wasm site/gallery/
+          cp build-web/map_seeds.js site/gallery/
+          cp -r build-web/map_goldens site/gallery/
 
       # --- Gameplay scenario review page (issue #14 stage 3): record a
       # per-team WebM video for every scenario at the PR's head and publish
       # them on an HTML page inside the same per-PR preview. ---
-      - name: Install native toolchain and video dependencies
-        if: github.event.action != 'closed'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev mesa-common-dev \
-            xvfb ffmpeg
-
       - name: Configure (native)
         if: github.event.action != 'closed'
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -109,7 +144,8 @@ jobs:
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           repo="${GITHUB_REPOSITORY#*/}"
           url="https://${owner}.github.io/${repo}/pr-preview/pr-${PR_NUMBER}/scenarios/"
-          body="$(printf '%s\n%s' "$marker" "🎬 [Gameplay scenario review page](${url}) — per-team videos of every scenario, grouped by how this PR changes it, refreshed at commit \`${HEAD_SHA:0:7}\` (updates with each push; may take a minute to go live after deploy).")"
+          gallery_url="https://${owner}.github.io/${repo}/pr-preview/pr-${PR_NUMBER}/gallery/"
+          body="$(printf '%s\n%s\n\n%s' "$marker" "🎬 [Gameplay scenario review page](${url}) — per-team videos of every scenario, grouped by how this PR changes it, refreshed at commit \`${HEAD_SHA:0:7}\` (updates with each push; may take a minute to go live after deploy)." "🖼️ [Asset gallery](${gallery_url}) — browse models and animations, including this PR's changes.")"
           existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             --paginate --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" | head -n1)
           if [ -n "$existing" ]; then

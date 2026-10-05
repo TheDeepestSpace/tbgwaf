@@ -83,12 +83,63 @@ Scene ParseScene(const YAML::Node& root) {
 
   bool generated = false;
   if (const YAML::Node mapNode = root["map"]) {
-    // `generate: {seed: N}` builds a procedural city (units come from the
-    // generator unless the scenario lists its own).
+    // `generate: {seed: N, type: urban|hilly}` builds a procedural map
+    // (units come from the generator unless the scenario lists its own).
+    // `type` defaults to the urban city generator.
     if (const YAML::Node genNode = mapNode["generate"]) {
       if (!genNode["seed"]) throw std::runtime_error("map.generate requires 'seed'");
-      scene = GenerateUrbanMap(genNode["seed"].as<uint32_t>());
+      const uint32_t seed = genNode["seed"].as<uint32_t>();
+      const std::string type = genNode["type"] ? genNode["type"].as<std::string>() : "urban";
+      if (type == "urban") {
+        MapGeneratorConfig config;
+        if (genNode["arteries"]) config.arteryCount = genNode["arteries"].as<int>();
+        if (genNode["artery_width"]) config.arteryWidth = genNode["artery_width"].as<float>();
+        if (genNode["local_street_width"]) {
+          config.localStreetWidth = genNode["local_street_width"].as<float>();
+        }
+        // `elevated` forces the overpass on/off; omitted keeps the generator's
+        // seed-driven draw. `elevated_layout` pins one of the deck layouts.
+        if (genNode["elevated"]) {
+          config.elevatedHighway =
+              genNode["elevated"].as<bool>() ? OverpassMode::On : OverpassMode::Off;
+        }
+        if (genNode["elevated_layout"]) {
+          const std::string layout = genNode["elevated_layout"].as<std::string>();
+          if (layout == "ramp-up-ramp-down") config.overpassLayout = OverpassLayout::RampUpRampDown;
+          else if (layout == "through") config.overpassLayout = OverpassLayout::Through;
+          else if (layout == "enter-ramp-up") config.overpassLayout = OverpassLayout::EnterRampUp;
+          else if (layout == "enter-ramp-down") config.overpassLayout = OverpassLayout::EnterRampDown;
+          else {
+            throw std::runtime_error(
+                "map.generate.elevated_layout must be ramp-up-ramp-down/through/"
+                "enter-ramp-up/enter-ramp-down, got '" + layout + "'");
+          }
+        }
+        // `elevated_branch` pins the branch's map-edge end (`ramp`/`off-map`);
+        // scenarios that force the overpass default to a ramp.
+        if (genNode["elevated"]) config.branchEnd = BranchEnd::Ramp;
+        if (genNode["elevated_branch"]) {
+          const std::string end = genNode["elevated_branch"].as<std::string>();
+          if (end == "ramp") config.branchEnd = BranchEnd::Ramp;
+          else if (end == "off-map") config.branchEnd = BranchEnd::OffMap;
+          else {
+            throw std::runtime_error(
+                "map.generate.elevated_branch must be ramp/off-map, got '" + end + "'");
+          }
+        }
+        scene = GenerateUrbanMap(seed, config);
+      } else if (type == "hilly") {
+        scene = GenerateHillyMap(seed);
+      } else {
+        throw std::runtime_error("map.generate.type must be 'urban' or 'hilly', got '" + type +
+                                 "'");
+      }
       generated = true;
+    }
+    // `half_extent: N` sizes the ground square (default 15); scenarios whose
+    // units sit far apart must grow the map so every figure stands on it.
+    if (const YAML::Node halfNode = mapNode["half_extent"]) {
+      scene.mapHalfExtent = halfNode.as<float>();
     }
     if (const YAML::Node obstaclesNode = mapNode["obstacles"]) {
       for (const auto& obsNode : obstaclesNode) {
@@ -127,6 +178,13 @@ Scene ParseScene(const YAML::Node& root) {
     unit.facingYaw =
         unitNode["facing_degrees"] ? unitNode["facing_degrees"].as<float>() * kPi / 180.0f : 0.0f;
     unit.alive = true;
+    if (std::abs(unit.position.x) > scene.mapHalfExtent ||
+        std::abs(unit.position.z) > scene.mapHalfExtent) {
+      throw std::runtime_error("units[] id " + std::to_string(unit.id) +
+                               " is outside the map; raise map.half_extent (currently " +
+                               std::to_string(scene.mapHalfExtent) + ")");
+    }
+    unit.weapon = DefaultWeaponForUnit(unit.id);
     scene.units.push_back(unit);
   }
   return scene;
@@ -137,6 +195,11 @@ ScenarioAction ParseAction(const YAML::Node& node) {
   const std::string kind = node["action"].as<std::string>();
   if (kind == "commit") {
     action.kind = ScenarioAction::Kind::Commit;
+    return action;
+  }
+
+  if (kind == "new_game") {
+    action.kind = ScenarioAction::Kind::NewGame;
     return action;
   }
 
@@ -161,6 +224,8 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     if (!node["target"]) throw std::runtime_error("script 'shoot' action requires 'target'");
     action.target = node["target"].as<int>();
     action.expectNoop = node["expect_noop"] && node["expect_noop"].as<bool>();
+  } else if (kind == "begin_move") {
+    action.kind = ScenarioAction::Kind::BeginMove;
   } else if (kind == "pass") {
     action.kind = ScenarioAction::Kind::Pass;
   } else if (kind == "cancel") {
@@ -169,7 +234,7 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     action.kind = ScenarioAction::Kind::Focus;
   } else {
     throw std::runtime_error("unknown script action '" + kind +
-                              "' (expected move/shoot/pass/cancel/focus/commit)");
+                              "' (expected move/begin_move/shoot/pass/cancel/focus/commit/new_game)");
   }
   return action;
 }
@@ -211,8 +276,8 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   return assertion;
 }
 
-bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
-                    const PlaybackHooks& hooks, ScenarioResult* result) {
+bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& action,
+                    int stepIndex, const PlaybackHooks& hooks, ScenarioResult* result) {
   auto Fail = [&](const std::string& msg) {
     result->failures.push_back("step " + std::to_string(stepIndex) + " (actor " +
                                 std::to_string(action.actor) + "): " + msg);
@@ -280,6 +345,14 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
     return true;
   }
 
+  if (action.kind == ScenarioAction::Kind::NewGame) {
+    // Same call the UI's new-game paths make (playbooks survive it).
+    NotifyMenuClick(Team::Blue, "New Match");
+    game.Reset(scene);
+    game.UpdateSightingMemory(0.0f);
+    return true;
+  }
+
   if (action.kind == ScenarioAction::Kind::Cancel) {
     game.CancelAction();
     return true;
@@ -329,6 +402,21 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
       }
       return true;
     }
+    case ScenarioAction::Kind::BeginMove: {
+      // Issue #136: open move planning and stop, so the post-action capture
+      // (and any following assertions) see the movement frontier up.
+      NotifyMenuClick(actorTeam, "Move");
+      game.ChooseMove();
+      if (game.Mode() != InputMode::AwaitingMoveDestination) {
+        return Fail("could not open move planning (begin_move)");
+      }
+      if (hooks.onMoveFrontier) {
+        for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
+          hooks.onMoveFrontier(game, actorTeam);
+        }
+      }
+      return true;
+    }
     case ScenarioAction::Kind::Shoot: {
       NotifyMenuClick(actorTeam, "Shoot");
       game.ChooseShoot();
@@ -359,6 +447,7 @@ bool ExecuteAction(GameLogic& game, const ScenarioAction& action, int stepIndex,
       return true;
     case ScenarioAction::Kind::Cancel:
     case ScenarioAction::Kind::Commit:
+    case ScenarioAction::Kind::NewGame:
       break;  // Handled above.
   }
   return true;
@@ -455,6 +544,22 @@ Scenario LoadScenarioFromFile(const std::string& path) {
     if (cam["target"]) scenario.cameraTarget = ParseVec2(cam["target"], "camera.target");
     if (cam["zoom"]) scenario.cameraZoom = cam["zoom"].as<float>();
   }
+  if (const YAML::Node render = root["render"]) {
+    if (render["fov_overlay"]) {
+      const std::string mode = render["fov_overlay"].as<std::string>();
+      if (mode == "cpu") {
+        scenario.fovOverlay = Scenario::FovOverlay::Cpu;
+      } else if (mode == "shadow_map") {
+        scenario.fovOverlay = Scenario::FovOverlay::ShadowMap;
+      } else {
+        throw std::runtime_error("render.fov_overlay must be 'cpu' or 'shadow_map', got '" +
+                                 mode + "'");
+      }
+    }
+    if (render["fov_probe_height"]) {
+      scenario.fovProbeHeight = render["fov_probe_height"].as<float>();
+    }
+  }
 
   if (const YAML::Node scriptNode = root["script"]) {
     for (const auto& stepNode : scriptNode) {
@@ -477,6 +582,13 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
   GameLogic game(scenario.scene);
   game.SetPlaybook(Team::Blue, scenario.playbooks[0]);
   game.SetPlaybook(Team::Red, scenario.playbooks[1]);
+  // A second page that only mirrors the simulator's snapshots, like the
+  // networked follower pane. Its sighting memory is checked too.
+  GameLogic follower(scenario.scene);
+  auto SyncFollower = [&] {
+    follower.ImportState(game.ExportState());
+    follower.UpdateSightingMemory(0.0f);
+  };
 
   auto EmitHoldFrames = [&] {
     if (!hooks.onFrame) return;
@@ -492,14 +604,21 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
   for (int i = 0; i < static_cast<int>(scenario.steps.size()); ++i) {
     const ScenarioStep& step = scenario.steps[i];
     if (step.action) {
-      if (!ExecuteAction(game, *step.action, i, hooks, &result)) {
+      if (!ExecuteAction(game, scenario.scene, *step.action, i, hooks, &result)) {
         break;  // The script's own preconditions were violated; state past this point is unreliable.
       }
+      SyncFollower();
       ++completedActions;
       EmitHoldFrames();
       if (hooks.onActionComplete) hooks.onActionComplete(game, completedActions);
     } else {
       CheckAssertion(game, *step.assertion, i, &result);
+      if (step.assertion->rememberedByTeam &&
+          (!step.assertion->memoryAge || *step.assertion->memoryAge == 0)) {
+        ScenarioResult followerResult;
+        CheckAssertion(follower, *step.assertion, i, &followerResult);
+        for (auto& f : followerResult.failures) result.failures.push_back("follower " + f);
+      }
     }
   }
   return result;

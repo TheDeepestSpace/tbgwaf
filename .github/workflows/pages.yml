@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  packages: read
 
 concurrency:
   group: pages
@@ -15,30 +16,40 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/thedeepestspace/tbgwaf-dev:latest
+      options: --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Emscripten
-        uses: mymindstorm/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16
-        with:
-          version: latest
-
-      - name: Install Ninja
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
-
       - name: Configure (Emscripten)
-        run: emcmake cmake -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: |
+          . /opt/emsdk/emsdk_env.sh > /dev/null
+          emcmake cmake -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build tactics_app (WASM/WebGL2)
-        run: cmake --build build-web
+        run: |
+          . /opt/emsdk/emsdk_env.sh > /dev/null
+          cmake --build build-web
 
       - name: Assemble Pages site
         run: |
-          mkdir -p site
+          mkdir -p site site/gallery
           cp build-web/index.html site/
           cp build-web/tactics_app.js site/
           cp build-web/tactics_app.wasm site/
+          cp build-web/gallery.html site/gallery/index.html
+          cp build-web/tactics_gallery.js site/gallery/
+          cp build-web/tactics_gallery.wasm site/gallery/
+          cp build-web/map_seeds.js site/gallery/
+          cp -r build-web/map_goldens site/gallery/
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0

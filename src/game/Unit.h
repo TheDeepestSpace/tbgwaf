@@ -6,6 +6,7 @@
 #include <glm/glm.hpp>
 
 #include "game/Types.h"
+#include "game/Weapon.h"
 
 namespace tactics {
 
@@ -101,6 +102,10 @@ struct Unit {
   float shootElapsed = -1.0f;
   float shootAimYaw = 0.0f;
   float runSpeed = constants::kMoveSpeed;  // World units per second while moving.
+  // Visual-only loadout (issue #126): the model in the figure's hands and
+  // the carry/aim animation class. Creation sites assign
+  // DefaultWeaponForUnit(id) once the id is known.
+  WeaponType weapon = WeaponType::AssaultRifle;
   PlannedAction plan;  // This figure's plan for the current/upcoming round commit.
 
   // How far this figure can move in one round's fixed execution window --
@@ -110,6 +115,14 @@ struct Unit {
 
   glm::vec3 EyePosition() const {
     return position + glm::vec3(0.0f, constants::kEyeHeight, 0.0f);
+  }
+
+  // World position of the gun tip when aiming (see constants::kMuzzle*).
+  glm::vec3 MuzzlePosition() const {
+    const glm::vec3 fwd = FacingDirection();
+    const glm::vec3 right(-fwd.z, 0.0f, fwd.x);
+    return position + fwd * constants::kMuzzleForward + right * constants::kMuzzleSide +
+           glm::vec3(0.0f, constants::kMuzzleHeight, 0.0f);
   }
 
   glm::vec3 FacingDirection() const {

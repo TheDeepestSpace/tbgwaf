@@ -81,6 +81,10 @@ deployments; a public static browser must not embed that token. Origin checks
 are not authentication, so retain the hard request budget and place the
 adapter behind a platform access gateway if the preview should be private.
 
+`.github/workflows/jev-adapter-deploy.yml` (manual `workflow_dispatch`) deploys the
+adapter using the `TBGWAF_FLYIO_TBGWAF_ORG_TOKEN` and `TBGWAF_JEV_API_KEY` Actions
+secrets; it creates the app if missing.
+
 The example Fly service auto-stops at zero machines. No hosted adapter is
 deployed by this repository: deployment still requires the app owner's Fly.io
 account and runtime secret. Until its URL is configured, the page reports the

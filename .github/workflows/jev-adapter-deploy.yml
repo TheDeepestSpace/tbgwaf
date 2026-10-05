@@ -1,0 +1,53 @@
+name: Deploy Jev adapter
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: Fly.io app name
+        default: tbgwaf-jev-adapter
+      org:
+        description: Fly.io org slug (used only when the app must be created)
+        default: tbgwaf
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jev-adapter-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FLY_API_TOKEN: ${{ secrets.TBGWAF_FLYIO_TBGWAF_ORG_TOKEN }}
+      TBGWAF_JEV_API_KEY: ${{ secrets.TBGWAF_JEV_API_KEY }}
+      FLY_APP: ${{ inputs.app }}
+      FLY_ORG: ${{ inputs.org }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Require secrets
+        run: |
+          [ -n "$FLY_API_TOKEN" ] || { echo "::error::TBGWAF_FLYIO_TBGWAF_ORG_TOKEN is not available"; exit 1; }
+          [ -n "$TBGWAF_JEV_API_KEY" ] || { echo "::error::TBGWAF_JEV_API_KEY is not available"; exit 1; }
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Create app if missing
+        working-directory: server/jev-adapter
+        run: flyctl apps list --json | grep -q "\"Name\": *\"$FLY_APP\"" || flyctl apps create "$FLY_APP" --org "$FLY_ORG"
+
+      - name: Set runtime secret
+        working-directory: server/jev-adapter
+        run: flyctl secrets set --stage --app "$FLY_APP" TBGWAF_JEV_API_KEY="$TBGWAF_JEV_API_KEY"
+
+      - name: Deploy
+        working-directory: server/jev-adapter
+        run: |
+          sed "s/^app = .*/app = \"$FLY_APP\"/" fly.toml.example > fly.toml
+          flyctl deploy --remote-only --app "$FLY_APP"
+          echo "Adapter URL: https://$FLY_APP.fly.dev (use ?jev=https://$FLY_APP.fly.dev)" >> "$GITHUB_STEP_SUMMARY"

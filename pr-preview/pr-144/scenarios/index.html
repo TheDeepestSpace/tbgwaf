@@ -144,7 +144,107 @@ listed by name only.</p>
 </div>
 <h2>Modified scenarios <span class="count">(0)</span></h2>
 <p class="empty">None.</p>
-<h2>Unchanged scenarios <span class="count">(29)</span></h2>
+<h2>Unchanged scenarios <span class="count">(43)</span></h2>
+<div class="scenario has-video" data-stem="burst_free_aim_point_target"><h3>burst_free_aim_point_target</h3><div class="path">tests/scenarios/burst_free_aim_point_target.yaml</div>
+<p class="description">Bursts work for free-aim point-target shots too (issues places a blind-fire aim point on the enemy&#x27;s torso and fires a 5-shot burst at it. Every bullet flies its own scattered line inside the weapon&#x27;s cone; only bullets whose line actually crosses the figure roll against the hit chance (the pinned roll always hits), so the burst downs the figure with one of the bullets that land on the body.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/burst_free_aim_point_target/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/burst_free_aim_point_target/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Free-aim burst at the point where the enemy stands (protocol form, no lock-on).</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> shoots unit None</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u red">red1</span> is down — A bullet of the burst connected</div>
+<div class="detail">Check: <span class="u blue">blue0</span> faces 0° (tolerance 1) — Turned onto the aim point</div>
+<div class="detail">Check: winner: blue</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="burst_mag_caps"><h3>burst_mag_caps</h3><div class="path">tests/scenarios/burst_mag_caps.yaml</div>
+<p class="description">Multi-shot bursts (issue to min(magazine, round window / fire interval) shots -- AR 30, sniper 5, Deagle 8. Since issue between shots), so rolls are consumed in shot-schedule order across all three bursts at once. The pinned rolls make every shot miss except the very last one of each burst, so each red figure only drops if its attacker fired *exactly* its weapon&#x27;s cap on exactly its weapon&#x27;s schedule: any missing shot or timing drift pulls the hit rolls out of alignment. The duelists stand close (5 apart) so every scattered bullet is geometrically certain to cross its figure -- a bullet that misses the body outright would consume no roll and break the alignment.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/burst_mag_caps/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/burst_mag_caps/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Every blue figure empties a full burst at its opposite number; only the last shot of each burst is a pinned hit.</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> shoots <span class="u red">red3</span></div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> shoots <span class="u red">red4</span></div>
+<div class="step" data-action="3"><span class="u blue">blue2</span> shoots <span class="u red">red5</span></div>
+<div class="step" data-action="4"><span class="u red">red3</span> passes</div>
+<div class="step" data-action="5"><span class="u red">red4</span> passes</div>
+<div class="step" data-action="6"><span class="u red">red5</span> passes</div>
+<div class="step" data-action="7">commit round</div>
+<div class="detail">Check: <span class="u red">red3</span> is down — Dropped by the AR burst&#x27;s 30th shot</div>
+<div class="detail">Check: <span class="u red">red4</span> is down — Dropped by the sniper burst&#x27;s 5th shot</div>
+<div class="detail">Check: <span class="u red">red5</span> is down — Dropped by the Deagle burst&#x27;s 8th shot</div>
+<div class="detail">Check: winner: blue</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="burst_over_cap_and_min_clamp"><h3>burst_over_cap_and_min_clamp</h3><div class="path">tests/scenarios/burst_over_cap_and_min_clamp.yaml</div>
+<p class="description">Burst-size clamping (issue asks for 99 but fires exactly 30), and shots below 1 clamp up to the single-shot minimum (the sniper asks for 0 but still fires once). Rolls are consumed in shot-schedule order (issue first (rolls 2 and 3, both pinned hits), then the AR&#x27;s remaining 29 shots pace out at 0.16 s. The proofs: a 0-shot sniper action would hand its hit roll to the Deagle one slot early (unit 4 would survive), and an unclamped 31st AR shot at t=4.8 would consume the trailing pinned hit roll and down unit 3. The duelists stand close (5 apart) so every scattered bullet is geometrically certain to cross its figure -- a bullet that misses the body outright would consume no roll and break the alignment.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/burst_over_cap_and_min_clamp/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/burst_over_cap_and_min_clamp/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Asks for 99 shots; the bar/setter clamps to the AR&#x27;s 30-shot cap.</div>
+<div class="detail">Asks for 0 shots; clamps up to the 1-shot minimum (never 0).</div>
+<div class="detail">No shots key at all keeps the pre-burst default of 1.</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> shoots <span class="u red">red3</span></div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> shoots <span class="u red">red4</span></div>
+<div class="step" data-action="3"><span class="u blue">blue2</span> shoots <span class="u red">red5</span></div>
+<div class="step" data-action="4"><span class="u red">red3</span> passes</div>
+<div class="step" data-action="5"><span class="u red">red4</span> passes</div>
+<div class="step" data-action="6"><span class="u red">red5</span> passes</div>
+<div class="step" data-action="7">commit round</div>
+<div class="detail">Check: <span class="u red">red3</span> is alive — All 30 clamped AR shots were pinned misses -- and no 31st shot reached the tripwire hit roll</div>
+<div class="detail">Check: <span class="u red">red4</span> is down — The clamped-to-1 sniper shot got the 2nd roll, a hit</div>
+<div class="detail">Check: <span class="u red">red5</span> is down — The default single shot got the 3rd roll, a hit</div>
+<div class="detail">Check: winner: none</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="burst_stops_on_early_death"><h3>burst_stops_on_early_death</h3><div class="path">tests/scenarios/burst_stops_on_early_death.yaml</div>
+<p class="description">A burst keeps firing after its target goes down (the whole requested magazine level is taken, issue 30-shot AR mag dump, fires its first shot at t=0 (simultaneous with the red sniper&#x27;s pinned hit that kills it), and the remaining 29 shots are never taken. Roll alignment proves it: the red Deagle&#x27;s 2-shot burst fires its second shot at t=0.5, and only because blue 0&#x27;s trigger went silent does that shot draw the 4th pinned roll (a hit, downing blue 1). Had blue 0 kept firing, its shots at t=0.16/0.32/0.48 would consume the rolls in between and blue 1 would survive (and the wrapped roll list would down red 3, failing that assert too). The duelists stand close (5 apart) so every scattered bullet is geometrically certain to cross its figure -- a bullet that misses the body outright would consume no roll and break the alignment.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/burst_stops_on_early_death/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/burst_stops_on_early_death/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Full 30-shot mag dump planned; only shot 1 is ever taken -- the shooter dies to the simultaneous t=0 sniper shot.</div>
+<div class="detail">2-shot Deagle burst; its 0.5 s-later second shot is the roll-alignment probe.</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> shoots <span class="u red">red3</span></div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="3"><span class="u blue">blue2</span> passes</div>
+<div class="step" data-action="4"><span class="u red">red3</span> passes</div>
+<div class="step" data-action="5"><span class="u red">red4</span> shoots <span class="u blue">blue0</span></div>
+<div class="step" data-action="6"><span class="u red">red5</span> shoots <span class="u blue">blue1</span></div>
+<div class="step" data-action="7">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is down — Killed at t=0 by the red sniper</div>
+<div class="detail">Check: <span class="u red">red3</span> is alive — Blue 0&#x27;s single taken shot was a pinned miss</div>
+<div class="detail">Check: <span class="u blue">blue1</span> is down — Down to the Deagle&#x27;s 2nd shot drawing the 4th roll -- proof blue 0 stopped at 1</div>
+<div class="detail">Check: winner: none</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
 <div class="scenario has-video" data-stem="default_scene_shoot_rows"><h3>default_scene_shoot_rows</h3><div class="path">tests/scenarios/default_scene_shoot_rows.yaml</div>
 <p class="description">Replicates the original open-lane layout (not the current BuildDefaultScene()) and the same shot outcomes as TestGameLogicShootRowsMatchLayout in tests/logic_tests.cpp: the top/bottom lanes are wall-blocked (shots there must miss), the middle lane is open (a clean shot must hit). Under WEGO rounds both teams plan the same round, so the middle lane&#x27;s mutual blue1 &lt;-&gt; red4 exchange resolves simultaneously and downs both shooters.</p>
 <div class="panes">
@@ -325,24 +425,23 @@ listed by name only.</p>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
 <div class="scenario has-video" data-stem="fov_gating_blocks_out_of_view_shot"><h3>fov_gating_blocks_out_of_view_shot</h3><div class="path">tests/scenarios/fov_gating_blocks_out_of_view_shot.yaml</div>
-<p class="description">Regression coverage for the fog-of-war shoot gating exercised by TestGameLogicShootGatingRequiresTeamVisibility in tests/logic_tests.cpp: a living enemy outside the shooter&#x27;s team FOV must not be a clickable target at all (the click is a no-op, not a guaranteed miss), and a no-op must not record a plan. Blue0 faces away (180 degrees) from red, so red is entirely outside blue&#x27;s cone.</p>
+<p class="description">Regression coverage for the fog-of-war shoot gating exercised by TestGameLogicShootGatingRequiresTeamVisibility in tests/logic_tests.cpp: a living enemy outside the shooter&#x27;s team FOV must not be a clickable target at all (the click is a no-op, not a guaranteed miss) and records no plan. Blue0 faces away (180 degrees) from red, so red is entirely outside blue&#x27;s cone. Gating applies only to targeted shots: a free-aim shot at the same position is still allowed (blue turns around and fires).</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/fov_gating_blocks_out_of_view_shot/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/fov_gating_blocks_out_of_view_shot/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1</div>
-<div class="detail">The gated no-op recorded no plan, so blue0 still needs one before the round can commit; both figures pass and the round resolves with no shots.</div>
+<div class="detail">Free aim is not gated -- blue turns around and fires at the point where red stands. The turn brings red into the cone and the trace hits.</div>
 <div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
 <div class="step" data-action="1"><span class="u blue">blue0</span> shoots <span class="u red">red1</span> (expected no-op: target not visible)</div>
 <div class="detail">Check: <span class="u red">red1</span> is alive</div>
-<div class="step" data-action="2"><span class="u blue">blue0</span> cancels</div>
-<div class="step" data-action="3"><span class="u blue">blue0</span> passes</div>
-<div class="step" data-action="4"><span class="u red">red1</span> passes</div>
-<div class="step" data-action="5">commit round</div>
-<div class="detail">Check: <span class="u blue">blue0</span> is alive</div>
-<div class="detail">Check: <span class="u red">red1</span> is alive</div>
-<div class="detail">Check: round is 2</div>
+<div class="step" data-action="2"><span class="u blue">blue0</span> shoots unit None</div>
+<div class="step" data-action="3"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> faces 0° (tolerance 1) — Turned to the aim point</div>
+<div class="detail">Check: <span class="u red">red1</span> is down — The free-aim shot connected</div>
+<div class="detail">Check: winner: blue</div>
 </div>
 </div></figure>
 </div>
@@ -386,6 +485,200 @@ listed by name only.</p>
 </div>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
+<div class="scenario has-video" data-stem="free_aim_aiming_ui"><h3>free_aim_aiming_ui</h3><div class="path">tests/scenarios/free_aim_aiming_ui.yaml</div>
+<p class="description">Issue uses (tap-to-place, re-tap to adjust, confirm): the acid-green 360-degree LOS highlight with obstacle shadows, the &quot;+&quot; selector with the spread-only cone over empty ground, the cone lighting up a figure standing inside it, and the planned shot&#x27;s persisting marker after confirmation.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_aiming_ui/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_aiming_ui/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Tap-to-place on empty ground: 360-degree LOS highlight (note the obstacle shadows), &#x27;+&#x27; selector, and a spread-only cone with no unit target.</div>
+<div class="detail">Re-placing adjusts the aim (the drag-adjust gesture): the cone now passes over red1, which catches the cone&#x27;s light -- hit probability feedback appears only on figures inside the cone.</div>
+<div class="step" data-action="1">aim (actor 0)</div>
+<div class="step" data-action="2">aim (actor 0)</div>
+<div class="step" data-action="3"><span class="u blue">blue0</span> cancels</div>
+<div class="step" data-action="4"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="5"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="6">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is alive</div>
+<div class="detail">Check: <span class="u red">red1</span> is alive</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="free_aim_area_denial"><h3>free_aim_area_denial</h3><div class="path">tests/scenarios/free_aim_area_denial.yaml</div>
+<p class="description">Issue hits nobody (even with a guaranteed roll pinned -- there is simply nothing in the trace), leaks no information about the unseen enemy, and still swings the figure to cover the point it fired at.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_area_denial/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_area_denial/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Blue0 covers the empty south-east corner.</div>
+<div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> shoots unit None</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u red">red1</span> is alive</div>
+<div class="detail">Check: blue has no memory of <span class="u red">red1</span> — No info leak either way</div>
+<div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
+<div class="detail">Check: <span class="u blue">blue0</span> faces -26.57° (tolerance 1) — Faces the denied area</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="free_aim_blind_fire_hit_reveals"><h3>free_aim_blind_fire_hit_reveals</h3><div class="path">tests/scenarios/free_aim_blind_fire_hit_reveals.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_blind_fire_hit_reveals/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_blind_fire_hit_reveals/red.webm"></video></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="free_aim_blind_fire_miss_no_reveal"><h3>free_aim_blind_fire_miss_no_reveal</h3><div class="path">tests/scenarios/free_aim_blind_fire_miss_no_reveal.yaml</div>
+<p class="description">Issue free_aim_blind_fire_hit_reveals but with full-height cover (a figure&#x27;s eye is sighted over crouch-height cover, so it would not stay hidden once blue turns), and the pinned roll misses. A blind shot that doesn&#x27;t connect reveals nothing -- no kill, no sighting memory, no live visibility -- even though the figure still turned and took the shot.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_blind_fire_miss_no_reveal/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_blind_fire_miss_no_reveal/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
+<div class="detail">Check: <span class="u red">red2</span> is not visible to blue — Off to blue&#x27;s side before the turn</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> shoots unit None</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: <span class="u red">red1</span> is alive — The 0.99 roll missed</div>
+<div class="detail">Check: <span class="u blue">blue0</span> faces 0° (tolerance 1) — The shot was still taken</div>
+<div class="detail">Check: blue has no memory of <span class="u red">red1</span> — A miss leaks nothing</div>
+<div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
+<div class="detail">Check: <span class="u red">red2</span> is visible to blue — The FOV follows the kept facing</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="free_aim_friendly_fire"><h3>free_aim_friendly_fire</h3><div class="path">tests/scenarios/free_aim_friendly_fire.yaml</div>
+<p class="description">Issue in the bullet&#x27;s path -- a teammate between the shooter and its aim point absorbs the shot first, and the enemy behind survives.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_friendly_fire/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_friendly_fire/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Blue0 fires at a chest-height point at red2&#x27;s position; blue1 stands square in the lane.</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> shoots unit None</div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="3"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: <span class="u blue">blue1</span> is down — The teammate caught the bullet first</div>
+<div class="detail">Check: <span class="u red">red2</span> is alive</div>
+<div class="detail">Check: winner: none</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="free_aim_friendly_fire_off"><h3>free_aim_friendly_fire_off</h3><div class="path">tests/scenarios/free_aim_friendly_fire_off.yaml</div>
+<p class="description">Issue transparent to the ballistic trace -- the identical shot flies through blue1 untouched and downs the enemy behind it.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_friendly_fire_off/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_friendly_fire_off/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> shoots unit None</div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="3"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: <span class="u blue">blue1</span> is alive — Transparent to the trace with the flag off</div>
+<div class="detail">Check: <span class="u red">red2</span> is down</div>
+<div class="detail">Check: winner: blue</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="free_aim_overwatch_facing"><h3>free_aim_overwatch_facing</h3><div class="path">tests/scenarios/free_aim_overwatch_facing.yaml</div>
+<p class="description">Issue point due north) turns blue0 from south to north, which immediately changes what it can see -- red1 enters the new FOV. In round 2 the squad playbook&#x27;s stationary-shoot reaction (overwatch) fires on red1 the moment it moves across that new cone.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_overwatch_facing/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_overwatch_facing/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Playbook (blue): stationary seen: shoot, stationary unseen: shoot</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Blind covering shot due north; nothing is there, but the turn re-points blue&#x27;s FOV.</div>
+<div class="detail">Check: <span class="u red">red1</span> is not visible to blue — Behind blue&#x27;s initial facing</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> shoots unit None</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> faces 90° (tolerance 1)</div>
+<div class="detail">Check: <span class="u red">red1</span> is visible to blue — The new facing covers red1</div>
+<div class="detail">Check: round is 2</div>
+</div>
+<div class="round"><div class="round-title">Round 2</div>
+<div class="detail">Red1 tries to cross blue&#x27;s freshly-pointed cone.</div>
+<div class="step" data-action="4"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="5"><span class="u red">red1</span> moves to (-10, 8)</div>
+<div class="step" data-action="6">commit round</div>
+<div class="detail">Check: <span class="u red">red1</span> is down — The overwatch reaction fired under the new facing</div>
+<div class="detail">Check: winner: blue</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="free_aim_surface_hit"><h3>free_aim_surface_hit</h3><div class="path">tests/scenarios/free_aim_surface_hit.yaml</div>
+<p class="description">Free-aim surface placement (issue shooter&#x27;s 360-degree LOS resolves to a &quot;+&quot; selector at the surface point (the acid-green highlight state is captured by the aim step); confirming plans a shoot-at action, and after the commit the figure has turned to face its aim point.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_surface_hit/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_surface_hit/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Tap-to-place via the same ResolveAimRay a real click uses; the ray lands on open ground at [4, 0, 6], well inside the shooter&#x27;s 360-degree LOS.</div>
+<div class="detail">The Fire button confirms the placed point into a shoot-at plan.</div>
+<div class="step" data-action="1">aim (actor 0)</div>
+<div class="step" data-action="2"><span class="u blue">blue0</span> shoots unit None</div>
+<div class="step" data-action="3"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> faces 26.57° (tolerance 1) — Turned to face the aim point</div>
+<div class="detail">Check: <span class="u red">red1</span> is alive — Nobody stood in the bullet&#x27;s path</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="free_aim_unit_precedence"><h3>free_aim_unit_precedence</h3><div class="path">tests/scenarios/free_aim_unit_precedence.yaml</div>
+<p class="description">Issue behind it -- the same camera ray that would land on the ground at red1&#x27;s feet locks on to red1 instead, producing the existing shoot-target plan (which resolves with the pinned roll).</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_unit_precedence/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_unit_precedence/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">The ray passes straight through red1&#x27;s figure before reaching the ground, so the click is the familiar lock-on, not a free-aim placement.</div>
+<div class="detail">Check: <span class="u red">red1</span> is visible to blue</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> shoots unit None</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u red">red1</span> is down — The locked-on shot resolves with the pinned hit roll</div>
+<div class="detail">Check: winner: blue</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
 <div class="scenario has-video" data-stem="hilly_terrain_move"><h3>hilly_terrain_move</h3><div class="path">tests/scenarios/hilly_terrain_move.yaml</div>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/hilly_terrain_move/blue.webm"></video></figure>
@@ -400,6 +693,27 @@ listed by name only.</p>
 <div class="step" data-action="3">commit round</div>
 <div class="detail">Check: <span class="u blue">blue0</span> is at (-21, 9.173, -6) (tolerance 0.05)</div>
 <div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="lock_on_staged_ui"><h3>lock_on_staged_ui</h3><div class="path">tests/scenarios/lock_on_staged_ui.yaml</div>
+<p class="description">Lock-on staging UI (issue the shot -- it stages the lock, turning the aim cone onto the figure so the cone&#x27;s base (the cosine-law hit-probability footprint the shader paints) lands on the figure&#x27;s front, with the &quot;+&quot; selector on its torso. The shot-level bar stays up, so the burst size is pickable for a locked target exactly like for a free-aim point; Fire commits with the chosen count. The duelists stand close (5 apart) so every scattered bullet of the committed burst is geometrically certain to cross the figure, making the pinned-hit kill deterministic.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/lock_on_staged_ui/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/lock_on_staged_ui/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Clicking the enemy figure stages the lock: the cone turns onto the figure with its probability footprint on the figure&#x27;s front, the &#x27;+&#x27; sits on the torso, and the shot bar (dialed to 3 here) stays up.</div>
+<div class="detail">Fire commits the staged lock with the chosen 3-shot burst.</div>
+<div class="step" data-action="1">aim (actor 0)</div>
+<div class="step" data-action="2"><span class="u blue">blue0</span> shoots unit None</div>
+<div class="step" data-action="3"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: <span class="u red">red1</span> is down — The committed locked burst resolves with the pinned hit rolls</div>
+<div class="detail">Check: winner: blue</div>
 </div>
 </div></figure>
 </div>

@@ -9,8 +9,8 @@ The browser preview has three modes on the same page and uses the same WASM
 - **Jev vs Jev** (`?mode=ai-v-ai`) starts paused. Start, pause, restart, camera
   orbit, and camera zoom remain available to the spectator.
 
-Game code builds at most 16 legal actions for one figure at a time (visible
-shots, navmesh-validated moves, and wait). The request state contains all
+Game code builds a bounded set of legal actions (about 25 at most) for one figure at a time (visible
+shots, navmesh-validated moves incl. cover/hunt moves, and wait). The request state contains all
 friendlies and only enemies in that team's current FOV. The adapter asks Jev
 one TypeSafe `Choice`; the returned id is checked against the original set and
 replayed through the normal click/plan path. Jev does not generate commands.
@@ -20,6 +20,15 @@ magazine, capped by shots that fit the 5 s round), each bullet scattered in a
 cone; the option text carries the current per-shot hit chance, and the state
 lists each ally's weapon, magazine, fire interval, scatter and max burst. The
 objective text also covers FOV/LOS gating, friendly fire, and reaction fire.
+
+Environment Jev is told: a 32x32 ASCII top-down map (`state.map.grid`, with own
+figures, visible enemies and ghosts marked), the nearest 24 obstacles with
+exact footprints, FOV half-angle, shoot range, move budget, the team's
+reaction playbook, and `ghosts` (last-known enemy positions, rounds ago,
+movement direction). Move options say whether the destination is hidden from
+or exposed to the currently visible enemies; `cover_N` moves hide behind
+obstacle N away from the nearest threat and `hunt_N` moves toward a ghost.
+Only information the team could see is sent.
 
 ## Run locally
 

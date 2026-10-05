@@ -61,7 +61,7 @@ void TestBoundedCandidatesUseNormalLegalPath() {
   GameLogic game(TwoUnitScene(24.0f, false));
   const auto request = BuildJevRequest(game, Team::Blue, 1);
   CHECK(request.has_value());
-  CHECK(request->candidates.size() <= 18);
+  CHECK(request->candidates.size() <= 26);
   bool foundMove = false;
   bool foundWait = false;
   for (const auto& candidate : request->candidates) {
@@ -94,6 +94,32 @@ void TestShootCandidateIsFullBurstAndStateDescribesWeapons() {
   CHECK(request->json.find("scatter_half_angle_deg") != std::string::npos);
   CHECK(request->json.find("max_burst") != std::string::npos);
   CHECK(request->json.find("friendly fire") != std::string::npos);
+}
+
+void TestMapGhostsAndTacticalMovesAreCommunicated() {
+  Scene scene = TwoUnitScene(20.0f, true);
+  tactics::Obstacle wall;
+  wall.bounds.min = {-2.0f, 0.0f, 2.0f};
+  wall.bounds.max = {2.0f, 3.0f, 4.0f};
+  scene.obstacles.push_back(wall);
+  GameLogic game(scene);
+  game.UpdateSightingMemory(1.0f);  // Blue sights red.
+  game.FindUnit(0)->facingYaw = 3.14159265f;  // Turn away: red leaves view.
+  const auto request = BuildJevRequest(game, Team::Blue, 4);
+  CHECK(request.has_value());
+  CHECK(request->json.find("\"grid\":[") != std::string::npos);
+  CHECK(request->json.find("\"obstacles\":[{\"id\":0") != std::string::npos);
+  CHECK(request->json.find("\"ghosts\":[{\"id\":1") != std::string::npos);
+  CHECK(request->json.find("\"playbook\"") != std::string::npos);
+  CHECK(request->json.find("visible_enemies\":[]") != std::string::npos);
+  bool hunt = false;
+  for (const auto& c : request->candidates) hunt |= c.id == "hunt_1";
+  CHECK(hunt);
+  bool cover = false;
+  for (const auto& c : request->candidates) cover |= c.id == "cover_0";
+  CHECK(cover);
+  CHECK(request->json.find("exposure") != std::string::npos ||
+        request->json.find("no enemy is currently visible") != std::string::npos);
 }
 
 void TestHiddenEnemyNeverSerialized() {
@@ -167,6 +193,7 @@ int main() {
   TestIncrementalBuilderMatchesBlockingBuild();
   TestBoundedCandidatesUseNormalLegalPath();
   TestShootCandidateIsFullBurstAndStateDescribesWeapons();
+  TestMapGhostsAndTacticalMovesAreCommunicated();
   TestHiddenEnemyNeverSerialized();
   TestInvalidAndStaleResponsesDoNotMutate();
   TestPlayerVsAiTurnAutomaticallyBecomesCommittable();

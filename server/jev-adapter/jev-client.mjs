@@ -63,7 +63,7 @@ export async function chooseWithJev({
     questions: {
       action: {
         type: "choice",
-        instructions: "Select the strongest legal action for the acting figure. Prefer a useful visible shot; otherwise make progress toward eliminating the opposing squad. Shot options fire a scattered burst; weigh the stated per-shot hit chance (it falls with distance and off-axis angle) and the weapon details in state.allies. Return exactly one supplied option.",
+        instructions: "Select the strongest legal action for the acting figure. Prefer a useful visible shot; otherwise make progress toward eliminating the opposing squad. Shot options fire a scattered burst; weigh the stated per-shot hit chance (it falls with distance and off-axis angle) and the weapon details in state.allies. Use state.map (grid, obstacles), state.ghosts and state.playbook to hide from enemy line of sight, take cover_N options when exposed, and hunt_N options to chase ghosts; move options state whether the destination is hidden or exposed. Return exactly one supplied option.",
         criteria,
       },
     },

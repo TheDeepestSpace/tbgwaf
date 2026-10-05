@@ -11,6 +11,8 @@ namespace tactics::ai {
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
+constexpr int kGridCells = 32;
+constexpr size_t kMaxListedObstacles = 24;
 
 std::string JsonString(const std::string& value) {
   std::ostringstream out;
@@ -55,6 +57,59 @@ const char* WeaponName(WeaponType type) {
 std::string HitPercent(const GameLogic& game, const Unit& shooter, const Unit& target) {
   return std::to_string(static_cast<int>(game.ShotHitChance(shooter, target) * 100.0f + 0.5f)) +
          "%";
+}
+
+const char* ReactionName(ReactionAction action) {
+  switch (action) {
+    case ReactionAction::Shoot: return "shoot";
+    case ReactionAction::Stop: return "stop";
+    case ReactionAction::Continue: return "continue";
+    case ReactionAction::ShootStop: return "shoot_and_stop";
+    case ReactionAction::ShootContinue: return "shoot_while_moving";
+    default: return "do_nothing";
+  }
+}
+
+float XZDistance(const glm::vec3& a, const glm::vec3& b) {
+  return std::hypot(a.x - b.x, a.z - b.z);
+}
+
+// Latest remembered position of an enemy that is not currently visible.
+struct Ghost {
+  int id = -1;
+  const GameLogic::EnemySighting* sighting = nullptr;
+};
+
+std::vector<Ghost> HiddenEnemyGhosts(const GameLogic& game, Team team,
+                                     const TeamVisibility& visibility) {
+  std::vector<Ghost> ghosts;
+  for (const Unit& unit : game.GetScene().units) {
+    if (unit.team == team || visibility.UnitVisible(unit.id)) continue;
+    const auto& samples = game.Sightings(team, unit.id);
+    if (samples.empty()) continue;
+    ghosts.push_back({unit.id, &samples.back()});
+  }
+  return ghosts;
+}
+
+std::string ExposureNote(const GameLogic& game, Team team, const Unit& actor,
+                         const glm::vec3& destination) {
+  const TeamVisibility visibility = game.ComputeVisibility(team);
+  Unit probe = actor;
+  probe.position = destination;
+  int seenBy = 0;
+  int visibleCount = 0;
+  const Scene& scene = game.GetScene();
+  for (const Unit& enemy : scene.units) {
+    if (enemy.team == team || !enemy.alive || !visibility.UnitVisible(enemy.id)) continue;
+    ++visibleCount;
+    if (CanUnitSee(enemy, probe, scene.obstacles, scene.walkSurfaces, scene.ground)) ++seenBy;
+  }
+  if (visibleCount == 0) return "no enemy is currently visible, so exposure there is unknown";
+  if (seenBy == 0) return "hidden from all " + std::to_string(visibleCount) + " visible enemies "
+                          "if they hold position (cover)";
+  return "in line of sight of " + std::to_string(seenBy) + " of " +
+         std::to_string(visibleCount) + " visible enemies if they hold position (exposed)";
 }
 
 bool IsPlanning(const GameLogic& game) {
@@ -144,6 +199,74 @@ std::vector<JevCandidate> GenerateCandidateSpecs(const GameLogic& game, Team tea
     }
   }
 
+  // Tactical moves: duck behind nearby obstacles away from the threat, and
+  // close on the last-known position of an enemy that slipped out of view.
+  std::vector<glm::vec3> threats;
+  for (const Unit& unit : game.GetScene().units) {
+    if (unit.alive && unit.team != team && visibility.UnitVisible(unit.id)) {
+      threats.push_back(unit.position);
+    }
+  }
+  const std::vector<Ghost> ghosts = HiddenEnemyGhosts(game, team, visibility);
+  if (threats.empty()) {
+    for (const Ghost& ghost : ghosts) threats.push_back(ghost.sighting->position);
+  }
+  if (!threats.empty()) {
+    glm::vec3 nearestThreat = threats.front();
+    for (const glm::vec3& t : threats) {
+      if (XZDistance(t, actor->position) < XZDistance(nearestThreat, actor->position)) {
+        nearestThreat = t;
+      }
+    }
+    const auto& obstacles = game.GetScene().obstacles;
+    std::vector<size_t> order;
+    for (size_t i = 0; i < obstacles.size(); ++i) {
+      const glm::vec3 c = obstacles[i].bounds.Center();
+      if (obstacles[i].bounds.max.y - obstacles[i].bounds.min.y < 1.0f) continue;
+      if (XZDistance(c, actor->position) <= actor->MoveBudget()) order.push_back(i);
+    }
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+      return XZDistance(obstacles[a].bounds.Center(), actor->position) <
+             XZDistance(obstacles[b].bounds.Center(), actor->position);
+    });
+    for (size_t k = 0; k < order.size() && k < 3; ++k) {
+      const Obstacle& obstacle = obstacles[order[k]];
+      const glm::vec3 c = obstacle.bounds.Center();
+      glm::vec3 away = c - nearestThreat;
+      away.y = 0.0f;
+      if (glm::length(away) < 0.01f) continue;
+      away = glm::normalize(away);
+      const glm::vec3 half = obstacle.bounds.HalfExtents();
+      JevCandidate candidate;
+      candidate.id = "cover_" + std::to_string(order[k]);
+      candidate.kind = JevActionKind::Move;
+      candidate.actorId = actorId;
+      candidate.destination = c + away * (std::hypot(half.x, half.z) + 1.0f);
+      candidate.description = "Take cover on the far side of obstacle " +
+                              std::to_string(order[k]) + " from the nearest " +
+                              "known enemy.";
+      candidates.push_back(std::move(candidate));
+    }
+  }
+  int hunted = 0;
+  for (const Ghost& ghost : ghosts) {
+    if (hunted >= 2) break;
+    glm::vec3 dir = ghost.sighting->position - actor->position;
+    dir.y = 0.0f;
+    const float dist = glm::length(dir);
+    if (dist < 1.0f) continue;
+    JevCandidate candidate;
+    candidate.id = "hunt_" + std::to_string(ghost.id);
+    candidate.kind = JevActionKind::Move;
+    candidate.actorId = actorId;
+    candidate.destination = actor->position + dir / dist * std::min(dist, actor->MoveBudget() * 0.8f);
+    candidate.description = "Move toward ghost of enemy " + std::to_string(ghost.id) +
+                            " (last seen " + std::to_string(ghost.sighting->ageRounds) +
+                            " round(s) ago at " + PointJson(ghost.sighting->position) + ").";
+    candidates.push_back(std::move(candidate));
+    ++hunted;
+  }
+
   JevCandidate wait;
   wait.id = "wait";
   wait.description = "Wait in place for this round; use only when movement or a visible shot is worse.";
@@ -163,10 +286,12 @@ bool ValidateCandidate(const GameLogic& game, Team team, JevCandidate* candidate
   const float forward = team == Team::Blue ? candidate->destination.x - actor->position.x
                                            : actor->position.x - candidate->destination.x;
   std::ostringstream description;
+  if (!candidate->description.empty()) description << candidate->description << " ";
   description << "Move legally to " << PointJson(candidate->destination) << "; "
               << (forward > 0.25f ? "advances toward the opposing deployment edge"
                                   : forward < -0.25f ? "retreats from the opposing edge"
                                                     : "moves laterally")
+              << "; at the destination " << ExposureNote(game, team, *actor, candidate->destination)
               << ".";
   candidate->description = description.str();
   return true;
@@ -174,8 +299,45 @@ bool ValidateCandidate(const GameLogic& game, Team team, JevCandidate* candidate
 
 std::string TeamName(Team team) { return team == Team::Blue ? "blue" : "red"; }
 
+// Coarse top-down overview: row 0 is the most negative Z, column 0 the most
+// negative X. '#' obstacle, '.' open; allies are their id digit, visible
+// enemies lowercase 'e', remembered (ghost) enemies '?'.
+std::vector<std::string> BuildGrid(const GameLogic& game, Team team,
+                                   const TeamVisibility& visibility,
+                                   const std::vector<Ghost>& ghosts, int cells) {
+  const Scene& scene = game.GetScene();
+  const float half = scene.mapHalfExtent;
+  const float cell = 2.0f * half / static_cast<float>(cells);
+  std::vector<std::string> rows(cells, std::string(cells, '.'));
+  const auto toCell = [&](float v) {
+    return std::clamp(static_cast<int>((v + half) / cell), 0, cells - 1);
+  };
+  for (const Obstacle& obstacle : scene.obstacles) {
+    if (obstacle.bounds.max.y - obstacle.bounds.min.y < 1.0f) continue;
+    for (int z = toCell(obstacle.bounds.min.z); z <= toCell(obstacle.bounds.max.z); ++z) {
+      for (int x = toCell(obstacle.bounds.min.x); x <= toCell(obstacle.bounds.max.x); ++x) {
+        rows[z][x] = '#';
+      }
+    }
+  }
+  for (const Ghost& ghost : ghosts) {
+    rows[toCell(ghost.sighting->position.z)][toCell(ghost.sighting->position.x)] = '?';
+  }
+  for (const Unit& unit : scene.units) {
+    if (!unit.alive) continue;
+    if (unit.team == team) {
+      rows[toCell(unit.position.z)][toCell(unit.position.x)] =
+          static_cast<char>('0' + unit.id % 10);
+    } else if (visibility.UnitVisible(unit.id)) {
+      rows[toCell(unit.position.z)][toCell(unit.position.x)] = 'e';
+    }
+  }
+  return rows;
+}
+
 std::string BuildVisibleState(const GameLogic& game, Team team, int actorId) {
   const TeamVisibility visibility = game.ComputeVisibility(team);
+  const std::vector<Ghost> ghosts = HiddenEnemyGhosts(game, team, visibility);
   std::ostringstream out;
   out << "{\"round\":" << game.RoundNumber() << ",\"team\":" << JsonString(TeamName(team))
       << ",\"objective\":"
@@ -194,7 +356,42 @@ std::string BuildVisibleState(const GameLogic& game, Team team, int actorId) {
                     "fire). A figure that sights an enemy while idle or moving may also "
                     "react and fire on its own. There is no ammo pool across rounds.")
       << ",\"actor_id\":" << actorId << ",\"map_half_extent\":" << std::fixed
-      << std::setprecision(2) << game.GetScene().mapHalfExtent << ",\"allies\":[";
+      << std::setprecision(2) << game.GetScene().mapHalfExtent
+      << ",\"fov_half_angle_deg\":" << constants::kShootHalfFovDegrees
+      << ",\"shoot_range\":" << constants::kShootRange << ",\"move_budget\":"
+      << game.FindUnit(actorId)->MoveBudget() << ",\"playbook\":{";
+  const SquadPlaybook& playbook = game.Playbook(team);
+  out << "\"stationary_unseen\":" << JsonString(ReactionName(playbook.At(false, false)))
+      << ",\"stationary_seen\":" << JsonString(ReactionName(playbook.At(false, true)))
+      << ",\"moving_unseen\":" << JsonString(ReactionName(playbook.At(true, false)))
+      << ",\"moving_seen\":" << JsonString(ReactionName(playbook.At(true, true)))
+      << "},\"map\":{\"half_extent\":" << game.GetScene().mapHalfExtent
+      << ",\"grid_cells\":" << kGridCells << ",\"grid_legend\":"
+      << JsonString("rows run -Z to +Z, columns -X to +X; # obstacle, . open, digit = your "
+                    "figure id, e = visible enemy, ? = ghost (last known enemy position)")
+      << ",\"grid\":[";
+  const std::vector<std::string> grid = BuildGrid(game, team, visibility, ghosts, kGridCells);
+  for (size_t i = 0; i < grid.size(); ++i) out << (i ? "," : "") << JsonString(grid[i]);
+  out << "],\"obstacles\":[";
+  {
+    const Scene& scene = game.GetScene();
+    const glm::vec3 from = game.FindUnit(actorId)->position;
+    std::vector<size_t> order;
+    for (size_t i = 0; i < scene.obstacles.size(); ++i) order.push_back(i);
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+      return XZDistance(scene.obstacles[a].bounds.Center(), from) <
+             XZDistance(scene.obstacles[b].bounds.Center(), from);
+    });
+    if (order.size() > kMaxListedObstacles) order.resize(kMaxListedObstacles);
+    for (size_t i = 0; i < order.size(); ++i) {
+      const Obstacle& o = scene.obstacles[order[i]];
+      out << (i ? "," : "") << "{\"id\":" << order[i] << ",\"min_xz\":["
+          << o.bounds.min.x << "," << o.bounds.min.z << "],\"max_xz\":[" << o.bounds.max.x
+          << "," << o.bounds.max.z << "],\"height\":" << o.bounds.max.y - o.bounds.min.y
+          << ",\"climbable\":" << (o.climbable ? "true" : "false") << "}";
+    }
+  }
+  out << "]},\"allies\":[";
 
   bool first = true;
   for (const Unit& unit : game.GetScene().units) {
@@ -221,6 +418,18 @@ std::string BuildVisibleState(const GameLogic& game, Team team, int actorId) {
     out << "{\"id\":" << unit.id << ",\"position\":" << PointJson(unit.position)
         << ",\"facing\":" << std::setprecision(3) << unit.facingYaw << ",\"weapon\":"
         << JsonString(WeaponName(unit.weapon)) << "}";
+  }
+  out << "],\"ghosts\":[";
+  first = true;
+  for (const Ghost& ghost : ghosts) {
+    if (!first) out << ',';
+    first = false;
+    const auto& g = *ghost.sighting;
+    out << "{\"id\":" << ghost.id << ",\"last_known_position\":" << PointJson(g.position)
+        << ",\"rounds_ago\":" << g.ageRounds << ",\"was_moving\":"
+        << (glm::length(g.moveDirection) > 0.01f ? "true" : "false")
+        << ",\"move_direction_xz\":[" << std::setprecision(2) << g.moveDirection.x << ","
+        << g.moveDirection.z << "]}";
   }
   out << "]}";
   return out.str();

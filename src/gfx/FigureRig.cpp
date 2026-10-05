@@ -148,6 +148,9 @@ struct ShootPose {
 ShootPose SampleShootPose(const Unit& unit) {
   ShootPose pose;
   if (unit.shootElapsed < 0.0f) return pose;
+  // A rider hangs from the trolley with the weapon slung: no aim, recoil or
+  // muzzle flash while on the cable.
+  if (unit.rideTravel >= 0.0f && unit.rideLength > 0.0f) return pose;
   const float t = unit.shootElapsed;
   const float lowerStart = tactics::constants::kShootAnimDuration - kLowerDuration;
   if (t < kAimRaiseDuration) {

@@ -270,9 +270,8 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
   ImGui::EndDisabled();
 
   // Track: a line with a circle per turn boundary and a draggable handle.
-  // Positions are proportional to recorded game time; the handle sits at the
+  // Turns get equal widths (see below); the handle sits at the
   // right end while live.
-  const float endTime = timeline.EndTime();
   const float trackW = std::max(140.0f, std::min(static_cast<float>(rect.width) - 280.0f, 420.0f));
   const float trackH = 52.0f;
   const float pad = 14.0f;  // Room for end circles and the handle.
@@ -283,13 +282,32 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
   const float x0 = origin.x + pad;
   const float x1 = origin.x + trackW - pad;
   const float lineY = origin.y + 18.0f;
-  auto XForTime = [&](float t) {
-    return endTime > 0.0f ? x0 + (x1 - x0) * std::min(t / endTime, 1.0f) : x0;
+  // Every turn gets an equal share of the track (rounds are the same length
+  // in game terms, but a client may record them with different wall-clock
+  // durations); frames sit proportionally to recorded time within their turn.
+  // Frames after the last tick (a round in progress) form one trailing turn.
+  const size_t frameCount = timeline.FrameCount();
+  const bool hasTail = ticks.back().frame + 1 < frameCount;
+  const int segments = std::max(1, (tickCount - 1) + (hasTail ? 1 : 0));
+  auto SegStart = [&](int s) { return timeline.FrameTime(ticks[s].frame); };
+  auto SegEnd = [&](int s) {
+    return s + 1 < tickCount ? timeline.FrameTime(ticks[s + 1].frame) : timeline.EndTime();
   };
-  auto TickX = [&](int i) { return XForTime(timeline.FrameTime(ticks[i].frame)); };
+  auto Norm = [&](size_t frame) {  // Frame index -> [0, 1] along the track.
+    const int s = std::min(timeline.TickForFrame(frame), segments - 1);
+    const float len = SegEnd(s) - SegStart(s);
+    const float f = len > 0.0f ? (timeline.FrameTime(frame) - SegStart(s)) / len : 0.0f;
+    return (static_cast<float>(s) + std::max(0.0f, std::min(f, 1.0f))) / segments;
+  };
+  auto FrameAtNorm = [&](float u) {
+    const float pos = std::max(0.0f, std::min(u, 1.0f)) * segments;
+    const int s = std::min(static_cast<int>(pos), segments - 1);
+    return timeline.FrameAtTime(SegStart(s) + (pos - s) * (SegEnd(s) - SegStart(s)));
+  };
+  auto TickX = [&](int i) { return x0 + (x1 - x0) * std::min(float(i) / segments, 1.0f); };
 
-  float handleX = live ? x1 : XForTime(timeline.FrameTime(playback.FrameIndex()));
-  if (dragging && endTime > 0.0f) {
+  float handleX = live ? x1 : x0 + (x1 - x0) * Norm(playback.FrameIndex());
+  if (dragging && frameCount > 1) {
     constexpr float kMagnetPx = 14.0f;
     float mx = std::max(x0, std::min(ImGui::GetIO().MousePos.x, x1));
     float best = kMagnetPx;
@@ -306,7 +324,7 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
       if (!live) actions.live = true;
       handleX = x1;
     } else {
-      const size_t frame = timeline.FrameAtTime((handleX - x0) / (x1 - x0) * endTime);
+      const size_t frame = FrameAtNorm((handleX - x0) / (x1 - x0));
       if (live || frame != playback.FrameIndex()) actions.seekFrame = frame;
     }
   }

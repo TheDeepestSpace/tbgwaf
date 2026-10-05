@@ -6,8 +6,8 @@ from the start or from any completed round ("turn" = one WEGO round).
 ## UI
 
 - **Timeline line** with a circle at each turn boundary: `Start` (game
-  start) plus `T1, T2, ...` (each round's end), spaced by recorded game
-  time. A draggable handle moves freely along it (any recorded frame, not
+  start) plus `T1, T2, ...` (each round's end), spaced evenly (each
+  turn is the same width; frames sit proportionally within their turn). A draggable handle moves freely along it (any recorded frame, not
   just boundaries) but **magnetizes** to a circle within ~14 px.
 - **Play / Pause** replays forward from wherever the handle is
   (`TimelinePlayback::kReplaySpeed`, currently 1x) and pauses at the live

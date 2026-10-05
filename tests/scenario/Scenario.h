@@ -39,7 +39,10 @@ struct ScenarioAction {
   // shoot-target mode and places the "+" aim marker without confirming, so
   // the step ends mid-aim (for visual captures of the aiming UI). A
   // following `shoot` step by the same actor confirms it (the Fire button).
-  enum class Kind { Move, Shoot, Aim, Pass, Cancel, Commit, Focus, NewGame };
+  // BeginMove opens move planning (select + Move) and deliberately stops
+  // there, leaving the movement frontier up for the visual runner's
+  // post-action capture; no destination is clicked and no plan is recorded.
+  enum class Kind { Move, BeginMove, Shoot, Aim, Pass, Cancel, Commit, Focus, NewGame };
 
   int actor = -1;  // Unused (and not required in YAML) for Commit/NewGame.
   Kind kind = Kind::Pass;

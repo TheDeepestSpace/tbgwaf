@@ -241,6 +241,8 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     }
     if (node["shots"]) action.shots = node["shots"].as<int>();
     action.expectNoop = node["expect_noop"] && node["expect_noop"].as<bool>();
+  } else if (kind == "begin_move") {
+    action.kind = ScenarioAction::Kind::BeginMove;
   } else if (kind == "pass") {
     action.kind = ScenarioAction::Kind::Pass;
   } else if (kind == "cancel") {
@@ -249,7 +251,7 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     action.kind = ScenarioAction::Kind::Focus;
   } else {
     throw std::runtime_error("unknown script action '" + kind +
-                              "' (expected move/shoot/aim/pass/cancel/focus/commit/new_game)");
+                              "' (expected move/begin_move/shoot/aim/pass/cancel/focus/commit/new_game)");
   }
   return action;
 }
@@ -422,6 +424,21 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
       if (action.finalFacingDegrees) {
         game.SetPlannedMoveFacing(action.actor, *action.finalFacingDegrees * 3.14159265f / 180.0f,
                                   actorTeam);
+      }
+      return true;
+    }
+    case ScenarioAction::Kind::BeginMove: {
+      // Issue #136: open move planning and stop, so the post-action capture
+      // (and any following assertions) see the movement frontier up.
+      NotifyMenuClick(actorTeam, "Move");
+      game.ChooseMove();
+      if (game.Mode() != InputMode::AwaitingMoveDestination) {
+        return Fail("could not open move planning (begin_move)");
+      }
+      if (hooks.onMoveFrontier) {
+        for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
+          hooks.onMoveFrontier(game, actorTeam);
+        }
       }
       return true;
     }

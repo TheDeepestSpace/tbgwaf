@@ -153,12 +153,25 @@ prone there"), and it stays consistent with the obstacle-visibility
 sampling in `ComputeTeamVisibility`. Pure target-LOS is a one-line setting
 if the gameplay rule changes.
 
-Gameplay enemy visibility now uses that same zero-height surface probe:
-`ComputeTeamVisibility` and playbook reactions test the rendered surface
-under a target's feet rather than its eye. Their LOS also intersects the
-heightfield's actual triangles, so a terrain ridge hides an enemy wherever
-the shadow-map mask leaves the ground dark. Shot resolution still traces to
-the target's eye, but includes the same terrain occlusion.
+Gameplay enemy visibility (`ComputeTeamVisibility`, `CanUnitSee`, and so
+playbook reactions and shoot-target gating) sights a figure through either
+of two probes: that same zero-height surface under its feet, or its eye. The
+feet probe keeps the overlay's promise that a figure standing on tinted
+ground is always seen; its LOS intersects the heightfield's actual
+triangles, so a terrain ridge hides that ground exactly where the mask
+leaves it dark. The eye probe covers what the surface probe cannot: a
+figure whose body shows above low cover, a terrain crest, or the edge of a
+deck. The last case is why the eye probe exists (the overpass deck-edge
+issue): from the street, a deck top faces away from the eye, so the mask
+never tints it and the sightline to the feet always enters the deck's own
+0.45 slab; the player instead sees the deck's side face tinted and the
+figure standing on it. Since shot resolution traces to the target's eye
+(with the same terrain and deck occlusion), the eye probe also guarantees
+that a shooter can always see its target, and two figures facing each
+other either both have the other's eye in view or neither does; only
+facing still makes a sighting one-way. The overlay is therefore a lower
+bound on what is seen: tinted ground always reveals a figure on it; a
+figure on untinted ground is still seen when its head is exposed.
 
 ### Recommendation on retiring the CPU path
 

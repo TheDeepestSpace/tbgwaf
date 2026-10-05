@@ -307,14 +307,15 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
   return actions;
 }
 
-void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float fps,
-                    float frameMs, float fovMs,
+void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& disableOcclusionFade,
+                    bool& showFps, float fps, float frameMs, float fovMs,
                     const gfx::RenderFrameStats& stats, float top) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
   ImGui::Begin("Debug", nullptr,
                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove);
   ImGui::Checkbox("Disable FOV cones", &disableFov);
   ImGui::Checkbox("Disable shadows", &disableShadows);
+  ImGui::Checkbox("Disable occlusion fade", &disableOcclusionFade);
   ImGui::Checkbox("Show FPS", &showFps);
   if (showFps) ImGui::Text("%.1f FPS (%.2f ms)", fps, frameMs);
   ImGui::Text("Draw calls: %d", stats.drawCalls);

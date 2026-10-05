@@ -376,26 +376,35 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
       for (size_t surface = 0; surface < walkSurfaces_.size(); ++surface) {
         if (!SurfaceContainsXZ(walkSurfaces_[surface], x, z)) continue;
         glm::vec3 goal(x, SurfaceHeightAt(walkSurfaces_[surface], x, z), z);
+        const auto pathLength = [](const std::vector<glm::vec3>& path) {
+          float length = 0.0f;
+          for (size_t i = 0; i + 1 < path.size(); ++i) length += glm::distance(path[i], path[i + 1]);
+          return length;
+        };
         std::vector<glm::vec3> path;
         bool found = false;
-        float surfaceBaseCost = 0.0f;
+        float distance = 0.0f;
         if (startSurface >= 0) {
           found = FindSurfacePath(startSurface, start, static_cast<int>(surface), goal, &path);
+          if (found) distance = pathLength(path);
         } else {
-          for (size_t entry = 0; entry < walkSurfaces_.size() && !found; ++entry) {
+          // Cheapest ground entry overall, not the first that connects: the
+          // deck and its ramps form one connected graph, so the first foot
+          // always "succeeds" even when it routes the long way around and
+          // prices the cell out of the budget.
+          for (size_t entry = 0; entry < walkSurfaces_.size(); ++entry) {
             if (!std::isfinite(entryCost[entry])) continue;
             const glm::vec3 connection = GroundConnectionPoint(static_cast<int>(entry));
             if (!FindSurfacePath(static_cast<int>(entry), connection,
                                  static_cast<int>(surface), goal, &path)) {
               continue;
             }
-            surfaceBaseCost = entryCost[entry];
+            const float total = entryCost[entry] + pathLength(path);
+            if (!found || total < distance) distance = total;
             found = true;
           }
         }
         if (!found) continue;
-        float distance = surfaceBaseCost;
-        for (size_t i = 0; i + 1 < path.size(); ++i) distance += glm::distance(path[i], path[i + 1]);
         if (distance <= budget && (startSurface >= 0 || distance < field.dist[idx] + 0.5f)) {
           field.dist[idx] = distance;
           field.surfaceY[idx] = goal.y;

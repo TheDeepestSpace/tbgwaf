@@ -1,7 +1,8 @@
 name: free_aim_blind_fire_miss_no_reveal
 description: >
-  Issue #129 blind fire, the miss half: same crouch-height-cover layout as
-  free_aim_blind_fire_hit_reveals, but the pinned roll misses. A blind shot that doesn't
+  Issue #129 blind fire, the miss half: same layout as
+  free_aim_blind_fire_hit_reveals but with full-height cover (a figure's eye is sighted over
+  crouch-height cover, so it would not stay hidden once blue turns), and the pinned roll misses. A blind shot that doesn't
   connect reveals nothing -- no kill, no sighting memory, no live visibility -- even
   though the figure still turned and took the shot.
 
@@ -9,7 +10,7 @@ shot_rolls: [0.99]
 
 map:
   obstacles:
-    - {center: [2.5, 0], half_extent: [0.5, 2], height: 0.8}
+    - {center: [2.5, 0], half_extent: [0.5, 2], height: 2.0}
 
 units:
   - {id: 0, team: blue, position: [-6, 0, 0], facing_degrees: -90}

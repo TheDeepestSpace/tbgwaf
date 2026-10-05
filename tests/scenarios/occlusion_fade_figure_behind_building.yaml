@@ -1,0 +1,34 @@
+name: occlusion_fade_figure_behind_building
+description: >
+  Issue #136 camera-occlusion see-through, custom-map case: a tall building
+  stands between Blue's pane camera and its own figure, so the building is
+  drawn at the see-through opacity from the very first capture. The scripted
+  move then plans a path whose middle runs behind the building (the path and
+  the planned-move indicators must stay readable), and begin_move leaves the
+  chained-leg movement frontier up so the final capture shows the frontier
+  through the faded block. Red's pane has a clear line to its own figure and
+  keeps every block opaque.
+
+map:
+  half_extent: 14
+  obstacles:
+    - {center: [-2, 2.5], half_extent: [1.5, 1.5], height: 6}
+
+units:
+  - {id: 0, team: blue, position: [-4.5, 0, 5.5], facing_degrees: 0}
+  - {id: 1, team: red, position: [8, 0, -8], facing_degrees: 180}
+
+camera:
+  target: [-2, 3]
+  zoom: -4
+
+script:
+  - action: move
+    actor: 0
+    destination: [2.5, 0, 6.5]
+    comment: The straight chord of the planned path passes behind the building.
+  - action: begin_move
+    actor: 0
+    comment: Chained-leg frontier around the planned destination; parts of it are behind the building.
+  - assert: {unit: 0, position: [-4.5, 0, 5.5], tolerance: 0.05}
+  - assert: {round: 1}

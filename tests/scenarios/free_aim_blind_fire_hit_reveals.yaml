@@ -4,7 +4,8 @@ description: >
   (eye-to-ground LOS is blocked no matter which way blue faces) -- but a free-aim shot at
   chest height flies flat over the low wall. The real ballistic trace hits the unseen
   figure, and the connecting hit is the one thing that reveals it: a sighting-memory ghost
-  for blue, while the body itself stays outside blue's live FOV.
+  for blue, while blue faces away. (Once blue turns toward the aim point, the figure's eye shows
+  above the crouch-height cover and it is sighted live as well.)
 
 shot_rolls: [0.0]
 
@@ -31,5 +32,5 @@ script:
   - assert: {unit: 1, alive: false, comment: The trace met the unseen figure and the pinned roll hit}
   - assert: {unit: 0, facing_degrees: 0, tolerance: 1.0, comment: Turned to the aim point}
   - assert: {unit: 1, remembered_by: blue, remembered: true, comment: Only the hit reveals it}
-  - assert: {unit: 1, visible_to: blue, visible: false, comment: The body still is not in live FOV}
+  - assert: {unit: 1, visible_to: blue, visible: true, comment: Once blue faces it, the eye above the low cover is sighted too}
   - assert: {winner: blue}

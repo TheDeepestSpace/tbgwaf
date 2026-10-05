@@ -47,6 +47,12 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
 namespace {
 
 constexpr int kShadowMapSize = 2048;
+// Deck/ramp slabs form one continuous ribbon but are submitted as separate
+// shadow casters. A stronger-than-default slope bias keeps each shallow
+// joint from shadowing the next slab while the deck still shadows geometry
+// below its 0.45-unit thickness.
+constexpr float kDeckShadowSlopeBias = 16.0f;
+constexpr float kDeckShadowConstantBias = 64.0f;
 const glm::vec3 kSetupColor(0.2f, 1.0f, 0.3f);
 // Scene geometry base colors, shared by the opaque pass and the issue #136
 // see-through pass so a faded block keeps its normal tint.
@@ -1947,12 +1953,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         geometryMesh_.Draw();
       }
     }
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(kDeckShadowSlopeBias, kDeckShadowConstantBias);
     for (const tactics::WalkSurface& surface : game.GetScene().walkSurfaces) {
       const std::vector<char> hidden = SharedEdges(game.GetScene().walkSurfaces, surface);
       BuildSurfacePatch(surface.vertices, 0.45f, &geometryMesh_, &hidden);
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
       geometryMesh_.Draw();
     }
+    glDisable(GL_POLYGON_OFFSET_FILL);
     for (const Unit& unit : game.GetScene().units) {
       if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
       DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);

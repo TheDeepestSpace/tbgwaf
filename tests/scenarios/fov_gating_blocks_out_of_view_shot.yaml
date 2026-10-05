@@ -3,8 +3,11 @@ description: >
   Regression coverage for the fog-of-war shoot gating exercised by
   TestGameLogicShootGatingRequiresTeamVisibility in tests/logic_tests.cpp: a living enemy
   outside the shooter's team FOV must not be a clickable target at all (the click is a
-  no-op, not a guaranteed miss), and a no-op must not record a plan. Blue0 faces away (180
-  degrees) from red, so red is entirely outside blue's cone.
+  no-op, not a guaranteed miss) and records no plan. Blue0 faces away (180 degrees) from
+  red, so red is entirely outside blue's cone. Gating applies only to targeted shots: a
+  free-aim shot at the same position is still allowed (blue turns around and fires).
+
+shot_rolls: [0.0]
 
 units:
   - {id: 0, team: blue, position: [-5, 0, 0], facing_degrees: 180}
@@ -19,14 +22,14 @@ script:
     expect_noop: true
   - assert: {unit: 1, alive: true}
 
-  - action: cancel
-    description: The gated no-op recorded no plan, so blue0 still needs one before the round can commit; both figures pass and the round resolves with no shots.
+  - action: shoot
+    description: Free aim is not gated -- blue turns around and fires at the point where red stands. The turn brings red into the cone and the trace hits.
     actor: 0
-  - action: pass
-    actor: 0
+    at: [5, 0.9, 0]
   - action: pass
     actor: 1
   - action: commit
-  - assert: {unit: 0, alive: true}
-  - assert: {unit: 1, alive: true}
-  - assert: {round: 2}
+
+  - assert: {unit: 0, facing_degrees: 0, tolerance: 1.0, comment: Turned to the aim point}
+  - assert: {unit: 1, alive: false, comment: The free-aim shot connected}
+  - assert: {winner: blue}

@@ -1,5 +1,6 @@
 #include "gallery/GalleryScene.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -7,6 +8,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "game/Types.h"
+#include "game/Weapon.h"
 #include "gfx/FigureRig.h"
 
 using tactics::Unit;
@@ -62,6 +64,82 @@ void main() {
 const glm::vec3 kLightDir = glm::normalize(glm::vec3(0.35f, -1.0f, 0.25f));
 const glm::vec4 kGroundColor(0.16f, 0.18f, 0.20f, 1.0f);
 
+// Empty-mag animation (issue #140): shot k leaves at k * the weapon's fire
+// interval, the same pacing a committed burst uses in the game.
+constexpr float kEmptyMagHoldSeconds = 1.0f;  // Rest after the last shot.
+constexpr float kTracerRange = 6.0f;          // How far the demo bullets fly.
+
+float EmptyMagDuration(tactics::WeaponType weapon) {
+  const tactics::WeaponStats& stats = tactics::StatsOf(weapon);
+  return (stats.magazineSize - 1) * stats.shotIntervalSeconds +
+         tactics::constants::kShootAnimDuration + kEmptyMagHoldSeconds;
+}
+
+// Shots fired by loop time `t` (0 before the first) and the shoot-beat time
+// the shooter is at, replaying GameLogic's rule: a follow-up shot landing
+// while the beat still plays only re-triggers the recoil kick, otherwise the
+// weapon is drawn afresh.
+struct EmptyMagState {
+  int fired = 0;
+  float shootElapsed = -1.0f;
+};
+
+EmptyMagState SampleEmptyMag(tactics::WeaponType weapon, double t) {
+  const tactics::WeaponStats& stats = tactics::StatsOf(weapon);
+  EmptyMagState state;
+  if (t < 0.0) return state;
+  const int last = std::min(stats.magazineSize - 1,
+                            static_cast<int>(std::floor(t / stats.shotIntervalSeconds)));
+  float elapsed = -1.0f;
+  for (int i = 0; i <= last; ++i) {
+    if (i > 0 && elapsed >= 0.0f) {
+      elapsed += stats.shotIntervalSeconds;
+      if (elapsed >= tactics::constants::kShootAnimDuration) elapsed = -1.0f;
+    }
+    elapsed = elapsed >= 0.0f ? tactics::constants::kShootRecoilStart : 0.0f;
+  }
+  elapsed += static_cast<float>(t - last * stats.shotIntervalSeconds);
+  state.fired = last + 1;
+  state.shootElapsed = elapsed < tactics::constants::kShootAnimDuration ? elapsed : -1.0f;
+  return state;
+}
+
+// End point of bullet `index`: a uniformly scattered ray inside the weapon's
+// cone (same hash as the game), flown kTracerRange from the muzzle.
+glm::vec3 BulletEnd(const Unit& unit, int index) {
+  const float scatter =
+      glm::radians(tactics::StatsOf(unit.weapon).scatterHalfAngleDegrees);
+  const float radius = std::sqrt(tactics::ScatterUnit(0, 1, index, 1)) * scatter;
+  const float theta = kTwoPi * tactics::ScatterUnit(0, 1, index, 2);
+  const float yaw = radius * std::cos(theta);
+  const float pitch = radius * std::sin(theta);
+  const glm::vec3 dir(std::cos(pitch) * std::cos(yaw), std::sin(pitch),
+                      std::cos(pitch) * std::sin(yaw));
+  return unit.MuzzlePosition() + dir * kTracerRange;
+}
+
+// A thin box from `a` to `b` (tracer line) as a lit part.
+gfx::FigurePart TracerPart(const glm::vec3& a, const glm::vec3& b, const glm::vec4& color) {
+  constexpr float kThickness = 0.02f;
+  const glm::vec3 delta = b - a;
+  const float length = glm::length(delta);
+  const glm::vec3 dir = delta / length;
+  // Box local +X runs along the line.
+  const glm::vec3 side = glm::normalize(glm::cross(dir, glm::vec3(0.0f, 1.0f, 0.0f)));
+  const glm::vec3 up = glm::cross(side, dir);
+  glm::mat4 frame(1.0f);
+  frame[0] = glm::vec4(dir, 0.0f);
+  frame[1] = glm::vec4(up, 0.0f);
+  frame[2] = glm::vec4(side, 0.0f);
+  frame[3] = glm::vec4(a, 1.0f);
+  gfx::FigurePart part;
+  part.model = frame * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -kThickness * 0.5f, -kThickness * 0.5f)) *
+               glm::scale(glm::mat4(1.0f), glm::vec3(length, kThickness, kThickness));
+  part.color = color;
+  part.primitive = gfx::FigurePrimitive::Box;
+  return part;
+}
+
 }  // namespace
 
 const std::vector<GalleryItem>& Catalog() {
@@ -91,9 +169,11 @@ const std::vector<GalleryItem>& Catalog() {
         {AnimKind::Idle, "idle", "idle", tactics::constants::kIdleAnimDuration},
         {AnimKind::Run, "run", "run", kRunCycleSeconds},
         {AnimKind::Shoot, "shoot", "shoot", tactics::constants::kShootAnimDuration},
+        {AnimKind::EmptyMag, "empty_mag", "empty mag", 0.0f},  // Per weapon, below.
     };
     for (const W& w : weapons) {
-      for (const A& a : anims) {
+      for (A a : anims) {
+        if (a.kind == AnimKind::EmptyMag) a.duration = EmptyMagDuration(w.type);
         // Leaked once at startup; ids/labels must outlive the catalog.
         char* id = new char[64];
         char* label = new char[64];
@@ -139,6 +219,14 @@ ViewState DefaultView(int itemIndex) {
     view.yawRadians = glm::radians(30.0f);
     view.pitchRadians = glm::radians(14.0f);
     view.distance = 3.6f;
+    if (item.anim == AnimKind::EmptyMag) {
+      // Over the shooter's shoulder, so the fan of scattered bullet lines
+      // downrange (+X) toward the backstop reads as a spread.
+      view.target = glm::vec3(kTracerRange * 0.45f, 1.0f, 0.0f);
+      view.yawRadians = glm::radians(200.0f);
+      view.pitchRadians = glm::radians(22.0f);
+      view.distance = 7.5f;
+    }
   }
   return view;
 }
@@ -161,6 +249,10 @@ Unit AnimationUnit(const GalleryItem& item, double t) {
     case AnimKind::Shoot:
       unit.shootElapsed =
           static_cast<float>(std::fmod(t, tactics::constants::kShootAnimDuration));
+      unit.shootAimYaw = unit.facingYaw;
+      break;
+    case AnimKind::EmptyMag:
+      unit.shootElapsed = SampleEmptyMag(item.weapon, t).shootElapsed;
       unit.shootAimYaw = unit.facingYaw;
       break;
   }
@@ -218,7 +310,33 @@ void GalleryRenderer::Render(int itemIndex, double t, const ViewState& view, int
     ground.color = kGroundColor;
     ground.primitive = gfx::FigurePrimitive::Box;
     parts.push_back(ground);
-    const gfx::FigureParts figure = gfx::BuildFigure(AnimationUnit(item, t));
+    const Unit unit = AnimationUnit(item, t);
+    if (item.anim == AnimKind::EmptyMag) {
+      // Longer stage with a backstop plate, plus one tracer per bullet fired
+      // so far; the newest flashes white-hot like in the game.
+      parts.back().model =
+          glm::translate(glm::mat4(1.0f), glm::vec3(-1.6f, -0.05f, -1.6f)) *
+          glm::scale(glm::mat4(1.0f), glm::vec3(kTracerRange + 2.4f, 0.05f, 3.2f));
+      gfx::FigurePart plate;
+      plate.model = glm::translate(glm::mat4(1.0f), glm::vec3(kTracerRange + 0.1f, 0.0f, -1.2f)) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(0.08f, 2.0f, 2.4f));
+      plate.color = glm::vec4(0.35f, 0.18f, 0.16f, 1.0f);
+      plate.primitive = gfx::FigurePrimitive::Box;
+      parts.push_back(plate);
+      const EmptyMagState mag = SampleEmptyMag(item.weapon, t);
+      const tactics::WeaponStats& stats = tactics::StatsOf(item.weapon);
+      Unit aimed = unit;
+      aimed.facingYaw = unit.shootAimYaw;
+      for (int i = 0; i < mag.fired; ++i) {
+        const float age = static_cast<float>(t) - i * stats.shotIntervalSeconds;
+        const float flash = glm::clamp(1.0f - age / 0.25f, 0.0f, 1.0f);
+        const glm::vec4 color(glm::mix(glm::vec3(0.2f, 0.45f, 0.95f),
+                                       glm::vec3(1.0f, 0.97f, 0.8f), flash),
+                              1.0f);
+        parts.push_back(TracerPart(aimed.MuzzlePosition(), BulletEnd(aimed, i), color));
+      }
+    }
+    const gfx::FigureParts figure = gfx::BuildFigure(unit);
     parts.insert(parts.end(), figure.begin(), figure.end());
   }
 

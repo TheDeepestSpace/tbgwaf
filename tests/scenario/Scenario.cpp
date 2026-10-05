@@ -141,6 +141,14 @@ Scene ParseScene(const YAML::Node& root) {
     if (const YAML::Node halfNode = mapNode["half_extent"]) {
       scene.mapHalfExtent = halfNode.as<float>();
     }
+    // `ziplines: [{from: [x, y, z], to: [x, y, z]}, ...]`: pre-built two-way
+    // ziplines (anchor foot positions), on top of any generated map's own.
+    if (const YAML::Node ziplinesNode = mapNode["ziplines"]) {
+      for (const auto& zipNode : ziplinesNode) {
+        scene.ziplines.push_back(Zipline{ParseVec3(zipNode["from"], "map.ziplines[].from"),
+                                         ParseVec3(zipNode["to"], "map.ziplines[].to")});
+      }
+    }
     if (const YAML::Node obstaclesNode = mapNode["obstacles"]) {
       for (const auto& obsNode : obstaclesNode) {
         const glm::vec2 center = ParseVec2(obsNode["center"], "map.obstacles[].center");
@@ -219,6 +227,7 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     if (node["final_facing_degrees"]) {
       action.finalFacingDegrees = node["final_facing_degrees"].as<float>();
     }
+    action.expectUnreachable = node["expect_unreachable"] && node["expect_unreachable"].as<bool>();
   } else if (kind == "shoot") {
     action.kind = ScenarioAction::Kind::Shoot;
     if (!node["target"]) throw std::runtime_error("script 'shoot' action requires 'target'");
@@ -391,6 +400,18 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
       }
       NotifyClick(actorTeam, action.destination);
       game.ClickGround(action.destination, actorTeam);
+      if (action.expectUnreachable) {
+        // Walk and zipline plans alike must have been rejected: nothing planned.
+        if (game.Mode() != InputMode::AwaitingMoveDestination ||
+            game.FindUnit(action.actor)->plan.type != PlannedActionType::None) {
+          return Fail("destination " + ToString(action.destination) +
+                      " was expected to be unreachable, but a move was planned");
+        }
+        NotifyMenuClick(actorTeam, "Cancel");
+        game.CancelAction();  // Back to the action menu, like a real player.
+        game.CancelAction();  // ...and deselect.
+        return true;
+      }
       game.FinishMovePlan();
       if (game.Mode() != InputMode::AwaitingSelection) {
         return Fail("has no path to destination " + ToString(action.destination) +

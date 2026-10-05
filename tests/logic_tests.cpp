@@ -1896,6 +1896,277 @@ void TestFollowerBuildsSightingsWithoutPhysicsUpdate() {
   CHECK(anyMoving);
 }
 
+// --- Ziplines (issue #166). ---
+
+// Open 80x80 field, a 26-unit line from (-16,0,0) to (10,0,0) and a figure at
+// (-18,0,0) with a 20-unit round budget: the far side (x = 20) is out of
+// walking reach (38 away) but in zipline reach (2 + 6.5 ride + 10 = 18.5).
+tactics::Scene ZiplineScene(float lineLength = 26.0f) {
+  tactics::Scene scene;
+  scene.mapHalfExtent = 40.0f;
+  scene.ziplines.push_back(
+      tactics::Zipline{glm::vec3(-16.0f, 0.0f, 0.0f), glm::vec3(-16.0f + lineLength, 0.0f, 0.0f)});
+  auto add = [&](int id, tactics::Team team, glm::vec3 position) {
+    tactics::Unit unit;
+    unit.id = id;
+    unit.team = team;
+    unit.position = position;
+    scene.units.push_back(unit);
+  };
+  add(0, tactics::Team::Blue, glm::vec3(-18.0f, 0.0f, 0.0f));
+  add(1, tactics::Team::Blue, glm::vec3(-18.0f, 0.0f, 1.0f));
+  add(3, tactics::Team::Red, glm::vec3(-2.0f, 0.0f, 12.0f));
+  return scene;
+}
+
+void PlanMove(GameLogic& game, int unitId, glm::vec3 destination) {
+  game.ClickUnit(unitId, game.FindUnit(unitId)->team);
+  game.ChooseMove();
+  game.ClickGround(destination, game.FindUnit(unitId)->team);
+  game.FinishMovePlan();
+}
+
+void PassRest(GameLogic& game) {
+  for (const Unit& u : game.GetScene().units) {
+    if (u.alive && u.plan.type == tactics::PlannedActionType::None) {
+      game.ClickUnit(u.id, u.team);
+      game.ChoosePass();
+    }
+  }
+}
+
+void TestZiplineExtendsReachBeyondWalking() {
+  const glm::vec3 far(20.0f, 0.0f, 0.0f);
+
+  // Without the line the click is out of the round's walking budget.
+  tactics::Scene noLine = ZiplineScene();
+  noLine.ziplines.clear();
+  GameLogic walkOnly(noLine);
+  walkOnly.ClickUnit(0, Team::Blue);
+  walkOnly.ChooseMove();
+  CHECK(walkOnly.ZiplineFrontiers().empty());
+  walkOnly.HoverGround(far, Team::Blue);
+  CHECK(!walkOnly.MovePreviewValid());
+  walkOnly.ClickGround(far, Team::Blue);
+  CHECK(walkOnly.FindUnit(0)->plan.type == tactics::PlannedActionType::None);
+
+  // With it, the same click plans walk -> ride -> walk.
+  GameLogic game(ZiplineScene());
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  // Only the near end is affordable (the far one is 28 units of walking away).
+  CHECK(game.ZiplineFrontiers().size() == 1);
+  const auto& region = game.ZiplineFrontiers()[0];
+  CHECK(region.zipline == 0);
+  CHECK(glm::distance(region.entry, game.GetScene().ziplines[0].a) < 1e-4f);
+  CHECK(glm::distance(region.exit, game.GetScene().ziplines[0].b) < 1e-4f);
+  CHECK(std::fabs(region.walkCost - 2.0f) < 0.05f);
+  // The walk region doesn't reach `far`; the zipline region does.
+  const ReachField* walk = game.MoveFrontier();
+  CHECK(walk != nullptr);
+  auto reaches = [](const ReachField& f, glm::vec3 p) {
+    const int ix = static_cast<int>(std::lround((p.x - f.minX) / f.step));
+    const int iz = static_cast<int>(std::lround((p.z - f.minZ) / f.step));
+    return f.Reached(ix, iz);
+  };
+  CHECK(!reaches(*walk, far));
+  CHECK(reaches(region.field, far));
+  CHECK(!reaches(region.field, glm::vec3(31.0f, 0.0f, 0.0f)));  // 21 beyond the exit: too far.
+
+  game.HoverGround(far, Team::Blue);
+  CHECK(game.MovePreviewValid());
+  CHECK(game.MovePreviewRides().size() == 1);
+
+  game.ClickGround(far, Team::Blue);
+  const Unit* mover = game.FindUnit(0);
+  CHECK(mover->plan.type == tactics::PlannedActionType::Move);
+  CHECK(mover->plan.moveRides.size() == 1);
+  const auto& path = mover->plan.movePath;
+  const tactics::PathRide ride = mover->plan.moveRides[0];
+  CHECK(ride.zipline == 0);
+  CHECK(static_cast<size_t>(ride.segment) + 1 < path.size());
+  CHECK(glm::distance(path[ride.segment], game.GetScene().ziplines[0].a) < 1e-4f);
+  CHECK(glm::distance(path[ride.segment + 1], game.GetScene().ziplines[0].b) < 1e-4f);
+  CHECK(glm::distance(path.back(), far) < 1e-3f);
+  game.FinishMovePlan();
+
+  PassRest(game);
+  game.CommitRound();
+  while (game.Mode() == InputMode::Executing) game.Update(0.05f);
+  CHECK(glm::distance(game.FindUnit(0)->position, far) < 0.05f);
+  CHECK(game.RoundNumber() == 2);
+}
+
+void TestZiplineCostScalesWithLength() {
+  auto frontierOf = [](float lineLength) {
+    GameLogic game(ZiplineScene(lineLength));
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseMove();
+    // The short line's far end is also within walking range; take the near-end entry.
+    for (const auto& region : game.ZiplineFrontiers()) {
+      if (glm::distance(region.entry, game.GetScene().ziplines[0].a) < 1e-4f) return region;
+    }
+    CHECK(false);
+    return GameLogic::ZiplineFrontier{};
+  };
+  const auto longLine = frontierOf(26.0f);
+  const auto shortLine = frontierOf(13.0f);
+  CHECK(std::fabs(longLine.rideCost - 26.0f * tactics::constants::kZiplineCostFactor) < 1e-4f);
+  CHECK(std::fabs(shortLine.rideCost - 13.0f * tactics::constants::kZiplineCostFactor) < 1e-4f);
+  CHECK(std::fabs(longLine.rideCost - 2.0f * shortLine.rideCost) < 1e-4f);
+  // The longer line leaves less budget for the onward walk: budget 20 - walk 2 - ride.
+  CHECK(std::fabs(longLine.field.budget - (20.0f - longLine.walkCost - longLine.rideCost)) < 1e-3f);
+  CHECK(std::fabs(shortLine.field.budget - (20.0f - shortLine.walkCost - shortLine.rideCost)) < 1e-3f);
+  CHECK(shortLine.field.budget > longLine.field.budget);
+
+  // A destination right at the edge of the short line's reach is out of the long line's.
+  GameLogic game(ZiplineScene(26.0f));
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  const glm::vec3 exit = game.GetScene().ziplines[0].b;
+  game.HoverGround(exit + glm::vec3(longLine.field.budget - 0.5f, 0.0f, 0.0f), Team::Blue);
+  CHECK(game.MovePreviewValid());
+  game.HoverGround(exit + glm::vec3(longLine.field.budget + 1.0f, 0.0f, 0.0f), Team::Blue);
+  CHECK(!game.MovePreviewValid());
+}
+
+void TestZiplineIsTwoWay() {
+  tactics::Scene scene = ZiplineScene();
+  scene.units[0].position = glm::vec3(12.0f, 0.0f, 0.0f);  // Near the b end.
+  GameLogic game(scene);
+  const glm::vec3 far(-26.0f, 0.0f, 0.0f);  // 38 away on foot; 2 + 6.5 + 10 by line.
+  PlanMove(game, 0, far);
+  const Unit* mover = game.FindUnit(0);
+  CHECK(mover->plan.type == tactics::PlannedActionType::Move);
+  CHECK(mover->plan.moveRides.size() == 1);
+  const auto& path = mover->plan.movePath;
+  const tactics::PathRide ride = mover->plan.moveRides[0];
+  CHECK(glm::distance(path[ride.segment], game.GetScene().ziplines[0].b) < 1e-4f);
+  CHECK(glm::distance(path[ride.segment + 1], game.GetScene().ziplines[0].a) < 1e-4f);
+  PassRest(game);
+  game.CommitRound();
+  while (game.Mode() == InputMode::Executing) game.Update(0.05f);
+  CHECK(glm::distance(game.FindUnit(0)->position, far) < 0.05f);
+}
+
+void TestZiplineRideIsFasterThanWalking() {
+  GameLogic game(ZiplineScene());
+  PlanMove(game, 0, glm::vec3(20.0f, 0.0f, 0.0f));
+  PassRest(game);
+  game.CommitRound();
+  // 0.5 s walks the 2 units to the anchor; riding then advances 1/kZiplineCostFactor
+  // world units per unit of budget (4 units/s of budget = 16 units/s of cable).
+  for (int i = 0; i < 10; ++i) game.Update(0.05f);  // t = 0.5 s
+  CHECK(game.FindUnit(0)->position.x < -15.5f);
+  for (int i = 0; i < 10; ++i) game.Update(0.05f);  // t = 1.0 s: 0.5 s riding.
+  const float expected = -16.0f + 0.5f * 4.0f / tactics::constants::kZiplineCostFactor;
+  CHECK(game.IsUnitRiding(0));
+  CHECK(std::fabs(game.FindUnit(0)->position.x - expected) < 0.5f);
+}
+
+void TestZiplineOccupiedLineBlocksSecondRider() {
+  GameLogic game(ZiplineScene());
+  MakePassive(game);
+  PlanMove(game, 0, glm::vec3(20.0f, 0.0f, 0.0f));
+  PlanMove(game, 1, glm::vec3(20.0f, 0.0f, 1.0f));
+  PassRest(game);
+  game.CommitRound();
+
+  const glm::vec3 anchor = game.GetScene().ziplines[0].a;
+  bool sawBlocked = false;
+  int ticks = 0;
+  while (game.Mode() == InputMode::Executing && ++ticks < 2000) {
+    game.Update(0.02f);
+    const bool r0 = game.IsUnitRiding(0), r1 = game.IsUnitRiding(1);
+    CHECK(!(r0 && r1));  // One rider at a time.
+    // Unit 1 reaches the anchor while unit 0 is still on the line: it waits there.
+    if (r0 && glm::distance(game.FindUnit(1)->position, anchor) < 1e-3f) sawBlocked = true;
+  }
+  CHECK(sawBlocked);
+  CHECK(game.Mode() != InputMode::Executing);
+  // The second rider still gets across once the line frees up.
+  CHECK(glm::distance(game.FindUnit(0)->position, glm::vec3(20.0f, 0.0f, 0.0f)) < 0.05f);
+  CHECK(glm::distance(game.FindUnit(1)->position, glm::vec3(20.0f, 0.0f, 1.0f)) < 0.05f);
+}
+
+void TestZiplineRiderCannotShoot() {
+  GameLogic game(ZiplineScene());
+  MakePassive(game);
+  Unit* rider = game.FindUnit(0);
+  Unit* enemy = game.FindUnit(3);
+  enemy->position = glm::vec3(-2.0f, 0.0f, 3.0f);
+  PlanMove(game, 0, glm::vec3(20.0f, 0.0f, 0.0f));
+  PassRest(game);
+  // Open ground, enemy in the cone: the shot connects while walking...
+  CHECK(game.ShotHitChance(*rider, *enemy) > 0.0f);
+  game.CommitRound();
+  bool sawRide = false;
+  for (int i = 0; i < 400 && game.Mode() == InputMode::Executing; ++i) {
+    game.Update(0.02f);
+    if (game.IsUnitRiding(0)) {
+      sawRide = true;
+      CHECK(game.ShotHitChance(*rider, *enemy) == 0.0f);  // ...but not while riding.
+    }
+  }
+  CHECK(sawRide);
+}
+
+void TestZiplinePlanSnapshotRoundTrip() {
+  GameLogic game(ZiplineScene());
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(glm::vec3(20.0f, 0.0f, 0.0f), Team::Blue);
+  game.ClickGround(glm::vec3(20.0f, 0.0f, 12.0f), Team::Blue);  // A later leg, walk only.
+  game.FinishMovePlan();
+  const auto& plan = game.FindUnit(0)->plan;
+  CHECK(plan.moveRides.size() == 1);
+  CHECK(plan.queuedLegs.size() == 1);
+
+  tactics::GameSnapshot out;
+  CHECK(tactics::DeserializeSnapshot(tactics::SerializeSnapshot(game.ExportState()), &out));
+  GameLogic mirror(ZiplineScene());
+  CHECK(mirror.ImportState(out));
+  CHECK(mirror.FindUnit(0)->plan.moveRides == plan.moveRides);
+  CHECK(mirror.FindUnit(0)->plan.queuedLegs.size() == 1);
+  CHECK(mirror.FindUnit(0)->plan.queuedLegRides.empty() ||
+        mirror.FindUnit(0)->plan.queuedLegRides[0].empty());
+
+  // A later leg that itself rides survives the round trip.
+  GameLogic chained(ZiplineScene());
+  chained.ClickUnit(0, Team::Blue);
+  chained.ChooseMove();
+  chained.ClickGround(glm::vec3(20.0f, 0.0f, 0.0f), Team::Blue);
+  chained.ClickGround(glm::vec3(-14.0f, 0.0f, 0.0f), Team::Blue);  // Back across the line.
+  chained.FinishMovePlan();
+  const auto& chainedPlan = chained.FindUnit(0)->plan;
+  CHECK(chainedPlan.queuedLegRides.size() == 1 && chainedPlan.queuedLegRides[0].size() == 1);
+  CHECK(tactics::DeserializeSnapshot(tactics::SerializeSnapshot(chained.ExportState()), &out));
+  CHECK(mirror.ImportState(out));
+  CHECK(mirror.FindUnit(0)->plan.moveRides == chainedPlan.moveRides);
+  CHECK(mirror.FindUnit(0)->plan.queuedLegRides == chainedPlan.queuedLegRides);
+}
+
+void TestZiplineLegsChainAcrossRounds() {
+  // Leg 1 rides across; leg 2 rides back. Each leg is priced separately.
+  GameLogic game(ZiplineScene());
+  MakePassive(game);
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(glm::vec3(20.0f, 0.0f, 0.0f), Team::Blue);
+  game.ClickGround(glm::vec3(-14.0f, 0.0f, 0.0f), Team::Blue);  // 34 on foot from leg 1's end: ride back.
+  game.FinishMovePlan();
+  const auto& plan = game.FindUnit(0)->plan;
+  CHECK(plan.queuedLegs.size() == 1);
+  CHECK(plan.moveRides.size() == 1);
+  CHECK(plan.queuedLegRides.size() == 1 && plan.queuedLegRides[0].size() == 1);
+  for (int round = 0; round < 2; ++round) {
+    PassRest(game);
+    game.CommitRound();
+    while (game.Mode() == InputMode::Executing) game.Update(0.05f);
+  }
+  CHECK(glm::distance(game.FindUnit(0)->position, glm::vec3(-14.0f, 0.0f, 0.0f)) < 0.05f);
+}
+
 int main() {
   TestNavMeshRoutesAroundObstacle();
   TestNavMeshDirectPathWhenUnobstructed();
@@ -1954,6 +2225,14 @@ int main() {
   TestResetClearsSightings();
   TestImportStateOfNewGameClearsFollowerSightings();
   TestFollowerBuildsSightingsWithoutPhysicsUpdate();
+  TestZiplineExtendsReachBeyondWalking();
+  TestZiplineCostScalesWithLength();
+  TestZiplineIsTwoWay();
+  TestZiplineRideIsFasterThanWalking();
+  TestZiplineOccupiedLineBlocksSecondRider();
+  TestZiplineRiderCannotShoot();
+  TestZiplinePlanSnapshotRoundTrip();
+  TestZiplineLegsChainAcrossRounds();
 
   if (g_failures == 0) {
     std::printf("All logic tests passed.\n");

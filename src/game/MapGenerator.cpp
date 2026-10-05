@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "game/Geometry.h"
+#include "game/NavMesh.h"
 
 namespace tactics {
 namespace {
@@ -765,6 +766,131 @@ bool SpansTouchAtSameHeight(const WalkSurface& a, const WalkSurface& b) {
                    SurfaceHeightAt(b, probe.x, probe.y)) < 0.6f;
 }
 
+// --- Ziplines (issue #166) -------------------------------------------------
+
+// Distance from `p` to a convex polygon of either winding (0 inside).
+float DistanceToPolygon(glm::vec2 p, const std::vector<glm::vec2>& poly) {
+  bool allLeft = true, allRight = true;
+  float best = std::numeric_limits<float>::infinity();
+  for (size_t i = 0; i < poly.size(); ++i) {
+    const glm::vec2 a = poly[i], b = poly[(i + 1) % poly.size()];
+    const glm::vec2 e = b - a, r = p - a;
+    const float cross = e.x * r.y - e.y * r.x;
+    allLeft &= cross >= 0.0f;
+    allRight &= cross <= 0.0f;
+    best = std::min(best, PointSegmentDistance(p, a, b));
+  }
+  return allLeft || allRight ? 0.0f : best;
+}
+
+// Closest approach of two XZ segments (0 if they cross).
+float SegmentSegmentDistance(glm::vec2 a0, glm::vec2 a1, glm::vec2 b0, glm::vec2 b1) {
+  auto side = [](glm::vec2 p, glm::vec2 q, glm::vec2 r) {
+    return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+  };
+  if (side(a0, a1, b0) * side(a0, a1, b1) < 0.0f && side(b0, b1, a0) * side(b0, b1, a1) < 0.0f) {
+    return 0.0f;
+  }
+  return std::min({PointSegmentDistance(a0, b0, b1), PointSegmentDistance(a1, b0, b1),
+                   PointSegmentDistance(b0, a0, a1), PointSegmentDistance(b1, a0, a1)});
+}
+
+// Draws each block's ziplines. A line runs along one street-side edge of the
+// block, offset into the obstacle-free sidewalk strip, so both anchors are
+// ordinary walkable ground reachable from the street. Candidates are
+// rejected unless the whole line keeps clear of every obstacle, other
+// ziplines, and the spawn points. Uses its own RNG stream (seed-derived), so
+// adding or removing ziplines never changes the rest of a seed's map.
+void PlaceZiplines(Scene* scene, const std::vector<UrbanBlock>& blocks, uint32_t seed,
+                   const MapGeneratorConfig& c) {
+  if (c.maxZiplinesPerBlock <= 0) return;
+  Rng rng(seed ^ 0x21b1e5a7u);
+  constexpr float kClearance = 0.7f;    // Anchors/cable stay this far from any obstacle.
+  constexpr float kEdgeMargin = 0.8f;   // Along-edge slack at both ends of a candidate.
+  constexpr float kLineSpacing = 2.5f;  // Min gap between two ziplines (and from a spawn).
+  constexpr int kAttempts = 40;
+  const float inset = std::min(c.sidewalkWidth * 0.5f, 0.75f);
+
+  std::vector<std::vector<glm::vec2>> footprints;
+  std::vector<glm::vec4> footprintBounds;  // minX, minZ, maxX, maxZ.
+  for (const Obstacle& o : scene->obstacles) {
+    footprints.push_back(ObstacleFootprint(o));
+    footprintBounds.emplace_back(o.bounds.min.x, o.bounds.min.z, o.bounds.max.x, o.bounds.max.z);
+  }
+  // Anchors must be ordinary walkable ground in the real (padded) navmesh.
+  NavMesh nav;
+  nav.Build(scene->obstacles, scene->mapHalfExtent, constants::kAgentRadius);
+  auto clear = [&](glm::vec2 a, glm::vec2 b) {
+    if (!nav.IsWalkable(a.x, a.y) || !nav.IsWalkable(b.x, b.y)) return false;
+    const glm::vec2 lo = glm::min(a, b) - glm::vec2(kClearance);
+    const glm::vec2 hi = glm::max(a, b) + glm::vec2(kClearance);
+    const int steps = std::max(2, static_cast<int>(glm::length(b - a) / 0.5f));
+    for (size_t i = 0; i < footprints.size(); ++i) {
+      const glm::vec4& bb = footprintBounds[i];
+      if (bb.z < lo.x || bb.x > hi.x || bb.w < lo.y || bb.y > hi.y) continue;
+      for (int s = 0; s <= steps; ++s) {
+        if (DistanceToPolygon(a + (b - a) * (static_cast<float>(s) / steps), footprints[i]) <
+            kClearance) {
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+
+  for (const UrbanBlock& block : blocks) {
+    std::vector<glm::vec2> poly = block.vertices;
+    if (poly.empty()) {
+      poly = {{block.x0, block.z0}, {block.x1, block.z0}, {block.x1, block.z1}, {block.x0, block.z1}};
+    }
+    if (poly.size() < 3) continue;
+    float area2 = 0.0f, perimeter = 0.0f;
+    std::vector<float> edgeLen(poly.size());
+    for (size_t i = 0; i < poly.size(); ++i) {
+      const glm::vec2 a = poly[i], b = poly[(i + 1) % poly.size()];
+      area2 += a.x * b.y - b.x * a.y;
+      perimeter += edgeLen[i] = glm::length(b - a);
+    }
+    const float inward = area2 >= 0.0f ? 1.0f : -1.0f;
+
+    const int want = rng.Int(0, c.maxZiplinesPerBlock);
+    int placed = 0;
+    for (int attempt = 0; attempt < kAttempts * want && placed < want; ++attempt) {
+      // Length-weighted edge pick, then a span along it.
+      float pick = rng.Float(0.0f, perimeter);
+      size_t edge = 0;
+      while (edge + 1 < poly.size() && pick > edgeLen[edge]) pick -= edgeLen[edge++];
+      const float length = rng.Float(c.ziplineMinLength, c.ziplineMaxLength);
+      const float t0 = rng.Unit01();
+      const bool flip = rng.Chance(0.5f);
+      const float slack = edgeLen[edge] - length - 2.0f * kEdgeMargin;
+      if (slack < 0.0f) continue;
+      const glm::vec2 p0 = poly[edge], p1 = poly[(edge + 1) % poly.size()];
+      const glm::vec2 dir = (p1 - p0) / edgeLen[edge];
+      const glm::vec2 normal = glm::vec2(-dir.y, dir.x) * inward;
+      const glm::vec2 start = p0 + dir * (kEdgeMargin + slack * t0) + normal * inset;
+      glm::vec2 a = start, b = start + dir * length;
+      if (flip) std::swap(a, b);
+
+      // Near an acute corner the inset line can leave the block.
+      if (!PointInConvexPolygon(a, poly) || !PointInConvexPolygon(b, poly)) continue;
+      if (!clear(a, b)) continue;
+      bool ok = true;
+      for (const Zipline& other : scene->ziplines) {
+        ok &= SegmentSegmentDistance(a, b, glm::vec2(other.a.x, other.a.z),
+                                     glm::vec2(other.b.x, other.b.z)) >= kLineSpacing;
+      }
+      for (const Unit& unit : scene->units) {
+        ok &= PointSegmentDistance(glm::vec2(unit.position.x, unit.position.z), a, b) >=
+              kLineSpacing;
+      }
+      if (!ok) continue;
+      scene->ziplines.push_back(Zipline{glm::vec3(a.x, 0.0f, a.y), glm::vec3(b.x, 0.0f, b.y)});
+      ++placed;
+    }
+  }
+}
+
 Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   Rng rng(seed);
   Scene scene;
@@ -954,6 +1080,7 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     unit.facingYaw = blueTeam ? yawBlue : yawBlue + kPi;
     scene.units.push_back(unit);
   }
+  PlaceZiplines(&scene, blocks, seed, c);
   return scene;
 }
 
@@ -1180,6 +1307,7 @@ Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     red.weapon = DefaultWeaponForUnit(red.id);
     scene.units.push_back(red);
   }
+  PlaceZiplines(&scene, UrbanBlocks(seed, c), seed, c);
   return scene;
 }
 

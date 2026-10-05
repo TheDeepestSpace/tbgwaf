@@ -73,6 +73,10 @@ bool SameScene(const Scene& a, const Scene& b) {
       return false;
     }
   }
+  if (a.ziplines.size() != b.ziplines.size()) return false;
+  for (size_t i = 0; i < a.ziplines.size(); ++i) {
+    if (a.ziplines[i].a != b.ziplines[i].a || a.ziplines[i].b != b.ziplines[i].b) return false;
+  }
   for (size_t i = 0; i < a.units.size(); ++i) {
     if (a.units[i].position != b.units[i].position || a.units[i].team != b.units[i].team ||
         a.units[i].facingYaw != b.units[i].facingYaw) {
@@ -1243,10 +1247,118 @@ void TestBranchJunctionCrossingsStayLocalAcrossLayouts() {
   }
 }
 
+// --- Ziplines (issue #166). ---
+
+bool InsideConvex(glm::vec2 p, const std::vector<glm::vec2>& poly) {
+  bool allLeft = true, allRight = true;
+  for (size_t i = 0; i < poly.size(); ++i) {
+    const glm::vec2 a = poly[i], b = poly[(i + 1) % poly.size()];
+    const float cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+    allLeft &= cross >= -kEps;
+    allRight &= cross <= kEps;
+  }
+  return allLeft || allRight;
+}
+
+std::vector<glm::vec2> BlockPolygon(const UrbanBlock& block) {
+  if (!block.vertices.empty()) return block.vertices;
+  return {{block.x0, block.z0}, {block.x1, block.z0}, {block.x1, block.z1}, {block.x0, block.z1}};
+}
+
+glm::vec2 XZ(const glm::vec3& p) { return glm::vec2(p.x, p.z); }
+
+float MinSegmentSeparation(const Zipline& l, const Zipline& m) {
+  float best = 1.0e9f;
+  for (int i = 0; i <= 40; ++i) {
+    const glm::vec2 p = XZ(glm::mix(l.a, l.b, i / 40.0f));
+    best = std::min(best, DistanceToSegment(p, XZ(m.a), XZ(m.b)));
+  }
+  for (int i = 0; i <= 40; ++i) {
+    const glm::vec2 p = XZ(glm::mix(m.a, m.b, i / 40.0f));
+    best = std::min(best, DistanceToSegment(p, XZ(l.a), XZ(l.b)));
+  }
+  return best;
+}
+
+void TestZiplinesAreDeterministicBoundedAndValid() {
+  for (const bool legacy : {false, true}) {
+    for (uint32_t seed : kSeeds) {
+      MapGeneratorConfig config = legacy ? LegacyConfig() : MapGeneratorConfig{};
+      const Scene scene = GenerateUrbanMap(seed, config);
+      CHECK(SameScene(scene, GenerateUrbanMap(seed, config)));
+      CHECK(!scene.ziplines.empty());
+
+      // Placing ziplines never perturbs the rest of the seed's map.
+      MapGeneratorConfig off = config;
+      off.maxZiplinesPerBlock = 0;
+      Scene bare = GenerateUrbanMap(seed, off);
+      CHECK(bare.ziplines.empty());
+      bare.ziplines = scene.ziplines;
+      CHECK(SameScene(scene, bare));
+
+      // 0..2 lines per block: every line sits inside a block, and no block holds more than 2.
+      const std::vector<UrbanBlock> blocks = UrbanBlocks(seed, config);
+      std::vector<int> perBlock(blocks.size(), 0);
+      for (const Zipline& line : scene.ziplines) {
+        bool inBlock = false;
+        for (size_t i = 0; i < blocks.size(); ++i) {
+          const auto poly = BlockPolygon(blocks[i]);
+          if (InsideConvex(XZ(line.a), poly) && InsideConvex(XZ(line.b), poly)) {
+            ++perBlock[i];
+            inBlock = true;
+          }
+        }
+        CHECK(inBlock);
+      }
+      for (int count : perBlock) CHECK(count <= config.maxZiplinesPerBlock);
+
+      NavMesh nav;
+      nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius);
+      for (size_t i = 0; i < scene.ziplines.size(); ++i) {
+        const Zipline& line = scene.ziplines[i];
+        // Length bounded, so ride cost stays sensible.
+        CHECK(line.Length() >= config.ziplineMinLength - kEps);
+        CHECK(line.Length() <= config.ziplineMaxLength + kEps);
+        CHECK(std::fabs(line.a.y) < kEps && std::fabs(line.b.y) < kEps);
+        // Anchors are walkable ground and the cable never crosses an obstacle.
+        CHECK(nav.IsWalkable(line.a.x, line.a.z));
+        CHECK(nav.IsWalkable(line.b.x, line.b.z));
+        CHECK(std::fabs(line.a.x) < scene.mapHalfExtent && std::fabs(line.b.z) < scene.mapHalfExtent);
+        for (const Obstacle& o : scene.obstacles) {
+          const auto fp = ObstacleFootprint(o);
+          for (int k = 0; k <= 80; ++k) {
+            CHECK(!InsideConvex(XZ(glm::mix(line.a, line.b, k / 80.0f)), fp));
+          }
+        }
+        for (size_t j = i + 1; j < scene.ziplines.size(); ++j) {
+          CHECK(MinSegmentSeparation(line, scene.ziplines[j]) >= 2.0f);
+        }
+      }
+    }
+  }
+  // Different seeds draw different lines.
+  CHECK(!SameScene(GenerateUrbanMap(1), GenerateUrbanMap(42)));
+}
+
+// Anchors are reachable on foot from the spawns, so a zipline is a real nav edge.
+void TestZiplineAnchorsReachableFromSpawn() {
+  const Scene scene = GenerateUrbanMap(42);
+  NavMesh nav;
+  nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
+            &scene.walkSurfaces);
+  std::vector<glm::vec3> path;
+  for (const Zipline& line : scene.ziplines) {
+    CHECK(nav.FindPath(scene.units.front().position, line.a, &path));
+    CHECK(nav.FindPath(scene.units.front().position, line.b, &path));
+  }
+}
+
 }  // namespace
 
 int main() {
   TestDeterminismAndVariety();
+  TestZiplinesAreDeterministicBoundedAndValid();
+  TestZiplineAnchorsReachableFromSpawn();
   TestPinnedSeedFingerprints();
   TestMapIsMuchLargerThanDefault();
   TestStreetsAndSidewalksAreObstacleFree();

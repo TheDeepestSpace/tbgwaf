@@ -1,0 +1,34 @@
+name: lock_on_staged_ui
+description: >
+  Lock-on staging UI (issue #140): clicking an enemy figure while aiming does NOT commit
+  the shot -- it stages the lock, turning the aim cone onto the figure so the cone's base
+  (the cosine-law hit-probability footprint the shader paints) lands on the figure's
+  front, with the "+" selector on its torso. The shot-level bar stays up, so the burst
+  size is pickable for a locked target exactly like for a free-aim point; Fire commits
+  with the chosen count. The duelists stand close (5 apart) so every scattered bullet of
+  the committed burst is geometrically certain to cross the figure, making the pinned-hit
+  kill deterministic.
+
+shot_rolls: [0.0]
+
+units:
+  - {id: 0, team: blue, position: [-2, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [3, 0, 0], facing_degrees: 180}
+
+script:
+  - action: aim
+    description: "Clicking the enemy figure stages the lock: the cone turns onto the figure with its probability footprint on the figure's front, the '+' sits on the torso, and the shot bar (dialed to 3 here) stays up."
+    actor: 0
+    shots: 3
+    aim_from: [3, 20, 0]
+    aim_dir: [0, -1, 0]
+  - action: shoot
+    description: "Fire commits the staged lock with the chosen 3-shot burst."
+    actor: 0
+    confirm: true
+  - action: pass
+    actor: 1
+  - action: commit
+
+  - assert: {unit: 1, alive: false, comment: The committed locked burst resolves with the pinned hit rolls}
+  - assert: {winner: blue}

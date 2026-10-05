@@ -1,0 +1,37 @@
+name: free_aim_aiming_ui
+description: >
+  Issue #129 aiming UI captures, driven through the same touch-friendly flow a player
+  uses (tap-to-place, re-tap to adjust, confirm): the acid-green 360-degree LOS highlight
+  with obstacle shadows, the "+" selector with the spread-only cone over empty ground,
+  the cone lighting up a figure standing inside it, and the planned shot's persisting marker after confirmation.
+
+map:
+  obstacles:
+    - {center: [0, -4], half_extent: [1, 2], height: 2}
+    - {center: [3, 5], half_extent: [1.5, 1], height: 2}
+
+units:
+  - {id: 0, team: blue, position: [-8, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [6, 0, 0], facing_degrees: 180}
+
+script:
+  - action: aim
+    description: "Tap-to-place on empty ground: 360-degree LOS highlight (note the obstacle shadows), '+' selector, and a spread-only cone with no unit target."
+    actor: 0
+    aim_from: [-2, 20, -8]
+    aim_dir: [0, -1, 0]
+  - action: aim
+    description: "Re-placing adjusts the aim (the drag-adjust gesture): the cone now passes over red1, which catches the cone's light -- hit probability feedback appears only on figures inside the cone."
+    actor: 0
+    at: [8, 0.9, 0]
+  - action: cancel
+    actor: 0
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: commit
+
+  - assert: {unit: 0, alive: true}
+  - assert: {unit: 1, alive: true}
+  - assert: {round: 2}

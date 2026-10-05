@@ -1,7 +1,7 @@
 name: Deploy Jev adapter
 
 on:
-  # TEMP: deploy on every push to this branch while iterating; remove before merge
+  # TEMP: deploy on every push to this branch while iterating; remove before merge (retrigger)
   push:
     branches: [jev-prototype-165]
     paths:

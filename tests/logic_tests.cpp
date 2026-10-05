@@ -2146,6 +2146,99 @@ void TestZiplinePlanSnapshotRoundTrip() {
   CHECK(mirror.FindUnit(0)->plan.queuedLegRides == chainedPlan.queuedLegRides);
 }
 
+// Street-to-roof line: a 6-high building at x in [2,10] with a flat roof slab
+// and a line from the street (-7,0,0) up to the roof (3,6.05,0).
+tactics::Scene RoofZiplineScene() {
+  tactics::Scene scene;
+  scene.mapHalfExtent = 40.0f;
+  scene.obstacles.push_back(tactics::Obstacle{
+      tactics::AABB{glm::vec3(2.0f, 0.0f, -4.0f), glm::vec3(10.0f, 6.0f, 4.0f)}, false});
+  tactics::WalkSurface roof;
+  roof.vertices = {{2.25f, 6.05f, -3.75f}, {2.25f, 6.05f, 3.75f}, {9.75f, 6.05f, 3.75f},
+                   {9.75f, 6.05f, -3.75f}};
+  scene.walkSurfaces.push_back(roof);
+  scene.ziplines.push_back(
+      tactics::Zipline{glm::vec3(-7.0f, 0.0f, 0.0f), glm::vec3(3.0f, 6.05f, 0.0f)});
+  tactics::Unit blue;
+  blue.id = 0;
+  blue.team = tactics::Team::Blue;
+  blue.position = glm::vec3(-9.0f, 0.0f, 0.0f);
+  scene.units.push_back(blue);
+  tactics::Unit red;
+  red.id = 3;
+  red.team = tactics::Team::Red;
+  red.position = glm::vec3(-9.0f, 0.0f, 20.0f);
+  scene.units.push_back(red);
+  return scene;
+}
+
+// Rides the line street -> roof -> street, checking the ride pose state
+// (travel along the cable, slope sign) on the way and that the rider lands
+// on the roof / back on the street.
+void TestZiplineRoofAccessBothDirections() {
+  GameLogic game(RoofZiplineScene());
+  MakePassive(game);
+  const glm::vec3 roofSpot(7.0f, 6.05f, 0.0f);
+  PlanMove(game, 0, roofSpot);
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Move);
+  CHECK(game.FindUnit(0)->plan.moveRides.size() == 1);
+  PassRest(game);
+  game.CommitRound();
+  bool sawUphill = false;
+  float lastTravel = -1.0f;
+  for (int i = 0; i < 400 && game.Mode() == InputMode::Executing; ++i) {
+    game.Update(0.02f);
+    const Unit* u = game.FindUnit(0);
+    if (u->rideTravel >= 0.0f) {
+      sawUphill |= u->rideSlope > 0.5f && std::fabs(u->rideLength - 11.7f) < 0.2f;
+      CHECK(u->rideTravel >= lastTravel - 1e-4f && u->rideTravel <= u->rideLength + 1e-4f);
+      lastTravel = u->rideTravel;
+    }
+  }
+  CHECK(sawUphill);
+  CHECK(game.FindUnit(0)->rideTravel < 0.0f);
+  CHECK(glm::distance(game.FindUnit(0)->position, roofSpot) < 0.05f);
+
+  // And back down to the street.
+  const glm::vec3 street(-12.0f, 0.0f, 0.0f);
+  PlanMove(game, 0, street);
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Move);
+  CHECK(game.FindUnit(0)->plan.moveRides.size() == 1);
+  PassRest(game);
+  game.CommitRound();
+  bool sawDownhill = false;
+  for (int i = 0; i < 400 && game.Mode() == InputMode::Executing; ++i) {
+    game.Update(0.02f);
+    const Unit* u = game.FindUnit(0);
+    sawDownhill |= u->rideTravel >= 0.0f && u->rideSlope < -0.5f;
+  }
+  CHECK(sawDownhill);
+  CHECK(glm::distance(game.FindUnit(0)->position, street) < 0.05f);
+
+  // The roof is only reachable by the line: no walking route from the street.
+  tactics::Scene noLine = RoofZiplineScene();
+  noLine.ziplines.clear();
+  GameLogic noZip(noLine);
+  PlanMove(noZip, 0, roofSpot);
+  CHECK(noZip.FindUnit(0)->plan.type != tactics::PlannedActionType::Move);
+}
+
+// The ride pose state survives a snapshot, so a follower plays the same animation.
+void TestRideStateInSnapshot() {
+  GameLogic game(RoofZiplineScene());
+  Unit* u = game.FindUnit(0);
+  u->rideTravel = 3.5f;
+  u->rideLength = 11.7f;
+  u->rideSlope = -0.6f;
+  tactics::GameSnapshot snap;
+  CHECK(tactics::DeserializeSnapshot(tactics::SerializeSnapshot(game.ExportState()), &snap));
+  GameLogic mirror(RoofZiplineScene());
+  CHECK(mirror.ImportState(snap));
+  CHECK(mirror.FindUnit(0)->rideTravel == 3.5f);
+  CHECK(mirror.FindUnit(0)->rideLength == 11.7f);
+  CHECK(mirror.FindUnit(0)->rideSlope == -0.6f);
+}
+
 void TestZiplineLegsChainAcrossRounds() {
   // Leg 1 rides across; leg 2 rides back. Each leg is priced separately.
   GameLogic game(ZiplineScene());
@@ -2233,6 +2326,8 @@ int main() {
   TestZiplineRiderCannotShoot();
   TestZiplinePlanSnapshotRoundTrip();
   TestZiplineLegsChainAcrossRounds();
+  TestZiplineRoofAccessBothDirections();
+  TestRideStateInSnapshot();
 
   if (g_failures == 0) {
     std::printf("All logic tests passed.\n");

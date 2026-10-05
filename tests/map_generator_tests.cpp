@@ -754,6 +754,7 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   // from the piers, by the merge) stays clear for ground shots.
   glm::vec3 top(0.0f);
   for (const WalkSurface& surface : scene.walkSurfaces) {
+    if (surface.neighbors.empty()) continue;  // A zipline's roof slab, not the deck.
     const glm::vec3 center = SurfaceCenter(surface);
     if (center.y > top.y) top = center;
   }
@@ -1004,6 +1005,7 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
                 &scene.walkSurfaces);
       glm::vec3 top(0.0f);  // Highest deck surface center still on the map.
       for (const WalkSurface& surface : scene.walkSurfaces) {
+        if (surface.neighbors.empty()) continue;  // A zipline's roof slab, not the deck.
         const glm::vec3 center = SurfaceCenter(surface);
         if (std::max(std::fabs(center.x), std::fabs(center.z)) > half - 2.0f) continue;
         if (center.y > top.y) top = center;
@@ -1288,60 +1290,70 @@ void TestZiplinesAreDeterministicBoundedAndValid() {
       CHECK(SameScene(scene, GenerateUrbanMap(seed, config)));
       CHECK(!scene.ziplines.empty());
 
-      // Placing ziplines never perturbs the rest of the seed's map.
+      // Placing ziplines never perturbs the rest of the seed's map: it only
+      // appends the ziplines and one roof slab per line.
       MapGeneratorConfig off = config;
       off.maxZiplinesPerBlock = 0;
       Scene bare = GenerateUrbanMap(seed, off);
       CHECK(bare.ziplines.empty());
+      CHECK(scene.walkSurfaces.size() == bare.walkSurfaces.size() + scene.ziplines.size());
       bare.ziplines = scene.ziplines;
+      bare.walkSurfaces = scene.walkSurfaces;
       CHECK(SameScene(scene, bare));
 
-      // 0..2 lines per block: every line sits inside a block, and no block holds more than 2.
       const std::vector<UrbanBlock> blocks = UrbanBlocks(seed, config);
       std::vector<int> perBlock(blocks.size(), 0);
-      for (const Zipline& line : scene.ziplines) {
-        bool inBlock = false;
-        for (size_t i = 0; i < blocks.size(); ++i) {
-          const auto poly = BlockPolygon(blocks[i]);
-          if (InsideConvex(XZ(line.a), poly) && InsideConvex(XZ(line.b), poly)) {
-            ++perBlock[i];
-            inBlock = true;
-          }
-        }
-        CHECK(inBlock);
-      }
-      for (int count : perBlock) CHECK(count <= config.maxZiplinesPerBlock);
-
       NavMesh nav;
       nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius);
       for (size_t i = 0; i < scene.ziplines.size(); ++i) {
         const Zipline& line = scene.ziplines[i];
-        // Length bounded, so ride cost stays sensible.
+        // Cable length bounded, so ride cost stays sensible.
         CHECK(line.Length() >= config.ziplineMinLength - kEps);
         CHECK(line.Length() <= config.ziplineMaxLength + kEps);
-        CHECK(std::fabs(line.a.y) < kEps && std::fabs(line.b.y) < kEps);
-        // Anchors are walkable ground and the cable never crosses an obstacle.
+
+        // `a` is walkable street level; `b` is on the flat roof slab of a building
+        // in a block, so the line goes from the ground up to a rooftop.
+        CHECK(std::fabs(line.a.y) < kEps);
         CHECK(nav.IsWalkable(line.a.x, line.a.z));
-        CHECK(nav.IsWalkable(line.b.x, line.b.z));
-        CHECK(std::fabs(line.a.x) < scene.mapHalfExtent && std::fabs(line.b.z) < scene.mapHalfExtent);
+        CHECK(std::fabs(line.a.x) < scene.mapHalfExtent && std::fabs(line.a.z) < scene.mapHalfExtent);
+        const WalkSurface& roof = scene.walkSurfaces[scene.walkSurfaces.size() - scene.ziplines.size() + i];
+        CHECK(!roof.connectsToGround && roof.neighbors.empty());
+        CHECK(SurfaceContainsXZ(roof, line.b.x, line.b.z));
+        CHECK(std::fabs(SurfaceHeightAt(roof, line.b.x, line.b.z) - line.b.y) < kEps);
+        CHECK(line.b.y > line.a.y + 2.0f);
+        bool onBuilding = false;
+        for (const Obstacle& o : scene.obstacles) {
+          onBuilding |= InsideConvex(XZ(line.b), ObstacleFootprint(o)) &&
+                        std::fabs(o.bounds.max.y + 0.05f - line.b.y) < kEps;
+        }
+        CHECK(onBuilding);
+        for (size_t k = 0; k < blocks.size(); ++k) {
+          if (InsideConvex(XZ(line.b), BlockPolygon(blocks[k]))) ++perBlock[k];
+        }
+
+        // The cable (post tops) never passes through an obstacle.
+        const glm::vec3 up(0.0f, constants::kZiplinePostHeight, 0.0f);
         for (const Obstacle& o : scene.obstacles) {
           const auto fp = ObstacleFootprint(o);
           for (int k = 0; k <= 80; ++k) {
-            CHECK(!InsideConvex(XZ(glm::mix(line.a, line.b, k / 80.0f)), fp));
+            const glm::vec3 p = glm::mix(line.a, line.b, k / 80.0f) + up;
+            CHECK(!InsideConvex(XZ(p), fp) || p.y > o.bounds.max.y);
           }
         }
         for (size_t j = i + 1; j < scene.ziplines.size(); ++j) {
           CHECK(MinSegmentSeparation(line, scene.ziplines[j]) >= 2.0f);
         }
       }
+      for (int count : perBlock) CHECK(count <= config.maxZiplinesPerBlock);
     }
   }
   // Different seeds draw different lines.
   CHECK(!SameScene(GenerateUrbanMap(1), GenerateUrbanMap(42)));
 }
 
-// Anchors are reachable on foot from the spawns, so a zipline is a real nav edge.
-void TestZiplineAnchorsReachableFromSpawn() {
+// The street end is reachable on foot from the spawns; the roof end only by
+// the line itself (the roof slab joins nothing).
+void TestZiplineStreetEndsReachableRoofsOnlyByLine() {
   const Scene scene = GenerateUrbanMap(42);
   NavMesh nav;
   nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
@@ -1349,7 +1361,7 @@ void TestZiplineAnchorsReachableFromSpawn() {
   std::vector<glm::vec3> path;
   for (const Zipline& line : scene.ziplines) {
     CHECK(nav.FindPath(scene.units.front().position, line.a, &path));
-    CHECK(nav.FindPath(scene.units.front().position, line.b, &path));
+    CHECK(!nav.FindPath(scene.units.front().position, line.b, &path));
   }
 }
 
@@ -1358,7 +1370,7 @@ void TestZiplineAnchorsReachableFromSpawn() {
 int main() {
   TestDeterminismAndVariety();
   TestZiplinesAreDeterministicBoundedAndValid();
-  TestZiplineAnchorsReachableFromSpawn();
+  TestZiplineStreetEndsReachableRoofsOnlyByLine();
   TestPinnedSeedFingerprints();
   TestMapIsMuchLargerThanDefault();
   TestStreetsAndSidewalksAreObstacleFree();

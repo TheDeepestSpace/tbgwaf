@@ -233,6 +233,9 @@ GameSnapshot GameLogic::ExportState() const {
     u.idleElapsed = unit.idleElapsed;
     u.shootElapsed = unit.shootElapsed;
     u.shootAimYaw = unit.shootAimYaw;
+    u.rideTravel = unit.rideTravel;
+    u.rideLength = unit.rideLength;
+    u.rideSlope = unit.rideSlope;
     u.moving = IsUnitMoving(unit.id);
     snap.units.push_back(std::move(u));
   }
@@ -284,6 +287,9 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     unit->idleElapsed = u.idleElapsed;
     unit->shootElapsed = u.shootElapsed;
     unit->shootAimYaw = u.shootAimYaw;
+    unit->rideTravel = u.rideTravel;
+    unit->rideLength = u.rideLength;
+    unit->rideSlope = u.rideSlope;
     ApplyPlan(u, unit);
     if (u.moving) mirroredMoving_.push_back(u.id);
   }
@@ -331,6 +337,7 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
         << u.knockdownAxis.x << ' ' << u.knockdownAxis.y << ' ' << u.knockdownAxis.z << ' '
         << u.knockdownElapsed << ' ' << u.walkPhase << ' ' << u.walkBlend << ' '
         << u.idleElapsed << ' ' << u.shootElapsed << ' ' << u.shootAimYaw << ' '
+        << u.rideTravel << ' ' << u.rideLength << ' ' << u.rideSlope << ' '
         << (u.moving ? 1 : 0) << ' '
         << u.planPath.size();
     for (const auto& p : u.planPath) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
@@ -371,7 +378,8 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
     if (!(in >> u.id >> u.position.x >> u.position.y >> u.position.z >> u.facingYaw >> alive >>
           plan >> u.planShootTargetId >> u.planEndFacingYaw >> u.knockdownAxis.x >>
           u.knockdownAxis.y >> u.knockdownAxis.z >> u.knockdownElapsed >> u.walkPhase >>
-          u.walkBlend >> u.idleElapsed >> u.shootElapsed >> u.shootAimYaw >> moving >>
+          u.walkBlend >> u.idleElapsed >> u.shootElapsed >> u.shootAimYaw >> u.rideTravel >> u.rideLength >>
+          u.rideSlope >> moving >>
           pathCount)) {
       return false;
     }
@@ -605,6 +613,7 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
       // the figure fell.
       move.segment = move.path.size();
       move.ridingZipline = -1;
+      mover->rideTravel = -1.0f;
       continue;
     }
 
@@ -641,13 +650,25 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
         mover->position = segEnd;
         remaining -= costToEnd;
         ++move.segment;
-        if (ride) move.ridingZipline = -1;
+        if (ride) {
+          move.ridingZipline = -1;
+          mover->rideTravel = -1.0f;
+        }
       } else {
         step = remaining / costScale;
         mover->position += (toEnd / distToEnd) * step;
         remaining = 0.0f;
       }
-      if (ride) continue;  // Hanging from the cable: no stride.
+      if (ride) {
+        // Hanging from the cable: no stride, the rig poses off the ride state.
+        if (move.ridingZipline >= 0) {
+          const float run = glm::length(glm::vec2(segDelta.x, segDelta.z));
+          mover->rideTravel = glm::distance(segStart, mover->position);
+          mover->rideLength = glm::length(segDelta);
+          mover->rideSlope = run > 1e-4f ? segDelta.y / run : 0.0f;
+        }
+        continue;
+      }
       // Distance-driven walk cycle: feet stay in step with the ground
       // regardless of run speed or frame rate. Wrapped so the phase can't
       // grow without bound over a long match.

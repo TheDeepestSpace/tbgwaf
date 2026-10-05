@@ -46,11 +46,14 @@ struct WalkSurface {
   bool connectsToGround = false;    // The lowest edge is a legal ground transition.
 };
 
-// A pre-built zipline: a two-way cable between two ground anchor posts.
-// `a`/`b` are the anchor foot positions (where a rider steps on/off); the
-// cable runs between the post tops (see constants::kZiplinePostHeight) and
-// the rider glides straight from one foot position to the other. One rider
-// at a time. Riding costs ZiplineRideCost() of a figure's move budget.
+// A pre-built zipline: a two-way cable between a ground anchor post and a
+// rooftop anchor post (ground-to-roof access to a building). `a`/`b` are the
+// anchor foot positions (where a rider steps on/off: street level at one end,
+// the roof surface at the other, in either order); the cable runs between
+// the post tops (see constants::kZiplinePostHeight) and the rider glides
+// straight from one foot position to the other (hanging from the cable, see
+// constants::kZiplineHangLift). One rider at a time. Riding costs
+// ZiplineRideCost() of a figure's move budget.
 struct Zipline {
   glm::vec3 a{0.0f};
   glm::vec3 b{0.0f};
@@ -204,7 +207,12 @@ constexpr int kSightingMemoryRounds = 3;       // 1 / kSightingFadePerRound.
 // more of the turn spent. Tune here; everything (planning, frontier,
 // execution speed) derives from it.
 constexpr float kZiplineCostFactor = 0.25f;
-constexpr float kZiplinePostHeight = 2.6f;  // Anchor post / cable-end height above its foot position.
+constexpr float kZiplinePostHeight = 1.7f;  // Short anchor post: cable-end height above its foot position.
+// A rider hangs from a trolley on the cable with the feet this far above the
+// foot-to-foot line mid-ride; the lift eases in over the first (mount) and
+// out over the last (dismount) kZiplineMountDistance of the cable.
+constexpr float kZiplineHangLift = 0.2f;
+constexpr float kZiplineMountDistance = 1.4f;
 }  // namespace constants
 
 inline float ZiplineRideCost(const Zipline& zipline) {

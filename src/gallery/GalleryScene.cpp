@@ -21,6 +21,10 @@ constexpr float kTurntableSeconds = 8.0f;
 // kWalkStrideLength world units covered at kMoveSpeed.
 constexpr float kRunCycleSeconds =
     tactics::constants::kWalkStrideLength / tactics::constants::kMoveSpeed;
+// Demo zipline ride: a 12-unit cable at a 0.6 slope, covered in kZipRideSeconds.
+constexpr float kZipRideLength = 12.0f;
+constexpr float kZipRideSlope = 0.6f;
+constexpr float kZipRideSeconds = 3.0f;
 
 // Same single directional light as the game scene, minus the shadow map:
 // the gallery shows one model on an empty stage, so shadows would only
@@ -91,6 +95,8 @@ const std::vector<GalleryItem>& Catalog() {
         {AnimKind::Idle, "idle", "idle", tactics::constants::kIdleAnimDuration},
         {AnimKind::Run, "run", "run", kRunCycleSeconds},
         {AnimKind::Shoot, "shoot", "shoot", tactics::constants::kShootAnimDuration},
+        {AnimKind::ZipDown, "zip_down", "zipline (downhill)", kZipRideSeconds},
+        {AnimKind::ZipUp, "zip_up", "zipline (uphill)", kZipRideSeconds},
     };
     for (const W& w : weapons) {
       for (const A& a : anims) {
@@ -162,6 +168,14 @@ Unit AnimationUnit(const GalleryItem& item, double t) {
       unit.shootElapsed =
           static_cast<float>(std::fmod(t, tactics::constants::kShootAnimDuration));
       unit.shootAimYaw = unit.facingYaw;
+      break;
+    case AnimKind::ZipDown:
+    case AnimKind::ZipUp:
+      unit.idleElapsed = static_cast<float>(t);
+      unit.rideLength = kZipRideLength;
+      unit.rideTravel = static_cast<float>(std::fmod(t, kZipRideSeconds) / kZipRideSeconds) *
+                        kZipRideLength;
+      unit.rideSlope = item.anim == AnimKind::ZipDown ? -kZipRideSlope : kZipRideSlope;
       break;
   }
   return unit;

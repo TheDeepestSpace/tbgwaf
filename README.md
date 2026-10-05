@@ -106,7 +106,7 @@ Every weapon model and animation can be inspected on the **asset &
 animation gallery**, a standalone page built alongside the game:
 [live gallery](https://thedeepestspace.github.io/tbgwaf/gallery/) on Pages,
 and `pr-preview/pr-<number>/gallery/` in each PR preview. The page lists
-the three weapon turntables plus idle/run/shoot per weapon (drag to orbit,
+the three weapon turntables plus idle/run/shoot and downhill/uphill zipline rides per weapon (drag to orbit,
 scroll to zoom, play/pause and scrub the loop). The catalog, framing, and
 renderer live in `src/gallery/GalleryScene.*`, shared verbatim between the
 web viewer (`src/gallery/gallery_main.cpp` + `web/gallery.html`) and a

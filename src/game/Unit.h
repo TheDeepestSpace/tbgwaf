@@ -113,6 +113,12 @@ struct Unit {
   // arm can swing onto the target even when it sits off-center in the FOV.
   float shootElapsed = -1.0f;
   float shootAimYaw = 0.0f;
+  // Visual-only zipline ride (drives the mount / hang / dismount pose):
+  // distance travelled along the cable (<0 = not riding), the cable's
+  // length and its slope (rise over run, + = riding uphill).
+  float rideTravel = -1.0f;
+  float rideLength = 0.0f;
+  float rideSlope = 0.0f;
   float runSpeed = constants::kMoveSpeed;  // World units per second while moving.
   // Visual-only loadout (issue #126): the model in the figure's hands and
   // the carry/aim animation class. Creation sites assign

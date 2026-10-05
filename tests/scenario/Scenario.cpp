@@ -165,6 +165,16 @@ Scene ParseScene(const YAML::Node& root) {
                  glm::vec3(center.x + halfExtent.x, height, center.y + halfExtent.y)};
         obstacle.climbable = obsNode["climbable"] ? obsNode["climbable"].as<bool>() : false;
         scene.obstacles.push_back(obstacle);
+        // `roof_slab: true`: a flat walkable slab on the obstacle's top (a
+        // zipline's roof end), reachable only by line.
+        if (obsNode["roof_slab"] && obsNode["roof_slab"].as<bool>()) {
+          const AABB& b = obstacle.bounds;
+          const float y = b.max.y + 0.05f;
+          WalkSurface slab;
+          slab.vertices = {{b.min.x, y, b.min.z}, {b.min.x, y, b.max.z}, {b.max.x, y, b.max.z},
+                           {b.max.x, y, b.min.z}};
+          scene.walkSurfaces.push_back(std::move(slab));
+        }
       }
     }
   }

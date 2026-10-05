@@ -60,6 +60,9 @@ struct GameSnapshot {
     float idleElapsed = 0.0f;
     float shootElapsed = -1.0f;
     float shootAimYaw = 0.0f;
+    float rideTravel = -1.0f;
+    float rideLength = 0.0f;
+    float rideSlope = 0.0f;
     bool moving = false;  // Has an in-flight move in the executing round.
   };
   std::vector<UnitState> units;

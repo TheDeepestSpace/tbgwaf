@@ -29,6 +29,9 @@ bool IsUnitVisibleForRender(const tactics::Unit& unit, tactics::Team viewingTeam
 struct RenderDebugOptions {
   bool disableFov = false;
   bool disableShadows = false;
+  // Issue #136: skip the camera-occlusion see-through pass (occluding
+  // blocks/decks are then always drawn fully opaque).
+  bool disableOcclusionFade = false;
   // Optional sink for per-frame draw counters; accumulates across panes, so
   // the caller zeroes it once per frame. Null (default) = not collected.
   RenderFrameStats* stats = nullptr;
@@ -44,6 +47,15 @@ struct PaneOverlays {
   const tactics::ReachField* moveFrontier = nullptr;  // Reachable-area gradient + border.
   bool moveFrontierSubsequentLeg = false;             // Border drawn yellow instead of green.
   bool showShotCone = false;                          // Selected figure is actively choosing a target.
+  // Free-aim (issue #129), set while this pane's selected figure is choosing
+  // a target: aimShooter gets the acid-green 360-degree LOS surface
+  // highlight (everything it could aim at directly). aimMarker is the
+  // placed-but-unconfirmed "+" selector.
+  const tactics::Unit* aimShooter = nullptr;
+  std::optional<glm::vec3> aimMarker;
+  // Where the preview cone points: the placed marker, else the hovered
+  // point, so it never sticks to the facing left by an earlier round's shot.
+  std::optional<glm::vec3> aimConeTarget;
   // Debug: walkable-cell boundaries of this navmesh (ground cells cyan,
   // climb-top cells orange), hugging the terrain. Not set by
   // BuildPaneOverlays; the app's debug toggle / the map golden harness
@@ -118,6 +130,7 @@ class SceneRenderer {
   LineMesh pathLine_;
   ColorTriangleMesh fovConeMesh_;
   ColorTriangleMesh shotConeMesh_;
+  ColorTriangleMesh aimOverlayMesh_;  // "+" aim selector / free-aim markers.
   // Reuse the terrain-clipped geometry until the unit or map changes.
   struct TerrainFovCache {
     int unitId = -1;
@@ -163,11 +176,13 @@ class SceneRenderer {
   GLuint fovDepthTex_[2] = {0, 0};
   LitTriangleMesh fovSceneMesh_;
   unsigned long long fovSceneKey_ = 0;
-  // Renders the two depth maps for `unit`, then re-draws the static scene
-  // into the pane with the mask shader. Leaves the pane framebuffer,
+  // Renders the two depth maps for `unit` looking along `facingYaw`, then
+  // re-draws the static scene into the pane with the mask shader, tinted
+  // `color` within `halfFovDegrees` of that heading. Leaves the pane framebuffer,
   // viewport, scissor and the FOV-overlay blend/stencil state as it found
   // them.
   void DrawFovShadowMask(const tactics::GameLogic& game, const tactics::Unit& unit,
+                         float facingYaw, float halfFovDegrees, const glm::vec4& color,
                          const glm::mat4& viewProj, bool drawTerrain, GLuint targetFramebuffer,
                          int x, int y, int width, int height);
 };

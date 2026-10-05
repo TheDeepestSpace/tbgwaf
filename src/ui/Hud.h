@@ -57,6 +57,11 @@ struct HudActions {
   bool pass = false;
   bool cancel = false;
   bool done = false;
+  // Free-aim (issue #129): Fire confirms the placed aim point.
+  bool fire = false;
+  // Multi-shot bursts (issue #138): set when the player dragged the shot
+  // bar to a new level this frame; route to GameLogic::SetPlannedShotCount.
+  std::optional<int> shots;
   // Set when the pane's Playbook view edited its team's squad-wide reaction
   // table; a config edit, not a turn action.
   std::optional<tactics::SquadPlaybook> playbook;
@@ -94,8 +99,8 @@ HudActions DrawHud(const tactics::GameLogic& game, tactics::Team team, bool plan
 // The extra metrics: `frameMs` last frame time, `fovMs` time spent in the
 // visibility (FOV-cone) computation, and `stats`
 // draw-call/vertex/triangle counters for the frame.
-void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float fps,
-                    float frameMs, float fovMs,
+void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& disableOcclusionFade,
+                    bool& showFps, float fps, float frameMs, float fovMs,
                     const gfx::RenderFrameStats& stats, float top);
 
 }  // namespace ui

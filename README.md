@@ -158,13 +158,17 @@ weapon sets the figure's animation class: rifles (AR + sniper) are carried
 two-handed across the chest (both arms IK-solved onto the weapon, no arm
 swing while running) and shoulder-aimed for shots; the Desert Eagle keeps
 the one-handed low-ready carry and quick-draw shot. Weapons are visual
-only — hit resolution is identical across them.
+only — hit resolution is identical across them, though each weapon has its
+own fire interval and bullet-scatter cone (every bullet of a burst flies its
+own line).
 
 Every weapon model and animation can be inspected on the **asset &
 animation gallery**, a standalone page built alongside the game:
 [live gallery](https://thedeepestspace.github.io/tbgwaf/gallery/) on Pages,
 and `pr-preview/pr-<number>/gallery/` in each PR preview. The page lists
-the three weapon turntables plus idle/run/shoot per weapon (drag to orbit,
+the three weapon turntables plus idle/run/shoot/empty-mag per weapon — the
+empty-mag clip dumps the whole magazine at the weapon's own fire interval,
+each bullet leaving its own scattered tracer line (drag to orbit,
 scroll to zoom, play/pause and scrub the loop). The catalog, framing, and
 renderer live in `src/gallery/GalleryScene.*`, shared verbatim between the
 web viewer (`src/gallery/gallery_main.cpp` + `web/gallery.html`) and a

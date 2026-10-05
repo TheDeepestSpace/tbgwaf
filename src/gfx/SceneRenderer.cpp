@@ -42,12 +42,49 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
     }
   }
   overlays.showShotCone = game.Mode() == tactics::InputMode::AwaitingShootTarget;
+  if (overlays.showShotCone) {
+    // Free-aim (issue #129): the aiming figure gets its 360-degree LOS
+    // highlight, and a placed aim point shows as the "+" selector.
+    overlays.aimShooter = selected;
+    if (const auto& preview = game.GetAimPreview()) {
+      overlays.aimMarker = preview->point;
+    } else if (const auto& lock = game.GetLockPreview()) {
+      // A staged lock-on shows the cone and "+" on the locked figure's
+      // torso -- the exact point the burst will be aimed at, so the cone
+      // footprint the shader paints on the figure is the real hit odds.
+      if (const tactics::Unit* target = game.FindUnit(*lock)) {
+        overlays.aimMarker =
+            target->position + glm::vec3(0.0f, tactics::constants::kTorsoAimHeight, 0.0f);
+      }
+    }
+    overlays.aimConeTarget = overlays.aimMarker ? overlays.aimMarker : hoveredGroundPoint;
+  }
   return overlays;
 }
 namespace {
 
 constexpr int kShadowMapSize = 2048;
+// Deck/ramp slabs form one continuous ribbon but are submitted as separate
+// shadow casters. A stronger-than-default slope bias keeps each shallow
+// joint from shadowing the next slab while the deck still shadows geometry
+// below its 0.45-unit thickness.
+constexpr float kDeckShadowSlopeBias = 16.0f;
+constexpr float kDeckShadowConstantBias = 64.0f;
 const glm::vec3 kSetupColor(0.2f, 1.0f, 0.3f);
+// Scene geometry base colors, shared by the opaque pass and the issue #136
+// see-through pass so a faded block keeps its normal tint.
+const glm::vec3 kObstacleColor(0.55f, 0.55f, 0.6f);
+const glm::vec3 kDeckColor(0.44f, 0.45f, 0.48f);
+
+// Issue #136 camera-occlusion see-through: map geometry (buildings, deck/
+// ramp slabs) standing between the camera and something the player needs to
+// see is drawn at this opacity instead of fully opaque. First guess per the
+// issue; tune freely.
+constexpr float kOccluderFadeOpacity = 0.5f;
+// Spacing of the visibility probes laid along paths and across the movement
+// frontier. Finer spacing catches narrower slivers of hidden overlay at the
+// cost of more camera raycasts per frame.
+constexpr float kOcclusionProbeSpacing = 1.0f;
 
 // Flat, unlit shader used for UI-ish overlays (selection highlights, the
 // move-path preview line) that should stay crisp regardless of shadowing.
@@ -438,8 +475,12 @@ void BuildPolygonPrism(const tactics::Obstacle& obstacle, LitTriangleMesh* mesh)
   mesh->SetMesh(vertices, indices);
 }
 
+// `hiddenEdges[i]` (optional) skips the side wall under polygon edge i, for
+// edges butted against a neighbouring slab: the wall would only show as a
+// seam, most visibly through the faded see-through pass.
 void AppendSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
-                        LitVertices* vertices, std::vector<GLuint>* indices) {
+                        LitVertices* vertices, std::vector<GLuint>* indices,
+                        const std::vector<char>* hiddenEdges = nullptr) {
   if (polygon.size() < 3) return;
   glm::vec3 topNormal = glm::normalize(glm::cross(polygon[1] - polygon[0], polygon[2] - polygon[0]));
   if (topNormal.y < 0.0f) topNormal = -topNormal;
@@ -456,6 +497,7 @@ void AppendSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
   }
   if (thickness > 0.0f) {
     for (size_t i = 0; i < polygon.size(); ++i) {
+      if (hiddenEdges && (*hiddenEdges)[i]) continue;
       const glm::vec3 a = polygon[i], b = polygon[(i + 1) % polygon.size()];
       glm::vec3 normal = glm::cross(b - a, glm::vec3(0, -1, 0));
       if (glm::length(normal) > 1e-6f) normal = glm::normalize(normal);
@@ -466,11 +508,33 @@ void AppendSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
 }
 
 void BuildSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
-                       LitTriangleMesh* mesh) {
+                       LitTriangleMesh* mesh, const std::vector<char>* hiddenEdges = nullptr) {
   LitVertices vertices;
   std::vector<GLuint> indices;
-  AppendSurfacePatch(polygon, thickness, &vertices, &indices);
+  AppendSurfacePatch(polygon, thickness, &vertices, &indices, hiddenEdges);
   mesh->SetMesh(vertices, indices);
+}
+
+// Edges of `surface` shared (same endpoints, either direction) with one of its
+// chain neighbours, i.e. the joints between consecutive deck/ramp slabs.
+std::vector<char> SharedEdges(const std::vector<tactics::WalkSurface>& surfaces,
+                              const tactics::WalkSurface& surface) {
+  const std::vector<glm::vec3>& v = surface.vertices;
+  std::vector<char> shared(v.size(), 0);
+  auto same = [](const glm::vec3& p, const glm::vec3& q) { return glm::distance(p, q) < 1e-3f; };
+  for (int neighbor : surface.neighbors) {
+    const std::vector<glm::vec3>& w = surfaces[neighbor].vertices;
+    for (size_t i = 0; i < v.size(); ++i) {
+      const glm::vec3& a = v[i];
+      const glm::vec3& b = v[(i + 1) % v.size()];
+      for (size_t j = 0; j < w.size(); ++j) {
+        const glm::vec3& c = w[j];
+        const glm::vec3& d = w[(j + 1) % w.size()];
+        if ((same(a, c) && same(b, d)) || (same(a, d) && same(b, c))) shared[i] = 1;
+      }
+    }
+  }
+  return shared;
 }
 
 // Axis-aligned box with outward normals (same faces as CubeMesh, in world
@@ -1366,12 +1430,14 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
 // Caller enables blending and caps overlapping cones with the stencil buffer.
 // Alpha fades linearly from kFovAlpha at the unit to zero at the visual range.
 void DrawFovCone(const Shader& shader, ColorTriangleMesh& mesh, const glm::mat4& viewProj,
-                 const Unit& unit, const std::vector<glm::vec3>& points) {
-  constexpr float kFovAlpha = 0.15f;
+                 const Unit& unit, const std::vector<glm::vec3>& points,
+                 const glm::vec3* colorOverride = nullptr, float alpha = 0.15f) {
+  const float kFovAlpha = alpha;
   const glm::vec3 eye = unit.EyePosition();
   const float range = tactics::constants::kFovConeVisualRange;
-  const glm::vec3 baseColor = unit.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
-                                                      : glm::vec3(0.9f, 0.25f, 0.22f);
+  const glm::vec3 baseColor = colorOverride ? *colorOverride
+                              : unit.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
+                                                        : glm::vec3(0.9f, 0.25f, 0.22f);
   std::vector<ColorTriangleMesh::Vertex> vertices;
   vertices.reserve(points.size());
   for (const glm::vec3& p : points) {
@@ -1403,15 +1469,31 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
                   const glm::mat4& viewProj, const Unit& unit,
                   const std::vector<const Unit*>& litUnits,
                   const std::vector<tactics::Obstacle>& obstacles,
-                  const std::vector<AABB>& sidewalks, float mapHalfExtent) {
+                  const std::vector<AABB>& sidewalks, float mapHalfExtent,
+                  const glm::vec3* aimPoint = nullptr) {
   constexpr int kSegments = 40;
   constexpr int kRings = 12;  // Along the axis, so the alpha fade interpolates smoothly.
   constexpr float kSurfaceAlpha = 0.18f;
   constexpr float kFootprintAlpha = 0.7f;
   constexpr float kTwoPi = 6.28318530717958647692f;
-  const float tanHalf = std::tan(glm::radians(tactics::constants::kShotConeHalfAngleDegrees));
-  const glm::vec3 apex = unit.MuzzlePosition();
-  const glm::vec3 axis = unit.FacingDirection();
+  // Keep the setup preview identical to the trajectory scatter used when
+  // the action executes.  In particular, the sniper and Deagle must not
+  // inherit the AR's 3-degree cone.
+  const float tanHalf =
+      std::tan(glm::radians(tactics::StatsOf(unit.weapon).scatterHalfAngleDegrees));
+  // Free-aim (issue #129): the cone leaves the muzzle of the figure as it
+  // will stand when it fires -- turned toward the aim point -- and its axis
+  // may pitch up/down (sky or elevated aim).
+  Unit aimed = unit;
+  if (aimPoint) {
+    const glm::vec2 flat(aimPoint->x - unit.position.x, aimPoint->z - unit.position.z);
+    if (glm::length(flat) > 1e-4f) aimed.facingYaw = std::atan2(flat.y, flat.x);
+  }
+  const glm::vec3 apex = aimed.MuzzlePosition();
+  glm::vec3 axis = aimed.FacingDirection();
+  if (aimPoint && glm::distance(*aimPoint, apex) > 1e-4f) {
+    axis = glm::normalize(*aimPoint - apex);
+  }
   const float fadeRange = tactics::kDefaultShotProfile.range;
   // The cone ends where its axis first meets an obstacle, so it never pokes
   // out the far side of a wall.
@@ -1434,8 +1516,10 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
     }
     if (hit && tEnter > 0.0f) range = tEnter;
   }
-  const glm::vec3 right(-axis.z, 0.0f, axis.x);
-  const glm::vec3 up(0.0f, 1.0f, 0.0f);
+  // Basis perpendicular to the (possibly pitched) axis.
+  glm::vec3 right = glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), axis);
+  right = glm::length(right) < 1e-5f ? glm::vec3(1.0f, 0.0f, 0.0f) : glm::normalize(right);
+  const glm::vec3 up = glm::normalize(glm::cross(axis, right));
   const auto vertex = [&](int ring, int seg) {
     const float u = static_cast<float>(ring) / static_cast<float>(kRings);
     const float a = kTwoPi * static_cast<float>(seg) / static_cast<float>(kSegments);
@@ -1496,6 +1580,110 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
   }
 }
 
+// Acid-green overlays for the free-aim flow (issue #129).
+const glm::vec3 kAimColor(0.55f, 1.0f, 0.1f);
+
+// The "+" aim selector: a 3D plus sign (three thin axis-aligned bars) so a
+// point placed on a surface or in the sky reads from any camera angle.
+void DrawAimMarker(const Shader& colorShader, ColorTriangleMesh& mesh,
+                   const glm::mat4& viewProj, const glm::vec3& point) {
+  constexpr float kArm = 0.55f;
+  constexpr float kThick = 0.06f;
+  constexpr float kAlpha = 0.95f;
+  std::vector<ColorTriangleMesh::Vertex> vertices;
+  const glm::vec4 color(kAimColor, kAlpha);
+  const auto appendBox = [&](const glm::vec3& halfExtents) {
+    const glm::vec3 mn = point - halfExtents;
+    const glm::vec3 mx = point + halfExtents;
+    const glm::vec3 corners[8] = {
+        {mn.x, mn.y, mn.z}, {mx.x, mn.y, mn.z}, {mx.x, mx.y, mn.z}, {mn.x, mx.y, mn.z},
+        {mn.x, mn.y, mx.z}, {mx.x, mn.y, mx.z}, {mx.x, mx.y, mx.z}, {mn.x, mx.y, mx.z}};
+    static const int faces[6][4] = {{0, 1, 2, 3}, {5, 4, 7, 6}, {4, 0, 3, 7},
+                                    {1, 5, 6, 2}, {3, 2, 6, 7}, {4, 5, 1, 0}};
+    for (const auto& face : faces) {
+      const int quad[6] = {face[0], face[1], face[2], face[0], face[2], face[3]};
+      for (int index : quad) vertices.push_back({corners[index], color});
+    }
+  };
+  appendBox(glm::vec3(kArm, kThick, kThick));
+  appendBox(glm::vec3(kThick, kArm, kThick));
+  appendBox(glm::vec3(kThick, kThick, kArm));
+  colorShader.Use();
+  mesh.SetVertices(vertices);
+  colorShader.SetMat4("uMVP", viewProj);
+  mesh.Draw();
+}
+
+// Issue #136: everything `team`'s pane must keep visible this frame -- the
+// team's own living figures, the movement-frontier overlay, movement
+// indicators (preview/planned paths, destination ghosts) and remembered-
+// sighting ghosts/arrows -- as world-space probe points. Any obstacle or
+// deck slab crossing a camera->probe segment is drawn see-through.
+std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team, bool fogActive,
+                                               const PaneOverlays& overlays) {
+  // Probes hover slightly above their surface so grazing contact with the
+  // ground/deck they sit on never reads as occlusion.
+  constexpr float kSurfaceLift = 0.3f;
+  constexpr float kGhostLift = 0.9f;  // Mid-torso of a ghost/figure wireframe.
+  std::vector<glm::vec3> probes;
+  for (const Unit& unit : game.GetScene().units) {
+    if (!unit.alive || unit.team != team) continue;
+    probes.push_back(unit.EyePosition());
+    probes.push_back(unit.position + glm::vec3(0.0f, kSurfaceLift, 0.0f));
+  }
+  const auto addPolyline = [&](const std::vector<glm::vec3>& path) {
+    for (size_t i = 0; i < path.size(); ++i) {
+      probes.push_back(path[i] + glm::vec3(0.0f, kSurfaceLift, 0.0f));
+      if (i + 1 == path.size()) continue;
+      // Subdivide long chords so a stretch hidden mid-segment still probes.
+      const int pieces = static_cast<int>(glm::distance(path[i], path[i + 1]) /
+                                          kOcclusionProbeSpacing);
+      for (int k = 1; k <= pieces; ++k) {
+        probes.push_back(glm::mix(path[i], path[i + 1],
+                                  static_cast<float>(k) / static_cast<float>(pieces + 1)) +
+                         glm::vec3(0.0f, kSurfaceLift, 0.0f));
+      }
+    }
+  };
+  if (overlays.movePreviewPath) addPolyline(*overlays.movePreviewPath);
+  if (overlays.moveFrontier && overlays.moveFrontier->nx > 0) {
+    const tactics::ReachField& f = *overlays.moveFrontier;
+    const int stride =
+        std::max(1, static_cast<int>(std::round(kOcclusionProbeSpacing / f.step)));
+    for (int iz = 0; iz < f.nz; iz += stride) {
+      for (int ix = 0; ix < f.nx; ix += stride) {
+        if (f.Reached(ix, iz)) {
+          probes.push_back(f.Node(ix, iz) + glm::vec3(0.0f, kSurfaceLift, 0.0f));
+        }
+      }
+    }
+  }
+  const bool planning =
+      game.Mode() != InputMode::GameOver && game.Mode() != InputMode::Executing;
+  if (planning) {
+    for (const Unit& unit : game.GetScene().units) {
+      if (!unit.alive || unit.team != team) continue;
+      if (unit.plan.type != tactics::PlannedActionType::Move || unit.plan.movePath.size() < 2) {
+        continue;
+      }
+      addPolyline(unit.plan.movePath);
+      probes.push_back(unit.plan.movePath.back() +
+                       glm::vec3(0.0f, kGhostLift, 0.0f));  // Destination ghost.
+      for (const auto& leg : unit.plan.queuedLegs) addPolyline(leg);
+    }
+  }
+  if (fogActive) {
+    for (const Unit& unit : game.GetScene().units) {
+      if (unit.team == team) continue;
+      for (const auto& s : game.Sightings(team, unit.id)) {
+        if (1.0f - s.ageRounds * tactics::constants::kSightingFadePerRound <= 0.0f) continue;
+        probes.push_back(s.position + glm::vec3(0.0f, kGhostLift, 0.0f));  // Ghost + arrow.
+      }
+    }
+  }
+  return probes;
+}
+
 }  // namespace
 
 bool IsUnitVisibleForRender(const Unit& unit, Team viewingTeam, bool fogActive,
@@ -1537,6 +1725,7 @@ bool SceneRenderer::Init() {
   pathLine_.Init();
   fovConeMesh_.Init();
   shotConeMesh_.Init();
+  aimOverlayMesh_.Init();
   terrainMesh_.Init();
   geometryMesh_.Init();
   fovSceneMesh_.Init();
@@ -1613,6 +1802,7 @@ void SceneRenderer::Destroy() {
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
   shotConeMesh_.Destroy();
+  aimOverlayMesh_.Destroy();
   terrainFovCache_.clear();
   fovKeyObstacles_.clear();
   fovKeySidewalks_.clear();
@@ -1635,7 +1825,8 @@ void SceneRenderer::Destroy() {
   fovFbo_[0] = fovFbo_[1] = 0;
 }
 
-void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit,
+void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, float facingYaw,
+                                      float halfFovDegrees, const glm::vec4& color,
                                       const glm::mat4& viewProj, bool drawTerrain,
                                       GLuint targetFramebuffer, int x, int y, int width,
                                       int height) {
@@ -1653,7 +1844,7 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit,
                                           aspect, kFovMapNear, far);
   glm::mat4 mapMatrix[2];
   for (int half = 0; half < 2; ++half) {
-    const float yaw = unit.facingYaw + glm::radians(kFovMapHalfSplitDegrees) * (half == 0 ? -1.0f : 1.0f);
+    const float yaw = facingYaw + glm::radians(kFovMapHalfSplitDegrees) * (half == 0 ? -1.0f : 1.0f);
     const glm::vec3 dir(std::cos(yaw), 0.0f, std::sin(yaw));
     mapMatrix[half] = proj * glm::lookAt(eye, eye + dir, glm::vec3(0.0f, 1.0f, 0.0f));
   }
@@ -1703,14 +1894,10 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit,
   glEnable(GL_POLYGON_OFFSET_FILL);
   glPolygonOffset(-1.0f, -2.0f);
 
-  constexpr float kConeAlpha = 0.15f;
-  const glm::vec4 baseColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
-                                                      : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
   fovMaskShader_.Use();
   fovMaskShader_.SetVec3("uEye", eye);
-  fovMaskShader_.SetVec3("uFacing", unit.FacingDirection());
-  fovMaskShader_.SetFloat("uCosHalfFov",
-                          std::cos(glm::radians(tactics::constants::kShootHalfFovDegrees)));
+  fovMaskShader_.SetVec3("uFacing", glm::vec3(std::cos(facingYaw), 0.0f, std::sin(facingYaw)));
+  fovMaskShader_.SetFloat("uCosHalfFov", std::cos(glm::radians(halfFovDegrees)));
   fovMaskShader_.SetFloat("uRange", range);
   fovMaskShader_.SetMat4("uFovMatrix0", mapMatrix[0]);
   fovMaskShader_.SetMat4("uFovMatrix1", mapMatrix[1]);
@@ -1724,7 +1911,7 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit,
                                    2.0f * std::tan(glm::radians(kFovMapHalfAzimuthDegrees)) /
                                        kFovMapWidth));
   fovMaskShader_.SetFloat("uProbeHeight", fovProbeHeight_);
-  fovMaskShader_.SetVec4("uColor", glm::vec4(baseColor.r, baseColor.g, baseColor.b, kConeAlpha));
+  fovMaskShader_.SetVec4("uColor", color);
   fovMaskShader_.SetInt("uFovMap0", 1);
   fovMaskShader_.SetInt("uFovMap1", 2);
   glActiveTexture(GL_TEXTURE1);
@@ -1836,11 +2023,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         geometryMesh_.Draw();
       }
     }
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(kDeckShadowSlopeBias, kDeckShadowConstantBias);
     for (const tactics::WalkSurface& surface : game.GetScene().walkSurfaces) {
-      BuildSurfacePatch(surface.vertices, 0.45f, &geometryMesh_);
+      const std::vector<char> hidden = SharedEdges(game.GetScene().walkSurfaces, surface);
+      BuildSurfacePatch(surface.vertices, 0.45f, &geometryMesh_, &hidden);
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
       geometryMesh_.Draw();
     }
+    glDisable(GL_POLYGON_OFFSET_FILL);
     for (const Unit& unit : game.GetScene().units) {
       if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
       DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
@@ -1862,6 +2053,59 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const glm::mat4 proj =
       camera.ProjectionMatrix(static_cast<float>(width) / static_cast<float>(height));
   const glm::mat4 viewProj = proj * view;
+
+  // Issue #136 camera-occlusion see-through: per frame, raycast from the
+  // camera to every point the player needs to see (own figures, movement
+  // frontier, move paths/ghosts, sighting ghosts) and mark each obstacle or
+  // deck slab actually crossing a sightline. Marked occluders are skipped by
+  // the opaque pass below and re-drawn translucent after the figures.
+  const auto& walkSurfaces = game.GetScene().walkSurfaces;
+  std::vector<char> fadeObstacle(obstacles.size(), 0);
+  std::vector<char> fadeSurface(walkSurfaces.size(), 0);
+  bool anyFaded = false;
+  if (!debug.disableOcclusionFade) {
+    const std::vector<glm::vec3> probes =
+        CollectSeeThroughProbes(game, team, fogActive, overlays);
+    const glm::vec3 cameraPos = camera.Position();
+    struct ProbeRay {
+      glm::vec3 direction;
+      float length;
+    };
+    std::vector<ProbeRay> rays;
+    rays.reserve(probes.size());
+    for (const glm::vec3& probe : probes) {
+      const glm::vec3 segment = probe - cameraPos;
+      const float length = glm::length(segment);
+      if (length > 1e-4f) rays.push_back({segment / length, length});
+    }
+    // Same endpoint handling as LineOfSightClear: a hit at (or essentially
+    // at) the probe itself does not count, so a figure hugging a wall does
+    // not fade that wall.
+    constexpr float kEndpointEpsilon = 1e-2f;
+    for (size_t i = 0; i < obstacles.size(); ++i) {
+      for (const ProbeRay& ray : rays) {
+        float t = 0.0f;
+        if (tactics::RayIntersectsObstacle(cameraPos, ray.direction, obstacles[i], &t) &&
+            t > kEndpointEpsilon && t < ray.length - kEndpointEpsilon) {
+          fadeObstacle[i] = 1;
+          anyFaded = true;
+          break;
+        }
+      }
+    }
+    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+      for (const ProbeRay& ray : rays) {
+        float t = 0.0f;
+        if (tactics::RayIntersectsWalkSurface(cameraPos, ray.direction, walkSurfaces[i],
+                                              kDeckThickness, &t) &&
+            t > kEndpointEpsilon && t < ray.length - kEndpointEpsilon) {
+          fadeSurface[i] = 1;
+          anyFaded = true;
+          break;
+        }
+      }
+    }
+  }
 
   litShader_.Use();
   litShader_.SetVec3("uLightDir", lightDir_);
@@ -1898,17 +2142,20 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
   }
-  for (const tactics::WalkSurface& surface : game.GetScene().walkSurfaces) {
+  for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+    if (fadeSurface[i]) continue;  // Re-drawn translucent below.
     // Concrete, clearly lighter than the asphalt below: the elevated deck
     // and its ramps must read as a bridge, not as more ground road.
-    BuildSurfacePatch(surface.vertices, 0.45f, &geometryMesh_);
+    const std::vector<char> hidden = SharedEdges(walkSurfaces, walkSurfaces[i]);
+    BuildSurfacePatch(walkSurfaces[i].vertices, kDeckThickness, &geometryMesh_, &hidden);
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(0.44f, 0.45f, 0.48f, 1.0f));
+                 glm::vec4(kDeckColor, 1.0f));
   }
 
   for (size_t i = 0; i < obstacles.size(); ++i) {
+    if (fadeObstacle[i]) continue;  // Re-drawn translucent below.
     const AABB& bounds = obstacles[i].bounds;
-    const glm::vec4 color(0.55f, 0.55f, 0.6f, 1.0f);
+    const glm::vec4 color(kObstacleColor, 1.0f);
     if (obstacles[i].footprint.empty()) {
       DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, bounds.min,
                  bounds.max - bounds.min, color);
@@ -1921,6 +2168,69 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   for (const Unit& unit : game.GetScene().units) {
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
     DrawUnit(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, unit);
+  }
+
+  // Issue #136: alpha-blended re-draw of the occluders marked above, sorted
+  // front-to-back and stencil-capped so each pixel is blended exactly once
+  // (the nearest occluder): stacked buildings read as one flat
+  // kOccluderFadeOpacity instead of compounding toward opaque. Depth writes off -- the figures already drawn and
+  // the depth-tested overlays drawn later (frontier fill, FOV cones, paths)
+  // all show through them. Shadow casting and the FOV depth maps are left
+  // untouched: a faded block is still physically there and still blocks
+  // unit sightlines; only the camera gets to see through it.
+  if (anyFaded) {
+    struct FadedOccluder {
+      float viewDistance;
+      int obstacle;  // Index into obstacles, or -1 when `surface` is set.
+      int surface;   // Index into walkSurfaces, or -1.
+    };
+    const glm::vec3 cameraPos = camera.Position();
+    std::vector<FadedOccluder> faded;
+    for (size_t i = 0; i < obstacles.size(); ++i) {
+      if (fadeObstacle[i]) {
+        faded.push_back({glm::distance(cameraPos, obstacles[i].bounds.Center()),
+                         static_cast<int>(i), -1});
+      }
+    }
+    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+      if (fadeSurface[i]) {
+        faded.push_back({glm::distance(cameraPos, tactics::SurfaceCenter(walkSurfaces[i])), -1,
+                         static_cast<int>(i)});
+      }
+    }
+    std::sort(faded.begin(), faded.end(), [](const FadedOccluder& a, const FadedOccluder& b) {
+      return a.viewDistance < b.viewDistance;
+    });
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_STENCIL_TEST);
+    glStencilFunc(GL_EQUAL, 0, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+    for (const FadedOccluder& f : faded) {
+      if (f.obstacle >= 0) {
+        const tactics::Obstacle& obstacle = obstacles[f.obstacle];
+        const glm::vec4 color(kObstacleColor, kOccluderFadeOpacity);
+        if (obstacle.footprint.empty()) {
+          DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, obstacle.bounds.min,
+                     obstacle.bounds.max - obstacle.bounds.min, color);
+        } else {
+          BuildPolygonPrism(obstacle, &geometryMesh_);
+          DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                       color);
+        }
+      } else {
+        const std::vector<char> hidden = SharedEdges(walkSurfaces, walkSurfaces[f.surface]);
+        BuildSurfacePatch(walkSurfaces[f.surface].vertices, kDeckThickness, &geometryMesh_,
+                          &hidden);
+        DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                     glm::vec4(kDeckColor, kOccluderFadeOpacity));
+      }
+    }
+    glDisable(GL_STENCIL_TEST);
+    glClear(GL_STENCIL_BUFFER_BIT);  // Later passes expect a clean stencil.
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
   }
 
   // Navmesh boundary debug overlay (opaque lines, depth-tested like the
@@ -1995,17 +2305,24 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // avoid z-fighting speckle.
   glEnable(GL_POLYGON_OFFSET_FILL);
   glPolygonOffset(-2.0f, -4.0f);
-  if (fovOverlayMode_ == FovOverlayMode::ShadowMap) {
-    // Issue #110 prototype: projective per-unit mask instead of the
-    // analytic ground overlay. Static receivers/casters are cached per scene.
+  // Static receivers/casters for the shadow-map mask, cached per scene. Needed
+  // by the prototype FOV mode and by the free-aim highlight (always masked).
+  if (fovOverlayMode_ == FovOverlayMode::ShadowMap || overlays.aimShooter) {
     const unsigned long long sceneKey = FovSceneFingerprint(game.GetScene());
     if (sceneKey != fovSceneKey_) {
       BuildFovSceneMesh(game.GetScene(), &fovSceneMesh_);
       fovSceneKey_ = sceneKey;
     }
+  }
+  if (fovOverlayMode_ == FovOverlayMode::ShadowMap) {
+    // Issue #110 prototype: projective per-unit mask instead of the
+    // analytic ground overlay.
     for (const Unit& unit : game.GetScene().units) {
       if (debug.disableFov || !unit.alive || unit.team != team) continue;
-      DrawFovShadowMask(game, unit, viewProj, drawTerrain, targetFramebuffer, x, y, width, height);
+      const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 0.15f)
+                                                          : glm::vec4(0.9f, 0.25f, 0.22f, 0.15f);
+      DrawFovShadowMask(game, unit, unit.facingYaw, tactics::constants::kShootHalfFovDegrees,
+                        teamColor, viewProj, drawTerrain, targetFramebuffer, x, y, width, height);
     }
     colorShader_.Use();
   } else {
@@ -2034,6 +2351,26 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   }
   glDisable(GL_STENCIL_TEST);
+  // Free-aim (issue #129): the aiming figure's acid-green 360-degree LOS
+  // highlight -- the shadow-map mask shader, so it tints every surface the
+  // figure could aim at directly (building walls and roofs included, not
+  // just the ground). The figure turns to shoot, so its facing doesn't gate
+  // the sweep: three 120-degree sectors (each within the two depth maps'
+  // reach) tile the full circle. Own stencil pass so it layers over the
+  // team's FOV tint, while the sectors' seams still blend only once.
+  if (overlays.aimShooter && overlays.aimShooter->alive && !debug.disableFov) {
+    const Unit& shooter = *overlays.aimShooter;
+    glEnable(GL_STENCIL_TEST);
+    glStencilMask(0xFF);
+    glClear(GL_STENCIL_BUFFER_BIT);
+    for (int sector = 0; sector < 3; ++sector) {
+      DrawFovShadowMask(game, shooter, shooter.facingYaw + glm::radians(120.0f * sector), 61.0f,
+                        glm::vec4(kAimColor, 0.22f), viewProj, drawTerrain, targetFramebuffer, x,
+                        y, width, height);
+    }
+    colorShader_.Use();
+  }
+  glDisable(GL_STENCIL_TEST);
   // Shot probability cones are setup feedback, drawn over the FOV overlay:
   // the selected figure gets one while choosing a target, and every planned
   // shot keeps its cone until the round is committed (like a planned move's
@@ -2060,9 +2397,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         // already in the depth buffer.
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LEQUAL);
+        // With a free-aim point placed, the cone previews that shot: it
+        // leaves the turned figure and may pitch toward a sky/elevated aim.
         DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, sphereMesh_,
                      viewProj, *selected, coneLitUnits(*selected), obstacles,
-                     game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
+                     game.GetScene().sidewalks, game.GetScene().mapHalfExtent,
+                     overlays.aimConeTarget ? &*overlays.aimConeTarget : nullptr);
         glDepthFunc(GL_LESS);
         aimingShooter = selected;
       }
@@ -2074,13 +2414,39 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           unit.plan.type != tactics::PlannedActionType::Shoot || &unit == aimingShooter) {
         continue;
       }
+      // A planned locked shot aims its cone at the target's torso -- the
+      // same point the burst's bullets will be aimed at (and the same
+      // marker used while staging the lock), so the footprint shader keeps
+      // painting the hit odds on the figure until the commit instead of
+      // falling back to the figure's old facing.
+      std::optional<glm::vec3> coneAim;
+      if (unit.plan.hasAimPoint) {
+        coneAim = unit.plan.aimPoint;
+      } else if (const Unit* lockTarget = game.FindUnit(unit.plan.shootTargetId)) {
+        coneAim = lockTarget->position +
+                  glm::vec3(0.0f, tactics::constants::kTorsoAimHeight, 0.0f);
+      }
       glEnable(GL_DEPTH_TEST);
       glDepthFunc(GL_LEQUAL);
       DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, sphereMesh_,
                    viewProj, unit, coneLitUnits(unit), obstacles,
-                   game.GetScene().sidewalks, game.GetScene().mapHalfExtent);
+                   game.GetScene().sidewalks, game.GetScene().mapHalfExtent,
+                   coneAim ? &*coneAim : nullptr);
       glDepthFunc(GL_LESS);
+      // A planned shot keeps its "+" selector until the commit, like a
+      // planned move keeps its destination ghost.
+      if (coneAim) {
+        DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, *coneAim);
+      }
     }
+  }
+  // The unconfirmed "+" selector the aiming player has placed, acid green
+  // like the LOS highlight.
+  if (overlays.aimMarker) {
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, *overlays.aimMarker);
+    glDepthFunc(GL_LESS);
   }
   glDisable(GL_POLYGON_OFFSET_FILL);
   unlitShader_.Use();
@@ -2352,6 +2718,52 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glDisable(GL_BLEND);
   }
 
+  // Bullet tracers: a team-colored dotted path from the muzzle to where the
+  // shot ended, fading per completed round like the sighting ghosts.  A new
+  // shot briefly overlays the dots with a full white-hot line.
+  {
+    constexpr float kTracerMaxAlpha = 0.9f;
+    constexpr float kTracerDotLength = 0.04f;
+    constexpr float kTracerDotStride = 0.2f;
+    unlitShader_.Use();
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    for (const tactics::Tracer& tracer : game.Tracers()) {
+      const int age = game.RoundNumber() - tracer.birthRound;
+      const float life = 1.0f - static_cast<float>(age) / tactics::constants::kTracerMemoryRounds;
+      if (life <= 0.0f) continue;
+      const glm::vec3 teamColor = tracer.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
+                                                            : glm::vec3(0.9f, 0.25f, 0.22f);
+      const glm::vec3 delta = tracer.to - tracer.from;
+      const float length = glm::length(delta);
+      if (length <= 1e-4f) continue;
+      const glm::vec3 direction = delta / length;
+      std::vector<glm::vec3> dots;
+      dots.reserve(static_cast<size_t>(std::ceil(length / kTracerDotStride)) * 2);
+      for (float start = 0.0f; start < length; start += kTracerDotStride) {
+        dots.push_back(tracer.from + direction * start);
+        dots.push_back(tracer.from + direction * std::min(start + kTracerDotLength, length));
+      }
+      pathLine_.SetPoints(dots);
+      unlitShader_.SetMat4("uMVP", viewProj);
+      unlitShader_.SetVec4("uColor", glm::vec4(teamColor, life * kTracerMaxAlpha));
+      pathLine_.DrawSegments();
+
+      // Each shot of a burst still pops as a full white-hot line, but that
+      // continuous overlay disappears quickly and leaves only the dots.
+      constexpr float kTracerFlashSeconds = 0.25f;
+      const float flash = glm::clamp(1.0f - tracer.age / kTracerFlashSeconds, 0.0f, 1.0f);
+      if (flash > 0.0f) {
+        pathLine_.SetPoints({tracer.from, tracer.to});
+        unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.97f, 0.8f, flash));
+        pathLine_.Draw();
+      }
+    }
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+  }
+
   // WEGO planning: both teams plan concurrently, so during the planning
   // phase every pane highlights its own team's living figures (dim white =
   // still needs a plan, green = plan set) -- this is squad-wide, not a
@@ -2457,15 +2869,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                 OnSurface(leg.back()), yellow, legNumber,
                                 SurfaceNormal(leg.back()));
         }
-      } else if (unit.plan.type == tactics::PlannedActionType::Shoot) {
-        if (const Unit* shotTarget = game.FindUnit(unit.plan.shootTargetId)) {
-          const std::vector<glm::vec3> shotLine = {unit.MuzzlePosition(), shotTarget->EyePosition()};
-          pathLine_.SetPoints(shotLine);
-          unlitShader_.SetMat4("uMVP", viewProj);
-          unlitShader_.SetVec4("uColor", glm::vec4(0.95f, 0.25f, 0.2f, 1.0f));
-          pathLine_.Draw();
-        }
       }
+      // Planned locked shots draw no line here: the shot cone aimed at the
+      // target's torso (plus the "+" marker) is the whole preview, same as
+      // a planned free-aim shot.
     }
   }
   glDisable(GL_SCISSOR_TEST);

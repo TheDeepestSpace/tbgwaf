@@ -9,7 +9,7 @@ function trimEndpoint(value) {
 }
 
 export class JevPreviewController {
-  constructor({ fetchImpl = globalThis.fetch?.bind(globalThis), endpoint = "", timeoutMs = 12000,
+  constructor({ fetchImpl = globalThis.fetch?.bind(globalThis), endpoint = "", timeoutMs = 25000,
                 documentRef = globalThis.document } = {}) {
     this.fetchImpl = fetchImpl;
     this.endpoint = trimEndpoint(endpoint);
@@ -142,9 +142,14 @@ export class JevPreviewController {
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || `proxy returned HTTP ${response.status}`);
       if (generation !== this.generation || !this.#isAiPlayer(player) || this.paused) return;
-      const legal = payload.candidates?.some((candidate) => candidate.id === body.choice);
-      if (!legal) throw new Error("proxy returned a choice outside the legal candidate set");
-      module.tbgwafAiInbox.push(`D ${requestId} ${body.choice}`);
+      const choices = body.choices;
+      const figures = new Set(payload.candidates?.map((candidate) => candidate.figure));
+      const legal = choices && typeof choices === "object" &&
+        Object.keys(choices).length === figures.size &&
+        [...figures].every((figure) => payload.candidates.some((candidate) =>
+          candidate.figure === figure && candidate.id === choices[figure]));
+      if (!legal) throw new Error("proxy returned choices outside the legal candidate set");
+      module.tbgwafAiInbox.push(`D ${requestId} ${Object.values(choices).join(",")}`);
       module.tbgwafAiState = "idle";
     } catch (error) {
       if (generation !== this.generation || (abort.signal.aborted && this.paused)) return;

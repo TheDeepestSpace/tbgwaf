@@ -52,6 +52,7 @@
 </head>
 <body data-baseline-url="../../../scenario-baseline">
 <h1>Gameplay scenario review</h1>
+<p class="nav"><a href="../gallery/">Asset gallery &rarr;</a></p>
 <p>Scenarios under <code>tests/scenarios</code>, classified against this PR from
 git metadata on the YAML files. Every scenario present at the PR's head —
 new, modified, and unchanged — gets a video: the full scripted scenario as
@@ -63,7 +64,7 @@ listed by name only.</p>
 <p class="empty">None.</p>
 <h2>Modified scenarios <span class="count">(0)</span></h2>
 <p class="empty">None.</p>
-<h2>Unchanged scenarios <span class="count">(16)</span></h2>
+<h2>Unchanged scenarios <span class="count">(29)</span></h2>
 <div class="scenario has-video" data-stem="default_scene_shoot_rows"><h3>default_scene_shoot_rows</h3><div class="path">tests/scenarios/default_scene_shoot_rows.yaml</div>
 <p class="description">Replicates the original open-lane layout (not the current BuildDefaultScene()) and the same shot outcomes as TestGameLogicShootRowsMatchLayout in tests/logic_tests.cpp: the top/bottom lanes are wall-blocked (shots there must miss), the middle lane is open (a clean shot must hit). Under WEGO rounds both teams plan the same round, so the middle lane&#x27;s mutual blue1 &lt;-&gt; red4 exchange resolves simultaneously and downs both shooters.</p>
 <div class="panes">
@@ -108,6 +109,25 @@ listed by name only.</p>
 </div>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
+<div class="scenario has-video" data-stem="elevated_highway_ramp"><h3>elevated_highway_ramp</h3><div class="path">tests/scenarios/elevated_highway_ramp.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/elevated_highway_ramp/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/elevated_highway_ramp/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [-52, 13], zoom 26</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (-44.64, 1.40745, 10.9775)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-44.64, 1.40745, 10.9775) (tolerance 0.05)</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
 <div class="scenario has-video" data-stem="enemy_sighting_memory_trail"><h3>enemy_sighting_memory_trail</h3><div class="path">tests/scenarios/enemy_sighting_memory_trail.yaml</div>
 <p class="description">Showcases enemy sighting memory: red starts in blue&#x27;s FOV, then runs out of it. The faded wireframe trail and movement arrow of where blue last saw red stay on screen in blue&#x27;s pane (round 2 holds on them) while red itself is hidden.</p>
 <div class="panes">
@@ -132,6 +152,98 @@ listed by name only.</p>
 </div>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
+<div class="scenario has-video" data-stem="finish_new_game_finish"><h3>finish_new_game_finish</h3><div class="path">tests/scenarios/finish_new_game_finish.yaml</div>
+<p class="description">Regression for ghost wireframes (sighting-memory trails) surviving a new game. Game 1: blue sights red1, red1 walks out of view (remembered trail, plus planned-move ghosts while planning), then blue finishes both reds (GameOver). `new_game` then restarts the match the way the UI does; the runner also mirrors every step into a follower page via ImportState (the second pane), whose memory is checked as well. No old sightings may remain (only fresh age-0 ones from the opening view), and game 2 is played to completion too.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/finish_new_game_finish/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/finish_new_game_finish/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Check: <span class="u red">red1</span> is visible to blue</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (-12, 14) <span class="detail">— Leaves blue&#x27;s cone; blue remembers the trail.</span></div>
+<div class="step" data-action="3"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: blue remembers <span class="u red">red1</span></div>
+<div class="detail">Check: round is 2</div>
+</div>
+<div class="round"><div class="round-title">Round 2</div>
+<div class="step" data-action="5"><span class="u blue">blue0</span> shoots <span class="u red">red2</span></div>
+<div class="step" data-action="6"><span class="u red">red1</span> moves to (-8, 14) <span class="detail">— Planned-move ghost is on screen while the round is committed.</span></div>
+<div class="step" data-action="7"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="8">commit round</div>
+<div class="detail">Check: <span class="u red">red2</span> is down</div>
+</div>
+<div class="round"><div class="round-title">Round 3</div>
+<div class="step" data-action="9"><span class="u blue">blue0</span> moves to (-12, 6)</div>
+<div class="step" data-action="10"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="11">commit round</div>
+<div class="detail">Check: <span class="u red">red1</span> is visible to blue</div>
+<div class="detail">Check: blue remembers <span class="u red">red1</span></div>
+</div>
+<div class="round"><div class="round-title">Round 4</div>
+<div class="step" data-action="12"><span class="u blue">blue0</span> shoots <span class="u red">red1</span></div>
+<div class="step" data-action="13"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="14">commit round</div>
+<div class="detail">Check: winner: blue</div>
+</div>
+<div class="round"><div class="round-title">Round 5</div>
+<div class="step" data-action="15">new_game (actor None)</div>
+<div class="detail">Check: winner: none</div>
+<div class="detail">Check: round is 1</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-14, 0)</div>
+<div class="detail">Check: <span class="u red">red1</span> is alive</div>
+<div class="detail">Check: blue remembers <span class="u red">red1</span> (memory age 0)</div>
+<div class="detail">Check: blue remembers <span class="u red">red2</span> (memory age 0)</div>
+<div class="detail">Check: red remembers <span class="u blue">blue0</span> (memory age 0)</div>
+<div class="step" data-action="16"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="17"><span class="u red">red1</span> moves to (-12, 14)</div>
+<div class="step" data-action="18"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="19">commit round</div>
+<div class="detail">Check: blue remembers <span class="u red">red1</span> (memory age 1)</div>
+<div class="detail">Check: round is 2</div>
+</div>
+<div class="round"><div class="round-title">Round 6</div>
+<div class="step" data-action="20"><span class="u blue">blue0</span> shoots <span class="u red">red2</span></div>
+<div class="step" data-action="21"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="22"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="23">commit round</div>
+<div class="detail">Check: <span class="u red">red2</span> is down</div>
+</div>
+<div class="round"><div class="round-title">Round 7</div>
+<div class="step" data-action="24"><span class="u blue">blue0</span> moves to (-12, 6)</div>
+<div class="step" data-action="25"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="26">commit round</div>
+</div>
+<div class="round"><div class="round-title">Round 8</div>
+<div class="step" data-action="27"><span class="u blue">blue0</span> shoots <span class="u red">red1</span></div>
+<div class="step" data-action="28"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="29">commit round</div>
+<div class="detail">Check: winner: blue</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="fov_cone_bridge_deck"><h3>fov_cone_bridge_deck</h3><div class="path">tests/scenarios/fov_cone_bridge_deck.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/fov_cone_bridge_deck/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/fov_cone_bridge_deck/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [-60, 14], zoom 40</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
 <div class="scenario has-video" data-stem="fov_gating_blocks_out_of_view_shot"><h3>fov_gating_blocks_out_of_view_shot</h3><div class="path">tests/scenarios/fov_gating_blocks_out_of_view_shot.yaml</div>
 <p class="description">Regression coverage for the fog-of-war shoot gating exercised by TestGameLogicShootGatingRequiresTeamVisibility in tests/logic_tests.cpp: a living enemy outside the shooter&#x27;s team FOV must not be a clickable target at all (the click is a no-op, not a guaranteed miss), and a no-op must not record a plan. Blue0 faces away (180 degrees) from red, so red is entirely outside blue&#x27;s cone.</p>
 <div class="panes">
@@ -150,6 +262,63 @@ listed by name only.</p>
 <div class="step" data-action="5">commit round</div>
 <div class="detail">Check: <span class="u blue">blue0</span> is alive</div>
 <div class="detail">Check: <span class="u red">red1</span> is alive</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="fov_shadow_map_building_walls"><h3>fov_shadow_map_building_walls</h3><div class="path">tests/scenarios/fov_shadow_map_building_walls.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/fov_shadow_map_building_walls/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/fov_shadow_map_building_walls/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [2, -1], zoom 4</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (-10, -2)</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u red">red1</span> is at (-10, -2) (tolerance 0.05)</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="fov_shadow_map_elevated_highway_ramp"><h3>fov_shadow_map_elevated_highway_ramp</h3><div class="path">tests/scenarios/fov_shadow_map_elevated_highway_ramp.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/fov_shadow_map_elevated_highway_ramp/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/fov_shadow_map_elevated_highway_ramp/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [-52, 13], zoom 26</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (-44.64, 1.40745, 10.9775)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-44.64, 1.40745, 10.9775) (tolerance 0.05)</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="hilly_terrain_move"><h3>hilly_terrain_move</h3><div class="path">tests/scenarios/hilly_terrain_move.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/hilly_terrain_move/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/hilly_terrain_move/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-37, 11.337, -6) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u red">red1</span> is at (37, 8.084, 6) (tolerance 0.05)</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (-21, 9.173, -6)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-21, 9.173, -6) (tolerance 0.05)</div>
 <div class="detail">Check: round is 2</div>
 </div>
 </div></figure>
@@ -190,6 +359,142 @@ listed by name only.</p>
 <div class="detail">Check: <span class="u blue">blue0</span> faces 0° (tolerance 0.5)</div>
 <div class="detail">Check: <span class="u red">red1</span> is at (5, 0) (tolerance 0.05)</div>
 <div class="detail">Check: <span class="u red">red1</span> faces -90° (tolerance 0.5)</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="occlusion_fade_figure_behind_building"><h3>occlusion_fade_figure_behind_building</h3><div class="path">tests/scenarios/occlusion_fade_figure_behind_building.yaml</div>
+<p class="description">Issue stands between Blue&#x27;s pane camera and its own figure, so the building is drawn at the see-through opacity from the very first capture. The scripted move then plans a path whose middle runs behind the building (the path and the planned-move indicators must stay readable), and begin_move leaves the chained-leg movement frontier up so the final capture shows the frontier through the faded block. Red&#x27;s pane has a clear line to its own figure and keeps every block opaque.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/occlusion_fade_figure_behind_building/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/occlusion_fade_figure_behind_building/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [-2, 3], zoom -4</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1 (uncommitted)</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (2.5, 6.5) <span class="detail">— The straight chord of the planned path passes behind the building.</span></div>
+<div class="step" data-action="2">begin_move (actor 0) <span class="detail">— Chained-leg frontier around the planned destination; parts of it are behind the building.</span></div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-4.5, 5.5) (tolerance 0.05)</div>
+<div class="detail">Check: round is 1</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="occlusion_fade_frontier_behind_overpass"><h3>occlusion_fade_frontier_behind_overpass</h3><div class="path">tests/scenarios/occlusion_fade_frontier_behind_overpass.yaml</div>
+<p class="description">Issue overpass as elevated_highway_ramp): Blue stands at grade beside the mid-span deck, and begin_move leaves its movement frontier up. The reachable area continues under and past the overpass, so the deck slabs hiding parts of the frontier (and any buildings clipping Blue&#x27;s sightlines) are drawn see-through in Blue&#x27;s pane while everything stays opaque where nothing important is hidden.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/occlusion_fade_frontier_behind_overpass/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/occlusion_fade_frontier_behind_overpass/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [-11.5, 4], zoom -100</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1 (uncommitted)</div>
+<div class="step" data-action="1">begin_move (actor 0) <span class="detail">— Frontier spreads under the mid-span deck; the deck must fade, not hide it.</span></div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-11.5, 9) (tolerance 0.05)</div>
+<div class="detail">Check: round is 1</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="overpass_deck_edge_sighting"><h3>overpass_deck_edge_sighting</h3><div class="path">tests/scenarios/overpass_deck_edge_sighting.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/overpass_deck_edge_sighting/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/overpass_deck_edge_sighting/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [19, 5], zoom -128</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">The street figure can target the deck figure: the click is gated on team visibility and used to be a silent no-op here.</div>
+<div class="detail">Check: <span class="u red">red1</span> is visible to blue — Deck figure sighted from the street</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is visible to red — Street figure sighted from the deck</div>
+<div class="detail">Check: <span class="u red">red2</span> is not visible to blue</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> shoots <span class="u red">red1</span></div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="overpass_enter_ramp_down"><h3>overpass_enter_ramp_down</h3><div class="path">tests/scenarios/overpass_enter_ramp_down.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/overpass_enter_ramp_down/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/overpass_enter_ramp_down/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [-54.1, -49.5], zoom 34</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (-51.6121, 2.6756, -45.9804)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-51.6121, 2.6756, -45.9804) (tolerance 0.05)</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="overpass_enter_ramp_up"><h3>overpass_enter_ramp_up</h3><div class="path">tests/scenarios/overpass_enter_ramp_up.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/overpass_enter_ramp_up/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/overpass_enter_ramp_up/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [1.7, 33.2], zoom 34</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (5.1133, 2.3199, 28.3091)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (5.1133, 2.3199, 28.3091) (tolerance 0.05)</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="overpass_ramp_up_ramp_down"><h3>overpass_ramp_up_ramp_down</h3><div class="path">tests/scenarios/overpass_ramp_up_ramp_down.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/overpass_ramp_up_ramp_down/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/overpass_ramp_up_ramp_down/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [-40.1, 8.1], zoom 34</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (-35.9248, 2.8771, 6.4562)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-35.9248, 2.8771, 6.4562) (tolerance 0.05)</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="overpass_through"><h3>overpass_through</h3><div class="path">tests/scenarios/overpass_through.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/overpass_through/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/overpass_through/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [-23.6, 38.5], zoom 34</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (-20.7085, 2.1273, 33.3434)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-20.7085, 2.1273, 33.3434) (tolerance 0.05)</div>
+<div class="detail">Check: round is 2</div>
 </div>
 </div></figure>
 </div>

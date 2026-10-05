@@ -63,7 +63,7 @@ export async function chooseWithJev({
     questions: {
       action: {
         type: "choice",
-        instructions: "Select the strongest legal action for the acting figure. Prefer a useful visible shot; otherwise make progress toward eliminating the opposing squad. Return exactly one supplied option.",
+        instructions: "Select the strongest legal action for the acting figure. Prefer a useful visible shot; otherwise make progress toward eliminating the opposing squad. Shot options fire a scattered burst; weigh the stated per-shot hit chance (it falls with distance and off-axis angle) and the weapon details in state.allies. Return exactly one supplied option.",
         criteria,
       },
     },

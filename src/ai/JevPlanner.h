@@ -21,6 +21,7 @@ struct JevCandidate {
   JevActionKind kind = JevActionKind::Wait;
   int actorId = -1;
   int targetId = -1;
+  int shots = 1;  // Burst size for Shoot (the weapon's per-round cap).
   glm::vec3 destination{0.0f};
 };
 

@@ -15,6 +15,12 @@ friendlies and only enemies in that team's current FOV. The adapter asks Jev
 one TypeSafe `Choice`; the returned id is checked against the original set and
 replayed through the normal click/plan path. Jev does not generate commands.
 
+Shooting mechanics Jev is told: shot options fire a full burst (the weapon's
+magazine, capped by shots that fit the 5 s round), each bullet scattered in a
+cone; the option text carries the current per-shot hit chance, and the state
+lists each ally's weapon, magazine, fire interval, scatter and max burst. The
+objective text also covers FOV/LOS gating, friendly fire, and reaction fire.
+
 ## Run locally
 
 Build the WASM app as usual, then start the adapter in another terminal. The

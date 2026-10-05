@@ -44,6 +44,19 @@ std::string PointJson(const glm::vec3& p) {
   return out.str();
 }
 
+const char* WeaponName(WeaponType type) {
+  switch (type) {
+    case WeaponType::DesertEagle: return "Desert Eagle";
+    case WeaponType::SniperRifle: return "sniper rifle";
+    default: return "assault rifle";
+  }
+}
+
+std::string HitPercent(const GameLogic& game, const Unit& shooter, const Unit& target) {
+  return std::to_string(static_cast<int>(game.ShotHitChance(shooter, target) * 100.0f + 0.5f)) +
+         "%";
+}
+
 bool IsPlanning(const GameLogic& game) {
   return game.Mode() != InputMode::Executing && game.Mode() != InputMode::GameOver;
 }
@@ -64,6 +77,7 @@ bool CandidateApplied(const GameLogic& before, Team team, const JevCandidate& ca
     out->ChoosePass();
   } else if (candidate.kind == JevActionKind::Shoot) {
     out->ChooseShoot();
+    out->SetPlannedShotCount(candidate.shots, team);
     out->ClickUnit(candidate.targetId, team);
   } else {
     out->ChooseMove();
@@ -78,7 +92,8 @@ bool CandidateApplied(const GameLogic& before, Team team, const JevCandidate& ca
   }
   if (candidate.kind == JevActionKind::Shoot) {
     return planned->plan.type == PlannedActionType::Shoot &&
-           planned->plan.shootTargetId == candidate.targetId;
+           planned->plan.shootTargetId == candidate.targetId &&
+           planned->plan.shots == candidate.shots;
   }
   return planned->plan.type == PlannedActionType::Move && !planned->plan.movePath.empty();
 }
@@ -96,8 +111,13 @@ std::vector<JevCandidate> GenerateCandidateSpecs(const GameLogic& game, Team tea
     if (!unit.alive || unit.team == team || !visibility.UnitVisible(unit.id)) continue;
     JevCandidate candidate;
     candidate.id = "shoot_" + std::to_string(unit.id);
+    candidate.shots = MaxShotsPerAction(actor->weapon, constants::kRoundDuration);
     candidate.description = "Shoot visible enemy " + std::to_string(unit.id) + " at " +
-                            PointJson(unit.position) + ".";
+                            PointJson(unit.position) + " with the " + WeaponName(actor->weapon) +
+                            ", a burst of " + std::to_string(candidate.shots) +
+                            " scattered shots fired over the round while the target stays in "
+                            "view; current hit chance per shot " + HitPercent(game, *actor, unit) +
+                            ".";
     candidate.kind = JevActionKind::Shoot;
     candidate.actorId = actorId;
     candidate.targetId = unit.id;
@@ -160,7 +180,19 @@ std::string BuildVisibleState(const GameLogic& game, Team team, int actorId) {
   out << "{\"round\":" << game.RoundNumber() << ",\"team\":" << JsonString(TeamName(team))
       << ",\"objective\":"
       << JsonString("Eliminate the opposing squad. Blue generally advances toward +X; Red toward -X. "
-                    "Prefer a useful visible shot, otherwise advance while keeping options open.")
+                    "Prefer a useful visible shot, otherwise advance while keeping options open. "
+                    "Shooting: a Shoot action fires a burst of up to the weapon's magazine "
+                    "(capped by shots fitting the 5 s round at its fire interval) at one "
+                    "visible enemy. Each bullet flies its own line scattered inside a cone "
+                    "(scatter_half_angle_deg). Hit chance per shot falls with distance and with "
+                    "how far the target is off the shooter's facing, and is 0 outside the "
+                    "shooter's shot cone or without line of sight; each shot option states "
+                    "its current chance. A shot only connects while the target is in view "
+                    "when it fires, so a target that moves away or behind cover can be "
+                    "missed. "
+                    "Bullets can hit any figure in their path, including allies (friendly "
+                    "fire). A figure that sights an enemy while idle or moving may also "
+                    "react and fire on its own. There is no ammo pool across rounds.")
       << ",\"actor_id\":" << actorId << ",\"map_half_extent\":" << std::fixed
       << std::setprecision(2) << game.GetScene().mapHalfExtent << ",\"allies\":[";
 
@@ -171,7 +203,13 @@ std::string BuildVisibleState(const GameLogic& game, Team team, int actorId) {
     first = false;
     out << "{\"id\":" << unit.id << ",\"alive\":" << (unit.alive ? "true" : "false")
         << ",\"position\":" << PointJson(unit.position) << ",\"facing\":"
-        << std::setprecision(3) << unit.facingYaw << ",\"planned\":"
+        << std::setprecision(3) << unit.facingYaw << ",\"weapon\":"
+        << JsonString(WeaponName(unit.weapon)) << ",\"magazine_size\":"
+        << StatsOf(unit.weapon).magazineSize << ",\"shot_interval_s\":"
+        << std::setprecision(2) << StatsOf(unit.weapon).shotIntervalSeconds
+        << ",\"scatter_half_angle_deg\":" << StatsOf(unit.weapon).scatterHalfAngleDegrees
+        << ",\"max_burst\":" << MaxShotsPerAction(unit.weapon, constants::kRoundDuration)
+        << ",\"planned\":"
         << (unit.plan.type == PlannedActionType::None ? "false" : "true") << "}";
   }
   out << "],\"visible_enemies\":[";
@@ -181,7 +219,8 @@ std::string BuildVisibleState(const GameLogic& game, Team team, int actorId) {
     if (!first) out << ',';
     first = false;
     out << "{\"id\":" << unit.id << ",\"position\":" << PointJson(unit.position)
-        << ",\"facing\":" << std::setprecision(3) << unit.facingYaw << "}";
+        << ",\"facing\":" << std::setprecision(3) << unit.facingYaw << ",\"weapon\":"
+        << JsonString(WeaponName(unit.weapon)) << "}";
   }
   out << "]}";
   return out.str();

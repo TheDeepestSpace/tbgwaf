@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdio>
 #include <string>
 
@@ -74,6 +75,27 @@ void TestBoundedCandidatesUseNormalLegalPath() {
   CHECK(foundWait);
 }
 
+void TestShootCandidateIsFullBurstAndStateDescribesWeapons() {
+  GameLogic game(TwoUnitScene(10.0f, true));
+  const auto request = BuildJevRequest(game, Team::Blue, 3);
+  CHECK(request.has_value());
+  const auto shoot = std::find_if(request->candidates.begin(), request->candidates.end(),
+                                  [](const auto& c) { return c.kind == JevActionKind::Shoot; });
+  CHECK(shoot != request->candidates.end());
+  if (shoot != request->candidates.end()) {
+    CHECK(shoot->shots == tactics::MaxShotsPerAction(game.FindUnit(0)->weapon,
+                                                     tactics::constants::kRoundDuration));
+    CHECK(shoot->shots > 1);
+    CHECK(shoot->description.find("hit chance") != std::string::npos);
+    GameLogic copy = game;
+    CHECK(ApplyJevChoice(&copy, *request, shoot->id));
+    CHECK(copy.FindUnit(0)->plan.shots == shoot->shots);
+  }
+  CHECK(request->json.find("scatter_half_angle_deg") != std::string::npos);
+  CHECK(request->json.find("max_burst") != std::string::npos);
+  CHECK(request->json.find("friendly fire") != std::string::npos);
+}
+
 void TestHiddenEnemyNeverSerialized() {
   GameLogic game(TwoUnitScene(17.25f, false));
   const auto request = BuildJevRequest(game, Team::Blue, 2);
@@ -110,6 +132,7 @@ void TestPlayerVsAiTurnAutomaticallyBecomesCommittable() {
   CHECK(game.CanCommitRound());
   game.SetShotRollSource([] { return 0.0f; });
   game.CommitRound();
+  game.Update(10.0f);  // Bursts are paced in real time; fast-forward the round.
   CHECK(game.Mode() == InputMode::GameOver);
   CHECK(game.Winner() == Team::Red);
 }
@@ -130,6 +153,7 @@ void TestCompleteAiVsAiMatchAndTerminalStop() {
   CHECK(ApplyJevChoice(&game, *red, DeterministicFallbackChoice(*red)));
   CHECK(game.CanCommitRound());
   game.CommitRound();
+  game.Update(10.0f);  // Bursts are paced in real time; fast-forward the round.
 
   CHECK(game.Mode() == InputMode::GameOver);
   CHECK(!game.Winner().has_value());  // Simultaneous mutual elimination is a complete draw.
@@ -142,6 +166,7 @@ void TestCompleteAiVsAiMatchAndTerminalStop() {
 int main() {
   TestIncrementalBuilderMatchesBlockingBuild();
   TestBoundedCandidatesUseNormalLegalPath();
+  TestShootCandidateIsFullBurstAndStateDescribesWeapons();
   TestHiddenEnemyNeverSerialized();
   TestInvalidAndStaleResponsesDoNotMutate();
   TestPlayerVsAiTurnAutomaticallyBecomesCommittable();

@@ -297,7 +297,7 @@ void TestTeamVisibilityAggregatesAcrossFigures() {
   CHECK(!visibility.ObstacleVisible(1));  // Crate behind blueB: outside every cone.
 }
 
-void TestVisibilityMatchesShadowMapGroundProbe() {
+void TestVisibilitySightsFeetSurfaceOrEye() {
   std::vector<Unit> units(2);
   units[0].id = 0;
   units[0].team = Team::Blue;
@@ -307,22 +307,103 @@ void TestVisibilityMatchesShadowMapGroundProbe() {
   units[1].team = Team::Red;
   units[1].position = glm::vec3(4.0f, 0.0f, 0.0f);
 
-  // The target's eye is visible over this low block, but the shadow-map FOV
-  // checks the ground under its feet. That ground point is still in shadow.
+  const std::vector<WalkSurface> noSurfaces;
+  const HeightField flat;
+
+  // A low block hides the ground under the target's feet (the shadow-map
+  // overlay leaves that strip untinted) but not the target's eye: the
+  // figure's body shows above the block, so it is sighted through its eye.
   const std::vector<Obstacle> lowBlock = {
       Obstacle{AABB{glm::vec3(-0.5f, 0.0f, -1.0f), glm::vec3(0.5f, 1.0f, 1.0f)}},
   };
-  const std::vector<WalkSurface> noSurfaces;
-  const HeightField flat;
+  CHECK(!LineOfSightClear(units[0].EyePosition(), units[1].position, lowBlock, noSurfaces));
   CHECK(LineOfSightClear(units[0].EyePosition(), units[1].EyePosition(), lowBlock,
                          noSurfaces));
-  CHECK(!CanUnitSee(units[0], units[1], lowBlock, noSurfaces, flat));
-  CHECK(!ComputeTeamVisibility(Team::Blue, units, lowBlock, noSurfaces, flat).UnitVisible(1));
-
-  // Farther behind the same low block, the sightline reaches the ground
-  // after passing over it, matching the end of the rendered ground shadow.
-  units[1].position.x = 12.0f;
   CHECK(CanUnitSee(units[0], units[1], lowBlock, noSurfaces, flat));
+  CHECK(ComputeTeamVisibility(Team::Blue, units, lowBlock, noSurfaces, flat).UnitVisible(1));
+
+  // An eye-high block hides both probes: nothing of the figure shows.
+  const std::vector<Obstacle> tallBlock = {
+      Obstacle{AABB{glm::vec3(-0.5f, 0.0f, -1.0f), glm::vec3(0.5f, 2.0f, 1.0f)}},
+  };
+  CHECK(!CanUnitSee(units[0], units[1], tallBlock, noSurfaces, flat));
+  CHECK(!ComputeTeamVisibility(Team::Blue, units, tallBlock, noSurfaces, flat).UnitVisible(1));
+
+  // Farther behind the low block, the sightline reaches the ground after
+  // passing over it, matching the end of the rendered ground shadow.
+  units[1].position.x = 12.0f;
+  CHECK(LineOfSightClear(units[0].EyePosition(), units[1].position, lowBlock, noSurfaces));
+  CHECK(CanUnitSee(units[0], units[1], lowBlock, noSurfaces, flat));
+  units[1].position.x = 4.0f;
+
+  // The reverse case: a head-height overhang hides the eye but not the
+  // ground under the feet. A figure standing on tinted ground is always
+  // seen.
+  const std::vector<Obstacle> overhang = {
+      Obstacle{AABB{glm::vec3(0.0f, 1.2f, -1.0f), glm::vec3(8.0f, 2.0f, 1.0f)}},
+  };
+  CHECK(!LineOfSightClear(units[0].EyePosition(), units[1].EyePosition(), overhang,
+                          noSurfaces));
+  CHECK(LineOfSightClear(units[0].EyePosition(), units[1].position, overhang, noSurfaces));
+  CHECK(CanUnitSee(units[0], units[1], overhang, noSurfaces, flat));
+  CHECK(ComputeTeamVisibility(Team::Blue, units, overhang, noSurfaces, flat).UnitVisible(1));
+}
+
+// A flat 0.45-thick deck with its top at y=5 (the generated overpass
+// height) seen from the street. A figure near the deck edge shows its whole
+// body above the edge, but the deck top under its feet faces away from a
+// street-level eye and the sightline to it enters the deck's own slab, so
+// the feet probe alone never sighted it (one-way visibility: the deck
+// figure saw, and could shoot, the street figure).
+void TestDeckEdgeFigureSightedFromBelow() {
+  WalkSurface deck;
+  deck.vertices = {glm::vec3(-10.0f, 5.0f, -4.0f), glm::vec3(-10.0f, 5.0f, 4.0f),
+                   glm::vec3(10.0f, 5.0f, 4.0f), glm::vec3(10.0f, 5.0f, -4.0f)};
+  const std::vector<WalkSurface> surfaces = {deck};
+  const std::vector<Obstacle> noObstacles;
+  const HeightField flat;
+
+  std::vector<Unit> units(2);
+  units[0].id = 0;
+  units[0].team = Team::Blue;
+  units[0].position = glm::vec3(0.0f, 0.0f, -14.0f);
+  units[0].facingYaw = kPi / 2.0f;  // Faces +Z, toward the deck.
+  units[1].id = 1;
+  units[1].team = Team::Red;
+  units[1].position = glm::vec3(0.0f, 5.0f, -3.6f);  // kAgentRadius inside the near edge.
+  units[1].facingYaw = -kPi / 2.0f;  // Faces -Z, down at the street figure.
+
+  CHECK(!LineOfSightClear(units[0].EyePosition(), units[1].position, noObstacles, surfaces));
+  CHECK(LineOfSightClear(units[0].EyePosition(), units[1].EyePosition(), noObstacles,
+                         surfaces));
+  CHECK(CanUnitSee(units[0], units[1], noObstacles, surfaces, flat));
+  CHECK(CanUnitSee(units[1], units[0], noObstacles, surfaces, flat));
+  CHECK(ComputeTeamVisibility(Team::Blue, units, noObstacles, surfaces, flat).UnitVisible(1));
+  CHECK(ComputeTeamVisibility(Team::Red, units, noObstacles, surfaces, flat).UnitVisible(0));
+
+  // Deep on the deck, the slab hides the whole figure from this close.
+  units[1].position.z = 3.0f;
+  CHECK(!LineOfSightClear(units[0].EyePosition(), units[1].EyePosition(), noObstacles,
+                          surfaces));
+  CHECK(!CanUnitSee(units[0], units[1], noObstacles, surfaces, flat));
+  CHECK(!ComputeTeamVisibility(Team::Blue, units, noObstacles, surfaces, flat).UnitVisible(1));
+  units[1].position.z = -3.6f;
+
+  // End to end: the street figure can plan a shot at the deck figure (the
+  // target click is gated on team visibility) and the shot can land.
+  Scene scene;
+  scene.mapHalfExtent = 20.0f;
+  scene.walkSurfaces = surfaces;
+  scene.units = units;
+  GameLogic game(scene);
+  CHECK(game.ComputeVisibility(Team::Blue).UnitVisible(1));
+  CHECK(game.ComputeVisibility(Team::Red).UnitVisible(0));
+  CHECK(game.ShotHitChance(*game.FindUnit(0), *game.FindUnit(1)) > 0.0f);
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  game.ClickUnit(1, Team::Blue);
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Shoot);
+  CHECK(game.FindUnit(0)->plan.shootTargetId == 1);
 }
 
 void TestTerrainOccludesVisibilityLikeShadowMap() {
@@ -360,6 +441,15 @@ void TestTerrainOccludesVisibilityLikeShadowMap() {
   GameLogic game(scene);
   CHECK(!game.ResolveShot(*game.FindUnit(0), *game.FindUnit(1)));
   CHECK(game.FindUnit(1)->alive);
+
+  // A lower crest still hides the ground under the far figure's feet, but
+  // its eye clears the crest: the figure shows over it and is sighted.
+  ridge.heights[2] = ridge.heights[7] = 1.2f;
+  CHECK(!LineOfSightClear(units[0].EyePosition(), units[1].position, ridge));
+  CHECK(LineOfSightClear(units[0].EyePosition(), units[1].EyePosition(), ridge));
+  CHECK(CanUnitSee(units[0], units[1], noObstacles, noSurfaces, ridge));
+  CHECK(ComputeTeamVisibility(Team::Blue, units, noObstacles, noSurfaces, ridge)
+            .UnitVisible(1));
 
   std::fill(ridge.heights.begin(), ridge.heights.end(), 0.0f);
   CHECK(LineOfSightClear(units[0].EyePosition(), units[1].position, ridge));
@@ -1941,7 +2031,8 @@ int main() {
   TestElevatedEyePositionSeesOverObstacle();
   TestFovCone();
   TestTeamVisibilityAggregatesAcrossFigures();
-  TestVisibilityMatchesShadowMapGroundProbe();
+  TestVisibilitySightsFeetSurfaceOrEye();
+  TestDeckEdgeFigureSightedFromBelow();
   TestTerrainOccludesVisibilityLikeShadowMap();
   TestCheckWinner();
   TestRoundPlanningTeamGating();

@@ -172,6 +172,16 @@ if(EMSCRIPTEN)
   )
   add_custom_target(tactics_web_page ALL
     DEPENDS ${CMAKE_BINARY_DIR}/index.html ${CMAKE_BINARY_DIR}/gallery.html)
+  # Map-seed goldens (issue #133): the gallery's "Map seeds" section is
+  # driven by whatever PNGs sit under tests/map_goldens/. The script globs
+  # at build time, so re-run it every build and a new golden shows up in
+  # the gallery without touching the page.
+  add_custom_target(gallery_map_seeds ALL
+    COMMAND ${CMAKE_COMMAND}
+            -DGOLDENS_DIR=${CMAKE_SOURCE_DIR}/tests/map_goldens
+            -DOUT_DIR=${CMAKE_BINARY_DIR}
+            -P ${CMAKE_SOURCE_DIR}/scripts/gen_gallery_map_seeds.cmake
+    COMMENT "Collecting map-seed goldens for the gallery")
 else()
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)

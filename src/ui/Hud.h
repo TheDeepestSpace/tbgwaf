@@ -118,8 +118,8 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 // The extra metrics: `frameMs` last frame time, `fovMs` time spent in the
 // visibility (FOV-cone) computation, and `stats`
 // draw-call/vertex/triangle counters for the frame.
-void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& showFps, float fps,
-                    float frameMs, float fovMs,
+void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& disableOcclusionFade,
+                    bool& showFps, float fps, float frameMs, float fovMs,
                     const gfx::RenderFrameStats& stats, float top);
 
 }  // namespace ui

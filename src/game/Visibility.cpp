@@ -83,23 +83,38 @@ glm::vec3 UnitFovProbe(const Unit& target, const std::vector<WalkSurface>& walkS
   return probe;
 }
 
+// A figure is sighted through either of two points (see Visibility.h): the
+// surface under its feet, so a figure standing on overlay-tinted ground is
+// always seen, or its eye, so a figure whose body shows above a deck edge,
+// low cover or a terrain crest is seen even though the surface it stands on
+// is hidden. Both are tested against the same cone and the same occluders.
+template <typename SeesPoint>
+bool SightedThroughAnyProbe(const glm::vec3& feetProbe, const Unit& target,
+                            SeesPoint seesPoint) {
+  return seesPoint(feetProbe) || seesPoint(target.EyePosition());
+}
+
 }  // namespace
 
 bool CanUnitSee(const Unit& viewer, const Unit& target, const std::vector<Obstacle>& obstacles,
                  const std::vector<WalkSurface>& walkSurfaces) {
-  return viewer.alive &&
-         InFovCone(viewer.EyePosition(), viewer.FacingDirection(), target.position,
-                   constants::kShootHalfFovDegrees, constants::kSightRange) &&
-         LineOfSightClear(viewer.EyePosition(), target.position, obstacles, walkSurfaces);
+  if (!viewer.alive) return false;
+  return SightedThroughAnyProbe(target.position, target, [&](const glm::vec3& point) {
+    return InFovCone(viewer.EyePosition(), viewer.FacingDirection(), point,
+                     constants::kShootHalfFovDegrees, constants::kSightRange) &&
+           LineOfSightClear(viewer.EyePosition(), point, obstacles, walkSurfaces);
+  });
 }
 
 bool CanUnitSee(const Unit& viewer, const Unit& target, const std::vector<Obstacle>& obstacles,
                 const std::vector<WalkSurface>& walkSurfaces, const HeightField& terrain) {
+  if (!viewer.alive) return false;
   const glm::vec3 probe = UnitFovProbe(target, walkSurfaces, terrain);
-  return viewer.alive &&
-         InFovCone(viewer.EyePosition(), viewer.FacingDirection(), probe,
-                   constants::kShootHalfFovDegrees, constants::kSightRange) &&
-         LineOfSightClear(viewer.EyePosition(), probe, obstacles, walkSurfaces, terrain);
+  return SightedThroughAnyProbe(probe, target, [&](const glm::vec3& point) {
+    return InFovCone(viewer.EyePosition(), viewer.FacingDirection(), point,
+                     constants::kShootHalfFovDegrees, constants::kSightRange) &&
+           LineOfSightClear(viewer.EyePosition(), point, obstacles, walkSurfaces, terrain);
+  });
 }
 
 namespace {
@@ -127,7 +142,9 @@ TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
 
   for (const auto& target : units) {
     if (target.team == team) continue;  // Downed enemies stay visible while in FOV.
-    if (IsPointVisibleToTeam(team, target.position, units, obstacles)) {
+    if (SightedThroughAnyProbe(target.position, target, [&](const glm::vec3& point) {
+          return IsPointVisibleToTeam(team, point, units, obstacles);
+        })) {
       result.visibleUnit[target.id] = true;
     }
   }
@@ -154,7 +171,9 @@ TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
   result.visibleObstacle.resize(obstacles.size(), false);
   for (const Unit& target : units) {
     if (target.team == team) continue;
-    if (IsPointVisibleToTeam(team, target.position, units, obstacles)) {
+    if (SightedThroughAnyProbe(target.position, target, [&](const glm::vec3& point) {
+          return IsPointVisibleToTeam(team, point, units, obstacles);
+        })) {
       result.visibleUnit[target.id] = true;
     }
   }
@@ -184,7 +203,9 @@ TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
   result.visibleObstacle.resize(obstacles.size(), false);
   for (const Unit& target : units) {
     if (target.team == team) continue;
-    if (IsPointVisibleToTeam(team, target.position, units, obstacles, walkSurfaces)) {
+    if (SightedThroughAnyProbe(target.position, target, [&](const glm::vec3& point) {
+          return IsPointVisibleToTeam(team, point, units, obstacles, walkSurfaces);
+        })) {
       result.visibleUnit[target.id] = true;
     }
   }
@@ -216,7 +237,9 @@ TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
   for (const Unit& target : units) {
     if (target.team == team) continue;
     const glm::vec3 probe = UnitFovProbe(target, walkSurfaces, terrain);
-    if (IsPointVisibleToTeam(team, probe, units, obstacles, walkSurfaces, terrain)) {
+    if (SightedThroughAnyProbe(probe, target, [&](const glm::vec3& point) {
+          return IsPointVisibleToTeam(team, point, units, obstacles, walkSurfaces, terrain);
+        })) {
       result.visibleUnit[target.id] = true;
     }
   }

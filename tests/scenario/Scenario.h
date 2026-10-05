@@ -43,8 +43,11 @@ struct ScenarioAction {
   // view), `timeline_play` starts/resumes playback and advances it by
   // `seconds` of replay time, `timeline_pause` pauses it. While the replay
   // is active, subsequent `assert` steps check the *replayed* state.
+  // BeginMove opens move planning (select + Move) and deliberately stops
+  // there, leaving the movement frontier up for the visual runner's
+  // post-action capture; no destination is clicked and no plan is recorded.
   enum class Kind {
-    Move, Shoot, Pass, Cancel, Commit, Focus, NewGame,
+    Move, BeginMove, Shoot, Pass, Cancel, Commit, Focus, NewGame,
     TimelineSeek, TimelinePlay, TimelinePause,
   };
 

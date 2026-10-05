@@ -39,7 +39,8 @@ jobs:
 
       - name: Create app if missing
         working-directory: server/jev-adapter
-        run: flyctl apps list --json | grep -q "\"Name\": *\"$FLY_APP\"" || flyctl apps create "$FLY_APP" --org "$FLY_ORG"
+        run: |
+          flyctl apps list --json | grep -q "\"Name\": *\"$FLY_APP\"" || flyctl apps create "$FLY_APP" --org "$FLY_ORG"
 
       - name: Set runtime secret
         working-directory: server/jev-adapter

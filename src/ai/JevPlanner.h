@@ -39,6 +39,28 @@ struct JevRequest {
 std::optional<JevRequest> BuildJevRequest(const GameLogic& game, Team team,
                                           unsigned requestNonce);
 
+// Same as BuildJevRequest, but candidate validation (navmesh pathing, ~100 ms
+// each) runs in time-boxed Step() calls so the render loop can keep drawing
+// and taking input. The builder works on its own copy of `game`; staleness is
+// caught later by ApplyJevChoice. Finish() is nullopt when there is nothing
+// to ask (no actor / no legal candidates).
+class JevRequestBuilder {
+ public:
+  JevRequestBuilder(const GameLogic& game, Team team, unsigned requestNonce);
+  // Validates candidates for up to ~budgetMs (at least one per call).
+  // Returns true once all are validated.
+  bool Step(double budgetMs);
+  std::optional<JevRequest> Finish();
+
+ private:
+  GameLogic game_;
+  Team team_;
+  bool valid_ = false;
+  JevRequest request_;
+  std::vector<JevCandidate> pending_;
+  size_t next_ = 0;
+};
+
 // Rechecks the response against the current round/unit and applies it through
 // ClickUnit/Choose*/ClickGround. Unknown, stale, or newly-illegal choices are
 // rejected without changing the game.

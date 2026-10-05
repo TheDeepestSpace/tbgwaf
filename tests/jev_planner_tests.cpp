@@ -44,6 +44,18 @@ Scene TwoUnitScene(float distance, bool faceEachOther) {
   return scene;
 }
 
+void TestIncrementalBuilderMatchesBlockingBuild() {
+  GameLogic game(TwoUnitScene(24.0f, false));
+  const auto expected = BuildJevRequest(game, Team::Blue, 7);
+  tactics::ai::JevRequestBuilder builder(game, Team::Blue, 7);
+  int steps = 1;
+  while (!builder.Step(0.0)) ++steps;  // zero budget: one candidate per step
+  const auto actual = builder.Finish();
+  CHECK(expected.has_value() && actual.has_value());
+  CHECK(steps > 1);
+  CHECK(actual->json == expected->json);
+}
+
 void TestBoundedCandidatesUseNormalLegalPath() {
   GameLogic game(TwoUnitScene(24.0f, false));
   const auto request = BuildJevRequest(game, Team::Blue, 1);
@@ -128,6 +140,7 @@ void TestCompleteAiVsAiMatchAndTerminalStop() {
 }  // namespace
 
 int main() {
+  TestIncrementalBuilderMatchesBlockingBuild();
   TestBoundedCandidatesUseNormalLegalPath();
   TestHiddenEnemyNeverSerialized();
   TestInvalidAndStaleResponsesDoNotMutate();

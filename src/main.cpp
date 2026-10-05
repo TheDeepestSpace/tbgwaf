@@ -415,6 +415,9 @@ int main() {
   bool forceBroadcast = false;
 #ifdef __EMSCRIPTEN__
   std::optional<tactics::ai::JevRequest> pendingJevRequest;
+  // Candidates are validated a few ms per frame so planning never freezes the
+  // page (and the other pane) while Jev's request is being prepared.
+  std::optional<tactics::ai::JevRequestBuilder> jevBuilder;
   unsigned jevRequestNonce = 0;
   int observedAiGeneration = tbgwaf_ai_generation();
   bool jevErrorHold = false;
@@ -463,12 +466,14 @@ int main() {
     if (aiGeneration != observedAiGeneration) {
       observedAiGeneration = aiGeneration;
       pendingJevRequest.reset();
+      jevBuilder.reset();
       jevErrorHold = false;
     }
     if (tbgwaf_take_ai_retry()) jevErrorHold = false;
     if (networked && tbgwaf_take_restart()) {
       game.Reset(makeMap());
       pendingJevRequest.reset();
+      jevBuilder.reset();
       jevErrorHold = false;
       lastAutoCommittedRound = -1;
       lastSentState.clear();
@@ -736,29 +741,36 @@ int main() {
         jevErrorHold = true;
       }
       pendingJevRequest.reset();
+      jevBuilder.reset();
     }
 
     if (aiEnabled && !aiPaused && !jevErrorHold && !awaitingPeerSync &&
         game.Mode() == InputMode::AwaitingSelection) {
       if (!pendingJevRequest) {
-        pendingJevRequest =
-            tactics::ai::BuildJevRequest(game, *fixedTeam, ++jevRequestNonce);
-        if (pendingJevRequest) {
-          if (tbgwaf_ai_fallback()) {
-            const std::string choice =
-                tactics::ai::DeterministicFallbackChoice(*pendingJevRequest);
-            if (!tactics::ai::ApplyJevChoice(&game, *pendingJevRequest, choice)) {
-              jevErrorHold = true;
-              tbgwaf_ai_local_error("deterministic fallback action became invalid; retry required");
+        if (!jevBuilder) {
+          jevBuilder.emplace(game, *fixedTeam, ++jevRequestNonce);
+        }
+        if (jevBuilder->Step(6.0)) {
+          pendingJevRequest = jevBuilder->Finish();
+          jevBuilder.reset();
+          if (pendingJevRequest) {
+            if (tbgwaf_ai_fallback()) {
+              const std::string choice =
+                  tactics::ai::DeterministicFallbackChoice(*pendingJevRequest);
+              if (!tactics::ai::ApplyJevChoice(&game, *pendingJevRequest, choice)) {
+                jevErrorHold = true;
+                tbgwaf_ai_local_error("deterministic fallback action became invalid; retry required");
+              }
+              pendingJevRequest.reset();
+            } else {
+              tbgwaf_ai_request(pendingJevRequest->json.c_str());
             }
-            pendingJevRequest.reset();
-          } else {
-            tbgwaf_ai_request(pendingJevRequest->json.c_str());
           }
         }
       }
     } else if (!aiEnabled || aiPaused || game.Mode() == InputMode::GameOver) {
       pendingJevRequest.reset();
+      jevBuilder.reset();
     }
 
     // Blue is the only simulator. In AI modes it commits exactly once as

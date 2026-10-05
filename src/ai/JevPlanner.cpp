@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <sstream>
@@ -82,7 +83,10 @@ bool CandidateApplied(const GameLogic& before, Team team, const JevCandidate& ca
   return planned->plan.type == PlannedActionType::Move && !planned->plan.movePath.empty();
 }
 
-std::vector<JevCandidate> GenerateCandidates(const GameLogic& game, Team team, int actorId) {
+// Unvalidated candidate specs; ValidateCandidate() checks each one through a
+// GameLogic copy (move pathing is the expensive part, so callers can spread
+// validation across frames).
+std::vector<JevCandidate> GenerateCandidateSpecs(const GameLogic& game, Team team, int actorId) {
   const Unit* actor = game.FindUnit(actorId);
   if (!actor) return {};
   std::vector<JevCandidate> candidates;
@@ -97,8 +101,7 @@ std::vector<JevCandidate> GenerateCandidates(const GameLogic& game, Team team, i
     candidate.kind = JevActionKind::Shoot;
     candidate.actorId = actorId;
     candidate.targetId = unit.id;
-    GameLogic trial;
-    if (CandidateApplied(game, team, candidate, &trial)) candidates.push_back(candidate);
+    candidates.push_back(std::move(candidate));
   }
 
   // Fixed bearings and two radii keep the option set bounded while giving
@@ -117,19 +120,6 @@ std::vector<JevCandidate> GenerateCandidates(const GameLogic& game, Team team, i
       candidate.destination = actor->position +
                               glm::vec3(std::cos(angle) * distance, 0.0f,
                                         std::sin(angle) * distance);
-      GameLogic trial;
-      if (!CandidateApplied(game, team, candidate, &trial)) continue;
-      const Unit* planned = trial.FindUnit(actorId);
-      candidate.destination = planned->plan.movePath.back();
-      const float forward = team == Team::Blue ? candidate.destination.x - actor->position.x
-                                               : actor->position.x - candidate.destination.x;
-      std::ostringstream description;
-      description << "Move legally to " << PointJson(candidate.destination) << "; "
-                  << (forward > 0.25f ? "advances toward the opposing deployment edge"
-                                      : forward < -0.25f ? "retreats from the opposing edge"
-                                                        : "moves laterally")
-                  << ".";
-      candidate.description = description.str();
       candidates.push_back(std::move(candidate));
     }
   }
@@ -139,9 +129,27 @@ std::vector<JevCandidate> GenerateCandidates(const GameLogic& game, Team team, i
   wait.description = "Wait in place for this round; use only when movement or a visible shot is worse.";
   wait.kind = JevActionKind::Wait;
   wait.actorId = actorId;
-  GameLogic trial;
-  if (CandidateApplied(game, team, wait, &trial)) candidates.push_back(std::move(wait));
+  candidates.push_back(std::move(wait));
   return candidates;
+}
+
+bool ValidateCandidate(const GameLogic& game, Team team, JevCandidate* candidate) {
+  GameLogic trial;
+  if (!CandidateApplied(game, team, *candidate, &trial)) return false;
+  if (candidate->kind != JevActionKind::Move) return true;
+  const Unit* actor = game.FindUnit(candidate->actorId);
+  const Unit* planned = trial.FindUnit(candidate->actorId);
+  candidate->destination = planned->plan.movePath.back();
+  const float forward = team == Team::Blue ? candidate->destination.x - actor->position.x
+                                           : actor->position.x - candidate->destination.x;
+  std::ostringstream description;
+  description << "Move legally to " << PointJson(candidate->destination) << "; "
+              << (forward > 0.25f ? "advances toward the opposing deployment edge"
+                                  : forward < -0.25f ? "retreats from the opposing edge"
+                                                    : "moves laterally")
+              << ".";
+  candidate->description = description.str();
+  return true;
 }
 
 std::string TeamName(Team team) { return team == Team::Blue ? "blue" : "red"; }
@@ -181,9 +189,9 @@ std::string BuildVisibleState(const GameLogic& game, Team team, int actorId) {
 
 }  // namespace
 
-std::optional<JevRequest> BuildJevRequest(const GameLogic& game, Team team,
-                                          unsigned requestNonce) {
-  if (!IsPlanning(game) || game.Mode() != InputMode::AwaitingSelection) return std::nullopt;
+JevRequestBuilder::JevRequestBuilder(const GameLogic& game, Team team, unsigned requestNonce)
+    : game_(game), team_(team) {
+  if (!IsPlanning(game) || game.Mode() != InputMode::AwaitingSelection) return;
   const Unit* actor = nullptr;
   for (const Unit& unit : game.GetScene().units) {
     if (unit.team == team && unit.alive && unit.plan.type == PlannedActionType::None &&
@@ -191,29 +199,53 @@ std::optional<JevRequest> BuildJevRequest(const GameLogic& game, Team team,
       actor = &unit;
     }
   }
-  if (!actor) return std::nullopt;
+  if (!actor) return;
 
-  JevRequest request;
-  request.team = team;
-  request.round = game.RoundNumber();
-  request.actorId = actor->id;
-  request.id = "r" + std::to_string(request.round) + "-t" +
-               std::to_string(static_cast<int>(team)) + "-u" + std::to_string(actor->id) + "-n" +
-               std::to_string(requestNonce);
-  request.candidates = GenerateCandidates(game, team, actor->id);
-  if (request.candidates.empty()) return std::nullopt;
+  request_.team = team;
+  request_.round = game.RoundNumber();
+  request_.actorId = actor->id;
+  request_.id = "r" + std::to_string(request_.round) + "-t" +
+                std::to_string(static_cast<int>(team)) + "-u" + std::to_string(actor->id) + "-n" +
+                std::to_string(requestNonce);
+  pending_ = GenerateCandidateSpecs(game, team, actor->id);
+  valid_ = true;
+}
 
+bool JevRequestBuilder::Step(double budgetMs) {
+  if (!valid_) return true;
+  const auto start = std::chrono::steady_clock::now();
+  while (next_ < pending_.size()) {
+    JevCandidate candidate = std::move(pending_[next_++]);
+    if (ValidateCandidate(game_, team_, &candidate)) request_.candidates.push_back(std::move(candidate));
+    const std::chrono::duration<double, std::milli> elapsed =
+        std::chrono::steady_clock::now() - start;
+    if (elapsed.count() >= budgetMs) break;
+  }
+  return next_ >= pending_.size();
+}
+
+std::optional<JevRequest> JevRequestBuilder::Finish() {
+  if (!valid_ || next_ < pending_.size() || request_.candidates.empty()) return std::nullopt;
   std::ostringstream out;
-  out << "{\"requestId\":" << JsonString(request.id) << ",\"state\":"
-      << BuildVisibleState(game, team, actor->id) << ",\"candidates\":[";
-  for (size_t i = 0; i < request.candidates.size(); ++i) {
+  out << "{\"requestId\":" << JsonString(request_.id) << ",\"state\":"
+      << BuildVisibleState(game_, team_, request_.actorId) << ",\"candidates\":[";
+  for (size_t i = 0; i < request_.candidates.size(); ++i) {
     if (i) out << ',';
-    out << "{\"id\":" << JsonString(request.candidates[i].id) << ",\"description\":"
-        << JsonString(request.candidates[i].description) << "}";
+    out << "{\"id\":" << JsonString(request_.candidates[i].id) << ",\"description\":"
+        << JsonString(request_.candidates[i].description) << "}";
   }
   out << "]}";
-  request.json = out.str();
-  return request;
+  request_.json = out.str();
+  valid_ = false;
+  return std::move(request_);
+}
+
+std::optional<JevRequest> BuildJevRequest(const GameLogic& game, Team team,
+                                          unsigned requestNonce) {
+  JevRequestBuilder builder(game, team, requestNonce);
+  while (!builder.Step(1e9)) {
+  }
+  return builder.Finish();
 }
 
 bool ApplyJevChoice(GameLogic* game, const JevRequest& request, const std::string& choice) {

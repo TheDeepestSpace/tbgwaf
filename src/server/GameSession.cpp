@@ -24,6 +24,14 @@ GameSession::GameSession(uint32_t seed) : seed_(seed), game_(GenerateUrbanMap(se
 
 GameSession::GameSession(const Scene& scene) : seed_(0), fixedScene_(scene), game_(scene) {}
 
+void GameSession::ConfigureForTest(bool friendlyFire, std::vector<float> shotRolls) {
+  game_.SetFriendlyFireEnabled(friendlyFire);
+  if (shotRolls.empty()) return;
+  game_.SetShotRollSource([rolls = std::move(shotRolls), next = size_t{0}]() mutable {
+    return rolls[next++ % rolls.size()];
+  });
+}
+
 GameSession::Result GameSession::Apply(Team team, const net::Action& action, uint32_t newSeed) {
   Result result;
   if (action.kind == net::ActionKind::Commit) {

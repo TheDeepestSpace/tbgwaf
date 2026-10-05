@@ -52,6 +52,10 @@ struct Action {
   ActionKind kind = ActionKind::Pass;
   int unit = -1;
   int target = -1;
+  // Shoot only: a free-aim shot (issue #129) carries aimPoint instead of a
+  // target; shots is the burst size (issue #138).
+  std::optional<glm::vec3> aimPoint;
+  int shots = 1;
   std::vector<glm::vec3> waypoints;
   std::optional<float> facing;
   tactics::SquadPlaybook playbook;  // Reaction only.

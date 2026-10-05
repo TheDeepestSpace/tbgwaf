@@ -1,5 +1,6 @@
 #pragma once
 
+#include <vector>
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -20,6 +21,10 @@ class GameSession {
   // A match on a fixed, explicitly built scene (test control tap); `new_match`
   // restarts on the same scene.
   explicit GameSession(const Scene& scene);
+
+  // Test knobs (control tap): the friendly-fire flag and pinned shot rolls
+  // (consumed in resolution order, repeating when exhausted; empty = seeded RNG).
+  void ConfigureForTest(bool friendlyFire, std::vector<float> shotRolls);
 
   uint32_t seed() const { return seed_; }
   const GameLogic& game() const { return game_; }

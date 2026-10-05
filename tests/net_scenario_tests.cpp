@@ -418,6 +418,12 @@ std::vector<std::string> RunNetScenario(const Scenario& scenario, int index, Ser
   load.Set("t", "load_scenario");
   load.Set("room", room);
   load.Set("scene", scenario.sceneSpec);
+  load.Set("friendly_fire", Json(scenario.friendlyFire));
+  if (!scenario.shotRolls.empty()) {
+    Json rolls{Json::Array{}};
+    for (float r : scenario.shotRolls) rolls.Push(Json(static_cast<double>(r)));
+    load.Set("shot_rolls", std::move(rolls));
+  }
   control.Send(load.Dump());
   {
     std::vector<std::string> reply;

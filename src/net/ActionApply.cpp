@@ -71,7 +71,13 @@ bool ApplyPlanAction(GameLogic& game, Team team, const Action& action, std::stri
       return true;
     case ActionKind::Shoot: {
       game.ChooseShoot();
-      game.ClickUnit(action.target, team);
+      game.SetPlannedShotCount(action.shots, team);
+      if (action.aimPoint) {
+        game.PlaceAimPoint(*action.aimPoint, team);
+        game.ConfirmAim(team);
+      } else {
+        game.ClickUnit(action.target, team);
+      }
       if (game.Mode() != InputMode::AwaitingSelection) {
         return Rollback("invalid shot target (not an enemy in your team's view)");
       }
@@ -111,6 +117,8 @@ Action PlanToAction(const Unit& unit) {
     case PlannedActionType::Shoot:
       a.kind = ActionKind::Shoot;
       a.target = unit.plan.shootTargetId;
+      if (unit.plan.hasAimPoint) a.aimPoint = unit.plan.aimPoint;
+      a.shots = unit.plan.shots;
       break;
     case PlannedActionType::Pass: a.kind = ActionKind::Pass; break;
     case PlannedActionType::None: a.kind = ActionKind::Cancel; break;

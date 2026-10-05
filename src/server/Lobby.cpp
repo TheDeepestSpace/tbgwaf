@@ -74,6 +74,7 @@ void Lobby::Join(int conn, const Json& message) {
   members_[conn] = Member{name, Team::Red};
   room.session = room.scene ? std::make_unique<GameSession>(*room.scene)
                             : std::make_unique<GameSession>(seed_());
+  if (room.scene) room.session->ConfigureForTest(room.friendlyFire, room.shotRolls);
   StartMatch(room);
 }
 
@@ -160,6 +161,12 @@ Json Lobby::OnControl(const Json& message) {
     Room& room = rooms_[name];
     room.scene = std::move(scene);
     room.sceneSpec = message["scene"];
+    if (message["friendly_fire"].IsBool()) room.friendlyFire = message["friendly_fire"].AsBool();
+    if (message["shot_rolls"].IsArray()) {
+      for (const net::Json& r : message["shot_rolls"].AsArray()) {
+        if (r.IsNumber()) room.shotRolls.push_back(static_cast<float>(r.AsNumber()));
+      }
+    }
     return reply(true, "");
   }
   if (type == "dump_state") {

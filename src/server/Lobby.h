@@ -37,6 +37,8 @@ class Lobby {
     std::unique_ptr<GameSession> session;
     std::optional<Scene> scene;  // Set by load_scenario.
     net::Json sceneSpec;         // The same scene, sent to clients in `start`.
+    bool friendlyFire = true;    // Test knobs from load_scenario.
+    std::vector<float> shotRolls;
   };
   struct Member {
     std::string room;

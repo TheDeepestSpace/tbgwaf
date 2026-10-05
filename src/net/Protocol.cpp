@@ -1,5 +1,6 @@
 #include "net/Protocol.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace tactics::net {
@@ -110,7 +111,17 @@ bool ParseAction(const Json& m, Action* out, std::string* error) {
 
   switch (a.kind) {
     case ActionKind::Shoot:
-      if (!ReadId(m["target"], &a.target)) return Fail("bad target id");
+      if (m.Has("aim")) {
+        glm::vec3 p;
+        if (!DecodeVec3(m["aim"], &p)) return Fail("bad aim point");
+        a.aimPoint = p;
+      } else if (!ReadId(m["target"], &a.target)) {
+        return Fail("bad target id");
+      }
+      if (m.Has("shots")) {
+        if (!m["shots"].IsNumber() || !std::isfinite(m["shots"].AsNumber())) return Fail("bad shots");
+        a.shots = static_cast<int>(std::clamp(m["shots"].AsNumber(), 1.0, 1000.0));
+      }
       break;
     case ActionKind::Move: {
       if (!m["waypoints"].IsArray()) return Fail("missing waypoints");
@@ -145,7 +156,14 @@ Json EncodeAction(const Action& a) {
   }
   if (a.seq) j.Set("seq", a.seq);
   if (a.unit >= 0) j.Set("unit", a.unit);
-  if (a.kind == ActionKind::Shoot) j.Set("target", a.target);
+  if (a.kind == ActionKind::Shoot) {
+    if (a.aimPoint) {
+      j.Set("aim", EncodeVec3(*a.aimPoint));
+    } else {
+      j.Set("target", a.target);
+    }
+    if (a.shots != 1) j.Set("shots", a.shots);
+  }
   if (a.kind == ActionKind::Move) {
     Json pts{Json::Array{}};
     for (const auto& w : a.waypoints) pts.Push(EncodeVec3(w));

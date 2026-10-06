@@ -503,9 +503,11 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
   const ShootPose shot = SampleShootPose(unit);
   const glm::mat4 fall = KnockdownModel(unit);
   // Flag pickup beat: the figure dips forward to reach the pole and comes
-  // back up (a quick overlay; it never blocks walking or shooting).
+  // back up (a quick overlay; it never blocks walking or shooting).  Wireframe
+  // ghosts (plan previews, sighting memory) copy the live unit's state but
+  // are not performing the grab, so they skip it.
   float grabLean = 0.0f;
-  if (unit.grabElapsed >= 0.0f) {
+  if (unit.grabElapsed >= 0.0f && !compactWeapon) {
     const float t = glm::clamp(unit.grabElapsed / tactics::constants::kGrabAnimDuration, 0.0f, 1.0f);
     grabLean = kGrabLean * std::sin(glm::pi<float>() * t);
   }

@@ -1,0 +1,25 @@
+name: zipline_opposing_teams_same_direction
+description: >
+  Issue #166: the one-rider-at-a-time rule is team-blind. Blue and Red both
+  plan the same line eastward in the same round; one rides first, the other
+  waits at the anchor, and both end up at their destinations.
+
+map:
+  half_extent: 40
+  ziplines:
+    - {from: [-16, 0, 0], to: [10, 0, 0]}
+
+units:
+  - {id: 0, team: blue, position: [-18, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [-18, 0, 1], facing_degrees: 0}
+
+script:
+  - action: move
+    actor: 0
+    destination: [20, 0, 0]
+  - action: move
+    actor: 1
+    destination: [20, 0, 1]
+  - action: commit
+  - assert: {unit: 0, position: [20, 0, 0], tolerance: 0.05}
+  - assert: {unit: 1, position: [20, 0, 1], tolerance: 0.05}

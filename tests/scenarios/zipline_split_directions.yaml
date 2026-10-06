@@ -1,0 +1,31 @@
+name: zipline_split_directions
+description: >
+  Issue #166: figures that want to go different ways don't interact. Blue 0
+  rides the line east while Blue 1 walks west away from it; neither waits and
+  both finish in the round.
+
+map:
+  half_extent: 40
+  ziplines:
+    - {from: [-16, 0, 0], to: [10, 0, 0]}
+
+units:
+  - {id: 0, team: blue, position: [-18, 0, 0], facing_degrees: 0}
+  - {id: 1, team: blue, position: [-18, 0, 3], facing_degrees: 0}
+  - {id: 2, team: red, position: [30, 0, 20], facing_degrees: 180}
+
+script:
+  - action: move
+    actor: 0
+    destination: [20, 0, 0]
+    comment: Walk 2, ride, walk 10.
+  - action: move
+    actor: 1
+    destination: [-36, 0, 3]
+    comment: Walks 18 the other way; never touches the line.
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {unit: 0, position: [20, 0, 0], tolerance: 0.05}
+  - assert: {unit: 1, position: [-36, 0, 3], tolerance: 0.05}
+  - assert: {round: 2}

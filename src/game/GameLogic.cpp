@@ -267,6 +267,12 @@ void ApplyPlan(const GameSnapshot::UnitState& u, Unit* unit) {
 
 }  // namespace
 
+void GameLogic::ClearAllPlans() {
+  for (auto& unit : scene_.units) unit.plan = PlannedAction{};
+  movePreviewPath_.clear();
+  movePreviewValid_ = false;
+}
+
 bool GameLogic::ImportState(const GameSnapshot& snap) {
   if (!SnapshotMatchesUnits(snap, scene_.units)) return false;
   // Deaths arriving in this snapshot whose victim the opposing team cannot

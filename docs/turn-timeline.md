@@ -38,6 +38,9 @@ from the start or from any completed round ("turn" = one WEGO round).
   positions. Sighting-memory ghost trails are rebuilt as the replay plays
   forward (approximate, not recorded).
 
+Replayed (non-current) turns show no plan details -- planned/armed next
+moves, shot lines and plan rings are stripped from the replay instance.
+
 ## Decisions (as asked in the issue)
 
 - **View-only replay, no branching.** Scrubbing back and pressing Play never

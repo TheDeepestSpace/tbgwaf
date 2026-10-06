@@ -83,6 +83,7 @@ void TimelinePlayback::ShowFrame(const TurnTimeline& timeline, const GameLogic& 
       return;
     }
   }
+  replay_->ClearAllPlans();
   replay_->UpdateSightingMemory(0.0f);
   frame_ = index;
   time_ = timeline.FrameTime(index);
@@ -135,6 +136,7 @@ void TimelinePlayback::Update(const TurnTimeline& timeline, float dtSeconds) {
   }
   if (target != frame_) {
     replay_->ImportState(timeline.FrameSnapshot(target));
+    replay_->ClearAllPlans();
     frame_ = target;
   }
   // Rebuild ghost trails as the replay advances (a follower does the same

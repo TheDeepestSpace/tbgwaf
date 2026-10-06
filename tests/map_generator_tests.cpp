@@ -1245,7 +1245,38 @@ void TestBranchJunctionCrossingsStayLocalAcrossLayouts() {
 
 }  // namespace
 
+// Issue #146: feature flags are plumbed but inert, and the street graph
+// covers the highway plus every local street.
+void TestFeatureFlagsAndStreetGraph() {
+  MapGeneratorConfig full;
+  for (const char* name : {"lanes", "curbs", "furniture", "terrain", "interiors", "rail"}) {
+    FeatureToggle* toggle = UrbanFeatureByName(&full.features, name);
+    CHECK(toggle != nullptr);
+    if (toggle) toggle->mode = FeatureMode::On;
+  }
+  CHECK(UrbanFeatureByName(&full.features, "bogus") == nullptr);
+  FeatureMode mode = FeatureMode::Auto;
+  CHECK(ParseFeatureMode("on", &mode) && mode == FeatureMode::On);
+  CHECK(!ParseFeatureMode("maybe", &mode));
+  for (uint32_t seed : kSeeds) {
+    CHECK(SameScene(GenerateUrbanMap(seed), GenerateUrbanMap(seed, full)));
+    const std::vector<UrbanStreet> streets = UrbanStreets(seed);
+    CHECK(SameScene(GenerateUrbanMap(seed), GenerateUrbanMap(seed)));
+    int highway = 0, local = 0;
+    for (const UrbanStreet& street : streets) {
+      CHECK(street.width > 0.0f);
+      (street.cls == UrbanStreetClass::Highway ? highway : local)++;
+    }
+    CHECK(highway > 0 && local > 0);
+    CHECK(streets.size() == UrbanStreets(seed).size());
+  }
+  MapGeneratorConfig legacy;
+  legacy.arteryCount = 0;
+  CHECK(UrbanStreets(1, legacy).empty());
+}
+
 int main() {
+  TestFeatureFlagsAndStreetGraph();
   TestDeterminismAndVariety();
   TestPinnedSeedFingerprints();
   TestMapIsMuchLargerThanDefault();

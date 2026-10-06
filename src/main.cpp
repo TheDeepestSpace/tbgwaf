@@ -377,7 +377,8 @@ int main() {
   // TBGWAF_MAP picks the generator/urban variant; both web clients must
   // agree the same way they must agree on the seed. The urban-auto default
   // lets the seed decide whether the city gets an overpass (and which layout,
-  // issue #130); TBGWAF_MAP=urban forces it off, urban-elevated forces it on.
+  // issue #130); TBGWAF_MAP=urban forces it off, urban-elevated forces it on;
+  // urban-full forces every optional feature layer on.
   std::string mapType = "urban-auto";
   if (const char* mapEnv = std::getenv("TBGWAF_MAP")) mapType = mapEnv;
   auto makeMap = [&mapSeed, &mapType]() {
@@ -388,6 +389,12 @@ int main() {
       config.elevatedHighway = tactics::OverpassMode::Off;
     }
     if (mapType == "urban-elevated") config.elevatedHighway = tactics::OverpassMode::On;
+    if (mapType == "urban-full") {
+      // Every optional detail layer forced on (issue #146).
+      for (const char* name : {"lanes", "curbs", "furniture", "terrain", "interiors", "rail"}) {
+        tactics::UrbanFeatureByName(&config.features, name)->mode = tactics::FeatureMode::On;
+      }
+    }
     return tactics::GenerateUrbanMap(mapSeed, config);
   };
   GameLogic game(makeMap());

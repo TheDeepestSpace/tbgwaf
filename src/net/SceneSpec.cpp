@@ -69,6 +69,24 @@ bool SceneFromSpec(const Json& spec, tactics::Scene* out, std::string* error) {
           return Fail(error, "map.generate.elevated_branch must be ramp/off-map, got '" + end + "'");
         }
       }
+      // `features: {lanes: on, curbs: {mode: auto, chance: 0.3}, ...}`
+      // sets the optional urban detail layers (see UrbanFeatures).
+      if (gen["features"].IsObject()) {
+        for (const auto& [name, value] : gen["features"].AsObject()) {
+          FeatureToggle* toggle = UrbanFeatureByName(&config.features, name);
+          if (!toggle) return Fail(error, "map.generate.features: unknown feature '" + name + "'");
+          const std::string mode = value.IsObject()
+                                       ? (value["mode"].IsString() ? value["mode"].AsString() : "auto")
+                                       : (value.IsString() ? value.AsString() : "");
+          if (!ParseFeatureMode(mode, &toggle->mode)) {
+            return Fail(error, "map.generate.features." + name + " must be auto/off/on, got '" +
+                                   mode + "'");
+          }
+          if (value.IsObject() && value["chance"].IsNumber()) {
+            toggle->chance = static_cast<float>(value["chance"].AsNumber());
+          }
+        }
+      }
       scene = GenerateUrbanMap(seed, config);
     } else if (type == "hilly") {
       scene = GenerateHillyMap(seed);

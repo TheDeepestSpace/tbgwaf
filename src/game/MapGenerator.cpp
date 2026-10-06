@@ -11,6 +11,18 @@
 namespace tactics {
 namespace {
 
+// Rng sub-streams. Every pass draws from its own `Rng(seed ^ constant)` so
+// adding or forcing one never reshuffles another (issue #146). New passes
+// pick a fresh constant and add a row here.
+//
+//   constant      pass             draws
+//   (seed)        parcels, towers  park/height/gap/junction draws per block, then tower picks
+//   0x0ebe7a55u   overpass         presence + layout (ResolveOverpass)
+//   0xa17e2d31u   highway plan     artery placement and profile
+//   0x5b2a9c47u   highway branch   branch end, ramp fraction/length
+//   0xb10c5eedu   street graph     avenues and cross streets
+constexpr uint32_t kStreetStream = 0xb10c5eedu;
+
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kSidewalkHeight = 0.12f;  // Curb: purely visual, well under a step.
 
@@ -461,49 +473,94 @@ void CutStreet(std::vector<std::vector<glm::vec2>>* regions, glm::vec2 origin, g
   *regions = std::move(next);
 }
 
-// Convex polygon blocks: the rim rectangle is split by the artery corridor,
-// the branch corridor, avenues roughly parallel to the artery and oblique
-// cross streets. Every surviving region is a block whose shape follows
-// whatever angles the streets around it happen to make.
-std::vector<UrbanBlock> BuildCityBlocks(uint32_t seed, const MapGeneratorConfig& c) {
-  const HighwayPlan plan = BuildHighwayPlan(seed, c);
+// A street carved out of one side's blocks: a band of `width` around the
+// line origin + t*dir. Recorded in the order drawn so the block pass replays
+// exactly the cuts the street pass chose.
+struct StreetCut {
+  glm::vec2 origin, dir;
+  float width;
+  int side;
+  UrbanStreetClass cls;
+};
+
+// Every street of the city: the highway roads plus the local cuts.
+struct StreetGraph {
+  std::vector<UrbanRoad> roads;
+  std::vector<StreetCut> cuts;
+};
+
+// Everything the passes share. Built front to back: HighwayPlan ->
+// StreetGraph -> Blocks; Parcels and Scene emission consume it.
+struct CityPlan {
+  HighwayPlan highway;
+  StreetGraph streets;
+  std::vector<UrbanBlock> blocks;
+};
+
+float RimWidth(const MapGeneratorConfig& c) { return std::max(c.streetWidth, c.localStreetWidth); }
+float ArteryBand(const MapGeneratorConfig& c) {
+  return c.arteryWidth * 0.5f + c.localStreetWidth * 0.45f;
+}
+
+// Street pass: the branch corridor, avenues roughly parallel to the artery
+// and oblique cross streets for each side. Each side draws its own, so
+// junctions don't line up across the artery and block shapes differ.
+StreetGraph BuildStreetGraph(uint32_t seed, const MapGeneratorConfig& c, const HighwayPlan& plan) {
   const ArterySpec& artery = plan.artery;
-  Rng rng(seed ^ 0xb10c5eedu);
+  Rng rng(seed ^ kStreetStream);
   const float half = UrbanMapHalfExtent(c);
-  const float rim = std::max(c.streetWidth, c.localStreetWidth);
+  const float band = ArteryBand(c);
+  StreetGraph graph;
+  graph.roads = BuildUrbanRoads(seed, c);
+  for (const int side : {1, -1}) {
+    if (plan.hasBranch && plan.branch.side == side) {
+      graph.cuts.push_back({plan.branch.start, plan.branch.dir,
+                            plan.branch.width + c.localStreetWidth * 0.8f, side,
+                            UrbanStreetClass::Highway});
+    }
+    float offset = band + c.blockSize * rng.Float(0.8f, 1.1f);
+    while (offset < half * 1.5f) {
+      const glm::vec2 dir = Rotate(artery.dir, rng.Float(-0.09f, 0.09f));
+      const float width = c.localStreetWidth * rng.Float(0.85f, 1.25f);
+      graph.cuts.push_back(
+          {artery.origin + artery.normal * (static_cast<float>(side) * offset), dir, width, side,
+           UrbanStreetClass::Avenue});
+      offset += c.blockSize * rng.Float(0.85f, 1.25f) + width;
+    }
+    float s = artery.sMin + c.blockSize * rng.Float(0.55f, 0.9f);
+    while (s < artery.sMax - c.blockSize * 0.4f) {
+      const glm::vec2 dir =
+          Rotate(artery.normal, rng.Float(-c.localStreetSkew, c.localStreetSkew));
+      const float width = c.localStreetWidth * rng.Float(0.85f, 1.25f);
+      graph.cuts.push_back({artery.origin + artery.dir * s, dir, width, side,
+                            UrbanStreetClass::Cross});
+      s += c.blockSize * rng.Float(0.9f, 1.35f) + width;
+    }
+  }
+  return graph;
+}
+
+// Block pass. Convex polygon blocks: the rim rectangle is split by the
+// artery corridor and every street cut. Each surviving region is a block
+// whose shape follows whatever angles the streets around it happen to make.
+std::vector<UrbanBlock> BuildBlocks(const MapGeneratorConfig& c, const HighwayPlan& plan,
+                                    const StreetGraph& graph) {
+  const ArterySpec& artery = plan.artery;
+  const float half = UrbanMapHalfExtent(c);
+  const float rim = RimWidth(c);
   const float lo = -half + rim, hi = half - rim;
   const std::vector<glm::vec2> rimRect = {{lo, lo}, {hi, lo}, {hi, hi}, {lo, hi}};
-  const float band = c.arteryWidth * 0.5f + c.localStreetWidth * 0.45f;
   const float arteryD = glm::dot(artery.normal, artery.origin);
 
   std::vector<UrbanBlock> blocks;
   for (const int side : {1, -1}) {
     const glm::vec2 n = artery.normal * static_cast<float>(side);
     std::vector<std::vector<glm::vec2>> regions;
-    std::vector<glm::vec2> base = KeepSide(rimRect, n, static_cast<float>(side) * arteryD + band);
+    std::vector<glm::vec2> base =
+        KeepSide(rimRect, n, static_cast<float>(side) * arteryD + ArteryBand(c));
     if (base.size() >= 3) regions.push_back(std::move(base));
-    if (plan.hasBranch && plan.branch.side == side) {
-      CutStreet(&regions, plan.branch.start, plan.branch.dir,
-                plan.branch.width + c.localStreetWidth * 0.8f);
-    }
-    // Avenues roughly parallel to the artery.
-    float offset = band + c.blockSize * rng.Float(0.8f, 1.1f);
-    while (offset < half * 1.5f) {
-      const glm::vec2 dir = Rotate(artery.dir, rng.Float(-0.09f, 0.09f));
-      const float width = c.localStreetWidth * rng.Float(0.85f, 1.25f);
-      CutStreet(&regions, artery.origin + artery.normal * (static_cast<float>(side) * offset),
-                dir, width);
-      offset += c.blockSize * rng.Float(0.85f, 1.25f) + width;
-    }
-    // Oblique cross streets. Each side draws its own, so junctions don't
-    // line up across the artery and the block shapes differ everywhere.
-    float s = artery.sMin + c.blockSize * rng.Float(0.55f, 0.9f);
-    while (s < artery.sMax - c.blockSize * 0.4f) {
-      const glm::vec2 dir =
-          Rotate(artery.normal, rng.Float(-c.localStreetSkew, c.localStreetSkew));
-      const float width = c.localStreetWidth * rng.Float(0.85f, 1.25f);
-      CutStreet(&regions, artery.origin + artery.dir * s, dir, width);
-      s += c.blockSize * rng.Float(0.9f, 1.35f) + width;
+    for (const StreetCut& cut : graph.cuts) {
+      if (cut.side == side) CutStreet(&regions, cut.origin, cut.dir, cut.width);
     }
     for (auto& region : regions) {
       if (PolygonArea(region) < c.minPolygonArea) continue;
@@ -511,6 +568,19 @@ std::vector<UrbanBlock> BuildCityBlocks(uint32_t seed, const MapGeneratorConfig&
     }
   }
   return blocks;
+}
+
+CityPlan BuildCityPlan(uint32_t seed, const MapGeneratorConfig& c) {
+  CityPlan plan;
+  plan.highway = BuildHighwayPlan(seed, c);
+  plan.streets = BuildStreetGraph(seed, c, plan.highway);
+  plan.blocks = BuildBlocks(c, plan.highway, plan.streets);
+  return plan;
+}
+
+std::vector<UrbanBlock> BuildCityBlocks(uint32_t seed, const MapGeneratorConfig& c) {
+  const HighwayPlan highway = BuildHighwayPlan(seed, c);
+  return BuildBlocks(c, highway, BuildStreetGraph(seed, c, highway));
 }
 
 // Ribbon edge; an end vertex sitting exactly on the map boundary slides
@@ -540,6 +610,18 @@ std::vector<glm::vec3> RibbonSide(const UrbanRoad& road, bool left, float half) 
   }
   return side;
 }
+
+// A buildable lot: footprint plus height, before it becomes an Obstacle.
+struct Parcel {
+  std::vector<glm::vec2> footprint;
+  float height;
+};
+
+// Parcel pass output for one block.
+struct BlockParcels {
+  std::vector<glm::vec2> sidewalk;  // The block outline, paved.
+  std::vector<Parcel> parcels;
+};
 
 void AddPolygonBuilding(Scene* scene, std::vector<glm::vec2> footprint, float height) {
   if (footprint.size() < 3 || PolygonArea(footprint) < 1.0f) return;
@@ -581,21 +663,18 @@ bool PolygonClearOfRoads(const std::vector<glm::vec2>& polygon,
 // wall-to-wall junctions, seeded alley gaps and at least one opening into
 // the courtyard. Acute wedge blocks whose inner ring collapses become one
 // real angled building; blocks whose first inset collapses stay open.
-void EmitBlockBuildings(Scene* scene, const UrbanBlock& block, size_t blockIndex,
-                        const std::vector<UrbanRoad>& arteries, const MapGeneratorConfig& c,
-                        Rng* rng) {
-  RoadSurface sidewalk;
-  for (const glm::vec2& p : block.vertices) {
-    sidewalk.vertices.emplace_back(p.x, kSidewalkHeight, p.y);
-  }
-  scene->sidewalkSurfaces.push_back(std::move(sidewalk));
+BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
+                              const std::vector<UrbanRoad>& arteries, const MapGeneratorConfig& c,
+                              Rng* rng) {
+  BlockParcels out;
+  out.sidewalk = block.vertices;
   const bool park = rng->Chance(0.10f);  // Pocket park/open lot.
   const float cluster = rng->Float(c.minBuildingHeight, c.maxBuildingHeight);
-  if (park) return;
+  if (park) return out;
   std::vector<glm::vec2> outer = InsetConvexPolygon(block.vertices, c.sidewalkWidth);
   if (outer.size() < 3 || PolygonArea(outer) < c.minPolygonArea ||
       !PolygonClearOfRoads(outer, arteries, c.sidewalkWidth)) {
-    return;
+    return out;
   }
   std::vector<glm::vec2> inner = InsetConvexPolygon(outer, c.buildingDepth);
   const std::vector<glm::vec2> courtyard = InsetConvexPolygon(outer, c.buildingDepth + 1.2f);
@@ -643,11 +722,11 @@ void EmitBlockBuildings(Scene* scene, const UrbanBlock& block, size_t blockIndex
     }
     for (auto& slab : slabs) {
       if (PolygonArea(slab) < c.minPolygonArea * 0.35f) continue;
-      AddPolygonBuilding(scene, std::move(slab),
+      out.parcels.push_back({std::move(slab),
                          std::clamp(cluster + rng->Float(-1.2f, 1.2f), c.minBuildingHeight,
-                                    c.maxBuildingHeight));
+                                    c.maxBuildingHeight)});
     }
-    return;
+    return out;
   }
 
   // Plan every junction first so the block is guaranteed an opening.
@@ -718,11 +797,12 @@ void EmitBlockBuildings(Scene* scene, const UrbanBlock& block, size_t blockIndex
       // A back wall pinched to a point becomes a (still convex) triangle.
       if (ub - ua < 0.05f) footprint.pop_back();
       if (PolygonArea(footprint) < c.minPolygonArea * 0.18f) continue;
-      AddPolygonBuilding(scene, std::move(footprint),
+      out.parcels.push_back({std::move(footprint),
                          std::clamp(cluster + rng->Float(-1.2f, 1.2f), c.minBuildingHeight,
-                                    c.maxBuildingHeight));
+                                    c.maxBuildingHeight)});
     }
   }
+  return out;
 }
 
 // True when two deck spans overlap in plan at matching height, i.e. a figure
@@ -765,13 +845,13 @@ bool SpansTouchAtSameHeight(const WalkSurface& a, const WalkSurface& b) {
                    SurfaceHeightAt(b, probe.x, probe.y)) < 0.6f;
 }
 
-Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
-  Rng rng(seed);
-  Scene scene;
-  scene.mapHalfExtent = UrbanMapHalfExtent(c);
-  const HighwayPlan plan = BuildHighwayPlan(seed, c);
-  const std::vector<UrbanRoad> roads = BuildUrbanRoads(seed, c);
+// Scene emission, one emitter per feature family. Obstacles are appended in
+// emitter order (piers, then buildings), which the tower pick depends on.
 
+// Road pavement, elevated deck chains and their ground/branch links.
+void EmitHighwaySurfaces(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c) {
+  const HighwayPlan& plan = city.highway;
+  const std::vector<UrbanRoad>& roads = city.streets.roads;
   // Pavement and deck layers come from the same mitered ribbons. At-grade
   // stretches stay ordinary ground roads; everything above grade becomes an
   // explicit WalkSurface chain so the deck never erases the ground beneath.
@@ -782,8 +862,8 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   std::vector<Chain> chains(roads.size());
   for (size_t roadIndex = 0; roadIndex < roads.size(); ++roadIndex) {
     const UrbanRoad& road = roads[roadIndex];
-    const auto left = RibbonSide(road, true, scene.mapHalfExtent);
-    const auto right = RibbonSide(road, false, scene.mapHalfExtent);
+    const auto left = RibbonSide(road, true, scene->mapHalfExtent);
+    const auto right = RibbonSide(road, false, scene->mapHalfExtent);
     const std::vector<float> params = roadIndex == 0
                                           ? SampleParams(plan.artery.s0, plan.artery.s1)
                                           : SampleParams(plan.branch.u0, plan.branch.length);
@@ -793,21 +873,21 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
           plan.elevated &&
           std::max(road.centerline[i].y, road.centerline[i + 1].y) > kGradeY + 0.05f;
       if (!deck) {
-        scene.roads.push_back(RoadSurface{{left[i], right[i], right[i + 1], left[i + 1]}});
+        scene->roads.push_back(RoadSurface{{left[i], right[i], right[i + 1], left[i + 1]}});
         continue;
       }
       WalkSurface surface;
       surface.vertices = {left[i], right[i], right[i + 1], left[i + 1]};
-      const int index = static_cast<int>(scene.walkSurfaces.size());
+      const int index = static_cast<int>(scene->walkSurfaces.size());
       if (chain.first < 0) chain.first = index;
       if (chain.last >= 0) {
         surface.neighbors.push_back(chain.last);
-        scene.walkSurfaces[chain.last].neighbors.push_back(index);
+        scene->walkSurfaces[chain.last].neighbors.push_back(index);
       }
       chain.last = index;
       chain.loS.push_back(params[i]);
       chain.hiS.push_back(params[i + 1]);
-      scene.walkSurfaces.push_back(std::move(surface));
+      scene->walkSurfaces.push_back(std::move(surface));
     }
   }
   if (plan.elevated && chains[0].first >= 0) {
@@ -815,13 +895,13 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     // actually returns to grade on-map (an off-map elevated end never does);
     // the connecting ramp's foot always starts at grade.
     if (ArteryElevationAt(plan, c, plan.artery.s0) < kGradeY + 0.05f) {
-      scene.walkSurfaces[chains[0].first].connectsToGround = true;
+      scene->walkSurfaces[chains[0].first].connectsToGround = true;
     }
     if (ArteryElevationAt(plan, c, plan.artery.s1) < kGradeY + 0.05f) {
-      scene.walkSurfaces[chains[0].last].connectsToGround = true;
+      scene->walkSurfaces[chains[0].last].connectsToGround = true;
     }
     if (roads.size() > 1 && chains[1].first >= 0) {
-      if (!plan.branch.offMap) scene.walkSurfaces[chains[1].first].connectsToGround = true;
+      if (!plan.branch.offMap) scene->walkSurfaces[chains[1].first].connectsToGround = true;
       // The on-ramp rides level with the deck across the whole junction
       // overlap (its profile only starts descending once clear of the
       // artery), so every overlapping same-height deck/branch span pair is a
@@ -831,9 +911,9 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
       bool linked = false;
       for (int bi = chains[1].first; bi <= chains[1].last; ++bi) {
         for (int di = chains[0].first; di <= chains[0].last; ++di) {
-          if (!SpansTouchAtSameHeight(scene.walkSurfaces[di], scene.walkSurfaces[bi])) continue;
-          scene.walkSurfaces[bi].neighbors.push_back(di);
-          scene.walkSurfaces[di].neighbors.push_back(bi);
+          if (!SpansTouchAtSameHeight(scene->walkSurfaces[di], scene->walkSurfaces[bi])) continue;
+          scene->walkSurfaces[bi].neighbors.push_back(di);
+          scene->walkSurfaces[di].neighbors.push_back(bi);
           linked = true;
         }
       }
@@ -848,13 +928,17 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
           }
         }
         if (deckAtMerge >= 0) {
-          scene.walkSurfaces[chains[1].last].neighbors.push_back(deckAtMerge);
-          scene.walkSurfaces[deckAtMerge].neighbors.push_back(chains[1].last);
+          scene->walkSurfaces[chains[1].last].neighbors.push_back(deckAtMerge);
+          scene->walkSurfaces[deckAtMerge].neighbors.push_back(chains[1].last);
         }
       }
     }
   }
+}
 
+// Bridge piers under the elevated spans.
+void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c) {
+  const HighwayPlan& plan = city.highway;
   // Bridge stands: paired pier columns under the high spans, leaving broad
   // navigable ground between bents. None near the on-ramp's merge, where the
   // two slabs overlap.
@@ -885,9 +969,9 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
         const glm::vec2 foot = center + across * (lat * halfSpan);
         const float top = deckY - c.highwayThickness - 0.05f;
         // A column stands fully on the map even where the deck runs past it.
-        if (std::max(std::fabs(foot.x), std::fabs(foot.y)) > scene.mapHalfExtent - 0.75f) continue;
+        if (std::max(std::fabs(foot.x), std::fabs(foot.y)) > scene->mapHalfExtent - 0.75f) continue;
         if (!columnFits(foot, top)) continue;
-        scene.obstacles.push_back(
+        scene->obstacles.push_back(
             Obstacle{AABB{glm::vec3(foot.x - 0.7f, 0.0f, foot.y - 0.7f),
                           glm::vec3(foot.x + 0.7f, top, foot.y + 0.7f)},
                      false});
@@ -919,25 +1003,43 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
       }
     }
   }
+}
 
-  const std::vector<UrbanBlock> blocks = BuildCityBlocks(seed, c);
-  for (size_t blockIndex = 0; blockIndex < blocks.size(); ++blockIndex) {
-    EmitBlockBuildings(&scene, blocks[blockIndex], blockIndex, roads, c, &rng);
+// Sidewalks and buildings from the parcel pass, then landmark towers.
+void EmitBuildings(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, Rng* rng) {
+  std::vector<BlockParcels> blocks;
+  for (size_t blockIndex = 0; blockIndex < city.blocks.size(); ++blockIndex) {
+    blocks.push_back(
+        PlanBlockParcels(city.blocks[blockIndex], blockIndex, city.streets.roads, c, rng));
+  }
+  for (BlockParcels& block : blocks) {
+    RoadSurface sidewalk;
+    for (const glm::vec2& p : block.sidewalk) {
+      sidewalk.vertices.emplace_back(p.x, kSidewalkHeight, p.y);
+    }
+    scene->sidewalkSurfaces.push_back(std::move(sidewalk));
+    for (Parcel& parcel : block.parcels) {
+      AddPolygonBuilding(scene, std::move(parcel.footprint), parcel.height);
+    }
   }
 
   // Landmark towers reuse actual polygon footprints rather than reverting to
   // bounding boxes.
-  const int towers = std::min<int>(c.towerCount, static_cast<int>(scene.obstacles.size()));
+  const int towers = std::min<int>(c.towerCount, static_cast<int>(scene->obstacles.size()));
   std::vector<size_t> candidates;
-  for (size_t i = 0; i < scene.obstacles.size(); ++i) {
-    if (!scene.obstacles[i].footprint.empty()) candidates.push_back(i);
+  for (size_t i = 0; i < scene->obstacles.size(); ++i) {
+    if (!scene->obstacles[i].footprint.empty()) candidates.push_back(i);
   }
   for (int i = 0; i < towers && !candidates.empty(); ++i) {
-    const size_t pick = static_cast<size_t>(rng.Int(0, static_cast<int>(candidates.size()) - 1));
-    scene.obstacles[candidates[pick]].bounds.max.y = rng.Float(c.towerMinHeight, c.towerMaxHeight);
+    const size_t pick = static_cast<size_t>(rng->Int(0, static_cast<int>(candidates.size()) - 1));
+    scene->obstacles[candidates[pick]].bounds.max.y = rng->Float(c.towerMinHeight, c.towerMaxHeight);
     candidates.erase(candidates.begin() + pick);
   }
+}
 
+// Squads at the artery's ends.
+void EmitSpawns(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c) {
+  const HighwayPlan& plan = city.highway;
   // Squads spawn at ground level on the artery's ends (beneath the deck
   // where an elevated layout runs off-map), facing each other down it.
   const float spawnInset = std::max(c.streetWidth, c.localStreetWidth) * 0.8f;
@@ -952,12 +1054,41 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     unit.team = blueTeam ? Team::Blue : Team::Red;
     unit.position = glm::vec3(p.x, 0.0f, p.y);
     unit.facingYaw = blueTeam ? yawBlue : yawBlue + kPi;
-    scene.units.push_back(unit);
+    scene->units.push_back(unit);
   }
+}
+
+Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
+  Rng rng(seed);
+  Scene scene;
+  scene.mapHalfExtent = UrbanMapHalfExtent(c);
+  const CityPlan city = BuildCityPlan(seed, c);
+  EmitHighwaySurfaces(&scene, city, c);
+  EmitPiers(&scene, city, c);
+  EmitBuildings(&scene, city, c, &rng);
+  EmitSpawns(&scene, city, c);
   return scene;
 }
 
 }  // namespace
+
+FeatureToggle* UrbanFeatureByName(UrbanFeatures* f, const std::string& name) {
+  if (name == "lanes") return &f->lanes;
+  if (name == "curbs") return &f->curbs;
+  if (name == "furniture") return &f->furniture;
+  if (name == "terrain") return &f->terrain;
+  if (name == "interiors") return &f->interiors;
+  if (name == "rail") return &f->rail;
+  return nullptr;
+}
+
+bool ParseFeatureMode(const std::string& text, FeatureMode* mode) {
+  if (text == "auto") *mode = FeatureMode::Auto;
+  else if (text == "off") *mode = FeatureMode::Off;
+  else if (text == "on") *mode = FeatureMode::On;
+  else return false;
+  return true;
+}
 
 std::vector<UrbanBlock> UrbanBlocks(uint32_t seed, const MapGeneratorConfig& c) {
   if (c.arteryCount > 0) return BuildCityBlocks(seed, c);
@@ -975,6 +1106,29 @@ std::vector<UrbanBlock> UrbanBlocks(uint32_t seed, const MapGeneratorConfig& c) 
 std::vector<UrbanRoad> UrbanRoads(uint32_t seed, const MapGeneratorConfig& c) {
   if (c.arteryCount <= 0) return {};
   return BuildUrbanRoads(seed, c);
+}
+
+std::vector<UrbanStreet> UrbanStreets(uint32_t seed, const MapGeneratorConfig& c) {
+  std::vector<UrbanStreet> out;
+  if (c.arteryCount <= 0) return out;
+  const HighwayPlan plan = BuildHighwayPlan(seed, c);
+  const StreetGraph graph = BuildStreetGraph(seed, c, plan);
+  for (const UrbanRoad& road : graph.roads) {
+    for (size_t i = 0; i + 1 < road.centerline.size(); ++i) {
+      out.push_back({road.centerline[i], road.centerline[i + 1], road.width,
+                     UrbanStreetClass::Highway, road.elevated});
+    }
+  }
+  const float half = UrbanMapHalfExtent(c);
+  for (const StreetCut& cut : graph.cuts) {
+    if (cut.cls == UrbanStreetClass::Highway) continue;  // Already a road above.
+    float t0, t1;
+    ClipLineToSquare(cut.origin, cut.dir, half, &t0, &t1);
+    if (!(t1 > t0)) continue;
+    const glm::vec2 a = cut.origin + cut.dir * t0, b = cut.origin + cut.dir * t1;
+    out.push_back({glm::vec3(a.x, 0.0f, a.y), glm::vec3(b.x, 0.0f, b.y), cut.width, cut.cls, false});
+  }
+  return out;
 }
 
 OverpassChoice UrbanOverpass(uint32_t seed, const MapGeneratorConfig& c) {

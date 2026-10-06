@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "game/Scene.h"
@@ -29,6 +30,30 @@ enum class OverpassLayout {
 // stays at deck height and runs off the map with no ramp (never drawn for
 // the Through layout, where the branch is the only way up).
 enum class BranchEnd { Auto, Ramp, OffMap };
+
+// Per-feature switch for the optional urban detail layers (issue #146).
+// Auto lets the seed decide, with `chance` as the per-seed probability; Off/On
+// force it. The features are plumbed through the config ahead of the emitters
+// that consume them, so today they do not change the generated Scene.
+enum class FeatureMode { Auto, Off, On };
+struct FeatureToggle {
+  FeatureMode mode = FeatureMode::Auto;
+  float chance = 0.5f;
+};
+struct UrbanFeatures {
+  FeatureToggle lanes;
+  FeatureToggle curbs;
+  FeatureToggle furniture;
+  FeatureToggle terrain;
+  FeatureToggle interiors;
+  FeatureToggle rail;
+};
+
+// Name lookups for scenario YAML / env plumbing. UrbanFeatureByName takes
+// lanes/curbs/furniture/terrain/interiors/rail; both return null/false for
+// an unknown name. ParseFeatureMode takes auto/off/on.
+FeatureToggle* UrbanFeatureByName(UrbanFeatures* features, const std::string& name);
+bool ParseFeatureMode(const std::string& text, FeatureMode* mode);
 
 // Tuning for GenerateUrbanMap. Defaults give a 4x4 city of ~26-unit average
 // blocks (~144 units across, ~4.8x the default scene's 30). The overall
@@ -76,6 +101,7 @@ struct MapGeneratorConfig {
   int maxZiplinesPerBlock = 2;
   float ziplineMinLength = 4.0f;
   float ziplineMaxLength = 22.0f;
+  UrbanFeatures features;
 };
 
 // A block's footprint, street edge to street edge. The bounds are retained
@@ -122,6 +148,24 @@ std::vector<UrbanBlock> UrbanBlocks(uint32_t seed, const MapGeneratorConfig& con
 // the bounds where an elevated layout runs off-map); the branching avenue
 // follows, sampled from the map boundary to its merge point on the artery.
 std::vector<UrbanRoad> UrbanRoads(uint32_t seed, const MapGeneratorConfig& config = {});
+
+// Street classes of the street graph. Highway: the artery and its branch.
+// Avenue: roughly parallel to the artery. Cross: oblique cross street.
+enum class UrbanStreetClass { Highway, Avenue, Cross };
+
+// One straight piece of street. Highway pieces follow the sampled
+// centerline (so carry elevation in `a.y`/`b.y`); local streets are one
+// segment clipped to the map square at y = 0.
+struct UrbanStreet {
+  glm::vec3 a, b;
+  float width = 0.0f;
+  UrbanStreetClass cls = UrbanStreetClass::Cross;
+  bool elevated = false;
+};
+
+// Every street of GenerateUrbanMap(seed, config) as segments: highway
+// pieces first, then avenues and cross streets. Empty for arteryCount=0.
+std::vector<UrbanStreet> UrbanStreets(uint32_t seed, const MapGeneratorConfig& config = {});
 
 // The overpass decision GenerateUrbanMap(seed, config) makes: whether the
 // artery is elevated and, if so, the deck layout used. Seed-driven under

@@ -1,0 +1,24 @@
+name: flag_tie_lowest_id_wins
+description: >
+  CTF part 1 tiebreak: when figures of both teams touch the flag in the same round, the
+  earliest arrival (distance walked / run speed) grabs it. Here red1 and blue0 are equally
+  far -- an exact tie, which goes to the lowest unit id (blue0) -- and in the second match
+  red is simply closer and wins.
+
+flag:
+  enabled: true
+
+units:
+  - {id: 0, team: blue, position: [-4, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [4, 0, 0], facing_degrees: 180}
+
+script:
+  - action: move
+    actor: 0
+    destination: [0, 0, 0]
+  - action: move
+    actor: 1
+    destination: [0, 0, 0]
+  - action: commit
+  - assert: {flag_carrier: 0, comment: Exact tie -> lowest unit id}
+  - assert: {winner: blue}

@@ -1,0 +1,27 @@
+name: flag_round_limit_draw
+description: >
+  Round limit with nobody grabbing the flag: the match ends as a draw (GameOver, no winner)
+  once the limit round has been played, with the round counter parked on the limit.
+
+flag:
+  enabled: true
+round_limit: 2
+
+units:
+  - {id: 0, team: blue, position: [-10, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [10, 0, 0], facing_degrees: 180}
+
+script:
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {round: 2, winner: none, flag_state: rest}
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {round: 2, winner: none, flag_state: rest}
+  - assert: {flag_carrier: -1}

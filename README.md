@@ -48,6 +48,20 @@ restores the analytic FOV-cone overlay. Visual scenarios still default to
 the analytic overlay and opt in
 with a `render: {fov_overlay: shadow_map}` block.
 
+### Flag objective (CTF part 1)
+
+A scene (or scenario YAML `flag:` block) can enable a neutral flag at the map
+center (or the nearest free spot; `flag: {position: [x, z]}` overrides). A
+living figure whose move passes through the flag's spot picks it up for free
+and its team wins at once; `win_on_grab: false` instead just carries it
+(stowed on the figure's back) while play continues. A carrier acts as normal;
+if it dies the flag drops there and anyone passing picks it up. If several
+figures reach it in the same tick the earliest arrival wins, with an exact tie
+going to the lowest unit id. The flag is a neutral objective, so fog never
+hides it (a carried one shows with its carrier). `round_limit: N` ends the
+match as a draw after N rounds with no winner. Flag state travels in the
+snapshot text protocol (`ExportState`/`ImportState`).
+
 ### Gameplay scenario tests
 
 `tests/scenarios/*.yaml` are state-only (no rendering) gameplay regression

@@ -154,7 +154,7 @@ and removes the preview automatically when the PR closes.
 
 ## App flow
 
-Screen flow (Splash -> Map Select -> Gameplay), declared in
+Screen flow (Splash -> Game Mode -> Map Select -> Gameplay), declared in
 `flow/app_flow.yaml`. The build regenerates `flow/app_flow.mmd` from it; paste
 that file's contents below if the flow changes.
 
@@ -162,12 +162,16 @@ that file's contents below if the flow changes.
 %%{init: {"flowchart": {"htmlLabels": false}, "themeVariables": {"fontFamily": "Arial, sans-serif"}}}%%
 flowchart TD
     splash("  Splash  ")
+    game_mode("  Game Mode  ")
     map_select("  Map Select  ")
     gameplay("  Gameplay  ")
-    splash -->|new_game| map_select
+    splash -->|new_game| game_mode
+    game_mode -->|select_regular| map_select
+    game_mode -->|select_ctf| map_select
+    game_mode -->|back| splash
     map_select -->|select_urban| gameplay
     map_select -->|select_hills| gameplay
-    map_select -->|back| splash
+    map_select -->|back| game_mode
 ```
 
 ## Controls

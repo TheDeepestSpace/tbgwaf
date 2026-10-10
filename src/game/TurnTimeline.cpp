@@ -50,6 +50,7 @@ bool TurnTimeline::Observe(const GameLogic& game, float dtSeconds) {
     const int finishedRound = roundCompleted ? game.RoundNumber() - 1 : game.RoundNumber();
     Capture(game);
     ticks_.push_back(Tick{"T" + std::to_string(finishedRound), frames_.size() - 1});
+    time_ += kFadeHold;
   }
 
   lastRound_ = game.RoundNumber();
@@ -84,6 +85,7 @@ void TimelinePlayback::ShowFrame(const TurnTimeline& timeline, const GameLogic& 
     }
   }
   replay_->ClearAllPlans();
+  replay_->RestartGhostPlayback();
   replay_->UpdateSightingMemory(0.0f);
   frame_ = index;
   time_ = timeline.FrameTime(index);
@@ -144,9 +146,12 @@ void TimelinePlayback::Update(const TurnTimeline& timeline, float dtSeconds) {
   replay_->UpdateSightingMemory(dtSeconds * kReplaySpeed);
   if (frame_ + 1 >= timeline.FrameCount()) {
     // Live end reached: pause there (stay on the replay view; the player
-    // returns to live explicitly).
-    playing_ = false;
-    time_ = timeline.FrameTime(frame_);
+    // returns to live explicitly), once the last turn's ghosts have faded.
+    const bool fading = replay_->Mode() != InputMode::Executing;
+    if (!fading || time_ >= timeline.FrameTime(frame_) + TurnTimeline::kFadeHold) {
+      playing_ = false;
+      time_ = timeline.FrameTime(frame_);
+    }
   }
 }
 

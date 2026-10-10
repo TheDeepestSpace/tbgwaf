@@ -51,7 +51,10 @@ script:
   - assert: {round: 2}
   - assert: {unit: 0, position: [0, 0, 0], tolerance: 0.1}
   - action: timeline_play
-    seconds: 1.0
+    seconds: 6.5
+    comment: >
+      Replay holds 5.5 s after each finished round (ghost fade-out), then the mover
+      is one second into the second round.
   - assert: {unit: 0, position: [0, 0, 4], tolerance: 0.5}
 
   # ---- Pause, then play through to the live end: pauses on the final state. ----

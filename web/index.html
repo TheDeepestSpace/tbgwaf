@@ -4,87 +4,114 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" href="data:," />
-    <title>tbgwaf</title>
+    <title>tbgwaf · Jev preview</title>
     <style>
+      :root { color-scheme: dark; }
       html, body {
         margin: 0;
         padding: 0;
         background: #16171a;
         color: #e6e6e6;
-        font-family: -apple-system, system-ui, sans-serif;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         overflow: hidden;
       }
+      #control-panel {
+        position: fixed;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 30;
+        width: min(760px, calc(100vw - 24px));
+        padding: 9px 12px;
+        border: 1px solid #4b4e56;
+        border-radius: 8px;
+        background: rgba(20, 21, 24, 0.94);
+        box-shadow: 0 3px 18px rgba(0, 0, 0, 0.45);
+        font-size: 12px;
+      }
+      .row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+      .row + .row { margin-top: 7px; }
+      button, input {
+        border: 1px solid #5b5f69;
+        border-radius: 4px;
+        background: #292b31;
+        color: inherit;
+        padding: 5px 8px;
+        font: inherit;
+      }
+      button { cursor: pointer; }
+      button:hover { background: #363941; }
+      button[aria-pressed="true"] { border-color: #7ba7ff; background: #253858; }
+      button:disabled { cursor: default; opacity: 0.45; }
+      #mode-label { font-weight: 650; }
+      #ai-status[data-kind="error"] { color: #ff9d9d; }
+      #ai-status[data-kind="fallback"] { color: #ffd778; }
+      #outcome { color: #a9d4ff; }
+      #config { margin-left: auto; }
+      #config summary { cursor: pointer; color: #b9bbc2; }
+      #jev-endpoint { width: min(310px, 55vw); }
       #hud {
         position: fixed;
-        top: 8px;
+        bottom: 8px;
         right: 12px;
         z-index: 20;
         font-size: 12px;
-        opacity: 0.8;
+        opacity: 0.82;
         text-align: right;
+        pointer-events: none;
       }
       #status:empty { display: none; }
-      #panes {
-        display: flex;
-        width: 100vw;
-        height: 100vh;
-      }
-      .pane {
-        position: relative;
-        flex: 1 1 50%;
-        min-width: 0;
-      }
+      #panes { display: flex; width: 100vw; height: 100vh; }
+      .pane { position: relative; flex: 1 1 50%; min-width: 0; }
       .pane + .pane { border-left: 2px solid #000; }
-      .pane canvas {
-        background: #000;
-        display: block;
-        width: 100%;
-        height: 100%;
+      .pane canvas { background: #000; display: block; width: 100%; height: 100%; }
+      @media (max-width: 680px) {
+        #control-panel { left: 6px; right: 6px; transform: none; width: auto; }
+        #config { margin-left: 0; }
       }
     </style>
   </head>
   <body>
-    <div id="panes">
-      <div class="pane" id="pane-blue">
+    <main id="panes">
+      <div class="pane" id="pane-blue" aria-label="Blue team view">
         <canvas oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
       </div>
-      <div class="pane" id="pane-red">
+      <div class="pane" id="pane-red" aria-label="Red team view">
         <canvas oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
       </div>
-    </div>
+    </main>
+
+    <section id="control-panel" aria-label="Preview mode controls">
+      <div class="row">
+        <span id="mode-label">Mode: Human vs Human</span>
+        <button type="button" data-mode="human" aria-pressed="true">Human vs Human</button>
+        <button type="button" data-mode="player-v-ai" aria-pressed="false">Blue vs Jev</button>
+        <button type="button" data-mode="ai-v-ai" aria-pressed="false">Jev vs Jev</button>
+        <details id="config">
+          <summary>Jev proxy</summary>
+          <div class="row">
+            <input id="jev-endpoint" type="url" inputmode="url"
+                   aria-label="Jev proxy URL" placeholder="http://localhost:8787" />
+            <button id="save-endpoint" type="button">Use endpoint</button>
+          </div>
+        </details>
+      </div>
+      <div class="row">
+        <button id="start-ai" type="button" disabled>Start</button>
+        <button id="pause-ai" type="button" disabled>Pause</button>
+        <button id="restart-match" type="button">Restart</button>
+        <button id="retry-ai" type="button" hidden>Retry Jev</button>
+        <button id="fallback-ai" type="button" hidden>Use deterministic fallback</button>
+        <span id="ai-status" role="status" aria-live="polite">Human-controlled match.</span>
+        <span id="outcome"></span>
+      </div>
+    </section>
+
     <div id="hud">
-      <div>Blue plans in the left canvas, Red in the right; both plan at once.</div>
-      <div id="status">Loading...</div>
+      <div>Blue uses the left canvas; Red uses the right. Camera orbit and zoom stay available.</div>
+      <div id="status">Loading game…</div>
     </div>
     <script src="tactics_app.js"></script>
-    <script type="text/javascript">
-      var statusEl = document.getElementById("status");
-      window.onerror = function () {
-        statusEl.innerText = "Failed to load -- check the browser console.";
-      };
-      // Both teams play on this one page: the module is instantiated twice,
-      // one client per team, each rendering into its own canvas. The two
-      // instances keep one shared match by exchanging state over this bus
-      // (a list of per-instance inboxes): Blue simulates rounds, Red sends
-      // its plans/commit requests to Blue and mirrors Blue's snapshots.
-      var bus = { inboxes: [] };
-      // The factory promise only settles when main() exits, which an
-      // infinite main loop never does -- so readiness is tracked via
-      // onRuntimeInitialized instead.
-      var pending = 2;
-      function spawnClient(player) {
-        var pane = document.getElementById("pane-" + player);
-        createTbgwafModule({
-          canvas: pane.querySelector("canvas"),
-          tbgwafPlayer: player,
-          tbgwafBus: bus,
-          onRuntimeInitialized: function () {
-            if (--pending === 0) statusEl.innerText = "";
-          },
-        });
-      }
-      spawnClient("blue");
-      spawnClient("red");
-    </script>
+    <script type="module" src="jev-preview.js"></script>
   </body>
 </html>

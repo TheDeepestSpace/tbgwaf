@@ -7,6 +7,11 @@ is eliminated.
 **[Play it in your browser](https://thedeepestspace.github.io/tbgwaf/)** --
 both players on one screen, no install required.
 
+The page also includes **Blue vs Jev** and **Jev vs Jev** preview modes. They
+use the same WASM game and require a server-side TypeSafe adapter; the API key
+is never sent to the browser. See [Jev gameplay preview](docs/jev-preview.md)
+for local setup, Pages/PR-preview URLs, deployment, limits, and smoke tests.
+
 ## Play in browser
 
 The [live Pages build](https://thedeepestspace.github.io/tbgwaf/) is the same

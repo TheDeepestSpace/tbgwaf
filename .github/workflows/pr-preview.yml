@@ -91,6 +91,7 @@ jobs:
           cp build-web/index.html site/
           cp build-web/tactics_app.js site/
           cp build-web/tactics_app.wasm site/
+          cp build-web/jev-preview.js site/
           cp build-web/gallery.html site/gallery/index.html
           cp build-web/tactics_gallery.js site/gallery/
           cp build-web/tactics_gallery.wasm site/gallery/

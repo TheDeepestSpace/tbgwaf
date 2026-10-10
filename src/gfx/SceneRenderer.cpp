@@ -2773,6 +2773,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     ziplineBorder_.DrawSegments();
     glDisable(GL_POLYGON_OFFSET_FILL);
     for (const auto& fr : frontiers) {
+      // The ring below overwrites uMVP/uColor, so restore them per line.
+      unlitShader_.SetMat4("uMVP", viewProj);
+      unlitShader_.SetVec4("uColor", glm::vec4(kZiplineColor, 1.0f));
       pathLine_.SetPoints(cablePoints(game.GetScene().ziplines[fr.zipline]));
       pathLine_.Draw();
       DrawHighlightOnSurface(fr.entry, glm::vec4(kZiplineColor, 1.0f));

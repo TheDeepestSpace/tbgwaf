@@ -264,6 +264,7 @@ Unit AnimationUnit(const GalleryItem& item, double t) {
       unit.rideTravel = static_cast<float>(std::fmod(t, kZipRideSeconds) / kZipRideSeconds) *
                         kZipRideLength;
       unit.rideSlope = item.anim == AnimKind::ZipDown ? -kZipRideSlope : kZipRideSlope;
+      break;
     case AnimKind::EmptyMag:
       unit.shootElapsed = SampleEmptyMag(item.weapon, t).shootElapsed;
       unit.shootAimYaw = unit.facingYaw;

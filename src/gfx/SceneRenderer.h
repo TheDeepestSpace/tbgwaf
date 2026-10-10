@@ -29,6 +29,10 @@ bool IsUnitVisibleForRender(const tactics::Unit& unit, tactics::Team viewingTeam
 struct RenderDebugOptions {
   bool disableFov = false;
   bool disableShadows = false;
+  // White-hot thermal prototype: scene geometry is grayscale, figures are
+  // brightest, and the shadow pass is skipped. Gameplay overlays are drawn
+  // by later unlit passes and keep their normal colors.
+  bool thermal = false;
   // Issue #136: skip the camera-occlusion see-through pass (occluding
   // blocks/decks are then always drawn fully opaque).
   bool disableOcclusionFade = false;

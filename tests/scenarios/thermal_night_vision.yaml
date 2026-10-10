@@ -1,0 +1,39 @@
+name: thermal_night_vision
+description: >
+  Issue #177 white-hot thermal rendering: both teams' visible figures are bright
+  grayscale silhouettes while terrain and blocks remain dark. FOV, the aiming
+  probability cone, selector, tracer, and HUD retain their normal overlay colors.
+
+shot_rolls: [0.0]
+
+map:
+  obstacles:
+    - {center: [0, -4], half_extent: [1.5, 1.5], height: 4.0, climbable: false}
+    - {center: [0, 5], half_extent: [2.0, 1.0], height: 1.0, climbable: false}
+
+render:
+  thermal: true
+
+units:
+  - {id: 0, team: blue, position: [-5, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [5, 0, 0], facing_degrees: 180}
+  - {id: 2, team: red, position: [7, 0, 7], facing_degrees: 180}
+
+script:
+  - action: aim
+    description: The colored FOV and shot-probability overlays stay legible over thermal figures.
+    actor: 0
+    aim_from: [5, 20, 0]
+    aim_dir: [0, -1, 0]
+  - action: shoot
+    actor: 0
+    confirm: true
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: commit
+
+  - assert: {unit: 1, alive: false}
+  - assert: {unit: 2, alive: true}
+  - assert: {round: 2}

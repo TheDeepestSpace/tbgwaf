@@ -840,7 +840,7 @@ int main() {
       }
     }
     // Anchored under the Round panel so it follows collapse/expand.
-    ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows,
+    ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, debugOptions.thermal,
                        debugOptions.disableOcclusionFade, showFps,
                        smoothedFps, frameMs, fovMs, frameStats,
                        roundPanelBottom + 6.0f);

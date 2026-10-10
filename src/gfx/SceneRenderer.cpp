@@ -204,6 +204,8 @@ uniform vec3 uLightDir;  // Direction the light travels; surfaces face -uLightDi
 uniform vec3 uViewPos;
 uniform sampler2D uShadowMap;
 uniform int uDisableShadows;
+uniform int uThermal;
+uniform int uThermalHot;
 out vec4 FragColor;
 
 float ComputeShadow(vec3 normal) {
@@ -235,6 +237,21 @@ void main() {
   float shadow = ComputeShadow(normal);
   const float kAmbient = 0.35;
   float lit = kAmbient + (1.0 - shadow) * diffuse * 0.65;
+  if (uThermal != 0) {
+    // FLIR-style white-hot palette. Figures ignore their material/team
+    // colors and sit at the top of the range; world geometry keeps enough
+    // luminance, height, and diffuse variation to remain readable.
+    float gray;
+    if (uThermalHot != 0) {
+      gray = 0.82 + lit * 0.18;
+    } else {
+      float luminance = dot(uColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+      float height = clamp(vWorldPos.y / 12.0, 0.0, 1.0);
+      gray = clamp(0.035 + luminance * lit * 0.62 + height * 0.12, 0.035, 0.58);
+    }
+    FragColor = vec4(vec3(gray), uColor.a);
+    return;
+  }
   FragColor = vec4(uColor.rgb * lit, uColor.a);
 }
 )";
@@ -2035,7 +2052,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
 
   // Shadow pass: only casters this team can currently see.
   glDisable(GL_SCISSOR_TEST);
-  if (!debug.disableShadows) {
+  if (!debug.disableShadows && !debug.thermal) {
     glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo_);
     glViewport(0, 0, kShadowMapSize, kShadowMapSize);
     glClear(GL_DEPTH_BUFFER_BIT);
@@ -2080,7 +2097,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glEnable(GL_SCISSOR_TEST);
   glViewport(x, y, width, height);
   glScissor(x, y, width, height);
-  glClearColor(0.10f, 0.11f, 0.13f, 1.0f);
+  if (debug.thermal) {
+    glClearColor(0.025f, 0.025f, 0.025f, 1.0f);
+  } else {
+    glClearColor(0.10f, 0.11f, 0.13f, 1.0f);
+  }
   glClearStencil(0);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
@@ -2146,7 +2167,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   litShader_.SetVec3("uLightDir", lightDir_);
   litShader_.SetVec3("uViewPos", camera.Position());
   litShader_.SetInt("uShadowMap", 0);
-  litShader_.SetInt("uDisableShadows", debug.disableShadows ? 1 : 0);
+  litShader_.SetInt("uDisableShadows", (debug.disableShadows || debug.thermal) ? 1 : 0);
+  litShader_.SetInt("uThermal", debug.thermal ? 1 : 0);
+  litShader_.SetInt("uThermalHot", 0);
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
 
@@ -2200,10 +2223,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   }
 
+  litShader_.SetInt("uThermalHot", 1);
   for (const Unit& unit : game.GetScene().units) {
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
     DrawUnit(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, unit);
   }
+  litShader_.SetInt("uThermalHot", 0);
   DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
 
   // Issue #136: alpha-blended re-draw of the occluders marked above, sorted

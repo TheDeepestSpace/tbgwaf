@@ -76,6 +76,7 @@ set(GAME_LOGIC_SOURCES
   src/game/Raycast.cpp
   src/game/Visibility.cpp
   src/game/GameLogic.cpp
+  src/game/TurnTimeline.cpp
 )
 
 add_library(tactics_logic STATIC ${GAME_LOGIC_SOURCES})

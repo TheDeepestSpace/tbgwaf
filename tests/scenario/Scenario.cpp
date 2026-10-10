@@ -11,6 +11,7 @@
 #include "game/MapGenerator.h"
 #include "net/SceneSpec.h"
 #include "game/GameLogic.h"
+#include "game/TurnTimeline.h"
 
 namespace tactics::scenario {
 namespace {
@@ -69,6 +70,10 @@ void ParsePlaybooks(const YAML::Node& root, SquadPlaybook (&out)[2]) {
     SquadPlaybook& pb = out[static_cast<int>(team)];
     for (const auto& slot : teamEntry.second) {
       const std::string key = slot.first.as<std::string>();
+      if (key == "ignore_idle") {
+        pb.ignoreIdle = slot.second.as<bool>();
+        continue;
+      }
       const ReactionAction action = ParseReaction(slot.second.as<std::string>());
       if (key == "moving_seen") pb.At(true, true) = action;
       else if (key == "moving_unseen") pb.At(true, false) = action;
@@ -130,6 +135,23 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     return action;
   }
 
+  // Turn-timeline steps (issue #143): drive the replay like the HUD strip.
+  if (kind == "timeline_seek") {
+    action.kind = ScenarioAction::Kind::TimelineSeek;
+    if (!node["tick"]) throw std::runtime_error("timeline_seek requires 'tick'");
+    action.timelineTick = node["tick"].as<int>();
+    return action;
+  }
+  if (kind == "timeline_play") {
+    action.kind = ScenarioAction::Kind::TimelinePlay;
+    if (node["seconds"]) action.playSeconds = node["seconds"].as<float>();
+    return action;
+  }
+  if (kind == "timeline_pause") {
+    action.kind = ScenarioAction::Kind::TimelinePause;
+    return action;
+  }
+
   if (!node["actor"]) throw std::runtime_error("script action step requires 'actor'");
   action.actor = node["actor"].as<int>();
   if (kind == "move") {
@@ -178,8 +200,10 @@ ScenarioAction ParseAction(const YAML::Node& node) {
   } else if (kind == "focus") {
     action.kind = ScenarioAction::Kind::Focus;
   } else {
-    throw std::runtime_error("unknown script action '" + kind +
-                              "' (expected move/begin_move/shoot/aim/pass/cancel/focus/commit/new_game)");
+    throw std::runtime_error(
+        "unknown script action '" + kind +
+        "' (expected move/begin_move/shoot/aim/pass/cancel/focus/commit/new_game/"
+        "timeline_seek/timeline_play/timeline_pause)");
   }
   return action;
 }
@@ -201,6 +225,7 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   if (node["remembered"]) assertion.remembered = node["remembered"].as<bool>();
   if (node["memory_age"]) assertion.memoryAge = node["memory_age"].as<int>();
   if (node["round"]) assertion.round = node["round"].as<int>();
+  if (node["timeline_ticks"]) assertion.timelineTicks = node["timeline_ticks"].as<int>();
   if (node["flag_carrier"]) assertion.flagCarrier = node["flag_carrier"].as<int>();
   if (node["flag_state"]) {
     assertion.flagState = node["flag_state"].as<std::string>();
@@ -243,7 +268,8 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
 }
 
 bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction& action,
-                    int stepIndex, const PlaybackHooks& hooks, ScenarioResult* result) {
+                    int stepIndex, const PlaybackHooks& hooks, TurnTimeline& timeline,
+                    TimelinePlayback& playback, ScenarioResult* result) {
   auto Fail = [&](const std::string& msg) {
     result->failures.push_back("step " + std::to_string(stepIndex) + " (actor " +
                                 std::to_string(action.actor) + "): " + msg);
@@ -283,6 +309,7 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
       while (game.Mode() == InputMode::Executing && ++ticks <= kMaxMoveTicks) {
         game.Update(hooks.tickSeconds);
         game.UpdateSightingMemory(hooks.tickSeconds);
+        timeline.Observe(game, hooks.tickSeconds);
         if (hooks.onFrame) hooks.onFrame(game);
       }
       // Shots resolve at commit, so the fall may outlive (or entirely
@@ -290,6 +317,7 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
       while (game.HasActiveKnockdown() && ++ticks <= kMaxMoveTicks) {
         game.Update(hooks.tickSeconds);
         game.UpdateSightingMemory(hooks.tickSeconds);
+        timeline.Observe(game, hooks.tickSeconds);
         if (hooks.onFrame) hooks.onFrame(game);
       }
       if (game.Mode() == InputMode::Executing) {
@@ -298,24 +326,59 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
       }
     } else {
       // Fast-forward the executing round. Step coarsely (not one giant tick)
-      // so sighting memory still samples the figures along the way.
+      // so sighting memory still samples the figures along the way (and the
+      // turn timeline records replayable frames at the same granularity).
       constexpr float kFastStepSeconds = constants::kSimStepSeconds;
       constexpr int kMaxFastSteps = 20000;
       for (int i = 0; game.Mode() == InputMode::Executing && i < kMaxFastSteps; ++i) {
         game.Update(kFastStepSeconds);
         game.UpdateSightingMemory(kFastStepSeconds);
+        timeline.Observe(game, kFastStepSeconds);
       }
       game.Update(1.0e6f);  // Settle anything still pending (e.g. knockdowns).
       game.UpdateSightingMemory(0.0f);
     }
+    // Catch the round-end (or game-over) transition the loops stopped on,
+    // the same way the app's frame loop observes it after Update().
+    timeline.Observe(game, 0.0f);
     return true;
   }
 
   if (action.kind == ScenarioAction::Kind::NewGame) {
-    // Same call the UI's new-game paths make (playbooks survive it).
+    // Same call the UI's new-game paths make (playbooks survive it). The
+    // timeline restarts with the match, as in main.cpp (issue #143).
     NotifyMenuClick(Team::Blue, "New Match");
     game.Reset(scene);
     game.UpdateSightingMemory(0.0f);
+    timeline.Reset(game);
+    playback.Reset();
+    return true;
+  }
+
+  if (action.kind == ScenarioAction::Kind::TimelineSeek) {
+    if (!playback.SeekTick(timeline, game, action.timelineTick)) {
+      return Fail("timeline_seek tick " + std::to_string(action.timelineTick) +
+                  " is out of range (timeline has " + std::to_string(timeline.Ticks().size()) +
+                  " ticks)");
+    }
+    return true;
+  }
+
+  if (action.kind == ScenarioAction::Kind::TimelinePlay) {
+    playback.Play(timeline, game);
+    if (!playback.Active()) return Fail("timeline_play: nothing recorded to play");
+    // Advance the replay the way the app's frame loop would, emitting
+    // frames so video mode captures the replay in motion.
+    const float step = hooks.tickSeconds > 0.0f ? hooks.tickSeconds : 0.05f;
+    for (float elapsed = 0.0f; elapsed < action.playSeconds; elapsed += step) {
+      playback.Update(timeline, step);
+      if (hooks.onFrame) hooks.onFrame(playback.Active() ? playback.Game() : game);
+    }
+    return true;
+  }
+
+  if (action.kind == ScenarioAction::Kind::TimelinePause) {
+    playback.SetPlaying(false);
     return true;
   }
 
@@ -492,13 +555,16 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
     case ScenarioAction::Kind::Cancel:
     case ScenarioAction::Kind::Commit:
     case ScenarioAction::Kind::NewGame:
+    case ScenarioAction::Kind::TimelineSeek:
+    case ScenarioAction::Kind::TimelinePlay:
+    case ScenarioAction::Kind::TimelinePause:
       break;  // Handled above.
   }
   return true;
 }
 
 void CheckAssertionImpl(const GameLogic& game, const ScenarioAssertion& a, int stepIndex,
-                     ScenarioResult* result) {
+                     const TurnTimeline* timeline, ScenarioResult* result) {
   auto Fail = [&](const std::string& msg) {
     result->failures.push_back("step " + std::to_string(stepIndex) + " (assert): " + msg);
   };
@@ -592,18 +658,29 @@ void CheckAssertionImpl(const GameLogic& game, const ScenarioAssertion& a, int s
     Fail("expected round " + std::to_string(*a.round) + " but was " +
          std::to_string(game.RoundNumber()));
   }
+
+  if (a.timelineTicks) {
+    if (!timeline) {
+      Fail("'timeline_ticks' assertion has no timeline to check");
+    } else if (static_cast<int>(timeline->Ticks().size()) != *a.timelineTicks) {
+      Fail("expected timeline_ticks " + std::to_string(*a.timelineTicks) + " but was " +
+           std::to_string(timeline->Ticks().size()));
+    }
+  }
 }
 
 }  // namespace
 
 bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& action,
                    int stepIndex, ScenarioResult* result) {
-  return ExecuteActionImpl(game, scene, action, stepIndex, {}, result);
+  TurnTimeline timeline;
+  TimelinePlayback playback;
+  return ExecuteActionImpl(game, scene, action, stepIndex, {}, timeline, playback, result);
 }
 
 void CheckAssertion(const GameLogic& game, const ScenarioAssertion& assertion, int stepIndex,
                     ScenarioResult* result) {
-  CheckAssertionImpl(game, assertion, stepIndex, result);
+  CheckAssertionImpl(game, assertion, stepIndex, nullptr, result);
 }
 
 Scenario LoadScenarioFromFile(const std::string& path) {
@@ -689,29 +766,41 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
     follower.UpdateSightingMemory(0.0f);
   };
 
+  // Turn timeline (issue #143): recorded/replayed exactly as in main.cpp.
+  // While a `timeline_*` step has a replay active, observers and assertions
+  // see the replayed state -- what the app would be rendering.
+  TurnTimeline timeline;
+  timeline.Reset(game);
+  TimelinePlayback playback;
+  if (hooks.onTimeline) hooks.onTimeline(timeline, playback);
+  auto Display = [&]() -> const GameLogic& {
+    return playback.Active() ? playback.Game() : game;
+  };
+
   auto EmitHoldFrames = [&] {
     if (!hooks.onFrame) return;
-    for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) hooks.onFrame(game);
+    for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) hooks.onFrame(Display());
   };
 
   // Mirrors main.cpp's frame loop so captured frames include sighting memory.
   game.UpdateSightingMemory(0.0f);
   EmitHoldFrames();
-  if (hooks.onActionComplete) hooks.onActionComplete(game, 0);
+  if (hooks.onActionComplete) hooks.onActionComplete(Display(), 0);
 
   int completedActions = 0;
   for (int i = 0; i < static_cast<int>(scenario.steps.size()); ++i) {
     const ScenarioStep& step = scenario.steps[i];
     if (step.action) {
-      if (!ExecuteActionImpl(game, scenario.scene, *step.action, i, hooks, &result)) {
+      if (!ExecuteActionImpl(game, scenario.scene, *step.action, i, hooks, timeline, playback,
+                             &result)) {
         break;  // The script's own preconditions were violated; state past this point is unreliable.
       }
       SyncFollower();
       ++completedActions;
       EmitHoldFrames();
-      if (hooks.onActionComplete) hooks.onActionComplete(game, completedActions);
+      if (hooks.onActionComplete) hooks.onActionComplete(Display(), completedActions);
     } else {
-      CheckAssertionImpl(game, *step.assertion, i, &result);
+      CheckAssertionImpl(Display(), *step.assertion, i, &timeline, &result);
       const ScenarioAssertion& as = *step.assertion;
       if (as.flagCarrier || as.flagState || as.flagPosition || as.flagVisibleTo) {
         // The follower mirrors the flag too (flag fields only; the rest of
@@ -723,13 +812,13 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
         flagOnly.flagVisibleTo = as.flagVisibleTo;
         flagOnly.tolerance = as.tolerance;
         ScenarioResult followerResult;
-        CheckAssertionImpl(follower, flagOnly, i, &followerResult);
+        CheckAssertionImpl(follower, flagOnly, i, nullptr, &followerResult);
         for (auto& f : followerResult.failures) result.failures.push_back("follower " + f);
       }
       if (step.assertion->rememberedByTeam &&
           (!step.assertion->memoryAge || *step.assertion->memoryAge == 0)) {
         ScenarioResult followerResult;
-        CheckAssertionImpl(follower, *step.assertion, i, &followerResult);
+        CheckAssertionImpl(follower, *step.assertion, i, &timeline, &followerResult);
         for (auto& f : followerResult.failures) result.failures.push_back("follower " + f);
       }
     }

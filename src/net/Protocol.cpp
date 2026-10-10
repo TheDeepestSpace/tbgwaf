@@ -64,12 +64,18 @@ Json EncodePlaybook(const SquadPlaybook& playbook) {
       }
     }
   }
+  list.Push(Json(playbook.ignoreIdle));
   return list;
 }
 
 bool DecodePlaybook(const Json& j, SquadPlaybook* out) {
-  if (!j.IsArray() || j.AsArray().size() != 4) return false;
+  // Four reaction names, plus an optional trailing ignore-idle flag.
+  if (!j.IsArray() || (j.AsArray().size() != 4 && j.AsArray().size() != 5)) return false;
   SquadPlaybook pb;
+  if (j.AsArray().size() == 5) {
+    if (!j.AsArray()[4].IsBool()) return false;
+    pb.ignoreIdle = j.AsArray()[4].AsBool();
+  }
   for (int i = 0; i < 4; ++i) {
     const Json& e = j.AsArray()[i];
     if (!e.IsString()) return false;

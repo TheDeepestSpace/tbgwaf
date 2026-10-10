@@ -10,7 +10,7 @@ description: >
   win).
 
 playbook:
-  blue: {stationary_seen: shoot, stationary_unseen: shoot}
+  blue: {stationary_seen: shoot, stationary_unseen: shoot, ignore_idle: true}
 
 map:
   obstacles:

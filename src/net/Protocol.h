@@ -27,6 +27,7 @@
 //                                                     [stationary,unseen] [stationary,seen]
 //                                                     [moving,unseen] [moving,seen]; each one of
 //                                                     "none","shoot","stop","continue","shoot_stop","shoot_continue"
+//                                                     optional 5th element: ignore-idle bool
 //   {"t":"commit"}             this team is ready; the round runs once both are
 //   {"t":"new_match"}          only after game over
 //

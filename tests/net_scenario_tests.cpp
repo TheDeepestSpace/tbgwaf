@@ -525,6 +525,20 @@ int main(int argc, char** argv) {
       ++failed;
       continue;
     }
+    // The turn timeline/replay (issue #143) is purely client-side view state,
+    // with nothing to round-trip through the server; it is covered by the
+    // in-process and visual runners.
+    const bool usesTimeline = std::any_of(
+        scenario.steps.begin(), scenario.steps.end(), [](const scenario::ScenarioStep& st) {
+          if (st.assertion) return st.assertion->timelineTicks.has_value();
+          using K = ScenarioAction::Kind;
+          return st.action->kind == K::TimelineSeek || st.action->kind == K::TimelinePlay ||
+                 st.action->kind == K::TimelinePause;
+        });
+    if (usesTimeline) {
+      std::printf("SKIP %s (client-side timeline)\n", scenario.name.c_str());
+      continue;
+    }
     const auto failures = RunNetScenario(scenario, index++, server, control, &stats);
     if (failures.empty()) {
       std::printf("PASS %s (%s)\n", scenario.name.c_str(), file.string().c_str());

@@ -388,6 +388,9 @@ class GameLogic {
   GameSnapshot ExportState() const;
   bool ImportState(const GameSnapshot& snapshot);
   bool ImportTeamPlans(const GameSnapshot& snapshot, Team team);
+  // Drops every figure's plan (incl. queued legs). The timeline replay uses
+  // it so past turns don't show what was planned/armed next.
+  void ClearAllPlans();
 
   // True while `unitId` has an in-flight planned move animating as part of
   // the executing round (figures from both teams can be animating at once).
@@ -550,7 +553,7 @@ class GameLogic {
   // and shoots the nearest sighted enemy and/or cuts the figure's move short.
   // All reactions are judged against the same snapshot, then applied, so
   // mutual shots both land.
-  void ApplyPlaybookReactions();
+  void ApplyPlaybookReactions(bool roundStart = false);
   // Opens a magazine-long burst at `target` unless `shooter` is already
   // firing a reaction burst or has no rounds left this round.
   void StartReactionBurst(const Unit& shooter, const Unit& target);

@@ -288,8 +288,7 @@ std::vector<JevCandidate> GenerateCandidateSpecs(const GameLogic& game, Team tea
     candidate.actorId = actorId;
     candidate.destination = actor->position + dir / dist * std::min(dist, actor->MoveBudget() * 0.8f);
     candidate.description = "Move toward ghost of enemy " + std::to_string(ghost.id) +
-                            " (last seen " + std::to_string(ghost.sighting->ageRounds) +
-                            " round(s) ago at " + PointJson(ghost.sighting->position) + ").";
+                            " (last seen at " + PointJson(ghost.sighting->position) + ").";
     candidates.push_back(std::move(candidate));
     ++hunted;
   }
@@ -529,7 +528,7 @@ std::string BuildVisibleState(const GameLogic& game, Team team,
     first = false;
     const auto& g = *ghost.sighting;
     out << "{\"id\":" << ghost.id << ",\"last_known_position\":" << PointJson(g.position)
-        << ",\"rounds_ago\":" << g.ageRounds << ",\"was_moving\":"
+        << ",\"was_moving\":"
         << (glm::length(g.moveDirection) > 0.01f ? "true" : "false")
         << ",\"move_direction_xz\":[" << std::setprecision(2) << g.moveDirection.x << ","
         << g.moveDirection.z << "]}";

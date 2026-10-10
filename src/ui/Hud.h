@@ -123,8 +123,14 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 // The extra metrics: `frameMs` last frame time, `fovMs` time spent in the
 // visibility (FOV-cone) computation, and `stats`
 // draw-call/vertex/triangle counters for the frame.
-void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& disableOcclusionFade,
-                    bool& showFps, float fps, float frameMs, float fovMs,
-                    const gfx::RenderFrameStats& stats, float top);
+void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
+                    bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,
+                    float fovMs, const gfx::RenderFrameStats& stats, float top);
+
+// Thermal view (issue #177): restyles every HUD window drawn in between to
+// the monochrome green symbology of real thermal footage, pane team label
+// included. Push before the frame's HUD windows, pop after.
+void PushThermalHudStyle();
+void PopThermalHudStyle();
 
 }  // namespace ui

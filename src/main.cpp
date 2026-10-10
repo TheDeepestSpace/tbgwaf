@@ -717,6 +717,9 @@ int main() {
             static_cast<float>(SDL_GetPerformanceFrequency());
 
     // --- UI ---
+    // Thermal view restyles the whole HUD (both panes and the debug panel
+    // below) to sensor-green symbology; popped after the debug panel.
+    if (debugOptions.thermal) ui::PushThermalHudStyle();
     float roundPanelBottom = 2.0f;
     for (int pane = 0; pane < paneCount; ++pane) {
       const ui::HudActions hud = ui::DrawHud(displayGame, paneTeam(pane), hudPlanning,
@@ -885,10 +888,14 @@ int main() {
       }
     }
     // Anchored under the Round panel so it follows collapse/expand.
-    ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows,
-                       debugOptions.disableOcclusionFade, showFps,
+    const bool hudWasThermal = debugOptions.thermal;
+    ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, debugOptions.thermal,
+                       debugOptions.thermalBlackHot, debugOptions.disableOcclusionFade, showFps,
                        smoothedFps, frameMs, fovMs, frameStats,
                        roundPanelBottom + 6.0f);
+    // Pop against the pre-panel state: the checkbox may have just toggled
+    // `thermal`, but the push at the top of this frame is what must unwind.
+    if (hudWasThermal) ui::PopThermalHudStyle();
 
     // --- Render: one shadow pass + one color pass per pane, both inside
     // SceneRenderer::RenderPane. Selection/move-preview overlays belong to

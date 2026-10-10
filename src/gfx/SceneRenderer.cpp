@@ -2548,7 +2548,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       if (f.surfaceY.size() != static_cast<size_t>(nx) * nz) return true;
       return std::abs(f.surfaceY[az * nx + ax] - f.surfaceY[bz * nx + bx]) <= kLayerStep;
     };
-    // A node on its layer's edge counts as touching the unreached class.
+    // A node on its layer's edge counts as touching the unreached class,
+    // one step away -- exactly like a reached ground node beside an
+    // obstacle -- so the contour lands half a step past the edge node.
     const auto onLayerEdge = [&](int ix, int iz) {
       constexpr int kDx[4] = {-1, 1, 0, 0}, kDz[4] = {0, 0, -1, 1};
       for (int k = 0; k < 4; ++k) {
@@ -2567,7 +2569,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         for (int ix = 0; ix < nx; ++ix)
           if (f.Reached(ix, iz) == target ||
               (!target && f.Reached(ix, iz) && onLayerEdge(ix, iz)))
-            d[iz * nx + ix] = 0.0f;
+            d[iz * nx + ix] = f.Reached(ix, iz) && !target ? f.step : 0.0f;
       const float s = f.step, sd = f.step * 1.41421356f;
       auto relax = [&](int ix, int iz, int dx, int dz, float w) {
         const int jx = ix + dx, jz = iz + dz;
@@ -2610,7 +2612,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           float sum = 0.0f;
           for (int k = -2; k <= 2; ++k) {
             const int jx = std::clamp(ix + k, 0, nx - 1);
-            sum += sameLayer(ix, iz, jx, iz) ? g[iz * nx + jx] : g[iz * nx + ix];
+            sum += sameLayer(ix, iz, jx, iz) ? g[iz * nx + jx] : -0.5f * f.step;
           }
           tmp[iz * nx + ix] = sum / 5.0f;
         }
@@ -2619,7 +2621,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           float sum = 0.0f;
           for (int k = -2; k <= 2; ++k) {
             const int jz = std::clamp(iz + k, 0, nz - 1);
-            sum += sameLayer(ix, iz, ix, jz) ? tmp[jz * nx + ix] : tmp[iz * nx + ix];
+            sum += sameLayer(ix, iz, ix, jz) ? tmp[jz * nx + ix] : -0.5f * f.step;
           }
           g[iz * nx + ix] = sum / 5.0f;
         }
@@ -2680,10 +2682,19 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           anyIn |= quad[k].g > 0.0f;
         }
         if (!anyIn) continue;
-        // Never triangulate across a layer step (deck edge).
-        if (!sameLayer(cx[0], cz[0], cx[1], cz[1]) || !sameLayer(cx[1], cz[1], cx[2], cz[2]) ||
-            !sameLayer(cx[2], cz[2], cx[3], cz[3]) || !sameLayer(cx[3], cz[3], cx[0], cz[0]))
-          continue;
+        // Never triangulate across a layer step (deck/roof edge). Corners
+        // on another layer than the strongest one become virtual unreached
+        // nodes at the same height, so the contour rounds off at the edge
+        // like it does beside a ground obstacle instead of leaving a
+        // grid-stepped gap.
+        int dom = 0;
+        for (int k = 1; k < 4; ++k)
+          if (quad[k].g > quad[dom].g) dom = k;
+        for (int k = 0; k < 4; ++k) {
+          if (sameLayer(cx[dom], cz[dom], cx[k], cz[k])) continue;
+          quad[k].p.y = quad[dom].p.y;
+          quad[k].g = -0.5f * f.step;
+        }
         // Clip the cell to g >= 0 (Sutherland-Hodgman against the field).
         std::vector<Pt> poly;
         std::vector<Pt> cut;  // Contour crossings, in polygon order.

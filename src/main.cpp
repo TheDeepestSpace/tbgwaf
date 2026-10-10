@@ -331,7 +331,7 @@ int main() {
   // urban-full forces every optional feature layer on.
   std::string mapType = "urban-auto";
   if (const char* mapEnv = std::getenv("TBGWAF_MAP")) mapType = mapEnv;
-  auto makeMap = [&mapSeed, &mapType]() {
+  auto makeBaseMap = [](uint32_t mapSeed, const std::string& mapType) {
     if (mapType == "hilly") return tactics::GenerateHillyMap(mapSeed);
     tactics::MapGeneratorConfig config;
     if (mapType == "urban-merge" || mapType == "urban-elevated") config.arteryCount = 2;
@@ -346,6 +346,13 @@ int main() {
       }
     }
     return tactics::GenerateUrbanMap(mapSeed, config);
+  };
+  // Chosen on the Game Mode screen; CTF turns on the neutral flag objective.
+  bool ctfMode = false;
+  auto makeMap = [&mapSeed, &mapType, &ctfMode, &makeBaseMap]() {
+    tactics::Scene scene = makeBaseMap(mapSeed, mapType);
+    scene.flag.enabled = ctfMode;
+    return scene;
   };
   GameLogic game(makeMap());
   // Start zoomed out far enough that the whole map is in view.
@@ -609,10 +616,17 @@ int main() {
           tactics::ui::DrawMenu(screen, windowWidth, windowHeight, &mapSeed);
       // Headless smoke run: walk the menu automatically so gameplay is exercised.
       if (isSmokeTest && !flowEvent) {
-        flowEvent = screen == tbgwaf_flow::State::Splash ? tbgwaf_flow::Event::NewGame
-                                                         : tbgwaf_flow::Event::SelectUrban;
+        switch (screen) {
+          case tbgwaf_flow::State::Splash: flowEvent = tbgwaf_flow::Event::NewGame; break;
+          case tbgwaf_flow::State::GameMode: flowEvent = tbgwaf_flow::Event::SelectRegular; break;
+          default: flowEvent = tbgwaf_flow::Event::SelectUrban; break;
+        }
       }
       if (flowEvent) {
+        if (*flowEvent == tbgwaf_flow::Event::SelectRegular ||
+            *flowEvent == tbgwaf_flow::Event::SelectCtf) {
+          ctfMode = *flowEvent == tbgwaf_flow::Event::SelectCtf;
+        }
         if (*flowEvent == tbgwaf_flow::Event::SelectUrban ||
             *flowEvent == tbgwaf_flow::Event::SelectHills) {
           // The menu's Urban entry uses the seed-driven random overpass mode.

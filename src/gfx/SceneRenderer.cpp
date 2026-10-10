@@ -635,6 +635,40 @@ void DrawUnit(const Shader& shader, const CubeMesh& cube, const SphereMesh& sphe
   }
 }
 
+// The neutral flag at rest / dropped (a carried one is part of its carrier's
+// figure). Visible to both teams regardless of fog: it is a neutral objective.
+bool FlagPlantedOnGround(const GameLogic& game) {
+  return game.Flag().enabled && game.Flag().carrierId < 0;
+}
+
+void DrawPlantedFlag(const Shader& shader, const CubeMesh& cube, const SphereMesh& sphere,
+                     const glm::mat4& viewProj, const glm::mat4& lightSpaceMatrix,
+                     const GameLogic& game) {
+  if (!FlagPlantedOnGround(game)) return;
+  for (const FigurePart& part :
+       BuildPlantedFlag(game.Flag().position, game.Flag().dropElapsed)) {
+    if (part.primitive == FigurePrimitive::Rounded) {
+      DrawLitModel(shader, sphere, viewProj, lightSpaceMatrix, part.model, part.color);
+    } else {
+      DrawLitModel(shader, cube, viewProj, lightSpaceMatrix, part.model, part.color);
+    }
+  }
+}
+
+void DrawPlantedFlagDepth(const Shader& shader, const CubeMesh& cube, const SphereMesh& sphere,
+                          const glm::mat4& lightSpaceMatrix, const GameLogic& game) {
+  if (!FlagPlantedOnGround(game)) return;
+  for (const FigurePart& part :
+       BuildPlantedFlag(game.Flag().position, game.Flag().dropElapsed)) {
+    shader.SetMat4("uLightMVP", lightSpaceMatrix * part.model);
+    if (part.primitive == FigurePrimitive::Rounded) {
+      sphere.Draw();
+    } else {
+      cube.Draw();
+    }
+  }
+}
+
 // Wireframe unit cube transformed by `model` (same convention as BoxModel:
 // the unit cube [0,1]^3), drawn as one line strip that retraces a few edges
 // to cover all 12. Line strips rather than GL_LINE polygon mode, which
@@ -2042,6 +2076,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
       DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
     }
+    DrawPlantedFlagDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, game);
   }
   glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
 
@@ -2187,6 +2222,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
     DrawUnit(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, unit);
   }
+  DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
 
   // Issue #136: alpha-blended re-draw of the occluders marked above, sorted
   // front-to-back and stencil-capped so each pixel is blended exactly once

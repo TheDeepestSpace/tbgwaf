@@ -68,6 +68,33 @@ std::optional<Team> CheckWinner(const std::vector<Unit>& units) {
   return std::nullopt;
 }
 
+namespace {
+
+// Earliest fraction t in [0,1] along p0->p1 at which the XZ distance to
+// `center` is within `radius` (0 if p0 already is); false if the segment
+// never gets that close.
+bool SegmentEntersDisc(const glm::vec3& p0, const glm::vec3& p1, const glm::vec3& center,
+                       float radius, float* outT) {
+  const glm::vec2 a(p0.x - center.x, p0.z - center.z);
+  const glm::vec2 v(p1.x - p0.x, p1.z - p0.z);
+  const float c = glm::dot(a, a) - radius * radius;
+  if (c <= 0.0f) {
+    *outT = 0.0f;
+    return true;
+  }
+  const float qa = glm::dot(v, v);
+  if (qa < 1e-12f) return false;
+  const float qb = 2.0f * glm::dot(v, a);
+  const float disc = qb * qb - 4.0f * qa * c;
+  if (disc < 0.0f) return false;
+  const float t = (-qb - std::sqrt(disc)) / (2.0f * qa);
+  if (t < 0.0f || t > 1.0f) return false;
+  *outT = t;
+  return true;
+}
+
+}  // namespace
+
 void GameLogic::Reset() { Reset(BuildDefaultScene()); }
 
 void GameLogic::Reset(Scene scene) {
@@ -94,6 +121,8 @@ void GameLogic::Reset(Scene scene) {
   selectedUnitId_.reset();
   winner_.reset();
   ClearMoveOverlays();
+  flagWinner_.reset();
+  InitFlag();
   activeMoves_.clear();
   pendingShots_.clear();
   mirroredMoving_.clear();
@@ -256,6 +285,7 @@ GameSnapshot GameLogic::ExportState() const {
     u.rideTravel = unit.rideTravel;
     u.rideLength = unit.rideLength;
     u.rideSlope = unit.rideSlope;
+    u.grabElapsed = unit.grabElapsed;
     u.moving = IsUnitMoving(unit.id);
     snap.units.push_back(std::move(u));
   }
@@ -265,6 +295,8 @@ GameSnapshot GameLogic::ExportState() const {
   snap.mode = mode_;
   snap.roundNumber = roundNumber_;
   snap.winner = winner_ ? static_cast<int>(*winner_) : -1;
+  snap.flag = flag_;
+  if (flag_.carrierId >= 0) snap.flag.position = FlagPosition();
   return snap;
 }
 
@@ -327,6 +359,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     unit->rideTravel = u.rideTravel;
     unit->rideLength = u.rideLength;
     unit->rideSlope = u.rideSlope;
+    unit->grabElapsed = u.grabElapsed;
     ApplyPlan(u, unit);
     if (u.moving) mirroredMoving_.push_back(u.id);
   }
@@ -356,6 +389,8 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   roundNumber_ = snap.roundNumber;
   if (newGame) ResetSightingMemory();
   tracers_ = snap.tracers;
+  flag_ = snap.flag;
+  for (Unit& unit : scene_.units) unit.carryingFlag = flag_.enabled && unit.id == flag_.carrierId;
   if (snap.winner >= 0) {
     winner_ = static_cast<Team>(snap.winner);
   } else {
@@ -395,7 +430,7 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
         << u.knockdownElapsed << ' ' << u.walkPhase << ' ' << u.walkBlend << ' '
         << u.idleElapsed << ' ' << u.shootElapsed << ' ' << u.shootAimYaw << ' '
         << u.rideTravel << ' ' << u.rideLength << ' ' << u.rideSlope << ' '
-        << (u.moving ? 1 : 0) << ' '
+        << u.grabElapsed << ' ' << (u.moving ? 1 : 0) << ' '
         << u.planPath.size();
     for (const auto& p : u.planPath) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
     out << ' ' << u.planQueuedLegs.size();
@@ -419,6 +454,9 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
   for (const auto& pb : snap.playbooks)
     for (int m = 0; m < 2; ++m)
       for (int s = 0; s < 2; ++s) out << ' ' << static_cast<int>(pb.table[m][s]);
+  out << ' ' << (snap.flag.enabled ? 1 : 0) << ' ' << snap.flag.carrierId << ' '
+      << snap.flag.position.x << ' ' << snap.flag.position.y << ' ' << snap.flag.position.z << ' '
+      << snap.flag.dropElapsed;
   return out.str();
 }
 
@@ -442,7 +480,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
           u.planAimPoint.z >> u.planShots >> u.planEndFacingYaw >> u.knockdownAxis.x >>
           u.knockdownAxis.y >> u.knockdownAxis.z >> u.knockdownElapsed >> u.walkPhase >>
           u.walkBlend >> u.idleElapsed >> u.shootElapsed >> u.shootAimYaw >> u.rideTravel >> u.rideLength >>
-          u.rideSlope >> moving >>
+          u.rideSlope >> u.grabElapsed >> moving >>
           pathCount)) {
       return false;
     }
@@ -507,6 +545,15 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
       }
     }
   }
+  int flagEnabled = 0;
+  if (!(in >> flagEnabled >> snap.flag.carrierId >> snap.flag.position.x >>
+        snap.flag.position.y >> snap.flag.position.z >> snap.flag.dropElapsed)) {
+    return false;
+  }
+  snap.flag.enabled = flagEnabled != 0;
+  bool carrierKnown = snap.flag.carrierId < 0;
+  for (const auto& u : snap.units) carrierKnown |= u.id == snap.flag.carrierId;
+  if (!carrierKnown) return false;
   *outSnap = std::move(snap);
   return true;
 }
@@ -674,7 +721,15 @@ void GameLogic::Update(float dtSeconds) {
       unit.shootElapsed += dtSeconds;
       if (unit.shootElapsed >= constants::kShootAnimDuration) unit.shootElapsed = -1.0f;
     }
+    if (unit.grabElapsed >= 0.0f) {
+      unit.grabElapsed += dtSeconds;
+      if (unit.grabElapsed >= constants::kGrabAnimDuration) unit.grabElapsed = -1.0f;
+    }
   }
+  if (flag_.dropElapsed >= 0.0f) {
+    flag_.dropElapsed = std::min(flag_.dropElapsed + dtSeconds, constants::kFlagDropDuration);
+  }
+  SyncFlag();  // Also catches a carrier felled outside a round (direct ResolveShot).
 
   for (Tracer& tracer : tracers_) tracer.age = std::min(tracer.age + dtSeconds, 60.0f);
 
@@ -694,7 +749,11 @@ void GameLogic::Update(float dtSeconds) {
 }
 
 void GameLogic::AdvanceExecutingRound(float dtSeconds) {
+  const float tickStart = executionElapsed_;
   executionElapsed_ += dtSeconds;
+  std::vector<FlagTouch> flagTouches;
+  CollectStationaryFlagTouches(tickStart, &flagTouches);
+  const bool flagLoose = flag_.enabled && flag_.carrierId < 0;
   for (ActiveMove& move : activeMoves_) {
     Unit* mover = FindUnit(move.unitId);
     if (!mover || move.path.size() < 2) continue;
@@ -711,6 +770,13 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
     // walking spends one unit per world unit, a zipline ride only
     // kZiplineCostFactor per world unit (so it covers ground faster).
     float remaining = dtSeconds * mover->runSpeed;
+    float walked = 0.0f;
+    bool touched = false;
+    auto NoteTouch = [&](float distanceWalked) {
+      touched = true;
+      flagTouches.push_back({mover->id, tickStart + distanceWalked / mover->runSpeed});
+    };
+    if (flagLoose && TouchesFlag(mover->position)) NoteTouch(0.0f);
     while (remaining > 0.0f && move.segment + 1 < move.path.size()) {
       const glm::vec3& segStart = move.path[move.segment];
       const glm::vec3& segEnd = move.path[move.segment + 1];
@@ -734,9 +800,22 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
       const glm::vec3 toEnd = segEnd - mover->position;
       const float distToEnd = glm::length(toEnd);
       const float costToEnd = distToEnd * costScale;
-      float step;
-      if (costToEnd <= remaining) {
-        step = distToEnd;
+      const bool reachesEnd = costToEnd <= remaining;
+      float step = reachesEnd ? distToEnd : remaining / costScale;
+      if (flagLoose && !touched) {
+        // Passing *through* the flag's spot counts, even mid-tick.
+        const glm::vec3 pieceEnd =
+            reachesEnd ? segEnd : mover->position + (toEnd / distToEnd) * step;
+        float t = 0.0f;
+        if (SegmentEntersDisc(mover->position, pieceEnd, flag_.position,
+                              constants::kFlagGrabRadius, &t) &&
+            std::abs(glm::mix(mover->position.y, pieceEnd.y, t) - flag_.position.y) <=
+                constants::kFlagGrabHeight) {
+          NoteTouch(walked + t * step * costScale);
+        }
+      }
+      walked += step * costScale;
+      if (reachesEnd) {
         mover->position = segEnd;
         remaining -= costToEnd;
         ++move.segment;
@@ -745,7 +824,6 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
           mover->rideTravel = -1.0f;
         }
       } else {
-        step = remaining / costScale;
         mover->position += (toEnd / distToEnd) * step;
         remaining = 0.0f;
       }
@@ -772,12 +850,17 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
     }
   }
 
+  // Grabs happen where the figures physically are, before reactions or shots
+  // this tick can change anything (a grabber shot a moment later still held it).
+  GrabFlagFrom(flagTouches);
+
   ApplyPlaybookReactions();
 
   // Continuous shot resolution: with everyone's position advanced for this
   // tick, held shots get their per-tick FOV/LOS re-check -- this is what
   // lets a shooter hit a target that only walks into its cone mid-round.
   ResolvePendingShots();
+  SyncFlag();
 
   // Every mover advances together above; drop whichever ones just finished
   // their path (or died to a shot this tick). Once none are left, a shot
@@ -1685,11 +1768,17 @@ void GameLogic::CommitRound() {
   mode_ = InputMode::Executing;
   executionElapsed_ = 0.0f;
 
+  // A figure already standing on the flag (e.g. a dropped one) grabs it now.
+  std::vector<FlagTouch> startTouches;
+  CollectStationaryFlagTouches(0.0f, &startTouches);
+  GrabFlagFrom(startTouches);
+
   // Tick 0: bursts whose FOV/LOS is already valid at the pre-move positions
   // open fire the instant the round starts (simultaneously,
   // snapshot-judged); blocked ones stay pending and re-check as the round's
   // movement unfolds.
   ResolvePendingShots();
+  SyncFlag();
 
   // Anyone killed at tick 0 never starts walking.
   activeMoves_.erase(std::remove_if(activeMoves_.begin(), activeMoves_.end(),
@@ -1698,6 +1787,11 @@ void GameLogic::CommitRound() {
                                        return !mover || !mover->alive;
                                      }),
                       activeMoves_.end());
+
+  if (flagWinner_) {
+    FinishRound();
+    return;
+  }
 
   // With no movement in flight, nothing can change a still-blocked shot's
   // geometry: it expires now. The round stays executing while any opened
@@ -1708,6 +1802,123 @@ void GameLogic::CommitRound() {
                         pendingShots_.end());
     if (pendingShots_.empty()) FinishRound();
   }
+}
+
+void GameLogic::InitFlag() {
+  flag_ = FlagState{};
+  for (Unit& unit : scene_.units) {
+    unit.carryingFlag = false;
+    unit.grabElapsed = -1.0f;
+  }
+  const FlagConfig& config = scene_.flag;
+  if (!config.enabled) return;
+  flag_.enabled = true;
+  glm::vec3 pos(0.0f);
+  if (config.position) {
+    pos = *config.position;
+  } else {
+    // Map center, or the nearest spot to it that no obstacle covers
+    // (searched in expanding rings, so the result is deterministic).
+    auto Free = [this](float x, float z) {
+      if (std::abs(x) > scene_.mapHalfExtent || std::abs(z) > scene_.mapHalfExtent) return false;
+      for (const Obstacle& o : scene_.obstacles) {
+        const float m = constants::kAgentRadius;
+        if (x > o.bounds.min.x - m && x < o.bounds.max.x + m && z > o.bounds.min.z - m &&
+            z < o.bounds.max.z + m) {
+          return false;
+        }
+      }
+      return true;
+    };
+    constexpr float kStep = 0.5f;
+    bool found = Free(0.0f, 0.0f);
+    for (int ring = 1; !found && ring * kStep <= scene_.mapHalfExtent * 1.5f; ++ring) {
+      float bestD = 1e30f;
+      for (int ix = -ring; ix <= ring; ++ix) {
+        for (int iz = -ring; iz <= ring; ++iz) {
+          if (std::max(std::abs(ix), std::abs(iz)) != ring) continue;
+          const float x = ix * kStep, z = iz * kStep;
+          const float d = x * x + z * z;
+          if (d < bestD && Free(x, z)) {
+            bestD = d;
+            pos = glm::vec3(x, 0.0f, z);
+            found = true;
+          }
+        }
+      }
+    }
+  }
+  if (std::fabs(pos.y) < 1e-4f) pos.y = scene_.ground.HeightAt(pos.x, pos.z);
+  flag_.position = pos;
+}
+
+glm::vec3 GameLogic::FlagPosition() const {
+  if (flag_.carrierId >= 0) {
+    if (const Unit* carrier = FindUnit(flag_.carrierId)) return carrier->position;
+  }
+  return flag_.position;
+}
+
+bool GameLogic::FlagVisibleTo(Team team) const {
+  if (!flag_.enabled) return false;
+  if (flag_.carrierId < 0) return true;
+  const Unit* carrier = FindUnit(flag_.carrierId);
+  if (!carrier) return false;
+  return carrier->team == team || ComputeVisibility(team).UnitVisible(carrier->id);
+}
+
+void GameLogic::SyncFlag() {
+  if (!flag_.enabled) return;
+  if (flag_.carrierId >= 0) {
+    const Unit* carrier = FindUnit(flag_.carrierId);
+    if (carrier && carrier->alive) {
+      flag_.position = carrier->position;
+    } else {
+      // Carrier down: the flag stays where they fell.
+      if (carrier) flag_.position = carrier->position;
+      flag_.carrierId = -1;
+      flag_.dropElapsed = 0.0f;
+    }
+  }
+  for (Unit& unit : scene_.units) unit.carryingFlag = unit.id == flag_.carrierId;
+}
+
+bool GameLogic::TouchesFlag(const glm::vec3& position) const {
+  return std::abs(position.y - flag_.position.y) <= constants::kFlagGrabHeight &&
+         glm::length(glm::vec2(position.x - flag_.position.x, position.z - flag_.position.z)) <=
+             constants::kFlagGrabRadius;
+}
+
+void GameLogic::CollectStationaryFlagTouches(float arrival, std::vector<FlagTouch>* touches) const {
+  if (!flag_.enabled || flag_.carrierId >= 0) return;
+  for (const Unit& unit : scene_.units) {
+    if (!unit.alive || !TouchesFlag(unit.position)) continue;
+    bool moving = false;
+    for (const ActiveMove& move : activeMoves_) {
+      moving |= move.unitId == unit.id && move.segment + 1 < move.path.size();
+    }
+    if (!moving) touches->push_back({unit.id, arrival});
+  }
+}
+
+void GameLogic::GrabFlagFrom(const std::vector<FlagTouch>& touches) {
+  if (!flag_.enabled || flag_.carrierId >= 0 || touches.empty()) return;
+  const FlagTouch* best = nullptr;
+  for (const FlagTouch& t : touches) {
+    constexpr float kTieSeconds = 1e-4f;
+    if (!best || t.arrival < best->arrival - kTieSeconds ||
+        (std::abs(t.arrival - best->arrival) <= kTieSeconds && t.unitId < best->unitId)) {
+      best = &t;
+    }
+  }
+  Unit* grabber = FindUnit(best->unitId);
+  if (!grabber) return;
+  flag_.carrierId = grabber->id;
+  flag_.dropElapsed = -1.0f;
+  flag_.position = grabber->position;
+  grabber->grabElapsed = 0.0f;
+  if (scene_.flag.winOnGrab) flagWinner_ = grabber->team;
+  SyncFlag();
 }
 
 void GameLogic::FinishRound() {
@@ -1733,6 +1944,15 @@ void GameLogic::FinishRound() {
     unit.plan.endFacingYaw = FinalYaw(unit.plan.movePath, unit.facingYaw);
   }
 
+  SyncFlag();
+  if (flagWinner_) {
+    // Win-on-grab beats elimination: the grab happened first.
+    winner_ = flagWinner_;
+    flagWinner_.reset();
+    mode_ = InputMode::GameOver;
+    return;
+  }
+
   const auto winner = CheckWinner(scene_.units);
   bool anyAlive = false;
   for (const auto& unit : scene_.units) anyAlive |= unit.alive;
@@ -1740,6 +1960,12 @@ void GameLogic::FinishRound() {
     // Simultaneous execution can wipe out both sides in the same round;
     // that's a draw (GameOver with no winner).
     winner_ = winner;
+    mode_ = InputMode::GameOver;
+    return;
+  }
+  if (scene_.roundLimit > 0 && roundNumber_ >= scene_.roundLimit) {
+    // Round limit reached with no winner: a draw (GameOver, no winner).
+    winner_.reset();
     mode_ = InputMode::GameOver;
     return;
   }

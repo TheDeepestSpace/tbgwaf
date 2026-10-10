@@ -2608,6 +2608,50 @@ void TestFreeAimPlanSnapshotAndProtocolRoundTrip() {
   CHECK(peer.FindUnit(1)->plan.hasAimPoint);
 }
 
+// Flag state (carrier, position, drop beat) and the grab reach beat survive
+// the snapshot text protocol; a flag-less scene round-trips as disabled.
+void TestFlagSnapshotRoundTrip() {
+  GameLogic off(LegacyScene());
+  GameSnapshot decodedOff;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(off.ExportState()), &decodedOff));
+  CHECK(!decodedOff.flag.enabled);
+
+  Scene scene;
+  scene.flag.enabled = true;
+  scene.flag.winOnGrab = false;
+  scene.flag.position = glm::vec3(0.0f, 0.0f, 0.0f);
+  for (int id = 0; id < 2; ++id) {
+    Unit u;
+    u.id = id;
+    u.team = id == 0 ? Team::Blue : Team::Red;
+    u.position = glm::vec3(id == 0 ? -3.0f : 6.0f, 0.0f, 0.0f);
+    scene.units.push_back(u);
+  }
+  GameLogic game(scene);
+  CHECK(game.Flag().enabled);
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(glm::vec3(0.0f, 0.0f, 0.0f), Team::Blue);
+  game.FinishMovePlan();
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  game.Update(1.0f);
+  game.Update(1.0f);
+  CHECK(game.Flag().carrierId == 0);
+  CHECK(game.FindUnit(0)->carryingFlag);
+
+  GameSnapshot decoded;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &decoded));
+  CHECK(decoded.flag.enabled && decoded.flag.carrierId == 0);
+  GameLogic follower(scene);
+  CHECK(follower.ImportState(decoded));
+  CHECK(follower.Flag().carrierId == 0);
+  CHECK(follower.FindUnit(0)->carryingFlag);
+  CHECK(!follower.FindUnit(1)->carryingFlag);
+  CHECK(glm::distance(follower.FlagPosition(), game.FlagPosition()) < 1e-3f);
+}
+
 // A resolved shot leaves a tracer from the muzzle toward the target; it
 // survives the snapshot round trip (followers) and expires after
 // kTracerMemoryRounds completed rounds.
@@ -2971,6 +3015,7 @@ int main() {
   TestFreeAimAreaDenialShotLeaksNothing();
   TestFollowerMirrorsBlindHitReveal();
   TestFreeAimPlanSnapshotAndProtocolRoundTrip();
+  TestFlagSnapshotRoundTrip();
   TestShotLeavesFadingTracer();
   TestWeaponBurstCaps();
   TestPlannedShotCountClampsToWeaponCap();

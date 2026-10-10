@@ -13,6 +13,12 @@
 // `action: commit` step, which mirrors clicking "Commit Round" and plays
 // out every figure's plan on both teams simultaneously.
 //
+// Optional top-level `flag: {position: [x, z] | [x, y, z], win_on_grab: bool}`
+// enables the neutral flag objective (position defaults to the map center or
+// the nearest free spot; win_on_grab defaults to true, false just carries/
+// drops it and play goes on). `round_limit: N` ends the match as a draw after
+// N rounds with no winner.
+//
 // `map.half_extent` sizes the ground square; units must start inside it.
 //
 // See tests/scenarios/*.yaml for the file format by example, and
@@ -103,6 +109,16 @@ struct ScenarioAssertion {
   std::optional<int> memoryAge;
 
   std::optional<int> round;
+
+  // Neutral flag (CTF part 1). `flag_carrier`: id of the carrying figure, or
+  // -1 when nobody carries it. `flag_state`: "rest" (never picked up),
+  // "carried" or "dropped". `flag_position`: where it is now (the carrier's
+  // feet while carried), within `tolerance`. `flag_visible_to`: the team's
+  // fog-of-war view includes the flag.
+  std::optional<int> flagCarrier;
+  std::optional<std::string> flagState;
+  std::optional<glm::vec3> flagPosition;
+  std::optional<Team> flagVisibleTo;
 };
 
 struct ScenarioStep {

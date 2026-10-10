@@ -154,7 +154,7 @@ listed by name only.</p>
 </div>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
-<h2>Unchanged scenarios <span class="count">(59)</span></h2>
+<h2>Unchanged scenarios <span class="count">(63)</span></h2>
 <div class="scenario has-video" data-stem="burst_free_aim_point_target"><h3>burst_free_aim_point_target</h3><div class="path">tests/scenarios/burst_free_aim_point_target.yaml</div>
 <p class="description">Bursts work for free-aim point-target shots too (issues places a blind-fire aim point on the enemy&#x27;s torso and fires a 5-shot burst at it. Every bullet flies its own scattered line inside the weapon&#x27;s cone; only bullets whose line actually crosses the figure roll against the hit chance (the pinned roll always hits), so the burst downs the figure with one of the bullets that land on the body.</p>
 <div class="panes">
@@ -1132,6 +1132,27 @@ listed by name only.</p>
 </div>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
+<div class="scenario has-video" data-stem="playbook_ignore_idle_no_shots"><h3>playbook_ignore_idle_no_shots</h3><div class="path">tests/scenarios/playbook_ignore_idle_no_shots.yaml</div>
+<p class="description">Same as playbook_stationary_shoots_idle_enemy but with ignore_idle on: stationary watchers skip idle enemies, so nobody fires and everyone survives.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_ignore_idle_no_shots/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_ignore_idle_no_shots/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Playbook (blue): stationary seen: shoot, stationary unseen: shoot, ignore idle: True</div>
+<div class="detail">Playbook (red): stationary seen: shoot, stationary unseen: shoot, ignore idle: True</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is alive</div>
+<div class="detail">Check: <span class="u red">red1</span> is alive</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
 <div class="scenario has-video" data-stem="playbook_moving_continue_walks_through"><h3>playbook_moving_continue_walks_through</h3><div class="path">tests/scenarios/playbook_moving_continue_walks_through.yaml</div>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_continue_walks_through/blue.webm"></video></figure>
@@ -1215,7 +1236,7 @@ listed by name only.</p>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_shoot_on_fov_entry/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
 <div class="round-title">Setup</div>
-<div class="detail">Playbook (blue): stationary seen: shoot, stationary unseen: shoot</div>
+<div class="detail">Playbook (blue): stationary seen: shoot, stationary unseen: shoot, ignore idle: True</div>
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1</div>
 <div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
@@ -1264,6 +1285,108 @@ listed by name only.</p>
 <div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
 <div class="detail">Check: blue has no memory of <span class="u red">red1</span></div>
 <div class="detail">Check: round is 4</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="playbook_stationary_shoots_idle_enemy"><h3>playbook_stationary_shoots_idle_enemy</h3><div class="path">tests/scenarios/playbook_stationary_shoots_idle_enemy.yaml</div>
+<p class="description">Both sides have a stationary &quot;shoot&quot; playbook and both pass in plain view. Stationary watchers react to visible idle enemies by default, so the round opens with shots fired. Counterpart: playbook_ignore_idle_no_shots.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_stationary_shoots_idle_enemy/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_stationary_shoots_idle_enemy/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Playbook (blue): stationary seen: shoot, stationary unseen: shoot</div>
+<div class="detail">Playbook (red): stationary seen: shoot, stationary unseen: shoot</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is down</div>
+<div class="detail">Check: <span class="u red">red1</span> is down</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="timeline_new_game"><h3>timeline_new_game</h3><div class="path">tests/scenarios/timeline_new_game.yaml</div>
+<p class="description">Turn timeline (issue played and replayed from its Start tick, then `new_game` restarts the match the way the UI does: the timeline resets to a single Start tick (any replay in progress is dropped, back to the live view -- cf. issue records and replays its own history independently of the old one&#x27;s.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/timeline_new_game/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/timeline_new_game/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (0, 0)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: round is 2, timeline ticks 2</div>
+</div>
+<div class="round"><div class="round-title">Round 2</div>
+<div class="step" data-action="4">timeline_seek (actor None)</div>
+<div class="detail">Check: round is 1</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-8, 0)</div>
+<div class="step" data-action="5">new_game (actor None)</div>
+<div class="detail">Check: round is 1, timeline ticks 1</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-8, 0)</div>
+<div class="step" data-action="6"><span class="u blue">blue0</span> moves to (-2, 4)</div>
+<div class="step" data-action="7"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="8">commit round</div>
+<div class="detail">Check: round is 2, timeline ticks 2</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-2, 4)</div>
+</div>
+<div class="round"><div class="round-title">Round 3 (uncommitted)</div>
+<div class="step" data-action="9">timeline_seek (actor None)</div>
+<div class="detail">Check: round is 1</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-8, 0)</div>
+<div class="step" data-action="10">timeline_play (actor None) <span class="detail">— Replays game 2&#x27;s round to the live end and pauses there.</span></div>
+<div class="detail">Check: round is 2</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-2, 4)</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="timeline_scrub_replay"><h3>timeline_scrub_replay</h3><div class="path">tests/scenarios/timeline_scrub_replay.yaml</div>
+<p class="description">Turn timeline (issue replay from the Start tick (initial positions restored, mover mid-walk one second in), scrubbing to another tick while playback is running (snaps there, keeps playing), resuming from a mid-game tick, playing to the live end (playback pauses there on the final state), and returning to the live view by scrubbing to the newest tick while paused. Assertions after a timeline step check the replayed state, exactly what the app renders while the replay is active.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/timeline_scrub_replay/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/timeline_scrub_replay/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (0, 0)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: round is 2, timeline ticks 2</div>
+</div>
+<div class="round"><div class="round-title">Round 2</div>
+<div class="step" data-action="4"><span class="u blue">blue0</span> moves to (0, 6)</div>
+<div class="step" data-action="5"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="6">commit round</div>
+<div class="detail">Check: round is 3, timeline ticks 3</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 6)</div>
+</div>
+<div class="round"><div class="round-title">Round 3 (uncommitted)</div>
+<div class="step" data-action="7">timeline_seek (actor None)</div>
+<div class="detail">Check: round is 1</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-8, 0)</div>
+<div class="step" data-action="8">timeline_play (actor None) <span class="detail">— One second into the replayed first round the mover is mid-walk (4 u/s).</span></div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-4, 0) (tolerance 0.5)</div>
+<div class="step" data-action="9">timeline_seek (actor None)</div>
+<div class="detail">Check: round is 2</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 0) (tolerance 0.1)</div>
+<div class="step" data-action="10">timeline_play (actor None)</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 4) (tolerance 0.5)</div>
+<div class="step" data-action="11">timeline_pause (actor None)</div>
+<div class="step" data-action="12">timeline_play (actor None)</div>
+<div class="detail">Check: round is 3</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 6)</div>
+<div class="step" data-action="13">timeline_seek (actor None)</div>
+<div class="detail">Check: round is 3</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 6)</div>
 </div>
 </div></figure>
 </div>

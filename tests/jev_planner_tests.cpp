@@ -122,6 +122,32 @@ void TestMapGhostsAndTacticalMovesAreCommunicated() {
         request->json.find("no enemy is currently visible") != std::string::npos);
 }
 
+void TestCaptureTheFlagIsExplained() {
+  Scene scene = TwoUnitScene(24.0f, false);
+  GameLogic plain(scene);
+  const auto off = BuildJevRequest(plain, Team::Blue, 1);
+  CHECK(off.has_value());
+  CHECK(off->json.find("\"flag\":null") != std::string::npos);
+  CHECK(off->json.find("Capture the flag") == std::string::npos);
+
+  scene.flag.enabled = true;
+  scene.flag.position = glm::vec3(-6.0f, 0.0f, 0.0f);
+  GameLogic game(scene);
+  const auto request = BuildJevRequest(game, Team::Blue, 1);
+  CHECK(request.has_value());
+  CHECK(request->json.find("Capture the flag") != std::string::npos);
+  CHECK(request->json.find("\"status\":\"at_rest\"") != std::string::npos);
+  CHECK(request->json.find("\"win_on_grab\":true") != std::string::npos);
+  const auto flag = std::find_if(request->candidates.begin(), request->candidates.end(),
+                                 [](const auto& c) { return c.id == "f0_flag"; });
+  CHECK(flag != request->candidates.end());
+  if (flag != request->candidates.end()) {
+    CHECK(flag->description.find("wins the match immediately") != std::string::npos);
+    GameLogic copy = game;
+    CHECK(ApplyJevChoice(&copy, *request, {flag->id}));
+  }
+}
+
 void TestWholeSquadIsPlannedAtOnce() {
   Scene scene = TwoUnitScene(24.0f, false);
   Unit second;
@@ -233,6 +259,7 @@ int main() {
   TestBoundedCandidatesUseNormalLegalPath();
   TestShootCandidateIsFullBurstAndStateDescribesWeapons();
   TestMapGhostsAndTacticalMovesAreCommunicated();
+  TestCaptureTheFlagIsExplained();
   TestWholeSquadIsPlannedAtOnce();
   TestHiddenEnemyNeverSerialized();
   TestInvalidAndStaleResponsesDoNotMutate();

@@ -27,6 +27,11 @@ cone; the option text carries the current per-shot hit chance, and the state
 lists each ally's weapon, magazine, fire interval, scatter and max burst. The
 objective text also covers FOV/LOS gating, friendly fire, and reaction fire.
 
+Capture the flag: when the scene's flag is enabled, the objective text explains the
+win condition (first figure to touch the flag wins when `winOnGrab`), `state.flag`
+gives position/status/carrier, the grid marks it `F`, and each figure gets an `f<id>_flag`
+move option toward it (`state.flag` is `null` otherwise).
+
 Environment Jev is told: an ASCII top-down map (`state.map.grid`, 0.75-unit cells,
 up to 96x96, sampled at cell centres against the exact obstacle footprints; `#`
 obstacle, `+` climbable, own figures, visible enemies and ghosts marked, with

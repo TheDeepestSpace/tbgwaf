@@ -252,6 +252,29 @@ std::vector<JevCandidate> GenerateCandidateSpecs(const GameLogic& game, Team tea
       candidates.push_back(std::move(candidate));
     }
   }
+  const Unit* flagCarrier = game.Flag().carrierId >= 0 ? game.FindUnit(game.Flag().carrierId) : nullptr;
+  if (game.Flag().enabled && (!flagCarrier || flagCarrier->team != team)) {
+    const glm::vec3 flag = game.FlagPosition();
+    glm::vec3 dir = flag - actor->position;
+    dir.y = 0.0f;
+    const float dist = glm::length(dir);
+    if (dist >= 0.3f) {
+      JevCandidate candidate;
+      candidate.id = "flag";
+      candidate.kind = JevActionKind::Move;
+      candidate.actorId = actorId;
+      candidate.destination = dist <= actor->MoveBudget() ? flag : actor->position + dir / dist * actor->MoveBudget();
+      candidate.description =
+          std::string(dist <= actor->MoveBudget() ? "Run onto the flag at " : "Run toward the flag at ") +
+          PointJson(flag) + " (" + std::to_string(static_cast<int>(dist + 0.5f)) +
+          " units away, move budget " + std::to_string(static_cast<int>(actor->MoveBudget())) +
+          (flagCarrier ? "); it is carried by an enemy, so this chases the carrier." : ").") +
+          (game.GetScene().flag.winOnGrab && dist <= actor->MoveBudget()
+               ? " Touching it anywhere along the path wins the match immediately."
+               : "");
+      candidates.push_back(std::move(candidate));
+    }
+  }
   int hunted = 0;
   for (const Ghost& ghost : ghosts) {
     if (hunted >= 2) break;
@@ -326,7 +349,8 @@ bool InsideFootprint(const std::vector<glm::vec2>& poly, float x, float z) {
 // X. Each cell is sampled at its centre against the exact obstacle footprint
 // (obstacles smaller than a cell still mark the cell holding their centre).
 // '#' obstacle, '+' climbable obstacle, '.' open; allies are their id digit,
-// visible enemies lowercase 'e', remembered (ghost) enemies '?'.
+// visible enemies lowercase 'e', remembered (ghost) enemies '?', the flag 'F'
+// (drawn under figures, so a carried flag shows as its carrier).
 std::vector<std::string> BuildGrid(const GameLogic& game, Team team,
                                    const TeamVisibility& visibility,
                                    const std::vector<Ghost>& ghosts, int cells) {
@@ -354,6 +378,10 @@ std::vector<std::string> BuildGrid(const GameLogic& game, Team team,
   for (const Ghost& ghost : ghosts) {
     rows[toCell(ghost.sighting->position.z)][toCell(ghost.sighting->position.x)] = '?';
   }
+  if (game.Flag().enabled) {
+    const glm::vec3 flag = game.FlagPosition();
+    rows[toCell(flag.z)][toCell(flag.x)] = 'F';
+  }
   for (const Unit& unit : scene.units) {
     if (!unit.alive) continue;
     if (unit.team == team) {
@@ -366,6 +394,35 @@ std::vector<std::string> BuildGrid(const GameLogic& game, Team team,
   return rows;
 }
 
+const char* ObjectiveText(const GameLogic& game) {
+  if (!game.Flag().enabled) return "Eliminate the opposing squad.";
+  if (game.GetScene().flag.winOnGrab) {
+    return "Capture the flag: a neutral flag lies on the map (state.flag, 'F' on the grid). "
+           "The first figure from either team to touch it wins the match instantly for its "
+           "team; touching it anywhere along a move path counts, with no action needed. "
+           "Both teams race for it, so favour the 'flag' option, shield or screen the "
+           "figure running to it, and shoot enemies that are closer to it than you are. "
+           "Eliminating the opposing squad also still wins.";
+  }
+  return "Flag objective: a neutral flag lies on the map (state.flag, 'F' on the grid). "
+         "Figures pick it up by touching it; a carrier drops it where it dies. "
+         "Eliminating the opposing squad wins.";
+}
+
+std::string FlagJson(const GameLogic& game, Team team) {
+  const FlagState& flag = game.Flag();
+  if (!flag.enabled) return "null";
+  const Unit* carrier = flag.carrierId >= 0 ? game.FindUnit(flag.carrierId) : nullptr;
+  std::ostringstream out;
+  out << "{\"position\":" << PointJson(game.FlagPosition()) << ",\"status\":"
+      << JsonString(!carrier ? (flag.dropElapsed >= 0.0f ? "dropped" : "at_rest")
+                             : carrier->team == team ? "carried_by_ally" : "carried_by_enemy")
+      << ",\"carrier_id\":" << flag.carrierId << ",\"win_on_grab\":"
+      << (game.GetScene().flag.winOnGrab ? "true" : "false") << ",\"grab_radius\":"
+      << constants::kFlagGrabRadius << "}";
+  return out.str();
+}
+
 std::string BuildVisibleState(const GameLogic& game, Team team,
                               const std::vector<int>& actorIds) {
   const TeamVisibility visibility = game.ComputeVisibility(team);
@@ -374,7 +431,7 @@ std::string BuildVisibleState(const GameLogic& game, Team team,
   std::ostringstream out;
   out << "{\"round\":" << game.RoundNumber() << ",\"team\":" << JsonString(TeamName(team))
       << ",\"objective\":"
-      << JsonString("Eliminate the opposing squad. Blue generally advances toward +X; Red toward -X. "
+      << JsonString(std::string(ObjectiveText(game)) + " Blue generally advances toward +X; Red toward -X. "
                     "You plan every listed acting figure at once, one option each, as a single "
                     "coordinated squad plan: all plans execute simultaneously. Cover each other, "
                     "focus fire, stagger exposure instead of exposing everyone, and keep "
@@ -392,6 +449,7 @@ std::string BuildVisibleState(const GameLogic& game, Team team,
                     "Bullets can hit any figure in their path, including allies (friendly "
                     "fire). A figure that sights an enemy while idle or moving may also "
                     "react and fire on its own. There is no ammo pool across rounds.")
+      << ",\"flag\":" << FlagJson(game, team)
       << ",\"acting_figures\":[";
   for (size_t i = 0; i < actorIds.size(); ++i) out << (i ? "," : "") << actorIds[i];
   out << "],\"map_half_extent\":" << std::fixed
@@ -410,7 +468,7 @@ std::string BuildVisibleState(const GameLogic& game, Team team,
       << JsonString("cell (row r, column c) covers x from -half_extent + c*cell_size and z from "
                     "-half_extent + r*cell_size; rows run -Z to +Z, columns -X to +X; # obstacle, "
                     "+ climbable obstacle, . open, digit = your figure id, e = visible enemy, "
-                    "? = ghost (last known enemy position)")
+                    "? = ghost (last known enemy position), F = the neutral flag (CTF only)")
       << ",\"grid\":[";
   const std::vector<std::string> grid = BuildGrid(game, team, visibility, ghosts, cells);
   for (size_t i = 0; i < grid.size(); ++i) out << (i ? "," : "") << JsonString(grid[i]);

@@ -1,0 +1,6 @@
+.git
+build*
+tests/goldens
+docs
+site
+node_modules

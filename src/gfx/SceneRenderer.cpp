@@ -1712,7 +1712,7 @@ std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team,
     for (const Unit& unit : game.GetScene().units) {
       if (unit.team == team) continue;
       for (const auto& s : game.Sightings(team, unit.id)) {
-        if (1.0f - s.ageRounds * tactics::constants::kSightingFadePerRound <= 0.0f) continue;
+        if (game.GhostAlpha(s.at) <= 0.0f) continue;
         probes.push_back(s.position + glm::vec3(0.0f, kGhostLift, 0.0f));  // Ghost + arrow.
       }
     }
@@ -2831,7 +2831,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glDepthMask(GL_TRUE);
   glDisable(GL_BLEND);
 
-  // Enemy sighting memory: faint wireframe trail fading with age.
+  // Enemy ghosts: faint wireframes shown during the turn, fading after it.
   if (fogActive) {
     constexpr float kSightingMaxAlpha = 0.35f;
     unlitShader_.Use();
@@ -2841,7 +2841,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (const Unit& unit : game.GetScene().units) {
       if (unit.team == team) continue;
       for (const auto& s : game.Sightings(team, unit.id)) {
-        const float life = 1.0f - s.ageRounds * tactics::constants::kSightingFadePerRound;
+        const float life = game.GhostAlpha(s.at);
         if (life <= 0.0f) continue;
         DrawSighting(unlitShader_, pathLine_, viewProj, unit, s, game.GetScene().sidewalks,
                      life * kSightingMaxAlpha, terrain);
@@ -2852,7 +2852,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   // Bullet tracers: a team-colored dotted path from the muzzle to where the
-  // shot ended, fading per completed round like the sighting ghosts.  A new
+  // shot ended, fading out after the turn like the sighting ghosts.  A new
   // shot briefly overlays the dots with a full white-hot line.
   {
     constexpr float kTracerMaxAlpha = 0.9f;
@@ -2863,8 +2863,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
     for (const tactics::Tracer& tracer : game.Tracers()) {
-      const int age = game.RoundNumber() - tracer.birthRound;
-      const float life = 1.0f - static_cast<float>(age) / tactics::constants::kTracerMemoryRounds;
+      const float life = game.GhostAlpha(tracer.at);
       if (life <= 0.0f) continue;
       const glm::vec3 teamColor = tracer.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
                                                             : glm::vec3(0.9f, 0.25f, 0.22f);

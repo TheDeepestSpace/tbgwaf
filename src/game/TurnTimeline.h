@@ -25,7 +25,7 @@
 // the same ComputeVisibility/RenderPane path as the live game, so each pane
 // sees the replayed moment with its own team's fog recomputed from the
 // replayed positions. Sighting-memory ghost trails are rebuilt as the replay
-// plays forward (ImportState drops memory when jumping backwards), so they
+// (seeking restarts them), so they
 // approximate -- rather than exactly reproduce -- what a team remembered.
 
 #include <memory>

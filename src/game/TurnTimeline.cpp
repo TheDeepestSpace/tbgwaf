@@ -84,6 +84,7 @@ void TimelinePlayback::ShowFrame(const TurnTimeline& timeline, const GameLogic& 
     }
   }
   replay_->ClearAllPlans();
+  replay_->RestartGhostPlayback();
   replay_->UpdateSightingMemory(0.0f);
   frame_ = index;
   time_ = timeline.FrameTime(index);

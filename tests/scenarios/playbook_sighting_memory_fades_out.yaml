@@ -1,8 +1,8 @@
 name: playbook_sighting_memory_fades_out
 description: >
-  Sighting memory fades out completely: red is seen by blue once, runs out of blue's FOV,
-  then nobody moves. The remembered trail ages one round per commit (33% opacity lost each)
-  and is fully gone after kSightingMemoryRounds (3) rounds.
+  Ghosts show for the turn only: red is seen by blue once, then runs out of blue's FOV. When
+  the turn ends the ghosts are fully visible, then fade out over kGhostFadeDuration (0.5s) each,
+  starting in the order they appeared. Nothing carries over into the next turn.
 
 map:
   obstacles: []
@@ -15,30 +15,29 @@ script:
   - assert: {unit: 1, visible_to: blue, visible: true}
 
   - action: pass
-    description: Red leaves blue's FOV; the trail ages to 1 as the round completes.
+    description: Red leaves blue's FOV during the turn.
     actor: 0
   - action: move
     actor: 1
     destination: [-12, 0, 14]
   - action: commit
   - assert: {unit: 1, visible_to: blue, visible: false}
-  - assert: {unit: 1, remembered_by: blue, remembered: true, memory_age: 1}
   - assert: {round: 2}
+  - assert: {unit: 1, remembered_by: blue, remembered: true, ghost_alpha: 1.0, comment: Turn just ended; fully visible}
+
+  - action: wait
+    seconds: 0.25
+  - assert: {unit: 1, remembered_by: blue, ghost_alpha: 0.65, tolerance: 0.2, comment: Oldest ghost is mid-fade}
+
+  - action: wait
+    seconds: 10
+  - assert: {unit: 1, remembered_by: blue, ghost_alpha: 0.0, comment: Everything has faded}
 
   - action: pass
-    description: Nothing moves; trail is one more round old.
-    actor: 0
-  - action: pass
-    actor: 1
-  - action: commit
-  - assert: {unit: 1, remembered_by: blue, remembered: true, memory_age: 2}
-
-  - action: pass
-    description: The third round completes and the trail is gone entirely.
+    description: Next turn; the faded ghosts are not shown again.
     actor: 0
   - action: pass
     actor: 1
   - action: commit
   - assert: {unit: 1, visible_to: blue, visible: false}
-  - assert: {unit: 1, remembered_by: blue, remembered: false}
-  - assert: {round: 4}
+  - assert: {round: 3}

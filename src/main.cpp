@@ -124,6 +124,7 @@ EM_JS(int, tbgwaf_ai_enabled, (), { return Module.tbgwafAI ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_paused, (), { return Module.tbgwafAIPaused ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_fallback, (), { return Module.tbgwafAIFallback ? 1 : 0; });
 EM_JS(int, tbgwaf_auto_commit, (), { return Module.tbgwafAutoCommit ? 1 : 0; });
+EM_JS(int, tbgwaf_default_ctf, (), { return Module.tbgwafDefaultCtf ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_generation, (), { return Module.tbgwafAIGeneration || 0; });
 EM_JS(int, tbgwaf_take_restart, (), {
   const value = Module.tbgwafRestart ? 1 : 0;
@@ -385,6 +386,9 @@ int main() {
   };
   // Chosen on the Game Mode screen; CTF turns on the neutral flag objective.
   bool ctfMode = false;
+#ifdef __EMSCRIPTEN__
+  bool ctfFromPreview = false;
+#endif
   auto makeMap = [&mapSeed, &mapType, &ctfMode, &makeBaseMap]() {
     tactics::Scene scene = makeBaseMap(mapSeed, mapType);
     scene.flag.enabled = ctfMode;
@@ -497,6 +501,11 @@ int main() {
     }
     if (tbgwaf_take_ai_retry()) jevErrorHold = false;
     if (networked && tbgwaf_take_restart()) {
+      // Jev vs Jev defaults to CTF; leaving it restores the menu's choice.
+      const bool previewCtf = tbgwaf_default_ctf();
+      if (previewCtf) ctfMode = true;
+      else if (ctfFromPreview) ctfMode = false;
+      ctfFromPreview = previewCtf;
       game.Reset(makeMap());
       pendingJevRequest.reset();
       jevBuilder.reset();
@@ -700,13 +709,18 @@ int main() {
           tactics::ui::DrawMenu(screen, windowWidth, windowHeight, &mapSeed);
       // Headless smoke run: walk the menu automatically so gameplay is exercised.
       bool autoEnterGameplay = isSmokeTest;
+      bool autoCtf = false;
 #ifdef __EMSCRIPTEN__
       autoEnterGameplay = autoEnterGameplay || aiEnabled;
+      autoCtf = tbgwaf_default_ctf();
+      ctfFromPreview = autoCtf;
 #endif
       if (autoEnterGameplay && !flowEvent) {
         switch (screen) {
           case tbgwaf_flow::State::Splash: flowEvent = tbgwaf_flow::Event::NewGame; break;
-          case tbgwaf_flow::State::GameMode: flowEvent = tbgwaf_flow::Event::SelectRegular; break;
+          case tbgwaf_flow::State::GameMode:
+            flowEvent = autoCtf ? tbgwaf_flow::Event::SelectCtf : tbgwaf_flow::Event::SelectRegular;
+            break;
           default: flowEvent = tbgwaf_flow::Event::SelectUrban; break;
         }
       }

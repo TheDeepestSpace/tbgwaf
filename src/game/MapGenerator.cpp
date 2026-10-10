@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <random>
 #include <vector>
@@ -27,6 +28,11 @@ constexpr uint32_t kStreetStream = 0xb10c5eedu;
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kSidewalkHeight = 0.12f;  // Curb: purely visual, well under a step.
 
+// Every urban scene emitter places its output relative to this sampled base.
+// The urban map remains flat for now; keeping the sampler at the emission
+// boundary lets terrain generation replace it without revisiting each feature.
+using GroundY = std::function<float(float, float)>;
+
 // std::mt19937 output is fully specified by the standard, but the
 // <random> distributions are not, so draw values by hand to keep a seed's
 // output identical across standard libraries.
@@ -42,9 +48,12 @@ class Rng {
   std::mt19937 engine_;
 };
 
-void AddBuilding(Scene* scene, float x0, float z0, float x1, float z1, float height) {
-  scene->obstacles.push_back(
-      Obstacle{AABB{glm::vec3(x0, 0.0f, z0), glm::vec3(x1, height, z1)}, /*climbable=*/false});
+void AddBuilding(Scene* scene, float x0, float z0, float x1, float z1, float height,
+                 const GroundY& groundY) {
+  const float baseY = groundY(0.5f * (x0 + x1), 0.5f * (z0 + z1));
+  scene->obstacles.push_back(Obstacle{
+      AABB{glm::vec3(x0, baseY, z0), glm::vec3(x1, baseY + height, z1)},
+      /*climbable=*/false});
 }
 
 // Splits [a, b] into `count` buildings. Junction i (between building i and
@@ -587,7 +596,8 @@ std::vector<UrbanBlock> BuildCityBlocks(uint32_t seed, const MapGeneratorConfig&
 // Ribbon edge; an end vertex sitting exactly on the map boundary slides
 // along the road direction onto it so the oblique road is cut off flush
 // with the edge, elevated off-map deck ends included.
-std::vector<glm::vec3> RibbonSide(const UrbanRoad& road, bool left, float half) {
+std::vector<glm::vec3> RibbonSide(const UrbanRoad& road, bool left, float half,
+                                  const GroundY& groundY) {
   std::vector<glm::vec3> side;
   side.reserve(road.centerline.size());
   for (size_t i = 0; i < road.centerline.size(); ++i) {
@@ -607,7 +617,7 @@ std::vector<glm::vec3> RibbonSide(const UrbanRoad& road, bool left, float half) 
       ClipLineToSquare(q, tangent, half, &tMin, &tMax);
       q += tangent * (first ? tMin : tMax);
     }
-    side.emplace_back(q.x, p.y, q.y);
+    side.emplace_back(q.x, groundY(q.x, q.y) + p.y, q.y);
   }
   return side;
 }
@@ -624,7 +634,8 @@ struct BlockParcels {
   std::vector<Parcel> parcels;
 };
 
-void AddPolygonBuilding(Scene* scene, std::vector<glm::vec2> footprint, float height) {
+void AddPolygonBuilding(Scene* scene, std::vector<glm::vec2> footprint, float height,
+                        const GroundY& groundY) {
   if (footprint.size() < 3 || PolygonArea(footprint) < 1.0f) return;
   if (PolygonSignedArea(footprint) < 0.0f) std::reverse(footprint.begin(), footprint.end());
   AABB bounds;
@@ -632,12 +643,18 @@ void AddPolygonBuilding(Scene* scene, std::vector<glm::vec2> footprint, float he
                          std::numeric_limits<float>::infinity());
   bounds.max = glm::vec3(-std::numeric_limits<float>::infinity(), height,
                          -std::numeric_limits<float>::infinity());
+  glm::vec2 center(0.0f);
   for (const glm::vec2& p : footprint) {
+    center += p;
     bounds.min.x = std::min(bounds.min.x, p.x);
     bounds.max.x = std::max(bounds.max.x, p.x);
     bounds.min.z = std::min(bounds.min.z, p.y);
     bounds.max.z = std::max(bounds.max.z, p.y);
   }
+  center /= static_cast<float>(footprint.size());
+  const float baseY = groundY(center.x, center.y);
+  bounds.min.y = baseY;
+  bounds.max.y = baseY + height;
   scene->obstacles.push_back(Obstacle{bounds, false, std::move(footprint)});
 }
 
@@ -1086,7 +1103,8 @@ void PlaceZiplines(Scene* scene, const std::vector<UrbanBlock>& blocks, uint32_t
 // emitter order (piers, then buildings), which the tower pick depends on.
 
 // Road pavement, elevated deck chains and their ground/branch links.
-void EmitHighwaySurfaces(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c) {
+void EmitHighwaySurfaces(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
+                         const GroundY& groundY) {
   const HighwayPlan& plan = city.highway;
   const std::vector<UrbanRoad>& roads = city.streets.roads;
   // Pavement and deck layers come from the same mitered ribbons. At-grade
@@ -1099,8 +1117,8 @@ void EmitHighwaySurfaces(Scene* scene, const CityPlan& city, const MapGeneratorC
   std::vector<Chain> chains(roads.size());
   for (size_t roadIndex = 0; roadIndex < roads.size(); ++roadIndex) {
     const UrbanRoad& road = roads[roadIndex];
-    const auto left = RibbonSide(road, true, scene->mapHalfExtent);
-    const auto right = RibbonSide(road, false, scene->mapHalfExtent);
+    const auto left = RibbonSide(road, true, scene->mapHalfExtent, groundY);
+    const auto right = RibbonSide(road, false, scene->mapHalfExtent, groundY);
     const std::vector<float> params = roadIndex == 0
                                           ? SampleParams(plan.artery.s0, plan.artery.s1)
                                           : SampleParams(plan.branch.u0, plan.branch.length);
@@ -1174,7 +1192,8 @@ void EmitHighwaySurfaces(Scene* scene, const CityPlan& city, const MapGeneratorC
 }
 
 // Bridge piers under the elevated spans.
-void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c) {
+void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
+               const GroundY& groundY) {
   const HighwayPlan& plan = city.highway;
   // Bridge stands: paired pier columns under the high spans, leaving broad
   // navigable ground between bents. None near the on-ramp's merge, where the
@@ -1182,11 +1201,11 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c) 
   if (plan.elevated) {
     // A column may only stand where it stays below every slab crossing it
     // (and never on at-grade pavement, whose slab sits at ground level).
-    auto columnFits = [&](glm::vec2 foot, float top) {
+    auto columnFits = [&](glm::vec2 foot, float relativeTop) {
       const float sA = glm::dot(foot - plan.artery.origin, plan.artery.dir);
       const float dA = std::fabs(glm::dot(foot - plan.artery.origin, plan.artery.normal));
       if (dA < c.arteryWidth * 0.5f + 0.8f &&
-          top > ArteryElevationAt(plan, c, sA) - c.highwayThickness - 0.049f) {
+          relativeTop > ArteryElevationAt(plan, c, sA) - c.highwayThickness - 0.049f) {
         return false;
       }
       if (plan.hasBranch) {
@@ -1195,7 +1214,7 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c) 
         const glm::vec2 bn(-plan.branch.dir.y, plan.branch.dir.x);
         if (u > -0.5f && u < plan.branch.length + 0.5f &&
             std::fabs(glm::dot(rel, bn)) < plan.branch.width * 0.5f + 0.8f &&
-            top > BranchElevationAt(plan, c, u) - c.highwayThickness - 0.049f) {
+            relativeTop > BranchElevationAt(plan, c, u) - c.highwayThickness - 0.049f) {
           return false;
         }
       }
@@ -1204,13 +1223,14 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c) 
     auto addBent = [&](glm::vec2 center, glm::vec2 across, float halfSpan, float deckY) {
       for (const float lat : {1.0f, -1.0f}) {
         const glm::vec2 foot = center + across * (lat * halfSpan);
-        const float top = deckY - c.highwayThickness - 0.05f;
+        const float height = deckY - c.highwayThickness - 0.05f;
         // A column stands fully on the map even where the deck runs past it.
         if (std::max(std::fabs(foot.x), std::fabs(foot.y)) > scene->mapHalfExtent - 0.75f) continue;
-        if (!columnFits(foot, top)) continue;
+        if (!columnFits(foot, height)) continue;
+        const float baseY = groundY(foot.x, foot.y);
         scene->obstacles.push_back(
-            Obstacle{AABB{glm::vec3(foot.x - 0.7f, 0.0f, foot.y - 0.7f),
-                          glm::vec3(foot.x + 0.7f, top, foot.y + 0.7f)},
+            Obstacle{AABB{glm::vec3(foot.x - 0.7f, baseY, foot.y - 0.7f),
+                          glm::vec3(foot.x + 0.7f, baseY + height, foot.y + 0.7f)},
                      false});
       }
     };
@@ -1243,7 +1263,8 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c) 
 }
 
 // Sidewalks and buildings from the parcel pass, then landmark towers.
-void EmitBuildings(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, Rng* rng) {
+void EmitBuildings(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, Rng* rng,
+                   const GroundY& groundY) {
   std::vector<BlockParcels> blocks;
   for (size_t blockIndex = 0; blockIndex < city.blocks.size(); ++blockIndex) {
     blocks.push_back(
@@ -1252,11 +1273,11 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const MapGeneratorConfig&
   for (BlockParcels& block : blocks) {
     RoadSurface sidewalk;
     for (const glm::vec2& p : block.sidewalk) {
-      sidewalk.vertices.emplace_back(p.x, kSidewalkHeight, p.y);
+      sidewalk.vertices.emplace_back(p.x, groundY(p.x, p.y) + kSidewalkHeight, p.y);
     }
     scene->sidewalkSurfaces.push_back(std::move(sidewalk));
     for (Parcel& parcel : block.parcels) {
-      AddPolygonBuilding(scene, std::move(parcel.footprint), parcel.height);
+      AddPolygonBuilding(scene, std::move(parcel.footprint), parcel.height, groundY);
     }
   }
 
@@ -1269,13 +1290,15 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const MapGeneratorConfig&
   }
   for (int i = 0; i < towers && !candidates.empty(); ++i) {
     const size_t pick = static_cast<size_t>(rng->Int(0, static_cast<int>(candidates.size()) - 1));
-    scene->obstacles[candidates[pick]].bounds.max.y = rng->Float(c.towerMinHeight, c.towerMaxHeight);
+    AABB& bounds = scene->obstacles[candidates[pick]].bounds;
+    bounds.max.y = bounds.min.y + rng->Float(c.towerMinHeight, c.towerMaxHeight);
     candidates.erase(candidates.begin() + pick);
   }
 }
 
 // Squads at the artery's ends.
-void EmitSpawns(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c) {
+void EmitSpawns(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
+                const GroundY& groundY) {
   const HighwayPlan& plan = city.highway;
   // Squads spawn at ground level on the artery's ends (beneath the deck
   // where an elevated layout runs off-map), facing each other down it.
@@ -1289,21 +1312,22 @@ void EmitSpawns(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c)
     Unit unit;
     unit.id = i;
     unit.team = blueTeam ? Team::Blue : Team::Red;
-    unit.position = glm::vec3(p.x, 0.0f, p.y);
+    unit.position = glm::vec3(p.x, groundY(p.x, p.y), p.y);
     unit.facingYaw = blueTeam ? yawBlue : yawBlue + kPi;
     scene->units.push_back(unit);
   }
 }
 
-Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
+Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c,
+                               const GroundY& groundY) {
   Rng rng(seed);
   Scene scene;
   scene.mapHalfExtent = UrbanMapHalfExtent(c);
   const CityPlan city = BuildCityPlan(seed, c);
-  EmitHighwaySurfaces(&scene, city, c);
-  EmitPiers(&scene, city, c);
-  EmitBuildings(&scene, city, c, &rng);
-  EmitSpawns(&scene, city, c);
+  EmitHighwaySurfaces(&scene, city, c, groundY);
+  EmitPiers(&scene, city, c, groundY);
+  EmitBuildings(&scene, city, c, &rng, groundY);
+  EmitSpawns(&scene, city, c, groundY);
   PlaceZiplines(&scene, city.blocks, seed, c);
   return scene;
 }
@@ -1402,7 +1426,8 @@ float UrbanMapHalfExtent(const MapGeneratorConfig& c) {
 }
 
 Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
-  if (c.arteryCount > 0) return GenerateArterialUrbanMap(seed, c);
+  const GroundY groundY = [](float, float) { return 0.0f; };
+  if (c.arteryCount > 0) return GenerateArterialUrbanMap(seed, c, groundY);
   Rng rng(seed);
   Scene scene;
   scene.mapHalfExtent = UrbanMapHalfExtent(c);
@@ -1452,8 +1477,13 @@ Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     auto box = [&](float u0, float v0, float u1, float v1, float h, bool building) {
       const float xl = flipU ? -u1 : u0, xr = flipU ? -u0 : u1;
       const float zl = flipV ? -v1 : v0, zr = flipV ? -v0 : v1;
-      if (building) AddBuilding(&scene, xl, zl, xr, zr, h);
-      else scene.sidewalks.push_back(AABB{glm::vec3(xl, 0.0f, zl), glm::vec3(xr, kSidewalkHeight, zr)});
+      if (building) {
+        AddBuilding(&scene, xl, zl, xr, zr, h, groundY);
+      } else {
+        const float baseY = groundY(0.5f * (xl + xr), 0.5f * (zl + zr));
+        scene.sidewalks.push_back(
+            AABB{glm::vec3(xl, baseY, zl), glm::vec3(xr, baseY + kSidewalkHeight, zr)});
+      }
     };
     auto walk = [&](float u0, float v0, float u1, float v1) { box(u0, v0, u1, v1, 0.0f, false); };
 
@@ -1542,7 +1572,8 @@ Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     const size_t i = static_cast<size_t>(rng.Int(0, static_cast<int>(scene.obstacles.size()) - 1));
     if (std::find(picked.begin(), picked.end(), i) != picked.end()) continue;
     picked.push_back(i);
-    scene.obstacles[i].bounds.max.y = rng.Float(c.towerMinHeight, c.towerMaxHeight);
+    AABB& bounds = scene.obstacles[i].bounds;
+    bounds.max.y = bounds.min.y + rng.Float(c.towerMinHeight, c.towerMaxHeight);
   }
 
   // Squads line up on the west (Blue) and east (Red) rim streets, centered
@@ -1558,7 +1589,7 @@ Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     Unit blue;
     blue.id = i;
     blue.team = Team::Blue;
-    blue.position = glm::vec3(-spawnX, 0.0f, rows[i]);
+    blue.position = glm::vec3(-spawnX, groundY(-spawnX, rows[i]), rows[i]);
     blue.facingYaw = 0.0f;
     blue.weapon = DefaultWeaponForUnit(blue.id);
     scene.units.push_back(blue);
@@ -1567,7 +1598,7 @@ Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
     Unit red;
     red.id = 3 + i;
     red.team = Team::Red;
-    red.position = glm::vec3(spawnX, 0.0f, rows[i]);
+    red.position = glm::vec3(spawnX, groundY(spawnX, rows[i]), rows[i]);
     red.facingYaw = kPi;
     red.weapon = DefaultWeaponForUnit(red.id);
     scene.units.push_back(red);

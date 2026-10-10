@@ -173,6 +173,14 @@ Json GameSession::DumpState() const {
     units.Push(std::move(j));
   }
   dump.Set("units", std::move(units));
+  const FlagState& flag = game_.Flag();
+  if (flag.enabled) {
+    Json f;
+    f.Set("carrier", Num(flag.carrierId));
+    f.Set("dropped", Json(flag.carrierId < 0 && flag.dropElapsed >= 0.0f));
+    f.Set("pos", net::EncodeVec3(game_.FlagPosition()));
+    dump.Set("flag", std::move(f));
+  }
   for (Team team : {Team::Blue, Team::Red}) {
     const TeamVisibility vis = game_.ComputeVisibility(team);
     Json seen{Json::Array{}};

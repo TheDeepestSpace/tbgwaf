@@ -326,6 +326,12 @@ GameLogic OracleFromDump(const Scenario& scenario, const Json& dump) {
   snap.mode = dump["over"].AsBool() ? InputMode::GameOver : InputMode::AwaitingSelection;
   const auto winner = net::ParseTeamName(dump["winner"].AsString());
   snap.winner = winner ? static_cast<int>(*winner) : -1;
+  if (dump["flag"].IsObject()) {
+    const Json& f = dump["flag"];
+    snap.flag.carrierId = static_cast<int>(f["carrier"].AsNumber(-1));
+    snap.flag.dropElapsed = f["dropped"].AsBool() ? 0.0f : -1.0f;
+    net::DecodeVec3(f["pos"], &snap.flag.position);
+  }
   oracle.ImportState(snap);
   return oracle;
 }

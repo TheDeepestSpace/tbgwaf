@@ -112,6 +112,8 @@ net::Json ParseSceneSpec(const YAML::Node& root) {
   net::Json spec;
   if (root["map"]) spec.Set("map", YamlToJson(root["map"]));
   if (root["units"]) spec.Set("units", YamlToJson(root["units"]));
+  if (root["flag"]) spec.Set("flag", YamlToJson(root["flag"]));
+  if (root["round_limit"]) spec.Set("round_limit", YamlToJson(root["round_limit"]));
   return spec;
 }
 
@@ -144,6 +146,7 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     if (node["final_facing_degrees"]) {
       action.finalFacingDegrees = node["final_facing_degrees"].as<float>();
     }
+    action.expectUnreachable = node["expect_unreachable"] && node["expect_unreachable"].as<bool>();
   } else if (kind == "shoot" || kind == "aim") {
     action.kind = kind == "aim" ? ScenarioAction::Kind::Aim : ScenarioAction::Kind::Shoot;
     if (node["at"]) action.shootAt = ParseVec3(node["at"], "script[].at");
@@ -198,6 +201,27 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   if (node["remembered"]) assertion.remembered = node["remembered"].as<bool>();
   if (node["memory_age"]) assertion.memoryAge = node["memory_age"].as<int>();
   if (node["round"]) assertion.round = node["round"].as<int>();
+  if (node["flag_carrier"]) assertion.flagCarrier = node["flag_carrier"].as<int>();
+  if (node["flag_state"]) {
+    assertion.flagState = node["flag_state"].as<std::string>();
+    if (*assertion.flagState != "rest" && *assertion.flagState != "carried" &&
+        *assertion.flagState != "dropped") {
+      throw std::runtime_error("assert.flag_state must be rest, carried or dropped");
+    }
+  }
+  if (node["flag_position"]) {
+    const YAML::Node pos = node["flag_position"];
+    if (pos.IsSequence() && pos.size() == 2) {
+      const glm::vec2 xz = ParseVec2(pos, "assert.flag_position");
+      assertion.flagPosition = glm::vec3(xz.x, 0.0f, xz.y);
+    } else {
+      assertion.flagPosition = ParseVec3(pos, "assert.flag_position");
+    }
+  }
+  if (node["flag_visible_to"]) {
+    assertion.flagVisibleTo =
+        ParseTeam(node["flag_visible_to"].as<std::string>(), "assert.flag_visible_to");
+  }
   if (node["winner"]) {
     assertion.checkWinner = true;
     const std::string raw = node["winner"].as<std::string>();
@@ -341,6 +365,18 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
       }
       NotifyClick(actorTeam, action.destination);
       game.ClickGround(action.destination, actorTeam);
+      if (action.expectUnreachable) {
+        // Walk and zipline plans alike must have been rejected: nothing planned.
+        if (game.Mode() != InputMode::AwaitingMoveDestination ||
+            game.FindUnit(action.actor)->plan.type != PlannedActionType::None) {
+          return Fail("destination " + ToString(action.destination) +
+                      " was expected to be unreachable, but a move was planned");
+        }
+        NotifyMenuClick(actorTeam, "Cancel");
+        game.CancelAction();  // Back to the action menu, like a real player.
+        game.CancelAction();  // ...and deselect.
+        return true;
+      }
       game.FinishMovePlan();
       if (game.Mode() != InputMode::AwaitingSelection) {
         return Fail("has no path to destination " + ToString(action.destination) +
@@ -527,6 +563,31 @@ void CheckAssertionImpl(const GameLogic& game, const ScenarioAssertion& a, int s
     Fail("expected winner=" + ToString(a.expectedWinner) + " but was " + ToString(game.Winner()));
   }
 
+  const FlagState& flag = game.Flag();
+  if (a.flagCarrier && flag.carrierId != *a.flagCarrier) {
+    Fail("expected flag_carrier " + std::to_string(*a.flagCarrier) + " but was " +
+         std::to_string(flag.carrierId));
+  }
+  if (a.flagState) {
+    const std::string actual =
+        flag.carrierId >= 0 ? "carried" : (flag.dropElapsed >= 0.0f ? "dropped" : "rest");
+    if (actual != *a.flagState) {
+      Fail("expected flag_state " + *a.flagState + " but was " + actual);
+    }
+  }
+  if (a.flagPosition) {
+    // Y is only compared when the script gave a 3-element position (a 2-element
+    // one parses to y == 0, which on hilly terrain would not be the ground).
+    const glm::vec3 actual = game.FlagPosition();
+    const glm::vec3 d = actual - *a.flagPosition;
+    if (std::hypot(d.x, d.z) > a.tolerance) {
+      Fail("expected flag_position " + ToString(*a.flagPosition) + " but was " + ToString(actual));
+    }
+  }
+  if (a.flagVisibleTo && !game.FlagVisibleTo(*a.flagVisibleTo)) {
+    Fail("expected the flag to be visible to " + ToString(a.flagVisibleTo));
+  }
+
   if (a.round && game.RoundNumber() != *a.round) {
     Fail("expected round " + std::to_string(*a.round) + " but was " +
          std::to_string(game.RoundNumber()));
@@ -651,6 +712,20 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
       if (hooks.onActionComplete) hooks.onActionComplete(game, completedActions);
     } else {
       CheckAssertionImpl(game, *step.assertion, i, &result);
+      const ScenarioAssertion& as = *step.assertion;
+      if (as.flagCarrier || as.flagState || as.flagPosition || as.flagVisibleTo) {
+        // The follower mirrors the flag too (flag fields only; the rest of
+        // the assertion is already checked on the simulator).
+        ScenarioAssertion flagOnly;
+        flagOnly.flagCarrier = as.flagCarrier;
+        flagOnly.flagState = as.flagState;
+        flagOnly.flagPosition = as.flagPosition;
+        flagOnly.flagVisibleTo = as.flagVisibleTo;
+        flagOnly.tolerance = as.tolerance;
+        ScenarioResult followerResult;
+        CheckAssertionImpl(follower, flagOnly, i, &followerResult);
+        for (auto& f : followerResult.failures) result.failures.push_back("follower " + f);
+      }
       if (step.assertion->rememberedByTeam &&
           (!step.assertion->memoryAge || *step.assertion->memoryAge == 0)) {
         ScenarioResult followerResult;

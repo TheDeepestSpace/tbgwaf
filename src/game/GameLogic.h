@@ -51,6 +51,18 @@ struct Tracer {
   float age = 0.0f;
 };
 
+// Neutral flag objective state (see FlagConfig). Three states: at rest
+// (carrierId < 0, dropElapsed < 0), carried (carrierId >= 0; the figure's
+// position is the flag's), or dropped (carrierId < 0, dropElapsed >= 0: it
+// was just let fall where the carrier died and plays a short settle beat).
+// A dropped flag is picked up by any figure passing it, exactly like one at rest.
+struct FlagState {
+  bool enabled = false;
+  glm::vec3 position{0.0f};  // Where it lies; trails the carrier while carried.
+  int carrierId = -1;
+  float dropElapsed = -1.0f;  // Seconds since dropped (<0 = never dropped / at rest).
+};
+
 struct GameSnapshot {
   struct UnitState {
     int id = -1;
@@ -64,6 +76,8 @@ struct GameSnapshot {
     int planShots = 1;  // Burst size of a Shoot plan (issue #138).
     std::vector<glm::vec3> planPath;
     std::vector<std::vector<glm::vec3>> planQueuedLegs;
+    std::vector<PathRide> planRides;
+    std::vector<std::vector<PathRide>> planQueuedLegRides;
     float planEndFacingYaw = 0.0f;
     glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
     float knockdownElapsed = -1.0f;
@@ -74,6 +88,10 @@ struct GameSnapshot {
     float idleElapsed = 0.0f;
     float shootElapsed = -1.0f;
     float shootAimYaw = 0.0f;
+    float rideTravel = -1.0f;
+    float rideLength = 0.0f;
+    float rideSlope = 0.0f;
+    float grabElapsed = -1.0f;  // Flag pickup reach beat (see Unit).
     bool moving = false;  // Has an in-flight move in the executing round.
   };
   std::vector<UnitState> units;
@@ -82,6 +100,7 @@ struct GameSnapshot {
   InputMode mode = InputMode::AwaitingSelection;
   int roundNumber = 1;
   int winner = -1;  // -1 = none, else static_cast<int>(Team).
+  FlagState flag;
 };
 
 // Text encoding of a snapshot (for the page-level message bus). Deserialize
@@ -149,6 +168,22 @@ class GameLogic {
   std::optional<Team> Winner() const { return winner_; }
   int RoundNumber() const { return roundNumber_; }
 
+  // --- Neutral flag objective (CTF part 1). A living figure whose move
+  // passes through the flag's spot (anywhere along its path, not just where
+  // it stops) automatically grabs it: no action, no action cost. With
+  // FlagConfig::winOnGrab the grabber's team wins at once, ending the round.
+  // If several figures touch it in the same tick the earliest arrival (by
+  // distance walked / run speed) grabs it; an exact tie goes to the lowest
+  // unit id. A carrier can act exactly as normal (shooting, FOV and
+  // accuracy are unchanged). When the carrier dies the flag drops at that
+  // spot and anyone passing picks it up again. ---
+  const FlagState& Flag() const { return flag_; }
+  // Where the flag currently is (the carrier's feet while carried).
+  glm::vec3 FlagPosition() const;
+  // The flag is a neutral objective, so at rest or dropped it is visible to
+  // both teams regardless of fog. A carried flag is visible with its carrier.
+  bool FlagVisibleTo(Team team) const;
+
   // True once every living figure on *both* teams has a non-None plan,
   // i.e. CommitRound() is ready to be called.
   bool CanCommitRound() const;
@@ -164,6 +199,28 @@ class GameLogic {
     return mode_ == InputMode::AwaitingMoveDestination && moveFrontier_.nx > 0 ? &moveFrontier_
                                                                               : nullptr;
   }
+
+  // Zipline region of the move frontier: where the selected figure can get by
+  // walking to one end of a zipline (`walkCost`), riding it (`rideCost`) and
+  // walking on from the other end with whatever budget remains. `field` is
+  // that onward walk region around `exit`. One entry per (zipline, entry
+  // end) whose entry is affordable.
+  struct ZiplineFrontier {
+    int zipline = -1;
+    glm::vec3 entry{0.0f};
+    glm::vec3 exit{0.0f};
+    float walkCost = 0.0f;
+    float rideCost = 0.0f;
+    ReachField field;
+  };
+  // Valid while planning a move (empty otherwise).
+  const std::vector<ZiplineFrontier>& ZiplineFrontiers() const;
+
+  // Rides in the current hover preview (MovePreviewPath()'s traverse steps).
+  const std::vector<PathRide>& MovePreviewRides() const { return movePreviewRides_; }
+
+  // True while `unitId` is mid-ride on a zipline in the executing round.
+  bool IsUnitRiding(int unitId) const;
 
   Unit* FindUnit(int id);
   const Unit* FindUnit(int id) const;
@@ -371,6 +428,8 @@ class GameLogic {
     std::vector<glm::vec3> path;
     size_t segment = 0;
     float endFacingYaw = 0.0f;  // Snapped to once the path is consumed.
+    std::vector<PathRide> rides;
+    int ridingZipline = -1;  // Zipline currently occupied by this rider, else -1.
   };
 
   // A planned shot waiting for its first tick with valid FOV+LOS. Expires
@@ -453,6 +512,20 @@ class GameLogic {
 
   void FinishRound();
 
+  // Flag helpers. InitFlag places the flag at Reset; SyncFlag drops it if its
+  // carrier has died and refreshes each unit's carryingFlag; a FlagTouch is a
+  // figure reaching the flag this tick (arrival = seconds on the execution
+  // clock), resolved by GrabFlagFrom.
+  struct FlagTouch {
+    int unitId = -1;
+    float arrival = 0.0f;
+  };
+  void InitFlag();
+  void SyncFlag();
+  bool TouchesFlag(const glm::vec3& position) const;
+  void CollectStationaryFlagTouches(float arrival, std::vector<FlagTouch>* touches) const;
+  void GrabFlagFrom(const std::vector<FlagTouch>& touches);
+
   // The Executing-mode body of Update(): advances every in-flight move,
   // re-checks held shots, and finishes the round once nothing is in flight.
   void AdvanceExecutingRound(float dtSeconds);
@@ -462,6 +535,14 @@ class GameLogic {
   // the cached one already covers this figure at this origin.
   void EnsureNavMeshFor(const Unit& mover, const glm::vec3& origin);
   void RefreshMoveFrontier();
+  // Rebuilds ziplineFrontiers_ (and their navmeshes) for a leg from `origin`.
+  void BuildZiplineFrontiers(const Unit& mover, const glm::vec3& origin);
+  // Plans one leg from `from` to `goal`: a plain walk when affordable within
+  // the mover's budget, otherwise walk -> ride -> walk over the cheapest
+  // zipline. False if neither fits. Fills `rides` (empty for a walk).
+  bool PlanLeg(const Unit& mover, const glm::vec3& from, const glm::vec3& goal,
+               std::vector<glm::vec3>* path, std::vector<PathRide>* rides);
+  void ClearMoveOverlays();
 
   // Squad-playbook pass, run once per executing tick after every mover has
   // advanced: for each living figure with a living enemy in its FOV+LOS,
@@ -487,10 +568,17 @@ class GameLogic {
   InputMode mode_ = InputMode::AwaitingSelection;
   std::optional<int> selectedUnitId_;
   std::optional<Team> winner_;
+  FlagState flag_;
+  std::optional<Team> flagWinner_;  // Set by a win-on-grab pickup until FinishRound.
 
   std::vector<glm::vec3> movePreviewPath_;
   bool movePreviewValid_ = false;
   ReachField moveFrontier_;
+  std::vector<ZiplineFrontier> ziplineFrontiers_;
+  std::vector<NavMesh> ziplineMeshes_;  // Parallel to ziplineFrontiers_: mesh around each exit.
+  int ziplineUnitId_ = -1;
+  glm::vec3 ziplineOrigin_{0.0f};
+  std::vector<PathRide> movePreviewRides_;
 
   // Every figure's in-flight planned move / not-yet-fired planned shot for
   // the executing round, valid only while mode_ == Executing; empty once

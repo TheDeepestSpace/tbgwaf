@@ -42,12 +42,37 @@ ramps back down; the branch becomes an on-ramp merging mid-deck), and
 tune artery count/width, local-street width/skew and elevation through
 `MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
 overlay of the navmesh's walkable-cell boundaries.
+
+Urban maps carry pre-built **ziplines** (0-2 per block, seed-deterministic,
+`MapGeneratorConfig::maxZiplinesPerBlock`): two-way cables between anchor
+posts along the block sidewalks. A move plan may walk to one anchor, ride,
+and walk on from the other; a ride costs `length * kZiplineCostFactor`
+(0.25, in `game/Types.h`) of the figure's per-round move budget, so a longer
+line spends more of the turn. The move frontier draws that reach as a second
+(cyan) region with the line highlighted. One rider per line at a time (a
+second rider waits at the anchor), and a rider can't shoot. Scenarios add
+lines with `map.ziplines: [{from: [x,y,z], to: [x,y,z]}]` and assert an
+out-of-reach move with `expect_unreachable: true`.
 The app defaults to the prototype per-unit shadow-map FOV mask (tints
 walls, roofs and deck sides too; see
 [docs/fov-shadow-map.md](docs/fov-shadow-map.md)); `TBGWAF_FOV_SHADOW_MAP=0`
 restores the analytic FOV-cone overlay. Visual scenarios still default to
 the analytic overlay and opt in
 with a `render: {fov_overlay: shadow_map}` block.
+
+### Flag objective (CTF part 1)
+
+A scene (or scenario YAML `flag:` block) can enable a neutral flag at the map
+center (or the nearest free spot; `flag: {position: [x, z]}` overrides). A
+living figure whose move passes through the flag's spot picks it up for free
+and its team wins at once; `win_on_grab: false` instead just carries it
+(stowed on the figure's back) while play continues. A carrier acts as normal;
+if it dies the flag drops there and anyone passing picks it up. If several
+figures reach it in the same tick the earliest arrival wins, with an exact tie
+going to the lowest unit id. The flag is a neutral objective, so fog never
+hides it (a carried one shows with its carrier). `round_limit: N` ends the
+match as a draw after N rounds with no winner. Flag state travels in the
+snapshot text protocol (`ExportState`/`ImportState`).
 
 ### Gameplay scenario tests
 
@@ -166,7 +191,7 @@ Every weapon model and animation can be inspected on the **asset &
 animation gallery**, a standalone page built alongside the game:
 [live gallery](https://thedeepestspace.github.io/tbgwaf/gallery/) on Pages,
 and `pr-preview/pr-<number>/gallery/` in each PR preview. The page lists
-the three weapon turntables plus idle/run/shoot/empty-mag per weapon — the
+the three weapon turntables plus idle/run/shoot/empty-mag and downhill/uphill zipline rides per weapon — the
 empty-mag clip dumps the whole magazine at the weapon's own fire interval,
 each bullet leaving its own scattered tracer line (drag to orbit,
 scroll to zoom, play/pause and scrub the loop). The catalog, framing, and
@@ -252,7 +277,7 @@ and removes the preview automatically when the PR closes.
 
 ## App flow
 
-Screen flow (Splash -> Map Select -> Gameplay), declared in
+Screen flow (Splash -> Game Mode -> Map Select -> Gameplay), declared in
 `flow/app_flow.yaml`. The build regenerates `flow/app_flow.mmd` from it; paste
 that file's contents below if the flow changes.
 
@@ -260,12 +285,16 @@ that file's contents below if the flow changes.
 %%{init: {"flowchart": {"htmlLabels": false}, "themeVariables": {"fontFamily": "Arial, sans-serif"}}}%%
 flowchart TD
     splash("  Splash  ")
+    game_mode("  Game Mode  ")
     map_select("  Map Select  ")
     gameplay("  Gameplay  ")
-    splash -->|new_game| map_select
+    splash -->|new_game| game_mode
+    game_mode -->|select_regular| map_select
+    game_mode -->|select_ctf| map_select
+    game_mode -->|back| splash
     map_select -->|select_urban| gameplay
     map_select -->|select_hills| gameplay
-    map_select -->|back| splash
+    map_select -->|back| game_mode
 ```
 
 ## Controls

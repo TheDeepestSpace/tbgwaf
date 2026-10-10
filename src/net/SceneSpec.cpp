@@ -100,6 +100,15 @@ bool SceneFromSpec(const Json& spec, tactics::Scene* out, std::string* error) {
   if (map["half_extent"].IsNumber()) {
     scene.mapHalfExtent = static_cast<float>(map["half_extent"].AsNumber());
   }
+  // `ziplines: [{from: [x, y, z], to: [x, y, z]}, ...]`: pre-built two-way
+  // ziplines (anchor foot positions), on top of any generated map's own.
+  for (const Json& z : map["ziplines"].AsArray()) {
+    Zipline zipline;
+    if (!DecodeVec3(z["from"], &zipline.a) || !DecodeVec3(z["to"], &zipline.b)) {
+      return Fail(error, "map.ziplines[] requires 'from' and 'to' 3-element [x, y, z] lists");
+    }
+    scene.ziplines.push_back(zipline);
+  }
   for (const Json& o : map["obstacles"].AsArray()) {
     glm::vec2 center, half;
     if (!DecodeVec2(o["center"], &center)) return Fail(error, "map.obstacles[].center must be a 2-element [x, z] list");
@@ -110,7 +119,35 @@ bool SceneFromSpec(const Json& spec, tactics::Scene* out, std::string* error) {
                            glm::vec3(center.x + half.x, o["height"].AsNumber(), center.y + half.y)};
     obstacle.climbable = o["climbable"].AsBool();
     scene.obstacles.push_back(obstacle);
+    // `roof_slab: true`: a flat walkable slab on the obstacle's top (a
+    // zipline's roof end), reachable only by line.
+    if (o["roof_slab"].AsBool()) {
+      const AABB& b = obstacle.bounds;
+      const float y = b.max.y + 0.05f;
+      WalkSurface slab;
+      slab.vertices = {{b.min.x, y, b.min.z}, {b.min.x, y, b.max.z}, {b.max.x, y, b.max.z},
+                       {b.max.x, y, b.min.z}};
+      scene.walkSurfaces.push_back(std::move(slab));
+    }
   }
+
+  const Json& flag = spec["flag"];
+  if (flag.IsObject()) {
+    scene.flag.enabled = flag.Has("enabled") ? flag["enabled"].AsBool() : true;
+    if (flag.Has("position")) {
+      const Json& pos = flag["position"];
+      glm::vec2 xz;
+      if (pos.IsArray() && pos.AsArray().size() == 2 && DecodeVec2(pos, &xz)) {
+        scene.flag.position = glm::vec3(xz.x, 0.0f, xz.y);
+      } else {
+        glm::vec3 xyz;
+        if (!DecodeVec3(pos, &xyz)) return Fail(error, "flag.position must be a 2- or 3-element list");
+        scene.flag.position = xyz;
+      }
+    }
+    if (flag.Has("win_on_grab")) scene.flag.winOnGrab = flag["win_on_grab"].AsBool();
+  }
+  if (spec["round_limit"].IsNumber()) scene.roundLimit = static_cast<int>(spec["round_limit"].AsNumber());
 
   const Json& units = spec["units"];
   if (generated && !units.IsArray()) {

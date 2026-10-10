@@ -74,7 +74,7 @@ ctest --test-dir build -R 'jev_planner_tests|logic_tests' --output-on-failure
 The mode controls and `?mode=` entry points are included in both the production
 Pages workflow and each PR preview. GitHub Pages is static and cannot safely
 hold `TBGWAF_JEV_API_KEY`, so live decisions require a separately hosted
-adapter. Configure it through `?jev=https://your-adapter.example` or the page
+adapter. It defaults to `https://tbgwaf-jev-adapter.fly.dev` (the app name the deploy workflow uses); override it through `?jev=https://your-adapter.example` or the page
 control.
 
 `server/jev-adapter/Dockerfile` and `fly.toml.example` provide a concrete Fly.io

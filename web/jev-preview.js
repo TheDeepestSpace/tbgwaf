@@ -248,12 +248,14 @@ export class JevPreviewController {
   }
 }
 
+const DEFAULT_JEV_ENDPOINT = "https://tbgwaf-jev-adapter.fly.dev";
+
 function initialConfiguration() {
   const params = new URLSearchParams(window.location.search);
   const storedEndpoint = window.localStorage.getItem("tbgwafJevProxy") || "";
   return {
     mode: MODES[params.get("mode")] ? params.get("mode") : "human",
-    endpoint: params.get("jev") || window.TBGWAF_JEV_PROXY_URL || storedEndpoint,
+    endpoint: params.get("jev") || window.TBGWAF_JEV_PROXY_URL || storedEndpoint || DEFAULT_JEV_ENDPOINT,
   };
 }
 

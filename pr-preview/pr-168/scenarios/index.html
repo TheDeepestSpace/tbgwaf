@@ -60,7 +60,7 @@ rendered for that team's fog-of-war pane, the PR's version (no base-branch
 comparison). Both panes play in lockstep from the shared transport below
 them; click a script step to jump both videos to it. Deleted scenarios are
 listed by name only.</p>
-<h2>New scenarios <span class="count">(10)</span></h2>
+<h2>New scenarios <span class="count">(11)</span></h2>
 <div class="scenario has-video" data-stem="zipline_daisy_chain"><h3>zipline_daisy_chain</h3><div class="path">tests/scenarios/zipline_daisy_chain.yaml</div>
 <p class="description">Issue = 14 would fit one round&#x27;s 20-unit budget (38 on foot), but PlanLeg prices at most one ride per leg, so the single-move chain is rejected and the chain is planned as two legs, one per round: line 1 then line 2. Pins today&#x27;s behaviour; a one-round daisy chain is a follow-up.</p>
 <div class="panes">
@@ -205,6 +205,23 @@ listed by name only.</p>
 </div>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
+<div class="scenario has-video" data-stem="zipline_two_frontiers"><h3>zipline_two_frontiers</h3><div class="path">tests/scenarios/zipline_two_frontiers.yaml</div>
+<p class="description">Issue frontier up with a cyan region per line; every highlighted cable must sit on its own line (regression: the second one was drawn offset because the anchor ring overwrote the shader&#x27;s MVP).</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_two_frontiers/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_two_frontiers/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [0, 18], zoom 40</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1 (uncommitted)</div>
+<div class="step" data-action="1">begin_move (actor 0) <span class="detail">— Both cables highlighted on their own lines.</span></div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-18, 2) (tolerance 0.05)</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
 <div class="scenario has-video" data-stem="zipline_two_lines_available"><h3>zipline_two_lines_available</h3><div class="path">tests/scenarios/zipline_two_lines_available.yaml</div>
 <p class="description">Issue destination is only reachable via one of them (budget 20; walking is 38+), so the planner picks the right line per figure, and since they ride different lines nobody waits.</p>
 <div class="panes">
@@ -268,7 +285,7 @@ listed by name only.</p>
 </div>
 <h2>Modified scenarios <span class="count">(0)</span></h2>
 <p class="empty">None.</p>
-<h2>Unchanged scenarios <span class="count">(43)</span></h2>
+<h2>Unchanged scenarios <span class="count">(52)</span></h2>
 <div class="scenario has-video" data-stem="burst_free_aim_point_target"><h3>burst_free_aim_point_target</h3><div class="path">tests/scenarios/burst_free_aim_point_target.yaml</div>
 <p class="description">Bursts work for free-aim point-target shots too (issues places a blind-fire aim point on the enemy&#x27;s torso and fires a 5-shot burst at it. Every bullet flies its own scattered line inside the weapon&#x27;s cone; only bullets whose line actually crosses the figure roll against the hit chance (the pinned roll always hits), so the burst downs the figure with one of the bullets that land on the body.</p>
 <div class="panes">
@@ -525,6 +542,214 @@ listed by name only.</p>
 <div class="step" data-action="28"><span class="u red">red1</span> passes</div>
 <div class="step" data-action="29">commit round</div>
 <div class="detail">Check: winner: blue</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="flag_carrier_killed_enemy_picks_up"><h3>flag_carrier_killed_enemy_picks_up</h3><div class="path">tests/scenarios/flag_carrier_killed_enemy_picks_up.yaml</div>
+<p class="description">CTF part 1 (carry mode): the carrier is shot dead, so the flag drops at the spot where it fell (turn 2, with its drop settle). An enemy figure that later passes through that spot auto-picks it up -- dropped is no different from at rest.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/flag_carrier_killed_enemy_picks_up/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/flag_carrier_killed_enemy_picks_up/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (0, 0)</div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="3"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="4"><span class="u red">red3</span> passes</div>
+<div class="step" data-action="5">commit round</div>
+<div class="detail">Check: check, flag carrier 0, flag state carried</div>
+</div>
+<div class="round"><div class="round-title">Round 2</div>
+<div class="step" data-action="6"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="7"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="8"><span class="u red">red2</span> shoots <span class="u blue">blue0</span></div>
+<div class="step" data-action="9"><span class="u red">red3</span> passes</div>
+<div class="step" data-action="10">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is down</div>
+<div class="detail">Check: check, flag carrier -1, flag state dropped</div>
+<div class="detail">Check: check, flag position [0, 0], tolerance 0.05 — Dropped where the carrier fell</div>
+<div class="detail">Check: check, flag visible to blue</div>
+<div class="detail">Check: check, flag visible to red</div>
+</div>
+<div class="round"><div class="round-title">Round 3</div>
+<div class="step" data-action="11"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="12"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="13"><span class="u red">red3</span> moves to (0, -3) <span class="detail">— Runs through the dropped flag&#x27;s spot.</span></div>
+<div class="step" data-action="14">commit round</div>
+<div class="detail">Check: check, flag carrier 3, flag state carried</div>
+<div class="detail">Check: winner: none</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="flag_carrier_killed_teammate_picks_up"><h3>flag_carrier_killed_teammate_picks_up</h3><div class="path">tests/scenarios/flag_carrier_killed_teammate_picks_up.yaml</div>
+<p class="description">CTF part 1 (carry mode): after the carrier dies and drops the flag, a surviving teammate can pick it up just by passing through the spot -- the same auto-pickup as for anyone.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/flag_carrier_killed_teammate_picks_up/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/flag_carrier_killed_teammate_picks_up/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (0, 0)</div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="3"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: check, flag carrier 0</div>
+</div>
+<div class="round"><div class="round-title">Round 2</div>
+<div class="step" data-action="5"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="6"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="7"><span class="u red">red2</span> shoots <span class="u blue">blue0</span></div>
+<div class="step" data-action="8">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is down</div>
+<div class="detail">Check: check, flag state dropped, flag position [0, 0]</div>
+</div>
+<div class="round"><div class="round-title">Round 3</div>
+<div class="step" data-action="9"><span class="u blue">blue1</span> moves to (0, 3)</div>
+<div class="step" data-action="10"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="11">commit round</div>
+<div class="detail">Check: check, flag carrier 1, flag state carried</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="flag_carry_and_shoot"><h3>flag_carry_and_shoot</h3><div class="path">tests/scenarios/flag_carry_and_shoot.yaml</div>
+<p class="description">CTF part 1 (carry mode, win_on_grab off so play continues): blue0 runs through the flag and grabs it mid-move (turn 1: the reach/pickup dip), then carries it stowed on its back (turn 2) while shooting exactly as it would without the flag -- same FOV, same hit.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/flag_carry_and_shoot/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/flag_carry_and_shoot/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (0.8, 0) <span class="detail">— Passes through the flag&#x27;s spot, ending just beyond it.</span></div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: check, flag carrier 0, flag state carried</div>
+<div class="detail">Check: winner: none; round is 2</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (0.8, 0)</div>
+<div class="detail">Check: check, flag position [0.8, 0], tolerance 0.05 — A carried flag rides with its figure</div>
+<div class="detail">Check: <span class="u red">red1</span> is visible to blue — Carrying does not change FOV</div>
+</div>
+<div class="round"><div class="round-title">Round 2</div>
+<div class="step" data-action="5"><span class="u blue">blue0</span> shoots <span class="u red">red1</span></div>
+<div class="step" data-action="6"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="7"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="8">commit round</div>
+<div class="detail">Check: <span class="u red">red1</span> is down — The carrier&#x27;s shot lands as usual</div>
+<div class="detail">Check: winner: none, flag carrier 0</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="flag_closer_team_wins_race"><h3>flag_closer_team_wins_race</h3><div class="path">tests/scenarios/flag_closer_team_wins_race.yaml</div>
+<p class="description">CTF part 1 tiebreak, non-tie case: both teams reach the flag in the same round, but red1 is closer, so it arrives first and grabs it even though blue0 has the lower unit id.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/flag_closer_team_wins_race/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/flag_closer_team_wins_race/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (0, 0)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (0, 0)</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: check, flag carrier 1</div>
+<div class="detail">Check: winner: red</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="flag_fog_visible_to_both"><h3>flag_fog_visible_to_both</h3><div class="path">tests/scenarios/flag_fog_visible_to_both.yaml</div>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/flag_fog_visible_to_both/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/flag_fog_visible_to_both/red.webm"></video></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="flag_pass_through_grabs"><h3>flag_pass_through_grabs</h3><div class="path">tests/scenarios/flag_pass_through_grabs.yaml</div>
+<p class="description">CTF part 1: the grab triggers anywhere along a move&#x27;s path, not only where it stops. Red runs straight through the flag&#x27;s cell and ends well past it, but still wins.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/flag_pass_through_grabs/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/flag_pass_through_grabs/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (-3, 0) <span class="detail">— Crosses the flag at the origin mid-move.</span></div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: check, flag carrier 1</div>
+<div class="detail">Check: winner: red</div>
+<div class="detail">Check: <span class="u red">red1</span> is at (-3, 0) (tolerance 3)</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="flag_round_limit_draw"><h3>flag_round_limit_draw</h3><div class="path">tests/scenarios/flag_round_limit_draw.yaml</div>
+<p class="description">Round limit with nobody grabbing the flag: the match ends as a draw (GameOver, no winner) once the limit round has been played, with the round counter parked on the limit.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/flag_round_limit_draw/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/flag_round_limit_draw/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: winner: none; round is 2, flag state rest</div>
+</div>
+<div class="round"><div class="round-title">Round 2</div>
+<div class="step" data-action="4"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="5"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="6">commit round</div>
+<div class="detail">Check: winner: none; round is 2, flag state rest</div>
+<div class="detail">Check: check, flag carrier -1</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="flag_tie_lowest_id_wins"><h3>flag_tie_lowest_id_wins</h3><div class="path">tests/scenarios/flag_tie_lowest_id_wins.yaml</div>
+<p class="description">CTF part 1 tiebreak: when figures of both teams touch the flag in the same round, the earliest arrival (distance walked / run speed) grabs it. Here red1 and blue0 are equally far -- an exact tie, which goes to the lowest unit id (blue0) -- and in the second match red is simply closer and wins.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/flag_tie_lowest_id_wins/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/flag_tie_lowest_id_wins/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (0, 0)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (0, 0)</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: check, flag carrier 0 — Exact tie -&gt; lowest unit id</div>
+<div class="detail">Check: winner: blue</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="flag_walk_onto_wins"><h3>flag_walk_onto_wins</h3><div class="path">tests/scenarios/flag_walk_onto_wins.yaml</div>
+<p class="description">CTF part 1: with the neutral flag enabled (default spot: map center) the first figure to step onto it grabs it for free and its team wins at once -- no elimination needed.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/flag_walk_onto_wins/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/flag_walk_onto_wins/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Check: check, flag state rest, flag position [0, 0], flag visible to blue</div>
+<div class="detail">Check: winner: none</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (0, 0) <span class="detail">— Ends exactly on the flag.</span></div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: check, flag carrier 0, flag state carried</div>
+<div class="detail">Check: winner: blue</div>
+<div class="detail">Check: <span class="u red">red1</span> is alive — Nobody was eliminated</div>
 </div>
 </div></figure>
 </div>

@@ -62,6 +62,12 @@ class TurnTimeline {
   // progress. Auto-initializes from `game` on the very first call.
   bool Observe(const GameLogic& game, float dtSeconds);
 
+  // Replay time reserved after each finished round so ghosts and tracers can
+  // fade out as in the live game (the last item appears at most
+  // kRoundDuration in and then fades over kGhostFadeDuration). Live planning
+  // time isn't recorded, so without this the next round would clear them.
+  static constexpr float kFadeHold = constants::kRoundDuration + constants::kGhostFadeDuration;
+
   size_t FrameCount() const { return frames_.size(); }
   const GameSnapshot& FrameSnapshot(size_t index) const { return frames_[index].snapshot; }
   float FrameTime(size_t index) const { return frames_[index].time; }

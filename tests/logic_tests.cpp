@@ -2428,6 +2428,26 @@ void TestTurnTimelineRecordsTicksAndReplays() {
   CHECK(!playback.Active());
 }
 
+void TestTurnTimelineHoldsForGhostFade() {
+  GameLogic game(TwoUnitTimelineScene());
+  MakePassive(game);
+  TurnTimeline timeline;
+  timeline.Reset(game);
+  TimelinePlayback playback;
+  PlayTimelineRound(game, timeline, glm::vec3(0.0f, 0.0f, 0.0f));
+  PlayTimelineRound(game, timeline, glm::vec3(0.0f, 0.0f, 4.0f));
+
+  // Replay time keeps room after a finished round so ghosts and tracers fade
+  // out as in the live game before the next turn starts.
+  const size_t finishFrame = timeline.Ticks()[1].frame;
+  CHECK(timeline.FrameTime(finishFrame + 1) - timeline.FrameTime(finishFrame) >=
+        TurnTimeline::kFadeHold);
+  CHECK(playback.SeekFrame(timeline, game, finishFrame));
+  playback.Play(timeline, game);
+  playback.Update(timeline, TurnTimeline::kFadeHold * 0.5f);
+  CHECK(playback.FrameIndex() == finishFrame);
+}
+
 void TestTurnTimelineResetsOnNewMatch() {
   GameLogic game(TwoUnitTimelineScene());
   MakePassive(game);
@@ -3161,6 +3181,7 @@ int main() {
   TestImportStateOfNewGameClearsFollowerSightings();
   TestFollowerBuildsSightingsWithoutPhysicsUpdate();
   TestTurnTimelineRecordsTicksAndReplays();
+  TestTurnTimelineHoldsForGhostFade();
   TestTurnTimelineResetsOnNewMatch();
   TestZiplineExtendsReachBeyondWalking();
   TestZiplineCostScalesWithLength();

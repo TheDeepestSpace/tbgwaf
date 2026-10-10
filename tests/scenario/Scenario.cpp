@@ -128,6 +128,25 @@ Scene ParseScene(const YAML::Node& root) {
                 "map.generate.elevated_branch must be ramp/off-map, got '" + end + "'");
           }
         }
+        // `features: {lanes: on, curbs: {mode: auto, chance: 0.3}, ...}`
+        // sets the optional urban detail layers (see UrbanFeatures).
+        if (const YAML::Node featNode = genNode["features"]) {
+          for (const auto& entry : featNode) {
+            const std::string name = entry.first.as<std::string>();
+            FeatureToggle* toggle = UrbanFeatureByName(&config.features, name);
+            if (!toggle) {
+              throw std::runtime_error("map.generate.features: unknown feature '" + name + "'");
+            }
+            const YAML::Node value = entry.second;
+            const std::string mode = value.IsMap() ? value["mode"].as<std::string>("auto")
+                                                   : value.as<std::string>();
+            if (!ParseFeatureMode(mode, &toggle->mode)) {
+              throw std::runtime_error("map.generate.features." + name +
+                                       " must be auto/off/on, got '" + mode + "'");
+            }
+            if (value.IsMap() && value["chance"]) toggle->chance = value["chance"].as<float>();
+          }
+        }
         scene = GenerateUrbanMap(seed, config);
       } else if (type == "hilly") {
         scene = GenerateHillyMap(seed);
@@ -161,6 +180,20 @@ Scene ParseScene(const YAML::Node& root) {
       }
     }
   }
+
+  if (const YAML::Node flagNode = root["flag"]) {
+    scene.flag.enabled = flagNode["enabled"] ? flagNode["enabled"].as<bool>() : true;
+    if (const YAML::Node pos = flagNode["position"]) {
+      if (pos.IsSequence() && pos.size() == 2) {
+        const glm::vec2 xz = ParseVec2(pos, "flag.position");
+        scene.flag.position = glm::vec3(xz.x, 0.0f, xz.y);
+      } else {
+        scene.flag.position = ParseVec3(pos, "flag.position");
+      }
+    }
+    if (flagNode["win_on_grab"]) scene.flag.winOnGrab = flagNode["win_on_grab"].as<bool>();
+  }
+  if (root["round_limit"]) scene.roundLimit = root["round_limit"].as<int>();
 
   const YAML::Node unitsNode = root["units"];
   if (generated && !unitsNode) return scene;
@@ -294,6 +327,27 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   if (node["memory_age"]) assertion.memoryAge = node["memory_age"].as<int>();
   if (node["round"]) assertion.round = node["round"].as<int>();
   if (node["timeline_ticks"]) assertion.timelineTicks = node["timeline_ticks"].as<int>();
+  if (node["flag_carrier"]) assertion.flagCarrier = node["flag_carrier"].as<int>();
+  if (node["flag_state"]) {
+    assertion.flagState = node["flag_state"].as<std::string>();
+    if (*assertion.flagState != "rest" && *assertion.flagState != "carried" &&
+        *assertion.flagState != "dropped") {
+      throw std::runtime_error("assert.flag_state must be rest, carried or dropped");
+    }
+  }
+  if (node["flag_position"]) {
+    const YAML::Node pos = node["flag_position"];
+    if (pos.IsSequence() && pos.size() == 2) {
+      const glm::vec2 xz = ParseVec2(pos, "assert.flag_position");
+      assertion.flagPosition = glm::vec3(xz.x, 0.0f, xz.y);
+    } else {
+      assertion.flagPosition = ParseVec3(pos, "assert.flag_position");
+    }
+  }
+  if (node["flag_visible_to"]) {
+    assertion.flagVisibleTo =
+        ParseTeam(node["flag_visible_to"].as<std::string>(), "assert.flag_visible_to");
+  }
   if (node["winner"]) {
     assertion.checkWinner = true;
     const std::string raw = node["winner"].as<std::string>();
@@ -664,6 +718,31 @@ void CheckAssertion(const GameLogic& game, const ScenarioAssertion& a, int stepI
     Fail("expected winner=" + ToString(a.expectedWinner) + " but was " + ToString(game.Winner()));
   }
 
+  const FlagState& flag = game.Flag();
+  if (a.flagCarrier && flag.carrierId != *a.flagCarrier) {
+    Fail("expected flag_carrier " + std::to_string(*a.flagCarrier) + " but was " +
+         std::to_string(flag.carrierId));
+  }
+  if (a.flagState) {
+    const std::string actual =
+        flag.carrierId >= 0 ? "carried" : (flag.dropElapsed >= 0.0f ? "dropped" : "rest");
+    if (actual != *a.flagState) {
+      Fail("expected flag_state " + *a.flagState + " but was " + actual);
+    }
+  }
+  if (a.flagPosition) {
+    // Y is only compared when the script gave a 3-element position (a 2-element
+    // one parses to y == 0, which on hilly terrain would not be the ground).
+    const glm::vec3 actual = game.FlagPosition();
+    const glm::vec3 d = actual - *a.flagPosition;
+    if (std::hypot(d.x, d.z) > a.tolerance) {
+      Fail("expected flag_position " + ToString(*a.flagPosition) + " but was " + ToString(actual));
+    }
+  }
+  if (a.flagVisibleTo && !game.FlagVisibleTo(*a.flagVisibleTo)) {
+    Fail("expected the flag to be visible to " + ToString(a.flagVisibleTo));
+  }
+
   if (a.round && game.RoundNumber() != *a.round) {
     Fail("expected round " + std::to_string(*a.round) + " but was " +
          std::to_string(game.RoundNumber()));
@@ -795,6 +874,20 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
       if (hooks.onActionComplete) hooks.onActionComplete(Display(), completedActions);
     } else {
       CheckAssertion(Display(), *step.assertion, i, &timeline, &result);
+            const ScenarioAssertion& as = *step.assertion;
+      if (as.flagCarrier || as.flagState || as.flagPosition || as.flagVisibleTo) {
+        // The follower mirrors the flag too (flag fields only; the rest of
+        // the assertion is already checked on the simulator).
+        ScenarioAssertion flagOnly;
+        flagOnly.flagCarrier = as.flagCarrier;
+        flagOnly.flagState = as.flagState;
+        flagOnly.flagPosition = as.flagPosition;
+        flagOnly.flagVisibleTo = as.flagVisibleTo;
+        flagOnly.tolerance = as.tolerance;
+        ScenarioResult followerResult;
+        CheckAssertion(follower, flagOnly, i, nullptr, &followerResult);
+        for (auto& f : followerResult.failures) result.failures.push_back("follower " + f);
+      }
       if (step.assertion->rememberedByTeam &&
           (!step.assertion->memoryAge || *step.assertion->memoryAge == 0)) {
         ScenarioResult followerResult;

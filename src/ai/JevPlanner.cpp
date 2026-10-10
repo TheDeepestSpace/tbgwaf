@@ -121,6 +121,8 @@ bool IsPlanning(const GameLogic& game) {
 bool CandidateApplied(const GameLogic& before, Team team, const JevCandidate& candidate,
                       GameLogic* out) {
   *out = before;
+  // Trials never show the move-range overlay; computing it dominated cost.
+  out->SetMoveFrontierEnabled(false);
   if (!IsPlanning(*out) || out->Mode() != InputMode::AwaitingSelection) return false;
   const Unit* original = out->FindUnit(candidate.actorId);
   if (!original || !original->alive || original->team != team ||
@@ -577,6 +579,7 @@ bool ApplyJevChoice(GameLogic* game, const JevRequest& request,
     if (!CandidateApplied(validated, request.team, *candidate, &next)) return false;
     validated = std::move(next);
   }
+  validated.SetMoveFrontierEnabled(true);
   *game = std::move(validated);
   return true;
 }

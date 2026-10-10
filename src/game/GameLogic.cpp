@@ -725,6 +725,7 @@ void GameLogic::ClearQueuedLegs(std::optional<int> unitId) {
 // Frontier of where the next leg can reach: built around the chain end.
 void GameLogic::RefreshMoveFrontier() {
   moveFrontier_ = ReachField();
+  if (!moveFrontierEnabled_) return;
   if (const Unit* mover = FindUnit(selectedUnitId_.value_or(-1))) {
     const glm::vec3 origin = MoveChainEnd();
     EnsureNavMeshFor(*mover, origin);

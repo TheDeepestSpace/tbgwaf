@@ -145,6 +145,9 @@ class GameLogic {
   // planned for (see EnsureNavMeshFor), empty until one has been.
   const NavMesh& GetNavMesh() const { return navMesh_; }
   InputMode Mode() const { return mode_; }
+  // The reach field is UI-only and costs ~75 ms per move click; headless
+  // callers that plan many moves (Jev) turn it off. On by default.
+  void SetMoveFrontierEnabled(bool enabled) { moveFrontierEnabled_ = enabled; }
   std::optional<int> SelectedUnitId() const { return selectedUnitId_; }
   std::optional<Team> Winner() const { return winner_; }
   int RoundNumber() const { return roundNumber_; }
@@ -491,6 +494,7 @@ class GameLogic {
   std::vector<glm::vec3> movePreviewPath_;
   bool movePreviewValid_ = false;
   ReachField moveFrontier_;
+  bool moveFrontierEnabled_ = true;
 
   // Every figure's in-flight planned move / not-yet-fired planned shot for
   // the executing round, valid only while mode_ == Executing; empty once

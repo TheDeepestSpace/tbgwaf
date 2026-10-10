@@ -41,6 +41,14 @@ FigureParts BuildFigure(const tactics::Unit& unit);
 // the golden screenshots -- one box reads just as well at ghost fidelity.
 FigureParts BuildFigureWireframe(const tactics::Unit& unit);
 
+// The neutral flag planted at `base` (feet-level point on the ground), pole
+// up, cloth trailing toward -X. `dropElapsed` (seconds since a carrier let it
+// fall; <0 for one simply at rest) plays the drop/plant settle: the pole
+// swings from lying over to upright over tactics::constants::kFlagDropDuration.
+// A figure with unit.carryingFlag instead gets a scaled-down flag stowed
+// on its back from BuildFigure (it rotates with the figure).
+FigureParts BuildPlantedFlag(const glm::vec3& base, float dropElapsed);
+
 // The weapon alone, in its local frame: origin at the top of the grip
 // (where the hand wraps), +X toward the muzzle, +Y up, +Z the weapon's
 // right-hand side. Used by the gallery's weapon turntables; BuildFigure

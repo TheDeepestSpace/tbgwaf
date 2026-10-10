@@ -1,0 +1,45 @@
+name: flag_carrier_killed_teammate_picks_up
+description: >
+  CTF part 1 (carry mode): after the carrier dies and drops the flag, a surviving teammate
+  can pick it up just by passing through the spot -- the same auto-pickup as for anyone.
+
+flag:
+  enabled: true
+  win_on_grab: false
+
+shot_rolls: [0.0]
+
+units:
+  - {id: 0, team: blue, position: [-4, 0, 0], facing_degrees: 0}
+  - {id: 1, team: blue, position: [0, 0, -7], facing_degrees: 90}
+  - {id: 2, team: red, position: [6, 0, 0], facing_degrees: 180}
+
+script:
+  - action: move
+    actor: 0
+    destination: [0, 0, 0]
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {flag_carrier: 0}
+
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: shoot
+    actor: 2
+    target: 0
+  - action: commit
+  - assert: {unit: 0, alive: false}
+  - assert: {flag_state: dropped, flag_position: [0, 0]}
+
+  - action: move
+    actor: 1
+    destination: [0, 0, 3]
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {flag_carrier: 1, flag_state: carried}

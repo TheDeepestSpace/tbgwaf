@@ -82,6 +82,7 @@ constexpr float kWalkBobHeight = 0.04f;
 constexpr float kIdleBobHeight = 0.008f;
 
 constexpr float kTwoPi = 6.28318530717958647692f;
+constexpr float kGrabLean = glm::radians(32.0f);  // Peak forward dip of the flag-grab reach.
 
 float SampleLoop(const BipedCurve& curve, float phase) {
   float wrapped = std::fmod(phase, kTwoPi);
@@ -392,7 +393,49 @@ void AppendArmIK(FigureParts* parts, const glm::mat4& figure, const glm::vec3& s
                     color});
 }
 
+// ---------------------------------------------------------------------------
+// Neutral flag: a slim pole with a finial, a rectangular cloth streaming
+// toward -X, and (planted only) a small round foot. Local frame: origin at
+// the pole's foot, +Y up. `scale` shrinks it for the back-stowed carry.
+
+const glm::vec4 kFlagPole(0.78f, 0.78f, 0.80f, 1.0f);
+const glm::vec4 kFlagCloth(0.97f, 0.82f, 0.15f, 1.0f);
+const glm::vec4 kFlagFoot(0.25f, 0.25f, 0.28f, 1.0f);
+constexpr float kFlagPoleHeight = 2.2f;
+
+void AppendFlag(FigureParts* parts, const glm::mat4& frame, float scale, bool withFoot) {
+  const float h = kFlagPoleHeight * scale;
+  AddBox(parts, frame, {-0.025f * scale, 0.0f, -0.025f * scale}, {0.05f * scale, h, 0.05f * scale},
+         kFlagPole);
+  parts->push_back({EllipsoidModel(frame, glm::vec3(0.0f, h + 0.03f * scale, 0.0f),
+                                   glm::vec3(0.06f * scale)),
+                    kFlagCloth, FigurePrimitive::Rounded});
+  AddBox(parts, frame, {-0.75f * scale, h - 0.70f * scale, -0.015f * scale},
+         {0.72f * scale, 0.55f * scale, 0.03f * scale}, kFlagCloth);
+  if (withFoot) {
+    parts->push_back({EllipsoidModel(frame, glm::vec3(0.0f, 0.02f, 0.0f),
+                                     glm::vec3(0.22f, 0.05f, 0.22f)),
+                      kFlagFoot, FigurePrimitive::Rounded});
+  }
+}
+
 }  // namespace
+
+FigureParts BuildPlantedFlag(const glm::vec3& base, float dropElapsed) {
+  float tilt = 0.0f;
+  if (dropElapsed >= 0.0f) {
+    const float t = glm::clamp(dropElapsed / tactics::constants::kFlagDropDuration, 0.0f, 1.0f);
+    tilt = glm::radians(75.0f) * (1.0f - EaseOutQuad(t));
+  }
+  FigureParts parts;
+  const glm::mat4 frame = glm::translate(glm::mat4(1.0f), base) *
+                          glm::rotate(glm::mat4(1.0f), tilt, glm::vec3(0.0f, 0.0f, 1.0f));
+  AppendFlag(&parts, frame, 1.0f, /*withFoot=*/false);
+  parts.push_back({EllipsoidModel(glm::translate(glm::mat4(1.0f), base), glm::vec3(0.0f, 0.02f, 0.0f),
+                                  glm::vec3(0.22f, 0.05f, 0.22f)),
+                   kFlagFoot, FigurePrimitive::Rounded});
+  return parts;
+}
 
 FigureParts BuildWeaponParts(WeaponType type) {
   FigureParts parts;
@@ -459,8 +502,18 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
 
   const ShootPose shot = SampleShootPose(unit);
   const glm::mat4 fall = KnockdownModel(unit);
+  // Flag pickup beat: the figure dips forward to reach the pole and comes
+  // back up (a quick overlay; it never blocks walking or shooting).  Wireframe
+  // ghosts (plan previews, sighting memory) copy the live unit's state but
+  // are not performing the grab, so they skip it.
+  float grabLean = 0.0f;
+  if (unit.grabElapsed >= 0.0f && !compactWeapon) {
+    const float t = glm::clamp(unit.grabElapsed / tactics::constants::kGrabAnimDuration, 0.0f, 1.0f);
+    grabLean = kGrabLean * std::sin(glm::pi<float>() * t);
+  }
   const glm::mat4 figure =
-      fall * YawFrame(unit.position + glm::vec3(0.0f, bob, 0.0f), unit.facingYaw);
+      fall * YawFrame(unit.position + glm::vec3(0.0f, bob, 0.0f), unit.facingYaw) *
+      glm::rotate(glm::mat4(1.0f), -grabLean, glm::vec3(0.0f, 0.0f, 1.0f));
 
   // Rifle aim blades the torso/shoulders onto the target bearing plus
   // kRifleAimBlade and leans the head to the sight line; both follow
@@ -624,6 +677,14 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
     AppendArmIK(&parts, figure,
                 shoulderRot * glm::vec3(0.0f, kShoulderHeight, -kArmSideOffset), leftHand,
                 glm::vec3(-0.2f, -1.0f, -0.5f), teamColor);
+  }
+  if (unit.carryingFlag && !compactWeapon) {
+    // Stowed backpack-style: pole strapped behind the torso, leaning back
+    // slightly, cloth streaming; rides the figure frame so it turns with it.
+    AppendFlag(&parts,
+               figure * glm::translate(glm::mat4(1.0f), glm::vec3(-0.27f, 0.32f, 0.0f)) *
+                   glm::rotate(glm::mat4(1.0f), glm::radians(12.0f), glm::vec3(0.0f, 0.0f, 1.0f)),
+               0.6f, /*withFoot=*/false);
   }
   return parts;
 }

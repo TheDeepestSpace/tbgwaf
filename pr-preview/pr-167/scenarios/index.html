@@ -64,7 +64,7 @@ listed by name only.</p>
 <p class="empty">None.</p>
 <h2>Modified scenarios <span class="count">(0)</span></h2>
 <p class="empty">None.</p>
-<h2>Unchanged scenarios <span class="count">(52)</span></h2>
+<h2>Unchanged scenarios <span class="count">(63)</span></h2>
 <div class="scenario has-video" data-stem="burst_free_aim_point_target"><h3>burst_free_aim_point_target</h3><div class="path">tests/scenarios/burst_free_aim_point_target.yaml</div>
 <p class="description">Bursts work for free-aim point-target shots too (issues places a blind-fire aim point on the enemy&#x27;s torso and fires a 5-shot burst at it. Every bullet flies its own scattered line inside the weapon&#x27;s cone; only bullets whose line actually crosses the figure roll against the hit chance (the pinned roll always hits), so the burst downs the figure with one of the bullets that land on the body.</p>
 <div class="panes">
@@ -1267,6 +1267,228 @@ listed by name only.</p>
 <div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
 <div class="detail">Check: blue has no memory of <span class="u red">red1</span></div>
 <div class="detail">Check: round is 4</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="zipline_daisy_chain"><h3>zipline_daisy_chain</h3><div class="path">tests/scenarios/zipline_daisy_chain.yaml</div>
+<p class="description">Issue = 14 would fit one round&#x27;s 20-unit budget (38 on foot), but PlanLeg prices at most one ride per leg, so the single-move chain is rejected and the chain is planned as two legs, one per round: line 1 then line 2. Pins today&#x27;s behaviour; a one-round daisy chain is a follow-up.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_daisy_chain/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_daisy_chain/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (20, 0) <span class="detail">— Both lines in one leg are not planned (one ride per leg).</span></div>
+<div class="step" data-action="2"><span class="u blue">blue0</span> moves to (20, 0) via (1, 0) <span class="detail">— Leg 1 rides line 1 (walk 2, ride 4, walk 1); leg 2 rides line 2.</span></div>
+<div class="step" data-action="3"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (1, 0) (tolerance 0.05)</div>
+<div class="detail">Check: round is 2</div>
+</div>
+<div class="round"><div class="round-title">Round 2</div>
+<div class="step" data-action="5"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="6">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (20, 0) (tolerance 0.05)</div>
+<div class="detail">Check: round is 3</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="zipline_frontier_generated_map"><h3>zipline_frontier_generated_map</h3><div class="path">tests/scenarios/zipline_frontier_generated_map.yaml</div>
+<p class="description">Issue map seed 4 Blue stands at one anchor of a 17-unit line; begin_move leaves the frontier up: the green walk region around Blue, plus a second (cyan) region around the far anchor sized by the budget left after the (cheap) ride, with the line&#x27;s cable highlighted. The map&#x27;s own ziplines and anchor posts are drawn too.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_frontier_generated_map/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_frontier_generated_map/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [30, 25], zoom -90</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1 (uncommitted)</div>
+<div class="step" data-action="1">begin_move (actor 0) <span class="detail">— Walk region at Blue, zipline region around the far anchor.</span></div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (21.8, 27.57) (tolerance 0.05)</div>
+<div class="detail">Check: round is 1</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="zipline_opposing_teams_opposite_directions"><h3>zipline_opposing_teams_opposite_directions</h3><div class="path">tests/scenarios/zipline_opposing_teams_opposite_directions.yaml</div>
+<p class="description">Issue ride west on the same line. Both reach their anchors at the same moment; the line is single-occupancy, so one waits for the other to land and both still arrive.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_opposing_teams_opposite_directions/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_opposing_teams_opposite_directions/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (20, 0)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (-26, 1)</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (20, 0) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u red">red1</span> is at (-26, 1) (tolerance 0.05)</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="zipline_opposing_teams_same_direction"><h3>zipline_opposing_teams_same_direction</h3><div class="path">tests/scenarios/zipline_opposing_teams_same_direction.yaml</div>
+<p class="description">Issue plan the same line eastward in the same round; one rides first, the other waits at the anchor, and both end up at their destinations.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_opposing_teams_same_direction/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_opposing_teams_same_direction/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (20, 0)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (20, 1)</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (20, 0) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u red">red1</span> is at (20, 1) (tolerance 0.05)</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="zipline_roof_access"><h3>zipline_roof_access</h3><div class="path">tests/scenarios/zipline_roof_access.yaml</div>
+<p class="description">Ziplines run from the street up to a rooftop. The 6-high building&#x27;s flat roof slab joins nothing, so the line is the only way onto it: Blue walks to the short street post, rides up to the roof post (mount, hang, dismount) and walks on across the roof; next round it walks back to the roof post and rides the line down to the street. Red cannot walk onto the roof.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_roof_access/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_roof_access/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u red">red1</span> moves to (6, 6.05, 0) <span class="detail">— Red is too far from the line to get up this round.</span></div>
+<div class="step" data-action="2"><span class="u blue">blue0</span> moves to (7, 6.05, 0) <span class="detail">— Walk 2 to the street post, ride up 11.7, walk 4 across the roof.</span></div>
+<div class="step" data-action="3"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (7, 6.05, 0) (tolerance 0.05)</div>
+</div>
+<div class="round"><div class="round-title">Round 2</div>
+<div class="step" data-action="5"><span class="u blue">blue0</span> moves to (-12, 0) <span class="detail">— Back across the roof, ride down, walk on along the street.</span></div>
+<div class="step" data-action="6"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="7">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-12, 0) (tolerance 0.05)</div>
+<div class="detail">Check: round is 3</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="zipline_shared_line"><h3>zipline_shared_line</h3><div class="path">tests/scenarios/zipline_shared_line.yaml</div>
+<p class="description">Issue the same round; the second waits at the anchor until the first has landed, then rides, and both reach their destinations within the round (tests/logic_tests.cpp TestZiplineOccupiedLineBlocksSecondRider checks the mid-round exclusion tick by tick).</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_shared_line/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_shared_line/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (20, 0)</div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> moves to (20, 1)</div>
+<div class="step" data-action="3"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (20, 0) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u blue">blue1</span> is at (20, 1) (tolerance 0.05)</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="zipline_split_directions"><h3>zipline_split_directions</h3><div class="path">tests/scenarios/zipline_split_directions.yaml</div>
+<p class="description">Issue rides the line east while Blue 1 walks west away from it; neither waits and both finish in the round.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_split_directions/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_split_directions/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (20, 0) <span class="detail">— Walk 2, ride, walk 10.</span></div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> moves to (-36, 3) <span class="detail">— Walks 18 the other way; never touches the line.</span></div>
+<div class="step" data-action="3"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (20, 0) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u blue">blue1</span> is at (-36, 3) (tolerance 0.05)</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="zipline_two_frontiers"><h3>zipline_two_frontiers</h3><div class="path">tests/scenarios/zipline_two_frontiers.yaml</div>
+<p class="description">Issue frontier up with a cyan region per line; every highlighted cable must sit on its own line (regression: the second one was drawn offset because the anchor ring overwrote the shader&#x27;s MVP).</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_two_frontiers/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_two_frontiers/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [0, 18], zoom 40</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1 (uncommitted)</div>
+<div class="step" data-action="1">begin_move (actor 0) <span class="detail">— Both cables highlighted on their own lines.</span></div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-18, 2) (tolerance 0.05)</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="zipline_two_lines_available"><h3>zipline_two_lines_available</h3><div class="path">tests/scenarios/zipline_two_lines_available.yaml</div>
+<p class="description">Issue destination is only reachable via one of them (budget 20; walking is 38+), so the planner picks the right line per figure, and since they ride different lines nobody waits.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_two_lines_available/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_two_lines_available/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [0, 18], zoom 40</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (18, 0) <span class="detail">— East line; walk 2.8 + ride 6.5 + walk 8.</span></div>
+<div class="step" data-action="2"><span class="u blue">blue1</span> moves to (-18, 38) <span class="detail">— North line; walk 2.8 + ride 6.5 + walk 8.</span></div>
+<div class="step" data-action="3"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (18, 0) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u blue">blue1</span> is at (-18, 38) (tolerance 0.05)</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="zipline_two_way"><h3>zipline_two_way</h3><div class="path">tests/scenarios/zipline_two_way.yaml</div>
+<p class="description">Issue starts beside the far anchor and rides back west to a destination 38 units away on foot (2 walk + 6.5 ride + 10 walk).</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_two_way/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_two_way/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (-26, 0)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-26, 0) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u blue">blue0</span> faces 180° (tolerance 1)</div>
+<div class="detail">Check: round is 2</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="zipline_walk_ride_walk"><h3>zipline_walk_ride_walk</h3><div class="path">tests/scenarios/zipline_walk_ride_walk.yaml</div>
+<p class="description">Issue a 20-unit round budget; the destination at x=20 is 38 units away on foot (rejected without the line) but costs 2 (walk to the anchor) + 6.5 (the 26-unit line at kZiplineCostFactor 0.25) + 10 (walk on from the far anchor) = 18.5 with it. The plan is one walk -&gt; ride -&gt; walk path and executes in a single round. Red, whose destination is out of reach even with the line, has the move rejected.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_walk_ride_walk/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_walk_ride_walk/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (20, 0) <span class="detail">— Walk 2, ride the line, walk 10.</span></div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (-30, 20) <span class="detail">— 60 away; no line near Red, so no plan fits the budget.</span></div>
+<div class="step" data-action="3"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="4">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (20, 0) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u red">red1</span> is at (30, 20) (tolerance 0.05)</div>
+<div class="detail">Check: round is 2</div>
 </div>
 </div></figure>
 </div>

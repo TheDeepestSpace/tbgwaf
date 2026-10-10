@@ -122,7 +122,7 @@
       //  * Local preview (no server): both teams on this page, with the Jev
       //    controls, driven by jev-preview.js. Used when no server is
       //    configured, or forced with ?local=1.
-      var BUILD_DEFAULT_SERVER = ""; // Left as-is when served from source.
+      var BUILD_DEFAULT_SERVER = "wss://tbgwaf-server-pr-101.fly.dev"; // Left as-is when served from source.
       function resolveServerUrl() {
         var params = new URLSearchParams(window.location.search);
         if (params.has("local")) return "";

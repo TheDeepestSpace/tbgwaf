@@ -1,0 +1,25 @@
+name: zipline_two_way
+description: >
+  Issue #166: ziplines are two-way. Same line as zipline_walk_ride_walk; Blue
+  starts beside the far anchor and rides back west to a destination 38 units
+  away on foot (2 walk + 6.5 ride + 10 walk).
+
+map:
+  half_extent: 40
+  ziplines:
+    - {from: [-16, 0, 0], to: [10, 0, 0]}
+
+units:
+  - {id: 0, team: blue, position: [12, 0, 0], facing_degrees: 180}
+  - {id: 1, team: red, position: [30, 0, 20], facing_degrees: 180}
+
+script:
+  - action: move
+    actor: 0
+    destination: [-26, 0, 0]
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [-26, 0, 0], tolerance: 0.05}
+  - assert: {unit: 0, facing_degrees: 180, tolerance: 1}
+  - assert: {round: 2}

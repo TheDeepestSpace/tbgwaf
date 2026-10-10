@@ -21,9 +21,11 @@ enum class ItemKind {
   Animation,    // A full figure looping one animation of its weapon class.
 };
 
+// ZipDown / ZipUp: a whole zipline ride (mount, hang, dismount) going
+// downhill (roof to street) or uphill (street to roof).
 // EmptyMag: the whole magazine fired at the weapon's own pace (issue #140),
 // every bullet leaving its own scattered tracer line.
-enum class AnimKind { Idle, Run, Shoot, EmptyMag };
+enum class AnimKind { Idle, Run, Shoot, ZipDown, ZipUp, EmptyMag };
 
 struct GalleryItem {
   const char* id;     // Stable slug; also the golden-file prefix.
@@ -36,7 +38,7 @@ struct GalleryItem {
   float duration = 1.0f;
 };
 
-// 3 weapon turntables followed by idle/run/shoot/empty-mag per weapon.
+// 3 weapon turntables followed by idle/run/shoot/zip-down/zip-up/empty-mag per weapon.
 const std::vector<GalleryItem>& Catalog();
 
 // Simple deterministic orbit framing: spherical offset from a look-at

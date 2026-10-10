@@ -12,6 +12,7 @@
 #include "game/NavMesh.h"
 #include "game/Raycast.h"
 #include "game/Scene.h"
+#include "game/TurnTimeline.h"
 #include "game/Types.h"
 #include "game/Visibility.h"
 

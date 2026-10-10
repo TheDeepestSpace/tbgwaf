@@ -199,6 +199,7 @@ export class JevPreviewController {
     module.tbgwafAI = this.#isAiPlayer(player);
     module.tbgwafAIPaused = this.paused;
     module.tbgwafAIFallback = this.fallback;
+    module.tbgwafDefaultCtf = this.mode === "ai-v-ai";
     module.tbgwafAutoCommit = this.mode !== "human";
     module.tbgwafAIGeneration = this.generation;
   }

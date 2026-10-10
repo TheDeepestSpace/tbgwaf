@@ -32,6 +32,8 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
   overlays.selectionHighlight = selected->position;
   if (game.Mode() == tactics::InputMode::AwaitingMoveDestination) {
     overlays.moveFrontier = game.MoveFrontier();
+    overlays.ziplineFrontiers = &game.ZiplineFrontiers();
+    overlays.movePreviewRides = &game.MovePreviewRides();
     // A later leg's boundary is yellow, matching the selector; the first leg's stays green.
     overlays.moveFrontierSubsequentLeg = selected->plan.type == tactics::PlannedActionType::Move &&
                                          selected->plan.movePath.size() >= 2;
@@ -1834,6 +1836,8 @@ bool SceneRenderer::Init() {
   sphereMesh_.Init();
   frontierFill_.Init();
   frontierBorder_.Init();
+  ziplineFill_.Init();
+  ziplineBorder_.Init();
   pathLine_.Init();
   fovConeMesh_.Init();
   shotConeMesh_.Init();
@@ -1911,6 +1915,8 @@ bool SceneRenderer::Init() {
 void SceneRenderer::Destroy() {
   frontierFill_.Destroy();
   frontierBorder_.Destroy();
+  ziplineFill_.Destroy();
+  ziplineBorder_.Destroy();
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
   shotConeMesh_.Destroy();
@@ -2301,6 +2307,18 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   }
 
+  // Zipline anchor posts (the cable itself is drawn with the line overlays).
+  for (const tactics::Zipline& line : game.GetScene().ziplines) {
+    for (const glm::vec3& foot : {line.a, line.b}) {
+      constexpr float kPostHalf = 0.12f;
+      DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_,
+                 foot + glm::vec3(-kPostHalf, 0.0f, -kPostHalf),
+                 glm::vec3(2.0f * kPostHalf, tactics::constants::kZiplinePostHeight,
+                           2.0f * kPostHalf),
+                 glm::vec4(kObstacleColor, 1.0f));
+    }
+  }
+
   litShader_.SetInt("uThermalFigure", 1);
   for (const Unit& unit : game.GetScene().units) {
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
@@ -2590,6 +2608,258 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glDisable(GL_POLYGON_OFFSET_FILL);
   unlitShader_.Use();
 
+  // Zipline cable: post top to post top, with a slight sag.
+  const auto cablePoints = [](const tactics::Zipline& line) {
+    constexpr int kPieces = 10;
+    constexpr float kSag = 0.3f;
+    const glm::vec3 up(0.0f, tactics::constants::kZiplinePostHeight, 0.0f);
+    std::vector<glm::vec3> points;
+    for (int i = 0; i <= kPieces; ++i) {
+      const float t = static_cast<float>(i) / kPieces;
+      points.push_back(glm::mix(line.a, line.b, t) + up -
+                       glm::vec3(0.0f, kSag * 4.0f * t * (1.0f - t), 0.0f));
+    }
+    return points;
+  };
+  unlitShader_.SetMat4("uMVP", viewProj);
+  unlitShader_.SetVec4("uColor", glm::vec4(0.12f, 0.12f, 0.12f, 1.0f));
+  for (const tactics::Zipline& line : game.GetScene().ziplines) {
+    pathLine_.SetPoints(cablePoints(line));
+    pathLine_.Draw();
+  }
+
+  // Builds one reach field's glow + boundary geometry (see below) in `color`,
+  // appending to `fill`/`border`. Shared by the walk region and the zipline
+  // regions, which only differ in tint.
+  const auto appendFrontier = [&](const tactics::ReachField& f, const glm::vec3& color,
+                                  std::vector<ColorTriangleMesh::Vertex>& fill,
+                                  std::vector<glm::vec3>& border) {
+    constexpr float kY = 0.03f;
+    constexpr float kSlabOffset = 0.015f;  // Above a sidewalk slab's top face.
+    constexpr float kFadeWidth = 0.8f;   // World units from boundary to transparent.
+    constexpr float kEdgeAlpha = 0.65f;  // Fill alpha right at the boundary.
+    const int nx = f.nx, nz = f.nz;
+    const float inf = std::numeric_limits<float>::infinity();
+
+    // Nodes whose surface heights differ by more than a step belong to
+    // different walk layers (deck vs. ground, or either side of a deck
+    // edge). Nothing -- distance, blur, triangles -- may span them, or the
+    // frontier hangs off the deck edge as vertical curtains.
+    constexpr float kLayerStep = 0.6f;
+    constexpr float kMaxDepth = 4.0f;  // Caps distance when no same-layer boundary exists.
+    const auto sameLayer = [&](int ax, int az, int bx, int bz) {
+      if (f.surfaceY.size() != static_cast<size_t>(nx) * nz) return true;
+      return std::abs(f.surfaceY[az * nx + ax] - f.surfaceY[bz * nx + bx]) <= kLayerStep;
+    };
+    // A node on its layer's edge counts as touching the unreached class,
+    // one step away -- exactly like a reached ground node beside an
+    // obstacle -- so the contour lands half a step past the edge node.
+    const auto onLayerEdge = [&](int ix, int iz) {
+      constexpr int kDx[4] = {-1, 1, 0, 0}, kDz[4] = {0, 0, -1, 1};
+      for (int k = 0; k < 4; ++k) {
+        const int jx = ix + kDx[k], jz = iz + kDz[k];
+        if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) continue;
+        if (!sameLayer(ix, iz, jx, jz)) return true;
+      }
+      return false;
+    };
+
+    // Chamfer distance (in world units) from each node to the nearest node
+    // of the opposite reached/unreached class, within its own layer.
+    auto chamfer = [&](bool target) {
+      std::vector<float> d(static_cast<size_t>(nx) * nz, inf);
+      for (int iz = 0; iz < nz; ++iz)
+        for (int ix = 0; ix < nx; ++ix)
+          if (f.Reached(ix, iz) == target ||
+              (!target && f.Reached(ix, iz) && onLayerEdge(ix, iz)))
+            d[iz * nx + ix] = f.Reached(ix, iz) && !target ? f.step : 0.0f;
+      const float s = f.step, sd = f.step * 1.41421356f;
+      auto relax = [&](int ix, int iz, int dx, int dz, float w) {
+        const int jx = ix + dx, jz = iz + dz;
+        if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) return;
+        if (!sameLayer(ix, iz, jx, jz)) return;
+        float& v = d[iz * nx + ix];
+        v = std::min(v, d[jz * nx + jx] + w);
+      };
+      for (int iz = 0; iz < nz; ++iz)
+        for (int ix = 0; ix < nx; ++ix) {
+          relax(ix, iz, -1, 0, s);
+          relax(ix, iz, 0, -1, s);
+          relax(ix, iz, -1, -1, sd);
+          relax(ix, iz, 1, -1, sd);
+        }
+      for (int iz = nz - 1; iz >= 0; --iz)
+        for (int ix = nx - 1; ix >= 0; --ix) {
+          relax(ix, iz, 1, 0, s);
+          relax(ix, iz, 0, 1, s);
+          relax(ix, iz, 1, 1, sd);
+          relax(ix, iz, -1, 1, sd);
+        }
+      return d;
+    };
+    const std::vector<float> dIn = chamfer(false);   // Distance to nearest unreached.
+    const std::vector<float> dOut = chamfer(true);   // Distance to nearest reached.
+    std::vector<float> g(dIn.size());
+    for (int iz = 0; iz < nz; ++iz)
+      for (int ix = 0; ix < nx; ++ix) {
+        const int i = iz * nx + ix;
+        // Signed depth: positive inside, zero contour half a step out.
+        g[i] = f.Reached(ix, iz) ? std::min(dIn[i], kMaxDepth) - 0.5f * f.step
+                                 : -(std::min(dOut[i], kMaxDepth) - 0.5f * f.step);
+      }
+    // Separable box blur (radius 2, two passes) rounds off the grid steps.
+    std::vector<float> tmp(g.size());
+    for (int pass = 0; pass < 2; ++pass) {
+      for (int iz = 0; iz < nz; ++iz)
+        for (int ix = 0; ix < nx; ++ix) {
+          float sum = 0.0f;
+          for (int k = -2; k <= 2; ++k) {
+            const int jx = std::clamp(ix + k, 0, nx - 1);
+            sum += sameLayer(ix, iz, jx, iz) ? g[iz * nx + jx] : -0.5f * f.step;
+          }
+          tmp[iz * nx + ix] = sum / 5.0f;
+        }
+      for (int iz = 0; iz < nz; ++iz)
+        for (int ix = 0; ix < nx; ++ix) {
+          float sum = 0.0f;
+          for (int k = -2; k <= 2; ++k) {
+            const int jz = std::clamp(iz + k, 0, nz - 1);
+            sum += sameLayer(ix, iz, ix, jz) ? tmp[jz * nx + ix] : -0.5f * f.step;
+          }
+          g[iz * nx + ix] = sum / 5.0f;
+        }
+    }
+
+    struct Pt {
+      glm::vec3 p;
+      float g;
+    };
+    const std::vector<AABB>& slabs = game.GetScene().sidewalks;
+    // Clips a convex polygon to a slab's XZ footprint (Sutherland-Hodgman),
+    // interpolating the field value, and lifts it onto the slab's top.
+    auto clipToSlab = [&](const std::vector<Pt>& in, const AABB& slab) {
+      std::vector<Pt> poly = in;
+      for (int edge = 0; edge < 4 && !poly.empty(); ++edge) {
+        const float bound = edge == 0 ? slab.min.x : edge == 1 ? slab.max.x
+                            : edge == 2 ? slab.min.z : slab.max.z;
+        const auto coord = [&](const Pt& q) { return edge < 2 ? q.p.x : q.p.z; };
+        const auto inside = [&](const Pt& q) {
+          return edge % 2 == 0 ? coord(q) >= bound : coord(q) <= bound;
+        };
+        std::vector<Pt> out;
+        for (size_t v = 0; v < poly.size(); ++v) {
+          const Pt& cur = poly[v];
+          const Pt& prev = poly[(v + poly.size() - 1) % poly.size()];
+          if (inside(cur) != inside(prev)) {
+            const float t = (bound - coord(prev)) / (coord(cur) - coord(prev));
+            out.push_back({prev.p + (cur.p - prev.p) * t, prev.g + (cur.g - prev.g) * t});
+          }
+          if (inside(cur)) out.push_back(cur);
+        }
+        poly = std::move(out);
+      }
+      for (Pt& q : poly) q.p.y = slab.max.y + kSlabOffset;
+      return poly;
+    };
+    auto toVertex = [&](const Pt& q) {
+      const float a = kEdgeAlpha * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
+      return ColorTriangleMesh::Vertex{q.p, glm::vec4(color, a)};
+    };
+    for (int iz = 0; iz + 1 < nz; ++iz) {
+      for (int ix = 0; ix + 1 < nx; ++ix) {
+        const int cx[4] = {ix, ix + 1, ix + 1, ix};
+        const int cz[4] = {iz, iz, iz + 1, iz + 1};
+        Pt quad[4];
+        bool anyIn = false;
+        for (int k = 0; k < 4; ++k) {
+          quad[k] = {f.Node(cx[k], cz[k]), g[cz[k] * nx + cx[k]]};
+          // Each node rides the terrain under it (HeightAt is 0 on flat
+          // maps); the 0.25-unit grid is fine enough that the linear
+          // contour/edge interpolation below stays on the slope.
+          for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
+            if (PatchContainsXZ(sidewalk, quad[k].p.x, quad[k].p.z)) {
+              quad[k].p.y = std::max(quad[k].p.y, sidewalk.vertices.front().y);
+            }
+          }
+          quad[k].p.y += kY;
+          anyIn |= quad[k].g > 0.0f;
+        }
+        if (!anyIn) continue;
+        // Never triangulate across a layer step (deck/roof edge). Corners
+        // on another layer than the strongest one become virtual unreached
+        // nodes at the same height, so the contour rounds off at the edge
+        // like it does beside a ground obstacle instead of leaving a
+        // grid-stepped gap.
+        int dom = 0;
+        for (int k = 1; k < 4; ++k)
+          if (quad[k].g > quad[dom].g) dom = k;
+        for (int k = 0; k < 4; ++k) {
+          if (sameLayer(cx[dom], cz[dom], cx[k], cz[k])) continue;
+          quad[k].p.y = quad[dom].p.y;
+          quad[k].g = -0.5f * f.step;
+        }
+        // Clip the cell to g >= 0 (Sutherland-Hodgman against the field).
+        std::vector<Pt> poly;
+        std::vector<Pt> cut;  // Contour crossings, in polygon order.
+        for (int k = 0; k < 4; ++k) {
+          const Pt& a = quad[k];
+          const Pt& b = quad[(k + 1) % 4];
+          const bool ain = a.g >= 0.0f, bin = b.g >= 0.0f;
+          if (ain) poly.push_back(a);
+          if (ain != bin) {
+            const float t = a.g / (a.g - b.g);
+            const Pt c{a.p + (b.p - a.p) * t, 0.0f};
+            poly.push_back(c);
+            cut.push_back(c);
+          }
+        }
+        for (size_t k = 1; k + 1 < poly.size(); ++k) {
+          fill.push_back(toVertex(poly[0]));
+          fill.push_back(toVertex(poly[k]));
+          fill.push_back(toVertex(poly[k + 1]));
+        }
+        if (cut.size() == 2) {
+          border.push_back(cut[0].p);
+          border.push_back(cut[1].p);
+        }
+        // The ground-level copy is buried under raised sidewalk slabs, so
+        // lay a clipped copy on top of each slab the cell overlaps.
+        for (const AABB& slab : slabs) {
+          const std::vector<Pt> piece = clipToSlab(poly, slab);
+          for (size_t k = 1; k + 1 < piece.size(); ++k) {
+            fill.push_back(toVertex(piece[0]));
+            fill.push_back(toVertex(piece[k]));
+            fill.push_back(toVertex(piece[k + 1]));
+          }
+          if (cut.size() == 2) {
+            // Liang-Barsky clip of the border segment to the slab footprint.
+            const glm::vec3 a = cut[0].p, d = cut[1].p - cut[0].p;
+            float t0 = 0.0f, t1 = 1.0f;
+            const float lo[2] = {slab.min.x, slab.min.z}, hi[2] = {slab.max.x, slab.max.z};
+            const float a2[2] = {a.x, a.z}, d2[2] = {d.x, d.z};
+            bool vis = true;
+            for (int ax = 0; ax < 2 && vis; ++ax) {
+              if (std::abs(d2[ax]) < 1e-9f) {
+                vis = a2[ax] >= lo[ax] && a2[ax] <= hi[ax];
+                continue;
+              }
+              float ta = (lo[ax] - a2[ax]) / d2[ax], tb = (hi[ax] - a2[ax]) / d2[ax];
+              if (ta > tb) std::swap(ta, tb);
+              t0 = std::max(t0, ta);
+              t1 = std::min(t1, tb);
+              vis = t0 < t1;
+            }
+            if (vis) {
+              const float y = slab.max.y + kSlabOffset;
+              border.emplace_back(a.x + d.x * t0, y, a.z + d.z * t0);
+              border.emplace_back(a.x + d.x * t1, y, a.z + d.z * t1);
+            }
+          }
+        }
+      }
+    }
+  };
+
   // Movement frontier: a glow hugging the reach boundary -- brightest at the
   // boundary, fading to fully transparent within kFadeWidth inside it. The
   // boundary is the zero contour of a blurred signed-distance field, so it
@@ -2602,221 +2872,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       frontierKeyField_ = &f;
       frontierKeyOrigin_ = origin;
       frontierKeyBudget_ = f.budget;
-      constexpr float kY = 0.03f;
-      constexpr float kSlabOffset = 0.015f;  // Above a sidewalk slab's top face.
-      constexpr float kFadeWidth = 0.8f;   // World units from boundary to transparent.
-      constexpr float kEdgeAlpha = 0.65f;  // Fill alpha right at the boundary.
-      const int nx = f.nx, nz = f.nz;
-      const float inf = std::numeric_limits<float>::infinity();
-
-      // Nodes whose surface heights differ by more than a step belong to
-      // different walk layers (deck vs. ground, or either side of a deck
-      // edge). Nothing -- distance, blur, triangles -- may span them, or the
-      // frontier hangs off the deck edge as vertical curtains.
-      constexpr float kLayerStep = 0.6f;
-      constexpr float kMaxDepth = 4.0f;  // Caps distance when no same-layer boundary exists.
-      const auto sameLayer = [&](int ax, int az, int bx, int bz) {
-        if (f.surfaceY.size() != static_cast<size_t>(nx) * nz) return true;
-        return std::abs(f.surfaceY[az * nx + ax] - f.surfaceY[bz * nx + bx]) <= kLayerStep;
-      };
-      // A node on its layer's edge counts as touching the unreached class.
-      const auto onLayerEdge = [&](int ix, int iz) {
-        constexpr int kDx[4] = {-1, 1, 0, 0}, kDz[4] = {0, 0, -1, 1};
-        for (int k = 0; k < 4; ++k) {
-          const int jx = ix + kDx[k], jz = iz + kDz[k];
-          if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) continue;
-          if (!sameLayer(ix, iz, jx, jz)) return true;
-        }
-        return false;
-      };
-
-      // Chamfer distance (in world units) from each node to the nearest node
-      // of the opposite reached/unreached class, within its own layer.
-      auto chamfer = [&](bool target) {
-        std::vector<float> d(static_cast<size_t>(nx) * nz, inf);
-        for (int iz = 0; iz < nz; ++iz)
-          for (int ix = 0; ix < nx; ++ix)
-            if (f.Reached(ix, iz) == target ||
-                (!target && f.Reached(ix, iz) && onLayerEdge(ix, iz)))
-              d[iz * nx + ix] = 0.0f;
-        const float s = f.step, sd = f.step * 1.41421356f;
-        auto relax = [&](int ix, int iz, int dx, int dz, float w) {
-          const int jx = ix + dx, jz = iz + dz;
-          if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) return;
-          if (!sameLayer(ix, iz, jx, jz)) return;
-          float& v = d[iz * nx + ix];
-          v = std::min(v, d[jz * nx + jx] + w);
-        };
-        for (int iz = 0; iz < nz; ++iz)
-          for (int ix = 0; ix < nx; ++ix) {
-            relax(ix, iz, -1, 0, s);
-            relax(ix, iz, 0, -1, s);
-            relax(ix, iz, -1, -1, sd);
-            relax(ix, iz, 1, -1, sd);
-          }
-        for (int iz = nz - 1; iz >= 0; --iz)
-          for (int ix = nx - 1; ix >= 0; --ix) {
-            relax(ix, iz, 1, 0, s);
-            relax(ix, iz, 0, 1, s);
-            relax(ix, iz, 1, 1, sd);
-            relax(ix, iz, -1, 1, sd);
-          }
-        return d;
-      };
-      const std::vector<float> dIn = chamfer(false);   // Distance to nearest unreached.
-      const std::vector<float> dOut = chamfer(true);   // Distance to nearest reached.
-      std::vector<float> g(dIn.size());
-      for (int iz = 0; iz < nz; ++iz)
-        for (int ix = 0; ix < nx; ++ix) {
-          const int i = iz * nx + ix;
-          // Signed depth: positive inside, zero contour half a step out.
-          g[i] = f.Reached(ix, iz) ? std::min(dIn[i], kMaxDepth) - 0.5f * f.step
-                                   : -(std::min(dOut[i], kMaxDepth) - 0.5f * f.step);
-        }
-      // Separable box blur (radius 2, two passes) rounds off the grid steps.
-      std::vector<float> tmp(g.size());
-      for (int pass = 0; pass < 2; ++pass) {
-        for (int iz = 0; iz < nz; ++iz)
-          for (int ix = 0; ix < nx; ++ix) {
-            float sum = 0.0f;
-            for (int k = -2; k <= 2; ++k) {
-              const int jx = std::clamp(ix + k, 0, nx - 1);
-              sum += sameLayer(ix, iz, jx, iz) ? g[iz * nx + jx] : g[iz * nx + ix];
-            }
-            tmp[iz * nx + ix] = sum / 5.0f;
-          }
-        for (int iz = 0; iz < nz; ++iz)
-          for (int ix = 0; ix < nx; ++ix) {
-            float sum = 0.0f;
-            for (int k = -2; k <= 2; ++k) {
-              const int jz = std::clamp(iz + k, 0, nz - 1);
-              sum += sameLayer(ix, iz, ix, jz) ? tmp[jz * nx + ix] : tmp[iz * nx + ix];
-            }
-            g[iz * nx + ix] = sum / 5.0f;
-          }
-      }
-
-      struct Pt {
-        glm::vec3 p;
-        float g;
-      };
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
-      const std::vector<AABB>& slabs = game.GetScene().sidewalks;
-      // Clips a convex polygon to a slab's XZ footprint (Sutherland-Hodgman),
-      // interpolating the field value, and lifts it onto the slab's top.
-      auto clipToSlab = [&](const std::vector<Pt>& in, const AABB& slab) {
-        std::vector<Pt> poly = in;
-        for (int edge = 0; edge < 4 && !poly.empty(); ++edge) {
-          const float bound = edge == 0 ? slab.min.x : edge == 1 ? slab.max.x
-                              : edge == 2 ? slab.min.z : slab.max.z;
-          const auto coord = [&](const Pt& q) { return edge < 2 ? q.p.x : q.p.z; };
-          const auto inside = [&](const Pt& q) {
-            return edge % 2 == 0 ? coord(q) >= bound : coord(q) <= bound;
-          };
-          std::vector<Pt> out;
-          for (size_t v = 0; v < poly.size(); ++v) {
-            const Pt& cur = poly[v];
-            const Pt& prev = poly[(v + poly.size() - 1) % poly.size()];
-            if (inside(cur) != inside(prev)) {
-              const float t = (bound - coord(prev)) / (coord(cur) - coord(prev));
-              out.push_back({prev.p + (cur.p - prev.p) * t, prev.g + (cur.g - prev.g) * t});
-            }
-            if (inside(cur)) out.push_back(cur);
-          }
-          poly = std::move(out);
-        }
-        for (Pt& q : poly) q.p.y = slab.max.y + kSlabOffset;
-        return poly;
-      };
-      auto toVertex = [&](const Pt& q) {
-        const float a = kEdgeAlpha * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
-        return ColorTriangleMesh::Vertex{q.p, glm::vec4(kSetupColor, a)};
-      };
-      for (int iz = 0; iz + 1 < nz; ++iz) {
-        for (int ix = 0; ix + 1 < nx; ++ix) {
-          const int cx[4] = {ix, ix + 1, ix + 1, ix};
-          const int cz[4] = {iz, iz, iz + 1, iz + 1};
-          Pt quad[4];
-          bool anyIn = false;
-          for (int k = 0; k < 4; ++k) {
-            quad[k] = {f.Node(cx[k], cz[k]), g[cz[k] * nx + cx[k]]};
-            // Each node rides the terrain under it (HeightAt is 0 on flat
-            // maps); the 0.25-unit grid is fine enough that the linear
-            // contour/edge interpolation below stays on the slope.
-            for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
-              if (PatchContainsXZ(sidewalk, quad[k].p.x, quad[k].p.z)) {
-                quad[k].p.y = std::max(quad[k].p.y, sidewalk.vertices.front().y);
-              }
-            }
-            quad[k].p.y += kY;
-            anyIn |= quad[k].g > 0.0f;
-          }
-          if (!anyIn) continue;
-          // Never triangulate across a layer step (deck edge).
-          if (!sameLayer(cx[0], cz[0], cx[1], cz[1]) || !sameLayer(cx[1], cz[1], cx[2], cz[2]) ||
-              !sameLayer(cx[2], cz[2], cx[3], cz[3]) || !sameLayer(cx[3], cz[3], cx[0], cz[0]))
-            continue;
-          // Clip the cell to g >= 0 (Sutherland-Hodgman against the field).
-          std::vector<Pt> poly;
-          std::vector<Pt> cut;  // Contour crossings, in polygon order.
-          for (int k = 0; k < 4; ++k) {
-            const Pt& a = quad[k];
-            const Pt& b = quad[(k + 1) % 4];
-            const bool ain = a.g >= 0.0f, bin = b.g >= 0.0f;
-            if (ain) poly.push_back(a);
-            if (ain != bin) {
-              const float t = a.g / (a.g - b.g);
-              const Pt c{a.p + (b.p - a.p) * t, 0.0f};
-              poly.push_back(c);
-              cut.push_back(c);
-            }
-          }
-          for (size_t k = 1; k + 1 < poly.size(); ++k) {
-            fill.push_back(toVertex(poly[0]));
-            fill.push_back(toVertex(poly[k]));
-            fill.push_back(toVertex(poly[k + 1]));
-          }
-          if (cut.size() == 2) {
-            border.push_back(cut[0].p);
-            border.push_back(cut[1].p);
-          }
-          // The ground-level copy is buried under raised sidewalk slabs, so
-          // lay a clipped copy on top of each slab the cell overlaps.
-          for (const AABB& slab : slabs) {
-            const std::vector<Pt> piece = clipToSlab(poly, slab);
-            for (size_t k = 1; k + 1 < piece.size(); ++k) {
-              fill.push_back(toVertex(piece[0]));
-              fill.push_back(toVertex(piece[k]));
-              fill.push_back(toVertex(piece[k + 1]));
-            }
-            if (cut.size() == 2) {
-              // Liang-Barsky clip of the border segment to the slab footprint.
-              const glm::vec3 a = cut[0].p, d = cut[1].p - cut[0].p;
-              float t0 = 0.0f, t1 = 1.0f;
-              const float lo[2] = {slab.min.x, slab.min.z}, hi[2] = {slab.max.x, slab.max.z};
-              const float a2[2] = {a.x, a.z}, d2[2] = {d.x, d.z};
-              bool vis = true;
-              for (int ax = 0; ax < 2 && vis; ++ax) {
-                if (std::abs(d2[ax]) < 1e-9f) {
-                  vis = a2[ax] >= lo[ax] && a2[ax] <= hi[ax];
-                  continue;
-                }
-                float ta = (lo[ax] - a2[ax]) / d2[ax], tb = (hi[ax] - a2[ax]) / d2[ax];
-                if (ta > tb) std::swap(ta, tb);
-                t0 = std::max(t0, ta);
-                t1 = std::min(t1, tb);
-                vis = t0 < t1;
-              }
-              if (vis) {
-                const float y = slab.max.y + kSlabOffset;
-                border.emplace_back(a.x + d.x * t0, y, a.z + d.z * t0);
-                border.emplace_back(a.x + d.x * t1, y, a.z + d.z * t1);
-              }
-            }
-          }
-        }
-      }
+      appendFrontier(f, kSetupColor, fill, border);
       frontierFill_.SetVertices(fill);
       frontierBorder_.SetPoints(border);
     }
@@ -2833,6 +2891,45 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                        : glm::vec4(kSetupColor, 1.0f));
     frontierBorder_.DrawSegments();
     glDisable(GL_POLYGON_OFFSET_FILL);
+  }
+  // Zipline regions: where a walk -> ride -> walk plan can reach, in a second
+  // (cyan) tint, with the usable line's cable highlighted.
+  if (overlays.ziplineFrontiers && !overlays.ziplineFrontiers->empty()) {
+    const glm::vec3 kZiplineColor(0.2f, 0.75f, 1.0f);
+    const auto& frontiers = *overlays.ziplineFrontiers;
+    std::vector<glm::vec4> key;
+    for (const auto& fr : frontiers) {
+      key.emplace_back(fr.field.minX, fr.field.minZ, fr.field.budget,
+                       static_cast<float>(fr.zipline));
+    }
+    if (key != ziplineKey_) {
+      ziplineKey_ = key;
+      std::vector<ColorTriangleMesh::Vertex> fill;
+      std::vector<glm::vec3> border;
+      for (const auto& fr : frontiers) {
+        if (fr.field.nx > 0) appendFrontier(fr.field, kZiplineColor, fill, border);
+      }
+      ziplineFill_.SetVertices(fill);
+      ziplineBorder_.SetPoints(border);
+    }
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(-2.0f, -4.0f);
+    colorShader_.Use();
+    colorShader_.SetMat4("uMVP", viewProj);
+    ziplineFill_.Draw();
+    unlitShader_.Use();
+    unlitShader_.SetMat4("uMVP", viewProj);
+    unlitShader_.SetVec4("uColor", glm::vec4(kZiplineColor, 1.0f));
+    ziplineBorder_.DrawSegments();
+    glDisable(GL_POLYGON_OFFSET_FILL);
+    for (const auto& fr : frontiers) {
+      // The ring below overwrites uMVP/uColor, so restore them per line.
+      unlitShader_.SetMat4("uMVP", viewProj);
+      unlitShader_.SetVec4("uColor", glm::vec4(kZiplineColor, 1.0f));
+      pathLine_.SetPoints(cablePoints(game.GetScene().ziplines[fr.zipline]));
+      pathLine_.Draw();
+      DrawHighlightOnSurface(fr.entry, glm::vec4(kZiplineColor, 1.0f));
+    }
   }
   glDepthMask(GL_TRUE);
   glDisable(GL_BLEND);
@@ -2956,11 +3053,40 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
     return lifted;
   };
-  if (overlays.movePreviewPath && overlays.movePreviewPath->size() >= 2) {
-    pathLine_.SetPoints(liftedPath(*overlays.movePreviewPath));
+  // A move path as walk -> ride -> walk: walked stretches in `walkColor`,
+  // each zipline ride in the zipline tint.
+  const auto drawMovePath = [&](const std::vector<glm::vec3>& path,
+                                const std::vector<tactics::PathRide>& rides,
+                                const glm::vec4& walkColor) {
+    const glm::vec4 rideColor(0.2f, 0.75f, 1.0f, 1.0f);
     unlitShader_.SetMat4("uMVP", viewProj);
-    unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
-    pathLine_.Draw();
+    const auto drawRange = [&](size_t first, size_t last, const glm::vec4& color) {
+      if (last <= first) return;
+      pathLine_.SetPoints(liftedPath(std::vector<glm::vec3>(path.begin() + first,
+                                                            path.begin() + last + 1)));
+      unlitShader_.SetVec4("uColor", color);
+      pathLine_.Draw();
+    };
+    std::vector<tactics::PathRide> sorted = rides;
+    std::sort(sorted.begin(), sorted.end(),
+              [](const tactics::PathRide& a, const tactics::PathRide& b) {
+                return a.segment < b.segment;
+              });
+    size_t begin = 0;
+    for (const tactics::PathRide& ride : sorted) {
+      const size_t seg = static_cast<size_t>(std::max(ride.segment, 0));
+      if (seg + 1 >= path.size() || seg < begin) continue;
+      drawRange(begin, seg, walkColor);
+      drawRange(seg, seg + 1, rideColor);
+      begin = seg + 1;
+    }
+    drawRange(begin, path.size() - 1, walkColor);
+  };
+  if (overlays.movePreviewPath && overlays.movePreviewPath->size() >= 2) {
+    static const std::vector<tactics::PathRide> kNoRides;
+    drawMovePath(*overlays.movePreviewPath,
+                 overlays.movePreviewRides ? *overlays.movePreviewRides : kNoRides,
+                 glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
     // Mark the final position with the same ring used for selection.
     DrawHighlightOnSurface(overlays.movePreviewPath->back(),
                   glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
@@ -2976,10 +3102,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (const Unit& unit : game.GetScene().units) {
       if (!unit.alive || unit.team != team) continue;
       if (unit.plan.type == tactics::PlannedActionType::Move && unit.plan.movePath.size() >= 2) {
-        pathLine_.SetPoints(liftedPath(unit.plan.movePath));
-        unlitShader_.SetMat4("uMVP", viewProj);
-        unlitShader_.SetVec4("uColor", glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
-        pathLine_.Draw();
+        drawMovePath(unit.plan.movePath, unit.plan.moveRides, glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
         // Wireframe stand-in at the destination, showing the planned final
         // facing (persists until the turn is committed).
         Unit ghost = unit;
@@ -3000,10 +3123,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         for (const auto& leg : unit.plan.queuedLegs) {
           ++legNumber;
           if (leg.size() < 2) continue;
-          pathLine_.SetPoints(liftedPath(leg));
-          unlitShader_.SetMat4("uMVP", viewProj);
-          unlitShader_.SetVec4("uColor", yellow);
-          pathLine_.Draw();
+          const size_t legIndex = static_cast<size_t>(legNumber - 2);
+          static const std::vector<tactics::PathRide> kNoLegRides;
+          drawMovePath(leg,
+                       legIndex < unit.plan.queuedLegRides.size() ? unit.plan.queuedLegRides[legIndex]
+                                                                  : kNoLegRides,
+                       yellow);
           DrawNumberedHighlight(unlitShader_, highlightRing_, cubeMesh_, viewProj, view,
                                 OnSurface(leg.back()), yellow, legNumber,
                                 SurfaceNormal(leg.back()));

@@ -46,6 +46,25 @@ struct WalkSurface {
   bool connectsToGround = false;    // The lowest edge is a legal ground transition.
 };
 
+// A pre-built zipline: a two-way cable between a ground anchor post and a
+// rooftop anchor post (ground-to-roof access to a building). `a`/`b` are the
+// anchor foot positions (where a rider steps on/off: street level at one end,
+// the roof surface at the other, in either order); the cable runs between
+// the post tops (see constants::kZiplinePostHeight) and the rider glides
+// straight from one foot position to the other (hanging from the cable, see
+// constants::kZiplineHangLift). One rider at a time. Riding costs
+// ZiplineRideCost() of a figure's move budget.
+struct Zipline {
+  glm::vec3 a{0.0f};
+  glm::vec3 b{0.0f};
+
+  float Length() const { return glm::distance(a, b); }
+};
+
+// Move-budget cost of riding `zipline` end to end: proportional to its
+// length (constants::kZiplineCostFactor), in the same units as walking.
+inline float ZiplineRideCost(const Zipline& zipline);
+
 // Visual road pavement. Elevated/ramp pavement is represented by
 // WalkSurface instead so its rendered geometry and gameplay surface are one
 // and the same.
@@ -187,6 +206,18 @@ constexpr float kFovConeVisualRange = kSightRange;
 constexpr float kSightingSampleInterval = 0.5f;
 constexpr float kSightingFadePerRound = 1.0f / 3.0f;  // Fraction of opacity lost each round.
 constexpr int kSightingMemoryRounds = 3;       // 1 / kSightingFadePerRound.
+// Ziplines: ride cost per world unit of cable, as a fraction of the cost of
+// walking the same distance (0.25 = riding is 4x cheaper than running, so a
+// 20-unit line costs 5 units of the 20-unit round budget). Longer line =
+// more of the turn spent. Tune here; everything (planning, frontier,
+// execution speed) derives from it.
+constexpr float kZiplineCostFactor = 0.25f;
+constexpr float kZiplinePostHeight = 1.7f;  // Short anchor post: cable-end height above its foot position.
+// A rider hangs from a trolley on the cable with the feet this far above the
+// foot-to-foot line mid-ride; the lift eases in over the first (mount) and
+// out over the last (dismount) kZiplineMountDistance of the cable.
+constexpr float kZiplineHangLift = 0.2f;
+constexpr float kZiplineMountDistance = 1.4f;
 // Bullet tracers fade on the same schedule as sighting ghosts.
 constexpr int kTracerMemoryRounds = kSightingMemoryRounds;
 // Free-aim shooting (issue #129). Friendly fire is on by default; the single
@@ -205,5 +236,9 @@ constexpr float kFlagGrabHeight = 1.2f;
 constexpr float kGrabAnimDuration = 0.6f;  // Visual reach/pickup beat on the grabber.
 constexpr float kFlagDropDuration = 0.8f;  // Visual drop/plant settle of a dropped flag.
 }  // namespace constants
+
+inline float ZiplineRideCost(const Zipline& zipline) {
+  return zipline.Length() * constants::kZiplineCostFactor;
+}
 
 }  // namespace tactics

@@ -54,6 +54,10 @@ struct PaneOverlays {
   const std::vector<glm::vec3>* movePreviewPath = nullptr;  // Yellow preview polyline.
   const tactics::ReachField* moveFrontier = nullptr;  // Reachable-area gradient + border.
   bool moveFrontierSubsequentLeg = false;             // Border drawn yellow instead of green.
+  // Zipline reach (walk -> ride -> walk), drawn as a second, cyan region with
+  // the line itself highlighted; the preview/planned path marks its ride.
+  const std::vector<tactics::GameLogic::ZiplineFrontier>* ziplineFrontiers = nullptr;
+  const std::vector<tactics::PathRide>* movePreviewRides = nullptr;
   bool showShotCone = false;                          // Selected figure is actively choosing a target.
   // Free-aim (issue #129), set while this pane's selected figure is choosing
   // a target: aimShooter gets the acid-green 360-degree LOS surface
@@ -157,6 +161,9 @@ class SceneRenderer {
   const tactics::ReachField* frontierKeyField_ = nullptr;
   glm::vec2 frontierKeyOrigin_{0.0f};
   float frontierKeyBudget_ = -1.0f;
+  ColorTriangleMesh ziplineFill_;
+  LineMesh ziplineBorder_;
+  std::vector<glm::vec4> ziplineKey_;  // (minX, minZ, budget, zipline) per region.
   // Terrain ground mesh, rebuilt only when the scene's heightfield changes.
   // Keyed on the field's contents, not its address: successive scenes can
   // reuse the same storage address (e.g. stack-allocated GameLogic

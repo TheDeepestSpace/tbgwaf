@@ -17,9 +17,21 @@ namespace tactics {
 // plays out together.
 enum class PlannedActionType { None, Move, Shoot, Pass };
 
+// A traverse step inside a move path: the segment path[segment] ->
+// path[segment + 1] is a ride on scene.ziplines[zipline] rather than a walk.
+// Its cost is ZiplineRideCost (length * kZiplineCostFactor), not its length.
+struct PathRide {
+  int segment = 0;
+  int zipline = 0;
+  bool operator==(const PathRide& o) const { return segment == o.segment && zipline == o.zipline; }
+};
+
 struct PlannedAction {
   PlannedActionType type = PlannedActionType::None;
   std::vector<glm::vec3> movePath;  // Resolved via NavMesh::FindPath, for type == Move.
+  std::vector<PathRide> moveRides;  // Zipline traverse steps within movePath (usually empty).
+  // Rides of queuedLegs[i]; may be shorter than queuedLegs (missing = walk only).
+  std::vector<std::vector<PathRide>> queuedLegRides;
   // Further legs the player chained after movePath, one per later round.
   // Each leg is a polyline of at most MoveBudget() length that starts where
   // the previous leg (movePath for the first) ends; FinishRound arms the next.
@@ -111,6 +123,12 @@ struct Unit {
   // arm can swing onto the target even when it sits off-center in the FOV.
   float shootElapsed = -1.0f;
   float shootAimYaw = 0.0f;
+  // Visual-only zipline ride (drives the mount / hang / dismount pose):
+  // distance travelled along the cable (<0 = not riding), the cable's
+  // length and its slope (rise over run, + = riding uphill).
+  float rideTravel = -1.0f;
+  float rideLength = 0.0f;
+  float rideSlope = 0.0f;
   // Neutral flag (CTF): true while this figure carries it (stowed on its
   // back; derived from GameLogic's flag state), and seconds since it picked
   // the flag up (<0 = none) for the visual reach beat.

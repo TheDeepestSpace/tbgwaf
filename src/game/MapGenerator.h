@@ -93,6 +93,14 @@ struct MapGeneratorConfig {
   float highwayThickness = 0.45f;
   float supportSpacing = 18.0f;  // Arc-length between pier bents under the deck.
   float minPolygonArea = 22.0f;  // Smaller inset/sliver regions remain open.
+  // Ziplines (issue #166): each block draws 0..maxZiplinesPerBlock lines
+  // uniformly, each from the street up to the roof of one of the block's
+  // buildings (which gets a walkable roof slab), from a dedicated RNG
+  // stream, so they never shift the layout. Lengths are cable lengths.
+  // Set maxZiplinesPerBlock = 0 to disable.
+  int maxZiplinesPerBlock = 2;
+  float ziplineMinLength = 4.0f;
+  float ziplineMaxLength = 22.0f;
   UrbanFeatures features;
 };
 
@@ -123,7 +131,11 @@ struct UrbanRoad {
 // becomes a connecting ramp that climbs from grade and merges onto the
 // elevated deck mid-span. arteryCount=0 retains the original orthogonal
 // generator for compatibility. The same (seed, config) always yields an
-// identical Scene.
+// identical Scene. Scene::ziplines holds the block ziplines (see
+// MapGeneratorConfig::maxZiplinesPerBlock): each runs from obstacle-free
+// street level (`a`) to the roof of a building in the block (`b`, with a
+// flat walkable roof slab in Scene::walkSurfaces), clear of obstacles, and
+// lines are non-overlapping.
 Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& config = {});
 
 // Block footprints GenerateUrbanMap(seed, config) uses. The hierarchical

@@ -58,6 +58,11 @@ struct ScenarioAction {
                                       // plan, one leg executes per round).
   std::optional<float> finalFacingDegrees;  // Move only: re-aims the planned
                                              // wireframe before commit.
+  bool expectUnreachable = false;           // Move only: `destination` must be
+                                             // rejected (no walk or zipline
+                                             // plan fits the budget); nothing
+                                             // is planned. Waypoints are
+                                             // clicked first as usual.
   int target = -1;              // Shoot only: locked-on figure target.
   bool expectNoop = false;      // Shoot only: the click is expected not to
                                  // resolve (e.g. target outside the

@@ -1,0 +1,26 @@
+name: zipline_opposing_teams_opposite_directions
+description: >
+  Issue #166: Blue rides east while Red, starting at the far anchor, wants to
+  ride west on the same line. Both reach their anchors at the same moment; the
+  line is single-occupancy, so one waits for the other to land and both still
+  arrive.
+
+map:
+  half_extent: 40
+  ziplines:
+    - {from: [-16, 0, 0], to: [10, 0, 0]}
+
+units:
+  - {id: 0, team: blue, position: [-18, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [12, 0, 1], facing_degrees: 180}
+
+script:
+  - action: move
+    actor: 0
+    destination: [20, 0, 0]
+  - action: move
+    actor: 1
+    destination: [-26, 0, 1]
+  - action: commit
+  - assert: {unit: 0, position: [20, 0, 0], tolerance: 0.05}
+  - assert: {unit: 1, position: [-26, 0, 1], tolerance: 0.05}

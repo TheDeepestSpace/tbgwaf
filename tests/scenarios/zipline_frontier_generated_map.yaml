@@ -1,0 +1,26 @@
+name: zipline_frontier_generated_map
+description: >
+  Issue #166: the movement frontier with a zipline region. On generated
+  map seed 4 Blue stands at one anchor of a 17-unit line; begin_move leaves
+  the frontier up: the green walk region around Blue, plus a second (cyan)
+  region around the far anchor sized by the budget left after the (cheap)
+  ride, with the line's cable highlighted. The map's own ziplines and
+  anchor posts are drawn too.
+
+map:
+  generate: {type: urban, seed: 4, arteries: 2}
+
+units:
+  - {id: 0, team: blue, position: [21.8, 0, 27.57], facing_degrees: 0}
+  - {id: 1, team: red, position: [64.6, 0, -36.6], facing_degrees: 180}
+
+camera:
+  target: [30, 25]
+  zoom: -90
+
+script:
+  - action: begin_move
+    actor: 0
+    comment: Walk region at Blue, zipline region around the far anchor.
+  - assert: {unit: 0, position: [21.8, 0, 27.57], tolerance: 0.05}
+  - assert: {round: 1}

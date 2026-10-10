@@ -1,0 +1,31 @@
+name: zipline_shared_line
+description: >
+  Issue #166: one rider at a time. Two Blue figures plan the same line in
+  the same round; the second waits at the anchor until the first has landed,
+  then rides, and both reach their destinations within the round
+  (tests/logic_tests.cpp TestZiplineOccupiedLineBlocksSecondRider checks the
+  mid-round exclusion tick by tick).
+
+map:
+  half_extent: 40
+  ziplines:
+    - {from: [-16, 0, 0], to: [10, 0, 0]}
+
+units:
+  - {id: 0, team: blue, position: [-18, 0, 0], facing_degrees: 0}
+  - {id: 1, team: blue, position: [-18, 0, 1], facing_degrees: 0}
+  - {id: 2, team: red, position: [30, 0, 20], facing_degrees: 180}
+
+script:
+  - action: move
+    actor: 0
+    destination: [20, 0, 0]
+  - action: move
+    actor: 1
+    destination: [20, 0, 1]
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {unit: 0, position: [20, 0, 0], tolerance: 0.05}
+  - assert: {unit: 1, position: [20, 0, 1], tolerance: 0.05}
+  - assert: {round: 2}

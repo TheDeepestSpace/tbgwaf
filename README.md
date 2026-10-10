@@ -46,6 +46,17 @@ ramps back down; the branch becomes an on-ramp merging mid-deck), and
 tune artery count/width, local-street width/skew and elevation through
 `MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
 overlay of the navmesh's walkable-cell boundaries.
+
+Urban maps carry pre-built **ziplines** (0-2 per block, seed-deterministic,
+`MapGeneratorConfig::maxZiplinesPerBlock`): two-way cables between anchor
+posts along the block sidewalks. A move plan may walk to one anchor, ride,
+and walk on from the other; a ride costs `length * kZiplineCostFactor`
+(0.25, in `game/Types.h`) of the figure's per-round move budget, so a longer
+line spends more of the turn. The move frontier draws that reach as a second
+(cyan) region with the line highlighted. One rider per line at a time (a
+second rider waits at the anchor), and a rider can't shoot. Scenarios add
+lines with `map.ziplines: [{from: [x,y,z], to: [x,y,z]}]` and assert an
+out-of-reach move with `expect_unreachable: true`.
 The app defaults to the prototype per-unit shadow-map FOV mask (tints
 walls, roofs and deck sides too; see
 [docs/fov-shadow-map.md](docs/fov-shadow-map.md)); `TBGWAF_FOV_SHADOW_MAP=0`
@@ -116,7 +127,7 @@ Every weapon model and animation can be inspected on the **asset &
 animation gallery**, a standalone page built alongside the game:
 [live gallery](https://thedeepestspace.github.io/tbgwaf/gallery/) on Pages,
 and `pr-preview/pr-<number>/gallery/` in each PR preview. The page lists
-the three weapon turntables plus idle/run/shoot/empty-mag per weapon — the
+the three weapon turntables plus idle/run/shoot/empty-mag and downhill/uphill zipline rides per weapon — the
 empty-mag clip dumps the whole magazine at the weapon's own fire interval,
 each bullet leaving its own scattered tracer line (drag to orbit,
 scroll to zoom, play/pause and scrub the loop). The catalog, framing, and

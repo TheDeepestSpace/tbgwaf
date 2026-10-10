@@ -76,6 +76,8 @@ struct GameSnapshot {
     int planShots = 1;  // Burst size of a Shoot plan (issue #138).
     std::vector<glm::vec3> planPath;
     std::vector<std::vector<glm::vec3>> planQueuedLegs;
+    std::vector<PathRide> planRides;
+    std::vector<std::vector<PathRide>> planQueuedLegRides;
     float planEndFacingYaw = 0.0f;
     glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
     float knockdownElapsed = -1.0f;
@@ -86,6 +88,9 @@ struct GameSnapshot {
     float idleElapsed = 0.0f;
     float shootElapsed = -1.0f;
     float shootAimYaw = 0.0f;
+    float rideTravel = -1.0f;
+    float rideLength = 0.0f;
+    float rideSlope = 0.0f;
     float grabElapsed = -1.0f;  // Flag pickup reach beat (see Unit).
     bool moving = false;  // Has an in-flight move in the executing round.
   };
@@ -197,6 +202,28 @@ class GameLogic {
     return mode_ == InputMode::AwaitingMoveDestination && moveFrontier_.nx > 0 ? &moveFrontier_
                                                                               : nullptr;
   }
+
+  // Zipline region of the move frontier: where the selected figure can get by
+  // walking to one end of a zipline (`walkCost`), riding it (`rideCost`) and
+  // walking on from the other end with whatever budget remains. `field` is
+  // that onward walk region around `exit`. One entry per (zipline, entry
+  // end) whose entry is affordable.
+  struct ZiplineFrontier {
+    int zipline = -1;
+    glm::vec3 entry{0.0f};
+    glm::vec3 exit{0.0f};
+    float walkCost = 0.0f;
+    float rideCost = 0.0f;
+    ReachField field;
+  };
+  // Valid while planning a move (empty otherwise).
+  const std::vector<ZiplineFrontier>& ZiplineFrontiers() const;
+
+  // Rides in the current hover preview (MovePreviewPath()'s traverse steps).
+  const std::vector<PathRide>& MovePreviewRides() const { return movePreviewRides_; }
+
+  // True while `unitId` is mid-ride on a zipline in the executing round.
+  bool IsUnitRiding(int unitId) const;
 
   Unit* FindUnit(int id);
   const Unit* FindUnit(int id) const;
@@ -404,6 +431,8 @@ class GameLogic {
     std::vector<glm::vec3> path;
     size_t segment = 0;
     float endFacingYaw = 0.0f;  // Snapped to once the path is consumed.
+    std::vector<PathRide> rides;
+    int ridingZipline = -1;  // Zipline currently occupied by this rider, else -1.
   };
 
   // A planned shot waiting for its first tick with valid FOV+LOS. Expires
@@ -509,6 +538,14 @@ class GameLogic {
   // the cached one already covers this figure at this origin.
   void EnsureNavMeshFor(const Unit& mover, const glm::vec3& origin);
   void RefreshMoveFrontier();
+  // Rebuilds ziplineFrontiers_ (and their navmeshes) for a leg from `origin`.
+  void BuildZiplineFrontiers(const Unit& mover, const glm::vec3& origin);
+  // Plans one leg from `from` to `goal`: a plain walk when affordable within
+  // the mover's budget, otherwise walk -> ride -> walk over the cheapest
+  // zipline. False if neither fits. Fills `rides` (empty for a walk).
+  bool PlanLeg(const Unit& mover, const glm::vec3& from, const glm::vec3& goal,
+               std::vector<glm::vec3>* path, std::vector<PathRide>* rides);
+  void ClearMoveOverlays();
 
   // Squad-playbook pass, run once per executing tick after every mover has
   // advanced: for each living figure with a living enemy in its FOV+LOS,
@@ -541,6 +578,11 @@ class GameLogic {
   bool movePreviewValid_ = false;
   ReachField moveFrontier_;
   bool moveFrontierEnabled_ = true;
+  std::vector<ZiplineFrontier> ziplineFrontiers_;
+  std::vector<NavMesh> ziplineMeshes_;  // Parallel to ziplineFrontiers_: mesh around each exit.
+  int ziplineUnitId_ = -1;
+  glm::vec3 ziplineOrigin_{0.0f};
+  std::vector<PathRide> movePreviewRides_;
 
   // Every figure's in-flight planned move / not-yet-fired planned shot for
   // the executing round, valid only while mode_ == Executing; empty once

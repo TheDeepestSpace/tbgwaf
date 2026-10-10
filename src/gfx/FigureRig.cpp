@@ -149,6 +149,9 @@ struct ShootPose {
 ShootPose SampleShootPose(const Unit& unit) {
   ShootPose pose;
   if (unit.shootElapsed < 0.0f) return pose;
+  // A rider hangs from the trolley with the weapon slung: no aim, recoil or
+  // muzzle flash while on the cable.
+  if (unit.rideTravel >= 0.0f && unit.rideLength > 0.0f) return pose;
   const float t = unit.shootElapsed;
   const float lowerStart = tactics::constants::kShootAnimDuration - kLowerDuration;
   if (t < kAimRaiseDuration) {
@@ -158,6 +161,52 @@ ShootPose SampleShootPose(const Unit& unit) {
     pose.recoil = std::exp(-kRecoilDecayRate * (t - kAimRaiseDuration));
   }
   pose.aimYawDelta = std::remainder(unit.shootAimYaw - unit.facingYaw, kTwoPi) * pose.raise;
+  return pose;
+}
+
+// Zipline ride (unit.rideTravel along a cable of unit.rideLength). Mount
+// (first kZiplineMountDistance): the figure runs up, jumps with the knees
+// tucked, and its arms reach up to the trolley handle while its weapon is
+// slung. Hang (middle): body hangs below the cable with the legs swinging
+// forward on a downhill ride (gliding) and trailing back on an uphill one
+// (being hauled up). Dismount (last kZiplineMountDistance): the legs reach
+// out to land, the hands release and the weapon comes back up. Every phase
+// is distance-driven, so it plays the same at any ride speed.
+struct RidePose {
+  bool riding = false;
+  float hang = 0.0f;      // 0 = standing, 1 = fully hanging (body lifted, legs glide).
+  float armsUp = 0.0f;    // 0 = arms in the carry pose, 1 = both hands on the handle.
+  float lift = 0.0f;      // Body lift above the foot-to-foot line.
+  float kick = 0.0f;      // Mount jump beat, 0..1..0.
+  float land = 0.0f;      // Dismount landing beat, 0..1..0.
+  float hip = 0.0f;       // Glide hip angle (before the mount/landing beats).
+  float knee = 0.0f;
+  float sway = 0.0f;      // Gentle leg swing, opposite on each leg.
+};
+
+float SmoothStep01(float t) {
+  t = glm::clamp(t, 0.0f, 1.0f);
+  return t * t * (3.0f - 2.0f * t);
+}
+
+RidePose SampleRidePose(const Unit& unit) {
+  RidePose pose;
+  if (!unit.alive || unit.rideTravel < 0.0f || unit.rideLength <= 0.0f) return pose;
+  const float mount = tactics::constants::kZiplineMountDistance;
+  const float travel = glm::clamp(unit.rideTravel, 0.0f, unit.rideLength);
+  const float toEnd = unit.rideLength - travel;
+  const float edge = std::min(travel, toEnd);
+  pose.riding = true;
+  pose.hang = SmoothStep01(edge / mount);
+  pose.armsUp = SmoothStep01(edge / (0.6f * mount));
+  pose.lift = tactics::constants::kZiplineHangLift * pose.hang;
+  if (travel < mount) pose.kick = std::sin(glm::pi<float>() * travel / mount);
+  if (toEnd < mount) pose.land = std::sin(glm::pi<float>() * toEnd / mount);
+  // Downhill (slope < 0): legs swing forward. Uphill: they trail back.
+  const float forward = 0.5f * (glm::clamp(-unit.rideSlope * 3.0f, -1.0f, 1.0f) + 1.0f);
+  pose.hip = glm::radians(glm::mix(-6.0f, 26.0f, forward));
+  pose.knee = glm::radians(glm::mix(-14.0f, -30.0f, forward));
+  pose.sway = glm::radians(4.0f) * std::sin(travel * 1.3f + unit.id * 0.73f);
   return pose;
 }
 
@@ -468,6 +517,16 @@ float WeaponLength(WeaponType type) {
   return 1.0f;
 }
 
+// Zipline trolley: a pulley block on the cable, with a strap down to the
+// handlebar the rider's hands grip (`handleY`, figure-local).
+void AppendTrolley(FigureParts* parts, const glm::mat4& figure, float cableY, float handleY) {
+  const glm::vec4 steel = kSteel;
+  AddBox(parts, figure, {-0.07f, cableY - 0.05f, -0.07f}, {0.20f, 0.10f, 0.14f}, steel);
+  AddBox(parts, figure, {0.0f, handleY, -0.012f}, {0.024f, std::max(0.0f, cableY - handleY), 0.024f},
+         kBlackMetal);
+  AddBox(parts, figure, {0.0f, handleY - 0.02f, -0.19f}, {0.05f, 0.04f, 0.38f}, kBlackMetal);
+}
+
 FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
   // Every body part shares the one flat team color; only the weapon differs.
   const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
@@ -489,16 +548,33 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
       glm::radians(-12.0f + (SampleLoop(kIdleLeftKnee, idlePhase) + 40.7f) * 0.12f);
   const float idleRightKnee =
       glm::radians(-12.0f + (SampleLoop(kIdleRightKnee, idlePhase) + 40.0f) * 0.12f);
-  const float leftHip =
+  const float leftHipWalk =
       glm::mix(idleLeftHip, glm::radians(SampleLoop(kWalkLeftHip, unit.walkPhase) * 0.55f), walk);
-  const float rightHip = glm::mix(
+  const float rightHipWalk = glm::mix(
       idleRightHip, glm::radians(SampleLoop(kWalkRightHip, unit.walkPhase) * 0.55f), walk);
-  const float leftKnee = glm::mix(
+  const float leftKneeWalk = glm::mix(
       idleLeftKnee, glm::radians(SampleLoop(kWalkLeftKnee, unit.walkPhase) * 0.50f), walk);
-  const float rightKnee = glm::mix(
+  const float rightKneeWalk = glm::mix(
       idleRightKnee, glm::radians(SampleLoop(kWalkRightKnee, unit.walkPhase) * 0.50f), walk);
   const float bob = glm::mix(kIdleBobHeight * SampleLoop(kIdleBob, idlePhase),
                              kWalkBobHeight * SampleLoop(kWalkBob, unit.walkPhase), walk);
+
+  const RidePose ride = SampleRidePose(unit);
+  float leftHip = leftHipWalk, rightHip = rightHipWalk;
+  float leftKnee = leftKneeWalk, rightKnee = rightKneeWalk;
+  if (ride.riding) {
+    leftHip = glm::mix(leftHip, ride.hip + ride.sway, ride.hang);
+    rightHip = glm::mix(rightHip, ride.hip - ride.sway, ride.hang);
+    leftKnee = glm::mix(leftKnee, ride.knee, ride.hang);
+    rightKnee = glm::mix(rightKnee, ride.knee, ride.hang);
+    // Mount: jump with the knees tucked. Dismount: reach out to land.
+    const float hipBeat = glm::radians(24.0f) * ride.kick + glm::radians(32.0f) * ride.land;
+    const float kneeBeat = glm::radians(-40.0f) * ride.kick + glm::radians(22.0f) * ride.land;
+    leftHip += hipBeat;
+    rightHip += hipBeat;
+    leftKnee += kneeBeat;
+    rightKnee += kneeBeat;
+  }
 
   const ShootPose shot = SampleShootPose(unit);
   const glm::mat4 fall = KnockdownModel(unit);
@@ -512,7 +588,7 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
     grabLean = kGrabLean * std::sin(glm::pi<float>() * t);
   }
   const glm::mat4 figure =
-      fall * YawFrame(unit.position + glm::vec3(0.0f, bob, 0.0f), unit.facingYaw) *
+      fall * YawFrame(unit.position + glm::vec3(0.0f, bob + ride.lift, 0.0f), unit.facingYaw) *
       glm::rotate(glm::mat4(1.0f), -grabLean, glm::vec3(0.0f, 0.0f, 1.0f));
 
   // Rifle aim blades the torso/shoulders onto the target bearing plus
@@ -529,7 +605,15 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
   }
 
   FigureParts parts;
-  parts.reserve(28);
+  parts.reserve(36);
+  // Riding: the trolley rides the cable (kZiplinePostHeight above the
+  // foot-to-foot line, so below that in the lifted figure frame), the
+  // handlebar hangs as far down its strap as the arms can reach.
+  const float cableY = tactics::constants::kZiplinePostHeight - ride.lift;
+  const float handleY = std::min(cableY - 0.12f, kShoulderHeight + kUpperArmLength + kLowerArmLength - 0.1f);
+  const glm::vec3 handleRight(0.04f, handleY, 0.14f);
+  const glm::vec3 handleLeft(0.04f, handleY, -0.14f);
+  if (ride.riding) AppendTrolley(&parts, figure, cableY, handleY);
   parts.push_back({EllipsoidModel(
                        figure * glm::rotate(glm::mat4(1.0f), torsoYaw,
                                             glm::vec3(0.0f, -1.0f, 0.0f)),
@@ -593,11 +677,13 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
         LimbFrame(glm::mat4(1.0f), glm::vec3(0.0f, kShoulderHeight, kArmSideOffset),
                   gunArmSwing, shot.aimYawDelta + inward, -kArmSplay * (1.0f - shot.raise));
     const glm::mat4 gunForearm = ChildBoneFrame(gunUpperArm, kUpperArmLength, gunElbow);
-    parts.push_back({RoundedSegment(figure * gunUpperArm, kUpperArmLength, kArmRadius),
-                     teamColor});
-    parts.push_back({JointBall(figure * gunForearm, kArmRadius), teamColor});
-    parts.push_back({RoundedSegment(figure * gunForearm, kLowerArmLength, kArmRadius * 0.92f),
-                     teamColor});
+    if (ride.armsUp <= 0.0f) {
+      parts.push_back({RoundedSegment(figure * gunUpperArm, kUpperArmLength, kArmRadius),
+                       teamColor});
+      parts.push_back({JointBall(figure * gunForearm, kArmRadius), teamColor});
+      parts.push_back({RoundedSegment(figure * gunForearm, kLowerArmLength, kArmRadius * 0.92f),
+                       teamColor});
+    }
 
     // Pistol gripped at the hand (end of the arm). The weapon-local +X
     // (barrel) must run along the pitched hand frame's -Y, which
@@ -605,7 +691,7 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
     // arm angle so the barrel stays on the aim bearing, the grip drops so
     // the fist wraps it below the slide, and recoil slides the gun back
     // along the barrel.
-    const glm::mat4 weaponFrame =
+    glm::mat4 weaponFrame =
         gunForearm *
         glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -kLowerArmLength, 0.0f)) *
         glm::rotate(glm::mat4(1.0f), gunPitch, glm::vec3(0.0f, 0.0f, 1.0f)) *
@@ -613,10 +699,22 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
         glm::rotate(glm::mat4(1.0f), -inward, glm::vec3(0.0f, -1.0f, 0.0f)) *
         glm::translate(glm::mat4(1.0f),
                        glm::vec3(-kRecoilSlide * shot.recoil, kPistolGripDrop, 0.0f));
+    // Riding: the pistol goes to the hip holster while both hands grip the handle.
+    weaponFrame[3] = glm::mix(weaponFrame[3], glm::vec4(0.05f, 0.5f, 0.34f, 1.0f), ride.armsUp);
     AppendWeapon(&parts, figure * weaponFrame, unit.weapon, compactWeapon);
     AppendMuzzleFlash(&parts, figure * weaponFrame, unit.weapon, shot.recoil, compactWeapon);
 
-    if (unit.shootElapsed >= 0.0f) {
+    if (ride.armsUp > 0.0f) {
+      const glm::vec3 gunHand =
+          glm::vec3(gunForearm * glm::vec4(0.0f, -kLowerArmLength, 0.0f, 1.0f));
+      const glm::vec3 swingHand =
+          glm::vec3(leftForearm * glm::vec4(0.0f, -kLowerArmLength, 0.0f, 1.0f));
+      AppendArmIK(&parts, figure, glm::vec3(0.0f, kShoulderHeight, kArmSideOffset),
+                  glm::mix(gunHand, handleRight, ride.armsUp), glm::vec3(-0.3f, -0.6f, 0.8f),
+                  teamColor);
+      AppendArmIK(&parts, figure, leftShoulderPivot, glm::mix(swingHand, handleLeft, ride.armsUp),
+                  glm::vec3(-0.3f, -0.6f, -0.8f), teamColor);
+    } else if (unit.shootElapsed >= 0.0f) {
       // Two-handed firing stance: the support hand leaves its gait swing and
       // clasps the front of the grip as the gun comes up (and rides the
       // recoil with it, since the target lives in the weapon frame).
@@ -646,12 +744,16 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
     // handguard; the aim grip rises toward the leaned head's sight line.
     const glm::vec3 gripLow(0.26f, 0.75f, -0.02f);
     const glm::vec3 gripAim(0.22f, 1.02f, 0.03f);
-    const glm::vec3 grip = glm::mix(gripLow, gripAim, shot.raise);
+    // Riding: the rifle is slung muzzle-up across the back.
+    const glm::vec3 gripSling(-0.26f, 0.62f, 0.10f);
+    const glm::vec3 grip = glm::mix(glm::mix(gripLow, gripAim, shot.raise), gripSling, ride.armsUp);
     // rotate(+angle, +Y) yaws the muzzle toward the figure's left (-Z);
     // rotate(+angle, Z) pitches it up.
-    const float weaponYaw = glm::mix(glm::radians(35.0f) + sway, 0.0f, shot.raise);
-    const float weaponPitch = glm::mix(glm::radians(-35.0f), 0.0f, shot.raise) +
-                              kRecoilMuzzleFlip * kRifleRecoilScale * shot.recoil;
+    const float weaponYaw =
+        glm::mix(glm::radians(35.0f) + sway, 0.0f, shot.raise) * (1.0f - ride.armsUp);
+    const float weaponPitch = glm::mix(glm::mix(glm::radians(-35.0f), 0.0f, shot.raise) +
+                                           kRecoilMuzzleFlip * kRifleRecoilScale * shot.recoil,
+                                       glm::radians(80.0f), ride.armsUp);
     // The whole weapon-and-arms assembly twists onto the target's bearing
     // around the torso's vertical axis (same sign convention as facingYaw).
     const glm::mat4 weaponFig =
@@ -664,9 +766,12 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
     AppendWeapon(&parts, figure * weaponFig, unit.weapon, compactWeapon);
     AppendMuzzleFlash(&parts, figure * weaponFig, unit.weapon, shot.recoil, compactWeapon);
 
-    const glm::vec3 rightHand = glm::vec3(weaponFig * glm::vec4(0.0f, -0.03f, 0.0f, 1.0f));
+    const glm::vec3 rightHand =
+        glm::mix(glm::vec3(weaponFig * glm::vec4(0.0f, -0.03f, 0.0f, 1.0f)), handleRight,
+                 ride.armsUp);
     const glm::vec3 leftHand =
-        glm::vec3(weaponFig * glm::vec4(WeaponLeftHandLocal(unit.weapon), 1.0f));
+        glm::mix(glm::vec3(weaponFig * glm::vec4(WeaponLeftHandLocal(unit.weapon), 1.0f)),
+                 handleLeft, ride.armsUp);
     // The IK shoulders ride the bladed torso (torsoYaw), which swings the
     // left shoulder forward toward the handguard while aiming.
     const glm::mat3 shoulderRot = glm::mat3(

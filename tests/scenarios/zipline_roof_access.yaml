@@ -1,0 +1,42 @@
+name: zipline_roof_access
+description: >
+  Ziplines run from the street up to a rooftop. The 6-high building's flat
+  roof slab joins nothing, so the line is the only way onto it: Blue walks to
+  the short street post, rides up to the roof post (mount, hang, dismount)
+  and walks on across the roof; next round it walks back to the roof post and
+  rides the line down to the street. Red cannot walk onto the roof.
+
+map:
+  half_extent: 40
+  obstacles:
+    - {center: [6, 0], half_extent: [4, 4], height: 6, roof_slab: true}
+  ziplines:
+    - {from: [-7, 0, 0], to: [3, 6.05, 0]}
+
+units:
+  - {id: 0, team: blue, position: [-9, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [-9, 0, 20], facing_degrees: 0}
+
+script:
+  - action: move
+    actor: 1
+    destination: [6, 6.05, 0]
+    expect_unreachable: true
+    comment: Red is too far from the line to get up this round.
+  - action: move
+    actor: 0
+    destination: [7, 6.05, 0]
+    comment: Walk 2 to the street post, ride up 11.7, walk 4 across the roof.
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [7, 6.05, 0], tolerance: 0.05}
+  - action: move
+    actor: 0
+    destination: [-12, 0, 0]
+    comment: Back across the roof, ride down, walk on along the street.
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [-12, 0, 0], tolerance: 0.05}
+  - assert: {round: 3}

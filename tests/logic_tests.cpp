@@ -12,6 +12,7 @@
 #include "game/NavMesh.h"
 #include "game/Raycast.h"
 #include "game/Scene.h"
+#include "game/TurnTimeline.h"
 #include "game/Types.h"
 #include "game/Visibility.h"
 
@@ -2298,6 +2299,129 @@ void TestZiplineLegsChainAcrossRounds() {
   CHECK(glm::distance(game.FindUnit(0)->position, glm::vec3(-14.0f, 0.0f, 0.0f)) < 0.05f);
 }
 
+// ---- Turn timeline: scrub/replay history (issue #143). ----
+
+tactics::Scene TwoUnitTimelineScene() {
+  tactics::Scene scene;
+  tactics::Unit blue;
+  blue.id = 0;
+  blue.team = tactics::Team::Blue;
+  blue.position = glm::vec3(-8.0f, 0.0f, 0.0f);
+  blue.facingYaw = 0.0f;
+  scene.units.push_back(blue);
+  tactics::Unit red;
+  red.id = 1;
+  red.team = tactics::Team::Red;
+  red.position = glm::vec3(8.0f, 0.0f, 0.0f);
+  red.facingYaw = 3.14159265f;
+  scene.units.push_back(red);
+  return scene;
+}
+
+// Plans blue 0's move to `destination` (red 1 passes), commits, and runs the
+// round to completion while the timeline observes each step -- the same
+// Observe-after-Update cadence as main.cpp's frame loop.
+void PlayTimelineRound(GameLogic& game, TurnTimeline& timeline, const glm::vec3& destination) {
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(destination, Team::Blue);
+  game.FinishMovePlan();
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+  int steps = 0;
+  while (game.Mode() == InputMode::Executing && ++steps < 10000) {
+    game.Update(0.05f);
+    game.UpdateSightingMemory(0.05f);
+    timeline.Observe(game, 0.05f);
+  }
+  CHECK(steps < 10000);
+  timeline.Observe(game, 0.0f);
+}
+
+void TestTurnTimelineRecordsTicksAndReplays() {
+  GameLogic game(TwoUnitTimelineScene());
+  MakePassive(game);
+  TurnTimeline timeline;
+  timeline.Reset(game);
+  TimelinePlayback playback;
+
+  CHECK(timeline.Ticks().size() == 1);
+  CHECK(timeline.Ticks()[0].label == "Start");
+  CHECK(timeline.FrameCount() == 1);
+
+  PlayTimelineRound(game, timeline, glm::vec3(0.0f, 0.0f, 0.0f));  // 8 units, ~2 s.
+  CHECK(game.RoundNumber() == 2);
+  CHECK(timeline.Ticks().size() == 2);
+  CHECK(timeline.Ticks()[1].label == "T1");
+  CHECK(timeline.FrameCount() > 10);  // The executing round was captured frame by frame.
+
+  // Seek back to the start: the replay shows the original state...
+  CHECK(playback.SeekTick(timeline, game, 0));
+  CHECK(playback.Active());
+  CHECK(!playback.Playing());
+  CHECK(playback.Game().RoundNumber() == 1);
+  CHECK(glm::distance(playback.Game().FindUnit(0)->position, glm::vec3(-8.0f, 0.0f, 0.0f)) <
+        1e-3f);
+  // ...while the live game is untouched.
+  CHECK(glm::distance(game.FindUnit(0)->position, glm::vec3(0.0f)) < 1e-3f);
+  CHECK(game.RoundNumber() == 2);
+
+  // Play one second: the replayed mover is mid-walk near x = -4 (4 u/s).
+  playback.Play(timeline, game);
+  CHECK(playback.Playing());
+  playback.Update(timeline, 1.0f);
+  CHECK(std::fabs(playback.Game().FindUnit(0)->position.x - (-4.0f)) < 0.5f);
+  CHECK(playback.Game().FindUnit(0)->position.x > -8.0f + 1e-3f);
+
+  // Fast-forward far past the end: playback pauses at the live end, on the
+  // round's final state.
+  playback.Update(timeline, 100.0f);
+  CHECK(playback.Active());
+  CHECK(!playback.Playing());
+  CHECK(playback.AtLiveEnd(timeline));
+  CHECK(glm::distance(playback.Game().FindUnit(0)->position, glm::vec3(0.0f)) < 1e-3f);
+
+  // Seeking to the newest tick while paused returns to the live view.
+  CHECK(playback.SeekTick(timeline, game, 1));
+  CHECK(!playback.Active());
+}
+
+void TestTurnTimelineResetsOnNewMatch() {
+  GameLogic game(TwoUnitTimelineScene());
+  MakePassive(game);
+  TurnTimeline timeline;
+  timeline.Reset(game);
+  TimelinePlayback playback;
+
+  PlayTimelineRound(game, timeline, glm::vec3(0.0f, 0.0f, 0.0f));
+  CHECK(timeline.Ticks().size() == 2);
+  CHECK(playback.SeekTick(timeline, game, 0));
+  CHECK(playback.Active());
+
+  // A new match is detected from observation alone (the round counter went
+  // backwards) -- how a follower, which gets no explicit Reset call, learns
+  // of it. Observe reports it so the caller can drop the replay.
+  game.Reset(TwoUnitTimelineScene());
+  CHECK(timeline.Observe(game, 0.016f));
+  playback.Reset();
+  CHECK(!playback.Active());
+  CHECK(timeline.Ticks().size() == 1);
+  CHECK(timeline.FrameCount() == 1);
+
+  // The new match records a fresh history replayable from its own start.
+  PlayTimelineRound(game, timeline, glm::vec3(-2.0f, 0.0f, 4.0f));
+  CHECK(timeline.Ticks().size() == 2);
+  CHECK(playback.SeekTick(timeline, game, 0));
+  CHECK(glm::distance(playback.Game().FindUnit(0)->position, glm::vec3(-8.0f, 0.0f, 0.0f)) <
+        1e-3f);
+  playback.Play(timeline, game);
+  playback.Update(timeline, 100.0f);
+  CHECK(glm::distance(playback.Game().FindUnit(0)->position, glm::vec3(-2.0f, 0.0f, 4.0f)) <
+        1e-3f);
+}
+
 // Minimal flat scene for the free-aim tests: unit ids are sequential from 0
 // so sighting memory indexes line up.
 tactics::Scene AimScene(const std::vector<std::pair<Team, glm::vec3>>& layout,
@@ -3000,6 +3124,8 @@ int main() {
   TestResetClearsSightings();
   TestImportStateOfNewGameClearsFollowerSightings();
   TestFollowerBuildsSightingsWithoutPhysicsUpdate();
+  TestTurnTimelineRecordsTicksAndReplays();
+  TestTurnTimelineResetsOnNewMatch();
   TestZiplineExtendsReachBeyondWalking();
   TestZiplineCostScalesWithLength();
   TestZiplineIsTwoWay();

@@ -39,6 +39,7 @@
 
 #include "visual/ImageUtil.h"
 #include "game/GameLogic.h"
+#include "game/TurnTimeline.h"
 #include "game/Types.h"
 #include "game/Visibility.h"
 #include "gfx/Camera.h"
@@ -181,6 +182,12 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
 
   const int paneWidth = kWindowWidth / 2;
 
+  // Turn timeline (issue #143): every capture draws the HUD timeline strip,
+  // as the live app does (RunScenario hands over its recorder/replay
+  // controller via hooks.onTimeline below).
+  const tactics::TurnTimeline* timelineView = nullptr;
+  const tactics::TimelinePlayback* timelinePlayback = nullptr;
+
   // Issue #110: the scenario (or --fov-shadow-map) picks the FOV overlay
   // path; restored to the CPU default after the scenario.
   const bool shadowMapFov =
@@ -250,6 +257,11 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
         layouts[pane] = ui::HudLayout{};
         ui::DrawHud(g, PaneTeam(pane), planning, ui::ComputePaneRect(pane, kWindowWidth),
                     kWindowHeight, cameras[pane], &layouts[pane]);
+        if (timelineView && timelinePlayback) {
+          ui::DrawTimeline(*timelineView, *timelinePlayback, PaneTeam(pane),
+                           ui::ComputePaneRect(pane, kWindowWidth), kWindowHeight,
+                           &layouts[pane]);
+        }
       }
     };
     // Auto-resize windows need a couple of frames to settle on their content
@@ -386,6 +398,11 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
       }
     }
     camera.Update(1.0e3f);
+  };
+  hooks.onTimeline = [&](const tactics::TurnTimeline& timeline,
+                         const tactics::TimelinePlayback& playback) {
+    timelineView = &timeline;
+    timelinePlayback = &playback;
   };
   hooks.onActionComplete = [&](const GameLogic& game, int turn) {
     // The holds for this action have already been emitted, so framesWritten

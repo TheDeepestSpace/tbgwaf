@@ -388,6 +388,9 @@ class GameLogic {
   GameSnapshot ExportState() const;
   bool ImportState(const GameSnapshot& snapshot);
   bool ImportTeamPlans(const GameSnapshot& snapshot, Team team);
+  // Drops every figure's plan (incl. queued legs). The timeline replay uses
+  // it so past turns don't show what was planned/armed next.
+  void ClearAllPlans();
 
   // True while `unitId` has an in-flight planned move animating as part of
   // the executing round (figures from both teams can be animating at once).

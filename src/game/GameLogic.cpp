@@ -1651,7 +1651,7 @@ bool GameLogic::IsUnitMoving(int unitId) const {
   return false;
 }
 
-void GameLogic::ApplyPlaybookReactions() {
+void GameLogic::ApplyPlaybookReactions(bool roundStart) {
   // A reaction burst keeps firing only while its target stays in the
   // shooter's FOV+LOS; the unspent rounds stay in reactionAmmo_ for when the
   // enemy is sighted again.
@@ -1684,14 +1684,18 @@ void GameLogic::ApplyPlaybookReactions() {
     // A rider is committed to the line: it neither reacts nor halts mid-air.
     if (IsUnitRiding(unit.id)) continue;
     const bool moving = isMidMove(unit.id);
+    // Round start only seeds idle-vs-idle sightings; movement reacts per tick.
+    if (roundStart && moving) continue;
     Unit* nearest = nullptr;
     float nearestDist = 0.0f;
     bool canSeeMe = false;
     for (Unit& enemy : scene_.units) {
       if (!enemy.alive || enemy.team == unit.team) continue;
-      // A stationary figure reacts to enemies *moving* into its view (the
-      // watcher-on-mover case), not to everyone idling in its cone.
-      if (!moving && !isMidMove(enemy.id)) continue;
+      // With ignoreIdle a stationary figure reacts only to enemies *moving*
+      // into its view, not to everyone idling in its cone.
+      const bool enemyMoving = isMidMove(enemy.id);
+      if (roundStart && enemyMoving) continue;
+      if (!moving && Playbook(unit.team).ignoreIdle && !enemyMoving) continue;
       if (!CanUnitSee(unit, enemy, scene_.obstacles, scene_.walkSurfaces, scene_.ground)) continue;
       const float dist = glm::distance(unit.position, enemy.position);
       if (!nearest || dist < nearestDist) {
@@ -1776,7 +1780,9 @@ void GameLogic::CommitRound() {
   // Tick 0: bursts whose FOV/LOS is already valid at the pre-move positions
   // open fire the instant the round starts (simultaneously,
   // snapshot-judged); blocked ones stay pending and re-check as the round's
-  // movement unfolds.
+  // movement unfolds. Standing playbook reactions to what is already in view
+  // (e.g. idle enemies) start here too, so an all-pass round still reacts.
+  ApplyPlaybookReactions(/*roundStart=*/true);
   ResolvePendingShots();
   SyncFlag();
 

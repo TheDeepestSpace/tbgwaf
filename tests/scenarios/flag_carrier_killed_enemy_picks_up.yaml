@@ -1,0 +1,58 @@
+name: flag_carrier_killed_enemy_picks_up
+description: >
+  CTF part 1 (carry mode): the carrier is shot dead, so the flag drops at the spot where it
+  fell (turn 2, with its drop settle). An enemy figure that later passes through that spot
+  auto-picks it up -- dropped is no different from at rest.
+
+flag:
+  enabled: true
+  win_on_grab: false
+
+shot_rolls: [0.0]
+
+units:
+  - {id: 0, team: blue, position: [-4, 0, 0], facing_degrees: 0}
+  - {id: 1, team: blue, position: [-8, 0, -8], facing_degrees: 0}
+  - {id: 2, team: red, position: [6, 0, 0], facing_degrees: 180}
+  - {id: 3, team: red, position: [0, 0, 7], facing_degrees: 270}
+
+script:
+  - action: move
+    actor: 0
+    destination: [0, 0, 0]
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: pass
+    actor: 3
+  - action: commit
+  - assert: {flag_carrier: 0, flag_state: carried}
+
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: shoot
+    actor: 2
+    target: 0
+  - action: pass
+    actor: 3
+  - action: commit
+  - assert: {unit: 0, alive: false}
+  - assert: {flag_carrier: -1, flag_state: dropped}
+  - assert: {flag_position: [0, 0], tolerance: 0.05, comment: Dropped where the carrier fell}
+  - assert: {flag_visible_to: blue}
+  - assert: {flag_visible_to: red}
+
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: move
+    actor: 3
+    destination: [0, 0, -3]
+    comment: Runs through the dropped flag's spot.
+  - action: commit
+  - assert: {flag_carrier: 3, flag_state: carried}
+  - assert: {winner: none}

@@ -51,6 +51,18 @@ struct Tracer {
   float age = 0.0f;
 };
 
+// Neutral flag objective state (see FlagConfig). Three states: at rest
+// (carrierId < 0, dropElapsed < 0), carried (carrierId >= 0; the figure's
+// position is the flag's), or dropped (carrierId < 0, dropElapsed >= 0: it
+// was just let fall where the carrier died and plays a short settle beat).
+// A dropped flag is picked up by any figure passing it, exactly like one at rest.
+struct FlagState {
+  bool enabled = false;
+  glm::vec3 position{0.0f};  // Where it lies; trails the carrier while carried.
+  int carrierId = -1;
+  float dropElapsed = -1.0f;  // Seconds since dropped (<0 = never dropped / at rest).
+};
+
 struct GameSnapshot {
   struct UnitState {
     int id = -1;
@@ -74,6 +86,7 @@ struct GameSnapshot {
     float idleElapsed = 0.0f;
     float shootElapsed = -1.0f;
     float shootAimYaw = 0.0f;
+    float grabElapsed = -1.0f;  // Flag pickup reach beat (see Unit).
     bool moving = false;  // Has an in-flight move in the executing round.
   };
   std::vector<UnitState> units;
@@ -82,6 +95,7 @@ struct GameSnapshot {
   InputMode mode = InputMode::AwaitingSelection;
   int roundNumber = 1;
   int winner = -1;  // -1 = none, else static_cast<int>(Team).
+  FlagState flag;
 };
 
 // Text encoding of a snapshot (for the page-level message bus). Deserialize
@@ -148,6 +162,22 @@ class GameLogic {
   std::optional<int> SelectedUnitId() const { return selectedUnitId_; }
   std::optional<Team> Winner() const { return winner_; }
   int RoundNumber() const { return roundNumber_; }
+
+  // --- Neutral flag objective (CTF part 1). A living figure whose move
+  // passes through the flag's spot (anywhere along its path, not just where
+  // it stops) automatically grabs it: no action, no action cost. With
+  // FlagConfig::winOnGrab the grabber's team wins at once, ending the round.
+  // If several figures touch it in the same tick the earliest arrival (by
+  // distance walked / run speed) grabs it; an exact tie goes to the lowest
+  // unit id. A carrier can act exactly as normal (shooting, FOV and
+  // accuracy are unchanged). When the carrier dies the flag drops at that
+  // spot and anyone passing picks it up again. ---
+  const FlagState& Flag() const { return flag_; }
+  // Where the flag currently is (the carrier's feet while carried).
+  glm::vec3 FlagPosition() const;
+  // The flag is a neutral objective, so at rest or dropped it is visible to
+  // both teams regardless of fog. A carried flag is visible with its carrier.
+  bool FlagVisibleTo(Team team) const;
 
   // True once every living figure on *both* teams has a non-None plan,
   // i.e. CommitRound() is ready to be called.
@@ -453,6 +483,20 @@ class GameLogic {
 
   void FinishRound();
 
+  // Flag helpers. InitFlag places the flag at Reset; SyncFlag drops it if its
+  // carrier has died and refreshes each unit's carryingFlag; a FlagTouch is a
+  // figure reaching the flag this tick (arrival = seconds on the execution
+  // clock), resolved by GrabFlagFrom.
+  struct FlagTouch {
+    int unitId = -1;
+    float arrival = 0.0f;
+  };
+  void InitFlag();
+  void SyncFlag();
+  bool TouchesFlag(const glm::vec3& position) const;
+  void CollectStationaryFlagTouches(float arrival, std::vector<FlagTouch>* touches) const;
+  void GrabFlagFrom(const std::vector<FlagTouch>& touches);
+
   // The Executing-mode body of Update(): advances every in-flight move,
   // re-checks held shots, and finishes the round once nothing is in flight.
   void AdvanceExecutingRound(float dtSeconds);
@@ -487,6 +531,8 @@ class GameLogic {
   InputMode mode_ = InputMode::AwaitingSelection;
   std::optional<int> selectedUnitId_;
   std::optional<Team> winner_;
+  FlagState flag_;
+  std::optional<Team> flagWinner_;  // Set by a win-on-grab pickup until FinishRound.
 
   std::vector<glm::vec3> movePreviewPath_;
   bool movePreviewValid_ = false;

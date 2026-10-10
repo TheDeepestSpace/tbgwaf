@@ -48,6 +48,20 @@ restores the analytic FOV-cone overlay. Visual scenarios still default to
 the analytic overlay and opt in
 with a `render: {fov_overlay: shadow_map}` block.
 
+### Flag objective (CTF part 1)
+
+A scene (or scenario YAML `flag:` block) can enable a neutral flag at the map
+center (or the nearest free spot; `flag: {position: [x, z]}` overrides). A
+living figure whose move passes through the flag's spot picks it up for free
+and its team wins at once; `win_on_grab: false` instead just carries it
+(stowed on the figure's back) while play continues. A carrier acts as normal;
+if it dies the flag drops there and anyone passing picks it up. If several
+figures reach it in the same tick the earliest arrival wins, with an exact tie
+going to the lowest unit id. The flag is a neutral objective, so fog never
+hides it (a carried one shows with its carrier). `round_limit: N` ends the
+match as a draw after N rounds with no winner. Flag state travels in the
+snapshot text protocol (`ExportState`/`ImportState`).
+
 ### Gameplay scenario tests
 
 `tests/scenarios/*.yaml` are state-only (no rendering) gameplay regression
@@ -140,7 +154,7 @@ and removes the preview automatically when the PR closes.
 
 ## App flow
 
-Screen flow (Splash -> Map Select -> Gameplay), declared in
+Screen flow (Splash -> Game Mode -> Map Select -> Gameplay), declared in
 `flow/app_flow.yaml`. The build regenerates `flow/app_flow.mmd` from it; paste
 that file's contents below if the flow changes.
 
@@ -148,12 +162,16 @@ that file's contents below if the flow changes.
 %%{init: {"flowchart": {"htmlLabels": false}, "themeVariables": {"fontFamily": "Arial, sans-serif"}}}%%
 flowchart TD
     splash("  Splash  ")
+    game_mode("  Game Mode  ")
     map_select("  Map Select  ")
     gameplay("  Gameplay  ")
-    splash -->|new_game| map_select
+    splash -->|new_game| game_mode
+    game_mode -->|select_regular| map_select
+    game_mode -->|select_ctf| map_select
+    game_mode -->|back| splash
     map_select -->|select_urban| gameplay
     map_select -->|select_hills| gameplay
-    map_select -->|back| splash
+    map_select -->|back| game_mode
 ```
 
 ## Controls

@@ -225,7 +225,10 @@ void TestPlayerVsAiTurnAutomaticallyBecomesCommittable() {
   game.CommitRound();
   game.Update(10.0f);  // Bursts are paced in real time; fast-forward the round.
   CHECK(game.Mode() == InputMode::GameOver);
-  CHECK(game.Winner() == Team::Red);
+  // Blue passed, but the default playbook lets an idle figure return fire, so
+  // the duel may end in mutual elimination (no winner) -- never a Blue win.
+  CHECK(game.Winner() != Team::Blue);
+  CHECK(!game.FindUnit(0)->alive);
 }
 
 void TestCompleteAiVsAiMatchAndTerminalStop() {

@@ -182,19 +182,9 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
 
   const int paneWidth = kWindowWidth / 2;
 
-  // Turn timeline (issue #143): scenarios that script `timeline_*` steps get
-  // the HUD timeline strip drawn into their captures (RunScenario hands over
-  // its recorder/replay controller via hooks.onTimeline below). Scenarios
-  // that don't are rendered exactly as before, keeping their goldens stable.
-  using tactics::scenario::ScenarioAction;
-  bool usesTimeline = false;
-  for (const auto& step : scenario.steps) {
-    if (step.action && (step.action->kind == ScenarioAction::Kind::TimelineSeek ||
-                        step.action->kind == ScenarioAction::Kind::TimelinePlay ||
-                        step.action->kind == ScenarioAction::Kind::TimelinePause)) {
-      usesTimeline = true;
-    }
-  }
+  // Turn timeline (issue #143): every capture draws the HUD timeline strip,
+  // as the live app does (RunScenario hands over its recorder/replay
+  // controller via hooks.onTimeline below).
   const tactics::TurnTimeline* timelineView = nullptr;
   const tactics::TimelinePlayback* timelinePlayback = nullptr;
 
@@ -409,13 +399,11 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     }
     camera.Update(1.0e3f);
   };
-  if (usesTimeline) {
-    hooks.onTimeline = [&](const tactics::TurnTimeline& timeline,
-                           const tactics::TimelinePlayback& playback) {
-      timelineView = &timeline;
-      timelinePlayback = &playback;
-    };
-  }
+  hooks.onTimeline = [&](const tactics::TurnTimeline& timeline,
+                         const tactics::TimelinePlayback& playback) {
+    timelineView = &timeline;
+    timelinePlayback = &playback;
+  };
   hooks.onActionComplete = [&](const GameLogic& game, int turn) {
     // The holds for this action have already been emitted, so framesWritten
     // is the exclusive end of the action's video segment (turn 0 = the

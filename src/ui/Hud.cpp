@@ -36,6 +36,10 @@ bool& PlaybookOpen(Team team) {
   return open[team == Team::Blue ? 0 : 1];
 }
 
+// Set while the thermal HUD style is pushed, so draw-list text (the pane
+// team label) can follow the green symbology too.
+bool g_thermalHudStyle = false;
+
 const char* ReactionName(tactics::ReactionAction a) {
   static const char* names[] = {"Do Nothing", "Shoot", "Stop", "Continue", "Shoot + Stop",
                                 "Shoot + Continue"};
@@ -302,12 +306,14 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
     }
   }
 
-  ImGui::GetForegroundDrawList()->AddText(ImVec2(left + 10.0f, windowHeight - 24.0f),
-                                           IM_COL32(255, 255, 255, 220), TeamName(team));
+  ImGui::GetForegroundDrawList()->AddText(
+      ImVec2(left + 10.0f, windowHeight - 24.0f),
+      g_thermalHudStyle ? IM_COL32(110, 255, 130, 230) : IM_COL32(255, 255, 255, 220),
+      TeamName(team));
   return actions;
 }
 
-void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal,
+void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
                     bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,
                     float fovMs, const gfx::RenderFrameStats& stats, float top) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
@@ -316,6 +322,11 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal,
   ImGui::Checkbox("Disable FOV cones", &disableFov);
   ImGui::Checkbox("Disable shadows", &disableShadows);
   ImGui::Checkbox("Thermal view", &thermal);
+  if (thermal) {
+    // Polarity toggle, like the white-hot/black-hot switch on a real FLIR.
+    ImGui::SameLine();
+    ImGui::Checkbox("Black hot", &thermalBlackHot);
+  }
   ImGui::Checkbox("Disable occlusion fade", &disableOcclusionFade);
   ImGui::Checkbox("Show FPS", &showFps);
   if (showFps) ImGui::Text("%.1f FPS (%.2f ms)", fps, frameMs);
@@ -324,6 +335,42 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal,
   ImGui::Text("Vertices: %lld", stats.vertices);
   ImGui::Text("FOV cones: %.2f ms", fovMs);
   ImGui::End();
+}
+
+void PushThermalHudStyle() {
+  g_thermalHudStyle = true;
+  const ImVec4 text(0.55f, 1.00f, 0.60f, 1.00f);
+  const ImVec4 textDim(0.32f, 0.62f, 0.36f, 1.00f);
+  const ImVec4 bright(0.30f, 0.90f, 0.40f, 1.00f);
+  const ImVec4 bg(0.00f, 0.07f, 0.02f, 0.62f);
+  const ImVec4 bgSolid(0.02f, 0.12f, 0.05f, 1.00f);
+  const ImVec4 widget(0.05f, 0.24f, 0.10f, 1.00f);
+  const ImVec4 widgetHover(0.09f, 0.36f, 0.15f, 1.00f);
+  const ImVec4 widgetActive(0.13f, 0.48f, 0.20f, 1.00f);
+  ImGui::PushStyleColor(ImGuiCol_Text, text);
+  ImGui::PushStyleColor(ImGuiCol_TextDisabled, textDim);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, bg);
+  ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.70f, 0.32f, 0.55f));
+  ImGui::PushStyleColor(ImGuiCol_TitleBg, bgSolid);
+  ImGui::PushStyleColor(ImGuiCol_TitleBgActive, bgSolid);
+  ImGui::PushStyleColor(ImGuiCol_TitleBgCollapsed, bgSolid);
+  ImGui::PushStyleColor(ImGuiCol_FrameBg, widget);
+  ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, widgetHover);
+  ImGui::PushStyleColor(ImGuiCol_FrameBgActive, widgetActive);
+  ImGui::PushStyleColor(ImGuiCol_Button, widget);
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, widgetHover);
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, widgetActive);
+  ImGui::PushStyleColor(ImGuiCol_CheckMark, bright);
+  ImGui::PushStyleColor(ImGuiCol_Header, widget);
+  ImGui::PushStyleColor(ImGuiCol_HeaderHovered, widgetHover);
+  ImGui::PushStyleColor(ImGuiCol_HeaderActive, widgetActive);
+  ImGui::PushStyleColor(ImGuiCol_SliderGrab, bright);
+  ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, text);
+}
+
+void PopThermalHudStyle() {
+  ImGui::PopStyleColor(19);
+  g_thermalHudStyle = false;
 }
 
 }  // namespace ui

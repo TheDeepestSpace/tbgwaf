@@ -111,9 +111,16 @@ void main() {
 const char* kColorFragmentShaderSrc = R"(#version 300 es
 precision mediump float;
 in vec4 vColor;
+uniform int uThermal;
 out vec4 FragColor;
 void main() {
-  FragColor = vColor;
+  vec4 color = vColor;
+  // Thermal view: monochrome sensor-green symbology (see kUnlitFragmentShaderSrc).
+  if (uThermal != 0) {
+    float lum = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+    color.rgb = vec3(0.25, 0.95, 0.35) * (0.30 + 0.70 * lum);
+  }
+  FragColor = color;
 }
 )";
 
@@ -143,6 +150,7 @@ uniform vec3 uAxis;
 uniform vec4 uCone;   // x = tan(half angle), y = clipped range, z = fade range, w = start alpha
 uniform vec3 uColor;
 uniform int uRequireFacing;
+uniform int uThermal;
 out vec4 FragColor;
 void main() {
   vec3 d = vWorld - uApex;
@@ -158,16 +166,31 @@ void main() {
   // the mask is where a shot is most likely to land.
   float angleFalloff = cos(atan(radial, t) / atan(uCone.x) * 1.57079632679);
   float rangeFalloff = pow(max(1.0 - t / uCone.z, 0.0), 4.0);
-  FragColor = vec4(uColor, uCone.w * angleFalloff * rangeFalloff);
+  vec3 rgb = uColor;
+  // Thermal view: monochrome sensor-green symbology (see kUnlitFragmentShaderSrc).
+  if (uThermal != 0) {
+    float lum = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+    rgb = vec3(0.25, 0.95, 0.35) * (0.30 + 0.70 * lum);
+  }
+  FragColor = vec4(rgb, uCone.w * angleFalloff * rangeFalloff);
 }
 )";
 
 const char* kUnlitFragmentShaderSrc = R"(#version 300 es
 precision mediump float;
 uniform vec4 uColor;
+uniform int uThermal;
 out vec4 FragColor;
 void main() {
-  FragColor = uColor;
+  vec4 color = uColor;
+  // Thermal view: overlays drop their team/gameplay colors for the
+  // monochrome green symbology of real sensor footage, keeping their
+  // relative brightness so states stay distinguishable.
+  if (uThermal != 0) {
+    float lum = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+    color.rgb = vec3(0.25, 0.95, 0.35) * (0.30 + 0.70 * lum);
+  }
+  FragColor = color;
 }
 )";
 
@@ -205,8 +228,24 @@ uniform vec3 uViewPos;
 uniform sampler2D uShadowMap;
 uniform int uDisableShadows;
 uniform int uThermal;
-uniform int uThermalHot;
+uniform int uThermalBlackHot;  // 1 = hot reads dark (the review reference), 0 = white-hot.
+uniform int uThermalFigure;    // Drawing a figure: the hottest thing in the scene.
 out vec4 FragColor;
+
+// Hash/value noise for the thermal view's sensor grain and surface blotches.
+// Pure arithmetic on fragment/world coordinates, so native and WASM renders
+// stay deterministic for the goldens.
+float ThermalHash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float ThermalNoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(ThermalHash(i), ThermalHash(i + vec2(1.0, 0.0)), u.x),
+             mix(ThermalHash(i + vec2(0.0, 1.0)), ThermalHash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
 
 float ComputeShadow(vec3 normal) {
   if (uDisableShadows != 0) return 0.0;
@@ -238,18 +277,33 @@ void main() {
   const float kAmbient = 0.35;
   float lit = kAmbient + (1.0 - shadow) * diffuse * 0.65;
   if (uThermal != 0) {
-    // FLIR-style white-hot palette. Figures ignore their material/team
-    // colors and sit at the top of the range; world geometry keeps enough
-    // luminance, height, and diffuse variation to remain readable.
-    float gray;
-    if (uThermalHot != 0) {
-      gray = 0.82 + lit * 0.18;
+    // Modeled on real night-time aerial FLIR footage (PR #178 review
+    // reference): a relative "heat" signal mapped to gray by the selected
+    // polarity. Bodies are by far the hottest thing in the scene. Surfaces
+    // that face the night sky have radiated their warmth away (roofs read
+    // nearly blank-cold), walls keep some of the day's heat, and dark
+    // materials like asphalt keep the most; low-frequency blotches break up
+    // large surfaces the way patchy moisture and vegetation do on camera.
+    float heat;
+    if (uThermalFigure != 0) {
+      heat = 0.86 + diffuse * 0.14;  // Slight limb shading keeps the figure readable.
     } else {
+      float skyFacing = clamp(normal.y, 0.0, 1.0);
       float luminance = dot(uColor.rgb, vec3(0.2126, 0.7152, 0.0722));
-      float height = clamp(vWorldPos.y / 12.0, 0.0, 1.0);
-      gray = clamp(0.035 + luminance * lit * 0.62 + height * 0.12, 0.035, 0.58);
+      float blotch = ThermalNoise(vWorldPos.xz * 0.35) * 0.6 +
+                     ThermalNoise(vWorldPos.xz * 1.4) * 0.4;
+      // Faces at different orientations also pick up slightly different
+      // apparent temperature (emissivity falls off at grazing angles), which
+      // the small diffuse term stands in for -- it keeps box faces separable.
+      heat = 0.42 - skyFacing * 0.36 + (1.0 - luminance) * 0.25 +
+             (blotch - 0.5) * 0.14 + diffuse * 0.05;
+      heat = clamp(heat, 0.03, 0.75);
     }
-    FragColor = vec4(vec3(gray), uColor.a);
+    float gray = uThermalBlackHot != 0 ? 1.0 - heat : heat;
+    // Sensor grain over everything; real detectors never deliver a clean
+    // flat field.
+    gray += (ThermalHash(gl_FragCoord.xy) - 0.5) * 0.045;
+    FragColor = vec4(vec3(clamp(gray, 0.0, 1.0)), uColor.a);
     return;
   }
   FragColor = vec4(uColor.rgb * lit, uColor.a);
@@ -328,6 +382,7 @@ uniform float uFar;
 uniform float uTexelPerDepth;  // World size of one map texel per unit of map depth.
 uniform float uProbeHeight;
 uniform vec4 uColor;
+uniform int uThermal;
 out vec4 FragColor;
 
 // Perspective depth-buffer value -> distance along the map's view axis.
@@ -393,7 +448,13 @@ void main() {
   // Binary edge: a partially lit fragment would claim the stencil with a
   // faint alpha and block a teammate with a clearer view of the same pixel.
   if (lit < 0.5) discard;
-  FragColor = uColor;
+  vec4 color = uColor;
+  // Thermal view: monochrome sensor-green symbology (see kUnlitFragmentShaderSrc).
+  if (uThermal != 0) {
+    float lum = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+    color.rgb = vec3(0.25, 0.95, 0.35) * (0.30 + 0.70 * lum);
+  }
+  FragColor = color;
 }
 )";
 
@@ -2098,7 +2159,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glViewport(x, y, width, height);
   glScissor(x, y, width, height);
   if (debug.thermal) {
-    glClearColor(0.025f, 0.025f, 0.025f, 1.0f);
+    // Off-map void matches the scene's overall tone: washed-out bright for
+    // black-hot (the review's reference footage), near-black for white-hot.
+    const float voidGray = debug.thermalBlackHot ? 0.74f : 0.035f;
+    glClearColor(voidGray, voidGray, voidGray, 1.0f);
   } else {
     glClearColor(0.10f, 0.11f, 0.13f, 1.0f);
   }
@@ -2163,13 +2227,27 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   }
 
+  // Thermal view: every overlay shader swaps to monochrome sensor-green
+  // symbology. Uniform values stick to each program across Use() switches,
+  // so setting them once per pane covers all later draws.
+  const int thermalFlag = debug.thermal ? 1 : 0;
+  unlitShader_.Use();
+  unlitShader_.SetInt("uThermal", thermalFlag);
+  colorShader_.Use();
+  colorShader_.SetInt("uThermal", thermalFlag);
+  coneSurfaceShader_.Use();
+  coneSurfaceShader_.SetInt("uThermal", thermalFlag);
+  fovMaskShader_.Use();
+  fovMaskShader_.SetInt("uThermal", thermalFlag);
+
   litShader_.Use();
   litShader_.SetVec3("uLightDir", lightDir_);
   litShader_.SetVec3("uViewPos", camera.Position());
   litShader_.SetInt("uShadowMap", 0);
   litShader_.SetInt("uDisableShadows", (debug.disableShadows || debug.thermal) ? 1 : 0);
-  litShader_.SetInt("uThermal", debug.thermal ? 1 : 0);
-  litShader_.SetInt("uThermalHot", 0);
+  litShader_.SetInt("uThermal", thermalFlag);
+  litShader_.SetInt("uThermalBlackHot", debug.thermalBlackHot ? 1 : 0);
+  litShader_.SetInt("uThermalFigure", 0);
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
 
@@ -2223,12 +2301,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   }
 
-  litShader_.SetInt("uThermalHot", 1);
+  litShader_.SetInt("uThermalFigure", 1);
   for (const Unit& unit : game.GetScene().units) {
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
     DrawUnit(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, unit);
   }
-  litShader_.SetInt("uThermalHot", 0);
+  litShader_.SetInt("uThermalFigure", 0);
   DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
 
   // Issue #136: alpha-blended re-draw of the occluders marked above, sorted

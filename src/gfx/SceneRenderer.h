@@ -29,10 +29,14 @@ bool IsUnitVisibleForRender(const tactics::Unit& unit, tactics::Team viewingTeam
 struct RenderDebugOptions {
   bool disableFov = false;
   bool disableShadows = false;
-  // White-hot thermal prototype: scene geometry is grayscale, figures are
-  // brightest, and the shadow pass is skipped. Gameplay overlays are drawn
-  // by later unlit passes and keep their normal colors.
+  // Thermal camera prototype (issue #177): scene geometry is grayscale with
+  // figures the hottest signal, the shadow pass is skipped, and gameplay
+  // overlays swap to monochrome sensor-green symbology. `thermalBlackHot`
+  // picks the polarity, like the toggle on a real FLIR: true renders hot
+  // objects dark on a washed-out bright world (matching the PR #178 review's
+  // aerial reference footage), false is classic white-hot.
   bool thermal = false;
+  bool thermalBlackHot = true;
   // Issue #136: skip the camera-occlusion see-through pass (occluding
   // blocks/decks are then always drawn fully opaque).
   bool disableOcclusionFade = false;

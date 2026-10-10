@@ -1,8 +1,10 @@
 name: thermal_night_vision
 description: >
-  Issue #177 white-hot thermal rendering: both teams' visible figures are bright
-  grayscale silhouettes while terrain and blocks remain dark. FOV, the aiming
-  probability cone, selector, tracer, and HUD retain their normal overlay colors.
+  Issue #177 thermal rendering, black-hot polarity (modeled on real aerial FLIR
+  footage): figures are near-black hot silhouettes on a washed-out bright world
+  with sky-cooled roofs, patchy ground, and sensor grain. FOV, the aiming
+  probability cone, selector, tracer, and HUD all read as monochrome green
+  sensor symbology.
 
 shot_rolls: [0.0]
 
@@ -21,7 +23,7 @@ units:
 
 script:
   - action: aim
-    description: The colored FOV and shot-probability overlays stay legible over thermal figures.
+    description: The FOV and shot-probability overlays stay legible as green symbology over thermal figures.
     actor: 0
     aim_from: [5, 20, 0]
     aim_dir: [0, -1, 0]

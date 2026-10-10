@@ -248,11 +248,14 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     const bool planning = game.Mode() != InputMode::Executing && game.Mode() != InputMode::GameOver;
     std::array<ui::HudLayout, ui::kPaneCount> layouts;
     auto drawHud = [&](const GameLogic& g) {
+      // Thermal scenarios get the same sensor-green HUD as the live app.
+      if (scenario.thermal) ui::PushThermalHudStyle();
       for (int pane = 0; pane < ui::kPaneCount; ++pane) {
         layouts[pane] = ui::HudLayout{};
         ui::DrawHud(g, PaneTeam(pane), planning, ui::ComputePaneRect(pane, kWindowWidth),
                     kWindowHeight, cameras[pane], &layouts[pane]);
       }
+      if (scenario.thermal) ui::PopThermalHudStyle();
     };
     // Auto-resize windows need a couple of frames to settle on their content
     // size (and stay hidden meanwhile), as they would in the live app; run

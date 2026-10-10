@@ -36,11 +36,19 @@
 
 namespace tactics {
 class GameLogic;
+class TurnTimeline;
+class TimelinePlayback;
 }
 
 namespace tactics::scenario {
 
 struct ScenarioAction {
+  // Timeline* kinds (issue #143) drive the match's TurnTimeline replay the
+  // way the HUD strip does: `timeline_seek` (field `tick`) snaps the replay
+  // to a tick (0 = Start, 1 = T1, ...; the newest tick returns to the live
+  // view), `timeline_play` starts/resumes playback and advances it by
+  // `seconds` of replay time, `timeline_pause` pauses it. While the replay
+  // is active, subsequent `assert` steps check the *replayed* state.
   // Aim (issue #129) is the tap-to-place half of a free-aim shot: it enters
   // shoot-target mode and places the "+" aim marker without confirming, so
   // the step ends mid-aim (for visual captures of the aiming UI). A
@@ -48,9 +56,12 @@ struct ScenarioAction {
   // BeginMove opens move planning (select + Move) and deliberately stops
   // there, leaving the movement frontier up for the visual runner's
   // post-action capture; no destination is clicked and no plan is recorded.
-  enum class Kind { Move, BeginMove, Shoot, Aim, Pass, Cancel, Commit, Focus, NewGame };
+  enum class Kind {
+    Move, BeginMove, Shoot, Aim, Pass, Cancel, Commit, Focus, NewGame,
+    TimelineSeek, TimelinePlay, TimelinePause,
+  };
 
-  int actor = -1;  // Unused (and not required in YAML) for Commit/NewGame.
+  int actor = -1;  // Unused (and not required in YAML) for Commit/NewGame/Timeline*.
   Kind kind = Kind::Pass;
   glm::vec3 destination{0.0f};  // Move only: the last leg's end.
   std::vector<glm::vec3> waypoints;  // Move only: earlier leg ends, clicked in
@@ -67,6 +78,8 @@ struct ScenarioAction {
   bool expectNoop = false;      // Shoot only: the click is expected not to
                                  // resolve (e.g. target outside the
                                  // shooter's team FOV) and not record a plan.
+  int timelineTick = 0;         // TimelineSeek only.
+  float playSeconds = 0.0f;     // TimelinePlay only: replay time to advance.
   // Shoot/Aim free-aim forms (issue #129), mutually exclusive with `target`:
   // either the already-resolved world aim point (`at`, the protocol form --
   // deliberate blind fire at any point), or a camera-style ray
@@ -110,6 +123,9 @@ struct ScenarioAssertion {
 
   std::optional<int> round;
 
+  // Number of ticks on the match's turn timeline (game start + one per
+  // completed round; a new game resets it to 1). Issue #143.
+  std::optional<int> timelineTicks;
   // Neutral flag (CTF part 1). `flag_carrier`: id of the carrying figure, or
   // -1 when nobody carries it. `flag_state`: "rest" (never picked up),
   // "carried" or "dropped". `flag_position`: where it is now (the carrier's
@@ -213,6 +229,14 @@ struct PlaybackHooks {
   // figure is selected. The visual runner eases the owning pane's camera
   // over the figure's movement frontier here, emitting its own frames.
   std::function<void(const GameLogic&, int unitId, Team team)> onFocus;
+
+  // Fired once before the first step with the turn-timeline recorder and
+  // replay controller that drive the scenario's `timeline_*` steps (both
+  // outlive the RunScenario call). Lets the visual runner draw the HUD
+  // timeline strip for scenarios that script it. When a replay is active,
+  // the GameLogic passed to onFrame/onActionComplete is the *replayed*
+  // state, exactly what the app would render.
+  std::function<void(const TurnTimeline&, const TimelinePlayback&)> onTimeline;
 };
 
 // Runs `scenario` against a fresh GameLogic instance built from its scene,

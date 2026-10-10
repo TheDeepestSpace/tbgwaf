@@ -20,9 +20,11 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
+#include "ai/JevPlanner.h"
 #include "game/GameLogic.h"
 #include "game/Geometry.h"
 #include "game/MapGenerator.h"
@@ -166,6 +168,40 @@ EM_JS(double, tbgwaf_canvas_css_width, (), {
 });
 EM_JS(double, tbgwaf_canvas_css_height, (), {
   return Module.canvas.getBoundingClientRect().height;
+});
+
+EM_JS(int, tbgwaf_ai_enabled, (), { return Module.tbgwafAI ? 1 : 0; });
+EM_JS(int, tbgwaf_ai_paused, (), { return Module.tbgwafAIPaused ? 1 : 0; });
+EM_JS(int, tbgwaf_ai_fallback, (), { return Module.tbgwafAIFallback ? 1 : 0; });
+EM_JS(int, tbgwaf_auto_commit, (), { return Module.tbgwafAutoCommit ? 1 : 0; });
+EM_JS(int, tbgwaf_default_ctf, (), { return Module.tbgwafDefaultCtf ? 1 : 0; });
+EM_JS(int, tbgwaf_ai_generation, (), { return Module.tbgwafAIGeneration || 0; });
+EM_JS(int, tbgwaf_take_restart, (), {
+  const value = Module.tbgwafRestart ? 1 : 0;
+  Module.tbgwafRestart = false;
+  return value;
+});
+EM_JS(int, tbgwaf_take_ai_retry, (), {
+  const value = Module.tbgwafRetryAI ? 1 : 0;
+  Module.tbgwafRetryAI = false;
+  return value;
+});
+EM_JS(void, tbgwaf_ai_request, (const char* payload), {
+  if (Module.tbgwafRequestDecision) Module.tbgwafRequestDecision(UTF8ToString(payload));
+});
+EM_JS(char*, tbgwaf_ai_next, (), {
+  if (!Module.tbgwafAiInbox || Module.tbgwafAiInbox.length === 0) return 0;
+  const msg = Module.tbgwafAiInbox.shift();
+  const size = lengthBytesUTF8(msg) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(msg, ptr, size);
+  return ptr;
+});
+EM_JS(void, tbgwaf_report_match, (const char* phase, int round, int winner), {
+  if (Module.tbgwafReportMatch) Module.tbgwafReportMatch(UTF8ToString(phase), round, winner);
+});
+EM_JS(void, tbgwaf_ai_local_error, (const char* message), {
+  if (Module.tbgwafReportAiError) Module.tbgwafReportAiError(UTF8ToString(message));
 });
 #endif
 
@@ -400,6 +436,9 @@ int main() {
   };
   // Chosen on the Game Mode screen; CTF turns on the neutral flag objective.
   bool ctfMode = false;
+#ifdef __EMSCRIPTEN__
+  bool ctfFromPreview = false;
+#endif
   auto makeMap = [&mapSeed, &mapType, &ctfMode, &makeBaseMap]() {
     tactics::Scene scene = makeBaseMap(mapSeed, mapType);
     scene.flag.enabled = ctfMode;
@@ -475,6 +514,19 @@ int main() {
   };
   std::string lastSentState;
   bool forceBroadcast = false;
+#ifdef __EMSCRIPTEN__
+  std::optional<tactics::ai::JevRequest> pendingJevRequest;
+  // Candidates are validated a few ms per frame so planning never freezes the
+  // page (and the other pane) while Jev's request is being prepared.
+  std::optional<tactics::ai::JevRequestBuilder> jevBuilder;
+  unsigned jevRequestNonce = 0;
+  int observedAiGeneration = tbgwaf_ai_generation();
+  bool jevErrorHold = false;
+  int lastAutoCommittedRound = -1;
+  int lastReportedRound = -1;
+  int lastReportedWinner = -2;
+  InputMode lastReportedMode = InputMode::Executing;
+#endif
 
   bool quit = false;
   constexpr float kClickDragThresholdPx = 5.0f;
@@ -509,6 +561,33 @@ int main() {
 
   auto runFrame = [&]() {
 #ifdef __EMSCRIPTEN__
+    const bool aiEnabled = networked && tbgwaf_ai_enabled();
+    const bool aiPaused = tbgwaf_ai_paused();
+    const int aiGeneration = tbgwaf_ai_generation();
+    if (aiGeneration != observedAiGeneration) {
+      observedAiGeneration = aiGeneration;
+      pendingJevRequest.reset();
+      jevBuilder.reset();
+      jevErrorHold = false;
+    }
+    if (tbgwaf_take_ai_retry()) jevErrorHold = false;
+    if (networked && tbgwaf_take_restart()) {
+      // Jev vs Jev defaults to CTF; leaving it restores the menu's choice.
+      const bool previewCtf = tbgwaf_default_ctf();
+      if (previewCtf) ctfMode = true;
+      else if (ctfFromPreview) ctfMode = false;
+      ctfFromPreview = previewCtf;
+      game.Reset(makeMap());
+      pendingJevRequest.reset();
+      jevBuilder.reset();
+      jevErrorHold = false;
+      lastAutoCommittedRound = -1;
+      lastSentState.clear();
+      forceBroadcast = isSimulator;
+      awaitingPeerSync = false;
+      navMeshDebugBuilt = false;
+      showNavMeshDebug = false;
+    }
     // Track our own canvas element's CSS size (half the page per canvas).
     if (networked) {
       const double cssW = tbgwaf_canvas_css_width();
@@ -714,10 +793,19 @@ int main() {
       std::optional<tbgwaf_flow::Event> flowEvent =
           tactics::ui::DrawMenu(screen, windowWidth, windowHeight, &mapSeed);
       // Headless smoke run: walk the menu automatically so gameplay is exercised.
-      if (isSmokeTest && !flowEvent) {
+      bool autoEnterGameplay = isSmokeTest;
+      bool autoCtf = false;
+#ifdef __EMSCRIPTEN__
+      autoEnterGameplay = autoEnterGameplay || aiEnabled;
+      autoCtf = tbgwaf_default_ctf();
+      ctfFromPreview = autoCtf;
+#endif
+      if (autoEnterGameplay && !flowEvent) {
         switch (screen) {
           case tbgwaf_flow::State::Splash: flowEvent = tbgwaf_flow::Event::NewGame; break;
-          case tbgwaf_flow::State::GameMode: flowEvent = tbgwaf_flow::Event::SelectRegular; break;
+          case tbgwaf_flow::State::GameMode:
+            flowEvent = autoCtf ? tbgwaf_flow::Event::SelectCtf : tbgwaf_flow::Event::SelectRegular;
+            break;
           default: flowEvent = tbgwaf_flow::Event::SelectUrban; break;
         }
       }
@@ -757,13 +845,82 @@ int main() {
     }
     // A follower mirrors execution from the simulator's snapshots; running
     // its own (empty) round would end it immediately.
-    if (isSimulator || game.Mode() != InputMode::Executing) game.Update(dt);
+    bool simulationPaused = false;
+#ifdef __EMSCRIPTEN__
+    simulationPaused = networked && aiPaused && tbgwaf_auto_commit();
+#endif
+    if (!simulationPaused && (isSimulator || game.Mode() != InputMode::Executing)) game.Update(dt);
     // Sighting memory is per-page derived state: tick it unconditionally so
     // a follower (which skips Update() while Executing) still builds it.
     if (remoteMode) remote->Update(dt);
     game.UpdateSightingMemory(dt);
     for (auto& camera : cameras) camera.Update(dt);
 
+#ifdef __EMSCRIPTEN__
+    // Apply completed typed choices only if their request still matches this
+    // round. Mode changes/restarts increment the JS generation and clear the
+    // pending request before a stale result can reach GameLogic.
+    while (char* raw = tbgwaf_ai_next()) {
+      const std::string message(raw);
+      std::free(raw);
+      if (!pendingJevRequest || message.size() < 3 || message[1] != ' ') continue;
+      const size_t split = message.find(' ', 2);
+      const std::string requestId = message.substr(2, split == std::string::npos
+                                                         ? std::string::npos
+                                                         : split - 2);
+      if (requestId != pendingJevRequest->id) continue;
+      if (message[0] == 'D' && split != std::string::npos) {
+        std::vector<std::string> choices;
+        std::stringstream list(message.substr(split + 1));
+        for (std::string item; std::getline(list, item, ',');) choices.push_back(item);
+        if (!tactics::ai::ApplyJevChoice(&game, *pendingJevRequest, choices)) {
+          jevErrorHold = true;
+          tbgwaf_ai_local_error("selected action became invalid; retry required");
+        }
+      } else if (message[0] == 'E') {
+        jevErrorHold = true;
+      }
+      pendingJevRequest.reset();
+      jevBuilder.reset();
+    }
+
+    if (aiEnabled && !aiPaused && !jevErrorHold && !awaitingPeerSync &&
+        game.Mode() == InputMode::AwaitingSelection) {
+      if (!pendingJevRequest) {
+        if (!jevBuilder) {
+          jevBuilder.emplace(game, *fixedTeam, ++jevRequestNonce);
+        }
+        if (jevBuilder->Step(6.0)) {
+          pendingJevRequest = jevBuilder->Finish();
+          jevBuilder.reset();
+          if (pendingJevRequest) {
+            if (tbgwaf_ai_fallback()) {
+              const std::vector<std::string> choices =
+                  tactics::ai::DeterministicFallbackChoice(*pendingJevRequest);
+              if (!tactics::ai::ApplyJevChoice(&game, *pendingJevRequest, choices)) {
+                jevErrorHold = true;
+                tbgwaf_ai_local_error("deterministic fallback action became invalid; retry required");
+              }
+              pendingJevRequest.reset();
+            } else {
+              tbgwaf_ai_request(pendingJevRequest->json.c_str());
+            }
+          }
+        }
+      }
+    } else if (!aiEnabled || aiPaused || game.Mode() == InputMode::GameOver) {
+      pendingJevRequest.reset();
+      jevBuilder.reset();
+    }
+
+    // Blue is the only simulator. In AI modes it commits exactly once as
+    // soon as every living figure has a plan, including Blue-human vs Red-AI.
+    if (networked && isSimulator && tbgwaf_auto_commit() && !aiPaused &&
+        game.CanCommitRound() && lastAutoCommittedRound != game.RoundNumber()) {
+      lastAutoCommittedRound = game.RoundNumber();
+      game.CommitRound();
+    }
+#endif
     // Turn timeline (issue #143): record the local game's history and
     // advance any replay in progress. While a replay is viewed, the panes
     // render `displayGame` (the replay instance) and game-action input is
@@ -789,6 +946,13 @@ int main() {
     // button presses are only applied to the live game when no replay is
     // active (replay is strictly view-only).
     const bool hudPlanning = isPlanningMode(displayGame.Mode()) && !awaitingPeerSync && remotePlaying;
+#ifdef __EMSCRIPTEN__
+    const bool humanPlanning = planning && !aiEnabled;
+    const bool hudHumanPlanning = hudPlanning && !aiEnabled;
+#else
+    const bool humanPlanning = planning;
+    const bool hudHumanPlanning = hudPlanning;
+#endif
     const bool fogActive = displayGame.Mode() != InputMode::GameOver;
     // The team whose plan the shared selection/preview overlays currently
     // belong to (only one figure is ever mid-selection at a time).
@@ -808,7 +972,7 @@ int main() {
     // --- UI ---
     float roundPanelBottom = 2.0f;
     for (int pane = 0; pane < paneCount; ++pane) {
-      const ui::HudActions hud = ui::DrawHud(displayGame, paneTeam(pane), hudPlanning,
+      const ui::HudActions hud = ui::DrawHud(displayGame, paneTeam(pane), hudHumanPlanning,
                                              paneRects[pane], windowHeight, cameras[pane],
                                              nullptr, pane == 0 ? &roundPanelBottom : nullptr);
       // Replay is view-only: while it is showing, HUD presses must not leak
@@ -895,7 +1059,7 @@ int main() {
     if (enterPending && !replayActive) game.FinishMovePlan();
 
     const bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse;
-    if (!uiWantsMouse && planning) {
+    if (!uiWantsMouse && humanPlanning) {
       const int hoverPane = PaneForX(mouseX, paneCount, windowWidth);
       if (game.Mode() == InputMode::AwaitingShootTarget) {
         // The preview cone follows the cursor until an aim point is placed.
@@ -1025,6 +1189,17 @@ int main() {
     SDL_GL_SwapWindow(window);
 
 #ifdef __EMSCRIPTEN__
+    const int reportWinner = game.Winner() ? static_cast<int>(*game.Winner()) : -1;
+    if (game.RoundNumber() != lastReportedRound || game.Mode() != lastReportedMode ||
+        reportWinner != lastReportedWinner) {
+      const char* phase = game.Mode() == InputMode::GameOver
+                              ? "game-over"
+                              : game.Mode() == InputMode::Executing ? "executing" : "planning";
+      tbgwaf_report_match(phase, game.RoundNumber(), reportWinner);
+      lastReportedRound = game.RoundNumber();
+      lastReportedMode = game.Mode();
+      lastReportedWinner = reportWinner;
+    }
     // Publish state changes: the simulator ships the whole match, the
     // follower just its plans (only while planning).
     if (remoteMode) {

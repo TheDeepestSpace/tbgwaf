@@ -446,6 +446,8 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& disableOcclusi
                     bool& showFps, float fps, float frameMs, float fovMs,
                     const gfx::RenderFrameStats& stats, float top) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
+  // Once per run (not FirstUseEver) so a saved imgui.ini can't reopen it at startup.
+  ImGui::SetNextWindowCollapsed(true, ImGuiCond_Once);
   ImGui::Begin("Debug", nullptr,
                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove);
   ImGui::Checkbox("Disable FOV cones", &disableFov);

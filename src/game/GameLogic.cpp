@@ -914,6 +914,7 @@ void GameLogic::RefreshMoveFrontier() {
   ziplineFrontiers_.clear();
   ziplineMeshes_.clear();
   ziplineUnitId_ = -1;
+  if (!moveFrontierEnabled_) return;
   if (const Unit* mover = FindUnit(selectedUnitId_.value_or(-1))) {
     const glm::vec3 origin = MoveChainEnd();
     EnsureNavMeshFor(*mover, origin);

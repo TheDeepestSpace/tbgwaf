@@ -1,0 +1,35 @@
+name: zipline_walk_ride_walk
+description: >
+  Issue #166: a pre-built zipline extends a figure's reach. Blue at x=-18 has
+  a 20-unit round budget; the destination at x=20 is 38 units away on foot
+  (rejected without the line) but costs 2 (walk to the anchor) + 6.5 (the
+  26-unit line at kZiplineCostFactor 0.25) + 10 (walk on from the far anchor)
+  = 18.5 with it. The plan is one walk -> ride -> walk path and executes in a
+  single round. Red, whose destination is out of reach even with the line,
+  has the move rejected.
+
+map:
+  half_extent: 40
+  ziplines:
+    - {from: [-16, 0, 0], to: [10, 0, 0]}
+
+units:
+  - {id: 0, team: blue, position: [-18, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [30, 0, 20], facing_degrees: 180}
+
+script:
+  - action: move
+    actor: 0
+    destination: [20, 0, 0]
+    comment: Walk 2, ride the line, walk 10.
+  - action: move
+    actor: 1
+    destination: [-30, 0, 20]
+    expect_unreachable: true
+    comment: 60 away; no line near Red, so no plan fits the budget.
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [20, 0, 0], tolerance: 0.05}
+  - assert: {unit: 1, position: [30, 0, 20], tolerance: 0.05}
+  - assert: {round: 2}

@@ -32,6 +32,9 @@ struct Scene {
   std::vector<RoadSurface> roads;
   std::vector<RoadSurface> sidewalkSurfaces;
   std::vector<WalkSurface> walkSurfaces;
+  // Pre-built ziplines (extra nav-graph edges; see Zipline). Anchors are
+  // clear ground spots; the straight line between them avoids obstacles.
+  std::vector<Zipline> ziplines;
   std::vector<Unit> units;  // 3 Blue + 3 Red, in this order.
   // Playable area is [-mapHalfExtent, mapHalfExtent]^2 in XZ. Defaults to the
   // hand-authored scene's size; MapGenerator sets a much larger value.

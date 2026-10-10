@@ -550,7 +550,7 @@ class GameLogic {
   // and shoots the nearest sighted enemy and/or cuts the figure's move short.
   // All reactions are judged against the same snapshot, then applied, so
   // mutual shots both land.
-  void ApplyPlaybookReactions();
+  void ApplyPlaybookReactions(bool roundStart = false);
   // Opens a magazine-long burst at `target` unless `shooter` is already
   // firing a reaction burst or has no rounds left this round.
   void StartReactionBurst(const Unit& shooter, const Unit& target);

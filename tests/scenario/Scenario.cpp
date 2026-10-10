@@ -68,6 +68,10 @@ void ParsePlaybooks(const YAML::Node& root, SquadPlaybook (&out)[2]) {
     SquadPlaybook& pb = out[static_cast<int>(team)];
     for (const auto& slot : teamEntry.second) {
       const std::string key = slot.first.as<std::string>();
+      if (key == "ignore_idle") {
+        pb.ignoreIdle = slot.second.as<bool>();
+        continue;
+      }
       const ReactionAction action = ParseReaction(slot.second.as<std::string>());
       if (key == "moving_seen") pb.At(true, true) = action;
       else if (key == "moving_unseen") pb.At(true, false) = action;

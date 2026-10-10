@@ -627,6 +627,7 @@ void TestRoundExecutesBothTeamsMovesConcurrently() {
 
 void TestShootRowsResolveSimultaneouslyAcrossTeams() {
   GameLogic game(LegacyScene());
+  MakePassive(game);
   game.SetShotRollSource([] { return 0.0f; });  // Pin rolls to a hit.
   // The open-lane duelists get snipers: a pinned roll decides the hit only
   // once the scattered bullet actually crosses the figure, and only the
@@ -1261,6 +1262,7 @@ void TestGameLogicPlaybookDefaultTable() {
   }
   game.SetPlaybook(Team::Blue, SquadPlaybook::Passive());
   CHECK(game.Playbook(Team::Blue).At(false, true) == ReactionAction::DoNothing);
+  game.SetPlaybook(Team::Red, SquadPlaybook::Passive());  // Idle blue1 would draw red fire.
 
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
   StartRed4WalkThroughBlue1Lane(game, destination);
@@ -2743,6 +2745,7 @@ bool AllTracersDistinct(const std::vector<Tracer>& tracers) {
 
 void TestLockedBurstFiresAllShotsOverTime() {
   GameLogic game(LegacyScene());
+  MakePassive(game);
   int rolls = 0;
   const float sequence[] = {0.9f, 0.9f, 0.0f, 0.0f};
   game.SetShotRollSource([&rolls, &sequence] { return sequence[rolls++ % 4]; });
@@ -2822,6 +2825,7 @@ void TestFreeAimBurstHitsPointTarget() {
 // piled into one tick.
 void TestFullMagDumpLeavesThirtyTracers() {
   GameLogic game(LegacyScene());
+  MakePassive(game);
   game.SetShotRollSource([] { return 0.99f; });  // Everything misses.
   game.FindUnit(1)->weapon = WeaponType::AssaultRifle;
   game.ClickUnit(1, Team::Blue);

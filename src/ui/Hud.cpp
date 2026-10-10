@@ -98,6 +98,10 @@ void DrawPlaybookView(const GameLogic& game, Team team, const PaneRect& rect, in
     }
     ImGui::EndTable();
   }
+  if (ImGui::Checkbox("Ignore idle enemies (stationary figures react only to movers)",
+                      &edited.ignoreIdle)) {
+    changed = true;
+  }
   if (changed) actions.playbook = edited;
   if (ImGui::Button("Close")) PlaybookOpen(team) = false;
   ImGui::End();

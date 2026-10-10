@@ -77,6 +77,10 @@ struct SquadPlaybook {
       {ReactionAction::Continue, ReactionAction::ShootContinue},   // Moving.
   };
 
+  // When true, a stationary figure ignores visible enemies that are idle
+  // (not mid-move) and only reacts to ones moving into view.
+  bool ignoreIdle = false;
+
   // All-neutral table (never shoots or stops); for tests/scenarios that
   // aren't about reactions.
   static SquadPlaybook Passive() {
@@ -94,7 +98,7 @@ struct SquadPlaybook {
     for (int m = 0; m < 2; ++m)
       for (int s = 0; s < 2; ++s)
         if (table[m][s] != o.table[m][s]) return false;
-    return true;
+    return ignoreIdle == o.ignoreIdle;
   }
   bool operator!=(const SquadPlaybook& o) const { return !(*this == o); }
 };

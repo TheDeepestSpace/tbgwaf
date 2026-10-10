@@ -62,7 +62,7 @@ them; click a script step to jump both videos to it. Deleted scenarios are
 listed by name only.</p>
 <h2>New scenarios <span class="count">(0)</span></h2>
 <p class="empty">None.</p>
-<h2>Modified scenarios <span class="count">(3)</span></h2>
+<h2>Modified scenarios <span class="count">(4)</span></h2>
 <div class="scenario has-video" data-stem="enemy_sighting_memory_trail"><h3>enemy_sighting_memory_trail</h3><div class="path">tests/scenarios/enemy_sighting_memory_trail.yaml</div>
 <p class="description">Showcases enemy ghosts: red starts in blue&#x27;s FOV, then runs out of it. The wireframe trail and movement arrow of where blue saw red are shown as the turn ends and then fade out in the order they appeared (the wait step captures the mid-fade), while red itself is hidden.</p>
 <div class="panes">
@@ -196,7 +196,50 @@ listed by name only.</p>
 </div>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
-<h2>Unchanged scenarios <span class="count">(64)</span></h2>
+<div class="scenario has-video" data-stem="timeline_scrub_replay"><h3>timeline_scrub_replay</h3><div class="path">tests/scenarios/timeline_scrub_replay.yaml</div>
+<p class="description">Turn timeline (issue replay from the Start tick (initial positions restored, mover mid-walk one second in), scrubbing to another tick while playback is running (snaps there, keeps playing), resuming from a mid-game tick, playing to the live end (playback pauses there on the final state), and returning to the live view by scrubbing to the newest tick while paused. Assertions after a timeline step check the replayed state, exactly what the app renders while the replay is active.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/timeline_scrub_replay/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/timeline_scrub_replay/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (0, 0)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: round is 2, timeline ticks 2</div>
+</div>
+<div class="round"><div class="round-title">Round 2</div>
+<div class="step" data-action="4"><span class="u blue">blue0</span> moves to (0, 6)</div>
+<div class="step" data-action="5"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="6">commit round</div>
+<div class="detail">Check: round is 3, timeline ticks 3</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 6)</div>
+</div>
+<div class="round"><div class="round-title">Round 3 (uncommitted)</div>
+<div class="step" data-action="7">timeline_seek (actor None)</div>
+<div class="detail">Check: round is 1</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-8, 0)</div>
+<div class="step" data-action="8">timeline_play (actor None) <span class="detail">— One second into the replayed first round the mover is mid-walk (4 u/s).</span></div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (-4, 0) (tolerance 0.5)</div>
+<div class="step" data-action="9">timeline_seek (actor None)</div>
+<div class="detail">Check: round is 2</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 0) (tolerance 0.1)</div>
+<div class="step" data-action="10">timeline_play (actor None) <span class="detail">— Replay holds 5.5 s after each finished round (ghost fade-out), then the mover is one second into the second round.</span></div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 4) (tolerance 0.5)</div>
+<div class="step" data-action="11">timeline_pause (actor None)</div>
+<div class="step" data-action="12">timeline_play (actor None)</div>
+<div class="detail">Check: round is 3</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 6)</div>
+<div class="step" data-action="13">timeline_seek (actor None)</div>
+<div class="detail">Check: round is 3</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 6)</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<h2>Unchanged scenarios <span class="count">(63)</span></h2>
 <div class="scenario has-video" data-stem="burst_free_aim_point_target"><h3>burst_free_aim_point_target</h3><div class="path">tests/scenarios/burst_free_aim_point_target.yaml</div>
 <p class="description">Bursts work for free-aim point-target shots too (issues places a blind-fire aim point on the enemy&#x27;s torso and fires a 5-shot burst at it. Every bullet flies its own scattered line inside the weapon&#x27;s cone; only bullets whose line actually crosses the figure roll against the hit chance (the pinned roll always hits), so the burst downs the figure with one of the bullets that land on the body.</p>
 <div class="panes">
@@ -1343,49 +1386,6 @@ listed by name only.</p>
 <div class="step" data-action="10">timeline_play (actor None) <span class="detail">— Replays game 2&#x27;s round to the live end and pauses there.</span></div>
 <div class="detail">Check: round is 2</div>
 <div class="detail">Check: <span class="u blue">blue0</span> is at (-2, 4)</div>
-</div>
-</div></figure>
-</div>
-<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
-</div>
-<div class="scenario has-video" data-stem="timeline_scrub_replay"><h3>timeline_scrub_replay</h3><div class="path">tests/scenarios/timeline_scrub_replay.yaml</div>
-<p class="description">Turn timeline (issue replay from the Start tick (initial positions restored, mover mid-walk one second in), scrubbing to another tick while playback is running (snaps there, keeps playing), resuming from a mid-game tick, playing to the live end (playback pauses there on the final state), and returning to the live view by scrubbing to the newest tick while paused. Assertions after a timeline step check the replayed state, exactly what the app renders while the replay is active.</p>
-<div class="panes">
-<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/timeline_scrub_replay/blue.webm"></video></figure>
-<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/timeline_scrub_replay/red.webm"></video></figure>
-<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
-<div class="step" data-action="0">Initial state</div>
-<div class="round"><div class="round-title">Round 1</div>
-<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (0, 0)</div>
-<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
-<div class="step" data-action="3">commit round</div>
-<div class="detail">Check: round is 2, timeline ticks 2</div>
-</div>
-<div class="round"><div class="round-title">Round 2</div>
-<div class="step" data-action="4"><span class="u blue">blue0</span> moves to (0, 6)</div>
-<div class="step" data-action="5"><span class="u red">red1</span> passes</div>
-<div class="step" data-action="6">commit round</div>
-<div class="detail">Check: round is 3, timeline ticks 3</div>
-<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 6)</div>
-</div>
-<div class="round"><div class="round-title">Round 3 (uncommitted)</div>
-<div class="step" data-action="7">timeline_seek (actor None)</div>
-<div class="detail">Check: round is 1</div>
-<div class="detail">Check: <span class="u blue">blue0</span> is at (-8, 0)</div>
-<div class="step" data-action="8">timeline_play (actor None) <span class="detail">— One second into the replayed first round the mover is mid-walk (4 u/s).</span></div>
-<div class="detail">Check: <span class="u blue">blue0</span> is at (-4, 0) (tolerance 0.5)</div>
-<div class="step" data-action="9">timeline_seek (actor None)</div>
-<div class="detail">Check: round is 2</div>
-<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 0) (tolerance 0.1)</div>
-<div class="step" data-action="10">timeline_play (actor None)</div>
-<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 4) (tolerance 0.5)</div>
-<div class="step" data-action="11">timeline_pause (actor None)</div>
-<div class="step" data-action="12">timeline_play (actor None)</div>
-<div class="detail">Check: round is 3</div>
-<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 6)</div>
-<div class="step" data-action="13">timeline_seek (actor None)</div>
-<div class="detail">Check: round is 3</div>
-<div class="detail">Check: <span class="u blue">blue0</span> is at (0, 6)</div>
 </div>
 </div></figure>
 </div>

@@ -2863,7 +2863,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
     for (const tactics::Tracer& tracer : game.Tracers()) {
-      const float life = game.GhostAlpha(tracer.at);
+      const float life = game.TracerAlpha(tracer.at);
       if (life <= 0.0f) continue;
       const glm::vec3 teamColor = tracer.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
                                                             : glm::vec3(0.9f, 0.25f, 0.22f);

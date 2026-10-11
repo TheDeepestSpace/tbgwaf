@@ -262,6 +262,13 @@ class GameLogic {
   // with the same spacing as it appeared. Driven by the clock that
   // UpdateSightingMemory advances, so replays and tests are deterministic.
   float GhostAlpha(float at) const;
+  // Same for a bullet line stamped `at`.
+  float TracerAlpha(float at) const;
+
+  // Timeline-replay instance: ghosts/tracers expire on a free-running clock
+  // (kReplayGhostHold / kReplayTracerLife after they appear) and carry over
+  // into the next turn instead of being cleared. Live play is unaffected.
+  void SetReplayGhostMode(bool enabled) { replayGhosts_ = enabled; }
 
   // Advances the ghost clocks and samples newly visible enemies. Must be called
   // every frame on every page regardless of mode or simulator/follower role
@@ -275,7 +282,7 @@ class GameLogic {
 
   // Bullet lines of the current/last turn (see Tracer); cleared when the next
   // turn starts executing.
-  const std::vector<Tracer>& Tracers() const { return tracers_; }
+  const std::vector<Tracer>& Tracers() const { return replayGhosts_ ? replayTracers_ : tracers_; }
 
   // --- Free-aim shooting (issue #129). While AwaitingShootTarget, the
   // player may point-target any world position instead of locking onto a
@@ -632,6 +639,13 @@ class GameLogic {
   void ClearSightings();
   static constexpr float kNeverExecuted = 1.0e6f;  // fadeClock_ before any turn has played.
   bool wasExecuting_ = false;
+  // Replay-ghost mode state (see SetReplayGhostMode).
+  bool replayGhosts_ = false;
+  float replayClock_ = 0.0f;           // Free-running seconds; stamps ghosts/tracers.
+  std::vector<Tracer> replayTracers_;  // Absorbed from tracers_, `at` = replayClock_ stamp.
+  size_t replayTracersSeen_ = 0;       // Imported tracers of the current turn already absorbed.
+  int replayTracerRound_ = -1;
+  void StepReplayGhosts(float dtSeconds);
   float fadeClock_ = 0.0f;  // Seconds since the last turn finished executing.
   std::vector<bool> sightedLastFrame_[2];
   std::vector<float> sightingTimer_[2];

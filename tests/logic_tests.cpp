@@ -2428,7 +2428,7 @@ void TestTurnTimelineRecordsTicksAndReplays() {
   CHECK(!playback.Active());
 }
 
-void TestTurnTimelineHoldsForGhostFade() {
+void TestTurnTimelineReplayGhostLifetimes() {
   GameLogic game(TwoUnitTimelineScene());
   MakePassive(game);
   TurnTimeline timeline;
@@ -2437,15 +2437,24 @@ void TestTurnTimelineHoldsForGhostFade() {
   PlayTimelineRound(game, timeline, glm::vec3(0.0f, 0.0f, 0.0f));
   PlayTimelineRound(game, timeline, glm::vec3(0.0f, 0.0f, 4.0f));
 
-  // Replay time keeps room after a finished round so ghosts and tracers fade
-  // out as in the live game before the next turn starts.
-  const size_t finishFrame = timeline.Ticks()[1].frame;
-  CHECK(timeline.FrameTime(finishFrame + 1) - timeline.FrameTime(finishFrame) >=
-        TurnTimeline::kFadeHold);
-  CHECK(playback.SeekFrame(timeline, game, finishFrame));
+  // Replay: no hold between turns; items stamped at the replay clock's 0
+  // live kReplayTracerLife (bullets) / kReplayGhostHold + fade (ghosts).
+  CHECK(playback.SeekFrame(timeline, game, 0));
   playback.Play(timeline, game);
-  playback.Update(timeline, TurnTimeline::kFadeHold * 0.5f);
-  CHECK(playback.FrameIndex() == finishFrame);
+  const GameLogic& replay = playback.Game();
+  playback.Update(timeline, 0.25f);
+  CHECK(replay.TracerAlpha(0.0f) > 0.0f && replay.TracerAlpha(0.0f) < 1.0f);
+  CHECK(replay.GhostAlpha(0.0f) == 1.0f);
+  playback.Update(timeline, 0.5f);
+  CHECK(replay.TracerAlpha(0.0f) == 0.0f);
+  CHECK(replay.GhostAlpha(0.0f) == 1.0f);
+  playback.Update(timeline, 0.5f);  // 1.25 s: ghost has started to fade.
+  CHECK(replay.GhostAlpha(0.0f) < 1.0f && replay.GhostAlpha(0.0f) > 0.0f);
+  playback.Update(timeline, 0.5f);
+  CHECK(replay.GhostAlpha(0.0f) == 0.0f);
+
+  // The live game keeps the per-turn behaviour: opaque while executing.
+  CHECK(game.TracerAlpha(0.0f) == game.GhostAlpha(0.0f));
 }
 
 void TestTurnTimelineResetsOnNewMatch() {
@@ -3181,7 +3190,7 @@ int main() {
   TestImportStateOfNewGameClearsFollowerSightings();
   TestFollowerBuildsSightingsWithoutPhysicsUpdate();
   TestTurnTimelineRecordsTicksAndReplays();
-  TestTurnTimelineHoldsForGhostFade();
+  TestTurnTimelineReplayGhostLifetimes();
   TestTurnTimelineResetsOnNewMatch();
   TestZiplineExtendsReachBeyondWalking();
   TestZiplineCostScalesWithLength();

@@ -207,6 +207,12 @@ constexpr float kFovConeVisualRange = kSightRange;
 // to the next turn.
 constexpr float kSightingSampleInterval = 0.5f;
 constexpr float kGhostFadeDuration = kSightingSampleInterval;
+// Timeline replay has no planning phase to fade in, so ghosts and tracers
+// instead live on their own clock and carry over into the next turn: a ghost
+// holds kReplayGhostHold after appearing, then fades over kGhostFadeDuration;
+// a bullet line fades out over kReplayTracerLife after the shot.
+constexpr float kReplayGhostHold = 1.0f;
+constexpr float kReplayTracerLife = 0.5f;
 // Ziplines: ride cost per world unit of cable, as a fraction of the cost of
 // walking the same distance (0.25 = riding is 4x cheaper than running, so a
 // 20-unit line costs 5 units of the 20-unit round budget). Longer line =

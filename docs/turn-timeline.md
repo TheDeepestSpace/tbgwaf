@@ -36,9 +36,10 @@ from the start or from any completed round ("turn" = one WEGO round).
   `ComputeVisibility`/`RenderPane` path -- so each viewer sees the replayed
   moment with **their own team's fog of war** recomputed from the replayed
   positions. Ghosts and shot lines reappear in sequence as the replay plays
-  forward and fade out again after the turn (rebuilt, not recorded). Replay
-  time reserves `TurnTimeline::kFadeHold` after each finished round (live
-  planning time isn't recorded) so the fade-out plays in full, as live.
+  forward (rebuilt, not recorded). Unlike live play they don't wait for the
+  turn to end: on the replay instance a ghost holds `kReplayGhostHold` (1 s)
+  after appearing and then fades, and a bullet line fades out within
+  `kReplayTracerLife` (0.5 s) of the shot, carrying over into the next turn.
 
 Replayed (non-current) turns show no plan details -- planned/armed next
 moves, shot lines and plan rings are stripped from the replay instance.

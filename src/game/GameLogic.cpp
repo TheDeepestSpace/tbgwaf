@@ -146,6 +146,9 @@ void GameLogic::ResetSightingMemory() {
   wasExecuting_ = false;
   fadeClock_ = kNeverExecuted;  // Nothing to show until a turn has played.
   tracers_.clear();
+  replayTracers_.clear();
+  replayTracersSeen_ = 0;
+  replayTracerRound_ = -1;
 }
 
 void GameLogic::ClearSightings() {
@@ -157,13 +160,52 @@ void GameLogic::ClearSightings() {
 
 void GameLogic::RestartGhostPlayback() {
   ClearSightings();
+  replayTracers_.clear();
+  replayTracersSeen_ = 0;
+  replayTracerRound_ = -1;
   wasExecuting_ = mode_ == InputMode::Executing;
   fadeClock_ = wasExecuting_ ? 0.0f : kNeverExecuted;
 }
 
 float GameLogic::GhostAlpha(float at) const {
+  if (replayGhosts_) {
+    const float over = replayClock_ - at - constants::kReplayGhostHold;
+    return 1.0f - glm::clamp(over / constants::kGhostFadeDuration, 0.0f, 1.0f);
+  }
   if (mode_ == InputMode::Executing) return 1.0f;
   return 1.0f - glm::clamp((fadeClock_ - at) / constants::kGhostFadeDuration, 0.0f, 1.0f);
+}
+
+float GameLogic::TracerAlpha(float at) const {
+  if (replayGhosts_) {
+    return 1.0f - glm::clamp((replayClock_ - at) / constants::kReplayTracerLife, 0.0f, 1.0f);
+  }
+  return GhostAlpha(at);
+}
+
+void GameLogic::StepReplayGhosts(float dtSeconds) {
+  replayClock_ += dtSeconds;
+  // Bullets imported with the frame: absorb the new ones, stamped by when
+  // they were fired on the replay clock, so they outlive the turn change.
+  if (roundNumber_ != replayTracerRound_ || tracers_.size() < replayTracersSeen_) {
+    replayTracersSeen_ = 0;
+    replayTracerRound_ = roundNumber_;
+  }
+  for (; replayTracersSeen_ < tracers_.size(); ++replayTracersSeen_) {
+    Tracer t = tracers_[replayTracersSeen_];
+    t.at = replayClock_ - t.age;
+    replayTracers_.push_back(t);
+  }
+  replayTracers_.erase(std::remove_if(replayTracers_.begin(), replayTracers_.end(),
+                                      [&](const Tracer& t) { return TracerAlpha(t.at) <= 0.0f; }),
+                       replayTracers_.end());
+  for (auto& perUnit : sightings_) {
+    for (auto& list : perUnit) {
+      list.erase(std::remove_if(list.begin(), list.end(),
+                                [&](const EnemySighting& s) { return GhostAlpha(s.at) <= 0.0f; }),
+                 list.end());
+    }
+  }
 }
 
 void GameLogic::RecordTracer(const Unit& shooter, const glm::vec3& from, const glm::vec3& to,
@@ -182,7 +224,8 @@ const std::vector<GameLogic::EnemySighting>& GameLogic::Sightings(Team viewingTe
 
 void GameLogic::UpdateSightingMemory(float dtSeconds) {
   const bool executing = mode_ == InputMode::Executing;
-  if (executing && !wasExecuting_) {
+  if (replayGhosts_) StepReplayGhosts(dtSeconds);
+  if (executing && !wasExecuting_ && !replayGhosts_) {
     // A new turn starts: last turn's ghosts are gone, entries re-sample.
     ClearSightings();
   }
@@ -231,7 +274,7 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
       s.walkPhase = unit.walkPhase;
       s.walkBlend = unit.walkBlend;
       s.idleElapsed = unit.idleElapsed;
-      s.at = executing ? executionElapsed_ : 0.0f;
+      s.at = replayGhosts_ ? replayClock_ : executing ? executionElapsed_ : 0.0f;
       if (hasLastUnitPosition_) {
         glm::vec3 delta = unit.position - lastUnitPosition_[unit.id];
         delta.y = 0.0f;
@@ -399,6 +442,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
       s.walkPhase = dead->walkPhase;
       s.walkBlend = dead->walkBlend;
       s.idleElapsed = dead->idleElapsed;
+      s.at = replayClock_;
       sightings_[viewerIndex][deadId].push_back(s);
     }
   }
@@ -1490,6 +1534,7 @@ void GameLogic::ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets
       s.walkPhase = hitTarget->walkPhase;
       s.walkBlend = hitTarget->walkBlend;
       s.idleElapsed = hitTarget->idleElapsed;
+      s.at = replayClock_;
       sightings_[viewerIndex][hitTarget->id].push_back(s);
     }
   }

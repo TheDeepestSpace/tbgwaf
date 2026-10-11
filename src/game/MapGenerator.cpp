@@ -1206,13 +1206,18 @@ void EmitStreetSurfaces(Scene* scene, const CityPlan& city, const MapGeneratorCo
     const glm::vec2 n(-cut.dir.y, cut.dir.x);
     const glm::vec2 a = cut.origin + cut.dir * t0, b = cut.origin + cut.dir * t1;
     const float hw = cut.width * 0.5f;
-    const std::vector<glm::vec2> band =
+    std::vector<glm::vec2> band =
         KeepSide({a + n * hw, b + n * hw, b - n * hw, a - n * hw},
                  artery.normal * static_cast<float>(cut.side),
                  static_cast<float>(cut.side) * arteryD + ArteryBand(c));
+    // Oblique bands overhang the boundary at their corners: cut flush.
+    const float half = scene->mapHalfExtent;
+    for (const glm::vec2& edge : {glm::vec2(1, 0), glm::vec2(-1, 0), glm::vec2(0, 1), glm::vec2(0, -1)}) {
+      if (band.size() >= 3) band = KeepSide(band, -edge, -half);
+    }
     if (band.size() < 3 || PolygonArea(band) < 1.0f) continue;
     RoadSurface road;
-    for (const glm::vec2& p : band) road.vertices.emplace_back(p.x, groundY(p.x, p.y), p.y);
+    for (const glm::vec2& p : band) road.vertices.emplace_back(p.x, groundY(p.x, p.y) + kGradeY, p.y);
     scene->roads.push_back(std::move(road));
   }
 }

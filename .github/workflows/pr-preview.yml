@@ -76,7 +76,10 @@ jobs:
         if: github.event.action != 'closed'
         run: |
           . /opt/emsdk/emsdk_env.sh > /dev/null
-          emcmake cmake -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release
+          # Point the preview at this PR's backend (server-deploy.yml) when the PR has one.
+          server_url=""
+          [ -f server/Dockerfile ] && server_url="wss://tbgwaf-server-pr-${{ github.event.pull_request.number }}.fly.dev"
+          emcmake cmake -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release -DTBGWAF_SERVER_URL="$server_url"
 
       - name: Build tactics_app (WASM/WebGL2)
         if: github.event.action != 'closed'

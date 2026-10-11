@@ -32,7 +32,10 @@ jobs:
       - name: Configure (Emscripten)
         run: |
           . /opt/emsdk/emsdk_env.sh > /dev/null
-          emcmake cmake -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release
+          # Master's backend is deployed by server-deploy.yml.
+          server_url=""
+          [ -f server/Dockerfile ] && server_url="wss://tbgwaf-server.fly.dev"
+          emcmake cmake -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release -DTBGWAF_SERVER_URL="$server_url"
 
       - name: Build tactics_app (WASM/WebGL2)
         run: |

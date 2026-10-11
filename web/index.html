@@ -112,6 +112,55 @@
       <div id="status">Loading game…</div>
     </div>
     <script src="tactics_app.js"></script>
-    <script type="module" src="jev-preview.js"></script>
+    <script type="text/javascript">
+      // Two ways to play:
+      //  * Server mode: both panes are separate clients of the authoritative
+      //    server over WebSockets (?solo=1: one pane, for two browsers). The URL comes from ?server=ws://host:port (a bare
+      //    port such as ?server=8080 means ws://localhost:8080), else from
+      //    the build-time default (cmake -DTBGWAF_SERVER_URL=...). ?room=NAME
+      //    picks which room to pair in (default: private to this page load
+      //    in split screen, the one shared room with ?solo=1).
+      //  * Local preview (no server): both teams on this page, with the Jev
+      //    controls, driven by jev-preview.js. Used when no server is
+      //    configured, or forced with ?local=1.
+      var BUILD_DEFAULT_SERVER = "@TBGWAF_SERVER_URL@"; // Left as-is when served from source.
+      function resolveServerUrl() {
+        var params = new URLSearchParams(window.location.search);
+        if (params.has("local")) return "";
+        var url = params.get("server");
+        if (url === null) url = BUILD_DEFAULT_SERVER.charAt(0) === "@" ? "" : BUILD_DEFAULT_SERVER;
+        url = url.trim();
+        if (/^\d+$/.test(url)) url = "ws://localhost:" + url;
+        return url;
+      }
+      var serverUrl = resolveServerUrl();
+      var statusEl = document.getElementById("status");
+      var params = new URLSearchParams(window.location.search);
+      if (serverUrl && params.has("solo")) {
+        // One canvas, one player; a second player opens the same ?room=NAME.
+        document.getElementById("pane-red").remove();
+        document.getElementById("control-panel").remove();
+        statusEl.innerText = "Online match via " + serverUrl;
+        window.onerror = function () {
+          statusEl.innerText = "Failed to load -- check the browser console.";
+        };
+        createTbgwafModule({
+          canvas: document.querySelector("#pane-blue canvas"),
+          tbgwafServer: serverUrl,
+          tbgwafRoom: params.get("room") || "",
+          onRuntimeInitialized: function () { statusEl.innerText = ""; },
+        });
+      } else {
+        // Split screen: both panes are separate clients of the server, paired
+        // through a room private to this page load (so the mode controls,
+        // including the Jev modes, work as in the local preview).
+        if (serverUrl) {
+          var room = params.get("room") ||
+            "p" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+          window.TBGWAF_SERVER = { url: serverUrl, room: room };
+        }
+        import("./jev-preview.js");
+      }
+    </script>
   </body>
 </html>

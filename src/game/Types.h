@@ -195,6 +195,10 @@ constexpr float kMoveSpeed = 4.0f;  // Default run speed, world units per second
 // fixed-length window. A figure's plannable move distance is bounded by
 // runSpeed * kRoundDuration, so every move animation fits in the window.
 constexpr float kRoundDuration = 5.0f;  // Seconds of execution per round.
+// Fixed step the headless simulators advance a round in (the server and the
+// in-process scenario runner), so reactions that trigger on the first tick
+// something is seen resolve identically in every test topology.
+constexpr float kSimStepSeconds = 1.0f / 30.0f;
 // Visual length of the rendered FOV cone overlay. Sized off kSightRange
 // (bigger than any map's diagonal) so the cone reaches the map edge no matter
 // where a unit stands or faces; the renderer clips each ray at the map

@@ -9,6 +9,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include "game/MapGenerator.h"
+#include "net/SceneSpec.h"
 #include "game/GameLogic.h"
 #include "game/TurnTimeline.h"
 
@@ -83,167 +84,42 @@ void ParsePlaybooks(const YAML::Node& root, SquadPlaybook (&out)[2]) {
   }
 }
 
-Scene ParseScene(const YAML::Node& root) {
-  Scene scene;
-
-  bool generated = false;
-  if (const YAML::Node mapNode = root["map"]) {
-    // `generate: {seed: N, type: urban|hilly}` builds a procedural map
-    // (units come from the generator unless the scenario lists its own).
-    // `type` defaults to the urban city generator.
-    if (const YAML::Node genNode = mapNode["generate"]) {
-      if (!genNode["seed"]) throw std::runtime_error("map.generate requires 'seed'");
-      const uint32_t seed = genNode["seed"].as<uint32_t>();
-      const std::string type = genNode["type"] ? genNode["type"].as<std::string>() : "urban";
-      if (type == "urban") {
-        MapGeneratorConfig config;
-        if (genNode["arteries"]) config.arteryCount = genNode["arteries"].as<int>();
-        if (genNode["artery_width"]) config.arteryWidth = genNode["artery_width"].as<float>();
-        if (genNode["local_street_width"]) {
-          config.localStreetWidth = genNode["local_street_width"].as<float>();
-        }
-        // `elevated` forces the overpass on/off; omitted keeps the generator's
-        // seed-driven draw. `elevated_layout` pins one of the deck layouts.
-        if (genNode["elevated"]) {
-          config.elevatedHighway =
-              genNode["elevated"].as<bool>() ? OverpassMode::On : OverpassMode::Off;
-        }
-        if (genNode["elevated_layout"]) {
-          const std::string layout = genNode["elevated_layout"].as<std::string>();
-          if (layout == "ramp-up-ramp-down") config.overpassLayout = OverpassLayout::RampUpRampDown;
-          else if (layout == "through") config.overpassLayout = OverpassLayout::Through;
-          else if (layout == "enter-ramp-up") config.overpassLayout = OverpassLayout::EnterRampUp;
-          else if (layout == "enter-ramp-down") config.overpassLayout = OverpassLayout::EnterRampDown;
-          else {
-            throw std::runtime_error(
-                "map.generate.elevated_layout must be ramp-up-ramp-down/through/"
-                "enter-ramp-up/enter-ramp-down, got '" + layout + "'");
-          }
-        }
-        // `elevated_branch` pins the branch's map-edge end (`ramp`/`off-map`);
-        // scenarios that force the overpass default to a ramp.
-        if (genNode["elevated"]) config.branchEnd = BranchEnd::Ramp;
-        if (genNode["elevated_branch"]) {
-          const std::string end = genNode["elevated_branch"].as<std::string>();
-          if (end == "ramp") config.branchEnd = BranchEnd::Ramp;
-          else if (end == "off-map") config.branchEnd = BranchEnd::OffMap;
-          else {
-            throw std::runtime_error(
-                "map.generate.elevated_branch must be ramp/off-map, got '" + end + "'");
-          }
-        }
-        // `features: {lanes: on, curbs: {mode: auto, chance: 0.3}, ...}`
-        // sets the optional urban detail layers (see UrbanFeatures).
-        if (const YAML::Node featNode = genNode["features"]) {
-          for (const auto& entry : featNode) {
-            const std::string name = entry.first.as<std::string>();
-            FeatureToggle* toggle = UrbanFeatureByName(&config.features, name);
-            if (!toggle) {
-              throw std::runtime_error("map.generate.features: unknown feature '" + name + "'");
-            }
-            const YAML::Node value = entry.second;
-            const std::string mode = value.IsMap() ? value["mode"].as<std::string>("auto")
-                                                   : value.as<std::string>();
-            if (!ParseFeatureMode(mode, &toggle->mode)) {
-              throw std::runtime_error("map.generate.features." + name +
-                                       " must be auto/off/on, got '" + mode + "'");
-            }
-            if (value.IsMap() && value["chance"]) toggle->chance = value["chance"].as<float>();
-          }
-        }
-        scene = GenerateUrbanMap(seed, config);
-      } else if (type == "hilly") {
-        scene = GenerateHillyMap(seed);
-      } else {
-        throw std::runtime_error("map.generate.type must be 'urban' or 'hilly', got '" + type +
-                                 "'");
+// Generic YAML -> JSON, so the scene description can be handed to
+// net::SceneFromSpec (the same builder the server's control tap uses).
+net::Json YamlToJson(const YAML::Node& node) {
+  switch (node.Type()) {
+    case YAML::NodeType::Sequence: {
+      net::Json::Array items;
+      for (const auto& child : node) items.push_back(YamlToJson(child));
+      return net::Json(std::move(items));
+    }
+    case YAML::NodeType::Map: {
+      net::Json::Object members;
+      for (const auto& kv : node) members[kv.first.as<std::string>()] = YamlToJson(kv.second);
+      return net::Json(std::move(members));
+    }
+    case YAML::NodeType::Scalar: {
+      const std::string& text = node.Scalar();
+      if (text == "true" || text == "false") return net::Json(text == "true");
+      try {
+        size_t used = 0;
+        const double value = std::stod(text, &used);
+        if (used == text.size()) return net::Json(value);
+      } catch (const std::exception&) {
       }
-      generated = true;
+      return net::Json(text);
     }
-    // `half_extent: N` sizes the ground square (default 15); scenarios whose
-    // units sit far apart must grow the map so every figure stands on it.
-    if (const YAML::Node halfNode = mapNode["half_extent"]) {
-      scene.mapHalfExtent = halfNode.as<float>();
-    }
-    // `ziplines: [{from: [x, y, z], to: [x, y, z]}, ...]`: pre-built two-way
-    // ziplines (anchor foot positions), on top of any generated map's own.
-    if (const YAML::Node ziplinesNode = mapNode["ziplines"]) {
-      for (const auto& zipNode : ziplinesNode) {
-        scene.ziplines.push_back(Zipline{ParseVec3(zipNode["from"], "map.ziplines[].from"),
-                                         ParseVec3(zipNode["to"], "map.ziplines[].to")});
-      }
-    }
-    if (const YAML::Node obstaclesNode = mapNode["obstacles"]) {
-      for (const auto& obsNode : obstaclesNode) {
-        const glm::vec2 center = ParseVec2(obsNode["center"], "map.obstacles[].center");
-        const glm::vec2 halfExtent =
-            ParseVec2(obsNode["half_extent"], "map.obstacles[].half_extent");
-        if (!obsNode["height"]) {
-          throw std::runtime_error("map.obstacles[] requires 'height'");
-        }
-        const float height = obsNode["height"].as<float>();
+    default: return net::Json();
+  }
+}
 
-        Obstacle obstacle;
-        obstacle.bounds =
-            AABB{glm::vec3(center.x - halfExtent.x, 0.0f, center.y - halfExtent.y),
-                 glm::vec3(center.x + halfExtent.x, height, center.y + halfExtent.y)};
-        obstacle.climbable = obsNode["climbable"] ? obsNode["climbable"].as<bool>() : false;
-        scene.obstacles.push_back(obstacle);
-        // `roof_slab: true`: a flat walkable slab on the obstacle's top (a
-        // zipline's roof end), reachable only by line.
-        if (obsNode["roof_slab"] && obsNode["roof_slab"].as<bool>()) {
-          const AABB& b = obstacle.bounds;
-          const float y = b.max.y + 0.05f;
-          WalkSurface slab;
-          slab.vertices = {{b.min.x, y, b.min.z}, {b.min.x, y, b.max.z}, {b.max.x, y, b.max.z},
-                           {b.max.x, y, b.min.z}};
-          scene.walkSurfaces.push_back(std::move(slab));
-        }
-      }
-    }
-  }
-
-  if (const YAML::Node flagNode = root["flag"]) {
-    scene.flag.enabled = flagNode["enabled"] ? flagNode["enabled"].as<bool>() : true;
-    if (const YAML::Node pos = flagNode["position"]) {
-      if (pos.IsSequence() && pos.size() == 2) {
-        const glm::vec2 xz = ParseVec2(pos, "flag.position");
-        scene.flag.position = glm::vec3(xz.x, 0.0f, xz.y);
-      } else {
-        scene.flag.position = ParseVec3(pos, "flag.position");
-      }
-    }
-    if (flagNode["win_on_grab"]) scene.flag.winOnGrab = flagNode["win_on_grab"].as<bool>();
-  }
-  if (root["round_limit"]) scene.roundLimit = root["round_limit"].as<int>();
-
-  const YAML::Node unitsNode = root["units"];
-  if (generated && !unitsNode) return scene;
-  if (generated) scene.units.clear();
-  if (!unitsNode || !unitsNode.IsSequence() || unitsNode.size() == 0) {
-    throw std::runtime_error("scenario must declare at least one unit under 'units'");
-  }
-  for (const auto& unitNode : unitsNode) {
-    if (!unitNode["id"] || !unitNode["team"] || !unitNode["position"]) {
-      throw std::runtime_error("units[] requires 'id', 'team', and 'position'");
-    }
-    Unit unit;
-    unit.id = unitNode["id"].as<int>();
-    unit.team = ParseTeam(unitNode["team"].as<std::string>(), "units[].team");
-    unit.position = ParseVec3(unitNode["position"], "units[].position");
-    unit.facingYaw =
-        unitNode["facing_degrees"] ? unitNode["facing_degrees"].as<float>() * kPi / 180.0f : 0.0f;
-    unit.alive = true;
-    if (std::abs(unit.position.x) > scene.mapHalfExtent ||
-        std::abs(unit.position.z) > scene.mapHalfExtent) {
-      throw std::runtime_error("units[] id " + std::to_string(unit.id) +
-                               " is outside the map; raise map.half_extent (currently " +
-                               std::to_string(scene.mapHalfExtent) + ")");
-    }
-    unit.weapon = DefaultWeaponForUnit(unit.id);
-    scene.units.push_back(unit);
-  }
-  return scene;
+net::Json ParseSceneSpec(const YAML::Node& root) {
+  net::Json spec;
+  if (root["map"]) spec.Set("map", YamlToJson(root["map"]));
+  if (root["units"]) spec.Set("units", YamlToJson(root["units"]));
+  if (root["flag"]) spec.Set("flag", YamlToJson(root["flag"]));
+  if (root["round_limit"]) spec.Set("round_limit", YamlToJson(root["round_limit"]));
+  return spec;
 }
 
 ScenarioAction ParseAction(const YAML::Node& node) {
@@ -391,7 +267,7 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   return assertion;
 }
 
-bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& action,
+bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction& action,
                     int stepIndex, const PlaybackHooks& hooks, TurnTimeline& timeline,
                     TimelinePlayback& playback, ScenarioResult* result) {
   auto Fail = [&](const std::string& msg) {
@@ -452,7 +328,7 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
       // Fast-forward the executing round. Step coarsely (not one giant tick)
       // so sighting memory still samples the figures along the way (and the
       // turn timeline records replayable frames at the same granularity).
-      constexpr float kFastStepSeconds = 0.1f;
+      constexpr float kFastStepSeconds = constants::kSimStepSeconds;
       constexpr int kMaxFastSteps = 20000;
       for (int i = 0; game.Mode() == InputMode::Executing && i < kMaxFastSteps; ++i) {
         game.Update(kFastStepSeconds);
@@ -687,7 +563,7 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
   return true;
 }
 
-void CheckAssertion(const GameLogic& game, const ScenarioAssertion& a, int stepIndex,
+void CheckAssertionImpl(const GameLogic& game, const ScenarioAssertion& a, int stepIndex,
                      const TurnTimeline* timeline, ScenarioResult* result) {
   auto Fail = [&](const std::string& msg) {
     result->failures.push_back("step " + std::to_string(stepIndex) + " (assert): " + msg);
@@ -795,6 +671,18 @@ void CheckAssertion(const GameLogic& game, const ScenarioAssertion& a, int stepI
 
 }  // namespace
 
+bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& action,
+                   int stepIndex, ScenarioResult* result) {
+  TurnTimeline timeline;
+  TimelinePlayback playback;
+  return ExecuteActionImpl(game, scene, action, stepIndex, {}, timeline, playback, result);
+}
+
+void CheckAssertion(const GameLogic& game, const ScenarioAssertion& assertion, int stepIndex,
+                    ScenarioResult* result) {
+  CheckAssertionImpl(game, assertion, stepIndex, nullptr, result);
+}
+
 Scenario LoadScenarioFromFile(const std::string& path) {
   YAML::Node root;
   try {
@@ -806,7 +694,11 @@ Scenario LoadScenarioFromFile(const std::string& path) {
   Scenario scenario;
   scenario.sourcePath = path;
   scenario.name = root["name"] ? root["name"].as<std::string>() : path;
-  scenario.scene = ParseScene(root);
+  scenario.sceneSpec = ParseSceneSpec(root);
+  std::string sceneError;
+  if (!net::SceneFromSpec(scenario.sceneSpec, &scenario.scene, &sceneError)) {
+    throw std::runtime_error(path + ": " + sceneError);
+  }
   ParsePlaybooks(root, scenario.playbooks);
   if (root["friendly_fire"]) scenario.friendlyFire = root["friendly_fire"].as<bool>();
   if (const YAML::Node rolls = root["shot_rolls"]) {
@@ -899,8 +791,8 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
   for (int i = 0; i < static_cast<int>(scenario.steps.size()); ++i) {
     const ScenarioStep& step = scenario.steps[i];
     if (step.action) {
-      if (!ExecuteAction(game, scenario.scene, *step.action, i, hooks, timeline, playback,
-                         &result)) {
+      if (!ExecuteActionImpl(game, scenario.scene, *step.action, i, hooks, timeline, playback,
+                             &result)) {
         break;  // The script's own preconditions were violated; state past this point is unreliable.
       }
       SyncFollower();
@@ -908,8 +800,8 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
       EmitHoldFrames();
       if (hooks.onActionComplete) hooks.onActionComplete(Display(), completedActions);
     } else {
-      CheckAssertion(Display(), *step.assertion, i, &timeline, &result);
-            const ScenarioAssertion& as = *step.assertion;
+      CheckAssertionImpl(Display(), *step.assertion, i, &timeline, &result);
+      const ScenarioAssertion& as = *step.assertion;
       if (as.flagCarrier || as.flagState || as.flagPosition || as.flagVisibleTo) {
         // The follower mirrors the flag too (flag fields only; the rest of
         // the assertion is already checked on the simulator).
@@ -920,13 +812,13 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
         flagOnly.flagVisibleTo = as.flagVisibleTo;
         flagOnly.tolerance = as.tolerance;
         ScenarioResult followerResult;
-        CheckAssertion(follower, flagOnly, i, nullptr, &followerResult);
+        CheckAssertionImpl(follower, flagOnly, i, nullptr, &followerResult);
         for (auto& f : followerResult.failures) result.failures.push_back("follower " + f);
       }
       if (step.assertion->rememberedByTeam &&
           (!step.assertion->memoryAge || *step.assertion->memoryAge == 0)) {
         ScenarioResult followerResult;
-        CheckAssertion(follower, *step.assertion, i, &timeline, &followerResult);
+        CheckAssertionImpl(follower, *step.assertion, i, &timeline, &followerResult);
         for (auto& f : followerResult.failures) result.failures.push_back("follower " + f);
       }
     }

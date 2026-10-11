@@ -1,0 +1,47 @@
+name: Server janitor (Fly.io)
+
+# Safety net for server-deploy.yml's close-time cleanup (missed events, failed
+# runs): destroy every tbgwaf-server-pr-<N> app whose PR is no longer open.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List what would be destroyed without destroying it
+        type: boolean
+        default: false
+
+permissions:
+  pull-requests: read
+
+concurrency:
+  group: server-janitor
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FLY_API_TOKEN: ${{ secrets.TBGWAF_FLYIO_TBGWAF_ORG_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Destroy apps of closed/merged PRs
+        run: |
+          [ -n "$FLY_API_TOKEN" ] || { echo "::error::TBGWAF_FLYIO_TBGWAF_ORG_TOKEN is not available"; exit 1; }
+          apps=$(flyctl apps list --org tbgwaf --json | jq -r '.[].Name | select(test("^tbgwaf-server-pr-[0-9]+$"))')
+          for app in $apps; do
+            pr="${app##*-}"
+            state=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr}" --jq .state 2>/dev/null || echo unknown)
+            echo "$app: PR #$pr is $state"
+            # Only a confirmed non-open PR (closed or merged) is destroyed; API errors keep the app.
+            if [ "$state" = "closed" ]; then
+              if [ "$DRY_RUN" = "true" ]; then echo "  would destroy $app"
+              else flyctl apps destroy "$app" --yes; fi
+            fi
+          done

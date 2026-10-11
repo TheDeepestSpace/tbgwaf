@@ -33,6 +33,7 @@
 
 #include "game/Scene.h"
 #include "game/Types.h"
+#include "net/Json.h"
 
 namespace tactics {
 class GameLogic;
@@ -146,6 +147,7 @@ struct Scenario {
   std::string name;
   std::string sourcePath;
   Scene scene;
+  net::Json sceneSpec;  // Declarative form of `scene` (see net/SceneSpec.h).
   SquadPlaybook playbooks[2] = {SquadPlaybook::Passive(), SquadPlaybook::Passive()};  // Indexed by Team; passive unless the YAML sets `playbook`.
   // `friendly_fire: false` flips the single config flag that makes
   // same-team figures transparent to free-aim ballistic traces.
@@ -240,5 +242,14 @@ struct PlaybackHooks {
 // executing each step's action or checking its assertion in order.
 ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks);
 ScenarioResult RunScenario(const Scenario& scenario);
+
+// Building blocks for other runners (the networked one): apply one scripted
+// plan action (Move/Shoot/Pass/Cancel/Focus; also Commit/NewGame locally) to
+// a single GameLogic through its click/choose API, and check one assertion
+// against a GameLogic's state. Failures are appended to `result`.
+bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& action,
+                   int stepIndex, ScenarioResult* result);
+void CheckAssertion(const GameLogic& game, const ScenarioAssertion& assertion, int stepIndex,
+                    ScenarioResult* result);
 
 }  // namespace tactics::scenario

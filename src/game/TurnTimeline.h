@@ -121,7 +121,10 @@ class TimelinePlayback {
   // view it starts a replay of the whole match from the Start tick.
   void Play(const TurnTimeline& timeline, const GameLogic& live);
   void TogglePlay(const TurnTimeline& timeline, const GameLogic& live);
-  void SetPlaying(bool playing) { playing_ = active_ && playing; }
+  void SetPlaying(bool playing) {
+    playing_ = active_ && playing;
+    if (playing_) settling_ = false;
+  }
 
   // Advances playback by dtSeconds * kReplaySpeed, importing successive
   // recorded frames; pauses (stays on the replay view) at the live end.
@@ -131,6 +134,7 @@ class TimelinePlayback {
   void Deactivate() {
     active_ = false;
     playing_ = false;
+    settling_ = false;
   }
   // Deactivates and drops the internal replay game. Required on a new match:
   // a new map's unit ids can coincide with the old one's, so a stale replay
@@ -148,6 +152,8 @@ class TimelinePlayback {
   std::unique_ptr<GameLogic> replay_;
   bool active_ = false;
   bool playing_ = false;
+  // Paused at the live end with ghosts/bullets still fading out.
+  bool settling_ = false;
   size_t frame_ = 0;
   float time_ = 0.0f;
 };

@@ -2455,6 +2455,15 @@ void TestTurnTimelineReplayGhostLifetimes() {
 
   // The live game keeps the per-turn behaviour: opaque while executing.
   CHECK(game.TracerAlpha(0.0f) == game.GhostAlpha(0.0f));
+
+  // Reaching the live end pauses, but leftovers keep fading until gone.
+  playback.SeekFrame(timeline, game, 0);
+  playback.Play(timeline, game);
+  playback.Update(timeline, 100.0f);
+  CHECK(!playback.Playing());
+  for (int i = 0; i < 40; ++i) playback.Update(timeline, 0.1f);
+  CHECK(!playback.Game().HasReplayGhosts());
+  CHECK(playback.Game().Tracers().empty());
 }
 
 void TestTurnTimelineResetsOnNewMatch() {

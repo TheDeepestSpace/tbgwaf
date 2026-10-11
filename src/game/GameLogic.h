@@ -269,6 +269,14 @@ class GameLogic {
   // (kReplayGhostHold / kReplayTracerLife after they appear) and carry over
   // into the next turn instead of being cleared. Live play is unaffected.
   void SetReplayGhostMode(bool enabled) { replayGhosts_ = enabled; }
+  // True while any ghost or bullet line is still visible (replay mode).
+  bool HasReplayGhosts() const {
+    if (!replayTracers_.empty()) return true;
+    for (const auto& perUnit : sightings_)
+      for (const auto& list : perUnit)
+        if (!list.empty()) return true;
+    return false;
+  }
 
   // Advances the ghost clocks and samples newly visible enemies. Must be called
   // every frame on every page regardless of mode or simulator/follower role

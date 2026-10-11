@@ -1657,13 +1657,15 @@ void DrawAimMarker(const Shader& colorShader, ColorTriangleMesh& mesh,
 // deck slab crossing a camera->probe segment is drawn see-through.
 std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team, bool fogActive,
                                                const PaneOverlays& overlays) {
+  // The omniscient spectator keeps both teams' figures and plans visible.
+  const bool allTeams = overlays.spectatorFov;
   // Probes hover slightly above their surface so grazing contact with the
   // ground/deck they sit on never reads as occlusion.
   constexpr float kSurfaceLift = 0.3f;
   constexpr float kGhostLift = 0.9f;  // Mid-torso of a ghost/figure wireframe.
   std::vector<glm::vec3> probes;
   for (const Unit& unit : game.GetScene().units) {
-    if (!unit.alive || unit.team != team) continue;
+    if (!unit.alive || (!allTeams && unit.team != team)) continue;
     probes.push_back(unit.EyePosition());
     probes.push_back(unit.position + glm::vec3(0.0f, kSurfaceLift, 0.0f));
   }
@@ -1698,7 +1700,7 @@ std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team,
       game.Mode() != InputMode::GameOver && game.Mode() != InputMode::Executing;
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
-      if (!unit.alive || unit.team != team) continue;
+      if (!unit.alive || (!allTeams && unit.team != team)) continue;
       if (unit.plan.type != tactics::PlannedActionType::Move || unit.plan.movePath.size() < 2) {
         continue;
       }
@@ -2473,7 +2475,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
-      if (!unit.alive || unit.team != team ||
+      if (!unit.alive || (!overlays.spectatorFov && unit.team != team) ||
           unit.plan.type != tactics::PlannedActionType::Shoot || &unit == aimingShooter) {
         continue;
       }
@@ -2912,7 +2914,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // single actor.
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
-      if (!unit.alive || unit.team != team) continue;
+      if (!unit.alive || (!overlays.spectatorFov && unit.team != team)) continue;
       if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
       const bool planned = unit.plan.type != tactics::PlannedActionType::None;
       const glm::vec4 color = planned ? glm::vec4(0.25f, 0.9f, 0.35f, 1.0f)
@@ -3003,10 +3005,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // Visual feedback for the whole squad's plan so far: a planned move reuses
   // the same path-line rendering as the live preview above; a planned shot
   // gets a simple shooter->target line. Own team only -- the enemy's plans
-  // stay hidden even where its figures are visible.
+  // stay hidden even where its figures are visible (except to the spectator).
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
-      if (!unit.alive || unit.team != team) continue;
+      if (!unit.alive || (!overlays.spectatorFov && unit.team != team)) continue;
       if (unit.plan.type == tactics::PlannedActionType::Move && unit.plan.movePath.size() >= 2) {
         drawMovePath(unit.plan.movePath, unit.plan.moveRides, glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
         // Wireframe stand-in at the destination, showing the planned final

@@ -1397,6 +1397,38 @@ void TestFeatureFlagsAndStreetGraph() {
   CHECK(UrbanStreets(1, legacy).empty());
 }
 
+void TestLocalStreetsPavedAndSidewalkIsRing() {
+  const MapGeneratorConfig c;
+  for (uint32_t seed : kSeeds) {
+    size_t local = 0;
+    for (const UrbanStreet& street : UrbanStreets(seed, c)) {
+      if (street.cls != UrbanStreetClass::Highway) ++local;
+    }
+    const Scene scene = GenerateUrbanMap(seed, c);
+    CHECK(local > 0);
+    CHECK(scene.roads.size() >= local);
+    // Sidewalk ring: no paved strip covers the middle of a block.
+    for (const UrbanBlock& block : UrbanBlocks(seed, c)) {
+      glm::vec2 centroid(0.0f);
+      for (const glm::vec2& v : block.vertices) centroid += v;
+      centroid /= static_cast<float>(block.vertices.size());
+      float inradius = 1e9f;  // Ring is only guaranteed for blocks with room inside.
+      for (size_t e = 0; e < block.vertices.size(); ++e) {
+        const glm::vec2 a = block.vertices[e];
+        const glm::vec2 b = block.vertices[(e + 1) % block.vertices.size()];
+        const glm::vec2 d = b - a, r = centroid - a;
+        inradius = std::min(inradius, std::fabs(d.x * r.y - d.y * r.x) / glm::length(d));
+      }
+      if (inradius < c.sidewalkWidth * 2.0f) continue;
+      for (const RoadSurface& sw : scene.sidewalkSurfaces) {
+        std::vector<glm::vec2> poly;
+        for (const glm::vec3& v : sw.vertices) poly.emplace_back(v.x, v.z);
+        CHECK(!PointInConvexPolygon(centroid, poly));
+      }
+    }
+  }
+}
+
 int main() {
   TestFeatureFlagsAndStreetGraph();
   TestDeterminismAndVariety();
@@ -1409,6 +1441,7 @@ int main() {
   TestVariedHeightsWithFewTowers();
   TestBlocksAndStreetsVary();
   TestSidewalksCoverEveryBlock();
+  TestLocalStreetsPavedAndSidewalkIsRing();
   TestLotVariety();
   TestNavMeshFullyReachableFromSpawns();
   TestWindowedNavMeshMatchesGlobalWithinBudget();

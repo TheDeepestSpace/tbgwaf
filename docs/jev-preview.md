@@ -7,7 +7,13 @@ The browser preview has three modes on the same page and uses the same WASM
 - **Blue vs Jev** (`?mode=player-v-ai`) leaves Blue interactive and lets Jev
   plan Red. The Blue simulator commits automatically when both teams finish.
 - **Jev vs Jev** (`?mode=ai-v-ai`) starts paused. Start, pause, restart, camera
-  orbit, and camera zoom remain available to the spectator.
+  orbit, and camera zoom remain available to the spectator. It shows a single
+  omniscient third-person pane: every Blue and Red figure is drawn (no fog of
+  war) with both teams' translucent FOV cones. This is a mode-gated render path
+  in the existing WASM build (`Module.tbgwafSpectator`, set only on the Blue
+  instance; the Red instance keeps simulating in a hidden pane), not a separate
+  binary. It is rendering-only: Jev's request state still contains only
+  team-visible information. Other modes keep their two fog-limited panes.
 
 Game code builds a bounded set of legal actions (about 25 per figure) for every
 unplanned figure on the team (visible shots, navmesh-validated moves incl.

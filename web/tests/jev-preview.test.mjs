@@ -51,6 +51,26 @@ test("exposes all three modes and configures their controlled teams", () => {
   assert.equal(blue.tbgwafAIPaused, false);
 });
 
+test("only the Blue instance is a spectator, and only in Jev vs Jev", () => {
+  const controller = new JevPreviewController({ documentRef: null, endpoint: "http://adapter" });
+  const blue = moduleStub();
+  const red = moduleStub();
+  controller.registerModule("blue", blue);
+  controller.registerModule("red", red);
+  for (const mode of ["human", "player-v-ai"]) {
+    controller.setMode(mode);
+    assert.equal(blue.tbgwafSpectator, false);
+    assert.equal(red.tbgwafSpectator, false);
+  }
+  controller.setMode("ai-v-ai");
+  assert.equal(blue.tbgwafSpectator, true);
+  assert.equal(red.tbgwafSpectator, false);
+  controller.useFallback();
+  assert.equal(blue.tbgwafSpectator, true);
+  controller.setMode("human");
+  assert.equal(blue.tbgwafSpectator, false);
+});
+
 test("accepts one legal response and rejects duplicate concurrent requests", async () => {
   let calls = 0;
   let resolveFetch;

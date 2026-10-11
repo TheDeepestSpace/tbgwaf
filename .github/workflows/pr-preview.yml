@@ -44,10 +44,100 @@ jobs:
       target: dev
     secrets: inherit
 
-  preview:
+  # --- Gameplay scenario review page (issue #14 stage 3, #190): build the
+  # native runner once, record per-team WebM videos in parallel shards, and
+  # collect them into the page inside the preview job. ---
+  build_runner:
     needs: dev_image
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/thedeepestspace/tbgwaf-dev:pr-${{ github.event.pull_request.number }}
+      options: --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Configure (native)
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build visual scenario runner
+        run: cmake --build build --target tactics_visual_tests
+
+      # The runner reads its assets from the checkout (cwd), so the binary
+      # alone is enough for the shards.
+      - name: Upload runner
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: visual-runner
+          path: build/tactics_visual_tests
+          if-no-files-found: error
+          retention-days: 1
+
+  scenario_shard:
+    needs: build_runner
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/thedeepestspace/tbgwaf-dev:pr-${{ github.event.pull_request.number }}
+      options: --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: true
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history for the base...head classification.
+          fetch-depth: 0
+
+      - name: Trust workspace for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Download runner
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: visual-runner
+          path: build
+
+      - name: Record shard
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          SDL_VIDEODRIVER: x11
+        run: |
+          chmod +x build/tactics_visual_tests
+          xvfb-run --auto-servernum --server-args='-screen 0 1280x1024x24' \
+            python3 scripts/generate_scenario_review_page.py \
+              --base ${{ github.event.pull_request.base.sha }} \
+              --head ${{ github.event.pull_request.head.sha }} \
+              --runner build/tactics_visual_tests \
+              --out scenarios-out \
+              --shard ${{ matrix.shard }}/6
+
+      - name: Upload shard
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scenario-shard-${{ matrix.shard }}
+          path: scenarios-out
+          if-no-files-found: error
+          retention-days: 1
+
+  preview:
+    needs: [dev_image, scenario_shard]
     # The closed action skips the image builds and only cleans up the preview.
-    if: ${{ !cancelled() && github.event.pull_request.head.repo.full_name == github.repository && (needs.dev_image.result == 'success' || needs.dev_image.result == 'skipped') }}
+    if: ${{ !cancelled() && github.event.pull_request.head.repo.full_name == github.repository && (needs.dev_image.result == 'success' || needs.dev_image.result == 'skipped') && (needs.scenario_shard.result == 'success' || needs.scenario_shard.result == 'skipped') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/thedeepestspace/tbgwaf-dev:pr-${{ github.event.pull_request.number }}
@@ -101,30 +191,24 @@ jobs:
           cp build-web/map_seeds.js site/gallery/
           cp -r build-web/map_goldens site/gallery/
 
-      # --- Gameplay scenario review page (issue #14 stage 3): record a
-      # per-team WebM video for every scenario at the PR's head and publish
-      # them on an HTML page inside the same per-PR preview. ---
-      - name: Configure (native)
+      - name: Download scenario shards
         if: github.event.action != 'closed'
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build visual scenario runner
-        if: github.event.action != 'closed'
-        run: cmake --build build --target tactics_visual_tests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: scenario-shard-*
+          path: site/scenarios
+          merge-multiple: true
 
       - name: Generate scenario review page
         if: github.event.action != 'closed'
-        env:
-          LIBGL_ALWAYS_SOFTWARE: "1"
-          SDL_VIDEODRIVER: x11
         run: |
-          xvfb-run --auto-servernum --server-args='-screen 0 1280x1024x24' \
-            python3 scripts/generate_scenario_review_page.py \
-              --base ${{ github.event.pull_request.base.sha }} \
-              --head ${{ github.event.pull_request.head.sha }} \
-              --runner build/tactics_visual_tests \
-              --out site/scenarios \
-              --baseline-url ../../../scenario-baseline
+          python3 scripts/generate_scenario_review_page.py \
+            --base ${{ github.event.pull_request.base.sha }} \
+            --head ${{ github.event.pull_request.head.sha }} \
+            --out site/scenarios \
+            --collect \
+            --baseline-url ../../../scenario-baseline
+          rm -f site/scenarios/shard-*.json
 
       - name: Deploy PR preview
         uses: rossjrw/pr-preview-action@ffa7509e91a3ec8dfc2e5536c4d5c1acdf7a6de9 # v1.8.1

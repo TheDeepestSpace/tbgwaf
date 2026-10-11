@@ -117,6 +117,7 @@ EM_JS(char*, tbgwaf_channel_next, (), {
 // page passes the WebSocket URL as Module.tbgwafServer (and optionally a
 // room name as Module.tbgwafRoom). Returns a malloc'd string (caller frees),
 // empty when unset.
+EM_JS(int, tbgwaf_has_server, (), { return Module.tbgwafServer ? 1 : 0; });
 EM_JS(char*, tbgwaf_server_url, (), {
   const text = Module.tbgwafServer || "";
   const size = lengthBytesUTF8(text) + 1;
@@ -147,7 +148,13 @@ EM_JS(void, tbgwaf_ws_open, (const char* url), {
 
 EM_JS(void, tbgwaf_ws_send, (const char* msg), {
   const ws = Module.tbgwafWs;
-  if (ws && ws.readyState === 1) ws.send(UTF8ToString(msg));
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(UTF8ToString(msg));
+  // Lets a page that runs two clients order their joins (first = Blue).
+  if (!Module.tbgwafSentOnce) {
+    Module.tbgwafSentOnce = true;
+    if (Module.tbgwafOnFirstSend) Module.tbgwafOnFirstSend();
+  }
 });
 
 // Returns a malloc'd event (caller frees) or null if none are queued.
@@ -174,6 +181,7 @@ EM_JS(int, tbgwaf_ai_enabled, (), { return Module.tbgwafAI ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_paused, (), { return Module.tbgwafAIPaused ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_fallback, (), { return Module.tbgwafAIFallback ? 1 : 0; });
 EM_JS(int, tbgwaf_auto_commit, (), { return Module.tbgwafAutoCommit ? 1 : 0; });
+EM_JS(int, tbgwaf_auto_enter, (), { return Module.tbgwafAutoEnter ? 1 : 0; });
 EM_JS(int, tbgwaf_default_ctf, (), { return Module.tbgwafDefaultCtf ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_generation, (), { return Module.tbgwafAIGeneration || 0; });
 EM_JS(int, tbgwaf_take_restart, (), {
@@ -474,7 +482,8 @@ int main() {
   bool awaitingPeerSync = false;
   Uint32 peerSyncDeadline = 0;
 #ifdef __EMSCRIPTEN__
-  if (const int requested = tbgwaf_requested_player(); requested >= 0) {
+  if (const int requested = tbgwaf_requested_player();
+      requested >= 0 && !tbgwaf_has_server()) {
     fixedTeam = requested == 0 ? Team::Blue : Team::Red;
     tbgwaf_channel_open();
     tbgwaf_channel_post("H");
@@ -571,7 +580,9 @@ int main() {
       jevErrorHold = false;
     }
     if (tbgwaf_take_ai_retry()) jevErrorHold = false;
-    if (networked && tbgwaf_take_restart()) {
+    // A server-mode page restarts by reloading into a fresh room; the local
+    // game is only a mirror and must not be reset here.
+    if (tbgwaf_take_restart() && networked && !remoteMode) {
       // Jev vs Jev defaults to CTF; leaving it restores the menu's choice.
       const bool previewCtf = tbgwaf_default_ctf();
       if (previewCtf) ctfMode = true;
@@ -618,6 +629,10 @@ int main() {
       }
       if (remote->team()) fixedTeam = remote->team();
       if (remote->ConsumeMatchStarted()) {
+        pendingJevRequest.reset();
+        jevBuilder.reset();
+        jevErrorHold = false;
+        lastAutoCommittedRound = -1;
         timeline.Reset(game);
         timelinePlayback.Reset();
         for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
@@ -796,7 +811,7 @@ int main() {
       bool autoEnterGameplay = isSmokeTest;
       bool autoCtf = false;
 #ifdef __EMSCRIPTEN__
-      autoEnterGameplay = autoEnterGameplay || aiEnabled;
+      autoEnterGameplay = autoEnterGameplay || aiEnabled || (remoteMode && tbgwaf_auto_enter());
       autoCtf = tbgwaf_default_ctf();
       ctfFromPreview = autoCtf;
 #endif
@@ -814,8 +829,8 @@ int main() {
             *flowEvent == tbgwaf_flow::Event::SelectCtf) {
           ctfMode = *flowEvent == tbgwaf_flow::Event::SelectCtf;
         }
-        if (*flowEvent == tbgwaf_flow::Event::SelectUrban ||
-            *flowEvent == tbgwaf_flow::Event::SelectHills) {
+        if (!remoteMode && (*flowEvent == tbgwaf_flow::Event::SelectUrban ||
+                            *flowEvent == tbgwaf_flow::Event::SelectHills)) {
           // The menu's Urban entry uses the seed-driven random overpass mode.
           mapType = *flowEvent == tbgwaf_flow::Event::SelectHills ? "hilly" : "urban-auto";
           game.Reset(makeMap());
@@ -884,7 +899,9 @@ int main() {
       jevBuilder.reset();
     }
 
-    if (aiEnabled && !aiPaused && !jevErrorHold && !awaitingPeerSync &&
+    const bool remoteReady =
+        !remoteMode || remote->status() == tactics::net::RemoteClient::Status::Playing;
+    if (aiEnabled && !aiPaused && !jevErrorHold && !awaitingPeerSync && remoteReady &&
         game.Mode() == InputMode::AwaitingSelection) {
       if (!pendingJevRequest) {
         if (!jevBuilder) {
@@ -915,6 +932,13 @@ int main() {
 
     // Blue is the only simulator. In AI modes it commits exactly once as
     // soon as every living figure has a plan, including Blue-human vs Red-AI.
+    // A server-mode client commits its own team's plans the same way; the
+    // server runs the round once both clients have.
+    if (remoteMode && remoteReady && tbgwaf_auto_commit() && !aiPaused &&
+        game.CanCommitRound() && lastAutoCommittedRound != game.RoundNumber()) {
+      lastAutoCommittedRound = game.RoundNumber();
+      remote->RequestCommit();
+    }
     if (networked && isSimulator && tbgwaf_auto_commit() && !aiPaused &&
         game.CanCommitRound() && lastAutoCommittedRound != game.RoundNumber()) {
       lastAutoCommittedRound = game.RoundNumber();

@@ -232,20 +232,28 @@ cmake --build build
 `-DTBGWAF_BUILD_SERVER=OFF` skips the server. Both default to ON.
 
 **Local end-to-end test:** build the web client (below), serve the build dir,
-and open it in two windows with a server URL (a bare port means
-`ws://localhost:<port>`):
+and open it with a server URL (a bare port means `ws://localhost:<port>`):
 
 ```
 http://localhost:8000/index.html?server=8080
-http://localhost:8000/index.html?server=ws://localhost:8080&room=mygame
 ```
 
-The first window waits (Blue); the second is paired (Red). `room=` picks the
-pairing room (default: one shared room). Without `?server=` the page runs the
-no-server two-canvas demo (`?local=1` forces it). A default server can be
-baked in at build time: `emcmake cmake -B build-web -DTBGWAF_SERVER_URL=wss://...`
-(the query parameter still overrides it). Note an `https://` page can only
-reach `wss://` (or `ws://localhost`).
+With a server configured the page is split screen: the left and right panes
+are two separate clients of the server, paired in a room private to the page
+load, and the Human vs Human / Blue vs Jev / Jev vs Jev controls work as in the
+local preview (the Jev side plans through the adapter and commits its own
+team). Switching mode or Restart reloads into a fresh room. Known gap: the
+server always plays its seed-driven map, so Jev vs Jev's capture-the-flag
+default only applies to the no-server preview.
+
+`?solo=1` shows a single pane instead, for two browsers: open
+`index.html?server=ws://localhost:8080&solo=1&room=mygame` in both; the first
+waits (Blue), the second is paired (Red). `?room=` picks the room (default for
+`solo`: one shared room). Without `?server=` the page runs the in-page demo
+(`?local=1` forces it). A default server can be baked in at build time:
+`emcmake cmake -B build-web -DTBGWAF_SERVER_URL=wss://...` (the query parameter
+still overrides it). An `https://` page can only reach `wss://` (or
+`ws://localhost`).
 
 **Protocol** (JSON text frames; full reference in `src/net/Protocol.h`).
 Clients send discrete actions -- `move` (waypoint legs + facing), `shoot`,

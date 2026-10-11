@@ -114,11 +114,12 @@
     <script src="tactics_app.js"></script>
     <script type="text/javascript">
       // Two ways to play:
-      //  * Server mode: one canvas, talking to the authoritative server over
-      //    a WebSocket. The URL comes from ?server=ws://host:port (a bare
+      //  * Server mode: both panes are separate clients of the authoritative
+      //    server over WebSockets (?solo=1: one pane, for two browsers). The URL comes from ?server=ws://host:port (a bare
       //    port such as ?server=8080 means ws://localhost:8080), else from
       //    the build-time default (cmake -DTBGWAF_SERVER_URL=...). ?room=NAME
-      //    picks which room to pair in (default: one shared room).
+      //    picks which room to pair in (default: private to this page load
+      //    in split screen, the one shared room with ?solo=1).
       //  * Local preview (no server): both teams on this page, with the Jev
       //    controls, driven by jev-preview.js. Used when no server is
       //    configured, or forced with ?local=1.
@@ -134,7 +135,9 @@
       }
       var serverUrl = resolveServerUrl();
       var statusEl = document.getElementById("status");
-      if (serverUrl) {
+      var params = new URLSearchParams(window.location.search);
+      if (serverUrl && params.has("solo")) {
+        // One canvas, one player; a second player opens the same ?room=NAME.
         document.getElementById("pane-red").remove();
         document.getElementById("control-panel").remove();
         statusEl.innerText = "Online match via " + serverUrl;
@@ -144,10 +147,18 @@
         createTbgwafModule({
           canvas: document.querySelector("#pane-blue canvas"),
           tbgwafServer: serverUrl,
-          tbgwafRoom: new URLSearchParams(window.location.search).get("room") || "",
+          tbgwafRoom: params.get("room") || "",
           onRuntimeInitialized: function () { statusEl.innerText = ""; },
         });
       } else {
+        // Split screen: both panes are separate clients of the server, paired
+        // through a room private to this page load (so the mode controls,
+        // including the Jev modes, work as in the local preview).
+        if (serverUrl) {
+          var room = params.get("room") ||
+            "p" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+          window.TBGWAF_SERVER = { url: serverUrl, room: room };
+        }
         import("./jev-preview.js");
       }
     </script>

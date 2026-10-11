@@ -65,6 +65,12 @@
       .pane { position: relative; flex: 1 1 50%; min-width: 0; }
       .pane + .pane { border-left: 2px solid #000; }
       .pane canvas { background: #000; display: block; width: 100%; height: 100%; }
+      /* Jev vs Jev: one omniscient Blue-instance pane; the Red instance keeps
+         running (hidden, same size) so its AI and simulation mirror still work. */
+      #panes[data-spectator="true"] #pane-red {
+        position: absolute; inset: 0; visibility: hidden; pointer-events: none;
+      }
+      #panes[data-spectator="true"] .pane + .pane { border-left: 0; }
       @media (max-width: 680px) {
         #control-panel { left: 6px; right: 6px; transform: none; width: auto; }
         #config { margin-left: 0; }
@@ -73,7 +79,7 @@
   </head>
   <body>
     <main id="panes">
-      <div class="pane" id="pane-blue" aria-label="Blue team view">
+      <div class="pane" id="pane-blue" aria-label="Blue team view (Jev vs Jev: spectator view of all figures)">
         <canvas oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
       </div>
       <div class="pane" id="pane-red" aria-label="Red team view">
@@ -108,7 +114,7 @@
     </section>
 
     <div id="hud">
-      <div>Blue uses the left canvas; Red uses the right. Camera orbit and zoom stay available.</div>
+      <div>Blue uses the left canvas; Red uses the right (Jev vs Jev: one spectator view of both teams). Camera orbit and zoom stay available.</div>
       <div id="status">Loading game…</div>
     </div>
     <script src="tactics_app.js"></script>

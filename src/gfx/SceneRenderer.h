@@ -65,6 +65,10 @@ struct PaneOverlays {
   // BuildPaneOverlays; the app's debug toggle / the map golden harness
   // supply a mesh built over the whole scene.
   const tactics::NavMesh* navMeshDebug = nullptr;
+  // Jev-vs-Jev spectator view: draw both teams' FOV cones (each team's
+  // overlap flattened separately, so Blue/Red overlap still reads). Callers
+  // also pass fogActive=false so every figure is drawn.
+  bool spectatorFov = false;
 };
 
 // Overlays `pane` shows for the current game state. They belong to the team

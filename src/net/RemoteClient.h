@@ -77,9 +77,15 @@ class RemoteClient {
     int unit = -1;
     float yaw = 0.0f;
   };
+  struct TracerEvent {
+    float t = 0.0f;
+    Team team = Team::Blue;
+    glm::vec3 from{0.0f}, to{0.0f};
+  };
   struct Playback {
     std::vector<Frame> frames;
     std::vector<Shot> shots;
+    std::vector<TracerEvent> tracers;
     float clock = 0.0f;
     float duration = 0.0f;
     Json finalState;

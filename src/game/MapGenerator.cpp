@@ -1209,7 +1209,7 @@ void EmitStreetSurfaces(Scene* scene, const CityPlan& city, const MapGeneratorCo
     std::vector<glm::vec2> band =
         KeepSide({a + n * hw, b + n * hw, b - n * hw, a - n * hw},
                  artery.normal * static_cast<float>(cut.side),
-                 static_cast<float>(cut.side) * arteryD + ArteryBand(c));
+                 static_cast<float>(cut.side) * arteryD + c.arteryWidth * 0.5f - 0.2f);
     // Oblique bands overhang the boundary at their corners: cut flush.
     const float half = scene->mapHalfExtent;
     for (const glm::vec2& edge : {glm::vec2(1, 0), glm::vec2(-1, 0), glm::vec2(0, 1), glm::vec2(0, -1)}) {

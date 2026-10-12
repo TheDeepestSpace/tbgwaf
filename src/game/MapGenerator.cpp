@@ -1204,17 +1204,18 @@ void EmitStreetSurfaces(Scene* scene, const CityPlan& city, const MapGeneratorCo
     ClipLineToSquare(cut.origin, cut.dir, scene->mapHalfExtent, &t0, &t1);
     if (!(t1 > t0)) continue;
     const glm::vec2 n(-cut.dir.y, cut.dir.x);
-    const glm::vec2 a = cut.origin + cut.dir * t0, b = cut.origin + cut.dir * t1;
     const float hw = cut.width * 0.5f;
-    std::vector<glm::vec2> band =
-        KeepSide({a + n * hw, b + n * hw, b - n * hw, a - n * hw},
-                 artery.normal * static_cast<float>(cut.side),
-                 static_cast<float>(cut.side) * arteryD + c.arteryWidth * 0.5f - 0.2f);
-    // Oblique bands overhang the boundary at their corners: cut flush.
     const float half = scene->mapHalfExtent;
-    for (const glm::vec2& edge : {glm::vec2(1, 0), glm::vec2(-1, 0), glm::vec2(0, 1), glm::vec2(0, -1)}) {
-      if (band.size() >= 3) band = KeepSide(band, -edge, -half);
-    }
+    const float d = glm::dot(n, cut.origin);
+    // Clip an infinite street band out of the map square. Starting with a
+    // centerline clipped to the square would leave only half the pavement at
+    // an oblique boundary crossing: one corner lies outside the map while its
+    // opposite corner still stops short of the edge.
+    std::vector<glm::vec2> band = {{-half, half}, {half, half}, {half, -half}, {-half, -half}};
+    band = KeepSide(band, n, d - hw);
+    band = KeepSide(band, -n, -(d + hw));
+    band = KeepSide(band, artery.normal * static_cast<float>(cut.side),
+                    static_cast<float>(cut.side) * arteryD + c.arteryWidth * 0.5f - 0.2f);
     if (band.size() < 3 || PolygonArea(band) < 1.0f) continue;
     RoadSurface road;
     for (const glm::vec2& p : band) road.vertices.emplace_back(p.x, groundY(p.x, p.y) + kGradeY, p.y);

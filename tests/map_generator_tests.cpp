@@ -1429,6 +1429,41 @@ void TestLocalStreetsPavedAndSidewalkIsRing() {
   }
 }
 
+// A local street that exits obliquely must carry its full width through the
+// boundary. Clipping the centerline first produces the half-width notch from
+// PR #192's review screenshot.
+void TestLocalStreetBandsReachMapEdgeAtFullWidth() {
+  MapGeneratorConfig c;
+  c.elevatedHighway = OverpassMode::Off;
+  for (const uint32_t seed : kSeeds) {
+    const std::vector<UrbanStreet> streets = UrbanStreets(seed, c);
+    const Scene scene = GenerateUrbanMap(seed, c);
+    CHECK(scene.roads.size() == streets.size());
+    if (scene.roads.size() != streets.size()) continue;
+
+    for (size_t i = 0; i < streets.size(); ++i) {
+      const UrbanStreet& street = streets[i];
+      if (street.cls == UrbanStreetClass::Highway) continue;
+      const glm::vec2 a(street.a.x, street.a.z), b(street.b.x, street.b.z);
+      const glm::vec2 dir = glm::normalize(b - a);
+      const glm::vec2 normal(-dir.y, dir.x);
+      float minOffset = 1e9f, maxOffset = -1e9f;
+      for (const glm::vec3& vertex : scene.roads[i].vertices) {
+        const glm::vec2 p(vertex.x, vertex.z);
+        const bool onBoundary =
+            std::fabs(std::fabs(p.x) - scene.mapHalfExtent) < kEps ||
+            std::fabs(std::fabs(p.y) - scene.mapHalfExtent) < kEps;
+        if (!onBoundary) continue;
+        const float offset = glm::dot(p - a, normal);
+        minOffset = std::min(minOffset, offset);
+        maxOffset = std::max(maxOffset, offset);
+      }
+      CHECK(minOffset <= -street.width * 0.5f + kEps);
+      CHECK(maxOffset >= street.width * 0.5f - kEps);
+    }
+  }
+}
+
 int main() {
   TestFeatureFlagsAndStreetGraph();
   TestDeterminismAndVariety();
@@ -1442,6 +1477,7 @@ int main() {
   TestBlocksAndStreetsVary();
   TestSidewalksCoverEveryBlock();
   TestLocalStreetsPavedAndSidewalkIsRing();
+  TestLocalStreetBandsReachMapEdgeAtFullWidth();
   TestLotVariety();
   TestNavMeshFullyReachableFromSpawns();
   TestWindowedNavMeshMatchesGlobalWithinBudget();

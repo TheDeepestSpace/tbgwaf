@@ -74,6 +74,9 @@ size_t TurnTimeline::FrameAtTime(float t) const {
 void TimelinePlayback::ShowFrame(const TurnTimeline& timeline, const GameLogic& live,
                                  size_t index) {
   const GameSnapshot& snapshot = timeline.FrameSnapshot(index);
+  // Seeking forward within a live replay: let ghosts/bullets already on screen
+  // finish their hold + fade rather than cutting them at the step boundary.
+  const bool keepGhosts = active_ && replay_ && index > frame_;
   if (!replay_ || !replay_->ImportState(snapshot)) {
     replay_ = std::make_unique<GameLogic>(live.GetScene());
     replay_->SetReplayGhostMode(true);
@@ -85,7 +88,7 @@ void TimelinePlayback::ShowFrame(const TurnTimeline& timeline, const GameLogic& 
     }
   }
   replay_->ClearAllPlans();
-  replay_->RestartGhostPlayback();
+  replay_->RestartGhostPlayback(keepGhosts);
   replay_->UpdateSightingMemory(0.0f);
   frame_ = index;
   time_ = timeline.FrameTime(index);

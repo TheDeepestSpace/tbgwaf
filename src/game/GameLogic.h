@@ -285,8 +285,10 @@ class GameLogic {
   void UpdateSightingMemory(float dtSeconds);
   void ResetSightingMemory();
   // Drops the remembered ghosts and re-arms the fade clocks from the current
-  // mode (used when a replay seeks to another frame).
-  void RestartGhostPlayback();
+  // mode (used when a replay seeks to another frame). With `keepFading`
+  // (replay mode, seeking forward) the current ghosts/bullets are kept so
+  // they finish their hold and fade instead of vanishing.
+  void RestartGhostPlayback(bool keepFading = false);
 
   // Bullet lines of the current/last turn (see Tracer); cleared when the next
   // turn starts executing.

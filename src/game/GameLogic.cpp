@@ -158,11 +158,16 @@ void GameLogic::ClearSightings() {
   }
 }
 
-void GameLogic::RestartGhostPlayback() {
-  ClearSightings();
-  replayTracers_.clear();
-  replayTracersSeen_ = 0;
-  replayTracerRound_ = -1;
+void GameLogic::RestartGhostPlayback(bool keepFading) {
+  if (keepFading) {
+    // Existing ghosts/bullets live out their hold+fade; only re-arm sampling.
+    for (int t = 0; t < 2; ++t) sightedLastFrame_[t].assign(sightedLastFrame_[t].size(), false);
+  } else {
+    ClearSightings();
+    replayTracers_.clear();
+    replayTracersSeen_ = 0;
+    replayTracerRound_ = -1;
+  }
   wasExecuting_ = mode_ == InputMode::Executing;
   fadeClock_ = wasExecuting_ ? 0.0f : kNeverExecuted;
 }

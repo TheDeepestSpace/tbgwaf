@@ -1899,6 +1899,22 @@ void TestGhostsShowDuringTurnThenFadeInOrder() {
   CHECK(a1 > a0);
 }
 
+void TestReplaySeekForwardKeepsFadingGhosts() {
+  GameLogic game(LegacyScene());
+  game.SetReplayGhostMode(true);
+  ImportTurnState(game, InputMode::Executing, 0.0f);
+  game.UpdateSightingMemory(0.05f);
+  CHECK(!game.Sightings(Team::Blue, 4).empty());
+  game.RestartGhostPlayback(/*keepFading=*/true);  // Next step begins.
+  CHECK(!game.Sightings(Team::Blue, 4).empty());
+  game.UpdateSightingMemory(0.0f);
+  CHECK(game.HasReplayGhosts());
+  game.UpdateSightingMemory(0.5f);  // Still inside the hold.
+  CHECK(game.HasReplayGhosts());
+  game.RestartGhostPlayback();  // Backward seek / fresh start drops them.
+  CHECK(game.Sightings(Team::Blue, 4).empty());
+}
+
 void TestNextTurnStartsWithoutLastTurnsGhosts() {
   GameLogic game(LegacyScene());
   ImportTurnState(game, InputMode::Executing, 0.0f);
@@ -3200,6 +3216,7 @@ int main() {
   TestSnapshotMirrorsMatchAndTeamPlans();
   TestSightingRecordedImmediatelyOnEntry();
   TestDeadFigureInFovLeavesNoGhost();
+  TestReplaySeekForwardKeepsFadingGhosts();
   TestSightingSamplesAccumulateWhileInFov();
   TestSightingMoveDirectionOnlyWhenMoving();
   TestSightingCapturesAnimationPose();

@@ -696,16 +696,20 @@ def list_scenario_paths(ref: str, repo_root: Path) -> list[str]:
     return [p for p in out.splitlines() if p.endswith((".yaml", ".yml"))]
 
 
-def record_videos(paths: list[str], runner: Path, repo_root: Path, media_dir: Path) -> dict:
+def record_videos(paths: list[str], runner: Path, repo_root: Path, media_dir: Path,
+                  server: Path | None = None) -> dict:
     """Runs the visual runner with --video for each scenario; returns
     {path: {'stem', 'ok', 'detail'}}. A scenario whose script fails during
-    playback still yields whatever video was captured before the failure."""
+    playback still yields whatever video was captured before the failure.
+    With `server`, the runner films each team's client against a real
+    (test-control) server instead of an in-process game."""
+    server_args = ["--server", str(server)] if server else []
     results = {}
     for path in paths:
         stem = Path(path).stem
         with tempfile.TemporaryDirectory() as tmp:
             proc = subprocess.run(
-                [str(runner), "--video", "--skip-goldens", "--out-dir", tmp, path],
+                [str(runner), "--video", "--skip-goldens", *server_args, "--out-dir", tmp, path],
                 cwd=repo_root, capture_output=True, text=True,
             )
             ok = proc.returncode == 0
@@ -800,6 +804,8 @@ def main() -> int:
                         help="Path to the built tactics_visual_tests binary")
     parser.add_argument("--out", required=True, type=Path,
                         help="Output directory for index.html + media/")
+    parser.add_argument("--server", type=Path, default=None,
+                        help="tbgwaf_server_testctl binary: film through a real server")
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--baseline-url", default="",
                         help="URL (relative to the page) of a directory holding "
@@ -816,7 +822,8 @@ def main() -> int:
     media_dir = args.out / "media"
 
     renderable = changes["A"] + changes["M"] + changes["U"]
-    results = record_videos(renderable, args.runner.resolve(), args.repo_root, media_dir)
+    results = record_videos(renderable, args.runner.resolve(), args.repo_root, media_dir,
+                            args.server.resolve() if args.server else None)
     breakdowns = build_breakdowns(renderable, args.repo_root)
 
     if not any(changes.values()):

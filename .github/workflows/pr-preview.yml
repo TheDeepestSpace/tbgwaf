@@ -110,7 +110,7 @@ jobs:
 
       - name: Build visual scenario runner
         if: github.event.action != 'closed'
-        run: cmake --build build --target tactics_visual_tests
+        run: cmake --build build --target tactics_visual_tests tbgwaf_server_testctl
 
       - name: Generate scenario review page
         if: github.event.action != 'closed'
@@ -123,6 +123,7 @@ jobs:
               --base ${{ github.event.pull_request.base.sha }} \
               --head ${{ github.event.pull_request.head.sha }} \
               --runner build/tactics_visual_tests \
+              --server build/tbgwaf_server_testctl \
               --out site/scenarios \
               --baseline-url ../../../scenario-baseline
 

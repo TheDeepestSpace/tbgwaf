@@ -241,7 +241,8 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
 
     const TeamVisibility visibility = ComputeVisibility(viewer);
     for (const Unit& unit : scene_.units) {
-      if (unit.team == viewer || unit.id < 0 ||
+      // A corpse is drawn as itself; sampling it would stamp a fading ghost on it.
+      if (unit.team == viewer || !unit.alive || unit.id < 0 ||
           static_cast<size_t>(unit.id) >= sightings_[t].size()) {
         continue;
       }
@@ -406,7 +407,10 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   std::vector<int> newlyDeadIds;
   for (const auto& u : snap.units) {
     const Unit* unit = FindUnit(u.id);
-    if (unit && unit->alive && !u.alive) newlyDeadIds.push_back(u.id);
+    if (unit && unit->alive && !u.alive &&
+        !ComputeVisibility(OpposingTeam(unit->team)).UnitVisible(u.id)) {
+      newlyDeadIds.push_back(u.id);  // Hidden from the opponent when it fell.
+    }
   }
   mirroredMoving_.clear();
   for (const auto& u : snap.units) {
@@ -433,7 +437,6 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   for (int deadId : newlyDeadIds) {
     const Unit* dead = FindUnit(deadId);
     const Team opponent = OpposingTeam(dead->team);
-    if (ComputeVisibility(opponent).UnitVisible(deadId)) continue;
     const int viewerIndex = static_cast<int>(opponent);
     if (deadId >= 0 && static_cast<size_t>(deadId) < sightings_[viewerIndex].size()) {
       EnemySighting s;

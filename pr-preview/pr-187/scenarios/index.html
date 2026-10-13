@@ -91,6 +91,7 @@ listed by name only.</p>
 </div>
 <div class="scenario has-video" data-stem="finish_new_game_finish"><h3>finish_new_game_finish</h3><div class="path">tests/scenarios/finish_new_game_finish.yaml</div>
 <p class="description">Regression for ghost wireframes (sighting-memory trails) surviving a new game. Game 1: blue sights red1, red1 walks out of view (remembered trail, plus planned-move ghosts while planning), then blue finishes both reds (GameOver). `new_game` then restarts the match the way the UI does; the runner also mirrors every step into a follower page via ImportState (the second pane), whose memory is checked as well. No old sightings may remain (only fresh ones from the opening view), and game 2 is played to completion too.</p>
+<p class="note">⚠ scenario script failed during visual playback; video below stops at the failing step.</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/finish_new_game_finish/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/finish_new_game_finish/red.webm"></video></figure>
@@ -165,6 +166,7 @@ listed by name only.</p>
 </div>
 <div class="scenario has-video" data-stem="playbook_sighting_memory_fades_out"><h3>playbook_sighting_memory_fades_out</h3><div class="path">tests/scenarios/playbook_sighting_memory_fades_out.yaml</div>
 <p class="description">Ghosts show for the turn only: red is seen by blue once, then runs out of blue&#x27;s FOV. When the turn ends the ghosts are fully visible, then fade out over kGhostFadeDuration (0.5s) each, starting in the order they appeared. Nothing carries over into the next turn.</p>
+<p class="note">⚠ scenario script failed during visual playback; video below stops at the failing step.</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_sighting_memory_fades_out/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_sighting_memory_fades_out/red.webm"></video></figure>

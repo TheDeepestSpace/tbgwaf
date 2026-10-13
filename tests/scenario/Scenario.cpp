@@ -559,6 +559,7 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
       if (hooks.onMoveFrontier) {
         for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
           hooks.onMoveFrontier(game, actorTeam);
+          if (hooks.tickSeconds > 0.0f) game.UpdateSightingMemory(hooks.tickSeconds);
         }
       }
       for (const glm::vec3& waypoint : action.waypoints) {
@@ -604,6 +605,7 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
       if (hooks.onMoveFrontier) {
         for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
           hooks.onMoveFrontier(game, actorTeam);
+          if (hooks.tickSeconds > 0.0f) game.UpdateSightingMemory(hooks.tickSeconds);
         }
       }
       return true;
@@ -907,7 +909,14 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
 
   auto EmitHoldFrames = [&] {
     if (!hooks.onFrame) return;
-    for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) hooks.onFrame(Display());
+    for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
+      hooks.onFrame(Display());
+      // Video mode: time passes while planning, so ghosts/bullets keep
+      // fading across the held frames instead of freezing mid-hold.
+      if (hooks.tickSeconds > 0.0f && !playback.Active()) {
+        game.UpdateSightingMemory(hooks.tickSeconds);
+      }
+    }
   };
 
   // Mirrors main.cpp's frame loop so captured frames include sighting memory.

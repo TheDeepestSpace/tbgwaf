@@ -74,8 +74,12 @@ size_t TurnTimeline::FrameAtTime(float t) const {
 void TimelinePlayback::ShowFrame(const TurnTimeline& timeline, const GameLogic& live,
                                  size_t index) {
   const GameSnapshot& snapshot = timeline.FrameSnapshot(index);
+  // Seeking forward within a live replay: let ghosts/bullets already on screen
+  // finish their hold + fade rather than cutting them at the step boundary.
+  const bool keepGhosts = active_ && replay_ && index > frame_;
   if (!replay_ || !replay_->ImportState(snapshot)) {
     replay_ = std::make_unique<GameLogic>(live.GetScene());
+    replay_->SetReplayGhostMode(true);
     if (!replay_->ImportState(snapshot)) {
       // History doesn't match the live scene (shouldn't happen: both reset
       // together on a new match); fail back to the live view.
@@ -84,10 +88,12 @@ void TimelinePlayback::ShowFrame(const TurnTimeline& timeline, const GameLogic& 
     }
   }
   replay_->ClearAllPlans();
+  replay_->RestartGhostPlayback(keepGhosts);
   replay_->UpdateSightingMemory(0.0f);
   frame_ = index;
   time_ = timeline.FrameTime(index);
   active_ = true;
+  settling_ = false;
 }
 
 bool TimelinePlayback::SeekTick(const TurnTimeline& timeline, const GameLogic& live,
@@ -117,6 +123,7 @@ void TimelinePlayback::Play(const TurnTimeline& timeline, const GameLogic& live)
     if (!active_) return;
   }
   playing_ = true;
+  settling_ = false;
 }
 
 void TimelinePlayback::TogglePlay(const TurnTimeline& timeline, const GameLogic& live) {
@@ -128,7 +135,14 @@ void TimelinePlayback::TogglePlay(const TurnTimeline& timeline, const GameLogic&
 }
 
 void TimelinePlayback::Update(const TurnTimeline& timeline, float dtSeconds) {
-  if (!Playing()) return;
+  if (!Playing()) {
+    // Reached the live end: let the remaining ghosts/bullets fade out.
+    if (active_ && settling_) {
+      replay_->UpdateSightingMemory(dtSeconds * kReplaySpeed);
+      settling_ = replay_->HasReplayGhosts();
+    }
+    return;
+  }
   time_ += dtSeconds * kReplaySpeed;
   size_t target = frame_;
   while (target + 1 < timeline.FrameCount() && timeline.FrameTime(target + 1) <= time_) {
@@ -146,6 +160,7 @@ void TimelinePlayback::Update(const TurnTimeline& timeline, float dtSeconds) {
     // Live end reached: pause there (stay on the replay view; the player
     // returns to live explicitly).
     playing_ = false;
+    settling_ = true;
     time_ = timeline.FrameTime(frame_);
   }
 }

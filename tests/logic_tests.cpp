@@ -1766,15 +1766,6 @@ void StepSightings(GameLogic& game, float seconds, float dt = 0.05f) {
   for (int i = 0; i < steps; ++i) game.UpdateSightingMemory(dt);
 }
 
-// Simulates a round ending: bumps the round number the way a real round
-// transition would, then ticks memory once so it ages.
-void AdvanceRounds(GameLogic& game, int rounds) {
-  GameSnapshot snap = game.ExportState();
-  snap.roundNumber += rounds;
-  CHECK(game.ImportState(snap));
-  game.UpdateSightingMemory(0.0f);
-}
-
 void BlueLookAway(GameLogic& game, float yaw) {
   for (int id = 0; id <= 2; ++id) game.FindUnit(id)->facingYaw = yaw;
 }
@@ -1788,6 +1779,16 @@ void TestSightingRecordedImmediatelyOnEntry() {
   game.UpdateSightingMemory(0.05f);
   CHECK(game.Sightings(Team::Blue, 4).size() == 1);
   CHECK(game.Sightings(Team::Red, 4).empty());  // Own figures aren't "sighted".
+}
+
+void TestDeadFigureInFovLeavesNoGhost() {
+  GameLogic game(LegacyScene());
+  BlueLookAway(game, kPi);
+  StepSightings(game, 1.0f);
+  game.FindUnit(4)->alive = false;
+  BlueLookAway(game, 0.0f);
+  StepSightings(game, 1.0f);
+  CHECK(game.Sightings(Team::Blue, 4).empty());
 }
 
 void TestSightingSamplesAccumulateWhileInFov() {
@@ -1804,7 +1805,7 @@ void TestSightingSamplesAccumulateWhileInFov() {
   const auto& samples = game.Sightings(Team::Blue, 4);
   CHECK(samples.size() >= 6 && samples.size() <= 7);
   for (size_t i = 0; i + 1 < samples.size(); ++i) {
-    CHECK(samples[i].ageRounds == 0);  // No fading in real time.
+    CHECK(samples[i].at <= samples[i + 1].at);  // Oldest-first.
   }
 }
 
@@ -1848,35 +1849,100 @@ void TestSightingCapturesAnimationPose() {
   CHECK(game.Sightings(Team::Blue, 4).front().idleElapsed == 2.5f);
 }
 
-void TestSightingsPersistAfterLeavingFovThenExpire() {
+// Mirrors a follower page: the mode and clock come from imported snapshots,
+// then memory ticks once.
+void ImportTurnState(GameLogic& game, InputMode mode, float elapsed) {
+  GameSnapshot snap = game.ExportState();
+  snap.mode = mode;
+  snap.executionElapsed = elapsed;
+  CHECK(game.ImportState(snap));
+}
+
+void TestGhostsShowDuringTurnThenFadeInOrder() {
   GameLogic game(LegacyScene());
-  StepSightings(game, 2.0f);
-  const size_t count = game.Sightings(Team::Blue, 4).size();
-  CHECK(count > 0);
-  BlueLookAway(game, kPi);
-  StepSightings(game, 2.0f);
-  CHECK(game.Sightings(Team::Blue, 4).size() == count);  // Not cleared, none added.
-  StepSightings(game, 60.0f);
-  CHECK(game.Sightings(Team::Blue, 4).size() == count);  // Real time doesn't expire.
-  AdvanceRounds(game, constants::kSightingMemoryRounds - 1);
-  CHECK(game.Sightings(Team::Blue, 4).size() == count);
-  CHECK(game.Sightings(Team::Blue, 4).front().ageRounds == constants::kSightingMemoryRounds - 1);
-  AdvanceRounds(game, 1);
+  ImportTurnState(game, InputMode::Executing, 0.0f);
+  game.UpdateSightingMemory(0.0f);
+  Unit* enemy = game.FindUnit(4);
+  for (int i = 1; i <= 60; ++i) {
+    enemy->position.x += 0.01f;
+    ImportTurnState(game, InputMode::Executing, 0.05f * static_cast<float>(i));
+    game.UpdateSightingMemory(0.05f);
+  }
+  const auto samples = game.Sightings(Team::Blue, 4);
+  CHECK(samples.size() >= 6);
+  for (const auto& s : samples) CHECK(game.GhostAlpha(s.at) == 1.0f);  // Fully shown mid-turn.
+
+  // Turn ends: still fully visible, then each fades from its own start time.
+  ImportTurnState(game, InputMode::AwaitingSelection, 3.0f);
+  game.UpdateSightingMemory(0.0f);
+  for (const auto& s : samples) CHECK(game.GhostAlpha(s.at) == 1.0f);
+  const float step = 0.05f;
+  std::vector<float> previous(samples.size(), 1.0f);
+  bool sawMidFade = false;
+  for (float t = step; t < 6.0f; t += step) {
+    game.UpdateSightingMemory(step);
+    for (size_t i = 0; i < samples.size(); ++i) {
+      const float alpha = game.GhostAlpha(samples[i].at);
+      CHECK(alpha <= previous[i] + 1e-6f);
+      if (i > 0) CHECK(alpha >= game.GhostAlpha(samples[i - 1].at) - 1e-6f);  // Same order.
+      if (alpha > 0.01f && alpha < 0.99f) sawMidFade = true;
+      previous[i] = alpha;
+    }
+  }
+  CHECK(sawMidFade);
+  for (const auto& s : samples) CHECK(game.GhostAlpha(s.at) == 0.0f);
+
+  // Per-item delay matches the appearance spacing.
+  game.RestartGhostPlayback();
+  ImportTurnState(game, InputMode::AwaitingSelection, 3.0f);
+  const float a0 = samples.front().at, a1 = samples.back().at;
+  CHECK(a1 > a0);
+}
+
+void TestReplaySeekForwardKeepsFadingGhosts() {
+  GameLogic game(LegacyScene());
+  game.SetReplayGhostMode(true);
+  ImportTurnState(game, InputMode::Executing, 0.0f);
+  game.UpdateSightingMemory(0.05f);
+  CHECK(!game.Sightings(Team::Blue, 4).empty());
+  game.RestartGhostPlayback(/*keepFading=*/true);  // Next step begins.
+  CHECK(!game.Sightings(Team::Blue, 4).empty());
+  game.UpdateSightingMemory(0.0f);
+  CHECK(game.HasReplayGhosts());
+  game.UpdateSightingMemory(0.5f);  // Still inside the hold.
+  CHECK(game.HasReplayGhosts());
+  game.RestartGhostPlayback();  // Backward seek / fresh start drops them.
   CHECK(game.Sightings(Team::Blue, 4).empty());
 }
 
-void TestSightingReentryAppendsToAgingTrail() {
+void TestNextTurnStartsWithoutLastTurnsGhosts() {
   GameLogic game(LegacyScene());
+  ImportTurnState(game, InputMode::Executing, 0.0f);
+  game.UpdateSightingMemory(0.05f);
+  CHECK(!game.Sightings(Team::Blue, 4).empty());
+  ImportTurnState(game, InputMode::AwaitingSelection, 1.0f);
+  game.UpdateSightingMemory(0.0f);
+  BlueLookAway(game, kPi);  // Enemy leaves view before the next turn.
+  game.UpdateSightingMemory(0.05f);
+  CHECK(!game.Sightings(Team::Blue, 4).empty());  // Still around to fade.
+  ImportTurnState(game, InputMode::Executing, 0.0f);
+  game.UpdateSightingMemory(0.05f);
+  CHECK(game.Sightings(Team::Blue, 4).empty());  // Nothing persists across turns.
+}
+
+void TestSightingReentryAddsNewSample() {
+  GameLogic game(LegacyScene());
+  ImportTurnState(game, InputMode::Executing, 0.0f);
   StepSightings(game, 1.0f);
   const size_t before = game.Sightings(Team::Blue, 4).size();
   BlueLookAway(game, kPi);
-  AdvanceRounds(game, 2);
+  game.UpdateSightingMemory(0.05f);
   BlueLookAway(game, 0.0f);
+  ImportTurnState(game, InputMode::Executing, 2.0f);
   game.UpdateSightingMemory(0.05f);
   const auto& samples = game.Sightings(Team::Blue, 4);
   CHECK(samples.size() == before + 1);
-  CHECK(samples.front().ageRounds == 2);  // Kept aging, not reset.
-  CHECK(samples.back().ageRounds == 0);
+  CHECK(samples.back().at == 2.0f);
 }
 
 void TestResetClearsSightings() {
@@ -2388,6 +2454,44 @@ void TestTurnTimelineRecordsTicksAndReplays() {
   CHECK(!playback.Active());
 }
 
+void TestTurnTimelineReplayGhostLifetimes() {
+  GameLogic game(TwoUnitTimelineScene());
+  MakePassive(game);
+  TurnTimeline timeline;
+  timeline.Reset(game);
+  TimelinePlayback playback;
+  PlayTimelineRound(game, timeline, glm::vec3(0.0f, 0.0f, 0.0f));
+  PlayTimelineRound(game, timeline, glm::vec3(0.0f, 0.0f, 4.0f));
+
+  // Replay: no hold between turns; items stamped at the replay clock's 0
+  // live kReplayTracerLife (bullets) / kReplayGhostHold + fade (ghosts).
+  CHECK(playback.SeekFrame(timeline, game, 0));
+  playback.Play(timeline, game);
+  const GameLogic& replay = playback.Game();
+  playback.Update(timeline, 0.25f);
+  CHECK(replay.TracerAlpha(0.0f) > 0.0f && replay.TracerAlpha(0.0f) < 1.0f);
+  CHECK(replay.GhostAlpha(0.0f) == 1.0f);
+  playback.Update(timeline, 0.5f);
+  CHECK(replay.TracerAlpha(0.0f) == 0.0f);
+  CHECK(replay.GhostAlpha(0.0f) == 1.0f);
+  playback.Update(timeline, 0.5f);  // 1.25 s: ghost has started to fade.
+  CHECK(replay.GhostAlpha(0.0f) < 1.0f && replay.GhostAlpha(0.0f) > 0.0f);
+  playback.Update(timeline, 0.5f);
+  CHECK(replay.GhostAlpha(0.0f) == 0.0f);
+
+  // The live game keeps the per-turn behaviour: opaque while executing.
+  CHECK(game.TracerAlpha(0.0f) == game.GhostAlpha(0.0f));
+
+  // Reaching the live end pauses, but leftovers keep fading until gone.
+  playback.SeekFrame(timeline, game, 0);
+  playback.Play(timeline, game);
+  playback.Update(timeline, 100.0f);
+  CHECK(!playback.Playing());
+  for (int i = 0; i < 40; ++i) playback.Update(timeline, 0.1f);
+  CHECK(!playback.Game().HasReplayGhosts());
+  CHECK(playback.Game().Tracers().empty());
+}
+
 void TestTurnTimelineResetsOnNewMatch() {
   GameLogic game(TwoUnitTimelineScene());
   MakePassive(game);
@@ -2780,7 +2884,7 @@ void TestFlagSnapshotRoundTrip() {
 
 // A resolved shot leaves a tracer from the muzzle toward the target; it
 // survives the snapshot round trip (followers) and expires after
-// kTracerMemoryRounds completed rounds.
+// next turn's start.
 void TestShotLeavesFadingTracer() {
   GameLogic game(LegacyScene());
   game.SetShotRollSource([] { return 0.0f; });
@@ -2791,7 +2895,7 @@ void TestShotLeavesFadingTracer() {
   CHECK(game.Tracers().size() == 1);
   const Tracer tracer = game.Tracers().front();
   CHECK(tracer.team == Team::Blue);
-  CHECK(tracer.birthRound == game.RoundNumber());
+  CHECK(tracer.at == 0.0f);
   CHECK(glm::length(tracer.to - target->EyePosition()) < 1e-4f);
 
   GameSnapshot snap;
@@ -2801,14 +2905,9 @@ void TestShotLeavesFadingTracer() {
   CHECK(follower.Tracers().size() == 1);
   CHECK(glm::length(follower.Tracers().front().from - tracer.from) < 1e-4f);
 
-  // Recording another shot after the memory window drops the stale tracer.
-  GameSnapshot later = game.ExportState();
-  later.roundNumber += constants::kTracerMemoryRounds;
-  CHECK(game.ImportState(later));
-  game.FindUnit(4)->alive = true;
-  CHECK(game.ResolveShot(*game.FindUnit(1), *game.FindUnit(4)));
-  CHECK(game.Tracers().size() == 1);
-  CHECK(game.Tracers().front().birthRound == game.RoundNumber());
+  // Not executing and never played a turn: nothing is shown. Tracers fade on
+  // the ghost clock after a turn ends.
+  CHECK(game.GhostAlpha(tracer.at) == 0.0f);
 }
 
 // Multi-shot bursts (issue #138): the per-weapon magazine and fire interval
@@ -3116,15 +3215,19 @@ int main() {
   TestMuzzleIsAtGunTipNotHead();
   TestSnapshotMirrorsMatchAndTeamPlans();
   TestSightingRecordedImmediatelyOnEntry();
+  TestDeadFigureInFovLeavesNoGhost();
+  TestReplaySeekForwardKeepsFadingGhosts();
   TestSightingSamplesAccumulateWhileInFov();
   TestSightingMoveDirectionOnlyWhenMoving();
   TestSightingCapturesAnimationPose();
-  TestSightingsPersistAfterLeavingFovThenExpire();
-  TestSightingReentryAppendsToAgingTrail();
+  TestGhostsShowDuringTurnThenFadeInOrder();
+  TestNextTurnStartsWithoutLastTurnsGhosts();
+  TestSightingReentryAddsNewSample();
   TestResetClearsSightings();
   TestImportStateOfNewGameClearsFollowerSightings();
   TestFollowerBuildsSightingsWithoutPhysicsUpdate();
   TestTurnTimelineRecordsTicksAndReplays();
+  TestTurnTimelineReplayGhostLifetimes();
   TestTurnTimelineResetsOnNewMatch();
   TestZiplineExtendsReachBeyondWalking();
   TestZiplineCostScalesWithLength();

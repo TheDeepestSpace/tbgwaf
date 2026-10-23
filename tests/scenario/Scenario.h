@@ -164,9 +164,12 @@ struct Scenario {
   // the logic-only runner.
   //   fov_overlay: "cpu" (default) | "shadow_map" -- issue #110 prototype.
   //   fov_probe_height: shadow_map only; see SceneRenderer::SetFovProbeHeight.
+  //   thermal: false (default) | true -- thermal render prototype (the
+  //     renderer's default black-hot polarity; see RenderDebugOptions).
   enum class FovOverlay { Cpu, ShadowMap };
   FovOverlay fovOverlay = FovOverlay::Cpu;
   float fovProbeHeight = 0.0f;
+  bool thermal = false;
 };
 
 // Throws std::runtime_error with a descriptive message on malformed YAML.

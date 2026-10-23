@@ -444,7 +444,8 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& disableOcclusionFade,
                     bool& showFps, float fps, float frameMs, float fovMs,
-                    const gfx::RenderFrameStats& stats, float top) {
+                    const gfx::RenderFrameStats& stats, float top,
+                    std::optional<size_t> wasmHeapBytes) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
   // Once per run (not FirstUseEver) so a saved imgui.ini can't reopen it at startup.
   ImGui::SetNextWindowCollapsed(true, ImGuiCond_Once);
@@ -459,6 +460,11 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& disableOcclusi
   ImGui::Text("Triangles: %lld", stats.triangles);
   ImGui::Text("Vertices: %lld", stats.vertices);
   ImGui::Text("FOV cones: %.2f ms", fovMs);
+  if (wasmHeapBytes) {
+    ImGui::Text("WASM heap: %.1f MiB", static_cast<double>(*wasmHeapBytes) / (1024.0 * 1024.0));
+  } else {
+    ImGui::TextUnformatted("WASM heap: N/A (native)");
+  }
   ImGui::End();
 }
 

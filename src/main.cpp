@@ -124,6 +124,7 @@ EM_JS(int, tbgwaf_ai_enabled, (), { return Module.tbgwafAI ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_paused, (), { return Module.tbgwafAIPaused ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_fallback, (), { return Module.tbgwafAIFallback ? 1 : 0; });
 EM_JS(int, tbgwaf_auto_commit, (), { return Module.tbgwafAutoCommit ? 1 : 0; });
+EM_JS(int, tbgwaf_spectator, (), { return Module.tbgwafSpectator ? 1 : 0; });
 EM_JS(int, tbgwaf_default_ctf, (), { return Module.tbgwafDefaultCtf ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_generation, (), { return Module.tbgwafAIGeneration || 0; });
 EM_JS(int, tbgwaf_take_restart, (), {
@@ -864,7 +865,14 @@ int main() {
     const bool humanPlanning = planning;
     const bool hudHumanPlanning = hudPlanning;
 #endif
-    const bool fogActive = displayGame.Mode() != InputMode::GameOver;
+    // Jev-vs-Jev spectator (web, Blue instance only): render-only omniscience.
+    // Jev's request state is built elsewhere from team-visible data, untouched.
+#ifdef __EMSCRIPTEN__
+    const bool spectator = networked && tbgwaf_spectator();
+#else
+    const bool spectator = false;
+#endif
+    const bool fogActive = !spectator && displayGame.Mode() != InputMode::GameOver;
     // The team whose plan the shared selection/preview overlays currently
     // belong to (only one figure is ever mid-selection at a time).
     std::optional<Team> selectedTeam;
@@ -1069,6 +1077,7 @@ int main() {
       if (hasHoveredGroundPoint && !replayActive) hover = hoveredGroundPoint;
       gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(displayGame, paneTeam(pane), hover);
       if (showNavMeshDebug) overlays.navMeshDebug = &navMeshDebug;
+      overlays.spectatorFov = spectator;
       renderer.RenderPane(displayGame, paneTeam(pane), fogActive, paneVisibility[pane],
                           cameras[pane], rect.x, 0, rect.width, windowHeight, overlays, 0,
                           debugOptions);

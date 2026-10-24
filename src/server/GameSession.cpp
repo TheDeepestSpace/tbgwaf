@@ -75,10 +75,8 @@ std::array<Json, 2> GameSession::RunRound() {
   std::vector<float> lastShoot(units.size(), -1.0f);
   float t = 0.0f;
   int step = 0;
-  // This round's tracers sit at the tail of the game's list; remember how
-  // many were already forwarded.
+  // Tracers already forwarded this round.
   size_t tracersSent = 0;
-  const int round = game_.RoundNumber();
 
   auto sampleFrame = [&]() {
     for (int ti = 0; ti < 2; ++ti) {
@@ -122,10 +120,9 @@ std::array<Json, 2> GameSession::RunRound() {
     }
     {
       const auto& all = game_.Tracers();
-      size_t current = 0;
-      while (current < all.size() && all[all.size() - 1 - current].birthRound == round) ++current;
-      for (; tracersSent < current; ++tracersSent) {
-        const Tracer& tr = all[all.size() - current + tracersSent];
+      // The game clears its tracers when a turn starts, so all of them are this round's.
+      for (; tracersSent < all.size(); ++tracersSent) {
+        const Tracer& tr = all[tracersSent];
         for (int ti = 0; ti < 2; ++ti) {
           const Team viewer = static_cast<Team>(ti);
           if (tr.team != viewer) {

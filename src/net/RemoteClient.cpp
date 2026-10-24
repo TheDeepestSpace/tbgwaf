@@ -306,17 +306,11 @@ void RemoteClient::AdvancePlayback(float dt) {
     }
   }
   // Bullet lines, as the single-process game draws them: every tracer fired
-  // so far this round, aged by how long ago it left the barrel.
-  const int round = game_->RoundNumber();
-  snap.tracers.erase(std::remove_if(snap.tracers.begin(), snap.tracers.end(),
-                                    [&](const Tracer& tr) {
-                                      return tr.birthRound >= round ||
-                                             round - tr.birthRound >= constants::kTracerMemoryRounds;
-                                    }),
-                     snap.tracers.end());
+  // so far this turn (last turn's are gone), aged by how long ago it left the barrel.
+  snap.tracers.clear();
   for (const TracerEvent& ev : pb.tracers) {
     if (ev.t > pb.clock) continue;
-    snap.tracers.push_back(Tracer{ev.team, ev.from, ev.to, round, pb.clock - ev.t});
+    snap.tracers.push_back(Tracer{ev.team, ev.from, ev.to, ev.t, pb.clock - ev.t});
   }
   game_->ImportState(snap);
   NormalizeEnemyPlans();

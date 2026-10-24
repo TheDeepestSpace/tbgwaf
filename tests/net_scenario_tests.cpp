@@ -111,7 +111,7 @@ void CheckNetAssertion(const Scenario& scenario, Rig& rig, const Json& dump,
   ScenarioAssertion truth = a;
   truth.rememberedByTeam.reset();
   truth.remembered.reset();
-  truth.memoryAge.reset();
+  truth.ghostAlpha.reset();
   scenario::CheckAssertion(oracle, truth, step, &result);
 
   if (a.unit) {
@@ -148,17 +148,17 @@ void CheckNetAssertion(const Scenario& scenario, Rig& rig, const Json& dump,
   }
 
   // 4. Sighting memory lives on the owning client's mirror. Like the
-  //    in-process runner's follower pane, only the freshest sample (age 0)
+  //    in-process runner's follower pane, only a fully opaque (fresh) sample
   //    is comparable across a snapshot-fed mirror.
   if (a.rememberedByTeam) {
-    if (a.memoryAge && *a.memoryAge != 0) {
+    if (a.ghostAlpha && *a.ghostAlpha != 1.0f) {
       ++stats->skippedMemory;
     } else {
       ScenarioAssertion memory;
       memory.unit = a.unit;
       memory.rememberedByTeam = a.rememberedByTeam;
       memory.remembered = a.remembered;
-      memory.memoryAge = a.memoryAge;
+      memory.ghostAlpha = a.ghostAlpha;
       ScenarioResult mirrorResult;
       scenario::CheckAssertion(rig.For(*a.rememberedByTeam).game, memory, step, &mirrorResult);
       for (auto& f : mirrorResult.failures) result.failures.push_back("client " + f);
@@ -195,6 +195,13 @@ std::vector<std::string> RunNetScenario(const Scenario& scenario, int index, Ser
         rig.Commit();
       } else if (action.kind == ScenarioAction::Kind::NewGame) {
         rig.NewMatch();
+      } else if (action.kind == ScenarioAction::Kind::Wait) {
+        // Pure client-side time: ghosts fade on each mirror's own clock.
+        for (Team team : {Team::Blue, Team::Red}) {
+          for (float t = 0.0f; t < action.playSeconds - 1e-4f; t += 0.05f) {
+            rig.For(team).game.UpdateSightingMemory(0.05f);
+          }
+        }
       } else {
         const Unit* actor = nullptr;
         for (const Unit& u : scenario.scene.units) if (u.id == action.actor) actor = &u;

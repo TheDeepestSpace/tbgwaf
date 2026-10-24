@@ -340,6 +340,18 @@ else()
     PkgConfig::EGL
   )
 
+  # Observational renderer benchmark (issue #202). Kept out of ctest: it
+  # intentionally samples hosted-runner timing and is dispatched manually,
+  # while normal CI remains deterministic and pass/fail.
+  add_executable(tactics_performance_suite tests/performance/performance_main.cpp)
+  target_include_directories(tactics_performance_suite PRIVATE src)
+  target_link_libraries(tactics_performance_suite PRIVATE
+    tactics_logic
+    tactics_gfx
+    PkgConfig::SDL2
+    PkgConfig::EGL
+  )
+
   find_program(XVFB_RUN_EXECUTABLE xvfb-run)
   if(XVFB_RUN_EXECUTABLE)
     # Golden-screenshot regression run (no --video: ffmpeg isn't needed for

@@ -1370,14 +1370,10 @@ void EmitSpawns(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
   }
 }
 
-// Presence of the furniture layer (issue #150): the first draw of the
-// furniture stream, made unconditionally so forcing the feature on or off
-// never reshuffles anything else a seed draws.
-bool FurnitureEnabled(uint32_t seed, const MapGeneratorConfig& c) {
-  Rng rng(seed ^ kFurnitureStream);
-  const bool drawn = rng.Chance(c.features.furniture.chance);
-  return c.features.furniture.mode == FeatureMode::Auto ? drawn
-                                                        : c.features.furniture.mode == FeatureMode::On;
+// Presence of the furniture layer (issue #150): unconditional unless the
+// feature is forced Off; the seed never decides (Auto behaves like On).
+bool FurnitureEnabled(const MapGeneratorConfig& c) {
+  return c.features.furniture.mode != FeatureMode::Off;
 }
 
 // Curb-side furniture items (issue #150, roadmap 2.4). Footprints stay small
@@ -1406,8 +1402,8 @@ constexpr int kFurnitureKinds = static_cast<int>(sizeof(kFurnitureSpecs) / sizeo
 void EmitStreetFurniture(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
                          uint32_t seed, const GroundY& groundY) {
   Rng rng(seed ^ kFurnitureStream);
-  rng.Chance(c.features.furniture.chance);  // Presence; FurnitureEnabled re-draws it.
-  if (!FurnitureEnabled(seed, c)) return;
+  rng.Chance(0.5f);  // Legacy presence draw, kept so the item layout stays stable.
+  if (!FurnitureEnabled(c)) return;
 
   // Copies, not pointers: appending furniture reallocates scene->obstacles.
   std::vector<std::vector<glm::vec2>> buildings;
@@ -1518,7 +1514,7 @@ bool CutParamRange(const StreetCut& cut, const ArterySpec& artery, const MapGene
 // into the artery corridor, and street-name signs on block corners.
 void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
                         uint32_t seed, const GroundY& groundY) {
-  if (!FurnitureEnabled(seed, c)) return;
+  if (!FurnitureEnabled(c)) return;
   Rng rng(seed ^ kTrafficStream);
   const ArterySpec& artery = city.highway.artery;
   const float half = scene->mapHalfExtent;

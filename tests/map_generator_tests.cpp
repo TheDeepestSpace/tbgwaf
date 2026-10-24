@@ -1553,23 +1553,14 @@ void TestFurnitureHugsSidewalksAndRespectsClearances() {
     }
   }
 
-  // Auto: the seed decides, both outcomes occur, and each matches its forced
-  // twin (the presence draw never reshuffles placement).
-  int drawnOn = 0, drawnOff = 0;
+  // Auto is unconditional: it matches the forced-On scene for every seed.
   for (uint32_t seed = 1; seed <= 12; ++seed) {
     MapGeneratorConfig base;
     base.elevatedHighway = OverpassMode::Off;
     const Scene scene = GenerateUrbanMap(seed, base);
-    if (!scene.props.empty()) {
-      ++drawnOn;
-      CHECK(SameScene(scene, GenerateUrbanMap(seed, FurnitureConfig(FeatureMode::On))));
-    } else {
-      ++drawnOff;
-      CHECK(SameScene(scene, GenerateUrbanMap(seed, FurnitureConfig(FeatureMode::Off))));
-    }
+    CHECK(!scene.props.empty());
+    CHECK(SameScene(scene, GenerateUrbanMap(seed, FurnitureConfig(FeatureMode::On))));
   }
-  CHECK(drawnOn > 0);
-  CHECK(drawnOff > 0);
 }
 
 // The required connectivity property (roadmap 2.4): everything walkable

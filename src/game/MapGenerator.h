@@ -33,7 +33,7 @@ enum class BranchEnd { Auto, Ramp, OffMap };
 
 // Per-feature switch for the optional urban detail layers (issue #146).
 // Auto lets the seed decide, with `chance` as the per-seed probability; Off/On
-// force it. `furniture` is live (issue #150): it gates the street furniture
+// force it. `furniture` is live (issue #150) but unconditional: Auto behaves like On, only Off disables it. It gates the street furniture
 // obstacles along the sidewalk curbs and the visual-only traffic lights and
 // signage (Scene::props). The other features are plumbed ahead of the
 // emitters that will consume them and do not change the generated Scene yet.

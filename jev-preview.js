@@ -200,6 +200,9 @@ export class JevPreviewController {
     module.tbgwafAIPaused = this.paused;
     module.tbgwafAIFallback = this.fallback;
     module.tbgwafDefaultCtf = this.mode === "ai-v-ai";
+    // Jev vs Jev: the Blue instance renders every figure and both FOVs in one
+    // pane; the Red instance keeps simulating off-screen.
+    module.tbgwafSpectator = this.mode === "ai-v-ai" && player === "blue";
     module.tbgwafAutoCommit = this.mode !== "human";
     module.tbgwafAIGeneration = this.generation;
   }
@@ -212,6 +215,7 @@ export class JevPreviewController {
   #render() {
     if (!this.document) return;
     const spec = MODES[this.mode];
+    this.document.getElementById("panes")?.setAttribute("data-spectator", String(this.mode === "ai-v-ai"));
     const modeLabel = this.document.getElementById("mode-label");
     if (modeLabel) modeLabel.textContent = `Mode: ${spec.label}`;
     for (const button of this.document.querySelectorAll("[data-mode]")) {

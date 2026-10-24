@@ -2473,10 +2473,10 @@ void TestTurnTimelineReplayGhostLifetimes() {
   playback.Update(timeline, 0.25f);
   CHECK(replay.TracerAlpha(stamp0) > 0.0f && replay.TracerAlpha(stamp0) < 1.0f);
   CHECK(replay.GhostAlpha(0.0f) == 1.0f);
-  playback.Update(timeline, 0.5f);
+  playback.Update(timeline, 0.75f);
   CHECK(replay.TracerAlpha(stamp0) == 0.0f);
   CHECK(replay.GhostAlpha(0.0f) == 1.0f);
-  playback.Update(timeline, 0.5f);  // 1.25 s: ghost has started to fade.
+  playback.Update(timeline, 0.25f);  // 1.25 s: ghost has started to fade.
   CHECK(replay.GhostAlpha(0.0f) < 1.0f && replay.GhostAlpha(0.0f) > 0.0f);
   playback.Update(timeline, 0.5f);
   CHECK(replay.GhostAlpha(0.0f) == 0.0f);
@@ -2887,7 +2887,7 @@ void TestFlagSnapshotRoundTrip() {
 // A resolved shot leaves a tracer from the muzzle toward the target; it
 // survives the snapshot round trip (followers) and expires after
 // next turn's start.
-void TestLiveTracerFadesWithinHalfSecond() {
+void TestLiveTracerFadesWithinOneSecond() {
   GameLogic game(LegacyScene());
   game.SetShotRollSource([] { return 0.0f; });
   CHECK(game.ResolveShot(*game.FindUnit(1), *game.FindUnit(4)));
@@ -2896,7 +2896,7 @@ void TestLiveTracerFadesWithinHalfSecond() {
   game.Update(0.25f);
   const float mid = game.TracerAlpha(game.Tracers().front());
   CHECK(mid > 0.0f && mid < 1.0f);
-  game.Update(0.25f);
+  game.Update(0.75f);
   CHECK(game.TracerAlpha(game.Tracers().front()) == 0.0f);
 }
 
@@ -3270,7 +3270,7 @@ int main() {
   TestLockedBurstFiresAllShotsOverTime();
   TestFreeAimBurstHitsPointTarget();
   TestFullMagDumpLeavesThirtyTracers();
-  TestLiveTracerFadesWithinHalfSecond();
+  TestLiveTracerFadesWithinOneSecond();
   TestLockOnStagesUntilFireAndKeepsShotCount();
   TestBulletsFlyToMapEdgeNotWeaponRange();
   TestBurstPlanSurvivesSnapshotAndClampsOnImport();

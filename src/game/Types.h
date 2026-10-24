@@ -212,7 +212,7 @@ constexpr float kGhostFadeDuration = kSightingSampleInterval;
 // holds kReplayGhostHold after appearing, then fades over kGhostFadeDuration;
 // a bullet line fades out over kReplayTracerLife after the shot.
 constexpr float kReplayGhostHold = 1.0f;
-constexpr float kReplayTracerLife = 0.5f;
+constexpr float kReplayTracerLife = 1.0f;
 // Ziplines: ride cost per world unit of cable, as a fraction of the cost of
 // walking the same distance (0.25 = riding is 4x cheaper than running, so a
 // 20-unit line costs 5 units of the 20-unit round budget). Longer line =

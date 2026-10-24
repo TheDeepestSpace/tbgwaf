@@ -229,7 +229,7 @@ listed by name only.</p>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
 <div class="scenario has-video" data-stem="enemy_sighting_memory_trail"><h3>enemy_sighting_memory_trail</h3><div class="path">tests/scenarios/enemy_sighting_memory_trail.yaml</div>
-<p class="description">Showcases enemy sighting memory: red starts in blue&#x27;s FOV, then runs out of it. The faded wireframe trail and movement arrow of where blue last saw red stay on screen in blue&#x27;s pane (round 2 holds on them) while red itself is hidden.</p>
+<p class="description">Showcases enemy ghosts: red starts in blue&#x27;s FOV, then runs out of it. The wireframe trail and movement arrow of where blue saw red are shown as the turn ends and then fade out in the order they appeared (the wait step captures the mid-fade), while red itself is hidden.</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/enemy_sighting_memory_trail/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/enemy_sighting_memory_trail/red.webm"></video></figure>
@@ -243,17 +243,19 @@ listed by name only.</p>
 <div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
 </div>
 <div class="round"><div class="round-title">Round 2</div>
-<div class="detail">Nothing moves; the remembered trail is still drawn for blue.</div>
-<div class="step" data-action="4"><span class="u blue">blue0</span> passes</div>
-<div class="step" data-action="5"><span class="u red">red1</span> passes</div>
-<div class="step" data-action="6">commit round</div>
+<div class="detail">Mid-fade; the ghosts fade in the order they appeared.</div>
+<div class="detail">Nothing moves; the earlier ghosts are gone.</div>
+<div class="step" data-action="4">wait (actor None)</div>
+<div class="step" data-action="5"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="6"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="7">commit round</div>
 </div>
 </div></figure>
 </div>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
 <div class="scenario has-video" data-stem="finish_new_game_finish"><h3>finish_new_game_finish</h3><div class="path">tests/scenarios/finish_new_game_finish.yaml</div>
-<p class="description">Regression for ghost wireframes (sighting-memory trails) surviving a new game. Game 1: blue sights red1, red1 walks out of view (remembered trail, plus planned-move ghosts while planning), then blue finishes both reds (GameOver). `new_game` then restarts the match the way the UI does; the runner also mirrors every step into a follower page via ImportState (the second pane), whose memory is checked as well. No old sightings may remain (only fresh age-0 ones from the opening view), and game 2 is played to completion too.</p>
+<p class="description">Regression for ghost wireframes (sighting-memory trails) surviving a new game. Game 1: blue sights red1, red1 walks out of view (remembered trail, plus planned-move ghosts while planning), then blue finishes both reds (GameOver). `new_game` then restarts the match the way the UI does; the runner also mirrors every step into a follower page via ImportState (the second pane), whose memory is checked as well. No old sightings may remain (only fresh ones from the opening view), and game 2 is played to completion too.</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/finish_new_game_finish/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/finish_new_game_finish/red.webm"></video></figure>
@@ -294,14 +296,14 @@ listed by name only.</p>
 <div class="detail">Check: round is 1</div>
 <div class="detail">Check: <span class="u blue">blue0</span> is at (-14, 0)</div>
 <div class="detail">Check: <span class="u red">red1</span> is alive</div>
-<div class="detail">Check: blue remembers <span class="u red">red1</span> (memory age 0)</div>
-<div class="detail">Check: blue remembers <span class="u red">red2</span> (memory age 0)</div>
-<div class="detail">Check: red remembers <span class="u blue">blue0</span> (memory age 0)</div>
+<div class="detail">Check: blue remembers <span class="u red">red1</span></div>
+<div class="detail">Check: blue remembers <span class="u red">red2</span></div>
+<div class="detail">Check: red remembers <span class="u blue">blue0</span></div>
 <div class="step" data-action="16"><span class="u blue">blue0</span> passes</div>
 <div class="step" data-action="17"><span class="u red">red1</span> moves to (-12, 14)</div>
 <div class="step" data-action="18"><span class="u red">red2</span> passes</div>
 <div class="step" data-action="19">commit round</div>
-<div class="detail">Check: blue remembers <span class="u red">red1</span> (memory age 1)</div>
+<div class="detail">Check: blue remembers <span class="u red">red1</span>, ghost alpha 1</div>
 <div class="detail">Check: round is 2</div>
 </div>
 <div class="round"><div class="round-title">Round 6</div>
@@ -1254,38 +1256,33 @@ listed by name only.</p>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
 <div class="scenario has-video" data-stem="playbook_sighting_memory_fades_out"><h3>playbook_sighting_memory_fades_out</h3><div class="path">tests/scenarios/playbook_sighting_memory_fades_out.yaml</div>
-<p class="description">Sighting memory fades out completely: red is seen by blue once, runs out of blue&#x27;s FOV, then nobody moves. The remembered trail ages one round per commit (33% opacity lost each) and is fully gone after kSightingMemoryRounds (3) rounds.</p>
-<p class="note">⚠ scenario script failed during visual playback; video below stops at the failing step.</p>
+<p class="description">Ghosts show for the turn only: red is seen by blue once, then runs out of blue&#x27;s FOV. When the turn ends the ghosts are fully visible, then fade out over kGhostFadeDuration (0.5s) each, starting in the order they appeared. Nothing carries over into the next turn.</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_sighting_memory_fades_out/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_sighting_memory_fades_out/red.webm"></video></figure>
 <figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
 <div class="step" data-action="0">Initial state</div>
 <div class="round"><div class="round-title">Round 1</div>
-<div class="detail">Red leaves blue&#x27;s FOV; the trail ages to 1 as the round completes.</div>
+<div class="detail">Red leaves blue&#x27;s FOV during the turn.</div>
 <div class="detail">Check: <span class="u red">red1</span> is visible to blue</div>
 <div class="step" data-action="1"><span class="u blue">blue0</span> passes</div>
 <div class="step" data-action="2"><span class="u red">red1</span> moves to (-12, 14)</div>
 <div class="step" data-action="3">commit round</div>
 <div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
-<div class="detail">Check: blue remembers <span class="u red">red1</span> (memory age 1)</div>
 <div class="detail">Check: round is 2</div>
+<div class="detail">Check: blue remembers <span class="u red">red1</span>, ghost alpha 1 — Turn just ended; fully visible</div>
 </div>
 <div class="round"><div class="round-title">Round 2</div>
-<div class="detail">Nothing moves; trail is one more round old.</div>
-<div class="step" data-action="4"><span class="u blue">blue0</span> passes</div>
-<div class="step" data-action="5"><span class="u red">red1</span> passes</div>
-<div class="step" data-action="6">commit round</div>
-<div class="detail">Check: blue remembers <span class="u red">red1</span> (memory age 2)</div>
-</div>
-<div class="round"><div class="round-title">Round 3</div>
-<div class="detail">The third round completes and the trail is gone entirely.</div>
-<div class="step" data-action="7"><span class="u blue">blue0</span> passes</div>
-<div class="step" data-action="8"><span class="u red">red1</span> passes</div>
-<div class="step" data-action="9">commit round</div>
+<div class="detail">Next turn; the faded ghosts are not shown again.</div>
+<div class="step" data-action="4">wait (actor None)</div>
+<div class="detail">Check: check, remembered by blue, ghost alpha 0.65 — Oldest ghost is mid-fade</div>
+<div class="step" data-action="5">wait (actor None)</div>
+<div class="detail">Check: check, remembered by blue, ghost alpha 0 — Everything has faded</div>
+<div class="step" data-action="6"><span class="u blue">blue0</span> passes</div>
+<div class="step" data-action="7"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="8">commit round</div>
 <div class="detail">Check: <span class="u red">red1</span> is not visible to blue</div>
-<div class="detail">Check: blue has no memory of <span class="u red">red1</span></div>
-<div class="detail">Check: round is 4</div>
+<div class="detail">Check: round is 3</div>
 </div>
 </div></figure>
 </div>

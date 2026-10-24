@@ -76,7 +76,10 @@ jobs:
         if: github.event.action != 'closed'
         run: |
           . /opt/emsdk/emsdk_env.sh > /dev/null
-          emcmake cmake -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release
+          # Point the preview at this PR's backend (server-deploy.yml) when the PR has one.
+          server_url=""
+          [ -f server/Dockerfile ] && server_url="wss://tbgwaf-server-pr-${{ github.event.pull_request.number }}.fly.dev"
+          emcmake cmake -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release -DTBGWAF_SERVER_URL="$server_url"
 
       - name: Build tactics_app (WASM/WebGL2)
         if: github.event.action != 'closed'
@@ -107,7 +110,7 @@ jobs:
 
       - name: Build visual scenario runner
         if: github.event.action != 'closed'
-        run: cmake --build build --target tactics_visual_tests
+        run: cmake --build build --target tactics_visual_tests tbgwaf_server_testctl
 
       - name: Generate scenario review page
         if: github.event.action != 'closed'
@@ -120,6 +123,7 @@ jobs:
               --base ${{ github.event.pull_request.base.sha }} \
               --head ${{ github.event.pull_request.head.sha }} \
               --runner build/tactics_visual_tests \
+              --server build/tbgwaf_server_testctl \
               --out site/scenarios \
               --baseline-url ../../../scenario-baseline
 

@@ -383,6 +383,9 @@ int main() {
         tactics::UrbanFeatureByName(&config.features, name)->mode = tactics::FeatureMode::On;
       }
     }
+    if (const char* terrain = std::getenv("TBGWAF_TERRAIN")) {
+      tactics::ParseFeatureMode(terrain, &config.features.terrain.mode);
+    }
     return tactics::GenerateUrbanMap(mapSeed, config);
   };
   // Chosen on the Game Mode screen; CTF turns on the neutral flag objective.

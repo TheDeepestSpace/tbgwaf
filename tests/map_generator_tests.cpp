@@ -1367,7 +1367,7 @@ void TestZiplineStreetEndsReachableRoofsOnlyByLine() {
 
 }  // namespace
 
-// Issue #146: feature flags are plumbed but inert, and the street graph
+// Issue #146: reserved feature flags are inert, and the street graph
 // covers the highway plus every local street.
 void TestFeatureFlagsAndStreetGraph() {
   MapGeneratorConfig full;
@@ -1380,6 +1380,7 @@ void TestFeatureFlagsAndStreetGraph() {
   FeatureMode mode = FeatureMode::Auto;
   CHECK(ParseFeatureMode("on", &mode) && mode == FeatureMode::On);
   CHECK(!ParseFeatureMode("maybe", &mode));
+  full.features.terrain.mode = FeatureMode::Off;
   for (uint32_t seed : kSeeds) {
     CHECK(SameScene(GenerateUrbanMap(seed), GenerateUrbanMap(seed, full)));
     const std::vector<UrbanStreet> streets = UrbanStreets(seed);

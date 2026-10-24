@@ -8,6 +8,21 @@
 
 namespace tactics {
 
+// Reserved entrances into a raised urban pad. Stairs currently use the same
+// sloping WalkSurface as ramps; the shorter run gives them a steeper grade.
+struct TerrainAccess {
+  glm::vec3 bottom, top;
+  float width = 6.0f;
+};
+
+struct TerrainTerrace {
+  size_t blockIndex = 0;
+  std::vector<glm::vec2> footprint;
+  float baseHeight = 0.0f, height = 0.0f;
+  bool cliff = false;
+  TerrainAccess ramp, stair;
+};
+
 // Hardcoded Stage-A scene: a ~30x30 unit field with box-shaped obstacles and
 // two 3-figure squads facing each other across the map.
 // Neutral flag objective (CTF part 1). Off by default so existing scenes are
@@ -40,9 +55,10 @@ struct Scene {
   // hand-authored scene's size; MapGenerator sets a much larger value.
   float mapHalfExtent = constants::kMapHalfExtent;
   // Sampled ground elevation. Empty (the default) means flat ground at
-  // y = 0; the hilly generator fills it in, and NavMesh / unit placement /
+  // y = 0; hilly and terrain-enabled urban maps fill it in. Navigation, placement and
   // rendering all sample it (see HeightField).
   HeightField ground;
+  std::vector<TerrainTerrace> terraces;
   FlagConfig flag;
   // Round limit: when > 0 the match ends in a draw once this many rounds
   // have been played without a winner. 0 (the default) means unlimited.

@@ -33,8 +33,8 @@ enum class BranchEnd { Auto, Ramp, OffMap };
 
 // Per-feature switch for the optional urban detail layers (issue #146).
 // Auto lets the seed decide, with `chance` as the per-seed probability; Off/On
-// force it. The features are plumbed through the config ahead of the emitters
-// that consume them, so today they do not change the generated Scene.
+// force it. Terrain is opt-in while the later overpass/terrain stage is pending;
+// the remaining detail flags are reserved for their respective emitters.
 enum class FeatureMode { Auto, Off, On };
 struct FeatureToggle {
   FeatureMode mode = FeatureMode::Auto;
@@ -44,7 +44,7 @@ struct UrbanFeatures {
   FeatureToggle lanes;
   FeatureToggle curbs;
   FeatureToggle furniture;
-  FeatureToggle terrain;
+  FeatureToggle terrain{FeatureMode::Off, 0.5f};
   FeatureToggle interiors;
   FeatureToggle rail;
 };
@@ -101,6 +101,12 @@ struct MapGeneratorConfig {
   int maxZiplinesPerBlock = 2;
   float ziplineMinLength = 4.0f;
   float ziplineMaxLength = 22.0f;
+  // Urban ground: low-frequency noise and street-bounded, level block pads.
+  // -1 draws 2..4 terraces per seed; 0 keeps just rolling ground/level pads.
+  // Small maps may fit fewer terraces. Legacy arteryCount=0 stays flat.
+  float terrainAmplitude = 3.0f;
+  int terraceCount = -1;
+  float cliffChance = 0.5f;
   UrbanFeatures features;
 };
 
@@ -155,7 +161,7 @@ enum class UrbanStreetClass { Highway, Avenue, Cross };
 
 // One straight piece of street. Highway pieces follow the sampled
 // centerline (so carry elevation in `a.y`/`b.y`); local streets are one
-// segment clipped to the map square at y = 0.
+// segment clipped to the map square. Heights include the terrain field when enabled.
 struct UrbanStreet {
   glm::vec3 a, b;
   float width = 0.0f;

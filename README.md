@@ -47,6 +47,28 @@ tune artery count/width, local-street width/skew and elevation through
 `MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
 overlay of the navmesh's walkable-cell boundaries.
 
+City terrain is opt-in: `TBGWAF_TERRAIN=on` (or `auto` for a seeded 50% chance),
+`MapGeneratorConfig::features.terrain`, or scenario YAML:
+
+```yaml
+map:
+  generate:
+    type: urban
+    seed: 7
+    elevated: false
+    features: {terrain: on}
+    terrain_amplitude: 3.0
+    terrace_count: -1 # seeded 2–4; 0 disables terraces
+    cliff_chance: 0.5
+```
+
+Low-frequency noise follows the streets; buildings stand on level pads.
+Terraces reserve a gentle ramp and a shorter stair (currently a ramp surface),
+with retaining walls blocking abrupt edges. Small/custom maps can fit fewer
+terraces. The legacy orthogonal generator stays flat. With an overpass, its
+corridor keeps the existing grade; adapting the deck to uneven ground is a
+separate roadmap stage. `city_terrain_seed_*` goldens cover seeds 7, 42 and 2024.
+
 Urban maps carry pre-built **ziplines** (0-2 per block, seed-deterministic,
 `MapGeneratorConfig::maxZiplinesPerBlock`): two-way cables between anchor
 posts along the block sidewalks. A move plan may walk to one anchor, ride,

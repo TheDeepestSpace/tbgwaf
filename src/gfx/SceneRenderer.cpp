@@ -555,6 +555,41 @@ void AppendBox(const AABB& box, LitVertices* vertices, std::vector<GLuint>* indi
   quad({hi.x, lo.y, lo.z}, {hi.x, hi.y, lo.z}, {hi.x, hi.y, hi.z}, {hi.x, lo.y, hi.z}, {1, 0, 0});
 }
 
+// Pavement uses the same triangles as the ground, clipped to each street
+// or sidewalk polygon. The meshes are cached and batched by material.
+void AppendTerrainOverlay(const tactics::HeightField& terrain,
+                          const std::array<glm::vec3, 3>& footprint,
+                          std::vector<glm::vec3>* points, float lift = 0.08f);
+
+void AppendPavement(const tactics::RoadSurface& patch, const tactics::HeightField& ground,
+                    float lift, float thickness, LitVertices* vertices,
+                    std::vector<GLuint>* indices) {
+  if (ground.Empty()) {
+    AppendSurfacePatch(patch.vertices, thickness, vertices, indices);
+    return;
+  }
+  std::vector<glm::vec3> points;
+  for (size_t i = 1; i + 1 < patch.vertices.size(); ++i) {
+    AppendTerrainOverlay(ground, {patch.vertices[0], patch.vertices[i], patch.vertices[i + 1]},
+                         &points, lift);
+  }
+  for (size_t i = 0; i + 2 < points.size(); i += 3) {
+    glm::vec3 normal = glm::cross(points[i + 1] - points[i], points[i + 2] - points[i]);
+    if (glm::length(normal) < 1e-7f) continue;
+    normal = glm::normalize(normal);
+    if (normal.y < 0.0f) normal = -normal;
+    AppendTriangle(points[i], points[i + 1], points[i + 2], normal, vertices, indices);
+  }
+}
+
+void BuildPavementMesh(const std::vector<tactics::RoadSurface>& patches,
+                       const tactics::HeightField& ground, float lift, LitTriangleMesh* mesh) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  for (const auto& patch : patches) AppendPavement(patch, ground, lift, 0.0f, &vertices, &indices);
+  mesh->SetMesh(vertices, indices);
+}
+
 // Everything static the shadow-map FOV prototype (issue #110) casts from
 // and receives on, apart from the ground itself: obstacles (walls + roofs),
 // decks/ramps as 0.45-thick slabs (matching the gameplay LOS slab in
@@ -571,10 +606,10 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   }
   for (const AABB& slab : scene.sidewalks) AppendBox(slab, &vertices, &indices);
   for (const tactics::RoadSurface& sidewalk : scene.sidewalkSurfaces) {
-    AppendSurfacePatch(sidewalk.vertices, 0.10f, &vertices, &indices);
+    AppendPavement(sidewalk, scene.ground, 0.12f, 0.10f, &vertices, &indices);
   }
   for (const tactics::RoadSurface& road : scene.roads) {
-    AppendSurfacePatch(road.vertices, 0.0f, &vertices, &indices);
+    AppendPavement(road, scene.ground, 0.025f, 0.0f, &vertices, &indices);
   }
   mesh->SetMesh(vertices, indices);
 }
@@ -889,6 +924,41 @@ void DrawNumberedHighlight(const Shader& shader, const TriangleMesh& ring, const
   }
 }
 
+// Tessellate flat pads and gentle grades coarsely, retaining the full grid
+// at cliffs. The maximum geometric error is 1 cm (below the pavement lift).
+// Terrain, pavement and FOV overlays all use the same tile decomposition.
+constexpr int kTerrainTileCells = 8;
+bool MergeableTerrainTile(const tactics::HeightField& hf, int x0, int z0, int x1, int z1) {
+  const float a = hf.At(x0, z0), b = hf.At(x1, z0), c = hf.At(x0, z1), d = hf.At(x1, z1);
+  for (int z = z0; z <= z1; ++z) {
+    for (int x = x0; x <= x1; ++x) {
+      const float u = static_cast<float>(x - x0) / (x1 - x0);
+      const float v = static_cast<float>(z - z0) / (z1 - z0);
+      const float height = u >= v ? a + (b - a) * u + (d - b) * v
+                                 : a + (d - c) * u + (c - a) * v;
+      if (std::fabs(hf.At(x, z) - height) > 0.01f) return false;
+    }
+  }
+  return true;
+}
+
+template <typename Emit>
+void TerrainPatches(const tactics::HeightField& hf, int x0, int z0, int x1, int z1, Emit emit) {
+  if ((x1 - x0 == 1 && z1 - z0 == 1) || MergeableTerrainTile(hf, x0, z0, x1, z1)) {
+    emit(x0, z0, x1, z1);
+    return;
+  }
+  if (x1 - x0 >= z1 - z0) {
+    const int mid = (x0 + x1) / 2;
+    TerrainPatches(hf, x0, z0, mid, z1, emit);
+    TerrainPatches(hf, mid, z0, x1, z1, emit);
+  } else {
+    const int mid = (z0 + z1) / 2;
+    TerrainPatches(hf, x0, z0, x1, mid, emit);
+    TerrainPatches(hf, x0, mid, x1, z1, emit);
+  }
+}
+
 // Triangulated terrain heightfield with central-difference normals, plus a
 // border skirt dropping below the lowest sample so the map edge reads as a
 // solid block instead of a paper-thin sheet.
@@ -910,13 +980,16 @@ void BuildTerrainMesh(const tactics::HeightField& hf, LitTriangleMesh* mesh) {
     }
   }
   indices.reserve(static_cast<size_t>(nx - 1) * (nz - 1) * 6);
-  for (int iz = 0; iz + 1 < nz; ++iz) {
-    for (int ix = 0; ix + 1 < nx; ++ix) {
-      const GLuint a = static_cast<GLuint>(iz * nx + ix);
-      const GLuint b = a + 1;
-      const GLuint c = a + nx;
-      const GLuint d = c + 1;
-      indices.insert(indices.end(), {a, b, d, a, d, c});
+  const auto quad = [&](int x0, int z0, int x1, int z1) {
+    const GLuint a = static_cast<GLuint>(z0 * nx + x0), b = z0 * nx + x1;
+    const GLuint c = z1 * nx + x0, d = z1 * nx + x1;
+    indices.insert(indices.end(), {a, b, d, a, d, c});
+  };
+  for (int z = 0; z + 1 < nz; z += kTerrainTileCells) {
+    for (int x = 0; x + 1 < nx; x += kTerrainTileCells) {
+      const int x1 = std::min(x + kTerrainTileCells, nx - 1);
+      const int z1 = std::min(z + kTerrainTileCells, nz - 1);
+      TerrainPatches(hf, x, z, x1, z1, quad);
     }
   }
   skirtBottom -= 0.5f;
@@ -1182,14 +1255,13 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
   return visible;
 }
 
-// Clip the terrain's actual triangles to an overlay footprint, retaining
+// Clip the rendered terrain tiles to an overlay footprint, retaining
 // their interpolated heights. Sampling only the footprint's vertices (even
 // with radial subdivisions) cuts across ridges, and bilinear HeightAt does
 // not match the rendered surface within a non-planar heightfield cell.
 void AppendTerrainOverlay(const tactics::HeightField& terrain,
                           const std::array<glm::vec3, 3>& footprint,
-                          std::vector<glm::vec3>* points) {
-  constexpr float kTerrainLift = 0.08f;
+                          std::vector<glm::vec3>* points, float lift) {
   const auto crossXZ = [](const glm::vec3& a, const glm::vec3& b) {
     return a.x * b.z - a.z * b.x;
   };
@@ -1205,14 +1277,53 @@ void AppendTerrainOverlay(const tactics::HeightField& terrain,
   const int z0 = cellIndex(lo.z, terrain.minZ, terrain.nz);
   const int z1 = cellIndex(hi.z, terrain.minZ, terrain.nz);
   const auto vertex = [&](int ix, int iz) {
-    return glm::vec3(terrain.minX + ix * terrain.step, terrain.At(ix, iz) + kTerrainLift,
+    return glm::vec3(terrain.minX + ix * terrain.step, terrain.At(ix, iz) + lift,
                      terrain.minZ + iz * terrain.step);
   };
-  for (int iz = z0; iz <= z1; ++iz) {
-    // A narrow cone slice can have a huge bounding box. Restrict each grid
-    // row to the slice's X interval so we only clip nearby terrain cells.
+  const auto clipTriangle = [&](const std::array<glm::vec3, 3>& triangle) {
+    // A triangle clipped by three half-planes has at most six vertices.
+    std::array<glm::vec3, 6> poly{}, clipped{};
+    std::copy(triangle.begin(), triangle.end(), poly.begin());
+    int count = 3;
+    for (int edge = 0; edge < 3 && count > 0; ++edge) {
+      const glm::vec3& origin = footprint[edge];
+      const glm::vec3 direction = footprint[(edge + 1) % 3] - origin;
+      const auto side = [&](const glm::vec3& p) {
+        return winding * crossXZ(direction, p - origin);
+      };
+      int clippedCount = 0;
+      glm::vec3 prev = poly[count - 1];
+      float prevSide = side(prev);
+      for (int v = 0; v < count; ++v) {
+        const glm::vec3 cur = poly[v];
+        const float curSide = side(cur);
+        if ((prevSide >= 0.0f) != (curSide >= 0.0f)) {
+          clipped[clippedCount++] = glm::mix(prev, cur, prevSide / (prevSide - curSide));
+        }
+        if (curSide >= 0.0f) clipped[clippedCount++] = cur;
+        prev = cur;
+        prevSide = curSide;
+      }
+      poly.swap(clipped);
+      count = clippedCount;
+    }
+    for (int v = 1; v + 1 < count; ++v) {
+      points->insert(points->end(), {poly[0], poly[v], poly[v + 1]});
+    }
+  };
+  const auto quad = [&](int x0, int z0, int x1, int z1) {
+    const glm::vec3 a = vertex(x0, z0), b = vertex(x1, z0);
+    const glm::vec3 c = vertex(x0, z1), d = vertex(x1, z1);
+    clipTriangle({a, b, d});
+    clipTriangle({a, d, c});
+  };
+  const int tile = kTerrainTileCells;
+  for (int iz = (z0 / tile) * tile; iz <= z1; iz += tile) {
+    const int endZ = std::min(iz + tile, terrain.nz - 1);
+    // Restrict each tile row to the triangle's X interval. Cone slices can
+    // have large bounding boxes while covering very little of each row.
     const float rowMinZ = terrain.minZ + iz * terrain.step;
-    const float rowMaxZ = rowMinZ + terrain.step;
+    const float rowMaxZ = terrain.minZ + endZ * terrain.step;
     float minX = std::numeric_limits<float>::infinity();
     float maxX = -std::numeric_limits<float>::infinity();
     const auto includeX = [&](float x) {
@@ -1233,41 +1344,9 @@ void AppendTerrainOverlay(const tactics::HeightField& terrain,
     if (minX > maxX) continue;
     const int x0 = cellIndex(minX, terrain.minX, terrain.nx);
     const int x1 = cellIndex(maxX, terrain.minX, terrain.nx);
-    for (int ix = x0; ix <= x1; ++ix) {
-      const glm::vec3 a = vertex(ix, iz), b = vertex(ix + 1, iz);
-      const glm::vec3 c = vertex(ix, iz + 1), d = vertex(ix + 1, iz + 1);
-      // Same diagonal as BuildTerrainMesh: a-b-d and a-d-c.
-      for (const auto& triangle : {std::array{a, b, d}, std::array{a, d, c}}) {
-        // A triangle clipped by three half-planes has at most six vertices.
-        std::array<glm::vec3, 6> poly{}, clipped{};
-        std::copy(triangle.begin(), triangle.end(), poly.begin());
-        int count = 3;
-        for (int edge = 0; edge < 3 && count > 0; ++edge) {
-          const glm::vec3& origin = footprint[edge];
-          const glm::vec3 direction = footprint[(edge + 1) % 3] - origin;
-          const auto side = [&](const glm::vec3& p) {
-            return winding * crossXZ(direction, p - origin);
-          };
-          int clippedCount = 0;
-          glm::vec3 prev = poly[count - 1];
-          float prevSide = side(prev);
-          for (int v = 0; v < count; ++v) {
-            const glm::vec3 cur = poly[v];
-            const float curSide = side(cur);
-            if ((prevSide >= 0.0f) != (curSide >= 0.0f)) {
-              clipped[clippedCount++] = glm::mix(prev, cur, prevSide / (prevSide - curSide));
-            }
-            if (curSide >= 0.0f) clipped[clippedCount++] = cur;
-            prev = cur;
-            prevSide = curSide;
-          }
-          poly.swap(clipped);
-          count = clippedCount;
-        }
-        for (int v = 1; v + 1 < count; ++v) {
-          points->insert(points->end(), {poly[0], poly[v], poly[v + 1]});
-        }
-      }
+    for (int ix = (x0 / tile) * tile; ix <= x1; ix += tile) {
+      const int endX = std::min(ix + tile, terrain.nx - 1);
+      TerrainPatches(terrain, ix, iz, endX, endZ, quad);
     }
   }
 }
@@ -1371,7 +1450,8 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
     float y = terrain.HeightAt(x, z);
     for (const tactics::RoadSurface& sidewalk : polygonSidewalks) {
       if (PatchContainsXZ(sidewalk, x, z)) {
-        y = std::max(y, sidewalk.vertices.front().y);
+        y = std::max(y, terrain.Empty() ? sidewalk.vertices.front().y
+                                        : terrain.MeshHeightAt(x, z) + 0.12f);
       }
     }
     return glm::vec3(x, y + kGroundOffset, z);
@@ -1767,6 +1847,8 @@ bool SceneRenderer::Init() {
   shotConeMesh_.Init();
   aimOverlayMesh_.Init();
   terrainMesh_.Init();
+  terrainRoadMesh_.Init();
+  terrainSidewalkMesh_.Init();
   geometryMesh_.Init();
   fovSceneMesh_.Init();
   highlightRing_.Init();
@@ -1850,6 +1932,9 @@ void SceneRenderer::Destroy() {
   fovKeySidewalks_.clear();
   fovKeyMapHalfExtent_ = 0.0f;
   terrainMesh_.Destroy();
+  terrainRoadMesh_.Destroy();
+  terrainSidewalkMesh_.Destroy();
+  pavementKey_ = 0;
   geometryMesh_.Destroy();
   fovSceneMesh_.Destroy();
   fovSceneKey_ = 0;
@@ -1994,6 +2079,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (terrainChanged) {
     if (!terrain.Empty()) BuildTerrainMesh(terrain, &terrainMesh_);
     terrainKey_ = terrain;
+    fovSceneKey_ = 0;
+  }
+  if (!terrain.Empty()) {
+    const auto key = FovSceneFingerprint(game.GetScene());
+    if (terrainChanged || pavementKey_ != key) {
+      BuildPavementMesh(game.GetScene().roads, terrain, 0.025f, &terrainRoadMesh_);
+      BuildPavementMesh(game.GetScene().sidewalkSurfaces, terrain, 0.12f, &terrainSidewalkMesh_);
+      pavementKey_ = key;
+    }
   }
   // Terrain clipping is more expensive than the flat fan. Reuse each unit's
   // geometry while it stands still, invalidating on map contents rather
@@ -2159,9 +2253,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
 
   if (drawTerrain) {
+    // Retaining-wall tops coincide with the high pad. Bias the terrain
+    // behind the solid geometry to keep their shared edge free of z-fighting.
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(1.0f, 1.0f);
     // Earthy green-brown so the hills read as terrain rather than factory floor.
     DrawLitModel(litShader_, terrainMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(0.30f, 0.36f, 0.22f, 1.0f));
+    glDisable(GL_POLYGON_OFFSET_FILL);
   } else {
     DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_,
                glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
@@ -2174,13 +2273,21 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
   }
 
+  if (drawTerrain) {
+    DrawLitModel(litShader_, terrainSidewalkMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
+    DrawLitModel(litShader_, terrainRoadMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
+  }
   for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
+    if (drawTerrain) break;
     BuildSurfacePatch(sidewalk.vertices, 0.10f, &geometryMesh_);
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
   }
 
   for (const tactics::RoadSurface& road : game.GetScene().roads) {
+    if (drawTerrain) break;
     BuildSurfacePatch(road.vertices, 0.0f, &geometryMesh_);
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
@@ -2320,7 +2427,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
     for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
       if (PatchContainsXZ(sidewalk, position.x, position.z)) {
-        position.y = std::max(position.y, sidewalk.vertices.front().y);
+        position.y = std::max(position.y, terrain.Empty() ? sidewalk.vertices.front().y
+                         : terrain.MeshHeightAt(position.x, position.z) + 0.12f);
       }
     }
     return position;
@@ -2700,7 +2808,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           // contour/edge interpolation below stays on the slope.
           for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
             if (PatchContainsXZ(sidewalk, quad[k].p.x, quad[k].p.z)) {
-              quad[k].p.y = std::max(quad[k].p.y, sidewalk.vertices.front().y);
+              quad[k].p.y = std::max(quad[k].p.y, terrain.Empty() ? sidewalk.vertices.front().y
+                               : terrain.MeshHeightAt(quad[k].p.x, quad[k].p.z) + 0.12f);
             }
           }
           quad[k].p.y += kY;

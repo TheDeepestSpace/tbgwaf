@@ -127,6 +127,13 @@ int main(int argc, char** argv) {
                      tactics::GenerateUrbanMap(seed, gradeConfig), kCityCameraZoom,
                      /*showNavMesh=*/false});
   }
+  tactics::MapGeneratorConfig terrainConfig = gradeConfig;
+  terrainConfig.features.terrain.mode = tactics::FeatureMode::On;
+  for (const uint32_t seed : kCitySeeds) {
+    cases.push_back({"city_terrain_seed_" + std::to_string(seed),
+                     tactics::GenerateUrbanMap(seed, terrainConfig), 180.0f,
+                     /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
+  }
   tactics::MapGeneratorConfig mergeConfig = gradeConfig;
   mergeConfig.arteryCount = 2;
   cases.push_back({"city_merge_seed_42", tactics::GenerateUrbanMap(42, mergeConfig),

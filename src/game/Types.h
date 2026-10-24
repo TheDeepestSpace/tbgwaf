@@ -82,7 +82,7 @@ inline std::vector<glm::vec2> ObstacleFootprint(const Obstacle& obstacle) {
 
 // Sampled ground elevation over a regular XZ grid: sample (ix, iz) sits at
 // (minX + ix*step, minZ + iz*step). An empty field means flat ground at
-// y = 0 everywhere (the hand-authored and urban scenes), so every consumer
+// y = 0 everywhere (the hand-authored and terrain-disabled urban scenes), so every consumer
 // can sample unconditionally. Queries outside the grid clamp to the border.
 struct HeightField {
   float minX = 0.0f, minZ = 0.0f;

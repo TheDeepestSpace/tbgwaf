@@ -456,8 +456,11 @@ struct StreetPropParts {
 StreetPropParts BuildStreetPropParts(const tactics::StreetProp& prop) {
   StreetPropParts parts;
   const auto base = [&](float yaw) {
+    // StreetProp yaw follows the gameplay convention: (cos(yaw), 0,
+    // sin(yaw)). A positive GLM rotation about +Y sends local +X toward -Z,
+    // so use -Y to keep the rendered fixture aligned with its stored yaw.
     return glm::rotate(glm::translate(glm::mat4(1.0f), prop.position), yaw,
-                       glm::vec3(0.0f, 1.0f, 0.0f));
+                       glm::vec3(0.0f, -1.0f, 0.0f));
   };
   auto box = [&](float yaw, float cx, float y0, float cz, float sx, float sy, float sz,
                  const glm::vec4& color) {

@@ -1653,6 +1653,33 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
           hasPole |= o.bounds.max.y - prop.position.y >= 5.39f;
         }
         CHECK(hasPole);
+        // The arm crosses its curb at a right angle and points out of the
+        // block over the road, including along oblique streets.
+        bool hasCurb = false;
+        float curbDistance = 1e9f;
+        glm::vec2 curbDirection(0.0f), blockInterior(0.0f);
+        for (const UrbanBlock& block : blocks) {
+          if (!InsideConvex(p, block.vertices)) continue;
+          glm::vec2 centroid(0.0f);
+          for (const glm::vec2& vertex : block.vertices) centroid += vertex;
+          centroid /= static_cast<float>(block.vertices.size());
+          for (size_t e = 0; e < block.vertices.size(); ++e) {
+            const glm::vec2 a = block.vertices[e];
+            const glm::vec2 b = block.vertices[(e + 1) % block.vertices.size()];
+            const float distance = DistanceToSegment(p, a, b);
+            if (distance >= curbDistance) continue;
+            curbDistance = distance;
+            curbDirection = glm::normalize(b - a);
+            blockInterior = centroid - p;
+            hasCurb = true;
+          }
+        }
+        CHECK(hasCurb);
+        if (hasCurb) {
+          const glm::vec2 armDirection = direction(prop.yaw);
+          CHECK(std::fabs(glm::dot(armDirection, curbDirection)) < 1.0e-4f);
+          CHECK(glm::dot(armDirection, blockInterior) < 0.0f);
+        }
         continue;
       }
       for (const Obstacle& o : scene.obstacles) {

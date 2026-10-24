@@ -2268,6 +2268,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // striped bands and dark slabs through the faded block.
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
+    // The faded block would otherwise be shadowed by its own shadow-map
+    // entry (it is a caster), darkening its faces into patchy slabs.
+    litShader_.SetInt("uDisableShadows", 1);
     for (const FadedOccluder& f : faded) {
       if (f.obstacle >= 0) {
         const tactics::Obstacle& obstacle = obstacles[f.obstacle];
@@ -2288,6 +2291,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                      glm::vec4(kDeckColor, kOccluderFadeOpacity));
       }
     }
+    litShader_.SetInt("uDisableShadows", debug.disableShadows ? 1 : 0);
     glDisable(GL_CULL_FACE);
     glDisable(GL_STENCIL_TEST);
     glClear(GL_STENCIL_BUFFER_BIT);  // Later passes expect a clean stencil.

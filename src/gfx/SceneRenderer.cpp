@@ -2263,6 +2263,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glEnable(GL_STENCIL_TEST);
     glStencilFunc(GL_EQUAL, 0, 0xFF);
     glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+    // Front faces only: with no culling the stencil cap lets whichever
+    // triangle draws first claim the pixel, often a back face, which shows as
+    // striped bands and dark slabs through the faded block. Scene meshes use
+    // clockwise outward winding (matching CubeMesh), rather than OpenGL's
+    // default counter-clockwise front-face convention.
+    glFrontFace(GL_CW);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    // The faded block would otherwise be shadowed by its own shadow-map
+    // entry (it is a caster), darkening its faces into patchy slabs.
+    litShader_.SetInt("uDisableShadows", 1);
     for (const FadedOccluder& f : faded) {
       if (f.obstacle >= 0) {
         const tactics::Obstacle& obstacle = obstacles[f.obstacle];
@@ -2283,6 +2294,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                      glm::vec4(kDeckColor, kOccluderFadeOpacity));
       }
     }
+    litShader_.SetInt("uDisableShadows", debug.disableShadows ? 1 : 0);
+    glDisable(GL_CULL_FACE);
+    glFrontFace(GL_CCW);
     glDisable(GL_STENCIL_TEST);
     glClear(GL_STENCIL_BUFFER_BIT);  // Later passes expect a clean stencil.
     glDepthMask(GL_TRUE);

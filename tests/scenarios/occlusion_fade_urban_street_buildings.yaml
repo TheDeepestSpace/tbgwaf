@@ -1,0 +1,26 @@
+name: occlusion_fade_urban_street_buildings
+description: >
+  Issue #197 regression: on a generated urban map with roads and sidewalks,
+  a building between Blue's pane camera and its figure is drawn see-through.
+  The faded block must blend as one clean translucent layer (back faces
+  culled), with no striped bands or dark overlapping slabs, and the street
+  surfaces around it must stay opaque and flat.
+
+map:
+  generate: {seed: 7, type: urban, elevated: false}
+
+units:
+  - {id: 0, team: blue, position: [-1, 0, 19], facing_degrees: 0}
+  - {id: 1, team: red, position: [40, 0, -30], facing_degrees: 180}
+
+camera:
+  target: [-1, 12]
+  zoom: -6
+
+script:
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {round: 2}

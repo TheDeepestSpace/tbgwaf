@@ -134,7 +134,7 @@
     <div id="layout">
       <div id="sidebar">
         <h1>Asset gallery <a href="../">&larr; game</a></h1>
-        <p style="margin:0 0 8px;font-size:12px"><a href="../scenarios/" style="color:#8ab4ff;text-decoration:none">Scenario review &rarr;</a></p>
+        <p style="margin:0 0 8px;font-size:12px"><a href="../scenarios/" style="color:#8ab4ff;text-decoration:none">Scenario review &rarr;</a> · <a id="performanceLink" href="../performance/" style="color:#8ab4ff;text-decoration:none">Performance &rarr;</a></p>
         <div id="items"></div>
       </div>
       <div id="main">
@@ -153,6 +153,13 @@
     </div>
     <!-- Generated at build time from tests/map_goldens/ (see
          scripts/gen_gallery_map_seeds.cmake); defines MAP_SEED_GOLDENS. -->
+    <script>
+      // A PR gallery is nested three levels below the repository root;
+      // performance history is shared at the production Pages root.
+      if (location.pathname.indexOf("/pr-preview/") !== -1) {
+        document.getElementById("performanceLink").href = "../../../performance/";
+      }
+    </script>
     <script src="map_seeds.js"></script>
     <script src="tactics_gallery.js"></script>
     <script>

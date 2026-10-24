@@ -275,6 +275,29 @@ figures and enemy plans are never sent, and no animation fields cross the
 wire -- the client derives walk/shoot/fall animation locally. A round runs
 once both teams have committed.
 
+### Performance suite
+
+The **Performance suite** is an observational native/software-GL benchmark
+for 10 pinned, randomly selected `urban-auto` map seeds. It initializes the
+normal six figures and map-fitted two-pane camera, warms up the renderer, and
+records 120 frames of the debug-panel measurements: FPS/frame time, FOV time,
+draw calls, triangles, and vertices. Raw JSON retains every sample plus
+per-map and whole-run percentiles; no timing value is a pass/fail CI gate.
+
+Run the **Performance suite** workflow manually and choose a branch, tag, or
+SHA. It builds Release under Xvfb/llvmpipe, uploads the raw result, preserves
+the run in `gh-pages`, and refreshes the [published report](https://thedeepestspace.github.io/tbgwaf/performance/).
+Every PR preview also measures the PR head and publishes `pr-preview/pr-<number>/performance/`, compared against the preserved master runs.
+Master runs form the baseline shown beside measurements from other refs.
+Locally, after a Release configure:
+
+```sh
+cmake --build build --target tactics_performance_suite
+LIBGL_ALWAYS_SOFTWARE=1 SDL_VIDEODRIVER=x11 \
+  xvfb-run --auto-servernum --server-args='-screen 0 1280x1024x24' \
+  build/tactics_performance_suite --output performance-results.json
+```
+
 ## Web (WASM) build
 
 Requires the [Emscripten SDK](https://emscripten.io/docs/getting_started/downloads.html)

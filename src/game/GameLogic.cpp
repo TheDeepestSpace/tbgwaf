@@ -1775,7 +1775,8 @@ void GameLogic::ApplyPlaybookReactions(bool roundStart) {
       if (!moving && Playbook(unit.team).ignoreIdle && !enemyMoving) continue;
       if (!CanUnitSee(unit, enemy, scene_.obstacles, scene_.walkSurfaces, scene_.ground)) continue;
       const float dist = glm::distance(unit.position, enemy.position);
-      if (!nearest || dist < nearestDist) {
+      // Closest first; an exact tie goes to the lower id (deterministic).
+      if (!nearest || dist < nearestDist || (dist == nearestDist && enemy.id < nearest->id)) {
         nearest = &enemy;
         nearestDist = dist;
       }

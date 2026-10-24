@@ -1657,13 +1657,15 @@ void DrawAimMarker(const Shader& colorShader, ColorTriangleMesh& mesh,
 // deck slab crossing a camera->probe segment is drawn see-through.
 std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team, bool fogActive,
                                                const PaneOverlays& overlays) {
+  // The omniscient spectator keeps both teams' figures and plans visible.
+  const bool allTeams = overlays.spectatorFov;
   // Probes hover slightly above their surface so grazing contact with the
   // ground/deck they sit on never reads as occlusion.
   constexpr float kSurfaceLift = 0.3f;
   constexpr float kGhostLift = 0.9f;  // Mid-torso of a ghost/figure wireframe.
   std::vector<glm::vec3> probes;
   for (const Unit& unit : game.GetScene().units) {
-    if (!unit.alive || unit.team != team) continue;
+    if (!unit.alive || (!allTeams && unit.team != team)) continue;
     probes.push_back(unit.EyePosition());
     probes.push_back(unit.position + glm::vec3(0.0f, kSurfaceLift, 0.0f));
   }
@@ -1698,7 +1700,7 @@ std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team,
       game.Mode() != InputMode::GameOver && game.Mode() != InputMode::Executing;
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
-      if (!unit.alive || unit.team != team) continue;
+      if (!unit.alive || (!allTeams && unit.team != team)) continue;
       if (unit.plan.type != tactics::PlannedActionType::Move || unit.plan.movePath.size() < 2) {
         continue;
       }
@@ -1712,7 +1714,7 @@ std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team,
     for (const Unit& unit : game.GetScene().units) {
       if (unit.team == team) continue;
       for (const auto& s : game.Sightings(team, unit.id)) {
-        if (1.0f - s.ageRounds * tactics::constants::kSightingFadePerRound <= 0.0f) continue;
+        if (game.GhostAlpha(s.at) <= 0.0f) continue;
         probes.push_back(s.position + glm::vec3(0.0f, kGhostLift, 0.0f));  // Ghost + arrow.
       }
     }
@@ -2368,41 +2370,50 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       fovSceneKey_ = sceneKey;
     }
   }
-  if (fovOverlayMode_ == FovOverlayMode::ShadowMap) {
-    // Issue #110 prototype: projective per-unit mask instead of the
-    // analytic ground overlay.
-    for (const Unit& unit : game.GetScene().units) {
-      if (debug.disableFov || !unit.alive || unit.team != team) continue;
-      const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 0.15f)
-                                                          : glm::vec4(0.9f, 0.25f, 0.22f, 0.15f);
-      DrawFovShadowMask(game, unit, unit.facingYaw, tactics::constants::kShootHalfFovDegrees,
-                        teamColor, viewProj, drawTerrain, targetFramebuffer, x, y, width, height);
-    }
-    colorShader_.Use();
-  } else {
-    const auto build = [&](const Unit& unit) {
-      return BuildFovCone(unit, obstacles, sidewalks, mapHalfExtent, terrain,
-                          game.GetScene().sidewalkSurfaces, game.GetScene().walkSurfaces);
-    };
-    for (const Unit& unit : game.GetScene().units) {
-      if (debug.disableFov || !unit.alive || unit.team != team) continue;
-      if (terrain.Empty()) {
-        DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, build(unit));
-        continue;
+  const auto drawTeamFov = [&](Team fovTeam) {
+    if (fovOverlayMode_ == FovOverlayMode::ShadowMap) {
+      // Issue #110 prototype: projective per-unit mask instead of the
+      // analytic ground overlay.
+      for (const Unit& unit : game.GetScene().units) {
+        if (debug.disableFov || !unit.alive || unit.team != fovTeam) continue;
+        const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 0.15f)
+                                                            : glm::vec4(0.9f, 0.25f, 0.22f, 0.15f);
+        DrawFovShadowMask(game, unit, unit.facingYaw, tactics::constants::kShootHalfFovDegrees,
+                          teamColor, viewProj, drawTerrain, targetFramebuffer, x, y, width, height);
       }
-      auto cached = std::find_if(terrainFovCache_.begin(), terrainFovCache_.end(),
-                                 [&](const auto& entry) { return entry.unitId == unit.id; });
-      const glm::vec3 eye = unit.EyePosition();
-      if (cached == terrainFovCache_.end()) {
-        terrainFovCache_.push_back({unit.id, eye, unit.facingYaw, build(unit)});
-        cached = terrainFovCache_.end() - 1;
-      } else if (cached->eye != eye || cached->facingYaw != unit.facingYaw) {
-        cached->eye = eye;
-        cached->facingYaw = unit.facingYaw;
-        cached->points = build(unit);
+      colorShader_.Use();
+    } else {
+      const auto build = [&](const Unit& unit) {
+        return BuildFovCone(unit, obstacles, sidewalks, mapHalfExtent, terrain,
+                            game.GetScene().sidewalkSurfaces, game.GetScene().walkSurfaces);
+      };
+      for (const Unit& unit : game.GetScene().units) {
+        if (debug.disableFov || !unit.alive || unit.team != fovTeam) continue;
+        if (terrain.Empty()) {
+          DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, build(unit));
+          continue;
+        }
+        auto cached = std::find_if(terrainFovCache_.begin(), terrainFovCache_.end(),
+                                   [&](const auto& entry) { return entry.unitId == unit.id; });
+        const glm::vec3 eye = unit.EyePosition();
+        if (cached == terrainFovCache_.end()) {
+          terrainFovCache_.push_back({unit.id, eye, unit.facingYaw, build(unit)});
+          cached = terrainFovCache_.end() - 1;
+        } else if (cached->eye != eye || cached->facingYaw != unit.facingYaw) {
+          cached->eye = eye;
+          cached->facingYaw = unit.facingYaw;
+          cached->points = build(unit);
+        }
+        DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, cached->points);
       }
-      DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, cached->points);
     }
+  };
+  drawTeamFov(team);
+  if (overlays.spectatorFov) {
+    // Fresh stencil so the other team's cones blend over (not instead of) these.
+    glStencilMask(0xFF);
+    glClear(GL_STENCIL_BUFFER_BIT);
+    drawTeamFov(team == Team::Blue ? Team::Red : Team::Blue);
   }
   glDisable(GL_STENCIL_TEST);
   // Free-aim (issue #129): the aiming figure's acid-green 360-degree LOS
@@ -2464,7 +2475,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
-      if (!unit.alive || unit.team != team ||
+      if (!unit.alive || (!overlays.spectatorFov && unit.team != team) ||
           unit.plan.type != tactics::PlannedActionType::Shoot || &unit == aimingShooter) {
         continue;
       }
@@ -2831,7 +2842,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glDepthMask(GL_TRUE);
   glDisable(GL_BLEND);
 
-  // Enemy sighting memory: faint wireframe trail fading with age.
+  // Enemy ghosts: faint wireframes shown during the turn, fading after it.
   if (fogActive) {
     constexpr float kSightingMaxAlpha = 0.35f;
     unlitShader_.Use();
@@ -2841,7 +2852,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (const Unit& unit : game.GetScene().units) {
       if (unit.team == team) continue;
       for (const auto& s : game.Sightings(team, unit.id)) {
-        const float life = 1.0f - s.ageRounds * tactics::constants::kSightingFadePerRound;
+        const float life = game.GhostAlpha(s.at);
         if (life <= 0.0f) continue;
         DrawSighting(unlitShader_, pathLine_, viewProj, unit, s, game.GetScene().sidewalks,
                      life * kSightingMaxAlpha, terrain);
@@ -2852,7 +2863,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   // Bullet tracers: a team-colored dotted path from the muzzle to where the
-  // shot ended, fading per completed round like the sighting ghosts.  A new
+  // shot ended, fading out after the turn like the sighting ghosts.  A new
   // shot briefly overlays the dots with a full white-hot line.
   {
     constexpr float kTracerMaxAlpha = 0.9f;
@@ -2863,8 +2874,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
     for (const tactics::Tracer& tracer : game.Tracers()) {
-      const int age = game.RoundNumber() - tracer.birthRound;
-      const float life = 1.0f - static_cast<float>(age) / tactics::constants::kTracerMemoryRounds;
+      const float life = game.TracerAlpha(tracer.at);
       if (life <= 0.0f) continue;
       const glm::vec3 teamColor = tracer.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
                                                             : glm::vec3(0.9f, 0.25f, 0.22f);
@@ -2903,7 +2913,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // single actor.
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
-      if (!unit.alive || unit.team != team) continue;
+      if (!unit.alive || (!overlays.spectatorFov && unit.team != team)) continue;
       if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
       const bool planned = unit.plan.type != tactics::PlannedActionType::None;
       const glm::vec4 color = planned ? glm::vec4(0.25f, 0.9f, 0.35f, 1.0f)
@@ -2994,10 +3004,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // Visual feedback for the whole squad's plan so far: a planned move reuses
   // the same path-line rendering as the live preview above; a planned shot
   // gets a simple shooter->target line. Own team only -- the enemy's plans
-  // stay hidden even where its figures are visible.
+  // stay hidden even where its figures are visible (except to the spectator).
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
-      if (!unit.alive || unit.team != team) continue;
+      if (!unit.alive || (!overlays.spectatorFov && unit.team != team)) continue;
       if (unit.plan.type == tactics::PlannedActionType::Move && unit.plan.movePath.size() >= 2) {
         drawMovePath(unit.plan.movePath, unit.plan.moveRides, glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
         // Wireframe stand-in at the destination, showing the planned final

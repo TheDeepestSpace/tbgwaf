@@ -147,6 +147,13 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     if (node["seconds"]) action.playSeconds = node["seconds"].as<float>();
     return action;
   }
+  if (kind == "wait") {
+    // Advances live game time (ghosts/shot lines fade on this clock).
+    action.kind = ScenarioAction::Kind::Wait;
+    if (!node["seconds"]) throw std::runtime_error("wait requires 'seconds'");
+    action.playSeconds = node["seconds"].as<float>();
+    return action;
+  }
   if (kind == "timeline_pause") {
     action.kind = ScenarioAction::Kind::TimelinePause;
     return action;
@@ -223,7 +230,7 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
     assertion.rememberedByTeam = ParseTeam(node["remembered_by"].as<std::string>(), "assert.remembered_by");
   }
   if (node["remembered"]) assertion.remembered = node["remembered"].as<bool>();
-  if (node["memory_age"]) assertion.memoryAge = node["memory_age"].as<int>();
+  if (node["ghost_alpha"]) assertion.ghostAlpha = node["ghost_alpha"].as<float>();
   if (node["round"]) assertion.round = node["round"].as<int>();
   if (node["timeline_ticks"]) assertion.timelineTicks = node["timeline_ticks"].as<int>();
   if (node["flag_carrier"]) assertion.flagCarrier = node["flag_carrier"].as<int>();
@@ -254,12 +261,12 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   }
 
   if ((assertion.alive || assertion.position || assertion.facingDegrees ||
-       assertion.visible || assertion.remembered || assertion.memoryAge) && !assertion.unit) {
+       assertion.visible || assertion.remembered || assertion.ghostAlpha) && !assertion.unit) {
     throw std::runtime_error(
-        "assert checking alive/position/facing_degrees/visible/remembered/memory_age requires 'unit'");
+        "assert checking alive/position/facing_degrees/visible/remembered/ghost_alpha requires 'unit'");
   }
-  if ((assertion.remembered || assertion.memoryAge) && !assertion.rememberedByTeam) {
-    throw std::runtime_error("assert 'remembered'/'memory_age' require 'remembered_by'");
+  if ((assertion.remembered || assertion.ghostAlpha) && !assertion.rememberedByTeam) {
+    throw std::runtime_error("assert 'remembered'/'ghost_alpha' require 'remembered_by'");
   }
   if (assertion.visible.has_value() != assertion.visibleToTeam.has_value()) {
     throw std::runtime_error("assert 'visible' and 'visible_to' must be set together");
@@ -377,6 +384,17 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
     return true;
   }
 
+  if (action.kind == ScenarioAction::Kind::Wait) {
+    const float step = hooks.tickSeconds > 0.0f ? hooks.tickSeconds : 0.05f;
+    for (float elapsed = 0.0f; elapsed < action.playSeconds - 1e-4f; elapsed += step) {
+      game.Update(step);
+      game.UpdateSightingMemory(step);
+      timeline.Observe(game, step);
+      if (hooks.onFrame) hooks.onFrame(game);
+    }
+    return true;
+  }
+
   if (action.kind == ScenarioAction::Kind::TimelinePause) {
     playback.SetPlaying(false);
     return true;
@@ -417,6 +435,7 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
       if (hooks.onMoveFrontier) {
         for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
           hooks.onMoveFrontier(game, actorTeam);
+          if (hooks.tickSeconds > 0.0f) game.UpdateSightingMemory(hooks.tickSeconds);
         }
       }
       for (const glm::vec3& waypoint : action.waypoints) {
@@ -462,6 +481,7 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
       if (hooks.onMoveFrontier) {
         for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
           hooks.onMoveFrontier(game, actorTeam);
+          if (hooks.tickSeconds > 0.0f) game.UpdateSightingMemory(hooks.tickSeconds);
         }
       }
       return true;
@@ -558,6 +578,7 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
     case ScenarioAction::Kind::TimelineSeek:
     case ScenarioAction::Kind::TimelinePlay:
     case ScenarioAction::Kind::TimelinePause:
+    case ScenarioAction::Kind::Wait:
       break;  // Handled above.
   }
   return true;
@@ -612,13 +633,14 @@ void CheckAssertionImpl(const GameLogic& game, const ScenarioAssertion& a, int s
                ToString(a.rememberedByTeam) + "=" + (*a.remembered ? "true" : "false") + " but had " +
                std::to_string(samples.size()) + " samples");
         }
-        if (a.memoryAge) {
+        if (a.ghostAlpha) {
           if (samples.empty()) {
-            Fail("unit " + std::to_string(*a.unit) + " expected memory_age " +
-                 std::to_string(*a.memoryAge) + " but has no remembered samples");
-          } else if (samples.front().ageRounds != *a.memoryAge) {
-            Fail("unit " + std::to_string(*a.unit) + " expected memory_age " +
-                 std::to_string(*a.memoryAge) + " but was " + std::to_string(samples.front().ageRounds));
+            Fail("unit " + std::to_string(*a.unit) + " expected ghost_alpha " +
+                 std::to_string(*a.ghostAlpha) + " but has no remembered samples");
+          } else if (std::fabs(game.GhostAlpha(samples.front().at) - *a.ghostAlpha) > a.tolerance) {
+            Fail("unit " + std::to_string(*a.unit) + " expected ghost_alpha " +
+                 std::to_string(*a.ghostAlpha) + " but was " +
+                 std::to_string(game.GhostAlpha(samples.front().at)));
           }
         }
       }
@@ -779,7 +801,14 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
 
   auto EmitHoldFrames = [&] {
     if (!hooks.onFrame) return;
-    for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) hooks.onFrame(Display());
+    for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
+      hooks.onFrame(Display());
+      // Video mode: time passes while planning, so ghosts/bullets keep
+      // fading across the held frames instead of freezing mid-hold.
+      if (hooks.tickSeconds > 0.0f && !playback.Active()) {
+        game.UpdateSightingMemory(hooks.tickSeconds);
+      }
+    }
   };
 
   // Mirrors main.cpp's frame loop so captured frames include sighting memory.
@@ -816,7 +845,7 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
         for (auto& f : followerResult.failures) result.failures.push_back("follower " + f);
       }
       if (step.assertion->rememberedByTeam &&
-          (!step.assertion->memoryAge || *step.assertion->memoryAge == 0)) {
+          !step.assertion->ghostAlpha) {
         ScenarioResult followerResult;
         CheckAssertionImpl(follower, *step.assertion, i, &timeline, &followerResult);
         for (auto& f : followerResult.failures) result.failures.push_back("follower " + f);

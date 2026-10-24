@@ -216,6 +216,14 @@ void RemoteClient::HandleRound(const Json& m) {
                             static_cast<int>(s["unit"].AsNumber(-1)),
                             static_cast<float>(s["yaw"].AsNumber())});
   }
+  for (const Json& tj : m["tracers"].AsArray()) {
+    TracerEvent ev;
+    ev.t = static_cast<float>(tj["t"].AsNumber());
+    const auto team = ParseTeamName(tj["team"].AsString());
+    if (!team || !DecodeVec3(tj["from"], &ev.from) || !DecodeVec3(tj["to"], &ev.to)) continue;
+    ev.team = *team;
+    pb.tracers.push_back(ev);
+  }
   selfReady_ = peerReady_ = false;
   if (pb.frames.empty()) {
     ApplyState(pb.finalState);
@@ -296,6 +304,13 @@ void RemoteClient::AdvancePlayback(float dt) {
         u.shootAimYaw = shot.yaw;
       }
     }
+  }
+  // Bullet lines, as the single-process game draws them: every tracer fired
+  // so far this turn (last turn's are gone), aged by how long ago it left the barrel.
+  snap.tracers.clear();
+  for (const TracerEvent& ev : pb.tracers) {
+    if (ev.t > pb.clock) continue;
+    snap.tracers.push_back(Tracer{ev.team, ev.from, ev.to, ev.t, pb.clock - ev.t});
   }
   game_->ImportState(snap);
   NormalizeEnemyPlans();

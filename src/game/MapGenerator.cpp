@@ -1191,6 +1191,38 @@ void EmitHighwaySurfaces(Scene* scene, const CityPlan& city, const MapGeneratorC
   }
 }
 
+// Asphalt for every local street (avenues and cross streets): the cut's
+// band clipped to the map and to its side of the artery corridor. Neighbouring
+// bands overlap coplanar at junctions, so the crossing is paved by both.
+void EmitStreetSurfaces(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
+                        const GroundY& groundY) {
+  const ArterySpec& artery = city.highway.artery;
+  const float arteryD = glm::dot(artery.normal, artery.origin);
+  for (const StreetCut& cut : city.streets.cuts) {
+    if (cut.cls == UrbanStreetClass::Highway) continue;  // A highway road already.
+    float t0, t1;
+    ClipLineToSquare(cut.origin, cut.dir, scene->mapHalfExtent, &t0, &t1);
+    if (!(t1 > t0)) continue;
+    const glm::vec2 n(-cut.dir.y, cut.dir.x);
+    const float hw = cut.width * 0.5f;
+    const float half = scene->mapHalfExtent;
+    const float d = glm::dot(n, cut.origin);
+    // Clip an infinite street band out of the map square. Starting with a
+    // centerline clipped to the square would leave only half the pavement at
+    // an oblique boundary crossing: one corner lies outside the map while its
+    // opposite corner still stops short of the edge.
+    std::vector<glm::vec2> band = {{-half, half}, {half, half}, {half, -half}, {-half, -half}};
+    band = KeepSide(band, n, d - hw);
+    band = KeepSide(band, -n, -(d + hw));
+    band = KeepSide(band, artery.normal * static_cast<float>(cut.side),
+                    static_cast<float>(cut.side) * arteryD + c.arteryWidth * 0.5f - 0.2f);
+    if (band.size() < 3 || PolygonArea(band) < 1.0f) continue;
+    RoadSurface road;
+    for (const glm::vec2& p : band) road.vertices.emplace_back(p.x, groundY(p.x, p.y) + kGradeY, p.y);
+    scene->roads.push_back(std::move(road));
+  }
+}
+
 // Bridge piers under the elevated spans.
 void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
                const GroundY& groundY) {
@@ -1271,11 +1303,27 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const MapGeneratorConfig&
         PlanBlockParcels(city.blocks[blockIndex], blockIndex, city.streets.roads, c, rng));
   }
   for (BlockParcels& block : blocks) {
-    RoadSurface sidewalk;
-    for (const glm::vec2& p : block.sidewalk) {
-      sidewalk.vertices.emplace_back(p.x, groundY(p.x, p.y) + kSidewalkHeight, p.y);
+    // Sidewalk ring only: the parcel interior stays at grade. Each block
+    // edge owns the convex strip of the block within `sidewalkWidth` of it;
+    // strips overlap coplanar at the corners.
+    const std::vector<glm::vec2>& outline = block.sidewalk;
+    glm::vec2 centroid(0.0f);
+    for (const glm::vec2& p : outline) centroid += p;
+    centroid /= static_cast<float>(outline.size());
+    for (size_t e = 0; e < outline.size(); ++e) {
+      const glm::vec2 a = outline[e], b = outline[(e + 1) % outline.size()];
+      if (glm::length(b - a) < 1e-4f) continue;
+      glm::vec2 inward = glm::normalize(glm::vec2(-(b - a).y, (b - a).x));
+      if (glm::dot(inward, centroid - a) < 0.0f) inward = -inward;
+      const std::vector<glm::vec2> strip =
+          KeepSide(outline, -inward, -(glm::dot(inward, a) + c.sidewalkWidth));
+      if (strip.size() < 3 || PolygonArea(strip) < 0.5f) continue;
+      RoadSurface sidewalk;
+      for (const glm::vec2& p : strip) {
+        sidewalk.vertices.emplace_back(p.x, groundY(p.x, p.y) + kSidewalkHeight, p.y);
+      }
+      scene->sidewalkSurfaces.push_back(std::move(sidewalk));
     }
-    scene->sidewalkSurfaces.push_back(std::move(sidewalk));
     for (Parcel& parcel : block.parcels) {
       AddPolygonBuilding(scene, std::move(parcel.footprint), parcel.height, groundY);
     }
@@ -1325,6 +1373,7 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c,
   scene.mapHalfExtent = UrbanMapHalfExtent(c);
   const CityPlan city = BuildCityPlan(seed, c);
   EmitHighwaySurfaces(&scene, city, c, groundY);
+  EmitStreetSurfaces(&scene, city, c, groundY);
   EmitPiers(&scene, city, c, groundY);
   EmitBuildings(&scene, city, c, &rng, groundY);
   EmitSpawns(&scene, city, c, groundY);

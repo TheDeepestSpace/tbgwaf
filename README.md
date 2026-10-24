@@ -111,6 +111,15 @@ The runner (`build/tactics_visual_tests`) can also record a continuous
 per-team video of each scenario with `--video` (requires `ffmpeg`); see
 `--help` for the flags.
 
+With `--server build/tbgwaf_server_testctl --skip-goldens` the runner instead
+hosts a real backend and films each team's own `RemoteClient` mirror (one
+video per connected client), so the footage shows what a browser tab shows
+(server fog filtering, replayed rounds, shot tracers). The review page
+uses this mode; the `visual_server_tests` ctest runs it without video.
+Assertions stay with `net_scenario_tests`; click markers and move-frontier
+frames are not drawn in this mode, and timeline scenarios fall back to
+in-process.
+
 ### Networked scenario tests
 
 `net_scenario_tests` (`tests/net_scenario_tests.cpp`) replays the same YAML

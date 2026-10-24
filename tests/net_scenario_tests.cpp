@@ -37,7 +37,7 @@
 #include "net/Json.h"
 #include "net/Protocol.h"
 #include "net/RemoteClient.h"
-#include "WsClient.h"
+#include "NetRig.h"
 #include "scenario/Scenario.h"
 
 namespace fs = std::filesystem;
@@ -51,257 +51,11 @@ using testing::WsClient;
 
 namespace {
 
-constexpr int kWaitMs = 10000;
-
-int64_t NowMs() {
-  return std::chrono::duration_cast<std::chrono::milliseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
-}
-
-// ---- Server process ----
-
-struct ServerProcess {
-  pid_t pid = -1;
-  uint16_t gamePort = 0;
-  uint16_t controlPort = 0;
-
-  bool Start(const std::string& binary, std::string* error) {
-    int fds[2];
-    if (pipe(fds) != 0) return false;
-    pid = fork();
-    if (pid == 0) {
-      dup2(fds[1], STDOUT_FILENO);
-      close(fds[0]);
-      close(fds[1]);
-      // Scenario scripts are bursty; lift the per-connection message cap.
-      execl(binary.c_str(), binary.c_str(), "--port", "0", "--control-port", "0", "--rate-limit",
-            "100000", static_cast<char*>(nullptr));
-      _exit(127);
-    }
-    close(fds[1]);
-    // Read the startup banner: "...listening on A:PORT" then "...control tap on A:PORT".
-    std::string text;
-    const int64_t deadline = NowMs() + kWaitMs;
-    while ((gamePort == 0 || controlPort == 0) && NowMs() < deadline) {
-      pollfd p{fds[0], POLLIN, 0};
-      if (poll(&p, 1, 100) <= 0) continue;
-      char buf[256];
-      const ssize_t n = read(fds[0], buf, sizeof buf);
-      if (n <= 0) break;
-      text.append(buf, static_cast<size_t>(n));
-      auto portAfter = [&](const char* marker) -> uint16_t {
-        const size_t at = text.find(marker);
-        if (at == std::string::npos) return 0;
-        const size_t colon = text.find(':', at);
-        const size_t eol = text.find('\n', at);
-        if (colon == std::string::npos || eol == std::string::npos) return 0;
-        return static_cast<uint16_t>(std::atoi(text.c_str() + colon + 1));
-      };
-      gamePort = portAfter("listening on");
-      controlPort = portAfter("control tap on");
-    }
-    close(fds[0]);
-    if (gamePort == 0 || controlPort == 0) {
-      *error = "server did not report its ports (is it the test-control build?)";
-      Stop();
-      return false;
-    }
-    return true;
-  }
-
-  void Stop() {
-    if (pid <= 0) return;
-    kill(pid, SIGTERM);
-    int status = 0;
-    waitpid(pid, &status, 0);
-    pid = -1;
-  }
-};
-
-// ---- One headless team client ----
-
-struct Player {
-  Team team;
-  GameLogic game;
-  net::RemoteClient client;
-  WsClient ws;
-  int barrierSeq = 0;
-  bool barrierAcked = false, barrierDone = false;
-
-  Player(Team t, const Scene& scene, const std::string& room)
-      : team(t), game(scene), client(&game, room) {}
-};
-
-class Rig {
- public:
-  Rig(uint16_t gamePort, WsClient* control) : gamePort_(gamePort), control_(control) {}
-
-  std::vector<std::string> failures;
-
-  bool Join(const Scenario& scenario, const std::string& room) {
-    for (Team team : {Team::Blue, Team::Red}) {
-      players_[static_cast<int>(team)] = std::make_unique<Player>(team, scenario.scene, room);
-      Player& p = *players_[static_cast<int>(team)];
-      std::string error;
-      if (!p.ws.Connect(gamePort_, &error)) return Fail("connect: " + error);
-      p.client.OnOpen();
-      SendOutgoing(p);
-      const auto want = team == Team::Blue ? net::RemoteClient::Status::Waiting
-                                           : net::RemoteClient::Status::Playing;
-      if (!PumpUntil([&] { return p.client.status() == want; })) {
-        return Fail(std::string(net::TeamName(team)) + " client never reached expected status: " +
-                    p.client.StatusText());
-      }
-    }
-    return PumpUntil([&] { return Blue().client.status() == net::RemoteClient::Status::Playing; }) &&
-           Barrier(Blue()) && Barrier(Red());
-  }
-
-  Player& Blue() { return *players_[0]; }
-  Player& Red() { return *players_[1]; }
-  Player& For(Team t) { return *players_[static_cast<int>(t)]; }
-
-  bool Fail(const std::string& why) {
-    failures.push_back(why);
-    return false;
-  }
-
-  // Receives everything pending on both clients (waits up to `ms` for any).
-  void Pump(int ms) {
-    for (auto& p : players_) {
-      if (!p) continue;
-      std::vector<std::string> messages;
-      if (!p->ws.Poll(ms, &messages) && p->client.status() != net::RemoteClient::Status::Disconnected) {
-        p->client.OnClose();
-      }
-      for (const std::string& text : messages) Dispatch(*p, text);
-      ms = 0;  // Only block on the first socket.
-    }
-  }
-
-  template <typename Pred>
-  bool PumpUntil(Pred done) {
-    const int64_t deadline = NowMs() + kWaitMs;
-    while (!done()) {
-      if (NowMs() > deadline) return false;
-      Pump(5);
-    }
-    return true;
-  }
-
-  void SendOutgoing(Player& p) {
-    for (const std::string& frame : p.client.TakeOutgoing()) p.ws.Send(frame);
-  }
-
-  // Ships any plan changes the client's mirror holds, then waits until the
-  // server has processed them: a no-op `reaction` (the client's own current
-  // playbook) is acked, and answered with the authoritative `plans`, strictly
-  // after everything sent before it on the same connection.
-  bool Sync(Player& p) {
-    p.client.Update(0.0f);
-    SendOutgoing(p);
-    return Barrier(p);
-  }
-
-  bool Barrier(Player& p) {
-    net::Action ping;
-    ping.kind = net::ActionKind::Reaction;
-    ping.playbook = p.game.Playbook(p.team);
-    ping.seq = 1000000 + (++p.barrierSeq);
-    p.barrierAcked = p.barrierDone = false;
-    p.ws.Send(net::EncodeAction(ping).Dump());
-    if (!PumpUntil([&] { return p.barrierDone; })) {
-      return Fail(std::string(net::TeamName(p.team)) + " barrier timed out (server stopped answering?)");
-    }
-    return true;
-  }
-
-  bool Commit() {
-    for (Player* p : {&Blue(), &Red()}) {
-      if (!p->game.CanCommitRound()) {
-        return Fail("cannot commit: not every living figure (on both teams) has a plan yet");
-      }
-    }
-    Blue().client.RequestCommit();
-    SendOutgoing(Blue());
-    if (!Barrier(Blue())) return false;
-    Red().client.RequestCommit();
-    SendOutgoing(Red());
-    // Red's commit runs the round; its barrier is acked after the round
-    // messages, then blue's (a separate connection) after the same.
-    return Barrier(Red()) && Barrier(Blue()) && PlayOut();
-  }
-
-  // Advances both mirrors' round playback to the end, as the frame loop would.
-  bool PlayOut() {
-    for (int i = 0; i < 4000; ++i) {
-      if (!Blue().client.playingBack() && !Red().client.playingBack()) return true;
-      for (Player* p : {&Blue(), &Red()}) {
-        p->client.Update(0.1f);
-        p->game.UpdateSightingMemory(0.1f);
-      }
-    }
-    return Fail("round playback never finished");
-  }
-
-  bool NewMatch() {
-    if (Blue().game.Mode() != InputMode::GameOver) {
-      return Fail("new_game is only valid after game over in the networked runner");
-    }
-    Blue().client.RequestNewMatch();
-    SendOutgoing(Blue());
-    if (!Barrier(Blue()) || !Barrier(Red())) return false;
-    for (Player* p : {&Blue(), &Red()}) {
-      p->client.ConsumeMatchStarted();
-      p->game.UpdateSightingMemory(0.0f);
-    }
-    return true;
-  }
-
-  // Server-side ground truth for the room (control tap).
-  bool DumpState(const std::string& room, Json* dump) {
-    Json request;
-    request.Set("t", "dump_state");
-    request.Set("room", room);
-    control_->Send(request.Dump());
-    const int64_t deadline = NowMs() + kWaitMs;
-    std::vector<std::string> messages;
-    while (NowMs() < deadline) {
-      if (!control_->Poll(20, &messages)) return Fail("control tap closed");
-      if (!messages.empty()) {
-        if (!Json::Parse(messages.front(), dump) || (*dump)["t"].AsString() != "state_dump") {
-          return Fail("dump_state failed: " + messages.front());
-        }
-        return true;
-      }
-    }
-    return Fail("dump_state timed out");
-  }
-
- private:
-  void Dispatch(Player& p, const std::string& text) {
-    // NETDBG=1 traces every server message a client receives.
-    if (std::getenv("NETDBG")) std::fprintf(stderr, "[%s] %.300s\n", net::TeamName(p.team), text.c_str());
-    Json m;
-    if (Json::Parse(text, &m)) {
-      const std::string& type = m["t"].AsString();
-      const int seq = static_cast<int>(m["seq"].AsNumber(0));
-      const bool isBarrier = type == "ack" && seq == 1000000 + p.barrierSeq;
-      if (type == "ack" && !m["ok"].AsBool(true) && !isBarrier) {
-        Fail(std::string("server rejected ") + net::TeamName(p.team) + "'s action: " + m["error"].AsString());
-      }
-      if (type == "error") Fail(std::string("server error to ") + net::TeamName(p.team) + ": " + m["error"].AsString());
-      if (isBarrier) p.barrierAcked = true;
-      else if (type == "plans" && p.barrierAcked) p.barrierDone = true;
-    }
-    p.client.OnMessage(text);
-  }
-
-  uint16_t gamePort_;
-  WsClient* control_;
-  std::unique_ptr<Player> players_[2];
-};
+using testing::NowMs;
+using testing::kWaitMs;
+using testing::ServerProcess;
+using testing::Player;
+using testing::Rig;
 
 // ---- Assertions ----
 
@@ -357,7 +111,7 @@ void CheckNetAssertion(const Scenario& scenario, Rig& rig, const Json& dump,
   ScenarioAssertion truth = a;
   truth.rememberedByTeam.reset();
   truth.remembered.reset();
-  truth.memoryAge.reset();
+  truth.ghostAlpha.reset();
   scenario::CheckAssertion(oracle, truth, step, &result);
 
   if (a.unit) {
@@ -394,17 +148,17 @@ void CheckNetAssertion(const Scenario& scenario, Rig& rig, const Json& dump,
   }
 
   // 4. Sighting memory lives on the owning client's mirror. Like the
-  //    in-process runner's follower pane, only the freshest sample (age 0)
+  //    in-process runner's follower pane, only a fully opaque (fresh) sample
   //    is comparable across a snapshot-fed mirror.
   if (a.rememberedByTeam) {
-    if (a.memoryAge && *a.memoryAge != 0) {
+    if (a.ghostAlpha && *a.ghostAlpha != 1.0f) {
       ++stats->skippedMemory;
     } else {
       ScenarioAssertion memory;
       memory.unit = a.unit;
       memory.rememberedByTeam = a.rememberedByTeam;
       memory.remembered = a.remembered;
-      memory.memoryAge = a.memoryAge;
+      memory.ghostAlpha = a.ghostAlpha;
       ScenarioResult mirrorResult;
       scenario::CheckAssertion(rig.For(*a.rememberedByTeam).game, memory, step, &mirrorResult);
       for (auto& f : mirrorResult.failures) result.failures.push_back("client " + f);
@@ -420,25 +174,9 @@ std::vector<std::string> RunNetScenario(const Scenario& scenario, int index, Ser
   const std::string room = "scn" + std::to_string(index);
   Rig rig(server.gamePort, &control);
 
-  Json load;
-  load.Set("t", "load_scenario");
-  load.Set("room", room);
-  load.Set("scene", scenario.sceneSpec);
-  load.Set("friendly_fire", Json(scenario.friendlyFire));
-  if (!scenario.shotRolls.empty()) {
-    Json rolls{Json::Array{}};
-    for (float r : scenario.shotRolls) rolls.Push(Json(static_cast<double>(r)));
-    load.Set("shot_rolls", std::move(rolls));
-  }
-  control.Send(load.Dump());
   {
-    std::vector<std::string> reply;
-    const int64_t deadline = NowMs() + kWaitMs;
-    while (reply.empty() && NowMs() < deadline) control.Poll(20, &reply);
-    Json parsed;
-    if (reply.empty() || !Json::Parse(reply.front(), &parsed) || !parsed["ok"].AsBool()) {
-      return {"load_scenario failed: " + (reply.empty() ? std::string("no reply") : reply.front())};
-    }
+    std::string error;
+    if (!testing::LoadRoom(control, scenario, room, &error)) return {error};
   }
   if (!rig.Join(scenario, room)) return rig.failures;
   // Scenarios default to passive playbooks (the live default reacts); set
@@ -457,6 +195,13 @@ std::vector<std::string> RunNetScenario(const Scenario& scenario, int index, Ser
         rig.Commit();
       } else if (action.kind == ScenarioAction::Kind::NewGame) {
         rig.NewMatch();
+      } else if (action.kind == ScenarioAction::Kind::Wait) {
+        // Pure client-side time: ghosts fade on each mirror's own clock.
+        for (Team team : {Team::Blue, Team::Red}) {
+          for (float t = 0.0f; t < action.playSeconds - 1e-4f; t += 0.05f) {
+            rig.For(team).game.UpdateSightingMemory(0.05f);
+          }
+        }
       } else {
         const Unit* actor = nullptr;
         for (const Unit& u : scenario.scene.units) if (u.id == action.actor) actor = &u;

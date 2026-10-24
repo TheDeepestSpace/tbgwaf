@@ -67,6 +67,7 @@ std::array<Json, 2> GameSession::RunRound() {
   std::array<Json, 2> out;
   std::array<Json, 2> frames{Json(Json::Array{}), Json(Json::Array{})};
   std::array<Json, 2> shots{Json(Json::Array{}), Json(Json::Array{})};
+  std::array<Json, 2> tracers{Json(Json::Array{}), Json(Json::Array{})};
   ready_ = {false, false};
   game_.CommitRound();
 
@@ -74,6 +75,8 @@ std::array<Json, 2> GameSession::RunRound() {
   std::vector<float> lastShoot(units.size(), -1.0f);
   float t = 0.0f;
   int step = 0;
+  // Tracers already forwarded this round.
+  size_t tracersSent = 0;
 
   auto sampleFrame = [&]() {
     for (int ti = 0; ti < 2; ++ti) {
@@ -115,6 +118,29 @@ std::array<Json, 2> GameSession::RunRound() {
         shots[ti].Push(std::move(shot));
       }
     }
+    {
+      const auto& all = game_.Tracers();
+      // The game clears its tracers when a turn starts, so all of them are this round's.
+      for (; tracersSent < all.size(); ++tracersSent) {
+        const Tracer& tr = all[tracersSent];
+        for (int ti = 0; ti < 2; ++ti) {
+          const Team viewer = static_cast<Team>(ti);
+          if (tr.team != viewer) {
+            // Fog: an enemy's lines show only while some figure of theirs is in view.
+            const TeamVisibility vis = game_.ComputeVisibility(viewer);
+            bool seen = false;
+            for (const Unit& u : units) seen = seen || (u.team == tr.team && vis.UnitVisible(u.id));
+            if (!seen) continue;
+          }
+          Json j;
+          j.Set("t", Num(std::round((t - tr.age) * 100.0) / 100.0));
+          j.Set("team", net::TeamName(tr.team));
+          j.Set("from", net::EncodeVec3(tr.from));
+          j.Set("to", net::EncodeVec3(tr.to));
+          tracers[ti].Push(std::move(j));
+        }
+      }
+    }
     if (step % kFrameEvery == 0 || game_.Mode() != InputMode::Executing) sampleFrame();
   }
 
@@ -126,6 +152,7 @@ std::array<Json, 2> GameSession::RunRound() {
     msg.Set("duration", Num(std::round(t * 100.0) / 100.0));
     msg.Set("frames", std::move(frames[ti]));
     msg.Set("shots", std::move(shots[ti]));
+    msg.Set("tracers", std::move(tracers[ti]));
     msg.Set("state", StateBody(team));
     out[ti] = std::move(msg);
   }

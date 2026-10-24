@@ -368,8 +368,8 @@ else()
     )
     FetchContent_MakeAvailable(stb)
 
-    add_executable(tactics_visual_tests tests/visual/visual_main.cpp)
-    target_include_directories(tactics_visual_tests PRIVATE src tests ${stb_SOURCE_DIR})
+    add_executable(tactics_visual_tests tests/visual/visual_main.cpp tests/net/WsClient.cpp)
+    target_include_directories(tactics_visual_tests PRIVATE src tests tests/net ${stb_SOURCE_DIR})
     target_link_libraries(tactics_visual_tests PRIVATE
       tactics_scenario
       tactics_gfx
@@ -378,6 +378,11 @@ else()
       PkgConfig::SDL2
       PkgConfig::EGL
     )
+    if(TBGWAF_BUILD_SERVER)
+      # --server mode films scenarios through the test-control server build.
+      add_dependencies(tactics_visual_tests tbgwaf_server_testctl)
+      target_link_libraries(tactics_visual_tests PRIVATE tactics_server_lib)
+    endif()
 
     # Map-only golden renders of seeded generated cities (no units/teams).
     add_executable(tactics_map_visual_tests tests/visual/map_visual_main.cpp)
@@ -403,6 +408,21 @@ else()
         TIMEOUT 300
         ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
       )
+      if(TBGWAF_BUILD_SERVER)
+        # Same scenarios, rendered per team from a real server's RemoteClients.
+        add_test(
+          NAME visual_server_tests
+          COMMAND ${XVFB_RUN_EXECUTABLE} --auto-servernum --server-args=-screen\ 0\ 1280x1024x24
+                  $<TARGET_FILE:tactics_visual_tests> --skip-goldens
+                  --server $<TARGET_FILE:tbgwaf_server_testctl>
+                  --out-dir ${CMAKE_BINARY_DIR}/visual_server_out
+          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        )
+        set_tests_properties(visual_server_tests PROPERTIES
+          TIMEOUT 600
+          ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
+        )
+      endif()
       add_test(
         NAME map_visual_tests
         COMMAND ${XVFB_RUN_EXECUTABLE} --auto-servernum --server-args=-screen\ 0\ 1280x1024x24

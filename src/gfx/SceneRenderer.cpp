@@ -2877,7 +2877,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   // Bullet tracers: a team-colored dotted path from the muzzle to where the
-  // shot ended, fading out after the turn like the sighting ghosts.  A new
+  // shot ended, fading out within 0.5 s of its shot.  A new
   // shot briefly overlays the dots with a full white-hot line.
   {
     constexpr float kTracerMaxAlpha = 0.9f;
@@ -2888,7 +2888,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
     for (const tactics::Tracer& tracer : game.Tracers()) {
-      const float life = game.TracerAlpha(tracer.at);
+      const float life = game.TracerAlpha(tracer);
       if (life <= 0.0f) continue;
       const glm::vec3 teamColor = tracer.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
                                                             : glm::vec3(0.9f, 0.25f, 0.22f);
@@ -2910,7 +2910,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       // Each shot of a burst still pops as a full white-hot line, but that
       // continuous overlay disappears quickly and leaves only the dots.
       constexpr float kTracerFlashSeconds = 0.25f;
-      const float flash = glm::clamp(1.0f - tracer.age / kTracerFlashSeconds, 0.0f, 1.0f);
+      const float flash = glm::clamp(1.0f - game.TracerAge(tracer) / kTracerFlashSeconds, 0.0f, 1.0f);
       if (flash > 0.0f) {
         pathLine_.SetPoints({tracer.from, tracer.to});
         unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.97f, 0.8f, flash));

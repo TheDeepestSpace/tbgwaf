@@ -58,7 +58,7 @@ struct ScenarioAction {
   // post-action capture; no destination is clicked and no plan is recorded.
   enum class Kind {
     Move, BeginMove, Shoot, Aim, Pass, Cancel, Commit, Focus, NewGame,
-    TimelineSeek, TimelinePlay, TimelinePause,
+    TimelineSeek, TimelinePlay, TimelinePause, Wait,
   };
 
   int actor = -1;  // Unused (and not required in YAML) for Commit/NewGame/Timeline*.
@@ -79,7 +79,7 @@ struct ScenarioAction {
                                  // resolve (e.g. target outside the
                                  // shooter's team FOV) and not record a plan.
   int timelineTick = 0;         // TimelineSeek only.
-  float playSeconds = 0.0f;     // TimelinePlay only: replay time to advance.
+  float playSeconds = 0.0f;     // TimelinePlay/Wait: time to advance.
   // Shoot/Aim free-aim forms (issue #129), mutually exclusive with `target`:
   // either the already-resolved world aim point (`at`, the protocol form --
   // deliberate blind fire at any point), or a camera-style ray
@@ -115,11 +115,11 @@ struct ScenarioAssertion {
   std::optional<Team> expectedWinner;  // nullopt means "no winner yet".
 
   // Sighting memory: `remembered_by` team has (remembered=true) or has no
-  // (false) remembered trail of `unit`; `memory_age` is the oldest sample's
-  // ageRounds (rounds completed since it was recorded).
+  // (false) remembered trail of `unit`; `ghost_alpha` is the oldest
+  // sample's current opacity (GameLogic::GhostAlpha), within `tolerance`.
   std::optional<Team> rememberedByTeam;
   std::optional<bool> remembered;
-  std::optional<int> memoryAge;
+  std::optional<float> ghostAlpha;
 
   std::optional<int> round;
 

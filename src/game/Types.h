@@ -200,12 +200,19 @@ constexpr float kRoundDuration = 5.0f;  // Seconds of execution per round.
 // where a unit stands or faces; the renderer clips each ray at the map
 // boundary.
 constexpr float kFovConeVisualRange = kSightRange;
-// Enemy sighting memory: a figure continuously in FOV leaves one sample per
-// interval (plus one on entry). Samples fade per completed round (not in
-// real time) and are forgotten once fully faded.
+// Enemy ghosts: a figure continuously in FOV leaves one sample per interval
+// (plus one on entry) during a turn. Ghosts and bullet tracers show for that
+// turn only: once it ends each fades out over kGhostFadeDuration, starting
+// at the moment it appeared (same order and spacing). Nothing carries over
+// to the next turn.
 constexpr float kSightingSampleInterval = 0.5f;
-constexpr float kSightingFadePerRound = 1.0f / 3.0f;  // Fraction of opacity lost each round.
-constexpr int kSightingMemoryRounds = 3;       // 1 / kSightingFadePerRound.
+constexpr float kGhostFadeDuration = kSightingSampleInterval;
+// Timeline replay has no planning phase to fade in, so ghosts and tracers
+// instead live on their own clock and carry over into the next turn: a ghost
+// holds kReplayGhostHold after appearing, then fades over kGhostFadeDuration;
+// a bullet line fades out over kReplayTracerLife after the shot.
+constexpr float kReplayGhostHold = 1.0f;
+constexpr float kReplayTracerLife = 0.5f;
 // Ziplines: ride cost per world unit of cable, as a fraction of the cost of
 // walking the same distance (0.25 = riding is 4x cheaper than running, so a
 // 20-unit line costs 5 units of the 20-unit round budget). Longer line =
@@ -218,8 +225,6 @@ constexpr float kZiplinePostHeight = 1.7f;  // Short anchor post: cable-end heig
 // out over the last (dismount) kZiplineMountDistance of the cable.
 constexpr float kZiplineHangLift = 0.2f;
 constexpr float kZiplineMountDistance = 1.4f;
-// Bullet tracers fade on the same schedule as sighting ghosts.
-constexpr int kTracerMemoryRounds = kSightingMemoryRounds;
 // Free-aim shooting (issue #129). Friendly fire is on by default; the single
 // flag below (mirrored per GameLogic instance, settable from scenarios) is
 // the one switch that disables it, making friendlies transparent to the

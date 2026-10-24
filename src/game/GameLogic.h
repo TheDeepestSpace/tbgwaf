@@ -39,13 +39,14 @@ std::optional<Team> CheckWinner(const std::vector<Unit>& units);
 // (it alone commits and executes rounds); the Red instance mirrors its
 // snapshots instead of re-simulating so float divergence can't desync the
 // two. During planning each side only ships its own team's plans.
-// One fired bullet's path, kept for kTracerMemoryRounds rounds as a fading
-// line. Age is derived from birthRound, so it needs no per-peer ticking.
+// One fired bullet's path, shown for the turn it was fired in and faded out
+// after the turn ends (see GameLogic::GhostAlpha). `at` is when it was fired,
+// in seconds into the turn's execution.
 struct Tracer {
   Team team = Team::Blue;
   glm::vec3 from{0.0f};
   glm::vec3 to{0.0f};
-  int birthRound = 1;
+  float at = 0.0f;
   // Seconds since the bullet was fired (only ticks while the game updates);
   // the renderer flashes fresh tracers so each shot of a burst reads on its own.
   float age = 0.0f;
@@ -99,6 +100,7 @@ struct GameSnapshot {
   SquadPlaybook playbooks[2];  // Indexed by Team.
   InputMode mode = InputMode::AwaitingSelection;
   int roundNumber = 1;
+  float executionElapsed = 0.0f;
   int winner = -1;  // -1 = none, else static_cast<int>(Team).
   FlagState flag;
 };
@@ -248,23 +250,49 @@ class GameLogic {
     float walkPhase = 0.0f;
     float walkBlend = 0.0f;
     float idleElapsed = 0.0f;
-    int ageRounds = 0;  // Completed rounds since the sample was taken.
+    float at = 0.0f;  // Seconds into the turn's execution when sampled.
   };
-  // Oldest-first samples of `targetUnitId` as seen by `viewingTeam`; empty
-  // once all have aged past kSightingMemoryRounds.
+  // Oldest-first samples of `targetUnitId` as seen by `viewingTeam`, from the
+  // current/last turn only (cleared when the next turn starts executing).
   const std::vector<EnemySighting>& Sightings(Team viewingTeam, int targetUnitId) const;
 
-  // Ages sighting memory by completed rounds (tracked via the round number, so
-  // followers age too) and samples newly visible enemies. Must be called
+  // Opacity (0..1) of a ghost or tracer stamped `at` seconds into the turn.
+  // Fully opaque while the turn executes; once it ends, each item fades over
+  // kGhostFadeDuration starting at its own `at`, i.e. in the same order and
+  // with the same spacing as it appeared. Driven by the clock that
+  // UpdateSightingMemory advances, so replays and tests are deterministic.
+  float GhostAlpha(float at) const;
+  // Same for a bullet line stamped `at`.
+  float TracerAlpha(float at) const;
+
+  // Timeline-replay instance: ghosts/tracers expire on a free-running clock
+  // (kReplayGhostHold / kReplayTracerLife after they appear) and carry over
+  // into the next turn instead of being cleared. Live play is unaffected.
+  void SetReplayGhostMode(bool enabled) { replayGhosts_ = enabled; }
+  // True while any ghost or bullet line is still visible (replay mode).
+  bool HasReplayGhosts() const {
+    if (!replayTracers_.empty()) return true;
+    for (const auto& perUnit : sightings_)
+      for (const auto& list : perUnit)
+        if (!list.empty()) return true;
+    return false;
+  }
+
+  // Advances the ghost clocks and samples newly visible enemies. Must be called
   // every frame on every page regardless of mode or simulator/follower role
   // (unlike Update(), a follower never runs the physics tick during
   // Executing, yet still needs its own memory built from imported state).
   void UpdateSightingMemory(float dtSeconds);
   void ResetSightingMemory();
+  // Drops the remembered ghosts and re-arms the fade clocks from the current
+  // mode (used when a replay seeks to another frame). With `keepFading`
+  // (replay mode, seeking forward) the current ghosts/bullets are kept so
+  // they finish their hold and fade instead of vanishing.
+  void RestartGhostPlayback(bool keepFading = false);
 
-  // Bullet lines of recent rounds (see Tracer); those older than
-  // kTracerMemoryRounds are dropped as new ones are recorded.
-  const std::vector<Tracer>& Tracers() const { return tracers_; }
+  // Bullet lines of the current/last turn (see Tracer); cleared when the next
+  // turn starts executing.
+  const std::vector<Tracer>& Tracers() const { return replayGhosts_ ? replayTracers_ : tracers_; }
 
   // --- Free-aim shooting (issue #129). While AwaitingShootTarget, the
   // player may point-target any world position instead of locking onto a
@@ -618,7 +646,17 @@ class GameLogic {
   std::vector<Tracer> tracers_;
   void RecordTracer(const Unit& shooter, const glm::vec3& from, const glm::vec3& to,
                     float age = 0.0f);
-  int lastSightingRound_ = 1;
+  void ClearSightings();
+  static constexpr float kNeverExecuted = 1.0e6f;  // fadeClock_ before any turn has played.
+  bool wasExecuting_ = false;
+  // Replay-ghost mode state (see SetReplayGhostMode).
+  bool replayGhosts_ = false;
+  float replayClock_ = 0.0f;           // Free-running seconds; stamps ghosts/tracers.
+  std::vector<Tracer> replayTracers_;  // Absorbed from tracers_, `at` = replayClock_ stamp.
+  size_t replayTracersSeen_ = 0;       // Imported tracers of the current turn already absorbed.
+  int replayTracerRound_ = -1;
+  void StepReplayGhosts(float dtSeconds);
+  float fadeClock_ = 0.0f;  // Seconds since the last turn finished executing.
   std::vector<bool> sightedLastFrame_[2];
   std::vector<float> sightingTimer_[2];
   std::vector<glm::vec3> lastUnitPosition_;  // Previous frame's position per unit id.

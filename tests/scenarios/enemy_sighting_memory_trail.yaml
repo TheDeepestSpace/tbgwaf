@@ -1,8 +1,8 @@
 name: enemy_sighting_memory_trail
 description: >
-  Showcases enemy sighting memory: red starts in blue's FOV, then runs out of it. The faded
-  wireframe trail and movement arrow of where blue last saw red stay on screen in blue's
-  pane (round 2 holds on them) while red itself is hidden.
+  Showcases enemy ghosts: red starts in blue's FOV, then runs out of it. The wireframe trail and
+  movement arrow of where blue saw red are shown as the turn ends and then fade out in the
+  order they appeared (the wait step captures the mid-fade), while red itself is hidden.
 
 map:
   obstacles: []
@@ -23,8 +23,12 @@ script:
   - action: commit
   - assert: {unit: 1, visible_to: blue, visible: false}
 
+  - action: wait
+    seconds: 0.3
+    description: Mid-fade; the ghosts fade in the order they appeared.
+
   - action: pass
-    description: Nothing moves; the remembered trail is still drawn for blue.
+    description: Nothing moves; the earlier ghosts are gone.
     actor: 0
   - action: pass
     actor: 1

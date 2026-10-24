@@ -143,19 +143,80 @@ void GameLogic::ResetSightingMemory() {
   }
   lastUnitPosition_.assign(unitSlots, glm::vec3(0.0f));
   hasLastUnitPosition_ = false;
-  lastSightingRound_ = roundNumber_;
+  wasExecuting_ = false;
+  fadeClock_ = kNeverExecuted;  // Nothing to show until a turn has played.
   tracers_.clear();
+  replayTracers_.clear();
+  replayTracersSeen_ = 0;
+  replayTracerRound_ = -1;
+}
+
+void GameLogic::ClearSightings() {
+  for (int t = 0; t < 2; ++t) {
+    for (auto& list : sightings_[t]) list.clear();
+    sightedLastFrame_[t].assign(sightedLastFrame_[t].size(), false);
+  }
+}
+
+void GameLogic::RestartGhostPlayback(bool keepFading) {
+  if (keepFading) {
+    // Existing ghosts/bullets live out their hold+fade; only re-arm sampling.
+    for (int t = 0; t < 2; ++t) sightedLastFrame_[t].assign(sightedLastFrame_[t].size(), false);
+  } else {
+    ClearSightings();
+    replayTracers_.clear();
+    replayTracersSeen_ = 0;
+    replayTracerRound_ = -1;
+  }
+  wasExecuting_ = mode_ == InputMode::Executing;
+  fadeClock_ = wasExecuting_ ? 0.0f : kNeverExecuted;
+}
+
+float GameLogic::GhostAlpha(float at) const {
+  if (replayGhosts_) {
+    const float over = replayClock_ - at - constants::kReplayGhostHold;
+    return 1.0f - glm::clamp(over / constants::kGhostFadeDuration, 0.0f, 1.0f);
+  }
+  if (mode_ == InputMode::Executing) return 1.0f;
+  return 1.0f - glm::clamp((fadeClock_ - at) / constants::kGhostFadeDuration, 0.0f, 1.0f);
+}
+
+float GameLogic::TracerAlpha(float at) const {
+  if (replayGhosts_) {
+    return 1.0f - glm::clamp((replayClock_ - at) / constants::kReplayTracerLife, 0.0f, 1.0f);
+  }
+  return GhostAlpha(at);
+}
+
+void GameLogic::StepReplayGhosts(float dtSeconds) {
+  replayClock_ += dtSeconds;
+  // Bullets imported with the frame: absorb the new ones, stamped by when
+  // they were fired on the replay clock, so they outlive the turn change.
+  if (roundNumber_ != replayTracerRound_ || tracers_.size() < replayTracersSeen_) {
+    replayTracersSeen_ = 0;
+    replayTracerRound_ = roundNumber_;
+  }
+  for (; replayTracersSeen_ < tracers_.size(); ++replayTracersSeen_) {
+    Tracer t = tracers_[replayTracersSeen_];
+    t.at = replayClock_ - t.age;
+    replayTracers_.push_back(t);
+  }
+  replayTracers_.erase(std::remove_if(replayTracers_.begin(), replayTracers_.end(),
+                                      [&](const Tracer& t) { return TracerAlpha(t.at) <= 0.0f; }),
+                       replayTracers_.end());
+  for (auto& perUnit : sightings_) {
+    for (auto& list : perUnit) {
+      list.erase(std::remove_if(list.begin(), list.end(),
+                                [&](const EnemySighting& s) { return GhostAlpha(s.at) <= 0.0f; }),
+                 list.end());
+    }
+  }
 }
 
 void GameLogic::RecordTracer(const Unit& shooter, const glm::vec3& from, const glm::vec3& to,
                              float age) {
-  tracers_.erase(std::remove_if(tracers_.begin(), tracers_.end(),
-                                [this](const Tracer& t) {
-                                  return roundNumber_ - t.birthRound >=
-                                         constants::kTracerMemoryRounds;
-                                }),
-                 tracers_.end());
-  tracers_.push_back(Tracer{shooter.team, from, to, roundNumber_, age});
+  const float at = mode_ == InputMode::Executing ? std::max(0.0f, executionElapsed_ - age) : 0.0f;
+  tracers_.push_back(Tracer{shooter.team, from, to, at, age});
 }
 
 const std::vector<GameLogic::EnemySighting>& GameLogic::Sightings(Team viewingTeam,
@@ -167,24 +228,26 @@ const std::vector<GameLogic::EnemySighting>& GameLogic::Sightings(Team viewingTe
 }
 
 void GameLogic::UpdateSightingMemory(float dtSeconds) {
-  const int elapsedRounds = std::max(0, roundNumber_ - lastSightingRound_);
-  lastSightingRound_ = roundNumber_;
+  const bool executing = mode_ == InputMode::Executing;
+  if (replayGhosts_) StepReplayGhosts(dtSeconds);
+  if (executing && !wasExecuting_ && !replayGhosts_) {
+    // A new turn starts: last turn's ghosts are gone, entries re-sample.
+    ClearSightings();
+  }
+  if (executing) {
+    fadeClock_ = 0.0f;
+  } else {
+    // The turn just ended: fading starts now, so the tick that ended it adds nothing.
+    fadeClock_ = wasExecuting_ ? 0.0f : std::min(fadeClock_ + dtSeconds, kNeverExecuted);
+  }
+  wasExecuting_ = executing;
   for (int t = 0; t < 2; ++t) {
     const Team viewer = static_cast<Team>(t);
-    if (elapsedRounds > 0) {
-      for (auto& list : sightings_[t]) {
-        for (EnemySighting& s : list) s.ageRounds += elapsedRounds;
-        list.erase(std::remove_if(list.begin(), list.end(),
-                                  [](const EnemySighting& s) {
-                                    return s.ageRounds >= constants::kSightingMemoryRounds;
-                                  }),
-                   list.end());
-      }
-    }
 
     const TeamVisibility visibility = ComputeVisibility(viewer);
     for (const Unit& unit : scene_.units) {
-      if (unit.team == viewer || unit.id < 0 ||
+      // A corpse is drawn as itself; sampling it would stamp a fading ghost on it.
+      if (unit.team == viewer || !unit.alive || unit.id < 0 ||
           static_cast<size_t>(unit.id) >= sightings_[t].size()) {
         continue;
       }
@@ -217,6 +280,7 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
       s.walkPhase = unit.walkPhase;
       s.walkBlend = unit.walkBlend;
       s.idleElapsed = unit.idleElapsed;
+      s.at = replayGhosts_ ? replayClock_ : executing ? executionElapsed_ : 0.0f;
       if (hasLastUnitPosition_) {
         glm::vec3 delta = unit.position - lastUnitPosition_[unit.id];
         delta.y = 0.0f;
@@ -294,6 +358,7 @@ GameSnapshot GameLogic::ExportState() const {
   snap.playbooks[1] = playbooks_[1];
   snap.mode = mode_;
   snap.roundNumber = roundNumber_;
+  snap.executionElapsed = executionElapsed_;
   snap.winner = winner_ ? static_cast<int>(*winner_) : -1;
   snap.flag = flag_;
   if (flag_.carrierId >= 0) snap.flag.position = FlagPosition();
@@ -347,7 +412,10 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   std::vector<int> newlyDeadIds;
   for (const auto& u : snap.units) {
     const Unit* unit = FindUnit(u.id);
-    if (unit && unit->alive && !u.alive) newlyDeadIds.push_back(u.id);
+    if (unit && unit->alive && !u.alive &&
+        !ComputeVisibility(OpposingTeam(unit->team)).UnitVisible(u.id)) {
+      newlyDeadIds.push_back(u.id);  // Hidden from the opponent when it fell.
+    }
   }
   mirroredMoving_.clear();
   for (const auto& u : snap.units) {
@@ -374,7 +442,6 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   for (int deadId : newlyDeadIds) {
     const Unit* dead = FindUnit(deadId);
     const Team opponent = OpposingTeam(dead->team);
-    if (ComputeVisibility(opponent).UnitVisible(deadId)) continue;
     const int viewerIndex = static_cast<int>(opponent);
     if (deadId >= 0 && static_cast<size_t>(deadId) < sightings_[viewerIndex].size()) {
       EnemySighting s;
@@ -383,6 +450,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
       s.walkPhase = dead->walkPhase;
       s.walkBlend = dead->walkBlend;
       s.idleElapsed = dead->idleElapsed;
+      s.at = replayClock_;
       sightings_[viewerIndex][deadId].push_back(s);
     }
   }
@@ -393,6 +461,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
                        (mode_ == InputMode::GameOver && snap.mode != InputMode::GameOver);
   mode_ = snap.mode;
   roundNumber_ = snap.roundNumber;
+  executionElapsed_ = snap.executionElapsed;
   if (newGame) ResetSightingMemory();
   tracers_ = snap.tracers;
   flag_ = snap.flag;
@@ -424,7 +493,7 @@ bool GameLogic::ImportTeamPlans(const GameSnapshot& snap, Team team) {
 std::string SerializeSnapshot(const GameSnapshot& snap) {
   std::ostringstream out;
   out.precision(9);
-  out << static_cast<int>(snap.mode) << ' ' << snap.winner << ' ' << snap.roundNumber << ' '
+  out << static_cast<int>(snap.mode) << ' ' << snap.winner << ' ' << snap.roundNumber << ' ' << snap.executionElapsed << ' '
       << snap.units.size();
   for (const auto& u : snap.units) {
     out << ' ' << u.id << ' ' << u.position.x << ' ' << u.position.y << ' ' << u.position.z << ' '
@@ -455,7 +524,7 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
   out << ' ' << snap.tracers.size();
   for (const Tracer& t : snap.tracers) {
     out << ' ' << static_cast<int>(t.team) << ' ' << t.from.x << ' ' << t.from.y << ' ' << t.from.z
-        << ' ' << t.to.x << ' ' << t.to.y << ' ' << t.to.z << ' ' << t.birthRound << ' ' << t.age;
+        << ' ' << t.to.x << ' ' << t.to.y << ' ' << t.to.z << ' ' << t.at << ' ' << t.age;
   }
   for (const auto& pb : snap.playbooks)
     for (int m = 0; m < 2; ++m)
@@ -472,7 +541,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
   int mode = 0;
   size_t unitCount = 0;
   constexpr size_t kMaxEntries = 1024;
-  if (!(in >> mode >> snap.winner >> snap.roundNumber >> unitCount)) return false;
+  if (!(in >> mode >> snap.winner >> snap.roundNumber >> snap.executionElapsed >> unitCount)) return false;
   if (mode < 0 || mode > static_cast<int>(InputMode::GameOver)) return false;
   if (snap.winner < -1 || snap.winner > 1) return false;
   if (unitCount > kMaxEntries) return false;
@@ -535,7 +604,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
   for (Tracer& t : snap.tracers) {
     int team = 0;
     if (!(in >> team >> t.from.x >> t.from.y >> t.from.z >> t.to.x >> t.to.y >> t.to.z >>
-          t.birthRound >> t.age) ||
+          t.at >> t.age) ||
         team < 0 || team > 1) {
       return false;
     }
@@ -1473,6 +1542,7 @@ void GameLogic::ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets
       s.walkPhase = hitTarget->walkPhase;
       s.walkBlend = hitTarget->walkBlend;
       s.idleElapsed = hitTarget->idleElapsed;
+      s.at = replayClock_;
       sightings_[viewerIndex][hitTarget->id].push_back(s);
     }
   }
@@ -1778,6 +1848,8 @@ void GameLogic::CommitRound() {
 
   mode_ = InputMode::Executing;
   executionElapsed_ = 0.0f;
+  tracers_.clear();  // Last turn's shot lines and ghosts are gone.
+  ClearSightings();
 
   // A figure already standing on the flag (e.g. a dropped one) grabs it now.
   std::vector<FlagTouch> startTouches;

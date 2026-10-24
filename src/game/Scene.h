@@ -24,6 +24,12 @@ struct FlagConfig {
 
 struct Scene {
   std::vector<Obstacle> obstacles;
+  // Typology of the generated buildings (issue #151): one record per
+  // building, indexed from Obstacle::building. Empty for hand-authored
+  // scenes. `massing` holds the visual-only parapets, roof furniture and
+  // awnings the renderer draws on/over them.
+  std::vector<Building> buildings;
+  std::vector<MassingDetail> massing;
   // Flat, walkable, visual-only slabs (e.g. legacy rectangular sidewalks).
   std::vector<AABB> sidewalks;
   // Asphalt polygons at ground level, plus explicit ramp/deck layers. The

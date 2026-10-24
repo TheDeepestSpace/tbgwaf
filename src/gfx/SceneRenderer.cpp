@@ -77,6 +77,40 @@ const glm::vec3 kSetupColor(0.2f, 1.0f, 0.3f);
 // see-through pass so a faded block keeps its normal tint.
 const glm::vec3 kObstacleColor(0.55f, 0.55f, 0.6f);
 const glm::vec3 kDeckColor(0.44f, 0.45f, 0.48f);
+// Facade palette per building style (issue #151): BuildingKind order, two
+// variants each (style = kind * 2 + variant). Obstacles that aren't part of
+// a generated building keep kObstacleColor.
+const glm::vec3 kFacadePalette[tactics::kBuildingKindCount * 2] = {
+    {0.64f, 0.47f, 0.40f}, {0.70f, 0.62f, 0.52f},  // Residential: brick, ochre plaster.
+    {0.68f, 0.64f, 0.56f}, {0.58f, 0.50f, 0.46f},  // Mixed-use: warm plaster, brown brick.
+    {0.50f, 0.57f, 0.66f}, {0.60f, 0.63f, 0.66f},  // Office: blue glass, grey curtain wall.
+    {0.63f, 0.62f, 0.56f}, {0.56f, 0.58f, 0.60f},  // Commercial: beige cladding, corrugated.
+    {0.74f, 0.72f, 0.66f}, {0.66f, 0.64f, 0.60f},  // Civic: pale stone, granite.
+    {0.52f, 0.52f, 0.52f}, {0.56f, 0.55f, 0.50f},  // Garage: raw / stained concrete.
+};
+// Massing colour groups: parapet coping, roof furniture, three awning cloths.
+const glm::vec3 kMassingPalette[5] = {
+    {0.60f, 0.58f, 0.54f}, {0.42f, 0.44f, 0.47f},
+    {0.55f, 0.18f, 0.16f}, {0.16f, 0.40f, 0.28f}, {0.18f, 0.26f, 0.48f},
+};
+
+glm::vec3 ObstacleBaseColor(const tactics::Scene& scene, const tactics::Obstacle& obstacle) {
+  if (obstacle.building < 0 || obstacle.building >= static_cast<int>(scene.buildings.size())) {
+    return kObstacleColor;
+  }
+  const int style = scene.buildings[static_cast<size_t>(obstacle.building)].style;
+  if (style < 0 || style >= tactics::kBuildingKindCount * 2) return kObstacleColor;
+  return kFacadePalette[style];
+}
+
+int MassingGroup(const tactics::MassingDetail& detail) {
+  switch (detail.kind) {
+    case tactics::MassingDetail::Kind::Parapet: return 0;
+    case tactics::MassingDetail::Kind::RoofFixture: return 1;
+    case tactics::MassingDetail::Kind::Awning: return 2 + std::max(0, detail.building) % 3;
+  }
+  return 0;
+}
 
 // Issue #136 camera-occlusion see-through: map geometry (buildings, deck/
 // ramp slabs) standing between the camera and something the player needs to
@@ -603,6 +637,45 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
   for (const tactics::RoadSurface& s : scene.sidewalkSurfaces) mixVec3s(s.vertices);
   for (const tactics::RoadSurface& s : scene.roads) mixVec3s(s.vertices);
   return h;
+}
+
+// Content hash of Scene::massing, so the massing meshes rebuild only when
+// the dressing itself changes.
+unsigned long long MassingFingerprint(const tactics::Scene& scene) {
+  unsigned long long h = 1469598103934665603ULL ^ scene.massing.size();
+  auto mix = [&](const void* data, size_t bytes) {
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < bytes; ++i) {
+      h ^= p[i];
+      h *= 1099511628211ULL;
+    }
+  };
+  for (const tactics::MassingDetail& d : scene.massing) {
+    mix(&d.kind, sizeof(d.kind));
+    mix(&d.y0, sizeof(d.y0));
+    mix(&d.y1, sizeof(d.y1));
+    mix(&d.building, sizeof(d.building));
+    mix(d.footprint.data(), d.footprint.size() * sizeof(glm::vec2));
+  }
+  return h;
+}
+
+// One prism per massing detail, bucketed by colour group.
+void BuildMassingMeshes(const tactics::Scene& scene, LitTriangleMesh* meshes, int groups) {
+  std::vector<LitVertices> vertices(static_cast<size_t>(groups));
+  std::vector<std::vector<GLuint>> indices(static_cast<size_t>(groups));
+  for (const tactics::MassingDetail& d : scene.massing) {
+    if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
+    const int g = std::clamp(MassingGroup(d), 0, groups - 1);
+    tactics::Obstacle prism;
+    prism.footprint = d.footprint;
+    prism.bounds.min.y = d.y0;
+    prism.bounds.max.y = d.y1;
+    AppendPolygonPrism(prism, &vertices[static_cast<size_t>(g)], &indices[static_cast<size_t>(g)]);
+  }
+  for (int g = 0; g < groups; ++g) {
+    meshes[g].SetMesh(vertices[static_cast<size_t>(g)], indices[static_cast<size_t>(g)]);
+  }
 }
 
 bool PatchContainsXZ(const tactics::RoadSurface& patch, float x, float z) {
@@ -1769,6 +1842,7 @@ bool SceneRenderer::Init() {
   terrainMesh_.Init();
   geometryMesh_.Init();
   fovSceneMesh_.Init();
+  for (LitTriangleMesh& mesh : massingMesh_) mesh.Init();
   highlightRing_.Init();
   highlightRing_.SetPoints(BuildRingPoints());
 
@@ -1853,6 +1927,8 @@ void SceneRenderer::Destroy() {
   geometryMesh_.Destroy();
   fovSceneMesh_.Destroy();
   fovSceneKey_ = 0;
+  for (LitTriangleMesh& mesh : massingMesh_) mesh.Destroy();
+  massingKey_ = 0;
   terrainKey_ = tactics::HeightField{};
   highlightRing_.Destroy();
   sphereMesh_.Destroy();
@@ -2041,6 +2117,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                  orthoHalfExtent, 0.1f, lightDistance * 2.0f) *
                       lightView;
 
+  // Building massing (visual only), rebuilt when the scene's records change.
+  {
+    const unsigned long long massingKey = MassingFingerprint(game.GetScene());
+    if (massingKey != massingKey_) {
+      BuildMassingMeshes(game.GetScene(), massingMesh_, kMassingGroups);
+      massingKey_ = massingKey;
+    }
+  }
+
   // Shadow pass: only casters this team can currently see.
   glDisable(GL_SCISSOR_TEST);
   if (!debug.disableShadows) {
@@ -2064,6 +2149,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
         geometryMesh_.Draw();
       }
+    }
+    for (const LitTriangleMesh& mesh : massingMesh_) {
+      if (!mesh.HasGeometry()) continue;
+      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+      mesh.Draw();
     }
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(kDeckShadowSlopeBias, kDeckShadowConstantBias);
@@ -2198,7 +2288,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   for (size_t i = 0; i < obstacles.size(); ++i) {
     if (fadeObstacle[i]) continue;  // Re-drawn translucent below.
     const AABB& bounds = obstacles[i].bounds;
-    const glm::vec4 color(kObstacleColor, 1.0f);
+    const glm::vec4 color(ObstacleBaseColor(game.GetScene(), obstacles[i]), 1.0f);
     if (obstacles[i].footprint.empty()) {
       DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, bounds.min,
                  bounds.max - bounds.min, color);
@@ -2206,6 +2296,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       BuildPolygonPrism(obstacles[i], &geometryMesh_);
       DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f), color);
     }
+  }
+
+  // Building massing: parapets, roof furniture, awnings (issue #151).
+  for (int g = 0; g < kMassingGroups; ++g) {
+    if (!massingMesh_[g].HasGeometry()) continue;
+    DrawLitModel(litShader_, massingMesh_[g], viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(kMassingPalette[g], 1.0f));
   }
 
   // Zipline anchor posts (the cable itself is drawn with the line overlays).
@@ -2277,7 +2374,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (const FadedOccluder& f : faded) {
       if (f.obstacle >= 0) {
         const tactics::Obstacle& obstacle = obstacles[f.obstacle];
-        const glm::vec4 color(kObstacleColor, kOccluderFadeOpacity);
+        const glm::vec4 color(ObstacleBaseColor(game.GetScene(), obstacle), kOccluderFadeOpacity);
         if (obstacle.footprint.empty()) {
           DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, obstacle.bounds.min,
                      obstacle.bounds.max - obstacle.bounds.min, color);

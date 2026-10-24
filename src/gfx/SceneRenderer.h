@@ -187,6 +187,12 @@ class SceneRenderer {
   GLuint fovDepthTex_[2] = {0, 0};
   LitTriangleMesh fovSceneMesh_;
   unsigned long long fovSceneKey_ = 0;
+  // Visual-only building massing (issue #151: parapets, roof furniture,
+  // awnings), one static mesh per colour group, rebuilt when the scene's
+  // massing records change. Drawn in the shadow and lit passes only.
+  static constexpr int kMassingGroups = 5;
+  LitTriangleMesh massingMesh_[kMassingGroups];
+  unsigned long long massingKey_ = 0;
   // Renders the two depth maps for `unit` looking along `facingYaw`, then
   // re-draws the static scene into the pane with the mask shader, tinted
   // `color` within `halfFovDegrees` of that heading. Leaves the pane framebuffer,

@@ -3,6 +3,18 @@
 #include <cmath>
 
 namespace tactics {
+
+const char* BuildingKindName(BuildingKind kind) {
+  switch (kind) {
+    case BuildingKind::Residential: return "residential";
+    case BuildingKind::MixedUse: return "mixed-use";
+    case BuildingKind::Office: return "office";
+    case BuildingKind::Commercial: return "commercial";
+    case BuildingKind::Civic: return "civic";
+    case BuildingKind::Garage: return "garage";
+  }
+  return "unknown";
+}
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;

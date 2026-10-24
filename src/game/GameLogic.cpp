@@ -181,11 +181,16 @@ float GameLogic::GhostAlpha(float at) const {
   return 1.0f - glm::clamp((fadeClock_ - at) / constants::kGhostFadeDuration, 0.0f, 1.0f);
 }
 
-float GameLogic::TracerAlpha(float at) const {
-  if (replayGhosts_) {
-    return 1.0f - glm::clamp((replayClock_ - at) / constants::kReplayTracerLife, 0.0f, 1.0f);
-  }
-  return GhostAlpha(at);
+float GameLogic::TracerAge(const Tracer& tracer) const {
+  return replayGhosts_ ? replayClock_ - tracer.at : tracer.age;
+}
+
+float GameLogic::TracerAlphaForAge(float age) {
+  return 1.0f - glm::clamp(age / constants::kReplayTracerLife, 0.0f, 1.0f);
+}
+
+float GameLogic::TracerAlpha(const Tracer& tracer) const {
+  return TracerAlphaForAge(TracerAge(tracer));
 }
 
 void GameLogic::StepReplayGhosts(float dtSeconds) {
@@ -202,7 +207,7 @@ void GameLogic::StepReplayGhosts(float dtSeconds) {
     replayTracers_.push_back(t);
   }
   replayTracers_.erase(std::remove_if(replayTracers_.begin(), replayTracers_.end(),
-                                      [&](const Tracer& t) { return TracerAlpha(t.at) <= 0.0f; }),
+                                      [&](const Tracer& t) { return TracerAlpha(t) <= 0.0f; }),
                        replayTracers_.end());
   for (auto& perUnit : sightings_) {
     for (auto& list : perUnit) {

@@ -39,7 +39,7 @@ from the start or from any completed round ("turn" = one WEGO round).
   forward (rebuilt, not recorded). Unlike live play they don't wait for the
   turn to end: on the replay instance a ghost holds `kReplayGhostHold` (1 s)
   after appearing and then fades, and a bullet line fades out within
-  `kReplayTracerLife` (0.5 s) of the shot, carrying over into the next turn.
+  `kReplayTracerLife` (1 s) of the shot, carrying over into the next turn.
 
 Replayed (non-current) turns show no plan details -- planned/armed next
 moves, shot lines and plan rings are stripped from the replay instance.
@@ -79,5 +79,5 @@ moves, shot lines and plan rings are stripped from the replay instance.
   scenarios render unchanged, keeping their goldens stable.
 
 Shot lines (live and replay) share `GameLogic::TracerAlphaForAge`: each fades
-linearly to nothing within `kReplayTracerLife` (0.5 s) of its own shot. Ghosts
+linearly to nothing within `kReplayTracerLife` (1 s) of its own shot. Ghosts
 keep their per-turn behaviour.

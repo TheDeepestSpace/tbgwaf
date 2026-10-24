@@ -77,3 +77,7 @@ moves, shot lines and plan rings are stripped from the replay instance.
   The visual runner draws the timeline strip (and captures goldens of the
   replayed states) for scenarios that script timeline steps; other
   scenarios render unchanged, keeping their goldens stable.
+
+Shot lines (live and replay) share `GameLogic::TracerAlphaForAge`: each fades
+linearly to nothing within `kReplayTracerLife` (0.5 s) of its own shot. Ghosts
+keep their per-turn behaviour.

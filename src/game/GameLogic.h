@@ -262,8 +262,12 @@ class GameLogic {
   // with the same spacing as it appeared. Driven by the clock that
   // UpdateSightingMemory advances, so replays and tests are deterministic.
   float GhostAlpha(float at) const;
-  // Same for a bullet line stamped `at`.
-  float TracerAlpha(float at) const;
+  // Bullet lines fade linearly to nothing within kReplayTracerLife of their
+  // shot, per shot, in live turns and replay alike (ghosts are unaffected).
+  static float TracerAlphaForAge(float age);
+  // Seconds since the shot: live age, or replay clock minus its stamp.
+  float TracerAge(const Tracer& tracer) const;
+  float TracerAlpha(const Tracer& tracer) const;
 
   // Timeline-replay instance: ghosts/tracers expire on a free-running clock
   // (kReplayGhostHold / kReplayTracerLife after they appear) and carry over

@@ -622,6 +622,10 @@ class GameLogic {
   std::vector<PendingShot> pendingShots_;
   // Rounds left in each figure's magazine for reaction fire this round.
   std::map<int, int> reactionAmmo_;
+  // When each figure's reaction burst may next fire: a dropped burst (target
+  // down or out of view) hands its trigger pace to the next one, so retargeting
+  // never beats the weapon's interval.
+  std::map<int, float> reactionNextShotAt_;
   // Execution clock: seconds since the executing round's commit. Bursts
   // schedule their shots against it; only the [0, kRoundDuration) window
   // fires (issue #140).

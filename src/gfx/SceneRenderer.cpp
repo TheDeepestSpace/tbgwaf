@@ -2424,6 +2424,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glEnable(GL_STENCIL_TEST);
     glStencilFunc(GL_EQUAL, 0, 0xFF);
     glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+    // Front faces only: with no culling the stencil cap lets whichever
+    // triangle draws first claim the pixel, often a back face, which shows as
+    // striped bands and dark slabs through the faded block. Scene meshes use
+    // clockwise outward winding (matching CubeMesh), rather than OpenGL's
+    // default counter-clockwise front-face convention.
+    glFrontFace(GL_CW);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    // The faded block would otherwise be shadowed by its own shadow-map
+    // entry (it is a caster), darkening its faces into patchy slabs.
+    litShader_.SetInt("uDisableShadows", 1);
     for (const FadedOccluder& f : faded) {
       if (f.obstacle >= 0) {
         const tactics::Obstacle& obstacle = obstacles[f.obstacle];
@@ -2444,6 +2455,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                      glm::vec4(kDeckColor, kOccluderFadeOpacity));
       }
     }
+    litShader_.SetInt("uDisableShadows", debug.disableShadows ? 1 : 0);
+    glDisable(GL_CULL_FACE);
+    glFrontFace(GL_CCW);
     glDisable(GL_STENCIL_TEST);
     glClear(GL_STENCIL_BUFFER_BIT);  // Later passes expect a clean stencil.
     glDepthMask(GL_TRUE);
@@ -3024,7 +3038,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   // Bullet tracers: a team-colored dotted path from the muzzle to where the
-  // shot ended, fading out after the turn like the sighting ghosts.  A new
+  // shot ended, fading out within 0.5 s of its shot.  A new
   // shot briefly overlays the dots with a full white-hot line.
   {
     constexpr float kTracerMaxAlpha = 0.9f;
@@ -3035,7 +3049,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
     for (const tactics::Tracer& tracer : game.Tracers()) {
-      const float life = game.TracerAlpha(tracer.at);
+      const float life = game.TracerAlpha(tracer);
       if (life <= 0.0f) continue;
       const glm::vec3 teamColor = tracer.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
                                                             : glm::vec3(0.9f, 0.25f, 0.22f);
@@ -3057,7 +3071,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       // Each shot of a burst still pops as a full white-hot line, but that
       // continuous overlay disappears quickly and leaves only the dots.
       constexpr float kTracerFlashSeconds = 0.25f;
-      const float flash = glm::clamp(1.0f - tracer.age / kTracerFlashSeconds, 0.0f, 1.0f);
+      const float flash = glm::clamp(1.0f - game.TracerAge(tracer) / kTracerFlashSeconds, 0.0f, 1.0f);
       if (flash > 0.0f) {
         pathLine_.SetPoints({tracer.from, tracer.to});
         unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.97f, 0.8f, flash));

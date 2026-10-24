@@ -136,6 +136,7 @@ void NavMesh::Build(const std::vector<Obstacle>& obstacles, const NavRegion& reg
                      const std::vector<WalkSurface>* walkSurfaces) {
   ground_ = ground ? *ground : HeightField{};
   walkSurfaces_ = walkSurfaces ? *walkSurfaces : std::vector<WalkSurface>{};
+  BuildSurfaceCaches();
   polygonMode_ = false;
   paddedPolygons_.clear();
   paddedPolygons_.reserve(obstacles.size());
@@ -266,6 +267,109 @@ void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float 
   }
 }
 
+void NavMesh::BuildSurfaceCaches() {
+  const size_t n = walkSurfaces_.size();
+  surfaceFootprints_.assign(n, {});
+  surfaceBounds_.assign(n, glm::vec4(0.0f));
+  surfaceCenters_.assign(n, glm::vec3(0.0f));
+  surfaceParent_.clear();
+  surfaceGrid_.clear();
+  gridNx_ = gridNz_ = 0;
+  if (n == 0) return;
+
+  const float inf = std::numeric_limits<float>::infinity();
+  float minX = inf, minZ = inf, maxX = -inf, maxZ = -inf;
+  float meanSpan = 0.0f;
+  for (size_t i = 0; i < n; ++i) {
+    glm::vec4 bounds(inf, inf, -inf, -inf);
+    for (const glm::vec3& v : walkSurfaces_[i].vertices) {
+      surfaceFootprints_[i].emplace_back(v.x, v.z);
+      bounds.x = std::min(bounds.x, v.x);
+      bounds.y = std::min(bounds.y, v.z);
+      bounds.z = std::max(bounds.z, v.x);
+      bounds.w = std::max(bounds.w, v.z);
+    }
+    // Padded to cover PointInConvexPolygon's boundary epsilon.
+    constexpr float kBoundsPad = 1e-3f;
+    bounds += glm::vec4(-kBoundsPad, -kBoundsPad, kBoundsPad, kBoundsPad);
+    surfaceBounds_[i] = bounds;
+    surfaceCenters_[i] = SurfaceCenter(walkSurfaces_[i]);
+    if (walkSurfaces_[i].vertices.empty()) continue;
+    minX = std::min(minX, bounds.x);
+    minZ = std::min(minZ, bounds.y);
+    maxX = std::max(maxX, bounds.z);
+    maxZ = std::max(maxZ, bounds.w);
+    meanSpan += std::max(bounds.z - bounds.x, bounds.w - bounds.y);
+  }
+
+  // Uniform grid sized to the typical surface so each covers a few cells.
+  if (minX <= maxX) {
+    gridCell_ = std::max(meanSpan / static_cast<float>(n), 0.5f);
+    gridMinX_ = minX;
+    gridMinZ_ = minZ;
+    gridNx_ = std::min(256, static_cast<int>((maxX - minX) / gridCell_) + 1);
+    gridNz_ = std::min(256, static_cast<int>((maxZ - minZ) / gridCell_) + 1);
+    gridCell_ = std::max(gridCell_, std::max((maxX - minX) / gridNx_, (maxZ - minZ) / gridNz_));
+    surfaceGrid_.assign(static_cast<size_t>(gridNx_) * gridNz_, {});
+    const auto clampCell = [](int v, int count) { return std::max(0, std::min(count - 1, v)); };
+    for (size_t i = 0; i < n; ++i) {
+      if (walkSurfaces_[i].vertices.empty()) continue;
+      const glm::vec4& b = surfaceBounds_[i];
+      const int x0 = clampCell(static_cast<int>(std::floor((b.x - gridMinX_) / gridCell_)), gridNx_);
+      const int x1 = clampCell(static_cast<int>(std::floor((b.z - gridMinX_) / gridCell_)), gridNx_);
+      const int z0 = clampCell(static_cast<int>(std::floor((b.y - gridMinZ_) / gridCell_)), gridNz_);
+      const int z1 = clampCell(static_cast<int>(std::floor((b.w - gridMinZ_) / gridCell_)), gridNz_);
+      for (int gz = z0; gz <= z1; ++gz) {
+        for (int gx = x0; gx <= x1; ++gx) {
+          surfaceGrid_[static_cast<size_t>(gz) * gridNx_ + gx].push_back(static_cast<int>(i));
+        }
+      }
+    }
+  }
+
+  // All-pairs shortest routes over the center-to-center surface graph: one
+  // Dijkstra per source, done once here instead of per FindSurfacePath call.
+  surfaceParent_.assign(n, std::vector<int>(n, -1));
+  using Entry = std::pair<float, int>;
+  std::vector<float> distance(n);
+  for (size_t src = 0; src < n; ++src) {
+    std::fill(distance.begin(), distance.end(), inf);
+    std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+    distance[src] = 0.0f;
+    open.push({0.0f, static_cast<int>(src)});
+    while (!open.empty()) {
+      const auto [d, current] = open.top();
+      open.pop();
+      if (d != distance[current]) continue;
+      for (int next : walkSurfaces_[current].neighbors) {
+        if (next < 0 || static_cast<size_t>(next) >= n) continue;
+        const float edge = glm::distance(surfaceCenters_[current], surfaceCenters_[next]);
+        if (d + edge < distance[next]) {
+          distance[next] = d + edge;
+          surfaceParent_[src][next] = current;
+          open.push({distance[next], next});
+        }
+      }
+    }
+    surfaceParent_[src][src] = -1;
+  }
+}
+
+bool NavMesh::SurfaceContains(int surface, float x, float z) const {
+  const glm::vec4& b = surfaceBounds_[surface];
+  if (x < b.x || x > b.z || z < b.y || z > b.w) return false;
+  return PointInConvexPolygon({x, z}, surfaceFootprints_[surface]);
+}
+
+const std::vector<int>& NavMesh::SurfaceCandidates(float x, float z) const {
+  static const std::vector<int> kNone;
+  if (surfaceGrid_.empty()) return kNone;
+  const int gx = static_cast<int>(std::floor((x - gridMinX_) / gridCell_));
+  const int gz = static_cast<int>(std::floor((z - gridMinZ_) / gridCell_));
+  if (gx < 0 || gz < 0 || gx >= gridNx_ || gz >= gridNz_) return kNone;
+  return surfaceGrid_[static_cast<size_t>(gz) * gridNx_ + gx];
+}
+
 ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, float step) const {
   ReachField field;
   field.step = step;
@@ -364,28 +468,34 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
       entryCost[entry] = length;
     }
   }
+  std::vector<glm::vec3> entryPoint(walkSurfaces_.size());
+  for (size_t entry = 0; entry < walkSurfaces_.size(); ++entry) {
+    if (std::isfinite(entryCost[entry])) {
+      entryPoint[entry] = GroundConnectionPoint(static_cast<int>(entry));
+    }
+  }
 
   // Add the explicit stacked layer without ever connecting it merely because
   // it overlaps ground in XZ. A ground start must first route to a declared
   // ramp foot; a surface start remains on its connected surface component.
+  const auto pathLength = [](const std::vector<glm::vec3>& path) {
+    float length = 0.0f;
+    for (size_t i = 0; i + 1 < path.size(); ++i) length += glm::distance(path[i], path[i + 1]);
+    return length;
+  };
   for (int iz = 0; iz < field.nz; ++iz) {
     for (int ix = 0; ix < field.nx; ++ix) {
       const int idx = iz * field.nx + ix;
       const float x = field.minX + ix * field.step;
       const float z = field.minZ + iz * field.step;
-      for (size_t surface = 0; surface < walkSurfaces_.size(); ++surface) {
-        if (!SurfaceContainsXZ(walkSurfaces_[surface], x, z)) continue;
+      for (int surface : SurfaceCandidates(x, z)) {
+        if (!SurfaceContains(surface, x, z)) continue;
         glm::vec3 goal(x, SurfaceHeightAt(walkSurfaces_[surface], x, z), z);
-        const auto pathLength = [](const std::vector<glm::vec3>& path) {
-          float length = 0.0f;
-          for (size_t i = 0; i + 1 < path.size(); ++i) length += glm::distance(path[i], path[i + 1]);
-          return length;
-        };
         std::vector<glm::vec3> path;
         bool found = false;
         float distance = 0.0f;
         if (startSurface >= 0) {
-          found = FindSurfacePath(startSurface, start, static_cast<int>(surface), goal, &path);
+          found = FindSurfacePath(startSurface, start, surface, goal, &path);
           if (found) distance = pathLength(path);
         } else {
           // Cheapest ground entry overall, not the first that connects: the
@@ -394,9 +504,18 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
           // prices the cell out of the budget.
           for (size_t entry = 0; entry < walkSurfaces_.size(); ++entry) {
             if (!std::isfinite(entryCost[entry])) continue;
-            const glm::vec3 connection = GroundConnectionPoint(static_cast<int>(entry));
-            if (!FindSurfacePath(static_cast<int>(entry), connection,
-                                 static_cast<int>(surface), goal, &path)) {
+            // Unreachable from this foot (cached routes), or provably no
+            // better than the best/budget (a path is never shorter than the
+            // straight line from the foot).
+            if (static_cast<int>(entry) != surface &&
+                surfaceParent_[entry][surface] < 0) {
+              continue;
+            }
+            const glm::vec3& connection = entryPoint[entry];
+            const float bound = entryCost[entry] + glm::distance(
+                glm::vec2(connection.x, connection.z), glm::vec2(x, z));
+            if (bound > budget || (found && bound >= distance)) continue;
+            if (!FindSurfacePath(static_cast<int>(entry), connection, surface, goal, &path)) {
               continue;
             }
             const float total = entryCost[entry] + pathLength(path);
@@ -450,12 +569,12 @@ int NavMesh::FindCellContaining(float x, float z, float yHint) const {
 int NavMesh::FindWalkSurfaceContaining(float x, float z, float yHint) const {
   int best = -1;
   float bestDy = std::fabs(ground_.HeightAt(x, z) - yHint) + 1e-4f;
-  for (size_t i = 0; i < walkSurfaces_.size(); ++i) {
-    if (!SurfaceContainsXZ(walkSurfaces_[i], x, z)) continue;
+  for (int i : SurfaceCandidates(x, z)) {
+    if (!SurfaceContains(i, x, z)) continue;
     const float dy = std::fabs(SurfaceHeightAt(walkSurfaces_[i], x, z) - yHint);
     if (dy <= bestDy) {
       bestDy = dy;
-      best = static_cast<int>(i);
+      best = i;
     }
   }
   return best;
@@ -491,32 +610,11 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
       static_cast<size_t>(goalSurface) >= walkSurfaces_.size()) {
     return false;
   }
-  const size_t n = walkSurfaces_.size();
-  std::vector<float> distance(n, std::numeric_limits<float>::infinity());
-  std::vector<int> parent(n, -1);
-  using Entry = std::pair<float, int>;
-  std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
-  distance[startSurface] = 0.0f;
-  open.push({0.0f, startSurface});
-  while (!open.empty()) {
-    const auto [d, current] = open.top();
-    open.pop();
-    if (d != distance[current]) continue;
-    if (current == goalSurface) break;
-    for (int next : walkSurfaces_[current].neighbors) {
-      if (next < 0 || static_cast<size_t>(next) >= n) continue;
-      const float edge = glm::distance(SurfaceCenter(walkSurfaces_[current]),
-                                       SurfaceCenter(walkSurfaces_[next]));
-      if (d + edge < distance[next]) {
-        distance[next] = d + edge;
-        parent[next] = current;
-        open.push({distance[next], next});
-      }
-    }
-  }
-  if (!std::isfinite(distance[goalSurface])) return false;
+  if (startSurface != goalSurface && surfaceParent_[startSurface][goalSurface] < 0) return false;
   std::vector<int> route;
-  for (int node = goalSurface; node >= 0; node = parent[node]) route.push_back(node);
+  for (int node = goalSurface; node >= 0; node = surfaceParent_[startSurface][node]) {
+    route.push_back(node);
+  }
   std::reverse(route.begin(), route.end());
 
   start.y = SurfaceHeightAt(walkSurfaces_[startSurface], start.x, start.z);
@@ -527,7 +625,7 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
   // two planes agree, so "first containing" is unambiguous there.
   auto corridorY = [&](float x, float z, float fallback) {
     for (int node : route) {
-      if (SurfaceContainsXZ(walkSurfaces_[node], x, z)) {
+      if (SurfaceContains(node, x, z)) {
         return SurfaceHeightAt(walkSurfaces_[node], x, z);
       }
     }

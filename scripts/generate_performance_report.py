@@ -139,7 +139,7 @@ def history_rows(runs: list[dict]) -> str:
         metadata = result.get("metadata", {})
         environment = result.get("environment", {})
         commit = metadata.get("commit", "")
-        filename = html.escape(result.get("_filename", ""), quote=True)
+        href = html.escape(result.get("_href") or f"history/{result.get('_filename', '')}", quote=True)
         rows.append(
             "<tr>"
             f'<td>{html.escape(metadata.get("timestamp", ""))}</td>'
@@ -148,13 +148,13 @@ def history_rows(runs: list[dict]) -> str:
             f'<td>{fmt(metric_p50(result, "fps"), 1)}</td>'
             f'<td>{fmt(metric_p50(result, "frame_ms"), 2)}</td>'
             f'<td>{html.escape(environment.get("gl_renderer", ""))}</td>'
-            f'<td><a href="history/{filename}">JSON</a></td>'
+            f'<td><a href="{href}">JSON</a></td>'
             "</tr>"
         )
     return "\n".join(rows)
 
 
-def build_page(current: dict, runs: list[dict]) -> str:
+def build_page(current: dict, runs: list[dict], title: str = "Performance suite") -> str:
     metadata = current.get("metadata", {})
     config = current.get("configuration", {})
     environment = current.get("environment", {})
@@ -174,7 +174,7 @@ def build_page(current: dict, runs: list[dict]) -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>tbgwaf · Performance suite</title>
+<title>tbgwaf · {html.escape(title)}</title>
 <style>
 :root {{ color-scheme: dark; }}
 body {{ font-family: system-ui,sans-serif; margin: 2rem auto; max-width: 1500px; padding: 0 1rem;
@@ -196,8 +196,8 @@ tbody th,td:nth-child(1) {{ text-align: left; }} code {{ font-size: .9em; }}
 </style>
 </head>
 <body>
-<h1>Performance suite</h1>
-<nav class="nav"><a href="../">Game</a><a href="../gallery/">Asset gallery</a><a href="latest/results.json">Latest raw JSON</a></nav>
+<h1>{html.escape(title)}</h1>
+<nav class="nav"><a href="../">Game</a><a href="../gallery/">Asset gallery</a><a href="{html.escape(current.get("_href") or "latest/results.json", quote=True)}">Raw JSON</a></nav>
 <p>Observational software-rendering measurements for 10 pinned <code>urban-auto</code> maps. Values are medians;
 master ranges show the median from each preserved master run. Timing changes are reported, not gated.</p>
 <div class="cards">{cards(current, baselines)}</div>
@@ -230,6 +230,11 @@ def main() -> int:
     parser.add_argument("--current", required=True, type=Path)
     parser.add_argument("--history-dir", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--history-url", default="history/",
+                        help="URL prefix (relative to the page) where history JSON files are served")
+    parser.add_argument("--current-url", default=None,
+                        help="URL of the current run's JSON when it is not stored in the history dir")
+    parser.add_argument("--title", default="Performance suite")
     args = parser.parse_args()
 
     current = load_result(args.current)
@@ -239,13 +244,16 @@ def main() -> int:
     if args.history_dir.exists():
         for path in args.history_dir.glob("*.json"):
             if result := load_result(path):
+                result["_href"] = args.history_url + path.name
                 runs.append(result)
     current_run_id = current.get("metadata", {}).get("run_id")
     if not any(run.get("metadata", {}).get("run_id") == current_run_id for run in runs):
+        if args.current_url:
+            current["_href"] = args.current_url
         runs.append(current)
 
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "index.html").write_text(build_page(current, runs))
+    (args.out / "index.html").write_text(build_page(current, runs, args.title))
     print(f"wrote {args.out / 'index.html'} ({len(runs)} preserved runs, "
           f"{sum(is_master(run) for run in runs)} master baselines)")
     return 0

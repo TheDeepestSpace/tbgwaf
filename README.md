@@ -158,6 +158,7 @@ per-map and whole-run percentiles; no timing value is a pass/fail CI gate.
 Run the **Performance suite** workflow manually and choose a branch, tag, or
 SHA. It builds Release under Xvfb/llvmpipe, uploads the raw result, preserves
 the run in `gh-pages`, and refreshes the [published report](https://thedeepestspace.github.io/tbgwaf/performance/).
+Every PR preview also measures the PR head and publishes `pr-preview/pr-<number>/performance/`, compared against the preserved master runs.
 Master runs form the baseline shown beside measurements from other refs.
 Locally, after a Release configure:
 

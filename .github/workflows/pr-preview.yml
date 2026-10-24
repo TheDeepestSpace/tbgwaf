@@ -121,7 +121,8 @@ jobs:
               --head ${{ github.event.pull_request.head.sha }} \
               --runner build/tactics_visual_tests \
               --out site/scenarios \
-              --baseline-url ../../../scenario-baseline
+              --baseline-url ../../../scenario-baseline \
+              --performance-url ../../../performance/
 
       - name: Deploy PR preview
         uses: rossjrw/pr-preview-action@ffa7509e91a3ec8dfc2e5536c4d5c1acdf7a6de9 # v1.8.1
@@ -146,7 +147,8 @@ jobs:
           repo="${GITHUB_REPOSITORY#*/}"
           url="https://${owner}.github.io/${repo}/pr-preview/pr-${PR_NUMBER}/scenarios/"
           gallery_url="https://${owner}.github.io/${repo}/pr-preview/pr-${PR_NUMBER}/gallery/"
-          body="$(printf '%s\n%s\n\n%s' "$marker" "🎬 [Gameplay scenario review page](${url}) — per-team videos of every scenario, grouped by how this PR changes it, refreshed at commit \`${HEAD_SHA:0:7}\` (updates with each push; may take a minute to go live after deploy)." "🖼️ [Asset gallery](${gallery_url}) — browse models and animations, including this PR's changes.")"
+          performance_url="https://${owner}.github.io/${repo}/performance/"
+          body="$(printf '%s\n%s\n\n%s\n\n%s' "$marker" "🎬 [Gameplay scenario review page](${url}) — per-team videos of every scenario, grouped by how this PR changes it, refreshed at commit \`${HEAD_SHA:0:7}\` (updates with each push; may take a minute to go live after deploy)." "🖼️ [Asset gallery](${gallery_url}) — browse models and animations, including this PR's changes." "📈 [Performance suite](${performance_url}) — pinned-map rendering measurements and preserved master baselines.")"
           existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             --paginate --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" | head -n1)
           if [ -n "$existing" ]; then

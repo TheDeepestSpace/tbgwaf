@@ -144,6 +144,11 @@ class NavMesh {
   bool FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface,
                        glm::vec3 goal, std::vector<glm::vec3>* outPath) const;
   glm::vec3 GroundConnectionPoint(int surface) const;
+  // Per-Build caches over walkSurfaces_: footprints/bounds, a uniform XZ grid
+  // for point queries, and all-pairs surface routes (see BuildSurfaceCaches).
+  void BuildSurfaceCaches();
+  bool SurfaceContains(int surface, float x, float z) const;
+  const std::vector<int>& SurfaceCandidates(float x, float z) const;
 
   std::vector<NavCell> cells_;
   std::vector<std::vector<int>> neighbors_;      // neighbors_[cellIndex] = adjacent cell indices.
@@ -153,6 +158,16 @@ class NavMesh {
   std::vector<WalkSurface> walkSurfaces_;
   std::vector<std::vector<glm::vec2>> paddedPolygons_;
   bool polygonMode_ = false;
+
+  std::vector<std::vector<glm::vec2>> surfaceFootprints_;
+  std::vector<glm::vec4> surfaceBounds_;          // (xMin, zMin, xMax, zMax).
+  std::vector<glm::vec3> surfaceCenters_;
+  // surfaceParent_[src][node] = predecessor of `node` on the shortest
+  // center-to-center route from `src` (-1 for src / unreachable).
+  std::vector<std::vector<int>> surfaceParent_;
+  float gridMinX_ = 0.0f, gridMinZ_ = 0.0f, gridCell_ = 1.0f;
+  int gridNx_ = 0, gridNz_ = 0;
+  std::vector<std::vector<int>> surfaceGrid_;     // Ascending surface indices per cell.
 };
 
 }  // namespace tactics

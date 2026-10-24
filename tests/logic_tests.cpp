@@ -3,6 +3,7 @@
 // dependency, so this runs in plain CI without a display.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <initializer_list>
@@ -3164,6 +3165,56 @@ void TestBurstPlanSurvivesSnapshotAndClampsOnImport() {
   CHECK(clamped.FindUnit(1)->plan.shots == 30);
 }
 
+// Benchmark: ~300 small deck/ramp surfaces (interiors-scale). Guards the
+// per-Build route table and surface spatial index; the ceiling is generous
+// so only an algorithmic regression trips it (the pre-cache code took ~3.3 s here).
+void TestReachFieldManySurfacesPerformance() {
+  using Clock = std::chrono::steady_clock;
+  std::vector<tactics::WalkSurface> surfaces;
+  const int kCols = 20, kRows = 15;
+  for (int r = 0; r < kRows; ++r) {
+    for (int c = 0; c < kCols; ++c) {
+      tactics::WalkSurface s;
+      const float x = -20.0f + c * 2.0f, z = -15.0f + r * 2.0f, y = 1.0f;
+      s.vertices = {{x, y, z}, {x + 1.8f, y, z}, {x + 1.8f, y, z + 1.8f}, {x, y, z + 1.8f}};
+      const int id = r * kCols + c;
+      if (c > 0) s.neighbors.push_back(id - 1);
+      if (c + 1 < kCols) s.neighbors.push_back(id + 1);
+      if (r > 0) s.neighbors.push_back(id - kCols);
+      if (r + 1 < kRows) s.neighbors.push_back(id + kCols);
+      s.connectsToGround = (id == 0);
+      surfaces.push_back(std::move(s));
+    }
+  }
+  tactics::NavMesh nav;
+  const auto buildStart = Clock::now();
+  nav.Build(std::vector<tactics::Obstacle>{}, /*mapHalfExtent=*/30.0f, /*agentRadius=*/0.4f,
+            nullptr, &surfaces);
+  const double buildMs =
+      std::chrono::duration<double, std::milli>(Clock::now() - buildStart).count();
+
+  const auto start = Clock::now();
+  const tactics::ReachField onSurface = nav.ComputeReachField(glm::vec3(-19.0f, 1.0f, -14.0f), 30.0f);
+  const tactics::ReachField fromGround = nav.ComputeReachField(glm::vec3(-22.0f, 0.0f, -16.0f), 30.0f);
+  const double reachMs = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+  std::printf("  navmesh bench: build %.1f ms, 2x reach field %.1f ms\n", buildMs, reachMs);
+
+  const auto nodeAt = [](const tactics::ReachField& f, float x, float z) {
+    return std::make_pair(static_cast<int>(std::lround((x - f.minX) / f.step)),
+                          static_cast<int>(std::lround((z - f.minZ) / f.step)));
+  };
+  const auto far = nodeAt(onSurface, -19.0f + 10.0f, -14.0f + 10.0f);
+  CHECK(onSurface.Reached(far.first, far.second));
+  CHECK(onSurface.Dist(far.first, far.second) >= 14.0f);
+  const auto deck = nodeAt(fromGround, -19.0f, -14.0f);
+  CHECK(fromGround.Reached(deck.first, deck.second));
+#ifdef NDEBUG
+  CHECK(buildMs + reachMs < 1000.0);  // Release (CI): ~190 ms measured.
+#else
+  CHECK(buildMs + reachMs < 10000.0);  // Unoptimised builds are ~10x slower.
+#endif
+}
+
 int main() {
   TestNavMeshRoutesAroundObstacle();
   TestNavMeshDirectPathWhenUnobstructed();
@@ -3258,6 +3309,7 @@ int main() {
   TestLockOnStagesUntilFireAndKeepsShotCount();
   TestBulletsFlyToMapEdgeNotWeaponRange();
   TestBurstPlanSurvivesSnapshotAndClampsOnImport();
+  TestReachFieldManySurfacesPerformance();
 
   if (g_failures == 0) {
     std::printf("All logic tests passed.\n");

@@ -435,6 +435,51 @@ glm::mat4 BoxModel(const glm::vec3& minCorner, const glm::vec3& size) {
   return glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
 }
 
+// Visual-only street props (issue #150): traffic lights and signs placed by
+// the map generator. Boxes only, drawn like the zipline anchor posts; never
+// obstacles, so they cast no shadows, never occlude FOV and never join the
+// static FOV mask mesh.
+void DrawStreetProp(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
+                    const glm::mat4& lightSpaceMatrix, const tactics::StreetProp& prop) {
+  const glm::mat4 base = glm::rotate(glm::translate(glm::mat4(1.0f), prop.position), prop.yaw,
+                                     glm::vec3(0.0f, 1.0f, 0.0f));
+  // A box centered on the post axis in local XZ (+X faces down `yaw`),
+  // spanning [y0, y0 + sy].
+  auto box = [&](float cx, float y0, float cz, float sx, float sy, float sz,
+                 const glm::vec4& color) {
+    const glm::mat4 model =
+        base * glm::translate(glm::mat4(1.0f), glm::vec3(cx - sx * 0.5f, y0, cz - sz * 0.5f)) *
+        glm::scale(glm::mat4(1.0f), glm::vec3(sx, sy, sz));
+    DrawLitModel(shader, cube, viewProj, lightSpaceMatrix, model, color);
+  };
+  const glm::vec4 kPole(0.25f, 0.26f, 0.28f, 1.0f);
+  switch (prop.kind) {
+    case tactics::StreetPropKind::TrafficLight:
+      box(0.0f, 0.0f, 0.0f, 0.14f, 3.1f, 0.14f, kPole);
+      // The head leans out toward the junction with its lamps facing it.
+      box(0.24f, 2.35f, 0.0f, 0.30f, 0.80f, 0.26f, glm::vec4(0.10f, 0.11f, 0.12f, 1.0f));
+      box(0.40f, 2.88f, 0.0f, 0.06f, 0.16f, 0.16f, glm::vec4(0.85f, 0.18f, 0.14f, 1.0f));
+      box(0.40f, 2.67f, 0.0f, 0.06f, 0.16f, 0.16f, glm::vec4(0.92f, 0.76f, 0.18f, 1.0f));
+      box(0.40f, 2.46f, 0.0f, 0.06f, 0.16f, 0.16f, glm::vec4(0.22f, 0.78f, 0.28f, 1.0f));
+      break;
+    case tactics::StreetPropKind::StopSign:
+      box(0.0f, 0.0f, 0.0f, 0.09f, 2.2f, 0.09f, kPole);
+      box(0.07f, 1.62f, 0.0f, 0.05f, 0.52f, 0.52f, glm::vec4(0.78f, 0.12f, 0.12f, 1.0f));
+      break;
+    case tactics::StreetPropKind::YieldSign:
+      box(0.0f, 0.0f, 0.0f, 0.09f, 2.2f, 0.09f, kPole);
+      box(0.07f, 1.62f, 0.0f, 0.05f, 0.52f, 0.52f, glm::vec4(0.92f, 0.90f, 0.85f, 1.0f));
+      box(0.10f, 1.74f, 0.0f, 0.03f, 0.28f, 0.28f, glm::vec4(0.80f, 0.16f, 0.14f, 1.0f));
+      break;
+    case tactics::StreetPropKind::StreetNameSign:
+      box(0.0f, 0.0f, 0.0f, 0.08f, 2.5f, 0.08f, kPole);
+      // Two crossed name plates, one per street of the corner.
+      box(0.18f, 2.28f, 0.0f, 0.55f, 0.14f, 0.04f, glm::vec4(0.12f, 0.42f, 0.22f, 1.0f));
+      box(0.0f, 2.10f, 0.18f, 0.04f, 0.14f, 0.55f, glm::vec4(0.12f, 0.42f, 0.22f, 1.0f));
+      break;
+  }
+}
+
 using LitVertices = std::vector<LitTriangleMesh::Vertex>;
 
 void AppendTriangle(glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 normal,
@@ -2206,6 +2251,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       BuildPolygonPrism(obstacles[i], &geometryMesh_);
       DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f), color);
     }
+  }
+
+  // Visual-only street props (issue #150): traffic lights and signage.
+  for (const tactics::StreetProp& prop : game.GetScene().props) {
+    DrawStreetProp(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, prop);
   }
 
   // Zipline anchor posts (the cable itself is drawn with the line overlays).

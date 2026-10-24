@@ -8,7 +8,7 @@ description: >
   anchor posts are drawn too.
 
 map:
-  generate: {type: urban, seed: 4, arteries: 2}
+  generate: {type: urban, seed: 4, arteries: 2, features: {furniture: off}}
 
 units:
   - {id: 0, team: blue, position: [21.8, 0, 27.57], facing_degrees: 0}

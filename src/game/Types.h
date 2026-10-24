@@ -72,6 +72,17 @@ struct RoadSurface {
   std::vector<glm::vec3> vertices;
 };
 
+// A visual-only street prop (issue #150): traffic lights at bigger
+// junctions, stop/yield signs at smaller ones, street-name signs at block
+// corners. Rendered, but ignored by collision, navmesh, LOS and the FOV
+// mask -- unlike street furniture, which is small `Obstacle`s.
+enum class StreetPropKind { TrafficLight, StopSign, YieldSign, StreetNameSign };
+struct StreetProp {
+  StreetPropKind kind = StreetPropKind::TrafficLight;
+  glm::vec3 position{0.0f};  // Foot of the post.
+  float yaw = 0.0f;          // Facing about Y (radians; 0 looks down +X).
+};
+
 inline std::vector<glm::vec2> ObstacleFootprint(const Obstacle& obstacle) {
   if (!obstacle.footprint.empty()) return obstacle.footprint;
   return {{obstacle.bounds.min.x, obstacle.bounds.min.z},

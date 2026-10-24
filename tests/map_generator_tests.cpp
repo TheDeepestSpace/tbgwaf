@@ -77,6 +77,13 @@ bool SameScene(const Scene& a, const Scene& b) {
   for (size_t i = 0; i < a.ziplines.size(); ++i) {
     if (a.ziplines[i].a != b.ziplines[i].a || a.ziplines[i].b != b.ziplines[i].b) return false;
   }
+  if (a.props.size() != b.props.size()) return false;
+  for (size_t i = 0; i < a.props.size(); ++i) {
+    if (a.props[i].kind != b.props[i].kind || a.props[i].position != b.props[i].position ||
+        a.props[i].yaw != b.props[i].yaw) {
+      return false;
+    }
+  }
   for (size_t i = 0; i < a.units.size(); ++i) {
     if (a.units[i].position != b.units[i].position || a.units[i].team != b.units[i].team ||
         a.units[i].facingYaw != b.units[i].facingYaw) {
@@ -690,6 +697,9 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   config.arteryCount = 2;
   config.elevatedHighway = OverpassMode::On;
   config.overpassLayout = OverpassLayout::RampUpRampDown;
+  // The pier checks below identify piers as the footprint-free obstacles;
+  // furniture items (issue #150) are footprint-free too, so pin them off.
+  config.features.furniture.mode = FeatureMode::Off;
   const Scene scene = GenerateUrbanMap(7, config);
   const auto roads = UrbanRoads(7, config);
 
@@ -1367,8 +1377,9 @@ void TestZiplineStreetEndsReachableRoofsOnlyByLine() {
 
 }  // namespace
 
-// Issue #146: feature flags are plumbed but inert, and the street graph
-// covers the highway plus every local street.
+// Issue #146: feature flags are plumbed (the ones without an emitter yet stay
+// inert; `furniture` is live, issue #150), and the street graph covers the
+// highway plus every local street.
 void TestFeatureFlagsAndStreetGraph() {
   MapGeneratorConfig full;
   for (const char* name : {"lanes", "curbs", "furniture", "terrain", "interiors", "rail"}) {
@@ -1380,8 +1391,13 @@ void TestFeatureFlagsAndStreetGraph() {
   FeatureMode mode = FeatureMode::Auto;
   CHECK(ParseFeatureMode("on", &mode) && mode == FeatureMode::On);
   CHECK(!ParseFeatureMode("maybe", &mode));
+  // Every feature but the live `furniture` is inert: forcing the others on
+  // leaves the scene identical as long as furniture is pinned the same way.
+  full.features.furniture.mode = FeatureMode::Off;
+  MapGeneratorConfig noFurniture;
+  noFurniture.features.furniture.mode = FeatureMode::Off;
   for (uint32_t seed : kSeeds) {
-    CHECK(SameScene(GenerateUrbanMap(seed), GenerateUrbanMap(seed, full)));
+    CHECK(SameScene(GenerateUrbanMap(seed, noFurniture), GenerateUrbanMap(seed, full)));
     const std::vector<UrbanStreet> streets = UrbanStreets(seed);
     CHECK(SameScene(GenerateUrbanMap(seed), GenerateUrbanMap(seed)));
     int highway = 0, local = 0;
@@ -1464,8 +1480,230 @@ void TestLocalStreetBandsReachMapEdgeAtFullWidth() {
   }
 }
 
+// --- Street furniture and traffic props (issue #150, roadmap 2.4/2.6). ---
+
+constexpr float kPiTest = 3.14159265f;
+
+MapGeneratorConfig FurnitureConfig(FeatureMode mode) {
+  MapGeneratorConfig c;
+  c.elevatedHighway = OverpassMode::Off;
+  c.features.furniture.mode = mode;
+  return c;
+}
+
+float DistanceToConvexPolygon(glm::vec2 p, const std::vector<glm::vec2>& poly) {
+  if (InsideConvex(p, poly)) return 0.0f;
+  float best = 1e9f;
+  for (size_t i = 0; i < poly.size(); ++i) {
+    best = std::min(best, DistanceToSegment(p, poly[i], poly[(i + 1) % poly.size()]));
+  }
+  return best;
+}
+
+// Furniture only appends small curb-side obstacles: the rest of the scene is
+// untouched, every item hugs a sidewalk strip, keeps 2 * kAgentRadius of
+// clear sidewalk to every building, and stays off the spawn rows. The Auto
+// mode draws presence per seed, and a drawn seed matches the forced-on map.
+void TestFurnitureHugsSidewalksAndRespectsClearances() {
+  const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
+  const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
+  for (uint32_t seed : kSeeds) {
+    const Scene bare = GenerateUrbanMap(seed, off);
+    const Scene scene = GenerateUrbanMap(seed, on);
+    CHECK(bare.props.empty());
+    CHECK(scene.obstacles.size() > bare.obstacles.size() + 20);
+    for (size_t i = 0; i < bare.obstacles.size(); ++i) {
+      CHECK(scene.obstacles[i].bounds.min == bare.obstacles[i].bounds.min);
+      CHECK(scene.obstacles[i].bounds.max == bare.obstacles[i].bounds.max);
+      CHECK(scene.obstacles[i].footprint == bare.obstacles[i].footprint);
+    }
+    CHECK(SameScene(scene, GenerateUrbanMap(seed, on)));
+
+    const std::vector<UrbanBlock> blocks = UrbanBlocks(seed, on);
+    for (size_t i = bare.obstacles.size(); i < scene.obstacles.size(); ++i) {
+      const Obstacle& o = scene.obstacles[i];
+      CHECK(o.footprint.empty());
+      CHECK(!o.climbable);
+      const glm::vec3 size = o.bounds.max - o.bounds.min;
+      CHECK(size.x <= 0.4f && size.z <= 0.4f);  // Post-sized, never cover-sized.
+      const glm::vec2 center(o.bounds.Center().x, o.bounds.Center().z);
+      const float halfOut = 0.5f * std::max(size.x, size.z);
+      bool onSidewalk = false;
+      for (const UrbanBlock& block : blocks) {
+        if (!InsideConvex(center, block.vertices)) continue;
+        float edgeDistance = 1e9f;
+        for (size_t e = 0; e < block.vertices.size(); ++e) {
+          edgeDistance = std::min(
+              edgeDistance, DistanceToSegment(center, block.vertices[e],
+                                              block.vertices[(e + 1) % block.vertices.size()]));
+        }
+        onSidewalk |= edgeDistance <= on.sidewalkWidth;
+      }
+      CHECK(onSidewalk);
+      for (const Obstacle& building : bare.obstacles) {
+        if (building.footprint.empty()) continue;
+        const float gap = DistanceToConvexPolygon(center, building.footprint) - halfOut;
+        CHECK(gap >= 2.0f * constants::kAgentRadius - kEps);
+      }
+      for (const Unit& unit : scene.units) {
+        CHECK(glm::distance(glm::vec2(unit.position.x, unit.position.z), center) >= 2.5f);
+      }
+    }
+  }
+
+  // Auto: the seed decides, both outcomes occur, and each matches its forced
+  // twin (the presence draw never reshuffles placement).
+  int drawnOn = 0, drawnOff = 0;
+  for (uint32_t seed = 1; seed <= 12; ++seed) {
+    MapGeneratorConfig base;
+    base.elevatedHighway = OverpassMode::Off;
+    const Scene scene = GenerateUrbanMap(seed, base);
+    if (!scene.props.empty()) {
+      ++drawnOn;
+      CHECK(SameScene(scene, GenerateUrbanMap(seed, FurnitureConfig(FeatureMode::On))));
+    } else {
+      ++drawnOff;
+      CHECK(SameScene(scene, GenerateUrbanMap(seed, FurnitureConfig(FeatureMode::Off))));
+    }
+  }
+  CHECK(drawnOn > 0);
+  CHECK(drawnOff > 0);
+}
+
+// The required connectivity property (roadmap 2.4): everything walkable
+// without furniture stays walkable with it -- items never seal a sidewalk,
+// alley or opening.
+void TestFurnitureKeepsSidewalksConnected() {
+  for (uint32_t seed : kSeeds) {
+    const Scene bare = GenerateUrbanMap(seed, FurnitureConfig(FeatureMode::Off));
+    const Scene scene = GenerateUrbanMap(seed, FurnitureConfig(FeatureMode::On));
+    NavMesh bareNav, nav;
+    bareNav.Build(bare.obstacles, bare.mapHalfExtent, constants::kAgentRadius);
+    nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius);
+    const glm::vec3 blue = scene.units.front().position;
+    std::vector<glm::vec3> path;
+    CHECK(nav.FindPath(blue, scene.units.back().position, &path));
+    // One routed-distance flood per mesh (per-point FindPath would cost
+    // seconds each), then probe rings around every item: whatever was
+    // reachable right next to it without furniture must stay reachable.
+    const float budget = 4.0f * scene.mapHalfExtent;
+    const ReachField bareField = bareNav.ComputeReachField(blue, budget, 0.5f);
+    const ReachField field = nav.ComputeReachField(blue, budget, 0.5f);
+    auto reachedAt = [](const ReachField& f, glm::vec2 p) {
+      const int ix = static_cast<int>(std::round((p.x - f.minX) / f.step));
+      const int iz = static_cast<int>(std::round((p.y - f.minZ) / f.step));
+      return f.Reached(ix, iz);
+    };
+    int compared = 0, unreachable = 0;
+    for (size_t i = bare.obstacles.size(); i < scene.obstacles.size(); ++i) {
+      const glm::vec3 center = scene.obstacles[i].bounds.Center();
+      for (const float radius : {1.2f, 2.5f}) {
+        for (int k = 0; k < 8; ++k) {
+          const float angle = static_cast<float>(k) * 0.25f * kPiTest;
+          const glm::vec2 target(center.x + radius * std::cos(angle),
+                                 center.z + radius * std::sin(angle));
+          // Keep clear of every item so the furniture's own inflated
+          // footprint never explains a miss.
+          bool nearItem = false;
+          for (size_t j = bare.obstacles.size(); j < scene.obstacles.size(); ++j) {
+            const glm::vec3 other = scene.obstacles[j].bounds.Center();
+            nearItem |= j != i && glm::distance(glm::vec2(other.x, other.z), target) < 1.0f;
+          }
+          if (nearItem || !reachedAt(bareField, target)) continue;
+          ++compared;
+          if (!reachedAt(field, target)) ++unreachable;
+        }
+      }
+    }
+    CHECK(compared > 300);
+    if (unreachable) {
+      std::fprintf(stderr, "seed %u: furniture cut off %d probe points\n", seed, unreachable);
+    }
+    CHECK(unreachable == 0);
+  }
+}
+
+// Traffic lights stand on junction corners (two streets of distinct heading
+// within reach), stop/yield signs appear at artery tees, street-name signs
+// at block corners -- and all of them stay visual-only: never inside an
+// obstacle, absent from the furniture-off scene.
+void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
+  const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
+  int lights = 0, stopYield = 0, names = 0;
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed, on);
+    CHECK(!scene.props.empty());
+    const std::vector<UrbanStreet> streets = UrbanStreets(seed, on);
+    const std::vector<UrbanBlock> blocks = UrbanBlocks(seed, on);
+    for (const StreetProp& prop : scene.props) {
+      const glm::vec2 p(prop.position.x, prop.position.z);
+      CHECK(std::fabs(p.x) < scene.mapHalfExtent - 0.4f);
+      CHECK(std::fabs(p.y) < scene.mapHalfExtent - 0.4f);
+      for (const Obstacle& o : scene.obstacles) {
+        CHECK(DistanceToConvexPolygon(p, ObstacleFootprint(o)) > 0.2f);
+      }
+      if (prop.kind == StreetPropKind::StreetNameSign) {
+        ++names;
+        float corner = 1e9f;
+        for (const UrbanBlock& block : blocks) {
+          for (const glm::vec2& v : block.vertices) corner = std::min(corner, glm::distance(p, v));
+        }
+        CHECK(corner <= 1.0f);
+        continue;
+      }
+      (prop.kind == StreetPropKind::TrafficLight ? lights : stopYield)++;
+      // A junction: two nearby streets with clearly different headings.
+      glm::vec2 firstDir(0.0f);
+      bool junction = false;
+      for (const UrbanStreet& street : streets) {
+        const glm::vec2 a(street.a.x, street.a.z), b(street.b.x, street.b.z);
+        if (DistanceToSegment(p, a, b) > street.width * 0.5f + 2.0f) continue;
+        const glm::vec2 dir = glm::normalize(b - a);
+        if (firstDir == glm::vec2(0.0f)) {
+          firstDir = dir;
+        } else if (std::fabs(firstDir.x * dir.y - firstDir.y * dir.x) > 0.25f) {
+          junction = true;
+        }
+      }
+      CHECK(junction);
+    }
+  }
+  CHECK(lights > 0);
+  CHECK(stopYield > 0);
+  CHECK(names > 0);
+
+  // Visual-only also means: identical gameplay surfaces with and without
+  // props is covered by TestFurnitureHugsSidewalksAndRespectsClearances;
+  // here, the off scene must carry no props at all.
+  CHECK(GenerateUrbanMap(kSeeds[0], FurnitureConfig(FeatureMode::Off)).props.empty());
+}
+
+// Pinned per-seed furniture output (issue #150): a generator change that
+// alters item or prop placement shows up here first.
+void TestPinnedFurnitureFingerprints() {
+  struct Expected { uint32_t seed; size_t furniture; size_t props; };
+  const Expected expected[] = {{1u, 106, 74}, {42u, 96, 80}, {2024u, 114, 85}};
+  const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
+  const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
+  for (const auto& e : expected) {
+    const Scene scene = GenerateUrbanMap(e.seed, on);
+    const size_t furniture =
+        scene.obstacles.size() - GenerateUrbanMap(e.seed, off).obstacles.size();
+    if (furniture != e.furniture || scene.props.size() != e.props) {
+      std::fprintf(stderr, "seed %u: %zu furniture, %zu props (expected %zu, %zu)\n", e.seed,
+                   furniture, scene.props.size(), e.furniture, e.props);
+    }
+    CHECK(furniture == e.furniture);
+    CHECK(scene.props.size() == e.props);
+  }
+}
+
 int main() {
   TestFeatureFlagsAndStreetGraph();
+  TestFurnitureHugsSidewalksAndRespectsClearances();
+  TestFurnitureKeepsSidewalksConnected();
+  TestTrafficPropsSitAtJunctionsAndStayVisualOnly();
+  TestPinnedFurnitureFingerprints();
   TestDeterminismAndVariety();
   TestZiplinesAreDeterministicBoundedAndValid();
   TestZiplineStreetEndsReachableRoofsOnlyByLine();

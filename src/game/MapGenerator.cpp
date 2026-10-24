@@ -1552,12 +1552,25 @@ void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorCo
   }
 
   // Four-arm crossings between two streets of one side (the wide branch
-  // corridor counts as a street): a traffic light on each corner.
+  // corridor counts as a street). A smaller street crossing a larger one
+  // (avenue or branch corridor) always gets a signal; two streets of the same
+  // class get one 20% of the time. Either way only one street is signalled:
+  // a head on the sidewalk corner facing each approach of the smaller street.
   constexpr float kInteriorMargin = 1.5f;
   constexpr float kCornerSetback = 0.55f;  // Post stands just off the pavement corner.
   for (size_t i = 0; i < cuts.size(); ++i) {
     for (size_t j = i + 1; j < cuts.size(); ++j) {
+      // Drawn before any rejection so a skipped crossing never reshuffles
+      // the rest.
+      const bool minorLight = rng.Chance(0.2f);
       if (!valid[i] || !valid[j] || cuts[i].side != cuts[j].side) continue;
+      const auto rank = [](UrbanStreetClass cls) {
+        return cls == UrbanStreetClass::Cross ? 0 : 1;
+      };
+      const int ri = rank(cuts[i].cls), rj = rank(cuts[j].cls);
+      if (ri == rj && !minorLight) continue;
+      // The street whose approaches carry the heads: the smaller one.
+      const bool signalI = ri <= rj;
       // An elevated seed's branch corridor carries a ramp overhead: no posts
       // under it.
       if (city.highway.elevated && (cuts[i].cls == UrbanStreetClass::Highway ||
@@ -1577,10 +1590,10 @@ void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorCo
         for (const float s2 : {1.0f, -1.0f}) {
           const glm::vec2 corner = junction + d1 * (s1 * (cuts[j].width * 0.5f + kCornerSetback)) +
                                    d2 * (s2 * (cuts[i].width * 0.5f + kCornerSetback));
-          // Each corner carries one head for one of the two approaches. Pick
-          // opposite corners for each street, and face down that street
-          // toward approaching traffic instead of diagonally at the corner.
-          const glm::vec2 facing = s1 * s2 > 0.0f ? -s1 * d1 : -s2 * d2;
+          // Opposite corners serve the two approaches of the signalled
+          // street; face down that street toward approaching traffic.
+          if ((s1 * s2 > 0.0f) != signalI) continue;
+          const glm::vec2 facing = signalI ? -s1 * d1 : -s2 * d2;
           const float yaw = std::atan2(facing.y, facing.x);
           add(StreetPropKind::TrafficLight, corner, yaw, yaw);
         }

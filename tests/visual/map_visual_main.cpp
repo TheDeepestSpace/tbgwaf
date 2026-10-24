@@ -122,6 +122,8 @@ int main(int argc, char** argv) {
   // here pins an explicit presence (and layout) so it tests one variant.
   tactics::MapGeneratorConfig gradeConfig;
   gradeConfig.elevatedHighway = tactics::OverpassMode::Off;
+  // Terrain is seed-driven too; the flat-city goldens pin it off (terrain has its own).
+  gradeConfig.features.terrain.mode = tactics::FeatureMode::Off;
   for (const uint32_t seed : kCitySeeds) {
     cases.push_back({"city_seed_" + std::to_string(seed),
                      tactics::GenerateUrbanMap(seed, gradeConfig), kCityCameraZoom,
@@ -140,6 +142,7 @@ int main(int argc, char** argv) {
                    kCityCameraZoom, /*showNavMesh=*/false});
   tactics::MapGeneratorConfig mergeConfigAuto;  // Seed-driven overpass presence and layout.
   mergeConfigAuto.arteryCount = 2;
+  mergeConfigAuto.features.terrain.mode = tactics::FeatureMode::Off;  // Overpass vs terrain: roadmap 4.4.
   tactics::MapGeneratorConfig elevatedConfig = mergeConfig;
   elevatedConfig.elevatedHighway = tactics::OverpassMode::On;
   elevatedConfig.overpassLayout = tactics::OverpassLayout::RampUpRampDown;

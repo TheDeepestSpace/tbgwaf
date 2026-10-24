@@ -6,7 +6,7 @@
 name: overpass_through
 
 map:
-  generate: {type: urban, seed: 4, arteries: 2}
+  generate: {type: urban, seed: 4, arteries: 2, features: {terrain: off}}
 
 units:
   - {id: 0, team: blue, position: [-26.5064, 0.6495, 43.6518], facing_degrees: 0}

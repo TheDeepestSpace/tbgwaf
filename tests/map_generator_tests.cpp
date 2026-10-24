@@ -690,6 +690,7 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   config.arteryCount = 2;
   config.elevatedHighway = OverpassMode::On;
   config.overpassLayout = OverpassLayout::RampUpRampDown;
+  config.features.terrain.mode = FeatureMode::Off;  // Overpass vs terrain is roadmap 4.4.
   const Scene scene = GenerateUrbanMap(7, config);
   const auto roads = UrbanRoads(7, config);
 

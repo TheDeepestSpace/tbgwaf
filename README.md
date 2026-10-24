@@ -47,7 +47,8 @@ tune artery count/width, local-street width/skew and elevation through
 `MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
 overlay of the navmesh's walkable-cell boundaries.
 
-City terrain is opt-in: `TBGWAF_TERRAIN=on` (or `auto` for a seeded 50% chance),
+City terrain defaults to `auto` (a seeded 50% chance per map); force it with
+`TBGWAF_TERRAIN=on|off`,
 `MapGeneratorConfig::features.terrain`, or scenario YAML:
 
 ```yaml

@@ -221,10 +221,11 @@ void TestVariedHeightsWithFewTowers() {
   const MapGeneratorConfig c;
   for (uint32_t seed : kSeeds) {
     const Scene scene = GenerateUrbanMap(seed);
-    int towers = 0, medium = 0;
+    int towers = 0, medium = 0, buildings = 0;
     float lo = 1e9f, hi = 0.0f;
     for (const auto& o : scene.obstacles) {
       if (o.footprint.empty()) continue;  // Pier columns (elevated seeds), not buildings.
+      ++buildings;
       const float h = o.bounds.max.y;
       lo = std::min(lo, h);
       hi = std::max(hi, h);
@@ -234,7 +235,7 @@ void TestVariedHeightsWithFewTowers() {
     }
     CHECK(towers == c.towerCount);
     CHECK(hi - lo > 8.0f);
-    CHECK(medium * 10 > static_cast<int>(scene.obstacles.size()));  // Medium heights still appear.
+    CHECK(medium * 10 > buildings);  // Medium heights still appear.
   }
 }
 
@@ -1529,6 +1530,12 @@ void TestFurnitureHugsSidewalksAndRespectsClearances() {
       const glm::vec3 size = o.bounds.max - o.bounds.min;
       CHECK(size.x <= 0.4f && size.z <= 0.4f);  // Post-sized, never cover-sized.
       const glm::vec2 center(o.bounds.Center().x, o.bounds.Center().z);
+      bool signalPost = false;  // Traffic-control poles sit at junctions, not on sidewalks only.
+      for (const StreetProp& prop : scene.props) {
+        signalPost |= prop.kind != StreetPropKind::LampPost &&
+                      glm::distance(glm::vec2(prop.position.x, prop.position.z), center) < 1e-4f;
+      }
+      if (signalPost) continue;
       const float halfOut = 0.5f * std::max(size.x, size.z);
       bool onSidewalk = false;
       for (const UrbanBlock& block : blocks) {
@@ -1676,6 +1683,8 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
         continue;
       }
       for (const Obstacle& o : scene.obstacles) {
+        // A prop's own collision post sits exactly under it.
+        if (glm::distance(p, glm::vec2(o.bounds.Center().x, o.bounds.Center().z)) < 1e-4f) continue;
         CHECK(DistanceToConvexPolygon(p, ObstacleFootprint(o)) > 0.2f);
       }
       if (prop.kind == StreetPropKind::StreetNameSign) {
@@ -1745,7 +1754,7 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
 // alters item or prop placement shows up here first.
 void TestPinnedFurnitureFingerprints() {
   struct Expected { uint32_t seed; size_t furniture; size_t props; };
-  const Expected expected[] = {{1u, 106, 80}, {42u, 96, 79}, {2024u, 114, 90}};
+  const Expected expected[] = {{1u, 169, 80}, {42u, 165, 79}, {2024u, 181, 90}};
   const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
   const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
   for (const auto& e : expected) {

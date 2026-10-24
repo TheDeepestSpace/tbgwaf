@@ -1540,8 +1540,20 @@ void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorCo
     for (const glm::vec2& q : placed) {
       if (glm::distance(p, q) < 1.0f) return;
     }
-    scene->props.push_back(
-        StreetProp{kind, glm::vec3(p.x, propY(p), p.y), yaw, secondaryYaw});
+    const float y = propY(p);
+    scene->props.push_back(StreetProp{kind, glm::vec3(p.x, y, p.y), yaw, secondaryYaw});
+    // The pole is solid: a thin obstacle hidden inside the rendered pole
+    // (heights match BuildStreetPropParts) so units can't walk through it.
+    const float post = 0.06f;
+    const float height = kind == StreetPropKind::TrafficLight   ? 3.1f
+                         : kind == StreetPropKind::StreetNameSign ? 2.5f
+                                                                  : 2.2f;
+    scene->obstacles.push_back(Obstacle{
+        AABB{glm::vec3(p.x - post * 0.5f, y, p.y - post * 0.5f),
+             glm::vec3(p.x + post * 0.5f, y + height, p.y + post * 0.5f)},
+        /*climbable=*/false,
+        /*footprint=*/{},
+        ObstacleKind::StreetFurniture});
     placed.push_back(p);
   };
   const std::vector<StreetCut>& cuts = city.streets.cuts;

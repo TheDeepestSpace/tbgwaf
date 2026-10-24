@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>tbgwaf · Performance suite · PR #207</title>
+<style>
+:root { color-scheme: dark; }
+body { font-family: system-ui,sans-serif; margin: 2rem auto; max-width: 1500px; padding: 0 1rem;
+        background: #14161a; color: #e8e8e8; }
+a { color: #8ab4ff; } h1 { margin-bottom: .25rem; }
+.nav { display: flex; gap: 1rem; margin: .2rem 0 1.5rem; }
+.muted,.range { color: #9299a5; } .range { font-size: .8em; white-space: nowrap; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: .75rem; }
+.card { border: 1px solid #343941; background: #1b1e23; border-radius: 8px; padding: .8rem; }
+.card span,.card small { display: block; color: #aab0ba; } .card strong { font-size: 1.5rem; }
+.good { color: #62cf83; } .bad { color: #ef7373; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .86rem; }
+th,td { border: 1px solid #343941; padding: .42rem .55rem; text-align: right; white-space: nowrap; }
+thead th { background: #22262c; } tbody tr:nth-child(even) { background: #191c20; }
+tbody th,td:nth-child(1) { text-align: left; } code { font-size: .9em; }
+.meta { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; }
+.meta dt { color: #9299a5; } .meta dd { margin: 0; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<h1>Performance suite · PR #207</h1>
+<nav class="nav"><a href="../">Game</a><a href="../gallery/">Asset gallery</a><a href="results.json">Raw JSON</a></nav>
+<p>Observational software-rendering measurements for 10 pinned <code>urban-auto</code> maps. Values are medians;
+master ranges show the median from each preserved master run. Timing changes are reported, not gated.</p>
+<div class="cards"><div class="card"><span>FPS</span><strong>5.1</strong><small>master — · —</small></div>
+<div class="card"><span>Frame ms</span><strong>197.89</strong><small>master — · —</small></div>
+<div class="card"><span>FOV ms</span><strong>4.48</strong><small>master — · —</small></div>
+<div class="card"><span>Draw calls</span><strong>674</strong><small>master — · —</small></div>
+<div class="card"><span>Triangles</span><strong>192,816</strong><small>master — · —</small></div>
+<div class="card"><span>Vertices</span><strong>578,756</strong><small>master — · —</small></div></div>
+<h2>Per-map measurements</h2>
+<div class="scroll"><table><thead><tr><th rowspan="2">Seed</th><th colspan="3">FPS</th><th colspan="3">Frame ms</th><th colspan="2">FOV ms</th><th colspan="2">Draw calls</th><th colspan="2">Triangles</th><th colspan="2">Vertices</th></tr><tr><th>current</th><th>master</th><th>Δ</th><th>current</th><th>master</th><th>Δ</th><th>current</th><th>master</th><th>current</th><th>master</th><th>current</th><th>master</th><th>current</th><th>master</th></tr></thead>
+<tbody><tr><th>857197117</th><td>5.0</td><td>—</td><td>—</td><td>199.72</td><td>—</td><td>—</td><td>6.80</td><td>—</td><td>448</td><td>—</td><td>97,728</td><td>—</td><td>293,492</td><td>—</td></tr>
+<tr><th>2626763209</th><td>4.9</td><td>—</td><td>—</td><td>203.48</td><td>—</td><td>—</td><td>5.78</td><td>—</td><td>674</td><td>—</td><td>192,816</td><td>—</td><td>578,756</td><td>—</td></tr>
+<tr><th>1363136209</th><td>4.7</td><td>—</td><td>—</td><td>213.87</td><td>—</td><td>—</td><td>4.66</td><td>—</td><td>748</td><td>—</td><td>193,728</td><td>—</td><td>581,470</td><td>—</td></tr>
+<tr><th>1916785565</th><td>5.1</td><td>—</td><td>—</td><td>197.34</td><td>—</td><td>—</td><td>6.69</td><td>—</td><td>432</td><td>—</td><td>97,680</td><td>—</td><td>293,216</td><td>—</td></tr>
+<tr><th>717769303</th><td>5.4</td><td>—</td><td>—</td><td>184.80</td><td>—</td><td>—</td><td>3.83</td><td>—</td><td>656</td><td>—</td><td>192,672</td><td>—</td><td>578,258</td><td>—</td></tr>
+<tr><th>1426808689</th><td>5.0</td><td>—</td><td>—</td><td>198.17</td><td>—</td><td>—</td><td>3.86</td><td>—</td><td>722</td><td>—</td><td>193,200</td><td>—</td><td>580,084</td><td>—</td></tr>
+<tr><th>1572775524</th><td>5.2</td><td>—</td><td>—</td><td>191.16</td><td>—</td><td>—</td><td>4.20</td><td>—</td><td>674</td><td>—</td><td>192,816</td><td>—</td><td>578,756</td><td>—</td></tr>
+<tr><th>828253415</th><td>5.0</td><td>—</td><td>—</td><td>199.93</td><td>—</td><td>—</td><td>5.86</td><td>—</td><td>680</td><td>—</td><td>192,864</td><td>—</td><td>578,922</td><td>—</td></tr>
+<tr><th>795514493</th><td>5.3</td><td>—</td><td>—</td><td>188.48</td><td>—</td><td>—</td><td>3.51</td><td>—</td><td>662</td><td>—</td><td>192,720</td><td>—</td><td>578,424</td><td>—</td></tr>
+<tr><th>4017845533</th><td>5.3</td><td>—</td><td>—</td><td>189.99</td><td>—</td><td>—</td><td>2.76</td><td>—</td><td>698</td><td>—</td><td>193,008</td><td>—</td><td>579,420</td><td>—</td></tr></tbody></table></div>
+<p class="muted">Each map warms up for 30 frames, then records
+120 frames at 1280×720,
+two fog-of-war panes with six figures and shadow-map FOV.</p>
+<h2>Current run</h2>
+<dl class="meta">
+<dt>Ref</dt><dd>pr-207</dd>
+<dt>Commit</dt><dd><code>88df86e44eaaaa48af97cac525216ca5d50bde46</code></dd>
+<dt>Recorded</dt><dd>2026-10-24T23:44:47Z</dd>
+<dt>Run</dt><dd>pr-207-40142555451-1</dd>
+<dt>Renderer</dt><dd>llvmpipe (LLVM 15.0.7, 256 bits)</dd>
+<dt>GL</dt><dd>Mesa · OpenGL ES 3.2 Mesa 23.2.1-1ubuntu3.1~22.04.4</dd>
+<dt>Platform</dt><dd>Linux 6.17.0-1022-azure x86_64</dd>
+</dl>
+<h2>Run history</h2>
+<div class="scroll"><table><thead><tr><th>Recorded</th><th>Ref</th><th>Commit</th><th>FPS</th><th>Frame ms</th><th>Renderer</th><th>Raw</th></tr></thead>
+<tbody><tr><td>2026-10-24T23:44:47Z</td><td>pr-207</td><td><code>88df86e44e</code></td><td>5.1</td><td>197.89</td><td>llvmpipe (LLVM 15.0.7, 256 bits)</td><td><a href="results.json">JSON</a></td></tr></tbody></table></div>
+</body>
+</html>

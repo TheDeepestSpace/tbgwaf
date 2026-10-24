@@ -148,7 +148,11 @@ jobs:
           url="https://${owner}.github.io/${repo}/pr-preview/pr-${PR_NUMBER}/scenarios/"
           gallery_url="https://${owner}.github.io/${repo}/pr-preview/pr-${PR_NUMBER}/gallery/"
           performance_url="https://${owner}.github.io/${repo}/performance/"
-          body="$(printf '%s\n%s\n\n%s\n\n%s' "$marker" "🎬 [Gameplay scenario review page](${url}) — per-team videos of every scenario, grouped by how this PR changes it, refreshed at commit \`${HEAD_SHA:0:7}\` (updates with each push; may take a minute to go live after deploy)." "🖼️ [Asset gallery](${gallery_url}) — browse models and animations, including this PR's changes." "📈 [Performance suite](${performance_url}) — pinned-map rendering measurements and preserved master baselines.")"
+          body="$(printf '%s\n%s\n\n%s' "$marker" "🎬 [Gameplay scenario review page](${url}) — per-team videos of every scenario, grouped by how this PR changes it, refreshed at commit \`${HEAD_SHA:0:7}\` (updates with each push; may take a minute to go live after deploy)." "🖼️ [Asset gallery](${gallery_url}) — browse models and animations, including this PR's changes.")"
+          # The performance page only exists once the Performance suite has run on master.
+          if curl -fsSIo /dev/null "$performance_url"; then
+            body="$(printf '%s\n\n%s' "$body" "📈 [Performance suite](${performance_url}) — pinned-map rendering measurements and preserved master baselines.")"
+          fi
           existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             --paginate --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" | head -n1)
           if [ -n "$existing" ]; then

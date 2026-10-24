@@ -51,7 +51,7 @@ bool SameScene(const Scene& a, const Scene& b) {
     const auto& x = a.obstacles[i];
     const auto& y = b.obstacles[i];
     if (x.bounds.min != y.bounds.min || x.bounds.max != y.bounds.max ||
-        x.climbable != y.climbable || x.footprint != y.footprint) {
+        x.climbable != y.climbable || x.footprint != y.footprint || x.kind != y.kind) {
       return false;
     }
   }
@@ -1516,6 +1516,7 @@ void TestFurnitureHugsSidewalksAndRespectsClearances() {
       CHECK(scene.obstacles[i].bounds.min == bare.obstacles[i].bounds.min);
       CHECK(scene.obstacles[i].bounds.max == bare.obstacles[i].bounds.max);
       CHECK(scene.obstacles[i].footprint == bare.obstacles[i].footprint);
+      CHECK(scene.obstacles[i].kind == bare.obstacles[i].kind);
     }
     CHECK(SameScene(scene, GenerateUrbanMap(seed, on)));
 
@@ -1524,6 +1525,7 @@ void TestFurnitureHugsSidewalksAndRespectsClearances() {
       const Obstacle& o = scene.obstacles[i];
       CHECK(o.footprint.empty());
       CHECK(!o.climbable);
+      CHECK(o.kind == ObstacleKind::StreetFurniture);
       const glm::vec3 size = o.bounds.max - o.bounds.min;
       CHECK(size.x <= 0.4f && size.z <= 0.4f);  // Post-sized, never cover-sized.
       const glm::vec2 center(o.bounds.Center().x, o.bounds.Center().z);

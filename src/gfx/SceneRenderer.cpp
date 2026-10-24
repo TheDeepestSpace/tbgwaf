@@ -437,15 +437,47 @@ glm::mat4 BoxModel(const glm::vec3& minCorner, const glm::vec3& size) {
 
 struct StreetPropPart {
   glm::mat4 model{1.0f};
-  glm::vec4 color{1.0f};
+  size_t material = 0;
 };
+
+enum class StreetPropMaterial : size_t {
+  Pole,
+  TrafficHousing,
+  TrafficRed,
+  TrafficYellow,
+  TrafficGreen,
+  StopRed,
+  YieldWhite,
+  YieldRed,
+  StreetName,
+  LampHousing,
+  LampGlow,
+  Count,
+};
+
+const glm::vec4& StreetPropColor(StreetPropMaterial material) {
+  static const std::array<glm::vec4, static_cast<size_t>(StreetPropMaterial::Count)> kColors = {
+      glm::vec4(0.25f, 0.26f, 0.28f, 1.0f),
+      glm::vec4(0.10f, 0.11f, 0.12f, 1.0f),
+      glm::vec4(0.85f, 0.18f, 0.14f, 1.0f),
+      glm::vec4(0.92f, 0.76f, 0.18f, 1.0f),
+      glm::vec4(0.22f, 0.78f, 0.28f, 1.0f),
+      glm::vec4(0.78f, 0.12f, 0.12f, 1.0f),
+      glm::vec4(0.92f, 0.90f, 0.85f, 1.0f),
+      glm::vec4(0.80f, 0.16f, 0.14f, 1.0f),
+      glm::vec4(0.12f, 0.42f, 0.22f, 1.0f),
+      glm::vec4(0.18f, 0.19f, 0.21f, 1.0f),
+      glm::vec4(0.96f, 0.82f, 0.42f, 1.0f),
+  };
+  return kColors[static_cast<size_t>(material)];
+}
 
 struct StreetPropParts {
   std::array<StreetPropPart, 8> values{};
   size_t count = 0;
 
-  void Add(const glm::mat4& model, const glm::vec4& color) {
-    values[count++] = {model, color};
+  void Add(const glm::mat4& model, StreetPropMaterial material) {
+    values[count++] = {model, static_cast<size_t>(material)};
   }
   const StreetPropPart* begin() const { return values.data(); }
   const StreetPropPart* end() const { return values.data() + count; }
@@ -463,16 +495,16 @@ StreetPropParts BuildStreetPropParts(const tactics::StreetProp& prop) {
                        glm::vec3(0.0f, -1.0f, 0.0f));
   };
   auto box = [&](float yaw, float cx, float y0, float cz, float sx, float sy, float sz,
-                 const glm::vec4& color) {
+                 StreetPropMaterial material) {
     const glm::mat4 model =
         base(yaw) *
         glm::translate(glm::mat4(1.0f), glm::vec3(cx - sx * 0.5f, y0, cz - sz * 0.5f)) *
         glm::scale(glm::mat4(1.0f), glm::vec3(sx, sy, sz));
-    parts.Add(model, color);
+    parts.Add(model, material);
   };
   // A square beam between two local XY points, used to approximate a curved
   // lamp arm with short straight segments.
-  auto beam = [&](glm::vec2 a, glm::vec2 b, float thickness, const glm::vec4& color) {
+  auto beam = [&](glm::vec2 a, glm::vec2 b, float thickness, StreetPropMaterial material) {
     const glm::vec2 delta = b - a;
     const float length = glm::length(delta);
     const float angle = std::atan2(delta.y, delta.x);
@@ -482,75 +514,57 @@ StreetPropParts BuildStreetPropParts(const tactics::StreetProp& prop) {
         glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -thickness * 0.5f,
                                                   -thickness * 0.5f)) *
         glm::scale(glm::mat4(1.0f), glm::vec3(length, thickness, thickness));
-    parts.Add(model, color);
+    parts.Add(model, material);
   };
 
-  const glm::vec4 kPole(0.25f, 0.26f, 0.28f, 1.0f);
   switch (prop.kind) {
     case tactics::StreetPropKind::TrafficLight:
-      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.14f, 3.1f, 0.14f, kPole);
+      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.14f, 3.1f, 0.14f, StreetPropMaterial::Pole);
       // +X is both the controlled approach's facing and the head/lamp face.
       box(prop.yaw, 0.24f, 2.35f, 0.0f, 0.30f, 0.80f, 0.26f,
-          glm::vec4(0.10f, 0.11f, 0.12f, 1.0f));
+          StreetPropMaterial::TrafficHousing);
       box(prop.yaw, 0.40f, 2.88f, 0.0f, 0.06f, 0.16f, 0.16f,
-          glm::vec4(0.85f, 0.18f, 0.14f, 1.0f));
+          StreetPropMaterial::TrafficRed);
       box(prop.yaw, 0.40f, 2.67f, 0.0f, 0.06f, 0.16f, 0.16f,
-          glm::vec4(0.92f, 0.76f, 0.18f, 1.0f));
+          StreetPropMaterial::TrafficYellow);
       box(prop.yaw, 0.40f, 2.46f, 0.0f, 0.06f, 0.16f, 0.16f,
-          glm::vec4(0.22f, 0.78f, 0.28f, 1.0f));
+          StreetPropMaterial::TrafficGreen);
       break;
     case tactics::StreetPropKind::StopSign:
-      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.09f, 2.2f, 0.09f, kPole);
-      box(prop.yaw, 0.07f, 1.62f, 0.0f, 0.05f, 0.52f, 0.52f,
-          glm::vec4(0.78f, 0.12f, 0.12f, 1.0f));
+      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.09f, 2.2f, 0.09f, StreetPropMaterial::Pole);
+      box(prop.yaw, 0.07f, 1.62f, 0.0f, 0.05f, 0.52f, 0.52f, StreetPropMaterial::StopRed);
       break;
     case tactics::StreetPropKind::YieldSign:
-      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.09f, 2.2f, 0.09f, kPole);
+      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.09f, 2.2f, 0.09f, StreetPropMaterial::Pole);
       box(prop.yaw, 0.07f, 1.62f, 0.0f, 0.05f, 0.52f, 0.52f,
-          glm::vec4(0.92f, 0.90f, 0.85f, 1.0f));
+          StreetPropMaterial::YieldWhite);
       box(prop.yaw, 0.10f, 1.74f, 0.0f, 0.03f, 0.28f, 0.28f,
-          glm::vec4(0.80f, 0.16f, 0.14f, 1.0f));
+          StreetPropMaterial::YieldRed);
       break;
     case tactics::StreetPropKind::StreetNameSign:
-      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.08f, 2.5f, 0.08f, kPole);
+      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.08f, 2.5f, 0.08f, StreetPropMaterial::Pole);
       // Each blade follows its actual incident street; secondaryYaw is not
       // assumed perpendicular, so skewed junctions remain skewed here.
       box(prop.yaw, 0.0f, 2.28f, 0.0f, 0.80f, 0.14f, 0.04f,
-          glm::vec4(0.12f, 0.42f, 0.22f, 1.0f));
+          StreetPropMaterial::StreetName);
       box(prop.secondaryYaw, 0.0f, 2.10f, 0.0f, 0.80f, 0.14f, 0.04f,
-          glm::vec4(0.12f, 0.42f, 0.22f, 1.0f));
+          StreetPropMaterial::StreetName);
       break;
     case tactics::StreetPropKind::LampPost:
       // The nested obstacle remains the collision/LOS pole; this slightly
       // wider visible pole hides its plain obstacle-box rendering.
-      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.18f, 5.40f, 0.18f, kPole);
-      beam({0.0f, 5.20f}, {0.32f, 5.52f}, 0.16f, kPole);
-      beam({0.32f, 5.52f}, {0.82f, 5.72f}, 0.16f, kPole);
-      beam({0.82f, 5.72f}, {1.48f, 5.72f}, 0.16f, kPole);
-      beam({1.48f, 5.72f}, {1.66f, 5.54f}, 0.16f, kPole);
+      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.18f, 5.40f, 0.18f, StreetPropMaterial::Pole);
+      beam({0.0f, 5.20f}, {0.32f, 5.52f}, 0.16f, StreetPropMaterial::Pole);
+      beam({0.32f, 5.52f}, {0.82f, 5.72f}, 0.16f, StreetPropMaterial::Pole);
+      beam({0.82f, 5.72f}, {1.48f, 5.72f}, 0.16f, StreetPropMaterial::Pole);
+      beam({1.48f, 5.72f}, {1.66f, 5.54f}, 0.16f, StreetPropMaterial::Pole);
       box(prop.yaw, 1.66f, 5.38f, 0.0f, 0.54f, 0.18f, 0.32f,
-          glm::vec4(0.18f, 0.19f, 0.21f, 1.0f));
+          StreetPropMaterial::LampHousing);
       box(prop.yaw, 1.66f, 5.34f, 0.0f, 0.38f, 0.05f, 0.24f,
-          glm::vec4(0.96f, 0.82f, 0.42f, 1.0f));
+          StreetPropMaterial::LampGlow);
       break;
   }
   return parts;
-}
-
-void DrawStreetProp(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
-                    const glm::mat4& lightSpaceMatrix, const tactics::StreetProp& prop) {
-  for (const StreetPropPart& part : BuildStreetPropParts(prop)) {
-    DrawLitModel(shader, cube, viewProj, lightSpaceMatrix, part.model, part.color);
-  }
-}
-
-void DrawStreetPropDepth(const Shader& shader, const CubeMesh& cube,
-                         const glm::mat4& lightSpaceMatrix,
-                         const tactics::StreetProp& prop) {
-  for (const StreetPropPart& part : BuildStreetPropParts(prop)) {
-    shader.SetMat4("uLightMVP", lightSpaceMatrix * part.model);
-    cube.Draw();
-  }
 }
 
 using LitVertices = std::vector<LitTriangleMesh::Vertex>;
@@ -695,6 +709,35 @@ void AppendBoxModel(const glm::mat4& model, LitVertices* vertices,
   quad(p(0, 0, 1), p(1, 0, 1), p(1, 1, 1), p(0, 1, 1), n(0, 0, 1));
   quad(p(0, 0, 0), p(0, 0, 1), p(0, 1, 1), p(0, 1, 0), n(-1, 0, 0));
   quad(p(1, 0, 0), p(1, 1, 0), p(1, 1, 1), p(1, 0, 1), n(1, 0, 0));
+}
+
+void BuildStreetFixtureMeshes(
+    const std::vector<tactics::Obstacle>& obstacles,
+    const std::vector<tactics::StreetProp>& props, LitTriangleMesh* furnitureMesh,
+    LitTriangleMesh* depthMesh,
+    std::array<LitTriangleMesh, static_cast<size_t>(StreetPropMaterial::Count)>* materialMeshes) {
+  LitVertices furnitureVertices;
+  std::vector<GLuint> furnitureIndices;
+  for (const tactics::Obstacle& obstacle : obstacles) {
+    if (obstacle.kind != tactics::ObstacleKind::StreetFurniture) continue;
+    AppendBox(obstacle.bounds, &furnitureVertices, &furnitureIndices);
+  }
+  furnitureMesh->SetMesh(furnitureVertices, furnitureIndices);
+
+  LitVertices depthVertices;
+  std::vector<GLuint> depthIndices;
+  std::array<LitVertices, static_cast<size_t>(StreetPropMaterial::Count)> vertices;
+  std::array<std::vector<GLuint>, static_cast<size_t>(StreetPropMaterial::Count)> indices;
+  for (const tactics::StreetProp& prop : props) {
+    for (const StreetPropPart& part : BuildStreetPropParts(prop)) {
+      AppendBoxModel(part.model, &depthVertices, &depthIndices);
+      AppendBoxModel(part.model, &vertices[part.material], &indices[part.material]);
+    }
+  }
+  depthMesh->SetMesh(depthVertices, depthIndices);
+  for (size_t i = 0; i < materialMeshes->size(); ++i) {
+    (*materialMeshes)[i].SetMesh(vertices[i], indices[i]);
+  }
 }
 
 // Everything static the shadow-map FOV prototype (issue #110) casts from
@@ -1921,6 +1964,9 @@ bool SceneRenderer::Init() {
   aimOverlayMesh_.Init();
   terrainMesh_.Init();
   geometryMesh_.Init();
+  streetFurnitureMesh_.Init();
+  streetPropDepthMesh_.Init();
+  for (LitTriangleMesh& mesh : streetPropMeshes_) mesh.Init();
   fovSceneMesh_.Init();
   highlightRing_.Init();
   highlightRing_.SetPoints(BuildRingPoints());
@@ -2004,6 +2050,11 @@ void SceneRenderer::Destroy() {
   fovKeyMapHalfExtent_ = 0.0f;
   terrainMesh_.Destroy();
   geometryMesh_.Destroy();
+  streetFurnitureMesh_.Destroy();
+  streetPropDepthMesh_.Destroy();
+  for (LitTriangleMesh& mesh : streetPropMeshes_) mesh.Destroy();
+  streetFurnitureKey_.clear();
+  streetPropKey_.clear();
   fovSceneMesh_.Destroy();
   fovSceneKey_ = 0;
   terrainKey_ = tactics::HeightField{};
@@ -2137,6 +2188,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const ScopedDrawStats drawStats(debug.stats);
   const auto& obstacles = game.GetScene().obstacles;
   const auto& sidewalks = game.GetScene().sidewalks;
+  const auto& streetProps = game.GetScene().props;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;
   const tactics::HeightField& terrain = game.GetScene().ground;
   // (Re)triangulate the terrain only when the scene's heightfield changes.
@@ -2167,6 +2219,41 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     fovKeyMapHalfExtent_ = mapHalfExtent;
   }
   const bool drawTerrain = !terrain.Empty() && terrainMesh_.HasGeometry();
+
+  // Street fixtures are static and consist of hundreds of tiny cubes in a
+  // typical city. Rebuild only when the scene changes, then submit one
+  // furniture mesh and one prop mesh per material instead of one draw per
+  // cube.
+  size_t furnitureIndex = 0;
+  bool sameStreetFurniture = true;
+  for (const tactics::Obstacle& obstacle : obstacles) {
+    if (obstacle.kind == tactics::ObstacleKind::StreetFurniture) {
+      sameStreetFurniture &= furnitureIndex < streetFurnitureKey_.size() &&
+                             obstacle.bounds.min == streetFurnitureKey_[furnitureIndex].min &&
+                             obstacle.bounds.max == streetFurnitureKey_[furnitureIndex].max;
+      ++furnitureIndex;
+    }
+  }
+  sameStreetFurniture &= furnitureIndex == streetFurnitureKey_.size();
+  const bool sameStreetProps =
+      streetProps.size() == streetPropKey_.size() &&
+      std::equal(streetProps.begin(), streetProps.end(), streetPropKey_.begin(),
+                 [](const tactics::StreetProp& a, const tactics::StreetProp& b) {
+                   return a.kind == b.kind && a.position == b.position && a.yaw == b.yaw &&
+                          a.secondaryYaw == b.secondaryYaw;
+                 });
+  if (!sameStreetFurniture || !sameStreetProps) {
+    BuildStreetFixtureMeshes(obstacles, streetProps, &streetFurnitureMesh_,
+                             &streetPropDepthMesh_, &streetPropMeshes_);
+    streetFurnitureKey_.clear();
+    streetFurnitureKey_.reserve(furnitureIndex);
+    for (const tactics::Obstacle& obstacle : obstacles) {
+      if (obstacle.kind == tactics::ObstacleKind::StreetFurniture) {
+        streetFurnitureKey_.push_back(obstacle.bounds);
+      }
+    }
+    streetPropKey_ = streetProps;
+  }
 
   // Fit the light frustum to the camera's current zoom instead of spreading
   // the shadow map over the whole scene. Cap it at the previous whole-map
@@ -2208,6 +2295,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       terrainMesh_.Draw();
     }
     for (const auto& obstacle : obstacles) {
+      if (obstacle.kind == tactics::ObstacleKind::StreetFurniture) continue;
       const AABB& bounds = obstacle.bounds;
       if (obstacle.footprint.empty()) {
         DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min,
@@ -2218,8 +2306,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         geometryMesh_.Draw();
       }
     }
-    for (const tactics::StreetProp& prop : game.GetScene().props) {
-      DrawStreetPropDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, prop);
+    if (streetFurnitureMesh_.HasGeometry()) {
+      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+      streetFurnitureMesh_.Draw();
+    }
+    if (streetPropDepthMesh_.HasGeometry()) {
+      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+      streetPropDepthMesh_.Draw();
     }
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(kDeckShadowSlopeBias, kDeckShadowConstantBias);
@@ -2282,6 +2375,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // not fade that wall.
     constexpr float kEndpointEpsilon = 1e-2f;
     for (size_t i = 0; i < obstacles.size(); ++i) {
+      // These post-sized items are too small to hide a useful target and are
+      // kept in one static render batch below.
+      if (obstacles[i].kind == tactics::ObstacleKind::StreetFurniture) continue;
       for (const ProbeRay& ray : rays) {
         float t = 0.0f;
         if (tactics::RayIntersectsObstacle(cameraPos, ray.direction, obstacles[i], &t) &&
@@ -2352,6 +2448,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   for (size_t i = 0; i < obstacles.size(); ++i) {
+    if (obstacles[i].kind == tactics::ObstacleKind::StreetFurniture) continue;
     if (fadeObstacle[i]) continue;  // Re-drawn translucent below.
     const AABB& bounds = obstacles[i].bounds;
     const glm::vec4 color(kObstacleColor, 1.0f);
@@ -2363,10 +2460,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f), color);
     }
   }
+  if (streetFurnitureMesh_.HasGeometry()) {
+    DrawLitModel(litShader_, streetFurnitureMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(kObstacleColor, 1.0f));
+  }
 
-  // Visual-only street props (issue #150): traffic lights and signage.
-  for (const tactics::StreetProp& prop : game.GetScene().props) {
-    DrawStreetProp(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, prop);
+  // Visual-only street props (issue #150), batched by material.
+  for (size_t i = 0; i < streetPropMeshes_.size(); ++i) {
+    if (!streetPropMeshes_[i].HasGeometry()) continue;
+    DrawLitModel(litShader_, streetPropMeshes_[i], viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 StreetPropColor(static_cast<StreetPropMaterial>(i)));
   }
 
   // Zipline anchor posts (the cable itself is drawn with the line overlays).

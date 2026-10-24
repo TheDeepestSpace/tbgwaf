@@ -1470,7 +1470,9 @@ void EmitStreetFurniture(Scene* scene, const CityPlan& city, const MapGeneratorC
             AABB{glm::vec3(center.x - spec.sx * 0.5f, baseY, center.y - spec.sz * 0.5f),
                  glm::vec3(center.x + spec.sx * 0.5f, baseY + kSidewalkHeight + spec.height,
                            center.y + spec.sz * 0.5f)},
-            /*climbable=*/false});
+            /*climbable=*/false,
+            /*footprint=*/{},
+            ObstacleKind::StreetFurniture});
         if (kind == 4) {
           // The thin obstacle is the physical pole. Its visible arm is a
           // fixture aimed out from the curb so the lamp hangs over the road.

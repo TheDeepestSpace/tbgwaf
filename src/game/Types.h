@@ -23,6 +23,10 @@ struct AABB {
   glm::vec3 HalfExtents() const { return (max - min) * 0.5f; }
 };
 
+// Semantic tag used only to group static render geometry; collision, LOS,
+// and navigation treat both kinds identically.
+enum class ObstacleKind { Generic, StreetFurniture };
+
 // A map obstacle. `climbable` obstacles get a navmesh connection from
 // ground level up to their top surface (see NavMesh); non-climbable
 // obstacles are simply impassable walls.
@@ -34,6 +38,9 @@ struct Obstacle {
   // phase and vertical extent; collision, LOS, navigation and rendering use
   // these vertices when present.
   std::vector<glm::vec2> footprint;
+  // Small curb-side items share collision/LOS semantics with every other
+  // obstacle but are tagged so the renderer can batch their static geometry.
+  ObstacleKind kind = ObstacleKind::Generic;
 };
 
 // A convex, planar walkable patch above (or sloping away from) the ground.

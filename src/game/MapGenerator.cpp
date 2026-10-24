@@ -1391,7 +1391,7 @@ constexpr FurnitureSpec kFurnitureSpecs[] = {
     {0.14f, 0.14f, 0.75f},  // Bollard.
     {0.26f, 0.26f, 0.70f},  // Fire hydrant.
     {0.12f, 0.12f, 2.40f},  // Street sign (post; the plate is below eye level anyway).
-    {0.16f, 0.16f, 4.20f},  // Lamp post.
+    {0.16f, 0.16f, 5.40f},  // Lamp post (the rendered arm continues above/over the street).
     {0.34f, 0.26f, 1.05f},  // Mailbox.
 };
 constexpr int kFurnitureKinds = static_cast<int>(sizeof(kFurnitureSpecs) / sizeof(FurnitureSpec));
@@ -1471,6 +1471,15 @@ void EmitStreetFurniture(Scene* scene, const CityPlan& city, const MapGeneratorC
                  glm::vec3(center.x + spec.sx * 0.5f, baseY + kSidewalkHeight + spec.height,
                            center.y + spec.sz * 0.5f)},
             /*climbable=*/false});
+        if (kind == 4) {
+          // The thin obstacle is the physical pole. Its visible arm is a
+          // fixture aimed out from the curb so the lamp hangs over the road.
+          const glm::vec2 outward = -inward;
+          const float yaw = std::atan2(outward.y, outward.x);
+          scene->props.push_back(StreetProp{StreetPropKind::LampPost,
+                                            glm::vec3(center.x, baseY + kSidewalkHeight, center.y),
+                                            yaw, yaw});
+        }
         placed.push_back(center);
       }
     }
@@ -1521,7 +1530,7 @@ void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorCo
     }
     return groundY(p.x, p.y) + kGradeY;
   };
-  auto add = [&](StreetPropKind kind, glm::vec2 p, float yaw) {
+  auto add = [&](StreetPropKind kind, glm::vec2 p, float yaw, float secondaryYaw) {
     if (std::max(std::fabs(p.x), std::fabs(p.y)) > half - 0.5f) return;
     for (const Obstacle& o : scene->obstacles) {
       if (p.x < o.bounds.min.x - 0.4f || p.x > o.bounds.max.x + 0.4f ||
@@ -1533,13 +1542,10 @@ void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorCo
     for (const glm::vec2& q : placed) {
       if (glm::distance(p, q) < 1.0f) return;
     }
-    scene->props.push_back(StreetProp{kind, glm::vec3(p.x, propY(p), p.y), yaw});
+    scene->props.push_back(
+        StreetProp{kind, glm::vec3(p.x, propY(p), p.y), yaw, secondaryYaw});
     placed.push_back(p);
   };
-  auto faceYaw = [](glm::vec2 from, glm::vec2 to) {
-    return std::atan2(to.y - from.y, to.x - from.x);
-  };
-
   const std::vector<StreetCut>& cuts = city.streets.cuts;
   std::vector<float> lo(cuts.size()), hi(cuts.size());
   std::vector<char> valid(cuts.size());
@@ -1573,7 +1579,12 @@ void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorCo
         for (const float s2 : {1.0f, -1.0f}) {
           const glm::vec2 corner = junction + d1 * (s1 * (cuts[j].width * 0.5f + kCornerSetback)) +
                                    d2 * (s2 * (cuts[i].width * 0.5f + kCornerSetback));
-          add(StreetPropKind::TrafficLight, corner, faceYaw(corner, junction));
+          // Each corner carries one head for one of the two approaches. Pick
+          // opposite corners for each street, and face down that street
+          // toward approaching traffic instead of diagonally at the corner.
+          const glm::vec2 facing = s1 * s2 > 0.0f ? -s1 * d1 : -s2 * d2;
+          const float yaw = std::atan2(facing.y, facing.x);
+          add(StreetPropKind::TrafficLight, corner, yaw, yaw);
         }
       }
     }
@@ -1606,10 +1617,11 @@ void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorCo
       const glm::vec2 corner =
           end - toward * 0.6f + n * (s * (cuts[i].width * 0.5f + kCornerSetback));
       if (light) {
-        add(StreetPropKind::TrafficLight, corner, faceYaw(corner, end));
+        const float yaw = std::atan2(-toward.y, -toward.x);
+        add(StreetPropKind::TrafficLight, corner, yaw, yaw);
       } else {
-        add(stop ? StreetPropKind::StopSign : StreetPropKind::YieldSign, corner,
-            std::atan2(-toward.y, -toward.x));
+        const float yaw = std::atan2(-toward.y, -toward.x);
+        add(stop ? StreetPropKind::StopSign : StreetPropKind::YieldSign, corner, yaw, yaw);
       }
     }
   }
@@ -1623,8 +1635,11 @@ void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorCo
     for (size_t v = 0; v < poly.size(); ++v) {
       if (!rng.Chance(0.4f)) continue;
       const glm::vec2 inward = glm::normalize(centroid - poly[v]);
-      const glm::vec2 edge = glm::normalize(poly[(v + 1) % poly.size()] - poly[v]);
-      add(StreetPropKind::StreetNameSign, poly[v] + inward * 0.5f, std::atan2(edge.y, edge.x));
+      const glm::vec2 nextEdge = glm::normalize(poly[(v + 1) % poly.size()] - poly[v]);
+      const glm::vec2 previousEdge =
+          glm::normalize(poly[v] - poly[(v + poly.size() - 1) % poly.size()]);
+      add(StreetPropKind::StreetNameSign, poly[v] + inward * 0.5f,
+          std::atan2(nextEdge.y, nextEdge.x), std::atan2(previousEdge.y, previousEdge.x));
     }
   }
 }

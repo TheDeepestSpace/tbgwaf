@@ -435,48 +435,118 @@ glm::mat4 BoxModel(const glm::vec3& minCorner, const glm::vec3& size) {
   return glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
 }
 
-// Visual-only street props (issue #150): traffic lights and signs placed by
-// the map generator. Boxes only, drawn like the zipline anchor posts; never
-// obstacles, so they cast no shadows, never occlude FOV and never join the
-// static FOV mask mesh.
-void DrawStreetProp(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
-                    const glm::mat4& lightSpaceMatrix, const tactics::StreetProp& prop) {
-  const glm::mat4 base = glm::rotate(glm::translate(glm::mat4(1.0f), prop.position), prop.yaw,
-                                     glm::vec3(0.0f, 1.0f, 0.0f));
-  // A box centered on the post axis in local XZ (+X faces down `yaw`),
-  // spanning [y0, y0 + sy].
-  auto box = [&](float cx, float y0, float cz, float sx, float sy, float sz,
+struct StreetPropPart {
+  glm::mat4 model{1.0f};
+  glm::vec4 color{1.0f};
+};
+
+struct StreetPropParts {
+  std::array<StreetPropPart, 8> values{};
+  size_t count = 0;
+
+  void Add(const glm::mat4& model, const glm::vec4& color) {
+    values[count++] = {model, color};
+  }
+  const StreetPropPart* begin() const { return values.data(); }
+  const StreetPropPart* end() const { return values.data() + count; }
+};
+
+// One geometry description feeds the lit, lighting-shadow, and shadow-map
+// FOV passes, so fixtures cannot drift between those views of the scene.
+StreetPropParts BuildStreetPropParts(const tactics::StreetProp& prop) {
+  StreetPropParts parts;
+  const auto base = [&](float yaw) {
+    return glm::rotate(glm::translate(glm::mat4(1.0f), prop.position), yaw,
+                       glm::vec3(0.0f, 1.0f, 0.0f));
+  };
+  auto box = [&](float yaw, float cx, float y0, float cz, float sx, float sy, float sz,
                  const glm::vec4& color) {
     const glm::mat4 model =
-        base * glm::translate(glm::mat4(1.0f), glm::vec3(cx - sx * 0.5f, y0, cz - sz * 0.5f)) *
+        base(yaw) *
+        glm::translate(glm::mat4(1.0f), glm::vec3(cx - sx * 0.5f, y0, cz - sz * 0.5f)) *
         glm::scale(glm::mat4(1.0f), glm::vec3(sx, sy, sz));
-    DrawLitModel(shader, cube, viewProj, lightSpaceMatrix, model, color);
+    parts.Add(model, color);
   };
+  // A square beam between two local XY points, used to approximate a curved
+  // lamp arm with short straight segments.
+  auto beam = [&](glm::vec2 a, glm::vec2 b, float thickness, const glm::vec4& color) {
+    const glm::vec2 delta = b - a;
+    const float length = glm::length(delta);
+    const float angle = std::atan2(delta.y, delta.x);
+    const glm::mat4 model =
+        base(prop.yaw) * glm::translate(glm::mat4(1.0f), glm::vec3(a.x, a.y, 0.0f)) *
+        glm::rotate(glm::mat4(1.0f), angle, glm::vec3(0.0f, 0.0f, 1.0f)) *
+        glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -thickness * 0.5f,
+                                                  -thickness * 0.5f)) *
+        glm::scale(glm::mat4(1.0f), glm::vec3(length, thickness, thickness));
+    parts.Add(model, color);
+  };
+
   const glm::vec4 kPole(0.25f, 0.26f, 0.28f, 1.0f);
   switch (prop.kind) {
     case tactics::StreetPropKind::TrafficLight:
-      box(0.0f, 0.0f, 0.0f, 0.14f, 3.1f, 0.14f, kPole);
-      // The head leans out toward the junction with its lamps facing it.
-      box(0.24f, 2.35f, 0.0f, 0.30f, 0.80f, 0.26f, glm::vec4(0.10f, 0.11f, 0.12f, 1.0f));
-      box(0.40f, 2.88f, 0.0f, 0.06f, 0.16f, 0.16f, glm::vec4(0.85f, 0.18f, 0.14f, 1.0f));
-      box(0.40f, 2.67f, 0.0f, 0.06f, 0.16f, 0.16f, glm::vec4(0.92f, 0.76f, 0.18f, 1.0f));
-      box(0.40f, 2.46f, 0.0f, 0.06f, 0.16f, 0.16f, glm::vec4(0.22f, 0.78f, 0.28f, 1.0f));
+      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.14f, 3.1f, 0.14f, kPole);
+      // +X is both the controlled approach's facing and the head/lamp face.
+      box(prop.yaw, 0.24f, 2.35f, 0.0f, 0.30f, 0.80f, 0.26f,
+          glm::vec4(0.10f, 0.11f, 0.12f, 1.0f));
+      box(prop.yaw, 0.40f, 2.88f, 0.0f, 0.06f, 0.16f, 0.16f,
+          glm::vec4(0.85f, 0.18f, 0.14f, 1.0f));
+      box(prop.yaw, 0.40f, 2.67f, 0.0f, 0.06f, 0.16f, 0.16f,
+          glm::vec4(0.92f, 0.76f, 0.18f, 1.0f));
+      box(prop.yaw, 0.40f, 2.46f, 0.0f, 0.06f, 0.16f, 0.16f,
+          glm::vec4(0.22f, 0.78f, 0.28f, 1.0f));
       break;
     case tactics::StreetPropKind::StopSign:
-      box(0.0f, 0.0f, 0.0f, 0.09f, 2.2f, 0.09f, kPole);
-      box(0.07f, 1.62f, 0.0f, 0.05f, 0.52f, 0.52f, glm::vec4(0.78f, 0.12f, 0.12f, 1.0f));
+      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.09f, 2.2f, 0.09f, kPole);
+      box(prop.yaw, 0.07f, 1.62f, 0.0f, 0.05f, 0.52f, 0.52f,
+          glm::vec4(0.78f, 0.12f, 0.12f, 1.0f));
       break;
     case tactics::StreetPropKind::YieldSign:
-      box(0.0f, 0.0f, 0.0f, 0.09f, 2.2f, 0.09f, kPole);
-      box(0.07f, 1.62f, 0.0f, 0.05f, 0.52f, 0.52f, glm::vec4(0.92f, 0.90f, 0.85f, 1.0f));
-      box(0.10f, 1.74f, 0.0f, 0.03f, 0.28f, 0.28f, glm::vec4(0.80f, 0.16f, 0.14f, 1.0f));
+      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.09f, 2.2f, 0.09f, kPole);
+      box(prop.yaw, 0.07f, 1.62f, 0.0f, 0.05f, 0.52f, 0.52f,
+          glm::vec4(0.92f, 0.90f, 0.85f, 1.0f));
+      box(prop.yaw, 0.10f, 1.74f, 0.0f, 0.03f, 0.28f, 0.28f,
+          glm::vec4(0.80f, 0.16f, 0.14f, 1.0f));
       break;
     case tactics::StreetPropKind::StreetNameSign:
-      box(0.0f, 0.0f, 0.0f, 0.08f, 2.5f, 0.08f, kPole);
-      // Two crossed name plates, one per street of the corner.
-      box(0.18f, 2.28f, 0.0f, 0.55f, 0.14f, 0.04f, glm::vec4(0.12f, 0.42f, 0.22f, 1.0f));
-      box(0.0f, 2.10f, 0.18f, 0.04f, 0.14f, 0.55f, glm::vec4(0.12f, 0.42f, 0.22f, 1.0f));
+      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.08f, 2.5f, 0.08f, kPole);
+      // Each blade follows its actual incident street; secondaryYaw is not
+      // assumed perpendicular, so skewed junctions remain skewed here.
+      box(prop.yaw, 0.0f, 2.28f, 0.0f, 0.80f, 0.14f, 0.04f,
+          glm::vec4(0.12f, 0.42f, 0.22f, 1.0f));
+      box(prop.secondaryYaw, 0.0f, 2.10f, 0.0f, 0.80f, 0.14f, 0.04f,
+          glm::vec4(0.12f, 0.42f, 0.22f, 1.0f));
       break;
+    case tactics::StreetPropKind::LampPost:
+      // The nested obstacle remains the collision/LOS pole; this slightly
+      // wider visible pole hides its plain obstacle-box rendering.
+      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.18f, 5.40f, 0.18f, kPole);
+      beam({0.0f, 5.20f}, {0.32f, 5.52f}, 0.16f, kPole);
+      beam({0.32f, 5.52f}, {0.82f, 5.72f}, 0.16f, kPole);
+      beam({0.82f, 5.72f}, {1.48f, 5.72f}, 0.16f, kPole);
+      beam({1.48f, 5.72f}, {1.66f, 5.54f}, 0.16f, kPole);
+      box(prop.yaw, 1.66f, 5.38f, 0.0f, 0.54f, 0.18f, 0.32f,
+          glm::vec4(0.18f, 0.19f, 0.21f, 1.0f));
+      box(prop.yaw, 1.66f, 5.34f, 0.0f, 0.38f, 0.05f, 0.24f,
+          glm::vec4(0.96f, 0.82f, 0.42f, 1.0f));
+      break;
+  }
+  return parts;
+}
+
+void DrawStreetProp(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
+                    const glm::mat4& lightSpaceMatrix, const tactics::StreetProp& prop) {
+  for (const StreetPropPart& part : BuildStreetPropParts(prop)) {
+    DrawLitModel(shader, cube, viewProj, lightSpaceMatrix, part.model, part.color);
+  }
+}
+
+void DrawStreetPropDepth(const Shader& shader, const CubeMesh& cube,
+                         const glm::mat4& lightSpaceMatrix,
+                         const tactics::StreetProp& prop) {
+  for (const StreetPropPart& part : BuildStreetPropParts(prop)) {
+    shader.SetMat4("uLightMVP", lightSpaceMatrix * part.model);
+    cube.Draw();
   }
 }
 
@@ -600,16 +670,45 @@ void AppendBox(const AABB& box, LitVertices* vertices, std::vector<GLuint>* indi
   quad({hi.x, lo.y, lo.z}, {hi.x, hi.y, lo.z}, {hi.x, hi.y, hi.z}, {hi.x, lo.y, hi.z}, {1, 0, 0});
 }
 
+// Unit cube transformed exactly like CubeMesh. Used to batch street
+// fixtures into the single static mesh consumed by the FOV depth/receiver
+// passes.
+void AppendBoxModel(const glm::mat4& model, LitVertices* vertices,
+                    std::vector<GLuint>* indices) {
+  const glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(model)));
+  const auto p = [&](float x, float y, float z) {
+    return glm::vec3(model * glm::vec4(x, y, z, 1.0f));
+  };
+  const auto n = [&](float x, float y, float z) {
+    return glm::normalize(normalMatrix * glm::vec3(x, y, z));
+  };
+  auto quad = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d, glm::vec3 normal) {
+    AppendTriangle(a, b, c, normal, vertices, indices);
+    AppendTriangle(a, c, d, normal, vertices, indices);
+  };
+  quad(p(0, 1, 0), p(0, 1, 1), p(1, 1, 1), p(1, 1, 0), n(0, 1, 0));
+  quad(p(0, 0, 0), p(1, 0, 0), p(1, 0, 1), p(0, 0, 1), n(0, -1, 0));
+  quad(p(0, 0, 0), p(0, 1, 0), p(1, 1, 0), p(1, 0, 0), n(0, 0, -1));
+  quad(p(0, 0, 1), p(1, 0, 1), p(1, 1, 1), p(0, 1, 1), n(0, 0, 1));
+  quad(p(0, 0, 0), p(0, 0, 1), p(0, 1, 1), p(0, 1, 0), n(-1, 0, 0));
+  quad(p(1, 0, 0), p(1, 1, 0), p(1, 1, 1), p(1, 0, 1), n(1, 0, 0));
+}
+
 // Everything static the shadow-map FOV prototype (issue #110) casts from
 // and receives on, apart from the ground itself: obstacles (walls + roofs),
 // decks/ramps as 0.45-thick slabs (matching the gameplay LOS slab in
-// LineOfSightClear and the lit pass), sidewalk slabs and patches, and
-// roads. Built once per scene so each extra per-unit pass is one draw call.
+// LineOfSightClear and the lit pass), street fixtures, sidewalk slabs and
+// patches, and roads. Built once per scene so each per-unit pass is one draw.
 void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   LitVertices vertices;
   std::vector<GLuint> indices;
   for (const tactics::Obstacle& obstacle : scene.obstacles) {
     AppendPolygonPrism(obstacle, &vertices, &indices);
+  }
+  for (const tactics::StreetProp& prop : scene.props) {
+    for (const StreetPropPart& part : BuildStreetPropParts(prop)) {
+      AppendBoxModel(part.model, &vertices, &indices);
+    }
   }
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
     AppendSurfacePatch(surface.vertices, 0.45f, &vertices, &indices);
@@ -642,6 +741,12 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
   for (const tactics::Obstacle& o : scene.obstacles) {
     mix(&o.bounds, sizeof(o.bounds));
     mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
+  }
+  for (const tactics::StreetProp& prop : scene.props) {
+    mix(&prop.kind, sizeof(prop.kind));
+    mix(&prop.position, sizeof(prop.position));
+    mix(&prop.yaw, sizeof(prop.yaw));
+    mix(&prop.secondaryYaw, sizeof(prop.secondaryYaw));
   }
   for (const tactics::WalkSurface& s : scene.walkSurfaces) mixVec3s(s.vertices);
   mix(scene.sidewalks.data(), scene.sidewalks.size() * sizeof(AABB));
@@ -2109,6 +2214,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
         geometryMesh_.Draw();
       }
+    }
+    for (const tactics::StreetProp& prop : game.GetScene().props) {
+      DrawStreetPropDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, prop);
     }
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(kDeckShadowSlopeBias, kDeckShadowConstantBias);

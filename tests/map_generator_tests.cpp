@@ -80,7 +80,7 @@ bool SameScene(const Scene& a, const Scene& b) {
   if (a.props.size() != b.props.size()) return false;
   for (size_t i = 0; i < a.props.size(); ++i) {
     if (a.props[i].kind != b.props[i].kind || a.props[i].position != b.props[i].position ||
-        a.props[i].yaw != b.props[i].yaw) {
+        a.props[i].yaw != b.props[i].yaw || a.props[i].secondaryYaw != b.props[i].secondaryYaw) {
       return false;
     }
   }
@@ -1624,12 +1624,17 @@ void TestFurnitureKeepsSidewalksConnected() {
 }
 
 // Traffic lights stand on junction corners (two streets of distinct heading
-// within reach), stop/yield signs appear at artery tees, street-name signs
-// at block corners -- and all of them stay visual-only: never inside an
-// obstacle, absent from the furniture-off scene.
+// within reach), stop/yield signs appear at artery tees, and every control
+// faces along one of those streets. Street-name blades reproduce both actual
+// corner headings (including skewed angles), while lamp arms point out over
+// the road from a taller collision pole.
 void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
   const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
-  int lights = 0, stopYield = 0, names = 0;
+  int lights = 0, stopYield = 0, names = 0, lamps = 0, skewedNames = 0;
+  const auto direction = [](float yaw) { return glm::vec2(std::cos(yaw), std::sin(yaw)); };
+  const auto parallel = [](glm::vec2 a, glm::vec2 b) {
+    return std::fabs(a.x * b.y - a.y * b.x) < 1.0e-4f;
+  };
   for (uint32_t seed : kSeeds) {
     const Scene scene = GenerateUrbanMap(seed, on);
     CHECK(!scene.props.empty());
@@ -1639,26 +1644,62 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
       const glm::vec2 p(prop.position.x, prop.position.z);
       CHECK(std::fabs(p.x) < scene.mapHalfExtent - 0.4f);
       CHECK(std::fabs(p.y) < scene.mapHalfExtent - 0.4f);
+      if (prop.kind == StreetPropKind::LampPost) {
+        ++lamps;
+        bool hasPole = false;
+        for (const Obstacle& o : scene.obstacles) {
+          const glm::vec3 center = o.bounds.Center();
+          if (glm::distance(glm::vec2(center.x, center.z), p) > 1.0e-3f) continue;
+          hasPole |= o.bounds.max.y - prop.position.y >= 5.39f;
+        }
+        CHECK(hasPole);
+        continue;
+      }
       for (const Obstacle& o : scene.obstacles) {
         CHECK(DistanceToConvexPolygon(p, ObstacleFootprint(o)) > 0.2f);
       }
       if (prop.kind == StreetPropKind::StreetNameSign) {
         ++names;
         float corner = 1e9f;
+        const UrbanBlock* closestBlock = nullptr;
+        size_t closestVertex = 0;
         for (const UrbanBlock& block : blocks) {
-          for (const glm::vec2& v : block.vertices) corner = std::min(corner, glm::distance(p, v));
+          for (size_t v = 0; v < block.vertices.size(); ++v) {
+            const float distance = glm::distance(p, block.vertices[v]);
+            if (distance >= corner) continue;
+            corner = distance;
+            closestBlock = &block;
+            closestVertex = v;
+          }
         }
         CHECK(corner <= 1.0f);
+        CHECK(closestBlock != nullptr);
+        if (closestBlock) {
+          const std::vector<glm::vec2>& poly = closestBlock->vertices;
+          const glm::vec2 next =
+              glm::normalize(poly[(closestVertex + 1) % poly.size()] - poly[closestVertex]);
+          const glm::vec2 previous = glm::normalize(
+              poly[closestVertex] - poly[(closestVertex + poly.size() - 1) % poly.size()]);
+          CHECK(parallel(direction(prop.yaw), next));
+          CHECK(parallel(direction(prop.secondaryYaw), previous));
+          if (std::fabs(glm::dot(next, previous)) > 0.05f) ++skewedNames;
+        }
         continue;
       }
-      (prop.kind == StreetPropKind::TrafficLight ? lights : stopYield)++;
+      if (prop.kind == StreetPropKind::TrafficLight) {
+        ++lights;
+      } else {
+        CHECK(prop.kind == StreetPropKind::StopSign || prop.kind == StreetPropKind::YieldSign);
+        ++stopYield;
+      }
       // A junction: two nearby streets with clearly different headings.
       glm::vec2 firstDir(0.0f);
-      bool junction = false;
+      bool junction = false, aligned = false;
       for (const UrbanStreet& street : streets) {
         const glm::vec2 a(street.a.x, street.a.z), b(street.b.x, street.b.z);
         if (DistanceToSegment(p, a, b) > street.width * 0.5f + 2.0f) continue;
         const glm::vec2 dir = glm::normalize(b - a);
+        aligned |= parallel(direction(prop.yaw), dir);
         if (firstDir == glm::vec2(0.0f)) {
           firstDir = dir;
         } else if (std::fabs(firstDir.x * dir.y - firstDir.y * dir.x) > 0.25f) {
@@ -1666,15 +1707,17 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
         }
       }
       CHECK(junction);
+      CHECK(aligned);
     }
   }
   CHECK(lights > 0);
   CHECK(stopYield > 0);
   CHECK(names > 0);
+  CHECK(lamps > 0);
+  CHECK(skewedNames > 0);
 
-  // Visual-only also means: identical gameplay surfaces with and without
-  // props is covered by TestFurnitureHugsSidewalksAndRespectsClearances;
-  // here, the off scene must carry no props at all.
+  // Traffic/sign fixtures add no gameplay surfaces; lamp collision remains
+  // the already-tested furniture pole. The off scene carries neither kind.
   CHECK(GenerateUrbanMap(kSeeds[0], FurnitureConfig(FeatureMode::Off)).props.empty());
 }
 
@@ -1682,7 +1725,7 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
 // alters item or prop placement shows up here first.
 void TestPinnedFurnitureFingerprints() {
   struct Expected { uint32_t seed; size_t furniture; size_t props; };
-  const Expected expected[] = {{1u, 106, 74}, {42u, 96, 80}, {2024u, 114, 85}};
+  const Expected expected[] = {{1u, 106, 91}, {42u, 96, 90}, {2024u, 114, 108}};
   const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
   const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
   for (const auto& e : expected) {

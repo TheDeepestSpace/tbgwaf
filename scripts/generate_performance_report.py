@@ -154,6 +154,19 @@ def history_rows(runs: list[dict]) -> str:
     return "\n".join(rows)
 
 
+def renderer_note(renderer: str) -> str:
+    """Explain why absolute numbers are low: CI measures on a CPU rasterizer, not a GPU."""
+    software = any(token in renderer.lower() for token in ("llvmpipe", "softpipe", "swrast", "software"))
+    if software:
+        return (f"Measured with <code>{html.escape(renderer)}</code>, a CPU software rasterizer on a shared "
+                "GitHub-hosted runner with no GPU. Absolute FPS and frame times are far below what the game "
+                "reaches on real hardware; only the deltas between master and the current run on this same "
+                "setup are meaningful.")
+    return (f"Measured with <code>{html.escape(renderer)}</code> on a GitHub-hosted runner, not on gaming "
+            "hardware. Compare master and the current run against each other rather than reading the "
+            "absolute numbers.")
+
+
 def build_page(current: dict, runs: list[dict], title: str = "Performance suite") -> str:
     metadata = current.get("metadata", {})
     config = current.get("configuration", {})
@@ -186,6 +199,7 @@ a {{ color: #8ab4ff; }} h1 {{ margin-bottom: .25rem; }}
 .card {{ border: 1px solid #343941; background: #1b1e23; border-radius: 8px; padding: .8rem; }}
 .card span,.card small {{ display: block; color: #aab0ba; }} .card strong {{ font-size: 1.5rem; }}
 .good {{ color: #62cf83; }} .bad {{ color: #ef7373; }}
+.note {{ border-left: 3px solid #e0a54a; background: #2a2416; padding: .6rem .8rem; margin: 1rem 0; }}
 .scroll {{ overflow-x: auto; }}
 table {{ border-collapse: collapse; width: 100%; font-size: .86rem; }}
 th,td {{ border: 1px solid #343941; padding: .42rem .55rem; text-align: right; white-space: nowrap; }}
@@ -200,6 +214,7 @@ tbody th,td:nth-child(1) {{ text-align: left; }} code {{ font-size: .9em; }}
 <nav class="nav"><a href="../">Game</a><a href="../gallery/">Asset gallery</a><a href="{html.escape(current.get("_href") or "latest/results.json", quote=True)}">Raw JSON</a></nav>
 <p>Observational software-rendering measurements for 10 pinned <code>urban-auto</code> maps. Values are medians;
 master ranges show the median from each preserved master run. Timing changes are reported, not gated.</p>
+<p class="note">{renderer_note(renderer)}</p>
 <div class="cards">{cards(current, baselines)}</div>
 <h2>Per-map measurements</h2>
 <div class="scroll"><table><thead><tr>{''.join(header_cells)}</tr><tr>{''.join(sub_cells)}</tr></thead>

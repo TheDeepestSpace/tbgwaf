@@ -556,6 +556,13 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
         rig.Commit();
       } else if (action.kind == ScenarioAction::Kind::NewGame) {
         rig.NewMatch();
+      } else if (action.kind == ScenarioAction::Kind::Wait) {
+        // Pure client-side time: ghosts fade on each mirror's own clock.
+        for (Team team : {Team::Blue, Team::Red}) {
+          for (float t = 0.0f; t < action.playSeconds - 1e-4f; t += 0.05f) {
+            rig.For(team).game.UpdateSightingMemory(0.05f);
+          }
+        }
       } else {
         const tactics::Unit* actor = nullptr;
         for (const tactics::Unit& u : scenario.scene.units) {

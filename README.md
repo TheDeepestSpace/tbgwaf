@@ -67,11 +67,12 @@ or climbs onto a deck before a run of walls, flies over them clear of the
 highest tier and settles onto the level beyond, with either ramp optionally
 replaced by an elevated map edge, up to one tall deck above every level. The
 branch merges onto whatever the artery is doing and ramps through the walls
-it meets at grade. A local street never runs into a level: an
-avenue may ramp through one; any other stops at the last street it crossed
-before the cliff (a T, not an X) and resumes at the first one beyond it, and
-the blocks either side of the missing stretch stay one block. Switch the
-levels off with
+it meets at grade. A local street never runs into a level or across a road
+that is ramping through one: an avenue may ramp through a level; any other
+street whose pavement would reach the level band or a ramp corridor stops at
+the last street it crossed before it (a T, not an X) and resumes at the first
+one beyond it, and the blocks either side of the missing stretch stay one
+block. Switch the levels off with
 `TBGWAF_TERRAIN=off`, `MapGeneratorConfig::features.terrain`, or scenario
 YAML:
 

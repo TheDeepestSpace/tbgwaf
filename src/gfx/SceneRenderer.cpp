@@ -2440,11 +2440,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(1.0f, 1.0f);
     // Earthy green-brown so the hills read as terrain rather than factory
-    // floor; a city's levels keep the urban ground tone.
+    // floor; a city with levels is concrete throughout, base ground, raised
+    // tiers, cliff faces and stairs alike, like its decks.
     const bool city = !game.GetScene().roads.empty();
     DrawLitModel(litShader_, terrainMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 city ? glm::vec4(0.16f, 0.18f, 0.20f, 1.0f) : glm::vec4(0.30f, 0.36f, 0.22f, 1.0f));
-    // Raised levels, their cliff faces and stairs: concrete, like the decks.
+                 city ? glm::vec4(kDeckColor, 1.0f) : glm::vec4(0.30f, 0.36f, 0.22f, 1.0f));
     DrawLitModel(litShader_, terrainRaisedMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(kDeckColor, 1.0f));
     DrawLitModel(litShader_, terrainStairMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),

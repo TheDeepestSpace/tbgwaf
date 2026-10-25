@@ -368,6 +368,31 @@ void TestHighwayProfilesOverLevels() {
   }
 }
 
+void TestStreetsKeepClearOfLevels() {
+  // A local street's pavement never reaches a level band, except the avenue
+  // ramped through that level, which crosses it climbing the full rise.
+  const auto c = TerrainConfig();
+  for (currentSeed = 1; currentSeed <= 200; ++currentSeed) {
+    const Scene s = GenerateUrbanMap(currentSeed, c);
+    for (const UrbanStreet& street : UrbanStreets(currentSeed, c)) {
+      if (street.cls == UrbanStreetClass::Highway) continue;
+      const glm::vec2 a(street.a.x, street.a.z), b(street.b.x, street.b.z);
+      float expectedRise = 0.0f;  // Over every level it ramps through.
+      for (const TerrainWall& wall : s.terrainWalls) {
+        const float da = glm::dot(wall.raisedNormal, a - wall.origin);
+        const float db = glm::dot(wall.raisedNormal, b - wall.origin);
+        if ((da < 0.0f) != (db < 0.0f)) {
+          expectedRise += wall.rise * ((db >= 0.0f ? 1.0f : 0.0f) - (da >= 0.0f ? 1.0f : 0.0f));
+          continue;
+        }
+        // Both ends on one side: the band (3.2) plus the street's half width.
+        CHECK(std::min(std::fabs(da), std::fabs(db)) >= 3.2f + street.width * 0.5f - 0.05f);
+      }
+      CHECK(std::fabs((street.b.y - street.a.y) - expectedRise) < 0.3f);
+    }
+  }
+}
+
 void TestTerrainZiplines() {
   auto c = TerrainConfig();
   c.maxZiplinesPerBlock = 2;
@@ -430,6 +455,7 @@ int main() {
   TestWallCoverAndCollision();
   TestHighwayTerrainInterplay();
   TestHighwayProfilesOverLevels();
+  TestStreetsKeepClearOfLevels();
   TestTerrainZiplines();
   TestMovementUpStair();
   if (failures) { std::fprintf(stderr, "%d terrain check(s) failed\n", failures); return 1; }

@@ -2269,7 +2269,11 @@ void SceneRenderer::ApplyThermalSensor(int x, int y, int width, int height) {
   }
   glBindTexture(GL_TEXTURE_2D, thermalSceneTex_);
   if (width != thermalSceneWidth_ || height != thermalSceneHeight_) {
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA,
+    // RGB, not RGBA: CopyTexSubImage2D may only copy into a texture whose
+    // components the read buffer has, and the WebGL2 canvas has no alpha.
+    // An RGBA copy fails there with GL_INVALID_OPERATION and the sensor
+    // pass then shows an uninitialized (black) image. Only .r is sampled.
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB,
                  GL_UNSIGNED_BYTE, nullptr);
     thermalSceneWidth_ = width;
     thermalSceneHeight_ = height;

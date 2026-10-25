@@ -5,7 +5,7 @@
 name: overpass_enter_ramp_up
 
 map:
-  generate: {type: urban, seed: 16, arteries: 2}
+  generate: {type: urban, seed: 16, arteries: 2, features: {terrain: off}}
 
 units:
   - {id: 0, team: blue, position: [-1.6459, 0.621, 38.0182], facing_degrees: 0}

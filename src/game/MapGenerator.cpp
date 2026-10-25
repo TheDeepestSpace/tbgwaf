@@ -1087,9 +1087,13 @@ std::vector<UrbanBlock> BuildCityBlocks(uint32_t seed, const MapGeneratorConfig&
 
 // Ribbon edge; an end vertex sitting exactly on the map boundary slides
 // along the road direction onto it so the oblique road is cut off flush
-// with the edge, elevated off-map deck ends included.
+// with the edge, elevated off-map deck ends included. A deck (lift above
+// grade) rides the grade under its centerline rather than under each edge:
+// where it flies over a wall the edges would otherwise straddle the sharp
+// step and the slab would hump or dip across it. `deckGrade` is that grade
+// (null: edges follow `groundY`).
 std::vector<glm::vec3> RibbonSide(const UrbanRoad& road, bool left, float half,
-                                  const GroundY& groundY) {
+                                  const GroundY& groundY, const GroundY* deckGrade = nullptr) {
   std::vector<glm::vec3> side;
   side.reserve(road.centerline.size());
   for (size_t i = 0; i < road.centerline.size(); ++i) {
@@ -1109,7 +1113,12 @@ std::vector<glm::vec3> RibbonSide(const UrbanRoad& road, bool left, float half,
       ClipLineToSquare(q, tangent, half, &tMin, &tMax);
       q += tangent * (first ? tMin : tMax);
     }
-    side.emplace_back(q.x, groundY(q.x, q.y) + p.y, q.y);
+    float grade = groundY(q.x, q.y);
+    if (deckGrade) {
+      const float onDeck = std::clamp(p.y / 0.5f, 0.0f, 1.0f);
+      grade += onDeck * ((*deckGrade)(p.x, p.z) - grade);
+    }
+    side.emplace_back(q.x, grade + p.y, q.y);
   }
   return side;
 }
@@ -2042,8 +2051,9 @@ void EmitHighwaySurfaces(Scene* scene, const CityPlan& city, const MapGeneratorC
       return HighwayGradeAt(city.terrain, {x, z}, roadDir, roadIndex != 0);
     };
     const GroundY& base = city.terrain.enabled ? roadGrade : groundY;
-    const auto left = RibbonSide(road, true, scene->mapHalfExtent, base);
-    const auto right = RibbonSide(road, false, scene->mapHalfExtent, base);
+    const GroundY* deckGrade = city.terrain.enabled ? &roadGrade : nullptr;
+    const auto left = RibbonSide(road, true, scene->mapHalfExtent, base, deckGrade);
+    const auto right = RibbonSide(road, false, scene->mapHalfExtent, base, deckGrade);
     const std::vector<float> params = roadIndex == 0
                                           ? SampleParams(plan.artery.s0, plan.artery.s1)
                                           : SampleParams(plan.branch.u0, plan.branch.length);

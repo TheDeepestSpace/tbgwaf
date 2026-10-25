@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -41,6 +42,55 @@ struct Obstacle {
   // Small curb-side items share collision/LOS semantics with every other
   // obstacle but are tagged so the renderer can batch their static geometry.
   ObstacleKind kind = ObstacleKind::Generic;
+  // Index into Scene::buildings when this prism is (part of) a generated
+  // building, else -1 (hand-placed boxes, rocks, pier columns, crates). The
+  // renderer reads the building's facade style through it.
+  int building = -1;
+};
+
+// Building archetype (urban map issue #151, roadmap 3.2). Drawn per parcel
+// from a street-class-weighted table with a per-block character bias;
+// drives floor count/height (so the building's height) and the facade style.
+enum class BuildingKind : uint8_t {
+  Residential,  // Apartments: 3.0 floors, brick/plaster.
+  MixedUse,     // Shops under apartments: 4.0 ground floor, awning.
+  Office,       // 3.5 floors, glassy; upper storeys may step back.
+  Commercial,   // Single-storey shop/warehouse hall, awning.
+  Civic,        // Landmark: the towers.
+  Garage,       // Parking decks: low 2.8 floors, raw concrete.
+};
+constexpr int kBuildingKindCount = 6;
+const char* BuildingKindName(BuildingKind kind);
+
+// One generated building: the gameplay geometry stays the solid Obstacle
+// prism(s); this record is the typology beside it.
+struct Building {
+  BuildingKind kind = BuildingKind::Residential;
+  int floorCount = 1;
+  float groundFloorHeight = 3.0f;  // First floor; the rest are floorHeight.
+  float floorHeight = 3.0f;
+  // Facade palette index the renderer reads (kind * variants + variant).
+  int style = 0;
+  int obstacle = -1;       // Base prism (full parcel footprint).
+  int upperObstacle = -1;  // Top floor stepped back as its own prism (offices), else -1.
+  int parcel = -1;         // Index into UrbanParcels(seed, config).
+  int block = -1;
+
+  float Height() const {
+    return groundFloorHeight + static_cast<float>(floorCount - 1) * floorHeight;
+  }
+};
+
+// Visual-only massing detail (roadmap 3.3): a prism over a convex XZ
+// footprint between y0 and y1. Blocks sight lines and FOV (see
+// SightObstacles). Parapets and roof fixtures also block walking: they are
+// copied into WalkSurface::blockers of their roof slab. Awnings are overhead.
+struct MassingDetail {
+  enum class Kind : uint8_t { Parapet, RoofFixture, Awning };
+  Kind kind = Kind::Parapet;
+  std::vector<glm::vec2> footprint;  // Counter-clockwise.
+  float y0 = 0.0f, y1 = 0.0f;
+  int building = -1;
 };
 
 // A convex, planar walkable patch above (or sloping away from) the ground.
@@ -51,6 +101,9 @@ struct WalkSurface {
   std::vector<glm::vec3> vertices;  // Counter-clockwise when viewed from above.
   std::vector<int> neighbors;
   bool connectsToGround = false;    // The lowest edge is a legal ground transition.
+  // Convex XZ footprints standing on the patch (roof parapets, furniture)
+  // that a figure can't walk into. Honoured on single-patch routes only.
+  std::vector<std::vector<glm::vec2>> blockers;
 };
 
 // A pre-built zipline: a two-way cable between a ground anchor post and a

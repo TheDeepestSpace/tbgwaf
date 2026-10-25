@@ -69,6 +69,17 @@ bool SceneFromSpec(const Json& spec, tactics::Scene* out, std::string* error) {
           return Fail(error, "map.generate.elevated_branch must be ramp/off-map, got '" + end + "'");
         }
       }
+      // `character: downtown|residential|industrial|mixed` forces every
+      // block's neighbourhood character (issue #151); omitted keeps the
+      // generator's per-block draw.
+      if (gen["character"].IsString()) {
+        const std::string character = gen["character"].AsString();
+        if (!ParseBlockCharacter(character, &config.character)) {
+          return Fail(error,
+                      "map.generate.character must be auto/mixed/downtown/residential/industrial, "
+                      "got '" + character + "'");
+        }
+      }
       // `features: {lanes: on, curbs: {mode: auto, chance: 0.3}, ...}`
       // sets the optional urban detail layers (see UrbanFeatures).
       if (gen["features"].IsObject()) {

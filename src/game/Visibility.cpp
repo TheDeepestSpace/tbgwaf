@@ -1,5 +1,6 @@
 #include "game/Visibility.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "game/Geometry.h"
@@ -230,10 +231,12 @@ TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
 TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
                                      const std::vector<Obstacle>& obstacles,
                                      const std::vector<WalkSurface>& walkSurfaces,
-                                     const HeightField& terrain) {
+                                     const HeightField& terrain,
+                                     size_t reportedObstacles) {
   TeamVisibility result;
   result.visibleUnit.resize(units.size(), false);
-  result.visibleObstacle.resize(obstacles.size(), false);
+  const size_t sampled = std::min(reportedObstacles, obstacles.size());
+  result.visibleObstacle.resize(sampled, false);
   for (const Unit& target : units) {
     if (target.team == team) continue;
     const glm::vec3 probe = UnitFovProbe(target, walkSurfaces, terrain);
@@ -244,7 +247,7 @@ TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
     }
   }
   std::vector<glm::vec3> samples;
-  for (size_t i = 0; i < obstacles.size(); ++i) {
+  for (size_t i = 0; i < sampled; ++i) {
     samples.clear();
     const Obstacle& obstacle = obstacles[i];
     samples.push_back(obstacle.bounds.Center());

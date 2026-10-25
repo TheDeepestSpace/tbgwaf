@@ -3,6 +3,7 @@
 #include "gfx/FigureRig.h"
 
 #include <algorithm>
+#include <functional>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -559,11 +560,12 @@ void AppendBox(const AABB& box, LitVertices* vertices, std::vector<GLuint>* indi
 // or sidewalk polygon. The meshes are cached and batched by material.
 void AppendTerrainOverlay(const tactics::HeightField& terrain,
                           const std::array<glm::vec3, 3>& footprint,
-                          std::vector<glm::vec3>* points, float lift = 0.08f);
+                          std::vector<glm::vec3>* points, float lift = 0.08f,
+                          const std::vector<tactics::TerrainCliff>* cliffs = nullptr);
 
 void AppendPavement(const tactics::RoadSurface& patch, const tactics::HeightField& ground,
-                    float lift, float thickness, LitVertices* vertices,
-                    std::vector<GLuint>* indices) {
+                    const std::vector<tactics::TerrainCliff>& cliffs, float lift,
+                    float thickness, LitVertices* vertices, std::vector<GLuint>* indices) {
   if (ground.Empty()) {
     AppendSurfacePatch(patch.vertices, thickness, vertices, indices);
     return;
@@ -571,7 +573,7 @@ void AppendPavement(const tactics::RoadSurface& patch, const tactics::HeightFiel
   std::vector<glm::vec3> points;
   for (size_t i = 1; i + 1 < patch.vertices.size(); ++i) {
     AppendTerrainOverlay(ground, {patch.vertices[0], patch.vertices[i], patch.vertices[i + 1]},
-                         &points, lift);
+                         &points, lift, &cliffs);
   }
   for (size_t i = 0; i + 2 < points.size(); i += 3) {
     glm::vec3 normal = glm::cross(points[i + 1] - points[i], points[i + 2] - points[i]);
@@ -583,10 +585,14 @@ void AppendPavement(const tactics::RoadSurface& patch, const tactics::HeightFiel
 }
 
 void BuildPavementMesh(const std::vector<tactics::RoadSurface>& patches,
-                       const tactics::HeightField& ground, float lift, LitTriangleMesh* mesh) {
+                       const tactics::HeightField& ground,
+                       const std::vector<tactics::TerrainCliff>& cliffs, float lift,
+                       LitTriangleMesh* mesh) {
   LitVertices vertices;
   std::vector<GLuint> indices;
-  for (const auto& patch : patches) AppendPavement(patch, ground, lift, 0.0f, &vertices, &indices);
+  for (const auto& patch : patches) {
+    AppendPavement(patch, ground, cliffs, lift, 0.0f, &vertices, &indices);
+  }
   mesh->SetMesh(vertices, indices);
 }
 
@@ -599,6 +605,7 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   LitVertices vertices;
   std::vector<GLuint> indices;
   for (const tactics::Obstacle& obstacle : scene.obstacles) {
+    if (obstacle.navOnly) continue;  // A cliff edge: the terrain mesh is the caster.
     AppendPolygonPrism(obstacle, &vertices, &indices);
   }
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
@@ -606,10 +613,10 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   }
   for (const AABB& slab : scene.sidewalks) AppendBox(slab, &vertices, &indices);
   for (const tactics::RoadSurface& sidewalk : scene.sidewalkSurfaces) {
-    AppendPavement(sidewalk, scene.ground, 0.12f, 0.10f, &vertices, &indices);
+    AppendPavement(sidewalk, scene.ground, scene.terrainCliffs, 0.12f, 0.10f, &vertices, &indices);
   }
   for (const tactics::RoadSurface& road : scene.roads) {
-    AppendPavement(road, scene.ground, 0.025f, 0.0f, &vertices, &indices);
+    AppendPavement(road, scene.ground, scene.terrainCliffs, 0.025f, 0.0f, &vertices, &indices);
   }
   mesh->SetMesh(vertices, indices);
 }
@@ -959,14 +966,48 @@ void TerrainPatches(const tactics::HeightField& hf, int x0, int z0, int x1, int 
   }
 }
 
+// Sutherland-Hodgman clip of a convex polygon to the half-plane
+// side * (dot(n, p) - d) >= 0.
+std::vector<glm::vec2> ClipHalfPlane(const std::vector<glm::vec2>& polygon, glm::vec2 n, float d,
+                                     float side) {
+  std::vector<glm::vec2> out;
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    const glm::vec2 a = polygon[i], b = polygon[(i + 1) % polygon.size()];
+    const float sa = side * (glm::dot(n, a) - d), sb = side * (glm::dot(n, b) - d);
+    if (sa >= 0.0f) out.push_back(a);
+    if ((sa < 0.0f && sb > 0.0f) || (sa > 0.0f && sb < 0.0f)) {
+      out.push_back(a + (b - a) * (sa / (sa - sb)));
+    }
+  }
+  return out;
+}
+
+float PolygonArea2(const std::vector<glm::vec2>& polygon) {
+  float area = 0.0f;
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    const glm::vec2 a = polygon[i], b = polygon[(i + 1) % polygon.size()];
+    area += a.x * b.y - b.x * a.y;
+  }
+  return std::fabs(area) * 0.5f;
+}
+
 // Triangulated terrain heightfield with central-difference normals, plus a
 // border skirt dropping below the lowest sample so the map edge reads as a
-// solid block instead of a paper-thin sheet.
-void BuildTerrainMesh(const tactics::HeightField& hf, LitTriangleMesh* mesh) {
+// solid block instead of a paper-thin sheet. Cells a terrain cliff crosses
+// are split exactly along it, each side sampled clear of the heightfield's
+// one-cell smear, and the drop between them becomes a vertical face: a
+// city level ends in a sheer edge, not a sawtooth. With `concreteTiers`,
+// raised ground (and every cliff face) goes to `raised` so the levels and
+// their stairs read as concrete; the base ground stays in `base`.
+void BuildTerrainMesh(const tactics::HeightField& hf,
+                      const std::vector<tactics::TerrainCliff>& cliffs, bool concreteTiers,
+                      LitTriangleMesh* base, LitTriangleMesh* raised) {
   const int nx = hf.nx, nz = hf.nz;
-  std::vector<LitTriangleMesh::Vertex> vertices;
-  std::vector<GLuint> indices;
-  vertices.reserve(static_cast<size_t>(nx) * nz);
+  struct Build {
+    std::vector<LitTriangleMesh::Vertex> vertices;
+    std::vector<GLuint> indices;
+  };
+  Build builds[2];  // 0 base, 1 raised.
   float skirtBottom = 0.0f;
   for (int iz = 0; iz < nz; ++iz) {
     for (int ix = 0; ix < nx; ++ix) {
@@ -976,14 +1017,173 @@ void BuildTerrainMesh(const tactics::HeightField& hf, LitTriangleMesh* mesh) {
       skirtBottom = std::min(skirtBottom, y);
       const float dx = (hf.At(ix + 1, iz) - hf.At(ix - 1, iz)) / (2.0f * hf.step);
       const float dz = (hf.At(ix, iz + 1) - hf.At(ix, iz - 1)) / (2.0f * hf.step);
-      vertices.push_back({glm::vec3(x, y, z), glm::normalize(glm::vec3(-dx, 1.0f, -dz))});
+      builds[0].vertices.push_back({glm::vec3(x, y, z), glm::normalize(glm::vec3(-dx, 1.0f, -dz))});
     }
   }
-  indices.reserve(static_cast<size_t>(nx - 1) * (nz - 1) * 6);
-  const auto quad = [&](int x0, int z0, int x1, int z1) {
+  builds[1].vertices = builds[0].vertices;  // Same grid indices in either mesh.
+  constexpr float kRaisedY = 0.35f;
+  const auto bucket = [&](float minY) { return concreteTiers && minY > kRaisedY ? 1 : 0; };
+
+  // Cells each cliff crosses (segment against the cell square, with a
+  // margin so a cliff running along a grid line splits both neighbours).
+  struct CliffLine {
+    glm::vec2 a, b, n;
+    float d;
+  };
+  std::vector<CliffLine> lines;
+  std::vector<std::vector<int>> cellCliffs(static_cast<size_t>(std::max(0, (nx - 1) * (nz - 1))));
+  for (const tactics::TerrainCliff& cliff : cliffs) {
+    const glm::vec2 dir = cliff.b - cliff.a;
+    const float length = glm::length(dir);
+    if (length < 1e-4f) continue;
+    const glm::vec2 n(-dir.y / length, dir.x / length);
+    const int index = static_cast<int>(lines.size());
+    lines.push_back({cliff.a, cliff.b, n, glm::dot(n, cliff.a)});
+    const int cx0 = std::clamp(static_cast<int>(std::floor((std::min(cliff.a.x, cliff.b.x) - hf.minX) / hf.step)) - 1, 0, nx - 2);
+    const int cx1 = std::clamp(static_cast<int>(std::floor((std::max(cliff.a.x, cliff.b.x) - hf.minX) / hf.step)) + 1, 0, nx - 2);
+    const int cz0 = std::clamp(static_cast<int>(std::floor((std::min(cliff.a.y, cliff.b.y) - hf.minZ) / hf.step)) - 1, 0, nz - 2);
+    const int cz1 = std::clamp(static_cast<int>(std::floor((std::max(cliff.a.y, cliff.b.y) - hf.minZ) / hf.step)) + 1, 0, nz - 2);
+    for (int cz = cz0; cz <= cz1; ++cz) {
+      for (int cx = cx0; cx <= cx1; ++cx) {
+        // Segment vs. cell square (expanded by a hair): parametric clip.
+        const float x0 = hf.minX + cx * hf.step - 1e-3f, x1 = x0 + hf.step + 2e-3f;
+        const float z0 = hf.minZ + cz * hf.step - 1e-3f, z1 = z0 + hf.step + 2e-3f;
+        float t0 = 0.0f, t1 = 1.0f;
+        bool inside = true;
+        for (int axis = 0; axis < 2 && inside; ++axis) {
+          const float o = axis ? cliff.a.y : cliff.a.x, dd = axis ? dir.y : dir.x;
+          const float lo = axis ? z0 : x0, hi = axis ? z1 : x1;
+          if (std::fabs(dd) < 1e-7f) {
+            inside = o >= lo && o <= hi;
+          } else {
+            const float ta = (lo - o) / dd, tb = (hi - o) / dd;
+            t0 = std::max(t0, std::min(ta, tb));
+            t1 = std::min(t1, std::max(ta, tb));
+            inside = t0 <= t1;
+          }
+        }
+        if (inside) cellCliffs[static_cast<size_t>(cz) * (nx - 1) + cx].push_back(index);
+      }
+    }
+  }
+  const auto hasCliff = [&](int x0, int z0, int x1, int z1) {
+    for (int cz = z0; cz < z1; ++cz) {
+      for (int cx = x0; cx < x1; ++cx) {
+        if (!cellCliffs[static_cast<size_t>(cz) * (nx - 1) + cx].empty()) return true;
+      }
+    }
+    return false;
+  };
+  const float sampleOff = 1.2f * hf.step;  // Clear of the bilinear smear across a cliff.
+  const auto heightBeside = [&](glm::vec2 p, glm::vec2 toward) {
+    const glm::vec2 q = p + toward * sampleOff;
+    return hf.HeightAt(q.x, q.y);
+  };
+  const auto pushTriangle = [&](Build& build, const glm::vec3& a, const glm::vec3& b,
+                                const glm::vec3& c, glm::vec3 normal) {
+    const GLuint start = static_cast<GLuint>(build.vertices.size());
+    build.vertices.push_back({a, normal});
+    build.vertices.push_back({b, normal});
+    build.vertices.push_back({c, normal});
+    build.indices.insert(build.indices.end(), {start, start + 1, start + 2});
+  };
+
+  // One grid cell split along the cliffs crossing it.
+  const auto splitCell = [&](int cx, int cz) {
+    const float x0 = hf.minX + cx * hf.step, x1 = x0 + hf.step;
+    const float z0 = hf.minZ + cz * hf.step, z1 = z0 + hf.step;
+    const std::vector<int>& here = cellCliffs[static_cast<size_t>(cz) * (nx - 1) + cx];
+    std::vector<std::vector<glm::vec2>> pieces = {{{x0, z0}, {x1, z0}, {x1, z1}, {x0, z1}}};
+    for (const int li : here) {
+      const CliffLine& line = lines[li];
+      std::vector<std::vector<glm::vec2>> next;
+      for (const auto& piece : pieces) {
+        for (const float side : {1.0f, -1.0f}) {
+          auto part = ClipHalfPlane(piece, line.n, line.d, side);
+          if (part.size() >= 3 && PolygonArea2(part) > 1e-6f) next.push_back(std::move(part));
+        }
+      }
+      pieces = std::move(next);
+    }
+    for (const auto& piece : pieces) {
+      glm::vec2 centroid(0.0f);
+      for (const glm::vec2& p : piece) centroid += p;
+      centroid /= static_cast<float>(piece.size());
+      std::vector<glm::vec3> lifted;
+      for (const glm::vec2& p : piece) {
+        // A vertex on a cliff line samples its own side; a grid corner is
+        // an exact sample already.
+        glm::vec2 toward(0.0f);
+        for (const int li : here) {
+          const CliffLine& line = lines[li];
+          if (std::fabs(glm::dot(line.n, p) - line.d) < 1e-3f) {
+            toward += line.n * (glm::dot(line.n, centroid) - line.d >= 0.0f ? 1.0f : -1.0f);
+          }
+        }
+        const float y = glm::length(toward) > 1e-6f ? heightBeside(p, glm::normalize(toward))
+                                                      : hf.HeightAt(p.x, p.y);
+        lifted.emplace_back(p.x, y, p.y);
+      }
+      float minY = lifted.front().y;
+      for (const glm::vec3& v : lifted) minY = std::min(minY, v.y);
+      Build& build = builds[bucket(minY)];
+      for (size_t i = 1; i + 1 < lifted.size(); ++i) {
+        glm::vec3 normal = glm::cross(lifted[i] - lifted[0], lifted[i + 1] - lifted[0]);
+        if (glm::length(normal) < 1e-9f) continue;
+        normal = glm::normalize(normal);
+        if (normal.y < 0.0f) normal = -normal;
+        pushTriangle(build, lifted[0], lifted[i], lifted[i + 1], normal);
+      }
+    }
+    // Vertical faces along each cliff's stretch inside the cell.
+    for (const int li : here) {
+      const CliffLine& line = lines[li];
+      std::vector<glm::vec2> strip = {{x0, z0}, {x1, z0}, {x1, z1}, {x0, z1}};
+      // The segment clipped to the cell: intersect the cell with a thin band
+      // around the line, then take the band's extent along the line.
+      strip = ClipHalfPlane(strip, line.n, line.d - 1e-4f, 1.0f);
+      strip = ClipHalfPlane(strip, line.n, line.d + 1e-4f, -1.0f);
+      if (strip.size() < 2) continue;
+      const glm::vec2 dir(line.n.y, -line.n.x);
+      float tLo = std::numeric_limits<float>::infinity(), tHi = -tLo;
+      for (const glm::vec2& p : strip) {
+        tLo = std::min(tLo, glm::dot(p - line.a, dir));
+        tHi = std::max(tHi, glm::dot(p - line.a, dir));
+      }
+      const float segLen = glm::dot(line.b - line.a, dir);
+      tLo = std::max(tLo, std::min(0.0f, segLen));
+      tHi = std::min(tHi, std::max(0.0f, segLen));
+      if (tHi - tLo < 1e-3f) continue;
+      const glm::vec2 q0 = line.a + dir * tLo, q1 = line.a + dir * tHi;
+      const float plus0 = heightBeside(q0, line.n), minus0 = heightBeside(q0, -line.n);
+      const float plus1 = heightBeside(q1, line.n), minus1 = heightBeside(q1, -line.n);
+      if (std::max(std::fabs(plus0 - minus0), std::fabs(plus1 - minus1)) < 0.02f) continue;
+      // Face toward the lower side.
+      const bool plusLower = plus0 + plus1 < minus0 + minus1;
+      const glm::vec3 normal(plusLower ? line.n.x : -line.n.x, 0.0f, plusLower ? line.n.y : -line.n.y);
+      const glm::vec3 a0(q0.x, std::min(plus0, minus0), q0.y), a1(q1.x, std::min(plus1, minus1), q1.y);
+      const glm::vec3 b0(q0.x, std::max(plus0, minus0), q0.y), b1(q1.x, std::max(plus1, minus1), q1.y);
+      Build& build = builds[concreteTiers ? 1 : 0];
+      pushTriangle(build, a0, a1, b1, normal);
+      pushTriangle(build, a0, b1, b0, normal);
+    }
+  };
+
+  const std::function<void(int, int, int, int)> quad = [&](int x0, int z0, int x1, int z1) {
+    if (hasCliff(x0, z0, x1, z1)) {
+      if (x1 - x0 == 1 && z1 - z0 == 1) {
+        splitCell(x0, z0);
+      } else {
+        for (int cz = z0; cz < z1; ++cz) {
+          for (int cx = x0; cx < x1; ++cx) quad(cx, cz, cx + 1, cz + 1);
+        }
+      }
+      return;
+    }
     const GLuint a = static_cast<GLuint>(z0 * nx + x0), b = z0 * nx + x1;
     const GLuint c = z1 * nx + x0, d = z1 * nx + x1;
-    indices.insert(indices.end(), {a, b, d, a, d, c});
+    const float minY = std::min({hf.At(x0, z0), hf.At(x1, z0), hf.At(x0, z1), hf.At(x1, z1)});
+    builds[bucket(minY)].indices.insert(builds[bucket(minY)].indices.end(), {a, b, d, a, d, c});
   };
   for (int z = 0; z + 1 < nz; z += kTerrainTileCells) {
     for (int x = 0; x + 1 < nx; x += kTerrainTileCells) {
@@ -995,14 +1195,15 @@ void BuildTerrainMesh(const tactics::HeightField& hf, LitTriangleMesh* mesh) {
   skirtBottom -= 0.5f;
   // Skirt: one quad per border edge, with an outward horizontal normal.
   auto skirtQuad = [&](int ix0, int iz0, int ix1, int iz1, const glm::vec3& normal) {
-    const GLuint base = static_cast<GLuint>(vertices.size());
-    const glm::vec3 a = vertices[iz0 * nx + ix0].pos;
-    const glm::vec3 b = vertices[iz1 * nx + ix1].pos;
-    vertices.push_back({a, normal});
-    vertices.push_back({b, normal});
-    vertices.push_back({glm::vec3(b.x, skirtBottom, b.z), normal});
-    vertices.push_back({glm::vec3(a.x, skirtBottom, a.z), normal});
-    indices.insert(indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+    Build& build = builds[0];
+    const GLuint start = static_cast<GLuint>(build.vertices.size());
+    const glm::vec3 a = build.vertices[iz0 * nx + ix0].pos;
+    const glm::vec3 b = build.vertices[iz1 * nx + ix1].pos;
+    build.vertices.push_back({a, normal});
+    build.vertices.push_back({b, normal});
+    build.vertices.push_back({glm::vec3(b.x, skirtBottom, b.z), normal});
+    build.vertices.push_back({glm::vec3(a.x, skirtBottom, a.z), normal});
+    build.indices.insert(build.indices.end(), {start, start + 1, start + 2, start, start + 2, start + 3});
   };
   for (int ix = 0; ix + 1 < nx; ++ix) {
     skirtQuad(ix, 0, ix + 1, 0, glm::vec3(0.0f, 0.0f, -1.0f));
@@ -1012,7 +1213,8 @@ void BuildTerrainMesh(const tactics::HeightField& hf, LitTriangleMesh* mesh) {
     skirtQuad(0, iz, 0, iz + 1, glm::vec3(-1.0f, 0.0f, 0.0f));
     skirtQuad(nx - 1, iz, nx - 1, iz + 1, glm::vec3(1.0f, 0.0f, 0.0f));
   }
-  mesh->SetMesh(vertices, indices);
+  base->SetMesh(builds[0].vertices, builds[0].indices);
+  raised->SetMesh(builds[1].vertices, builds[1].indices);
 }
 
 // Debug overlay of the navmesh's walkable-cell boundaries: each cell's
@@ -1261,13 +1463,55 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
 // not match the rendered surface within a non-planar heightfield cell.
 void AppendTerrainOverlay(const tactics::HeightField& terrain,
                           const std::array<glm::vec3, 3>& footprint,
-                          std::vector<glm::vec3>* points, float lift) {
+                          std::vector<glm::vec3>* points, float lift,
+                          const std::vector<tactics::TerrainCliff>* cliffs) {
   const auto crossXZ = [](const glm::vec3& a, const glm::vec3& b) {
     return a.x * b.z - a.z * b.x;
   };
   const float area = crossXZ(footprint[1] - footprint[0], footprint[2] - footprint[0]);
   if (std::abs(area) < 1e-8f) return;  // The cone's tip can make a degenerate triangle.
   const float winding = area > 0.0f ? 1.0f : -1.0f;
+  // Cliffs within the heightfield's one-cell smear of this patch: a
+  // clipped vertex that close to one is re-sampled clear of the smear on
+  // the patch's own side, so pavement stays flat right up to the edge
+  // instead of drooping over it (the patch itself never crosses a cliff).
+  struct NearCliff {
+    glm::vec2 n;
+    float d, side;
+  };
+  std::vector<NearCliff> near;
+  const float smear = 1.2f * terrain.step;
+  if (cliffs) {
+    const glm::vec3 centroid = (footprint[0] + footprint[1] + footprint[2]) / 3.0f;
+    for (const tactics::TerrainCliff& cliff : *cliffs) {
+      const glm::vec2 dir = cliff.b - cliff.a;
+      const float length = glm::length(dir);
+      if (length < 1e-4f) continue;
+      const glm::vec2 n(-dir.y / length, dir.x / length);
+      const float d = glm::dot(n, cliff.a);
+      float lo = 1e9f, hi = -1e9f;
+      for (const glm::vec3& v : footprint) {
+        const float s = glm::dot(n, glm::vec2(v.x, v.z)) - d;
+        lo = std::min(lo, s);
+        hi = std::max(hi, s);
+      }
+      if (lo > smear || hi < -smear) continue;
+      const float side = glm::dot(n, glm::vec2(centroid.x, centroid.z)) - d >= 0.0f ? 1.0f : -1.0f;
+      near.push_back({n, d, side});
+    }
+  }
+  const auto besideCliff = [&](glm::vec3 p) {
+    glm::vec2 toward(0.0f);
+    for (const NearCliff& c : near) {
+      const glm::vec2 q(p.x, p.z);
+      if (std::fabs(glm::dot(c.n, q) - c.d) >= smear) continue;
+      toward += c.n * c.side;
+    }
+    if (glm::length(toward) < 1e-6f) return p;
+    const glm::vec2 q = glm::vec2(p.x, p.z) + glm::normalize(toward) * smear;
+    p.y = terrain.HeightAt(q.x, q.y) + lift;
+    return p;
+  };
   const glm::vec3 lo = glm::min(footprint[0], glm::min(footprint[1], footprint[2]));
   const glm::vec3 hi = glm::max(footprint[0], glm::max(footprint[1], footprint[2]));
   const auto cellIndex = [&](float value, float origin, int count) {
@@ -1306,6 +1550,9 @@ void AppendTerrainOverlay(const tactics::HeightField& terrain,
       }
       poly.swap(clipped);
       count = clippedCount;
+    }
+    if (!near.empty()) {
+      for (int v = 0; v < count; ++v) poly[v] = besideCliff(poly[v]);
     }
     for (int v = 1; v + 1 < count; ++v) {
       points->insert(points->end(), {poly[0], poly[v], poly[v + 1]});
@@ -1847,6 +2094,7 @@ bool SceneRenderer::Init() {
   shotConeMesh_.Init();
   aimOverlayMesh_.Init();
   terrainMesh_.Init();
+  terrainRaisedMesh_.Init();
   terrainRoadMesh_.Init();
   terrainSidewalkMesh_.Init();
   geometryMesh_.Init();
@@ -1932,6 +2180,7 @@ void SceneRenderer::Destroy() {
   fovKeySidewalks_.clear();
   fovKeyMapHalfExtent_ = 0.0f;
   terrainMesh_.Destroy();
+  terrainRaisedMesh_.Destroy();
   terrainRoadMesh_.Destroy();
   terrainSidewalkMesh_.Destroy();
   pavementKey_ = 0;
@@ -1993,6 +2242,7 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, f
     if (drawTerrain) {
       depthShader_.SetMat4("uLightMVP", mapMatrix[half]);
       terrainMesh_.Draw();
+      terrainRaisedMesh_.Draw();
     } else {
       DrawBoxDepth(depthShader_, cubeMesh_, mapMatrix[half],
                    glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
@@ -2054,6 +2304,7 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, f
   };
   if (drawTerrain) {
     drawReceiver(terrainMesh_, glm::mat4(1.0f));
+    drawReceiver(terrainRaisedMesh_, glm::mat4(1.0f));
   } else {
     drawReceiver(cubeMesh_, BoxModel(glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
                                      glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f)));
@@ -2077,15 +2328,21 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       terrainKey_.nz != terrain.nz || terrainKey_.minX != terrain.minX ||
       terrainKey_.minZ != terrain.minZ || terrainKey_.step != terrain.step;
   if (terrainChanged) {
-    if (!terrain.Empty()) BuildTerrainMesh(terrain, &terrainMesh_);
+    if (!terrain.Empty()) {
+      BuildTerrainMesh(terrain, game.GetScene().terrainCliffs,
+                       /*concreteTiers=*/!game.GetScene().terrainCliffs.empty(), &terrainMesh_,
+                       &terrainRaisedMesh_);
+    }
     terrainKey_ = terrain;
     fovSceneKey_ = 0;
   }
   if (!terrain.Empty()) {
     const auto key = FovSceneFingerprint(game.GetScene());
     if (terrainChanged || pavementKey_ != key) {
-      BuildPavementMesh(game.GetScene().roads, terrain, 0.025f, &terrainRoadMesh_);
-      BuildPavementMesh(game.GetScene().sidewalkSurfaces, terrain, 0.12f, &terrainSidewalkMesh_);
+      BuildPavementMesh(game.GetScene().roads, terrain, game.GetScene().terrainCliffs, 0.025f,
+                        &terrainRoadMesh_);
+      BuildPavementMesh(game.GetScene().sidewalkSurfaces, terrain, game.GetScene().terrainCliffs,
+                        0.12f, &terrainSidewalkMesh_);
       pavementKey_ = key;
     }
   }
@@ -2147,8 +2404,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     if (drawTerrain) {
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
       terrainMesh_.Draw();
+      terrainRaisedMesh_.Draw();
     }
     for (const auto& obstacle : obstacles) {
+      if (obstacle.navOnly) continue;
       const AABB& bounds = obstacle.bounds;
       if (obstacle.footprint.empty()) {
         DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min,
@@ -2220,6 +2479,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // not fade that wall.
     constexpr float kEndpointEpsilon = 1e-2f;
     for (size_t i = 0; i < obstacles.size(); ++i) {
+      if (obstacles[i].navOnly) continue;
       for (const ProbeRay& ray : rays) {
         float t = 0.0f;
         if (tactics::RayIntersectsObstacle(cameraPos, ray.direction, obstacles[i], &t) &&
@@ -2262,6 +2522,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     const bool city = !game.GetScene().roads.empty();
     DrawLitModel(litShader_, terrainMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  city ? glm::vec4(0.16f, 0.18f, 0.20f, 1.0f) : glm::vec4(0.30f, 0.36f, 0.22f, 1.0f));
+    // Raised levels, their cliff faces and stairs: concrete, like the decks.
+    DrawLitModel(litShader_, terrainRaisedMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(kDeckColor, 1.0f));
     glDisable(GL_POLYGON_OFFSET_FILL);
   } else {
     DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_,
@@ -2305,7 +2568,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   for (size_t i = 0; i < obstacles.size(); ++i) {
-    if (fadeObstacle[i]) continue;  // Re-drawn translucent below.
+    if (fadeObstacle[i] || obstacles[i].navOnly) continue;  // Re-drawn translucent below / unseen.
     const AABB& bounds = obstacles[i].bounds;
     const glm::vec4 color(kObstacleColor, 1.0f);
     if (obstacles[i].footprint.empty()) {

@@ -34,6 +34,9 @@ struct Obstacle {
   // phase and vertical extent; collision, LOS, navigation and rendering use
   // these vertices when present.
   std::vector<glm::vec2> footprint;
+  // Blocks movement and LOS but is never drawn: the unseen wall along a
+  // terrain cliff edge, whose face the terrain mesh itself renders.
+  bool navOnly = false;
 };
 
 // A convex, planar walkable patch above (or sloping away from) the ground.

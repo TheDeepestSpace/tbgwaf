@@ -8,9 +8,9 @@
 
 namespace tactics {
 
-// A stair up one terrain level wall (issue #155): a flight attached along
-// the wall face on its low side, climbing parallel to the wall in the
-// wall-side walk, then a landing across the wall top onto the level.
+// A stair up one terrain level (issue #155): a flight attached along the
+// cliff face on its low side, climbing parallel to it, then a landing
+// across the cliff top onto the level.
 // `bottom` is the ground point at the flight's foot, `top` the ground point
 // on the level past the landing.
 struct TerrainAccess {
@@ -19,16 +19,24 @@ struct TerrainAccess {
 };
 
 // One map-spanning terrain step: ground on the `raisedNormal` side of the
-// step line sits `rise` higher, behind a retaining wall. `origin` and `dir`
-// give the centerline of the wall strip carved between the blocks on the
-// low side (the wall box, the stair flights and a walkway; 6.6 wide), whose
-// raised edge is the step line. Steps overlap into nested tiers; highway
-// ramps and the stair flights climb them.
+// step line sits `rise` higher, behind a sheer cliff. `origin` and `dir`
+// give the centerline of the strip carved between the blocks on the low
+// side (the stair flights and a walkway; 4.4 wide), whose raised edge is
+// the step line. Steps overlap into nested tiers; highway ramps and the
+// stair flights climb them.
 struct TerrainWall {
   glm::vec2 origin{0.0f}, dir{1.0f, 0.0f};
   glm::vec2 raisedNormal{0.0f, 1.0f};
   float rise = 0.0f;
   std::vector<TerrainAccess> accesses;
+};
+
+// A straight stretch along which the terrain is discontinuous (a level's
+// step line, a ramp channel's side, a stair flight's edge). The renderer
+// splits the ground mesh along it and draws the vertical face; an unseen
+// nav-only Obstacle keeps figures off the edge.
+struct TerrainCliff {
+  glm::vec2 a{0.0f}, b{0.0f};
 };
 
 // Hardcoded Stage-A scene: a ~30x30 unit field with box-shaped obstacles and
@@ -67,6 +75,7 @@ struct Scene {
   // rendering all sample it (see HeightField).
   HeightField ground;
   std::vector<TerrainWall> terrainWalls;
+  std::vector<TerrainCliff> terrainCliffs;
   FlagConfig flag;
   // Round limit: when > 0 the match ends in a draw once this many rounds
   // have been played without a winner. 0 (the default) means unlimited.

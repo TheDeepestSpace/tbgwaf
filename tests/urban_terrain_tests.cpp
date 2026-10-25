@@ -194,19 +194,27 @@ void TestWallCoverAndCollision() {
   for (const TerrainWall& wall : s.terrainWalls) {
     const glm::vec2 n = wall.raisedNormal;
     for (float t = -s.mapHalfExtent; t <= s.mapHalfExtent; t += 4.0f) {
-      // Walk the step line; wherever the wall stands (box center blocked),
-      // it blocks low LOS across and leaves the wall-top line clear.
+      // Walk the step line; wherever the cliff stands (its nav wall blocks
+      // the line), it blocks low LOS across and leaves the top line clear.
       const glm::vec2 onLine = wall.origin + wall.dir * t;
-      // Strip center -> step line (+3.3) -> wall box center (-1.1).
-      const glm::vec2 box = onLine + n * (6.6f * 0.5f - 1.1f);
+      // Strip center -> step line (+2.2), where the unseen cliff wall stands.
+      const glm::vec2 box = onLine + n * (4.4f * 0.5f);
       if (std::max(std::fabs(box.x), std::fabs(box.y)) > s.mapHalfExtent - 10.0f) continue;
-      if (nav.IsWalkable(box.x, box.y)) continue;  // A gap or off the wall.
-      const glm::vec2 low2 = box - n * 2.6f, high2 = box + n * 2.6f;
+      if (nav.IsWalkable(box.x, box.y)) continue;  // A gap or off the cliff.
+      // Probes just inside the level's sidewalk ring and just outside the
+      // stair strip, where the profile must be a clean full step: a flight,
+      // a ramp channel mouth or a building spoils the sample.
+      const glm::vec2 low2 = box - n * 1.2f, high2 = box + n * 1.2f;
       const float lowY = s.ground.HeightAt(low2.x, low2.y);
       const float highY = s.ground.HeightAt(high2.x, high2.y);
-      // Not the full retaining wall: a building, or a stair flight / landing
-      // raising the low-side sample.
       if (highY - lowY < wall.rise * 0.9f) continue;
+      bool clean = true;
+      for (float k = 0.6f; k <= 1.2f; k += 0.2f) {
+        const glm::vec2 lo = box - n * k, hi = box + n * k;
+        clean &= std::fabs(s.ground.HeightAt(lo.x, lo.y) - lowY) < 0.3f &&
+                 std::fabs(s.ground.HeightAt(hi.x, hi.y) - highY) < 0.3f;
+      }
+      if (!clean) continue;
       const glm::vec3 low(low2.x, lowY + 0.6f, low2.y);
       const glm::vec3 high(high2.x, lowY + 0.6f, high2.y);
       CHECK(!LineOfSightClear(low, high, s.obstacles));
@@ -296,7 +304,7 @@ void TestHighwayProfilesOverLevels() {
       // The step line is the wall strip's raised edge; the artery sample
       // nearest it is either at grade (ramped through) or well up on the
       // deck (flown over).
-      const glm::vec2 line = wall.origin + wall.raisedNormal * (6.6f * 0.5f);
+      const glm::vec2 line = wall.origin + wall.raisedNormal * (4.4f * 0.5f);
       float best = 1e9f, lift = 0.0f;
       for (const auto& p : roads[0].centerline) {
         const float d = std::fabs(glm::dot(glm::vec2(p.x, p.z) - line, wall.raisedNormal));

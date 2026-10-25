@@ -50,20 +50,21 @@ overlay of the navmesh's walkable-cell boundaries.
 Every arterial city has **terrain levels** (issue #155): 1–3 map-spanning
 raised levels, drawn per seed. Each level is a straight step across the whole
 map, roughly across the artery: everything on one side rises 1–5 figure
-heights behind a retaining wall. Only a narrow strip on the wall's low side
-(the wall, its stairs and a walkway) is carved between the blocks, so no
-street is owed to a level change; steps overlap into nested tiers at
-different heights, with sharp edges (no rolling noise). The terrain is planned first;
+heights behind a sheer concrete cliff (the ground mesh is split exactly
+along the edge; an unseen nav wall keeps figures off it). Only a narrow
+strip on the cliff's low side (its stairs and a walkway) is carved between
+the blocks, so no street is owed to a level change; steps overlap into
+nested tiers at different heights, with sharp edges (no rolling noise). The terrain is planned first;
 the highway profile is then chosen against it per seed: the artery stays at
 grade and ramps through every wall (a main road cutting through the levels),
 or climbs onto a deck before a run of walls, flies over them clear of the
 highest tier and settles onto the level beyond, with either ramp optionally
 replaced by an elevated map edge, up to one tall deck above every level. The
 branch merges onto whatever the artery is doing and ramps through the walls
-it meets at grade. Local streets are drawn independently of the walls: an
-avenue may ramp through one, the others dead-end at it. Stairs climb each wall along its face: a flight
-attached beside the wall on its low side, with a railing, and a landing
-across the wall top onto the level. Switch the levels off with
+it meets at grade. Local streets are drawn independently of the levels: an
+avenue may ramp through one, the others dead-end at it. Stairs climb each
+cliff along its face: a concrete flight hugging the cliff on its low side
+and a landing across its top onto the level. Switch the levels off with
 `TBGWAF_TERRAIN=off`, `MapGeneratorConfig::features.terrain`, or scenario
 YAML:
 

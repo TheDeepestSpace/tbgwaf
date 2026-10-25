@@ -80,6 +80,7 @@ set(APP_GFX_SOURCES
   src/gfx/Mesh.cpp
   src/gfx/Camera.cpp
   src/gfx/FigureRig.cpp
+  src/gfx/Ragdoll.cpp
   src/gfx/SceneRenderer.cpp
 )
 
@@ -139,6 +140,7 @@ if(EMSCRIPTEN)
     src/gfx/Shader.cpp
     src/gfx/Mesh.cpp
     src/gfx/FigureRig.cpp
+    src/gfx/Ragdoll.cpp
   )
   target_include_directories(tactics_gallery_web PRIVATE src)
   target_link_libraries(tactics_gallery_web PRIVATE glm::glm)
@@ -219,6 +221,7 @@ else()
     src/gfx/Mesh.cpp
     src/gfx/Camera.cpp
     src/gfx/FigureRig.cpp
+    src/gfx/Ragdoll.cpp
     src/gfx/SceneRenderer.cpp
   )
   target_include_directories(tactics_gfx PUBLIC src)
@@ -267,6 +270,12 @@ else()
   target_include_directories(tactics_camera_tests PRIVATE src)
   target_link_libraries(tactics_camera_tests PRIVATE glm::glm)
   add_test(NAME camera_tests COMMAND tactics_camera_tests)
+
+  add_executable(tactics_ragdoll_tests tests/ragdoll_tests.cpp src/gfx/Ragdoll.cpp
+                 src/gfx/FigureRig.cpp)
+  target_include_directories(tactics_ragdoll_tests PRIVATE src)
+  target_link_libraries(tactics_ragdoll_tests PRIVATE tactics_logic glm::glm)
+  add_test(NAME ragdoll_tests COMMAND tactics_ragdoll_tests)
 
   # YAML gameplay scenarios (issue #14): a native-only, test-only dependency,
   # so it's kept out of tactics_logic (which the WASM build also links) to

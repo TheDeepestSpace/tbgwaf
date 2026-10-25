@@ -1,0 +1,106 @@
+// Headless tests for the render-side ragdoll (issue #217). glm + game Unit
+// only; no GL.
+
+#include <cmath>
+#include <cstdio>
+
+#include "game/Types.h"
+#include "gfx/FigureRig.h"
+#include "gfx/Ragdoll.h"
+
+namespace {
+
+int g_failures = 0;
+
+#define CHECK(expr) \
+  do { \
+    if (!(expr)) { \
+      std::fprintf(stderr, "CHECK FAILED at %s:%d: %s\n", __FILE__, __LINE__, #expr); \
+      ++g_failures; \
+    } \
+  } while (0)
+
+// A unit just killed by a shot travelling +X (same encoding as KnockDown()).
+tactics::Unit Downed(int id, float elapsed) {
+  tactics::Unit u;
+  u.id = id;
+  u.position = glm::vec3(3.0f, 0.5f, -2.0f);
+  u.alive = false;
+  u.knockdownAxis = glm::vec3(0.0f, 0.0f, -1.0f);  // dir = +X
+  u.knockdownElapsed = elapsed;
+  return u;
+}
+
+void TestOnlyDownedUnitsRagdoll() {
+  tactics::Unit u;
+  CHECK(!gfx::RagdollActive(u));
+  CHECK(gfx::RagdollActive(Downed(1, 0.0f)));
+  u = Downed(1, -1.0f);
+  CHECK(!gfx::RagdollActive(u));
+}
+
+void TestFallsAlongShotAndRests() {
+  const tactics::Unit u = Downed(1, tactics::constants::kKnockdownDuration);
+  const gfx::RagdollPose start = gfx::SampleRagdollStep(u, 0);
+  const gfx::RagdollPose end = gfx::SampleRagdoll(u);
+  CHECK(start[gfx::kRagHead].y > u.position.y + 1.2f);
+  CHECK(end[gfx::kRagHead].y < u.position.y + 0.6f);  // Head came down.
+  CHECK(end[gfx::kRagHead].x > start[gfx::kRagHead].x + 0.3f);  // Toward the shot.
+  for (const glm::vec3& p : end) CHECK(p.y >= u.position.y - 1e-4f);  // Never below ground.
+  // At rest: the last frames are identical (asleep or settled).
+  const gfx::RagdollPose prev = gfx::SampleRagdollStep(u, gfx::kRagdollSteps - 1);
+  for (int i = 0; i < gfx::kRagJointCount; ++i) CHECK(glm::length(end[i] - prev[i]) < 0.02f);
+}
+
+void TestLimbLengthsPreserved() {
+  const tactics::Unit u = Downed(2, tactics::constants::kKnockdownDuration);
+  const tactics::Unit stand = [] {
+    tactics::Unit s = Downed(2, 0.0f);
+    return s;
+  }();
+  const gfx::RagdollPose a = gfx::SampleRagdollStep(stand, 0);
+  const gfx::RagdollPose b = gfx::SampleRagdoll(u);
+  auto len = [](const gfx::RagdollPose& p, int i, int j) { return glm::length(p[i] - p[j]); };
+  CHECK(std::fabs(len(a, gfx::kRagHipR, gfx::kRagKneeR) - len(b, gfx::kRagHipR, gfx::kRagKneeR)) <
+        0.05f);
+  CHECK(std::fabs(len(a, gfx::kRagShoulderL, gfx::kRagElbowL) -
+                  len(b, gfx::kRagShoulderL, gfx::kRagElbowL)) < 0.05f);
+}
+
+void TestDeterministicAndCacheBounded() {
+  const tactics::Unit u = Downed(7, 0.2f);
+  const gfx::RagdollPose a = gfx::SampleRagdoll(u);
+  // Thrash the cache well past its cap; evicted ragdolls must resimulate identically.
+  for (int id = 100; id < 100 + 3 * gfx::kRagdollMaxCached; ++id) {
+    gfx::SampleRagdoll(Downed(id, 0.4f));
+  }
+  const gfx::RagdollPose b = gfx::SampleRagdoll(u);
+  for (int i = 0; i < gfx::kRagJointCount; ++i) CHECK(a[i] == b[i]);
+  // Different units fall differently.
+  const gfx::RagdollPose c = gfx::SampleRagdoll(Downed(8, 0.2f));
+  CHECK(c[gfx::kRagHead] != a[gfx::kRagHead]);
+}
+
+void TestFigurePartsFollowRagdoll() {
+  const gfx::FigureParts standing = gfx::BuildFigure(tactics::Unit{});
+  const tactics::Unit down = Downed(1, tactics::constants::kKnockdownDuration);
+  const gfx::FigureParts parts = gfx::BuildFigure(down);
+  CHECK(!parts.empty());
+  CHECK(parts.size() >= 12);
+  // Every part's centre sits near the ground once at rest.
+  for (const gfx::FigurePart& p : parts) CHECK(p.model[3].y < down.position.y + 0.9f);
+  const gfx::FigureParts mid = gfx::BuildFigure(Downed(1, 0.1f));
+  CHECK(mid.size() == parts.size());
+}
+
+}  // namespace
+
+int main() {
+  TestOnlyDownedUnitsRagdoll();
+  TestFallsAlongShotAndRests();
+  TestLimbLengthsPreserved();
+  TestDeterministicAndCacheBounded();
+  TestFigurePartsFollowRagdoll();
+  if (g_failures == 0) std::puts("ragdoll_tests: OK");
+  return g_failures == 0 ? 0 : 1;
+}

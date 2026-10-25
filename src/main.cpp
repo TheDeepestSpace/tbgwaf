@@ -383,6 +383,9 @@ int main() {
         tactics::UrbanFeatureByName(&config.features, name)->mode = tactics::FeatureMode::On;
       }
     }
+    if (const char* terrain = std::getenv("TBGWAF_TERRAIN")) {
+      tactics::ParseFeatureMode(terrain, &config.features.terrain.mode);
+    }
     // TBGWAF_BLOCK_CHARACTER=downtown|residential|industrial|mixed forces
     // every block's neighbourhood character (issue #151); unset/auto keeps
     // the per-block draw. Unknown values are ignored.

@@ -30,9 +30,11 @@ struct RenderDebugOptions {
   bool disableFov = false;
   bool disableShadows = false;
   // Thermal camera prototype (issue #177): material-based grayscale with
-  // pale roofs, warmer streets and figures the hottest signal. Sensor blur
-  // and grain precede the overlays, the shadow pass is skipped, and gameplay
-  // overlays swap to monochrome sensor-green symbology. `thermalBlackHot`
+  // pale roofs, warmer streets and figures the hottest signal. Screen-space
+  // ambient occlusion adds the contact shading of the review's reference
+  // (wall bases, alleys, under figures) as trapped apparent heat; sensor
+  // blur and grain precede the overlays, the shadow pass is skipped, and
+  // gameplay overlays swap to monochrome sensor-green symbology. `thermalBlackHot`
   // picks the polarity, like the toggle on a real FLIR: true renders hot
   // objects dark on a washed-out bright world (matching the PR #178 review's
   // aerial reference footage), false is classic white-hot.
@@ -143,11 +145,29 @@ class SceneRenderer {
   Shader coneSurfaceShader_;
   Shader depthShader_;
   Shader thermalSensorShader_;
+  Shader thermalAoShader_;
   GLuint thermalSceneTex_ = 0;
   GLuint thermalSensorVao_ = 0;
+  // Thermal ambient occlusion (PR #178 review: the reference reads like an
+  // ambient-occlusion render): a camera depth prepass plus a screen-space
+  // AO resolve, folded into the sensor pass as extra apparent heat.
+  GLuint thermalDepthFbo_ = 0;
+  GLuint thermalDepthTex_ = 0;
+  GLuint thermalAoFbo_ = 0;
+  GLuint thermalAoTex_ = 0;
   int thermalSceneWidth_ = 0;
   int thermalSceneHeight_ = 0;
-  void ApplyThermalSensor(int x, int y, int width, int height);
+  // (Re)allocates the pane-sized thermal textures and framebuffers.
+  bool EnsureThermalTargets(int width, int height);
+  // Depth-only re-render of the pane's scene from the camera (the pane's
+  // own depth buffer can't be sampled), then the SSAO resolve into
+  // thermalAoTex_. Leaves the caller's framebuffer/viewport/scissor unbound;
+  // RenderPane restores them before the sensor pass.
+  void RenderThermalAo(const tactics::GameLogic& game, tactics::Team team, bool fogActive,
+                       const tactics::TeamVisibility& visibility, const glm::mat4& viewProj,
+                       const glm::mat4& proj, bool drawTerrain, float mapHalfExtent, int width,
+                       int height);
+  void ApplyThermalSensor(int x, int y, int width, int height, bool blackHot);
   CubeMesh cubeMesh_;
   SphereMesh sphereMesh_;
   LineMesh pathLine_;

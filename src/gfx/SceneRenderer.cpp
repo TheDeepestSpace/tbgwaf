@@ -345,6 +345,8 @@ precision highp float;
 precision highp int;
 in vec2 vUV;
 uniform sampler2D uScene;
+uniform sampler2D uAo;
+uniform int uBlackHot;
 out vec4 FragColor;
 void main() {
   vec2 size = vec2(textureSize(uScene, 0));
@@ -354,11 +356,107 @@ void main() {
   gray += texture(uScene, vUV - vec2(texel.x, 0.0)).r * 0.15;
   gray += texture(uScene, vUV + vec2(0.0, texel.y)).r * 0.15;
   gray += texture(uScene, vUV - vec2(0.0, texel.y)).r * 0.15;
+  // Ambient occlusion, blurred over a 3x3 tent to settle sample noise.
+  float ao = texture(uAo, vUV).r * 4.0;
+  ao += texture(uAo, vUV + vec2(texel.x, 0.0)).r * 2.0;
+  ao += texture(uAo, vUV - vec2(texel.x, 0.0)).r * 2.0;
+  ao += texture(uAo, vUV + vec2(0.0, texel.y)).r * 2.0;
+  ao += texture(uAo, vUV - vec2(0.0, texel.y)).r * 2.0;
+  ao += texture(uAo, vUV + texel).r;
+  ao += texture(uAo, vUV - texel).r;
+  ao += texture(uAo, vUV + vec2(texel.x, -texel.y)).r;
+  ao += texture(uAo, vUV - vec2(texel.x, -texel.y)).r;
+  ao /= 16.0;
+  // Occluded crevices trap radiated heat, so occlusion raises apparent
+  // *heat* rather than darkening the displayed gray directly: black-hot
+  // gains the ambient-occlusion-render contact shading of the review's
+  // reference while white-hot stays its exact inversion.
+  float heat = uBlackHot != 0 ? 1.0 - gray : gray;
+  heat = clamp(heat + ao * 0.55, 0.0, 1.0);
+  gray = uBlackHot != 0 ? 1.0 - heat : heat;
   uvec2 p = uvec2(vUV * size);
   uint h = (p.x * 1664525u) ^ (p.y * 1013904223u);
   h = (h ^ (h >> 16u)) * 2246822519u;
   gray += (float(h & 65535u) / 65535.0 - 0.5) * 0.012;
   FragColor = vec4(vec3(clamp(gray, 0.0, 1.0)), 1.0);
+}
+)";
+
+// Screen-space ambient occlusion over a camera depth prepass (PR #178
+// review: the aerial reference reads like an ambient-occlusion render, with
+// soft contact shading hugging wall bases, alleys and figures). View-space
+// position is reconstructed from depth, the normal from its derivatives; a
+// fixed hemisphere kernel is rotated per pixel by the same integer hash the
+// grain uses, so captures stay deterministic across frames and drivers.
+const char* kThermalAoFragmentShaderSrc = R"(#version 300 es
+precision highp float;
+precision highp int;
+in vec2 vUV;
+uniform highp sampler2D uDepth;
+uniform mat4 uProj;
+uniform mat4 uInvProj;
+out vec4 FragColor;
+
+const int kSampleCount = 16;
+// Hemisphere points (+Z up), denser near the origin for tight creases.
+const vec3 kKernel[16] = vec3[16](
+  vec3(0.0497, 0.0876, 0.0668), vec3(0.0645, -0.1011, 0.0439),
+  vec3(0.0443, 0.0155, 0.1335), vec3(-0.0534, 0.0249, 0.1510),
+  vec3(0.0897, -0.1417, 0.0885), vec3(0.0532, -0.1364, 0.1695),
+  vec3(-0.0749, 0.0504, 0.2494), vec3(0.2819, -0.0923, 0.1010),
+  vec3(-0.1893, 0.2307, 0.2160), vec3(-0.1263, -0.2587, 0.3197),
+  vec3(-0.2633, -0.2944, 0.3049), vec3(0.4961, 0.0473, 0.2860),
+  vec3(0.1444, 0.5774, 0.2786), vec3(-0.0635, -0.6686, 0.3259),
+  vec3(-0.6608, 0.0752, 0.5175), vec3(-0.7635, 0.2517, 0.4984));
+// World units; the view transform is rigid, so view-space lengths match.
+const float kRadius = 1.4;
+const float kBias = 0.04;
+
+vec3 ViewPos(vec2 uv, float depth) {
+  vec4 ndc = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+  vec4 view = uInvProj * ndc;
+  return view.xyz / view.w;
+}
+
+float AoHash(uvec2 q) {
+  uint h = (q.x * 1664525u) ^ (q.y * 1013904223u);
+  h = (h ^ (h >> 16u)) * 2246822519u;
+  return float(h & 65535u) / 65535.0;
+}
+
+void main() {
+  float depth = texture(uDepth, vUV).r;
+  if (depth >= 0.9999) {  // Cleared depth: off-geometry, no occlusion.
+    FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    return;
+  }
+  vec3 pos = ViewPos(vUV, depth);
+  vec3 normal = normalize(cross(dFdx(pos), dFdy(pos)));
+  if (dot(normal, pos) > 0.0) normal = -normal;  // Face the camera.
+  float angle = AoHash(uvec2(gl_FragCoord.xy)) * 6.2831853;
+  vec3 randomVec = vec3(cos(angle), sin(angle), 0.0);
+  vec3 tangent = randomVec - normal * dot(randomVec, normal);
+  // Degenerate when the surface faces straight down the random vector.
+  if (dot(tangent, tangent) < 1e-6) tangent = vec3(0.0, 1.0, 0.0) - normal * normal.y;
+  tangent = normalize(tangent);
+  mat3 tbn = mat3(tangent, cross(normal, tangent), normal);
+  float occlusion = 0.0;
+  for (int i = 0; i < kSampleCount; ++i) {
+    vec3 samplePos = pos + tbn * kKernel[i] * kRadius;
+    vec4 clip = uProj * vec4(samplePos, 1.0);
+    vec3 ndc = clip.xyz / clip.w;
+    vec2 sampleUV = ndc.xy * 0.5 + 0.5;
+    if (sampleUV.x < 0.0 || sampleUV.x > 1.0 || sampleUV.y < 0.0 || sampleUV.y > 1.0) continue;
+    float sceneZ = ViewPos(sampleUV, texture(uDepth, sampleUV).r).z;
+    // Fade occluders further than the radius so distant foreground
+    // silhouettes don't halo onto the ground behind them.
+    float rangeCheck = smoothstep(0.0, 1.0, kRadius / abs(pos.z - sceneZ));
+    occlusion += (sceneZ >= samplePos.z + kBias ? 1.0 : 0.0) * rangeCheck;
+  }
+  float ao = occlusion / float(kSampleCount);
+  // Drop the faint open-field haze, keep the crease/contact term.
+  ao = smoothstep(0.10, 0.95, ao);
+  FragColor = vec4(ao, 0.0, 0.0, 1.0);
 }
 )";
 
@@ -2119,6 +2217,10 @@ bool SceneRenderer::Init() {
     std::fprintf(stderr, "Failed to compile the thermal sensor shader\n");
     return false;
   }
+  if (!thermalAoShader_.Compile(kThermalSensorVertexShaderSrc, kThermalAoFragmentShaderSrc)) {
+    std::fprintf(stderr, "Failed to compile the thermal ambient-occlusion shader\n");
+    return false;
+  }
   cubeMesh_.Init();
   sphereMesh_.Init();
   frontierFill_.Init();
@@ -2242,36 +2344,144 @@ void SceneRenderer::Destroy() {
   fovFbo_[0] = fovFbo_[1] = 0;
   if (thermalSceneTex_) glDeleteTextures(1, &thermalSceneTex_);
   if (thermalSensorVao_) glDeleteVertexArrays(1, &thermalSensorVao_);
+  if (thermalDepthTex_) glDeleteTextures(1, &thermalDepthTex_);
+  if (thermalAoTex_) glDeleteTextures(1, &thermalAoTex_);
+  if (thermalDepthFbo_) glDeleteFramebuffers(1, &thermalDepthFbo_);
+  if (thermalAoFbo_) glDeleteFramebuffers(1, &thermalAoFbo_);
   thermalSceneTex_ = thermalSensorVao_ = 0;
+  thermalDepthTex_ = thermalAoTex_ = thermalDepthFbo_ = thermalAoFbo_ = 0;
   thermalSceneWidth_ = thermalSceneHeight_ = 0;
 }
 
-void SceneRenderer::ApplyThermalSensor(int x, int y, int width, int height) {
-  // Copy only this pane, including on non-default caller framebuffers. Its
-  // depth/stencil stay in place for the overlays that follow. Clamp sampling
-  // to the pane edges so the other team's image can never bleed into it.
+bool SceneRenderer::EnsureThermalTargets(int width, int height) {
   glActiveTexture(GL_TEXTURE0);
-  if (!thermalSceneTex_) {
+  const bool create = !thermalSceneTex_;
+  if (create) {
     glGenTextures(1, &thermalSceneTex_);
+    glGenTextures(1, &thermalDepthTex_);
+    glGenTextures(1, &thermalAoTex_);
     glGenVertexArrays(1, &thermalSensorVao_);
-    glBindTexture(GL_TEXTURE_2D, thermalSceneTex_);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glGenFramebuffers(1, &thermalDepthFbo_);
+    glGenFramebuffers(1, &thermalAoFbo_);
+    for (const GLuint tex : {thermalSceneTex_, thermalDepthTex_, thermalAoTex_}) {
+      glBindTexture(GL_TEXTURE_2D, tex);
+      // NEAREST on the depth map: filtered depth values are meaningless.
+      const GLint filter = tex == thermalDepthTex_ ? GL_NEAREST : GL_LINEAR;
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
   }
-  glBindTexture(GL_TEXTURE_2D, thermalSceneTex_);
-  if (width != thermalSceneWidth_ || height != thermalSceneHeight_) {
+  if (create || width != thermalSceneWidth_ || height != thermalSceneHeight_) {
+    glBindTexture(GL_TEXTURE_2D, thermalSceneTex_);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA,
                  GL_UNSIGNED_BYTE, nullptr);
+    glBindTexture(GL_TEXTURE_2D, thermalDepthTex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0,
+                 GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+    glBindTexture(GL_TEXTURE_2D, thermalAoTex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, width, height, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
     thermalSceneWidth_ = width;
     thermalSceneHeight_ = height;
   }
+  if (create) {
+    glBindFramebuffer(GL_FRAMEBUFFER, thermalDepthFbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, thermalDepthTex_,
+                           0);
+    const GLenum noColorBuffer = GL_NONE;
+    glDrawBuffers(1, &noColorBuffer);
+    glReadBuffer(GL_NONE);
+    const bool depthComplete =
+        glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glBindFramebuffer(GL_FRAMEBUFFER, thermalAoFbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, thermalAoTex_, 0);
+    const bool aoComplete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    if (!depthComplete || !aoComplete) {
+      std::fprintf(stderr, "Thermal AO framebuffer incomplete\n");
+      return false;
+    }
+  }
+  return true;
+}
+
+void SceneRenderer::RenderThermalAo(const tactics::GameLogic& game, tactics::Team team,
+                                    bool fogActive, const tactics::TeamVisibility& visibility,
+                                    const glm::mat4& viewProj, const glm::mat4& proj,
+                                    bool drawTerrain, float mapHalfExtent, int width, int height) {
+  if (!EnsureThermalTargets(width, height)) return;
+  // Depth prepass into the pane-sized internal framebuffer: everything the
+  // camera sees, so wall bases shade the pavement and figures gain contact
+  // shadows. Faded (see-through) occluders still occlude -- the structure
+  // is physically there; only the camera blends past it.
+  glDisable(GL_SCISSOR_TEST);
+  glBindFramebuffer(GL_FRAMEBUFFER, thermalDepthFbo_);
+  glViewport(0, 0, width, height);
+  glClear(GL_DEPTH_BUFFER_BIT);
+  depthShader_.Use();
+  depthShader_.SetMat4("uLightMVP", viewProj);
+  if (drawTerrain) {
+    terrainMesh_.Draw();
+    terrainRaisedMesh_.Draw();
+    terrainStairMesh_.Draw();
+  } else {
+    DrawBoxDepth(depthShader_, cubeMesh_, viewProj,
+                 glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
+                 glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f));
+  }
+  // Obstacles, massing, decks, stairs and pavement in one cached draw (the
+  // same static mesh the FOV shadow-map mask uses).
+  const unsigned long long sceneKey = FovSceneFingerprint(game.GetScene());
+  if (sceneKey != fovSceneKey_) {
+    BuildFovSceneMesh(game.GetScene(), &fovSceneMesh_);
+    fovSceneKey_ = sceneKey;
+  }
+  if (fovSceneMesh_.HasGeometry()) {
+    depthShader_.SetMat4("uLightMVP", viewProj);
+    fovSceneMesh_.Draw();
+  }
+  for (const Unit& unit : game.GetScene().units) {
+    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+    DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, viewProj, unit);
+  }
+  DrawPlantedFlagDepth(depthShader_, cubeMesh_, sphereMesh_, viewProj, game);
+
+  // SSAO resolve into the single-channel occlusion texture.
+  glBindFramebuffer(GL_FRAMEBUFFER, thermalAoFbo_);
+  glViewport(0, 0, width, height);
+  glDisable(GL_DEPTH_TEST);
+  glDepthMask(GL_FALSE);
+  thermalAoShader_.Use();
+  thermalAoShader_.SetInt("uDepth", 0);
+  thermalAoShader_.SetMat4("uProj", proj);
+  thermalAoShader_.SetMat4("uInvProj", glm::inverse(proj));
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, thermalDepthTex_);
+  glBindVertexArray(thermalSensorVao_);
+  glDrawArrays(GL_TRIANGLES, 0, 3);
+  RecordDraw(3, 1);
+  glBindVertexArray(0);
+  glDepthMask(GL_TRUE);
+  glEnable(GL_DEPTH_TEST);
+}
+
+void SceneRenderer::ApplyThermalSensor(int x, int y, int width, int height, bool blackHot) {
+  // Copy only this pane, including on non-default caller framebuffers. Its
+  // depth/stencil stay in place for the overlays that follow. Clamp sampling
+  // to the pane edges so the other team's image can never bleed into it.
+  if (!EnsureThermalTargets(width, height)) return;
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, thermalSceneTex_);
   glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, x, y, width, height);
   glDisable(GL_DEPTH_TEST);
   glDepthMask(GL_FALSE);
   thermalSensorShader_.Use();
   thermalSensorShader_.SetInt("uScene", 0);
+  thermalSensorShader_.SetInt("uAo", 1);
+  thermalSensorShader_.SetInt("uBlackHot", blackHot ? 1 : 0);
+  glActiveTexture(GL_TEXTURE1);
+  glBindTexture(GL_TEXTURE_2D, thermalAoTex_);
+  glActiveTexture(GL_TEXTURE0);
   glBindVertexArray(thermalSensorVao_);
   glDrawArrays(GL_TRIANGLES, 0, 3);
   RecordDraw(3, 1);
@@ -2883,7 +3093,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glDisable(GL_BLEND);
   }
 
-  if (debug.thermal) ApplyThermalSensor(x, y, width, height);
+  if (debug.thermal) {
+    // Ambient occlusion first (its own framebuffers), then back to this
+    // pane for the sensor composite over the copied scene image.
+    RenderThermalAo(game, team, fogActive, visibility, viewProj, proj, drawTerrain,
+                    mapHalfExtent, width, height);
+    glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
+    glEnable(GL_SCISSOR_TEST);
+    glViewport(x, y, width, height);
+    glScissor(x, y, width, height);
+    ApplyThermalSensor(x, y, width, height, debug.thermalBlackHot);
+  }
 
   // Navmesh boundary debug overlay (opaque lines, depth-tested like the
   // scene geometry so cells hidden behind obstacles/hills read correctly).

@@ -1024,7 +1024,8 @@ int main() {
         std::vector<Unit> pickableUnits;
         for (const Unit& unit : game.GetScene().units) {
           if (unit.alive && gfx::IsUnitVisibleForRender(unit, clickTeam, fogActive,
-                                                          paneVisibility[clickPane])) {
+                                                          paneVisibility[clickPane],
+                                                          game.GetScene())) {
             pickableUnits.push_back(unit);
           }
         }

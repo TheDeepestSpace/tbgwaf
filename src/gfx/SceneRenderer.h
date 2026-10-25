@@ -7,6 +7,7 @@
 #include <glm/glm.hpp>
 
 #include "game/GameLogic.h"
+#include "game/Scene.h"
 #include "game/Types.h"
 #include "game/Visibility.h"
 #include "gfx/Camera.h"
@@ -21,8 +22,12 @@ namespace gfx {
 // render pass here and main.cpp's click picking, which must agree exactly:
 // a hidden enemy's collision box must not be clickable just because it
 // happens to sit behind something that is drawn.
+// A downed enemy drawn as a ragdoll is judged by where its falling body
+// actually is (a few joints against the viewing team's FOV), not by the spot
+// it was shot at, so a figure that drops out of sight behind cover vanishes.
 bool IsUnitVisibleForRender(const tactics::Unit& unit, tactics::Team viewingTeam, bool fogActive,
-                            const tactics::TeamVisibility& visibility);
+                            const tactics::TeamVisibility& visibility,
+                            const tactics::Scene& scene);
 
 // Local-only rendering toggles for the interactive app's debug panel. Not
 // game state: never synced. Defaults render normally (visual runner never sets it).

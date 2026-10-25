@@ -1064,61 +1064,53 @@ void TestNoCornerSplitBuildings() {
   CHECK(wrapped > 0);  // Corner buildings still exist.
 }
 
-bool FootprintsMeet(const std::vector<glm::vec2>& a, const std::vector<glm::vec2>& b) {
-  for (const glm::vec2& p : a) {
-    for (size_t i = 0; i < b.size(); ++i) {
-      if (DistanceToSegment(p, b[i], b[(i + 1) % b.size()]) < 0.01f) return true;
+// True when two convex CCW footprints share interior area (touching edges
+// do not count).
+bool FootprintsOverlap(const std::vector<glm::vec2>& a, const std::vector<glm::vec2>& b) {
+  for (const std::vector<glm::vec2>* poly : {&a, &b}) {
+    for (size_t i = 0; i < poly->size(); ++i) {
+      const glm::vec2 edge = (*poly)[(i + 1) % poly->size()] - (*poly)[i];
+      const glm::vec2 axis(-edge.y, edge.x);
+      const float len = glm::length(axis);
+      if (len < 1.0e-6f) continue;
+      float loA = 1.0e30f, hiA = -1.0e30f, loB = 1.0e30f, hiB = -1.0e30f;
+      for (const glm::vec2& p : a) {
+        const float d = glm::dot(p, axis) / len;
+        loA = std::min(loA, d);
+        hiA = std::max(hiA, d);
+      }
+      for (const glm::vec2& p : b) {
+        const float d = glm::dot(p, axis) / len;
+        loB = std::min(loB, d);
+        hiB = std::max(hiB, d);
+      }
+      if (hiA <= loB + 0.02f || hiB <= loA + 0.02f) return false;
     }
   }
-  for (const glm::vec2& p : b) {
-    for (size_t i = 0; i < a.size(); ++i) {
-      if (DistanceToSegment(p, a[i], a[(i + 1) % a.size()]) < 0.01f) return true;
-    }
-  }
-  return false;
+  return true;
 }
 
 // Seed 7 used to turn a too-short corner alley into a merge after frontage
 // pieces had been planned. One piece then belonged to both neighboring
-// corner buildings, chaining three same-height footprints into a giant U.
+// corner buildings, chaining three footprints into a giant U. Pieces must
+// never share area, and ordinary two-piece L buildings must still appear.
 void TestCornerBuildingsDoNotChainAcrossAFrontage() {
   MapGeneratorConfig config;
   config.elevatedHighway = OverpassMode::Off;
   const Scene scene = GenerateUrbanMap(7, config);
   std::vector<const Obstacle*> buildings;
   for (const Obstacle& obstacle : scene.obstacles) {
-    if (!obstacle.footprint.empty()) buildings.push_back(&obstacle);
+    if (obstacle.building >= 0 && !obstacle.footprint.empty()) buildings.push_back(&obstacle);
   }
 
   int pairs = 0;
-  int largest = 0;
-  std::vector<bool> seen(buildings.size(), false);
-  for (size_t start = 0; start < buildings.size(); ++start) {
-    if (seen[start]) continue;
-    seen[start] = true;
-    std::vector<size_t> pending = {start};
-    int connected = 0;
-    while (!pending.empty()) {
-      const size_t i = pending.back();
-      pending.pop_back();
-      ++connected;
-      const float height = buildings[i]->bounds.max.y - buildings[i]->bounds.min.y;
-      for (size_t j = 0; j < buildings.size(); ++j) {
-        if (seen[j]) continue;
-        const float otherHeight = buildings[j]->bounds.max.y - buildings[j]->bounds.min.y;
-        if (std::fabs(height - otherHeight) > kEps ||
-            !FootprintsMeet(buildings[i]->footprint, buildings[j]->footprint)) {
-          continue;
-        }
-        seen[j] = true;
-        pending.push_back(j);
-      }
+  for (size_t i = 0; i < buildings.size(); ++i) {
+    for (size_t j = i + 1; j < buildings.size(); ++j) {
+      CHECK(!FootprintsOverlap(buildings[i]->footprint, buildings[j]->footprint));
     }
-    pairs += connected == 2;
-    largest = std::max(largest, connected);
   }
-  CHECK(pairs > 0);  // The test still sees ordinary two-piece L buildings.
-  CHECK(largest <= 2);
+  for (const Obstacle* b : buildings) pairs += b->footprint.size() > 4;
+  CHECK(pairs > 0);
 }
 
 float MinimumPolygonWidth(const std::vector<glm::vec2>& polygon) {
@@ -1146,7 +1138,7 @@ void TestThinCornerBuildingSliversAreDropped() {
   config.elevatedHighway = OverpassMode::Off;
   const Scene scene = GenerateUrbanMap(7, config);
   for (const Obstacle& obstacle : scene.obstacles) {
-    if (obstacle.footprint.empty()) continue;
+    if (obstacle.building < 0 || obstacle.footprint.empty()) continue;
     CHECK(MinimumPolygonWidth(obstacle.footprint) >= config.buildingDepth * 0.25f);
   }
 }

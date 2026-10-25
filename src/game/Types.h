@@ -76,8 +76,8 @@ struct Building {
 
 // Visual-only massing detail (roadmap 3.3): a prism over a convex XZ
 // footprint between y0 and y1. Blocks sight lines and FOV (see
-// SightObstacles) but is not collision or navigation geometry -- a figure
-// can't stand on or be stopped by it.
+// SightObstacles). Parapets and roof fixtures also block walking: they are
+// copied into WalkSurface::blockers of their roof slab. Awnings are overhead.
 struct MassingDetail {
   enum class Kind : uint8_t { Parapet, RoofFixture, Awning };
   Kind kind = Kind::Parapet;
@@ -94,6 +94,9 @@ struct WalkSurface {
   std::vector<glm::vec3> vertices;  // Counter-clockwise when viewed from above.
   std::vector<int> neighbors;
   bool connectsToGround = false;    // The lowest edge is a legal ground transition.
+  // Convex XZ footprints standing on the patch (roof parapets, furniture)
+  // that a figure can't walk into. Honoured on single-patch routes only.
+  std::vector<std::vector<glm::vec2>> blockers;
 };
 
 // A pre-built zipline: a two-way cable between a ground anchor post and a

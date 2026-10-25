@@ -314,6 +314,38 @@ void TestMassingBlocksSight() {
   }
 }
 
+// Parapets and roof furniture block walking: every one is a blocker on a roof
+// slab, and a path across a roof never enters a blocker.
+void TestRoofMassingBlocksWalking() {
+  int blockers = 0, crossings = 0;
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed);
+    NavMesh mesh;
+    mesh.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
+               &scene.walkSurfaces);
+    for (const WalkSurface& slab : scene.walkSurfaces) {
+      blockers += static_cast<int>(slab.blockers.size());
+      if (slab.blockers.empty()) continue;
+      // Straight across the slab, between points outside every blocker.
+      const glm::vec3 a = slab.vertices[0], b = slab.vertices[2];
+      for (float t : {0.1f, 0.2f, 0.3f}) {
+        const glm::vec3 from = glm::mix(a, SurfaceCenter(slab), t);
+        const glm::vec3 to = glm::mix(b, SurfaceCenter(slab), t);
+        std::vector<glm::vec3> path;
+        if (!mesh.FindPath(from, to, &path)) continue;
+        ++crossings;
+        for (size_t i = 0; i + 1 < path.size(); ++i) {
+          for (const auto& blocker : slab.blockers) {
+            CHECK(!SegmentEntersConvexPolygon({path[i].x, path[i].z},
+                                              {path[i + 1].x, path[i + 1].z}, blocker));
+          }
+        }
+      }
+    }
+  }
+  CHECK(blockers > 0 && crossings > 0);
+}
+
 // Issue #151: massing. Most roofs (zipline roofs included) get a parapet ring,
 // roof furniture stays inside the roof and clear of zipline landings, and
 // awnings hang over the sidewalk from shopfronts only.
@@ -1780,6 +1812,7 @@ int main() {
   TestParcelsMatchBuildingsAndFrontStreets();
   TestBuildingKindsFloorsAndHeights();
   TestMassingStaysOnItsBuilding();
+  TestRoofMassingBlocksWalking();
   TestMassingBlocksSight();
   TestPinnedKindHistograms();
   TestMapIsMuchLargerThanDefault();

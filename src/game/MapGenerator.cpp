@@ -1675,6 +1675,21 @@ void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed
     auto push = [&](MassingDetail::Kind kind, std::vector<glm::vec2> footprint, float y0,
                     float y1) {
       if (PolygonSignedArea(footprint) < 0.0f) std::reverse(footprint.begin(), footprint.end());
+      // Parapets and furniture also stop figures walking on the roof slab.
+      if (kind != MassingDetail::Kind::Awning) {
+        for (WalkSurface& slab : scene->walkSurfaces) {
+          if (slab.vertices.empty() || !slab.neighbors.empty() || slab.connectsToGround ||
+              std::fabs(slab.vertices[0].y - y0) > 0.1f) {
+            continue;
+          }
+          glm::vec2 mid(0.0f);
+          for (const glm::vec2& v : footprint) mid += v / static_cast<float>(footprint.size());
+          if (SurfaceContainsXZ(slab, mid.x, mid.y)) {
+            slab.blockers.push_back(footprint);
+            break;
+          }
+        }
+      }
       scene->massing.push_back(
           MassingDetail{kind, std::move(footprint), y0, y1, static_cast<int>(bi)});
     };
@@ -1702,6 +1717,12 @@ void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed
       for (size_t e = 0; wrapAround && copingUsable && e < roof.size(); ++e) {
         const size_t next = (e + 1) % roof.size();
         if (glm::distance(roof[e], roof[next]) < 2.0f * kParapetThickness) continue;
+        // Leave a gap where a zipline leaves the roof.
+        bool landingEdge = false;
+        for (const glm::vec2& landing : landings) {
+          landingEdge |= PointSegmentDistance(landing, roof[e], roof[next]) < 0.6f;
+        }
+        if (landingEdge) continue;
         push(MassingDetail::Kind::Parapet, {roof[e], roof[next], coping[next], coping[e]},
              roofTop, roofTop + parapet);
       }

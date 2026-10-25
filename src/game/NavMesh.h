@@ -146,8 +146,11 @@ class NavMesh {
   glm::vec3 GroundConnectionPoint(int surface) const;
   // Per-Build caches over walkSurfaces_: footprints/bounds, a uniform XZ grid
   // for point queries, and all-pairs surface routes (see BuildSurfaceCaches).
-  void BuildSurfaceCaches();
+  void BuildSurfaceCaches(float agentRadius);
   bool SurfaceContains(int surface, float x, float z) const;
+  bool SurfaceBlocked(int surface, float x, float z) const;
+  bool FindBlockedSurfacePath(int surface, glm::vec3 start, glm::vec3 goal,
+                              std::vector<glm::vec3>* outPath) const;
   const std::vector<int>& SurfaceCandidates(float x, float z) const;
 
   std::vector<NavCell> cells_;
@@ -156,6 +159,7 @@ class NavMesh {
   NavRegion region_;
   HeightField ground_;                            // Empty = flat ground at y 0.
   std::vector<WalkSurface> walkSurfaces_;
+  std::vector<std::vector<std::vector<glm::vec2>>> surfaceBlockers_;  // Agent-padded.
   std::vector<std::vector<glm::vec2>> paddedPolygons_;
   bool polygonMode_ = false;
 

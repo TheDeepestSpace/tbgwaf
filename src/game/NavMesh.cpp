@@ -136,7 +136,7 @@ void NavMesh::Build(const std::vector<Obstacle>& obstacles, const NavRegion& reg
                      const std::vector<WalkSurface>* walkSurfaces) {
   ground_ = ground ? *ground : HeightField{};
   walkSurfaces_ = walkSurfaces ? *walkSurfaces : std::vector<WalkSurface>{};
-  BuildSurfaceCaches();
+  BuildSurfaceCaches(agentRadius);
   polygonMode_ = false;
   paddedPolygons_.clear();
   paddedPolygons_.reserve(obstacles.size());
@@ -267,8 +267,15 @@ void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float 
   }
 }
 
-void NavMesh::BuildSurfaceCaches() {
+void NavMesh::BuildSurfaceCaches(float agentRadius) {
   const size_t n = walkSurfaces_.size();
+  surfaceBlockers_.assign(n, {});
+  for (size_t i = 0; i < n; ++i) {
+    for (const auto& blocker : walkSurfaces_[i].blockers) {
+      std::vector<glm::vec2> padded = ExpandConvexPolygon(blocker, agentRadius);
+      if (!padded.empty()) surfaceBlockers_[i].push_back(std::move(padded));
+    }
+  }
   surfaceFootprints_.assign(n, {});
   surfaceBounds_.assign(n, glm::vec4(0.0f));
   surfaceCenters_.assign(n, glm::vec3(0.0f));
@@ -359,6 +366,13 @@ bool NavMesh::SurfaceContains(int surface, float x, float z) const {
   const glm::vec4& b = surfaceBounds_[surface];
   if (x < b.x || x > b.z || z < b.y || z > b.w) return false;
   return PointInConvexPolygon({x, z}, surfaceFootprints_[surface]);
+}
+
+bool NavMesh::SurfaceBlocked(int surface, float x, float z) const {
+  for (const auto& polygon : surfaceBlockers_[surface]) {
+    if (PointInConvexPolygon({x, z}, polygon)) return true;
+  }
+  return false;
 }
 
 const std::vector<int>& NavMesh::SurfaceCandidates(float x, float z) const {
@@ -489,7 +503,7 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
       const float x = field.minX + ix * field.step;
       const float z = field.minZ + iz * field.step;
       for (int surface : SurfaceCandidates(x, z)) {
-        if (!SurfaceContains(surface, x, z)) continue;
+        if (!SurfaceContains(surface, x, z) || SurfaceBlocked(surface, x, z)) continue;
         glm::vec3 goal(x, SurfaceHeightAt(walkSurfaces_[surface], x, z), z);
         std::vector<glm::vec3> path;
         bool found = false;
@@ -610,6 +624,9 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
       static_cast<size_t>(goalSurface) >= walkSurfaces_.size()) {
     return false;
   }
+  if (startSurface == goalSurface && !surfaceBlockers_[startSurface].empty()) {
+    return FindBlockedSurfacePath(startSurface, start, goal, outPath);
+  }
   if (startSurface != goalSurface && surfaceParent_[startSurface][goalSurface] < 0) return false;
   std::vector<int> route;
   for (int node = goalSurface; node >= 0; node = surfaceParent_[startSurface][node]) {
@@ -711,6 +728,70 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
     flush(transition);
   }
   flush(goal);
+  return true;
+}
+
+// Shortest path across one patch around its padded blockers (visibility
+// graph over their corners). A start inside a padded blocker (a landing next
+// to a parapet) may leave it; a goal inside one is refused.
+bool NavMesh::FindBlockedSurfacePath(int surface, glm::vec3 start, glm::vec3 goal,
+                                     std::vector<glm::vec3>* outPath) const {
+  const WalkSurface& patch = walkSurfaces_[surface];
+  const auto& blockers = surfaceBlockers_[surface];
+  const glm::vec2 s(start.x, start.z), g(goal.x, goal.z);
+  if (SurfaceBlocked(surface, g.x, g.y)) return false;
+  std::vector<glm::vec2> nodes = {s, g};
+  for (const auto& polygon : blockers) {
+    for (const glm::vec2& p : polygon) {
+      if (SurfaceContains(surface, p.x, p.y) && !SurfaceBlocked(surface, p.x, p.y)) {
+        nodes.push_back(p);
+      }
+    }
+  }
+  std::vector<char> startInside(blockers.size(), 0);
+  for (size_t i = 0; i < blockers.size(); ++i) {
+    startInside[i] = PointInConvexPolygon(s, blockers[i]);
+  }
+  const auto clear = [&](size_t from, size_t to) {
+    for (size_t i = 0; i < blockers.size(); ++i) {
+      if (from == 0 && startInside[i]) continue;
+      if (SegmentEntersConvexPolygon(nodes[from], nodes[to], blockers[i])) return false;
+    }
+    return true;
+  };
+  const size_t n = nodes.size();
+  const float inf = std::numeric_limits<float>::infinity();
+  std::vector<float> distance(n, inf);
+  std::vector<int> parent(n, -1);
+  std::vector<char> closed(n, 0);
+  distance[0] = 0.0f;
+  for (;;) {
+    int current = -1;
+    for (size_t i = 0; i < n; ++i) {
+      if (!closed[i] && distance[i] < inf && (current < 0 || distance[i] < distance[current])) {
+        current = static_cast<int>(i);
+      }
+    }
+    if (current < 0 || current == 1) break;
+    closed[current] = 1;
+    for (size_t next = 1; next < n; ++next) {
+      if (closed[next] || !clear(current, next)) continue;
+      const float candidate = distance[current] + glm::distance(nodes[current], nodes[next]);
+      if (candidate < distance[next]) {
+        distance[next] = candidate;
+        parent[next] = current;
+      }
+    }
+  }
+  if (!std::isfinite(distance[1])) return false;
+  std::vector<int> route;
+  for (int node = 1; node >= 0; node = parent[node]) route.push_back(node);
+  std::reverse(route.begin(), route.end());
+  outPath->clear();
+  for (int node : route) {
+    const glm::vec2 p = nodes[node];
+    outPath->emplace_back(p.x, SurfaceHeightAt(patch, p.x, p.y), p.y);
+  }
   return true;
 }
 

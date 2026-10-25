@@ -45,13 +45,28 @@ jobs:
           cp build-web/index.html site/
           cp build-web/tactics_app.js site/
           cp build-web/tactics_app.wasm site/
+          cp build-web/jev-preview.js site/
           cp build-web/gallery.html site/gallery/index.html
           cp build-web/tactics_gallery.js site/gallery/
           cp build-web/tactics_gallery.wasm site/gallery/
           cp build-web/map_seeds.js site/gallery/
           cp -r build-web/map_goldens site/gallery/
 
+      # Other workflows (pr-preview, performance) push to gh-pages too; retry on a lost race.
       - name: Deploy to GitHub Pages
+        id: deploy
+        continue-on-error: true
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages
+          # Preserve the pr-preview/pr-*/ subdirectories maintained by
+          # pr-preview.yml on this same branch.
+          keep_files: true
+
+      - name: Deploy to GitHub Pages (retry)
+        if: steps.deploy.outcome == 'failure'
         uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}

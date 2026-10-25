@@ -3,6 +3,7 @@
 #include "gfx/FigureRig.h"
 
 #include <algorithm>
+#include <functional>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -77,7 +78,6 @@ const glm::vec3 kSetupColor(0.2f, 1.0f, 0.3f);
 // see-through pass so a faded block keeps its normal tint.
 const glm::vec3 kObstacleColor(0.55f, 0.55f, 0.6f);
 const glm::vec3 kDeckColor(0.44f, 0.45f, 0.48f);
-
 // Issue #136 camera-occlusion see-through: map geometry (buildings, deck/
 // ramp slabs) standing between the camera and something the player needs to
 // see is drawn at this opacity instead of fully opaque. First guess per the
@@ -595,6 +595,44 @@ void BuildSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
   mesh->SetMesh(vertices, indices);
 }
 
+// A terrain stair as one concrete wedge: the sloped flight and the flat
+// landing on top, each extruded down to the stair's base, sides outward.
+void AppendTerrainStair(const tactics::TerrainStair& stair, LitVertices* vertices,
+                        std::vector<GLuint>* indices) {
+  const float baseY = stair.base - 0.05f;
+  for (const std::vector<glm::vec3>* top : {&stair.flight, &stair.landing}) {
+    if (top->size() < 3) continue;
+    glm::vec3 center(0.0f);
+    for (const glm::vec3& v : *top) center += v;
+    center /= static_cast<float>(top->size());
+    glm::vec3 topNormal = glm::cross((*top)[1] - (*top)[0], (*top)[2] - (*top)[0]);
+    if (glm::length(topNormal) < 1e-7f) continue;
+    topNormal = glm::normalize(topNormal);
+    if (topNormal.y < 0.0f) topNormal = -topNormal;
+    for (size_t i = 1; i + 1 < top->size(); ++i) {
+      AppendTriangle((*top)[0], (*top)[i], (*top)[i + 1], topNormal, vertices, indices);
+    }
+    for (size_t i = 0; i < top->size(); ++i) {
+      const glm::vec3 a = (*top)[i], b = (*top)[(i + 1) % top->size()];
+      const glm::vec3 a0(a.x, baseY, a.z), b0(b.x, baseY, b.z);
+      glm::vec3 normal = glm::cross(b - a, a0 - a);
+      if (glm::length(normal) < 1e-7f) continue;
+      normal = glm::normalize(normal);
+      if (glm::dot(normal, center - a) > 0.0f) normal = -normal;  // Outward.
+      AppendTriangle(a, b0, b, normal, vertices, indices);
+      AppendTriangle(a, a0, b0, normal, vertices, indices);
+    }
+  }
+}
+
+void BuildTerrainStairMesh(const std::vector<tactics::TerrainStair>& stairs,
+                           LitTriangleMesh* mesh) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  for (const tactics::TerrainStair& stair : stairs) AppendTerrainStair(stair, &vertices, &indices);
+  mesh->SetMesh(vertices, indices);
+}
+
 // Edges of `surface` shared (same endpoints, either direction) with one of its
 // chain neighbours, i.e. the joints between consecutive deck/ramp slabs.
 std::vector<char> SharedEdges(const std::vector<tactics::WalkSurface>& surfaces,
@@ -633,6 +671,24 @@ void AppendBox(const AABB& box, LitVertices* vertices, std::vector<GLuint>* indi
   quad({hi.x, lo.y, lo.z}, {hi.x, hi.y, lo.z}, {hi.x, hi.y, hi.z}, {hi.x, lo.y, hi.z}, {1, 0, 0});
 }
 
+// Terrain overlays (FOV cones over hills) use the same triangles as the
+// ground, clipped to each footprint triangle.
+void AppendTerrainOverlay(const tactics::HeightField& terrain,
+                          const std::array<glm::vec3, 3>& footprint,
+                          std::vector<glm::vec3>* points, float lift = 0.08f);
+
+// Streets and sidewalks are planar patches at their own heights (a city's
+// levels are planar too), batched into one mesh per material.
+void BuildPavementMesh(const std::vector<tactics::RoadSurface>& patches, float thickness,
+                       LitTriangleMesh* mesh) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  for (const auto& patch : patches) {
+    AppendSurfacePatch(patch.vertices, thickness, &vertices, &indices);
+  }
+  mesh->SetMesh(vertices, indices);
+}
+
 // Everything static the shadow-map FOV prototype (issue #110) casts from
 // and receives on, apart from the ground itself: obstacles (walls + roofs),
 // decks/ramps as 0.45-thick slabs (matching the gameplay LOS slab in
@@ -642,10 +698,23 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   LitVertices vertices;
   std::vector<GLuint> indices;
   for (const tactics::Obstacle& obstacle : scene.obstacles) {
+    if (obstacle.navOnly) continue;  // A cliff edge: the terrain mesh is the caster.
     AppendPolygonPrism(obstacle, &vertices, &indices);
+  }
+  // Parapets, roof furniture and awnings occlude like the gameplay LOS.
+  for (const tactics::MassingDetail& d : scene.massing) {
+    if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
+    tactics::Obstacle prism;
+    prism.footprint = d.footprint;
+    prism.bounds.min.y = d.y0;
+    prism.bounds.max.y = d.y1;
+    AppendPolygonPrism(prism, &vertices, &indices);
   }
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
     AppendSurfacePatch(surface.vertices, 0.45f, &vertices, &indices);
+  }
+  for (const tactics::TerrainStair& stair : scene.terrainStairs) {
+    AppendTerrainStair(stair, &vertices, &indices);
   }
   for (const AABB& slab : scene.sidewalks) AppendBox(slab, &vertices, &indices);
   for (const tactics::RoadSurface& sidewalk : scene.sidewalkSurfaces) {
@@ -676,11 +745,56 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
     mix(&o.bounds, sizeof(o.bounds));
     mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
   }
+  for (const tactics::MassingDetail& d : scene.massing) {
+    mix(d.footprint.data(), d.footprint.size() * sizeof(glm::vec2));
+    mix(&d.y0, sizeof(d.y0));
+    mix(&d.y1, sizeof(d.y1));
+  }
   for (const tactics::WalkSurface& s : scene.walkSurfaces) mixVec3s(s.vertices);
+  for (const tactics::TerrainStair& s : scene.terrainStairs) {
+    mixVec3s(s.flight);
+    mixVec3s(s.landing);
+  }
   mix(scene.sidewalks.data(), scene.sidewalks.size() * sizeof(AABB));
   for (const tactics::RoadSurface& s : scene.sidewalkSurfaces) mixVec3s(s.vertices);
   for (const tactics::RoadSurface& s : scene.roads) mixVec3s(s.vertices);
   return h;
+}
+
+// Content hash of Scene::massing, so the massing meshes rebuild only when
+// the dressing itself changes.
+unsigned long long MassingFingerprint(const tactics::Scene& scene) {
+  unsigned long long h = 1469598103934665603ULL ^ scene.massing.size();
+  auto mix = [&](const void* data, size_t bytes) {
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < bytes; ++i) {
+      h ^= p[i];
+      h *= 1099511628211ULL;
+    }
+  };
+  for (const tactics::MassingDetail& d : scene.massing) {
+    mix(&d.kind, sizeof(d.kind));
+    mix(&d.y0, sizeof(d.y0));
+    mix(&d.y1, sizeof(d.y1));
+    mix(&d.building, sizeof(d.building));
+    mix(d.footprint.data(), d.footprint.size() * sizeof(glm::vec2));
+  }
+  return h;
+}
+
+// One prism per massing detail, merged into a single mesh.
+void BuildMassingMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  for (const tactics::MassingDetail& d : scene.massing) {
+    if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
+    tactics::Obstacle prism;
+    prism.footprint = d.footprint;
+    prism.bounds.min.y = d.y0;
+    prism.bounds.max.y = d.y1;
+    AppendPolygonPrism(prism, &vertices, &indices);
+  }
+  mesh->SetMesh(vertices, indices);
 }
 
 bool PatchContainsXZ(const tactics::RoadSurface& patch, float x, float z) {
@@ -967,10 +1081,115 @@ void DrawNumberedHighlight(const Shader& shader, const TriangleMesh& ring, const
   }
 }
 
+// Tessellate flat pads and gentle grades coarsely, retaining the full grid
+// at cliffs. The maximum geometric error is 1 cm (below the pavement lift).
+// Terrain, pavement and FOV overlays all use the same tile decomposition.
+constexpr int kTerrainTileCells = 8;
+bool MergeableTerrainTile(const tactics::HeightField& hf, int x0, int z0, int x1, int z1) {
+  const float a = hf.At(x0, z0), b = hf.At(x1, z0), c = hf.At(x0, z1), d = hf.At(x1, z1);
+  for (int z = z0; z <= z1; ++z) {
+    for (int x = x0; x <= x1; ++x) {
+      const float u = static_cast<float>(x - x0) / (x1 - x0);
+      const float v = static_cast<float>(z - z0) / (z1 - z0);
+      const float height = u >= v ? a + (b - a) * u + (d - b) * v
+                                 : a + (d - c) * u + (c - a) * v;
+      if (std::fabs(hf.At(x, z) - height) > 0.01f) return false;
+    }
+  }
+  return true;
+}
+
+template <typename Emit>
+void TerrainPatches(const tactics::HeightField& hf, int x0, int z0, int x1, int z1, Emit emit) {
+  if ((x1 - x0 == 1 && z1 - z0 == 1) || MergeableTerrainTile(hf, x0, z0, x1, z1)) {
+    emit(x0, z0, x1, z1);
+    return;
+  }
+  if (x1 - x0 >= z1 - z0) {
+    const int mid = (x0 + x1) / 2;
+    TerrainPatches(hf, x0, z0, mid, z1, emit);
+    TerrainPatches(hf, mid, z0, x1, z1, emit);
+  } else {
+    const int mid = (z0 + z1) / 2;
+    TerrainPatches(hf, x0, z0, x1, mid, emit);
+    TerrainPatches(hf, x0, mid, x1, z1, emit);
+  }
+}
+
+// A flat-topped convex prism from `bottom` up to `top`, like a building:
+// the top face and one vertical quad per edge, normals outward.
+void AppendPrism(const std::vector<glm::vec2>& polygon, float bottom, float top, bool topFace,
+                 LitVertices* vertices, std::vector<GLuint>* indices) {
+  if (polygon.size() < 3) return;
+  glm::vec2 center(0.0f);
+  for (glm::vec2 p : polygon) center += p;
+  center /= static_cast<float>(polygon.size());
+  if (topFace) {
+    const glm::vec3 a(polygon[0].x, top, polygon[0].y);
+    for (size_t i = 1; i + 1 < polygon.size(); ++i) {
+      AppendTriangle(a, {polygon[i].x, top, polygon[i].y},
+                     {polygon[i + 1].x, top, polygon[i + 1].y}, {0.0f, 1.0f, 0.0f}, vertices,
+                     indices);
+    }
+  }
+  if (top - bottom < 1e-4f) return;
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    const glm::vec2 a = polygon[i], b = polygon[(i + 1) % polygon.size()];
+    if (glm::distance(a, b) < 1e-4f) continue;
+    glm::vec2 n(-(b - a).y, (b - a).x);
+    if (glm::dot(n, center - a) > 0.0f) n = -n;  // Outward.
+    const glm::vec3 normal(glm::normalize(glm::vec3(n.x, 0.0f, n.y)));
+    const glm::vec3 a0(a.x, bottom, a.y), a1(a.x, top, a.y), b0(b.x, bottom, b.y), b1(b.x, top, b.y);
+    AppendTriangle(a0, b0, b1, normal, vertices, indices);
+    AppendTriangle(a0, b1, a1, normal, vertices, indices);
+  }
+}
+
+// Urban levels are deliberately geometric, like the buildings: each tier is
+// a convex polygon prism (the map square split by every step line, minus
+// the ramp corridors), flat on top and sheer on its sides down to the base
+// plane. Where a lower tier meets a higher one, the higher prism's exposed
+// side is the cliff; the rest of that side is hidden inside the lower
+// prism. The sampled heightfield stays the movement model and never shows.
+void BuildUrbanTierMeshes(const tactics::HeightField& hf,
+                          const std::vector<tactics::TerrainWall>& walls,
+                          const std::vector<std::vector<glm::vec2>>& cutouts,
+                          LitTriangleMesh* base, LitTriangleMesh* raised) {
+  LitVertices baseVertices, raisedVertices;
+  std::vector<GLuint> baseIndices, raisedIndices;
+  const float minX = hf.minX, minZ = hf.minZ;
+  const float maxX = hf.minX + (hf.nx - 1) * hf.step;
+  const float maxZ = hf.minZ + (hf.nz - 1) * hf.step;
+  const std::vector<glm::vec2> square = {{minX, minZ}, {maxX, minZ}, {maxX, maxZ}, {minX, maxZ}};
+
+  // The base plane and its skirt, as the flat city's ground slab.
+  constexpr float kSkirt = 0.5f;
+  AppendPrism(square, -kSkirt, 0.0f, /*topFace=*/true, &baseVertices, &baseIndices);
+
+  // Tier polygons: the map square split by each step line, minus the ramp
+  // corridors (shared with the tests, so what they check is what is drawn).
+  for (const tactics::TerrainTier& tier : tactics::TerrainTiers(walls, cutouts, square)) {
+    if (tier.height < 0.01f) continue;  // The base plane already shows here.
+    AppendPrism(tier.polygon, 0.0f, tier.height, /*topFace=*/true, &raisedVertices,
+                &raisedIndices);
+  }
+  base->SetMesh(baseVertices, baseIndices);
+  raised->SetMesh(raisedVertices, raisedIndices);
+}
+
 // Triangulated terrain heightfield with central-difference normals, plus a
 // border skirt dropping below the lowest sample so the map edge reads as a
-// solid block instead of a paper-thin sheet.
-void BuildTerrainMesh(const tactics::HeightField& hf, LitTriangleMesh* mesh) {
+// solid block instead of a paper-thin sheet. A city with levels is drawn
+// geometrically instead (BuildUrbanTierMeshes); `raised` is then the
+// concrete tiers and `base` the ground plane. Hills use the heightfield.
+void BuildTerrainMesh(const tactics::HeightField& hf,
+                      const std::vector<tactics::TerrainWall>& walls,
+                      const std::vector<std::vector<glm::vec2>>& cutouts, LitTriangleMesh* base,
+                      LitTriangleMesh* raised) {
+  if (!walls.empty()) {
+    BuildUrbanTierMeshes(hf, walls, cutouts, base, raised);
+    return;
+  }
   const int nx = hf.nx, nz = hf.nz;
   std::vector<LitTriangleMesh::Vertex> vertices;
   std::vector<GLuint> indices;
@@ -988,26 +1207,29 @@ void BuildTerrainMesh(const tactics::HeightField& hf, LitTriangleMesh* mesh) {
     }
   }
   indices.reserve(static_cast<size_t>(nx - 1) * (nz - 1) * 6);
-  for (int iz = 0; iz + 1 < nz; ++iz) {
-    for (int ix = 0; ix + 1 < nx; ++ix) {
-      const GLuint a = static_cast<GLuint>(iz * nx + ix);
-      const GLuint b = a + 1;
-      const GLuint c = a + nx;
-      const GLuint d = c + 1;
-      indices.insert(indices.end(), {a, b, d, a, d, c});
+  const auto quad = [&](int x0, int z0, int x1, int z1) {
+    const GLuint a = static_cast<GLuint>(z0 * nx + x0), b = z0 * nx + x1;
+    const GLuint c = z1 * nx + x0, d = z1 * nx + x1;
+    indices.insert(indices.end(), {a, b, d, a, d, c});
+  };
+  for (int z = 0; z + 1 < nz; z += kTerrainTileCells) {
+    for (int x = 0; x + 1 < nx; x += kTerrainTileCells) {
+      const int x1 = std::min(x + kTerrainTileCells, nx - 1);
+      const int z1 = std::min(z + kTerrainTileCells, nz - 1);
+      TerrainPatches(hf, x, z, x1, z1, quad);
     }
   }
   skirtBottom -= 0.5f;
   // Skirt: one quad per border edge, with an outward horizontal normal.
   auto skirtQuad = [&](int ix0, int iz0, int ix1, int iz1, const glm::vec3& normal) {
-    const GLuint base = static_cast<GLuint>(vertices.size());
+    const GLuint start = static_cast<GLuint>(vertices.size());
     const glm::vec3 a = vertices[iz0 * nx + ix0].pos;
     const glm::vec3 b = vertices[iz1 * nx + ix1].pos;
     vertices.push_back({a, normal});
     vertices.push_back({b, normal});
     vertices.push_back({glm::vec3(b.x, skirtBottom, b.z), normal});
     vertices.push_back({glm::vec3(a.x, skirtBottom, a.z), normal});
-    indices.insert(indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+    indices.insert(indices.end(), {start, start + 1, start + 2, start, start + 2, start + 3});
   };
   for (int ix = 0; ix + 1 < nx; ++ix) {
     skirtQuad(ix, 0, ix + 1, 0, glm::vec3(0.0f, 0.0f, -1.0f));
@@ -1017,7 +1239,8 @@ void BuildTerrainMesh(const tactics::HeightField& hf, LitTriangleMesh* mesh) {
     skirtQuad(0, iz, 0, iz + 1, glm::vec3(-1.0f, 0.0f, 0.0f));
     skirtQuad(nx - 1, iz, nx - 1, iz + 1, glm::vec3(1.0f, 0.0f, 0.0f));
   }
-  mesh->SetMesh(vertices, indices);
+  base->SetMesh(vertices, indices);
+  raised->SetMesh({}, {});
 }
 
 // Debug overlay of the navmesh's walkable-cell boundaries: each cell's
@@ -1260,14 +1483,13 @@ std::vector<GroundSpan> VisibleGroundSpans(const glm::vec3& eye, const glm::vec2
   return visible;
 }
 
-// Clip the terrain's actual triangles to an overlay footprint, retaining
+// Clip the rendered terrain tiles to an overlay footprint, retaining
 // their interpolated heights. Sampling only the footprint's vertices (even
 // with radial subdivisions) cuts across ridges, and bilinear HeightAt does
 // not match the rendered surface within a non-planar heightfield cell.
 void AppendTerrainOverlay(const tactics::HeightField& terrain,
                           const std::array<glm::vec3, 3>& footprint,
-                          std::vector<glm::vec3>* points) {
-  constexpr float kTerrainLift = 0.08f;
+                          std::vector<glm::vec3>* points, float lift) {
   const auto crossXZ = [](const glm::vec3& a, const glm::vec3& b) {
     return a.x * b.z - a.z * b.x;
   };
@@ -1283,14 +1505,53 @@ void AppendTerrainOverlay(const tactics::HeightField& terrain,
   const int z0 = cellIndex(lo.z, terrain.minZ, terrain.nz);
   const int z1 = cellIndex(hi.z, terrain.minZ, terrain.nz);
   const auto vertex = [&](int ix, int iz) {
-    return glm::vec3(terrain.minX + ix * terrain.step, terrain.At(ix, iz) + kTerrainLift,
+    return glm::vec3(terrain.minX + ix * terrain.step, terrain.At(ix, iz) + lift,
                      terrain.minZ + iz * terrain.step);
   };
-  for (int iz = z0; iz <= z1; ++iz) {
-    // A narrow cone slice can have a huge bounding box. Restrict each grid
-    // row to the slice's X interval so we only clip nearby terrain cells.
+  const auto clipTriangle = [&](const std::array<glm::vec3, 3>& triangle) {
+    // A triangle clipped by three half-planes has at most six vertices.
+    std::array<glm::vec3, 6> poly{}, clipped{};
+    std::copy(triangle.begin(), triangle.end(), poly.begin());
+    int count = 3;
+    for (int edge = 0; edge < 3 && count > 0; ++edge) {
+      const glm::vec3& origin = footprint[edge];
+      const glm::vec3 direction = footprint[(edge + 1) % 3] - origin;
+      const auto side = [&](const glm::vec3& p) {
+        return winding * crossXZ(direction, p - origin);
+      };
+      int clippedCount = 0;
+      glm::vec3 prev = poly[count - 1];
+      float prevSide = side(prev);
+      for (int v = 0; v < count; ++v) {
+        const glm::vec3 cur = poly[v];
+        const float curSide = side(cur);
+        if ((prevSide >= 0.0f) != (curSide >= 0.0f)) {
+          clipped[clippedCount++] = glm::mix(prev, cur, prevSide / (prevSide - curSide));
+        }
+        if (curSide >= 0.0f) clipped[clippedCount++] = cur;
+        prev = cur;
+        prevSide = curSide;
+      }
+      poly.swap(clipped);
+      count = clippedCount;
+    }
+    for (int v = 1; v + 1 < count; ++v) {
+      points->insert(points->end(), {poly[0], poly[v], poly[v + 1]});
+    }
+  };
+  const auto quad = [&](int x0, int z0, int x1, int z1) {
+    const glm::vec3 a = vertex(x0, z0), b = vertex(x1, z0);
+    const glm::vec3 c = vertex(x0, z1), d = vertex(x1, z1);
+    clipTriangle({a, b, d});
+    clipTriangle({a, d, c});
+  };
+  const int tile = kTerrainTileCells;
+  for (int iz = (z0 / tile) * tile; iz <= z1; iz += tile) {
+    const int endZ = std::min(iz + tile, terrain.nz - 1);
+    // Restrict each tile row to the triangle's X interval. Cone slices can
+    // have large bounding boxes while covering very little of each row.
     const float rowMinZ = terrain.minZ + iz * terrain.step;
-    const float rowMaxZ = rowMinZ + terrain.step;
+    const float rowMaxZ = terrain.minZ + endZ * terrain.step;
     float minX = std::numeric_limits<float>::infinity();
     float maxX = -std::numeric_limits<float>::infinity();
     const auto includeX = [&](float x) {
@@ -1311,41 +1572,9 @@ void AppendTerrainOverlay(const tactics::HeightField& terrain,
     if (minX > maxX) continue;
     const int x0 = cellIndex(minX, terrain.minX, terrain.nx);
     const int x1 = cellIndex(maxX, terrain.minX, terrain.nx);
-    for (int ix = x0; ix <= x1; ++ix) {
-      const glm::vec3 a = vertex(ix, iz), b = vertex(ix + 1, iz);
-      const glm::vec3 c = vertex(ix, iz + 1), d = vertex(ix + 1, iz + 1);
-      // Same diagonal as BuildTerrainMesh: a-b-d and a-d-c.
-      for (const auto& triangle : {std::array{a, b, d}, std::array{a, d, c}}) {
-        // A triangle clipped by three half-planes has at most six vertices.
-        std::array<glm::vec3, 6> poly{}, clipped{};
-        std::copy(triangle.begin(), triangle.end(), poly.begin());
-        int count = 3;
-        for (int edge = 0; edge < 3 && count > 0; ++edge) {
-          const glm::vec3& origin = footprint[edge];
-          const glm::vec3 direction = footprint[(edge + 1) % 3] - origin;
-          const auto side = [&](const glm::vec3& p) {
-            return winding * crossXZ(direction, p - origin);
-          };
-          int clippedCount = 0;
-          glm::vec3 prev = poly[count - 1];
-          float prevSide = side(prev);
-          for (int v = 0; v < count; ++v) {
-            const glm::vec3 cur = poly[v];
-            const float curSide = side(cur);
-            if ((prevSide >= 0.0f) != (curSide >= 0.0f)) {
-              clipped[clippedCount++] = glm::mix(prev, cur, prevSide / (prevSide - curSide));
-            }
-            if (curSide >= 0.0f) clipped[clippedCount++] = cur;
-            prev = cur;
-            prevSide = curSide;
-          }
-          poly.swap(clipped);
-          count = clippedCount;
-        }
-        for (int v = 1; v + 1 < count; ++v) {
-          points->insert(points->end(), {poly[0], poly[v], poly[v + 1]});
-        }
-      }
+    for (int ix = (x0 / tile) * tile; ix <= x1; ix += tile) {
+      const int endX = std::min(ix + tile, terrain.nx - 1);
+      TerrainPatches(terrain, ix, iz, endX, endZ, quad);
     }
   }
 }
@@ -1449,7 +1678,8 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
     float y = terrain.HeightAt(x, z);
     for (const tactics::RoadSurface& sidewalk : polygonSidewalks) {
       if (PatchContainsXZ(sidewalk, x, z)) {
-        y = std::max(y, sidewalk.vertices.front().y);
+        y = std::max(y, terrain.Empty() ? sidewalk.vertices.front().y
+                                        : terrain.MeshHeightAt(x, z) + 0.12f);
       }
     }
     return glm::vec3(x, y + kGroundOffset, z);
@@ -1735,13 +1965,15 @@ void DrawAimMarker(const Shader& colorShader, ColorTriangleMesh& mesh,
 // deck slab crossing a camera->probe segment is drawn see-through.
 std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team, bool fogActive,
                                                const PaneOverlays& overlays) {
+  // The omniscient spectator keeps both teams' figures and plans visible.
+  const bool allTeams = overlays.spectatorFov;
   // Probes hover slightly above their surface so grazing contact with the
   // ground/deck they sit on never reads as occlusion.
   constexpr float kSurfaceLift = 0.3f;
   constexpr float kGhostLift = 0.9f;  // Mid-torso of a ghost/figure wireframe.
   std::vector<glm::vec3> probes;
   for (const Unit& unit : game.GetScene().units) {
-    if (!unit.alive || unit.team != team) continue;
+    if (!unit.alive || (!allTeams && unit.team != team)) continue;
     probes.push_back(unit.EyePosition());
     probes.push_back(unit.position + glm::vec3(0.0f, kSurfaceLift, 0.0f));
   }
@@ -1776,7 +2008,7 @@ std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team,
       game.Mode() != InputMode::GameOver && game.Mode() != InputMode::Executing;
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
-      if (!unit.alive || unit.team != team) continue;
+      if (!unit.alive || (!allTeams && unit.team != team)) continue;
       if (unit.plan.type != tactics::PlannedActionType::Move || unit.plan.movePath.size() < 2) {
         continue;
       }
@@ -1790,7 +2022,7 @@ std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team,
     for (const Unit& unit : game.GetScene().units) {
       if (unit.team == team) continue;
       for (const auto& s : game.Sightings(team, unit.id)) {
-        if (1.0f - s.ageRounds * tactics::constants::kSightingFadePerRound <= 0.0f) continue;
+        if (game.GhostAlpha(s.at) <= 0.0f) continue;
         probes.push_back(s.position + glm::vec3(0.0f, kGhostLift, 0.0f));  // Ghost + arrow.
       }
     }
@@ -1843,8 +2075,13 @@ bool SceneRenderer::Init() {
   shotConeMesh_.Init();
   aimOverlayMesh_.Init();
   terrainMesh_.Init();
+  terrainRaisedMesh_.Init();
+  terrainRoadMesh_.Init();
+  terrainSidewalkMesh_.Init();
+  terrainStairMesh_.Init();
   geometryMesh_.Init();
   fovSceneMesh_.Init();
+  massingMesh_.Init();
   highlightRing_.Init();
   highlightRing_.SetPoints(BuildRingPoints());
 
@@ -1926,9 +2163,16 @@ void SceneRenderer::Destroy() {
   fovKeySidewalks_.clear();
   fovKeyMapHalfExtent_ = 0.0f;
   terrainMesh_.Destroy();
+  terrainRaisedMesh_.Destroy();
+  terrainRoadMesh_.Destroy();
+  terrainSidewalkMesh_.Destroy();
+  terrainStairMesh_.Destroy();
+  pavementKey_ = 0;
   geometryMesh_.Destroy();
   fovSceneMesh_.Destroy();
   fovSceneKey_ = 0;
+  massingMesh_.Destroy();
+  massingKey_ = 0;
   terrainKey_ = tactics::HeightField{};
   highlightRing_.Destroy();
   sphereMesh_.Destroy();
@@ -1984,6 +2228,8 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, f
     if (drawTerrain) {
       depthShader_.SetMat4("uLightMVP", mapMatrix[half]);
       terrainMesh_.Draw();
+      terrainRaisedMesh_.Draw();
+      terrainStairMesh_.Draw();
     } else {
       DrawBoxDepth(depthShader_, cubeMesh_, mapMatrix[half],
                    glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
@@ -2045,6 +2291,7 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, f
   };
   if (drawTerrain) {
     drawReceiver(terrainMesh_, glm::mat4(1.0f));
+    drawReceiver(terrainRaisedMesh_, glm::mat4(1.0f));
   } else {
     drawReceiver(cubeMesh_, BoxModel(glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
                                      glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f)));
@@ -2068,8 +2315,21 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       terrainKey_.nz != terrain.nz || terrainKey_.minX != terrain.minX ||
       terrainKey_.minZ != terrain.minZ || terrainKey_.step != terrain.step;
   if (terrainChanged) {
-    if (!terrain.Empty()) BuildTerrainMesh(terrain, &terrainMesh_);
+    if (!terrain.Empty()) {
+      BuildTerrainMesh(terrain, game.GetScene().terrainWalls, game.GetScene().terrainCutouts,
+                       &terrainMesh_, &terrainRaisedMesh_);
+    }
     terrainKey_ = terrain;
+    fovSceneKey_ = 0;
+  }
+  if (!terrain.Empty()) {
+    const auto key = FovSceneFingerprint(game.GetScene());
+    if (terrainChanged || pavementKey_ != key) {
+      BuildPavementMesh(game.GetScene().roads, 0.0f, &terrainRoadMesh_);
+      BuildPavementMesh(game.GetScene().sidewalkSurfaces, 0.10f, &terrainSidewalkMesh_);
+      BuildTerrainStairMesh(game.GetScene().terrainStairs, &terrainStairMesh_);
+      pavementKey_ = key;
+    }
   }
   // Terrain clipping is more expensive than the flat fan. Reuse each unit's
   // geometry while it stands still, invalidating on map contents rather
@@ -2117,6 +2377,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                  orthoHalfExtent, 0.1f, lightDistance * 2.0f) *
                       lightView;
 
+  // Building massing (visual only), rebuilt when the scene's records change.
+  {
+    const unsigned long long massingKey = MassingFingerprint(game.GetScene());
+    if (massingKey != massingKey_) {
+      BuildMassingMesh(game.GetScene(), &massingMesh_);
+      massingKey_ = massingKey;
+    }
+  }
+
   // Shadow pass: only casters this team can currently see.
   glDisable(GL_SCISSOR_TEST);
   if (!debug.disableShadows && !debug.thermal) {
@@ -2129,8 +2398,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     if (drawTerrain) {
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
       terrainMesh_.Draw();
+      terrainRaisedMesh_.Draw();
+      terrainStairMesh_.Draw();
     }
     for (const auto& obstacle : obstacles) {
+      if (obstacle.navOnly) continue;
       const AABB& bounds = obstacle.bounds;
       if (obstacle.footprint.empty()) {
         DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min,
@@ -2140,6 +2412,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
         geometryMesh_.Draw();
       }
+    }
+    if (massingMesh_.HasGeometry()) {
+      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+      massingMesh_.Draw();
     }
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(kDeckShadowSlopeBias, kDeckShadowConstantBias);
@@ -2188,6 +2464,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const auto& walkSurfaces = game.GetScene().walkSurfaces;
   std::vector<char> fadeObstacle(obstacles.size(), 0);
   std::vector<char> fadeSurface(walkSurfaces.size(), 0);
+  std::vector<char> fadeBuilding;
   bool anyFaded = false;
   if (!debug.disableOcclusionFade) {
     const std::vector<glm::vec3> probes =
@@ -2209,6 +2486,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // not fade that wall.
     constexpr float kEndpointEpsilon = 1e-2f;
     for (size_t i = 0; i < obstacles.size(); ++i) {
+      if (obstacles[i].navOnly) continue;
       for (const ProbeRay& ray : rays) {
         float t = 0.0f;
         if (tactics::RayIntersectsObstacle(cameraPos, ray.direction, obstacles[i], &t) &&
@@ -2229,6 +2507,48 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           anyFaded = true;
           break;
         }
+      }
+    }
+    // A building fades as a whole: if any part of it (either prism, its roof
+    // slab) blocks a sightline, all of it -- prisms, roof slab, massing --
+    // goes see-through together.
+    const auto roofBuilding = [&](const tactics::WalkSurface& surface) {
+      for (const tactics::Obstacle& o : obstacles) {
+        if (o.building < 0) continue;
+        bool inside = !surface.vertices.empty();
+        for (const glm::vec3& v : surface.vertices) {
+          inside &= v.x >= o.bounds.min.x - 0.05f && v.x <= o.bounds.max.x + 0.05f &&
+                    v.z >= o.bounds.min.z - 0.05f && v.z <= o.bounds.max.z + 0.05f &&
+                    std::fabs(v.y - o.bounds.max.y) < 0.1f;
+        }
+        if (inside) return o.building;
+      }
+      return -1;
+    };
+    std::vector<int> surfaceBuilding(walkSurfaces.size(), -1);
+    for (size_t i = 0; i < walkSurfaces.size(); ++i) surfaceBuilding[i] = roofBuilding(walkSurfaces[i]);
+    fadeBuilding.assign(game.GetScene().buildings.size(), 0);
+    const auto markBuilding = [&](int b) {
+      if (b >= 0 && b < static_cast<int>(fadeBuilding.size())) fadeBuilding[b] = 1;
+    };
+    for (size_t i = 0; i < obstacles.size(); ++i) {
+      if (fadeObstacle[i]) markBuilding(obstacles[i].building);
+    }
+    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+      if (fadeSurface[i]) markBuilding(surfaceBuilding[i]);
+    }
+    for (size_t i = 0; i < obstacles.size(); ++i) {
+      const int b = obstacles[i].building;
+      if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
+        fadeObstacle[i] = 1;
+        anyFaded = true;
+      }
+    }
+    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+      const int b = surfaceBuilding[i];
+      if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
+        fadeSurface[i] = 1;
+        anyFaded = true;
       }
     }
   }
@@ -2258,9 +2578,21 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
 
   if (drawTerrain) {
-    // Earthy green-brown so the hills read as terrain rather than factory floor.
+    // Retaining-wall tops coincide with the high pad. Bias the terrain
+    // behind the solid geometry to keep their shared edge free of z-fighting.
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(1.0f, 1.0f);
+    // Earthy green-brown so the hills read as terrain rather than factory
+    // floor; a city with levels is concrete throughout, base ground, raised
+    // tiers, cliff faces and stairs alike, like its decks.
+    const bool city = !game.GetScene().roads.empty();
     DrawLitModel(litShader_, terrainMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(0.30f, 0.36f, 0.22f, 1.0f));
+                 city ? glm::vec4(kDeckColor, 1.0f) : glm::vec4(0.30f, 0.36f, 0.22f, 1.0f));
+    DrawLitModel(litShader_, terrainRaisedMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(kDeckColor, 1.0f));
+    DrawLitModel(litShader_, terrainStairMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(kDeckColor, 1.0f));
+    glDisable(GL_POLYGON_OFFSET_FILL);
   } else {
     DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_,
                glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
@@ -2273,13 +2605,21 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
   }
 
+  if (drawTerrain) {
+    DrawLitModel(litShader_, terrainSidewalkMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
+    DrawLitModel(litShader_, terrainRoadMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
+  }
   for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
+    if (drawTerrain) break;
     BuildSurfacePatch(sidewalk.vertices, 0.10f, &geometryMesh_);
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
   }
 
   for (const tactics::RoadSurface& road : game.GetScene().roads) {
+    if (drawTerrain) break;
     BuildSurfacePatch(road.vertices, 0.0f, &geometryMesh_);
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
@@ -2295,7 +2635,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   for (size_t i = 0; i < obstacles.size(); ++i) {
-    if (fadeObstacle[i]) continue;  // Re-drawn translucent below.
+    if (fadeObstacle[i] || obstacles[i].navOnly) continue;  // Re-drawn translucent below / unseen.
     const AABB& bounds = obstacles[i].bounds;
     const glm::vec4 color(kObstacleColor, 1.0f);
     if (obstacles[i].footprint.empty()) {
@@ -2304,6 +2644,32 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     } else {
       BuildPolygonPrism(obstacles[i], &geometryMesh_);
       DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f), color);
+    }
+  }
+
+  // Building massing: parapets, roof furniture, awnings (issue #151).
+  const auto detailFaded = [&](const tactics::MassingDetail& d) {
+    return d.building >= 0 && d.building < static_cast<int>(fadeBuilding.size()) &&
+           fadeBuilding[d.building];
+  };
+  const auto drawDetail = [&](const tactics::MassingDetail& d, const glm::vec4& color) {
+    if (d.footprint.size() < 3 || d.y1 <= d.y0) return;
+    tactics::Obstacle prism;
+    prism.footprint = d.footprint;
+    prism.bounds.min.y = d.y0;
+    prism.bounds.max.y = d.y1;
+    BuildPolygonPrism(prism, &geometryMesh_);
+    DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f), color);
+  };
+  if (massingMesh_.HasGeometry()) {
+    if (!anyFaded) {
+      DrawLitModel(litShader_, massingMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                   glm::vec4(kObstacleColor, 1.0f));
+    } else {
+      // Details of faded buildings are re-drawn translucent below.
+      for (const tactics::MassingDetail& d : game.GetScene().massing) {
+        if (!detailFaded(d)) drawDetail(d, glm::vec4(kObstacleColor, 1.0f));
+      }
     }
   }
 
@@ -2364,6 +2730,22 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glEnable(GL_STENCIL_TEST);
     glStencilFunc(GL_EQUAL, 0, 0xFF);
     glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+    // Front faces only: with no culling the stencil cap lets whichever
+    // triangle draws first claim the pixel, often a back face, which shows as
+    // striped bands and dark slabs through the faded block. Scene meshes use
+    // clockwise outward winding (matching CubeMesh), rather than OpenGL's
+    // default counter-clockwise front-face convention.
+    glFrontFace(GL_CW);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    // The faded block would otherwise be shadowed by its own shadow-map
+    // entry (it is a caster), darkening its faces into patchy slabs.
+    litShader_.SetInt("uDisableShadows", 1);
+    // Massing first: it stands proud of the building prisms, so it claims its
+    // pixels in the stencil cap instead of being hidden behind a roof face.
+    for (const tactics::MassingDetail& d : game.GetScene().massing) {
+      if (detailFaded(d)) drawDetail(d, glm::vec4(kObstacleColor, kOccluderFadeOpacity));
+    }
     for (const FadedOccluder& f : faded) {
       if (f.obstacle >= 0) {
         const tactics::Obstacle& obstacle = obstacles[f.obstacle];
@@ -2384,6 +2766,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                      glm::vec4(kDeckColor, kOccluderFadeOpacity));
       }
     }
+    litShader_.SetInt("uDisableShadows", debug.disableShadows ? 1 : 0);
+    glDisable(GL_CULL_FACE);
+    glFrontFace(GL_CCW);
     glDisable(GL_STENCIL_TEST);
     glClear(GL_STENCIL_BUFFER_BIT);  // Later passes expect a clean stencil.
     glDepthMask(GL_TRUE);
@@ -2407,7 +2792,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
     for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
       if (PatchContainsXZ(sidewalk, position.x, position.z)) {
-        position.y = std::max(position.y, sidewalk.vertices.front().y);
+        position.y = std::max(position.y, terrain.Empty() ? sidewalk.vertices.front().y
+                         : terrain.MeshHeightAt(position.x, position.z) + 0.12f);
       }
     }
     return position;
@@ -2471,41 +2857,50 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       fovSceneKey_ = sceneKey;
     }
   }
-  if (fovOverlayMode_ == FovOverlayMode::ShadowMap) {
-    // Issue #110 prototype: projective per-unit mask instead of the
-    // analytic ground overlay.
-    for (const Unit& unit : game.GetScene().units) {
-      if (debug.disableFov || !unit.alive || unit.team != team) continue;
-      const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 0.15f)
-                                                          : glm::vec4(0.9f, 0.25f, 0.22f, 0.15f);
-      DrawFovShadowMask(game, unit, unit.facingYaw, tactics::constants::kShootHalfFovDegrees,
-                        teamColor, viewProj, drawTerrain, targetFramebuffer, x, y, width, height);
-    }
-    colorShader_.Use();
-  } else {
-    const auto build = [&](const Unit& unit) {
-      return BuildFovCone(unit, obstacles, sidewalks, mapHalfExtent, terrain,
-                          game.GetScene().sidewalkSurfaces, game.GetScene().walkSurfaces);
-    };
-    for (const Unit& unit : game.GetScene().units) {
-      if (debug.disableFov || !unit.alive || unit.team != team) continue;
-      if (terrain.Empty()) {
-        DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, build(unit));
-        continue;
+  const auto drawTeamFov = [&](Team fovTeam) {
+    if (fovOverlayMode_ == FovOverlayMode::ShadowMap) {
+      // Issue #110 prototype: projective per-unit mask instead of the
+      // analytic ground overlay.
+      for (const Unit& unit : game.GetScene().units) {
+        if (debug.disableFov || !unit.alive || unit.team != fovTeam) continue;
+        const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 0.15f)
+                                                            : glm::vec4(0.9f, 0.25f, 0.22f, 0.15f);
+        DrawFovShadowMask(game, unit, unit.facingYaw, tactics::constants::kShootHalfFovDegrees,
+                          teamColor, viewProj, drawTerrain, targetFramebuffer, x, y, width, height);
       }
-      auto cached = std::find_if(terrainFovCache_.begin(), terrainFovCache_.end(),
-                                 [&](const auto& entry) { return entry.unitId == unit.id; });
-      const glm::vec3 eye = unit.EyePosition();
-      if (cached == terrainFovCache_.end()) {
-        terrainFovCache_.push_back({unit.id, eye, unit.facingYaw, build(unit)});
-        cached = terrainFovCache_.end() - 1;
-      } else if (cached->eye != eye || cached->facingYaw != unit.facingYaw) {
-        cached->eye = eye;
-        cached->facingYaw = unit.facingYaw;
-        cached->points = build(unit);
+      colorShader_.Use();
+    } else {
+      const auto build = [&](const Unit& unit) {
+        return BuildFovCone(unit, game.SightObstacles(), sidewalks, mapHalfExtent, terrain,
+                            game.GetScene().sidewalkSurfaces, game.GetScene().walkSurfaces);
+      };
+      for (const Unit& unit : game.GetScene().units) {
+        if (debug.disableFov || !unit.alive || unit.team != fovTeam) continue;
+        if (terrain.Empty()) {
+          DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, build(unit));
+          continue;
+        }
+        auto cached = std::find_if(terrainFovCache_.begin(), terrainFovCache_.end(),
+                                   [&](const auto& entry) { return entry.unitId == unit.id; });
+        const glm::vec3 eye = unit.EyePosition();
+        if (cached == terrainFovCache_.end()) {
+          terrainFovCache_.push_back({unit.id, eye, unit.facingYaw, build(unit)});
+          cached = terrainFovCache_.end() - 1;
+        } else if (cached->eye != eye || cached->facingYaw != unit.facingYaw) {
+          cached->eye = eye;
+          cached->facingYaw = unit.facingYaw;
+          cached->points = build(unit);
+        }
+        DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, cached->points);
       }
-      DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, cached->points);
     }
+  };
+  drawTeamFov(team);
+  if (overlays.spectatorFov) {
+    // Fresh stencil so the other team's cones blend over (not instead of) these.
+    glStencilMask(0xFF);
+    glClear(GL_STENCIL_BUFFER_BIT);
+    drawTeamFov(team == Team::Blue ? Team::Red : Team::Blue);
   }
   glDisable(GL_STENCIL_TEST);
   // Free-aim (issue #129): the aiming figure's acid-green 360-degree LOS
@@ -2567,7 +2962,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
-      if (!unit.alive || unit.team != team ||
+      if (!unit.alive || (!overlays.spectatorFov && unit.team != team) ||
           unit.plan.type != tactics::PlannedActionType::Shoot || &unit == aimingShooter) {
         continue;
       }
@@ -2778,7 +3173,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           // contour/edge interpolation below stays on the slope.
           for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
             if (PatchContainsXZ(sidewalk, quad[k].p.x, quad[k].p.z)) {
-              quad[k].p.y = std::max(quad[k].p.y, sidewalk.vertices.front().y);
+              quad[k].p.y = std::max(quad[k].p.y, terrain.Empty() ? sidewalk.vertices.front().y
+                               : terrain.MeshHeightAt(quad[k].p.x, quad[k].p.z) + 0.12f);
             }
           }
           quad[k].p.y += kY;
@@ -2934,7 +3330,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glDepthMask(GL_TRUE);
   glDisable(GL_BLEND);
 
-  // Enemy sighting memory: faint wireframe trail fading with age.
+  // Enemy ghosts: faint wireframes shown during the turn, fading after it.
   if (fogActive) {
     constexpr float kSightingMaxAlpha = 0.35f;
     unlitShader_.Use();
@@ -2944,7 +3340,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (const Unit& unit : game.GetScene().units) {
       if (unit.team == team) continue;
       for (const auto& s : game.Sightings(team, unit.id)) {
-        const float life = 1.0f - s.ageRounds * tactics::constants::kSightingFadePerRound;
+        const float life = game.GhostAlpha(s.at);
         if (life <= 0.0f) continue;
         DrawSighting(unlitShader_, pathLine_, viewProj, unit, s, game.GetScene().sidewalks,
                      life * kSightingMaxAlpha, terrain);
@@ -2955,7 +3351,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   // Bullet tracers: a team-colored dotted path from the muzzle to where the
-  // shot ended, fading per completed round like the sighting ghosts.  A new
+  // shot ended, fading out within 0.5 s of its shot.  A new
   // shot briefly overlays the dots with a full white-hot line.
   {
     constexpr float kTracerMaxAlpha = 0.9f;
@@ -2966,8 +3362,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
     for (const tactics::Tracer& tracer : game.Tracers()) {
-      const int age = game.RoundNumber() - tracer.birthRound;
-      const float life = 1.0f - static_cast<float>(age) / tactics::constants::kTracerMemoryRounds;
+      const float life = game.TracerAlpha(tracer);
       if (life <= 0.0f) continue;
       const glm::vec3 teamColor = tracer.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
                                                             : glm::vec3(0.9f, 0.25f, 0.22f);
@@ -2989,7 +3384,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       // Each shot of a burst still pops as a full white-hot line, but that
       // continuous overlay disappears quickly and leaves only the dots.
       constexpr float kTracerFlashSeconds = 0.25f;
-      const float flash = glm::clamp(1.0f - tracer.age / kTracerFlashSeconds, 0.0f, 1.0f);
+      const float flash = glm::clamp(1.0f - game.TracerAge(tracer) / kTracerFlashSeconds, 0.0f, 1.0f);
       if (flash > 0.0f) {
         pathLine_.SetPoints({tracer.from, tracer.to});
         unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.97f, 0.8f, flash));
@@ -3006,7 +3401,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // single actor.
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
-      if (!unit.alive || unit.team != team) continue;
+      if (!unit.alive || (!overlays.spectatorFov && unit.team != team)) continue;
       if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
       const bool planned = unit.plan.type != tactics::PlannedActionType::None;
       const glm::vec4 color = planned ? glm::vec4(0.25f, 0.9f, 0.35f, 1.0f)
@@ -3097,10 +3492,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // Visual feedback for the whole squad's plan so far: a planned move reuses
   // the same path-line rendering as the live preview above; a planned shot
   // gets a simple shooter->target line. Own team only -- the enemy's plans
-  // stay hidden even where its figures are visible.
+  // stay hidden even where its figures are visible (except to the spectator).
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
-      if (!unit.alive || unit.team != team) continue;
+      if (!unit.alive || (!overlays.spectatorFov && unit.team != team)) continue;
       if (unit.plan.type == tactics::PlannedActionType::Move && unit.plan.movePath.size() >= 2) {
         drawMovePath(unit.plan.movePath, unit.plan.moveRides, glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
         // Wireframe stand-in at the destination, showing the planned final

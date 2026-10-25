@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -34,6 +35,58 @@ struct Obstacle {
   // phase and vertical extent; collision, LOS, navigation and rendering use
   // these vertices when present.
   std::vector<glm::vec2> footprint;
+  // Index into Scene::buildings when this prism is (part of) a generated
+  // building, else -1 (hand-placed boxes, rocks, pier columns, crates). The
+  // renderer reads the building's facade style through it.
+  int building = -1;
+  // Blocks movement and LOS but is never drawn: the unseen wall along a
+  // terrain cliff edge, whose face the terrain mesh itself renders.
+  bool navOnly = false;
+};
+
+// Building archetype (urban map issue #151, roadmap 3.2). Drawn per parcel
+// from a street-class-weighted table with a per-block character bias;
+// drives floor count/height (so the building's height) and the facade style.
+enum class BuildingKind : uint8_t {
+  Residential,  // Apartments: 3.0 floors, brick/plaster.
+  MixedUse,     // Shops under apartments: 4.0 ground floor, awning.
+  Office,       // 3.5 floors, glassy; upper storeys may step back.
+  Commercial,   // Single-storey shop/warehouse hall, awning.
+  Civic,        // Landmark: the towers.
+  Garage,       // Parking decks: low 2.8 floors, raw concrete.
+};
+constexpr int kBuildingKindCount = 6;
+const char* BuildingKindName(BuildingKind kind);
+
+// One generated building: the gameplay geometry stays the solid Obstacle
+// prism(s); this record is the typology beside it.
+struct Building {
+  BuildingKind kind = BuildingKind::Residential;
+  int floorCount = 1;
+  float groundFloorHeight = 3.0f;  // First floor; the rest are floorHeight.
+  float floorHeight = 3.0f;
+  // Facade palette index the renderer reads (kind * variants + variant).
+  int style = 0;
+  int obstacle = -1;       // Base prism (full parcel footprint).
+  int upperObstacle = -1;  // Top floor stepped back as its own prism (offices), else -1.
+  int parcel = -1;         // Index into UrbanParcels(seed, config).
+  int block = -1;
+
+  float Height() const {
+    return groundFloorHeight + static_cast<float>(floorCount - 1) * floorHeight;
+  }
+};
+
+// Visual-only massing detail (roadmap 3.3): a prism over a convex XZ
+// footprint between y0 and y1. Blocks sight lines and FOV (see
+// SightObstacles). Parapets and roof fixtures also block walking: they are
+// copied into WalkSurface::blockers of their roof slab. Awnings are overhead.
+struct MassingDetail {
+  enum class Kind : uint8_t { Parapet, RoofFixture, Awning };
+  Kind kind = Kind::Parapet;
+  std::vector<glm::vec2> footprint;  // Counter-clockwise.
+  float y0 = 0.0f, y1 = 0.0f;
+  int building = -1;
 };
 
 // A convex, planar walkable patch above (or sloping away from) the ground.
@@ -44,6 +97,9 @@ struct WalkSurface {
   std::vector<glm::vec3> vertices;  // Counter-clockwise when viewed from above.
   std::vector<int> neighbors;
   bool connectsToGround = false;    // The lowest edge is a legal ground transition.
+  // Convex XZ footprints standing on the patch (roof parapets, furniture)
+  // that a figure can't walk into. Honoured on single-patch routes only.
+  std::vector<std::vector<glm::vec2>> blockers;
 };
 
 // A pre-built zipline: a two-way cable between a ground anchor post and a
@@ -82,7 +138,7 @@ inline std::vector<glm::vec2> ObstacleFootprint(const Obstacle& obstacle) {
 
 // Sampled ground elevation over a regular XZ grid: sample (ix, iz) sits at
 // (minX + ix*step, minZ + iz*step). An empty field means flat ground at
-// y = 0 everywhere (the hand-authored and urban scenes), so every consumer
+// y = 0 everywhere (the hand-authored and terrain-disabled urban scenes), so every consumer
 // can sample unconditionally. Queries outside the grid clamp to the border.
 struct HeightField {
   float minX = 0.0f, minZ = 0.0f;
@@ -153,6 +209,8 @@ constexpr float kAgentRadius = 0.4f;     // Padding used to inflate obstacles fo
 constexpr float kUnitHalfWidth = 0.35f;
 constexpr float kUnitHeight = 1.8f;
 constexpr float kEyeHeight = 1.5f;
+// Ground beneath a deck/ramp is only walkable with at least this much headroom.
+constexpr float kMinDeckHeadroom = 2.2f;
 // Where a locked-on shot aims on the target figure: torso center height.
 // Shared by the ballistics (burst aim point), the staged-lock "+" marker and
 // the planned-shot cone, so what the cone shader shows is what gets shot at.
@@ -200,12 +258,19 @@ constexpr float kRoundDuration = 5.0f;  // Seconds of execution per round.
 // where a unit stands or faces; the renderer clips each ray at the map
 // boundary.
 constexpr float kFovConeVisualRange = kSightRange;
-// Enemy sighting memory: a figure continuously in FOV leaves one sample per
-// interval (plus one on entry). Samples fade per completed round (not in
-// real time) and are forgotten once fully faded.
+// Enemy ghosts: a figure continuously in FOV leaves one sample per interval
+// (plus one on entry) during a turn. Ghosts and bullet tracers show for that
+// turn only: once it ends each fades out over kGhostFadeDuration, starting
+// at the moment it appeared (same order and spacing). Nothing carries over
+// to the next turn.
 constexpr float kSightingSampleInterval = 0.5f;
-constexpr float kSightingFadePerRound = 1.0f / 3.0f;  // Fraction of opacity lost each round.
-constexpr int kSightingMemoryRounds = 3;       // 1 / kSightingFadePerRound.
+constexpr float kGhostFadeDuration = kSightingSampleInterval;
+// Timeline replay has no planning phase to fade in, so ghosts and tracers
+// instead live on their own clock and carry over into the next turn: a ghost
+// holds kReplayGhostHold after appearing, then fades over kGhostFadeDuration;
+// a bullet line fades out over kReplayTracerLife after the shot.
+constexpr float kReplayGhostHold = 1.0f;
+constexpr float kReplayTracerLife = 1.0f;
 // Ziplines: ride cost per world unit of cable, as a fraction of the cost of
 // walking the same distance (0.25 = riding is 4x cheaper than running, so a
 // 20-unit line costs 5 units of the 20-unit round budget). Longer line =
@@ -218,8 +283,6 @@ constexpr float kZiplinePostHeight = 1.7f;  // Short anchor post: cable-end heig
 // out over the last (dismount) kZiplineMountDistance of the cable.
 constexpr float kZiplineHangLift = 0.2f;
 constexpr float kZiplineMountDistance = 1.4f;
-// Bullet tracers fade on the same schedule as sighting ghosts.
-constexpr int kTracerMemoryRounds = kSightingMemoryRounds;
 // Free-aim shooting (issue #129). Friendly fire is on by default; the single
 // flag below (mirrored per GameLogic instance, settable from scenarios) is
 // the one switch that disables it, making friendlies transparent to the

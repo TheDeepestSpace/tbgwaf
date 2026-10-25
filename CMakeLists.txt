@@ -57,6 +57,7 @@ endif()
 # Pure game-logic sources: no SDL/GL/ImGui dependency, so they can be linked
 # into both the playable app and the headless logic test binary.
 set(GAME_LOGIC_SOURCES
+  src/ai/JevPlanner.cpp
   src/game/Scene.cpp
   src/game/Geometry.cpp
   src/game/MapGenerator.cpp
@@ -170,8 +171,15 @@ if(EMSCRIPTEN)
             ${CMAKE_SOURCE_DIR}/web/gallery.html ${CMAKE_BINARY_DIR}/gallery.html
     DEPENDS ${CMAKE_SOURCE_DIR}/web/gallery.html
   )
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/jev-preview.js
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_SOURCE_DIR}/web/jev-preview.js ${CMAKE_BINARY_DIR}/jev-preview.js
+    DEPENDS ${CMAKE_SOURCE_DIR}/web/jev-preview.js
+  )
   add_custom_target(tactics_web_page ALL
-    DEPENDS ${CMAKE_BINARY_DIR}/index.html ${CMAKE_BINARY_DIR}/gallery.html)
+    DEPENDS ${CMAKE_BINARY_DIR}/index.html ${CMAKE_BINARY_DIR}/gallery.html
+            ${CMAKE_BINARY_DIR}/jev-preview.js)
   # Map-seed goldens (issue #133): the gallery's "Map seeds" section is
   # driven by whatever PNGs sit under tests/map_goldens/. The script globs
   # at build time, so re-run it every build and a new golden shows up in
@@ -245,10 +253,19 @@ else()
   target_link_libraries(tactics_logic_tests PRIVATE tactics_logic)
   add_test(NAME logic_tests COMMAND tactics_logic_tests)
 
+  add_executable(tactics_jev_planner_tests tests/jev_planner_tests.cpp)
+  target_include_directories(tactics_jev_planner_tests PRIVATE src)
+  target_link_libraries(tactics_jev_planner_tests PRIVATE tactics_logic)
+  add_test(NAME jev_planner_tests COMMAND tactics_jev_planner_tests)
+
   add_executable(tactics_map_generator_tests tests/map_generator_tests.cpp)
   target_include_directories(tactics_map_generator_tests PRIVATE src)
   target_link_libraries(tactics_map_generator_tests PRIVATE tactics_logic)
   add_test(NAME map_generator_tests COMMAND tactics_map_generator_tests)
+
+  add_executable(tactics_urban_terrain_tests tests/urban_terrain_tests.cpp)
+  target_link_libraries(tactics_urban_terrain_tests PRIVATE tactics_logic)
+  add_test(NAME urban_terrain_tests COMMAND tactics_urban_terrain_tests)
 
   add_executable(tactics_camera_tests tests/camera_tests.cpp src/gfx/Camera.cpp)
   target_include_directories(tactics_camera_tests PRIVATE src)
@@ -321,6 +338,18 @@ else()
   add_executable(tactics_map_visual_tests tests/visual/map_visual_main.cpp)
   target_include_directories(tactics_map_visual_tests PRIVATE src tests ${stb_SOURCE_DIR})
   target_link_libraries(tactics_map_visual_tests PRIVATE
+    tactics_logic
+    tactics_gfx
+    PkgConfig::SDL2
+    PkgConfig::EGL
+  )
+
+  # Observational renderer benchmark (issue #202). Kept out of ctest: it
+  # intentionally samples hosted-runner timing and is dispatched manually,
+  # while normal CI remains deterministic and pass/fail.
+  add_executable(tactics_performance_suite tests/performance/performance_main.cpp)
+  target_include_directories(tactics_performance_suite PRIVATE src)
+  target_link_libraries(tactics_performance_suite PRIVATE
     tactics_logic
     tactics_gfx
     PkgConfig::SDL2

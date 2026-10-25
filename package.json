@@ -1,0 +1,9 @@
+{
+  "name": "tbgwaf-preview-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint:jev": "node --check web/jev-preview.js && node --check server/jev-adapter/server.mjs && node --check server/jev-adapter/jev-client.mjs && node --check scripts/jev_live_smoke.mjs",
+    "test:jev": "node --test web/tests/*.test.mjs server/jev-adapter/tests/*.test.mjs"
+  }
+}

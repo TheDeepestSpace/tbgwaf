@@ -100,6 +100,7 @@ void GameLogic::Reset() { Reset(BuildDefaultScene()); }
 void GameLogic::Reset(Scene scene) {
   scene_ = std::move(scene);
   obstacleBounds_ = ObstacleBounds(scene_.obstacles);
+  sightObstacles_ = tactics::SightObstacles(scene_);
   // On hilly terrain every figure stands on the sampled ground, so scenario
   // files can place units by XZ alone. Flat scenes (empty field) keep their
   // authored Y (e.g. crate-top starts).
@@ -143,19 +144,85 @@ void GameLogic::ResetSightingMemory() {
   }
   lastUnitPosition_.assign(unitSlots, glm::vec3(0.0f));
   hasLastUnitPosition_ = false;
-  lastSightingRound_ = roundNumber_;
+  wasExecuting_ = false;
+  fadeClock_ = kNeverExecuted;  // Nothing to show until a turn has played.
   tracers_.clear();
+  replayTracers_.clear();
+  replayTracersSeen_ = 0;
+  replayTracerRound_ = -1;
+}
+
+void GameLogic::ClearSightings() {
+  for (int t = 0; t < 2; ++t) {
+    for (auto& list : sightings_[t]) list.clear();
+    sightedLastFrame_[t].assign(sightedLastFrame_[t].size(), false);
+  }
+}
+
+void GameLogic::RestartGhostPlayback(bool keepFading) {
+  if (keepFading) {
+    // Existing ghosts/bullets live out their hold+fade; only re-arm sampling.
+    for (int t = 0; t < 2; ++t) sightedLastFrame_[t].assign(sightedLastFrame_[t].size(), false);
+  } else {
+    ClearSightings();
+    replayTracers_.clear();
+    replayTracersSeen_ = 0;
+    replayTracerRound_ = -1;
+  }
+  wasExecuting_ = mode_ == InputMode::Executing;
+  fadeClock_ = wasExecuting_ ? 0.0f : kNeverExecuted;
+}
+
+float GameLogic::GhostAlpha(float at) const {
+  if (replayGhosts_) {
+    const float over = replayClock_ - at - constants::kReplayGhostHold;
+    return 1.0f - glm::clamp(over / constants::kGhostFadeDuration, 0.0f, 1.0f);
+  }
+  if (mode_ == InputMode::Executing) return 1.0f;
+  return 1.0f - glm::clamp((fadeClock_ - at) / constants::kGhostFadeDuration, 0.0f, 1.0f);
+}
+
+float GameLogic::TracerAge(const Tracer& tracer) const {
+  return replayGhosts_ ? replayClock_ - tracer.at : tracer.age;
+}
+
+float GameLogic::TracerAlphaForAge(float age) {
+  return 1.0f - glm::clamp(age / constants::kReplayTracerLife, 0.0f, 1.0f);
+}
+
+float GameLogic::TracerAlpha(const Tracer& tracer) const {
+  return TracerAlphaForAge(TracerAge(tracer));
+}
+
+void GameLogic::StepReplayGhosts(float dtSeconds) {
+  replayClock_ += dtSeconds;
+  // Bullets imported with the frame: absorb the new ones, stamped by when
+  // they were fired on the replay clock, so they outlive the turn change.
+  if (roundNumber_ != replayTracerRound_ || tracers_.size() < replayTracersSeen_) {
+    replayTracersSeen_ = 0;
+    replayTracerRound_ = roundNumber_;
+  }
+  for (; replayTracersSeen_ < tracers_.size(); ++replayTracersSeen_) {
+    Tracer t = tracers_[replayTracersSeen_];
+    t.at = replayClock_ - t.age;
+    replayTracers_.push_back(t);
+  }
+  replayTracers_.erase(std::remove_if(replayTracers_.begin(), replayTracers_.end(),
+                                      [&](const Tracer& t) { return TracerAlpha(t) <= 0.0f; }),
+                       replayTracers_.end());
+  for (auto& perUnit : sightings_) {
+    for (auto& list : perUnit) {
+      list.erase(std::remove_if(list.begin(), list.end(),
+                                [&](const EnemySighting& s) { return GhostAlpha(s.at) <= 0.0f; }),
+                 list.end());
+    }
+  }
 }
 
 void GameLogic::RecordTracer(const Unit& shooter, const glm::vec3& from, const glm::vec3& to,
                              float age) {
-  tracers_.erase(std::remove_if(tracers_.begin(), tracers_.end(),
-                                [this](const Tracer& t) {
-                                  return roundNumber_ - t.birthRound >=
-                                         constants::kTracerMemoryRounds;
-                                }),
-                 tracers_.end());
-  tracers_.push_back(Tracer{shooter.team, from, to, roundNumber_, age});
+  const float at = mode_ == InputMode::Executing ? std::max(0.0f, executionElapsed_ - age) : 0.0f;
+  tracers_.push_back(Tracer{shooter.team, from, to, at, age});
 }
 
 const std::vector<GameLogic::EnemySighting>& GameLogic::Sightings(Team viewingTeam,
@@ -167,24 +234,26 @@ const std::vector<GameLogic::EnemySighting>& GameLogic::Sightings(Team viewingTe
 }
 
 void GameLogic::UpdateSightingMemory(float dtSeconds) {
-  const int elapsedRounds = std::max(0, roundNumber_ - lastSightingRound_);
-  lastSightingRound_ = roundNumber_;
+  const bool executing = mode_ == InputMode::Executing;
+  if (replayGhosts_) StepReplayGhosts(dtSeconds);
+  if (executing && !wasExecuting_ && !replayGhosts_) {
+    // A new turn starts: last turn's ghosts are gone, entries re-sample.
+    ClearSightings();
+  }
+  if (executing) {
+    fadeClock_ = 0.0f;
+  } else {
+    // The turn just ended: fading starts now, so the tick that ended it adds nothing.
+    fadeClock_ = wasExecuting_ ? 0.0f : std::min(fadeClock_ + dtSeconds, kNeverExecuted);
+  }
+  wasExecuting_ = executing;
   for (int t = 0; t < 2; ++t) {
     const Team viewer = static_cast<Team>(t);
-    if (elapsedRounds > 0) {
-      for (auto& list : sightings_[t]) {
-        for (EnemySighting& s : list) s.ageRounds += elapsedRounds;
-        list.erase(std::remove_if(list.begin(), list.end(),
-                                  [](const EnemySighting& s) {
-                                    return s.ageRounds >= constants::kSightingMemoryRounds;
-                                  }),
-                   list.end());
-      }
-    }
 
     const TeamVisibility visibility = ComputeVisibility(viewer);
     for (const Unit& unit : scene_.units) {
-      if (unit.team == viewer || unit.id < 0 ||
+      // A corpse is drawn as itself; sampling it would stamp a fading ghost on it.
+      if (unit.team == viewer || !unit.alive || unit.id < 0 ||
           static_cast<size_t>(unit.id) >= sightings_[t].size()) {
         continue;
       }
@@ -217,6 +286,7 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
       s.walkPhase = unit.walkPhase;
       s.walkBlend = unit.walkBlend;
       s.idleElapsed = unit.idleElapsed;
+      s.at = replayGhosts_ ? replayClock_ : executing ? executionElapsed_ : 0.0f;
       if (hasLastUnitPosition_) {
         glm::vec3 delta = unit.position - lastUnitPosition_[unit.id];
         delta.y = 0.0f;
@@ -294,6 +364,7 @@ GameSnapshot GameLogic::ExportState() const {
   snap.playbooks[1] = playbooks_[1];
   snap.mode = mode_;
   snap.roundNumber = roundNumber_;
+  snap.executionElapsed = executionElapsed_;
   snap.winner = winner_ ? static_cast<int>(*winner_) : -1;
   snap.flag = flag_;
   if (flag_.carrierId >= 0) snap.flag.position = FlagPosition();
@@ -347,7 +418,10 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   std::vector<int> newlyDeadIds;
   for (const auto& u : snap.units) {
     const Unit* unit = FindUnit(u.id);
-    if (unit && unit->alive && !u.alive) newlyDeadIds.push_back(u.id);
+    if (unit && unit->alive && !u.alive &&
+        !ComputeVisibility(OpposingTeam(unit->team)).UnitVisible(u.id)) {
+      newlyDeadIds.push_back(u.id);  // Hidden from the opponent when it fell.
+    }
   }
   mirroredMoving_.clear();
   for (const auto& u : snap.units) {
@@ -374,7 +448,6 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   for (int deadId : newlyDeadIds) {
     const Unit* dead = FindUnit(deadId);
     const Team opponent = OpposingTeam(dead->team);
-    if (ComputeVisibility(opponent).UnitVisible(deadId)) continue;
     const int viewerIndex = static_cast<int>(opponent);
     if (deadId >= 0 && static_cast<size_t>(deadId) < sightings_[viewerIndex].size()) {
       EnemySighting s;
@@ -383,6 +456,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
       s.walkPhase = dead->walkPhase;
       s.walkBlend = dead->walkBlend;
       s.idleElapsed = dead->idleElapsed;
+      s.at = replayClock_;
       sightings_[viewerIndex][deadId].push_back(s);
     }
   }
@@ -393,6 +467,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
                        (mode_ == InputMode::GameOver && snap.mode != InputMode::GameOver);
   mode_ = snap.mode;
   roundNumber_ = snap.roundNumber;
+  executionElapsed_ = snap.executionElapsed;
   if (newGame) ResetSightingMemory();
   tracers_ = snap.tracers;
   flag_ = snap.flag;
@@ -424,7 +499,7 @@ bool GameLogic::ImportTeamPlans(const GameSnapshot& snap, Team team) {
 std::string SerializeSnapshot(const GameSnapshot& snap) {
   std::ostringstream out;
   out.precision(9);
-  out << static_cast<int>(snap.mode) << ' ' << snap.winner << ' ' << snap.roundNumber << ' '
+  out << static_cast<int>(snap.mode) << ' ' << snap.winner << ' ' << snap.roundNumber << ' ' << snap.executionElapsed << ' '
       << snap.units.size();
   for (const auto& u : snap.units) {
     out << ' ' << u.id << ' ' << u.position.x << ' ' << u.position.y << ' ' << u.position.z << ' '
@@ -455,7 +530,7 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
   out << ' ' << snap.tracers.size();
   for (const Tracer& t : snap.tracers) {
     out << ' ' << static_cast<int>(t.team) << ' ' << t.from.x << ' ' << t.from.y << ' ' << t.from.z
-        << ' ' << t.to.x << ' ' << t.to.y << ' ' << t.to.z << ' ' << t.birthRound << ' ' << t.age;
+        << ' ' << t.to.x << ' ' << t.to.y << ' ' << t.to.z << ' ' << t.at << ' ' << t.age;
   }
   for (const auto& pb : snap.playbooks)
     for (int m = 0; m < 2; ++m)
@@ -472,7 +547,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
   int mode = 0;
   size_t unitCount = 0;
   constexpr size_t kMaxEntries = 1024;
-  if (!(in >> mode >> snap.winner >> snap.roundNumber >> unitCount)) return false;
+  if (!(in >> mode >> snap.winner >> snap.roundNumber >> snap.executionElapsed >> unitCount)) return false;
   if (mode < 0 || mode > static_cast<int>(InputMode::GameOver)) return false;
   if (snap.winner < -1 || snap.winner > 1) return false;
   if (unitCount > kMaxEntries) return false;
@@ -535,7 +610,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
   for (Tracer& t : snap.tracers) {
     int team = 0;
     if (!(in >> team >> t.from.x >> t.from.y >> t.from.z >> t.to.x >> t.to.y >> t.to.z >>
-          t.birthRound >> t.age) ||
+          t.at >> t.age) ||
         team < 0 || team > 1) {
       return false;
     }
@@ -914,6 +989,7 @@ void GameLogic::RefreshMoveFrontier() {
   ziplineFrontiers_.clear();
   ziplineMeshes_.clear();
   ziplineUnitId_ = -1;
+  if (!moveFrontierEnabled_) return;
   if (const Unit* mover = FindUnit(selectedUnitId_.value_or(-1))) {
     const glm::vec3 origin = MoveChainEnd();
     EnsureNavMeshFor(*mover, origin);
@@ -1108,7 +1184,7 @@ float GameLogic::ShotHitChance(const Unit& shooter, const Unit& target) const {
   const glm::vec3 targetEye = target.EyePosition();
   if (!InFovCone(eye, shooter.FacingDirection(), targetEye, profile.halfAngleDegrees,
                  std::numeric_limits<float>::infinity()) ||
-      !LineOfSightClear(eye, targetEye, scene_.obstacles, scene_.walkSurfaces, scene_.ground)) {
+      !LineOfSightClear(eye, targetEye, sightObstacles_, scene_.walkSurfaces, scene_.ground)) {
     return 0.0f;
   }
   const glm::vec3 toTarget = targetEye - eye;
@@ -1179,6 +1255,7 @@ namespace {
 // (area denial). Mirrors what the renderer draws, so the "+" selector lands
 // where the player actually pointed.
 bool IntersectAimSurface(const glm::vec3& origin, const glm::vec3& dir, const Scene& scene,
+                         const std::vector<Obstacle>& obstacles,
                          glm::vec3* outPoint) {
   bool found = false;
   float bestT = std::numeric_limits<float>::infinity();
@@ -1226,7 +1303,7 @@ bool IntersectAimSurface(const glm::vec3& origin, const glm::vec3& dir, const Sc
   }
 
   float t = 0.0f;
-  for (const Obstacle& obstacle : scene.obstacles) {
+  for (const Obstacle& obstacle : obstacles) {
     if (RayIntersectsObstacle(origin, dir, obstacle, &t)) consider(t);
   }
   for (const AABB& slab : scene.sidewalks) {
@@ -1253,7 +1330,7 @@ bool GameLogic::IsAimSurfaceVisible(const glm::vec3& point) const {
   // Lifted a hair off the surface so the LOS segment doesn't graze the very
   // triangle/face the point sits on. No FOV cone: the figure turns to shoot.
   const glm::vec3 probe = point + glm::vec3(0.0f, 0.05f, 0.0f);
-  return LineOfSightClear(eye, probe, scene_.obstacles, scene_.walkSurfaces, scene_.ground);
+  return LineOfSightClear(eye, probe, sightObstacles_, scene_.walkSurfaces, scene_.ground);
 }
 
 GameLogic::AimRayResult GameLogic::ResolveAimRay(const glm::vec3& origin,
@@ -1284,7 +1361,7 @@ GameLogic::AimRayResult GameLogic::ResolveAimRay(const glm::vec3& origin,
     }
 
     glm::vec3 surface;
-    if (IntersectAimSurface(origin, dir, scene_, &surface) && IsAimSurfaceVisible(surface)) {
+    if (IntersectAimSurface(origin, dir, scene_, sightObstacles_, &surface) && IsAimSurfaceVisible(surface)) {
       result.kind = AimRayResult::Kind::Surface;
       result.point = surface;
       return result;
@@ -1379,7 +1456,7 @@ std::vector<GameLogic::AimTraceCandidate> GameLogic::RayTraceCandidates(
     // before it gets there -- and, the ray being straight, before anything
     // beyond it too.
     const glm::vec3 entry = muzzle + dir * t;
-    if (!LineOfSightClear(muzzle, entry, scene_.obstacles, scene_.walkSurfaces, scene_.ground)) {
+    if (!LineOfSightClear(muzzle, entry, sightObstacles_, scene_.walkSurfaces, scene_.ground)) {
       continue;
     }
     // Same profile falloff as a locked shot, at the struck figure's actual
@@ -1411,7 +1488,7 @@ float GameLogic::RayReach(const glm::vec3& muzzle, const glm::vec3& ray) const {
     if (d < -1e-6f) reach = std::min(reach, (-half - origin) / d);
   }
   reach = std::max(reach, 0.0f);
-  for (const Obstacle& obstacle : scene_.obstacles) {
+  for (const Obstacle& obstacle : sightObstacles_) {
     float t = 0.0f;
     if (RayIntersectsObstacle(muzzle, ray, obstacle, &t) && t > 0.0f) reach = std::min(reach, t);
   }
@@ -1472,6 +1549,7 @@ void GameLogic::ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets
       s.walkPhase = hitTarget->walkPhase;
       s.walkBlend = hitTarget->walkBlend;
       s.idleElapsed = hitTarget->idleElapsed;
+      s.at = replayClock_;
       sightings_[viewerIndex][hitTarget->id].push_back(s);
     }
   }
@@ -1498,7 +1576,7 @@ void GameLogic::ResolvePendingShots() {
       const glm::vec3 aimPoint =
           target->position + glm::vec3(0.0f, constants::kTorsoAimHeight, 0.0f);
       const Unit aimed = AimedAt(*shooter, aimPoint);
-      if (!LineOfSightClear(aimed.MuzzlePosition(), aimPoint, scene_.obstacles,
+      if (!LineOfSightClear(aimed.MuzzlePosition(), aimPoint, sightObstacles_,
                             scene_.walkSurfaces, scene_.ground)) {
         continue;
       }
@@ -1667,9 +1745,16 @@ void GameLogic::ApplyPlaybookReactions(bool roundStart) {
                        if (!shot.reaction) return false;
                        const Unit* shooter = FindUnit(shot.shooterId);
                        const Unit* target = FindUnit(shot.targetId);
-                       return !shooter || !target || !shooter->alive || !target->alive ||
-                              !CanUnitSee(*shooter, *target, scene_.obstacles,
-                                          scene_.walkSurfaces, scene_.ground);
+                       const bool drop = !shooter || !target || !shooter->alive ||
+                                         !target->alive ||
+                                         !CanUnitSee(*shooter, *target, sightObstacles_,
+                                                     scene_.walkSurfaces, scene_.ground);
+                       if (drop && shooter) {
+                         reactionNextShotAt_[shot.shooterId] =
+                             shot.startTime +
+                             shot.shotsFired * StatsOf(shooter->weapon).shotIntervalSeconds;
+                       }
+                       return drop;
                      }),
       pendingShots_.end());
 
@@ -1702,14 +1787,15 @@ void GameLogic::ApplyPlaybookReactions(bool roundStart) {
       const bool enemyMoving = isMidMove(enemy.id);
       if (roundStart && enemyMoving) continue;
       if (!moving && Playbook(unit.team).ignoreIdle && !enemyMoving) continue;
-      if (!CanUnitSee(unit, enemy, scene_.obstacles, scene_.walkSurfaces, scene_.ground)) continue;
+      if (!CanUnitSee(unit, enemy, sightObstacles_, scene_.walkSurfaces, scene_.ground)) continue;
       const float dist = glm::distance(unit.position, enemy.position);
-      if (!nearest || dist < nearestDist) {
+      // Closest first; an exact tie goes to the lower id (deterministic).
+      if (!nearest || dist < nearestDist || (dist == nearestDist && enemy.id < nearest->id)) {
         nearest = &enemy;
         nearestDist = dist;
       }
       // Most-cautious tie-break: any sighted enemy that sees back counts.
-      canSeeMe |= CanUnitSee(enemy, unit, scene_.obstacles, scene_.walkSurfaces, scene_.ground);
+      canSeeMe |= CanUnitSee(enemy, unit, sightObstacles_, scene_.walkSurfaces, scene_.ground);
     }
     if (!nearest) continue;
     const ReactionAction action = Playbook(unit.team).At(moving, canSeeMe);
@@ -1740,12 +1826,15 @@ void GameLogic::StartReactionBurst(const Unit& shooter, const Unit& target) {
   shot.reaction = true;
   shot.started = true;
   shot.startTime = executionElapsed_;
+  const auto next = reactionNextShotAt_.find(shooter.id);
+  if (next != reactionNextShotAt_.end()) shot.startTime = std::max(shot.startTime, next->second);
   pendingShots_.push_back(shot);
 }
 
 void GameLogic::CommitRound() {
   if (!CanCommitRound()) return;
   reactionAmmo_.clear();
+  reactionNextShotAt_.clear();
 
   selectedUnitId_.reset();
   movePreviewPath_.clear();
@@ -1777,6 +1866,8 @@ void GameLogic::CommitRound() {
 
   mode_ = InputMode::Executing;
   executionElapsed_ = 0.0f;
+  tracers_.clear();  // Last turn's shot lines and ghosts are gone.
+  ClearSightings();
 
   // A figure already standing on the flag (e.g. a dropped one) grabs it now.
   std::vector<FlagTouch> startTouches;

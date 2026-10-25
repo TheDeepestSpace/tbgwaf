@@ -91,36 +91,12 @@ jobs:
           cp build-web/index.html site/
           cp build-web/tactics_app.js site/
           cp build-web/tactics_app.wasm site/
+          cp build-web/jev-preview.js site/
           cp build-web/gallery.html site/gallery/index.html
           cp build-web/tactics_gallery.js site/gallery/
           cp build-web/tactics_gallery.wasm site/gallery/
           cp build-web/map_seeds.js site/gallery/
           cp -r build-web/map_goldens site/gallery/
-
-      # --- Gameplay scenario review page (issue #14 stage 3): record a
-      # per-team WebM video for every scenario at the PR's head and publish
-      # them on an HTML page inside the same per-PR preview. ---
-      - name: Configure (native)
-        if: github.event.action != 'closed'
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build visual scenario runner
-        if: github.event.action != 'closed'
-        run: cmake --build build --target tactics_visual_tests
-
-      - name: Generate scenario review page
-        if: github.event.action != 'closed'
-        env:
-          LIBGL_ALWAYS_SOFTWARE: "1"
-          SDL_VIDEODRIVER: x11
-        run: |
-          xvfb-run --auto-servernum --server-args='-screen 0 1280x1024x24' \
-            python3 scripts/generate_scenario_review_page.py \
-              --base ${{ github.event.pull_request.base.sha }} \
-              --head ${{ github.event.pull_request.head.sha }} \
-              --runner build/tactics_visual_tests \
-              --out site/scenarios \
-              --baseline-url ../../../scenario-baseline
 
       - name: Deploy PR preview
         uses: rossjrw/pr-preview-action@ffa7509e91a3ec8dfc2e5536c4d5c1acdf7a6de9 # v1.8.1
@@ -145,7 +121,14 @@ jobs:
           repo="${GITHUB_REPOSITORY#*/}"
           url="https://${owner}.github.io/${repo}/pr-preview/pr-${PR_NUMBER}/scenarios/"
           gallery_url="https://${owner}.github.io/${repo}/pr-preview/pr-${PR_NUMBER}/gallery/"
-          body="$(printf '%s\n%s\n\n%s' "$marker" "🎬 [Gameplay scenario review page](${url}) — per-team videos of every scenario, grouped by how this PR changes it, refreshed at commit \`${HEAD_SHA:0:7}\` (updates with each push; may take a minute to go live after deploy)." "🖼️ [Asset gallery](${gallery_url}) — browse models and animations, including this PR's changes.")"
+          performance_url="https://${owner}.github.io/${repo}/performance/"
+          pr_performance_url="https://${owner}.github.io/${repo}/pr-preview/pr-${PR_NUMBER}/performance/"
+          body="$(printf '%s\n%s\n\n%s' "$marker" "🎬 [Gameplay scenario review page](${url}) — per-team videos of every scenario, grouped by how this PR changes it, refreshed at commit \`${HEAD_SHA:0:7}\` (generated after the playable build is live, so it may take several minutes to appear after each push)." "🖼️ [Asset gallery](${gallery_url}) — browse models and animations, including this PR's changes.")"
+          body="$(printf '%s\n\n%s' "$body" "📈 [PR performance](${pr_performance_url}) — pinned-map rendering measurements at \`${HEAD_SHA:0:7}\` (also published after the build), compared with the master baselines when available.")"
+          # The master page only exists once the Performance suite has run on master.
+          if curl -fsSIo /dev/null "$performance_url"; then
+            body="$(printf '%s\n\n%s' "$body" "📊 [Master performance history](${performance_url})")"
+          fi
           existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             --paginate --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" | head -n1)
           if [ -n "$existing" ]; then
@@ -153,3 +136,132 @@ jobs:
           else
             gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" -f body="$body" > /dev/null
           fi
+
+  scenarios:
+    needs: preview
+    # The closed action skips the image builds and only cleans up the preview.
+    if: ${{ github.event.action != 'closed' && needs.preview.result == 'success' }}
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/thedeepestspace/tbgwaf-dev:pr-${{ github.event.pull_request.number }}
+      options: --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: the scenario review page classifies scenarios as
+          # new/modified/deleted via `git diff <base>...<head>`, which needs
+          # the merge base to be present locally.
+          fetch-depth: 0
+
+      - name: Trust workspace for git
+        # Container runs as root but the workspace is owned by the runner user;
+        # without this `git diff` falls back to --no-index and exits 129.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+
+      - name: Configure (native)
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build visual scenario runner
+        run: cmake --build build --target tactics_visual_tests
+
+      - name: Generate scenario review page
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          SDL_VIDEODRIVER: x11
+        run: |
+          xvfb-run --auto-servernum --server-args='-screen 0 1280x1024x24' \
+            python3 scripts/generate_scenario_review_page.py \
+              --base ${{ github.event.pull_request.base.sha }} \
+              --head ${{ github.event.pull_request.head.sha }} \
+              --runner build/tactics_visual_tests \
+              --out site/scenarios \
+              --baseline-url ../../../scenario-baseline \
+              --performance-url ../../../performance/
+
+      - name: Publish into the PR preview
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: scripts/publish_to_preview.sh "pr-preview/pr-${PR_NUMBER}" site
+
+  performance:
+    needs: preview
+    # The closed action skips the image builds and only cleans up the preview.
+    if: ${{ github.event.action != 'closed' && needs.preview.result == 'success' }}
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/thedeepestspace/tbgwaf-dev:pr-${{ github.event.pull_request.number }}
+      options: --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: the scenario review page classifies scenarios as
+          # new/modified/deleted via `git diff <base>...<head>`, which needs
+          # the merge base to be present locally.
+          fetch-depth: 0
+
+      - name: Trust workspace for git
+        # Container runs as root but the workspace is owned by the runner user;
+        # without this `git diff` falls back to --no-index and exits 129.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+
+      - name: Configure (native)
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      # --- Per-PR performance: measure the PR head and compare against the
+      # master baselines preserved on gh-pages by the Performance suite. ---
+      - name: Build performance runner
+        run: cmake --build build --target tactics_performance_suite
+
+      - name: Measure and publish PR performance
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          SDL_VIDEODRIVER: x11
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p performance-output site/performance
+          xvfb-run --auto-servernum --server-args='-screen 0 1280x1024x24' \
+            build/tactics_performance_suite \
+              --seeds tests/performance/seeds.txt \
+              --output performance-output/results.json \
+              --warmup-frames 30 \
+              --sample-frames 120 \
+              --commit "$HEAD_SHA" \
+              --target-ref "pr-${PR_NUMBER}" \
+              --run-id "pr-${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+              --timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cp performance-output/results.json site/performance/results.json
+          # Master baselines live on gh-pages; absent until the Performance
+          # suite has run on master, in which case the page has no comparison.
+          mkdir -p master-history
+          if git fetch --depth=1 origin gh-pages 2>/dev/null; then
+            git archive FETCH_HEAD performance/history 2>/dev/null | tar -x -C master-history || true
+          fi
+          python3 scripts/generate_performance_report.py \
+            --current performance-output/results.json \
+            --history-dir master-history/performance/history \
+            --out site/performance \
+            --title "Performance suite · PR #${PR_NUMBER}" \
+            --history-url ../../../performance/history/ \
+            --current-url results.json
+
+      - name: Publish into the PR preview
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: scripts/publish_to_preview.sh "pr-preview/pr-${PR_NUMBER}" site

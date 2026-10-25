@@ -73,6 +73,10 @@ struct PaneOverlays {
   // BuildPaneOverlays; the app's debug toggle / the map golden harness
   // supply a mesh built over the whole scene.
   const tactics::NavMesh* navMeshDebug = nullptr;
+  // Jev-vs-Jev spectator view: draw both teams' FOV cones (each team's
+  // overlap flattened separately, so Blue/Red overlap still reads). Callers
+  // also pass fogActive=false so every figure is drawn.
+  bool spectatorFov = false;
 };
 
 // Overlays `pane` shows for the current game state. They belong to the team
@@ -169,6 +173,9 @@ class SceneRenderer {
   // reuse the same storage address (e.g. stack-allocated GameLogic
   // instances), which an address key would mistake for "unchanged".
   LitTriangleMesh terrainMesh_;
+  LitTriangleMesh terrainRaisedMesh_;  // Concrete level tops and cliff faces of a city.
+  LitTriangleMesh terrainRoadMesh_, terrainSidewalkMesh_, terrainStairMesh_;
+  unsigned long long pavementKey_ = 0;
   // Reused scratch mesh for polygon prisms and road/deck patches. Geometry
   // is already in world space, so the same upload path works in shadow and
   // lit passes without approximating wedges by their AABB.
@@ -191,6 +198,11 @@ class SceneRenderer {
   GLuint fovDepthTex_[2] = {0, 0};
   LitTriangleMesh fovSceneMesh_;
   unsigned long long fovSceneKey_ = 0;
+  // Visual-only building massing (issue #151: parapets, roof furniture,
+  // awnings), one static mesh rebuilt when the scene's massing records
+  // change. Drawn in the shadow and lit passes only.
+  LitTriangleMesh massingMesh_;
+  unsigned long long massingKey_ = 0;
   // Renders the two depth maps for `unit` looking along `facingYaw`, then
   // re-draws the static scene into the pane with the mask shader, tinted
   // `color` within `halfFovDegrees` of that heading. Leaves the pane framebuffer,

@@ -1,0 +1,33 @@
+name: ragdoll_shot_off_wall
+description: >
+  Issue #217 ragdoll: a figure on top of a wall is shot by a figure on the ground. The
+  scenario pins the gameplay half (the wall-top figure is visible, targetable and dies);
+  the golden frames show how the downed figure's ragdoll reacts at the wall edge.
+
+shot_rolls: [0.0]
+
+map:
+  obstacles:
+    - {center: [0, 0], half_extent: [0.6, 3.0], height: 3.0, climbable: true}
+
+units:
+  - {id: 0, team: blue, position: [-4, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [0, 3.0, 0], facing_degrees: 180}
+
+camera:
+  target: [-1, 0]
+  zoom: 4
+
+script:
+  - assert: {unit: 1, visible_to: blue, visible: true, comment: The wall-top figure is in plain view from the ground}
+  - action: shoot
+    description: Blue0 shoots red1, who stands on top of the wall.
+    actor: 0
+    target: 1
+  - action: pass
+    actor: 1
+  - action: commit
+
+  - assert: {unit: 1, alive: false, comment: The wall-top figure is downed}
+  - assert: {unit: 0, alive: true}
+  - assert: {winner: blue}

@@ -72,6 +72,44 @@ bool DropsWeapon(int id) {
   return (h & 1u) != 0u;
 }
 
+// Map obstacles the ragdoll collides with (bounding boxes only), set by the
+// renderer. Changing them drops every cached trajectory.
+std::vector<tactics::AABB>& Colliders() {
+  static std::vector<tactics::AABB> boxes;
+  return boxes;
+}
+
+// Top of the highest obstacle a point of radius `r` at (x, z) can rest on: one
+// whose top it was already at or above (`refY`, the point's previous height),
+// so a body beside a wall is never lifted onto it. Falls back to `base`.
+float FloorAt(float x, float z, float refY, float r, float base) {
+  float floorY = base;
+  for (const tactics::AABB& b : Colliders()) {
+    if (x < b.min.x - r || x > b.max.x + r || z < b.min.z - r || z > b.max.z + r) continue;
+    if (refY >= b.max.y - 0.1f) floorY = std::max(floorY, b.max.y);
+  }
+  return floorY;
+}
+
+// Pushes a point of radius `r` out of any obstacle it is beside (below the
+// top, not resting on it) through the nearest side face. Returns the normal
+// of the last face used (zero if none).
+glm::vec3 PushOutOfWalls(glm::vec3& p, float refY, float r) {
+  glm::vec3 normal(0.0f);
+  for (const tactics::AABB& b : Colliders()) {
+    if (refY >= b.max.y - 0.1f || p.y > b.max.y + r || p.y < b.min.y - r) continue;
+    const float dxMin = p.x - (b.min.x - r), dxMax = (b.max.x + r) - p.x;
+    const float dzMin = p.z - (b.min.z - r), dzMax = (b.max.z + r) - p.z;
+    if (dxMin <= 0.0f || dxMax <= 0.0f || dzMin <= 0.0f || dzMax <= 0.0f) continue;
+    const float m = std::min(std::min(dxMin, dxMax), std::min(dzMin, dzMax));
+    if (m == dxMin) { p.x -= dxMin; normal = glm::vec3(-1, 0, 0); }
+    else if (m == dxMax) { p.x += dxMax; normal = glm::vec3(1, 0, 0); }
+    else if (m == dzMin) { p.z -= dzMin; normal = glm::vec3(0, 0, -1); }
+    else { p.z += dzMax; normal = glm::vec3(0, 0, 1); }
+  }
+  return normal;
+}
+
 struct Link {
   int a, b;
   float rest;
@@ -184,12 +222,27 @@ Trajectory Simulate(const Unit& unit) {
   traj.guns.reserve(kRagdollSteps + 1);
   traj.guns.push_back(gunFrame());
 
-  const float groundY = unit.position.y;
+  // A figure shot while standing on top of an obstacle falls to the real
+  // ground (y = 0); otherwise the ground is wherever it was standing.
+  float groundY = unit.position.y;
+  for (const tactics::AABB& b : Colliders()) {
+    if (unit.position.x >= b.min.x && unit.position.x <= b.max.x && unit.position.z >= b.min.z &&
+        unit.position.z <= b.max.z && std::fabs(unit.position.y - b.max.y) < 0.15f) {
+      groundY = 0.0f;
+    }
+  }
   int still = 0;
+  std::array<bool, kRagJointCount> onFloor{};
   for (int step = 0; step < kRagdollSteps; ++step) {
     if (drops && !gunAsleep) {
       gunVel.y -= kGravity * kRagdollStep;
+      const float gunRefY = gunPos.y;
       gunPos += gunVel * kRagdollStep;
+      {
+        const glm::vec3 n = PushOutOfWalls(gunPos, gunRefY, 0.15f);
+        const float into = glm::dot(gunVel, n);
+        if (into < 0.0f) gunVel -= (1.0f + kGunRestitution) * into * n;
+      }
       const glm::quat dq = glm::quat(0.0f, gunSpin.x * kRagdollStep, gunSpin.y * kRagdollStep,
                                    gunSpin.z * kRagdollStep) * gunRot;
       gunRot = glm::normalize(glm::quat(gunRot.w + 0.5f * dq.w, gunRot.x + 0.5f * dq.x,
@@ -201,7 +254,7 @@ Trajectory Simulate(const Unit& unit) {
         const glm::vec3 local((c & 1) ? kGunHi.x : kGunLo.x, (c & 2) ? kGunHi.y : kGunLo.y,
                               (c & 4) ? kGunHi.z : kGunLo.z);
         const glm::vec3 corner = gunPos + R * local;
-        const float pen = groundY - corner.y;
+        const float pen = FloorAt(corner.x, corner.z, gunRefY, 0.0f, groundY) - corner.y;
         if (pen <= 0.0f) continue;
         gunPos.y += pen;
         const glm::vec3 r = corner - centre;
@@ -246,13 +299,22 @@ Trajectory Simulate(const Unit& unit) {
         pos[l.b] -= d * diff;
       }
       for (int i = 0; i < kRagJointCount; ++i) {
-        const float floorY = groundY + kGroundOffset[i];
+        const float r = kGroundOffset[i];
+        const float refY = prev[i].y;
+        const glm::vec3 n = PushOutOfWalls(pos[i], refY, r);
+        if (n != glm::vec3(0.0f)) {
+          // Kill the velocity into the wall (Verlet: move prev onto pos along n).
+          const float into = glm::dot(pos[i] - prev[i], n);
+          if (into < 0.0f) prev[i] -= into * n;
+        }
+        const float floorY = FloorAt(pos[i].x, pos[i].z, refY, r, groundY) + r;
         if (pos[i].y < floorY) pos[i].y = floorY;
+        onFloor[i] = pos[i].y <= floorY + 1e-3f;
       }
     }
     float maxSpeed = 0.0f;
     for (int i = 0; i < kRagJointCount; ++i) {
-      if (pos[i].y <= groundY + kGroundOffset[i] + 1e-3f) {
+      if (onFloor[i]) {
         // Resting on the ground: bleed off horizontal motion (friction).
         prev[i].x = pos[i].x - (pos[i].x - prev[i].x) * kGroundFriction;
         prev[i].z = pos[i].z - (pos[i].z - prev[i].z) * kGroundFriction;
@@ -268,6 +330,28 @@ Trajectory Simulate(const Unit& unit) {
 
 }  // namespace
 
+namespace {
+std::vector<Trajectory>& Cache() {
+  static std::vector<Trajectory> cache;
+  return cache;
+}
+}  // namespace
+
+void SetRagdollObstacles(const std::vector<tactics::Obstacle>& obstacles) {
+  std::vector<tactics::AABB> boxes;
+  boxes.reserve(obstacles.size());
+  for (const tactics::Obstacle& o : obstacles) boxes.push_back(o.bounds);
+  std::vector<tactics::AABB>& cur = Colliders();
+  const bool same = boxes.size() == cur.size() &&
+                    std::equal(boxes.begin(), boxes.end(), cur.begin(),
+                               [](const tactics::AABB& a, const tactics::AABB& b) {
+                                 return a.min == b.min && a.max == b.max;
+                               });
+  if (same) return;
+  cur = std::move(boxes);
+  Cache().clear();
+}
+
 bool RagdollActive(const Unit& unit) { return !unit.alive && unit.knockdownElapsed >= 0.0f; }
 
 namespace {
@@ -276,7 +360,7 @@ const Trajectory& CachedTrajectory(const Unit& unit) {
   // Small LRU cache of full trajectories, so the several draw passes per
   // frame share one simulation and the number of live ragdolls stays bounded
   // (an evicted one is simply re-simulated if it's drawn again).
-  static std::vector<Trajectory> cache;
+  std::vector<Trajectory>& cache = Cache();
   static unsigned long clock = 0;
   Trajectory* hit = nullptr;
   for (Trajectory& t : cache) {

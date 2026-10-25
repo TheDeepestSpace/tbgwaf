@@ -115,9 +115,30 @@ void TestGunReleaseAndDrop() {
   CHECK(dropped > 5 && dropped < 35);  // Random mix of droppers and holders.
 }
 
+void TestFallsOffWallAndStaysOutside() {
+  tactics::Obstacle wall;
+  wall.bounds.min = glm::vec3(-0.6f, 0.0f, -3.0f);
+  wall.bounds.max = glm::vec3(0.6f, 3.0f, 3.0f);
+  gfx::SetRagdollObstacles({wall});
+  tactics::Unit u = Downed(3, tactics::constants::kKnockdownDuration);
+  u.position = glm::vec3(0.3f, 3.0f, 0.0f);
+  u.knockdownAxis = glm::vec3(0.0f, 0.0f, -1.0f);  // Shot travels +X, off the wall.
+  const gfx::RagdollPose end = gfx::SampleRagdoll(u);
+  for (int s = 0; s <= gfx::kRagdollSteps; ++s) {
+    for (const glm::vec3& p : gfx::SampleRagdollStep(u, s)) {
+      // Never inside the wall's body.
+      CHECK(!(p.x > -0.55f && p.x < 0.55f && p.y < 2.9f));
+    }
+  }
+  CHECK(end[gfx::kRagHead].y < 1.0f);  // Landed on the ground, not the wall top.
+  CHECK(end[gfx::kRagHead].x > 0.6f);
+  gfx::SetRagdollObstacles({});
+}
+
 }  // namespace
 
 int main() {
+  TestFallsOffWallAndStaysOutside();
   TestGunReleaseAndDrop();
   TestOnlyDownedUnitsRagdoll();
   TestFallsAlongShotAndRests();

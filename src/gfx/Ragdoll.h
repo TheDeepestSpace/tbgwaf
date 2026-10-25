@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <vector>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -18,8 +19,9 @@ namespace gfx {
 // function of (id, position, facingYaw, knockdownAxis, knockdownElapsed), all
 // of which are already replicated/replayed state, so every client and every
 // replay reproduces the same result. Nothing here reads or writes game logic.
-// Collision is against the ground plane at unit.position.y only (no
-// buildings: the sim has no access to the scene).
+// Collision is against the ground plane at unit.position.y plus the map's
+// obstacle boxes (see SetRagdollObstacles): a figure shot on top of an
+// obstacle falls off its edge to the ground, and obstacle sides block it.
 
 enum RagdollJoint {
   kRagHead,
@@ -57,6 +59,10 @@ struct RagdollGun {
   glm::vec3 pos{0.0f};  // World position of the weapon-local origin (grip top).
   glm::quat rot{1.0f, 0.0f, 0.0f, 0.0f};  // Weapon-local -> world (+X is the barrel).
 };
+
+// Obstacles the ragdolls collide with. Call before sampling (cheap when
+// unchanged; a change drops all cached trajectories).
+void SetRagdollObstacles(const std::vector<tactics::Obstacle>& obstacles);
 
 // True for a downed unit whose knockdown animation has started: such units
 // are drawn as a ragdoll instead of a rigid tip-over.

@@ -1,5 +1,7 @@
 #include "gfx/SceneRenderer.h"
 
+#include "gfx/Ragdoll.h"
+
 #include "gfx/FigureRig.h"
 
 #include <algorithm>
@@ -1983,6 +1985,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                GLuint targetFramebuffer, const RenderDebugOptions& debug) {
   const ScopedDrawStats drawStats(debug.stats);
   const auto& obstacles = game.GetScene().obstacles;
+  SetRagdollObstacles(obstacles);
   const auto& sidewalks = game.GetScene().sidewalks;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;
   const tactics::HeightField& terrain = game.GetScene().ground;

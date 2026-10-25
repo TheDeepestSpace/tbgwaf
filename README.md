@@ -50,11 +50,17 @@ overlay of the navmesh's walkable-cell boundaries.
 Every arterial city has **terrain levels** (issue #155): 1–3 map-spanning
 raised levels, drawn per seed. Each level is a straight step across the whole
 map, roughly across the artery: everything on one side rises 1–5 figure
-heights behind a sheer concrete cliff (the ground mesh is split exactly
-along the edge; an unseen nav wall keeps figures off it). Only a narrow
-strip on the cliff's low side (its stairs and a walkway) is carved between
-the blocks, so no street is owed to a level change; steps overlap into
-nested tiers at different heights, with sharp edges (no rolling noise). The terrain is planned first;
+heights behind a sheer concrete cliff. The levels are drawn like the
+buildings: each tier is an extruded polygon (flat top, vertical sides), a
+ramp through a level is a rectangular cutout exactly the width of its
+pavement, and a stair is one extruded trapezoid (a straight flight and a flat
+landing at the level's height) attached to the cliff face. A level edge is a
+block boundary like a street: a 6.4-unit band centered on it is carved from
+the blocks on both sides, so sidewalk rings and buildings keep a street's
+setback from the cliff. Steps overlap into nested tiers at different
+heights, with sharp edges (no rolling noise). The sampled heightfield only
+drives movement (an unseen nav wall along each cliff keeps figures off the
+edge). The terrain is planned first;
 the highway profile is then chosen against it per seed: the artery stays at
 grade and ramps through every wall (a main road cutting through the levels),
 or climbs onto a deck before a run of walls, flies over them clear of the
@@ -64,8 +70,7 @@ branch merges onto whatever the artery is doing and ramps through the walls
 it meets at grade. A local street never runs into a level: an
 avenue may ramp through one; any other stops at the last street it crossed
 before the cliff (a T, not an X) and resumes at the first one beyond it, and
-the blocks either side of the missing stretch stay one block. Stairs climb
-each cliff as one straight concrete wedge attached to its face. Switch the
+the blocks either side of the missing stretch stay one block. Switch the
 levels off with
 `TBGWAF_TERRAIN=off`, `MapGeneratorConfig::features.terrain`, or scenario
 YAML:

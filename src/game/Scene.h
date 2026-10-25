@@ -9,38 +9,36 @@
 namespace tactics {
 
 // A stair up one terrain level (issue #155): a flight attached along the
-// cliff face on its low side, climbing parallel to it, then a landing
-// across the cliff top onto the level.
+// cliff face on its low side, climbing parallel to it, then a flat landing
+// at the level's height that lets onto the level over the cliff top.
 // `bottom` is the ground point at the flight's foot, `top` the ground point
-// on the level past the landing.
+// on the level beside the landing.
 struct TerrainAccess {
   glm::vec3 bottom, top;
   float width = 2.4f;
 };
 
 // One map-spanning terrain step: ground on the `raisedNormal` side of the
-// step line sits `rise` higher, behind a sheer cliff. `origin` and `dir`
-// give the centerline of the strip carved between the blocks on the low
-// side (the stair flights and a walkway; 4.4 wide), whose raised edge is
-// the step line. Steps overlap into nested tiers; highway ramps and the
-// stair flights climb them.
+// step line through `origin` along `dir` sits `rise` higher, behind a sheer
+// cliff. The step line is a block boundary like a street: a 6.4-unit band
+// centered on it is carved from the blocks on both sides, its low half
+// holding the stairs. Steps overlap into nested tiers; highway ramps and
+// the stairs climb them.
 struct TerrainWall {
   glm::vec2 origin{0.0f}, dir{1.0f, 0.0f};
   glm::vec2 raisedNormal{0.0f, 1.0f};
-  glm::vec2 lineOrigin{0.0f};  // A point on the raised edge of the level.
+  glm::vec2 lineOrigin{0.0f};  // A point on the step line (== origin).
   float rise = 0.0f;
   std::vector<TerrainAccess> accesses;
 };
 
-// A straight stretch along which the terrain is discontinuous (a level's
-// step line or a ramp channel's side). The renderer draws one trapezoidal
-// face from these exact endpoint heights; an unseen nav-only Obstacle keeps
-// figures off the edge.
-struct TerrainCliff {
-  glm::vec2 a{0.0f}, b{0.0f};
-  glm::vec2 lowerNormal{0.0f};
-  float lowA = 0.0f, highA = 0.0f;
-  float lowB = 0.0f, highB = 0.0f;
+// One stair up a level, as drawn: a sloped flight quad hugging the cliff on
+// its low side and a flat landing quad at the level's height past its head,
+// both extruded down to `base` as one concrete wedge. Movement follows the
+// same grades in `ground`.
+struct TerrainStair {
+  std::vector<glm::vec3> flight, landing;  // Four vertices each.
+  float base = 0.0f;                       // Ground height at the foot.
 };
 
 // Hardcoded Stage-A scene: a ~30x30 unit field with box-shaped obstacles and
@@ -78,15 +76,13 @@ struct Scene {
   // y = 0; hilly and terrain-enabled urban maps fill it in. Navigation, placement and
   // rendering all sample it (see HeightField).
   HeightField ground;
+  // Urban levels as drawn: each tier is an extruded polygon (the map split
+  // by the walls' step lines, minus the ramp corridors in `terrainCutouts`,
+  // convex rectangles exactly the width of their pavement), and each stair
+  // one extruded wedge. The heightfield above stays the movement model.
   std::vector<TerrainWall> terrainWalls;
-  std::vector<TerrainCliff> terrainCliffs;
-  // Convex ground-plane openings for the straight road grades through a
-  // level. Pavement fills them; tier tops must not cover the ramp.
   std::vector<std::vector<glm::vec2>> terrainCutouts;
-  // Visual-only stair wedges. Movement follows the matching simple planar
-  // grades in `ground`; keeping the render mesh separate prevents a narrow
-  // flight from inheriting the heightfield grid's extra triangles.
-  std::vector<RoadSurface> terrainStairs;
+  std::vector<TerrainStair> terrainStairs;
   FlagConfig flag;
   // Round limit: when > 0 the match ends in a draw once this many rounds
   // have been played without a winner. 0 (the default) means unlimited.

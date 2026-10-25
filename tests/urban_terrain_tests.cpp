@@ -67,7 +67,8 @@ void TestControlsAndDeterminism() {
   CHECK(on.ground.heights == repeat.ground.heights);
   CHECK(on.terrainStairs.size() == repeat.terrainStairs.size());
   for (size_t i = 0; i < on.terrainStairs.size(); ++i) {
-    CHECK(on.terrainStairs[i].vertices == repeat.terrainStairs[i].vertices);
+    CHECK(on.terrainStairs[i].flight == repeat.terrainStairs[i].flight);
+    CHECK(on.terrainStairs[i].landing == repeat.terrainStairs[i].landing);
   }
   CHECK(on.terrainWalls.size() == repeat.terrainWalls.size());
   for (size_t i = 0; i < on.terrainWalls.size(); ++i) {
@@ -149,12 +150,17 @@ void TestSeedInvariants() {
         CHECK(length < wall.rise / 0.8f + 12.0f);
       }
     }
-    // Each access renders as exactly one planar wedge. Roads are likewise
-    // emitted as planar patches instead of being tessellated over the grid.
+    // Each access renders as one wedge: a planar flight and a flat landing
+    // at the level's height. Roads are likewise planar patches instead of
+    // being tessellated over the grid.
     CHECK(s.terrainStairs.size() == accessCount);
-    for (const RoadSurface& stair : s.terrainStairs) {
-      CHECK(stair.vertices.size() == 4);
-      CHECK(Planar(stair.vertices));
+    for (const TerrainStair& stair : s.terrainStairs) {
+      CHECK(stair.flight.size() == 4 && Planar(stair.flight));
+      CHECK(stair.landing.size() == 4);
+      for (const glm::vec3& v : stair.landing) {
+        CHECK(std::fabs(v.y - stair.landing[0].y) < 1e-4f);
+        CHECK(v.y > stair.base + 0.4f);
+      }
     }
     for (const RoadSurface& road : s.roads) CHECK(Planar(road.vertices, 0.03f));
     // Buildings have a level foundation, including each footprint corner.
@@ -226,8 +232,8 @@ void TestWallCoverAndCollision() {
       // Walk the step line; wherever the cliff stands (its nav wall blocks
       // the line), it blocks low LOS across and leaves the top line clear.
       const glm::vec2 onLine = wall.origin + wall.dir * t;
-      // Strip center -> step line (+2.2), where the unseen cliff wall stands.
-      const glm::vec2 box = onLine + n * (4.4f * 0.5f);
+      // The wall's origin is the step line, where the unseen cliff wall stands.
+      const glm::vec2 box = onLine;
       if (std::max(std::fabs(box.x), std::fabs(box.y)) > s.mapHalfExtent - 10.0f) continue;
       if (nav.IsWalkable(box.x, box.y)) continue;  // A gap or off the cliff.
       // Probes just inside the level's sidewalk ring and just outside the
@@ -333,7 +339,7 @@ void TestHighwayProfilesOverLevels() {
       // The step line is the wall strip's raised edge; the artery sample
       // nearest it is either at grade (ramped through) or well up on the
       // deck (flown over).
-      const glm::vec2 line = wall.origin + wall.raisedNormal * (4.4f * 0.5f);
+      const glm::vec2 line = wall.origin;
       float best = 1e9f, lift = 0.0f;
       for (const auto& p : roads[0].centerline) {
         const float d = std::fabs(glm::dot(glm::vec2(p.x, p.z) - line, wall.raisedNormal));

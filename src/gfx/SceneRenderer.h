@@ -29,8 +29,9 @@ bool IsUnitVisibleForRender(const tactics::Unit& unit, tactics::Team viewingTeam
 struct RenderDebugOptions {
   bool disableFov = false;
   bool disableShadows = false;
-  // Thermal camera prototype (issue #177): scene geometry is grayscale with
-  // figures the hottest signal, the shadow pass is skipped, and gameplay
+  // Thermal camera prototype (issue #177): material-based grayscale with
+  // pale roofs, warmer streets and figures the hottest signal. Sensor blur
+  // and grain precede the overlays, the shadow pass is skipped, and gameplay
   // overlays swap to monochrome sensor-green symbology. `thermalBlackHot`
   // picks the polarity, like the toggle on a real FLIR: true renders hot
   // objects dark on a washed-out bright world (matching the PR #178 review's
@@ -141,6 +142,12 @@ class SceneRenderer {
   Shader colorShader_;
   Shader coneSurfaceShader_;
   Shader depthShader_;
+  Shader thermalSensorShader_;
+  GLuint thermalSceneTex_ = 0;
+  GLuint thermalSensorVao_ = 0;
+  int thermalSceneWidth_ = 0;
+  int thermalSceneHeight_ = 0;
+  void ApplyThermalSensor(int x, int y, int width, int height);
   CubeMesh cubeMesh_;
   SphereMesh sphereMesh_;
   LineMesh pathLine_;

@@ -197,6 +197,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   renderer.SetFovProbeHeight(scenario.fovProbeHeight);
   gfx::RenderDebugOptions renderDebug;
   renderDebug.thermal = scenario.thermal;
+  renderDebug.thermalBlackHot = scenario.thermalBlackHot;
   // --profile: per-pane RenderPane wall time (glFinish before and after)
   // and the number of own living units whose cones were drawn, so the cost
   // per pane and per unit can be read off.

@@ -78,6 +78,10 @@ const glm::vec3 kSetupColor(0.2f, 1.0f, 0.3f);
 // see-through pass so a faded block keeps its normal tint.
 const glm::vec3 kObstacleColor(0.55f, 0.55f, 0.6f);
 const glm::vec3 kDeckColor(0.44f, 0.45f, 0.48f);
+
+// Apparent temperatures are art-directed to the aerial black-hot reference,
+// independent of visible-light paint/team colors. Keep the shader IDs in sync.
+enum class ThermalMaterial { Ground = 0, Concrete, Asphalt, Building, Metal, Figure };
 // Issue #136 camera-occlusion see-through: map geometry (buildings, deck/
 // ramp slabs) standing between the camera and something the player needs to
 // see is drawn at this opacity instead of fully opaque. First guess per the
@@ -221,6 +225,7 @@ void main() {
 
 const char* kLitFragmentShaderSrc = R"(#version 300 es
 precision highp float;
+precision highp int;
 in vec3 vWorldPos;
 in vec3 vWorldNormal;
 in vec4 vLightSpacePos;
@@ -231,14 +236,15 @@ uniform sampler2D uShadowMap;
 uniform int uDisableShadows;
 uniform int uThermal;
 uniform int uThermalBlackHot;  // 1 = hot reads dark (the review reference), 0 = white-hot.
-uniform int uThermalFigure;    // Drawing a figure: the hottest thing in the scene.
+uniform int uThermalMaterial;  // ThermalMaterial, independent of uColor.
 out vec4 FragColor;
 
-// Hash/value noise for the thermal view's sensor grain and surface blotches.
-// Pure arithmetic on fragment/world coordinates, so native and WASM renders
-// stay deterministic for the goldens.
+// Integer hash avoids sin()-dependent grain differences across GL drivers.
 float ThermalHash(vec2 p) {
-  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+  uvec2 q = uvec2(ivec2(floor(p)));
+  uint h = (q.x * 1664525u) ^ (q.y * 1013904223u);
+  h = (h ^ (h >> 16u)) * 2246822519u;
+  return float(h & 65535u) / 65535.0;
 }
 
 float ThermalNoise(vec2 p) {
@@ -279,36 +285,80 @@ void main() {
   const float kAmbient = 0.35;
   float lit = kAmbient + (1.0 - shadow) * diffuse * 0.65;
   if (uThermal != 0) {
-    // Modeled on real night-time aerial FLIR footage (PR #178 review
-    // reference): a relative "heat" signal mapped to gray by the selected
-    // polarity. Bodies are by far the hottest thing in the scene. Surfaces
-    // that face the night sky have radiated their warmth away (roofs read
-    // nearly blank-cold), walls keep some of the day's heat, and dark
-    // materials like asphalt keep the most; low-frequency blotches break up
-    // large surfaces the way patchy moisture and vegetation do on camera.
+    // Relative apparent heat, not a temperature simulation. The reference
+    // has almost white roofs, mid-gray streets and dark human silhouettes.
+    // In particular, pavement must not cool to the same tone as every roof.
     float heat;
-    if (uThermalFigure != 0) {
-      heat = 0.86 + diffuse * 0.14;  // Slight limb shading keeps the figure readable.
+    if (uThermalMaterial == 5) {
+      // A small view-dependent falloff rounds limbs without sun lighting
+      // or team-color differences in a thermal image.
+      heat = 0.91 + 0.07 * max(dot(normal, viewDir), 0.0);
     } else {
       float skyFacing = clamp(normal.y, 0.0, 1.0);
-      float luminance = dot(uColor.rgb, vec3(0.2126, 0.7152, 0.0722));
-      float blotch = ThermalNoise(vWorldPos.xz * 0.35) * 0.6 +
-                     ThermalNoise(vWorldPos.xz * 1.4) * 0.4;
-      // Faces at different orientations also pick up slightly different
-      // apparent temperature (emissivity falls off at grazing angles), which
-      // the small diffuse term stands in for -- it keeps box faces separable.
-      heat = 0.42 - skyFacing * 0.36 + (1.0 - luminance) * 0.25 +
-             (blotch - 0.5) * 0.14 + diffuse * 0.05;
-      heat = clamp(heat, 0.03, 0.75);
+      // Project onto the dominant face: walls get 2D texture too, instead
+      // of stretching ground noise into vertical stripes. Fine detail fades
+      // out when smaller than a pixel so distant roofs do not shimmer.
+      vec3 axis = abs(normal);
+      vec2 p = axis.y >= max(axis.x, axis.z) ? vWorldPos.xz :
+               (axis.x > axis.z ? vWorldPos.zy : vWorldPos.xy);
+      float fineWeight = 1.0 - smoothstep(0.15, 0.6, length(fwidth(p)));
+      float textureHeat = (ThermalNoise(p * 0.45) - 0.5) * 0.45 +
+                          (ThermalNoise(p * 2.5) - 0.5) * 0.35 +
+                          (ThermalNoise(p * 9.0) - 0.5) * 0.20 * fineWeight;
+      if (uThermalMaterial == 3) {
+        heat = mix(0.30, 0.018, skyFacing) +
+               textureHeat * mix(0.12, 0.025, skyFacing);
+        // Undersides retain a darker tone; never use visible-light shadows.
+        heat += max(-normal.y, 0.0) * 0.15;
+      } else if (uThermalMaterial == 2) {
+        heat = 0.36 + textureHeat * 0.16;
+      } else if (uThermalMaterial == 1) {
+        heat = mix(0.27, 0.15, skyFacing) + textureHeat * 0.09;
+      } else if (uThermalMaterial == 4) {
+        heat = 0.24 + textureHeat * 0.04;
+      } else {
+        heat = 0.19 + textureHeat * 0.26;
+      }
+      heat += (1.0 - max(dot(normal, viewDir), 0.0)) * 0.018;
     }
     float gray = uThermalBlackHot != 0 ? 1.0 - heat : heat;
-    // Sensor grain over everything; real detectors never deliver a clean
-    // flat field.
-    gray += (ThermalHash(gl_FragCoord.xy) - 0.5) * 0.045;
     FragColor = vec4(vec3(clamp(gray, 0.0, 1.0)), uColor.a);
     return;
   }
   FragColor = vec4(uColor.rgb * lit, uColor.a);
+}
+)";
+
+// Optics act on the world image before symbology is drawn. A small blur
+// removes razor-sharp polygon edges; subtle detector grain follows it.
+// No temporal noise: paused frames and regression captures stay stable.
+const char* kThermalSensorVertexShaderSrc = R"(#version 300 es
+out vec2 vUV;
+void main() {
+  vUV = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(vUV * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+
+const char* kThermalSensorFragmentShaderSrc = R"(#version 300 es
+precision highp float;
+precision highp int;
+in vec2 vUV;
+uniform sampler2D uScene;
+out vec4 FragColor;
+void main() {
+  vec2 size = vec2(textureSize(uScene, 0));
+  vec2 texel = 1.0 / size;
+  float gray = texture(uScene, vUV).r * 0.40;
+  gray += texture(uScene, vUV + vec2(texel.x, 0.0)).r * 0.15;
+  gray += texture(uScene, vUV - vec2(texel.x, 0.0)).r * 0.15;
+  gray += texture(uScene, vUV + vec2(0.0, texel.y)).r * 0.15;
+  gray += texture(uScene, vUV - vec2(0.0, texel.y)).r * 0.15;
+  uvec2 p = uvec2(vUV * size);
+  uint h = (p.x * 1664525u) ^ (p.y * 1013904223u);
+  h = (h ^ (h >> 16u)) * 2246822519u;
+  gray += (float(h & 65535u) / 65535.0 - 0.5) * 0.012;
+  FragColor = vec4(vec3(clamp(gray, 0.0, 1.0)), 1.0);
 }
 )";
 
@@ -2064,6 +2114,11 @@ bool SceneRenderer::Init() {
     std::fprintf(stderr, "Failed to compile the FOV mask shader\n");
     return false;
   }
+  if (!thermalSensorShader_.Compile(kThermalSensorVertexShaderSrc,
+                                    kThermalSensorFragmentShaderSrc)) {
+    std::fprintf(stderr, "Failed to compile the thermal sensor shader\n");
+    return false;
+  }
   cubeMesh_.Init();
   sphereMesh_.Init();
   frontierFill_.Init();
@@ -2185,6 +2240,44 @@ void SceneRenderer::Destroy() {
   if (fovFbo_[0]) glDeleteFramebuffers(2, fovFbo_);
   fovDepthTex_[0] = fovDepthTex_[1] = 0;
   fovFbo_[0] = fovFbo_[1] = 0;
+  if (thermalSceneTex_) glDeleteTextures(1, &thermalSceneTex_);
+  if (thermalSensorVao_) glDeleteVertexArrays(1, &thermalSensorVao_);
+  thermalSceneTex_ = thermalSensorVao_ = 0;
+  thermalSceneWidth_ = thermalSceneHeight_ = 0;
+}
+
+void SceneRenderer::ApplyThermalSensor(int x, int y, int width, int height) {
+  // Copy only this pane, including on non-default caller framebuffers. Its
+  // depth/stencil stay in place for the overlays that follow. Clamp sampling
+  // to the pane edges so the other team's image can never bleed into it.
+  glActiveTexture(GL_TEXTURE0);
+  if (!thermalSceneTex_) {
+    glGenTextures(1, &thermalSceneTex_);
+    glGenVertexArrays(1, &thermalSensorVao_);
+    glBindTexture(GL_TEXTURE_2D, thermalSceneTex_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  }
+  glBindTexture(GL_TEXTURE_2D, thermalSceneTex_);
+  if (width != thermalSceneWidth_ || height != thermalSceneHeight_) {
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    thermalSceneWidth_ = width;
+    thermalSceneHeight_ = height;
+  }
+  glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, x, y, width, height);
+  glDisable(GL_DEPTH_TEST);
+  glDepthMask(GL_FALSE);
+  thermalSensorShader_.Use();
+  thermalSensorShader_.SetInt("uScene", 0);
+  glBindVertexArray(thermalSensorVao_);
+  glDrawArrays(GL_TRIANGLES, 0, 3);
+  RecordDraw(3, 1);
+  glBindVertexArray(0);
+  glDepthMask(GL_TRUE);
+  glEnable(GL_DEPTH_TEST);
 }
 
 void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, float facingYaw,
@@ -2443,7 +2536,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (debug.thermal) {
     // Off-map void matches the scene's overall tone: washed-out bright for
     // black-hot (the review's reference footage), near-black for white-hot.
-    const float voidGray = debug.thermalBlackHot ? 0.74f : 0.035f;
+    const float voidGray = debug.thermalBlackHot ? 0.86f : 0.14f;
     glClearColor(voidGray, voidGray, voidGray, 1.0f);
   } else {
     glClearColor(0.10f, 0.11f, 0.13f, 1.0f);
@@ -2573,7 +2666,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   litShader_.SetInt("uDisableShadows", (debug.disableShadows || debug.thermal) ? 1 : 0);
   litShader_.SetInt("uThermal", thermalFlag);
   litShader_.SetInt("uThermalBlackHot", debug.thermalBlackHot ? 1 : 0);
-  litShader_.SetInt("uThermalFigure", 0);
+  const auto thermalMaterial = [&](ThermalMaterial material) {
+    if (debug.thermal) litShader_.SetInt("uThermalMaterial", static_cast<int>(material));
+  };
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
 
@@ -2586,20 +2681,24 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // floor; a city with levels is concrete throughout, base ground, raised
     // tiers, cliff faces and stairs alike, like its decks.
     const bool city = !game.GetScene().roads.empty();
+    thermalMaterial(city ? ThermalMaterial::Concrete : ThermalMaterial::Ground);
     DrawLitModel(litShader_, terrainMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  city ? glm::vec4(kDeckColor, 1.0f) : glm::vec4(0.30f, 0.36f, 0.22f, 1.0f));
+    thermalMaterial(ThermalMaterial::Concrete);
     DrawLitModel(litShader_, terrainRaisedMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(kDeckColor, 1.0f));
     DrawLitModel(litShader_, terrainStairMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(kDeckColor, 1.0f));
     glDisable(GL_POLYGON_OFFSET_FILL);
   } else {
+    thermalMaterial(ThermalMaterial::Ground);
     DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_,
                glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
                glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f),
                glm::vec4(0.16f, 0.18f, 0.20f, 1.0f));
   }
 
+  thermalMaterial(ThermalMaterial::Concrete);
   for (const AABB& slab : game.GetScene().sidewalks) {
     DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, slab.min, slab.max - slab.min,
                glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
@@ -2608,9 +2707,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (drawTerrain) {
     DrawLitModel(litShader_, terrainSidewalkMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
+    thermalMaterial(ThermalMaterial::Asphalt);
     DrawLitModel(litShader_, terrainRoadMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
   }
+  thermalMaterial(ThermalMaterial::Concrete);
   for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
     if (drawTerrain) break;
     BuildSurfacePatch(sidewalk.vertices, 0.10f, &geometryMesh_);
@@ -2618,12 +2719,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                  glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
   }
 
+  thermalMaterial(ThermalMaterial::Asphalt);
   for (const tactics::RoadSurface& road : game.GetScene().roads) {
     if (drawTerrain) break;
     BuildSurfacePatch(road.vertices, 0.0f, &geometryMesh_);
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
   }
+  thermalMaterial(ThermalMaterial::Concrete);
   for (size_t i = 0; i < walkSurfaces.size(); ++i) {
     if (fadeSurface[i]) continue;  // Re-drawn translucent below.
     // Concrete, clearly lighter than the asphalt below: the elevated deck
@@ -2634,6 +2737,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                  glm::vec4(kDeckColor, 1.0f));
   }
 
+  thermalMaterial(ThermalMaterial::Building);
   for (size_t i = 0; i < obstacles.size(); ++i) {
     if (fadeObstacle[i] || obstacles[i].navOnly) continue;  // Re-drawn translucent below / unseen.
     const AABB& bounds = obstacles[i].bounds;
@@ -2654,6 +2758,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   };
   const auto drawDetail = [&](const tactics::MassingDetail& d, const glm::vec4& color) {
     if (d.footprint.size() < 3 || d.y1 <= d.y0) return;
+    thermalMaterial(ThermalMaterial::Building);
     tactics::Obstacle prism;
     prism.footprint = d.footprint;
     prism.bounds.min.y = d.y0;
@@ -2674,6 +2779,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   // Zipline anchor posts (the cable itself is drawn with the line overlays).
+  thermalMaterial(ThermalMaterial::Metal);
   for (const tactics::Zipline& line : game.GetScene().ziplines) {
     for (const glm::vec3& foot : {line.a, line.b}) {
       constexpr float kPostHalf = 0.12f;
@@ -2685,12 +2791,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   }
 
-  litShader_.SetInt("uThermalFigure", 1);
+  thermalMaterial(ThermalMaterial::Figure);
   for (const Unit& unit : game.GetScene().units) {
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
     DrawUnit(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, unit);
   }
-  litShader_.SetInt("uThermalFigure", 0);
+  thermalMaterial(ThermalMaterial::Metal);
   DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
 
   // Issue #136: alpha-blended re-draw of the occluders marked above, sorted
@@ -2748,6 +2854,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
     for (const FadedOccluder& f : faded) {
       if (f.obstacle >= 0) {
+        thermalMaterial(ThermalMaterial::Building);
         const tactics::Obstacle& obstacle = obstacles[f.obstacle];
         const glm::vec4 color(kObstacleColor, kOccluderFadeOpacity);
         if (obstacle.footprint.empty()) {
@@ -2759,6 +2866,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                        color);
         }
       } else {
+        thermalMaterial(ThermalMaterial::Concrete);
         const std::vector<char> hidden = SharedEdges(walkSurfaces, walkSurfaces[f.surface]);
         BuildSurfacePatch(walkSurfaces[f.surface].vertices, kDeckThickness, &geometryMesh_,
                           &hidden);
@@ -2766,7 +2874,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                      glm::vec4(kDeckColor, kOccluderFadeOpacity));
       }
     }
-    litShader_.SetInt("uDisableShadows", debug.disableShadows ? 1 : 0);
+    litShader_.SetInt("uDisableShadows", (debug.disableShadows || debug.thermal) ? 1 : 0);
     glDisable(GL_CULL_FACE);
     glFrontFace(GL_CCW);
     glDisable(GL_STENCIL_TEST);
@@ -2774,6 +2882,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
   }
+
+  if (debug.thermal) ApplyThermalSensor(x, y, width, height);
 
   // Navmesh boundary debug overlay (opaque lines, depth-tested like the
   // scene geometry so cells hidden behind obstacles/hills read correctly).
@@ -2857,14 +2967,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       fovSceneKey_ = sceneKey;
     }
   }
+  // Keep the thermal image dominant; the FOV tint remains a light guide.
+  const float fovAlpha = debug.thermal ? 0.065f : 0.15f;
   const auto drawTeamFov = [&](Team fovTeam) {
     if (fovOverlayMode_ == FovOverlayMode::ShadowMap) {
       // Issue #110 prototype: projective per-unit mask instead of the
       // analytic ground overlay.
       for (const Unit& unit : game.GetScene().units) {
         if (debug.disableFov || !unit.alive || unit.team != fovTeam) continue;
-        const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 0.15f)
-                                                            : glm::vec4(0.9f, 0.25f, 0.22f, 0.15f);
+        const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, fovAlpha)
+                                                            : glm::vec4(0.9f, 0.25f, 0.22f, fovAlpha);
         DrawFovShadowMask(game, unit, unit.facingYaw, tactics::constants::kShootHalfFovDegrees,
                           teamColor, viewProj, drawTerrain, targetFramebuffer, x, y, width, height);
       }
@@ -2877,7 +2989,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       for (const Unit& unit : game.GetScene().units) {
         if (debug.disableFov || !unit.alive || unit.team != fovTeam) continue;
         if (terrain.Empty()) {
-          DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, build(unit));
+          DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, build(unit), nullptr, fovAlpha);
           continue;
         }
         auto cached = std::find_if(terrainFovCache_.begin(), terrainFovCache_.end(),
@@ -2891,7 +3003,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           cached->facingYaw = unit.facingYaw;
           cached->points = build(unit);
         }
-        DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, cached->points);
+        DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, cached->points, nullptr, fovAlpha);
       }
     }
   };

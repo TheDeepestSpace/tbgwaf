@@ -123,6 +123,16 @@ restores the analytic FOV-cone overlay. Visual scenarios still default to
 the analytic overlay and opt in
 with a `render: {fov_overlay: shadow_map}` block.
 
+The debug panel's **Thermal view** uses black-hot polarity by default, based
+on the aerial reference in PR #178: pale roofs, gray streets and dark figures.
+Uncheck **Black hot** to invert it. Apparent heat is assigned by material,
+independent of team colors; this is a visual approximation, not a temperature
+simulation. Light sensor blur and grain affect the world before the green
+gameplay overlays and HUD are drawn. The `thermal_urban_black_hot` and
+`thermal_urban_white_hot` scenarios show both polarities on the same city;
+scenario YAML selects them with `render: {thermal: true, thermal_black_hot: false}`
+for white-hot (omit `thermal_black_hot` for black-hot).
+
 ### Flag objective (CTF part 1)
 
 A scene (or scenario YAML `flag:` block) can enable a neutral flag at the map

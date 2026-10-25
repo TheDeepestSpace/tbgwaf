@@ -42,8 +42,7 @@ their frontage; `TBGWAF_MAP=urban-merge` adds a wide branching avenue that
 merges into the artery, `TBGWAF_MAP=urban-elevated` (default) turns the artery into a
 true overpass (ramps up, crosses on pier bents with usable ground beneath,
 ramps back down; the branch becomes an on-ramp merging mid-deck), and
-`TBGWAF_MAP=urban-terrain` forces the terrain levels on (the Map Select
-screen's **Urban Terrain** entry), and `TBGWAF_MAP=hilly` selects rolling hills. Urban code/scenarios can also
+`TBGWAF_MAP=hilly` selects rolling hills. Urban code/scenarios can also
 tune artery count/width, local-street width/skew and elevation through
 `MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
 overlay of the navmesh's walkable-cell boundaries.

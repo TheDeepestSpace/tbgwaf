@@ -815,8 +815,7 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
     };
     for (int i = 0; i < count; ++i) {
       float ta = bounds[i], tb = bounds[i + 1];
-      if (i == 0 && cornerGap[e]) ta += halfGapT;
-      if (i == count - 1 && cornerGap[next]) tb -= halfGapT;
+      // Corner alleys are cut square to a street below, not by trimming ends.
       if (i > 0 && innerGap[e][i - 1]) ta += halfGapT;
       if (i < count - 1 && innerGap[e][i]) tb -= halfGapT;
       if (tb - ta < 0.04f) continue;
@@ -881,6 +880,45 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
     return result;
   };
   const float minArea = c.minPolygonArea * 0.18f;
+  // Corner alleys: both walls are cut square to one of the two streets, so
+  // they run parallel and the passage keeps its full width. (Cutting each
+  // piece square to its own street leaves a wedge at non-right corners.) If
+  // neither orientation leaves usable pieces, the corner merges instead.
+  auto cutAlley = [&](size_t e, size_t next, bool randomFirst) {
+    if (next == e || rows[e].empty() || rows[next].empty()) return false;
+    if (!rows[e].back().atEnd || !rows[next].front().atStart) return false;
+    std::vector<glm::vec2>& pf = rows[e].back().footprint;
+    std::vector<glm::vec2>& qf = rows[next].front().footprint;
+    const glm::vec2 dirs[2] = {glm::normalize(outer[next] - outer[e]),
+                               glm::normalize(outer[(next + 1) % edges] - outer[next])};
+    const int first = randomFirst && rng->Chance(0.5f) ? 1 : 0;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      const int axis = (first + attempt) % 2;
+      const glm::vec2 n = dirs[axis];
+      const glm::vec2 along(-n.y, n.x);
+      // The piece running along `n` backs off by the alley width; the other
+      // piece is only trimmed where it would reach back past the corner (an
+      // acute one), so at a right angle its wall stays flush with the street.
+      const float pOff = axis == 0 ? -(c.gapWidth + 0.01f) : 0.01f;
+      const float qOff = axis == 0 ? -0.01f : c.gapWidth + 0.01f;
+      const glm::vec2 a = outer[next] + n * pOff;
+      const glm::vec2 b = outer[next] + n * qOff;
+      std::vector<glm::vec2> pt = clipToSide(pf, a, along, a - n * 1000.0f);
+      std::vector<glm::vec2> qt = clipToSide(qf, b, along, b + n * 1000.0f);
+      if (pt.size() < 3 || qt.size() < 3 || PolygonArea(pt) < minArea ||
+          PolygonArea(qt) < minArea) {
+        continue;
+      }
+      pf = std::move(pt);
+      qf = std::move(qt);
+      return true;
+    }
+    return false;
+  };
+  for (size_t e = 0; e < edges; ++e) {
+    const size_t next = (e + 1) % edges;
+    if (cornerGap[next] && !cutAlley(e, next, true)) cornerGap[next] = false;
+  }
   for (size_t e = 0; e < edges; ++e) {
     const size_t next = (e + 1) % edges;
     if (cornerGap[next] || next == e || rows[e].empty() || rows[next].empty()) continue;
@@ -922,7 +960,12 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
       }
       joined = true;
     }
-    if (!joined) continue;
+    if (!joined) {
+      // Neither piece can give up the corner; open an alley instead of
+      // leaving the two meeting at a point.
+      cutAlley(e, next, false);
+      continue;
+    }
     // One building: the L's two halves share a height.
     if (heights[pid] < 0.0f) heights[pid] = height();
     heights[qid] = heights[pid];

@@ -1636,9 +1636,10 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>
 
 // --- Massing details (issue #151, roadmap 3.3) ------------------------------
 
-// Visual-only parapets, roof furniture and awnings. Nothing stands on a roof
-// a zipline lands on (a figure walks there, and these aren't collision), and
-// awnings hang over the sidewalk well above head height. Own rng stream, so
+// Parapets, roof furniture and awnings (sight-blocking, not collision). Every
+// roof gets them, zipline roofs included: a parapet is skipped at random
+// (the furniture stays), and furniture keeps clear of zipline landings.
+// Awnings hang over the sidewalk well above head height. Own rng stream, so
 // the buildings never move when the dressing changes.
 void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed) {
   Rng rng(seed ^ kMassingStream);
@@ -1660,13 +1661,17 @@ void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed
     const glm::vec2 along = glm::normalize(fb - fa);
     const glm::vec2 outward(along.y, -along.x);  // Right of a CCW edge: the street side.
 
-    bool roofWalkable = false;
+    std::vector<glm::vec2> landings;  // Zipline feet on this roof.
     for (const Zipline& line : scene->ziplines) {
       for (const glm::vec3& foot : {line.a, line.b}) {
-        roofWalkable |= std::fabs(foot.y - roofTop) < 0.2f &&
-                        PointInConvexPolygon(glm::vec2(foot.x, foot.z), roof);
+        if (std::fabs(foot.y - roofTop) < 0.2f &&
+            PointInConvexPolygon(glm::vec2(foot.x, foot.z), roof)) {
+          landings.emplace_back(foot.x, foot.z);
+        }
       }
     }
+    constexpr float kLandingClearance = 1.5f;
+    const bool wrapAround = rng.Float(0.0f, 1.0f) < 0.75f;
     auto push = [&](MassingDetail::Kind kind, std::vector<glm::vec2> footprint, float y0,
                     float y1) {
       if (PolygonSignedArea(footprint) < 0.0f) std::reverse(footprint.begin(), footprint.end());
@@ -1674,8 +1679,8 @@ void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed
           MassingDetail{kind, std::move(footprint), y0, y1, static_cast<int>(bi)});
     };
 
-    if (!roofWalkable) {
-      // Parapet: a low wall along every roof edge.
+    {
+      // Parapet: a low wall along every roof edge (most roofs).
       float parapet = 0.6f;
       switch (b.kind) {
         case BuildingKind::Residential: parapet = 0.6f; break;
@@ -1694,7 +1699,7 @@ void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed
         copingUsable = glm::dot(roof[next] - roof[e], coping[next] - coping[e]) > 0.0f &&
                        PointInConvexPolygon(coping[e], roof);
       }
-      for (size_t e = 0; copingUsable && e < roof.size(); ++e) {
+      for (size_t e = 0; wrapAround && copingUsable && e < roof.size(); ++e) {
         const size_t next = (e + 1) % roof.size();
         if (glm::distance(roof[e], roof[next]) < 2.0f * kParapetThickness) continue;
         push(MassingDetail::Kind::Parapet, {roof[e], roof[next], coping[next], coping[e]},
@@ -1735,6 +1740,9 @@ void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed
           for (const glm::vec2& corner : corners) {
             fits &= PointInConvexPolygon(corner, roof) &&
                     DistanceToPolygonEdges(corner, roof) >= margin;
+          }
+          for (const glm::vec2& landing : landings) {
+            fits &= glm::distance(centre, landing) >= halfDiag + kLandingClearance;
           }
           if (!fits) continue;
           bool overlaps = false;

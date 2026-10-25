@@ -314,9 +314,9 @@ void TestMassingBlocksSight() {
   }
 }
 
-// Issue #151: visual-only massing. Parapets ring every roof nobody can walk
-// on, roof furniture stays inside the parapet, awnings hang over the
-// sidewalk from shopfronts only, and nothing is placed on a zipline roof.
+// Issue #151: massing. Most roofs (zipline roofs included) get a parapet ring,
+// roof furniture stays inside the roof and clear of zipline landings, and
+// awnings hang over the sidewalk from shopfronts only.
 void TestMassingStaysOnItsBuilding() {
   for (uint32_t seed : kSeeds) {
     const Scene scene = GenerateUrbanMap(seed);
@@ -342,11 +342,18 @@ void TestMassingStaysOnItsBuilding() {
           } else {
             ++fixtures;
           }
-          // Nothing stands on a roof a zipline lands on.
-          for (const Zipline& line : scene.ziplines) {
-            for (const glm::vec3& foot : {line.a, line.b}) {
-              CHECK(!(std::fabs(foot.y - roof.bounds.max.y) < 0.2f &&
-                      PointInConvexPolygon(glm::vec2(foot.x, foot.z), roof.footprint)));
+          // Furniture keeps clear of a zipline landing on its roof.
+          if (d.kind == MassingDetail::Kind::RoofFixture) {
+            for (const Zipline& line : scene.ziplines) {
+              for (const glm::vec3& foot : {line.a, line.b}) {
+                if (std::fabs(foot.y - roof.bounds.max.y) < 0.2f &&
+                    PointInConvexPolygon(glm::vec2(foot.x, foot.z), roof.footprint)) {
+                  glm::vec2 centre(0.0f);
+                  for (const glm::vec2& v : d.footprint) centre += v;
+                  centre /= static_cast<float>(d.footprint.size());
+                  CHECK(glm::distance(centre, glm::vec2(foot.x, foot.z)) >= 1.5f);
+                }
+              }
             }
           }
           break;

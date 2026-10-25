@@ -430,6 +430,22 @@ void TestSurfacesSitOnTiers() {
       const float h = s.mapHalfExtent;
       const std::vector<TerrainTier> tiers =
           TerrainTiers(s.terrainWalls, s.terrainCutouts, {{-h, -h}, {h, -h}, {h, h}, {-h, h}});
+      // No sliver pieces: a zero-width tier piece along a step line would
+      // stand as a thin wall across the ramp where the tier is cut away.
+      for (const TerrainTier& tier : tiers) {
+        float width = std::numeric_limits<float>::infinity();
+        for (size_t i = 0; i < tier.polygon.size(); ++i) {
+          const glm::vec2 a = tier.polygon[i], e = tier.polygon[(i + 1) % tier.polygon.size()] - a;
+          const float length = glm::length(e);
+          if (length < 1e-6f) continue;
+          float farthest = 0.0f;
+          for (const glm::vec2& p : tier.polygon) {
+            farthest = std::max(farthest, std::fabs(e.x * (p.y - a.y) - e.y * (p.x - a.x)) / length);
+          }
+          width = std::min(width, farthest);
+        }
+        CHECK(tier.polygon.size() >= 3 && width >= 0.05f);
+      }
       const auto onTiers = [&](const RoadSurface& patch) {
         if (patch.vertices.size() < 3) return;
         std::vector<glm::vec2> flat;

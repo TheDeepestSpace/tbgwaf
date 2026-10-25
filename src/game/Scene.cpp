@@ -1,6 +1,8 @@
 #include "game/Scene.h"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace tactics {
 namespace {
@@ -101,13 +103,27 @@ std::vector<glm::vec2> ClipHalfPlane(const std::vector<glm::vec2>& polygon, glm:
   return out;
 }
 
-float PolygonArea2(const std::vector<glm::vec2>& polygon) {
-  float area = 0.0f;
+// A clipped piece worth keeping: at least three vertices and a real width.
+// Clipping a polygon against a line that runs along its own edge (a ramp
+// corridor's start edge lies on the step line that already bounds the
+// tier) leaves a zero-width sliver of vertices on that line; an area test
+// alone keeps it when it is long, and its prism would stand as a thin
+// wall right across the road where the real tier is cut away.
+bool UsablePiece(const std::vector<glm::vec2>& polygon) {
+  if (polygon.size() < 3) return false;
+  constexpr float kMinWidth = 0.05f;
+  float width = std::numeric_limits<float>::infinity();
   for (size_t i = 0; i < polygon.size(); ++i) {
-    const glm::vec2 a = polygon[i], b = polygon[(i + 1) % polygon.size()];
-    area += a.x * b.y - b.x * a.y;
+    const glm::vec2 a = polygon[i], e = polygon[(i + 1) % polygon.size()] - a;
+    const float length = glm::length(e);
+    if (length < 1e-6f) continue;
+    float farthest = 0.0f;
+    for (const glm::vec2& p : polygon) {
+      farthest = std::max(farthest, std::fabs(e.x * (p.y - a.y) - e.y * (p.x - a.x)) / length);
+    }
+    width = std::min(width, farthest);
   }
-  return std::fabs(area) * 0.5f;
+  return width >= kMinWidth;
 }
 
 }  // namespace
@@ -124,7 +140,7 @@ std::vector<TerrainTier> TerrainTiers(const std::vector<TerrainWall>& walls,
     for (const auto& polygon : tiers) {
       for (const float side : {-1.0f, 1.0f}) {
         auto piece = ClipHalfPlane(polygon, wall.raisedNormal, d, side);
-        if (piece.size() >= 3 && PolygonArea2(piece) > 1e-5f) split.push_back(std::move(piece));
+        if (UsablePiece(piece)) split.push_back(std::move(piece));
       }
     }
     tiers = std::move(split);
@@ -146,7 +162,7 @@ std::vector<TerrainTier> TerrainTiers(const std::vector<TerrainWall>& walls,
         if (signedArea < 0.0f) inward = -inward;
         const float d = glm::dot(inward, a);
         auto piece = ClipHalfPlane(inside, inward, d, -1.0f);
-        if (piece.size() >= 3 && PolygonArea2(piece) > 1e-5f) outside.push_back(std::move(piece));
+        if (UsablePiece(piece)) outside.push_back(std::move(piece));
         inside = ClipHalfPlane(inside, inward, d, 1.0f);
       }
     }

@@ -272,7 +272,9 @@ void NavMesh::BuildSurfaceCaches(float agentRadius) {
   surfaceBlockers_.assign(n, {});
   for (size_t i = 0; i < n; ++i) {
     for (const auto& blocker : walkSurfaces_[i].blockers) {
-      std::vector<glm::vec2> padded = ExpandConvexPolygon(blocker, agentRadius);
+      // Half the usual obstacle padding: roof furniture is knee-to-waist-high
+      // scenery, so a figure may stand close enough to brush it.
+      std::vector<glm::vec2> padded = ExpandConvexPolygon(blocker, 0.5f * agentRadius);
       if (!padded.empty()) surfaceBlockers_[i].push_back(std::move(padded));
     }
   }
@@ -742,7 +744,10 @@ bool NavMesh::FindBlockedSurfacePath(int surface, glm::vec3 start, glm::vec3 goa
   if (SurfaceBlocked(surface, g.x, g.y)) return false;
   std::vector<glm::vec2> nodes = {s, g};
   for (const auto& polygon : blockers) {
-    for (const glm::vec2& p : polygon) {
+    // Way-nodes sit a nudge outside their blocker: a corner on the boundary
+    // itself would read as blocked, and a leg running exactly along an edge
+    // is numerically unsafe against the strict-interior segment test.
+    for (const glm::vec2& p : ExpandConvexPolygon(polygon, 1e-3f)) {
       if (SurfaceContains(surface, p.x, p.y) && !SurfaceBlocked(surface, p.x, p.y)) {
         nodes.push_back(p);
       }

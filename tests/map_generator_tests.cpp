@@ -331,8 +331,20 @@ void TestRoofMassingBlocksWalking() {
       for (float t : {0.1f, 0.2f, 0.3f}) {
         const glm::vec3 from = glm::mix(a, SurfaceCenter(slab), t);
         const glm::vec3 to = glm::mix(b, SurfaceCenter(slab), t);
+        // Endpoints clear of every blocker (by a full agent radius, at least
+        // the navmesh's own padding) must reach each other: a detour around
+        // the blocker always exists on the open roof.
+        bool endpointsClear = true;
+        for (const auto& blocker : slab.blockers) {
+          const std::vector<glm::vec2> padded =
+              ExpandConvexPolygon(blocker, constants::kAgentRadius);
+          endpointsClear &= !PointInConvexPolygon({from.x, from.z}, padded) &&
+                            !PointInConvexPolygon({to.x, to.z}, padded);
+        }
         std::vector<glm::vec3> path;
-        if (!mesh.FindPath(from, to, &path)) continue;
+        const bool found = mesh.FindPath(from, to, &path);
+        if (endpointsClear) CHECK(found);
+        if (!found) continue;
         ++crossings;
         for (size_t i = 0; i + 1 < path.size(); ++i) {
           for (const auto& blocker : slab.blockers) {

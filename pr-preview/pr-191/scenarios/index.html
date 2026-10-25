@@ -277,6 +277,7 @@ listed by name only.</p>
 </div>
 <div class="scenario has-video" data-stem="finish_new_game_finish"><h3>finish_new_game_finish</h3><div class="path">tests/scenarios/finish_new_game_finish.yaml</div>
 <p class="description">Regression for ghost wireframes (sighting-memory trails) surviving a new game. Game 1: blue sights red1, red1 walks out of view (remembered trail, plus planned-move ghosts while planning), then blue finishes both reds (GameOver). `new_game` then restarts the match the way the UI does; the runner also mirrors every step into a follower page via ImportState (the second pane), whose memory is checked as well. No old sightings may remain (only fresh ones from the opening view), and game 2 is played to completion too.</p>
+<p class="note">⚠ scenario script failed during visual playback; video below stops at the failing step.</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/finish_new_game_finish/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/finish_new_game_finish/red.webm"></video></figure>
@@ -1129,6 +1130,7 @@ listed by name only.</p>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
 <div class="scenario has-video" data-stem="playbook_moving_multi_enemy_seen"><h3>playbook_moving_multi_enemy_seen</h3><div class="path">tests/scenarios/playbook_moving_multi_enemy_seen.yaml</div>
+<p class="note">⚠ scenario script failed during visual playback; video below stops at the failing step.</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_multi_enemy_seen/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_multi_enemy_seen/red.webm"></video></figure>
@@ -1143,7 +1145,7 @@ listed by name only.</p>
 <div class="step" data-action="3"><span class="u red">red2</span> moves to (8, 3)</div>
 <div class="step" data-action="4"><span class="u red">red3</span> passes</div>
 <div class="step" data-action="5">commit round</div>
-<div class="detail">Check: <span class="u red">red2</span> is at (8, 0.1333) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u red">red2</span> is at (8, 0.4) (tolerance 0.1)</div>
 <div class="detail">Check: <span class="u red">red2</span> is alive</div>
 </div>
 </div></figure>
@@ -1167,13 +1169,13 @@ listed by name only.</p>
 <div class="step" data-action="5">commit round</div>
 <div class="detail">Check: <span class="u blue">blue0</span> is down</div>
 <div class="detail">Check: <span class="u red">red2</span> is at (8, 3) (tolerance 0.1)</div>
-<div class="detail">Check: <span class="u blue">blue1</span> is alive</div>
 </div>
 </div></figure>
 </div>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
 <div class="scenario has-video" data-stem="playbook_moving_shoot_stop"><h3>playbook_moving_shoot_stop</h3><div class="path">tests/scenarios/playbook_moving_shoot_stop.yaml</div>
+<p class="note">⚠ scenario script failed during visual playback; video below stops at the failing step.</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_shoot_stop/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_shoot_stop/red.webm"></video></figure>
@@ -1189,7 +1191,7 @@ listed by name only.</p>
 <div class="step" data-action="4"><span class="u red">red3</span> passes</div>
 <div class="step" data-action="5">commit round</div>
 <div class="detail">Check: <span class="u blue">blue0</span> is down</div>
-<div class="detail">Check: <span class="u red">red2</span> is at (8, 0.1333) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u red">red2</span> is at (8, 0.4) (tolerance 0.1)</div>
 <div class="detail">Check: <span class="u red">red2</span> is alive</div>
 </div>
 </div></figure>
@@ -1197,6 +1199,7 @@ listed by name only.</p>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
 <div class="scenario has-video" data-stem="playbook_moving_stop_halts_mid_walk"><h3>playbook_moving_stop_halts_mid_walk</h3><div class="path">tests/scenarios/playbook_moving_stop_halts_mid_walk.yaml</div>
+<p class="note">⚠ scenario script failed during visual playback; video below stops at the failing step.</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_stop_halts_mid_walk/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_moving_stop_halts_mid_walk/red.webm"></video></figure>
@@ -1211,7 +1214,7 @@ listed by name only.</p>
 <div class="step" data-action="3"><span class="u red">red2</span> moves to (8, 3)</div>
 <div class="step" data-action="4"><span class="u red">red3</span> passes</div>
 <div class="step" data-action="5">commit round</div>
-<div class="detail">Check: <span class="u red">red2</span> is at (8, 0.1333) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u red">red2</span> is at (8, 0.4) (tolerance 0.1)</div>
 <div class="detail">Check: <span class="u red">red2</span> is alive</div>
 <div class="detail">Check: <span class="u blue">blue0</span> is alive</div>
 </div>
@@ -1320,6 +1323,7 @@ listed by name only.</p>
 </div>
 <div class="scenario has-video" data-stem="playbook_sighting_memory_fades_out"><h3>playbook_sighting_memory_fades_out</h3><div class="path">tests/scenarios/playbook_sighting_memory_fades_out.yaml</div>
 <p class="description">Ghosts show for the turn only: red is seen by blue once, then runs out of blue&#x27;s FOV. When the turn ends the ghosts are fully visible, then fade out over kGhostFadeDuration (0.5s) each, starting in the order they appeared. Nothing carries over into the next turn.</p>
+<p class="note">⚠ scenario script failed during visual playback; video below stops at the failing step.</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/playbook_sighting_memory_fades_out/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/playbook_sighting_memory_fades_out/red.webm"></video></figure>

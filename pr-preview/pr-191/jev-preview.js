@@ -271,24 +271,12 @@ function bootstrap() {
   const endpointInput = document.getElementById("jev-endpoint");
   endpointInput.value = controller.endpoint;
 
-  const reloadInto = (mode) => {
-    const url = new URL(window.location.href);
-    url.searchParams.set("mode", mode);
-    url.searchParams.delete("room");
-    window.location.href = url.toString();
-  };
   document.querySelectorAll("[data-mode]").forEach((button) => {
-    button.addEventListener("click", () => {
-      if (window.TBGWAF_SERVER) reloadInto(button.dataset.mode);
-      else controller.setMode(button.dataset.mode);
-    });
+    button.addEventListener("click", () => controller.setMode(button.dataset.mode));
   });
   document.getElementById("start-ai").addEventListener("click", () => controller.start());
   document.getElementById("pause-ai").addEventListener("click", () => controller.pause());
-  document.getElementById("restart-match").addEventListener("click", () => {
-    if (window.TBGWAF_SERVER) reloadInto(controller.mode);
-    else controller.restart();
-  });
+  document.getElementById("restart-match").addEventListener("click", () => controller.restart());
   document.getElementById("retry-ai").addEventListener("click", () => controller.retry());
   document.getElementById("fallback-ai").addEventListener("click", () => controller.useFallback());
   document.getElementById("save-endpoint").addEventListener("click", () => {
@@ -299,22 +287,14 @@ function bootstrap() {
 
   const status = document.getElementById("status");
   window.onerror = () => { status.textContent = "Failed to load — check the browser console."; };
-  // Server mode (window.TBGWAF_SERVER = { url, room }): each pane is its own
-  // client of the authoritative server, paired through a private room, so
-  // there is no in-page bus. Changing mode or restarting reloads the page
-  // into a fresh room (the server owns the match, so it cannot be reset
-  // from here).
-  const server = window.TBGWAF_SERVER;
   const bus = { inboxes: [] };
   let pending = 2;
-  const startPlayer = (player) => {
+  for (const player of ["blue", "red"]) {
     const pane = document.getElementById(`pane-${player}`);
     const moduleConfig = {
       canvas: pane.querySelector("canvas"),
       tbgwafPlayer: player,
-      ...(server
-        ? { tbgwafServer: server.url, tbgwafRoom: server.room, tbgwafAutoEnter: true }
-        : { tbgwafBus: bus }),
+      tbgwafBus: bus,
       tbgwafRequestDecision: (payload) => controller.requestDecision(player, payload),
       tbgwafReportMatch: (phase, round, winner) =>
         controller.reportMatch(player, phase, round, winner),
@@ -324,17 +304,7 @@ function bootstrap() {
         if (--pending === 0) status.textContent = "";
       },
     };
-    return moduleConfig;
-  };
-  const blueConfig = startPlayer("blue");
-  if (server) {
-    // The first client to join a room plays Blue, so Red connects only once
-    // Blue's join has gone out.
-    blueConfig.tbgwafOnFirstSend = () => createTbgwafModule(startPlayer("red"));
-    createTbgwafModule(blueConfig);
-  } else {
-    createTbgwafModule(blueConfig);
-    createTbgwafModule(startPlayer("red"));
+    createTbgwafModule(moduleConfig);
   }
   controller.setMode(config.mode);
 }

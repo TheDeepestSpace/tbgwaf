@@ -211,6 +211,11 @@ constexpr float kUnitHeight = 1.8f;
 constexpr float kEyeHeight = 1.5f;
 // Ground beneath a deck/ramp is only walkable with at least this much headroom.
 constexpr float kMinDeckHeadroom = 2.2f;
+// Steepest ground a figure can walk (rise over run). Stair flights (0.8) and
+// road ramps (0.3) pass; the sheer sides of stair, ramp and level blocks do
+// not, so an upper level is reachable only by walking up its stair or ramp.
+// Equivalent to a 0.3 step over one 0.25 sample.
+constexpr float kMaxWalkSlope = 1.2f;
 // Where a locked-on shot aims on the target figure: torso center height.
 // Shared by the ballistics (burst aim point), the staged-lock "+" marker and
 // the planned-shot cone, so what the cone shader shows is what gets shot at.

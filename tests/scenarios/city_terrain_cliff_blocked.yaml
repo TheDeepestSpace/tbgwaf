@@ -1,0 +1,34 @@
+# Sheer terrain faces are not walkable (issue #221): the blue figure beside a
+# stair flight cannot scale the cliff or the flight's side to the level above.
+# A spot on the level a few steps away is refused (the only way up is the
+# whole flight, which exceeds the move budget for that spot), while the stair
+# head, reached by walking up the flight, is fine.
+name: city_terrain_cliff_blocked
+map:
+  generate:
+    type: urban
+    seed: 7
+    elevated: false
+    features: {terrain: on}
+    terrain_levels: -1
+units:
+  - {id: 0, team: blue, position: [-32.3, 0, -20.5], facing_degrees: 270}
+  - {id: 1, team: red, position: [-65, 0, 10], facing_degrees: 0}
+camera:
+  target: [-35, -20]
+  zoom: -120
+script:
+  - action: move
+    actor: 0
+    destination: [-37.0, 4.681, -20.5]
+    expect_unreachable: true
+    comment: 5 away across the cliff; the stair is 12+ away.
+  - action: move
+    actor: 0
+    destination: [-30.9, 0, -9.0]
+    comment: Along the foot of the cliff to the stair foot.
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [-30.9, 0, -9.0], tolerance: 0.3}
+  - assert: {round: 2}

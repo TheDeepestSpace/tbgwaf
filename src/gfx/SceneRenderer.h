@@ -190,7 +190,7 @@ class SceneRenderer {
   // Visual-only building massing (issue #151: parapets, roof furniture,
   // awnings), one static mesh per colour group, rebuilt when the scene's
   // massing records change. Drawn in the shadow and lit passes only.
-  static constexpr int kMassingGroups = 5;
+  static constexpr int kMassingGroups = tactics::kBuildingKindCount * 2 + 1;
   LitTriangleMesh massingMesh_[kMassingGroups];
   unsigned long long massingKey_ = 0;
   // Renders the two depth maps for `unit` looking along `facingYaw`, then

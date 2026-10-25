@@ -88,12 +88,6 @@ const glm::vec3 kFacadePalette[tactics::kBuildingKindCount * 2] = {
     {0.74f, 0.72f, 0.66f}, {0.66f, 0.64f, 0.60f},  // Civic: pale stone, granite.
     {0.52f, 0.52f, 0.52f}, {0.56f, 0.55f, 0.50f},  // Garage: raw / stained concrete.
 };
-// Massing colour groups: parapet coping, roof furniture, three awning cloths.
-const glm::vec3 kMassingPalette[5] = {
-    {0.60f, 0.58f, 0.54f}, {0.42f, 0.44f, 0.47f},
-    {0.55f, 0.18f, 0.16f}, {0.16f, 0.40f, 0.28f}, {0.18f, 0.26f, 0.48f},
-};
-
 glm::vec3 ObstacleBaseColor(const tactics::Scene& scene, const tactics::Obstacle& obstacle) {
   if (obstacle.building < 0 || obstacle.building >= static_cast<int>(scene.buildings.size())) {
     return kObstacleColor;
@@ -103,13 +97,21 @@ glm::vec3 ObstacleBaseColor(const tactics::Scene& scene, const tactics::Obstacle
   return kFacadePalette[style];
 }
 
-int MassingGroup(const tactics::MassingDetail& detail) {
-  switch (detail.kind) {
-    case tactics::MassingDetail::Kind::Parapet: return 0;
-    case tactics::MassingDetail::Kind::RoofFixture: return 1;
-    case tactics::MassingDetail::Kind::Awning: return 2 + std::max(0, detail.building) % 3;
+// Massing (parapets, roof furniture, awnings) is bucketed by the owning
+// building's facade style so it renders in the building's own colour; the
+// last group is the fallback for details with no valid building.
+int MassingGroup(const tactics::Scene& scene, const tactics::MassingDetail& detail) {
+  constexpr int kStyles = tactics::kBuildingKindCount * 2;
+  if (detail.building < 0 || detail.building >= static_cast<int>(scene.buildings.size())) {
+    return kStyles;
   }
-  return 0;
+  const int style = scene.buildings[static_cast<size_t>(detail.building)].style;
+  return (style < 0 || style >= kStyles) ? kStyles : style;
+}
+
+glm::vec3 MassingGroupColor(int group) {
+  return group >= 0 && group < tactics::kBuildingKindCount * 2 ? kFacadePalette[group]
+                                                              : kObstacleColor;
 }
 
 // Issue #136 camera-occlusion see-through: map geometry (buildings, deck/
@@ -666,7 +668,7 @@ void BuildMassingMeshes(const tactics::Scene& scene, LitTriangleMesh* meshes, in
   std::vector<std::vector<GLuint>> indices(static_cast<size_t>(groups));
   for (const tactics::MassingDetail& d : scene.massing) {
     if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
-    const int g = std::clamp(MassingGroup(d), 0, groups - 1);
+    const int g = std::clamp(MassingGroup(scene, d), 0, groups - 1);
     tactics::Obstacle prism;
     prism.footprint = d.footprint;
     prism.bounds.min.y = d.y0;
@@ -2302,7 +2304,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   for (int g = 0; g < kMassingGroups; ++g) {
     if (!massingMesh_[g].HasGeometry()) continue;
     DrawLitModel(litShader_, massingMesh_[g], viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(kMassingPalette[g], 1.0f));
+                 glm::vec4(MassingGroupColor(g), 1.0f));
   }
 
   // Zipline anchor posts (the cable itself is drawn with the line overlays).

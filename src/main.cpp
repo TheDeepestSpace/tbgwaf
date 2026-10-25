@@ -453,6 +453,10 @@ int main() {
   int observedAiGeneration = tbgwaf_ai_generation();
   bool jevErrorHold = false;
   int lastAutoCommittedRound = -1;
+  // Seconds every figure has had a plan; the auto-commit waits a beat so both
+  // teams' plan overlays are rendered before execution starts.
+  float autoCommitHold = 0.0f;
+  constexpr float kAutoCommitDelay = 0.75f;
   int lastReportedRound = -1;
   int lastReportedWinner = -2;
   InputMode lastReportedMode = InputMode::Executing;
@@ -512,6 +516,7 @@ int main() {
       jevBuilder.reset();
       jevErrorHold = false;
       lastAutoCommittedRound = -1;
+      autoCommitHold = 0.0f;
       lastSentState.clear();
       forceBroadcast = isSimulator;
       awaitingPeerSync = false;
@@ -832,8 +837,15 @@ int main() {
     // soon as every living figure has a plan, including Blue-human vs Red-AI.
     if (networked && isSimulator && tbgwaf_auto_commit() && !aiPaused &&
         game.CanCommitRound() && lastAutoCommittedRound != game.RoundNumber()) {
-      lastAutoCommittedRound = game.RoundNumber();
-      game.CommitRound();
+      if (autoCommitHold >= kAutoCommitDelay) {
+        autoCommitHold = 0.0f;
+        lastAutoCommittedRound = game.RoundNumber();
+        game.CommitRound();
+      } else {
+        autoCommitHold += dt;
+      }
+    } else {
+      autoCommitHold = 0.0f;
     }
 #endif
     // Turn timeline (issue #143): record the local game's history and

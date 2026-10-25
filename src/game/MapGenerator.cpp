@@ -989,6 +989,24 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
     *t = (w.x * d2.y - w.y * d2.x) / den;
     return true;
   };
+  auto minimumWidth = [](const std::vector<glm::vec2>& poly) {
+    float result = std::numeric_limits<float>::infinity();
+    for (size_t i = 0; i < poly.size(); ++i) {
+      const glm::vec2 edge = poly[(i + 1) % poly.size()] - poly[i];
+      const float length = glm::length(edge);
+      if (length < 1.0e-4f) continue;
+      const glm::vec2 normal(-edge.y / length, edge.x / length);
+      float lo = std::numeric_limits<float>::infinity();
+      float hi = -lo;
+      for (const glm::vec2& point : poly) {
+        const float projection = glm::dot(point, normal);
+        lo = std::min(lo, projection);
+        hi = std::max(hi, projection);
+      }
+      result = std::min(result, hi - lo);
+    }
+    return result;
+  };
   for (size_t e = 0; e < edges; ++e) {
     const size_t next = (e + 1) % edges;
     if (cornerGap[next] || next == e || rows[e].empty() || rows[next].empty()) continue;
@@ -1043,7 +1061,13 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
   }
   for (size_t p = 0; p < order.size(); ++p) {
     ensureHeight(p);
-    out.parcels.push_back({rows[order[p].first][order[p].second].footprint, heights[p]});
+    std::vector<glm::vec2>& footprint = rows[order[p].first][order[p].second].footprint;
+    // Keep narrow temporary pieces available while resolving alleys and
+    // corner merges, but do not emit the tapered slivers that can remain at
+    // acute corners. Drawing their heights above preserves the seeded RNG
+    // stream for every later block.
+    if (minimumWidth(footprint) < c.buildingDepth * 0.25f) continue;
+    out.parcels.push_back({std::move(footprint), heights[p]});
   }
   return out;
 }

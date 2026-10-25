@@ -755,6 +755,36 @@ void TestCornerBuildingsDoNotChainAcrossAFrontage() {
   CHECK(largest <= 2);
 }
 
+float MinimumPolygonWidth(const std::vector<glm::vec2>& polygon) {
+  float result = std::numeric_limits<float>::infinity();
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    const glm::vec2 edge = polygon[(i + 1) % polygon.size()] - polygon[i];
+    const float length = glm::length(edge);
+    if (length < 1.0e-4f) continue;
+    const glm::vec2 normal(-edge.y / length, edge.x / length);
+    float lo = std::numeric_limits<float>::infinity(), hi = -lo;
+    for (const glm::vec2& point : polygon) {
+      const float projection = glm::dot(point, normal);
+      lo = std::min(lo, projection);
+      hi = std::max(hi, projection);
+    }
+    result = std::min(result, hi - lo);
+  }
+  return result;
+}
+
+// Seed 7 also left a long, tapered remnant at an acute corner. It was large
+// enough for the clipping machinery but too thin to be a useful building.
+void TestThinCornerBuildingSliversAreDropped() {
+  MapGeneratorConfig config;
+  config.elevatedHighway = OverpassMode::Off;
+  const Scene scene = GenerateUrbanMap(7, config);
+  for (const Obstacle& obstacle : scene.obstacles) {
+    if (obstacle.footprint.empty()) continue;
+    CHECK(MinimumPolygonWidth(obstacle.footprint) >= config.buildingDepth * 0.25f);
+  }
+}
+
 void TestPolygonCollisionLosAndNavigationUseRealFootprint() {
   Obstacle wedge;
   wedge.bounds = AABB{glm::vec3(-2.0f, 0.0f, -2.0f), glm::vec3(2.0f, 4.0f, 2.0f)};
@@ -1573,6 +1603,7 @@ int main() {
   TestPolygonBlocksAdaptToAngledStreets();
   TestNoCornerSplitBuildings();
   TestCornerBuildingsDoNotChainAcrossAFrontage();
+  TestThinCornerBuildingSliversAreDropped();
   TestPolygonCollisionLosAndNavigationUseRealFootprint();
   TestElevatedOverpassRampsPiersAndDistinctLayers();
   TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable();

@@ -39,6 +39,14 @@ const std::vector<uint32_t> kCitySeeds = {7, 42, 2024};
 // Hilly goldens also pin the navmesh boundary debug overlay, so a terrain or
 // navmesh regression shows up as a visual diff.
 const std::vector<uint32_t> kHillySeeds = {7, 2024};
+// 50 randomly drawn seeds of the default (seed-driven terrain / overpass)
+// city, so the gallery's map view samples what players actually get.
+const std::vector<uint32_t> kRandomCitySeeds = {
+    6805,  7622,  13514, 15121, 16096, 16478, 16693, 18035, 19376, 22493,
+    24711, 25257, 26421, 27757, 32252, 32727, 37632, 38105, 39138, 39683,
+    40925, 46219, 47957, 48757, 50859, 51093, 54145, 58507, 59312, 59877,
+    64344, 65145, 66154, 66720, 75266, 80231, 80930, 81365, 82666, 83042,
+    87158, 87288, 87781, 89225, 90416, 91714, 92269, 92718, 94609, 94951};
 
 struct Options {
   fs::path goldensDir = "tests/map_goldens";
@@ -122,17 +130,42 @@ int main(int argc, char** argv) {
   // here pins an explicit presence (and layout) so it tests one variant.
   tactics::MapGeneratorConfig gradeConfig;
   gradeConfig.elevatedHighway = tactics::OverpassMode::Off;
+  // Terrain is seed-driven too; the flat-city goldens pin it off (terrain has its own).
+  gradeConfig.features.terrain.mode = tactics::FeatureMode::Off;
   for (const uint32_t seed : kCitySeeds) {
     cases.push_back({"city_seed_" + std::to_string(seed),
                      tactics::GenerateUrbanMap(seed, gradeConfig), kCityCameraZoom,
                      /*showNavMesh=*/false});
   }
+  tactics::MapGeneratorConfig terrainConfig = gradeConfig;
+  terrainConfig.features.terrain.mode = tactics::FeatureMode::On;
+  for (const uint32_t seed : kCitySeeds) {
+    cases.push_back({"city_terrain_seed_" + std::to_string(seed),
+                     tactics::GenerateUrbanMap(seed, terrainConfig), 180.0f,
+                     /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
+  }
+  // Default seed 7 is the reported combination of terrain, an elevated
+  // artery and stairs. Keep its complete geometry pinned together.
+  tactics::MapGeneratorConfig terrainAutoConfig;
+  cases.push_back({"city_terrain_auto_seed_7",
+                   tactics::GenerateUrbanMap(7, terrainAutoConfig), 180.0f,
+                   /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
+  // Terrain under an overpass (issue #155): the deck starts on one level,
+  // flies over the walls it crosses and settles onto the level at its far
+  // end; the branch ramps between its own level and the deck.
+  tactics::MapGeneratorConfig terrainElevatedConfig = terrainConfig;
+  terrainElevatedConfig.arteryCount = 2;
+  terrainElevatedConfig.elevatedHighway = tactics::OverpassMode::On;
+  cases.push_back({"city_terrain_elevated_seed_16",
+                   tactics::GenerateUrbanMap(16, terrainElevatedConfig), 180.0f,
+                   /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
   tactics::MapGeneratorConfig mergeConfig = gradeConfig;
   mergeConfig.arteryCount = 2;
   cases.push_back({"city_merge_seed_42", tactics::GenerateUrbanMap(42, mergeConfig),
                    kCityCameraZoom, /*showNavMesh=*/false});
   tactics::MapGeneratorConfig mergeConfigAuto;  // Seed-driven overpass presence and layout.
   mergeConfigAuto.arteryCount = 2;
+  mergeConfigAuto.features.terrain.mode = tactics::FeatureMode::Off;  // Overpass vs terrain: roadmap 4.4.
   tactics::MapGeneratorConfig elevatedConfig = mergeConfig;
   elevatedConfig.elevatedHighway = tactics::OverpassMode::On;
   elevatedConfig.overpassLayout = tactics::OverpassLayout::RampUpRampDown;
@@ -165,6 +198,11 @@ int main(int argc, char** argv) {
     deckFrontier.frontierFrom = glm::vec3(-11.52f, 5.0f, 1.869f);
     deckFrontier.frontierBudget = 12.0f;
     cases.push_back(std::move(deckFrontier));
+  }
+  for (const uint32_t seed : kRandomCitySeeds) {
+    cases.push_back({"city_random_seed_" + std::to_string(seed),
+                     tactics::GenerateUrbanMap(seed, terrainAutoConfig), 180.0f,
+                     /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
   }
   // Building archetypes and massing (issue #151): one close-framed golden
   // per forced block character, so each archetype mix (and its parapets,

@@ -69,6 +69,9 @@ bool SceneFromSpec(const Json& spec, tactics::Scene* out, std::string* error) {
           return Fail(error, "map.generate.elevated_branch must be ramp/off-map, got '" + end + "'");
         }
       }
+      if (gen["terrain_levels"].IsNumber()) {
+        config.terrainLevelCount = static_cast<int>(gen["terrain_levels"].AsNumber());
+      }
       // `character: downtown|residential|industrial|mixed` forces every
       // block's neighbourhood character (issue #151); omitted keeps the
       // generator's per-block draw.

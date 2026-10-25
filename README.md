@@ -64,9 +64,9 @@ branch merges onto whatever the artery is doing and ramps through the walls
 it meets at grade. A local street never runs into a level: an
 avenue may ramp through one; any other stops at the last street it crossed
 before the cliff (a T, not an X) and resumes at the first one beyond it, and
-the blocks either side of the missing stretch stay one block. Stairs climb each
-cliff along its face: a concrete flight hugging the cliff on its low side
-and a landing across its top onto the level. Switch the levels off with
+the blocks either side of the missing stretch stay one block. Stairs climb
+each cliff as one straight concrete wedge attached to its face. Switch the
+levels off with
 `TBGWAF_TERRAIN=off`, `MapGeneratorConfig::features.terrain`, or scenario
 YAML:
 

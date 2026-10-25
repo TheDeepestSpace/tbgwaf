@@ -518,6 +518,46 @@ void BuildSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
   mesh->SetMesh(vertices, indices);
 }
 
+// A terrain stair is one sloped top extruded down to a horizontal base: a
+// single wedge, not a staircase assembled from heightfield tiles.
+void AppendTerrainStair(const tactics::RoadSurface& stair, LitVertices* vertices,
+                        std::vector<GLuint>* indices) {
+  if (stair.vertices.size() < 3) return;
+  const float baseY = std::min_element(stair.vertices.begin(), stair.vertices.end(),
+                                      [](const glm::vec3& a, const glm::vec3& b) {
+                                        return a.y < b.y;
+                                      })->y - 0.08f;
+  glm::vec3 topNormal = glm::cross(stair.vertices[1] - stair.vertices[0],
+                                  stair.vertices[2] - stair.vertices[0]);
+  if (glm::length(topNormal) < 1e-7f) return;
+  topNormal = glm::normalize(topNormal);
+  if (topNormal.y < 0.0f) topNormal = -topNormal;
+  for (size_t i = 1; i + 1 < stair.vertices.size(); ++i) {
+    AppendTriangle(stair.vertices[0], stair.vertices[i], stair.vertices[i + 1], topNormal,
+                   vertices, indices);
+  }
+  for (size_t i = 0; i < stair.vertices.size(); ++i) {
+    const glm::vec3 a = stair.vertices[i];
+    const glm::vec3 b = stair.vertices[(i + 1) % stair.vertices.size()];
+    const glm::vec3 a0(a.x, baseY, a.z), b0(b.x, baseY, b.z);
+    glm::vec3 normal = glm::cross(b - a, a0 - a);
+    if (glm::length(normal) < 1e-7f) continue;
+    normal = glm::normalize(normal);
+    AppendTriangle(a, b0, b, normal, vertices, indices);
+    AppendTriangle(a, a0, b0, normal, vertices, indices);
+  }
+}
+
+void BuildTerrainStairMesh(const std::vector<tactics::RoadSurface>& stairs,
+                           LitTriangleMesh* mesh) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  for (const tactics::RoadSurface& stair : stairs) {
+    AppendTerrainStair(stair, &vertices, &indices);
+  }
+  mesh->SetMesh(vertices, indices);
+}
+
 // Edges of `surface` shared (same endpoints, either direction) with one of its
 // chain neighbours, i.e. the joints between consecutive deck/ramp slabs.
 std::vector<char> SharedEdges(const std::vector<tactics::WalkSurface>& surfaces,
@@ -565,8 +605,9 @@ void AppendTerrainOverlay(const tactics::HeightField& terrain,
 
 void AppendPavement(const tactics::RoadSurface& patch, const tactics::HeightField& ground,
                     const std::vector<tactics::TerrainCliff>& cliffs, float lift,
-                    float thickness, LitVertices* vertices, std::vector<GLuint>* indices) {
-  if (ground.Empty()) {
+                    float thickness, bool drapeTerrain, LitVertices* vertices,
+                    std::vector<GLuint>* indices) {
+  if (ground.Empty() || !drapeTerrain) {
     AppendSurfacePatch(patch.vertices, thickness, vertices, indices);
     return;
   }
@@ -587,11 +628,11 @@ void AppendPavement(const tactics::RoadSurface& patch, const tactics::HeightFiel
 void BuildPavementMesh(const std::vector<tactics::RoadSurface>& patches,
                        const tactics::HeightField& ground,
                        const std::vector<tactics::TerrainCliff>& cliffs, float lift,
-                       LitTriangleMesh* mesh) {
+                       bool drapeTerrain, LitTriangleMesh* mesh) {
   LitVertices vertices;
   std::vector<GLuint> indices;
   for (const auto& patch : patches) {
-    AppendPavement(patch, ground, cliffs, lift, 0.0f, &vertices, &indices);
+    AppendPavement(patch, ground, cliffs, lift, 0.0f, drapeTerrain, &vertices, &indices);
   }
   mesh->SetMesh(vertices, indices);
 }
@@ -611,12 +652,17 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
     AppendSurfacePatch(surface.vertices, 0.45f, &vertices, &indices);
   }
+  for (const tactics::RoadSurface& stair : scene.terrainStairs) {
+    AppendTerrainStair(stair, &vertices, &indices);
+  }
   for (const AABB& slab : scene.sidewalks) AppendBox(slab, &vertices, &indices);
   for (const tactics::RoadSurface& sidewalk : scene.sidewalkSurfaces) {
-    AppendPavement(sidewalk, scene.ground, scene.terrainCliffs, 0.12f, 0.10f, &vertices, &indices);
+    AppendPavement(sidewalk, scene.ground, scene.terrainCliffs, 0.12f, 0.10f,
+                   scene.terrainWalls.empty(), &vertices, &indices);
   }
   for (const tactics::RoadSurface& road : scene.roads) {
-    AppendPavement(road, scene.ground, scene.terrainCliffs, 0.025f, 0.0f, &vertices, &indices);
+    AppendPavement(road, scene.ground, scene.terrainCliffs, 0.025f, 0.0f,
+                   scene.terrainWalls.empty(), &vertices, &indices);
   }
   mesh->SetMesh(vertices, indices);
 }
@@ -641,6 +687,7 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
     mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
   }
   for (const tactics::WalkSurface& s : scene.walkSurfaces) mixVec3s(s.vertices);
+  for (const tactics::RoadSurface& s : scene.terrainStairs) mixVec3s(s.vertices);
   mix(scene.sidewalks.data(), scene.sidewalks.size() * sizeof(AABB));
   for (const tactics::RoadSurface& s : scene.sidewalkSurfaces) mixVec3s(s.vertices);
   for (const tactics::RoadSurface& s : scene.roads) mixVec3s(s.vertices);
@@ -991,6 +1038,131 @@ float PolygonArea2(const std::vector<glm::vec2>& polygon) {
   return std::fabs(area) * 0.5f;
 }
 
+// Urban levels are deliberately geometric: flat convex tiers plus explicit
+// trapezoidal cliff faces. The sampled field remains the movement model, but
+// exposing its half-unit grid here is what produced dents, spikes at wall
+// corners and dozens of tiny polygons along otherwise straight road ramps.
+void BuildGeometricUrbanTerrain(const tactics::HeightField& hf,
+                                const std::vector<tactics::TerrainWall>& walls,
+                                const std::vector<tactics::TerrainCliff>& cliffs,
+                                const std::vector<std::vector<glm::vec2>>& cutouts,
+                                LitTriangleMesh* base, LitTriangleMesh* raised) {
+  struct Build {
+    LitVertices vertices;
+    std::vector<GLuint> indices;
+  };
+  Build builds[2];
+  constexpr float kRaisedY = 0.35f;
+  const auto bucket = [&](float y) { return y > kRaisedY ? 1 : 0; };
+  const auto triangle = [&](Build& build, glm::vec3 a, glm::vec3 b, glm::vec3 c,
+                            glm::vec3 normal) {
+    const GLuint start = static_cast<GLuint>(build.vertices.size());
+    build.vertices.push_back({a, normal});
+    build.vertices.push_back({b, normal});
+    build.vertices.push_back({c, normal});
+    build.indices.insert(build.indices.end(), {start, start + 1, start + 2});
+  };
+
+  const float minX = hf.minX, minZ = hf.minZ;
+  const float maxX = hf.minX + (hf.nx - 1) * hf.step;
+  const float maxZ = hf.minZ + (hf.nz - 1) * hf.step;
+  std::vector<std::vector<glm::vec2>> tiers = {
+      {{minX, minZ}, {maxX, minZ}, {maxX, maxZ}, {minX, maxZ}}};
+  for (const tactics::TerrainWall& wall : walls) {
+    const float d = glm::dot(wall.raisedNormal, wall.lineOrigin);
+    std::vector<std::vector<glm::vec2>> split;
+    for (const auto& polygon : tiers) {
+      for (float side : {-1.0f, 1.0f}) {
+        auto piece = ClipHalfPlane(polygon, wall.raisedNormal, d, side);
+        if (piece.size() >= 3 && PolygonArea2(piece) > 1e-5f) {
+          split.push_back(std::move(piece));
+        }
+      }
+    }
+    tiers = std::move(split);
+  }
+  // Ramps replace the tier top within their simple convex corridors. Split
+  // out (and discard) the inside of each corridor rather than leaving a
+  // high-level polygon to cover the road as it climbs.
+  for (const auto& cutout : cutouts) {
+    if (cutout.size() < 3) continue;
+    float signedArea = 0.0f;
+    for (size_t i = 0; i < cutout.size(); ++i) {
+      const glm::vec2 a = cutout[i], b = cutout[(i + 1) % cutout.size()];
+      signedArea += a.x * b.y - b.x * a.y;
+    }
+    std::vector<std::vector<glm::vec2>> outside;
+    for (const auto& polygon : tiers) {
+      std::vector<glm::vec2> inside = polygon;
+      for (size_t i = 0; i < cutout.size() && inside.size() >= 3; ++i) {
+        const glm::vec2 a = cutout[i], b = cutout[(i + 1) % cutout.size()];
+        const glm::vec2 edge = b - a;
+        glm::vec2 inward(-edge.y, edge.x);
+        if (signedArea < 0.0f) inward = -inward;
+        const float d = glm::dot(inward, a);
+        auto piece = ClipHalfPlane(inside, inward, d, -1.0f);
+        if (piece.size() >= 3 && PolygonArea2(piece) > 1e-5f) {
+          outside.push_back(std::move(piece));
+        }
+        inside = ClipHalfPlane(inside, inward, d, 1.0f);
+      }
+    }
+    tiers = std::move(outside);
+  }
+  for (const auto& polygon : tiers) {
+    glm::vec2 center(0.0f);
+    for (glm::vec2 p : polygon) center += p;
+    center /= static_cast<float>(polygon.size());
+    float y = 0.0f;
+    for (const tactics::TerrainWall& wall : walls) {
+      if (glm::dot(wall.raisedNormal, center - wall.lineOrigin) >= 0.0f) y += wall.rise;
+    }
+    Build& build = builds[bucket(y)];
+    const glm::vec3 a(polygon[0].x, y, polygon[0].y);
+    for (size_t i = 1; i + 1 < polygon.size(); ++i) {
+      triangle(build, a, {polygon[i].x, y, polygon[i].y},
+               {polygon[i + 1].x, y, polygon[i + 1].y}, {0.0f, 1.0f, 0.0f});
+    }
+  }
+
+  // Each recorded run is one clean face (two triangles), including the
+  // sloped trapezoids beside an at-grade road ramp.
+  for (const tactics::TerrainCliff& cliff : cliffs) {
+    if (std::max(cliff.highA - cliff.lowA, cliff.highB - cliff.lowB) < 0.02f) continue;
+    const glm::vec3 normal(cliff.lowerNormal.x, 0.0f, cliff.lowerNormal.y);
+    const glm::vec3 a0(cliff.a.x, cliff.lowA, cliff.a.y);
+    const glm::vec3 a1(cliff.a.x, cliff.highA, cliff.a.y);
+    const glm::vec3 b0(cliff.b.x, cliff.lowB, cliff.b.y);
+    const glm::vec3 b1(cliff.b.x, cliff.highB, cliff.b.y);
+    triangle(builds[1], a0, b0, b1, normal);
+    triangle(builds[1], a0, b1, a1, normal);
+  }
+
+  // A simple border skirt closes the map edge. Its short segments may follow
+  // the navigation field; unlike the playable top, they are only silhouette.
+  float skirtBottom = 0.0f;
+  for (float y : hf.heights) skirtBottom = std::min(skirtBottom, y);
+  skirtBottom -= 0.5f;
+  const auto skirt = [&](glm::vec2 a, glm::vec2 b, glm::vec3 normal) {
+    const float ay = hf.HeightAt(a.x, a.y), by = hf.HeightAt(b.x, b.y);
+    triangle(builds[0], {a.x, ay, a.y}, {b.x, by, b.y}, {b.x, skirtBottom, b.y}, normal);
+    triangle(builds[0], {a.x, ay, a.y}, {b.x, skirtBottom, b.y},
+             {a.x, skirtBottom, a.y}, normal);
+  };
+  for (int i = 0; i + 1 < hf.nx; ++i) {
+    const float x0 = hf.minX + i * hf.step, x1 = x0 + hf.step;
+    skirt({x0, minZ}, {x1, minZ}, {0, 0, -1});
+    skirt({x0, maxZ}, {x1, maxZ}, {0, 0, 1});
+  }
+  for (int i = 0; i + 1 < hf.nz; ++i) {
+    const float z0 = hf.minZ + i * hf.step, z1 = z0 + hf.step;
+    skirt({minX, z0}, {minX, z1}, {-1, 0, 0});
+    skirt({maxX, z0}, {maxX, z1}, {1, 0, 0});
+  }
+  base->SetMesh(builds[0].vertices, builds[0].indices);
+  raised->SetMesh(builds[1].vertices, builds[1].indices);
+}
+
 // Triangulated terrain heightfield with central-difference normals, plus a
 // border skirt dropping below the lowest sample so the map edge reads as a
 // solid block instead of a paper-thin sheet. Cells a terrain cliff crosses
@@ -998,10 +1170,16 @@ float PolygonArea2(const std::vector<glm::vec2>& polygon) {
 // one-cell smear, and the drop between them becomes a vertical face: a
 // city level ends in a sheer edge, not a sawtooth. With `concreteTiers`,
 // raised ground (and every cliff face) goes to `raised` so the levels and
-// their stairs read as concrete; the base ground stays in `base`.
+// their cliff faces read as concrete; the base ground stays in `base`.
 void BuildTerrainMesh(const tactics::HeightField& hf,
-                      const std::vector<tactics::TerrainCliff>& cliffs, bool concreteTiers,
+                      const std::vector<tactics::TerrainWall>& walls,
+                      const std::vector<tactics::TerrainCliff>& cliffs,
+                      const std::vector<std::vector<glm::vec2>>& cutouts, bool concreteTiers,
                       LitTriangleMesh* base, LitTriangleMesh* raised) {
+  if (concreteTiers && !walls.empty()) {
+    BuildGeometricUrbanTerrain(hf, walls, cliffs, cutouts, base, raised);
+    return;
+  }
   const int nx = hf.nx, nz = hf.nz;
   struct Build {
     std::vector<LitTriangleMesh::Vertex> vertices;
@@ -2097,6 +2275,7 @@ bool SceneRenderer::Init() {
   terrainRaisedMesh_.Init();
   terrainRoadMesh_.Init();
   terrainSidewalkMesh_.Init();
+  terrainStairMesh_.Init();
   geometryMesh_.Init();
   fovSceneMesh_.Init();
   highlightRing_.Init();
@@ -2183,6 +2362,7 @@ void SceneRenderer::Destroy() {
   terrainRaisedMesh_.Destroy();
   terrainRoadMesh_.Destroy();
   terrainSidewalkMesh_.Destroy();
+  terrainStairMesh_.Destroy();
   pavementKey_ = 0;
   geometryMesh_.Destroy();
   fovSceneMesh_.Destroy();
@@ -2243,6 +2423,7 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, f
       depthShader_.SetMat4("uLightMVP", mapMatrix[half]);
       terrainMesh_.Draw();
       terrainRaisedMesh_.Draw();
+      terrainStairMesh_.Draw();
     } else {
       DrawBoxDepth(depthShader_, cubeMesh_, mapMatrix[half],
                    glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
@@ -2329,7 +2510,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       terrainKey_.minZ != terrain.minZ || terrainKey_.step != terrain.step;
   if (terrainChanged) {
     if (!terrain.Empty()) {
-      BuildTerrainMesh(terrain, game.GetScene().terrainCliffs,
+      BuildTerrainMesh(terrain, game.GetScene().terrainWalls, game.GetScene().terrainCliffs,
+                       game.GetScene().terrainCutouts,
                        /*concreteTiers=*/!game.GetScene().terrainCliffs.empty(), &terrainMesh_,
                        &terrainRaisedMesh_);
     }
@@ -2339,10 +2521,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (!terrain.Empty()) {
     const auto key = FovSceneFingerprint(game.GetScene());
     if (terrainChanged || pavementKey_ != key) {
+      const bool drape = game.GetScene().terrainWalls.empty();
       BuildPavementMesh(game.GetScene().roads, terrain, game.GetScene().terrainCliffs, 0.025f,
-                        &terrainRoadMesh_);
+                        drape, &terrainRoadMesh_);
       BuildPavementMesh(game.GetScene().sidewalkSurfaces, terrain, game.GetScene().terrainCliffs,
-                        0.12f, &terrainSidewalkMesh_);
+                        0.12f, drape, &terrainSidewalkMesh_);
+      BuildTerrainStairMesh(game.GetScene().terrainStairs, &terrainStairMesh_);
       pavementKey_ = key;
     }
   }
@@ -2405,6 +2589,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
       terrainMesh_.Draw();
       terrainRaisedMesh_.Draw();
+      terrainStairMesh_.Draw();
     }
     for (const auto& obstacle : obstacles) {
       if (obstacle.navOnly) continue;
@@ -2524,6 +2709,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                  city ? glm::vec4(0.16f, 0.18f, 0.20f, 1.0f) : glm::vec4(0.30f, 0.36f, 0.22f, 1.0f));
     // Raised levels, their cliff faces and stairs: concrete, like the decks.
     DrawLitModel(litShader_, terrainRaisedMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(kDeckColor, 1.0f));
+    DrawLitModel(litShader_, terrainStairMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(kDeckColor, 1.0f));
     glDisable(GL_POLYGON_OFFSET_FILL);
   } else {

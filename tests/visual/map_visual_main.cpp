@@ -136,6 +136,12 @@ int main(int argc, char** argv) {
                      tactics::GenerateUrbanMap(seed, terrainConfig), 180.0f,
                      /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
   }
+  // Default seed 7 is the reported combination of terrain, an elevated
+  // artery and stairs. Keep its complete geometry pinned together.
+  tactics::MapGeneratorConfig terrainAutoConfig;
+  cases.push_back({"city_terrain_auto_seed_7",
+                   tactics::GenerateUrbanMap(7, terrainAutoConfig), 180.0f,
+                   /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
   // Terrain under an overpass (issue #155): the deck starts on one level,
   // flies over the walls it crosses and settles onto the level at its far
   // end; the branch ramps between its own level and the deck.

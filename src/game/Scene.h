@@ -27,16 +27,20 @@ struct TerrainAccess {
 struct TerrainWall {
   glm::vec2 origin{0.0f}, dir{1.0f, 0.0f};
   glm::vec2 raisedNormal{0.0f, 1.0f};
+  glm::vec2 lineOrigin{0.0f};  // A point on the raised edge of the level.
   float rise = 0.0f;
   std::vector<TerrainAccess> accesses;
 };
 
 // A straight stretch along which the terrain is discontinuous (a level's
-// step line, a ramp channel's side, a stair flight's edge). The renderer
-// splits the ground mesh along it and draws the vertical face; an unseen
-// nav-only Obstacle keeps figures off the edge.
+// step line or a ramp channel's side). The renderer draws one trapezoidal
+// face from these exact endpoint heights; an unseen nav-only Obstacle keeps
+// figures off the edge.
 struct TerrainCliff {
   glm::vec2 a{0.0f}, b{0.0f};
+  glm::vec2 lowerNormal{0.0f};
+  float lowA = 0.0f, highA = 0.0f;
+  float lowB = 0.0f, highB = 0.0f;
 };
 
 // Hardcoded Stage-A scene: a ~30x30 unit field with box-shaped obstacles and
@@ -76,6 +80,13 @@ struct Scene {
   HeightField ground;
   std::vector<TerrainWall> terrainWalls;
   std::vector<TerrainCliff> terrainCliffs;
+  // Convex ground-plane openings for the straight road grades through a
+  // level. Pavement fills them; tier tops must not cover the ramp.
+  std::vector<std::vector<glm::vec2>> terrainCutouts;
+  // Visual-only stair wedges. Movement follows the matching simple planar
+  // grades in `ground`; keeping the render mesh separate prevents a narrow
+  // flight from inheriting the heightfield grid's extra triangles.
+  std::vector<RoadSurface> terrainStairs;
   FlagConfig flag;
   // Round limit: when > 0 the match ends in a draw once this many rounds
   // have been played without a winner. 0 (the default) means unlimited.

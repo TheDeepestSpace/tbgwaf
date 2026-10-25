@@ -33,6 +33,21 @@ glm::vec3 OnGround(const Scene& scene, glm::vec3 p) {
 float FlatDistance(glm::vec3 a, glm::vec3 b) {
   return glm::length(glm::vec2(a.x - b.x, a.z - b.z));
 }
+bool Planar(const std::vector<glm::vec3>& polygon, float tolerance = 0.01f) {
+  if (polygon.size() < 4) return true;
+  glm::vec3 normal(0.0f);
+  for (size_t i = 1; i + 1 < polygon.size(); ++i) {
+    const glm::vec3 candidate =
+        glm::cross(polygon[i] - polygon[0], polygon[i + 1] - polygon[0]);
+    if (glm::length(candidate) > glm::length(normal)) normal = candidate;
+  }
+  if (glm::length(normal) < 1e-5f) return false;
+  normal = glm::normalize(normal);
+  for (const glm::vec3& p : polygon) {
+    if (std::fabs(glm::dot(normal, p - polygon[0])) > tolerance) return false;
+  }
+  return true;
+}
 // Width estimate of an obstacle footprint: area over its longest edge.
 // Retaining walls and ramp flanks are thin; buildings are not.
 float FootprintWidth(const Obstacle& o) {
@@ -50,6 +65,10 @@ void TestControlsAndDeterminism() {
   auto c = TerrainConfig();
   const Scene on = GenerateUrbanMap(7, c), repeat = GenerateUrbanMap(7, c);
   CHECK(on.ground.heights == repeat.ground.heights);
+  CHECK(on.terrainStairs.size() == repeat.terrainStairs.size());
+  for (size_t i = 0; i < on.terrainStairs.size(); ++i) {
+    CHECK(on.terrainStairs[i].vertices == repeat.terrainStairs[i].vertices);
+  }
   CHECK(on.terrainWalls.size() == repeat.terrainWalls.size());
   for (size_t i = 0; i < on.terrainWalls.size(); ++i) {
     CHECK(on.terrainWalls[i].origin == repeat.terrainWalls[i].origin);
@@ -105,6 +124,7 @@ void TestSeedInvariants() {
     const Scene s = GenerateUrbanMap(currentSeed, c);
     CHECK(s.terrainWalls.size() >= 1 && s.terrainWalls.size() <= 3);
     CHECK(!s.ground.Empty());
+    size_t accessCount = 0;
     NavMesh nav;
     nav.Build(s.obstacles, s.mapHalfExtent, constants::kAgentRadius, &s.ground, &s.walkSurfaces);
     for (const Unit& unit : s.units) {
@@ -115,12 +135,13 @@ void TestSeedInvariants() {
       CHECK(wall.rise >= constants::kUnitHeight * 0.99f);
       CHECK(wall.rise <= constants::kUnitHeight * 5.01f);
       CHECK(!wall.accesses.empty());
+      accessCount += wall.accesses.size();
       for (const TerrainAccess& access : wall.accesses) {
         CHECK(std::fabs(access.top.y - access.bottom.y - wall.rise) < 0.3f);
         CHECK(nav.IsWalkable(access.bottom.x, access.bottom.z));
         CHECK(nav.IsWalkable(access.top.x, access.top.z));
         // The flight is carried by the ground: a direct route climbs it
-        // (foot, along the wall, landing, onto the level) at stair grade.
+        // (foot, straight up the wall, onto the level) at stair grade.
         std::vector<glm::vec3> path;
         CHECK(nav.FindPath(access.bottom, access.top, &path));
         float length = 0.0f;
@@ -128,6 +149,14 @@ void TestSeedInvariants() {
         CHECK(length < wall.rise / 0.8f + 12.0f);
       }
     }
+    // Each access renders as exactly one planar wedge. Roads are likewise
+    // emitted as planar patches instead of being tessellated over the grid.
+    CHECK(s.terrainStairs.size() == accessCount);
+    for (const RoadSurface& stair : s.terrainStairs) {
+      CHECK(stair.vertices.size() == 4);
+      CHECK(Planar(stair.vertices));
+    }
+    for (const RoadSurface& road : s.roads) CHECK(Planar(road.vertices, 0.03f));
     // Buildings have a level foundation, including each footprint corner.
     // Thin obstacles are retaining walls / ramp flanks standing on slopes.
     for (const Obstacle& o : s.obstacles) {

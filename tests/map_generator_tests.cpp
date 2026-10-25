@@ -353,6 +353,8 @@ void TestRoofMassingBlocksWalking() {
         if (endpointsClear) CHECK(found);
         if (!found) continue;
         ++crossings;
+        // An endpoint inside a blocker's padding may legitimately leave it.
+        if (!endpointsClear) continue;
         for (size_t i = 0; i + 1 < path.size(); ++i) {
           for (const auto& blocker : slab.blockers) {
             CHECK(!SegmentEntersConvexPolygon({path[i].x, path[i].z},

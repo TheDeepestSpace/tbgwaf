@@ -1783,14 +1783,14 @@ void TestSightingRecordedImmediatelyOnEntry() {
   CHECK(game.Sightings(Team::Red, 4).empty());  // Own figures aren't "sighted".
 }
 
-void TestDeadFigureInFovLeavesNoGhost() {
+void TestDeadFigureInFovGetsGhost() {
   GameLogic game(LegacyScene());
   BlueLookAway(game, kPi);
   StepSightings(game, 1.0f);
   game.FindUnit(4)->alive = false;
   BlueLookAway(game, 0.0f);
   StepSightings(game, 1.0f);
-  CHECK(game.Sightings(Team::Blue, 4).empty());
+  CHECK(!game.Sightings(Team::Blue, 4).empty());
 }
 
 void TestSightingSamplesAccumulateWhileInFov() {
@@ -3314,7 +3314,7 @@ int main() {
   TestMuzzleIsAtGunTipNotHead();
   TestSnapshotMirrorsMatchAndTeamPlans();
   TestSightingRecordedImmediatelyOnEntry();
-  TestDeadFigureInFovLeavesNoGhost();
+  TestDeadFigureInFovGetsGhost();
   TestReplaySeekForwardKeepsFadingGhosts();
   TestSightingSamplesAccumulateWhileInFov();
   TestSightingMoveDirectionOnlyWhenMoving();

@@ -252,8 +252,7 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
 
     const TeamVisibility visibility = ComputeVisibility(viewer);
     for (const Unit& unit : scene_.units) {
-      // A corpse is drawn as itself; sampling it would stamp a fading ghost on it.
-      if (unit.team == viewer || !unit.alive || unit.id < 0 ||
+      if (unit.team == viewer || unit.id < 0 ||
           static_cast<size_t>(unit.id) >= sightings_[t].size()) {
         continue;
       }

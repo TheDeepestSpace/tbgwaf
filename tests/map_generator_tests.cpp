@@ -43,6 +43,14 @@ MapGeneratorConfig LegacyConfig() {
   return c;
 }
 
+// The default city with the terrain levels off: the archetype and parcel
+// tests assume one building per parcel on flat ground.
+MapGeneratorConfig FlatConfig() {
+  MapGeneratorConfig c;
+  c.features.terrain.mode = FeatureMode::Off;
+  return c;
+}
+
 bool SameScene(const Scene& a, const Scene& b) {
   if (a.mapHalfExtent != b.mapHalfExtent || a.obstacles.size() != b.obstacles.size() ||
       a.units.size() != b.units.size()) {
@@ -117,10 +125,10 @@ void TestPinnedSeedFingerprints() {
 void TestParcelsMatchBuildingsAndFrontStreets() {
   const MapGeneratorConfig c;
   for (uint32_t seed : kSeeds) {
-    const Scene scene = GenerateUrbanMap(seed);
-    const std::vector<UrbanParcel> parcels = UrbanParcels(seed);
-    const std::vector<UrbanBlock> blocks = UrbanBlocks(seed);
-    const std::vector<UrbanStreet> streets = UrbanStreets(seed);
+    const Scene scene = GenerateUrbanMap(seed, FlatConfig());
+    const std::vector<UrbanParcel> parcels = UrbanParcels(seed, FlatConfig());
+    const std::vector<UrbanBlock> blocks = UrbanBlocks(seed, FlatConfig());
+    const std::vector<UrbanStreet> streets = UrbanStreets(seed, FlatConfig());
     CHECK(!parcels.empty());
     CHECK(parcels.size() == scene.buildings.size());
     int highway = 0, avenue = 0, cross = 0, corners = 0;
@@ -199,7 +207,7 @@ void TestParcelsMatchBuildingsAndFrontStreets() {
     CHECK(highway > 0 && avenue > 0 && cross > 0);
     CHECK(corners > 0 && corners < static_cast<int>(parcels.size()));
     // Parcels don't move anything: the layout rng's draws are unchanged.
-    CHECK(UrbanParcels(seed).size() == parcels.size());
+    CHECK(UrbanParcels(seed, FlatConfig()).size() == parcels.size());
   }
   CHECK(UrbanParcels(7, LegacyConfig()).empty());
 }
@@ -210,9 +218,10 @@ void TestParcelsMatchBuildingsAndFrontStreets() {
 // prism on their base.
 void TestBuildingKindsFloorsAndHeights() {
   const MapGeneratorConfig c;
+  int highwayDowntown = 0, highwayTotal = 0, crossResidential = 0, crossTotal = 0;
   for (uint32_t seed : kSeeds) {
-    const Scene scene = GenerateUrbanMap(seed);
-    const std::vector<UrbanParcel> parcels = UrbanParcels(seed);
+    const Scene scene = GenerateUrbanMap(seed, FlatConfig());
+    const std::vector<UrbanParcel> parcels = UrbanParcels(seed, FlatConfig());
     int perKind[kBuildingKindCount] = {};
     int setbacks = 0;
     for (size_t i = 0; i < scene.buildings.size(); ++i) {
@@ -249,7 +258,6 @@ void TestBuildingKindsFloorsAndHeights() {
 
     // Street weighting: artery frontage is mostly office/mixed-use, back
     // streets mostly residential/commercial/garage, across the seeds.
-    int highwayDowntown = 0, highwayTotal = 0, crossResidential = 0, crossTotal = 0;
     for (size_t i = 0; i < scene.buildings.size(); ++i) {
       const BuildingKind kind = scene.buildings[i].kind;
       if (kind == BuildingKind::Civic) continue;
@@ -262,9 +270,11 @@ void TestBuildingKindsFloorsAndHeights() {
                             kind == BuildingKind::Garage;
       }
     }
-    CHECK(highwayTotal > 0 && 2 * highwayDowntown > highwayTotal);
-    CHECK(crossTotal > 0 && 2 * crossResidential > crossTotal);
   }
+  // Pooled over the seeds: a single seed has too few artery-fronting parcels
+  // for the majority to be stable.
+  CHECK(highwayTotal > 0 && 2 * highwayDowntown > highwayTotal);
+  CHECK(crossTotal > 0 && 2 * crossResidential > crossTotal);
 
   // Forcing a character biases every block the same way without moving a
   // wall: identical footprints, different kind mix.
@@ -319,7 +329,7 @@ void TestMassingBlocksSight() {
 void TestRoofMassingBlocksWalking() {
   int blockers = 0, crossings = 0;
   for (uint32_t seed : kSeeds) {
-    const Scene scene = GenerateUrbanMap(seed);
+    const Scene scene = GenerateUrbanMap(seed, FlatConfig());
     NavMesh mesh;
     mesh.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
                &scene.walkSurfaces);
@@ -344,7 +354,9 @@ void TestRoofMassingBlocksWalking() {
         std::vector<glm::vec3> path;
         const bool found = mesh.FindPath(from, to, &path);
         if (endpointsClear) CHECK(found);
-        if (!found) continue;
+        // An endpoint inside a blocker (a parapet hugging the roof edge) has
+        // no guarantee of a path around it.
+        if (!found || !endpointsClear) continue;
         ++crossings;
         for (size_t i = 0; i + 1 < path.size(); ++i) {
           for (const auto& blocker : slab.blockers) {
@@ -363,7 +375,7 @@ void TestRoofMassingBlocksWalking() {
 // awnings hang over the sidewalk from shopfronts only.
 void TestMassingStaysOnItsBuilding() {
   for (uint32_t seed : kSeeds) {
-    const Scene scene = GenerateUrbanMap(seed);
+    const Scene scene = GenerateUrbanMap(seed, FlatConfig());
     CHECK(!scene.massing.empty());
     int parapets = 0, fixtures = 0, awnings = 0;
     std::vector<int> parapetsPerBuilding(scene.buildings.size(), 0);
@@ -407,7 +419,7 @@ void TestMassingStaysOnItsBuilding() {
           CHECK(b.kind == BuildingKind::MixedUse || b.kind == BuildingKind::Commercial);
           CHECK(d.y0 > 2.4f && d.y0 < b.groundFloorHeight);  // Above head height, below floor 2.
           // Over the sidewalk: outside the building, inside its block.
-          const std::vector<glm::vec2> blockOutline = UrbanBlocks(seed)[b.block].vertices;
+          const std::vector<glm::vec2> blockOutline = UrbanBlocks(seed, FlatConfig())[b.block].vertices;
           bool anyOutside = false;
           for (const glm::vec2& v : d.footprint) {
             anyOutside |= !PointInConvexPolygon(v, InsetConvexPolygon(roof.footprint, 1e-3f));
@@ -439,12 +451,12 @@ void TestPinnedKindHistograms() {
   struct Expected { uint32_t seed; size_t buildings; int kinds[kBuildingKindCount]; };
   const Expected expected[] = {
       // residential, mixed-use, office, commercial, civic, garage
-      {1u, 58, {18, 15, 4, 11, 2, 8}},
-      {42u, 57, {26, 13, 7, 4, 2, 5}},
-      {2024u, 56, {19, 10, 6, 14, 2, 5}},
+      {1u, 53, {16, 8, 10, 5, 2, 12}},
+      {42u, 55, {16, 13, 8, 5, 2, 11}},
+      {2024u, 81, {27, 21, 13, 7, 2, 11}},
   };
   for (const auto& e : expected) {
-    const Scene scene = GenerateUrbanMap(e.seed);
+    const Scene scene = GenerateUrbanMap(e.seed, FlatConfig());
     int kinds[kBuildingKindCount] = {};
     for (const Building& b : scene.buildings) ++kinds[static_cast<int>(b.kind)];
     bool same = scene.buildings.size() == e.buildings;
@@ -562,9 +574,10 @@ void TestEveryBlockHasWallToWallAndGappedRuns() {
 }
 
 void TestVariedHeightsWithFewTowers() {
-  const MapGeneratorConfig c;
+  MapGeneratorConfig c;
+  c.features.terrain.mode = FeatureMode::Off;  // Buildings only: no retaining walls.
   for (uint32_t seed : kSeeds) {
-    const Scene scene = GenerateUrbanMap(seed);
+    const Scene scene = GenerateUrbanMap(seed, c);
     int towers = 0, medium = 0;
     float lo = 1e9f, hi = 0.0f;
     for (const auto& o : scene.obstacles) {
@@ -911,6 +924,7 @@ float DistanceToSegment(glm::vec2 p, glm::vec2 a, glm::vec2 b) {
 
 void TestObliqueArteryAndBranchMerge() {
   MapGeneratorConfig one;
+  one.features.terrain.mode = FeatureMode::Off;  // Flat-city road geometry.
   one.arteryCount = 1;
   one.elevatedHighway = OverpassMode::Off;
   const float half = UrbanMapHalfExtent(one);
@@ -953,6 +967,7 @@ void TestObliqueArteryAndBranchMerge() {
 
 void TestPolygonBlocksAdaptToAngledStreets() {
   MapGeneratorConfig config;
+  config.features.terrain.mode = FeatureMode::Off;  // Flat-city blocks.
   config.arteryCount = 2;
   config.elevatedHighway = OverpassMode::Off;
   const Scene scene = GenerateUrbanMap(42, config);
@@ -1020,6 +1035,114 @@ void TestPolygonBlocksAdaptToAngledStreets() {
   CHECK(acuteBuilding);
 }
 
+// A block corner without an alley is one building wrapping the corner: no
+// two footprints may both have a vertex at the same frontage corner.
+void TestNoCornerSplitBuildings() {
+  MapGeneratorConfig config;
+  config.arteryCount = 2;
+  config.elevatedHighway = OverpassMode::Off;
+  int wrapped = 0;
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed, config);
+    for (const UrbanBlock& block : UrbanBlocks(seed, config)) {
+      const std::vector<glm::vec2> outer = InsetConvexPolygon(block.vertices, config.sidewalkWidth);
+      for (const glm::vec2& corner : outer) {
+        int touching = 0;
+        for (const Obstacle& o : scene.obstacles) {
+          for (const glm::vec2& v : o.footprint) {
+            if (glm::distance(v, corner) < 0.05f) {
+              ++touching;
+              break;
+            }
+          }
+        }
+        CHECK(touching <= 1);
+        wrapped += touching;
+      }
+    }
+  }
+  CHECK(wrapped > 0);  // Corner buildings still exist.
+}
+
+// True when two convex CCW footprints share interior area (touching edges
+// do not count).
+bool FootprintsOverlap(const std::vector<glm::vec2>& a, const std::vector<glm::vec2>& b) {
+  for (const std::vector<glm::vec2>* poly : {&a, &b}) {
+    for (size_t i = 0; i < poly->size(); ++i) {
+      const glm::vec2 edge = (*poly)[(i + 1) % poly->size()] - (*poly)[i];
+      const glm::vec2 axis(-edge.y, edge.x);
+      const float len = glm::length(axis);
+      if (len < 1.0e-6f) continue;
+      float loA = 1.0e30f, hiA = -1.0e30f, loB = 1.0e30f, hiB = -1.0e30f;
+      for (const glm::vec2& p : a) {
+        const float d = glm::dot(p, axis) / len;
+        loA = std::min(loA, d);
+        hiA = std::max(hiA, d);
+      }
+      for (const glm::vec2& p : b) {
+        const float d = glm::dot(p, axis) / len;
+        loB = std::min(loB, d);
+        hiB = std::max(hiB, d);
+      }
+      if (hiA <= loB + 0.02f || hiB <= loA + 0.02f) return false;
+    }
+  }
+  return true;
+}
+
+// Seed 7 used to turn a too-short corner alley into a merge after frontage
+// pieces had been planned. One piece then belonged to both neighboring
+// corner buildings, chaining three footprints into a giant U. Pieces must
+// never share area, and ordinary two-piece L buildings must still appear.
+void TestCornerBuildingsDoNotChainAcrossAFrontage() {
+  MapGeneratorConfig config;
+  config.elevatedHighway = OverpassMode::Off;
+  const Scene scene = GenerateUrbanMap(7, config);
+  std::vector<const Obstacle*> buildings;
+  for (const Obstacle& obstacle : scene.obstacles) {
+    if (obstacle.building >= 0 && !obstacle.footprint.empty()) buildings.push_back(&obstacle);
+  }
+
+  int pairs = 0;
+  for (size_t i = 0; i < buildings.size(); ++i) {
+    for (size_t j = i + 1; j < buildings.size(); ++j) {
+      CHECK(!FootprintsOverlap(buildings[i]->footprint, buildings[j]->footprint));
+    }
+  }
+  for (const Obstacle* b : buildings) pairs += b->footprint.size() > 4;
+  CHECK(pairs > 0);
+}
+
+float MinimumPolygonWidth(const std::vector<glm::vec2>& polygon) {
+  float result = std::numeric_limits<float>::infinity();
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    const glm::vec2 edge = polygon[(i + 1) % polygon.size()] - polygon[i];
+    const float length = glm::length(edge);
+    if (length < 1.0e-4f) continue;
+    const glm::vec2 normal(-edge.y / length, edge.x / length);
+    float lo = std::numeric_limits<float>::infinity(), hi = -lo;
+    for (const glm::vec2& point : polygon) {
+      const float projection = glm::dot(point, normal);
+      lo = std::min(lo, projection);
+      hi = std::max(hi, projection);
+    }
+    result = std::min(result, hi - lo);
+  }
+  return result;
+}
+
+// Seed 7 also left a long, tapered remnant at an acute corner. It was large
+// enough for the clipping machinery but too thin to be a useful building.
+void TestThinCornerBuildingSliversAreDropped() {
+  MapGeneratorConfig config;
+  config.elevatedHighway = OverpassMode::Off;
+  const Scene scene = GenerateUrbanMap(7, config);
+  for (const Obstacle& obstacle : scene.obstacles) {
+    if (obstacle.building < 0 || obstacle.footprint.empty()) continue;
+    CHECK(MinimumPolygonWidth(obstacle.footprint) >= config.buildingDepth * 0.25f);
+  }
+}
+
 void TestPolygonCollisionLosAndNavigationUseRealFootprint() {
   Obstacle wedge;
   wedge.bounds = AABB{glm::vec3(-2.0f, 0.0f, -2.0f), glm::vec3(2.0f, 4.0f, 2.0f)};
@@ -1041,6 +1164,7 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   config.arteryCount = 2;
   config.elevatedHighway = OverpassMode::On;
   config.overpassLayout = OverpassLayout::RampUpRampDown;
+  config.features.terrain.mode = FeatureMode::Off;  // Overpass vs terrain is roadmap 4.4.
   const Scene scene = GenerateUrbanMap(7, config);
   const auto roads = UrbanRoads(7, config);
 
@@ -1200,7 +1324,8 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
 // --- Random overpass presence and off-map layouts (issue #130). ---
 
 void TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable() {
-  const MapGeneratorConfig autoConfig;  // Auto presence + Auto layout.
+  MapGeneratorConfig autoConfig;  // Auto presence + Auto layout.
+  autoConfig.features.terrain.mode = FeatureMode::Off;  // Flat: the deck is the only climb.
   int present = 0, absent = 0, layoutCounts[4] = {};
   for (uint32_t seed = 1; seed <= 120; ++seed) {
     const OverpassChoice choice = UrbanOverpass(seed, autoConfig);
@@ -1241,8 +1366,10 @@ void TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable() {
 
   // The seeds the overpass goldens/scenarios use produce their layout
   // naturally under the default (Auto) config, and seed 7 has no overpass.
+  // Terrain is pinned off: a terrain-enabled seed boosts the presence draw.
   MapGeneratorConfig twoArteries;
   twoArteries.arteryCount = 2;
+  twoArteries.features.terrain.mode = FeatureMode::Off;
   const std::pair<uint32_t, OverpassLayout> kNatural[] = {
       {33, OverpassLayout::RampUpRampDown}, {4, OverpassLayout::Through},
       {16, OverpassLayout::EnterRampUp},    {22, OverpassLayout::EnterRampDown},
@@ -1267,6 +1394,7 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
       {OverpassLayout::EnterRampDown, false, true},
   };
   MapGeneratorConfig config;
+  config.features.terrain.mode = FeatureMode::Off;  // Legacy flat-city layouts.
   config.elevatedHighway = OverpassMode::On;
   config.branchEnd = BranchEnd::Ramp;
   const float half = UrbanMapHalfExtent(config);
@@ -1377,6 +1505,7 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
 
 void TestBranchMayRunOffMapWithoutRamp() {
   MapGeneratorConfig config;
+  config.features.terrain.mode = FeatureMode::Off;  // Flat-city deck heights.
   config.elevatedHighway = OverpassMode::On;
   const float half = UrbanMapHalfExtent(config);
 
@@ -1461,6 +1590,7 @@ void TestMoveFrontierCoversBranchRampAtJunction() {
   config.arteryCount = 2;
   config.elevatedHighway = OverpassMode::On;
   config.overpassLayout = OverpassLayout::RampUpRampDown;
+  config.features.terrain.mode = FeatureMode::Off;  // Pin the flat-grade junction.
   Scene scene = GenerateUrbanMap(7, config);
   const auto roads = UrbanRoads(7, config);
   const auto& deck = roads[0].centerline;
@@ -1637,6 +1767,7 @@ void TestZiplinesAreDeterministicBoundedAndValid() {
   for (const bool legacy : {false, true}) {
     for (uint32_t seed : kSeeds) {
       MapGeneratorConfig config = legacy ? LegacyConfig() : MapGeneratorConfig{};
+      config.features.terrain.mode = FeatureMode::Off;  // Anchors at y = 0.
       const Scene scene = GenerateUrbanMap(seed, config);
       CHECK(SameScene(scene, GenerateUrbanMap(seed, config)));
       CHECK(!scene.ziplines.empty());
@@ -1718,7 +1849,7 @@ void TestZiplineStreetEndsReachableRoofsOnlyByLine() {
 
 }  // namespace
 
-// Issue #146: feature flags are plumbed but inert, and the street graph
+// Issue #146: reserved feature flags are inert, and the street graph
 // covers the highway plus every local street.
 void TestFeatureFlagsAndStreetGraph() {
   MapGeneratorConfig full;
@@ -1785,6 +1916,7 @@ void TestLocalStreetsPavedAndSidewalkIsRing() {
 // PR #192's review screenshot.
 void TestLocalStreetBandsReachMapEdgeAtFullWidth() {
   MapGeneratorConfig c;
+  c.features.terrain.mode = FeatureMode::Off;  // One pavement band per street.
   c.elevatedHighway = OverpassMode::Off;
   for (const uint32_t seed : kSeeds) {
     const std::vector<UrbanStreet> streets = UrbanStreets(seed, c);
@@ -1842,6 +1974,9 @@ int main() {
   TestVisibilityStillSpansWholeMap();
   TestObliqueArteryAndBranchMerge();
   TestPolygonBlocksAdaptToAngledStreets();
+  TestNoCornerSplitBuildings();
+  TestCornerBuildingsDoNotChainAcrossAFrontage();
+  TestThinCornerBuildingSliversAreDropped();
   TestPolygonCollisionLosAndNavigationUseRealFootprint();
   TestElevatedOverpassRampsPiersAndDistinctLayers();
   TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable();

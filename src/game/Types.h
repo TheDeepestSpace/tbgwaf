@@ -39,6 +39,9 @@ struct Obstacle {
   // building, else -1 (hand-placed boxes, rocks, pier columns, crates). The
   // renderer reads the building's facade style through it.
   int building = -1;
+  // Blocks movement and LOS but is never drawn: the unseen wall along a
+  // terrain cliff edge, whose face the terrain mesh itself renders.
+  bool navOnly = false;
 };
 
 // Building archetype (urban map issue #151, roadmap 3.2). Drawn per parcel
@@ -135,7 +138,7 @@ inline std::vector<glm::vec2> ObstacleFootprint(const Obstacle& obstacle) {
 
 // Sampled ground elevation over a regular XZ grid: sample (ix, iz) sits at
 // (minX + ix*step, minZ + iz*step). An empty field means flat ground at
-// y = 0 everywhere (the hand-authored and urban scenes), so every consumer
+// y = 0 everywhere (the hand-authored and terrain-disabled urban scenes), so every consumer
 // can sample unconditionally. Queries outside the grid clamp to the border.
 struct HeightField {
   float minX = 0.0f, minZ = 0.0f;

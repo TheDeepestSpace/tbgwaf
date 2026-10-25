@@ -170,6 +170,9 @@ class SceneRenderer {
   // reuse the same storage address (e.g. stack-allocated GameLogic
   // instances), which an address key would mistake for "unchanged".
   LitTriangleMesh terrainMesh_;
+  LitTriangleMesh terrainRaisedMesh_;  // Concrete level tops and cliff faces of a city.
+  LitTriangleMesh terrainRoadMesh_, terrainSidewalkMesh_, terrainStairMesh_;
+  unsigned long long pavementKey_ = 0;
   // Reused scratch mesh for polygon prisms and road/deck patches. Geometry
   // is already in world space, so the same upload path works in shadow and
   // lit passes without approximating wedges by their AABB.

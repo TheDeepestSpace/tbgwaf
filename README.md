@@ -47,6 +47,52 @@ tune artery count/width, local-street width/skew and elevation through
 `MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
 overlay of the navmesh's walkable-cell boundaries.
 
+Every arterial city has **terrain levels** (issue #155): 1–3 map-spanning
+raised levels, drawn per seed. Each level is a straight step across the whole
+map, roughly across the artery: everything on one side rises 1–5 figure
+heights behind a sheer concrete cliff. The levels are drawn like the
+buildings: each tier is an extruded polygon (flat top, vertical sides), a
+ramp through a level is a rectangular cutout exactly the width of its
+pavement, and a stair is one extruded trapezoid (a straight flight and a flat
+landing at the level's height) attached to the cliff face. A level edge is a
+block boundary like a street: a 6.4-unit band centered on it is carved from
+the blocks on both sides, so sidewalk rings and buildings keep a street's
+setback from the cliff. Steps overlap into nested tiers at different
+heights, with sharp edges (no rolling noise). The sampled heightfield only
+drives movement (an unseen nav wall along each cliff keeps figures off the
+edge). The terrain is planned first;
+the highway profile is then chosen against it per seed: the artery stays at
+grade and ramps through every wall (a main road cutting through the levels),
+or climbs onto a deck before a run of walls, flies over them clear of the
+highest tier and settles onto the level beyond, with either ramp optionally
+replaced by an elevated map edge, up to one tall deck above every level. The
+branch merges onto whatever the artery is doing and ramps through the walls
+it meets at grade. A local street never runs into a level or across a road
+that is ramping through one: an avenue may ramp through a level; any other
+street whose pavement would reach the level band or a ramp corridor stops at
+the last street it crossed before it (a T, not an X) and resumes at the first
+one beyond it, and the blocks either side of the missing stretch stay one
+block; where that last street itself ends at the junction (an L), the street
+instead runs on as a dead end stopping just short of the band or corridor, so
+no street ever pokes into a block. Sidewalk rings are one flat plane per
+strip, on the tier beside the cliff. Switch the levels off with
+`TBGWAF_TERRAIN=off`, `MapGeneratorConfig::features.terrain`, or scenario
+YAML:
+
+```yaml
+map:
+  generate:
+    type: urban
+    seed: 7
+    elevated: false
+    features: {terrain: on}
+    terrain_levels: -1 # seeded 1–3; 0 keeps the city flat
+```
+
+The legacy orthogonal generator stays flat. `city_terrain_seed_*` goldens
+cover seeds 7, 42 and 2024 at grade and `city_terrain_elevated_seed_16` a
+deck over the levels; the flat-city goldens pin terrain off.
+
 Urban buildings have an **archetype** (`Scene::buildings`, one `Building` per
 parcel beside its obstacle): residential, mixed-use, office, commercial hall,
 garage, or civic for the two landmark towers. Each parcel's kind is drawn

@@ -4,6 +4,8 @@
 
 #include "ai/JevPlanner.h"
 #include "game/GameLogic.h"
+#include "game/Geometry.h"
+#include "game/MapGenerator.h"
 
 namespace {
 
@@ -257,6 +259,60 @@ void TestCompleteAiVsAiMatchAndTerminalStop() {
 
 }  // namespace
 
+// Issue #209: Jev figures at the foot of the raised highway ramp used to be
+// sent to ground-level goals beneath the rising slab, walking "through" it.
+// Every move must now stay on a walkable surface (never at grade under a deck
+// without headroom), and the ramp-ward bearing must climb the ramp.
+void TestJevMovesNeverCrossRampSlab() {
+  tactics::MapGeneratorConfig config;
+  config.arteryCount = 2;
+  config.elevatedHighway = tactics::OverpassMode::On;
+  config.overpassLayout = tactics::OverpassLayout::RampUpRampDown;
+  Scene scene = tactics::GenerateUrbanMap(7, config);
+  const tactics::WalkSurface& foot = scene.walkSurfaces[0];
+  glm::vec3 center(0.0f);
+  for (const glm::vec3& v : foot.vertices) center += v;
+  center /= static_cast<float>(foot.vertices.size());
+  scene.units.clear();
+  for (int i = 0; i < 3; ++i) {
+    Unit red;
+    red.id = i;
+    red.team = Team::Red;
+    red.position = {center.x + 3.0f * static_cast<float>(i), 0.0f, center.z};
+    red.position.y = tactics::SurfaceHeightAt(foot, red.position.x, red.position.z);
+    scene.units.push_back(red);
+  }
+  Unit blue;
+  blue.id = 10;
+  blue.team = Team::Blue;
+  blue.position = {60.0f, 0.0f, -18.0f};
+  scene.units.push_back(blue);
+  GameLogic game(scene);
+  const auto request = BuildJevRequest(game, Team::Red, 1);
+  CHECK(request.has_value());
+  bool climbed = false;
+  for (const auto& candidate : request->candidates) {
+    if (candidate.kind != JevActionKind::Move) continue;
+    std::vector<std::string> choices;
+    for (int id : request->actorIds) {
+      choices.push_back(id == candidate.actorId ? candidate.id : "f" + std::to_string(id) + "_wait");
+    }
+    GameLogic copy = game;
+    CHECK(ApplyJevChoice(&copy, *request, choices));
+    const auto& path = copy.FindUnit(candidate.actorId)->plan.movePath;
+    for (size_t i = 0; i + 1 < path.size(); ++i) {
+      for (int k = 0; k <= 4; ++k) {
+        const glm::vec3 q = path[i] + (path[i + 1] - path[i]) * (static_cast<float>(k) / 4.0f);
+        // Standing on a surface, or on ground with real headroom above.
+        CHECK(!copy.GetNavMesh().GroundUnderLowDeck(q.x, q.z) ||
+              q.y > scene.ground.HeightAt(q.x, q.z) + 0.3f);
+      }
+    }
+    climbed |= path.back().y > 1.0f;
+  }
+  CHECK(climbed);
+}
+
 int main() {
   TestIncrementalBuilderMatchesBlockingBuild();
   TestBoundedCandidatesUseNormalLegalPath();
@@ -268,6 +324,7 @@ int main() {
   TestInvalidAndStaleResponsesDoNotMutate();
   TestPlayerVsAiTurnAutomaticallyBecomesCommittable();
   TestCompleteAiVsAiMatchAndTerminalStop();
+  TestJevMovesNeverCrossRampSlab();
   if (failures == 0) {
     std::puts("All Jev planner scenarios passed.");
     return 0;

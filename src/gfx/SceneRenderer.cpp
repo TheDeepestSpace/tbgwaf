@@ -77,7 +77,6 @@ const glm::vec3 kSetupColor(0.2f, 1.0f, 0.3f);
 // see-through pass so a faded block keeps its normal tint.
 const glm::vec3 kObstacleColor(0.55f, 0.55f, 0.6f);
 const glm::vec3 kDeckColor(0.44f, 0.45f, 0.48f);
-
 // Issue #136 camera-occlusion see-through: map geometry (buildings, deck/
 // ramp slabs) standing between the camera and something the player needs to
 // see is drawn at this opacity instead of fully opaque. First guess per the
@@ -566,6 +565,15 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   for (const tactics::Obstacle& obstacle : scene.obstacles) {
     AppendPolygonPrism(obstacle, &vertices, &indices);
   }
+  // Parapets, roof furniture and awnings occlude like the gameplay LOS.
+  for (const tactics::MassingDetail& d : scene.massing) {
+    if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
+    tactics::Obstacle prism;
+    prism.footprint = d.footprint;
+    prism.bounds.min.y = d.y0;
+    prism.bounds.max.y = d.y1;
+    AppendPolygonPrism(prism, &vertices, &indices);
+  }
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
     AppendSurfacePatch(surface.vertices, 0.45f, &vertices, &indices);
   }
@@ -598,11 +606,52 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
     mix(&o.bounds, sizeof(o.bounds));
     mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
   }
+  for (const tactics::MassingDetail& d : scene.massing) {
+    mix(d.footprint.data(), d.footprint.size() * sizeof(glm::vec2));
+    mix(&d.y0, sizeof(d.y0));
+    mix(&d.y1, sizeof(d.y1));
+  }
   for (const tactics::WalkSurface& s : scene.walkSurfaces) mixVec3s(s.vertices);
   mix(scene.sidewalks.data(), scene.sidewalks.size() * sizeof(AABB));
   for (const tactics::RoadSurface& s : scene.sidewalkSurfaces) mixVec3s(s.vertices);
   for (const tactics::RoadSurface& s : scene.roads) mixVec3s(s.vertices);
   return h;
+}
+
+// Content hash of Scene::massing, so the massing meshes rebuild only when
+// the dressing itself changes.
+unsigned long long MassingFingerprint(const tactics::Scene& scene) {
+  unsigned long long h = 1469598103934665603ULL ^ scene.massing.size();
+  auto mix = [&](const void* data, size_t bytes) {
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < bytes; ++i) {
+      h ^= p[i];
+      h *= 1099511628211ULL;
+    }
+  };
+  for (const tactics::MassingDetail& d : scene.massing) {
+    mix(&d.kind, sizeof(d.kind));
+    mix(&d.y0, sizeof(d.y0));
+    mix(&d.y1, sizeof(d.y1));
+    mix(&d.building, sizeof(d.building));
+    mix(d.footprint.data(), d.footprint.size() * sizeof(glm::vec2));
+  }
+  return h;
+}
+
+// One prism per massing detail, merged into a single mesh.
+void BuildMassingMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  for (const tactics::MassingDetail& d : scene.massing) {
+    if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
+    tactics::Obstacle prism;
+    prism.footprint = d.footprint;
+    prism.bounds.min.y = d.y0;
+    prism.bounds.max.y = d.y1;
+    AppendPolygonPrism(prism, &vertices, &indices);
+  }
+  mesh->SetMesh(vertices, indices);
 }
 
 bool PatchContainsXZ(const tactics::RoadSurface& patch, float x, float z) {
@@ -1769,6 +1818,7 @@ bool SceneRenderer::Init() {
   terrainMesh_.Init();
   geometryMesh_.Init();
   fovSceneMesh_.Init();
+  massingMesh_.Init();
   highlightRing_.Init();
   highlightRing_.SetPoints(BuildRingPoints());
 
@@ -1853,6 +1903,8 @@ void SceneRenderer::Destroy() {
   geometryMesh_.Destroy();
   fovSceneMesh_.Destroy();
   fovSceneKey_ = 0;
+  massingMesh_.Destroy();
+  massingKey_ = 0;
   terrainKey_ = tactics::HeightField{};
   highlightRing_.Destroy();
   sphereMesh_.Destroy();
@@ -2041,6 +2093,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                  orthoHalfExtent, 0.1f, lightDistance * 2.0f) *
                       lightView;
 
+  // Building massing (visual only), rebuilt when the scene's records change.
+  {
+    const unsigned long long massingKey = MassingFingerprint(game.GetScene());
+    if (massingKey != massingKey_) {
+      BuildMassingMesh(game.GetScene(), &massingMesh_);
+      massingKey_ = massingKey;
+    }
+  }
+
   // Shadow pass: only casters this team can currently see.
   glDisable(GL_SCISSOR_TEST);
   if (!debug.disableShadows) {
@@ -2064,6 +2125,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
         geometryMesh_.Draw();
       }
+    }
+    if (massingMesh_.HasGeometry()) {
+      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+      massingMesh_.Draw();
     }
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(kDeckShadowSlopeBias, kDeckShadowConstantBias);
@@ -2105,6 +2170,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const auto& walkSurfaces = game.GetScene().walkSurfaces;
   std::vector<char> fadeObstacle(obstacles.size(), 0);
   std::vector<char> fadeSurface(walkSurfaces.size(), 0);
+  std::vector<char> fadeBuilding;
   bool anyFaded = false;
   if (!debug.disableOcclusionFade) {
     const std::vector<glm::vec3> probes =
@@ -2146,6 +2212,48 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           anyFaded = true;
           break;
         }
+      }
+    }
+    // A building fades as a whole: if any part of it (either prism, its roof
+    // slab) blocks a sightline, all of it -- prisms, roof slab, massing --
+    // goes see-through together.
+    const auto roofBuilding = [&](const tactics::WalkSurface& surface) {
+      for (const tactics::Obstacle& o : obstacles) {
+        if (o.building < 0) continue;
+        bool inside = !surface.vertices.empty();
+        for (const glm::vec3& v : surface.vertices) {
+          inside &= v.x >= o.bounds.min.x - 0.05f && v.x <= o.bounds.max.x + 0.05f &&
+                    v.z >= o.bounds.min.z - 0.05f && v.z <= o.bounds.max.z + 0.05f &&
+                    std::fabs(v.y - o.bounds.max.y) < 0.1f;
+        }
+        if (inside) return o.building;
+      }
+      return -1;
+    };
+    std::vector<int> surfaceBuilding(walkSurfaces.size(), -1);
+    for (size_t i = 0; i < walkSurfaces.size(); ++i) surfaceBuilding[i] = roofBuilding(walkSurfaces[i]);
+    fadeBuilding.assign(game.GetScene().buildings.size(), 0);
+    const auto markBuilding = [&](int b) {
+      if (b >= 0 && b < static_cast<int>(fadeBuilding.size())) fadeBuilding[b] = 1;
+    };
+    for (size_t i = 0; i < obstacles.size(); ++i) {
+      if (fadeObstacle[i]) markBuilding(obstacles[i].building);
+    }
+    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+      if (fadeSurface[i]) markBuilding(surfaceBuilding[i]);
+    }
+    for (size_t i = 0; i < obstacles.size(); ++i) {
+      const int b = obstacles[i].building;
+      if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
+        fadeObstacle[i] = 1;
+        anyFaded = true;
+      }
+    }
+    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+      const int b = surfaceBuilding[i];
+      if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
+        fadeSurface[i] = 1;
+        anyFaded = true;
       }
     }
   }
@@ -2205,6 +2313,32 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     } else {
       BuildPolygonPrism(obstacles[i], &geometryMesh_);
       DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f), color);
+    }
+  }
+
+  // Building massing: parapets, roof furniture, awnings (issue #151).
+  const auto detailFaded = [&](const tactics::MassingDetail& d) {
+    return d.building >= 0 && d.building < static_cast<int>(fadeBuilding.size()) &&
+           fadeBuilding[d.building];
+  };
+  const auto drawDetail = [&](const tactics::MassingDetail& d, const glm::vec4& color) {
+    if (d.footprint.size() < 3 || d.y1 <= d.y0) return;
+    tactics::Obstacle prism;
+    prism.footprint = d.footprint;
+    prism.bounds.min.y = d.y0;
+    prism.bounds.max.y = d.y1;
+    BuildPolygonPrism(prism, &geometryMesh_);
+    DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f), color);
+  };
+  if (massingMesh_.HasGeometry()) {
+    if (!anyFaded) {
+      DrawLitModel(litShader_, massingMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                   glm::vec4(kObstacleColor, 1.0f));
+    } else {
+      // Details of faded buildings are re-drawn translucent below.
+      for (const tactics::MassingDetail& d : game.GetScene().massing) {
+        if (!detailFaded(d)) drawDetail(d, glm::vec4(kObstacleColor, 1.0f));
+      }
     }
   }
 
@@ -2274,6 +2408,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // The faded block would otherwise be shadowed by its own shadow-map
     // entry (it is a caster), darkening its faces into patchy slabs.
     litShader_.SetInt("uDisableShadows", 1);
+    // Massing first: it stands proud of the building prisms, so it claims its
+    // pixels in the stencil cap instead of being hidden behind a roof face.
+    for (const tactics::MassingDetail& d : game.GetScene().massing) {
+      if (detailFaded(d)) drawDetail(d, glm::vec4(kObstacleColor, kOccluderFadeOpacity));
+    }
     for (const FadedOccluder& f : faded) {
       if (f.obstacle >= 0) {
         const tactics::Obstacle& obstacle = obstacles[f.obstacle];
@@ -2398,7 +2537,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       colorShader_.Use();
     } else {
       const auto build = [&](const Unit& unit) {
-        return BuildFovCone(unit, obstacles, sidewalks, mapHalfExtent, terrain,
+        return BuildFovCone(unit, game.SightObstacles(), sidewalks, mapHalfExtent, terrain,
                             game.GetScene().sidewalkSurfaces, game.GetScene().walkSurfaces);
       };
       for (const Unit& unit : game.GetScene().units) {

@@ -1687,6 +1687,10 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
         if (glm::distance(p, glm::vec2(o.bounds.Center().x, o.bounds.Center().z)) < 1e-4f) continue;
         CHECK(DistanceToConvexPolygon(p, ObstacleFootprint(o)) > 0.2f);
       }
+      // Signs and lights stand on a sidewalk corner, never out in the street.
+      bool onSidewalk = false;
+      for (const UrbanBlock& block : blocks) onSidewalk |= InsideConvex(p, block.vertices);
+      CHECK(onSidewalk);
       if (prop.kind == StreetPropKind::StreetNameSign) {
         ++names;
         float corner = 1e9f;
@@ -1726,7 +1730,7 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
       bool junction = false, aligned = false;
       for (const UrbanStreet& street : streets) {
         const glm::vec2 a(street.a.x, street.a.z), b(street.b.x, street.b.z);
-        if (DistanceToSegment(p, a, b) > street.width * 0.5f + 2.0f) continue;
+        if (DistanceToSegment(p, a, b) > street.width * 0.5f + 4.0f) continue;
         const glm::vec2 dir = glm::normalize(b - a);
         aligned |= parallel(direction(prop.yaw), dir);
         if (firstDir == glm::vec2(0.0f)) {
@@ -1754,7 +1758,7 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
 // alters item or prop placement shows up here first.
 void TestPinnedFurnitureFingerprints() {
   struct Expected { uint32_t seed; size_t furniture; size_t props; };
-  const Expected expected[] = {{1u, 169, 80}, {42u, 165, 79}, {2024u, 181, 90}};
+  const Expected expected[] = {{1u, 158, 69}, {42u, 153, 67}, {2024u, 169, 78}};
   const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
   const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
   for (const auto& e : expected) {

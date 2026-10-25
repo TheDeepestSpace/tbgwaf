@@ -1528,7 +1528,27 @@ void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorCo
     }
     return groundY(p.x, p.y) + kGradeY;
   };
+  // Signals and signs stand on the sidewalk corner, not where the street
+  // geometry estimates it: snap to the nearest block corner, nudged inward.
+  auto snapToCorner = [&](glm::vec2 p, glm::vec2* out) {
+    float best = 3.5f;
+    bool found = false;
+    for (const UrbanBlock& block : city.blocks) {
+      glm::vec2 centroid(0.0f);
+      for (const glm::vec2& v : block.vertices) centroid += v;
+      centroid /= static_cast<float>(block.vertices.size());
+      for (const glm::vec2& v : block.vertices) {
+        const float d = glm::distance(p, v);
+        if (d >= best) continue;
+        best = d;
+        *out = v + glm::normalize(centroid - v) * 0.5f;
+        found = true;
+      }
+    }
+    return found;
+  };
   auto add = [&](StreetPropKind kind, glm::vec2 p, float yaw, float secondaryYaw) {
+    if (kind != StreetPropKind::StreetNameSign && !snapToCorner(p, &p)) return;
     if (std::max(std::fabs(p.x), std::fabs(p.y)) > half - 0.5f) return;
     for (const Obstacle& o : scene->obstacles) {
       if (p.x < o.bounds.min.x - 0.4f || p.x > o.bounds.max.x + 0.4f ||

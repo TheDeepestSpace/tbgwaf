@@ -136,6 +136,15 @@ int main(int argc, char** argv) {
                      tactics::GenerateUrbanMap(seed, terrainConfig), 180.0f,
                      /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
   }
+  // Terrain under an overpass (issue #155): the deck starts on one level,
+  // flies over the walls it crosses and settles onto the level at its far
+  // end; the branch ramps between its own level and the deck.
+  tactics::MapGeneratorConfig terrainElevatedConfig = terrainConfig;
+  terrainElevatedConfig.arteryCount = 2;
+  terrainElevatedConfig.elevatedHighway = tactics::OverpassMode::On;
+  cases.push_back({"city_terrain_elevated_seed_16",
+                   tactics::GenerateUrbanMap(16, terrainElevatedConfig), 180.0f,
+                   /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
   tactics::MapGeneratorConfig mergeConfig = gradeConfig;
   mergeConfig.arteryCount = 2;
   cases.push_back({"city_merge_seed_42", tactics::GenerateUrbanMap(42, mergeConfig),

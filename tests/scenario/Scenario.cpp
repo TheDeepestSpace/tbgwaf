@@ -133,8 +133,7 @@ Scene ParseScene(const YAML::Node& root) {
           }
         }
         if (genNode["terrain_amplitude"]) config.terrainAmplitude = genNode["terrain_amplitude"].as<float>();
-        if (genNode["terrace_count"]) config.terraceCount = genNode["terrace_count"].as<int>();
-        if (genNode["cliff_chance"]) config.cliffChance = genNode["cliff_chance"].as<float>();
+        if (genNode["terrain_levels"]) config.terrainLevelCount = genNode["terrain_levels"].as<int>();
         // `features: {lanes: on, curbs: {mode: auto, chance: 0.3}, ...}`
         // sets the optional urban detail layers (see UrbanFeatures).
         if (const YAML::Node featNode = genNode["features"]) {

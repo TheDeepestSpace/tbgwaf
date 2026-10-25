@@ -85,7 +85,9 @@ struct MapGeneratorConfig {
   // Artery becomes an overpass crossing on piers. Auto draws presence per
   // seed (overpassChance) and one of the four layouts; see the enums above.
   OverpassMode elevatedHighway = OverpassMode::Auto;
-  float overpassChance = 0.5f;  // P(overpass) for an Auto seed: roughly 50/50.
+  // P(overpass) for an Auto seed: roughly 50/50. A terrain-enabled seed
+  // halves the complement (0.5 -> 0.75): flyovers pair well with levels.
+  float overpassChance = 0.5f;
   OverpassLayout overpassLayout = OverpassLayout::Auto;
   BranchEnd branchEnd = BranchEnd::Auto;
   float branchOffMapChance = 0.35f;  // P(off-map branch) for an Auto seed that allows one.
@@ -101,12 +103,18 @@ struct MapGeneratorConfig {
   int maxZiplinesPerBlock = 2;
   float ziplineMinLength = 4.0f;
   float ziplineMaxLength = 22.0f;
-  // Urban ground: low-frequency noise and street-bounded, level block pads.
-  // -1 draws 2..4 terraces per seed; 0 keeps just rolling ground/level pads.
-  // Small maps may fit fewer terraces. Legacy arteryCount=0 stays flat.
+  // Urban ground (issue #155): low rolling noise plus map-spanning raised
+  // levels. Each level is a straight step, roughly across the artery, laid
+  // along its own boundary street: everything on one side rises 1-5 figure
+  // heights behind a retaining wall parallel to that street. Steps overlap
+  // into nested tiers. The artery/branch ramp through a wall they meet at
+  // grade (a main road cutting through the level) or fly over it when
+  // elevated and settle onto the level beyond; an avenue may ramp through;
+  // stairs climb the wall elsewhere (through-wall channels and flights
+  // attached along the wall face). terrainLevelCount: -1 draws 1-3 per
+  // seed; 0 keeps just the rolling ground. Legacy arteryCount=0 stays flat.
   float terrainAmplitude = 3.0f;
-  int terraceCount = -1;
-  float cliffChance = 0.5f;
+  int terrainLevelCount = -1;
   UrbanFeatures features;
 };
 

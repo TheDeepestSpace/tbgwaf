@@ -891,8 +891,10 @@ void TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable() {
 
   // The seeds the overpass goldens/scenarios use produce their layout
   // naturally under the default (Auto) config, and seed 7 has no overpass.
+  // Terrain is pinned off: a terrain-enabled seed boosts the presence draw.
   MapGeneratorConfig twoArteries;
   twoArteries.arteryCount = 2;
+  twoArteries.features.terrain.mode = FeatureMode::Off;
   const std::pair<uint32_t, OverpassLayout> kNatural[] = {
       {33, OverpassLayout::RampUpRampDown}, {4, OverpassLayout::Through},
       {16, OverpassLayout::EnterRampUp},    {22, OverpassLayout::EnterRampDown},
@@ -1111,6 +1113,7 @@ void TestMoveFrontierCoversBranchRampAtJunction() {
   config.arteryCount = 2;
   config.elevatedHighway = OverpassMode::On;
   config.overpassLayout = OverpassLayout::RampUpRampDown;
+  config.features.terrain.mode = FeatureMode::Off;  // Pin the flat-grade junction.
   Scene scene = GenerateUrbanMap(7, config);
   const auto roads = UrbanRoads(7, config);
   const auto& deck = roads[0].centerline;

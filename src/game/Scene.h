@@ -8,19 +8,26 @@
 
 namespace tactics {
 
-// Reserved entrances into a raised urban pad. Stairs currently use the same
-// sloping WalkSurface as ramps; the shorter run gives them a steeper grade.
+// A stair up one terrain level wall (issue #155). `bottom` and `top` are
+// ground points on the low/high side. A through-wall stair cuts a walled
+// channel whose ground carries the flight; an along-wall stair hangs off
+// the wall face as explicit WalkSurfaces, climbing parallel to it, and
+// turns onto the level over the wall top.
 struct TerrainAccess {
   glm::vec3 bottom, top;
-  float width = 6.0f;
+  float width = 4.0f;
+  bool alongWall = false;
 };
 
-struct TerrainTerrace {
-  size_t blockIndex = 0;
-  std::vector<glm::vec2> footprint;
-  float baseHeight = 0.0f, height = 0.0f;
-  bool cliff = false;
-  TerrainAccess ramp, stair;
+// One map-spanning terrain step: ground on the `raisedNormal` side of the
+// step line through `origin` along `dir` sits `rise` higher, behind a
+// retaining wall that runs parallel to its boundary street. Steps overlap
+// into nested tiers; highway ramps and the accesses climb them.
+struct TerrainWall {
+  glm::vec2 origin{0.0f}, dir{1.0f, 0.0f};
+  glm::vec2 raisedNormal{0.0f, 1.0f};
+  float rise = 0.0f;
+  std::vector<TerrainAccess> accesses;
 };
 
 // Hardcoded Stage-A scene: a ~30x30 unit field with box-shaped obstacles and
@@ -58,7 +65,7 @@ struct Scene {
   // y = 0; hilly and terrain-enabled urban maps fill it in. Navigation, placement and
   // rendering all sample it (see HeightField).
   HeightField ground;
-  std::vector<TerrainTerrace> terraces;
+  std::vector<TerrainWall> terrainWalls;
   FlagConfig flag;
   // Round limit: when > 0 the match ends in a draw once this many rounds
   // have been played without a winner. 0 (the default) means unlimited.

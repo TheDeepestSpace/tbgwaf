@@ -59,16 +59,23 @@ map:
     elevated: false
     features: {terrain: on}
     terrain_amplitude: 3.0
-    terrace_count: -1 # seeded 2–4; 0 disables terraces
-    cliff_chance: 0.5
+    terrain_levels: -1 # seeded 1–3; 0 keeps just the rolling ground
 ```
 
-Low-frequency noise follows the streets; buildings stand on level pads.
-Terraces reserve a gentle ramp and a shorter stair (currently a ramp surface),
-with retaining walls blocking abrupt edges. Small/custom maps can fit fewer
-terraces. The legacy orthogonal generator stays flat. With an overpass, its
-corridor keeps the existing grade; adapting the deck to uneven ground is a
-separate roadmap stage. `city_terrain_seed_*` goldens cover seeds 7, 42 and 2024.
+Terrain raises whole portions of the map: each level is a straight step
+spanning the entire map, roughly across the artery and laid along its own
+boundary street, so everything on one side rises 1–5 figure heights behind a
+retaining wall parallel to that street. Steps overlap into nested tiers at
+different heights. Low-frequency noise rides on the tiers, buildings stand on
+level pads, and a wide walk runs along both sides of each wall. Stairs climb
+every wall: walled through-wall channels whose ground carries the flight, and
+flights attached along the wall face that turn onto the level over the wall
+top. The artery and branch meet a wall either at grade, ramping through a gap
+in it (a main road cutting through the level), or elevated, flying clear over
+it and settling onto the level at the far end; an avenue may also ramp
+through. Terrain-enabled seeds draw an overpass more often. The legacy
+orthogonal generator stays flat. `city_terrain_seed_*` goldens cover seeds 7,
+42 and 2024 at grade and `city_terrain_elevated_seed_16` the overpass case.
 
 Urban maps carry pre-built **ziplines** (0-2 per block, seed-deterministic,
 `MapGeneratorConfig::maxZiplinesPerBlock`): two-way cables between anchor

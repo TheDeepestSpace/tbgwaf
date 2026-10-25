@@ -1580,7 +1580,8 @@ void TestResolvedShotStartsShootAnimation() {
   CHECK(std::fabs(shooter->shootElapsed - 0.1f) < 1e-5f);
   game.Update(constants::kShootAnimDuration);
   CHECK(shooter->shootElapsed < 0.0f);  // Beat over: back to idle.
-  CHECK(target->knockdownElapsed == constants::kKnockdownDuration);
+  // Planning mode: the fall is frozen where it started (see below).
+  CHECK(target->knockdownElapsed == 0.0f);
 
   // A shot that can't connect (target behind the shooter) fires nothing.
   Unit* other = game.FindUnit(5);
@@ -3145,6 +3146,38 @@ void TestBulletsFlyToMapEdgeNotWeaponRange() {
   }
 }
 
+// A fall cut short by the end of a round freezes through planning and
+// resumes (from the same elapsed time) when the next round executes.
+void TestKnockdownFreezesBetweenRounds() {
+  GameLogic game(LegacyScene());
+  MakePassive(game);
+  Unit* downed = game.FindUnit(5);
+  downed->alive = false;
+  downed->knockdownElapsed = 0.3f;
+  CHECK(!game.HasActiveKnockdown());  // Planning: frozen.
+  game.Update(1.0f);
+  CHECK(downed->knockdownElapsed == 0.3f);
+
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(game.FindUnit(0)->position + glm::vec3(4.0f, 0.0f, 0.0f), Team::Blue);
+  game.FinishMovePlan();
+  for (int id : {1, 2, 3, 4}) {
+    game.ClickUnit(id, id < 3 ? Team::Blue : Team::Red);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  CHECK(game.Mode() == InputMode::Executing);
+  CHECK(game.HasActiveKnockdown());
+  game.Update(0.25f);
+  CHECK(std::fabs(downed->knockdownElapsed - 0.55f) < 1e-5f);  // Resumed.
+  game.Update(1.0e6f);
+  CHECK(game.Mode() != InputMode::Executing);
+  const float frozenAt = downed->knockdownElapsed;
+  game.Update(2.0f);
+  CHECK(downed->knockdownElapsed == frozenAt);
+}
+
 void TestBurstPlanSurvivesSnapshotAndClampsOnImport() {
   GameLogic game(LegacyScene());
   game.ClickUnit(1, Team::Blue);
@@ -3324,6 +3357,7 @@ int main() {
   TestLiveTracerFadesWithinOneSecond();
   TestLockOnStagesUntilFireAndKeepsShotCount();
   TestBulletsFlyToMapEdgeNotWeaponRange();
+  TestKnockdownFreezesBetweenRounds();
   TestBurstPlanSurvivesSnapshotAndClampsOnImport();
   TestReachFieldManySurfacesPerformance();
 

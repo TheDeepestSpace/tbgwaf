@@ -775,27 +775,35 @@ void GameLogic::SetPlannedMoveFacing(int unitId, float yaw, Team byTeam) {
 }
 
 bool GameLogic::HasActiveKnockdown() const {
+  if (!KnockdownsAdvance()) return false;
   for (const Unit& unit : scene_.units) {
     if (!unit.alive && unit.knockdownElapsed >= 0.0f &&
-        unit.knockdownElapsed < constants::kKnockdownDuration) {
+        unit.knockdownElapsed < constants::kKnockdownMaxSeconds) {
       return true;
     }
   }
   return false;
 }
 
+bool GameLogic::KnockdownsAdvance() const {
+  return mode_ == InputMode::Executing || mode_ == InputMode::GameOver;
+}
+
 void GameLogic::Update(float dtSeconds) {
-  // Knockdowns and the quick-draw beat advance regardless of mode: they're
-  // purely visual and can outlast the round that caused them. A knockdown
-  // holds its final pose; the shoot beat returns to idle (<0) once done.
+  // Knockdowns and the quick-draw beat are purely visual. A fall only runs
+  // while a round executes (or once the match is over): if the round ends
+  // with a figure still in mid-air it freezes there through planning and
+  // carries on, same velocities and all, when the next round starts. A
+  // knockdown holds its final pose; the shoot beat returns to idle (<0) once
+  // done.
   for (Unit& unit : scene_.units) {
     if (unit.alive) {
       unit.idleElapsed =
           std::fmod(unit.idleElapsed + dtSeconds, constants::kIdleAnimDuration);
     }
-    if (!unit.alive && unit.knockdownElapsed >= 0.0f) {
+    if (!unit.alive && unit.knockdownElapsed >= 0.0f && KnockdownsAdvance()) {
       unit.knockdownElapsed =
-          std::min(unit.knockdownElapsed + dtSeconds, constants::kKnockdownDuration);
+          std::min(unit.knockdownElapsed + dtSeconds, constants::kKnockdownMaxSeconds);
     }
     if (unit.shootElapsed >= 0.0f) {
       unit.shootElapsed += dtSeconds;

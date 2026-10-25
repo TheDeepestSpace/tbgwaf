@@ -40,7 +40,7 @@ void TestOnlyDownedUnitsRagdoll() {
 }
 
 void TestFallsAlongShotAndRests() {
-  const tactics::Unit u = Downed(1, tactics::constants::kKnockdownDuration);
+  const tactics::Unit u = Downed(1, tactics::constants::kKnockdownMaxSeconds);
   const gfx::RagdollPose start = gfx::SampleRagdollStep(u, 0);
   const gfx::RagdollPose end = gfx::SampleRagdoll(u);
   CHECK(start[gfx::kRagHead].y > u.position.y + 1.2f);
@@ -53,7 +53,7 @@ void TestFallsAlongShotAndRests() {
 }
 
 void TestLimbLengthsPreserved() {
-  const tactics::Unit u = Downed(2, tactics::constants::kKnockdownDuration);
+  const tactics::Unit u = Downed(2, tactics::constants::kKnockdownMaxSeconds);
   const tactics::Unit stand = [] {
     tactics::Unit s = Downed(2, 0.0f);
     return s;
@@ -83,7 +83,7 @@ void TestDeterministicAndCacheBounded() {
 
 void TestFigurePartsFollowRagdoll() {
   const gfx::FigureParts standing = gfx::BuildFigure(tactics::Unit{});
-  const tactics::Unit down = Downed(1, tactics::constants::kKnockdownDuration);
+  const tactics::Unit down = Downed(1, tactics::constants::kKnockdownMaxSeconds);
   const gfx::FigureParts parts = gfx::BuildFigure(down);
   CHECK(!parts.empty());
   CHECK(parts.size() >= 12);
@@ -96,7 +96,7 @@ void TestFigurePartsFollowRagdoll() {
 void TestGunReleaseAndDrop() {
   int dropped = 0;
   for (int id = 1; id <= 40; ++id) {
-    const tactics::Unit u = Downed(id, tactics::constants::kKnockdownDuration);
+    const tactics::Unit u = Downed(id, tactics::constants::kKnockdownMaxSeconds);
     const gfx::RagdollGun start = gfx::SampleRagdollGunStep(u, 0);
     const gfx::RagdollGun end = gfx::SampleRagdollGun(u);
     CHECK(start.dropped == end.dropped);
@@ -120,7 +120,7 @@ void TestFallsOffWallAndStaysOutside() {
   wall.bounds.min = glm::vec3(-0.6f, 0.0f, -3.0f);
   wall.bounds.max = glm::vec3(0.6f, 3.0f, 3.0f);
   gfx::SetRagdollObstacles({wall});
-  tactics::Unit u = Downed(3, tactics::constants::kKnockdownDuration);
+  tactics::Unit u = Downed(3, tactics::constants::kKnockdownMaxSeconds);
   u.position = glm::vec3(0.3f, 3.0f, 0.0f);
   u.knockdownAxis = glm::vec3(0.0f, 0.0f, -1.0f);  // Shot travels +X, off the wall.
   const gfx::RagdollPose end = gfx::SampleRagdoll(u);

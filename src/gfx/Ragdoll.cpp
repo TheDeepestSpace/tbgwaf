@@ -21,7 +21,9 @@ constexpr float kLaunchLift = 1.1f;
 constexpr int kConstraintIterations = 6;
 constexpr float kSleepSpeed = 0.05f;      // Units/s; below this a step counts as still.
 constexpr int kSleepSteps = 6;
-constexpr int kMaxSimSteps = 300;         // Hard cap on simulated steps (5 s).
+constexpr int kMaxSimSteps = kRagdollSteps;  // Hard cap on simulated steps.
+static_assert(kMaxSimSteps * kRagdollStep >= tactics::constants::kKnockdownMaxSeconds - 1e-3f,
+              "ragdoll must cover the longest knockdown timer");
 
 // Standing pose in the figure frame (+X forward, +Y up, +Z right), matching
 // the proportions in FigureRig.cpp.
@@ -162,7 +164,7 @@ struct Trajectory {
   float yaw = 0.0f;
   glm::vec3 axis{0.0f};
   unsigned long stamp = 0;
-  std::vector<RagdollPose> frames;  // kRagdollSteps + 1 entries.
+  std::vector<RagdollPose> frames;  // Up to kRagdollSteps + 1 entries.
   std::vector<RagdollGun> guns;     // Same length as frames.
 };
 
@@ -235,8 +237,7 @@ Trajectory Simulate(const Unit& unit) {
   int still = 0;
   std::array<bool, kRagJointCount> onFloor{};
   // Run until body and (dropped) gun are at rest, up to the cap: a fall from
-  // an obstacle top takes longer than kRagdollSteps. The recorded frames are
-  // resampled onto the fixed playback length below.
+  // an obstacle top takes a while.
   for (int step = 0; step < kMaxSimSteps; ++step) {
     if (still >= kSleepSteps && (!drops || gunAsleep)) break;
     if (drops && !gunAsleep) {
@@ -330,29 +331,6 @@ Trajectory Simulate(const Unit& unit) {
     traj.frames.push_back(pos);
     traj.guns.push_back(gunFrame());
   }
-  // Fit onto the fixed kRagdollSteps + 1 playback frames: pad a short fall
-  // with its rest pose, take evenly spaced frames of a long one (which thus
-  // plays back faster but still ends at rest).
-  const int simmed = static_cast<int>(traj.frames.size()) - 1;
-  if (simmed > kRagdollSteps) {
-    std::vector<RagdollPose> frames;
-    std::vector<RagdollGun> guns;
-    frames.reserve(kRagdollSteps + 1);
-    guns.reserve(kRagdollSteps + 1);
-    for (int k = 0; k <= kRagdollSteps; ++k) {
-      const size_t i =
-          static_cast<size_t>(std::lround(static_cast<double>(k) * simmed / kRagdollSteps));
-      frames.push_back(traj.frames[i]);
-      guns.push_back(traj.guns[i]);
-    }
-    traj.frames = std::move(frames);
-    traj.guns = std::move(guns);
-  } else {
-    while (static_cast<int>(traj.frames.size()) <= kRagdollSteps) {
-      traj.frames.push_back(traj.frames.back());
-      traj.guns.push_back(traj.guns.back());
-    }
-  }
   return traj;
 }
 
@@ -416,18 +394,18 @@ const Trajectory& CachedTrajectory(const Unit& unit) {
 }  // namespace
 
 RagdollPose SampleRagdollStep(const Unit& unit, int step) {
-  return CachedTrajectory(unit).frames[static_cast<size_t>(glm::clamp(step, 0, kRagdollSteps))];
+  const std::vector<RagdollPose>& frames = CachedTrajectory(unit).frames;
+  return frames[static_cast<size_t>(glm::clamp(step, 0, static_cast<int>(frames.size()) - 1))];
 }
 
 RagdollGun SampleRagdollGunStep(const Unit& unit, int step) {
-  return CachedTrajectory(unit).guns[static_cast<size_t>(glm::clamp(step, 0, kRagdollSteps))];
+  const std::vector<RagdollGun>& guns = CachedTrajectory(unit).guns;
+  return guns[static_cast<size_t>(glm::clamp(step, 0, static_cast<int>(guns.size()) - 1))];
 }
 
 namespace {
 int CurrentStep(const Unit& unit) {
-  const float t = glm::clamp(unit.knockdownElapsed / tactics::constants::kKnockdownDuration,
-                             0.0f, 1.0f);
-  return static_cast<int>(std::lround(t * kRagdollSteps));
+  return static_cast<int>(std::lround(std::max(0.0f, unit.knockdownElapsed) / kRagdollStep));
 }
 }  // namespace
 

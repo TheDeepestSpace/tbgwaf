@@ -44,12 +44,12 @@ enum RagdollJoint {
 
 using RagdollPose = std::array<glm::vec3, kRagJointCount>;  // World positions.
 
-// Fixed simulation step, number of playback frames from hit to rest (the
-// simulation itself runs for as many steps as the fall needs and is fitted
-// onto this many frames), and the cap on simultaneously cached (i.e.
-// actively evaluated) ragdolls.
+// Fixed simulation step, the most steps a fall is simulated for (it stops
+// earlier once the body is at rest; later frames repeat the last), and the
+// cap on simultaneously cached (i.e. actively evaluated) ragdolls. Playback is
+// real time: knockdownElapsed seconds = elapsed / kRagdollStep steps.
 constexpr float kRagdollStep = 1.0f / 60.0f;
-constexpr int kRagdollSteps = 60;
+constexpr int kRagdollSteps = 300;
 constexpr int kRagdollMaxCached = 16;
 
 // The weapon of a downed unit. Roughly half of all figures (decided
@@ -70,16 +70,17 @@ void SetRagdollObstacles(const std::vector<tactics::Obstacle>& obstacles);
 // are drawn as a ragdoll instead of a rigid tip-over.
 bool RagdollActive(const tactics::Unit& unit);
 
-// The full-fall trajectory frame `step` (0..kRagdollSteps) for this unit.
+// The full-fall trajectory frame `step` for this unit (clamped to the
+// frames simulated, i.e. the rest pose once the fall is over).
 RagdollPose SampleRagdollStep(const tactics::Unit& unit, int step);
 
 // The weapon state matching SampleRagdollStep / SampleRagdoll.
 RagdollGun SampleRagdollGunStep(const tactics::Unit& unit, int step);
 RagdollGun SampleRagdollGun(const tactics::Unit& unit);
 
-// The pose for the unit's current knockdownElapsed (progress through
-// kKnockdownDuration maps onto the full simulated fall, so the ragdoll is at
-// rest exactly when the knockdown timer finishes).
+// The pose for the unit's current knockdownElapsed, in real time. The timer
+// only advances while a round executes, so a fall cut off by the end of the
+// round freezes mid-air and resumes (same state) in the next one.
 RagdollPose SampleRagdoll(const tactics::Unit& unit);
 
 }  // namespace gfx

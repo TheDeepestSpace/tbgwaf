@@ -1,33 +1,59 @@
 name: ragdoll_shot_off_wall
 description: >
-  Issue #217 ragdoll: a figure on top of a wall is shot by a figure on the ground. The
-  scenario pins the gameplay half (the wall-top figure is visible, targetable and dies);
-  the golden frames show how the downed figure's ragdoll reacts at the wall edge.
+  Issue #217 ragdoll: a figure on top of a tall wall is shot by a figure on the ground at
+  the very end of the turn (the 5th and last sniper shot, t=4.0 s; blue 0's long walk keeps
+  the round running until t=4.4 s). The fall is therefore cut off mid-air by the end of the
+  turn: the turn_01 golden shows the body frozen in free fall beside the wall, and turn_02
+  (the next round) shows it resuming from that exact state and landing. The unit still
+  falls only while a round executes.
 
-shot_rolls: [0.0]
+# Four misses, then the killing hit on the sniper's last bullet.
+shot_rolls: [0.9, 0.9, 0.9, 0.9, 0.0]
 
 map:
   obstacles:
-    - {center: [0, 0], half_extent: [0.6, 3.0], height: 3.0, climbable: true}
+    - {center: [0, 0], half_extent: [0.6, 3.0], height: 8.0, climbable: true}
 
 units:
-  - {id: 0, team: blue, position: [-4, 0, 0], facing_degrees: 0}
-  - {id: 1, team: red, position: [0, 3.0, 0], facing_degrees: 180}
+  - {id: 0, team: blue, position: [-10, 0, -8], facing_degrees: 0}   # Walker; keeps the round running.
+  - {id: 1, team: blue, position: [-8, 0, 0], facing_degrees: 0}    # Sniper.
+  - {id: 2, team: red, position: [0, 8.0, 0], facing_degrees: 180}  # On top of the wall.
+  - {id: 3, team: red, position: [10, 0, 10], facing_degrees: 180}  # Out of the way.
 
 camera:
-  target: [-1, 0]
-  zoom: 4
+  target: [1, 0]
+  zoom: 3
 
 script:
-  - assert: {unit: 1, visible_to: blue, visible: true, comment: The wall-top figure is in plain view from the ground}
+  - assert: {unit: 2, visible_to: blue, visible: true, comment: The wall-top figure is in plain view from the ground}
   - action: shoot
-    description: Blue0 shoots red1, who stands on top of the wall.
-    actor: 0
-    target: 1
-  - action: pass
+    description: Blue1 fires a 5-shot burst at red2, who stands on top of the wall; only the last bullet hits.
     actor: 1
+    target: 2
+    shots: 5
+  - action: move
+    description: Blue0 walks for 4.7 s so the round outlasts the killing shot by 0.7 s.
+    actor: 0
+    destination: [8.8, 0, -8]
+  - action: pass
+    actor: 2
+  - action: pass
+    actor: 3
   - action: commit
 
-  - assert: {unit: 1, alive: false, comment: The wall-top figure is downed}
-  - assert: {unit: 0, alive: true}
-  - assert: {winner: blue}
+  - assert: {unit: 2, alive: false, comment: Downed by the last shot of the turn, mid-fall when the turn ends}
+  - assert: {unit: 1, alive: true}
+  - assert: {round: 2}
+
+  - action: move
+    description: Next turn; time passes again and the frozen fall carries on.
+    actor: 0
+    destination: [-3.2, 0, -8]
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 3
+  - action: commit
+
+  - assert: {round: 3}
+  - assert: {winner: none}

@@ -386,6 +386,12 @@ int main() {
     if (const char* terrain = std::getenv("TBGWAF_TERRAIN")) {
       tactics::ParseFeatureMode(terrain, &config.features.terrain.mode);
     }
+    // TBGWAF_BLOCK_CHARACTER=downtown|residential|industrial|mixed forces
+    // every block's neighbourhood character (issue #151); unset/auto keeps
+    // the per-block draw. Unknown values are ignored.
+    if (const char* characterEnv = std::getenv("TBGWAF_BLOCK_CHARACTER")) {
+      tactics::ParseBlockCharacter(characterEnv, &config.character);
+    }
     return tactics::GenerateUrbanMap(mapSeed, config);
   };
   // Chosen on the Game Mode screen; CTF turns on the neutral flag objective.

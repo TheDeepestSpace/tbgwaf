@@ -204,6 +204,24 @@ int main(int argc, char** argv) {
                      tactics::GenerateUrbanMap(seed, terrainAutoConfig), 180.0f,
                      /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
   }
+  // Building archetypes and massing (issue #151): one close-framed golden
+  // per forced block character, so each archetype mix (and its parapets,
+  // roof furniture, awnings and office setbacks) is pinned on its own. Seed
+  // 7's downtown-side blocks fill the frame; the layout is identical in all
+  // three, only kinds/heights/dressing differ.
+  const std::pair<const char*, tactics::BlockCharacter> kCharacters[] = {
+      {"city_archetypes_downtown_seed_7", tactics::BlockCharacter::Downtown},
+      {"city_archetypes_residential_seed_7", tactics::BlockCharacter::Residential},
+      {"city_archetypes_industrial_seed_7", tactics::BlockCharacter::Industrial},
+  };
+  for (const auto& [name, character] : kCharacters) {
+    tactics::MapGeneratorConfig config = gradeConfig;
+    config.character = character;
+    MapCase archetypes{name, tactics::GenerateUrbanMap(7, config), 60.0f,
+                       /*showNavMesh=*/false, /*pitchOffset=*/-0.45f, /*yawOffset=*/-0.9f};
+    archetypes.cameraTarget = glm::vec3(-20.0f, 0.0f, 10.0f);
+    cases.push_back(std::move(archetypes));
+  }
   for (const uint32_t seed : kHillySeeds) {
     cases.push_back({"hilly_seed_" + std::to_string(seed), tactics::GenerateHillyMap(seed),
                      kHillyCameraZoom, /*showNavMesh=*/true});

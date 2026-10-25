@@ -55,6 +55,14 @@ struct UrbanFeatures {
 FeatureToggle* UrbanFeatureByName(UrbanFeatures* features, const std::string& name);
 bool ParseFeatureMode(const std::string& text, FeatureMode* mode);
 
+// Neighbourhood character of a block (issue #151, roadmap 3.2): biases the
+// street-class-weighted BuildingKind table so a block reads coherently
+// (offices cluster, apartments cluster) instead of a per-parcel lottery.
+// Auto draws one per block (its own rng stream, so forcing a character never
+// moves a wall); the rest force every block to that character.
+enum class BlockCharacter { Auto, Mixed, Downtown, Residential, Industrial };
+bool ParseBlockCharacter(const std::string& text, BlockCharacter* character);
+
 // Tuning for GenerateUrbanMap. Defaults give a 4x4 city of ~26-unit average
 // blocks (~144 units across, ~4.8x the default scene's 30). The overall
 // extent is fixed by (blocks, blockSize, streetWidth); per-seed variation
@@ -70,7 +78,11 @@ struct MapGeneratorConfig {
   float sidewalkWidth = 1.5f;   // Obstacle-free strip inside each block edge, along the street.
   float buildingDepth = 5.0f;   // Thickness of the building ring inside the sidewalk setback.
   float minBuildingHeight = 3.5f;  // Taller than a figure can climb: walls block movement and LOS.
-  float maxBuildingHeight = 9.0f;  // Cap for ordinary (non-tower) buildings.
+  float maxBuildingHeight = 11.0f;  // Cap for ordinary (non-tower) buildings: 3 office floors.
+  // Building archetypes (issue #151): each parcel's BuildingKind is drawn
+  // from a table weighted by the street class it fronts, biased by its
+  // block's character; floor count/height per kind set the building height.
+  BlockCharacter character = BlockCharacter::Auto;
   int towerCount = 2;           // Tall landmark buildings scattered across the city.
   float towerMinHeight = 14.0f;
   float towerMaxHeight = 20.0f;
@@ -148,7 +160,9 @@ struct UrbanRoad {
 // MapGeneratorConfig::maxZiplinesPerBlock): each runs from obstacle-free
 // street level (`a`) to the roof of a building in the block (`b`, with a
 // flat walkable roof slab in Scene::walkSurfaces), clear of obstacles, and
-// lines are non-overlapping.
+// lines are non-overlapping. Scene::buildings carries each building's
+// archetype (see BuildingKind; the two landmark towers are Civic) and
+// Scene::massing its visual-only parapets, roof furniture and awnings.
 Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& config = {});
 
 // Block footprints GenerateUrbanMap(seed, config) uses. The hierarchical
@@ -199,6 +213,28 @@ struct UrbanLot { float x0, x1, z0, z1; bool empty, notch; };
 // Lot bounds for compatibility/inspection. Hierarchical layouts return one
 // bound per polygon block; arteryCount=0 returns the original merged/L lots.
 std::vector<UrbanLot> UrbanLots(uint32_t seed, const MapGeneratorConfig& config = {});
+
+// A parcel (issue #151, roadmap 3.1): one buildable lot of a block's frontage
+// ring (or slab row), the unit the plan sizes and counts buildings by.
+// `footprint` is the building's convex outline, counter-clockwise; edge
+// `frontageEdge` (footprint[i] -> footprint[i+1]) lies on the block's
+// building line along the street whose class is `street`. `depth` is the
+// footprint's extent behind the frontage; `corner` marks a piece at a block
+// corner (two street frontages). Buildings and parcels correspond 1:1:
+// Scene::buildings[i].parcel == i and GenerateUrbanMap's obstacle for
+// parcel i has that footprint.
+struct UrbanParcel {
+  std::vector<glm::vec2> footprint;
+  int frontageEdge = 0;
+  UrbanStreetClass street = UrbanStreetClass::Cross;
+  float depth = 0.0f;
+  bool corner = false;
+  int block = -1;
+};
+
+// Every parcel of GenerateUrbanMap(seed, config), in Scene::buildings order.
+// Empty for arteryCount=0 (the legacy grid has no parcel pass).
+std::vector<UrbanParcel> UrbanParcels(uint32_t seed, const MapGeneratorConfig& config = {});
 
 // Half-extent of the generated map for `config` (independent of seed).
 float UrbanMapHalfExtent(const MapGeneratorConfig& config);

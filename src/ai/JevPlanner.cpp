@@ -1,4 +1,5 @@
 #include "ai/JevPlanner.h"
+#include "game/Geometry.h"
 
 #include <algorithm>
 #include <array>
@@ -105,7 +106,7 @@ std::string ExposureNote(const GameLogic& game, Team team, const Unit& actor,
   for (const Unit& enemy : scene.units) {
     if (enemy.team == team || !enemy.alive || !visibility.UnitVisible(enemy.id)) continue;
     ++visibleCount;
-    if (CanUnitSee(enemy, probe, scene.obstacles, scene.walkSurfaces, scene.ground)) ++seenBy;
+    if (CanUnitSee(enemy, probe, game.SightObstacles(), scene.walkSurfaces, scene.ground)) ++seenBy;
   }
   if (visibleCount == 0) return "no enemy is currently visible, so exposure there is unknown";
   if (seenBy == 0) return "hidden from all " + std::to_string(visibleCount) + " visible enemies "
@@ -299,6 +300,24 @@ std::vector<JevCandidate> GenerateCandidateSpecs(const GameLogic& game, Team tea
   wait.kind = JevActionKind::Wait;
   wait.actorId = actorId;
   candidates.push_back(std::move(wait));
+
+  // Candidate destinations carry the actor's Y. Where the ground at a spot is
+  // under a low deck or ramp (not walkable), the figure can only be there on
+  // the slab, so aim at the surface instead of the unreachable ground below.
+  const Scene& scene = game.GetScene();
+  for (JevCandidate& candidate : candidates) {
+    if (candidate.kind != JevActionKind::Move) continue;
+    glm::vec3& d = candidate.destination;
+    const float groundY = scene.ground.HeightAt(d.x, d.z);
+    for (const WalkSurface& surface : scene.walkSurfaces) {
+      if (!SurfaceContainsXZ(surface, d.x, d.z)) continue;
+      const float clearance = SurfaceHeightAt(surface, d.x, d.z) - groundY;
+      if (clearance > 0.3f && clearance < constants::kMinDeckHeadroom) {
+        d.y = groundY + clearance;
+        break;
+      }
+    }
+  }
   return candidates;
 }
 

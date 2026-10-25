@@ -1618,21 +1618,103 @@ std::vector<glm::vec3> RibbonSide(const UrbanRoad& road, bool left, float half,
   return side;
 }
 
-// A buildable lot: footprint plus height, before it becomes an Obstacle.
+float DistanceToPolygonEdges(glm::vec2 p, const std::vector<glm::vec2>& poly);
+float RimWidth(const MapGeneratorConfig& c);
+
+// A buildable lot of a block (issue #151, roadmap 3.1): the footprint plus
+// where and what it fronts. Becomes exactly one Building (and its Obstacle
+// prism(s)); see UrbanParcel for the public mirror.
 struct Parcel {
-  std::vector<glm::vec2> footprint;
-  float height;
+  std::vector<glm::vec2> footprint;  // Counter-clockwise.
+  int frontageEdge = 0;
+  UrbanStreetClass street = UrbanStreetClass::Cross;
+  float depth = 0.0f;
+  bool corner = false;
+  int block = -1;
+  // Per-parcel draw from the layout rng (the same stream position the old
+  // per-building height jitter used, so layouts never shift): picks the
+  // BuildingKind from the weighted table.
+  float kindRoll = 0.0f;
 };
 
-// Parcel pass output for one block.
-struct BlockParcels {
-  std::vector<glm::vec2> sidewalk;  // The block outline, paved.
-  std::vector<Parcel> parcels;
-};
+// Street class of the street a block edge `a -> b` fronts (`inward` points
+// into the block). Probes just outside the building line and takes the
+// street band it is nearest to: the artery and branch roads, the local cuts
+// of this side of the artery, or the rim street when the probe leaves the map.
+UrbanStreetClass FrontageClass(const CityPlan& city, glm::vec2 a, glm::vec2 b, glm::vec2 inward,
+                               const MapGeneratorConfig& c) {
+  const float half = UrbanMapHalfExtent(c);
+  const float rim = RimWidth(c);
+  const glm::vec2 probe = (a + b) * 0.5f - inward * (c.sidewalkWidth + 0.5f);
+  const glm::vec2 edgeDir = glm::normalize(b - a);
+  constexpr float kParallel = 0.8f;  // |cos| between the edge and the street it fronts.
+  float best = std::numeric_limits<float>::infinity();
+  UrbanStreetClass cls = UrbanStreetClass::Cross;
+  // Rim streets: axis-aligned bands just inside the map square.
+  if (std::fabs(edgeDir.y) > kParallel) {
+    best = std::fabs(std::fabs(probe.x) - (half - rim * 0.5f)) - rim * 0.5f;
+  } else if (std::fabs(edgeDir.x) > kParallel) {
+    best = std::fabs(std::fabs(probe.y) - (half - rim * 0.5f)) - rim * 0.5f;
+  }
+  for (const UrbanRoad& road : city.streets.roads) {
+    for (size_t i = 0; i + 1 < road.centerline.size(); ++i) {
+      const glm::vec2 p(road.centerline[i].x, road.centerline[i].z);
+      const glm::vec2 q(road.centerline[i + 1].x, road.centerline[i + 1].z);
+      if (glm::length(q - p) < 1e-4f ||
+          std::fabs(glm::dot(edgeDir, glm::normalize(q - p))) < kParallel) {
+        continue;
+      }
+      const float d = PointSegmentDistance(probe, p, q) - road.width * 0.5f;
+      if (d < best) {
+        best = d;
+        cls = UrbanStreetClass::Highway;
+      }
+    }
+  }
+  const ArterySpec& artery = city.highway.artery;
+  const int side = glm::dot(probe - artery.origin, artery.normal) >= 0.0f ? 1 : -1;
+  for (const StreetCut& cut : city.streets.cuts) {
+    if (cut.cls == UrbanStreetClass::Highway || cut.side != side) continue;
+    if (std::fabs(glm::dot(edgeDir, cut.dir)) < kParallel) continue;
+    const glm::vec2 n(-cut.dir.y, cut.dir.x);
+    const float d = std::fabs(glm::dot(probe - cut.origin, n)) - cut.width * 0.5f;
+    if (d < best) {
+      best = d;
+      cls = cut.cls;
+    }
+  }
+  return cls;
+}
 
-void AddPolygonBuilding(Scene* scene, std::vector<glm::vec2> footprint, float height,
-                        const GroundY& groundY) {
-  if (footprint.size() < 3 || PolygonArea(footprint) < 1.0f) return;
+// Winds a parcel counter-clockwise (keeping `frontageEdge` on the same
+// edge) and fills in `depth` as the footprint's extent behind the frontage.
+void FinishParcel(Parcel* parcel) {
+  std::vector<glm::vec2>& fp = parcel->footprint;
+  if (PolygonSignedArea(fp) < 0.0f) {
+    std::reverse(fp.begin(), fp.end());
+    parcel->frontageEdge = static_cast<int>(fp.size()) - 2 - parcel->frontageEdge;
+  }
+  const glm::vec2 a = fp[parcel->frontageEdge];
+  const glm::vec2 b = fp[(parcel->frontageEdge + 1) % fp.size()];
+  const glm::vec2 inward = glm::normalize(glm::vec2(-(b - a).y, (b - a).x));  // Left of a->b.
+  float depth = 0.0f;
+  for (const glm::vec2& v : fp) depth = std::max(depth, glm::dot(v - a, inward));
+  parcel->depth = depth;
+}
+
+UrbanParcel ToPublicParcel(const Parcel& parcel) {
+  return UrbanParcel{parcel.footprint, parcel.frontageEdge, parcel.street, parcel.depth,
+                     parcel.corner, parcel.block};
+}
+
+// Smaller footprints than this never become buildings.
+constexpr float kMinBuildingArea = 1.0f;
+
+// Appends a prism over `footprint` from the ground (plus `baseLift`) up
+// `height`, tagged with its Building index; returns the obstacle index.
+int AddPolygonBuilding(Scene* scene, std::vector<glm::vec2> footprint, float baseLift,
+                       float height, int building, const GroundY& groundY) {
+  if (footprint.size() < 3 || PolygonArea(footprint) < kMinBuildingArea) return -1;
   if (PolygonSignedArea(footprint) < 0.0f) std::reverse(footprint.begin(), footprint.end());
   AABB bounds;
   bounds.min = glm::vec3(std::numeric_limits<float>::infinity(), 0.0f,
@@ -1648,10 +1730,11 @@ void AddPolygonBuilding(Scene* scene, std::vector<glm::vec2> footprint, float he
     bounds.max.z = std::max(bounds.max.z, p.y);
   }
   center /= static_cast<float>(footprint.size());
-  const float baseY = groundY(center.x, center.y);
+  const float baseY = groundY(center.x, center.y) + baseLift;
   bounds.min.y = baseY;
   bounds.max.y = baseY + height;
-  scene->obstacles.push_back(Obstacle{bounds, false, std::move(footprint)});
+  scene->obstacles.push_back(Obstacle{bounds, false, std::move(footprint), building});
+  return static_cast<int>(scene->obstacles.size()) - 1;
 }
 
 bool PolygonClearOfRoads(const std::vector<glm::vec2>& polygon,
@@ -1673,23 +1756,37 @@ bool PolygonClearOfRoads(const std::vector<glm::vec2>& polygon,
 }
 
 // Frontage-following building rows: each block edge gets one or more
-// buildings whose outer walls lie on the (possibly angled) frontage, with
+// parcels whose outer walls lie on the (possibly angled) frontage, with
 // wall-to-wall junctions, seeded alley gaps and at least one opening into
 // the courtyard. Acute wedge blocks whose inner ring collapses become one
-// real angled building; blocks whose first inset collapses stay open.
-BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
-                              const std::vector<UrbanRoad>& arteries, const MapGeneratorConfig& c,
-                              Rng* rng) {
-  BlockParcels out;
-  out.sidewalk = block.vertices;
+// real angled parcel; blocks whose first inset collapses stay open. Appends
+// to `out`; `characterRoll` receives the block's neighbourhood draw.
+void PlanBlockParcels(const CityPlan& city, size_t blockIndex, const MapGeneratorConfig& c,
+                      Rng* rng, std::vector<Parcel>* out, float* characterRoll) {
+  const UrbanBlock& block = city.blocks[blockIndex];
   const bool park = rng->Chance(0.10f);  // Pocket park/open lot.
-  const float cluster = rng->Float(c.minBuildingHeight, c.maxBuildingHeight);
-  if (park) return out;
+  *characterRoll = rng->Unit01();
+  if (park) return;
   std::vector<glm::vec2> outer = InsetConvexPolygon(block.vertices, c.sidewalkWidth);
   if (outer.size() < 3 || PolygonArea(outer) < c.minPolygonArea ||
-      !PolygonClearOfRoads(outer, arteries, c.sidewalkWidth)) {
-    return out;
+      !PolygonClearOfRoads(outer, city.streets.roads, c.sidewalkWidth)) {
+    return;
   }
+  glm::vec2 blockCentroid(0.0f);
+  for (const glm::vec2& p : outer) blockCentroid += p;
+  blockCentroid /= static_cast<float>(outer.size());
+  auto inwardOf = [&](glm::vec2 a, glm::vec2 b) {
+    glm::vec2 inward = glm::normalize(glm::vec2(-(b - a).y, (b - a).x));
+    if (glm::dot(inward, blockCentroid - a) < 0.0f) inward = -inward;
+    return inward;
+  };
+  auto emit = [&](Parcel parcel) {
+    if (parcel.footprint.size() < 3 || PolygonArea(parcel.footprint) < kMinBuildingArea) return;
+    parcel.block = static_cast<int>(blockIndex);
+    parcel.kindRoll = rng->Unit01();
+    FinishParcel(&parcel);
+    out->push_back(std::move(parcel));
+  };
   std::vector<glm::vec2> inner = InsetConvexPolygon(outer, c.buildingDepth);
   const std::vector<glm::vec2> courtyard = InsetConvexPolygon(outer, c.buildingDepth + 1.2f);
   // A deep inset can collapse an edge into a self-crossing "bowtie" while
@@ -1711,7 +1808,7 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
   };
   if (!ringUsable()) {
     // Too shallow for a courtyard ring (opposite frontages would overlap):
-    // a row of slab buildings along the block's longest frontage instead.
+    // a row of slab parcels along the block's longest frontage instead.
     // An acute wedge block keeps its sharp corner in the end slab.
     glm::vec2 axis(1.0f, 0.0f);
     float longest = 0.0f;
@@ -1736,11 +1833,34 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
     }
     for (auto& slab : slabs) {
       if (PolygonArea(slab) < c.minPolygonArea * 0.35f) continue;
-      out.parcels.push_back({std::move(slab),
-                         std::clamp(cluster + rng->Float(-1.2f, 1.2f), c.minBuildingHeight,
-                                    c.maxBuildingHeight)});
+      // The slab fronts the longest of its edges that lie on the building
+      // line; it is a corner piece when it keeps one of the block's corners.
+      Parcel parcel;
+      float best = -1.0f;
+      bool bestOnLine = false;
+      for (size_t i = 0; i < slab.size(); ++i) {
+        const glm::vec2 a = slab[i], b = slab[(i + 1) % slab.size()];
+        const float length = glm::length(b - a);
+        const bool onLine = DistanceToPolygonEdges(a, outer) < 1e-3f &&
+                            DistanceToPolygonEdges(b, outer) < 1e-3f &&
+                            DistanceToPolygonEdges((a + b) * 0.5f, outer) < 1e-3f;
+        if (onLine && !bestOnLine) best = -1.0f;  // Edges on the line beat any chord.
+        if ((onLine || !bestOnLine) && length > best) {
+          best = length;
+          bestOnLine = onLine;
+          parcel.frontageEdge = static_cast<int>(i);
+        }
+      }
+      for (const glm::vec2& v : slab) {
+        for (const glm::vec2& o : outer) parcel.corner |= glm::distance(v, o) < 1e-3f;
+      }
+      const glm::vec2 fa = slab[parcel.frontageEdge];
+      const glm::vec2 fb = slab[(parcel.frontageEdge + 1) % slab.size()];
+      parcel.street = FrontageClass(city, fa, fb, inwardOf(fa, fb), c);
+      parcel.footprint = std::move(slab);
+      emit(std::move(parcel));
     }
-    return out;
+    return;
   }
 
   // Plan every junction first so the block is guaranteed an opening.
@@ -1767,6 +1887,8 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
     if (!pieces[e]) continue;
     const size_t next = (e + 1) % edges;
     const float length = glm::distance(outer[e], outer[next]);
+    const UrbanStreetClass street =
+        FrontageClass(city, outer[e], outer[next], inwardOf(outer[e], outer[next]), c);
     const int count = pieces[e];
     std::vector<float> bounds(count + 1);
     for (int i = 0; i <= count; ++i) {
@@ -1805,18 +1927,176 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
       tb = std::min(tb, 0.9995f);
       float ua = innerU(ta, wallSkew[i]), ub = innerU(tb, wallSkew[i + 1]);
       if (ub < ua) ua = ub = (ua + ub) * 0.5f;
-      std::vector<glm::vec2> footprint = {
-          glm::mix(outer[e], outer[next], ta), glm::mix(outer[e], outer[next], tb),
-          inner[e] + innerDir * ub, inner[e] + innerDir * ua};
+      Parcel parcel;
+      parcel.footprint = {glm::mix(outer[e], outer[next], ta), glm::mix(outer[e], outer[next], tb),
+                          inner[e] + innerDir * ub, inner[e] + innerDir * ua};
       // A back wall pinched to a point becomes a (still convex) triangle.
-      if (ub - ua < 0.05f) footprint.pop_back();
-      if (PolygonArea(footprint) < c.minPolygonArea * 0.18f) continue;
-      out.parcels.push_back({std::move(footprint),
-                         std::clamp(cluster + rng->Float(-1.2f, 1.2f), c.minBuildingHeight,
-                                    c.maxBuildingHeight)});
+      if (ub - ua < 0.05f) parcel.footprint.pop_back();
+      if (PolygonArea(parcel.footprint) < c.minPolygonArea * 0.18f) continue;
+      parcel.frontageEdge = 0;
+      parcel.street = street;
+      parcel.corner = (i == 0 && !cornerGap[e]) || (i == count - 1 && !cornerGap[next]);
+      emit(std::move(parcel));
     }
   }
-  return out;
+}
+
+// Parcel pass over every block, in block order (the layout rng's draws
+// here are the only ones the building fabric makes, so UrbanParcels can
+// replay them). `characterRolls` gets one draw per block.
+std::vector<Parcel> PlanParcels(const CityPlan& city, const MapGeneratorConfig& c, Rng* rng,
+                                std::vector<float>* characterRolls) {
+  std::vector<Parcel> parcels;
+  characterRolls->assign(city.blocks.size(), 0.0f);
+  for (size_t blockIndex = 0; blockIndex < city.blocks.size(); ++blockIndex) {
+    PlanBlockParcels(city, blockIndex, c, rng, &parcels, &(*characterRolls)[blockIndex]);
+  }
+  return parcels;
+}
+
+// --- Building archetypes (issue #151, roadmap 3.2) -------------------------
+
+constexpr uint32_t kArchetypeStream = 0xa5c47e75u;  // Floors, variants, setbacks.
+constexpr uint32_t kMassingStream = 0x3a55196eu;    // Parapets, roof furniture, awnings.
+
+// Street-class-weighted kind table, Residential/MixedUse/Office/Commercial/
+// Garage (Civic is reserved for the landmark towers). Artery frontage leans
+// office/mixed-use, back streets residential/warehouse.
+const float kKindWeights[3][kBuildingKindCount] = {
+    /* Highway */ {0.08f, 0.34f, 0.40f, 0.10f, 0.0f, 0.08f},
+    /* Avenue  */ {0.26f, 0.30f, 0.24f, 0.12f, 0.0f, 0.08f},
+    /* Cross   */ {0.42f, 0.15f, 0.09f, 0.20f, 0.0f, 0.14f},
+};
+// Per-character multipliers on the table above (Mixed/Downtown/Residential/
+// Industrial), so a block's buildings agree with their neighbours.
+const float kCharacterBias[4][kBuildingKindCount] = {
+    /* Mixed       */ {1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 1.0f},
+    /* Downtown    */ {0.5f, 1.6f, 3.0f, 0.7f, 0.0f, 1.2f},
+    /* Residential */ {2.5f, 1.3f, 0.3f, 0.5f, 0.0f, 0.6f},
+    /* Industrial  */ {0.4f, 0.5f, 0.6f, 2.5f, 0.0f, 2.0f},
+};
+
+int CharacterIndex(BlockCharacter character) {
+  switch (character) {
+    case BlockCharacter::Downtown: return 1;
+    case BlockCharacter::Residential: return 2;
+    case BlockCharacter::Industrial: return 3;
+    default: return 0;
+  }
+}
+
+// A block's character from its roll: blocks with artery frontage are mostly
+// downtown, the rest mostly residential, unless the config forces one.
+BlockCharacter DrawCharacter(float roll, bool highwayFrontage, const MapGeneratorConfig& c) {
+  if (c.character != BlockCharacter::Auto) return c.character;
+  const BlockCharacter order[4] = {BlockCharacter::Downtown, BlockCharacter::Mixed,
+                                   BlockCharacter::Residential, BlockCharacter::Industrial};
+  const float downtownWeights[4] = {0.45f, 0.30f, 0.10f, 0.15f};
+  const float outskirtWeights[4] = {0.10f, 0.30f, 0.40f, 0.20f};
+  const float* weights = highwayFrontage ? downtownWeights : outskirtWeights;
+  float acc = 0.0f;
+  for (int i = 0; i < 4; ++i) {
+    acc += weights[i];
+    if (roll < acc) return order[i];
+  }
+  return order[3];
+}
+
+BuildingKind DrawKind(float roll, UrbanStreetClass street, BlockCharacter character) {
+  const float* base = kKindWeights[static_cast<int>(street)];
+  const float* bias = kCharacterBias[CharacterIndex(character)];
+  float total = 0.0f;
+  for (int k = 0; k < kBuildingKindCount; ++k) total += base[k] * bias[k];
+  float acc = 0.0f;
+  for (int k = 0; k < kBuildingKindCount; ++k) {
+    acc += base[k] * bias[k] / total;
+    if (roll < acc) return static_cast<BuildingKind>(k);
+  }
+  return BuildingKind::Residential;
+}
+
+// Floor count/height per kind; the building's height follows from them
+// (replacing the old cluster +-1.2 draw), kept within the config's ordinary
+// height range by trimming/adding floors.
+void DrawFloors(Building* b, const MapGeneratorConfig& c, Rng* rng) {
+  switch (b->kind) {
+    case BuildingKind::Residential:
+      b->groundFloorHeight = b->floorHeight = 3.0f;
+      b->floorCount = rng->Int(2, 3);
+      break;
+    case BuildingKind::MixedUse:
+      b->groundFloorHeight = 4.0f;  // Shopfront floor.
+      b->floorHeight = 3.0f;
+      b->floorCount = rng->Int(2, 3);
+      break;
+    case BuildingKind::Office:
+      b->groundFloorHeight = b->floorHeight = 3.5f;
+      b->floorCount = rng->Int(2, 3);
+      break;
+    case BuildingKind::Commercial:
+      b->groundFloorHeight = b->floorHeight = rng->Float(4.5f, 5.5f);  // One tall hall.
+      b->floorCount = 1;
+      break;
+    case BuildingKind::Garage:
+      b->groundFloorHeight = b->floorHeight = 2.8f;  // Parking decks.
+      b->floorCount = rng->Int(2, 3);
+      break;
+    case BuildingKind::Civic:
+      b->groundFloorHeight = b->floorHeight = 3.5f;
+      b->floorCount = 4;
+      break;
+  }
+  while (b->floorCount > 1 && b->Height() > c.maxBuildingHeight + 1e-3f) --b->floorCount;
+  while (b->Height() < c.minBuildingHeight - 1e-3f) ++b->floorCount;
+}
+
+// Kind, floors, facade variant and setback per parcel, then the landmark
+// towers (Civic, from the layout rng exactly where the old tower pick drew).
+std::vector<Building> PlanBuildings(const std::vector<Parcel>& parcels,
+                                    const std::vector<float>& characterRolls, uint32_t seed,
+                                    const MapGeneratorConfig& c, Rng* layoutRng) {
+  Rng rng(seed ^ kArchetypeStream);
+  std::vector<bool> highwayFrontage(characterRolls.size(), false);
+  for (const Parcel& parcel : parcels) {
+    if (parcel.street == UrbanStreetClass::Highway) highwayFrontage[parcel.block] = true;
+  }
+  std::vector<Building> buildings;
+  buildings.reserve(parcels.size());
+  for (size_t i = 0; i < parcels.size(); ++i) {
+    const Parcel& parcel = parcels[i];
+    const BlockCharacter character =
+        DrawCharacter(characterRolls[parcel.block], highwayFrontage[parcel.block], c);
+    Building b;
+    b.kind = DrawKind(parcel.kindRoll, parcel.street, character);
+    b.parcel = static_cast<int>(i);
+    b.block = parcel.block;
+    DrawFloors(&b, c, &rng);
+    b.style = static_cast<int>(b.kind) * 2 + (rng.Chance(0.5f) ? 1 : 0);
+    // Offices step their top floor back when there is room for it.
+    if (b.kind == BuildingKind::Office && b.floorCount >= 3 && rng.Chance(0.6f)) {
+      b.upperObstacle = -2;  // Request; EmitBuildings resolves it (or drops it).
+    }
+    buildings.push_back(b);
+  }
+
+  // Landmark towers: the same two picks the old generator made.
+  const int towers = std::min<int>(c.towerCount, static_cast<int>(buildings.size()));
+  std::vector<size_t> candidates(buildings.size());
+  for (size_t i = 0; i < candidates.size(); ++i) candidates[i] = i;
+  for (int i = 0; i < towers && !candidates.empty(); ++i) {
+    const size_t pick =
+        static_cast<size_t>(layoutRng->Int(0, static_cast<int>(candidates.size()) - 1));
+    Building& b = buildings[candidates[pick]];
+    const float height = layoutRng->Float(c.towerMinHeight, c.towerMaxHeight);
+    b.kind = BuildingKind::Civic;
+    b.style = static_cast<int>(b.kind) * 2 + (b.style & 1);
+    b.floorHeight = 3.5f;
+    b.floorCount = std::max(2, static_cast<int>(std::lround(height / b.floorHeight)));
+    b.groundFloorHeight = height - static_cast<float>(b.floorCount - 1) * b.floorHeight;
+    b.upperObstacle = -1;
+    candidates.erase(candidates.begin() + pick);
+  }
+  return buildings;
 }
 
 // True when two deck spans overlap in plan at matching height, i.e. a figure
@@ -2007,7 +2287,13 @@ void PlaceZiplines(Scene* scene, const std::vector<UrbanBlock>& blocks, uint32_t
       glm::vec2 centre(0.0f);
       for (const glm::vec2& v : footprints[i]) centre += v;
       centre /= static_cast<float>(footprints[i].size());
-      if (scene->obstacles[i].bounds.max.y >= kMinRoofHeight && PointInConvexPolygon(centre, poly)) {
+      // A base prism carrying a set-back top floor has no free roof.
+      const int building = scene->obstacles[i].building;
+      const bool covered = building >= 0 &&
+                           scene->buildings[building].upperObstacle >= 0 &&
+                           scene->buildings[building].obstacle == static_cast<int>(i);
+      if (!covered && scene->obstacles[i].bounds.max.y >= kMinRoofHeight &&
+          PointInConvexPolygon(centre, poly)) {
         roofs.push_back(i);
       }
     }
@@ -2436,7 +2722,7 @@ void EmitTerrainCliffs(Scene* scene, const CityPlan& city, const MapGeneratorCon
       if (top - base < 0.45f) continue;
       std::vector<glm::vec2> footprint = {p0 - n * kNavHalfWidth, p1 - n * kNavHalfWidth,
                                           p1 + n * kNavHalfWidth, p0 + n * kNavHalfWidth};
-      AddPolygonBuilding(scene, footprint, top - base, [base](float, float) { return base; });
+      AddPolygonBuilding(scene, footprint, 0.0f, top - base, -1, [base](float, float) { return base; });
       scene->obstacles.back().navOnly = true;
     }
   };
@@ -2836,54 +3122,17 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
   }
 }
 
-// Sidewalks and buildings from the parcel pass, then landmark towers.
-void EmitBuildings(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, Rng* rng,
+// Sidewalk rings, then one Building per parcel: its base prism over the
+// whole footprint and, for a set-back office, the top floor as a second,
+// inset prism standing on it (both tagged with the Building index).
+void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>& parcels,
+                   std::vector<Building> buildings, const MapGeneratorConfig& c,
                    const GroundY& groundY) {
-  std::vector<BlockParcels> blocks;
-  for (size_t blockIndex = 0; blockIndex < city.blocks.size(); ++blockIndex) {
-    blocks.push_back(
-        PlanBlockParcels(city.blocks[blockIndex], blockIndex, city.streets.roads, c, rng));
-  }
-  // Parcels make way for the stairs climbing a terrain level: any parcel
-  // overlapping an access (plus clearance) is dropped.
-  for (const TerrainWall& wall : scene->terrainWalls) {
-    for (const TerrainAccess& access : wall.accesses) {
-      const auto clearance = AccessFootprint(access, 1.8f);
-      for (BlockParcels& block : blocks) {
-        auto& parcels = block.parcels;
-        parcels.erase(std::remove_if(parcels.begin(), parcels.end(),
-                                     [&](const Parcel& parcel) {
-                                       return PolygonsOverlap(parcel.footprint, clearance);
-                                     }),
-                      parcels.end());
-      }
-    }
-  }
-  // A building needs a level foundation. Parcels keep the sidewalk inset
-  // from their frontage, except that a sliver block's mitered inset can
-  // leave a corner nearly on the block edge, where terrain ground already
-  // steps toward a level wall or ramp channel. Such a parcel is dropped
-  // rather than built on a slope. Flat cities are untouched.
-  if (!scene->ground.Empty()) {
-    for (BlockParcels& block : blocks) {
-      auto& parcels = block.parcels;
-      parcels.erase(std::remove_if(parcels.begin(), parcels.end(),
-                                   [&](const Parcel& parcel) {
-                                     const glm::vec2 center = PolygonCenter(parcel.footprint);
-                                     const float base = groundY(center.x, center.y);
-                                     for (const glm::vec2& p : parcel.footprint) {
-                                       if (std::fabs(groundY(p.x, p.y) - base) > 0.02f) return true;
-                                     }
-                                     return false;
-                                   }),
-                    parcels.end());
-    }
-  }
-  for (BlockParcels& block : blocks) {
+  for (const UrbanBlock& block : city.blocks) {
     // Sidewalk ring only: the parcel interior stays at grade. Each block
     // edge owns the convex strip of the block within `sidewalkWidth` of it;
     // strips overlap coplanar at the corners.
-    const std::vector<glm::vec2>& outline = block.sidewalk;
+    const std::vector<glm::vec2>& outline = block.vertices;
     glm::vec2 centroid(0.0f);
     for (const glm::vec2& p : outline) centroid += p;
     centroid /= static_cast<float>(outline.size());
@@ -2911,23 +3160,216 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const MapGeneratorConfig&
       }
       scene->sidewalkSurfaces.push_back(std::move(sidewalk));
     }
-    for (Parcel& parcel : block.parcels) {
-      AddPolygonBuilding(scene, std::move(parcel.footprint), parcel.height, groundY);
+  }
+  constexpr float kSetbackInset = 1.2f;
+  // Parcels make way for the stairs climbing a terrain level: any parcel
+  // overlapping an access (plus clearance) is dropped.
+  std::vector<std::vector<glm::vec2>> accessClearances;
+  for (const TerrainWall& wall : scene->terrainWalls) {
+    for (const TerrainAccess& access : wall.accesses) {
+      accessClearances.push_back(AccessFootprint(access, 1.8f));
     }
   }
-
-  // Landmark towers reuse actual polygon footprints rather than reverting to
-  // bounding boxes.
-  const int towers = std::min<int>(c.towerCount, static_cast<int>(scene->obstacles.size()));
-  std::vector<size_t> candidates;
-  for (size_t i = 0; i < scene->obstacles.size(); ++i) {
-    if (!scene->obstacles[i].footprint.empty()) candidates.push_back(i);
+  // A building needs a level foundation. Parcels keep the sidewalk inset
+  // from their frontage, except that a sliver block's mitered inset can
+  // leave a corner nearly on the block edge, where terrain ground already
+  // steps toward a level wall or ramp channel. Such a parcel is dropped
+  // rather than built on a slope. Flat cities are untouched.
+  const auto dropped = [&](const Parcel& parcel) {
+    for (const auto& clearance : accessClearances) {
+      if (PolygonsOverlap(parcel.footprint, clearance)) return true;
+    }
+    if (scene->ground.Empty()) return false;
+    const glm::vec2 center = PolygonCenter(parcel.footprint);
+    const float base = groundY(center.x, center.y);
+    for (const glm::vec2& p : parcel.footprint) {
+      if (std::fabs(groundY(p.x, p.y) - base) > 0.02f) return true;
+    }
+    return false;
+  };
+  for (size_t i = 0; i < parcels.size(); ++i) {
+    if (dropped(parcels[i])) continue;
+    Building& b = buildings[i];
+    const int index = static_cast<int>(scene->buildings.size());
+    const bool setback = b.upperObstacle == -2;
+    std::vector<glm::vec2> upper;
+    if (setback) {
+      upper = InsetConvexPolygon(parcels[i].footprint, kSetbackInset);
+      if (upper.size() < 3 || PolygonArea(upper) < 6.0f ||
+          PolygonArea(upper) < 0.4f * PolygonArea(parcels[i].footprint)) {
+        upper.clear();
+      }
+    }
+    b.upperObstacle = -1;
+    const float height = b.Height();
+    const float baseHeight = upper.empty() ? height : height - b.floorHeight;
+    b.obstacle = AddPolygonBuilding(scene, parcels[i].footprint, 0.0f, baseHeight, index, groundY);
+    if (!upper.empty()) {
+      b.upperObstacle =
+          AddPolygonBuilding(scene, std::move(upper), baseHeight, b.floorHeight, index, groundY);
+    }
+    scene->buildings.push_back(b);
   }
-  for (int i = 0; i < towers && !candidates.empty(); ++i) {
-    const size_t pick = static_cast<size_t>(rng->Int(0, static_cast<int>(candidates.size()) - 1));
-    AABB& bounds = scene->obstacles[candidates[pick]].bounds;
-    bounds.max.y = bounds.min.y + rng->Float(c.towerMinHeight, c.towerMaxHeight);
-    candidates.erase(candidates.begin() + pick);
+}
+
+// --- Massing details (issue #151, roadmap 3.3) ------------------------------
+
+// Parapets, roof furniture and awnings (sight-blocking, not collision). Every
+// roof gets them, zipline roofs included: a parapet is skipped at random
+// (the furniture stays), and furniture keeps clear of zipline landings.
+// Awnings hang over the sidewalk well above head height. Own rng stream, so
+// the buildings never move when the dressing changes.
+void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed) {
+  Rng rng(seed ^ kMassingStream);
+  constexpr float kParapetThickness = 0.25f;
+  constexpr float kAwningDepth = 1.1f;  // Over the 1.5 sidewalk, short of the curb.
+  constexpr float kAwningThickness = 0.15f;
+  struct Fixture { float along, across, height; };
+  const Fixture kTank{1.2f, 1.2f, 1.5f}, kAc{0.9f, 0.6f, 0.6f}, kBulkhead{2.2f, 1.6f, 1.3f};
+
+  for (size_t bi = 0; bi < scene->buildings.size(); ++bi) {
+    const Building& b = scene->buildings[bi];
+    const Parcel& parcel = parcels[b.parcel];
+    const Obstacle& roofPrism =
+        scene->obstacles[b.upperObstacle >= 0 ? b.upperObstacle : b.obstacle];
+    const std::vector<glm::vec2>& roof = roofPrism.footprint;
+    const float roofTop = roofPrism.bounds.max.y;
+    const glm::vec2 fa = parcel.footprint[parcel.frontageEdge];
+    const glm::vec2 fb = parcel.footprint[(parcel.frontageEdge + 1) % parcel.footprint.size()];
+    const glm::vec2 along = glm::normalize(fb - fa);
+    const glm::vec2 outward(along.y, -along.x);  // Right of a CCW edge: the street side.
+
+    std::vector<glm::vec2> landings;  // Zipline feet on this roof.
+    for (const Zipline& line : scene->ziplines) {
+      for (const glm::vec3& foot : {line.a, line.b}) {
+        if (std::fabs(foot.y - roofTop) < 0.2f &&
+            PointInConvexPolygon(glm::vec2(foot.x, foot.z), roof)) {
+          landings.emplace_back(foot.x, foot.z);
+        }
+      }
+    }
+    constexpr float kLandingClearance = 1.5f;
+    const bool wrapAround = rng.Float(0.0f, 1.0f) < 0.75f;
+    auto push = [&](MassingDetail::Kind kind, std::vector<glm::vec2> footprint, float y0,
+                    float y1) {
+      if (PolygonSignedArea(footprint) < 0.0f) std::reverse(footprint.begin(), footprint.end());
+      // Parapets and furniture also stop figures walking on the roof slab.
+      if (kind != MassingDetail::Kind::Awning) {
+        for (WalkSurface& slab : scene->walkSurfaces) {
+          if (slab.vertices.empty() || !slab.neighbors.empty() || slab.connectsToGround ||
+              std::fabs(slab.vertices[0].y - y0) > 0.1f) {
+            continue;
+          }
+          glm::vec2 mid(0.0f);
+          for (const glm::vec2& v : footprint) mid += v / static_cast<float>(footprint.size());
+          if (SurfaceContainsXZ(slab, mid.x, mid.y)) {
+            slab.blockers.push_back(footprint);
+            break;
+          }
+        }
+      }
+      scene->massing.push_back(
+          MassingDetail{kind, std::move(footprint), y0, y1, static_cast<int>(bi)});
+    };
+
+    {
+      // Parapet: a low wall along every roof edge (most roofs).
+      float parapet = 0.6f;
+      switch (b.kind) {
+        case BuildingKind::Residential: parapet = 0.6f; break;
+        case BuildingKind::MixedUse: parapet = 0.7f; break;
+        case BuildingKind::Office: parapet = 0.9f; break;
+        case BuildingKind::Commercial: parapet = 0.5f; break;
+        case BuildingKind::Civic: parapet = 1.0f; break;
+        case BuildingKind::Garage: parapet = 1.1f; break;  // Deck guard wall.
+      }
+      // Exact miters from the inset outline; a roof too small or too sharp
+      // for a valid inset (collapsed or flipped edges) gets no parapet.
+      const std::vector<glm::vec2> coping = InsetConvexPolygon(roof, kParapetThickness);
+      bool copingUsable = coping.size() == roof.size() && PolygonSignedArea(coping) > 0.1f;
+      for (size_t e = 0; copingUsable && e < roof.size(); ++e) {
+        const size_t next = (e + 1) % roof.size();
+        copingUsable = glm::dot(roof[next] - roof[e], coping[next] - coping[e]) > 0.0f &&
+                       PointInConvexPolygon(coping[e], roof);
+      }
+      for (size_t e = 0; wrapAround && copingUsable && e < roof.size(); ++e) {
+        const size_t next = (e + 1) % roof.size();
+        if (glm::distance(roof[e], roof[next]) < 2.0f * kParapetThickness) continue;
+        // Leave a gap where a zipline leaves the roof.
+        bool landingEdge = false;
+        for (const glm::vec2& landing : landings) {
+          landingEdge |= PointSegmentDistance(landing, roof[e], roof[next]) < 0.6f;
+        }
+        if (landingEdge) continue;
+        push(MassingDetail::Kind::Parapet, {roof[e], roof[next], coping[next], coping[e]},
+             roofTop, roofTop + parapet);
+      }
+
+      // Roof furniture: water tanks, AC units, stair bulkheads, placed inside
+      // the roof clear of the parapet and of one another.
+      int want = 0;
+      std::vector<const Fixture*> menu;
+      switch (b.kind) {
+        case BuildingKind::Residential: want = rng.Int(1, 2); menu = {&kTank, &kAc}; break;
+        case BuildingKind::MixedUse: want = rng.Int(1, 2); menu = {&kTank, &kAc, &kBulkhead}; break;
+        case BuildingKind::Office: want = rng.Int(1, 3); menu = {&kAc, &kBulkhead}; break;
+        case BuildingKind::Commercial: want = rng.Int(2, 4); menu = {&kAc}; break;
+        case BuildingKind::Civic: want = 1; menu = {&kBulkhead}; break;
+        case BuildingKind::Garage: want = rng.Int(0, 1); menu = {&kBulkhead}; break;
+      }
+      std::vector<std::pair<glm::vec2, float>> placed;  // Centre, half-diagonal.
+      for (int n = 0; n < want; ++n) {
+        const Fixture& f = *menu[static_cast<size_t>(rng.Int(0, static_cast<int>(menu.size()) - 1))];
+        const float halfDiag = 0.5f * std::hypot(f.along, f.across);
+        const float margin = kParapetThickness + 0.4f;  // Clear of the parapet.
+        glm::vec2 lo(std::numeric_limits<float>::infinity()), hi(-lo);
+        for (const glm::vec2& v : roof) {
+          lo = glm::min(lo, v);
+          hi = glm::max(hi, v);
+        }
+        if (PolygonArea(roof) < 4.0f * (halfDiag + margin) * (halfDiag + margin)) break;
+        for (int attempt = 0; attempt < 12; ++attempt) {
+          const glm::vec2 centre(rng.Float(lo.x, hi.x), rng.Float(lo.y, hi.y));
+          // Every corner on the roof and clear of its edge (checked against
+          // the roof itself: a deep inset of a sharp roof isn't trustworthy).
+          const glm::vec2 u = along * (0.5f * f.along), v = outward * (0.5f * f.across);
+          const glm::vec2 corners[4] = {centre - u - v, centre + u - v, centre + u + v,
+                                        centre - u + v};
+          bool fits = true;
+          for (const glm::vec2& corner : corners) {
+            fits &= PointInConvexPolygon(corner, roof) &&
+                    DistanceToPolygonEdges(corner, roof) >= margin;
+          }
+          for (const glm::vec2& landing : landings) {
+            fits &= glm::distance(centre, landing) >= halfDiag + kLandingClearance;
+          }
+          if (!fits) continue;
+          bool overlaps = false;
+          for (const auto& [other, r] : placed) {
+            overlaps |= glm::distance(centre, other) < r + halfDiag + 0.3f;
+          }
+          if (overlaps) continue;
+          push(MassingDetail::Kind::RoofFixture, {corners[0], corners[1], corners[2], corners[3]},
+               roofTop, roofTop + f.height);
+          placed.emplace_back(centre, halfDiag);
+          break;
+        }
+      }
+    }
+
+    // Awning/canopy over the shopfront of commercial ground floors.
+    if (b.kind == BuildingKind::MixedUse || b.kind == BuildingKind::Commercial) {
+      const float frontage = glm::distance(fa, fb);
+      if (frontage > 2.0f) {
+        const float trim = 0.4f;
+        const glm::vec2 a = fa + along * trim, d = fb - along * trim;
+        const float base = scene->obstacles[b.obstacle].bounds.min.y;
+        const float y0 = base + std::min(b.groundFloorHeight - 0.9f, 3.4f);
+        push(MassingDetail::Kind::Awning,
+             {a, d, d + outward * kAwningDepth, a + outward * kAwningDepth}, y0,
+             y0 + kAwningThickness);
+      }
+    }
   }
 }
 
@@ -2963,11 +3405,15 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   EmitHighwaySurfaces(&scene, city, c, groundY);
   EmitStreetSurfaces(&scene, city, c);
   EmitPiers(&scene, city, c, groundY);
-  EmitBuildings(&scene, city, c, &rng, groundY);
+  std::vector<float> characterRolls;
+  const std::vector<Parcel> parcels = PlanParcels(city, c, &rng, &characterRolls);
+  EmitBuildings(&scene, city, parcels, PlanBuildings(parcels, characterRolls, seed, c, &rng), c,
+                groundY);
   EmitSpawns(&scene, city, c, groundY);
   const size_t roofCount = scene.obstacles.size();
   EmitTerrainCliffs(&scene, city, c);
   PlaceZiplines(&scene, city.blocks, seed, c, roofCount);
+  EmitMassing(&scene, parcels, seed);
   return scene;
 }
 
@@ -2981,6 +3427,28 @@ FeatureToggle* UrbanFeatureByName(UrbanFeatures* f, const std::string& name) {
   if (name == "interiors") return &f->interiors;
   if (name == "rail") return &f->rail;
   return nullptr;
+}
+
+bool ParseBlockCharacter(const std::string& text, BlockCharacter* character) {
+  if (text == "auto") *character = BlockCharacter::Auto;
+  else if (text == "mixed") *character = BlockCharacter::Mixed;
+  else if (text == "downtown") *character = BlockCharacter::Downtown;
+  else if (text == "residential") *character = BlockCharacter::Residential;
+  else if (text == "industrial") *character = BlockCharacter::Industrial;
+  else return false;
+  return true;
+}
+
+std::vector<UrbanParcel> UrbanParcels(uint32_t seed, const MapGeneratorConfig& c) {
+  if (c.arteryCount <= 0) return {};
+  Rng rng(seed);  // Mirrors GenerateArterialUrbanMap: the parcel pass draws first.
+  const CityPlan city = BuildCityPlan(seed, c);
+  std::vector<float> characterRolls;
+  std::vector<UrbanParcel> out;
+  for (const Parcel& parcel : PlanParcels(city, c, &rng, &characterRolls)) {
+    out.push_back(ToPublicParcel(parcel));
+  }
+  return out;
 }
 
 bool ParseFeatureMode(const std::string& text, FeatureMode* mode) {

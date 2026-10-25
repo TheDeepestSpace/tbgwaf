@@ -136,7 +136,7 @@ void NavMesh::Build(const std::vector<Obstacle>& obstacles, const NavRegion& reg
                      const std::vector<WalkSurface>* walkSurfaces) {
   ground_ = ground ? *ground : HeightField{};
   walkSurfaces_ = walkSurfaces ? *walkSurfaces : std::vector<WalkSurface>{};
-  BuildSurfaceCaches();
+  BuildSurfaceCaches(agentRadius);
   polygonMode_ = false;
   paddedPolygons_.clear();
   paddedPolygons_.reserve(obstacles.size());
@@ -144,6 +144,7 @@ void NavMesh::Build(const std::vector<Obstacle>& obstacles, const NavRegion& reg
     polygonMode_ |= !obstacle.footprint.empty();
     paddedPolygons_.push_back(ExpandConvexPolygon(ObstacleFootprint(obstacle), agentRadius));
   }
+  AddLowDeckBlockers(agentRadius);
   BuildGroundMesh(ObstacleBounds(obstacles), region, agentRadius);
   AddClimbConnections(obstacles, agentRadius);
 }
@@ -267,8 +268,17 @@ void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float 
   }
 }
 
-void NavMesh::BuildSurfaceCaches() {
+void NavMesh::BuildSurfaceCaches(float agentRadius) {
   const size_t n = walkSurfaces_.size();
+  surfaceBlockers_.assign(n, {});
+  for (size_t i = 0; i < n; ++i) {
+    for (const auto& blocker : walkSurfaces_[i].blockers) {
+      // Half the usual obstacle padding: roof furniture is knee-to-waist-high
+      // scenery, so a figure may stand close enough to brush it.
+      std::vector<glm::vec2> padded = ExpandConvexPolygon(blocker, 0.5f * agentRadius);
+      if (!padded.empty()) surfaceBlockers_[i].push_back(std::move(padded));
+    }
+  }
   surfaceFootprints_.assign(n, {});
   surfaceBounds_.assign(n, glm::vec4(0.0f));
   surfaceCenters_.assign(n, glm::vec3(0.0f));
@@ -359,6 +369,13 @@ bool NavMesh::SurfaceContains(int surface, float x, float z) const {
   const glm::vec4& b = surfaceBounds_[surface];
   if (x < b.x || x > b.z || z < b.y || z > b.w) return false;
   return PointInConvexPolygon({x, z}, surfaceFootprints_[surface]);
+}
+
+bool NavMesh::SurfaceBlocked(int surface, float x, float z) const {
+  for (const auto& polygon : surfaceBlockers_[surface]) {
+    if (PointInConvexPolygon({x, z}, polygon)) return true;
+  }
+  return false;
 }
 
 const std::vector<int>& NavMesh::SurfaceCandidates(float x, float z) const {
@@ -489,7 +506,7 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
       const float x = field.minX + ix * field.step;
       const float z = field.minZ + iz * field.step;
       for (int surface : SurfaceCandidates(x, z)) {
-        if (!SurfaceContains(surface, x, z)) continue;
+        if (!SurfaceContains(surface, x, z) || SurfaceBlocked(surface, x, z)) continue;
         glm::vec3 goal(x, SurfaceHeightAt(walkSurfaces_[surface], x, z), z);
         std::vector<glm::vec3> path;
         bool found = false;
@@ -610,6 +627,9 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
       static_cast<size_t>(goalSurface) >= walkSurfaces_.size()) {
     return false;
   }
+  if (startSurface == goalSurface && !surfaceBlockers_[startSurface].empty()) {
+    return FindBlockedSurfacePath(startSurface, start, goal, outPath);
+  }
   if (startSurface != goalSurface && surfaceParent_[startSurface][goalSurface] < 0) return false;
   std::vector<int> route;
   for (int node = goalSurface; node >= 0; node = surfaceParent_[startSurface][node]) {
@@ -711,6 +731,73 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
     flush(transition);
   }
   flush(goal);
+  return true;
+}
+
+// Shortest path across one patch around its padded blockers (visibility
+// graph over their corners). A start inside a padded blocker (a landing next
+// to a parapet) may leave it; a goal inside one is refused.
+bool NavMesh::FindBlockedSurfacePath(int surface, glm::vec3 start, glm::vec3 goal,
+                                     std::vector<glm::vec3>* outPath) const {
+  const WalkSurface& patch = walkSurfaces_[surface];
+  const auto& blockers = surfaceBlockers_[surface];
+  const glm::vec2 s(start.x, start.z), g(goal.x, goal.z);
+  if (SurfaceBlocked(surface, g.x, g.y)) return false;
+  std::vector<glm::vec2> nodes = {s, g};
+  for (const auto& polygon : blockers) {
+    // Way-nodes sit a nudge outside their blocker: a corner on the boundary
+    // itself would read as blocked, and a leg running exactly along an edge
+    // is numerically unsafe against the strict-interior segment test.
+    for (const glm::vec2& p : ExpandConvexPolygon(polygon, 1e-3f)) {
+      if (SurfaceContains(surface, p.x, p.y) && !SurfaceBlocked(surface, p.x, p.y)) {
+        nodes.push_back(p);
+      }
+    }
+  }
+  std::vector<char> startInside(blockers.size(), 0);
+  for (size_t i = 0; i < blockers.size(); ++i) {
+    startInside[i] = PointInConvexPolygon(s, blockers[i]);
+  }
+  const auto clear = [&](size_t from, size_t to) {
+    for (size_t i = 0; i < blockers.size(); ++i) {
+      if (from == 0 && startInside[i]) continue;
+      if (SegmentEntersConvexPolygon(nodes[from], nodes[to], blockers[i])) return false;
+    }
+    return true;
+  };
+  const size_t n = nodes.size();
+  const float inf = std::numeric_limits<float>::infinity();
+  std::vector<float> distance(n, inf);
+  std::vector<int> parent(n, -1);
+  std::vector<char> closed(n, 0);
+  distance[0] = 0.0f;
+  for (;;) {
+    int current = -1;
+    for (size_t i = 0; i < n; ++i) {
+      if (!closed[i] && distance[i] < inf && (current < 0 || distance[i] < distance[current])) {
+        current = static_cast<int>(i);
+      }
+    }
+    if (current < 0 || current == 1) break;
+    closed[current] = 1;
+    for (size_t next = 1; next < n; ++next) {
+      if (closed[next] || !clear(current, next)) continue;
+      const float candidate = distance[current] + glm::distance(nodes[current], nodes[next]);
+      if (candidate < distance[next]) {
+        distance[next] = candidate;
+        parent[next] = current;
+      }
+    }
+  }
+  if (!std::isfinite(distance[1])) return false;
+  std::vector<int> route;
+  for (int node = 1; node >= 0; node = parent[node]) route.push_back(node);
+  std::reverse(route.begin(), route.end());
+  outPath->clear();
+  for (int node : route) {
+    const glm::vec2 p = nodes[node];
+    outPath->emplace_back(p.x, SurfaceHeightAt(patch, p.x, p.y), p.y);
+  }
   return true;
 }
 
@@ -839,6 +926,68 @@ bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* 
   if (best.empty()) return false;
   *outPath = std::move(best);
   return true;
+}
+
+// The ground beneath the low part of a ramp (or any deck hugging the ground)
+// has no headroom, so it is impassable: block the sub-polygon of each surface
+// whose clearance lies in (kFootSlack, kMinDeckHeadroom). The slab plane is
+// linear, so clipping the convex footprint against the two clearance levels
+// stays convex. Clearance near zero (the ramp foot itself) stays open so the
+// ground-to-ramp transition remains reachable.
+void NavMesh::AddLowDeckBlockers(float agentRadius) {
+  for (const WalkSurface& surface : walkSurfaces_) {
+    if (surface.vertices.size() < 3) continue;
+    std::vector<glm::vec3> pts;
+    for (const glm::vec3& v : surface.vertices) {
+      pts.emplace_back(v.x, v.z, v.y - ground_.HeightAt(v.x, v.z));  // (x, z, clearance)
+    }
+    // Sutherland-Hodgman against clearance >= lo, then clearance <= hi.
+    auto clip = [](const std::vector<glm::vec3>& in, float level, bool keepAbove) {
+      std::vector<glm::vec3> out;
+      for (size_t i = 0; i < in.size(); ++i) {
+        const glm::vec3& a = in[i];
+        const glm::vec3& b = in[(i + 1) % in.size()];
+        const bool aIn = keepAbove ? a.z >= level : a.z <= level;
+        const bool bIn = keepAbove ? b.z >= level : b.z <= level;
+        if (aIn) out.push_back(a);
+        if (aIn != bIn) {
+          const float t = (level - a.z) / (b.z - a.z);
+          out.push_back(a + (b - a) * t);
+        }
+      }
+      return out;
+    };
+    constexpr float kFootSlack = 0.3f;
+    // A declared ground transition whose lowest edge is already raised is a
+    // step up onto the slab, not a ramp foot: its connection stays reachable.
+    if (surface.connectsToGround) {
+      float lowest = pts.front().z;
+      for (const glm::vec3& p : pts) lowest = std::min(lowest, p.z);
+      if (lowest > kFootSlack) continue;
+    }
+    std::vector<glm::vec3> band = clip(pts, kFootSlack, true);
+    band = clip(band, constants::kMinDeckHeadroom, false);
+    if (band.size() < 3) continue;
+    std::vector<glm::vec2> polygon;
+    for (const glm::vec3& p : band) polygon.emplace_back(p.x, p.y);
+    std::vector<glm::vec2> padded = ExpandConvexPolygon(polygon, agentRadius);
+    if (padded.size() < 3) continue;
+    polygonMode_ = true;
+    paddedPolygons_.push_back(std::move(padded));
+  }
+}
+
+bool NavMesh::GroundUnderLowDeck(float x, float z) const {
+  // Below kFootSlack the deck is effectively at grade (a ramp foot or slab
+  // edge), where the ground and the deck are the same place.
+  constexpr float kFootSlack = 0.3f;
+  const float groundY = ground_.HeightAt(x, z);
+  for (int i : SurfaceCandidates(x, z)) {
+    if (!SurfaceContains(i, x, z)) continue;
+    const float clearance = SurfaceHeightAt(walkSurfaces_[i], x, z) - groundY;
+    if (clearance > kFootSlack && clearance < constants::kMinDeckHeadroom) return true;
+  }
+  return false;
 }
 
 bool NavMesh::FindGroundPath(glm::vec3 start, glm::vec3 goal,

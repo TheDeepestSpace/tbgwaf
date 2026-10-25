@@ -166,9 +166,12 @@ void TestSeedInvariants() {
     for (const RoadSurface& road : s.roads) CHECK(Planar(road.vertices, 0.03f));
     // Buildings have a level foundation, including each footprint corner.
     // Thin obstacles are retaining walls / ramp flanks standing on slopes.
-    for (const Obstacle& o : s.obstacles) {
+    for (size_t oi = 0; oi < s.obstacles.size(); ++oi) {
+      const Obstacle& o = s.obstacles[oi];
       if (o.bounds.max.y - o.bounds.min.y < c.minBuildingHeight - 0.001f) continue;
       if (FootprintWidth(o) < 3.0f) continue;
+      // A set-back top floor stands on its building's base prism, not the ground.
+      if (o.building >= 0 && s.buildings[o.building].upperObstacle == static_cast<int>(oi)) continue;
       for (glm::vec2 p : ObstacleFootprint(o)) {
         CHECK(std::fabs(s.ground.HeightAt(p.x, p.y) - o.bounds.min.y) < 0.03f);
       }

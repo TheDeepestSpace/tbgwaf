@@ -57,4 +57,9 @@ struct Scene {
 
 Scene BuildDefaultScene();
 
+// Obstacles plus the building massing (parapets, roof furniture, awnings) as
+// prisms, appended after the real obstacles so obstacle indices are
+// unchanged. For sight lines and FOV only: massing never collides.
+std::vector<Obstacle> SightObstacles(const Scene& scene);
+
 }  // namespace tactics

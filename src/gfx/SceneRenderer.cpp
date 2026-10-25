@@ -565,6 +565,15 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   for (const tactics::Obstacle& obstacle : scene.obstacles) {
     AppendPolygonPrism(obstacle, &vertices, &indices);
   }
+  // Parapets, roof furniture and awnings occlude like the gameplay LOS.
+  for (const tactics::MassingDetail& d : scene.massing) {
+    if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
+    tactics::Obstacle prism;
+    prism.footprint = d.footprint;
+    prism.bounds.min.y = d.y0;
+    prism.bounds.max.y = d.y1;
+    AppendPolygonPrism(prism, &vertices, &indices);
+  }
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
     AppendSurfacePatch(surface.vertices, 0.45f, &vertices, &indices);
   }
@@ -596,6 +605,11 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
   for (const tactics::Obstacle& o : scene.obstacles) {
     mix(&o.bounds, sizeof(o.bounds));
     mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
+  }
+  for (const tactics::MassingDetail& d : scene.massing) {
+    mix(d.footprint.data(), d.footprint.size() * sizeof(glm::vec2));
+    mix(&d.y0, sizeof(d.y0));
+    mix(&d.y1, sizeof(d.y1));
   }
   for (const tactics::WalkSurface& s : scene.walkSurfaces) mixVec3s(s.vertices);
   mix(scene.sidewalks.data(), scene.sidewalks.size() * sizeof(AABB));
@@ -2523,7 +2537,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       colorShader_.Use();
     } else {
       const auto build = [&](const Unit& unit) {
-        return BuildFovCone(unit, obstacles, sidewalks, mapHalfExtent, terrain,
+        return BuildFovCone(unit, game.SightObstacles(), sidewalks, mapHalfExtent, terrain,
                             game.GetScene().sidewalkSurfaces, game.GetScene().walkSurfaces);
       };
       for (const Unit& unit : game.GetScene().units) {

@@ -298,6 +298,22 @@ void TestBuildingKindsFloorsAndHeights() {
   CHECK(!ParseBlockCharacter("suburb", &parsed));
 }
 
+// Massing blocks sight lines and FOV (not movement): a segment through any
+// parapet, fixture or awning is blocked by SightObstacles, and the real
+// obstacle list is its unchanged prefix.
+void TestMassingBlocksSight() {
+  const Scene scene = GenerateUrbanMap(kSeeds[0]);
+  const std::vector<Obstacle> sight = SightObstacles(scene);
+  CHECK(sight.size() == scene.obstacles.size() + scene.massing.size());
+  for (size_t i = 0; i < scene.massing.size(); ++i) {
+    const AABB& box = sight[scene.obstacles.size() + i].bounds;
+    const glm::vec3 c = box.Center();
+    const float reach = 0.5f * (box.max.x - box.min.x) + 0.5f;  // Endpoints outside the prism.
+    CHECK(!LineOfSightClear(glm::vec3(c.x - reach, c.y, c.z), glm::vec3(c.x + reach, c.y, c.z),
+                            sight));
+  }
+}
+
 // Issue #151: visual-only massing. Parapets ring every roof nobody can walk
 // on, roof furniture stays inside the parapet, awnings hang over the
 // sidewalk from shopfronts only, and nothing is placed on a zipline roof.
@@ -1757,6 +1773,7 @@ int main() {
   TestParcelsMatchBuildingsAndFrontStreets();
   TestBuildingKindsFloorsAndHeights();
   TestMassingStaysOnItsBuilding();
+  TestMassingBlocksSight();
   TestPinnedKindHistograms();
   TestMapIsMuchLargerThanDefault();
   TestStreetsAndSidewalksAreObstacleFree();

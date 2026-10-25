@@ -105,7 +105,7 @@ std::string ExposureNote(const GameLogic& game, Team team, const Unit& actor,
   for (const Unit& enemy : scene.units) {
     if (enemy.team == team || !enemy.alive || !visibility.UnitVisible(enemy.id)) continue;
     ++visibleCount;
-    if (CanUnitSee(enemy, probe, scene.obstacles, scene.walkSurfaces, scene.ground)) ++seenBy;
+    if (CanUnitSee(enemy, probe, game.SightObstacles(), scene.walkSurfaces, scene.ground)) ++seenBy;
   }
   if (visibleCount == 0) return "no enemy is currently visible, so exposure there is unknown";
   if (seenBy == 0) return "hidden from all " + std::to_string(visibleCount) + " visible enemies "

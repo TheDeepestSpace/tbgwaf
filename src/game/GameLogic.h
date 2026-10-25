@@ -162,6 +162,8 @@ class GameLogic {
   void Reset(Scene scene);
 
   const Scene& GetScene() const { return scene_; }
+  // Obstacles plus building massing: what blocks sight lines and FOV.
+  const std::vector<Obstacle>& SightObstacles() const { return sightObstacles_; }
   // The navmesh currently in use: windowed around the figure most recently
   // planned for (see EnsureNavMeshFor), empty until one has been.
   const NavMesh& GetNavMesh() const { return navMesh_; }
@@ -235,7 +237,7 @@ class GameLogic {
   // the current scene state (cheap given the handful of units/obstacles
   // here), so callers always see a result consistent with the latest move.
   TeamVisibility ComputeVisibility(Team team) const {
-    return tactics::ComputeTeamVisibility(team, scene_.units, scene_.obstacles,
+    return tactics::ComputeTeamVisibility(team, scene_.units, sightObstacles_,
                                           scene_.walkSurfaces, scene_.ground);
   }
 
@@ -601,6 +603,7 @@ class GameLogic {
   int navMeshUnitId_ = -1;
   glm::vec3 navMeshOrigin_{0.0f};
   int roundNumber_ = 1;
+  std::vector<Obstacle> sightObstacles_;  // See SightObstacles(); rebuilt in Reset.
   std::vector<AABB> obstacleBounds_;  // Retained for compatibility/debug broad-phase inspection.
 
   InputMode mode_ = InputMode::AwaitingSelection;

@@ -75,8 +75,9 @@ struct Building {
 };
 
 // Visual-only massing detail (roadmap 3.3): a prism over a convex XZ
-// footprint between y0 and y1. Not collision, LOS, navigation or FOV
-// geometry -- a figure can't stand on, hide behind or be stopped by it.
+// footprint between y0 and y1. Blocks sight lines and FOV (see
+// SightObstacles) but is not collision or navigation geometry -- a figure
+// can't stand on or be stopped by it.
 struct MassingDetail {
   enum class Kind : uint8_t { Parapet, RoofFixture, Awning };
   Kind kind = Kind::Parapet;

@@ -89,6 +89,19 @@ struct Scene {
   int roundLimit = 0;
 };
 
+// One flat piece of a city level, as drawn: a convex polygon of the map
+// square split by every wall's step line and cut by every ramp corridor,
+// standing `height` above the base plane. The renderer extrudes each into a
+// prism (nothing else of the levels is drawn), so a pavement patch that
+// lies under a tier's top is buried behind the tier's face.
+struct TerrainTier {
+  std::vector<glm::vec2> polygon;
+  float height = 0.0f;
+};
+std::vector<TerrainTier> TerrainTiers(const std::vector<TerrainWall>& walls,
+                                      const std::vector<std::vector<glm::vec2>>& cutouts,
+                                      const std::vector<glm::vec2>& square);
+
 Scene BuildDefaultScene();
 
 }  // namespace tactics

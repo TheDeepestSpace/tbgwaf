@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 #include "game/GameLogic.h"
@@ -393,6 +394,88 @@ void TestStreetsKeepClearOfLevels() {
   }
 }
 
+// Convex intersection of `subject` with `clip` (Sutherland-Hodgman).
+std::vector<glm::vec2> ClipConvex(std::vector<glm::vec2> subject,
+                                  const std::vector<glm::vec2>& clip) {
+  const float orient = PolygonSignedArea(clip) >= 0.0f ? 1.0f : -1.0f;
+  for (size_t i = 0; i < clip.size() && subject.size() >= 3; ++i) {
+    const glm::vec2 a = clip[i], b = clip[(i + 1) % clip.size()];
+    const glm::vec2 inward = glm::vec2(-(b - a).y, (b - a).x) * orient;
+    const float d = glm::dot(inward, a);
+    std::vector<glm::vec2> out;
+    for (size_t j = 0; j < subject.size(); ++j) {
+      const glm::vec2 p = subject[j], q = subject[(j + 1) % subject.size()];
+      const float sp = glm::dot(inward, p) - d, sq = glm::dot(inward, q) - d;
+      if (sp >= 0.0f) out.push_back(p);
+      if ((sp < 0.0f && sq > 0.0f) || (sp > 0.0f && sq < 0.0f)) {
+        out.push_back(p + (q - p) * (sp / (sp - sq)));
+      }
+    }
+    subject = std::move(out);
+  }
+  return subject;
+}
+
+void TestSurfacesSitOnTiers() {
+  // Every pavement patch lies on the levels as drawn: no road or sidewalk
+  // area under a tier's top (a buried road, or a level's face standing
+  // across it), every sidewalk strip flat on its tier, and every ramp
+  // corridor cut out of a level carries its road. At grade and with the
+  // seed-driven overpass.
+  for (const bool overpass : {false, true}) {
+    auto c = TerrainConfig();
+    if (overpass) c.elevatedHighway = OverpassMode::Auto;
+    for (currentSeed = 1; currentSeed <= 200; ++currentSeed) {
+      const Scene s = GenerateUrbanMap(currentSeed, c);
+      const float h = s.mapHalfExtent;
+      const std::vector<TerrainTier> tiers =
+          TerrainTiers(s.terrainWalls, s.terrainCutouts, {{-h, -h}, {h, -h}, {h, h}, {-h, h}});
+      const auto onTiers = [&](const RoadSurface& patch) {
+        if (patch.vertices.size() < 3) return;
+        std::vector<glm::vec2> flat;
+        for (const glm::vec3& v : patch.vertices) flat.emplace_back(v.x, v.z);
+        const glm::vec3 p0 = patch.vertices[0];
+        glm::vec3 normal(0.0f);
+        for (size_t k = 2; k < patch.vertices.size() && glm::length(normal) < 1e-4f; ++k) {
+          normal = glm::cross(patch.vertices[1] - p0, patch.vertices[k] - p0);
+        }
+        const auto planeY = [&](glm::vec2 q) {
+          if (std::fabs(normal.y) < 1e-6f) return p0.y;
+          return p0.y - (normal.x * (q.x - p0.x) + normal.z * (q.y - p0.z)) / normal.y;
+        };
+        for (const TerrainTier& tier : tiers) {
+          if (tier.height < 0.01f) continue;
+          const std::vector<glm::vec2> overlap = ClipConvex(flat, tier.polygon);
+          if (overlap.size() < 3 || PolygonArea(overlap) < 0.05f) continue;
+          for (const glm::vec2& q : overlap) CHECK(planeY(q) >= tier.height - 0.05f);
+        }
+      };
+      for (const RoadSurface& road : s.roads) onTiers(road);
+      for (const RoadSurface& strip : s.sidewalkSurfaces) {
+        float lo = std::numeric_limits<float>::infinity(), hi = -lo;
+        for (const glm::vec3& v : strip.vertices) {
+          lo = std::min(lo, v.y);
+          hi = std::max(hi, v.y);
+        }
+        CHECK(hi - lo < 0.05f);
+        onTiers(strip);
+      }
+      for (const auto& cutout : s.terrainCutouts) {
+        glm::vec2 center(0.0f);
+        for (const glm::vec2& p : cutout) center += p;
+        center /= static_cast<float>(cutout.size());
+        bool paved = false;
+        for (const RoadSurface& road : s.roads) {
+          std::vector<glm::vec2> flat;
+          for (const glm::vec3& v : road.vertices) flat.emplace_back(v.x, v.z);
+          if (flat.size() >= 3 && PointInConvexPolygon(center, flat, 1e-3f)) paved = true;
+        }
+        CHECK(paved);
+      }
+    }
+  }
+}
+
 void TestTerrainZiplines() {
   auto c = TerrainConfig();
   c.maxZiplinesPerBlock = 2;
@@ -456,6 +539,7 @@ int main() {
   TestHighwayTerrainInterplay();
   TestHighwayProfilesOverLevels();
   TestStreetsKeepClearOfLevels();
+  TestSurfacesSitOnTiers();
   TestTerrainZiplines();
   TestMovementUpStair();
   if (failures) { std::fprintf(stderr, "%d terrain check(s) failed\n", failures); return 1; }

@@ -83,4 +83,88 @@ Scene BuildDefaultScene() {
   return scene;
 }
 
+namespace {
+
+// Sutherland-Hodgman clip of a convex polygon to the half-plane
+// side * (dot(n, p) - d) >= 0.
+std::vector<glm::vec2> ClipHalfPlane(const std::vector<glm::vec2>& polygon, glm::vec2 n, float d,
+                                     float side) {
+  std::vector<glm::vec2> out;
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    const glm::vec2 a = polygon[i], b = polygon[(i + 1) % polygon.size()];
+    const float sa = side * (glm::dot(n, a) - d), sb = side * (glm::dot(n, b) - d);
+    if (sa >= 0.0f) out.push_back(a);
+    if ((sa < 0.0f && sb > 0.0f) || (sa > 0.0f && sb < 0.0f)) {
+      out.push_back(a + (b - a) * (sa / (sa - sb)));
+    }
+  }
+  return out;
+}
+
+float PolygonArea2(const std::vector<glm::vec2>& polygon) {
+  float area = 0.0f;
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    const glm::vec2 a = polygon[i], b = polygon[(i + 1) % polygon.size()];
+    area += a.x * b.y - b.x * a.y;
+  }
+  return std::fabs(area) * 0.5f;
+}
+
+}  // namespace
+
+std::vector<TerrainTier> TerrainTiers(const std::vector<TerrainWall>& walls,
+                                      const std::vector<std::vector<glm::vec2>>& cutouts,
+                                      const std::vector<glm::vec2>& square) {
+  // Split by each step line, then cut by each ramp corridor (kept as the
+  // convex pieces outside it).
+  std::vector<std::vector<glm::vec2>> tiers = {square};
+  for (const TerrainWall& wall : walls) {
+    const float d = glm::dot(wall.raisedNormal, wall.lineOrigin);
+    std::vector<std::vector<glm::vec2>> split;
+    for (const auto& polygon : tiers) {
+      for (const float side : {-1.0f, 1.0f}) {
+        auto piece = ClipHalfPlane(polygon, wall.raisedNormal, d, side);
+        if (piece.size() >= 3 && PolygonArea2(piece) > 1e-5f) split.push_back(std::move(piece));
+      }
+    }
+    tiers = std::move(split);
+  }
+  for (const auto& cutout : cutouts) {
+    if (cutout.size() < 3) continue;
+    float signedArea = 0.0f;
+    for (size_t i = 0; i < cutout.size(); ++i) {
+      const glm::vec2 a = cutout[i], b = cutout[(i + 1) % cutout.size()];
+      signedArea += a.x * b.y - b.x * a.y;
+    }
+    std::vector<std::vector<glm::vec2>> outside;
+    for (const auto& polygon : tiers) {
+      std::vector<glm::vec2> inside = polygon;
+      for (size_t i = 0; i < cutout.size() && inside.size() >= 3; ++i) {
+        const glm::vec2 a = cutout[i], b = cutout[(i + 1) % cutout.size()];
+        const glm::vec2 edge = b - a;
+        glm::vec2 inward(-edge.y, edge.x);
+        if (signedArea < 0.0f) inward = -inward;
+        const float d = glm::dot(inward, a);
+        auto piece = ClipHalfPlane(inside, inward, d, -1.0f);
+        if (piece.size() >= 3 && PolygonArea2(piece) > 1e-5f) outside.push_back(std::move(piece));
+        inside = ClipHalfPlane(inside, inward, d, 1.0f);
+      }
+    }
+    tiers = std::move(outside);
+  }
+  std::vector<TerrainTier> out;
+  out.reserve(tiers.size());
+  for (auto& polygon : tiers) {
+    glm::vec2 center(0.0f);
+    for (glm::vec2 p : polygon) center += p;
+    center /= static_cast<float>(polygon.size());
+    float height = 0.0f;
+    for (const TerrainWall& wall : walls) {
+      if (glm::dot(wall.raisedNormal, center - wall.lineOrigin) >= 0.0f) height += wall.rise;
+    }
+    out.push_back({std::move(polygon), height});
+  }
+  return out;
+}
+
 }  // namespace tactics

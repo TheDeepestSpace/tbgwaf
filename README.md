@@ -72,7 +72,10 @@ that is ramping through one: an avenue may ramp through a level; any other
 street whose pavement would reach the level band or a ramp corridor stops at
 the last street it crossed before it (a T, not an X) and resumes at the first
 one beyond it, and the blocks either side of the missing stretch stay one
-block. Switch the levels off with
+block; where that last street itself ends at the junction (an L), the street
+instead runs on as a dead end stopping just short of the band or corridor, so
+no street ever pokes into a block. Sidewalk rings are one flat plane per
+strip, on the tier beside the cliff. Switch the levels off with
 `TBGWAF_TERRAIN=off`, `MapGeneratorConfig::features.terrain`, or scenario
 YAML:
 

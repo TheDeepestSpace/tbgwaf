@@ -407,6 +407,7 @@ constexpr float kFlightMargin = 1.5f; // Clear cliff line past a stair's ends.
 constexpr float kLevelBand = 6.4f;
 constexpr float kGroundStep = 0.5f;   // Heightfield spacing: sharp steps, narrow flights.
 constexpr float kDeckClearMargin = 8.0f;  // Deck at full height this far either side of a wall it flies over.
+constexpr float kDeckUnderClearance = 2.2f;  // Headroom a deck keeps over any tier beneath it.
 constexpr float kFlatMargin = 9.0f;       // Flat corridor either side of a wall ramped through at grade.
 
 // A ramped opening through one wall where an avenue crosses it: inside the
@@ -749,6 +750,15 @@ void FinishHighwayPlan(HighwayPlan* planOut, uint32_t seed, const MapGeneratorCo
     } else {
       b.u0 = 0.0f;
     }
+    // The branch deck (all of it off-map, else past the on-ramp) must clear
+    // every tier it runs over: a branch starting on a level higher than
+    // the deck would be buried in it.
+    if (plan.elevated && k > 0) {
+      for (float u = offMap ? 0.0f : b.riseEnd; u <= b.length + 1e-3f; u += 2.0f) {
+        const glm::vec2 p = b.start + b.dir * std::min(u, b.length);
+        if (TierHeight(terrain, p) + kDeckUnderClearance > terrain.deckCruise) return false;
+      }
+    }
     // At-grade zone of the branch: everything up to its on-ramp (the whole
     // branch when the artery stays at grade); nothing when it runs off-map.
     const float gradeEnd = !plan.elevated ? b.length : (offMap ? 0.0f : b.riseStart);
@@ -1017,6 +1027,9 @@ struct StreetCut {
   // cut it off, so it stops at the intersection before the wall (a T
   // there) and resumes at the first one beyond it. Sorted, disjoint.
   std::vector<std::pair<float, float>> gaps;
+  // Param intervals its pavement may never cover: the level bands and ramp
+  // corridors it would run into (what the gaps grew from). Sorted, disjoint.
+  std::vector<std::pair<float, float>> blocked;
 
   bool InGap(float t, float tol = 0.0f) const {
     for (const auto& g : gaps) {
@@ -1276,6 +1289,19 @@ void TrimStreetsAtWalls(const MapGeneratorConfig& c, const HighwayPlan& plan,
       }
     }
   }
+  for (const Crossing& x : crossings) (*cuts)[x.cut].blocked.emplace_back(x.lo, x.hi);
+  for (StreetCut& cut : *cuts) {
+    std::sort(cut.blocked.begin(), cut.blocked.end());
+    std::vector<std::pair<float, float>> merged;
+    for (const auto& b : cut.blocked) {
+      if (!merged.empty() && b.first <= merged.back().second) {
+        merged.back().second = std::max(merged.back().second, b.second);
+      } else {
+        merged.push_back(b);
+      }
+    }
+    cut.blocked = std::move(merged);
+  }
   if (crossings.empty()) return;
   // A street stops only at a junction that still exists, so a street cut
   // short itself can lose the junctions others had picked: iterate until
@@ -1329,6 +1355,38 @@ void TrimStreetsAtWalls(const MapGeneratorConfig& c, const HighwayPlan& plan,
   }
 }
 
+// Drops every channel whose avenue no longer runs over the ramp itself
+// (cut short by a level or corridor further on and rolled back past it):
+// a ramp with no road would be an empty cut in the level. True when any
+// was dropped.
+bool DropOrphanChannels(TerrainPlan* terrain, const std::vector<StreetCut>& cuts) {
+  bool dropped = false;
+  for (TerrainWallSpec& w : terrain->walls) {
+    const auto orphan = [&](const TerrainChannel& channel) {
+      for (const StreetCut& cut : cuts) {
+        if (cut.cls == UrbanStreetClass::Highway || cut.terrainBoundary) continue;
+        const glm::vec2 rel = channel.foot - cut.origin;
+        if (std::fabs(rel.x * cut.dir.y - rel.y * cut.dir.x) >= 1e-2f ||
+            std::fabs(glm::dot(channel.along, cut.dir)) <= 0.999f) {
+          continue;
+        }
+        // Its avenue: the climb and a margin either side must be one stretch.
+        const float t = glm::dot(rel, cut.dir);
+        const float top = t + channel.length * (glm::dot(channel.along, cut.dir) > 0.0f ? 1.0f : -1.0f);
+        const float lo = std::min(t, top) - 1.0f, hi = std::max(t, top) + 1.0f;
+        const auto kept = cut.Kept(lo, hi);
+        return kept.size() != 1 || kept[0].first > lo + 1e-3f || kept[0].second < hi - 1e-3f;
+      }
+      return true;  // No such street at all.
+    };
+    auto& channels = w.channels;
+    const size_t before = channels.size();
+    channels.erase(std::remove_if(channels.begin(), channels.end(), orphan), channels.end());
+    dropped = dropped || channels.size() != before;
+  }
+  return dropped;
+}
+
 // Street pass: the branch corridor, avenues roughly parallel to the artery
 // and oblique cross streets for each side. Each side draws its own, so
 // junctions don't line up across the artery and block shapes differ.
@@ -1376,7 +1434,17 @@ StreetGraph BuildStreetGraph(uint32_t seed, const MapGeneratorConfig& c, const H
     }
   }
   ChooseRampChannels(seed, c, plan, terrainPlan, graph.cuts);
-  TrimStreetsAtWalls(c, plan, terrain, &graph.cuts);
+  // Trimmed against the channels; a channel left without its avenue over
+  // the ramp is dropped and the streets trimmed again without it, so the
+  // avenue then stops short of the band like any other street.
+  for (;;) {
+    for (StreetCut& cut : graph.cuts) {
+      cut.gaps.clear();
+      cut.blocked.clear();
+    }
+    TrimStreetsAtWalls(c, plan, terrain, &graph.cuts);
+    if (!DropOrphanChannels(terrainPlan, graph.cuts)) break;
+  }
   return graph;
 }
 
@@ -1384,7 +1452,7 @@ StreetGraph BuildStreetGraph(uint32_t seed, const MapGeneratorConfig& c, const H
 // artery corridor and every street cut. Each surviving region is a block
 // whose shape follows whatever angles the streets around it happen to make.
 std::vector<UrbanBlock> BuildBlocks(const MapGeneratorConfig& c, const HighwayPlan& plan,
-                                    const StreetGraph& graph) {
+                                    StreetGraph* graph) {
   const ArterySpec& artery = plan.artery;
   const float half = UrbanMapHalfExtent(c);
   const float rim = RimWidth(c);
@@ -1393,6 +1461,13 @@ std::vector<UrbanBlock> BuildBlocks(const MapGeneratorConfig& c, const HighwayPl
   const float arteryD = glm::dot(artery.normal, artery.origin);
 
   std::vector<UrbanBlock> blocks;
+  // Chords a trimmed street was carved along beyond its existing stretch
+  // (see the last pass below), paved back afterwards up to its obstacles.
+  struct Ghost {
+    size_t cut;
+    float r0, r1;
+  };
+  std::vector<Ghost> ghosts;
   for (const int side : {1, -1}) {
     const glm::vec2 n = artery.normal * static_cast<float>(side);
     std::vector<std::vector<glm::vec2>> regions;
@@ -1402,7 +1477,7 @@ std::vector<UrbanBlock> BuildBlocks(const MapGeneratorConfig& c, const HighwayPl
     // Through streets first, then the ones a level cut short (they stop at
     // junctions the first batch already made).
     std::vector<const StreetCut*> trimmed;
-    for (const StreetCut& cut : graph.cuts) {
+    for (const StreetCut& cut : graph->cuts) {
       if (cut.side != side) continue;
       if (cut.gaps.empty()) {
         CutStreet(&regions, cut.origin, cut.dir, cut.width);
@@ -1413,9 +1488,13 @@ std::vector<UrbanBlock> BuildBlocks(const MapGeneratorConfig& c, const HighwayPl
     // A trimmed street splits only the regions its existing stretch spans;
     // a region over its gap stays one block. A region the stretch crosses
     // only partly waits for another street (itself trimmed) to split it
-    // first; the last pass settles what is left by where the chord mostly
-    // lies. Re-applying a street is harmless: a split region lies off the
-    // band.
+    // first. The last pass settles a stretch still dead-ending inside a
+    // region: it stopped at a junction with a street that itself ends
+    // there (an L, not a T), so nothing else will free it. The region is
+    // split along the whole line and the street paved back over that chord
+    // up to its obstacle -- a dead end just short of the level or ramp,
+    // never a street poking into a block. Re-applying a street is
+    // harmless: a split region lies off the band.
     for (int pass = 0; pass < 4; ++pass) {
       for (const StreetCut* cut : trimmed) {
         std::vector<std::vector<glm::vec2>> next;
@@ -1438,8 +1517,9 @@ std::vector<UrbanBlock> BuildBlocks(const MapGeneratorConfig& c, const HighwayPl
           for (const auto& k : cut->Kept(r0, r1)) keptLength += k.second - k.first;
           const float tol = 0.05f;
           const bool whole = keptLength >= (r1 - r0) - tol;
-          const bool none = keptLength <= tol;
-          if (whole || (pass == 3 && !none && keptLength * 2.0f >= r1 - r0)) {
+          const bool settle = pass == 3 && keptLength >= 1.0f;
+          if (whole || settle) {
+            if (!whole) ghosts.push_back({static_cast<size_t>(cut - graph->cuts.data()), r0, r1});
             std::vector<std::vector<glm::vec2>> one;
             one.push_back(std::move(region));
             CutStreet(&one, cut->origin, cut->dir, cut->width);
@@ -1456,6 +1536,31 @@ std::vector<UrbanBlock> BuildBlocks(const MapGeneratorConfig& c, const HighwayPl
       blocks.push_back(MakeUrbanBlock(std::move(region)));
     }
   }
+  // The ghost chords, paved again outside the street's obstacles.
+  for (const Ghost& g : ghosts) {
+    StreetCut& cut = graph->cuts[g.cut];
+    std::vector<std::pair<float, float>> paved;
+    float from = g.r0;
+    for (const auto& b : cut.blocked) {
+      if (b.second <= from) continue;
+      if (b.first >= g.r1) break;
+      if (b.first > from) paved.emplace_back(from, b.first);
+      from = std::max(from, b.second);
+    }
+    if (from < g.r1) paved.emplace_back(from, g.r1);
+    for (const auto& p : paved) {
+      std::vector<std::pair<float, float>> gaps;
+      for (const auto& gap : cut.gaps) {
+        if (gap.second <= p.first || gap.first >= p.second) {
+          gaps.push_back(gap);
+          continue;
+        }
+        if (gap.first < p.first) gaps.emplace_back(gap.first, p.first);
+        if (gap.second > p.second) gaps.emplace_back(p.second, gap.second);
+      }
+      cut.gaps = std::move(gaps);
+    }
+  }
   return blocks;
 }
 
@@ -1463,14 +1568,15 @@ CityPlan BuildCityPlan(uint32_t seed, const MapGeneratorConfig& c) {
   CityPlan plan;
   plan.highway = BuildHighwayPlan(seed, c, &plan.terrain);
   plan.streets = BuildStreetGraph(seed, c, plan.highway, &plan.terrain);
-  plan.blocks = BuildBlocks(c, plan.highway, plan.streets);
+  plan.blocks = BuildBlocks(c, plan.highway, &plan.streets);
   return plan;
 }
 
 std::vector<UrbanBlock> BuildCityBlocks(uint32_t seed, const MapGeneratorConfig& c) {
   TerrainPlan terrain;
   const HighwayPlan highway = BuildHighwayPlan(seed, c, &terrain);
-  return BuildBlocks(c, highway, BuildStreetGraph(seed, c, highway, &terrain));
+  StreetGraph graph = BuildStreetGraph(seed, c, highway, &terrain);
+  return BuildBlocks(c, highway, &graph);
 }
 
 // Ribbon edge; an end vertex sitting exactly on the map boundary slides
@@ -2790,11 +2896,18 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const MapGeneratorConfig&
           KeepSide(outline, -inward, -(glm::dot(inward, a) + c.sidewalkWidth));
       if (strip.size() < 3 || PolygonArea(strip) < 0.5f) continue;
       RoadSurface sidewalk;
-      for (const glm::vec2& p : strip) {
-        // The exact ground model: a ring vertex on a level's edge takes the
-        // level's height, not the sampled field's half-cell blend.
-        const float y = city.terrain.enabled ? UrbanGroundAt(city, c, p) : groundY(p.x, p.y);
-        sidewalk.vertices.emplace_back(p.x, y + kSidewalkHeight, p.y);
+      if (city.terrain.enabled) {
+        // One plane per strip, probed inside it: a block never straddles a
+        // level or a ramp, so the strip lies on one tier top. A ring vertex
+        // exactly on a ramp corridor's edge then takes the tier's height,
+        // not the ramp's below, and the strip stays flat beside the
+        // corridor's cliff instead of twisting down into it.
+        const auto ground = [&](glm::vec2 q) { return UrbanGroundAt(city, c, q) + kSidewalkHeight; };
+        if (!PlanarPatch(strip, ground, &sidewalk)) continue;
+      } else {
+        for (const glm::vec2& p : strip) {
+          sidewalk.vertices.emplace_back(p.x, groundY(p.x, p.y) + kSidewalkHeight, p.y);
+        }
       }
       scene->sidewalkSurfaces.push_back(std::move(sidewalk));
     }
@@ -2912,9 +3025,11 @@ std::vector<UrbanRoad> UrbanRoads(uint32_t seed, const MapGeneratorConfig& c) {
 std::vector<UrbanStreet> UrbanStreets(uint32_t seed, const MapGeneratorConfig& c) {
   std::vector<UrbanStreet> out;
   if (c.arteryCount <= 0) return out;
-  TerrainPlan terrainPlan;
-  const HighwayPlan plan = BuildHighwayPlan(seed, c, &terrainPlan);
-  const StreetGraph graph = BuildStreetGraph(seed, c, plan, &terrainPlan);
+  // The plan the scene is built from, trimmed and settled against its
+  // blocks, so the streets reported are exactly the ones paved.
+  CityPlan city = BuildCityPlan(seed, c);
+  const HighwayPlan& plan = city.highway;
+  const StreetGraph& graph = city.streets;
   for (const UrbanRoad& road : UrbanRoads(seed, c)) {
     for (size_t i = 0; i + 1 < road.centerline.size(); ++i) {
       out.push_back({road.centerline[i], road.centerline[i + 1], road.width,
@@ -2924,10 +3039,7 @@ std::vector<UrbanStreet> UrbanStreets(uint32_t seed, const MapGeneratorConfig& c
   const float half = UrbanMapHalfExtent(c);
   Scene terrain;
   terrain.mapHalfExtent = half;
-  if (c.features.terrain.mode != FeatureMode::Off) {
-    CityPlan city = BuildCityPlan(seed, c);
-    BuildUrbanTerrain(&terrain, &city, seed, c);
-  }
+  if (c.features.terrain.mode != FeatureMode::Off) BuildUrbanTerrain(&terrain, &city, seed, c);
   for (const StreetCut& cut : graph.cuts) {
     if (cut.cls == UrbanStreetClass::Highway) continue;  // Already a road above.
     if (cut.terrainBoundary) continue;                   // A level band, not a street.

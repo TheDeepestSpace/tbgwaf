@@ -144,6 +144,7 @@ void NavMesh::Build(const std::vector<Obstacle>& obstacles, const NavRegion& reg
     polygonMode_ |= !obstacle.footprint.empty();
     paddedPolygons_.push_back(ExpandConvexPolygon(ObstacleFootprint(obstacle), agentRadius));
   }
+  AddLowDeckBlockers(agentRadius);
   BuildGroundMesh(ObstacleBounds(obstacles), region, agentRadius);
   AddClimbConnections(obstacles, agentRadius);
 }
@@ -838,6 +839,68 @@ bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* 
   if (best.empty()) return false;
   *outPath = std::move(best);
   return true;
+}
+
+// The ground beneath the low part of a ramp (or any deck hugging the ground)
+// has no headroom, so it is impassable: block the sub-polygon of each surface
+// whose clearance lies in (kFootSlack, kMinDeckHeadroom). The slab plane is
+// linear, so clipping the convex footprint against the two clearance levels
+// stays convex. Clearance near zero (the ramp foot itself) stays open so the
+// ground-to-ramp transition remains reachable.
+void NavMesh::AddLowDeckBlockers(float agentRadius) {
+  for (const WalkSurface& surface : walkSurfaces_) {
+    if (surface.vertices.size() < 3) continue;
+    std::vector<glm::vec3> pts;
+    for (const glm::vec3& v : surface.vertices) {
+      pts.emplace_back(v.x, v.z, v.y - ground_.HeightAt(v.x, v.z));  // (x, z, clearance)
+    }
+    // Sutherland-Hodgman against clearance >= lo, then clearance <= hi.
+    auto clip = [](const std::vector<glm::vec3>& in, float level, bool keepAbove) {
+      std::vector<glm::vec3> out;
+      for (size_t i = 0; i < in.size(); ++i) {
+        const glm::vec3& a = in[i];
+        const glm::vec3& b = in[(i + 1) % in.size()];
+        const bool aIn = keepAbove ? a.z >= level : a.z <= level;
+        const bool bIn = keepAbove ? b.z >= level : b.z <= level;
+        if (aIn) out.push_back(a);
+        if (aIn != bIn) {
+          const float t = (level - a.z) / (b.z - a.z);
+          out.push_back(a + (b - a) * t);
+        }
+      }
+      return out;
+    };
+    constexpr float kFootSlack = 0.3f;
+    // A declared ground transition whose lowest edge is already raised is a
+    // step up onto the slab, not a ramp foot: its connection stays reachable.
+    if (surface.connectsToGround) {
+      float lowest = pts.front().z;
+      for (const glm::vec3& p : pts) lowest = std::min(lowest, p.z);
+      if (lowest > kFootSlack) continue;
+    }
+    std::vector<glm::vec3> band = clip(pts, kFootSlack, true);
+    band = clip(band, constants::kMinDeckHeadroom, false);
+    if (band.size() < 3) continue;
+    std::vector<glm::vec2> polygon;
+    for (const glm::vec3& p : band) polygon.emplace_back(p.x, p.y);
+    std::vector<glm::vec2> padded = ExpandConvexPolygon(polygon, agentRadius);
+    if (padded.size() < 3) continue;
+    polygonMode_ = true;
+    paddedPolygons_.push_back(std::move(padded));
+  }
+}
+
+bool NavMesh::GroundUnderLowDeck(float x, float z) const {
+  // Below kFootSlack the deck is effectively at grade (a ramp foot or slab
+  // edge), where the ground and the deck are the same place.
+  constexpr float kFootSlack = 0.3f;
+  const float groundY = ground_.HeightAt(x, z);
+  for (int i : SurfaceCandidates(x, z)) {
+    if (!SurfaceContains(i, x, z)) continue;
+    const float clearance = SurfaceHeightAt(walkSurfaces_[i], x, z) - groundY;
+    if (clearance > kFootSlack && clearance < constants::kMinDeckHeadroom) return true;
+  }
+  return false;
 }
 
 bool NavMesh::FindGroundPath(glm::vec3 start, glm::vec3 goal,

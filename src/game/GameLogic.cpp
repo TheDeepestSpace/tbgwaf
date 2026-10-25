@@ -1743,9 +1743,16 @@ void GameLogic::ApplyPlaybookReactions(bool roundStart) {
                        if (!shot.reaction) return false;
                        const Unit* shooter = FindUnit(shot.shooterId);
                        const Unit* target = FindUnit(shot.targetId);
-                       return !shooter || !target || !shooter->alive || !target->alive ||
-                              !CanUnitSee(*shooter, *target, scene_.obstacles,
-                                          scene_.walkSurfaces, scene_.ground);
+                       const bool drop = !shooter || !target || !shooter->alive ||
+                                         !target->alive ||
+                                         !CanUnitSee(*shooter, *target, scene_.obstacles,
+                                                     scene_.walkSurfaces, scene_.ground);
+                       if (drop && shooter) {
+                         reactionNextShotAt_[shot.shooterId] =
+                             shot.startTime +
+                             shot.shotsFired * StatsOf(shooter->weapon).shotIntervalSeconds;
+                       }
+                       return drop;
                      }),
       pendingShots_.end());
 
@@ -1780,7 +1787,8 @@ void GameLogic::ApplyPlaybookReactions(bool roundStart) {
       if (!moving && Playbook(unit.team).ignoreIdle && !enemyMoving) continue;
       if (!CanUnitSee(unit, enemy, scene_.obstacles, scene_.walkSurfaces, scene_.ground)) continue;
       const float dist = glm::distance(unit.position, enemy.position);
-      if (!nearest || dist < nearestDist) {
+      // Closest first; an exact tie goes to the lower id (deterministic).
+      if (!nearest || dist < nearestDist || (dist == nearestDist && enemy.id < nearest->id)) {
         nearest = &enemy;
         nearestDist = dist;
       }
@@ -1816,12 +1824,15 @@ void GameLogic::StartReactionBurst(const Unit& shooter, const Unit& target) {
   shot.reaction = true;
   shot.started = true;
   shot.startTime = executionElapsed_;
+  const auto next = reactionNextShotAt_.find(shooter.id);
+  if (next != reactionNextShotAt_.end()) shot.startTime = std::max(shot.startTime, next->second);
   pendingShots_.push_back(shot);
 }
 
 void GameLogic::CommitRound() {
   if (!CanCommitRound()) return;
   reactionAmmo_.clear();
+  reactionNextShotAt_.clear();
 
   selectedUnitId_.reset();
   movePreviewPath_.clear();

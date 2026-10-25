@@ -90,7 +90,8 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body data-baseline-url="{baseline_url}">
 <h1>Gameplay scenario review</h1>
-<p class="nav"><a href="../gallery/">Asset gallery &rarr;</a></p>
+<p class="nav"><a href="../gallery/">Asset gallery &rarr;</a> ·
+<a href="{performance_url}">Performance suite &rarr;</a></p>
 <p>Scenarios under <code>{scenario_dir}</code>, classified against this PR from
 git metadata on the YAML files. Every scenario present at the PR's head —
 new, modified, and unchanged — gets a video: the full scripted scenario as
@@ -805,6 +806,8 @@ def main() -> int:
                         help="URL (relative to the page) of a directory holding "
                              "<scenario>.json master timing baselines; enables the "
                              "red baseline line in the frame-time graph")
+    parser.add_argument("--performance-url", default="../../../performance/",
+                        help="URL of the published Performance suite report")
     args = parser.parse_args()
 
     changes = classify_changes(args.base, args.head, args.repo_root)
@@ -832,7 +835,8 @@ def main() -> int:
     (args.out / "index.html").write_text(
         PAGE_TEMPLATE.format(scenario_dir=SCENARIO_DIR, sections=sections,
                              page_js=PAGE_JS,
-                             baseline_url=html.escape(args.baseline_url, quote=True)))
+                             baseline_url=html.escape(args.baseline_url, quote=True),
+                             performance_url=html.escape(args.performance_url, quote=True)))
     print(f"[scenario-review] wrote {args.out / 'index.html'} "
           f"({len(changes['A'])} new, {len(changes['M'])} modified, "
           f"{len(changes['U'])} unchanged, {len(changes['D'])} deleted)", file=sys.stderr)

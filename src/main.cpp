@@ -366,7 +366,8 @@ int main() {
   // agree the same way they must agree on the seed. The urban-auto default
   // lets the seed decide whether the city gets an overpass (and which layout,
   // issue #130); TBGWAF_MAP=urban forces it off, urban-elevated forces it on;
-  // urban-full forces every optional feature layer on.
+  // urban-terrain forces the terrain levels on (issue #155), urban-full
+  // forces every optional feature layer on.
   std::string mapType = "urban-auto";
   if (const char* mapEnv = std::getenv("TBGWAF_MAP")) mapType = mapEnv;
   auto makeBaseMap = [](uint32_t mapSeed, const std::string& mapType) {
@@ -377,6 +378,7 @@ int main() {
       config.elevatedHighway = tactics::OverpassMode::Off;
     }
     if (mapType == "urban-elevated") config.elevatedHighway = tactics::OverpassMode::On;
+    if (mapType == "urban-terrain") config.features.terrain.mode = tactics::FeatureMode::On;
     if (mapType == "urban-full") {
       // Every optional detail layer forced on (issue #146).
       for (const char* name : {"lanes", "curbs", "furniture", "terrain", "interiors", "rail"}) {
@@ -734,9 +736,13 @@ int main() {
           ctfMode = *flowEvent == tbgwaf_flow::Event::SelectCtf;
         }
         if (*flowEvent == tbgwaf_flow::Event::SelectUrban ||
+            *flowEvent == tbgwaf_flow::Event::SelectUrbanTerrain ||
             *flowEvent == tbgwaf_flow::Event::SelectHills) {
-          // The menu's Urban entry uses the seed-driven random overpass mode.
-          mapType = *flowEvent == tbgwaf_flow::Event::SelectHills ? "hilly" : "urban-auto";
+          // The menu's Urban entry uses the seed-driven random overpass (and
+          // terrain) mode; Urban Terrain guarantees the terrain levels.
+          mapType = *flowEvent == tbgwaf_flow::Event::SelectHills          ? "hilly"
+                    : *flowEvent == tbgwaf_flow::Event::SelectUrbanTerrain ? "urban-terrain"
+                                                                           : "urban-auto";
           game.Reset(makeMap());
           timeline.Reset(game);
           timelinePlayback.Reset();

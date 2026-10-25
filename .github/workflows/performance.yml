@@ -1,6 +1,8 @@
 name: Performance suite
 
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
     inputs:
       ref:
@@ -33,7 +35,7 @@ jobs:
       - name: Checkout requested ref
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0
 
       - name: Trust workspace for git
@@ -49,7 +51,7 @@ jobs:
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           SDL_VIDEODRIVER: x11
-          TARGET_REF: ${{ inputs.ref }}
+          TARGET_REF: ${{ inputs.ref || 'master' }}
         run: |
           commit=$(git rev-parse HEAD)
           timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)

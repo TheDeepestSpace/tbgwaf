@@ -455,21 +455,11 @@ enum class StreetPropMaterial : size_t {
   Count,
 };
 
-const glm::vec4& StreetPropColor(StreetPropMaterial material) {
-  static const std::array<glm::vec4, static_cast<size_t>(StreetPropMaterial::Count)> kColors = {
-      glm::vec4(0.25f, 0.26f, 0.28f, 1.0f),
-      glm::vec4(0.10f, 0.11f, 0.12f, 1.0f),
-      glm::vec4(0.85f, 0.18f, 0.14f, 1.0f),
-      glm::vec4(0.92f, 0.76f, 0.18f, 1.0f),
-      glm::vec4(0.22f, 0.78f, 0.28f, 1.0f),
-      glm::vec4(0.78f, 0.12f, 0.12f, 1.0f),
-      glm::vec4(0.92f, 0.90f, 0.85f, 1.0f),
-      glm::vec4(0.80f, 0.16f, 0.14f, 1.0f),
-      glm::vec4(0.12f, 0.42f, 0.22f, 1.0f),
-      glm::vec4(0.18f, 0.19f, 0.21f, 1.0f),
-      glm::vec4(0.96f, 0.82f, 0.42f, 1.0f),
-  };
-  return kColors[static_cast<size_t>(material)];
+// Every street fixture shares the building color so props read as part of
+// the same urban fabric.
+const glm::vec4& StreetPropColor(StreetPropMaterial) {
+  static const glm::vec4 kColor(kObstacleColor, 1.0f);
+  return kColor;
 }
 
 struct StreetPropParts {

@@ -698,6 +698,63 @@ void TestNoCornerSplitBuildings() {
   CHECK(wrapped > 0);  // Corner buildings still exist.
 }
 
+bool FootprintsMeet(const std::vector<glm::vec2>& a, const std::vector<glm::vec2>& b) {
+  for (const glm::vec2& p : a) {
+    for (size_t i = 0; i < b.size(); ++i) {
+      if (DistanceToSegment(p, b[i], b[(i + 1) % b.size()]) < 0.01f) return true;
+    }
+  }
+  for (const glm::vec2& p : b) {
+    for (size_t i = 0; i < a.size(); ++i) {
+      if (DistanceToSegment(p, a[i], a[(i + 1) % a.size()]) < 0.01f) return true;
+    }
+  }
+  return false;
+}
+
+// Seed 7 used to turn a too-short corner alley into a merge after frontage
+// pieces had been planned. One piece then belonged to both neighboring
+// corner buildings, chaining three same-height footprints into a giant U.
+void TestCornerBuildingsDoNotChainAcrossAFrontage() {
+  MapGeneratorConfig config;
+  config.elevatedHighway = OverpassMode::Off;
+  const Scene scene = GenerateUrbanMap(7, config);
+  std::vector<const Obstacle*> buildings;
+  for (const Obstacle& obstacle : scene.obstacles) {
+    if (!obstacle.footprint.empty()) buildings.push_back(&obstacle);
+  }
+
+  int pairs = 0;
+  int largest = 0;
+  std::vector<bool> seen(buildings.size(), false);
+  for (size_t start = 0; start < buildings.size(); ++start) {
+    if (seen[start]) continue;
+    seen[start] = true;
+    std::vector<size_t> pending = {start};
+    int connected = 0;
+    while (!pending.empty()) {
+      const size_t i = pending.back();
+      pending.pop_back();
+      ++connected;
+      const float height = buildings[i]->bounds.max.y - buildings[i]->bounds.min.y;
+      for (size_t j = 0; j < buildings.size(); ++j) {
+        if (seen[j]) continue;
+        const float otherHeight = buildings[j]->bounds.max.y - buildings[j]->bounds.min.y;
+        if (std::fabs(height - otherHeight) > kEps ||
+            !FootprintsMeet(buildings[i]->footprint, buildings[j]->footprint)) {
+          continue;
+        }
+        seen[j] = true;
+        pending.push_back(j);
+      }
+    }
+    pairs += connected == 2;
+    largest = std::max(largest, connected);
+  }
+  CHECK(pairs > 0);  // The test still sees ordinary two-piece L buildings.
+  CHECK(largest <= 2);
+}
+
 void TestPolygonCollisionLosAndNavigationUseRealFootprint() {
   Obstacle wedge;
   wedge.bounds = AABB{glm::vec3(-2.0f, 0.0f, -2.0f), glm::vec3(2.0f, 4.0f, 2.0f)};
@@ -1515,6 +1572,7 @@ int main() {
   TestObliqueArteryAndBranchMerge();
   TestPolygonBlocksAdaptToAngledStreets();
   TestNoCornerSplitBuildings();
+  TestCornerBuildingsDoNotChainAcrossAFrontage();
   TestPolygonCollisionLosAndNavigationUseRealFootprint();
   TestElevatedOverpassRampsPiersAndDistinctLayers();
   TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable();

@@ -781,6 +781,7 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
     bool atStart, atEnd;  // Touches the corner at the edge's start/end.
   };
   std::vector<std::vector<Piece>> rows(edges);
+  std::vector<bool> lateSplit(edges, false);
   for (size_t e = 0; e < edges; ++e) {
     if (!pieces[e]) continue;
     const size_t next = (e + 1) % edges;
@@ -836,32 +837,6 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
     }
   }
 
-  // Corners without an alley are one L-shaped building wrapping the corner,
-  // not two buildings meeting on the miter line. Footprints must stay convex,
-  // so the L is two pieces whose seam sits on the inner wall line of the
-  // corner-owning piece, away from the frontage corner: the owner grows to
-  // cover the whole corner and its neighbor is trimmed back to meet it.
-  std::vector<std::pair<size_t, size_t>> order;  // (edge, index) per piece.
-  std::vector<std::vector<size_t>> pieceId(edges);
-  for (size_t e = 0; e < edges; ++e) {
-    for (size_t i = 0; i < rows[e].size(); ++i) {
-      pieceId[e].push_back(order.size());
-      order.push_back({e, i});
-    }
-  }
-  std::vector<bool> trimmedStart(order.size(), false);
-  std::vector<float> heights(order.size(), -1.0f);
-  auto height = [&] {
-    return std::clamp(cluster + rng->Float(-1.2f, 1.2f), c.minBuildingHeight, c.maxBuildingHeight);
-  };
-  // Intersection parameter along `d1` from `p1` with the line (p2, d2).
-  auto lineHit = [](glm::vec2 p1, glm::vec2 d1, glm::vec2 p2, glm::vec2 d2, float* t) {
-    const float den = d1.x * d2.y - d1.y * d2.x;
-    if (std::abs(den) < 1.0e-4f) return false;
-    const glm::vec2 w = p2 - p1;
-    *t = (w.x * d2.y - w.y * d2.x) / den;
-    return true;
-  };
   // Keep the part of `poly` on the side of the line (point, dir) that `keep` is on.
   auto clipToSide = [](const std::vector<glm::vec2>& poly, glm::vec2 point, glm::vec2 dir,
                        glm::vec2 keep) {
@@ -919,6 +894,101 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
     const size_t next = (e + 1) % edges;
     if (cornerGap[next] && !cutAlley(e, next, true)) cornerGap[next] = false;
   }
+
+  // A corner alley can be planned but prove too short to cut, turning into a
+  // merge above. If that leaves one piece spanning two merged corners, split
+  // it now so two corner buildings cannot chain into a three-sided block.
+  for (size_t e = 0; e < edges; ++e) {
+    const size_t next = (e + 1) % edges;
+    if (cornerGap[e] || cornerGap[next] || rows[e].size() != 1 ||
+        !rows[e][0].atStart || !rows[e][0].atEnd) {
+      continue;
+    }
+    const std::vector<glm::vec2>& footprint = rows[e][0].footprint;
+    const glm::vec2 frontDir = glm::normalize(outer[next] - outer[e]);
+    const glm::vec2 cutDir(-frontDir.y, frontDir.x);
+    const glm::vec2 cutPoint = (footprint[0] + footprint[1]) * 0.5f;
+    std::vector<glm::vec2> first = clipToSide(footprint, cutPoint, cutDir, footprint[0]);
+    std::vector<glm::vec2> second = clipToSide(footprint, cutPoint, cutDir, footprint[1]);
+    if (first.size() < 3 || second.size() < 3 || PolygonArea(first) < minArea ||
+        PolygonArea(second) < minArea) {
+      continue;
+    }
+    rows[e].clear();
+    rows[e].push_back({std::move(first), true, false});
+    rows[e].push_back({std::move(second), false, true});
+    lateSplit[e] = true;
+  }
+
+  // Corners without an alley are one L-shaped building wrapping the corner,
+  // not two buildings meeting on the miter line. Footprints must stay convex,
+  // so the L is two pieces whose seam sits on the inner wall line of the
+  // corner-owning piece, away from the frontage corner: the owner grows to
+  // cover the whole corner and its neighbor is trimmed back to meet it.
+  std::vector<std::pair<size_t, size_t>> order;  // (edge, index) per piece.
+  std::vector<std::vector<size_t>> pieceId(edges);
+  for (size_t e = 0; e < edges; ++e) {
+    for (size_t i = 0; i < rows[e].size(); ++i) {
+      pieceId[e].push_back(order.size());
+      order.push_back({e, i});
+    }
+  }
+  std::vector<bool> trimmedStart(order.size(), false);
+  std::vector<float> heights(order.size(), -1.0f);
+  // A late split replaces one RNG-planned piece, so its halves share one
+  // height draw to keep every later block on the same RNG stream. Offset the
+  // second half deterministically so the neighboring Ls do not read as one.
+  std::vector<int> splitGroup(order.size(), -1);
+  std::vector<float> splitBaseHeight;
+  std::vector<size_t> splitBasePiece;
+  for (size_t e = 0; e < edges; ++e) {
+    if (!lateSplit[e]) continue;
+    const int group = static_cast<int>(splitBaseHeight.size());
+    splitGroup[pieceId[e][0]] = group;
+    splitGroup[pieceId[e][1]] = group;
+    splitBaseHeight.push_back(-1.0f);
+    splitBasePiece.push_back(order.size());
+  }
+  auto height = [&] {
+    return std::clamp(cluster + rng->Float(-1.2f, 1.2f), c.minBuildingHeight, c.maxBuildingHeight);
+  };
+  auto variedHeight = [&](float h) {
+    const float middle = 0.5f * (c.minBuildingHeight + c.maxBuildingHeight);
+    return std::clamp(h + (h <= middle ? 0.6f : -0.6f), c.minBuildingHeight,
+                      c.maxBuildingHeight);
+  };
+  auto rememberSplitHeight = [&](size_t p, float h) {
+    const int group = splitGroup[p];
+    if (group >= 0 && splitBaseHeight[static_cast<size_t>(group)] < 0.0f) {
+      splitBaseHeight[static_cast<size_t>(group)] = h;
+      splitBasePiece[static_cast<size_t>(group)] = p;
+    }
+  };
+  auto ensureHeight = [&](size_t p) {
+    if (heights[p] >= 0.0f) return;
+    const int group = splitGroup[p];
+    if (group < 0) {
+      heights[p] = height();
+      return;
+    }
+    const size_t g = static_cast<size_t>(group);
+    if (splitBaseHeight[g] < 0.0f) {
+      splitBaseHeight[g] = height();
+      splitBasePiece[g] = p;
+      heights[p] = splitBaseHeight[g];
+    } else {
+      heights[p] =
+          p == splitBasePiece[g] ? splitBaseHeight[g] : variedHeight(splitBaseHeight[g]);
+    }
+  };
+  // Intersection parameter along `d1` from `p1` with the line (p2, d2).
+  auto lineHit = [](glm::vec2 p1, glm::vec2 d1, glm::vec2 p2, glm::vec2 d2, float* t) {
+    const float den = d1.x * d2.y - d1.y * d2.x;
+    if (std::abs(den) < 1.0e-4f) return false;
+    const glm::vec2 w = p2 - p1;
+    *t = (w.x * d2.y - w.y * d2.x) / den;
+    return true;
+  };
   for (size_t e = 0; e < edges; ++e) {
     const size_t next = (e + 1) % edges;
     if (cornerGap[next] || next == e || rows[e].empty() || rows[next].empty()) continue;
@@ -967,11 +1037,12 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
       continue;
     }
     // One building: the L's two halves share a height.
-    if (heights[pid] < 0.0f) heights[pid] = height();
+    ensureHeight(pid);
     heights[qid] = heights[pid];
+    rememberSplitHeight(qid, heights[qid]);
   }
   for (size_t p = 0; p < order.size(); ++p) {
-    if (heights[p] < 0.0f) heights[p] = height();
+    ensureHeight(p);
     out.parcels.push_back({rows[order[p].first][order[p].second].footprint, heights[p]});
   }
   return out;

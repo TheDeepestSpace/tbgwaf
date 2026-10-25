@@ -971,6 +971,33 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
       }
     }
   }
+
+  // Video tail: the last action's fixed hold is shorter than a bullet line's
+  // life / the ghost fade, so a round that ends on a shot would cut off with
+  // the tracer and ghosts still on screen. Keep ticking (after the final
+  // golden capture, which therefore is unaffected) until they have faded.
+  if (hooks.onFrame && hooks.tickSeconds > 0.0f && !playback.Active()) {
+    auto StillFading = [&] {
+      for (const Tracer& tracer : game.Tracers()) {
+        if (game.TracerAlpha(tracer) > 0.0f) return true;
+      }
+      for (const Unit& unit : scenario.scene.units) {
+        for (Team viewer : {Team::Blue, Team::Red}) {
+          for (const auto& sample : game.Sightings(viewer, unit.id)) {
+            if (game.GhostAlpha(sample.at) > 0.0f) return true;
+          }
+        }
+      }
+      return false;
+    };
+    constexpr float kMaxTailSeconds = 4.0f;
+    for (float elapsed = 0.0f; elapsed < kMaxTailSeconds && StillFading();
+         elapsed += hooks.tickSeconds) {
+      hooks.onFrame(game);
+      game.Update(hooks.tickSeconds);  // Ages the bullet lines (UpdateSightingMemory doesn't).
+      game.UpdateSightingMemory(hooks.tickSeconds);
+    }
+  }
   return result;
 }
 

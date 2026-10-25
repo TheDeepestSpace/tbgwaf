@@ -39,6 +39,14 @@ const std::vector<uint32_t> kCitySeeds = {7, 42, 2024};
 // Hilly goldens also pin the navmesh boundary debug overlay, so a terrain or
 // navmesh regression shows up as a visual diff.
 const std::vector<uint32_t> kHillySeeds = {7, 2024};
+// 50 randomly drawn seeds of the default (seed-driven terrain / overpass)
+// city, so the gallery's map view samples what players actually get.
+const std::vector<uint32_t> kRandomCitySeeds = {
+    6805,  7622,  13514, 15121, 16096, 16478, 16693, 18035, 19376, 22493,
+    24711, 25257, 26421, 27757, 32252, 32727, 37632, 38105, 39138, 39683,
+    40925, 46219, 47957, 48757, 50859, 51093, 54145, 58507, 59312, 59877,
+    64344, 65145, 66154, 66720, 75266, 80231, 80930, 81365, 82666, 83042,
+    87158, 87288, 87781, 89225, 90416, 91714, 92269, 92718, 94609, 94951};
 
 struct Options {
   fs::path goldensDir = "tests/map_goldens";
@@ -190,6 +198,11 @@ int main(int argc, char** argv) {
     deckFrontier.frontierFrom = glm::vec3(-11.52f, 5.0f, 1.869f);
     deckFrontier.frontierBudget = 12.0f;
     cases.push_back(std::move(deckFrontier));
+  }
+  for (const uint32_t seed : kRandomCitySeeds) {
+    cases.push_back({"city_random_seed_" + std::to_string(seed),
+                     tactics::GenerateUrbanMap(seed, terrainAutoConfig), 180.0f,
+                     /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
   }
   for (const uint32_t seed : kHillySeeds) {
     cases.push_back({"hilly_seed_" + std::to_string(seed), tactics::GenerateHillyMap(seed),

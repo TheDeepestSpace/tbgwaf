@@ -47,9 +47,25 @@ tune artery count/width, local-street width/skew and elevation through
 `MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
 overlay of the navmesh's walkable-cell boundaries.
 
-City terrain defaults to `auto` (a seeded 50% chance per map); force it with
-`TBGWAF_TERRAIN=on|off`,
-`MapGeneratorConfig::features.terrain`, or scenario YAML:
+Every arterial city has **terrain levels** (issue #155): 1–3 map-spanning
+raised levels, drawn per seed. Each level is a straight step across the whole
+map, roughly across the artery: everything on one side rises 1–5 figure
+heights behind a retaining wall. Only a narrow strip on the wall's low side
+(the wall, its stairs and a walkway) is carved between the blocks, so no
+street is owed to a level change; steps overlap into nested tiers at
+different heights, with sharp edges (no rolling noise). The terrain is planned first;
+the highway profile is then chosen against it per seed: the artery stays at
+grade and ramps through every wall (a main road cutting through the levels),
+or climbs onto a deck before a run of walls, flies over them clear of the
+highest tier and settles onto the level beyond, with either ramp optionally
+replaced by an elevated map edge, up to one tall deck above every level. The
+branch merges onto whatever the artery is doing and ramps through the walls
+it meets at grade. Local streets are drawn independently of the walls: an
+avenue may ramp through one, the others dead-end at it. Stairs climb each wall along its face: a flight
+attached beside the wall on its low side, with a railing, and a landing
+across the wall top onto the level. Switch the levels off with
+`TBGWAF_TERRAIN=off`, `MapGeneratorConfig::features.terrain`, or scenario
+YAML:
 
 ```yaml
 map:
@@ -58,24 +74,12 @@ map:
     seed: 7
     elevated: false
     features: {terrain: on}
-    terrain_amplitude: 3.0
-    terrain_levels: -1 # seeded 1–3; 0 keeps just the rolling ground
+    terrain_levels: -1 # seeded 1–3; 0 keeps the city flat
 ```
 
-Terrain raises whole portions of the map: each level is a straight step
-spanning the entire map, roughly across the artery and laid along its own
-boundary street, so everything on one side rises 1–5 figure heights behind a
-retaining wall parallel to that street. Steps overlap into nested tiers at
-different heights. Low-frequency noise rides on the tiers, buildings stand on
-level pads, and a wide walk runs along both sides of each wall. Stairs climb
-every wall: walled through-wall channels whose ground carries the flight, and
-flights attached along the wall face that turn onto the level over the wall
-top. The artery and branch meet a wall either at grade, ramping through a gap
-in it (a main road cutting through the level), or elevated, flying clear over
-it and settling onto the level at the far end; an avenue may also ramp
-through. Terrain-enabled seeds draw an overpass more often. The legacy
-orthogonal generator stays flat. `city_terrain_seed_*` goldens cover seeds 7,
-42 and 2024 at grade and `city_terrain_elevated_seed_16` the overpass case.
+The legacy orthogonal generator stays flat. `city_terrain_seed_*` goldens
+cover seeds 7, 42 and 2024 at grade and `city_terrain_elevated_seed_16` a
+deck over the levels; the flat-city goldens pin terrain off.
 
 Urban maps carry pre-built **ziplines** (0-2 per block, seed-deterministic,
 `MapGeneratorConfig::maxZiplinesPerBlock`): two-way cables between anchor

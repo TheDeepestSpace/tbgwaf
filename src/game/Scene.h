@@ -8,21 +8,22 @@
 
 namespace tactics {
 
-// A stair up one terrain level wall (issue #155). `bottom` and `top` are
-// ground points on the low/high side. A through-wall stair cuts a walled
-// channel whose ground carries the flight; an along-wall stair hangs off
-// the wall face as explicit WalkSurfaces, climbing parallel to it, and
-// turns onto the level over the wall top.
+// A stair up one terrain level wall (issue #155): a flight attached along
+// the wall face on its low side, climbing parallel to the wall in the
+// wall-side walk, then a landing across the wall top onto the level.
+// `bottom` is the ground point at the flight's foot, `top` the ground point
+// on the level past the landing.
 struct TerrainAccess {
   glm::vec3 bottom, top;
-  float width = 4.0f;
-  bool alongWall = false;
+  float width = 2.4f;
 };
 
 // One map-spanning terrain step: ground on the `raisedNormal` side of the
-// step line through `origin` along `dir` sits `rise` higher, behind a
-// retaining wall that runs parallel to its boundary street. Steps overlap
-// into nested tiers; highway ramps and the accesses climb them.
+// step line sits `rise` higher, behind a retaining wall. `origin` and `dir`
+// give the centerline of the wall strip carved between the blocks on the
+// low side (the wall box, the stair flights and a walkway; 6.6 wide), whose
+// raised edge is the step line. Steps overlap into nested tiers; highway
+// ramps and the stair flights climb them.
 struct TerrainWall {
   glm::vec2 origin{0.0f}, dir{1.0f, 0.0f};
   glm::vec2 raisedNormal{0.0f, 1.0f};

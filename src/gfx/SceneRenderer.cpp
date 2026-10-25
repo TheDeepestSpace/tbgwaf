@@ -2257,9 +2257,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // behind the solid geometry to keep their shared edge free of z-fighting.
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(1.0f, 1.0f);
-    // Earthy green-brown so the hills read as terrain rather than factory floor.
+    // Earthy green-brown so the hills read as terrain rather than factory
+    // floor; a city's levels keep the urban ground tone.
+    const bool city = !game.GetScene().roads.empty();
     DrawLitModel(litShader_, terrainMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(0.30f, 0.36f, 0.22f, 1.0f));
+                 city ? glm::vec4(0.16f, 0.18f, 0.20f, 1.0f) : glm::vec4(0.30f, 0.36f, 0.22f, 1.0f));
     glDisable(GL_POLYGON_OFFSET_FILL);
   } else {
     DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_,

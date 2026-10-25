@@ -1,5 +1,5 @@
-# The blue figure climbs a through-wall stair up a map-spanning terrain
-# level (issue #155): a walled channel whose ground carries the flight.
+# The blue figure climbs a stair flight attached along a terrain level's
+# retaining wall (issue #155) and turns onto the level over the wall top.
 # This also pins terrain-following pavement and the shadow-map FOV receivers.
 name: city_terrain_ramp_move
 map:
@@ -8,22 +8,21 @@ map:
     seed: 7
     elevated: false
     features: {terrain: on}
-    terrain_amplitude: 3.0
     terrain_levels: -1
 units:
-  - {id: 0, team: blue, position: [-42.74, 0, -34.59], facing_degrees: 170}
+  - {id: 0, team: blue, position: [-35.71, 0, -45.24], facing_degrees: 100}
   - {id: 1, team: red, position: [-65, 0, 10], facing_degrees: 0}
 camera:
-  target: [-46, -34]
+  target: [-37, -41]
   zoom: -120
 render: {fov_overlay: shadow_map}
 script:
-  - assert: {unit: 0, position: [-42.74, 0.685, -34.59], tolerance: 0.05}
+  - assert: {unit: 0, position: [-35.71, 0.098, -45.24], tolerance: 0.05}
   - action: move
     actor: 0
-    destination: [-50.42, 5.112, -33.00]
+    destination: [-38.77, 4.681, -37.40]
   - action: pass
     actor: 1
   - action: commit
-  - assert: {unit: 0, position: [-50.42, 5.112, -33.00], tolerance: 0.05}
+  - assert: {unit: 0, position: [-38.77, 4.681, -37.40], tolerance: 0.05}
   - assert: {round: 2}

@@ -33,8 +33,8 @@ enum class BranchEnd { Auto, Ramp, OffMap };
 
 // Per-feature switch for the optional urban detail layers (issue #146).
 // Auto lets the seed decide, with `chance` as the per-seed probability; Off/On
-// force it. Terrain defaults to Auto like the rest; the remaining detail flags are
-// reserved for their respective emitters.
+// force it. Terrain defaults to On (levels are part of every arterial city;
+// issue #155); the remaining detail flags are reserved for their emitters.
 enum class FeatureMode { Auto, Off, On };
 struct FeatureToggle {
   FeatureMode mode = FeatureMode::Auto;
@@ -44,7 +44,7 @@ struct UrbanFeatures {
   FeatureToggle lanes;
   FeatureToggle curbs;
   FeatureToggle furniture;
-  FeatureToggle terrain;
+  FeatureToggle terrain{FeatureMode::On, 0.5f};
   FeatureToggle interiors;
   FeatureToggle rail;
 };
@@ -103,17 +103,16 @@ struct MapGeneratorConfig {
   int maxZiplinesPerBlock = 2;
   float ziplineMinLength = 4.0f;
   float ziplineMaxLength = 22.0f;
-  // Urban ground (issue #155): low rolling noise plus map-spanning raised
-  // levels. Each level is a straight step, roughly across the artery, laid
-  // along its own boundary street: everything on one side rises 1-5 figure
-  // heights behind a retaining wall parallel to that street. Steps overlap
-  // into nested tiers. The artery/branch ramp through a wall they meet at
-  // grade (a main road cutting through the level) or fly over it when
-  // elevated and settle onto the level beyond; an avenue may ramp through;
-  // stairs climb the wall elsewhere (through-wall channels and flights
-  // attached along the wall face). terrainLevelCount: -1 draws 1-3 per
-  // seed; 0 keeps just the rolling ground. Legacy arteryCount=0 stays flat.
-  float terrainAmplitude = 3.0f;
+  // Urban ground (issue #155): map-spanning raised levels. Each level is a
+  // straight step, roughly across the artery, laid along its own boundary
+  // street: everything on one side rises 1-5 figure heights behind a
+  // retaining wall parallel to that street. Steps overlap into nested
+  // tiers (sharp, no rolling noise). The highway profile is planned
+  // against the levels: the artery/branch ramp through a wall at grade (a
+  // main road cutting through the level) or fly over a run of walls on a
+  // deck; an avenue may ramp through; stair flights attached along each
+  // wall face climb it elsewhere. terrainLevelCount: -1 draws 1-3 per
+  // seed; 0 keeps the city flat. Legacy arteryCount=0 stays flat.
   int terrainLevelCount = -1;
   UrbanFeatures features;
 };

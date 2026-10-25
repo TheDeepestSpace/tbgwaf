@@ -69,10 +69,8 @@ void TestControlsAndDeterminism() {
   c.features.terrain.chance = 1.0f;
   CHECK(GenerateUrbanMap(7, c).ground.heights == on.ground.heights);
   c.features.terrain.mode = FeatureMode::On;
-  c.terrainLevelCount = 0;
+  c.terrainLevelCount = 0;  // No levels: the city stays flat.
   CHECK(GenerateUrbanMap(7, c).terrainWalls.empty());
-  CHECK(!GenerateUrbanMap(7, c).ground.Empty());
-  c.terrainAmplitude = 0.0f;
   CHECK(GenerateUrbanMap(7, c).ground.Empty());
   c = TerrainConfig();
   c.terrainLevelCount = 2;
@@ -83,9 +81,9 @@ void TestControlsAndDeterminism() {
 
 void TestPinnedTerrainFingerprints() {
   struct Expected { uint32_t seed; size_t walls; float minHeight, maxHeight; };
-  for (const Expected& e : {Expected{7, 2, 0.000000f, 5.544831f},
-                            Expected{42, 1, 0.000000f, 6.285729f},
-                            Expected{2024, 2, 0.000000f, 9.058801f}}) {
+  for (const Expected& e : {Expected{7, 2, 0.000000f, 4.680593f},
+                            Expected{42, 1, 0.000000f, 5.304327f},
+                            Expected{2024, 2, 0.000000f, 8.247633f}}) {
     currentSeed = e.seed;
     const Scene s = GenerateUrbanMap(e.seed, TerrainConfig());
     const auto range = std::minmax_element(s.ground.heights.begin(), s.ground.heights.end());
@@ -116,24 +114,17 @@ void TestSeedInvariants() {
       CHECK(wall.rise >= constants::kUnitHeight * 0.99f);
       CHECK(wall.rise <= constants::kUnitHeight * 5.01f);
       CHECK(!wall.accesses.empty());
-      // Ground routes cannot cross the along-wall flights (explicit walk
-      // surfaces), so every wall keeps at least one through-wall stair.
-      bool ground = false;
-      for (const TerrainAccess& access : wall.accesses) ground |= !access.alongWall;
-      CHECK(ground);
       for (const TerrainAccess& access : wall.accesses) {
-        CHECK(access.top.y > access.bottom.y + 0.4f);
-        CHECK((access.top.y - access.bottom.y) /
-                  FlatDistance(access.top, access.bottom) <= 0.85f);
+        CHECK(std::fabs(access.top.y - access.bottom.y - wall.rise) < 0.3f);
         CHECK(nav.IsWalkable(access.bottom.x, access.bottom.z));
         CHECK(nav.IsWalkable(access.top.x, access.top.z));
-        if (access.alongWall) continue;
-        // A through-wall stair is carried by the ground: the whole climb
-        // line is walkable inside its channel.
-        for (int sample = 0; sample <= 10; ++sample) {
-          const glm::vec3 p = glm::mix(access.bottom, access.top, sample / 10.0f);
-          CHECK(nav.IsWalkable(p.x, p.z));
-        }
+        // The flight is carried by the ground: a direct route climbs it
+        // (foot, along the wall, landing, onto the level) at stair grade.
+        std::vector<glm::vec3> path;
+        CHECK(nav.FindPath(access.bottom, access.top, &path));
+        float length = 0.0f;
+        for (size_t i = 0; i + 1 < path.size(); ++i) length += glm::distance(path[i], path[i + 1]);
+        CHECK(length < wall.rise / 0.8f + 12.0f);
       }
     }
     // Buildings have a level foundation, including each footprint corner.
@@ -184,11 +175,10 @@ void TestReachability() {
             CHECK(nav.FindPath(s.units[id].position, OnGround(s, point), &path));
           }
         }
-        if (access.alongWall) continue;
         CHECK(nav.FindPath(OnGround(s, access.bottom), OnGround(s, access.top), &path));
         float length = 0.0f;
         for (size_t i = 0; i + 1 < path.size(); ++i) length += glm::distance(path[i], path[i + 1]);
-        CHECK(length < FlatDistance(access.bottom, access.top) * 3.0f + 8.0f);
+        CHECK(length < wall.rise / 0.8f + 12.0f);
       }
     }
   }
@@ -206,13 +196,16 @@ void TestWallCoverAndCollision() {
       // Walk the step line; wherever the wall stands (box center blocked),
       // it blocks low LOS across and leaves the wall-top line clear.
       const glm::vec2 onLine = wall.origin + wall.dir * t;
-      const glm::vec2 box = onLine + n * (6.0f * 1.15f * 0.5f + 4.2f - 1.1f);
+      // Strip center -> step line (+3.3) -> wall box center (-1.1).
+      const glm::vec2 box = onLine + n * (6.6f * 0.5f - 1.1f);
       if (std::max(std::fabs(box.x), std::fabs(box.y)) > s.mapHalfExtent - 10.0f) continue;
       if (nav.IsWalkable(box.x, box.y)) continue;  // A gap or off the wall.
       const glm::vec2 low2 = box - n * 2.6f, high2 = box + n * 2.6f;
       const float lowY = s.ground.HeightAt(low2.x, low2.y);
       const float highY = s.ground.HeightAt(high2.x, high2.y);
-      if (highY - lowY < 1.5f) continue;  // Not the retaining wall (e.g. a building).
+      // Not the full retaining wall: a building, or a stair flight / landing
+      // raising the low-side sample.
+      if (highY - lowY < wall.rise * 0.9f) continue;
       const glm::vec3 low(low2.x, lowY + 0.6f, low2.y);
       const glm::vec3 high(high2.x, lowY + 0.6f, high2.y);
       CHECK(!LineOfSightClear(low, high, s.obstacles));
@@ -267,6 +260,58 @@ void TestHighwayTerrainInterplay() {
   CHECK(boosted > plain);
 }
 
+void TestHighwayProfilesOverLevels() {
+  // With the overpass forced on, the deck is planned against the walls:
+  // it never dips below the ground, flies clear over every wall it crosses
+  // on the deck, ramps through the others at grade, and the layouts vary.
+  MapGeneratorConfig c;
+  c.elevatedHighway = OverpassMode::On;
+  c.arteryCount = 2;
+  int layouts[5] = {};
+  for (currentSeed = 1; currentSeed <= 200; ++currentSeed) {
+    const Scene s = GenerateUrbanMap(currentSeed, c);
+    const auto roads = UrbanRoads(currentSeed, c);
+    ++layouts[static_cast<int>(UrbanOverpass(currentSeed, c).layout)];
+    float deckTop = -1e9f;
+    for (const auto& p : roads[0].centerline) {
+      const float lift = p.y - s.ground.HeightAt(p.x, p.z);
+      CHECK(lift > -0.01f);
+      deckTop = std::max(deckTop, lift);
+    }
+    CHECK(deckTop > 3.0f);
+    for (const TerrainWall& wall : s.terrainWalls) {
+      // The step line is the wall strip's raised edge; the artery sample
+      // nearest it is either at grade (ramped through) or well up on the
+      // deck (flown over).
+      const glm::vec2 line = wall.origin + wall.raisedNormal * (6.6f * 0.5f);
+      float best = 1e9f, lift = 0.0f;
+      for (const auto& p : roads[0].centerline) {
+        const float d = std::fabs(glm::dot(glm::vec2(p.x, p.z) - line, wall.raisedNormal));
+        if (d < best) {
+          best = d;
+          lift = p.y - s.ground.HeightAt(p.x, p.z);
+        }
+      }
+      CHECK(lift < 0.1f || lift > 2.5f);
+    }
+  }
+  CHECK(layouts[static_cast<int>(OverpassLayout::Through)] > 0);
+  CHECK(layouts[static_cast<int>(OverpassLayout::RampUpRampDown)] > 0);
+  CHECK(layouts[static_cast<int>(OverpassLayout::EnterRampUp)] > 0);
+  CHECK(layouts[static_cast<int>(OverpassLayout::EnterRampDown)] > 0);
+  // At grade, the artery climbs through every wall it meets.
+  c.elevatedHighway = OverpassMode::Off;
+  for (currentSeed = 1; currentSeed <= 200; ++currentSeed) {
+    const auto roads = UrbanRoads(currentSeed, c);
+    float minY = 1e9f, maxY = -1e9f;
+    for (const auto& p : roads[0].centerline) {
+      minY = std::min(minY, p.y);
+      maxY = std::max(maxY, p.y);
+    }
+    CHECK(maxY - minY > constants::kUnitHeight * 0.9f);
+  }
+}
+
 void TestTerrainZiplines() {
   auto c = TerrainConfig();
   c.maxZiplinesPerBlock = 2;
@@ -287,8 +332,7 @@ void TestMovementUpStair() {
   const TerrainAccess* stair = nullptr;
   for (const TerrainWall& wall : s.terrainWalls) {
     for (const TerrainAccess& access : wall.accesses) {
-      if (!access.alongWall && (!stair || access.top.y - access.bottom.y >
-                                              stair->top.y - stair->bottom.y)) {
+      if (!stair || access.top.y - access.bottom.y > stair->top.y - stair->bottom.y) {
         stair = &access;
       }
     }
@@ -298,7 +342,7 @@ void TestMovementUpStair() {
   const glm::vec3 start = OnGround(s, stair->bottom), goal = OnGround(s, stair->top);
   NavMesh nav;
   nav.Build(s.obstacles, s.mapHalfExtent, constants::kAgentRadius, &s.ground, &s.walkSurfaces);
-  const ReachField reach = nav.ComputeReachField(start, 18.0f, 0.5f);
+  const ReachField reach = nav.ComputeReachField(start, 30.0f, 0.5f);
   const int ix = static_cast<int>(std::round((goal.x - reach.minX) / reach.step));
   const int iz = static_cast<int>(std::round((goal.z - reach.minZ) / reach.step));
   CHECK(reach.Reached(ix, iz));
@@ -329,6 +373,7 @@ int main() {
   TestReachability();
   TestWallCoverAndCollision();
   TestHighwayTerrainInterplay();
+  TestHighwayProfilesOverLevels();
   TestTerrainZiplines();
   TestMovementUpStair();
   if (failures) { std::fprintf(stderr, "%d terrain check(s) failed\n", failures); return 1; }

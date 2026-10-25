@@ -211,9 +211,10 @@ void TestEveryBlockHasWallToWallAndGappedRuns() {
 }
 
 void TestVariedHeightsWithFewTowers() {
-  const MapGeneratorConfig c;
+  MapGeneratorConfig c;
+  c.features.terrain.mode = FeatureMode::Off;  // Buildings only: no retaining walls.
   for (uint32_t seed : kSeeds) {
-    const Scene scene = GenerateUrbanMap(seed);
+    const Scene scene = GenerateUrbanMap(seed, c);
     int towers = 0, medium = 0;
     float lo = 1e9f, hi = 0.0f;
     for (const auto& o : scene.obstacles) {
@@ -560,6 +561,7 @@ float DistanceToSegment(glm::vec2 p, glm::vec2 a, glm::vec2 b) {
 
 void TestObliqueArteryAndBranchMerge() {
   MapGeneratorConfig one;
+  one.features.terrain.mode = FeatureMode::Off;  // Flat-city road geometry.
   one.arteryCount = 1;
   one.elevatedHighway = OverpassMode::Off;
   const float half = UrbanMapHalfExtent(one);
@@ -602,6 +604,7 @@ void TestObliqueArteryAndBranchMerge() {
 
 void TestPolygonBlocksAdaptToAngledStreets() {
   MapGeneratorConfig config;
+  config.features.terrain.mode = FeatureMode::Off;  // Flat-city blocks.
   config.arteryCount = 2;
   config.elevatedHighway = OverpassMode::Off;
   const Scene scene = GenerateUrbanMap(42, config);
@@ -850,7 +853,8 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
 // --- Random overpass presence and off-map layouts (issue #130). ---
 
 void TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable() {
-  const MapGeneratorConfig autoConfig;  // Auto presence + Auto layout.
+  MapGeneratorConfig autoConfig;  // Auto presence + Auto layout.
+  autoConfig.features.terrain.mode = FeatureMode::Off;  // Flat: the deck is the only climb.
   int present = 0, absent = 0, layoutCounts[4] = {};
   for (uint32_t seed = 1; seed <= 120; ++seed) {
     const OverpassChoice choice = UrbanOverpass(seed, autoConfig);
@@ -919,6 +923,7 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
       {OverpassLayout::EnterRampDown, false, true},
   };
   MapGeneratorConfig config;
+  config.features.terrain.mode = FeatureMode::Off;  // Legacy flat-city layouts.
   config.elevatedHighway = OverpassMode::On;
   config.branchEnd = BranchEnd::Ramp;
   const float half = UrbanMapHalfExtent(config);
@@ -1029,6 +1034,7 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
 
 void TestBranchMayRunOffMapWithoutRamp() {
   MapGeneratorConfig config;
+  config.features.terrain.mode = FeatureMode::Off;  // Flat-city deck heights.
   config.elevatedHighway = OverpassMode::On;
   const float half = UrbanMapHalfExtent(config);
 
@@ -1290,6 +1296,7 @@ void TestZiplinesAreDeterministicBoundedAndValid() {
   for (const bool legacy : {false, true}) {
     for (uint32_t seed : kSeeds) {
       MapGeneratorConfig config = legacy ? LegacyConfig() : MapGeneratorConfig{};
+      config.features.terrain.mode = FeatureMode::Off;  // Anchors at y = 0.
       const Scene scene = GenerateUrbanMap(seed, config);
       CHECK(SameScene(scene, GenerateUrbanMap(seed, config)));
       CHECK(!scene.ziplines.empty());
@@ -1384,7 +1391,6 @@ void TestFeatureFlagsAndStreetGraph() {
   FeatureMode mode = FeatureMode::Auto;
   CHECK(ParseFeatureMode("on", &mode) && mode == FeatureMode::On);
   CHECK(!ParseFeatureMode("maybe", &mode));
-  full.features.terrain.mode = FeatureMode::Off;
   for (uint32_t seed : kSeeds) {
     CHECK(SameScene(GenerateUrbanMap(seed), GenerateUrbanMap(seed, full)));
     const std::vector<UrbanStreet> streets = UrbanStreets(seed);
@@ -1439,6 +1445,7 @@ void TestLocalStreetsPavedAndSidewalkIsRing() {
 // PR #192's review screenshot.
 void TestLocalStreetBandsReachMapEdgeAtFullWidth() {
   MapGeneratorConfig c;
+  c.features.terrain.mode = FeatureMode::Off;  // One pavement band per street.
   c.elevatedHighway = OverpassMode::Off;
   for (const uint32_t seed : kSeeds) {
     const std::vector<UrbanStreet> streets = UrbanStreets(seed, c);

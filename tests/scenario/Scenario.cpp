@@ -132,7 +132,6 @@ Scene ParseScene(const YAML::Node& root) {
                 "map.generate.elevated_branch must be ramp/off-map, got '" + end + "'");
           }
         }
-        if (genNode["terrain_amplitude"]) config.terrainAmplitude = genNode["terrain_amplitude"].as<float>();
         if (genNode["terrain_levels"]) config.terrainLevelCount = genNode["terrain_levels"].as<int>();
         // `features: {lanes: on, curbs: {mode: auto, chance: 0.3}, ...}`
         // sets the optional urban detail layers (see UrbanFeatures).

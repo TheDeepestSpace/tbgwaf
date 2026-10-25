@@ -25,7 +25,8 @@ namespace {
 //   0xb10c5eedu   street graph     avenues and cross streets
 //   0xa2233e18u   terrain presence on/off draw
 //   0x7e22ac31u   terrain levels   level-step lines, raised sides, rises
-//   0x1eae1007u   terrain accesses avenue ramp-throughs and stair placement
+//   0x3c9d51e7u   highway profile  deck layout against the levels, ramp spots
+//   0x1eae1007u   terrain accesses avenue ramp-throughs and stair flights
 //   0x21b1e5a7u   ziplines         roof/anchor selection
 constexpr uint32_t kStreetStream = 0xb10c5eedu;
 
@@ -218,7 +219,7 @@ constexpr float kDeckOverhang = 0.0f;
 // Whether this (seed, config) generates terrain levels. Presence has its
 // own stream so forcing terrain never reshuffles the rest of a layout.
 bool TerrainEnabled(uint32_t seed, const MapGeneratorConfig& c) {
-  if (c.arteryCount <= 0 || c.terrainAmplitude <= 0.0f) return false;
+  if (c.arteryCount <= 0) return false;
   const FeatureToggle& toggle = c.features.terrain;
   if (toggle.mode == FeatureMode::Off) return false;
   if (toggle.mode == FeatureMode::On) return true;
@@ -295,22 +296,59 @@ struct HighwayPlan {
   OverpassLayout layout = OverpassLayout::RampUpRampDown;
   bool hasBranch = false;
   BranchSpec branch;
+  // Branch draws made before the terrain is known (same stream order as
+  // ever, so a flat city keeps its layout): merge fraction and turn.
+  float mergeUnit = 0.0f, turn = 0.0f;
+  int preferredTurn = 1;
 };
 
-// Where the branch meets the artery, as a fraction of the artery's on-map
-// length (mapped from one unit draw so layouts never shift the rng stream).
-// On an elevated artery the merge must land where the deck is at full
-// height, so the branch genuinely ramps between grade and deck.
-float MergeFraction(const HighwayPlan& plan, float t) {
-  if (!plan.elevated) return 0.30f + 0.14f * t;
-  switch (plan.layout) {
-    case OverpassLayout::EnterRampUp: return 0.62f + 0.12f * t;   // Deck from ~0.52 on.
-    case OverpassLayout::EnterRampDown: return 0.26f + 0.12f * t; // Deck until ~0.48.
-    default: return 0.46f + 0.08f * t;                            // Mid-span deck.
+// The overpass deck between its rise and fall ramps, as the legacy layouts
+// place them on a flat city. A ramp a layout never takes is parked far
+// outside the sampled range, so the shared smoothstep profile formula
+// (rise minus fall) applies unchanged to every layout.
+void ApplyLegacyLayout(ArterySpec* artery, OverpassLayout layout) {
+  ArterySpec& a = *artery;
+  const float length = a.sMax - a.sMin;
+  const float far = 100.0f * length;
+  a.s0 = a.sMin;
+  a.s1 = a.sMax;
+  a.rise0 = a.sMin + 0.10f * length;
+  a.rise1 = a.sMin + 0.36f * length;
+  a.fall0 = a.sMin + 0.64f * length;
+  a.fall1 = a.sMin + 0.90f * length;
+  switch (layout) {
+    case OverpassLayout::Auto:  // Resolved by the caller; both ramps on-map.
+    case OverpassLayout::RampUpRampDown:
+      break;
+    case OverpassLayout::Through:
+      a.s0 = a.sMin - kDeckOverhang;
+      a.s1 = a.sMax + kDeckOverhang;
+      a.rise0 = -far;
+      a.rise1 = -far + 1.0f;
+      a.fall0 = far;
+      a.fall1 = far + 1.0f;
+      break;
+    case OverpassLayout::EnterRampUp:
+      a.s1 = a.sMax + kDeckOverhang;
+      a.rise0 = a.sMin + 0.22f * length;
+      a.rise1 = a.sMin + 0.52f * length;
+      a.fall0 = far;
+      a.fall1 = far + 1.0f;
+      break;
+    case OverpassLayout::EnterRampDown:
+      a.s0 = a.sMin - kDeckOverhang;
+      a.rise0 = -far;
+      a.rise1 = -far + 1.0f;
+      a.fall0 = a.sMin + 0.48f * length;
+      a.fall1 = a.sMin + 0.78f * length;
+      break;
   }
 }
 
-HighwayPlan BuildHighwayPlan(uint32_t seed, const MapGeneratorConfig& c) {
+// First half of the highway plan: the artery line, the overpass draw and
+// the branch draws. The deck profile and the branch itself are settled by
+// FinishHighwayPlan once the terrain levels are known.
+HighwayPlan BeginHighwayPlan(uint32_t seed, const MapGeneratorConfig& c) {
   Rng rng(seed ^ 0xa17e2d31u);
   const float half = UrbanMapHalfExtent(c);
   HighwayPlan plan;
@@ -323,91 +361,13 @@ HighwayPlan BuildHighwayPlan(uint32_t seed, const MapGeneratorConfig& c) {
   artery.normal = glm::vec2(-artery.dir.y, artery.dir.x);
   artery.origin = artery.normal * (half * rng.Float(-0.12f, 0.12f));
   ClipLineToSquare(artery.origin, artery.dir, half, &artery.sMin, &artery.sMax);
-  const float length = artery.sMax - artery.sMin;
-  artery.s0 = artery.sMin;
-  artery.s1 = artery.sMax;
-  // Deck profile per layout. A ramp a layout never takes is parked far
-  // outside the sampled range, so the shared smoothstep profile formula
-  // (rise minus fall) applies unchanged to every layout.
-  const float far = 100.0f * length;
-  artery.rise0 = artery.sMin + 0.10f * length;
-  artery.rise1 = artery.sMin + 0.36f * length;
-  artery.fall0 = artery.sMin + 0.64f * length;
-  artery.fall1 = artery.sMin + 0.90f * length;
-  if (plan.elevated) {
-    switch (plan.layout) {
-      case OverpassLayout::Auto:  // Resolved above; both ramps on-map.
-      case OverpassLayout::RampUpRampDown:
-        break;
-      case OverpassLayout::Through:
-        artery.s0 = artery.sMin - kDeckOverhang;
-        artery.s1 = artery.sMax + kDeckOverhang;
-        artery.rise0 = -far;
-        artery.rise1 = -far + 1.0f;
-        artery.fall0 = far;
-        artery.fall1 = far + 1.0f;
-        break;
-      case OverpassLayout::EnterRampUp:
-        artery.s1 = artery.sMax + kDeckOverhang;
-        artery.rise0 = artery.sMin + 0.22f * length;
-        artery.rise1 = artery.sMin + 0.52f * length;
-        artery.fall0 = far;
-        artery.fall1 = far + 1.0f;
-        break;
-      case OverpassLayout::EnterRampDown:
-        artery.s0 = artery.sMin - kDeckOverhang;
-        artery.rise0 = -far;
-        artery.rise1 = -far + 1.0f;
-        artery.fall0 = artery.sMin + 0.48f * length;
-        artery.fall1 = artery.sMin + 0.78f * length;
-        break;
-    }
-  }
-
+  ApplyLegacyLayout(&artery, plan.elevated ? plan.layout : OverpassLayout::RampUpRampDown);
   plan.hasBranch = c.arteryCount >= 2 || plan.elevated;
   // Branch draws happen unconditionally so toggling the branch or the deck
   // never reshuffles the rest of a seed's layout.
-  const float mergeFraction = MergeFraction(plan, rng.Unit01());
-  const int preferredTurn = rng.Chance(0.5f) ? 1 : -1;
-  const float turn = glm::radians(rng.Float(30.0f, 44.0f));
-  if (plan.hasBranch) {
-    BranchSpec& branch = plan.branch;
-    branch.width = c.arteryWidth * 0.72f;
-    branch.mergeS = artery.sMin + mergeFraction * length;
-    const glm::vec2 merge = artery.origin + artery.dir * branch.mergeS;
-    for (const int turnSign : {preferredTurn, -preferredTurn}) {
-      branch.dir = Rotate(artery.dir, static_cast<float>(turnSign) * turn);
-      float tMin = 0.0f, tMax = 0.0f;
-      ClipLineToSquare(merge, -branch.dir, half, &tMin, &tMax);
-      branch.length = tMax;  // Distance back from the merge to the boundary.
-      if (branch.length > half * 0.75f) break;
-    }
-    branch.start = merge - branch.dir * branch.length;
-    branch.side = glm::dot(artery.normal, branch.start - artery.origin) > 0.0f ? 1 : -1;
-    // Ramp shape and off-map ending draw from their own stream so they never
-    // reshuffle the rest of a seed's layout. The off-map branch never ramps
-    // down to grade, so it needs the artery to offer a way up (not Through).
-    Rng branchRng(seed ^ 0x5b2a9c47u);
-    const bool drawnOffMap = branchRng.Chance(c.branchOffMapChance);
-    const float rampFraction = branchRng.Float(0.30f, 0.75f);
-    const float rampMax = branchRng.Float(30.0f, 70.0f);
-    const bool canOffMap = plan.elevated && plan.layout != OverpassLayout::Through;
-    branch.offMap = canOffMap && (c.branchEnd == BranchEnd::Auto ? drawnOffMap
-                                                                 : c.branchEnd == BranchEnd::OffMap);
-    // The ramp tops out before the branch slab crosses the deck's edge, so
-    // the whole junction sits at deck height and the branch only starts its
-    // descent once clear of the artery (no wedge cutting under the deck).
-    const float sinTurn =
-        std::max(0.2f, std::fabs(artery.dir.x * branch.dir.y - artery.dir.y * branch.dir.x));
-    const float junctionClear = (c.arteryWidth * 0.5f + branch.width * 0.5f + 2.0f) / sinTurn;
-    branch.riseEnd = std::max(branch.length * 0.5f, branch.length - junctionClear);
-    branch.riseStart = branch.riseEnd - std::min(branch.riseEnd * rampFraction, rampMax);
-    if (branch.offMap) {
-      branch.riseStart = 0.0f;
-      branch.riseEnd = 0.0f;
-      branch.u0 = -kDeckOverhang;
-    }
-  }
+  plan.mergeUnit = rng.Unit01();
+  plan.preferredTurn = rng.Chance(0.5f) ? 1 : -1;
+  plan.turn = glm::radians(rng.Float(30.0f, 44.0f));
   return plan;
 }
 
@@ -416,56 +376,107 @@ float SmoothStep01(float t) {
   return t * t * (3.0f - 2.0f * t);
 }
 
-// --- Map-spanning terrain levels (issue #155 redo). ---
+// --- Map-spanning terrain levels (issue #155). ---
 //
-// A terrain-enabled seed raises whole portions of the map behind retaining
-// walls. Each level step is a straight line crossing the entire map,
-// roughly perpendicular to the artery, laid along its own boundary street:
-// the wall slides parallel to that street and blocks never straddle it.
-// Steps stack where raised sides overlap, nesting tiers at different
-// heights. The artery and branch either ramp through a gap in a wall they
-// meet at grade -- a main road cutting through the level -- or, when
-// elevated there, fly over the wall and settle onto the level beyond.
+// Terrain comes first. A terrain-enabled seed raises whole portions of the
+// map behind retaining walls: each level step is a straight line crossing
+// the entire map, roughly perpendicular to the artery. A narrow strip on
+// its low side (the wall box, a stair strip and a walkway) is carved
+// between the blocks, so no block straddles a wall and no street is owed
+// to it; the local streets are drawn independently and may run into a
+// wall or ramp through it. Steps stack where raised sides overlap,
+// nesting tiers at different heights. The tiers are sharp: no rolling
+// noise. The highway profile is planned against the walls
+// (FinishHighwayPlan), and stairs climb each wall along its face.
 
 constexpr uint32_t kTerrainStream = 0x7e22ac31u;
-constexpr float kRampGrade = 0.30f;    // Max rise/run of a road/walk ramp.
-constexpr float kStairGrade = 0.80f;   // Steeper flight reserved for stairs.
+constexpr uint32_t kHighwayProfileStream = 0x3c9d51e7u;
+constexpr float kRampGrade = 0.30f;   // Max rise/run of a road ramping through a wall.
+constexpr float kDeckGrade = 0.22f;   // Rise/run of an overpass ramp.
+constexpr float kStairGrade = 0.80f;  // Along-wall stair flight.
 constexpr float kWallHalfWidth = 1.1f;
-constexpr float kStepBlend = 0.25f;    // Cliff feather of a level step.
-constexpr float kWallSidewalk = 4.2f;  // Walkable strip between a wall and its street's pavement.
+constexpr float kWallBox = 2.0f * kWallHalfWidth;  // Wall footprint, hugging the step's low side.
+constexpr float kStepBlend = 0.25f;   // Cliff feather of a level step.
+constexpr float kFlightWidth = 2.4f;  // Stair strip beside the wall box.
+constexpr float kLanding = 2.4f;      // Flat turn across the wall top at a flight's head.
+constexpr float kFlightMargin = 1.5f; // Clear wall line past a flight's ends.
+// Strip on a wall's low side: the wall box, the stair strip and a walkway.
+constexpr float kWallSidewalk = kWallBox + kFlightWidth + 2.0f;
+constexpr float kGroundStep = 0.5f;   // Heightfield spacing: sharp steps, narrow flights.
+constexpr float kDeckClearMargin = 8.0f;  // Deck at full height this far either side of a wall it flies over.
+constexpr float kFlatMargin = 9.0f;       // Flat corridor either side of a wall ramped through at grade.
 
-// A ramped opening through one wall (an avenue crossing or a through-wall
-// stair): inside the across-band around `foot + t * along`, the wall's step
-// becomes a linear climb over `length` instead of a sharp cliff.
+// A ramped opening through one wall where an avenue crosses it: inside the
+// across-band around `foot + t * along`, the wall's step becomes a linear
+// climb over `length` instead of a sharp cliff.
 struct TerrainChannel {
   glm::vec2 foot{0.0f}, along{0.0f, 1.0f};  // `along` points at the raised side.
   float width = 0.0f, length = 1.0f;
-  bool stair = false;  // Narrow stair channel (gets its own side walls).
+};
+
+// A stair flight attached along the wall face, on the low side: a strip
+// beside the wall box that climbs parallel to it, then a flat landing
+// across the wall top onto the level.
+struct TerrainFlight {
+  float tFoot = 0.0f;  // Wall-line param of the foot.
+  float dir = 1.0f;    // Climbs toward increasing (+1) or decreasing (-1) t.
+  float run = 1.0f;    // Flight length along the wall (rise / kStairGrade).
 };
 
 struct TerrainWallSpec {
-  glm::vec2 origin{0.0f}, dir{1.0f, 0.0f};  // Boundary street centerline.
+  glm::vec2 origin{0.0f}, dir{1.0f, 0.0f};  // Centerline of the wall strip carved between blocks.
   glm::vec2 raisedN{0.0f, 1.0f};            // Unit normal toward the raised side.
+  glm::vec2 lineOrigin{0.0f};               // A point on the step line (the strip's raised edge).
   float stepD = 0.0f;                       // Step line: dot(raisedN, p) >= stepD is raised.
   float rise = 0.0f;
-  float cutWidth = 0.0f, paveWidth = 0.0f;  // Boundary street carve/pavement widths.
+  float cutWidth = 0.0f;                    // Strip width: wall box, stair strip and walkway.
   float arteryS = 0.0f;                     // Artery param of the street crossing.
   bool arteryRamp = false;                  // Artery ramps through (vs deck flying over).
   bool branchRamp = false;                  // Same for the branch, when it crosses.
   float branchU = -1000.0f;                 // Branch param of the crossing, if any.
   std::vector<TerrainChannel> channels;     // Filled by the terrain emitter.
+  std::vector<TerrainFlight> flights;       // Likewise.
   std::vector<std::pair<float, float>> gaps;  // Wall-line param intervals left open.
+
+  // Where the step line meets a road through `origin` along `roadDir`:
+  // the road param of the crossing and the run of its at-grade ramp.
+  float CrossingParam(glm::vec2 roadOrigin, glm::vec2 roadDir) const {
+    return (stepD - glm::dot(raisedN, roadOrigin)) / glm::dot(raisedN, roadDir);
+  }
+  float RampRun(glm::vec2 roadDir) const {
+    return rise / kRampGrade / std::max(0.25f, std::fabs(glm::dot(raisedN, roadDir)));
+  }
+  // Height factor of this step at p: 0 on the low side, 1 on the raised
+  // side, with the channels' and flights' climbs in between.
+  float Factor(glm::vec2 p) const {
+    const float d = glm::dot(raisedN, p) - stepD;
+    for (const TerrainChannel& channel : channels) {
+      const glm::vec2 rel = p - channel.foot;
+      if (std::fabs(rel.x * channel.along.y - rel.y * channel.along.x) <= channel.width * 0.5f) {
+        return std::clamp(glm::dot(rel, channel.along) / channel.length, 0.0f, 1.0f);
+      }
+    }
+    if (d < 0.0f && d >= -(kWallBox + kFlightWidth)) {
+      const float t = glm::dot(p - lineOrigin, dir);
+      for (const TerrainFlight& flight : flights) {
+        const float along = (t - flight.tFoot) * flight.dir;
+        if (along < 0.0f || along > flight.run + kLanding) continue;
+        if (along >= flight.run) return 1.0f;  // Landing: flat across to the wall top.
+        if (d <= -kWallBox) return along / flight.run;
+      }
+    }
+    return SmoothStep01((d + kStepBlend) / kStepBlend);
+  }
 };
 
 struct TerrainPlan {
   bool enabled = false;
-  float amplitude = 0.0f, wavelength = 1.0f;
   float deckCruise = 0.0f;  // Absolute deck height at full overpass profile.
   std::vector<TerrainWallSpec> walls;
 };
 
-// Level height from the steps alone (sharp cliff edges), before noise,
-// block pads, road ramps and access channels.
+// Level height from the steps alone (sharp cliff edges), before road ramps,
+// channels and flights.
 float TierHeight(const TerrainPlan& terrain, glm::vec2 p) {
   float y = 0.0f;
   for (const TerrainWallSpec& w : terrain.walls) {
@@ -484,8 +495,8 @@ float HighwayGradeAt(const TerrainPlan& terrain, glm::vec2 p, glm::vec2 roadDir,
   for (const TerrainWallSpec& w : terrain.walls) {
     const float d = glm::dot(w.raisedN, p) - w.stepD;
     if (branchRoad ? w.branchRamp : w.arteryRamp) {
-      const float along = std::max(0.25f, std::fabs(glm::dot(w.raisedN, roadDir)));
-      y += w.rise * std::clamp(d / (along * (w.rise / kRampGrade)), 0.0f, 1.0f);
+      y += w.rise * std::clamp(d / (w.RampRun(roadDir) * std::fabs(glm::dot(w.raisedN, roadDir))),
+                               0.0f, 1.0f);
     } else {
       y += w.rise * SmoothStep01((d + kStepBlend) / kStepBlend);
     }
@@ -493,34 +504,20 @@ float HighwayGradeAt(const TerrainPlan& terrain, glm::vec2 p, glm::vec2 roadDir,
   return y;
 }
 
-TerrainPlan BuildTerrainPlan(uint32_t seed, const MapGeneratorConfig& c, const HighwayPlan& plan) {
+// The level steps, placed against the artery line alone: 1-3 per seed
+// (terrainLevelCount pins the count), each crossing the artery at a spot
+// that leaves room on the map for an at-grade ramp through it and a flat
+// stretch between neighbouring climbs.
+TerrainPlan BuildTerrainPlan(uint32_t seed, const MapGeneratorConfig& c, const ArterySpec& artery) {
   TerrainPlan terrain;
   if (!TerrainEnabled(seed, c)) return terrain;
-  terrain.enabled = true;
-  terrain.amplitude = c.terrainAmplitude;
-  terrain.wavelength = std::max(32.0f, c.blockSize * 2.5f);
-  terrain.deckCruise = c.highwayElevation;
   Rng rng(seed ^ kTerrainStream);
-  const ArterySpec& artery = plan.artery;
   const float length = artery.sMax - artery.sMin;
   const int drawn = 1 + rng.Int(0, 2);
   const int wanted = c.terrainLevelCount < 0 ? drawn : c.terrainLevelCount;
-
-  const auto profile01 = [&](float s) {
-    return SmoothStep01((s - artery.rise0) / (artery.rise1 - artery.rise0)) -
-           SmoothStep01((s - artery.fall0) / (artery.fall1 - artery.fall0));
-  };
-  const auto profileWithin = [&](float sA, float sB, float lo, float hi) {
-    for (int i = 0; i <= 8; ++i) {
-      const float p = profile01(glm::mix(sA, sB, i / 8.0f));
-      if (p < lo || p > hi) return false;
-    }
-    return true;
-  };
-
   for (int i = 0; i < wanted; ++i) {
     bool placed = false;
-    for (int attempt = 0; attempt < 16 && !placed; ++attempt) {
+    for (int attempt = 0; attempt < 24 && !placed; ++attempt) {
       TerrainWallSpec w;
       const float sCross = artery.sMin + length * rng.Float(0.20f, 0.80f);
       w.dir = Rotate(artery.normal, rng.Float(-0.18f, 0.18f));
@@ -528,110 +525,294 @@ TerrainPlan BuildTerrainPlan(uint32_t seed, const MapGeneratorConfig& c, const H
       const float side = rng.Chance(0.5f) ? 1.0f : -1.0f;
       w.raisedN = glm::vec2(-w.dir.y, w.dir.x) * side;
       w.rise = constants::kUnitHeight * rng.Float(1.0f, i == 0 ? 5.0f : 2.5f);
-      w.paveWidth = c.localStreetWidth * 1.15f;
-      w.cutWidth = w.paveWidth + 2.0f * kWallSidewalk;
+      // The strip sits on the low side of the step; raised blocks start
+      // right at the wall top.
+      w.cutWidth = kWallSidewalk;
+      w.origin -= w.raisedN * (w.cutWidth * 0.5f);
       w.stepD = glm::dot(w.raisedN, w.origin) + w.cutWidth * 0.5f;
+      w.lineOrigin = w.origin + w.raisedN * (w.cutWidth * 0.5f);
       w.arteryS = sCross;
-
-      // Where the step line meets the artery, and how far its road ramp
-      // would run (toward the raised side) along it.
-      const float alongA = glm::dot(w.raisedN, artery.dir);
-      const float sStep = (w.stepD - glm::dot(w.raisedN, artery.origin)) / alongA;
-      const float runA = w.rise / kRampGrade / std::fabs(alongA);
-      const float sA = std::min(sStep, sStep + runA * (alongA > 0.0f ? 1.0f : -1.0f));
-      const float sB = std::max(sStep, sStep + runA * (alongA > 0.0f ? 1.0f : -1.0f));
-
-      // The artery must meet the wall honestly: fully at grade (it ramps
-      // through a gap) or fully on the deck (it flies over).
-      const bool flying = plan.elevated && profileWithin(sStep - 10.0f, sStep + 10.0f, 0.98f, 1.0f);
-      w.arteryRamp = !plan.elevated || profileWithin(sA - 9.0f, sB + 9.0f, 0.0f, 0.02f);
-      if (w.arteryRamp) {
-        if (sA - 12.0f < artery.sMin + 4.0f || sB + 12.0f > artery.sMax - 4.0f) continue;
-      } else if (flying) {
-        w.arteryRamp = false;
-        if (sStep - 8.0f < artery.sMin + 4.0f || sStep + 8.0f > artery.sMax - 4.0f) continue;
-      } else {
-        continue;  // Crossing lands on a deck ramp: no honest meeting.
-      }
-
-      // Keep level steps apart along the artery: between two ramped walls
-      // the corridor needs a flat window at the local tier, so ground can
-      // step on and off the road between the climbs.
+      // The artery's at-grade climb through this wall, with a flat window
+      // either side, must fit on the map.
+      const float sStep = w.CrossingParam(artery.origin, artery.dir);
+      const float runA = w.RampRun(artery.dir);
+      const float sA = std::min(sStep, sStep + runA * (glm::dot(w.raisedN, artery.dir) > 0.0f ? 1.0f : -1.0f));
+      const float sB = std::max(sStep, sStep + runA * (glm::dot(w.raisedN, artery.dir) > 0.0f ? 1.0f : -1.0f));
+      if (sA - 12.0f < artery.sMin + 4.0f || sB + 12.0f > artery.sMax - 4.0f) continue;
+      // Keep level steps apart along the artery: between two climbs the
+      // corridor needs a flat window at the local tier.
       bool separated = true;
       for (const TerrainWallSpec& other : terrain.walls) {
-        const float needed = 14.0f + (w.arteryRamp ? runA : 2.0f) +
-                             (other.arteryRamp ? other.rise / kRampGrade * 1.1f : 2.0f);
+        const float needed = 14.0f + runA + other.RampRun(artery.dir) * 1.1f;
         if (std::fabs(sCross - other.arteryS) < std::max(30.0f, needed)) separated = false;
       }
       if (!separated) continue;
-
-      if (plan.hasBranch) {
-        const BranchSpec& branch = plan.branch;
-        const float denom = glm::dot(w.raisedN, branch.dir);
-        // A step line nearly parallel to the branch must keep clear of its
-        // corridor instead of slicing along it.
-        if (std::fabs(denom) < 0.25f) {
-          bool nearBranch = false;
-          for (float f : {0.25f, 0.5f, 0.75f}) {
-            const glm::vec2 q = branch.start + branch.dir * (branch.length * f);
-            if (std::fabs(glm::dot(w.raisedN, q) - w.stepD) < branch.width * 0.5f + 6.0f) {
-              nearBranch = true;
-            }
-          }
-          if (nearBranch) continue;
-        } else {
-          const float u = (w.stepD - glm::dot(w.raisedN, branch.start)) / denom;
-          if (u > -8.0f && u < branch.length + 8.0f) {
-            const float runB = w.rise / kRampGrade / std::fabs(denom);
-            const float uA = std::min(u, u + runB * (denom > 0.0f ? 1.0f : -1.0f));
-            const float uB = std::max(u, u + runB * (denom > 0.0f ? 1.0f : -1.0f));
-            // At-grade zone of the branch: everything up to its on-ramp (the
-            // whole branch when the artery stays at grade).
-            const float gradeEnd = plan.elevated ? branch.riseStart : branch.length;
-            if (!plan.elevated || (!branch.offMap && uB + 8.0f < gradeEnd - 2.0f && uA > 4.0f)) {
-              w.branchRamp = true;
-              w.branchU = u;
-              if (uA - 6.0f < 2.0f || uB + 6.0f > gradeEnd - 2.0f) continue;
-              // Two climbs on the branch need a flat window between them.
-              bool apart = true;
-              for (const TerrainWallSpec& other : terrain.walls) {
-                if (!other.branchRamp) continue;
-                if (std::fabs(u - other.branchU) <
-                    runB + other.rise / kRampGrade * 1.1f + 14.0f) {
-                  apart = false;
-                }
-              }
-              if (!apart) continue;
-            } else if (branch.offMap || u - 8.0f > branch.riseEnd + 2.0f) {
-              w.branchRamp = false;  // The branch deck flies over this wall.
-            } else {
-              continue;  // Crossing lands on the branch's on-ramp.
-            }
-          }
-        }
-      }
       terrain.walls.push_back(std::move(w));
       placed = true;
     }
     if (!placed) break;
   }
+  terrain.enabled = !terrain.walls.empty();
+  return terrain;
+}
 
-  // Cruise height of an elevated deck: clear the highest tier it crosses at
-  // full profile by the configured elevation.
-  if (plan.elevated) {
-    float maxTier = 0.0f;
-    const float s0 = std::max(artery.s0, artery.rise1 - 2.0f);
-    const float s1 = std::min(artery.s1, artery.fall0 + 2.0f);
-    for (float s = s0; s <= s1; s += 2.0f) {
-      const glm::vec2 p = artery.origin + artery.dir * s;
-      for (const float lat : {-0.6f, 0.0f, 0.6f}) {
-        maxTier = std::max(maxTier,
-                           TierHeight(terrain, p + artery.normal * (lat * c.arteryWidth)));
+// Second half of the highway plan, against the terrain levels. The deck
+// profile is chosen among every layout the walls allow: the artery stays
+// at grade and ramps through every wall (a main road cutting through the
+// levels), or it climbs onto a deck before a contiguous run of walls,
+// flies over them clear of the highest tier beneath and settles back onto
+// the level beyond -- with either ramp optionally replaced by an elevated
+// map edge, up to one tall deck above every level. One seeded draw picks
+// among the feasible layouts. The branch then merges onto the deck (or the
+// at-grade artery) and ramps through the walls it crosses at grade.
+void FinishHighwayPlan(HighwayPlan* planOut, uint32_t seed, const MapGeneratorConfig& c,
+                       TerrainPlan* terrainOut) {
+  HighwayPlan& plan = *planOut;
+  TerrainPlan& terrain = *terrainOut;
+  ArterySpec& artery = plan.artery;
+  const float half = UrbanMapHalfExtent(c);
+  const float length = artery.sMax - artery.sMin;
+  const float far = 100.0f * length;
+  Rng rng(seed ^ kHighwayProfileStream);
+  const float riseUnit = rng.Unit01(), fallUnit = rng.Unit01();
+  const auto tierAt = [&](float s) {
+    return TierHeight(terrain, artery.origin + artery.dir * s);
+  };
+
+  // Wall crossings along the artery, sorted, with each wall's at-grade
+  // climb zone [lo, hi].
+  struct Crossing {
+    size_t wall;
+    float sStep, lo, hi;
+  };
+  std::vector<Crossing> crossings;
+  for (size_t i = 0; i < terrain.walls.size(); ++i) {
+    const TerrainWallSpec& w = terrain.walls[i];
+    const float sStep = w.CrossingParam(artery.origin, artery.dir);
+    const float run = w.RampRun(artery.dir);
+    const float sign = glm::dot(w.raisedN, artery.dir) > 0.0f ? 1.0f : -1.0f;
+    crossings.push_back({i, sStep, std::min(sStep, sStep + sign * run),
+                         std::max(sStep, sStep + sign * run)});
+  }
+  std::sort(crossings.begin(), crossings.end(),
+            [](const Crossing& a, const Crossing& b) { return a.sStep < b.sStep; });
+  const int k = static_cast<int>(crossings.size());
+  for (TerrainWallSpec& w : terrain.walls) w.arteryRamp = true;
+  terrain.deckCruise = c.highwayElevation;
+
+  if (plan.elevated && k > 0) {
+    // Windows between the climb zones that may host a deck ramp: window i
+    // lies between wall i-1 and wall i (0 = before the first, k = after the
+    // last). A ramp's window edge keeps the flat margin past a wall ramped
+    // through at grade, or the deck-clearance margin past a wall flown over.
+    struct Option {
+      int a, b;  // Rise ramp in window a (-1: elevated map edge), fall in window b (k+1: elevated edge).
+      float loA, hiA, loB, hiB, lenA, lenB, cruise;
+    };
+    std::vector<Option> options;
+    const float minRamp = 24.0f;
+    // Walls a..b-1 are flown over (a = -1 / b = k+1: from/to an elevated
+    // map edge), so at least one real wall lies between the ramps.
+    for (int a = -1; a < k; ++a) {
+      for (int b = std::max(a + 1, 1); b <= k + 1; ++b) {
+        Option o{a, b, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        // Deck span bounds (conservative: the whole ramp windows).
+        const float spanLo = a < 0 ? artery.sMin : (a == 0 ? artery.sMin + 3.0f : crossings[a - 1].hi + kFlatMargin);
+        const float spanHi = b > k ? artery.sMax : (b == k ? artery.sMax - 3.0f : crossings[b].lo - kFlatMargin);
+        float maxTier = 0.0f;
+        for (float s = spanLo; s <= spanHi; s += 2.0f) maxTier = std::max(maxTier, tierAt(s));
+        o.cruise = maxTier + c.highwayElevation;
+        bool fits = true;
+        if (a >= 0) {
+          o.loA = spanLo;
+          o.hiA = crossings[a].sStep - kDeckClearMargin;
+          o.lenA = std::max(minRamp, (o.cruise - tierAt(o.loA + 1.0f)) / kDeckGrade);
+          if (o.hiA - o.loA < o.lenA + 2.0f) fits = false;
+        }
+        if (b <= k) {
+          o.loB = crossings[b - 1].sStep + kDeckClearMargin;
+          o.hiB = spanHi;
+          o.lenB = std::max(minRamp, (o.cruise - tierAt(o.hiB - 1.0f)) / kDeckGrade);
+          if (o.hiB - o.loB < o.lenB + 2.0f) fits = false;
+        }
+        if (fits) options.push_back(o);
       }
     }
-    terrain.deckCruise = maxTier + c.highwayElevation;
+    // Every wall flown over at once is always possible; the draw picks
+    // uniformly among the layouts that fit.
+    const Option& pick = options[static_cast<size_t>(rng.Int(0, static_cast<int>(options.size()) - 1))];
+    artery.s0 = artery.sMin;
+    artery.s1 = artery.sMax;
+    if (pick.a >= 0) {
+      artery.rise0 = pick.loA + riseUnit * (pick.hiA - pick.loA - pick.lenA);
+      artery.rise1 = artery.rise0 + pick.lenA;
+    } else {
+      artery.s0 = artery.sMin - kDeckOverhang;
+      artery.rise0 = -far;
+      artery.rise1 = -far + 1.0f;
+    }
+    if (pick.b <= k) {
+      artery.fall1 = pick.hiB - fallUnit * (pick.hiB - pick.loB - pick.lenB);
+      artery.fall0 = artery.fall1 - pick.lenB;
+    } else {
+      artery.s1 = artery.sMax + kDeckOverhang;
+      artery.fall0 = far;
+      artery.fall1 = far + 1.0f;
+    }
+    plan.layout = pick.a < 0 ? (pick.b > k ? OverpassLayout::Through : OverpassLayout::EnterRampDown)
+                             : (pick.b > k ? OverpassLayout::EnterRampUp
+                                           : OverpassLayout::RampUpRampDown);
+    for (int i = pick.a + 1; i < pick.b && i < k; ++i) {
+      if (i >= 0) terrain.walls[crossings[i].wall].arteryRamp = false;
+    }
+    terrain.deckCruise = pick.cruise;
   }
-  return terrain;
+
+  // The branch: where it merges and how it turns. On a deck the merge must
+  // land where the deck is at full height, so the branch genuinely ramps
+  // between grade and deck. Its crossings of the walls must be clean --
+  // ramped through on its at-grade stretch, with room either side, or
+  // flown over on its junction stretch -- so the merge fraction and turn
+  // are searched around their draws until every crossing works.
+  if (!plan.hasBranch) return;
+  BranchSpec& branch = plan.branch;
+  branch.width = c.arteryWidth * 0.72f;
+  Rng branchRng(seed ^ 0x5b2a9c47u);
+  const bool drawnOffMap = branchRng.Chance(c.branchOffMapChance);
+  const float rampFraction = branchRng.Float(0.30f, 0.75f);
+  const float rampMax = branchRng.Float(30.0f, 70.0f);
+  const bool canOffMap = plan.elevated && plan.layout != OverpassLayout::Through;
+  const bool wantOffMap = canOffMap && (c.branchEnd == BranchEnd::Auto ? drawnOffMap
+                                                                       : c.branchEnd == BranchEnd::OffMap);
+  const auto mergeAt = [&](float t) {
+    if (!plan.elevated) return artery.sMin + (0.30f + 0.14f * t) * length;
+    if (k == 0) {
+      switch (plan.layout) {
+        case OverpassLayout::EnterRampUp: return artery.sMin + (0.62f + 0.12f * t) * length;
+        case OverpassLayout::EnterRampDown: return artery.sMin + (0.26f + 0.12f * t) * length;
+        default: return artery.sMin + (0.46f + 0.08f * t) * length;
+      }
+    }
+    const float lo = std::max(artery.rise1, artery.sMin + 0.15f * length) + 10.0f;
+    const float hi = std::min(artery.fall0, artery.sMax - 0.15f * length) - 10.0f;
+    return glm::mix(lo, std::max(lo, hi), t);
+  };
+  // Lays the branch for one merge point and turn; false when a wall crossing
+  // cannot be made clean. Fills the walls' branch ramps on success.
+  const auto tryBranch = [&](float mergeS, int turnSign, bool offMap, bool strict) {
+    BranchSpec b;
+    b.width = branch.width;
+    b.mergeS = mergeS;
+    const glm::vec2 merge = artery.origin + artery.dir * mergeS;
+    b.dir = Rotate(artery.dir, static_cast<float>(turnSign) * plan.turn);
+    float tMin = 0.0f, tMax = 0.0f;
+    ClipLineToSquare(merge, -b.dir, half, &tMin, &tMax);
+    b.length = tMax;  // Distance back from the merge to the boundary.
+    if (strict && b.length <= half * 0.75f) return false;
+    b.start = merge - b.dir * b.length;
+    b.side = glm::dot(artery.normal, b.start - artery.origin) > 0.0f ? 1 : -1;
+    // The ramp tops out before the branch slab crosses the deck's edge, so
+    // the whole junction sits at deck height and the branch only starts its
+    // descent once clear of the artery (no wedge cutting under the deck).
+    const float sinTurn =
+        std::max(0.2f, std::fabs(artery.dir.x * b.dir.y - artery.dir.y * b.dir.x));
+    const float junctionClear = (c.arteryWidth * 0.5f + b.width * 0.5f + 2.0f) / sinTurn;
+    b.riseEnd = std::max(b.length * 0.5f, b.length - junctionClear);
+    b.riseStart = b.riseEnd - std::min(b.riseEnd * rampFraction, rampMax);
+    b.offMap = offMap;
+    if (offMap) {
+      b.riseStart = 0.0f;
+      b.riseEnd = 0.0f;
+      b.u0 = -kDeckOverhang;
+    } else {
+      b.u0 = 0.0f;
+    }
+    // At-grade zone of the branch: everything up to its on-ramp (the whole
+    // branch when the artery stays at grade); nothing when it runs off-map.
+    const float gradeEnd = !plan.elevated ? b.length : (offMap ? 0.0f : b.riseStart);
+    std::vector<std::pair<bool, float>> ramps(terrain.walls.size(), {false, -1000.0f});
+    std::vector<std::pair<float, float>> zones;
+    for (size_t i = 0; i < terrain.walls.size(); ++i) {
+      const TerrainWallSpec& w = terrain.walls[i];
+      const float denom = glm::dot(w.raisedN, b.dir);
+      const float u = w.CrossingParam(b.start, b.dir);
+      if (u <= -8.0f || u >= b.length + 8.0f) continue;
+      const float run = w.RampRun(b.dir);
+      const float uA = std::min(u, u + run * (denom > 0.0f ? 1.0f : -1.0f));
+      const float uB = std::max(u, u + run * (denom > 0.0f ? 1.0f : -1.0f));
+      if (uA - 6.0f >= 2.0f && uB + 6.0f <= gradeEnd - 2.0f) {
+        for (const auto& z : zones) {
+          if (std::min(uB, z.second) + 14.0f > std::max(uA, z.first)) return false;  // Two climbs need a flat window between them.
+        }
+        zones.emplace_back(uA, uB);
+        ramps[i] = {true, u};
+      } else if (plan.elevated && (offMap || u - 8.0f > b.riseEnd + 2.0f)) {
+        ramps[i] = {false, u};  // The branch deck flies over this wall.
+      } else {
+        return false;  // Crossing lands on the on-ramp or too near an end.
+      }
+    }
+    branch = b;
+    for (size_t i = 0; i < terrain.walls.size(); ++i) {
+      terrain.walls[i].branchRamp = ramps[i].first;
+      terrain.walls[i].branchU = ramps[i].second;
+    }
+    return true;
+  };
+  std::vector<float> candidates = {plan.mergeUnit};
+  for (float step = 0.12f; step <= 1.0f; step += 0.12f) {
+    for (const float t : {plan.mergeUnit + step, plan.mergeUnit - step}) {
+      if (t >= 0.0f && t <= 1.0f) candidates.push_back(t);
+    }
+  }
+  for (const bool strict : {true, false}) {
+    // A turn too short for the map is the last resort, the other turn first.
+    for (const int turnSign : {strict ? plan.preferredTurn : -plan.preferredTurn,
+                               strict ? -plan.preferredTurn : plan.preferredTurn}) {
+      for (const float t : candidates) {
+        for (const bool offMap : {wantOffMap, !wantOffMap}) {
+          if (offMap && !canOffMap) continue;
+          if (tryBranch(mergeAt(t), turnSign, offMap, strict)) return;
+        }
+        if (k == 0) break;  // A flat city keeps its drawn merge exactly.
+      }
+    }
+  }
+  // No clean crossing anywhere: an on-ramp the overpass itself asked for
+  // is dropped; a requested second artery is laid at its draw regardless.
+  if (c.arteryCount < 2) {
+    plan.hasBranch = false;
+    return;
+  }
+  for (TerrainWallSpec& w : terrain.walls) w.branchRamp = false;
+  BranchSpec b;
+  b.width = branch.width;
+  b.mergeS = mergeAt(plan.mergeUnit);
+  const glm::vec2 merge = artery.origin + artery.dir * b.mergeS;
+  b.dir = Rotate(artery.dir, static_cast<float>(plan.preferredTurn) * plan.turn);
+  float tMin = 0.0f, tMax = 0.0f;
+  ClipLineToSquare(merge, -b.dir, half, &tMin, &tMax);
+  b.length = tMax;
+  b.start = merge - b.dir * b.length;
+  b.side = glm::dot(artery.normal, b.start - artery.origin) > 0.0f ? 1 : -1;
+  b.riseEnd = b.length * 0.5f;
+  b.riseStart = b.riseEnd - std::min(b.riseEnd * rampFraction, rampMax);
+  branch = b;
+  for (TerrainWallSpec& w : terrain.walls) {
+    const float u = w.CrossingParam(b.start, b.dir);
+    if (u > -8.0f && u < b.length + 8.0f && (!plan.elevated || u < b.riseStart)) {
+      w.branchRamp = true;
+      w.branchU = u;
+    }
+  }
+}
+
+// The whole highway plan plus the terrain levels it was planned against.
+HighwayPlan BuildHighwayPlan(uint32_t seed, const MapGeneratorConfig& c, TerrainPlan* terrainOut) {
+  HighwayPlan plan = BeginHighwayPlan(seed, c);
+  *terrainOut = BuildTerrainPlan(seed, c, plan.artery);
+  FinishHighwayPlan(&plan, seed, c, terrainOut);
+  return plan;
 }
 
 // Overpass profile: between its rise and fall ramps the deck cruises flat
@@ -677,8 +858,8 @@ std::vector<float> SampleParams(float s0, float s1) {
 }
 
 std::vector<UrbanRoad> BuildUrbanRoads(uint32_t seed, const MapGeneratorConfig& c) {
-  const HighwayPlan plan = BuildHighwayPlan(seed, c);
-  const TerrainPlan terrain = BuildTerrainPlan(seed, c, plan);
+  TerrainPlan terrain;
+  const HighwayPlan plan = BuildHighwayPlan(seed, c, &terrain);
   std::vector<UrbanRoad> roads;
   UrbanRoad artery;
   artery.width = c.arteryWidth;
@@ -737,16 +918,16 @@ void CutStreet(std::vector<std::vector<glm::vec2>>* regions, glm::vec2 origin, g
 
 // A street carved out of one side's blocks: a band of `width` around the
 // line origin + t*dir. Recorded in the order drawn so the block pass replays
-// exactly the cuts the street pass chose. Terrain boundary streets carve
-// wider than they pave: the margins hold the retaining wall and a wall-side
-// walk, and both artery sides get the same line (one entry per side).
+// exactly the cuts the street pass chose. A terrain wall strip is carved
+// the same way but never paved (it holds the retaining wall, its stairs
+// and a walkway); both artery sides get the same line (one entry per side).
 struct StreetCut {
   glm::vec2 origin, dir;
   float width;
   int side;
   UrbanStreetClass cls;
   float pave = 0.0f;  // Pavement width; 0 means the full carve width.
-  bool terrainBoundary = false;
+  bool terrainBoundary = false;  // A wall strip: unpaved, not a street.
 };
 
 // Every street of the city: the highway roads plus the local cuts.
@@ -781,12 +962,13 @@ StreetGraph BuildStreetGraph(uint32_t seed, const MapGeneratorConfig& c, const H
   const float band = ArteryBand(c);
   StreetGraph graph;
   graph.roads = BuildUrbanRoads(seed, c);
-  // Terrain boundary streets first: one full map-spanning line per level
-  // step, carved on both artery sides so no block ever straddles a wall.
+  // Terrain wall strips first: one full map-spanning line per level step,
+  // carved on both artery sides so no block ever straddles a wall. They
+  // are not streets: nothing is paved there.
   for (const TerrainWallSpec& w : terrain.walls) {
     for (const int side : {1, -1}) {
-      graph.cuts.push_back({w.origin, w.dir, w.cutWidth, side, UrbanStreetClass::Cross,
-                            w.paveWidth, /*terrainBoundary=*/true});
+      graph.cuts.push_back({w.origin, w.dir, w.cutWidth, side, UrbanStreetClass::Cross, 0.0f,
+                            /*terrainBoundary=*/true});
     }
   }
   for (const int side : {1, -1}) {
@@ -849,16 +1031,15 @@ std::vector<UrbanBlock> BuildBlocks(const MapGeneratorConfig& c, const HighwayPl
 
 CityPlan BuildCityPlan(uint32_t seed, const MapGeneratorConfig& c) {
   CityPlan plan;
-  plan.highway = BuildHighwayPlan(seed, c);
-  plan.terrain = BuildTerrainPlan(seed, c, plan.highway);
+  plan.highway = BuildHighwayPlan(seed, c, &plan.terrain);
   plan.streets = BuildStreetGraph(seed, c, plan.highway, plan.terrain);
   plan.blocks = BuildBlocks(c, plan.highway, plan.streets);
   return plan;
 }
 
 std::vector<UrbanBlock> BuildCityBlocks(uint32_t seed, const MapGeneratorConfig& c) {
-  const HighwayPlan highway = BuildHighwayPlan(seed, c);
-  const TerrainPlan terrain = BuildTerrainPlan(seed, c, highway);
+  TerrainPlan terrain;
+  const HighwayPlan highway = BuildHighwayPlan(seed, c, &terrain);
   return BuildBlocks(c, highway, BuildStreetGraph(seed, c, highway, terrain));
 }
 
@@ -1377,20 +1558,6 @@ void PlaceZiplines(Scene* scene, const std::vector<UrbanBlock>& blocks, uint32_t
 // Scene emission, one emitter per feature family. Obstacles are appended in
 // emitter order (piers, then buildings), which the tower pick depends on.
 
-float ValueNoise(uint32_t seed, float x, float z);
-
-float InsideDistance(glm::vec2 p, const std::vector<glm::vec2>& polygon) {
-  float distance = std::numeric_limits<float>::infinity();
-  for (size_t i = 0; i < polygon.size(); ++i) {
-    const glm::vec2 a = polygon[i], edge = polygon[(i + 1) % polygon.size()] - a;
-    const float length = glm::length(edge);
-    if (length > 1e-4f) {
-      distance = std::min(distance, (edge.x * (p.y - a.y) - edge.y * (p.x - a.x)) / length);
-    }
-  }
-  return distance;
-}
-
 glm::vec2 PolygonCenter(const std::vector<glm::vec2>& polygon) {
   glm::vec2 center(0.0f);
   for (glm::vec2 p : polygon) center += p;
@@ -1433,10 +1600,11 @@ std::vector<std::pair<float, float>> FreeIntervals(float lo, float hi,
 }
 
 // Fills the ground heightfield and Scene::terrainWalls, and completes the
-// terrain plan in place: avenue ramp-throughs, stair channels and the wall
-// gaps they cut. Levels come from the plan's map-spanning steps; the ground
-// under the highway corridors keeps the road's own grade (ramping through a
-// wall met at grade, stepping sharply under a deck that flies over).
+// terrain plan in place: avenue ramp-throughs, the along-wall stair flights
+// and the wall gaps they need. Levels come from the plan's map-spanning
+// steps (sharp tiers, no noise); the ground under the highway corridors
+// keeps the road's own grade (ramping through a wall met at grade, stepping
+// sharply under a deck that flies over).
 void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
                        const MapGeneratorConfig& c) {
   CityPlan& city = *cityPlan;
@@ -1447,27 +1615,7 @@ void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
   const float half = scene->mapHalfExtent;
   // Accesses draw from their own stream: the level steps never reshuffle.
   Rng rng(seed ^ 0x1eae1007u);
-
-  // Rolling noise rides on the tiers; it fades out near the highway roads,
-  // whose ground must keep an exact, steady grade.
-  const auto noise = [&](glm::vec2 p) {
-    float y = terrain.amplitude * 0.35f *
-              ValueNoise(seed ^ kTerrainStream, p.x / terrain.wavelength, p.y / terrain.wavelength);
-    float clearance = std::numeric_limits<float>::infinity();
-    for (const UrbanRoad& road : city.streets.roads) {
-      for (size_t i = 1; i < road.centerline.size(); ++i) {
-        const auto& a = road.centerline[i - 1];
-        const auto& b = road.centerline[i];
-        const float d = PointSegmentDistance(p, {a.x, a.z}, {b.x, b.z});
-        clearance = std::min(clearance, d - road.width * 0.5f);
-      }
-    }
-    return y * SmoothStep01((clearance - 2.0f) / 6.0f);
-  };
-  std::vector<float> padHeights;
-  for (const UrbanBlock& block : city.blocks) {
-    padHeights.push_back(noise(PolygonCenter(block.vertices)));
-  }
+  const glm::vec2 branchN(-plan.branch.dir.y, plan.branch.dir.x);
 
   for (TerrainWallSpec& w : terrain.walls) {
     TerrainWall wall;
@@ -1475,41 +1623,46 @@ void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
     wall.dir = w.dir;
     wall.raisedNormal = w.raisedN;
     wall.rise = w.rise;
-    const glm::vec2 lineOrigin =
-        w.origin + w.raisedN * (w.stepD - glm::dot(w.raisedN, w.origin));
-    const auto lineAt = [&](float t) { return lineOrigin + w.dir * t; };
+    const auto lineAt = [&](float t) { return w.lineOrigin + w.dir * t; };
     float tMin = 0.0f, tMax = 0.0f;
-    ClipLineToSquare(lineOrigin, w.dir, half, &tMin, &tMax);
+    ClipLineToSquare(w.lineOrigin, w.dir, half, &tMin, &tMax);
 
     // Param interval of the step line inside a band |dot(n, p) - d0| < hw;
     // an inverted pair means the line never crosses it.
     const auto bandInterval = [&](glm::vec2 n, float d0, float hw) {
       const float slope = glm::dot(n, w.dir);
       if (std::fabs(slope) < 0.15f) return std::make_pair(1.0f, -1.0f);
-      const float tc = (d0 - glm::dot(n, lineOrigin)) / slope;
+      const float tc = (d0 - glm::dot(n, w.lineOrigin)) / slope;
       const float ht = hw / std::fabs(slope);
       return std::make_pair(tc - ht, tc + ht);
     };
-
-    // Stretches of the wall line where nothing may be placed: the rim
-    // streets, the highway corridors and every street crossing.
-    std::vector<std::pair<float, float>> blocked;
-    const float rim = RimWidth(c) + 2.0f;
-    blocked.emplace_back(tMin - 1.0f, tMin + rim);
-    blocked.emplace_back(tMax - rim, tMax + 1.0f);
-    const auto arteryBand = bandInterval(artery.normal, glm::dot(artery.normal, artery.origin),
-                                         c.arteryWidth * 0.5f + 6.0f);
-    blocked.push_back(arteryBand);
-    const glm::vec2 branchN(-plan.branch.dir.y, plan.branch.dir.x);
-    if (plan.hasBranch) {
-      const auto band = bandInterval(branchN, glm::dot(branchN, plan.branch.start),
-                                     plan.branch.width * 0.5f + c.localStreetWidth * 0.4f + 5.0f);
-      if (band.first < band.second) {
+    const auto branchBand = [&](float extra) {
+      auto band = bandInterval(branchN, glm::dot(branchN, plan.branch.start),
+                               plan.branch.width * 0.5f + c.localStreetWidth * 0.4f + extra);
+      if (plan.hasBranch && band.first < band.second) {
         const glm::vec2 q = lineAt(0.5f * (band.first + band.second));
         const float u = glm::dot(q - plan.branch.start, plan.branch.dir);
-        if (u > -8.0f && u < plan.branch.length + 8.0f) blocked.push_back(band);
+        if (u > -8.0f && u < plan.branch.length + 8.0f) return band;
       }
+      return std::make_pair(1.0f, -1.0f);
+    };
+
+    // Stretches of the wall line where nothing may be placed: the rim
+    // streets, the highway corridors and every street crossing. `hard`
+    // holds just the rim and corridors, for a last-resort flight across a
+    // dead-ending street's mouth.
+    std::vector<std::pair<float, float>> blocked, hard;
+    const float rim = RimWidth(c) + 2.0f;
+    hard.emplace_back(tMin - 1.0f, tMin + rim);
+    hard.emplace_back(tMax - rim, tMax + 1.0f);
+    const auto arteryBand = bandInterval(artery.normal, glm::dot(artery.normal, artery.origin),
+                                         c.arteryWidth * 0.5f + 6.0f);
+    hard.push_back(arteryBand);
+    {
+      const auto band = branchBand(5.0f);
+      if (band.first < band.second) hard.push_back(band);
     }
+    blocked = hard;
     for (const StreetCut& cut : city.streets.cuts) {
       const glm::vec2 n(-cut.dir.y, cut.dir.x);
       const auto band = bandInterval(n, glm::dot(n, cut.origin), cut.width * 0.5f + 3.0f);
@@ -1537,9 +1690,8 @@ void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
         }
         const float denom = glm::dot(w.raisedN, cut.dir);
         if (std::fabs(denom) < 0.55f) continue;  // Too oblique for a straight climb.
-        const float dLine = glm::dot(w.raisedN, cut.origin) - w.stepD;
-        const glm::vec2 q = cut.origin + cut.dir * (-dLine / denom);
-        const float run = w.rise / kRampGrade / std::fabs(denom);
+        const glm::vec2 q = cut.origin + cut.dir * w.CrossingParam(cut.origin, cut.dir);
+        const float run = w.RampRun(cut.dir);
         const glm::vec2 along = cut.dir * (denom > 0.0f ? 1.0f : -1.0f);
         bool fits = true;
         for (const glm::vec2 e : {q - along * 6.0f, q, q + along * run, q + along * (run + 6.0f)}) {
@@ -1564,11 +1716,12 @@ void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
           }
         }
         if (!fits) continue;
-        w.channels.push_back(TerrainChannel{q, along, cut.width, run, /*stair=*/false});
+        w.channels.push_back(TerrainChannel{q, along, cut.width, run});
         const glm::vec2 n(-cut.dir.y, cut.dir.x);
         const auto gap = bandInterval(n, glm::dot(n, cut.origin), cut.width * 0.5f + 0.6f);
         w.gaps.push_back(gap);
         blocked.emplace_back(gap.first - 4.0f, gap.second + 4.0f);
+        hard.emplace_back(gap.first - 4.0f, gap.second + 4.0f);
         break;
       }
     }
@@ -1576,19 +1729,14 @@ void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
     // Sections of the wall line between the splitters that fragment the
     // raised level: the highway corridors, ramped avenues (their flank
     // walls seal the climb's sides) and the other walls' boundary streets.
-    // Each gets its own ground climb below, so no fragment strands.
+    // Each gets its own flight, so no fragment strands.
     std::vector<std::pair<float, float>> splitters;
     splitters.emplace_back(tMin - 1.0f, tMin + rim);
     splitters.emplace_back(tMax - rim, tMax + 1.0f);
     splitters.emplace_back(arteryBand.first - 2.0f, arteryBand.second + 2.0f);
-    if (plan.hasBranch) {
-      const auto band = bandInterval(branchN, glm::dot(branchN, plan.branch.start),
-                                     plan.branch.width * 0.5f + c.localStreetWidth * 0.4f + 6.0f);
-      if (band.first < band.second) {
-        const glm::vec2 q = lineAt(0.5f * (band.first + band.second));
-        const float u = glm::dot(q - plan.branch.start, plan.branch.dir);
-        if (u > -8.0f && u < plan.branch.length + 8.0f) splitters.push_back(band);
-      }
+    {
+      const auto band = branchBand(6.0f);
+      if (band.first < band.second) splitters.push_back(band);
     }
     for (const auto& gap : w.gaps) splitters.emplace_back(gap.first - 2.0f, gap.second + 2.0f);
     for (const TerrainWallSpec& other : terrain.walls) {
@@ -1599,14 +1747,13 @@ void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
     }
     const auto sections = FreeIntervals(tMin, tMax, splitters);
 
-    // Stairs on the free stretches between streets: flights attached along
-    // the wall face (in the wall-side walk) and walled through-wall channels
-    // landing on the level. At least one climb per artery side.
-    const float stairRun = w.rise / kStairGrade;
-    const float flightMid = -(kWallHalfWidth * 2.0f + 0.9f);  // Strip center beside the wall box.
-    // A point an access rests on must be usable ground: on the map, outside
-    // the highway corridors, clear of every other wall's step and of every
-    // channel (whose climb and flank walls own that ground).
+    // Stair flights along the wall face: a strip beside the wall box on the
+    // low side climbs parallel to the wall, then a landing crosses the wall
+    // top onto the level. A flight needs its whole stretch of the wall line
+    // free, and its foot and landing on usable ground: on the map, outside
+    // the highway corridors and clear of every other wall's step.
+    const float run = w.rise / kStairGrade;
+    const float need = run + kLanding + 2.0f * kFlightMargin;
     const auto usableSpot = [&](glm::vec2 e) {
       if (std::max(std::fabs(e.x), std::fabs(e.y)) > half - RimWidth(c) - 1.5f) return false;
       if (std::fabs(glm::dot(e - artery.origin, artery.normal)) < c.arteryWidth * 0.5f + 3.0f) {
@@ -1621,121 +1768,78 @@ void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
         }
       }
       for (const TerrainWallSpec& other : terrain.walls) {
-        if (&other != &w &&
-            std::fabs(glm::dot(other.raisedN, e) - other.stepD) < 3.5f) {
+        if (&other != &w && std::fabs(glm::dot(other.raisedN, e) - other.stepD) < 3.5f) {
           return false;
-        }
-        for (const TerrainChannel& channel : other.channels) {
-          const glm::vec2 rel = e - channel.foot;
-          const float a = glm::dot(rel, channel.along);
-          const float b = std::fabs(rel.x * channel.along.y - rel.y * channel.along.x);
-          if (b < channel.width * 0.5f + 3.0f && a > -4.0f && a < channel.length + 4.0f) {
-            return false;
-          }
         }
       }
       return true;
     };
-    // Stretches of the line already taken by an access, so two never collide.
+    // Stretches of the line already taken by a flight, so two never collide.
     std::vector<std::pair<float, float>> used;
-    const auto free = [&](float lo, float hi) {
-      for (const auto& u : used) {
+    const auto clear = [&](float lo, float hi, const std::vector<std::pair<float, float>>& taken) {
+      for (const auto& u : taken) {
         if (lo < u.second && hi > u.first) return false;
       }
       return true;
     };
-    const auto placeAlong = [&](float tFoot) {
-      if (!free(tFoot - 2.0f, tFoot + stairRun + 4.0f)) return false;
-      const glm::vec2 foot = lineAt(tFoot) + w.raisedN * flightMid;
-      const glm::vec2 top = lineAt(tFoot + stairRun + 1.1f) + w.raisedN * 1.8f;
+    // A flight occupying [t0, t0 + need] of the line, climbing in `dir`.
+    const auto placeFlight = [&](float t0, float dir, bool lenient) {
+      if (!clear(t0, t0 + need, used) || !clear(t0, t0 + need, lenient ? hard : blocked)) {
+        return false;
+      }
+      const float tFoot = dir > 0.0f ? t0 + kFlightMargin : t0 + need - kFlightMargin;
+      const float tHead = tFoot + dir * (run + kLanding * 0.5f);
+      const glm::vec2 foot = lineAt(tFoot) - w.raisedN * (kWallBox + kFlightWidth * 0.5f);
+      const glm::vec2 top = lineAt(tHead) + w.raisedN * 1.2f;
       if (!usableSpot(foot) || !usableSpot(top)) return false;
-      used.emplace_back(tFoot - 2.0f, tFoot + stairRun + 4.0f);
+      used.emplace_back(t0, t0 + need);
+      w.flights.push_back(TerrainFlight{tFoot, dir, run});
+      const float tLand0 = tFoot + dir * run, tLand1 = tFoot + dir * (run + kLanding);
+      w.gaps.emplace_back(std::min(tLand0, tLand1) - 0.3f, std::max(tLand0, tLand1) + 0.3f);
       TerrainAccess access;
-      access.alongWall = true;
-      access.width = 1.6f;
+      access.width = kFlightWidth;
       access.bottom = glm::vec3(foot.x, 0.0f, foot.y);
       access.top = glm::vec3(top.x, 0.0f, top.y);
       wall.accesses.push_back(access);
       return true;
     };
-    std::vector<float> groundSpots;  // Line params of the through-wall stairs.
-    const auto placeThrough = [&](float tMid) {
-      if (!free(tMid - 6.0f, tMid + 6.0f)) return false;
-      const float setback = 2.0f;
-      const glm::vec2 foot = lineAt(tMid) - w.raisedN * setback;
-      const glm::vec2 top = lineAt(tMid) + w.raisedN * stairRun;
-      // The foot, the landing and a margin past it must be usable ground
-      // (a landing inside a block clears its own parcels later).
-      for (const glm::vec2 e : {foot, top, lineAt(tMid) + w.raisedN * (stairRun + 2.5f)}) {
-        if (!usableSpot(e)) return false;
-      }
-      used.emplace_back(tMid - 6.0f, tMid + 6.0f);
-      groundSpots.push_back(tMid);
-      TerrainChannel channel{foot, w.raisedN, 4.0f, setback + stairRun, /*stair=*/true};
-      w.channels.push_back(channel);
-      const float gapHalf = channel.width * 0.5f + kWallHalfWidth * 2.0f + 0.4f;
-      w.gaps.emplace_back(tMid - gapHalf, tMid + gapHalf);
-      TerrainAccess access;
-      access.width = channel.width;
-      access.bottom = glm::vec3(foot.x, 0.0f, foot.y);
-      access.top = glm::vec3(top.x, 0.0f, top.y);
-      wall.accesses.push_back(access);
-      return true;
-    };
-    // Fragment guarantee: every section (long enough to hold one) gets a
-    // ground climb. Ground paths cannot route over the along-wall flights
-    // (explicit walk surfaces), so each fragment needs a climb carried by
-    // the ground itself. A section position blocked by a street crossing
-    // is still acceptable here: that street dead-ends at the wall, so a
-    // stair may sit at its mouth.
+    // Fragment guarantee first: every section long enough gets a flight,
+    // climbing either way; a section with no clear stretch may still take
+    // one across a dead-ending street's mouth (never a corridor).
     for (const auto& section : sections) {
-      if (section.second - section.first < 9.0f) continue;
+      if (section.second - section.first < need + 1.0f) continue;
+      const float firstDir = rng.Chance(0.5f) ? 1.0f : -1.0f;
       bool has = false;
-      for (const float t : groundSpots) {
-        if (t > section.first && t < section.second) has = true;
-      }
-      for (const float at : {0.5f, 0.3f, 0.7f, 0.15f, 0.85f}) {
-        if (has) break;
-        has = placeThrough(glm::mix(section.first + 3.0f, section.second - 3.0f, at));
-      }
-      // Last resort: at least reach this fragment by an along-wall flight.
-      for (const float at : {0.2f, 0.5f}) {
-        if (has || section.second - section.first < stairRun + 8.0f) break;
-        has = placeAlong(glm::mix(section.first + 2.0f, section.second - stairRun - 5.0f, at));
-      }
-    }
-
-    const float tArtery = 0.5f * (arteryBand.first + arteryBand.second);
-    int placedCount[2] = {0, 0};
-    int groundCount[2] = {0, 0};  // Through-wall stairs: ground routes over the wall.
-    const auto freeRuns = FreeIntervals(tMin, tMax, blocked);
-    for (const auto& freeRun : freeRuns) {
-      const float length = freeRun.second - freeRun.first;
-      const int sideIndex = 0.5f * (freeRun.first + freeRun.second) < tArtery ? 0 : 1;
-      const bool wanted = rng.Chance(placedCount[sideIndex] ? 0.55f : 0.9f);
-      const bool preferAlong = rng.Chance(0.5f);
-      if (!wanted || placedCount[sideIndex] >= 2) continue;
-      bool done = false;
-      for (const bool along : {preferAlong, !preferAlong}) {
-        if (done) break;
-        if (along && length >= stairRun + 7.0f) {
-          done =
-              placeAlong(freeRun.first + rng.Float(2.0f, std::max(2.1f, length - stairRun - 4.5f)));
-        } else if (!along && length >= 10.0f) {
-          done = placeThrough(freeRun.first + rng.Float(4.0f, length - 4.0f));
-          if (done) ++groundCount[sideIndex];
+      for (const bool lenient : {false, true}) {
+        for (const float at : {0.5f, 0.3f, 0.7f, 0.15f, 0.85f, 0.0f, 1.0f}) {
+          for (const float dir : {firstDir, -firstDir}) {
+            if (has) break;
+            has = placeFlight(glm::mix(section.first + 0.5f, section.second - need - 0.5f, at), dir,
+                              lenient);
+          }
         }
       }
-      if (done) ++placedCount[sideIndex];
+    }
+    // Flavor flights on the free stretches between streets, up to two per
+    // artery side.
+    const float tArtery = 0.5f * (arteryBand.first + arteryBand.second);
+    int placedCount[2] = {0, 0};
+    for (const auto& freeRun : FreeIntervals(tMin, tMax, blocked)) {
+      const float length = freeRun.second - freeRun.first;
+      const int sideIndex = 0.5f * (freeRun.first + freeRun.second) < tArtery ? 0 : 1;
+      const bool wanted = rng.Chance(placedCount[sideIndex] ? 0.5f : 0.8f);
+      const float dir = rng.Chance(0.5f) ? 1.0f : -1.0f;
+      if (!wanted || placedCount[sideIndex] >= 2 || length < need + 1.0f) continue;
+      const float t0 = freeRun.first + rng.Float(0.5f, length - need - 0.5f);
+      if (placeFlight(t0, dir, false)) ++placedCount[sideIndex];
     }
     scene->terrainWalls.push_back(std::move(wall));
   }
 
-  // The assembled ground: noise, level block pads, the level steps (with
-  // their channels' climbs), and the highway corridors' exact road grade.
+  // The assembled ground: the level steps with their channels' and
+  // flights' climbs, and the highway corridors' exact road grade.
   const float bandA = c.arteryWidth * 0.5f + 1.6f;
   const float bandB = plan.hasBranch ? plan.branch.width * 0.5f + 1.6f : 0.0f;
-  const glm::vec2 branchN(-plan.branch.dir.y, plan.branch.dir.x);
   const auto groundAt = [&](glm::vec2 p) {
     const float sA = glm::dot(p - artery.origin, artery.dir);
     if (std::fabs(glm::dot(p - artery.origin, artery.normal)) < bandA &&
@@ -1749,30 +1853,14 @@ void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
         return HighwayGradeAt(terrain, p, plan.branch.dir, true);
       }
     }
-    float y = noise(p);
-    for (size_t i = 0; i < city.blocks.size(); ++i) {
-      const float d = InsideDistance(p, city.blocks[i].vertices);
-      if (d > -2.0f) y = glm::mix(y, padHeights[i], SmoothStep01((d + 2.0f) / 2.0f));
-    }
-    for (const TerrainWallSpec& w : terrain.walls) {
-      const float d = glm::dot(w.raisedN, p) - w.stepD;
-      float factor = SmoothStep01((d + kStepBlend) / kStepBlend);
-      for (const TerrainChannel& channel : w.channels) {
-        const glm::vec2 rel = p - channel.foot;
-        if (std::fabs(rel.x * channel.along.y - rel.y * channel.along.x) <=
-            channel.width * 0.5f) {
-          factor = std::clamp(glm::dot(rel, channel.along) / channel.length, 0.0f, 1.0f);
-          break;
-        }
-      }
-      y += w.rise * factor;
-    }
+    float y = 0.0f;
+    for (const TerrainWallSpec& w : terrain.walls) y += w.rise * w.Factor(p);
     return y;
   };
 
   HeightField& ground = scene->ground;
   ground.minX = ground.minZ = -half;
-  ground.nx = ground.nz = static_cast<int>(std::ceil(2.0f * half)) + 1;
+  ground.nx = ground.nz = static_cast<int>(std::ceil(2.0f * half / kGroundStep)) + 1;
   ground.step = 2.0f * half / (ground.nx - 1);
   ground.heights.resize(static_cast<size_t>(ground.nx) * ground.nz);
   for (int iz = 0; iz < ground.nz; ++iz) {
@@ -1790,8 +1878,8 @@ void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
 }
 
 // Retaining walls along every level step (gapped where roads ramp through
-// and at through-wall stairs), flanks beside the ramp cuts, and the
-// along-wall stair flights as explicit WalkSurfaces.
+// and at the stair landings), flanks beside the ramp cuts, and railings
+// along the stair flights.
 void EmitTerrainWalls(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c) {
   const TerrainPlan& terrain = city.terrain;
   if (!terrain.enabled) return;
@@ -1801,8 +1889,9 @@ void EmitTerrainWalls(Scene* scene, const CityPlan& city, const MapGeneratorConf
   const auto groundY = [&](glm::vec2 p) { return scene->ground.HeightAt(p.x, p.y); };
 
   // Short wall boxes between a and b: each stands on the lower ground
-  // (sampled at lowOff from the piece) and tops out flush with the upper
-  // ground (sampled at highOff), so wall tops follow the terrain.
+  // (sampled at lowOff from the piece and under the piece itself) and tops
+  // out flush with the upper ground (sampled at highOff), so wall tops
+  // follow the terrain.
   const auto wallRun = [&](glm::vec2 a, glm::vec2 b, glm::vec2 lowOff, glm::vec2 highOff,
                            float halfWidth) {
     const float length = glm::distance(a, b);
@@ -1814,8 +1903,9 @@ void EmitTerrainWalls(Scene* scene, const CityPlan& city, const MapGeneratorConf
       const glm::vec2 p0 = a + dir * (length * i / pieces);
       const glm::vec2 p1 = a + dir * (length * (i + 1) / pieces);
       const glm::vec2 mid = 0.5f * (p0 + p1);
-      const float base =
-          std::min({groundY(p0 + lowOff), groundY(mid + lowOff), groundY(p1 + lowOff)}) - 0.15f;
+      const float base = std::min({groundY(p0 + lowOff), groundY(mid + lowOff),
+                                   groundY(p1 + lowOff), groundY(mid)}) -
+                         0.15f;
       const float top = groundY(mid + highOff);
       if (top - base < 0.45f) continue;
       AddPolygonBuilding(scene,
@@ -1826,42 +1916,55 @@ void EmitTerrainWalls(Scene* scene, const CityPlan& city, const MapGeneratorConf
   };
 
   for (const TerrainWallSpec& w : terrain.walls) {
-    const glm::vec2 lineOrigin =
-        w.origin + w.raisedN * (w.stepD - glm::dot(w.raisedN, w.origin));
+    const auto lineAt = [&](float t) { return w.lineOrigin + w.dir * t; };
+    // The box hugs the lower side of the step so the level's own sidewalk
+    // ring stays walkable behind the wall top. Its run stops short of the
+    // map edge by its own half width, so no corner pokes off the map.
+    const glm::vec2 wallOff = -w.raisedN * kWallHalfWidth;
     float tMin = 0.0f, tMax = 0.0f;
-    ClipLineToSquare(lineOrigin, w.dir, half, &tMin, &tMax);
+    ClipLineToSquare(w.lineOrigin + wallOff, w.dir, half - kWallHalfWidth - 0.1f, &tMin, &tMax);
     auto gaps = w.gaps;
     std::sort(gaps.begin(), gaps.end());
-    // The box hugs the lower side of the step so the level's own sidewalk
-    // ring stays walkable behind the wall top.
-    const glm::vec2 wallOff = -w.raisedN * kWallHalfWidth;
     const auto emit = [&](float t0, float t1) {
       if (t1 - t0 < 0.1f) return;
-      wallRun(lineOrigin + w.dir * t0 + wallOff, lineOrigin + w.dir * t1 + wallOff,
-              -w.raisedN * 1.6f, w.raisedN * 2.2f, kWallHalfWidth);
+      wallRun(lineAt(t0) + wallOff, lineAt(t1) + wallOff, -w.raisedN * 1.6f, w.raisedN * 2.2f,
+              kWallHalfWidth);
     };
-    float from = tMin - 0.6f;
+    float from = tMin;
     for (const auto& gap : gaps) {
-      emit(from, gap.first);
+      emit(from, std::min(gap.first, tMax));
       from = std::max(from, gap.second);
     }
-    emit(from, tMax + 0.6f);
+    emit(from, tMax);
 
-    // Channel flanks: stair channels get full side walls; a ramped avenue
-    // walls its cut edges wherever the climb leaves a drop beside it. A
-    // flank reaches from inside the cut edge to the building line so it
-    // never strands a sliver of walkable sidewalk behind itself.
+    // Avenue channel flanks: the cut edges are walled wherever the climb
+    // leaves a drop beside it. A flank reaches from inside the cut edge to
+    // the building line so it never strands a sliver of walkable sidewalk
+    // behind itself.
     for (const TerrainChannel& channel : w.channels) {
       const glm::vec2 across(-channel.along.y, channel.along.x);
-      const float inner = channel.width * 0.5f + (channel.stair ? 0.0f : -0.1f);
-      const float outer = inner + (channel.stair ? kWallHalfWidth * 2.0f : c.sidewalkWidth + 0.3f);
+      const float inner = channel.width * 0.5f - 0.1f;
+      const float outer = inner + c.sidewalkWidth + 0.3f;
       for (const float side : {-1.0f, 1.0f}) {
         const glm::vec2 off = across * (side * 0.5f * (inner + outer));
-        const glm::vec2 a = channel.foot + off - channel.along * (channel.stair ? 0.3f : 0.5f);
+        const glm::vec2 a = channel.foot + off - channel.along * 0.5f;
         const glm::vec2 b = channel.foot + off + channel.along * (channel.length + 1.0f);
         wallRun(a, b, -across * (side * (0.5f * (inner + outer) - inner + 0.7f)),
                 across * (side * 2.2f), 0.5f * (outer - inner));
       }
+    }
+
+    // Stair railings: along the flight's outer edge and across the far end
+    // of its landing, so the strip only lets off onto the level.
+    for (const TerrainFlight& flight : w.flights) {
+      const float tEnd = flight.tFoot + flight.dir * (flight.run + kLanding);
+      const float railD = kWallBox + kFlightWidth + 0.3f;
+      wallRun(lineAt(flight.tFoot) - w.raisedN * railD,
+              lineAt(tEnd + flight.dir * 0.3f) - w.raisedN * railD, -w.raisedN * 0.9f,
+              w.raisedN * 0.9f, 0.3f);
+      const glm::vec2 endMid = lineAt(tEnd + flight.dir * 0.3f);
+      wallRun(endMid - w.raisedN * (railD + 0.3f), endMid - w.raisedN * (kWallBox - 0.2f),
+              w.dir * (flight.dir * 0.9f), -w.dir * (flight.dir * 0.9f), 0.3f);
     }
 
     // Flanks along a highway ramping through: the cut's sides are cliffs
@@ -1870,10 +1973,9 @@ void EmitTerrainWalls(Scene* scene, const CityPlan& city, const MapGeneratorConf
     const auto highwayFlanks = [&](glm::vec2 origin, glm::vec2 roadDir, float corridorHalf,
                                    float frontage) {
       const glm::vec2 roadN(-roadDir.y, roadDir.x);
-      const float along = glm::dot(w.raisedN, roadDir);
-      const float sStep = (w.stepD - glm::dot(w.raisedN, origin)) / along;
-      const float dirSign = along > 0.0f ? 1.0f : -1.0f;
-      const float run = w.rise / kRampGrade / std::fabs(along);
+      const float sStep = w.CrossingParam(origin, roadDir);
+      const float dirSign = glm::dot(w.raisedN, roadDir) > 0.0f ? 1.0f : -1.0f;
+      const float run = w.RampRun(roadDir);
       const float inner = corridorHalf - 0.1f;
       const float outer = frontage + c.sidewalkWidth + 0.1f;
       for (const float side : {-1.0f, 1.0f}) {
@@ -1890,47 +1992,6 @@ void EmitTerrainWalls(Scene* scene, const CityPlan& city, const MapGeneratorConf
     if (plan.hasBranch && w.branchRamp) {
       highwayFlanks(plan.branch.start, plan.branch.dir, plan.branch.width * 0.5f + 1.6f,
                     plan.branch.width * 0.5f + c.localStreetWidth * 0.4f);
-    }
-  }
-
-  // Along-wall stair flights: a sloped slab hugging the wall face, then a
-  // flat turn over the wall top onto the level. The turn's far edge sits a
-  // hair lower so its ground connection lands on the level side.
-  for (const TerrainWall& wall : scene->terrainWalls) {
-    const float run = wall.rise / kStairGrade;
-    for (const TerrainAccess& access : wall.accesses) {
-      if (!access.alongWall) continue;
-      const glm::vec2 foot(access.bottom.x, access.bottom.z);
-      const glm::vec2 landing(access.top.x, access.top.z);
-      const glm::vec2 along = wall.dir * (glm::dot(landing - foot, wall.dir) > 0.0f ? 1.0f : -1.0f);
-      const glm::vec2 flightTop = foot + along * run;
-      const glm::vec2 acrossHalf = wall.raisedNormal * (access.width * 0.5f);
-      // The top sits above curb height: the turn crosses the level's own
-      // sidewalk ring.
-      const float yBottom = access.bottom.y + 0.03f;
-      const float yTop = access.top.y + 0.16f;
-      WalkSurface flight;
-      flight.vertices = {glm::vec3(foot.x - acrossHalf.x, yBottom, foot.y - acrossHalf.y),
-                         glm::vec3(flightTop.x - acrossHalf.x, yTop, flightTop.y - acrossHalf.y),
-                         glm::vec3(flightTop.x + acrossHalf.x, yTop, flightTop.y + acrossHalf.y),
-                         glm::vec3(foot.x + acrossHalf.x, yBottom, foot.y + acrossHalf.y)};
-      flight.connectsToGround = true;
-      const int flightIndex = static_cast<int>(scene->walkSurfaces.size());
-      flight.neighbors.push_back(flightIndex + 1);
-      scene->walkSurfaces.push_back(std::move(flight));
-      // Turn slab: from the flight's strip, across the wall top, onto the
-      // level. Spans the wall box below it; no gap in the wall is needed.
-      const glm::vec2 inner = -acrossHalf;  // The flight's street-side edge.
-      const glm::vec2 outer = wall.raisedNormal * (1.8f + kWallHalfWidth * 2.0f + 0.9f);
-      WalkSurface turn;
-      const glm::vec2 t0 = flightTop + inner, t1 = flightTop + along * 2.2f + inner;
-      const glm::vec2 t2 = flightTop + along * 2.2f + outer, t3 = flightTop + outer;
-      turn.vertices = {glm::vec3(t0.x, yTop, t0.y), glm::vec3(t1.x, yTop, t1.y),
-                       glm::vec3(t2.x, access.top.y + 0.15f, t2.y),
-                       glm::vec3(t3.x, access.top.y + 0.15f, t3.y)};
-      turn.connectsToGround = true;
-      turn.neighbors.push_back(flightIndex);
-      scene->walkSurfaces.push_back(std::move(turn));
     }
   }
 }
@@ -2033,12 +2094,11 @@ void EmitStreetSurfaces(Scene* scene, const CityPlan& city, const MapGeneratorCo
   const float arteryD = glm::dot(artery.normal, artery.origin);
   for (const StreetCut& cut : city.streets.cuts) {
     if (cut.cls == UrbanStreetClass::Highway) continue;  // A highway road already.
+    if (cut.terrainBoundary) continue;                   // A wall strip: unpaved.
     float t0, t1;
     ClipLineToSquare(cut.origin, cut.dir, scene->mapHalfExtent, &t0, &t1);
     if (!(t1 > t0)) continue;
     const glm::vec2 n(-cut.dir.y, cut.dir.x);
-    // Terrain boundary streets carve wider than they pave; the margins hold
-    // the retaining wall and its wall-side walk.
     const float hw = (cut.pave > 0.0f ? cut.pave : cut.width) * 0.5f;
     const float half = scene->mapHalfExtent;
     const float d = glm::dot(n, cut.origin);
@@ -2312,9 +2372,9 @@ std::vector<UrbanRoad> UrbanRoads(uint32_t seed, const MapGeneratorConfig& c) {
 std::vector<UrbanStreet> UrbanStreets(uint32_t seed, const MapGeneratorConfig& c) {
   std::vector<UrbanStreet> out;
   if (c.arteryCount <= 0) return out;
-  const HighwayPlan plan = BuildHighwayPlan(seed, c);
-  const StreetGraph graph =
-      BuildStreetGraph(seed, c, plan, BuildTerrainPlan(seed, c, plan));
+  TerrainPlan terrainPlan;
+  const HighwayPlan plan = BuildHighwayPlan(seed, c, &terrainPlan);
+  const StreetGraph graph = BuildStreetGraph(seed, c, plan, terrainPlan);
   for (const UrbanRoad& road : UrbanRoads(seed, c)) {
     for (size_t i = 0; i + 1 < road.centerline.size(); ++i) {
       out.push_back({road.centerline[i], road.centerline[i + 1], road.width,
@@ -2330,7 +2390,7 @@ std::vector<UrbanStreet> UrbanStreets(uint32_t seed, const MapGeneratorConfig& c
   }
   for (const StreetCut& cut : graph.cuts) {
     if (cut.cls == UrbanStreetClass::Highway) continue;  // Already a road above.
-    if (cut.terrainBoundary && cut.side < 0) continue;   // One entry per boundary line.
+    if (cut.terrainBoundary) continue;                   // A wall strip, not a street.
     float t0, t1;
     ClipLineToSquare(cut.origin, cut.dir, half, &t0, &t1);
     if (!(t1 > t0)) continue;

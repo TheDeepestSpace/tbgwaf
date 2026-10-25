@@ -669,6 +669,35 @@ void TestPolygonBlocksAdaptToAngledStreets() {
   CHECK(acuteBuilding);
 }
 
+// A block corner without an alley is one building wrapping the corner: no
+// two footprints may both have a vertex at the same frontage corner.
+void TestNoCornerSplitBuildings() {
+  MapGeneratorConfig config;
+  config.arteryCount = 2;
+  config.elevatedHighway = OverpassMode::Off;
+  int wrapped = 0;
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed, config);
+    for (const UrbanBlock& block : UrbanBlocks(seed, config)) {
+      const std::vector<glm::vec2> outer = InsetConvexPolygon(block.vertices, config.sidewalkWidth);
+      for (const glm::vec2& corner : outer) {
+        int touching = 0;
+        for (const Obstacle& o : scene.obstacles) {
+          for (const glm::vec2& v : o.footprint) {
+            if (glm::distance(v, corner) < 0.05f) {
+              ++touching;
+              break;
+            }
+          }
+        }
+        CHECK(touching <= 1);
+        wrapped += touching;
+      }
+    }
+  }
+  CHECK(wrapped > 0);  // Corner buildings still exist.
+}
+
 void TestPolygonCollisionLosAndNavigationUseRealFootprint() {
   Obstacle wedge;
   wedge.bounds = AABB{glm::vec3(-2.0f, 0.0f, -2.0f), glm::vec3(2.0f, 4.0f, 2.0f)};
@@ -1485,6 +1514,7 @@ int main() {
   TestVisibilityStillSpansWholeMap();
   TestObliqueArteryAndBranchMerge();
   TestPolygonBlocksAdaptToAngledStreets();
+  TestNoCornerSplitBuildings();
   TestPolygonCollisionLosAndNavigationUseRealFootprint();
   TestElevatedOverpassRampsPiersAndDistinctLayers();
   TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable();

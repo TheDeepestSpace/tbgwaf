@@ -676,6 +676,28 @@ bool PolygonClearOfRoads(const std::vector<glm::vec2>& polygon,
   return true;
 }
 
+// Convex hull (Andrew's monotone chain), counter-clockwise.
+std::vector<glm::vec2> ConvexHull(std::vector<glm::vec2> pts) {
+  std::sort(pts.begin(), pts.end(), [](const glm::vec2& l, const glm::vec2& r) {
+    return l.x < r.x || (l.x == r.x && l.y < r.y);
+  });
+  auto cross = [](const glm::vec2& o, const glm::vec2& a, const glm::vec2& b) {
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  };
+  std::vector<glm::vec2> hull(2 * pts.size());
+  size_t n = 0;
+  for (size_t k = 0; k < pts.size(); ++k) {
+    while (n >= 2 && cross(hull[n - 2], hull[n - 1], pts[k]) <= 1.0e-4f) --n;
+    hull[n++] = pts[k];
+  }
+  for (size_t k = pts.size() - 1, lower = n + 1; k-- > 0;) {
+    while (n >= lower && cross(hull[n - 2], hull[n - 1], pts[k]) <= 1.0e-4f) --n;
+    hull[n++] = pts[k];
+  }
+  hull.resize(n > 1 ? n - 1 : n);
+  return hull;
+}
+
 // Frontage-following building rows: each block edge gets one or more
 // buildings whose outer walls lie on the (possibly angled) frontage, with
 // wall-to-wall junctions, seeded alley gaps and at least one opening into
@@ -766,7 +788,21 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
     anyGap |= cornerGap[e];
   }
   if (!anyGap) cornerGap[blockIndex % edges] = true;
+  // A lone piece between two merged corners would chain them into one fat
+  // building; split it along the street instead so each corner gets its own.
+  for (size_t e = 0; e < edges; ++e) {
+    const float length = glm::distance(outer[e], outer[(e + 1) % edges]);
+    if (pieces[e] == 1 && !cornerGap[e] && !cornerGap[(e + 1) % edges] && length >= 8.0f) {
+      pieces[e] = 2;
+      innerGap[e].assign(1, false);
+    }
+  }
 
+  struct Piece {
+    std::vector<glm::vec2> footprint;
+    bool atStart, atEnd;  // Touches the corner at the edge's start/end.
+  };
+  std::vector<std::vector<Piece>> rows(edges);
   for (size_t e = 0; e < edges; ++e) {
     if (!pieces[e]) continue;
     const size_t next = (e + 1) % edges;
@@ -791,6 +827,10 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
     for (int i = 1; i < count; ++i) {
       if (rng->Chance(0.2f)) wallSkew[i] = rng->Float(-0.5f, 0.5f) * c.buildingDepth;
     }
+    // Walls beside a merged corner stay square so the corner building's hull
+    // never reaches into its neighbor.
+    if (!cornerGap[e]) wallSkew[1] = 0.0f;
+    if (!cornerGap[next]) wallSkew[count - 1] = 0.0f;
     auto innerU = [&](float t, float skew) {
       const glm::vec2 foot = glm::mix(outer[e], outer[next], t);
       return std::clamp(glm::dot(foot - inner[e], innerDir) + skew, 0.0f, innerLen);
@@ -815,9 +855,100 @@ BlockParcels PlanBlockParcels(const UrbanBlock& block, size_t blockIndex,
       // A back wall pinched to a point becomes a (still convex) triangle.
       if (ub - ua < 0.05f) footprint.pop_back();
       if (PolygonArea(footprint) < c.minPolygonArea * 0.18f) continue;
-      out.parcels.push_back({std::move(footprint),
-                         std::clamp(cluster + rng->Float(-1.2f, 1.2f), c.minBuildingHeight,
-                                    c.maxBuildingHeight)});
+      rows[e].push_back({std::move(footprint), i == 0, i == count - 1});
+    }
+  }
+
+  // Corners without an alley are one building wrapping the corner, not two
+  // buildings meeting on the miter line. Pieces joined at a corner become the
+  // convex hull of their footprints (the courtyard-side notch fills in); the
+  // splits along each street stay.
+  std::vector<std::pair<size_t, size_t>> order;  // (edge, index) per piece.
+  std::vector<std::vector<size_t>> pieceId(edges);
+  for (size_t e = 0; e < edges; ++e) {
+    for (size_t i = 0; i < rows[e].size(); ++i) {
+      pieceId[e].push_back(order.size());
+      order.push_back({e, i});
+    }
+  }
+  // linkedNext[p]: piece p joins the following piece around a shared corner.
+  std::vector<bool> linkedNext(order.size(), false), linkedPrev(order.size(), false);
+  size_t links = 0;
+  for (size_t e = 0; e < edges; ++e) {
+    const size_t next = (e + 1) % edges;
+    if (cornerGap[next] || next == e || rows[e].empty() || rows[next].empty()) continue;
+    if (!rows[e].back().atEnd || !rows[next].front().atStart) continue;
+    linkedNext[pieceId[e].back()] = true;
+    linkedPrev[pieceId[next].front()] = true;
+    ++links;
+  }
+  if (links == order.size() && links > 0) {  // A closed ring would swallow the block.
+    for (size_t p = 0; p < order.size(); ++p) {
+      if (linkedNext[p]) {
+        linkedNext[p] = false;
+        for (size_t q = 0; q < order.size(); ++q) {
+          if (linkedPrev[q] && order[q].first == (order[p].first + 1) % edges) linkedPrev[q] = false;
+        }
+        break;
+      }
+    }
+  }
+  auto height = [&] {
+    return std::clamp(cluster + rng->Float(-1.2f, 1.2f), c.minBuildingHeight, c.maxBuildingHeight);
+  };
+  for (size_t p = 0; p < order.size(); ++p) {
+    if (linkedPrev[p]) continue;  // Emitted with the chain's first piece.
+    if (!linkedNext[p]) {
+      out.parcels.push_back({rows[order[p].first][order[p].second].footprint, height()});
+      continue;
+    }
+    std::vector<size_t> chain;
+    std::vector<glm::vec2> frontage, feet;  // Frontage points, then back-wall points.
+    for (size_t q = p;; q = (q + 1) % order.size()) {
+      chain.push_back(q);
+      const Piece& piece = rows[order[q].first][order[q].second];
+      for (size_t k = 0; k < piece.footprint.size(); ++k) {
+        if ((k == 0 && linkedPrev[q]) || (k == 1 && linkedNext[q])) continue;
+        (k < 2 ? frontage : feet).push_back(piece.footprint[k]);
+      }
+      if (!linkedNext[q]) break;
+      frontage.push_back(outer[(order[q].first + 1) % edges]);
+    }
+    // Skewed party walls can lean into the corner; take the full hull only if
+    // it stays clear of the block's other buildings, else the hull of the
+    // frontage plus the ring corners (never wider than the corner itself),
+    // else keep the pieces separate.
+    std::vector<glm::vec2> full = frontage;
+    full.insert(full.end(), feet.begin(), feet.end());
+    std::vector<glm::vec2> slim = frontage;
+    for (size_t q : chain) {
+      if (linkedNext[q]) slim.push_back(inner[(order[q].first + 1) % edges]);
+    }
+    auto clear = [&](const std::vector<glm::vec2>& poly) {
+      for (size_t o = 0; o < order.size(); ++o) {
+        if (std::find(chain.begin(), chain.end(), o) != chain.end()) continue;
+        const std::vector<glm::vec2>& other = rows[order[o].first][order[o].second].footprint;
+        for (size_t k = 0; k < poly.size(); ++k) {
+          if (SegmentEntersConvexPolygon(poly[k], poly[(k + 1) % poly.size()], other)) return false;
+        }
+        for (size_t k = 0; k < other.size(); ++k) {
+          if (SegmentEntersConvexPolygon(other[k], other[(k + 1) % other.size()], poly)) return false;
+        }
+      }
+      return true;
+    };
+    bool merged = false;
+    for (const std::vector<glm::vec2>* pts : {&full, &slim}) {
+      std::vector<glm::vec2> hull = ConvexHull(*pts);
+      if (hull.size() < 3 || !clear(hull)) continue;
+      out.parcels.push_back({std::move(hull), height()});
+      merged = true;
+      break;
+    }
+    if (!merged) {
+      for (size_t q : chain) {
+        out.parcels.push_back({rows[order[q].first][order[q].second].footprint, height()});
+      }
     }
   }
   return out;

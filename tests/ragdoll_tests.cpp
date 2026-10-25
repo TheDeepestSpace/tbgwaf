@@ -132,6 +132,12 @@ void TestFallsOffWallAndStaysOutside() {
   }
   CHECK(end[gfx::kRagHead].y < 1.0f);  // Landed on the ground, not the wall top.
   CHECK(end[gfx::kRagHead].x > 0.6f);
+  // The whole body (legs included) ends lying on the ground, not frozen
+  // mid-fall with the feet in the air.
+  for (const glm::vec3& p : end) CHECK(p.y < 0.5f);
+  // And it is actually at rest there.
+  const gfx::RagdollPose prev = gfx::SampleRagdollStep(u, gfx::kRagdollSteps - 1);
+  for (int i = 0; i < gfx::kRagJointCount; ++i) CHECK(glm::length(end[i] - prev[i]) < 0.05f);
   gfx::SetRagdollObstacles({});
 }
 

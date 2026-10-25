@@ -44,8 +44,10 @@ enum RagdollJoint {
 
 using RagdollPose = std::array<glm::vec3, kRagJointCount>;  // World positions.
 
-// Fixed simulation step, number of steps from hit to rest, and the cap on
-// simultaneously cached (i.e. actively evaluated) ragdolls.
+// Fixed simulation step, number of playback frames from hit to rest (the
+// simulation itself runs for as many steps as the fall needs and is fitted
+// onto this many frames), and the cap on simultaneously cached (i.e.
+// actively evaluated) ragdolls.
 constexpr float kRagdollStep = 1.0f / 60.0f;
 constexpr int kRagdollSteps = 60;
 constexpr int kRagdollMaxCached = 16;

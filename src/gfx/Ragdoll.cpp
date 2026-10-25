@@ -21,6 +21,7 @@ constexpr float kLaunchLift = 1.1f;
 constexpr int kConstraintIterations = 6;
 constexpr float kSleepSpeed = 0.05f;      // Units/s; below this a step counts as still.
 constexpr int kSleepSteps = 6;
+constexpr int kMaxSimSteps = 300;         // Hard cap on simulated steps (5 s).
 
 // Standing pose in the figure frame (+X forward, +Y up, +Z right), matching
 // the proportions in FigureRig.cpp.
@@ -233,7 +234,11 @@ Trajectory Simulate(const Unit& unit) {
   }
   int still = 0;
   std::array<bool, kRagJointCount> onFloor{};
-  for (int step = 0; step < kRagdollSteps; ++step) {
+  // Run until body and (dropped) gun are at rest, up to the cap: a fall from
+  // an obstacle top takes longer than kRagdollSteps. The recorded frames are
+  // resampled onto the fixed playback length below.
+  for (int step = 0; step < kMaxSimSteps; ++step) {
+    if (still >= kSleepSteps && (!drops || gunAsleep)) break;
     if (drops && !gunAsleep) {
       gunVel.y -= kGravity * kRagdollStep;
       const float gunRefY = gunPos.y;
@@ -279,7 +284,7 @@ Trajectory Simulate(const Unit& unit) {
         }
       }
     }
-    if (still >= kSleepSteps) {  // Asleep: hold the rest pose.
+    if (still >= kSleepSteps) {  // Asleep: hold the pose while the gun settles.
       traj.frames.push_back(pos);
       traj.guns.push_back(gunFrame());
       continue;
@@ -324,6 +329,29 @@ Trajectory Simulate(const Unit& unit) {
     still = maxSpeed < kSleepSpeed ? still + 1 : 0;
     traj.frames.push_back(pos);
     traj.guns.push_back(gunFrame());
+  }
+  // Fit onto the fixed kRagdollSteps + 1 playback frames: pad a short fall
+  // with its rest pose, take evenly spaced frames of a long one (which thus
+  // plays back faster but still ends at rest).
+  const int simmed = static_cast<int>(traj.frames.size()) - 1;
+  if (simmed > kRagdollSteps) {
+    std::vector<RagdollPose> frames;
+    std::vector<RagdollGun> guns;
+    frames.reserve(kRagdollSteps + 1);
+    guns.reserve(kRagdollSteps + 1);
+    for (int k = 0; k <= kRagdollSteps; ++k) {
+      const size_t i =
+          static_cast<size_t>(std::lround(static_cast<double>(k) * simmed / kRagdollSteps));
+      frames.push_back(traj.frames[i]);
+      guns.push_back(traj.guns[i]);
+    }
+    traj.frames = std::move(frames);
+    traj.guns = std::move(guns);
+  } else {
+    while (static_cast<int>(traj.frames.size()) <= kRagdollSteps) {
+      traj.frames.push_back(traj.frames.back());
+      traj.guns.push_back(traj.guns.back());
+    }
   }
   return traj;
 }

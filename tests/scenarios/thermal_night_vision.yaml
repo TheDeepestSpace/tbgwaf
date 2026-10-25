@@ -2,7 +2,7 @@ name: thermal_night_vision
 description: >
   Issue #177 thermal rendering, black-hot polarity (modeled on real aerial FLIR
   footage): figures are near-black hot silhouettes on a washed-out bright world
-  with sky-cooled roofs, patchy ground, and sensor grain. FOV, the aiming
+  with pale roofs, soft ambient contact shading, and sensor grain. FOV, the aiming
   probability cone, selector, tracer, and HUD all read as monochrome green
   sensor symbology.
 

@@ -124,10 +124,13 @@ the analytic overlay and opt in
 with a `render: {fov_overlay: shadow_map}` block.
 
 The debug panel's **Thermal view** uses black-hot polarity by default, based
-on the aerial reference in PR #178: pale roofs, gray streets and dark figures.
-Uncheck **Black hot** to invert it. Apparent heat is assigned by material,
+on the references in PR #178: pale clay-like surroundings, gray streets and
+dark figures. Screen-space ambient occlusion adds soft contact shading at
+building bases, parapets, roof furniture and feet. It samples nearby visible
+geometry, so hidden/offscreen surfaces cannot contribute. Uncheck **Black hot**
+to invert the complete image. Apparent heat is assigned by material,
 independent of team colors; this is a visual approximation, not a temperature
-simulation. Light sensor blur and grain affect the world before the green
+simulation. Light sensor blur and grain affect the shaded world before the green
 gameplay overlays and HUD are drawn. The `thermal_urban_black_hot` and
 `thermal_urban_white_hot` scenarios show both polarities on the same city;
 scenario YAML selects them with `render: {thermal: true, thermal_black_hot: false}`

@@ -80,6 +80,7 @@ set(APP_GFX_SOURCES
   src/gfx/Mesh.cpp
   src/gfx/Camera.cpp
   src/gfx/FigureRig.cpp
+  src/gfx/AmbientOcclusion.cpp
   src/gfx/SceneRenderer.cpp
 )
 
@@ -219,6 +220,7 @@ else()
     src/gfx/Mesh.cpp
     src/gfx/Camera.cpp
     src/gfx/FigureRig.cpp
+    src/gfx/AmbientOcclusion.cpp
     src/gfx/SceneRenderer.cpp
   )
   target_include_directories(tactics_gfx PUBLIC src)

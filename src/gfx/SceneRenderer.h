@@ -9,6 +9,7 @@
 #include "game/GameLogic.h"
 #include "game/Types.h"
 #include "game/Visibility.h"
+#include "gfx/AmbientOcclusion.h"
 #include "gfx/Camera.h"
 #include "gfx/Mesh.h"
 #include "gfx/Shader.h"
@@ -30,9 +31,9 @@ struct RenderDebugOptions {
   bool disableFov = false;
   bool disableShadows = false;
   // Thermal camera prototype (issue #177): material-based grayscale with
-  // pale roofs, warmer streets and figures the hottest signal. Sensor blur
-  // and grain precede the overlays, the shadow pass is skipped, and gameplay
-  // overlays swap to monochrome sensor-green symbology. `thermalBlackHot`
+  // pale surfaces, ambient contact shading and figures the hottest signal.
+  // Sensor blur and grain precede the overlays; sunlight shadows are
+  // skipped. Gameplay overlays swap to monochrome sensor-green symbology. `thermalBlackHot`
   // picks the polarity, like the toggle on a real FLIR: true renders hot
   // objects dark on a washed-out bright world (matching the PR #178 review's
   // aerial reference footage), false is classic white-hot.
@@ -143,6 +144,7 @@ class SceneRenderer {
   Shader coneSurfaceShader_;
   Shader depthShader_;
   Shader thermalSensorShader_;
+  AmbientOcclusion thermalOcclusion_;
   GLuint thermalSceneTex_ = 0;
   GLuint thermalSensorVao_ = 0;
   int thermalSceneWidth_ = 0;

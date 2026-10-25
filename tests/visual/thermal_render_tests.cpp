@@ -1,5 +1,6 @@
 // Exercise thermal post-processing state independently of screenshot goldens:
-// offscreen targets, pane isolation, resize, polarity, and returning to normal.
+// contact shading, fog privacy, offscreen targets, pane isolation, resize,
+// polarity, and returning to normal.
 #include <SDL.h>
 #include <GLES3/gl3.h>
 
@@ -88,10 +89,75 @@ void CheckRenderer() {
   Require(paleRoofPixels > 20 && midtonePixels > 100,
           "Thermal scene lost its roof/surroundings contrast");
   options.thermalBlackHot = true;
-  render(x, 79, 61);
+  // The AO targets grow to the largest pane and are shared: a smaller pane
+  // (the other half of an odd-width window) must render into their corner
+  // exactly as it would into tight targets of its own.
+  const auto smallShared = render(x, 79, 61);
+  {
+    gfx::SceneRenderer fresh;
+    Require(fresh.Init(), "Second renderer initialization failed");
+    fresh.RenderPane(game, tactics::Team::Blue, false, {}, camera, x, y, 79, 61, {}, fbo,
+                     options);
+    Require(Capture(x, y, 79, 61) == smallShared,
+            "Smaller pane rendered differently in shared (larger) AO targets");
+    fresh.Destroy();
+  }
   Require(render(x, width, height) == blackHot, "Thermal image changed after a viewport resize");
   options.thermal = false;
   Require(render(x, width, height) == normal, "Thermal state leaked into normal rendering");
+
+  // Compare identical ground points with/without nearby geometry. Contact
+  // shading must come from the building, not a painted material gradient;
+  // it must fall off while exposed roof centers stay pale.
+  options.thermal = true;
+  tactics::Scene emptyScene = scene;
+  emptyScene.obstacles.clear();
+  tactics::GameLogic emptyGame(emptyScene);
+  renderer.RenderPane(emptyGame, tactics::Team::Blue, false, {}, camera,
+                       x, y, width, height, {}, fbo, options);
+  const auto empty = Capture(x, y, width, height);
+  const glm::mat4 vp = camera.ProjectionMatrix(float(width) / height) * camera.ViewMatrix();
+  auto brightness = [&](const auto& pixels, const glm::vec3& point) {
+    const glm::vec4 clip = vp * glm::vec4(point, 1.0f);
+    const int px = int((clip.x / clip.w * 0.5f + 0.5f) * width);
+    const int py = int((clip.y / clip.w * 0.5f + 0.5f) * height);
+    Require(px > 0 && px < width - 1 && py > 0 && py < height - 1,
+            "AO probe outside pane");
+    int sum = 0;
+    for (int dy = -1; dy <= 1; ++dy) {
+      for (int dx = -1; dx <= 1; ++dx) sum += pixels[((py + dy) * width + px + dx) * 4];
+    }
+    return float(sum) / 9.0f;
+  };
+  const glm::vec3 contact(2.5f, 0.0f, 0.0f), openGround(6.0f, 0.0f, 0.0f);
+  Require(brightness(empty, contact) - brightness(blackHot, contact) > 12.0f,
+          "Building did not cast soft ambient contact shading");
+  Require(std::abs(brightness(empty, openGround) - brightness(blackHot, openGround)) < 4.0f,
+          "Ambient occlusion spread beyond nearby geometry");
+  Require(brightness(blackHot, glm::vec3(0.0f, 4.0f, 0.0f)) > 240.0f,
+          "Exposed roof was incorrectly occluded");
+
+  tactics::Scene floatingScene = scene;
+  floatingScene.obstacles[0].bounds.min.y += 6.0f;
+  floatingScene.obstacles[0].bounds.max.y += 6.0f;
+  tactics::GameLogic floatingGame(floatingScene);
+  renderer.RenderPane(floatingGame, tactics::Team::Blue, false, {}, camera,
+                       x, y, width, height, {}, fbo, options);
+  Require(std::abs(brightness(Capture(x, y, width, height), contact) -
+                   brightness(empty, contact)) < 4.0f,
+          "Distant geometry cast a false screen-space contact shadow");
+
+  // Hidden enemies must contribute neither silhouettes nor contact shading.
+  tactics::Scene hiddenScene = scene;
+  tactics::Unit enemy;
+  enemy.id = 7;
+  enemy.team = tactics::Team::Red;
+  enemy.position = glm::vec3(5.0f, 0.0f, 0.0f);
+  hiddenScene.units.push_back(enemy);
+  tactics::GameLogic hiddenGame(hiddenScene);
+  renderer.RenderPane(hiddenGame, tactics::Team::Blue, true, {}, camera,
+                       x, y, width, height, {}, fbo, options);
+  Require(Capture(x, y, width, height) == blackHot, "AO exposed a fog-hidden enemy");
 
   renderer.Destroy();
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -119,7 +185,8 @@ int main() {
   int result = 0;
   try {
     CheckRenderer();
-    std::puts("PASS thermal renderer: polarity, pane isolation, resize, and mode switching");
+    std::puts("PASS thermal renderer: contact shading, fog privacy, polarity, pane isolation, "
+              "resize, mode switching");
   } catch (const std::exception& e) {
     std::fprintf(stderr, "FAIL thermal renderer: %s\n", e.what());
     result = 1;

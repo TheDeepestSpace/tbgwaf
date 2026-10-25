@@ -237,7 +237,8 @@ uniform int uDisableShadows;
 uniform int uThermal;
 uniform int uThermalBlackHot;  // 1 = hot reads dark (the review reference), 0 = white-hot.
 uniform int uThermalMaterial;  // ThermalMaterial, independent of uColor.
-out vec4 FragColor;
+layout(location = 0) out vec4 FragColor;
+layout(location = 1) out vec4 WorldNormal;
 
 // Integer hash avoids sin()-dependent grain differences across GL drivers.
 float ThermalHash(vec2 p) {
@@ -279,15 +280,16 @@ void main() {
   vec3 normal = normalize(vWorldNormal);
   vec3 viewDir = normalize(uViewPos - vWorldPos);
   if (dot(normal, viewDir) < 0.0) normal = -normal;
+  WorldNormal = vec4(normal * 0.5 + 0.5, 1.0);
 
   float diffuse = max(dot(normal, -uLightDir), 0.0);
   float shadow = ComputeShadow(normal);
   const float kAmbient = 0.35;
   float lit = kAmbient + (1.0 - shadow) * diffuse * 0.65;
   if (uThermal != 0) {
-    // Relative apparent heat, not a temperature simulation. The reference
-    // has almost white roofs, mid-gray streets and dark human silhouettes.
-    // In particular, pavement must not cool to the same tone as every roof.
+    // Pale clay-like surroundings from the AO reference, with subtle
+    // material differences and hot figures from the aerial thermal view.
+    // Contact shading is applied in screen space after the opaque pass.
     float heat;
     if (uThermalMaterial == 5) {
       // A small view-dependent falloff rounds limbs without sun lighting
@@ -306,18 +308,18 @@ void main() {
                           (ThermalNoise(p * 2.5) - 0.5) * 0.35 +
                           (ThermalNoise(p * 9.0) - 0.5) * 0.20 * fineWeight;
       if (uThermalMaterial == 3) {
-        heat = mix(0.30, 0.018, skyFacing) +
-               textureHeat * mix(0.12, 0.025, skyFacing);
+        heat = mix(0.15, 0.018, skyFacing) +
+               textureHeat * mix(0.035, 0.015, skyFacing);
         // Undersides retain a darker tone; never use visible-light shadows.
         heat += max(-normal.y, 0.0) * 0.15;
       } else if (uThermalMaterial == 2) {
-        heat = 0.36 + textureHeat * 0.16;
+        heat = 0.20 + textureHeat * 0.045;
       } else if (uThermalMaterial == 1) {
-        heat = mix(0.27, 0.15, skyFacing) + textureHeat * 0.09;
+        heat = mix(0.17, 0.07, skyFacing) + textureHeat * 0.03;
       } else if (uThermalMaterial == 4) {
-        heat = 0.24 + textureHeat * 0.04;
+        heat = 0.13 + textureHeat * 0.025;
       } else {
-        heat = 0.19 + textureHeat * 0.26;
+        heat = 0.09 + textureHeat * 0.05;
       }
       heat += (1.0 - max(dot(normal, viewDir), 0.0)) * 0.018;
     }
@@ -2119,6 +2121,10 @@ bool SceneRenderer::Init() {
     std::fprintf(stderr, "Failed to compile the thermal sensor shader\n");
     return false;
   }
+  if (!thermalOcclusion_.Init()) {
+    std::fprintf(stderr, "Failed to compile the thermal ambient occlusion shaders\n");
+    return false;
+  }
   cubeMesh_.Init();
   sphereMesh_.Init();
   frontierFill_.Init();
@@ -2244,6 +2250,7 @@ void SceneRenderer::Destroy() {
   if (thermalSensorVao_) glDeleteVertexArrays(1, &thermalSensorVao_);
   thermalSceneTex_ = thermalSensorVao_ = 0;
   thermalSceneWidth_ = thermalSceneHeight_ = 0;
+  thermalOcclusion_.Destroy();
 }
 
 void SceneRenderer::ApplyThermalSensor(int x, int y, int width, int height) {
@@ -2549,6 +2556,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       camera.ProjectionMatrix(static_cast<float>(width) / static_cast<float>(height));
   const glm::mat4 viewProj = proj * view;
 
+  // Only opaque, visible geometry contributes to AO. Faded buildings are
+  // blended afterward, so they cannot leave opaque contact shadows over
+  // the figures and paths the see-through pass is meant to reveal.
+  const bool thermalAo = debug.thermal &&
+      thermalOcclusion_.Begin(width, height, debug.thermalBlackHot ? 0.86f : 0.14f);
+  if (debug.thermal && !thermalAo) {
+    glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
+    glViewport(x, y, width, height);
+    glScissor(x, y, width, height);
+  }
+
   // Issue #136 camera-occlusion see-through: per frame, raycast from the
   // camera to every point the player needs to see (own figures, movement
   // frontier, move paths/ghosts, sighting ghosts) and mark each obstacle or
@@ -2798,6 +2816,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
   thermalMaterial(ThermalMaterial::Metal);
   DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
+
+  if (thermalAo) {
+    thermalOcclusion_.Composite(targetFramebuffer, x, y, view, proj, debug.thermalBlackHot);
+    litShader_.Use();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
+  }
 
   // Issue #136: alpha-blended re-draw of the occluders marked above, sorted
   // front-to-back and stencil-capped so each pixel is blended exactly once

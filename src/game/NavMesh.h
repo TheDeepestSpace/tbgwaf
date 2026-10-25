@@ -120,6 +120,10 @@ class NavMesh {
   // ground level (elevation 0); climb-top surfaces are not considered.
   bool IsWalkable(float x, float z) const;
 
+  // True if (x, z) at ground level sits under a walk surface that is above
+  // the ground but leaves less than constants::kMinDeckHeadroom of clearance.
+  bool GroundUnderLowDeck(float x, float z) const;
+
   // Dijkstra flood fill over ground-level free space from `start`, covering
   // everything within `budget` path distance. Climb-top surfaces are not
   // included. Returns an empty field if `start` isn't on walkable ground.
@@ -138,6 +142,7 @@ class NavMesh {
   int FindWalkSurfaceContaining(float x, float z, float yHint) const;
   bool FindGroundPath(glm::vec3 start, glm::vec3 goal,
                       std::vector<glm::vec3>* outPath) const;
+  void AddLowDeckBlockers(float agentRadius);
   void LiftGroundPathOntoTerrain(std::vector<glm::vec3>* outPath) const;
   bool FindPolygonGroundPath(glm::vec3 start, glm::vec3 goal,
                              std::vector<glm::vec3>* outPath) const;

@@ -153,6 +153,8 @@ constexpr float kAgentRadius = 0.4f;     // Padding used to inflate obstacles fo
 constexpr float kUnitHalfWidth = 0.35f;
 constexpr float kUnitHeight = 1.8f;
 constexpr float kEyeHeight = 1.5f;
+// Ground beneath a deck/ramp is only walkable with at least this much headroom.
+constexpr float kMinDeckHeadroom = 2.2f;
 // Where a locked-on shot aims on the target figure: torso center height.
 // Shared by the ballistics (burst aim point), the staged-lock "+" marker and
 // the planned-shot cone, so what the cone shader shows is what gets shot at.

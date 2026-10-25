@@ -47,6 +47,19 @@ tune artery count/width, local-street width/skew and elevation through
 `MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
 overlay of the navmesh's walkable-cell boundaries.
 
+Urban buildings have an **archetype** (`Scene::buildings`, one `Building` per
+parcel beside its obstacle): residential, mixed-use, office, commercial hall,
+garage, or civic for the two landmark towers. Each parcel's kind is drawn
+from a table weighted by the street it fronts (artery frontage leans
+office/mixed-use, back streets residential/warehouse), biased by its block's
+neighbourhood character (downtown, residential, industrial or mixed; drawn per
+block, or forced with `TBGWAF_BLOCK_CHARACTER=downtown` / scenario
+`map.generate.character`). Floor count and floor height per kind set the
+building height; the renderer colours facades per kind and draws
+massing -- parapets, roof furniture, awnings over shopfronts, set-back office
+top floors. Massing blocks sight lines and FOV (`SightObstacles`) but not
+movement; the set-back top floor is full obstacle geometry.
+
 Urban maps carry pre-built **ziplines** (0-2 per block, seed-deterministic,
 `MapGeneratorConfig::maxZiplinesPerBlock`): two-way cables between anchor
 posts along the block sidewalks. A move plan may walk to one anchor, ride,

@@ -1,8 +1,22 @@
 #include "game/Scene.h"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace tactics {
+
+const char* BuildingKindName(BuildingKind kind) {
+  switch (kind) {
+    case BuildingKind::Residential: return "residential";
+    case BuildingKind::MixedUse: return "mixed-use";
+    case BuildingKind::Office: return "office";
+    case BuildingKind::Commercial: return "commercial";
+    case BuildingKind::Civic: return "civic";
+    case BuildingKind::Garage: return "garage";
+  }
+  return "unknown";
+}
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
@@ -81,6 +95,30 @@ Scene BuildDefaultScene() {
   }
 
   return scene;
+}
+
+std::vector<Obstacle> SightObstacles(const Scene& scene) {
+  std::vector<Obstacle> out = scene.obstacles;
+  out.reserve(out.size() + scene.massing.size());
+  for (const MassingDetail& d : scene.massing) {
+    if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
+    Obstacle prism;
+    prism.footprint = d.footprint;
+    prism.bounds.min.y = d.y0;
+    prism.bounds.max.y = d.y1;
+    constexpr float kInf = std::numeric_limits<float>::infinity();
+    prism.bounds.min.x = prism.bounds.min.z = kInf;
+    prism.bounds.max.x = prism.bounds.max.z = -kInf;
+    for (const glm::vec2& p : d.footprint) {
+      prism.bounds.min.x = std::min(prism.bounds.min.x, p.x);
+      prism.bounds.max.x = std::max(prism.bounds.max.x, p.x);
+      prism.bounds.min.z = std::min(prism.bounds.min.z, p.y);
+      prism.bounds.max.z = std::max(prism.bounds.max.z, p.y);
+    }
+    prism.building = d.building;
+    out.push_back(std::move(prism));
+  }
+  return out;
 }
 
 }  // namespace tactics

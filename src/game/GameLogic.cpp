@@ -100,6 +100,7 @@ void GameLogic::Reset() { Reset(BuildDefaultScene()); }
 void GameLogic::Reset(Scene scene) {
   scene_ = std::move(scene);
   obstacleBounds_ = ObstacleBounds(scene_.obstacles);
+  sightObstacles_ = tactics::SightObstacles(scene_);
   // On hilly terrain every figure stands on the sampled ground, so scenario
   // files can place units by XZ alone. Flat scenes (empty field) keep their
   // authored Y (e.g. crate-top starts).
@@ -1183,7 +1184,7 @@ float GameLogic::ShotHitChance(const Unit& shooter, const Unit& target) const {
   const glm::vec3 targetEye = target.EyePosition();
   if (!InFovCone(eye, shooter.FacingDirection(), targetEye, profile.halfAngleDegrees,
                  std::numeric_limits<float>::infinity()) ||
-      !LineOfSightClear(eye, targetEye, scene_.obstacles, scene_.walkSurfaces, scene_.ground)) {
+      !LineOfSightClear(eye, targetEye, sightObstacles_, scene_.walkSurfaces, scene_.ground)) {
     return 0.0f;
   }
   const glm::vec3 toTarget = targetEye - eye;
@@ -1254,6 +1255,7 @@ namespace {
 // (area denial). Mirrors what the renderer draws, so the "+" selector lands
 // where the player actually pointed.
 bool IntersectAimSurface(const glm::vec3& origin, const glm::vec3& dir, const Scene& scene,
+                         const std::vector<Obstacle>& obstacles,
                          glm::vec3* outPoint) {
   bool found = false;
   float bestT = std::numeric_limits<float>::infinity();
@@ -1301,7 +1303,7 @@ bool IntersectAimSurface(const glm::vec3& origin, const glm::vec3& dir, const Sc
   }
 
   float t = 0.0f;
-  for (const Obstacle& obstacle : scene.obstacles) {
+  for (const Obstacle& obstacle : obstacles) {
     if (RayIntersectsObstacle(origin, dir, obstacle, &t)) consider(t);
   }
   for (const AABB& slab : scene.sidewalks) {
@@ -1328,7 +1330,7 @@ bool GameLogic::IsAimSurfaceVisible(const glm::vec3& point) const {
   // Lifted a hair off the surface so the LOS segment doesn't graze the very
   // triangle/face the point sits on. No FOV cone: the figure turns to shoot.
   const glm::vec3 probe = point + glm::vec3(0.0f, 0.05f, 0.0f);
-  return LineOfSightClear(eye, probe, scene_.obstacles, scene_.walkSurfaces, scene_.ground);
+  return LineOfSightClear(eye, probe, sightObstacles_, scene_.walkSurfaces, scene_.ground);
 }
 
 GameLogic::AimRayResult GameLogic::ResolveAimRay(const glm::vec3& origin,
@@ -1359,7 +1361,7 @@ GameLogic::AimRayResult GameLogic::ResolveAimRay(const glm::vec3& origin,
     }
 
     glm::vec3 surface;
-    if (IntersectAimSurface(origin, dir, scene_, &surface) && IsAimSurfaceVisible(surface)) {
+    if (IntersectAimSurface(origin, dir, scene_, sightObstacles_, &surface) && IsAimSurfaceVisible(surface)) {
       result.kind = AimRayResult::Kind::Surface;
       result.point = surface;
       return result;
@@ -1454,7 +1456,7 @@ std::vector<GameLogic::AimTraceCandidate> GameLogic::RayTraceCandidates(
     // before it gets there -- and, the ray being straight, before anything
     // beyond it too.
     const glm::vec3 entry = muzzle + dir * t;
-    if (!LineOfSightClear(muzzle, entry, scene_.obstacles, scene_.walkSurfaces, scene_.ground)) {
+    if (!LineOfSightClear(muzzle, entry, sightObstacles_, scene_.walkSurfaces, scene_.ground)) {
       continue;
     }
     // Same profile falloff as a locked shot, at the struck figure's actual
@@ -1486,7 +1488,7 @@ float GameLogic::RayReach(const glm::vec3& muzzle, const glm::vec3& ray) const {
     if (d < -1e-6f) reach = std::min(reach, (-half - origin) / d);
   }
   reach = std::max(reach, 0.0f);
-  for (const Obstacle& obstacle : scene_.obstacles) {
+  for (const Obstacle& obstacle : sightObstacles_) {
     float t = 0.0f;
     if (RayIntersectsObstacle(muzzle, ray, obstacle, &t) && t > 0.0f) reach = std::min(reach, t);
   }
@@ -1574,7 +1576,7 @@ void GameLogic::ResolvePendingShots() {
       const glm::vec3 aimPoint =
           target->position + glm::vec3(0.0f, constants::kTorsoAimHeight, 0.0f);
       const Unit aimed = AimedAt(*shooter, aimPoint);
-      if (!LineOfSightClear(aimed.MuzzlePosition(), aimPoint, scene_.obstacles,
+      if (!LineOfSightClear(aimed.MuzzlePosition(), aimPoint, sightObstacles_,
                             scene_.walkSurfaces, scene_.ground)) {
         continue;
       }
@@ -1745,7 +1747,7 @@ void GameLogic::ApplyPlaybookReactions(bool roundStart) {
                        const Unit* target = FindUnit(shot.targetId);
                        const bool drop = !shooter || !target || !shooter->alive ||
                                          !target->alive ||
-                                         !CanUnitSee(*shooter, *target, scene_.obstacles,
+                                         !CanUnitSee(*shooter, *target, sightObstacles_,
                                                      scene_.walkSurfaces, scene_.ground);
                        if (drop && shooter) {
                          reactionNextShotAt_[shot.shooterId] =
@@ -1785,7 +1787,7 @@ void GameLogic::ApplyPlaybookReactions(bool roundStart) {
       const bool enemyMoving = isMidMove(enemy.id);
       if (roundStart && enemyMoving) continue;
       if (!moving && Playbook(unit.team).ignoreIdle && !enemyMoving) continue;
-      if (!CanUnitSee(unit, enemy, scene_.obstacles, scene_.walkSurfaces, scene_.ground)) continue;
+      if (!CanUnitSee(unit, enemy, sightObstacles_, scene_.walkSurfaces, scene_.ground)) continue;
       const float dist = glm::distance(unit.position, enemy.position);
       // Closest first; an exact tie goes to the lower id (deterministic).
       if (!nearest || dist < nearestDist || (dist == nearestDist && enemy.id < nearest->id)) {
@@ -1793,7 +1795,7 @@ void GameLogic::ApplyPlaybookReactions(bool roundStart) {
         nearestDist = dist;
       }
       // Most-cautious tie-break: any sighted enemy that sees back counts.
-      canSeeMe |= CanUnitSee(enemy, unit, scene_.obstacles, scene_.walkSurfaces, scene_.ground);
+      canSeeMe |= CanUnitSee(enemy, unit, sightObstacles_, scene_.walkSurfaces, scene_.ground);
     }
     if (!nearest) continue;
     const ReactionAction action = Playbook(unit.team).At(moving, canSeeMe);

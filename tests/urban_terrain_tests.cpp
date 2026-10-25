@@ -90,10 +90,11 @@ void TestPinnedTerrainFingerprints() {
     CHECK(s.terrainWalls.size() == e.walls);
     CHECK(std::fabs(*range.first - e.minHeight) < 0.00001f);
     CHECK(std::fabs(*range.second - e.maxHeight) < 0.00001f);
-    // Street inspection and emitted pavement use the same height sampler;
-    // at grade the artery follows the terrain, climbing through each wall.
+    // At grade the artery rides its exact road grade, which the heightfield
+    // under its corridor samples (bilinear smoothing at a ramp's ends is a
+    // few centimetres off): it follows the terrain, climbing through each wall.
     for (const auto& road : UrbanRoads(e.seed, TerrainConfig())) {
-      for (auto p : road.centerline) CHECK(std::fabs(p.y - s.ground.HeightAt(p.x, p.z) - 0.025f) < 0.001f);
+      for (auto p : road.centerline) CHECK(std::fabs(p.y - s.ground.HeightAt(p.x, p.z) - 0.025f) < 0.06f);
     }
   }
 }
@@ -279,6 +280,18 @@ void TestHighwayProfilesOverLevels() {
       deckTop = std::max(deckTop, lift);
     }
     CHECK(deckTop > 3.0f);
+    // No kinks: the grade between consecutive centerline segments of either
+    // highway road changes by no more than a road ramp's own grade (0.3),
+    // so a deck flying over a wall or an on-ramp climbing to a tall deck
+    // never folds.
+    for (const auto& road : roads) {
+      const auto& line = road.centerline;
+      for (size_t i = 1; i + 1 < line.size(); ++i) {
+        const float g0 = (line[i].y - line[i - 1].y) / FlatDistance(line[i], line[i - 1]);
+        const float g1 = (line[i + 1].y - line[i].y) / FlatDistance(line[i + 1], line[i]);
+        CHECK(std::fabs(g1 - g0) <= 0.31f);
+      }
+    }
     for (const TerrainWall& wall : s.terrainWalls) {
       // The step line is the wall strip's raised edge; the artery sample
       // nearest it is either at grade (ramped through) or well up on the

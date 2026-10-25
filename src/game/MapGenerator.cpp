@@ -600,16 +600,16 @@ void FinishHighwayPlan(HighwayPlan* planOut, uint32_t seed, const MapGeneratorCo
   for (TerrainWallSpec& w : terrain.walls) w.arteryRamp = true;
   terrain.deckCruise = c.highwayElevation;
 
+  // Windows between the climb zones that may host a deck ramp: window i
+  // lies between wall i-1 and wall i (0 = before the first, k = after the
+  // last). A ramp's window edge keeps the flat margin past a wall ramped
+  // through at grade, or the deck-clearance margin past a wall flown over.
+  struct Option {
+    int a, b;  // Rise ramp in window a (-1: elevated map edge), fall in window b (k+1: elevated edge).
+    float loA, hiA, loB, hiB, lenA, lenB, cruise;
+  };
+  std::vector<Option> options;
   if (plan.elevated && k > 0) {
-    // Windows between the climb zones that may host a deck ramp: window i
-    // lies between wall i-1 and wall i (0 = before the first, k = after the
-    // last). A ramp's window edge keeps the flat margin past a wall ramped
-    // through at grade, or the deck-clearance margin past a wall flown over.
-    struct Option {
-      int a, b;  // Rise ramp in window a (-1: elevated map edge), fall in window b (k+1: elevated edge).
-      float loA, hiA, loB, hiB, lenA, lenB, cruise;
-    };
-    std::vector<Option> options;
     const float minRamp = 24.0f;
     // Walls a..b-1 are flown over (a = -1 / b = k+1: from/to an elevated
     // map edge), so at least one real wall lies between the ramps.
@@ -638,9 +638,9 @@ void FinishHighwayPlan(HighwayPlan* planOut, uint32_t seed, const MapGeneratorCo
         if (fits) options.push_back(o);
       }
     }
-    // Every wall flown over at once is always possible; the draw picks
-    // uniformly among the layouts that fit.
-    const Option& pick = options[static_cast<size_t>(rng.Int(0, static_cast<int>(options.size()) - 1))];
+  }
+  // Lays the artery profile for one layout option.
+  const auto applyOption = [&](const Option& pick) {
     artery.s0 = artery.sMin;
     artery.s1 = artery.sMax;
     if (pick.a >= 0) {
@@ -662,11 +662,12 @@ void FinishHighwayPlan(HighwayPlan* planOut, uint32_t seed, const MapGeneratorCo
     plan.layout = pick.a < 0 ? (pick.b > k ? OverpassLayout::Through : OverpassLayout::EnterRampDown)
                              : (pick.b > k ? OverpassLayout::EnterRampUp
                                            : OverpassLayout::RampUpRampDown);
-    for (int i = pick.a + 1; i < pick.b && i < k; ++i) {
-      if (i >= 0) terrain.walls[crossings[i].wall].arteryRamp = false;
+    for (TerrainWallSpec& w : terrain.walls) w.arteryRamp = true;
+    for (int i = std::max(pick.a, 0); i < pick.b && i < k; ++i) {
+      terrain.walls[crossings[i].wall].arteryRamp = false;
     }
     terrain.deckCruise = pick.cruise;
-  }
+  };
 
   // The branch: where it merges and how it turns. On a deck the merge must
   // land where the deck is at full height, so the branch genuinely ramps
@@ -674,16 +675,12 @@ void FinishHighwayPlan(HighwayPlan* planOut, uint32_t seed, const MapGeneratorCo
   // ramped through on its at-grade stretch, with room either side, or
   // flown over on its junction stretch -- so the merge fraction and turn
   // are searched around their draws until every crossing works.
-  if (!plan.hasBranch) return;
   BranchSpec& branch = plan.branch;
   branch.width = c.arteryWidth * 0.72f;
   Rng branchRng(seed ^ 0x5b2a9c47u);
   const bool drawnOffMap = branchRng.Chance(c.branchOffMapChance);
   const float rampFraction = branchRng.Float(0.30f, 0.75f);
   const float rampMax = branchRng.Float(30.0f, 70.0f);
-  const bool canOffMap = plan.elevated && plan.layout != OverpassLayout::Through;
-  const bool wantOffMap = canOffMap && (c.branchEnd == BranchEnd::Auto ? drawnOffMap
-                                                                       : c.branchEnd == BranchEnd::OffMap);
   const auto mergeAt = [&](float t) {
     if (!plan.elevated) return artery.sMin + (0.30f + 0.14f * t) * length;
     if (k == 0) {
@@ -719,6 +716,15 @@ void FinishHighwayPlan(HighwayPlan* planOut, uint32_t seed, const MapGeneratorCo
     const float junctionClear = (c.arteryWidth * 0.5f + b.width * 0.5f + 2.0f) / sinTurn;
     b.riseEnd = std::max(b.length * 0.5f, b.length - junctionClear);
     b.riseStart = b.riseEnd - std::min(b.riseEnd * rampFraction, rampMax);
+    // Over terrain the deck can cruise well above the branch's own level:
+    // the on-ramp is stretched to keep the deck grade, and a branch too
+    // short for that climb is no on-ramp at all.
+    if (plan.elevated && k > 0 && !offMap) {
+      const glm::vec2 foot = b.start + b.dir * b.riseStart;
+      const float needed = (terrain.deckCruise - TierHeight(terrain, foot)) / kDeckGrade;
+      if (b.riseEnd - b.riseStart < needed) b.riseStart = b.riseEnd - needed;
+      if (b.riseStart < 2.0f) return false;
+    }
     b.offMap = offMap;
     if (offMap) {
       b.riseStart = 0.0f;
@@ -759,25 +765,57 @@ void FinishHighwayPlan(HighwayPlan* planOut, uint32_t seed, const MapGeneratorCo
     }
     return true;
   };
-  std::vector<float> candidates = {plan.mergeUnit};
-  for (float step = 0.12f; step <= 1.0f; step += 0.12f) {
-    for (const float t : {plan.mergeUnit + step, plan.mergeUnit - step}) {
-      if (t >= 0.0f && t <= 1.0f) candidates.push_back(t);
-    }
-  }
-  for (const bool strict : {true, false}) {
-    // A turn too short for the map is the last resort, the other turn first.
-    for (const int turnSign : {strict ? plan.preferredTurn : -plan.preferredTurn,
-                               strict ? -plan.preferredTurn : plan.preferredTurn}) {
-      for (const float t : candidates) {
-        for (const bool offMap : {wantOffMap, !wantOffMap}) {
-          if (offMap && !canOffMap) continue;
-          if (tryBranch(mergeAt(t), turnSign, offMap, strict)) return;
-        }
-        if (k == 0) break;  // A flat city keeps its drawn merge exactly.
+  // Searches merge fractions and turns around the draws for a clean branch.
+  const auto planBranch = [&]() {
+    const bool canOffMap = plan.elevated && plan.layout != OverpassLayout::Through;
+    const bool wantOffMap = canOffMap && (c.branchEnd == BranchEnd::Auto ? drawnOffMap
+                                                                         : c.branchEnd == BranchEnd::OffMap);
+    std::vector<float> candidates = {plan.mergeUnit};
+    for (float step = 0.12f; step <= 1.0f; step += 0.12f) {
+      for (const float t : {plan.mergeUnit + step, plan.mergeUnit - step}) {
+        if (t >= 0.0f && t <= 1.0f) candidates.push_back(t);
       }
     }
+    for (const bool strict : {true, false}) {
+      // A turn too short for the map is the last resort, the other turn first.
+      for (const int turnSign : {strict ? plan.preferredTurn : -plan.preferredTurn,
+                                 strict ? -plan.preferredTurn : plan.preferredTurn}) {
+        for (const float t : candidates) {
+          for (const bool offMap : {wantOffMap, !wantOffMap}) {
+            if (offMap && !canOffMap) continue;
+            if (tryBranch(mergeAt(t), turnSign, offMap, strict)) return true;
+          }
+          if (k == 0) break;  // A flat city keeps its drawn merge exactly.
+        }
+      }
+    }
+    return false;
+  };
+
+  if (!options.empty()) {
+    // The draw picks a layout; one the branch cannot serve (its on-ramp
+    // too steep or its wall crossings unclean) yields to the next, and
+    // with every layout exhausted the artery stays at grade -- unless the
+    // overpass was forced, which keeps the drawn layout regardless.
+    const int first = rng.Int(0, static_cast<int>(options.size()) - 1);
+    bool settled = false;
+    for (size_t i = 0; i < options.size() && !settled; ++i) {
+      applyOption(options[(first + i) % options.size()]);
+      settled = !plan.hasBranch || planBranch();
+    }
+    if (settled) return;
+    if (c.elevatedHighway != OverpassMode::On) {
+      plan.elevated = false;
+      plan.layout = OverpassLayout::RampUpRampDown;
+      ApplyLegacyLayout(&artery, OverpassLayout::RampUpRampDown);
+      for (TerrainWallSpec& w : terrain.walls) w.arteryRamp = true;
+      terrain.deckCruise = c.highwayElevation;
+      plan.hasBranch = c.arteryCount >= 2;
+    } else {
+      applyOption(options[static_cast<size_t>(first)]);
+    }
   }
+  if (!plan.hasBranch || planBranch()) return;
   // No clean crossing anywhere: an on-ramp the overpass itself asked for
   // is dropped; a requested second artery is laid at its draw regardless.
   if (c.arteryCount < 2) {
@@ -797,10 +835,17 @@ void FinishHighwayPlan(HighwayPlan* planOut, uint32_t seed, const MapGeneratorCo
   b.side = glm::dot(artery.normal, b.start - artery.origin) > 0.0f ? 1 : -1;
   b.riseEnd = b.length * 0.5f;
   b.riseStart = b.riseEnd - std::min(b.riseEnd * rampFraction, rampMax);
+  if (plan.elevated) {
+    const float needed = (terrain.deckCruise - TierHeight(terrain, b.start)) / kDeckGrade;
+    b.riseStart = std::max(0.0f, std::min(b.riseStart, b.riseEnd - needed));
+  }
   branch = b;
+  // Every wall it crosses short of the junction is ramped through, even
+  // under the on-ramp: the deck's lift rides the ramped grade, so the slab
+  // stays smooth instead of stepping with the wall beneath.
   for (TerrainWallSpec& w : terrain.walls) {
     const float u = w.CrossingParam(b.start, b.dir);
-    if (u > -8.0f && u < b.length + 8.0f && (!plan.elevated || u < b.riseStart)) {
+    if (u > -8.0f && u < b.length + 8.0f && (!plan.elevated || u - 8.0f <= b.riseEnd + 2.0f)) {
       w.branchRamp = true;
       w.branchU = u;
     }
@@ -2011,8 +2056,16 @@ void EmitHighwaySurfaces(Scene* scene, const CityPlan& city, const MapGeneratorC
   std::vector<Chain> chains(roads.size());
   for (size_t roadIndex = 0; roadIndex < roads.size(); ++roadIndex) {
     const UrbanRoad& road = roads[roadIndex];
-    const auto left = RibbonSide(road, true, scene->mapHalfExtent, groundY);
-    const auto right = RibbonSide(road, false, scene->mapHalfExtent, groundY);
+    // Over terrain the ribbon rides the road's exact grade, not the sampled
+    // heightfield: a deck flying over a wall would otherwise kink by the
+    // step height where the samples smear the sharp step.
+    const glm::vec2 roadDir = roadIndex == 0 ? plan.artery.dir : plan.branch.dir;
+    const GroundY roadGrade = [&](float x, float z) {
+      return HighwayGradeAt(city.terrain, {x, z}, roadDir, roadIndex != 0);
+    };
+    const GroundY& base = city.terrain.enabled ? roadGrade : groundY;
+    const auto left = RibbonSide(road, true, scene->mapHalfExtent, base);
+    const auto right = RibbonSide(road, false, scene->mapHalfExtent, base);
     const std::vector<float> params = roadIndex == 0
                                           ? SampleParams(plan.artery.s0, plan.artery.s1)
                                           : SampleParams(plan.branch.u0, plan.branch.length);
@@ -2357,13 +2410,16 @@ std::vector<UrbanBlock> UrbanBlocks(uint32_t seed, const MapGeneratorConfig& c) 
 std::vector<UrbanRoad> UrbanRoads(uint32_t seed, const MapGeneratorConfig& c) {
   if (c.arteryCount <= 0) return {};
   auto roads = BuildUrbanRoads(seed, c);
-  if (c.features.terrain.mode != FeatureMode::Off) {
-    Scene terrain;
-    terrain.mapHalfExtent = UrbanMapHalfExtent(c);
-    CityPlan city = BuildCityPlan(seed, c);
-    BuildUrbanTerrain(&terrain, &city, seed, c);
-    for (auto& road : roads) {
-      for (auto& p : road.centerline) p.y += terrain.ground.HeightAt(p.x, p.z);
+  TerrainPlan terrain;
+  const HighwayPlan plan = BuildHighwayPlan(seed, c, &terrain);
+  if (terrain.enabled) {
+    // The road's exact grade (what the ground under its corridor follows),
+    // so a deck stays smooth where it flies over a sharp step.
+    for (size_t i = 0; i < roads.size(); ++i) {
+      for (auto& p : roads[i].centerline) {
+        p.y += HighwayGradeAt(terrain, {p.x, p.z}, i == 0 ? plan.artery.dir : plan.branch.dir,
+                              i != 0);
+      }
     }
   }
   return roads;

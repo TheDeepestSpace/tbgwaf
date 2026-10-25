@@ -7,7 +7,7 @@ description: >
   surfaces around it must stay opaque and flat.
 
 map:
-  generate: {seed: 7, type: urban, elevated: false}
+  generate: {seed: 7, type: urban, elevated: false, features: {terrain: off}}
 
 units:
   - {id: 0, team: blue, position: [-1, 0, 19], facing_degrees: 0}

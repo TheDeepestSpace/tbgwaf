@@ -33,8 +33,8 @@ enum class BranchEnd { Auto, Ramp, OffMap };
 
 // Per-feature switch for the optional urban detail layers (issue #146).
 // Auto lets the seed decide, with `chance` as the per-seed probability; Off/On
-// force it. The features are plumbed through the config ahead of the emitters
-// that consume them, so today they do not change the generated Scene.
+// force it. Terrain defaults to On (levels are part of every arterial city;
+// issue #155); the remaining detail flags are reserved for their emitters.
 enum class FeatureMode { Auto, Off, On };
 struct FeatureToggle {
   FeatureMode mode = FeatureMode::Auto;
@@ -44,7 +44,7 @@ struct UrbanFeatures {
   FeatureToggle lanes;
   FeatureToggle curbs;
   FeatureToggle furniture;
-  FeatureToggle terrain;
+  FeatureToggle terrain{FeatureMode::On, 0.5f};
   FeatureToggle interiors;
   FeatureToggle rail;
 };
@@ -97,7 +97,9 @@ struct MapGeneratorConfig {
   // Artery becomes an overpass crossing on piers. Auto draws presence per
   // seed (overpassChance) and one of the four layouts; see the enums above.
   OverpassMode elevatedHighway = OverpassMode::Auto;
-  float overpassChance = 0.5f;  // P(overpass) for an Auto seed: roughly 50/50.
+  // P(overpass) for an Auto seed: roughly 50/50. A terrain-enabled seed
+  // halves the complement (0.5 -> 0.75): flyovers pair well with levels.
+  float overpassChance = 0.5f;
   OverpassLayout overpassLayout = OverpassLayout::Auto;
   BranchEnd branchEnd = BranchEnd::Auto;
   float branchOffMapChance = 0.35f;  // P(off-map branch) for an Auto seed that allows one.
@@ -113,6 +115,17 @@ struct MapGeneratorConfig {
   int maxZiplinesPerBlock = 2;
   float ziplineMinLength = 4.0f;
   float ziplineMaxLength = 22.0f;
+  // Urban ground (issue #155): map-spanning raised levels. Each level is a
+  // straight step, roughly across the artery, laid along its own boundary
+  // street: everything on one side rises 1-5 figure heights behind a
+  // retaining wall parallel to that street. Steps overlap into nested
+  // tiers (sharp, no rolling noise). The highway profile is planned
+  // against the levels: the artery/branch ramp through a wall at grade (a
+  // main road cutting through the level) or fly over a run of walls on a
+  // deck; an avenue may ramp through; stair flights attached along each
+  // wall face climb it elsewhere. terrainLevelCount: -1 draws 1-3 per
+  // seed; 0 keeps the city flat. Legacy arteryCount=0 stays flat.
+  int terrainLevelCount = -1;
   UrbanFeatures features;
 };
 
@@ -169,7 +182,7 @@ enum class UrbanStreetClass { Highway, Avenue, Cross };
 
 // One straight piece of street. Highway pieces follow the sampled
 // centerline (so carry elevation in `a.y`/`b.y`); local streets are one
-// segment clipped to the map square at y = 0.
+// segment clipped to the map square. Heights include the terrain field when enabled.
 struct UrbanStreet {
   glm::vec3 a, b;
   float width = 0.0f;

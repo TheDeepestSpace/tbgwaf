@@ -263,6 +263,10 @@ else()
   target_link_libraries(tactics_map_generator_tests PRIVATE tactics_logic)
   add_test(NAME map_generator_tests COMMAND tactics_map_generator_tests)
 
+  add_executable(tactics_urban_terrain_tests tests/urban_terrain_tests.cpp)
+  target_link_libraries(tactics_urban_terrain_tests PRIVATE tactics_logic)
+  add_test(NAME urban_terrain_tests COMMAND tactics_urban_terrain_tests)
+
   add_executable(tactics_camera_tests tests/camera_tests.cpp src/gfx/Camera.cpp)
   target_include_directories(tactics_camera_tests PRIVATE src)
   target_link_libraries(tactics_camera_tests PRIVATE glm::glm)

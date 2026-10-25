@@ -132,6 +132,7 @@ Scene ParseScene(const YAML::Node& root) {
                 "map.generate.elevated_branch must be ramp/off-map, got '" + end + "'");
           }
         }
+        if (genNode["terrain_levels"]) config.terrainLevelCount = genNode["terrain_levels"].as<int>();
         // `character: downtown|residential|industrial|mixed` forces every
         // block's neighbourhood character (issue #151); omitted keeps the
         // generator's per-block draw.

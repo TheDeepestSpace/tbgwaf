@@ -873,8 +873,9 @@ bool NavMesh::FindPolygonGroundPath(glm::vec3 start, glm::vec3 goal,
   std::reverse(route.begin(), route.end());
   for (int node : route) {
     const glm::vec2 p = nodes[node];
-    outPath->emplace_back(p.x, ground_.HeightAt(p.x, p.y), p.y);
+    outPath->emplace_back(p.x, 0.0f, p.y);
   }
+  LiftGroundPathOntoTerrain(outPath);
   return true;
 }
 

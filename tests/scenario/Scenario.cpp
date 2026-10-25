@@ -132,6 +132,17 @@ Scene ParseScene(const YAML::Node& root) {
                 "map.generate.elevated_branch must be ramp/off-map, got '" + end + "'");
           }
         }
+        // `character: downtown|residential|industrial|mixed` forces every
+        // block's neighbourhood character (issue #151); omitted keeps the
+        // generator's per-block draw.
+        if (genNode["character"]) {
+          const std::string character = genNode["character"].as<std::string>();
+          if (!ParseBlockCharacter(character, &config.character)) {
+            throw std::runtime_error(
+                "map.generate.character must be auto/mixed/downtown/residential/industrial, "
+                "got '" + character + "'");
+          }
+        }
         // `features: {lanes: on, curbs: {mode: auto, chance: 0.3}, ...}`
         // sets the optional urban detail layers (see UrbanFeatures).
         if (const YAML::Node featNode = genNode["features"]) {

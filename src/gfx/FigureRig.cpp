@@ -7,6 +7,7 @@
 
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 using tactics::Team;
 using tactics::Unit;
@@ -578,9 +579,15 @@ FigureParts BuildRagdollFigure(const Unit& unit, bool compactWeapon) {
   ball(kRagElbowR, kArmRadius);
   limb(kRagElbowR, kRagHandR, kArmRadius * 0.92f);
 
-  // The weapon stays in the right hand, barrel along the forearm.
+  // The weapon stays in the right hand, barrel along the forearm, unless the
+  // figure let go of it: then it is a free body from the ragdoll sim.
+  const RagdollGun gun = SampleRagdollGun(unit);
   glm::vec3 x = p[kRagHandR] - p[kRagElbowR];
-  if (glm::length(x) > 1e-5f) {
+  if (gun.dropped) {
+    glm::mat4 weapon = glm::mat4_cast(gun.rot);
+    weapon[3] = glm::vec4(gun.pos, 1.0f);
+    AppendWeapon(&parts, weapon, unit.weapon, compactWeapon);
+  } else if (glm::length(x) > 1e-5f) {
     x = glm::normalize(x);
     glm::vec3 z = glm::cross(x, glm::vec3(0.0f, 1.0f, 0.0f));
     if (glm::length(z) < 1e-4f) z = glm::vec3(0.0f, 0.0f, 1.0f);

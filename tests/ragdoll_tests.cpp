@@ -93,9 +93,32 @@ void TestFigurePartsFollowRagdoll() {
   CHECK(mid.size() == parts.size());
 }
 
+void TestGunReleaseAndDrop() {
+  int dropped = 0;
+  for (int id = 1; id <= 40; ++id) {
+    const tactics::Unit u = Downed(id, tactics::constants::kKnockdownDuration);
+    const gfx::RagdollGun start = gfx::SampleRagdollGunStep(u, 0);
+    const gfx::RagdollGun end = gfx::SampleRagdollGun(u);
+    CHECK(start.dropped == end.dropped);
+    if (!end.dropped) continue;
+    ++dropped;
+    // Falls under gravity: lands on (not through) the ground, away from the hand.
+    CHECK(end.pos.y >= u.position.y - 0.25f);
+    CHECK(end.pos.y < u.position.y + 0.4f);
+    CHECK(glm::length(end.pos - start.pos) > 0.2f);
+    // Deterministic and settled.
+    const gfx::RagdollGun again = gfx::SampleRagdollGun(u);
+    CHECK(again.pos == end.pos);
+    const gfx::RagdollGun prev = gfx::SampleRagdollGunStep(u, gfx::kRagdollSteps - 1);
+    CHECK(glm::length(prev.pos - end.pos) < 0.05f);
+  }
+  CHECK(dropped > 5 && dropped < 35);  // Random mix of droppers and holders.
+}
+
 }  // namespace
 
 int main() {
+  TestGunReleaseAndDrop();
   TestOnlyDownedUnitsRagdoll();
   TestFallsAlongShotAndRests();
   TestLimbLengthsPreserved();

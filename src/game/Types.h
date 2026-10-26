@@ -85,8 +85,9 @@ struct Building {
   }
 };
 
-// Visual-only massing detail (roadmap 3.3): a prism over a convex XZ
-// footprint between y0 and y1. Blocks sight lines and FOV (see
+// Visual-only massing detail (roadmap 3.3): a vertical extrusion over a
+// convex XZ footprint, flat between y0/y1 unless `top` supplies its surface.
+// Blocks sight lines and FOV (see
 // SightObstacles). Parapets, roof fixtures and deck rails also block
 // walking: they are copied into WalkSurface::blockers of their roof slab or
 // deck span. Awnings and pier caps are overhead. PierCap (the bent's
@@ -98,6 +99,12 @@ struct MassingDetail {
   std::vector<glm::vec2> footprint;  // Counter-clockwise.
   float y0 = 0.0f, y1 = 0.0f;
   int building = -1;
+  // Optional sloped top for details that follow a planar surface. When
+  // populated, the renderer extrudes this polygon vertically by `depth`
+  // instead of drawing the conservative y0..y1 sight prism. Deck rails use
+  // this so their top and bottom stay parallel to the ramp beneath them.
+  std::vector<glm::vec3> top;
+  float depth = 0.0f;
 };
 
 // A convex, planar walkable patch above (or sloping away from) the ground.

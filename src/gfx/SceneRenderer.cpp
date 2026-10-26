@@ -639,6 +639,28 @@ void BuildSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
   mesh->SetMesh(vertices, indices);
 }
 
+void AppendMassingDetail(const tactics::MassingDetail& detail, LitVertices* vertices,
+                         std::vector<GLuint>* indices) {
+  if (detail.top.size() == detail.footprint.size() && detail.top.size() >= 3 &&
+      detail.depth > 0.0f) {
+    AppendSurfacePatch(detail.top, detail.depth, vertices, indices);
+    return;
+  }
+  if (detail.footprint.size() < 3 || detail.y1 <= detail.y0) return;
+  tactics::Obstacle prism;
+  prism.footprint = detail.footprint;
+  prism.bounds.min.y = detail.y0;
+  prism.bounds.max.y = detail.y1;
+  AppendPolygonPrism(prism, vertices, indices);
+}
+
+void BuildMassingDetail(const tactics::MassingDetail& detail, LitTriangleMesh* mesh) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  AppendMassingDetail(detail, &vertices, &indices);
+  mesh->SetMesh(vertices, indices);
+}
+
 // A terrain stair as one concrete wedge: the sloped flight and the flat
 // landing on top, each extruded down to the stair's base, sides outward.
 void AppendTerrainStair(const tactics::TerrainStair& stair, LitVertices* vertices,
@@ -805,12 +827,7 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   }
   // Parapets, roof furniture and awnings occlude like the gameplay LOS.
   for (const tactics::MassingDetail& d : scene.massing) {
-    if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
-    tactics::Obstacle prism;
-    prism.footprint = d.footprint;
-    prism.bounds.min.y = d.y0;
-    prism.bounds.max.y = d.y1;
-    AppendPolygonPrism(prism, &vertices, &indices);
+    AppendMassingDetail(d, &vertices, &indices);
   }
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
     AppendSurfacePatch(surface.vertices, 0.45f, &vertices, &indices);
@@ -857,6 +874,8 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
     mix(d.footprint.data(), d.footprint.size() * sizeof(glm::vec2));
     mix(&d.y0, sizeof(d.y0));
     mix(&d.y1, sizeof(d.y1));
+    mix(d.top.data(), d.top.size() * sizeof(glm::vec3));
+    mix(&d.depth, sizeof(d.depth));
   }
   for (const tactics::WalkSurface& s : scene.walkSurfaces) mixVec3s(s.vertices);
   for (const tactics::TerrainStair& s : scene.terrainStairs) {
@@ -886,6 +905,8 @@ unsigned long long MassingFingerprint(const tactics::Scene& scene) {
     mix(&d.y1, sizeof(d.y1));
     mix(&d.building, sizeof(d.building));
     mix(d.footprint.data(), d.footprint.size() * sizeof(glm::vec2));
+    mix(d.top.data(), d.top.size() * sizeof(glm::vec3));
+    mix(&d.depth, sizeof(d.depth));
   }
   return h;
 }
@@ -895,12 +916,7 @@ void BuildMassingMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   LitVertices vertices;
   std::vector<GLuint> indices;
   for (const tactics::MassingDetail& d : scene.massing) {
-    if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
-    tactics::Obstacle prism;
-    prism.footprint = d.footprint;
-    prism.bounds.min.y = d.y0;
-    prism.bounds.max.y = d.y1;
-    AppendPolygonPrism(prism, &vertices, &indices);
+    AppendMassingDetail(d, &vertices, &indices);
   }
   mesh->SetMesh(vertices, indices);
 }
@@ -2807,11 +2823,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   };
   const auto drawDetail = [&](const tactics::MassingDetail& d, const glm::vec4& color) {
     if (d.footprint.size() < 3 || d.y1 <= d.y0) return;
-    tactics::Obstacle prism;
-    prism.footprint = d.footprint;
-    prism.bounds.min.y = d.y0;
-    prism.bounds.max.y = d.y1;
-    BuildPolygonPrism(prism, &geometryMesh_);
+    BuildMassingDetail(d, &geometryMesh_);
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f), color);
   };
   if (massingMesh_.HasGeometry()) {

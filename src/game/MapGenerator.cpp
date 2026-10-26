@@ -1,6 +1,7 @@
 #include "game/MapGenerator.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -1007,6 +1008,20 @@ void SimplifyPolygon(std::vector<glm::vec2>* polygon) {
     }
   }
   *polygon = std::move(clean);
+}
+
+// Cuts an oriented convex model footprint cleanly at the map boundary.
+// Keeping this independent of the model kind lets columns, footings and
+// their connector beams share exactly the same edge treatment.
+std::vector<glm::vec2> ClipModelToMap(std::vector<glm::vec2> polygon, float half) {
+  polygon = KeepSide(polygon, {1.0f, 0.0f}, -half);
+  polygon = KeepSide(polygon, {-1.0f, 0.0f}, -half);
+  polygon = KeepSide(polygon, {0.0f, 1.0f}, -half);
+  polygon = KeepSide(polygon, {0.0f, -1.0f}, -half);
+  SimplifyPolygon(&polygon);
+  if (polygon.size() < 3 || PolygonArea(polygon) < 1e-4f) return {};
+  if (PolygonSignedArea(polygon) < 0.0f) std::reverse(polygon.begin(), polygon.end());
+  return polygon;
 }
 
 // Carves a street band of `width` around the line origin + t*dir out of
@@ -3088,52 +3103,150 @@ bool PlanarPatch(const std::vector<glm::vec2>& piece, const Ground& ground, Road
   return true;
 }
 
-// Whether a deck-edge point lies over the junction with the other elevated
-// road, where the raised sides stay open so the on-ramp genuinely merges.
-bool OverMergeJunction(const HighwayPlan& plan, const MapGeneratorConfig& c, size_t roadIndex,
-                       glm::vec2 p) {
-  if (!plan.hasBranch) return false;
-  if (roadIndex == 0) {
-    const glm::vec2 rel = p - plan.branch.start;
-    const float u = glm::dot(rel, plan.branch.dir);
-    const glm::vec2 bn(-plan.branch.dir.y, plan.branch.dir.x);
-    return u > -1.0f && u < plan.branch.length + 1.0f &&
-           std::fabs(glm::dot(rel, bn)) < plan.branch.width * 0.5f + 0.6f;
+struct DeckRailJoin {
+  glm::vec2 outer{0.0f};
+  glm::vec2 inner{0.0f};
+  float arteryS = 0.0f;
+  float branchU = 0.0f;
+};
+
+struct DeckRailJunction {
+  bool valid = false;
+  int arterySide = 0;  // +1 is the artery's left edge, -1 its right edge.
+  // Branch left/right edge joins (+1/-1), respectively.
+  std::array<DeckRailJoin, 2> branch;
+};
+
+float Cross2(glm::vec2 a, glm::vec2 b) { return a.x * b.y - a.y * b.x; }
+
+bool IntersectLines(glm::vec2 a, glm::vec2 aDir, glm::vec2 b, glm::vec2 bDir,
+                    glm::vec2* intersection) {
+  const float denominator = Cross2(aDir, bDir);
+  if (std::fabs(denominator) < 1e-5f) return false;
+  *intersection = a + aDir * (Cross2(b - a, bDir) / denominator);
+  return true;
+}
+
+// Exact miters where the two branch rails meet the rail on the branch-facing
+// side of the artery. The outer and inner strip edges are intersected
+// independently, so both walls share one end cap: no overlap and no triangular
+// gap at either fork.
+DeckRailJunction BuildDeckRailJunction(const HighwayPlan& plan,
+                                       const MapGeneratorConfig& c, PierForm pierForm) {
+  DeckRailJunction junction;
+  if (!plan.hasBranch) return junction;
+  constexpr float kRailThickness = 0.3f;
+  const float extra = pierForm == PierForm::Twin ? 0.5f * c.twinDeckExtraWidth : 0.0f;
+  const float arteryHalf = 0.5f * c.arteryWidth + extra;
+  const float branchHalf = 0.5f * plan.branch.width + extra;
+  const glm::vec2 merge = plan.artery.origin + plan.artery.dir * plan.branch.mergeS;
+  const glm::vec2 branchNormal(-plan.branch.dir.y, plan.branch.dir.x);
+  junction.arterySide = plan.branch.side;
+  const glm::vec2 arteryInward =
+      -static_cast<float>(junction.arterySide) * plan.artery.normal;
+  const glm::vec2 arteryOuter =
+      merge + static_cast<float>(junction.arterySide) * plan.artery.normal * arteryHalf;
+  for (size_t i = 0; i < junction.branch.size(); ++i) {
+    const int branchSide = i == 0 ? 1 : -1;
+    const glm::vec2 branchInward = -static_cast<float>(branchSide) * branchNormal;
+    const glm::vec2 branchOuter =
+        merge + static_cast<float>(branchSide) * branchNormal * branchHalf;
+    DeckRailJoin& join = junction.branch[i];
+    if (!IntersectLines(arteryOuter, plan.artery.dir, branchOuter, plan.branch.dir,
+                        &join.outer) ||
+        !IntersectLines(arteryOuter + arteryInward * kRailThickness, plan.artery.dir,
+                        branchOuter + branchInward * kRailThickness, plan.branch.dir,
+                        &join.inner)) {
+      return DeckRailJunction{};
+    }
+    join.arteryS = glm::dot(join.outer - plan.artery.origin, plan.artery.dir);
+    join.branchU = glm::dot(join.outer - plan.branch.start, plan.branch.dir);
   }
-  return std::fabs(glm::dot(p - plan.artery.origin, plan.artery.normal)) <
-         c.arteryWidth * 0.5f + 0.6f;
+  junction.valid = true;
+  return junction;
 }
 
 // Raised sides of the overpass (issue #223): a guard parapet strip along an
 // elevated span's edge from `a` to `b` (`inward` points across the deck).
 // Massing (drawn, blocks LOS, so the deck edge is cover) plus a walk
-// blocker on the span; short stepped pieces follow a ramp's slope.
+// blocker on the span. The rendered prism follows the ramp plane exactly.
 void EmitDeckRail(Scene* scene, WalkSurface* span, const HighwayPlan& plan,
-                  const MapGeneratorConfig& c, size_t roadIndex, glm::vec3 a, glm::vec3 b,
+                  const MapGeneratorConfig& c, const DeckRailJunction& junction,
+                  size_t roadIndex, int edgeSide, glm::vec3 a, glm::vec3 b,
                   glm::vec2 inward) {
   constexpr float kRailThickness = 0.3f;
-  const float length = glm::distance(glm::vec2(a.x, a.z), glm::vec2(b.x, b.z));
-  if (length < 1e-3f) return;
-  const int pieces = std::max(1, static_cast<int>(std::ceil(length / 1.6f)));
-  for (int k = 0; k < pieces; ++k) {
-    const glm::vec3 pa = glm::mix(a, b, static_cast<float>(k) / pieces);
-    const glm::vec3 pb = glm::mix(a, b, static_cast<float>(k + 1) / pieces);
-    if (OverMergeJunction(plan, c, roadIndex,
-                          glm::vec2(0.5f * (pa.x + pb.x), 0.5f * (pa.z + pb.z)))) {
-      continue;
+  struct Endpoint {
+    glm::vec2 outer{0.0f};
+    glm::vec2 inner{0.0f};
+    float y = 0.0f;
+  };
+  const glm::vec2 outerA(a.x, a.z), outerB(b.x, b.z);
+  const glm::vec2 roadDir = roadIndex == 0 ? plan.artery.dir : plan.branch.dir;
+  const glm::vec2 roadOrigin = roadIndex == 0 ? plan.artery.origin : plan.branch.start;
+  const float pA = glm::dot(outerA - roadOrigin, roadDir);
+  const float pB = glm::dot(outerB - roadOrigin, roadDir);
+  if (pB - pA < 1e-4f) return;
+
+  const auto endpoint = [&](float p, const DeckRailJoin* join) {
+    const float t = std::clamp((p - pA) / (pB - pA), 0.0f, 1.0f);
+    Endpoint out;
+    out.outer = join ? join->outer : glm::mix(outerA, outerB, t);
+    out.inner = join ? join->inner : out.outer + inward * kRailThickness;
+    out.y = glm::mix(a.y, b.y, t);
+    return out;
+  };
+  const auto emit = [&](float lo, float hi, const DeckRailJoin* loJoin,
+                        const DeckRailJoin* hiJoin) {
+    if (hi - lo < 1e-4f) return;
+    const Endpoint pa = endpoint(lo, loJoin);
+    const Endpoint pb = endpoint(hi, hiJoin);
+    std::vector<glm::vec2> footprint = {pa.outer, pb.outer, pb.inner, pa.inner};
+    std::vector<glm::vec3> top = {
+        {pa.outer.x, pa.y + c.deckRailHeight, pa.outer.y},
+        {pb.outer.x, pb.y + c.deckRailHeight, pb.outer.y},
+        {pb.inner.x, pb.y + c.deckRailHeight, pb.inner.y},
+        {pa.inner.x, pa.y + c.deckRailHeight, pa.inner.y},
+    };
+    if (PolygonSignedArea(footprint) < 0.0f) {
+      std::reverse(footprint.begin(), footprint.end());
+      std::reverse(top.begin(), top.end());
     }
-    std::vector<glm::vec2> footprint = {{pa.x, pa.z},
-                                        {pb.x, pb.z},
-                                        {pb.x + inward.x * kRailThickness, pb.z + inward.y * kRailThickness},
-                                        {pa.x + inward.x * kRailThickness, pa.z + inward.y * kRailThickness}};
-    if (PolygonSignedArea(footprint) < 0.0f) std::reverse(footprint.begin(), footprint.end());
     MassingDetail rail;
     rail.kind = MassingDetail::Kind::DeckRail;
     rail.footprint = footprint;
-    rail.y0 = std::min(pa.y, pb.y) - 0.25f;  // Tucked into the slab's side.
+    rail.depth = c.deckRailHeight + 0.25f;  // Tucked into the slab's side.
+    rail.y0 = std::min(pa.y, pb.y) - 0.25f;
     rail.y1 = std::max(pa.y, pb.y) + c.deckRailHeight;
-    span->blockers.push_back(std::move(footprint));
+    rail.top = std::move(top);
+    span->blockers.push_back(footprint);
     scene->massing.push_back(std::move(rail));
+  };
+
+  if (!junction.valid) {
+    emit(pA, pB, nullptr, nullptr);
+    return;
+  }
+  if (roadIndex == 1) {
+    const DeckRailJoin& join = junction.branch[edgeSide > 0 ? 0 : 1];
+    if (pA >= join.branchU - 1e-4f) return;
+    const float hi = std::min(pB, join.branchU);
+    emit(pA, hi, nullptr, pB >= join.branchU - 1e-4f ? &join : nullptr);
+    return;
+  }
+  if (edgeSide != junction.arterySide) {
+    emit(pA, pB, nullptr, nullptr);
+    return;
+  }
+  const DeckRailJoin* lo = &junction.branch[0];
+  const DeckRailJoin* hi = &junction.branch[1];
+  if (lo->arteryS > hi->arteryS) std::swap(lo, hi);
+  if (pA < lo->arteryS) {
+    emit(pA, std::min(pB, lo->arteryS), nullptr,
+         pB >= lo->arteryS ? lo : nullptr);
+  }
+  if (pB > hi->arteryS) {
+    emit(std::max(pA, hi->arteryS), pB, pA <= hi->arteryS ? hi : nullptr,
+         nullptr);
   }
 }
 
@@ -3160,6 +3273,7 @@ void EmitHighwaySurfaces(Scene* scene, const CityPlan& city, const MapGeneratorC
     *polygons = std::move(split);
   };
   std::vector<Chain> chains(roads.size());
+  const DeckRailJunction railJunction = BuildDeckRailJunction(plan, c, pierForm);
   for (size_t roadIndex = 0; roadIndex < roads.size(); ++roadIndex) {
     const UrbanRoad& road = roads[roadIndex];
     // Over terrain the ribbon rides the road's exact grade, not the sampled
@@ -3242,8 +3356,10 @@ void EmitHighwaySurfaces(Scene* scene, const CityPlan& city, const MapGeneratorC
         const glm::vec2 inward =
             glm::normalize(glm::vec2(right[i].x + right[i + 1].x - left[i].x - left[i + 1].x,
                                      right[i].z + right[i + 1].z - left[i].z - left[i + 1].z));
-        EmitDeckRail(scene, &surface, plan, c, roadIndex, left[i], left[i + 1], inward);
-        EmitDeckRail(scene, &surface, plan, c, roadIndex, right[i], right[i + 1], -inward);
+        EmitDeckRail(scene, &surface, plan, c, railJunction, roadIndex, 1, left[i],
+                     left[i + 1], inward);
+        EmitDeckRail(scene, &surface, plan, c, railJunction, roadIndex, -1, right[i],
+                     right[i + 1], -inward);
       }
       const int index = static_cast<int>(scene->walkSurfaces.size());
       if (chain.first < 0) chain.first = index;
@@ -3440,6 +3556,7 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
       return r;
     };
     auto pushPier = [&](std::vector<glm::vec2> footprint, float y0, float y1) {
+      if (footprint.size() < 3 || PolygonArea(footprint) < 1e-4f) return;
       AABB bounds{glm::vec3(1e9f, y0, 1e9f), glm::vec3(-1e9f, y1, -1e9f)};
       for (const glm::vec2& p : footprint) {
         bounds.min.x = std::min(bounds.min.x, p.x);
@@ -3458,22 +3575,21 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
       // Footing + shaft; false where the column can't stand.
       auto addColumn = [&](glm::vec2 foot, float halfAlong, float halfAcross) {
         // Stepped footing: a plinth wider than the shaft wrapping its base.
-        const std::vector<glm::vec2> footing =
-            rect(foot, along, halfAlong + c.pierBaseExtra, halfAcross + c.pierBaseExtra);
-        // A column stands fully on the map even where the deck runs past it.
-        for (const glm::vec2& v : footing) {
-          if (std::max(std::fabs(v.x), std::fabs(v.y)) > scene->mapHalfExtent - 0.05f) {
-            return false;
-          }
-        }
         // Never inside a retaining wall where the deck crosses a level step.
         for (const TerrainWallSpec& w : city.terrain.walls) {
           if (std::fabs(glm::dot(w.raisedN, foot) - w.stepD) < 3.4f) return false;
         }
         if (!columnFits(foot, height)) return false;
+        std::vector<glm::vec2> footing = ClipModelToMap(
+            rect(foot, along, halfAlong + c.pierBaseExtra, halfAcross + c.pierBaseExtra),
+            scene->mapHalfExtent);
+        std::vector<glm::vec2> shaft = ClipModelToMap(
+            rect(foot, along, halfAlong, halfAcross), scene->mapHalfExtent);
+        if (shaft.empty()) return false;
         const float baseY = groundY(foot.x, foot.y);
-        pushPier(footing, baseY, baseY + std::min(c.pierBaseHeight, 0.4f * height));
-        pushPier(rect(foot, along, halfAlong, halfAcross), baseY, baseY + height);
+        pushPier(std::move(footing), baseY,
+                 baseY + std::min(c.pierBaseHeight, 0.4f * height));
+        pushPier(std::move(shaft), baseY, baseY + height);
         return true;
       };
       const glm::vec2 across(-along.y, along.x);
@@ -3494,7 +3610,10 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
       const float underside = groundY(center.x, center.y) + deckY - c.highwayThickness;
       MassingDetail cap;
       cap.kind = MassingDetail::Kind::PierCap;
-      cap.footprint = rect(center, along, form == PierForm::Twin ? 0.7f : 1.0f, capHalfSpan);
+      cap.footprint = ClipModelToMap(
+          rect(center, along, form == PierForm::Twin ? 0.7f : 1.0f, capHalfSpan),
+          scene->mapHalfExtent);
+      if (cap.footprint.empty()) return;
       cap.y0 = underside - c.pierCapDepth;
       cap.y1 = underside - 0.02f;
       scene->massing.push_back(std::move(cap));

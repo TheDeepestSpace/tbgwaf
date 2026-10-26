@@ -1234,6 +1234,51 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   }
   CHECK(piers >= 6);
 
+  // Rails are true sloped prisms, not a staircase of flat-topped boxes.
+  // At the fork, each branch wall and its artery continuation share the
+  // exact same mitered end-cap edge.
+  std::vector<const MassingDetail*> rails;
+  bool slopedRail = false;
+  for (const MassingDetail& d : scene.massing) {
+    if (d.kind != MassingDetail::Kind::DeckRail) continue;
+    rails.push_back(&d);
+    CHECK(d.top.size() == d.footprint.size());
+    CHECK(std::fabs(d.depth - (config.deckRailHeight + 0.25f)) < kEps);
+    float lo = 1e9f, hi = -1e9f;
+    for (size_t i = 0; i < d.top.size(); ++i) {
+      CHECK(glm::distance(glm::vec2(d.top[i].x, d.top[i].z), d.footprint[i]) < kEps);
+      lo = std::min(lo, d.top[i].y);
+      hi = std::max(hi, d.top[i].y);
+    }
+    slopedRail |= hi - lo > kEps;
+  }
+  CHECK(!rails.empty() && slopedRail);
+  const auto samePoint = [](glm::vec2 a, glm::vec2 b) {
+    return glm::distance(a, b) < kEps;
+  };
+  const auto sharesEdge = [&](const std::vector<glm::vec2>& a,
+                              const std::vector<glm::vec2>& b) {
+    for (size_t i = 0; i < a.size(); ++i) {
+      for (size_t j = 0; j < b.size(); ++j) {
+        if (samePoint(a[i], b[(j + 1) % b.size()]) &&
+            samePoint(a[(i + 1) % a.size()], b[j])) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  int forkJoins = 0;
+  for (size_t i = 0; i < rails.size(); ++i) {
+    const glm::vec2 ai = glm::normalize(rails[i]->footprint[1] - rails[i]->footprint[0]);
+    for (size_t j = i + 1; j < rails.size(); ++j) {
+      const glm::vec2 aj = glm::normalize(rails[j]->footprint[1] - rails[j]->footprint[0]);
+      if (std::fabs(ai.x * aj.y - ai.y * aj.x) < 0.2f) continue;
+      forkJoins += sharesEdge(rails[i]->footprint, rails[j]->footprint) ? 1 : 0;
+    }
+  }
+  CHECK(forkJoins == 2);
+
   // Both artery ramp feet plus the on-ramp foot declare ground connections,
   // and the on-ramp merges mid-deck (a span with a third neighbor).
   CHECK(scene.walkSurfaces.size() > 10);
@@ -1423,6 +1468,8 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
   config.elevatedHighway = OverpassMode::On;
   config.branchEnd = BranchEnd::Ramp;
   const float half = UrbanMapHalfExtent(config);
+  bool clippedPier = false;
+  bool clippedCap = false;
   for (const auto& tc : cases) {
     config.overpassLayout = tc.layout;
     for (uint32_t seed : kSeeds) {
@@ -1468,8 +1515,18 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
       // Pier columns stay on the map even when the deck runs past it.
       for (const Obstacle& o : scene.obstacles) {
         if (o.kind != ObstacleKind::Pier) continue;
-        CHECK(std::max({std::fabs(o.bounds.min.x), std::fabs(o.bounds.max.x),
-                        std::fabs(o.bounds.min.z), std::fabs(o.bounds.max.z)}) < half);
+        const float edge = std::max({std::fabs(o.bounds.min.x), std::fabs(o.bounds.max.x),
+                                     std::fabs(o.bounds.min.z), std::fabs(o.bounds.max.z)});
+        CHECK(edge <= half + kEps);
+        clippedPier |= edge >= half - kEps;
+      }
+      for (const MassingDetail& d : scene.massing) {
+        if (d.kind != MassingDetail::Kind::PierCap) continue;
+        for (const glm::vec2& p : d.footprint) {
+          const float edge = std::max(std::fabs(p.x), std::fabs(p.y));
+          CHECK(edge <= half + kEps);
+          clippedCap |= edge >= half - kEps;
+        }
       }
 
       // Ground transitions: one per on-map ramp foot plus the branch's foot.
@@ -1526,6 +1583,8 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
       }
     }
   }
+  CHECK(clippedPier);
+  CHECK(clippedCap);
 }
 
 void TestBranchMayRunOffMapWithoutRamp() {

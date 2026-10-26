@@ -379,7 +379,8 @@ int main() {
     if (mapType == "urban-elevated") config.elevatedHighway = tactics::OverpassMode::On;
     if (mapType == "urban-full") {
       // Every optional detail layer forced on (issue #146).
-      for (const char* name : {"lanes", "curbs", "furniture", "terrain", "interiors", "rail"}) {
+      for (const char* name :
+           {"lanes", "curbs", "furniture", "terrain", "interiors", "rail", "facades"}) {
         tactics::UrbanFeatureByName(&config.features, name)->mode = tactics::FeatureMode::On;
       }
     }
@@ -837,8 +838,8 @@ int main() {
       jevBuilder.reset();
     }
 
-    // Blue is the only simulator. In AI modes it commits exactly once as
-    // soon as every living figure has a plan, including Blue-human vs Red-AI.
+    // Blue is the only simulator. With no human player (Jev vs Jev) it commits once as
+    // soon as every living figure has a plan; human modes commit manually.
     if (networked && isSimulator && tbgwaf_auto_commit() && !aiPaused &&
         game.CanCommitRound() && lastAutoCommittedRound != game.RoundNumber()) {
       lastAutoCommittedRound = game.RoundNumber();

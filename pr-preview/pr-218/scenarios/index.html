@@ -100,9 +100,37 @@ listed by name only.</p>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
 <div class="scenario has-video" data-stem="ragdoll_shot_off_wall"><h3>ragdoll_shot_off_wall</h3><div class="path">tests/scenarios/ragdoll_shot_off_wall.yaml</div>
+<p class="description">Issue the very end of the turn (the 5th and last sniper shot, t=4.0 s; blue 0&#x27;s long walk keeps the round running until t=4.4 s). The fall is therefore cut off mid-air by the end of the turn: the turn_01 golden shows the body frozen in free fall beside the wall, and turn_02 (the next round) shows it resuming from that exact state and landing. The unit still falls only while a round executes.</p>
 <div class="panes">
 <figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/ragdoll_shot_off_wall/blue.webm"></video></figure>
 <figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/ragdoll_shot_off_wall/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Camera centered on [1, 0], zoom 3</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Blue1 fires a 5-shot burst at red2, who stands on top of the wall; only the last bullet hits.</div>
+<div class="detail">Blue0 walks for 4.7 s so the round outlasts the killing shot by 0.7 s.</div>
+<div class="detail">Check: <span class="u red">red2</span> is visible to blue — The wall-top figure is in plain view from the ground</div>
+<div class="step" data-action="1"><span class="u blue">blue1</span> shoots <span class="u red">red2</span></div>
+<div class="step" data-action="2"><span class="u blue">blue0</span> moves to (8.8, -8)</div>
+<div class="step" data-action="3"><span class="u red">red2</span> passes</div>
+<div class="step" data-action="4"><span class="u red">red3</span> passes</div>
+<div class="step" data-action="5">commit round</div>
+<div class="detail">Check: <span class="u red">red2</span> is down — Downed by the last shot of the turn, mid-fall when the turn ends</div>
+<div class="detail">Check: <span class="u blue">blue1</span> is alive</div>
+<div class="detail">Check: round is 2</div>
+</div>
+<div class="round"><div class="round-title">Round 2</div>
+<div class="detail">Next turn; time passes again and the frozen fall carries on.</div>
+<div class="step" data-action="6"><span class="u blue">blue0</span> moves to (-3.2, -8)</div>
+<div class="step" data-action="7"><span class="u blue">blue1</span> passes</div>
+<div class="step" data-action="8"><span class="u red">red3</span> passes</div>
+<div class="step" data-action="9">commit round</div>
+<div class="detail">Check: round is 3</div>
+<div class="detail">Check: winner: none</div>
+</div>
+</div></figure>
 </div>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>

@@ -208,6 +208,12 @@ The overpass profile is currently absolute (`highwayElevation` above `kGradeY`);
 relative to local ground so the deck still clears the streets beneath, and pier heights follow
 the field. Branch ramp length adapts to the actual rise.
 
+### 4.6 Sturdier overpass architecture ([#223](https://github.com/TheDeepestSpace/tbgwaf/issues/223))
+Replace the thin paired pier columns with a more pronounced structure, drawn per seed (own
+sub-stream): either a **T-bent** (one thick column flaring into a cap that wraps the deck
+underside) or **twin columns** joined by a crossbeam under a wider deck. Column bases get a
+thicker footing/plinth. Navmesh, LOS and cover footprints follow. Lands with or just before 4.4.
+
 ### 4.5 Underpasses and sunken streets
 With terrain available, a street can also run *under* a block pad (cut-and-cover) or be sunk
 between retaining walls, giving the "trench" variant for free. Draw per seed.
@@ -424,6 +430,7 @@ model, or solid obstacles).
 | 9 | 1.3 navmesh performance pass | M | – | no |
 | 10 | 4.1–4.3 terrain, terraces, retaining walls | L | 1.4, 1.3 | yes |
 | 11 | 4.4–4.5 overpass over terrain, sunken streets | M | 4.1 | yes |
+| 11b | 4.6 sturdier overpass columns | M | – (soft: 4.4) | yes |
 | 12 | 5.1–5.2 walls + doorways | M | 3.4 | yes (ground floors) |
 | 13 | 5.3 windows (see-through obstacles) | M | 5.1 | yes |
 | 14 | 5.4–5.5 floors + stairs (closes #40) | L | 1.3, 5.1 | yes |
@@ -432,6 +439,8 @@ model, or solid obstacles).
 | 17 | 6.3–6.4 fire escapes, bridges, rooftop links | M | 6.1 | yes |
 | 18 | 7.1 at-grade rail | M | 1.1, 2.x | yes |
 | 19 | 7.2–7.3 viaduct, stations, rolling stock | M | 7.1, 5.5 | yes |
+
+Non-blocking, any time after 1.3: **8.x 4× larger map at the same object scale** ([#224](https://github.com/TheDeepestSpace/tbgwaf/issues/224)), size L. 2× half-extent per axis; road, block, building and overpass sizes unchanged; behind a config knob.
 
 S ≈ one PR of a day or two, M ≈ a few PRs over a week, L ≈ a multi-PR stage with its own
 feature flag kept `Off` until the last PR.

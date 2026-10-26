@@ -25,8 +25,9 @@ struct AABB {
 };
 
 // Semantic tag used only to group static render geometry; collision, LOS,
-// and navigation treat both kinds identically.
-enum class ObstacleKind { Generic, StreetFurniture };
+// and navigation treat every kind identically. Pier marks the overpass
+// bents' columns and footings (issue #223).
+enum class ObstacleKind { Generic, StreetFurniture, Pier };
 
 // A map obstacle. `climbable` obstacles get a navmesh connection from
 // ground level up to their top surface (see NavMesh); non-climbable
@@ -86,10 +87,13 @@ struct Building {
 
 // Visual-only massing detail (roadmap 3.3): a prism over a convex XZ
 // footprint between y0 and y1. Blocks sight lines and FOV (see
-// SightObstacles). Parapets and roof fixtures also block walking: they are
-// copied into WalkSurface::blockers of their roof slab. Awnings are overhead.
+// SightObstacles). Parapets, roof fixtures and deck rails also block
+// walking: they are copied into WalkSurface::blockers of their roof slab or
+// deck span. Awnings and pier caps are overhead. PierCap (the bent's
+// hammerhead/crossbeam under the deck) and DeckRail (the overpass's raised
+// sides, issue #223) belong to the highway, not a building: building == -1.
 struct MassingDetail {
-  enum class Kind : uint8_t { Parapet, RoofFixture, Awning };
+  enum class Kind : uint8_t { Parapet, RoofFixture, Awning, PierCap, DeckRail };
   Kind kind = Kind::Parapet;
   std::vector<glm::vec2> footprint;  // Counter-clockwise.
   float y0 = 0.0f, y1 = 0.0f;

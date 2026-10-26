@@ -31,7 +31,9 @@ namespace {
 //   0x21b1e5a7u   ziplines         roof/anchor selection
 //   0x6c57f00du   furniture        feature presence, then curb-side item stations/kinds
 //   0x51674ea1u   traffic control  light-vs-sign draws per junction, street-name corners
+//   0x7d3a94c5u   pier form        T-bent vs twin-column bent draw (ResolvePierForm)
 constexpr uint32_t kStreetStream = 0xb10c5eedu;
+constexpr uint32_t kPierFormStream = 0x7d3a94c5u;
 constexpr uint32_t kRampChannelStream = 0x6a09e667u;
 constexpr uint32_t kFurnitureStream = 0x6c57f00du;
 constexpr uint32_t kTrafficStream = 0x51674ea1u;
@@ -251,6 +253,14 @@ OverpassChoice ResolveOverpass(uint32_t seed, const MapGeneratorConfig& c) {
   choice.layout =
       c.overpassLayout == OverpassLayout::Auto ? drawnLayout : c.overpassLayout;
   return choice;
+}
+
+// Bent column form (issue #223): one draw per seed from its own stream, so
+// forcing a form (or toggling the overpass) never reshuffles anything else.
+PierForm ResolvePierForm(uint32_t seed, const MapGeneratorConfig& c) {
+  if (c.pierForm != PierForm::Auto) return c.pierForm;
+  Rng rng(seed ^ kPierFormStream);
+  return rng.Chance(0.5f) ? PierForm::Twin : PierForm::TBent;
 }
 
 glm::vec2 Rotate(glm::vec2 v, float radians) {
@@ -1591,7 +1601,8 @@ std::vector<UrbanBlock> BuildCityBlocks(uint32_t seed, const MapGeneratorConfig&
 // step and the slab would hump or dip across it. `deckGrade` is that grade
 // (null: edges follow `groundY`).
 std::vector<glm::vec3> RibbonSide(const UrbanRoad& road, bool left, float half,
-                                  const GroundY& groundY, const GroundY* deckGrade = nullptr) {
+                                  const GroundY& groundY, const GroundY* deckGrade = nullptr,
+                                  const std::vector<float>* extraHalf = nullptr) {
   std::vector<glm::vec3> side;
   side.reserve(road.centerline.size());
   for (size_t i = 0; i < road.centerline.size(); ++i) {
@@ -1603,7 +1614,10 @@ std::vector<glm::vec3> RibbonSide(const UrbanRoad& road, bool left, float half,
     const glm::vec2 normal(-tangent.y, tangent.x);
     const float sign = left ? 1.0f : -1.0f;
     const glm::vec3& p = road.centerline[i];
-    glm::vec2 q(p.x + sign * normal.x * road.width * 0.5f, p.z + sign * normal.y * road.width * 0.5f);
+    // `extraHalf` widens the ribbon per sample (the twin-column overpass
+    // deck, issue #223): zero at grade, so at-grade pavement is untouched.
+    const float halfWidth = road.width * 0.5f + (extraHalf ? (*extraHalf)[i] : 0.0f);
+    glm::vec2 q(p.x + sign * normal.x * halfWidth, p.z + sign * normal.y * halfWidth);
     const bool first = i == 0, last = i + 1 == road.centerline.size();
     const bool onEdge = std::fabs(std::max(std::fabs(p.x), std::fabs(p.z)) - half) < 1e-2f;
     if ((first || last) && onEdge) {
@@ -3074,9 +3088,58 @@ bool PlanarPatch(const std::vector<glm::vec2>& piece, const Ground& ground, Road
   return true;
 }
 
+// Whether a deck-edge point lies over the junction with the other elevated
+// road, where the raised sides stay open so the on-ramp genuinely merges.
+bool OverMergeJunction(const HighwayPlan& plan, const MapGeneratorConfig& c, size_t roadIndex,
+                       glm::vec2 p) {
+  if (!plan.hasBranch) return false;
+  if (roadIndex == 0) {
+    const glm::vec2 rel = p - plan.branch.start;
+    const float u = glm::dot(rel, plan.branch.dir);
+    const glm::vec2 bn(-plan.branch.dir.y, plan.branch.dir.x);
+    return u > -1.0f && u < plan.branch.length + 1.0f &&
+           std::fabs(glm::dot(rel, bn)) < plan.branch.width * 0.5f + 0.6f;
+  }
+  return std::fabs(glm::dot(p - plan.artery.origin, plan.artery.normal)) <
+         c.arteryWidth * 0.5f + 0.6f;
+}
+
+// Raised sides of the overpass (issue #223): a guard parapet strip along an
+// elevated span's edge from `a` to `b` (`inward` points across the deck).
+// Massing (drawn, blocks LOS, so the deck edge is cover) plus a walk
+// blocker on the span; short stepped pieces follow a ramp's slope.
+void EmitDeckRail(Scene* scene, WalkSurface* span, const HighwayPlan& plan,
+                  const MapGeneratorConfig& c, size_t roadIndex, glm::vec3 a, glm::vec3 b,
+                  glm::vec2 inward) {
+  constexpr float kRailThickness = 0.3f;
+  const float length = glm::distance(glm::vec2(a.x, a.z), glm::vec2(b.x, b.z));
+  if (length < 1e-3f) return;
+  const int pieces = std::max(1, static_cast<int>(std::ceil(length / 1.6f)));
+  for (int k = 0; k < pieces; ++k) {
+    const glm::vec3 pa = glm::mix(a, b, static_cast<float>(k) / pieces);
+    const glm::vec3 pb = glm::mix(a, b, static_cast<float>(k + 1) / pieces);
+    if (OverMergeJunction(plan, c, roadIndex,
+                          glm::vec2(0.5f * (pa.x + pb.x), 0.5f * (pa.z + pb.z)))) {
+      continue;
+    }
+    std::vector<glm::vec2> footprint = {{pa.x, pa.z},
+                                        {pb.x, pb.z},
+                                        {pb.x + inward.x * kRailThickness, pb.z + inward.y * kRailThickness},
+                                        {pa.x + inward.x * kRailThickness, pa.z + inward.y * kRailThickness}};
+    if (PolygonSignedArea(footprint) < 0.0f) std::reverse(footprint.begin(), footprint.end());
+    MassingDetail rail;
+    rail.kind = MassingDetail::Kind::DeckRail;
+    rail.footprint = footprint;
+    rail.y0 = std::min(pa.y, pb.y) - 0.25f;  // Tucked into the slab's side.
+    rail.y1 = std::max(pa.y, pb.y) + c.deckRailHeight;
+    span->blockers.push_back(std::move(footprint));
+    scene->massing.push_back(std::move(rail));
+  }
+}
+
 // Road pavement, elevated deck chains and their ground/branch links.
 void EmitHighwaySurfaces(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
-                         const GroundY& groundY) {
+                         PierForm pierForm, const GroundY& groundY) {
   const HighwayPlan& plan = city.highway;
   const std::vector<UrbanRoad>& roads = city.streets.roads;
   // Pavement and deck layers come from the same mitered ribbons. At-grade
@@ -3108,8 +3171,23 @@ void EmitHighwaySurfaces(Scene* scene, const CityPlan& city, const MapGeneratorC
     };
     const GroundY& base = city.terrain.enabled ? roadGrade : groundY;
     const GroundY* deckGrade = city.terrain.enabled ? &roadGrade : nullptr;
-    const auto left = RibbonSide(road, true, scene->mapHalfExtent, base, deckGrade);
-    const auto right = RibbonSide(road, false, scene->mapHalfExtent, base, deckGrade);
+    // Twin-column seeds (issue #223) widen the elevated deck so the paired
+    // columns sit visibly under its edges. The widening scales with the
+    // lift, so at-grade pavement keeps the corridor width exactly.
+    std::vector<float> extraHalf;
+    if (plan.elevated && pierForm == PierForm::Twin && c.twinDeckExtraWidth > 0.0f) {
+      const float cruise =
+          (city.terrain.enabled ? city.terrain.deckCruise : c.highwayElevation) - kGradeY;
+      extraHalf.resize(road.centerline.size());
+      for (size_t i = 0; i < road.centerline.size(); ++i) {
+        const float f = std::min(1.0f, std::max(0.0f, (road.centerline[i].y - kGradeY) /
+                                                          std::max(1.0f, cruise)));
+        extraHalf[i] = 0.5f * c.twinDeckExtraWidth * f;
+      }
+    }
+    const std::vector<float>* widen = extraHalf.empty() ? nullptr : &extraHalf;
+    const auto left = RibbonSide(road, true, scene->mapHalfExtent, base, deckGrade, widen);
+    const auto right = RibbonSide(road, false, scene->mapHalfExtent, base, deckGrade, widen);
     const std::vector<float> params = roadIndex == 0
                                           ? SampleParams(plan.artery.s0, plan.artery.s1)
                                           : SampleParams(plan.branch.u0, plan.branch.length);
@@ -3156,6 +3234,17 @@ void EmitHighwaySurfaces(Scene* scene, const CityPlan& city, const MapGeneratorC
       }
       WalkSurface surface;
       surface.vertices = {left[i], right[i], right[i + 1], left[i + 1]};
+      // Raised deck sides (issue #223): guard parapets along both edges of
+      // every genuinely lifted span, open across the merge junction. The
+      // last half-meter of a ramp stays rail-free at its foot.
+      if (c.deckRailHeight > 0.0f &&
+          std::max(road.centerline[i].y, road.centerline[i + 1].y) > 0.5f) {
+        const glm::vec2 inward =
+            glm::normalize(glm::vec2(right[i].x + right[i + 1].x - left[i].x - left[i + 1].x,
+                                     right[i].z + right[i + 1].z - left[i].z - left[i + 1].z));
+        EmitDeckRail(scene, &surface, plan, c, roadIndex, left[i], left[i + 1], inward);
+        EmitDeckRail(scene, &surface, plan, c, roadIndex, right[i], right[i + 1], -inward);
+      }
       const int index = static_cast<int>(scene->walkSurfaces.size());
       if (chain.first < 0) chain.first = index;
       if (chain.last >= 0) {
@@ -3304,13 +3393,19 @@ void EmitStreetSurfaces(Scene* scene, const CityPlan& city, const MapGeneratorCo
   }
 }
 
-// Bridge piers under the elevated spans.
-void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
+// Bridge bents under the elevated spans (issue #223). Per the seed's drawn
+// form, a bent is either one thick central column flaring into a hammerhead
+// cap (TBent), or twin columns under the deck edges joined by a crossbeam
+// cap (Twin). Columns and their stepped footings are real obstacles
+// (navmesh, collision, LOS, cover); the cap wrapping the underside of the
+// deck is overhead massing, so the ground between bents -- and between twin
+// columns -- stays navigable.
+void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, PierForm form,
                const GroundY& groundY) {
   const HighwayPlan& plan = city.highway;
-  // Bridge stands: paired pier columns under the high spans, leaving broad
-  // navigable ground between bents. None near the on-ramp's merge, where the
-  // two slabs overlap.
+  // Bridge stands march under the high spans, leaving broad navigable
+  // ground between bents. None near the on-ramp's merge, where the two
+  // slabs overlap.
   if (plan.elevated) {
     // A column may only stand where it stays below every slab crossing it
     // (and never on at-grade pavement, whose slab sits at ground level).
@@ -3334,25 +3429,75 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
       }
       return true;
     };
-    auto addBent = [&](glm::vec2 center, glm::vec2 across, float halfSpan, float deckY) {
-      for (const float lat : {1.0f, -1.0f}) {
-        const glm::vec2 foot = center + across * (lat * halfSpan);
-        const float height = deckY - c.highwayThickness - 0.05f;
-        // A column stands fully on the map even where the deck runs past it.
-        if (std::max(std::fabs(foot.x), std::fabs(foot.y)) > scene->mapHalfExtent - 0.75f) continue;
-        // Never inside a retaining wall where the deck crosses a level step.
-        bool nearWall = false;
-        for (const TerrainWallSpec& w : city.terrain.walls) {
-          if (std::fabs(glm::dot(w.raisedN, foot) - w.stepD) < 3.4f) nearWall = true;
-        }
-        if (nearWall) continue;
-        if (!columnFits(foot, height)) continue;
-        const float baseY = groundY(foot.x, foot.y);
-        scene->obstacles.push_back(
-            Obstacle{AABB{glm::vec3(foot.x - 0.7f, baseY, foot.y - 0.7f),
-                          glm::vec3(foot.x + 0.7f, baseY + height, foot.y + 0.7f)},
-                     false});
+    // Oriented convex rectangle, counter-clockwise, aligned to the road.
+    const auto rect = [](glm::vec2 center, glm::vec2 along, float halfAlong, float halfAcross) {
+      const glm::vec2 across(-along.y, along.x);
+      std::vector<glm::vec2> r = {center - along * halfAlong - across * halfAcross,
+                                  center + along * halfAlong - across * halfAcross,
+                                  center + along * halfAlong + across * halfAcross,
+                                  center - along * halfAlong + across * halfAcross};
+      if (PolygonSignedArea(r) < 0.0f) std::reverse(r.begin(), r.end());
+      return r;
+    };
+    auto pushPier = [&](std::vector<glm::vec2> footprint, float y0, float y1) {
+      AABB bounds{glm::vec3(1e9f, y0, 1e9f), glm::vec3(-1e9f, y1, -1e9f)};
+      for (const glm::vec2& p : footprint) {
+        bounds.min.x = std::min(bounds.min.x, p.x);
+        bounds.max.x = std::max(bounds.max.x, p.x);
+        bounds.min.z = std::min(bounds.min.z, p.y);
+        bounds.max.z = std::max(bounds.max.z, p.y);
       }
+      scene->obstacles.push_back(
+          Obstacle{bounds, false, std::move(footprint), ObstacleKind::Pier});
+    };
+    // One bent at `center`: `deckHalf` is the road's half width, `along` its
+    // direction, `deckY` the relative deck lift there.
+    auto addBent = [&](glm::vec2 center, glm::vec2 along, float deckHalf, float deckY) {
+      const float height = deckY - c.highwayThickness - 0.05f;
+      const float shaftHalf = 0.5f * c.pierColumnWidth;
+      // Footing + shaft; false where the column can't stand.
+      auto addColumn = [&](glm::vec2 foot, float halfAlong, float halfAcross) {
+        // Stepped footing: a plinth wider than the shaft wrapping its base.
+        const std::vector<glm::vec2> footing =
+            rect(foot, along, halfAlong + c.pierBaseExtra, halfAcross + c.pierBaseExtra);
+        // A column stands fully on the map even where the deck runs past it.
+        for (const glm::vec2& v : footing) {
+          if (std::max(std::fabs(v.x), std::fabs(v.y)) > scene->mapHalfExtent - 0.05f) {
+            return false;
+          }
+        }
+        // Never inside a retaining wall where the deck crosses a level step.
+        for (const TerrainWallSpec& w : city.terrain.walls) {
+          if (std::fabs(glm::dot(w.raisedN, foot) - w.stepD) < 3.4f) return false;
+        }
+        if (!columnFits(foot, height)) return false;
+        const float baseY = groundY(foot.x, foot.y);
+        pushPier(footing, baseY, baseY + std::min(c.pierBaseHeight, 0.4f * height));
+        pushPier(rect(foot, along, halfAlong, halfAcross), baseY, baseY + height);
+        return true;
+      };
+      const glm::vec2 across(-along.y, along.x);
+      bool stood = false;
+      float capHalfSpan = deckHalf - 0.8f;  // The T-bent hammerhead wraps most of the deck.
+      if (form == PierForm::Twin) {
+        const float columnSpan = deckHalf - 0.7f;
+        for (const float lat : {1.0f, -1.0f}) {
+          stood |= addColumn(center + across * (lat * columnSpan), shaftHalf, shaftHalf);
+        }
+        capHalfSpan = columnSpan + 2.0f * shaftHalf;
+      } else {
+        stood = addColumn(center, shaftHalf, 2.0f * shaftHalf);
+      }
+      if (!stood) return;
+      // The cap joining the column(s) to the deck's underside: overhead
+      // massing (drawn, blocks LOS), never a ground obstacle.
+      const float underside = groundY(center.x, center.y) + deckY - c.highwayThickness;
+      MassingDetail cap;
+      cap.kind = MassingDetail::Kind::PierCap;
+      cap.footprint = rect(center, along, form == PierForm::Twin ? 0.7f : 1.0f, capHalfSpan);
+      cap.y0 = underside - c.pierCapDepth;
+      cap.y1 = underside - 0.02f;
+      scene->massing.push_back(std::move(cap));
     };
     // Bents march outward from the map-spanning corridor's midpoint and
     // continue down any ramps while there is still head clearance below the
@@ -3366,17 +3511,16 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
       const float deckY = ArteryElevationAt(plan, city.terrain, c, s);
       if (deckY < kMinClearance) continue;
       if (plan.hasBranch && std::fabs(s - plan.branch.mergeS) < c.supportSpacing * 0.6f) continue;
-      addBent(plan.artery.origin + plan.artery.dir * s, plan.artery.normal,
-              c.arteryWidth * 0.5f - 1.1f, deckY);
+      addBent(plan.artery.origin + plan.artery.dir * s, plan.artery.dir,
+              c.arteryWidth * 0.5f, deckY);
     }
     if (plan.hasBranch) {
       for (float u = std::max(0.0f, plan.branch.riseStart); u < plan.branch.length - 8.0f;
            u += c.supportSpacing * 0.75f) {
         const float deckY = BranchElevationAt(plan, city.terrain, c, u);
         if (deckY < kMinClearance) continue;
-        addBent(plan.branch.start + plan.branch.dir * u,
-                glm::vec2(-plan.branch.dir.y, plan.branch.dir.x),
-                plan.branch.width * 0.5f - 0.9f, deckY);
+        addBent(plan.branch.start + plan.branch.dir * u, plan.branch.dir,
+                plan.branch.width * 0.5f, deckY);
       }
     }
   }
@@ -3979,9 +4123,10 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   CityPlan city = BuildCityPlan(seed, c);
   BuildUrbanTerrain(&scene, &city, seed, c);
   const GroundY groundY = [&](float x, float z) { return scene.ground.HeightAt(x, z); };
-  EmitHighwaySurfaces(&scene, city, c, groundY);
+  const PierForm pierForm = ResolvePierForm(seed, c);
+  EmitHighwaySurfaces(&scene, city, c, pierForm, groundY);
   EmitStreetSurfaces(&scene, city, c);
-  EmitPiers(&scene, city, c, groundY);
+  EmitPiers(&scene, city, c, pierForm, groundY);
   std::vector<float> characterRolls;
   const std::vector<Parcel> parcels = PlanParcels(city, c, &rng, &characterRolls);
   EmitBuildings(&scene, city, parcels, PlanBuildings(parcels, characterRolls, seed, c, &rng), c,
@@ -4107,6 +4252,10 @@ std::vector<UrbanStreet> UrbanStreets(uint32_t seed, const MapGeneratorConfig& c
 OverpassChoice UrbanOverpass(uint32_t seed, const MapGeneratorConfig& c) {
   if (c.arteryCount <= 0) return OverpassChoice{};
   return ResolveOverpass(seed, c);
+}
+
+PierForm UrbanPierForm(uint32_t seed, const MapGeneratorConfig& c) {
+  return ResolvePierForm(seed, c);
 }
 
 std::vector<UrbanLot> UrbanLots(uint32_t seed, const MapGeneratorConfig& c) {

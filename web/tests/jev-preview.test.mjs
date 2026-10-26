@@ -39,7 +39,8 @@ test("exposes all three modes and configures their controlled teams", () => {
   controller.setMode("player-v-ai");
   assert.equal(blue.tbgwafAI, false);
   assert.equal(red.tbgwafAI, true);
-  assert.equal(blue.tbgwafAutoCommit, true);
+  assert.equal(blue.tbgwafAutoCommit, false);
+  assert.equal(red.tbgwafAutoCommit, false);
 
   controller.setMode("ai-v-ai");
   assert.equal(blue.tbgwafAI, true);

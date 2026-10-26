@@ -77,6 +77,9 @@ const glm::vec3 kSetupColor(0.2f, 1.0f, 0.3f);
 // Scene geometry base colors, shared by the opaque pass and the issue #136
 // see-through pass so a faded block keeps its normal tint.
 const glm::vec3 kObstacleColor(0.55f, 0.55f, 0.6f);
+// Facade decals (issue #152): window glass and door leafs on the walls.
+const glm::vec3 kWindowDecalColor(0.18f, 0.22f, 0.28f);
+const glm::vec3 kDoorDecalColor(0.30f, 0.24f, 0.18f);
 const glm::vec3 kDeckColor(0.44f, 0.45f, 0.48f);
 // Issue #136 camera-occlusion see-through: map geometry (buildings, deck/
 // ramp slabs) standing between the camera and something the player needs to
@@ -477,6 +480,36 @@ void BuildPolygonPrism(const tactics::Obstacle& obstacle, LitTriangleMesh* mesh)
   mesh->SetMesh(vertices, indices);
 }
 
+// A facade opening (issue #152): a flat quad on its wall face, nudged out
+// along the wall normal so it draws over the prism without z-fighting.
+void AppendFacadeDecal(const tactics::Scene& scene, const tactics::FacadeOpening& opening,
+                       LitVertices* vertices, std::vector<GLuint>* indices) {
+  if (opening.obstacle < 0 ||
+      opening.obstacle >= static_cast<int>(scene.obstacles.size())) {
+    return;
+  }
+  const std::vector<glm::vec2> fp =
+      tactics::ObstacleFootprint(scene.obstacles[opening.obstacle]);
+  if (fp.size() < 3 || opening.wallEdge < 0 ||
+      opening.wallEdge >= static_cast<int>(fp.size()) || opening.u1 <= opening.u0 ||
+      opening.y1 <= opening.y0) {
+    return;
+  }
+  const glm::vec2 a = fp[opening.wallEdge];
+  const glm::vec2 b = fp[(opening.wallEdge + 1) % fp.size()];
+  const float len = glm::length(b - a);
+  if (len < 1e-4f) return;
+  const glm::vec2 dir = (b - a) / len;
+  const glm::vec3 normal(dir.y, 0.0f, -dir.x);  // Outward, as AppendPolygonPrism.
+  constexpr float kDecalLift = 0.04f;
+  const glm::vec2 p0 = a + dir * opening.u0 + glm::vec2(normal.x, normal.z) * kDecalLift;
+  const glm::vec2 p1 = a + dir * opening.u1 + glm::vec2(normal.x, normal.z) * kDecalLift;
+  const glm::vec3 a0(p0.x, opening.y0, p0.y), a1(p0.x, opening.y1, p0.y);
+  const glm::vec3 b0(p1.x, opening.y0, p1.y), b1(p1.x, opening.y1, p1.y);
+  AppendTriangle(a0, b0, b1, normal, vertices, indices);
+  AppendTriangle(a0, b1, a1, normal, vertices, indices);
+}
+
 // `hiddenEdges[i]` (optional) skips the side wall under polygon edge i, for
 // edges butted against a neighbouring slab: the wall would only show as a
 // seam, most visibly through the faded see-through pass.
@@ -632,6 +665,11 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
     prism.bounds.max.y = d.y1;
     AppendPolygonPrism(prism, &vertices, &indices);
   }
+  // Facade decals receive the mask tint like the walls they sit on; as
+  // casters they are redundant with the wall right behind them.
+  for (const tactics::FacadeOpening& opening : scene.facadeOpenings) {
+    AppendFacadeDecal(scene, opening, &vertices, &indices);
+  }
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
     AppendSurfacePatch(surface.vertices, 0.45f, &vertices, &indices);
   }
@@ -672,6 +710,14 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
     mix(&d.y0, sizeof(d.y0));
     mix(&d.y1, sizeof(d.y1));
   }
+  for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
+    mix(&o.obstacle, sizeof(o.obstacle));
+    mix(&o.wallEdge, sizeof(o.wallEdge));
+    mix(&o.u0, sizeof(o.u0));
+    mix(&o.u1, sizeof(o.u1));
+    mix(&o.y0, sizeof(o.y0));
+    mix(&o.y1, sizeof(o.y1));
+  }
   for (const tactics::WalkSurface& s : scene.walkSurfaces) mixVec3s(s.vertices);
   for (const tactics::TerrainStair& s : scene.terrainStairs) {
     mixVec3s(s.flight);
@@ -702,6 +748,80 @@ unsigned long long MassingFingerprint(const tactics::Scene& scene) {
     mix(d.footprint.data(), d.footprint.size() * sizeof(glm::vec2));
   }
   return h;
+}
+
+// Content hash of Scene::facadeOpenings, so the decal meshes rebuild only
+// when the openings themselves change.
+unsigned long long FacadeFingerprint(const tactics::Scene& scene) {
+  unsigned long long h = 1469598103934665603ULL ^ scene.facadeOpenings.size();
+  auto mix = [&](const void* data, size_t bytes) {
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < bytes; ++i) {
+      h ^= p[i];
+      h *= 1099511628211ULL;
+    }
+  };
+  for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
+    mix(&o.kind, sizeof(o.kind));
+    mix(&o.obstacle, sizeof(o.obstacle));
+    mix(&o.wallEdge, sizeof(o.wallEdge));
+    mix(&o.u0, sizeof(o.u0));
+    mix(&o.u1, sizeof(o.u1));
+    mix(&o.y0, sizeof(o.y0));
+    mix(&o.y1, sizeof(o.y1));
+  }
+  return h;
+}
+
+// All decals of one kind (windows or doors) merged into a single mesh.
+// `skipBuilding` (optional) leaves out openings of camera-faded buildings.
+void BuildFacadeDecalMesh(const tactics::Scene& scene, tactics::FacadeOpening::Kind kind,
+                          LitTriangleMesh* mesh,
+                          const std::vector<char>* skipBuilding = nullptr) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  for (const tactics::FacadeOpening& opening : scene.facadeOpenings) {
+    if (opening.kind != kind) continue;
+    if (skipBuilding && opening.building >= 0 &&
+        opening.building < static_cast<int>(skipBuilding->size()) &&
+        (*skipBuilding)[opening.building]) {
+      continue;
+    }
+    AppendFacadeDecal(scene, opening, &vertices, &indices);
+  }
+  mesh->SetMesh(vertices, indices);
+}
+
+// Content hash of Scene::walkSurfaces (vertices and neighbour links, which
+// SharedEdges reads), so the batched deck mesh rebuilds only on scene change.
+unsigned long long DeckFingerprint(const tactics::Scene& scene) {
+  unsigned long long h = 1469598103934665603ULL ^ scene.walkSurfaces.size();
+  auto mix = [&](const void* data, size_t bytes) {
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < bytes; ++i) {
+      h ^= p[i];
+      h *= 1099511628211ULL;
+    }
+  };
+  for (const tactics::WalkSurface& s : scene.walkSurfaces) {
+    mix(s.vertices.data(), s.vertices.size() * sizeof(glm::vec3));
+    mix(s.neighbors.data(), s.neighbors.size() * sizeof(int));
+  }
+  return h;
+}
+
+// Every walk surface as one static mesh (0.45-thick slabs, shared chain
+// edges hidden): decks, ramps, roof slabs, stoops and rear platforms are
+// scene-static, so re-tessellating them per frame (and per pane) is wasted
+// work once facade stoops multiply their count (issue #152).
+void BuildDeckMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
+    const std::vector<char> hidden = SharedEdges(scene.walkSurfaces, surface);
+    AppendSurfacePatch(surface.vertices, 0.45f, &vertices, &indices, &hidden);
+  }
+  mesh->SetMesh(vertices, indices);
 }
 
 // One prism per massing detail, merged into a single mesh.
@@ -1532,6 +1652,15 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
   std::vector<DeckOccluder> decks;
   for (const tactics::WalkSurface& surface : walkSurfaces) {
     if (surface.vertices.size() < 3) continue;
+    // Knee-high slabs (facade stoops and rear-door platforms, issue #152)
+    // cast no meaningful eye-level shadow; keeping them out of the occluder
+    // set keeps the per-ray cost at the deck/ramp/roof count, not the far
+    // larger stoop count. Gameplay LOS stays exact in Raycast.
+    float clearance = 0.0f;
+    for (const glm::vec3& v : surface.vertices) {
+      clearance = std::max(clearance, v.y - terrain.HeightAt(v.x, v.z));
+    }
+    if (clearance < 0.6f) continue;
     DeckOccluder deck;
     deck.surface = &surface;
     for (const glm::vec3& v : surface.vertices) deck.footprint.footprint.emplace_back(v.x, v.z);
@@ -2004,6 +2133,9 @@ bool SceneRenderer::Init() {
   geometryMesh_.Init();
   fovSceneMesh_.Init();
   massingMesh_.Init();
+  facadeWindowMesh_.Init();
+  facadeDoorMesh_.Init();
+  deckMesh_.Init();
   highlightRing_.Init();
   highlightRing_.SetPoints(BuildRingPoints());
 
@@ -2095,6 +2227,11 @@ void SceneRenderer::Destroy() {
   fovSceneKey_ = 0;
   massingMesh_.Destroy();
   massingKey_ = 0;
+  facadeWindowMesh_.Destroy();
+  facadeDoorMesh_.Destroy();
+  facadeKey_ = 0;
+  deckMesh_.Destroy();
+  deckKey_ = 0;
   terrainKey_ = tactics::HeightField{};
   highlightRing_.Destroy();
   sphereMesh_.Destroy();
@@ -2307,6 +2444,25 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       massingKey_ = massingKey;
     }
   }
+  // Facade decals (issue #152), rebuilt when the opening records change.
+  {
+    const unsigned long long facadeKey = FacadeFingerprint(game.GetScene());
+    if (facadeKey != facadeKey_) {
+      BuildFacadeDecalMesh(game.GetScene(), tactics::FacadeOpening::Kind::Window,
+                           &facadeWindowMesh_);
+      BuildFacadeDecalMesh(game.GetScene(), tactics::FacadeOpening::Kind::Door,
+                           &facadeDoorMesh_);
+      facadeKey_ = facadeKey;
+    }
+  }
+  // Batched walk-surface slabs, rebuilt when the surfaces change.
+  {
+    const unsigned long long deckKey = DeckFingerprint(game.GetScene());
+    if (deckKey != deckKey_) {
+      BuildDeckMesh(game.GetScene(), &deckMesh_);
+      deckKey_ = deckKey;
+    }
+  }
 
   // Shadow pass: only casters this team can currently see.
   glDisable(GL_SCISSOR_TEST);
@@ -2341,11 +2497,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(kDeckShadowSlopeBias, kDeckShadowConstantBias);
-    for (const tactics::WalkSurface& surface : game.GetScene().walkSurfaces) {
-      const std::vector<char> hidden = SharedEdges(game.GetScene().walkSurfaces, surface);
-      BuildSurfacePatch(surface.vertices, 0.45f, &geometryMesh_, &hidden);
+    if (deckMesh_.HasGeometry()) {
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
-      geometryMesh_.Draw();
+      deckMesh_.Draw();
     }
     glDisable(GL_POLYGON_OFFSET_FILL);
     for (const Unit& unit : game.GetScene().units) {
@@ -2523,14 +2677,23 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
   }
-  for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-    if (fadeSurface[i]) continue;  // Re-drawn translucent below.
-    // Concrete, clearly lighter than the asphalt below: the elevated deck
-    // and its ramps must read as a bridge, not as more ground road.
-    const std::vector<char> hidden = SharedEdges(walkSurfaces, walkSurfaces[i]);
-    BuildSurfacePatch(walkSurfaces[i].vertices, kDeckThickness, &geometryMesh_, &hidden);
-    DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(kDeckColor, 1.0f));
+  // Concrete, clearly lighter than the asphalt below: the elevated deck and
+  // its ramps must read as a bridge, not as more ground road. One batched
+  // draw unless a surface is camera-faded (then the faded ones are skipped
+  // here and re-drawn translucent below).
+  if (!anyFaded) {
+    if (deckMesh_.HasGeometry()) {
+      DrawLitModel(litShader_, deckMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                   glm::vec4(kDeckColor, 1.0f));
+    }
+  } else {
+    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+      if (fadeSurface[i]) continue;  // Re-drawn translucent below.
+      const std::vector<char> hidden = SharedEdges(walkSurfaces, walkSurfaces[i]);
+      BuildSurfacePatch(walkSurfaces[i].vertices, kDeckThickness, &geometryMesh_, &hidden);
+      DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                   glm::vec4(kDeckColor, 1.0f));
+    }
   }
 
   for (size_t i = 0; i < obstacles.size(); ++i) {
@@ -2544,6 +2707,29 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       BuildPolygonPrism(obstacles[i], &geometryMesh_);
       DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f), color);
     }
+  }
+
+  // Facade window/door decals (issue #152) over the walls just drawn. A
+  // camera-faded building keeps its decals out of both passes (they would
+  // otherwise hang opaque in front of its translucent walls).
+  if (!anyFaded) {
+    if (facadeWindowMesh_.HasGeometry()) {
+      DrawLitModel(litShader_, facadeWindowMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                   glm::vec4(kWindowDecalColor, 1.0f));
+    }
+    if (facadeDoorMesh_.HasGeometry()) {
+      DrawLitModel(litShader_, facadeDoorMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                   glm::vec4(kDoorDecalColor, 1.0f));
+    }
+  } else {
+    BuildFacadeDecalMesh(game.GetScene(), tactics::FacadeOpening::Kind::Window, &geometryMesh_,
+                         &fadeBuilding);
+    DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(kWindowDecalColor, 1.0f));
+    BuildFacadeDecalMesh(game.GetScene(), tactics::FacadeOpening::Kind::Door, &geometryMesh_,
+                         &fadeBuilding);
+    DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(kDoorDecalColor, 1.0f));
   }
 
   // Building massing: parapets, roof furniture, awnings (issue #151).

@@ -82,6 +82,15 @@ bool SameScene(const Scene& a, const Scene& b) {
       return false;
     }
   }
+  if (a.facadeOpenings.size() != b.facadeOpenings.size()) return false;
+  for (size_t i = 0; i < a.facadeOpenings.size(); ++i) {
+    const FacadeOpening& x = a.facadeOpenings[i];
+    const FacadeOpening& y = b.facadeOpenings[i];
+    if (x.kind != y.kind || x.obstacle != y.obstacle || x.wallEdge != y.wallEdge ||
+        x.u0 != y.u0 || x.u1 != y.u1 || x.y0 != y.y0 || x.y1 != y.y1) {
+      return false;
+    }
+  }
   if (a.ziplines.size() != b.ziplines.size()) return false;
   for (size_t i = 0; i < a.ziplines.size(); ++i) {
     if (a.ziplines[i].a != b.ziplines[i].a || a.ziplines[i].b != b.ziplines[i].b) return false;
@@ -1165,6 +1174,7 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   config.elevatedHighway = OverpassMode::On;
   config.overpassLayout = OverpassLayout::RampUpRampDown;
   config.features.terrain.mode = FeatureMode::Off;  // Overpass vs terrain is roadmap 4.4.
+  config.features.facades.mode = FeatureMode::Off;  // Count highway transitions only.
   const Scene scene = GenerateUrbanMap(7, config);
   const auto roads = UrbanRoads(7, config);
 
@@ -1395,6 +1405,7 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
   };
   MapGeneratorConfig config;
   config.features.terrain.mode = FeatureMode::Off;  // Legacy flat-city layouts.
+  config.features.facades.mode = FeatureMode::Off;  // Count highway transitions only.
   config.elevatedHighway = OverpassMode::On;
   config.branchEnd = BranchEnd::Ramp;
   const float half = UrbanMapHalfExtent(config);
@@ -1506,6 +1517,7 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
 void TestBranchMayRunOffMapWithoutRamp() {
   MapGeneratorConfig config;
   config.features.terrain.mode = FeatureMode::Off;  // Flat-city deck heights.
+  config.features.facades.mode = FeatureMode::Off;  // Count highway transitions only.
   config.elevatedHighway = OverpassMode::On;
   const float half = UrbanMapHalfExtent(config);
 
@@ -1853,7 +1865,8 @@ void TestZiplineStreetEndsReachableRoofsOnlyByLine() {
 // covers the highway plus every local street.
 void TestFeatureFlagsAndStreetGraph() {
   MapGeneratorConfig full;
-  for (const char* name : {"lanes", "curbs", "furniture", "terrain", "interiors", "rail"}) {
+  for (const char* name :
+       {"lanes", "curbs", "furniture", "terrain", "interiors", "rail", "facades"}) {
     FeatureToggle* toggle = UrbanFeatureByName(&full.features, name);
     CHECK(toggle != nullptr);
     if (toggle) toggle->mode = FeatureMode::On;
@@ -1947,6 +1960,121 @@ void TestLocalStreetBandsReachMapEdgeAtFullWidth() {
   }
 }
 
+// Issue #152 (roadmap 3.4): windows and doors are recorded per building as
+// FacadeOpening data on a wall edge, inside the wall's bounds. Most
+// buildings get a street entrance on their frontage; some entrances are
+// raised on a stoop walk-up while others open straight off the ground; rear
+// doors are usually raised on a little platform whose ramp sits on one of
+// its three free sides. Every raised door has a walk surface at its base
+// that reaches the ground.
+void TestFacadeOpeningsDoorsStoopsAndPlatforms() {
+  int stoops = 0, grade = 0, rearDoors = 0, platforms = 0, rearAtGrade = 0;
+  std::set<int> rampSides;
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed, FlatConfig());
+    const std::vector<UrbanParcel> parcels = UrbanParcels(seed, FlatConfig());
+    CHECK(!scene.facadeOpenings.empty());
+    // Determinism: the same seed re-rolls the same openings; forcing the
+    // feature off removes them (and their stoop/platform surfaces) without
+    // moving anything else.
+    {
+      const Scene again = GenerateUrbanMap(seed, FlatConfig());
+      bool same = again.facadeOpenings.size() == scene.facadeOpenings.size();
+      for (size_t i = 0; same && i < scene.facadeOpenings.size(); ++i) {
+        const FacadeOpening& x = scene.facadeOpenings[i];
+        const FacadeOpening& y = again.facadeOpenings[i];
+        same = x.kind == y.kind && x.building == y.building && x.obstacle == y.obstacle &&
+               x.wallEdge == y.wallEdge && x.u0 == y.u0 && x.u1 == y.u1 && x.y0 == y.y0 &&
+               x.y1 == y.y1 && x.floor == y.floor;
+      }
+      CHECK(same);
+      MapGeneratorConfig bare = FlatConfig();
+      bare.features.facades.mode = FeatureMode::Off;
+      const Scene bareScene = GenerateUrbanMap(seed, bare);
+      CHECK(bareScene.facadeOpenings.empty());
+      CHECK(bareScene.walkSurfaces.size() <= scene.walkSurfaces.size());
+      CHECK(bareScene.obstacles.size() == scene.obstacles.size());
+    }
+    std::vector<int> frontDoors(scene.buildings.size(), 0);
+    int windows = 0;
+    for (const FacadeOpening& o : scene.facadeOpenings) {
+      CHECK(o.building >= 0 && o.building < static_cast<int>(scene.buildings.size()));
+      const Building& b = scene.buildings[o.building];
+      CHECK(o.obstacle == b.obstacle);
+      const Obstacle& wall = scene.obstacles[o.obstacle];
+      const std::vector<glm::vec2>& fp = wall.footprint;
+      CHECK(o.wallEdge >= 0 && o.wallEdge < static_cast<int>(fp.size()));
+      const glm::vec2 a = fp[o.wallEdge], q = fp[(o.wallEdge + 1) % fp.size()];
+      const float len = glm::distance(a, q);
+      // The opening lies within its wall edge, horizontally and vertically.
+      CHECK(o.u0 >= -kEps && o.u1 <= len + kEps && o.u0 < o.u1);
+      CHECK(o.y0 >= wall.bounds.min.y - kEps && o.y1 <= wall.bounds.max.y + kEps);
+      CHECK(o.y0 < o.y1);
+      if (o.kind == FacadeOpening::Kind::Window) {
+        ++windows;
+        continue;
+      }
+      CHECK(o.floor == 0);
+      const float baseY = wall.bounds.min.y;
+      const bool raised = o.y0 > baseY + 0.05f;
+      const bool front = o.wallEdge == parcels[b.parcel].frontageEdge;
+      if (front) {
+        ++frontDoors[o.building];
+        (raised ? stoops : grade) += 1;
+      } else {
+        ++rearDoors;
+        (raised ? platforms : rearAtGrade) += 1;
+      }
+      if (!raised) continue;
+      // A raised door's threshold: a walk surface right outside the wall at
+      // the door's base height, connected (itself or via a neighbour ramp)
+      // to the ground.
+      const glm::vec2 dir = (q - a) / len;
+      const glm::vec2 out(dir.y, -dir.x);
+      // Probe just outside the wall: the stoop ramp top / platform sits
+      // there at the door's base height (a stoop already slopes away, so
+      // allow its grade over the probe distance).
+      const glm::vec2 probe = a + dir * (0.5f * (o.u0 + o.u1)) + out * 0.12f;
+      int threshold = -1;
+      for (size_t s = 0; s < scene.walkSurfaces.size(); ++s) {
+        const WalkSurface& surface = scene.walkSurfaces[s];
+        if (!SurfaceContainsXZ(surface, probe.x, probe.y)) continue;
+        if (std::fabs(SurfaceHeightAt(surface, probe.x, probe.y) - o.y0) < 0.15f) {
+          threshold = static_cast<int>(s);
+          break;
+        }
+      }
+      CHECK(threshold >= 0);
+      if (threshold < 0) continue;
+      const WalkSurface& surface = scene.walkSurfaces[threshold];
+      bool grounded = surface.connectsToGround;
+      for (int ni : surface.neighbors) grounded |= scene.walkSurfaces[ni].connectsToGround;
+      CHECK(grounded);
+      if (!front && surface.neighbors.size() == 1) {
+        // Which of the platform's three free sides carries the ramp.
+        const WalkSurface& ramp = scene.walkSurfaces[surface.neighbors[0]];
+        const glm::vec3 pc = SurfaceCenter(surface), rc = SurfaceCenter(ramp);
+        const glm::vec2 d(rc.x - pc.x, rc.z - pc.z);
+        const float along = glm::dot(d, dir), outward = glm::dot(d, out);
+        rampSides.insert(std::fabs(along) > std::fabs(outward) ? (along < 0.0f ? 0 : 1) : 2);
+      }
+    }
+    CHECK(windows > 50);
+    int withDoor = 0;
+    for (int doors : frontDoors) {
+      CHECK(doors <= 1);
+      withDoor += doors;
+    }
+    // A street entrance per building, bar the rare frontage too small for one.
+    CHECK(withDoor > static_cast<int>(scene.buildings.size()) * 3 / 4);
+  }
+  // Across the pinned seeds: both entrance styles occur, rear doors exist
+  // and are usually raised, and ramps land on more than one platform side.
+  CHECK(stoops > 0 && grade > 0);
+  CHECK(rearDoors > 0 && platforms > rearAtGrade);
+  CHECK(rampSides.size() >= 2);
+}
+
 int main() {
   TestFeatureFlagsAndStreetGraph();
   TestDeterminismAndVariety();
@@ -1955,6 +2083,7 @@ int main() {
   TestPinnedSeedFingerprints();
   TestParcelsMatchBuildingsAndFrontStreets();
   TestBuildingKindsFloorsAndHeights();
+  TestFacadeOpeningsDoorsStoopsAndPlatforms();
   TestMassingStaysOnItsBuilding();
   TestRoofMassingBlocksWalking();
   TestMassingBlocksSight();

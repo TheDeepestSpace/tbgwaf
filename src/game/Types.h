@@ -89,6 +89,26 @@ struct MassingDetail {
   int building = -1;
 };
 
+// A window or door on a generated building's facade (issue #152, roadmap
+// 3.4). Openings are recorded as data and rendered as flat decals on the
+// wall face, so stage 5 can turn the same records into real holes without
+// re-rolling where they are. The opening lies on footprint edge `wallEdge`
+// (footprint[wallEdge] -> footprint[wallEdge + 1]) of
+// Scene::obstacles[obstacle]: `u0..u1` world units along that edge from its
+// first vertex, `y0..y1` world heights. A door whose y0 sits above the wall
+// base opens onto a raised stoop or rear platform (a facade WalkSurface
+// emitted alongside it).
+struct FacadeOpening {
+  enum class Kind : uint8_t { Window, Door };
+  Kind kind = Kind::Window;
+  int building = -1;  // Index into Scene::buildings.
+  int obstacle = -1;  // Wall prism the opening sits on.
+  int wallEdge = 0;
+  float u0 = 0.0f, u1 = 0.0f;
+  float y0 = 0.0f, y1 = 0.0f;
+  int floor = 0;
+};
+
 // A convex, planar walkable patch above (or sloping away from) the ground.
 // Patches form a separate navigation layer, so a deck never erases the
 // usable ground beneath it. Neighbour indices are explicit: overlapping XZ

@@ -203,7 +203,8 @@ export class JevPreviewController {
     // Jev vs Jev: the Blue instance renders every figure and both FOVs in one
     // pane; the Red instance keeps simulating off-screen.
     module.tbgwafSpectator = this.mode === "ai-v-ai" && player === "blue";
-    module.tbgwafAutoCommit = this.mode !== "human";
+    // Only with no human player; Blue vs Jev needs a manual Commit round.
+    module.tbgwafAutoCommit = this.mode === "ai-v-ai";
     module.tbgwafAIGeneration = this.generation;
   }
 

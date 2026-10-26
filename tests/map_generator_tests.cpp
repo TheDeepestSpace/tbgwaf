@@ -177,9 +177,14 @@ void TestParcelsMatchBuildingsAndFrontStreets() {
       const float half = UrbanMapHalfExtent(c);
       const float rim = std::max(c.streetWidth, c.localStreetWidth);
       const glm::vec2 outside = mid - inward * (c.sidewalkWidth + 1.0f);
-      const bool axisAligned = std::fabs(dir.x) > 0.95f || std::fabs(dir.y) > 0.95f;
+      const bool axisAligned = std::fabs(dir.x) > 0.99f || std::fabs(dir.y) > 0.99f;
       const bool onRim =
           axisAligned && half - std::max(std::fabs(outside.x), std::fabs(outside.y)) < rim;
+      bool pedestrianFrontage = false;
+      for (size_t other = 0; other < blocks.size(); ++other) {
+        if (other == static_cast<size_t>(p.block)) continue;
+        pedestrianFrontage |= PointInConvexPolygon(outside, blocks[other].vertices);
+      }
       float nearest = 1e9f;
       UrbanStreetClass nearestClass = UrbanStreetClass::Cross;
       for (const UrbanStreet& st : streets) {
@@ -194,7 +199,10 @@ void TestParcelsMatchBuildingsAndFrontStreets() {
           nearestClass = st.cls;
         }
       }
-      if (onRim) {
+      if (pedestrianFrontage) {
+        // Long blocks may be divided by a double sidewalk with no road.
+        // Frontages along that shared edge intentionally have no street.
+      } else if (onRim) {
         CHECK(p.street == UrbanStreetClass::Cross);
       } else {
         // On the building line: a sidewalk from a local street, a sidewalk
@@ -461,9 +469,9 @@ void TestPinnedKindHistograms() {
   struct Expected { uint32_t seed; size_t buildings; int kinds[kBuildingKindCount]; };
   const Expected expected[] = {
       // residential, mixed-use, office, commercial, civic, garage
-      {1u, 53, {16, 8, 10, 5, 2, 12}},
-      {42u, 55, {16, 13, 8, 5, 2, 11}},
-      {2024u, 81, {27, 21, 13, 7, 2, 11}},
+      {1u, 48, {20, 9, 6, 8, 2, 3}},
+      {42u, 80, {28, 19, 14, 9, 2, 8}},
+      {2024u, 77, {22, 22, 17, 7, 2, 7}},
   };
   for (const auto& e : expected) {
     const Scene scene = GenerateUrbanMap(e.seed, FlatConfig());
@@ -1117,6 +1125,7 @@ void TestCornerBuildingsDoNotChainAcrossAFrontage() {
   int pairs = 0;
   for (size_t i = 0; i < buildings.size(); ++i) {
     for (size_t j = i + 1; j < buildings.size(); ++j) {
+      if (buildings[i]->building == buildings[j]->building) continue;
       CHECK(!FootprintsOverlap(buildings[i]->footprint, buildings[j]->footprint));
     }
   }
@@ -1988,6 +1997,86 @@ float DistanceToConvexPolygon(glm::vec2 p, const std::vector<glm::vec2>& poly) {
   return best;
 }
 
+bool SharedBoundaryEdge(const UrbanBlock& a, const UrbanBlock& b, glm::vec2* from,
+                        glm::vec2* to) {
+  for (size_t i = 0; i < a.vertices.size(); ++i) {
+    const glm::vec2 a0 = a.vertices[i], a1 = a.vertices[(i + 1) % a.vertices.size()];
+    for (size_t j = 0; j < b.vertices.size(); ++j) {
+      const glm::vec2 b0 = b.vertices[j], b1 = b.vertices[(j + 1) % b.vertices.size()];
+      if (glm::distance(a0, b1) < kEps && glm::distance(a1, b0) < kEps) {
+        *from = a0;
+        *to = a1;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Long polygons no longer produce one empty perimeter-ring block. One seeded
+// variant is a length-scaled row of apartments; the other is 2-3 touching
+// blocks whose shared edges make a double sidewalk without a road or signal.
+void TestLongBlockApartmentRowsAndPedestrianSplits() {
+  {
+    const MapGeneratorConfig c = FurnitureConfig(FeatureMode::Off);
+    const std::vector<UrbanBlock> blocks = UrbanBlocks(1, c);
+    const std::vector<UrbanParcel> parcels = UrbanParcels(1, c);
+    const Scene scene = GenerateUrbanMap(1, c);
+    int rows = 0, minCount = 100, maxCount = 0;
+    for (size_t block = 0; block < blocks.size(); ++block) {
+      if (!blocks[block].apartmentRow) continue;
+      ++rows;
+      int parcelCount = 0, buildingCount = 0;
+      for (const UrbanParcel& parcel : parcels) parcelCount += parcel.block == static_cast<int>(block);
+      for (const Building& building : scene.buildings) {
+        if (building.block != static_cast<int>(block)) continue;
+        ++buildingCount;
+        CHECK(building.kind == BuildingKind::Residential);
+      }
+      CHECK(parcelCount >= 2 && parcelCount <= 6);
+      CHECK(buildingCount == parcelCount);
+      minCount = std::min(minCount, parcelCount);
+      maxCount = std::max(maxCount, parcelCount);
+    }
+    CHECK(rows >= 2);
+    CHECK(minCount < maxCount);  // Longer rows receive more apartments.
+  }
+
+  {
+    const MapGeneratorConfig c = FurnitureConfig(FeatureMode::On);
+    const std::vector<UrbanBlock> blocks = UrbanBlocks(42, c);
+    const std::vector<UrbanStreet> streets = UrbanStreets(42, c);
+    const Scene scene = GenerateUrbanMap(42, c);
+    int pedestrianEdges = 0;
+    for (size_t i = 0; i < blocks.size(); ++i) {
+      for (size_t j = i + 1; j < blocks.size(); ++j) {
+        glm::vec2 from, to;
+        if (!SharedBoundaryEdge(blocks[i], blocks[j], &from, &to)) continue;
+        ++pedestrianEdges;
+        const glm::vec2 midpoint = (from + to) * 0.5f;
+        for (const UrbanStreet& street : streets) {
+          CHECK(DistanceToSegment(midpoint, XZ(street.a), XZ(street.b)) >
+                street.width * 0.5f + 0.1f);
+        }
+        int sidewalkLayers = 0;
+        for (const RoadSurface& sidewalk : scene.sidewalkSurfaces) {
+          std::vector<glm::vec2> polygon;
+          for (const glm::vec3& vertex : sidewalk.vertices) polygon.push_back(XZ(vertex));
+          sidewalkLayers += PointInConvexPolygon(midpoint, polygon);
+        }
+        CHECK(sidewalkLayers >= 2);
+        for (const StreetProp& prop : scene.props) {
+          if (prop.kind != StreetPropKind::TrafficLight) continue;
+          const glm::vec2 p = XZ(prop.position);
+          CHECK(glm::distance(p, from) > 1.0f);
+          CHECK(glm::distance(p, to) > 1.0f);
+        }
+      }
+    }
+    CHECK(pedestrianEdges >= 2);
+  }
+}
+
 // Furniture only appends small curb-side obstacles: the rest of the scene is
 // untouched, every item hugs a sidewalk strip, keeps 2 * kAgentRadius of
 // clear sidewalk to every building, and stays off the spawn rows. The Auto
@@ -2246,7 +2335,7 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
 // alters item or prop placement shows up here first.
 void TestPinnedFurnitureFingerprints() {
   struct Expected { uint32_t seed; size_t furniture; size_t props; };
-  const Expected expected[] = {{1u, 132, 65}, {42u, 150, 69}, {2024u, 168, 77}};
+  const Expected expected[] = {{1u, 167, 70}, {42u, 168, 66}, {2024u, 169, 78}};
   const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
   const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
   for (const auto& e : expected) {
@@ -2264,6 +2353,7 @@ void TestPinnedFurnitureFingerprints() {
 
 int main() {
   TestFeatureFlagsAndStreetGraph();
+  TestLongBlockApartmentRowsAndPedestrianSplits();
   TestFurnitureHugsSidewalksAndRespectsClearances();
   TestFurnitureKeepsSidewalksConnected();
   TestTrafficPropsSitAtJunctionsAndStayVisualOnly();

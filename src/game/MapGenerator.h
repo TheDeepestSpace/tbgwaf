@@ -137,6 +137,10 @@ struct MapGeneratorConfig {
 struct UrbanBlock {
   float x0, x1, z0, z1;
   std::vector<glm::vec2> vertices;
+  // Long blocks left behind by a trimmed local street either split into
+  // smaller touching blocks (their shared edges become a pedestrian-only
+  // double sidewalk) or use this crosswise apartment-row layout.
+  bool apartmentRow = false;
 };
 
 struct UrbanRoad {

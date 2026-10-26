@@ -255,6 +255,10 @@ class GameLogic {
     float walkPhase = 0.0f;
     float walkBlend = 0.0f;
     float idleElapsed = 0.0f;
+    // Downed state at sample time: a corpse's ghost holds the fallen (ragdoll)
+    // pose of that instant rather than the upright one.
+    bool alive = true;
+    float knockdownElapsed = -1.0f;
     float at = 0.0f;  // Seconds into the turn's execution when sampled.
   };
   // Oldest-first samples of `targetUnitId` as seen by `viewingTeam`, from the

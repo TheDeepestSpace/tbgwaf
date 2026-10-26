@@ -1793,6 +1793,26 @@ void TestDeadFigureInFovGetsGhost() {
   CHECK(!game.Sightings(Team::Blue, 4).empty());
 }
 
+void TestFallingBodyKeepsSamplingItsPose() {
+  GameLogic game(LegacyScene());
+  StepSightings(game, 1.0f);
+  Unit* enemy = game.FindUnit(4);
+  enemy->alive = false;
+  enemy->knockdownElapsed = 0.0f;
+  // The body stays put while the fall plays out; each interval still stamps
+  // the pose of that instant.
+  for (int i = 0; i < 40; ++i) {
+    enemy->knockdownElapsed += 0.05f;
+    game.UpdateSightingMemory(0.05f);
+  }
+  const auto& samples = game.Sightings(Team::Blue, 4);
+  CHECK(samples.size() >= 4);
+  CHECK(samples.front().alive);
+  CHECK(!samples.back().alive);
+  CHECK(samples.back().knockdownElapsed > samples[samples.size() - 2].knockdownElapsed);
+  CHECK(samples.back().knockdownElapsed > 1.0f);
+}
+
 void TestSightingSamplesAccumulateWhileInFov() {
   GameLogic game(LegacyScene());
   StepSightings(game, 1.0f);
@@ -3315,6 +3335,7 @@ int main() {
   TestSnapshotMirrorsMatchAndTeamPlans();
   TestSightingRecordedImmediatelyOnEntry();
   TestDeadFigureInFovGetsGhost();
+  TestFallingBodyKeepsSamplingItsPose();
   TestReplaySeekForwardKeepsFadingGhosts();
   TestSightingSamplesAccumulateWhileInFov();
   TestSightingMoveDirectionOnlyWhenMoving();

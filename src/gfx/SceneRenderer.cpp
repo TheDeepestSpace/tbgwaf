@@ -873,7 +873,8 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
   ghost.walkPhase = s.walkPhase;
   ghost.walkBlend = s.walkBlend;
   ghost.idleElapsed = s.idleElapsed;
-  ghost.knockdownElapsed = -1.0f;
+  ghost.alive = s.alive;
+  ghost.knockdownElapsed = s.knockdownElapsed;
   if (glm::length(s.moveDirection) > 0.0f) {
     const glm::vec3 d = s.moveDirection;
     const glm::vec3 side(-d.z, 0.0f, d.x);

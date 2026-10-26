@@ -272,7 +272,10 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
           if (!sample) {
             glm::vec3 delta = unit.position - existing.back().position;
             delta.y = 0.0f;
-            sample = glm::length(delta) > 1e-4f;
+            // A falling body stays put but its pose keeps changing.
+            sample = glm::length(delta) > 1e-4f ||
+                     existing.back().alive != unit.alive ||
+                     existing.back().knockdownElapsed != unit.knockdownElapsed;
           }
         }
       }
@@ -285,6 +288,8 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
       s.walkPhase = unit.walkPhase;
       s.walkBlend = unit.walkBlend;
       s.idleElapsed = unit.idleElapsed;
+      s.alive = unit.alive;
+      s.knockdownElapsed = unit.knockdownElapsed;
       s.at = replayGhosts_ ? replayClock_ : executing ? executionElapsed_ : 0.0f;
       if (hasLastUnitPosition_) {
         glm::vec3 delta = unit.position - lastUnitPosition_[unit.id];

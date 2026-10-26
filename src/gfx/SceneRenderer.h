@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <optional>
 #include <vector>
 
@@ -177,6 +179,16 @@ class SceneRenderer {
   // is already in world space, so the same upload path works in shadow and
   // lit passes without approximating wedges by their AABB.
   LitTriangleMesh geometryMesh_;
+  // Static street fixtures are assembled once per scene instead of
+  // submitting every small cube separately each frame. The lit prop meshes
+  // are grouped by material because the shader color is a uniform. Keep this
+  // count in sync with StreetPropMaterial in the .cpp.
+  static constexpr size_t kStreetPropMaterialCount = 11;
+  LitTriangleMesh streetFurnitureMesh_;
+  LitTriangleMesh streetPropDepthMesh_;
+  std::array<LitTriangleMesh, kStreetPropMaterialCount> streetPropMeshes_;
+  std::vector<tactics::AABB> streetFurnitureKey_;
+  std::vector<tactics::StreetProp> streetPropKey_;
   tactics::HeightField terrainKey_;
   GLuint shadowFbo_ = 0;
   GLuint shadowDepthTex_ = 0;

@@ -1987,7 +1987,7 @@ void TestLocalStreetBandsReachMapEdgeAtFullWidth() {
 // its three free sides. Every raised door has a walk surface at its base
 // that reaches the ground.
 void TestFacadeOpeningsDoorsStoopsAndPlatforms() {
-  int stoops = 0, grade = 0, rearDoors = 0, platforms = 0, rearAtGrade = 0;
+  int stoops = 0, grade = 0, rearDoors = 0, platforms = 0, rearAtGrade = 0, loadingBays = 0;
   std::set<int> rampSides;
   for (uint32_t seed : kSeeds) {
     const Scene scene = GenerateUrbanMap(seed, FlatConfig());
@@ -2030,8 +2030,13 @@ void TestFacadeOpeningsDoorsStoopsAndPlatforms() {
       CHECK(o.y0 >= wall.bounds.min.y - kEps && o.y1 <= wall.bounds.max.y + kEps);
       CHECK(o.y0 < o.y1);
       if (o.kind == FacadeOpening::Kind::Window) {
+        // Warehouses (commercial halls) have no windows.
+        CHECK(b.kind != BuildingKind::Commercial);
         ++windows;
         continue;
+      }
+      if (b.kind == BuildingKind::Commercial && o.wallEdge == parcels[b.parcel].frontageEdge) {
+        if (o.u1 - o.u0 > 4.0f) ++loadingBays;
       }
       CHECK(o.floor == 0);
       const float baseY = wall.bounds.min.y;
@@ -2092,6 +2097,7 @@ void TestFacadeOpeningsDoorsStoopsAndPlatforms() {
   CHECK(stoops > 0 && grade > 0);
   CHECK(rearDoors > 0 && platforms > rearAtGrade);
   CHECK(rampSides.size() >= 2);
+  CHECK(loadingBays > 0);  // Warehouses get wide loading entrances.
 }
 
 // --- Street furniture and traffic props (issue #150, roadmap 2.4/2.6). ---

@@ -3668,7 +3668,7 @@ DoorSpec DoorSpecFor(BuildingKind kind) {
     case BuildingKind::Residential: return {1.2f, 2.2f, 0.55f, 0.60f};
     case BuildingKind::MixedUse: return {1.6f, 2.6f, 0.10f, 0.70f};
     case BuildingKind::Office: return {1.8f, 2.6f, 0.35f, 0.40f};
-    case BuildingKind::Commercial: return {2.4f, 2.8f, 0.00f, 0.55f};  // Shop/roll-up front.
+    case BuildingKind::Commercial: return {5.0f, 4.2f, 0.00f, 0.55f};  // Warehouse loading bay.
     case BuildingKind::Civic: return {1.8f, 2.8f, 0.50f, 0.30f};
     case BuildingKind::Garage: return {2.6f, 2.4f, 0.00f, 0.35f};
   }
@@ -3695,7 +3695,7 @@ std::vector<std::pair<float, float>> FacadeColumns(float len, float w, float gap
 // Windows and doors per building, recorded as FacadeOpening data and drawn
 // as pane extrusions (roadmap 3.4): a window grid per floor on every street
 // facade, one entrance door on the frontage, and a rear/courtyard door for
-// some. Entrances draw a short stoop ramp walk-up for some kinds; rear doors
+// some (warehouses get a wide loading bay and no windows). Entrances draw a short stoop ramp walk-up for some kinds; rear doors
 // are usually raised on a little platform whose access ramp sits on any of
 // its three free sides (both as WalkSurfaces, so figures use them). Own rng
 // stream: openings never move a wall or a zipline draw.
@@ -3956,8 +3956,9 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
     // a sparser grid on the rear wall's upper floors. Floors above the base
     // prism (a set-back office top) keep their walls blank.
     const WindowSpec spec = WindowSpecFor(b.kind);
-    // Commercial halls keep their factory-style grid windows on the ground
-    // floor instead of shopfront glazing; mixed-use shops stay glazed.
+    // Commercial halls are warehouses: no windows, just the wide loading
+    // entrance on the frontage. Mixed-use shops stay glazed.
+    if (b.kind == BuildingKind::Commercial) continue;
     const bool shopfront = b.kind == BuildingKind::MixedUse;
     const bool rearWindows =
         b.kind == BuildingKind::Residential || b.kind == BuildingKind::MixedUse ||

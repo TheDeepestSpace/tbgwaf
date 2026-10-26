@@ -134,9 +134,77 @@ listed by name only.</p>
 </div>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
-<h2>Modified scenarios <span class="count">(0)</span></h2>
-<p class="empty">None.</p>
-<h2>Unchanged scenarios <span class="count">(70)</span></h2>
+<h2>Modified scenarios <span class="count">(4)</span></h2>
+<div class="scenario has-video" data-stem="free_aim_overwatch_facing"><h3>free_aim_overwatch_facing</h3><div class="path">tests/scenarios/free_aim_overwatch_facing.yaml</div>
+<p class="description">Issue point due north) turns blue0 from south to north, which immediately changes what it can see -- red1 enters the new FOV. Rounds always play out their full 5 s, so the squad playbook&#x27;s stationary-shoot reaction (overwatch) fires on red1 within that same round and re-aims blue0 at it.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_overwatch_facing/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_overwatch_facing/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="round-title">Setup</div>
+<div class="detail">Playbook (blue): stationary seen: shoot, stationary unseen: shoot</div>
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="detail">Blind covering shot due north; nothing is there, but the turn re-points blue&#x27;s FOV.</div>
+<div class="detail">Check: <span class="u red">red1</span> is not visible to blue — Behind blue&#x27;s initial facing</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> shoots unit None</div>
+<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u red">red1</span> is down — Overwatch fired on red1 under the new facing</div>
+<div class="detail">Check: <span class="u blue">blue0</span> faces 45° (tolerance 1) — Re-aimed at red1</div>
+<div class="detail">Check: winner: blue</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="zipline_opposing_teams_opposite_directions"><h3>zipline_opposing_teams_opposite_directions</h3><div class="path">tests/scenarios/zipline_opposing_teams_opposite_directions.yaml</div>
+<p class="description">Issue ride west on the same line. Both reach their anchors at the same moment; the line is single-occupancy, so one waits for the other to land and, with rounds a fixed 5 s, is cut off short of its destination.</p>
+<p class="note">⚠ scenario script failed during visual playback; video below stops at the failing step.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_opposing_teams_opposite_directions/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_opposing_teams_opposite_directions/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (20, 0)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (-26, 1)</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (20, 0) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u red">red1</span> is at (-21.473, 0.547) (tolerance 0.05) — Cut off when the fixed 5 s window closes</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="zipline_opposing_teams_same_direction"><h3>zipline_opposing_teams_same_direction</h3><div class="path">tests/scenarios/zipline_opposing_teams_same_direction.yaml</div>
+<p class="description">Issue plan the same line eastward in the same round; one rides first, the other waits at the anchor and, with rounds a fixed 5 s, is cut off short of its destination.</p>
+<p class="note">⚠ scenario script failed during visual playback; video below stops at the failing step.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_opposing_teams_same_direction/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_opposing_teams_same_direction/red.webm"></video></figure>
+<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
+<div class="step" data-action="0">Initial state</div>
+<div class="round"><div class="round-title">Round 1</div>
+<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (20, 0)</div>
+<div class="step" data-action="2"><span class="u red">red1</span> moves to (20, 1)</div>
+<div class="step" data-action="3">commit round</div>
+<div class="detail">Check: <span class="u blue">blue0</span> is at (20, 0) (tolerance 0.05)</div>
+<div class="detail">Check: <span class="u red">red1</span> is at (15.473, 0.547) (tolerance 0.05) — Cut off when the fixed 5 s window closes</div>
+</div>
+</div></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<div class="scenario has-video" data-stem="zipline_shared_line"><h3>zipline_shared_line</h3><div class="path">tests/scenarios/zipline_shared_line.yaml</div>
+<p class="note">⚠ scenario script failed during visual playback; video below stops at the failing step.</p>
+<div class="panes">
+<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_shared_line/blue.webm"></video></figure>
+<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_shared_line/red.webm"></video></figure>
+</div>
+<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
+</div>
+<h2>Unchanged scenarios <span class="count">(66)</span></h2>
 <div class="scenario has-video" data-stem="burst_free_aim_point_target"><h3>burst_free_aim_point_target</h3><div class="path">tests/scenarios/burst_free_aim_point_target.yaml</div>
 <p class="description">Bursts work for free-aim point-target shots too (issues places a blind-fire aim point on the enemy&#x27;s torso and fires a 5-shot burst at it. Every bullet flies its own scattered line inside the weapon&#x27;s cone; only bullets whose line actually crosses the figure roll against the hit chance (the pinned roll always hits), so the burst downs the figure with one of the bullets that land on the body.</p>
 <div class="panes">
@@ -823,37 +891,6 @@ listed by name only.</p>
 <div class="step" data-action="4">commit round</div>
 <div class="detail">Check: <span class="u blue">blue1</span> is alive — Transparent to the trace with the flag off</div>
 <div class="detail">Check: <span class="u red">red2</span> is down</div>
-<div class="detail">Check: winner: blue</div>
-</div>
-</div></figure>
-</div>
-<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
-</div>
-<div class="scenario has-video" data-stem="free_aim_overwatch_facing"><h3>free_aim_overwatch_facing</h3><div class="path">tests/scenarios/free_aim_overwatch_facing.yaml</div>
-<p class="description">Issue point due north) turns blue0 from south to north, which immediately changes what it can see -- red1 enters the new FOV. In round 2 the squad playbook&#x27;s stationary-shoot reaction (overwatch) fires on red1 the moment it moves across that new cone.</p>
-<div class="panes">
-<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_overwatch_facing/blue.webm"></video></figure>
-<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/free_aim_overwatch_facing/red.webm"></video></figure>
-<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
-<div class="round-title">Setup</div>
-<div class="detail">Playbook (blue): stationary seen: shoot, stationary unseen: shoot</div>
-<div class="step" data-action="0">Initial state</div>
-<div class="round"><div class="round-title">Round 1</div>
-<div class="detail">Blind covering shot due north; nothing is there, but the turn re-points blue&#x27;s FOV.</div>
-<div class="detail">Check: <span class="u red">red1</span> is not visible to blue — Behind blue&#x27;s initial facing</div>
-<div class="step" data-action="1"><span class="u blue">blue0</span> shoots unit None</div>
-<div class="step" data-action="2"><span class="u red">red1</span> passes</div>
-<div class="step" data-action="3">commit round</div>
-<div class="detail">Check: <span class="u blue">blue0</span> faces 90° (tolerance 1)</div>
-<div class="detail">Check: <span class="u red">red1</span> is visible to blue — The new facing covers red1</div>
-<div class="detail">Check: round is 2</div>
-</div>
-<div class="round"><div class="round-title">Round 2</div>
-<div class="detail">Red1 tries to cross blue&#x27;s freshly-pointed cone.</div>
-<div class="step" data-action="4"><span class="u blue">blue0</span> passes</div>
-<div class="step" data-action="5"><span class="u red">red1</span> moves to (-10, 8)</div>
-<div class="step" data-action="6">commit round</div>
-<div class="detail">Check: <span class="u red">red1</span> is down — The overwatch reaction fired under the new facing</div>
 <div class="detail">Check: winner: blue</div>
 </div>
 </div></figure>
@@ -1571,42 +1608,6 @@ listed by name only.</p>
 </div>
 <div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
 </div>
-<div class="scenario has-video" data-stem="zipline_opposing_teams_opposite_directions"><h3>zipline_opposing_teams_opposite_directions</h3><div class="path">tests/scenarios/zipline_opposing_teams_opposite_directions.yaml</div>
-<p class="description">Issue ride west on the same line. Both reach their anchors at the same moment; the line is single-occupancy, so one waits for the other to land and both still arrive.</p>
-<div class="panes">
-<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_opposing_teams_opposite_directions/blue.webm"></video></figure>
-<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_opposing_teams_opposite_directions/red.webm"></video></figure>
-<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
-<div class="step" data-action="0">Initial state</div>
-<div class="round"><div class="round-title">Round 1</div>
-<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (20, 0)</div>
-<div class="step" data-action="2"><span class="u red">red1</span> moves to (-26, 1)</div>
-<div class="step" data-action="3">commit round</div>
-<div class="detail">Check: <span class="u blue">blue0</span> is at (20, 0) (tolerance 0.05)</div>
-<div class="detail">Check: <span class="u red">red1</span> is at (-26, 1) (tolerance 0.05)</div>
-</div>
-</div></figure>
-</div>
-<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
-</div>
-<div class="scenario has-video" data-stem="zipline_opposing_teams_same_direction"><h3>zipline_opposing_teams_same_direction</h3><div class="path">tests/scenarios/zipline_opposing_teams_same_direction.yaml</div>
-<p class="description">Issue plan the same line eastward in the same round; one rides first, the other waits at the anchor, and both end up at their destinations.</p>
-<div class="panes">
-<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_opposing_teams_same_direction/blue.webm"></video></figure>
-<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_opposing_teams_same_direction/red.webm"></video></figure>
-<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
-<div class="step" data-action="0">Initial state</div>
-<div class="round"><div class="round-title">Round 1</div>
-<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (20, 0)</div>
-<div class="step" data-action="2"><span class="u red">red1</span> moves to (20, 1)</div>
-<div class="step" data-action="3">commit round</div>
-<div class="detail">Check: <span class="u blue">blue0</span> is at (20, 0) (tolerance 0.05)</div>
-<div class="detail">Check: <span class="u red">red1</span> is at (20, 1) (tolerance 0.05)</div>
-</div>
-</div></figure>
-</div>
-<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
-</div>
 <div class="scenario has-video" data-stem="zipline_roof_access"><h3>zipline_roof_access</h3><div class="path">tests/scenarios/zipline_roof_access.yaml</div>
 <p class="description">Ziplines run from the street up to a rooftop. The 6-high building&#x27;s flat roof slab joins nothing, so the line is the only way onto it: Blue walks to the short street post, rides up to the roof post (mount, hang, dismount) and walks on across the roof; next round it walks back to the roof post and rides the line down to the street. Red cannot walk onto the roof.</p>
 <div class="panes">
@@ -1627,26 +1628,6 @@ listed by name only.</p>
 <div class="step" data-action="7">commit round</div>
 <div class="detail">Check: <span class="u blue">blue0</span> is at (-12, 0) (tolerance 0.05)</div>
 <div class="detail">Check: round is 3</div>
-</div>
-</div></figure>
-</div>
-<div class="transport"><button class="playpause" aria-label="Play/pause both views">▶</button><input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek both views"><span class="clock">0:00 / 0:00</span></div><div class="frametimes" hidden><canvas role="img" aria-label="Per-frame render time in ms over video time (this PR in green, master baseline in red), with action markers"></canvas></div>
-</div>
-<div class="scenario has-video" data-stem="zipline_shared_line"><h3>zipline_shared_line</h3><div class="path">tests/scenarios/zipline_shared_line.yaml</div>
-<p class="description">Issue the same round; the second waits at the anchor until the first has landed, then rides, and both reach their destinations within the round (tests/logic_tests.cpp TestZiplineOccupiedLineBlocksSecondRider checks the mid-round exclusion tick by tick).</p>
-<div class="panes">
-<figure class="pane blue"><figcaption>Blue view</figcaption><video muted playsinline preload="metadata" src="media/zipline_shared_line/blue.webm"></video></figure>
-<figure class="pane red"><figcaption>Red view</figcaption><video muted playsinline preload="metadata" src="media/zipline_shared_line/red.webm"></video></figure>
-<figure class="pane breakdown"><figcaption>Script</figcaption><div class="rounds">
-<div class="step" data-action="0">Initial state</div>
-<div class="round"><div class="round-title">Round 1</div>
-<div class="step" data-action="1"><span class="u blue">blue0</span> moves to (20, 0)</div>
-<div class="step" data-action="2"><span class="u blue">blue1</span> moves to (20, 1)</div>
-<div class="step" data-action="3"><span class="u red">red2</span> passes</div>
-<div class="step" data-action="4">commit round</div>
-<div class="detail">Check: <span class="u blue">blue0</span> is at (20, 0) (tolerance 0.05)</div>
-<div class="detail">Check: <span class="u blue">blue1</span> is at (20, 1) (tolerance 0.05)</div>
-<div class="detail">Check: round is 2</div>
 </div>
 </div></figure>
 </div>

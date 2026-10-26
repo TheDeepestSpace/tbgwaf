@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>tbgwaf · Performance suite · PR #229</title>
+<style>
+:root { color-scheme: dark; }
+body { font-family: system-ui,sans-serif; margin: 2rem auto; max-width: 1500px; padding: 0 1rem;
+        background: #14161a; color: #e8e8e8; }
+a { color: #8ab4ff; } h1 { margin-bottom: .25rem; }
+.nav { display: flex; gap: 1rem; margin: .2rem 0 1.5rem; }
+.muted,.range { color: #9299a5; } .range { font-size: .8em; white-space: nowrap; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: .75rem; }
+.card { border: 1px solid #343941; background: #1b1e23; border-radius: 8px; padding: .8rem; }
+.card span,.card small { display: block; color: #aab0ba; } .card strong { font-size: 1.5rem; }
+.good { color: #62cf83; } .bad { color: #ef7373; }
+.note { border-left: 3px solid #e0a54a; background: #2a2416; padding: .6rem .8rem; margin: 1rem 0; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .86rem; }
+th,td { border: 1px solid #343941; padding: .42rem .55rem; text-align: right; white-space: nowrap; }
+thead th { background: #22262c; } tbody tr:nth-child(even) { background: #191c20; }
+tbody th,td:nth-child(1) { text-align: left; } code { font-size: .9em; }
+.meta { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; }
+.meta dt { color: #9299a5; } .meta dd { margin: 0; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<h1>Performance suite · PR #229</h1>
+<nav class="nav"><a href="../">Game</a><a href="../gallery/">Asset gallery</a><a href="results.json">Raw JSON</a></nav>
+<p>Observational software-rendering measurements for 10 pinned <code>urban-auto</code> maps. Values are medians;
+master ranges show the median from each preserved master run. Timing changes are reported, not gated.</p>
+<p class="note">Measured with <code>llvmpipe (LLVM 15.0.7, 256 bits)</code>, a CPU software rasterizer on a shared GitHub-hosted runner with no GPU. Absolute FPS and frame times are far below what the game reaches on real hardware; only the deltas between master and the current run on this same setup are meaningful.</p>
+<div class="cards"><div class="card"><span>FPS</span><strong>3.4</strong><small>master 4.2 <span class="range">[3.5–6.3]</span> · <span class="bad">-18.8%</span></small></div>
+<div class="card"><span>Frame ms</span><strong>293.32</strong><small>master 238.27 <span class="range">[159.99–285.97]</span> · <span class="bad">+23.1%</span></small></div>
+<div class="card"><span>FOV ms</span><strong>0.39</strong><small>master 4.61 <span class="range">[0.26–5.22]</span> · <span class="good">-91.5%</span></small></div>
+<div class="card"><span>Draw calls</span><strong>1,280</strong><small>master 674 <span class="range">[445–1,280]</span> · <span class="bad">+90.0%</span></small></div>
+<div class="card"><span>Triangles</span><strong>368,915</strong><small>master 192,816 <span class="range">[97,704–368,915]</span> · <span class="bad">+91.3%</span></small></div>
+<div class="card"><span>Vertices</span><strong>1,107,009</strong><small>master 578,756 <span class="range">[293,409–1,107,009]</span> · <span class="bad">+91.3%</span></small></div></div>
+<h2>Per-map measurements</h2>
+<div class="scroll"><table><thead><tr><th rowspan="2">Seed</th><th colspan="3">FPS</th><th colspan="3">Frame ms</th><th colspan="3">FOV ms</th><th colspan="3">Draw calls</th><th colspan="3">Triangles</th><th colspan="3">Vertices</th></tr><tr><th>current</th><th>master</th><th>Δ</th><th>current</th><th>master</th><th>Δ</th><th>current</th><th>master</th><th>Δ</th><th>current</th><th>master</th><th>Δ</th><th>current</th><th>master</th><th>Δ</th><th>current</th><th>master</th><th>Δ</th></tr></thead>
+<tbody><tr><th>857197117</th><td>3.1</td><td>4.1 <span class="range">[3.2–5.9]</span></td><td><span class="bad">-23.8%</span></td><td>321.34</td><td>244.91 <span class="range">[170.47–313.32]</span></td><td><span class="bad">+31.2%</span></td><td>0.09</td><td>4.63 <span class="range">[0.06–8.34]</span></td><td><span class="good">-98.1%</span></td><td>1,591</td><td>448 <span class="range">[442–1,591]</span></td><td><span class="bad">+255.1%</span></td><td>369,498</td><td>97,728 <span class="range">[97,680–369,498]</span></td><td><span class="bad">+278.1%</span></td><td>1,108,824</td><td>293,492 <span class="range">[293,326–1,108,824]</span></td><td><span class="bad">+277.8%</span></td></tr>
+<tr><th>2626763209</th><td>3.5</td><td>4.1 <span class="range">[3.4–6.4]</span></td><td><span class="bad">-14.4%</span></td><td>287.93</td><td>246.41 <span class="range">[155.76–294.72]</span></td><td><span class="bad">+16.8%</span></td><td>0.52</td><td>3.85 <span class="range">[0.34–7.45]</span></td><td><span class="good">-86.4%</span></td><td>860</td><td>668 <span class="range">[342–860]</span></td><td><span class="bad">+28.7%</span></td><td>368,332</td><td>192,768 <span class="range">[96,576–368,332]</span></td><td><span class="bad">+91.1%</span></td><td>1,105,194</td><td>578,590 <span class="range">[289,926–1,105,194]</span></td><td><span class="bad">+91.0%</span></td></tr>
+<tr><th>1363136209</th><td>3.3</td><td>3.8 <span class="range">[3.3–6.0]</span></td><td><span class="bad">-14.6%</span></td><td>307.43</td><td>262.45 <span class="range">[166.02–299.10]</span></td><td><span class="bad">+17.1%</span></td><td>0.33</td><td>4.90 <span class="range">[0.24–5.38]</span></td><td><span class="good">-93.3%</span></td><td>1,970</td><td>730 <span class="range">[676–1,970]</span></td><td><span class="bad">+169.9%</span></td><td>438,482</td><td>193,584 <span class="range">[193,008–438,482]</span></td><td><span class="bad">+126.5%</span></td><td>1,315,600</td><td>580,972 <span class="range">[579,178–1,315,600]</span></td><td><span class="bad">+126.4%</span></td></tr>
+<tr><th>1916785565</th><td>3.3</td><td>4.1 <span class="range">[3.5–6.3]</span></td><td><span class="bad">-19.4%</span></td><td>301.85</td><td>243.34 <span class="range">[157.58–287.99]</span></td><td><span class="bad">+24.0%</span></td><td>0.08</td><td>5.16 <span class="range">[0.07–7.79]</span></td><td><span class="good">-98.4%</span></td><td>1,477</td><td>444 <span class="range">[432–1,477]</span></td><td><span class="bad">+232.7%</span></td><td>345,874</td><td>97,728 <span class="range">[97,680–345,874]</span></td><td><span class="bad">+253.9%</span></td><td>1,037,886</td><td>293,448 <span class="range">[293,216–1,037,886]</span></td><td><span class="bad">+253.7%</span></td></tr>
+<tr><th>717769303</th><td>3.5</td><td>4.3 <span class="range">[3.6–6.6]</span></td><td><span class="bad">-18.2%</span></td><td>285.42</td><td>233.61 <span class="range">[151.64–274.76]</span></td><td><span class="bad">+22.2%</span></td><td>0.64</td><td>3.70 <span class="range">[0.38–5.10]</span></td><td><span class="good">-82.7%</span></td><td>816</td><td>656 <span class="range">[342–816]</span></td><td><span class="bad">+24.4%</span></td><td>329,966</td><td>192,672 <span class="range">[96,576–329,966]</span></td><td><span class="bad">+71.3%</span></td><td>990,184</td><td>578,258 <span class="range">[289,926–990,184]</span></td><td><span class="bad">+71.2%</span></td></tr>
+<tr><th>1426808689</th><td>3.3</td><td>4.2 <span class="range">[3.3–6.0]</span></td><td><span class="bad">-22.2%</span></td><td>307.68</td><td>239.31 <span class="range">[165.69–301.47]</span></td><td><span class="bad">+28.6%</span></td><td>0.08</td><td>4.79 <span class="range">[0.05–5.26]</span></td><td><span class="good">-98.4%</span></td><td>1,533</td><td>680 <span class="range">[446–1,533]</span></td><td><span class="bad">+125.4%</span></td><td>383,234</td><td>192,864 <span class="range">[97,680–383,234]</span></td><td><span class="bad">+98.7%</span></td><td>1,150,032</td><td>578,922 <span class="range">[293,370–1,150,032]</span></td><td><span class="bad">+98.7%</span></td></tr>
+<tr><th>1572775524</th><td>3.6</td><td>4.3 <span class="range">[3.7–6.7]</span></td><td><span class="bad">-15.7%</span></td><td>277.98</td><td>234.31 <span class="range">[149.25–272.32]</span></td><td><span class="bad">+18.6%</span></td><td>0.42</td><td>3.57 <span class="range">[0.26–5.34]</span></td><td><span class="good">-88.3%</span></td><td>1,052</td><td>674 <span class="range">[618–1,052]</span></td><td><span class="bad">+56.1%</span></td><td>437,500</td><td>192,816 <span class="range">[192,288–437,500]</span></td><td><span class="bad">+126.9%</span></td><td>1,312,676</td><td>578,756 <span class="range">[577,040–1,312,676]</span></td><td><span class="bad">+126.8%</span></td></tr>
+<tr><th>828253415</th><td>3.7</td><td>4.2 <span class="range">[3.6–6.8]</span></td><td><span class="bad">-13.1%</span></td><td>272.43</td><td>236.86 <span class="range">[147.16–280.75]</span></td><td><span class="bad">+15.0%</span></td><td>0.47</td><td>3.70 <span class="range">[0.27–7.66]</span></td><td><span class="good">-87.4%</span></td><td>1,210</td><td>678 <span class="range">[636–1,210]</span></td><td><span class="bad">+78.5%</span></td><td>477,450</td><td>192,768 <span class="range">[192,432–477,450]</span></td><td><span class="bad">+147.7%</span></td><td>1,432,724</td><td>578,700 <span class="range">[577,538–1,432,724]</span></td><td><span class="bad">+147.6%</span></td></tr>
+<tr><th>795514493</th><td>3.3</td><td>4.4 <span class="range">[3.4–6.2]</span></td><td><span class="bad">-23.8%</span></td><td>301.69</td><td>229.81 <span class="range">[160.44–293.43]</span></td><td><span class="bad">+31.3%</span></td><td>0.56</td><td>4.34 <span class="range">[0.37–4.94]</span></td><td><span class="good">-87.1%</span></td><td>822</td><td>662 <span class="range">[354–822]</span></td><td><span class="bad">+24.2%</span></td><td>357,648</td><td>192,720 <span class="range">[96,672–357,648]</span></td><td><span class="bad">+85.6%</span></td><td>1,073,164</td><td>578,424 <span class="range">[290,258–1,073,164]</span></td><td><span class="bad">+85.5%</span></td></tr>
+<tr><th>4017845533</th><td>3.4</td><td>4.4 <span class="range">[3.5–6.0]</span></td><td><span class="bad">-21.4%</span></td><td>291.77</td><td>229.33 <span class="range">[165.50–283.93]</span></td><td><span class="bad">+27.2%</span></td><td>0.34</td><td>3.51 <span class="range">[0.19–5.37]</span></td><td><span class="good">-90.4%</span></td><td>1,351</td><td>680 <span class="range">[420–1,351]</span></td><td><span class="bad">+98.7%</span></td><td>355,086</td><td>192,864 <span class="range">[97,440–355,086]</span></td><td><span class="bad">+84.1%</span></td><td>1,065,522</td><td>578,922 <span class="range">[292,584–1,065,522]</span></td><td><span class="bad">+84.1%</span></td></tr></tbody></table></div>
+<p class="muted">Each map warms up for 30 frames, then records
+120 frames at 1280×720,
+two fog-of-war panes with six figures and shadow-map FOV.</p>
+<h2>Current run</h2>
+<dl class="meta">
+<dt>Ref</dt><dd>pr-229</dd>
+<dt>Commit</dt><dd><code>c0b81501f3c5b7dc4c30b8ca32bb6d57cf8cbca8</code></dd>
+<dt>Recorded</dt><dd>2026-10-26T03:05:54Z</dd>
+<dt>Run</dt><dd>pr-229-40260775613-1</dd>
+<dt>Renderer</dt><dd>llvmpipe (LLVM 15.0.7, 256 bits)</dd>
+<dt>GL</dt><dd>Mesa · OpenGL ES 3.2 Mesa 23.2.1-1ubuntu3.1~22.04.4</dd>
+<dt>Platform</dt><dd>Linux 6.17.0-1022-azure x86_64</dd>
+</dl>
+<h2>Run history</h2>
+<div class="scroll"><table><thead><tr><th>Recorded</th><th>Ref</th><th>Commit</th><th>FPS</th><th>Frame ms</th><th>Renderer</th><th>Raw</th></tr></thead>
+<tbody><tr><td>2026-10-26T03:05:54Z</td><td>pr-229</td><td><code>c0b81501f3</code></td><td>3.4</td><td>293.32</td><td>llvmpipe (LLVM 15.0.7, 256 bits)</td><td><a href="results.json">JSON</a></td></tr>
+<tr><td>2026-10-26T02:45:33Z</td><td>master</td><td><code>c161480642</code></td><td>6.3</td><td>159.99</td><td>llvmpipe (LLVM 15.0.7, 256 bits)</td><td><a href="../../../performance/history/run-40260575536-1.json">JSON</a></td></tr>
+<tr><td>2026-10-26T01:31:05Z</td><td>master</td><td><code>7d14e9dbf9</code></td><td>3.5</td><td>285.97</td><td>llvmpipe (LLVM 15.0.7, 256 bits)</td><td><a href="../../../performance/history/run-40254484789-1.json">JSON</a></td></tr>
+<tr><td>2026-10-26T01:11:27Z</td><td>master</td><td><code>f4997df2ad</code></td><td>3.5</td><td>284.66</td><td>llvmpipe (LLVM 15.0.7, 256 bits)</td><td><a href="../../../performance/history/run-40252850200-1.json">JSON</a></td></tr>
+<tr><td>2026-10-25T22:20:54Z</td><td>master</td><td><code>728cb2290c</code></td><td>3.5</td><td>285.28</td><td>llvmpipe (LLVM 15.0.7, 256 bits)</td><td><a href="../../../performance/history/run-40239626294-1.json">JSON</a></td></tr>
+<tr><td>2026-10-25T21:12:54Z</td><td>master</td><td><code>7424991b1b</code></td><td>3.6</td><td>279.58</td><td>llvmpipe (LLVM 15.0.7, 256 bits)</td><td><a href="../../../performance/history/run-40234291618-1.json">JSON</a></td></tr>
+<tr><td>2026-10-25T20:34:14Z</td><td>master</td><td><code>23241d2abe</code></td><td>4.6</td><td>216.20</td><td>llvmpipe (LLVM 15.0.7, 256 bits)</td><td><a href="../../../performance/history/run-40230757521-1.json">JSON</a></td></tr>
+<tr><td>2026-10-25T20:26:56Z</td><td>master</td><td><code>1fb671abea</code></td><td>4.6</td><td>217.79</td><td>llvmpipe (LLVM 15.0.7, 256 bits)</td><td><a href="../../../performance/history/run-40230677669-1.json">JSON</a></td></tr>
+<tr><td>2026-10-25T20:12:20Z</td><td>master</td><td><code>b274248e40</code></td><td>3.6</td><td>274.59</td><td>llvmpipe (LLVM 15.0.7, 256 bits)</td><td><a href="../../../performance/history/run-40229560527-1.json">JSON</a></td></tr>
+<tr><td>2026-10-25T15:52:25Z</td><td>master</td><td><code>eb83c9b73a</code></td><td>4.3</td><td>234.67</td><td>llvmpipe (LLVM 15.0.7, 256 bits)</td><td><a href="../../../performance/history/run-40208483619-1.json">JSON</a></td></tr>
+<tr><td>2026-10-25T15:44:41Z</td><td>master</td><td><code>b0584be5c5</code></td><td>4.2</td><td>238.27</td><td>llvmpipe (LLVM 15.0.7, 256 bits)</td><td><a href="../../../performance/history/run-40208284831-1.json">JSON</a></td></tr>
+<tr><td>2026-10-25T05:31:55Z</td><td>master</td><td><code>daf81b35a5</code></td><td>4.3</td><td>234.17</td><td>llvmpipe (LLVM 15.0.7, 256 bits)</td><td><a href="../../../performance/history/run-40165793789-1.json">JSON</a></td></tr></tbody></table></div>
+</body>
+</html>

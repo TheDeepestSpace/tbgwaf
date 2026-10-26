@@ -3649,8 +3649,8 @@ WindowSpec WindowSpecFor(BuildingKind kind) {
   switch (kind) {
     case BuildingKind::Residential: return {0.9f, 1.2f, 1.1f, 1.0f};
     case BuildingKind::MixedUse: return {0.9f, 1.2f, 1.1f, 1.0f};  // Upper floors.
-    case BuildingKind::Office: return {0.8f, 1.5f, 1.7f, 0.6f};    // Near-ribbon glazing.
-    case BuildingKind::Commercial: return {1.8f, 0.9f, 2.0f, 1.2f};  // High hall windows.
+    case BuildingKind::Office: return {0.5f, 2.4f, 2.6f, 0.45f};   // Full-floor ribbon glazing.
+    case BuildingKind::Commercial: return {1.2f, 1.9f, 2.6f, 0.9f};  // Large factory windows.
     case BuildingKind::Civic: return {0.9f, 1.6f, 1.4f, 0.9f};
     case BuildingKind::Garage: return {1.1f, 0.8f, 2.2f, 1.6f};  // Open deck slots.
   }
@@ -3693,7 +3693,7 @@ std::vector<std::pair<float, float>> FacadeColumns(float len, float w, float gap
 }
 
 // Windows and doors per building, recorded as FacadeOpening data and drawn
-// as wall decals (roadmap 3.4): a window grid per floor on every street
+// as pane extrusions (roadmap 3.4): a window grid per floor on every street
 // facade, one entrance door on the frontage, and a rear/courtyard door for
 // some. Entrances draw a short stoop ramp walk-up for some kinds; rear doors
 // are usually raised on a little platform whose access ramp sits on any of
@@ -3956,8 +3956,9 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
     // a sparser grid on the rear wall's upper floors. Floors above the base
     // prism (a set-back office top) keep their walls blank.
     const WindowSpec spec = WindowSpecFor(b.kind);
-    const bool shopfront =
-        b.kind == BuildingKind::MixedUse || b.kind == BuildingKind::Commercial;
+    // Commercial halls keep their factory-style grid windows on the ground
+    // floor instead of shopfront glazing; mixed-use shops stay glazed.
+    const bool shopfront = b.kind == BuildingKind::MixedUse;
     const bool rearWindows =
         b.kind == BuildingKind::Residential || b.kind == BuildingKind::MixedUse ||
         b.kind == BuildingKind::Office || b.kind == BuildingKind::Civic;

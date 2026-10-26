@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include <GLES3/gl3.h>
@@ -207,11 +208,16 @@ class SceneRenderer {
   // change. Drawn in the shadow and lit passes only.
   LitTriangleMesh massingMesh_;
   unsigned long long massingKey_ = 0;
-  // Facade window/door decals (issue #152): two static meshes (one color
-  // each) rebuilt when the scene's opening records change. Drawn in the lit
-  // pass right after the building prisms.
+  // Facade openings as pane extrusions (issue #152): three static meshes
+  // (one color each: window glazing, door leafs, frame/sill/mullion trim)
+  // rebuilt when the scene's opening records change. Drawn in the lit pass
+  // right after the building prisms. Recessed openings (doors, factory
+  // windows) also cut holes into their wall faces: the rectangles per
+  // obstacle/edge are cached alongside the meshes.
   LitTriangleMesh facadeWindowMesh_;
   LitTriangleMesh facadeDoorMesh_;
+  LitTriangleMesh facadeTrimMesh_;
+  std::unordered_map<int, std::vector<std::vector<glm::vec4>>> facadeRecessHoles_;
   unsigned long long facadeKey_ = 0;
   // All walk surfaces (decks, ramps, roof slabs, facade stoops/platforms)
   // batched into one static mesh for the shadow and lit passes; the

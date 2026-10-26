@@ -108,10 +108,14 @@ movement; the set-back top floor is full obstacle geometry.
 
 Buildings also carry **facade openings** (issue #152, `Scene::facadeOpenings`):
 a per-kind window grid per floor on every street facade (shopfront glazing on
-mixed-use/commercial ground floors, a sparser grid on the courtyard wall) and
-the doors, each recorded as data (wall edge, u-range, floor, kind) and drawn
-as a flat decal, so a later stage can turn the same records into real holes
-without re-rolling where they are. Nearly every building gets a street
+mixed-use ground floors, a sparser grid on the courtyard wall) and the doors,
+each recorded as data (wall edge, u-range, floor, kind) and rendered as pane
+extrusions -- window frames extruded out of the wall (with exterior sills on
+some residential buildings, flatter thinner frames on office ribbon glazing),
+while doors and the factory-style grid windows of commercial halls are
+recessed into the building body through a real hole in the drawn wall face --
+so a later stage can turn the same records into gameplay holes without
+re-rolling where they are. Nearly every building gets a street
 entrance on its frontage: some entrances climb a short stoop walk-up while
 the rest open straight off the ground, and some buildings add a rear
 courtyard door, usually raised on a little platform whose access ramp lands

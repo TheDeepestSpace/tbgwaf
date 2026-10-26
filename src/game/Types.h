@@ -97,9 +97,10 @@ struct MassingDetail {
 };
 
 // A window or door on a generated building's facade (issue #152, roadmap
-// 3.4). Openings are recorded as data and rendered as flat decals on the
-// wall face, so stage 5 can turn the same records into real holes without
-// re-rolling where they are. The opening lies on footprint edge `wallEdge`
+// 3.4). Openings are recorded as data; the renderer builds pane extrusions
+// from them (window frames extruded out of the wall, doors and factory
+// windows recessed into it), so stage 5 can turn the same records into real
+// holes without re-rolling where they are. The opening lies on footprint edge `wallEdge`
 // (footprint[wallEdge] -> footprint[wallEdge + 1]) of
 // Scene::obstacles[obstacle]: `u0..u1` world units along that edge from its
 // first vertex, `y0..y1` world heights. A door whose y0 sits above the wall

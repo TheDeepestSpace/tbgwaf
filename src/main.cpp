@@ -372,6 +372,12 @@ int main() {
   auto makeBaseMap = [](uint32_t mapSeed, const std::string& mapType) {
     if (mapType == "hilly") return tactics::GenerateHillyMap(mapSeed);
     tactics::MapGeneratorConfig config;
+    // The regular menu entry keeps the original 4x4 city. Urban x4 uses
+    // the 8x8 generator default: twice each dimension, four times the area.
+    if (mapType == "urban-auto-x1") {
+      config.blocksX = 4;
+      config.blocksZ = 4;
+    }
     if (mapType == "urban-merge" || mapType == "urban-elevated") config.arteryCount = 2;
     if (mapType == "urban" || mapType == "urban-merge") {
       config.elevatedHighway = tactics::OverpassMode::Off;
@@ -741,9 +747,12 @@ int main() {
           ctfMode = *flowEvent == tbgwaf_flow::Event::SelectCtf;
         }
         if (*flowEvent == tbgwaf_flow::Event::SelectUrban ||
+            *flowEvent == tbgwaf_flow::Event::SelectUrbanX4 ||
             *flowEvent == tbgwaf_flow::Event::SelectHills) {
-          // The menu's Urban entry uses the seed-driven random overpass mode.
-          mapType = *flowEvent == tbgwaf_flow::Event::SelectHills ? "hilly" : "urban-auto";
+          // Both urban entries use the seed-driven random overpass mode.
+          if (*flowEvent == tbgwaf_flow::Event::SelectHills) mapType = "hilly";
+          else if (*flowEvent == tbgwaf_flow::Event::SelectUrbanX4) mapType = "urban-auto";
+          else mapType = "urban-auto-x1";
           game.Reset(makeMap());
           timeline.Reset(game);
           timelinePlayback.Reset();

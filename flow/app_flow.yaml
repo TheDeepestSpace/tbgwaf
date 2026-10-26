@@ -15,5 +15,6 @@ transitions:
   - {from: game_mode, event: select_ctf, to: map_select}
   - {from: game_mode, event: back, to: splash}
   - {from: map_select, event: select_urban, to: gameplay}
+  - {from: map_select, event: select_urban_x4, to: gameplay}
   - {from: map_select, event: select_hills, to: gameplay}
   - {from: map_select, event: back, to: game_mode}

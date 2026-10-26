@@ -5,6 +5,7 @@ window.MAP_SEED_GOLDENS = [
   "city_archetypes_residential_seed_7.png",
   "city_elevated_deck_frontier_seed_7.png",
   "city_elevated_seed_7.png",
+  "city_furniture_seed_7.png",
   "city_merge_seed_42.png",
   "city_overpass_branch_off_map_seed_26.png",
   "city_overpass_enter_ramp_down_seed_22.png",

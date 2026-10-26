@@ -41,7 +41,7 @@ script:
     actor: 3
   - action: commit
 
-  - assert: {unit: 2, alive: false, comment: Downed by the last shot of the turn, mid-fall when the turn ends}
+  - assert: {unit: 2, alive: false, comment: "Downed by the last shot of the turn, mid-fall when the turn ends"}
   - assert: {unit: 1, alive: true}
   - assert: {round: 2}
 

@@ -71,6 +71,11 @@ struct Scene {
   // awnings the renderer draws on/over them.
   std::vector<Building> buildings;
   std::vector<MassingDetail> massing;
+  // Facade windows and doors (issue #152): data records rendered as decals
+  // on the building walls. Doors raised on a stoop or rear platform have a
+  // matching WalkSurface in `walkSurfaces` (a short ramp or a platform plus
+  // its ramp) so a figure can walk up to them.
+  std::vector<FacadeOpening> facadeOpenings;
   // Flat, walkable, visual-only slabs (e.g. legacy rectangular sidewalks).
   std::vector<AABB> sidewalks;
   // Asphalt polygons at ground level, plus explicit ramp/deck layers. The

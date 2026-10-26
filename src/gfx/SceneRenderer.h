@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include <GLES3/gl3.h>
@@ -207,6 +208,19 @@ class SceneRenderer {
   // change. Drawn in the shadow and lit passes only.
   LitTriangleMesh massingMesh_;
   unsigned long long massingKey_ = 0;
+  // Facade openings as pane extrusions (issue #152): one static mesh
+  // (frames, sills, mullions, niche reveals/backs; building color) rebuilt when the scene's opening records change. Drawn in the lit pass
+  // right after the building prisms. Recessed openings (doors, factory
+  // windows) also cut holes into their wall faces: the rectangles per
+  // obstacle/edge are cached alongside the meshes.
+  LitTriangleMesh facadeMesh_;
+  std::unordered_map<int, std::vector<std::vector<glm::vec4>>> facadeRecessHoles_;
+  unsigned long long facadeKey_ = 0;
+  // All walk surfaces (decks, ramps, roof slabs, facade stoops/platforms)
+  // batched into one static mesh for the shadow and lit passes; the
+  // per-surface path remains only for the camera-fade re-draw.
+  LitTriangleMesh deckMesh_;
+  unsigned long long deckKey_ = 0;
   // Renders the two depth maps for `unit` looking along `facingYaw`, then
   // re-draws the static scene into the pane with the mask shader, tinted
   // `color` within `halfFovDegrees` of that heading. Leaves the pane framebuffer,

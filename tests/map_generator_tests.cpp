@@ -60,7 +60,7 @@ bool SameScene(const Scene& a, const Scene& b) {
     const auto& x = a.obstacles[i];
     const auto& y = b.obstacles[i];
     if (x.bounds.min != y.bounds.min || x.bounds.max != y.bounds.max ||
-        x.climbable != y.climbable || x.footprint != y.footprint) {
+        x.climbable != y.climbable || x.footprint != y.footprint || x.kind != y.kind) {
       return false;
     }
   }
@@ -82,9 +82,25 @@ bool SameScene(const Scene& a, const Scene& b) {
       return false;
     }
   }
+  if (a.facadeOpenings.size() != b.facadeOpenings.size()) return false;
+  for (size_t i = 0; i < a.facadeOpenings.size(); ++i) {
+    const FacadeOpening& x = a.facadeOpenings[i];
+    const FacadeOpening& y = b.facadeOpenings[i];
+    if (x.kind != y.kind || x.obstacle != y.obstacle || x.wallEdge != y.wallEdge ||
+        x.u0 != y.u0 || x.u1 != y.u1 || x.y0 != y.y0 || x.y1 != y.y1) {
+      return false;
+    }
+  }
   if (a.ziplines.size() != b.ziplines.size()) return false;
   for (size_t i = 0; i < a.ziplines.size(); ++i) {
     if (a.ziplines[i].a != b.ziplines[i].a || a.ziplines[i].b != b.ziplines[i].b) return false;
+  }
+  if (a.props.size() != b.props.size()) return false;
+  for (size_t i = 0; i < a.props.size(); ++i) {
+    if (a.props[i].kind != b.props[i].kind || a.props[i].position != b.props[i].position ||
+        a.props[i].yaw != b.props[i].yaw || a.props[i].secondaryYaw != b.props[i].secondaryYaw) {
+      return false;
+    }
   }
   for (size_t i = 0; i < a.units.size(); ++i) {
     if (a.units[i].position != b.units[i].position || a.units[i].team != b.units[i].team ||
@@ -358,6 +374,8 @@ void TestRoofMassingBlocksWalking() {
         // no guarantee of a path around it.
         if (!found || !endpointsClear) continue;
         ++crossings;
+        // An endpoint inside a blocker's padding may legitimately leave it.
+        if (!endpointsClear) continue;
         for (size_t i = 0; i + 1 < path.size(); ++i) {
           for (const auto& blocker : slab.blockers) {
             CHECK(!SegmentEntersConvexPolygon({path[i].x, path[i].z},
@@ -578,10 +596,11 @@ void TestVariedHeightsWithFewTowers() {
   c.features.terrain.mode = FeatureMode::Off;  // Buildings only: no retaining walls.
   for (uint32_t seed : kSeeds) {
     const Scene scene = GenerateUrbanMap(seed, c);
-    int towers = 0, medium = 0;
+    int towers = 0, medium = 0, buildings = 0;
     float lo = 1e9f, hi = 0.0f;
     for (const auto& o : scene.obstacles) {
       if (o.footprint.empty()) continue;  // Pier columns (elevated seeds), not buildings.
+      ++buildings;
       const float h = o.bounds.max.y;
       lo = std::min(lo, h);
       hi = std::max(hi, h);
@@ -591,7 +610,7 @@ void TestVariedHeightsWithFewTowers() {
     }
     CHECK(towers == c.towerCount);
     CHECK(hi - lo > 8.0f);
-    CHECK(medium * 10 > static_cast<int>(scene.obstacles.size()));  // Medium heights still appear.
+    CHECK(medium * 10 > buildings);  // Medium heights still appear.
   }
 }
 
@@ -1164,7 +1183,11 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   config.arteryCount = 2;
   config.elevatedHighway = OverpassMode::On;
   config.overpassLayout = OverpassLayout::RampUpRampDown;
+  // The pier checks below identify piers as the footprint-free obstacles;
+  // furniture items (issue #150) are footprint-free too, so pin them off.
+  config.features.furniture.mode = FeatureMode::Off;
   config.features.terrain.mode = FeatureMode::Off;  // Overpass vs terrain is roadmap 4.4.
+  config.features.facades.mode = FeatureMode::Off;  // Count highway transitions only.
   const Scene scene = GenerateUrbanMap(7, config);
   const auto roads = UrbanRoads(7, config);
 
@@ -1395,6 +1418,7 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
   };
   MapGeneratorConfig config;
   config.features.terrain.mode = FeatureMode::Off;  // Legacy flat-city layouts.
+  config.features.facades.mode = FeatureMode::Off;  // Count highway transitions only.
   config.elevatedHighway = OverpassMode::On;
   config.branchEnd = BranchEnd::Ramp;
   const float half = UrbanMapHalfExtent(config);
@@ -1506,6 +1530,7 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
 void TestBranchMayRunOffMapWithoutRamp() {
   MapGeneratorConfig config;
   config.features.terrain.mode = FeatureMode::Off;  // Flat-city deck heights.
+  config.features.facades.mode = FeatureMode::Off;  // Count highway transitions only.
   config.elevatedHighway = OverpassMode::On;
   const float half = UrbanMapHalfExtent(config);
 
@@ -1849,11 +1874,13 @@ void TestZiplineStreetEndsReachableRoofsOnlyByLine() {
 
 }  // namespace
 
-// Issue #146: reserved feature flags are inert, and the street graph
-// covers the highway plus every local street.
+// Issue #146: feature flags are plumbed (the ones without an emitter yet stay
+// inert; `furniture` is live, issue #150), and the street graph covers the
+// highway plus every local street.
 void TestFeatureFlagsAndStreetGraph() {
   MapGeneratorConfig full;
-  for (const char* name : {"lanes", "curbs", "furniture", "terrain", "interiors", "rail"}) {
+  for (const char* name :
+       {"lanes", "curbs", "furniture", "terrain", "interiors", "rail", "facades"}) {
     FeatureToggle* toggle = UrbanFeatureByName(&full.features, name);
     CHECK(toggle != nullptr);
     if (toggle) toggle->mode = FeatureMode::On;
@@ -1862,8 +1889,13 @@ void TestFeatureFlagsAndStreetGraph() {
   FeatureMode mode = FeatureMode::Auto;
   CHECK(ParseFeatureMode("on", &mode) && mode == FeatureMode::On);
   CHECK(!ParseFeatureMode("maybe", &mode));
+  // Every feature but the live `furniture` is inert: forcing the others on
+  // leaves the scene identical as long as furniture is pinned the same way.
+  full.features.furniture.mode = FeatureMode::Off;
+  MapGeneratorConfig noFurniture;
+  noFurniture.features.furniture.mode = FeatureMode::Off;
   for (uint32_t seed : kSeeds) {
-    CHECK(SameScene(GenerateUrbanMap(seed), GenerateUrbanMap(seed, full)));
+    CHECK(SameScene(GenerateUrbanMap(seed, noFurniture), GenerateUrbanMap(seed, full)));
     const std::vector<UrbanStreet> streets = UrbanStreets(seed);
     CHECK(SameScene(GenerateUrbanMap(seed), GenerateUrbanMap(seed)));
     int highway = 0, local = 0;
@@ -1947,14 +1979,435 @@ void TestLocalStreetBandsReachMapEdgeAtFullWidth() {
   }
 }
 
+// Issue #152 (roadmap 3.4): windows and doors are recorded per building as
+// FacadeOpening data on a wall edge, inside the wall's bounds. Most
+// buildings get a street entrance on their frontage; some entrances are
+// raised on a stoop walk-up while others open straight off the ground; rear
+// doors are usually raised on a little platform whose ramp sits on one of
+// its three free sides. Every raised door has a walk surface at its base
+// that reaches the ground.
+void TestFacadeOpeningsDoorsStoopsAndPlatforms() {
+  int stoops = 0, grade = 0, rearDoors = 0, platforms = 0, rearAtGrade = 0, loadingBays = 0;
+  std::set<int> rampSides;
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed, FlatConfig());
+    const std::vector<UrbanParcel> parcels = UrbanParcels(seed, FlatConfig());
+    CHECK(!scene.facadeOpenings.empty());
+    // Determinism: the same seed re-rolls the same openings; forcing the
+    // feature off removes them (and their stoop/platform surfaces) without
+    // moving anything else.
+    {
+      const Scene again = GenerateUrbanMap(seed, FlatConfig());
+      bool same = again.facadeOpenings.size() == scene.facadeOpenings.size();
+      for (size_t i = 0; same && i < scene.facadeOpenings.size(); ++i) {
+        const FacadeOpening& x = scene.facadeOpenings[i];
+        const FacadeOpening& y = again.facadeOpenings[i];
+        same = x.kind == y.kind && x.building == y.building && x.obstacle == y.obstacle &&
+               x.wallEdge == y.wallEdge && x.u0 == y.u0 && x.u1 == y.u1 && x.y0 == y.y0 &&
+               x.y1 == y.y1 && x.floor == y.floor;
+      }
+      CHECK(same);
+      MapGeneratorConfig bare = FlatConfig();
+      bare.features.facades.mode = FeatureMode::Off;
+      const Scene bareScene = GenerateUrbanMap(seed, bare);
+      CHECK(bareScene.facadeOpenings.empty());
+      CHECK(bareScene.walkSurfaces.size() <= scene.walkSurfaces.size());
+      CHECK(bareScene.obstacles.size() == scene.obstacles.size());
+    }
+    std::vector<int> frontDoors(scene.buildings.size(), 0);
+    int windows = 0;
+    for (const FacadeOpening& o : scene.facadeOpenings) {
+      CHECK(o.building >= 0 && o.building < static_cast<int>(scene.buildings.size()));
+      const Building& b = scene.buildings[o.building];
+      CHECK(o.obstacle == b.obstacle);
+      const Obstacle& wall = scene.obstacles[o.obstacle];
+      const std::vector<glm::vec2>& fp = wall.footprint;
+      CHECK(o.wallEdge >= 0 && o.wallEdge < static_cast<int>(fp.size()));
+      const glm::vec2 a = fp[o.wallEdge], q = fp[(o.wallEdge + 1) % fp.size()];
+      const float len = glm::distance(a, q);
+      // The opening lies within its wall edge, horizontally and vertically.
+      CHECK(o.u0 >= -kEps && o.u1 <= len + kEps && o.u0 < o.u1);
+      CHECK(o.y0 >= wall.bounds.min.y - kEps && o.y1 <= wall.bounds.max.y + kEps);
+      CHECK(o.y0 < o.y1);
+      if (o.kind == FacadeOpening::Kind::Window) {
+        // Warehouses (commercial halls) have no windows.
+        CHECK(b.kind != BuildingKind::Commercial);
+        ++windows;
+        continue;
+      }
+      if (b.kind == BuildingKind::Commercial && o.wallEdge == parcels[b.parcel].frontageEdge) {
+        if (o.u1 - o.u0 > 4.0f) ++loadingBays;
+      }
+      CHECK(o.floor == 0);
+      const float baseY = wall.bounds.min.y;
+      const bool raised = o.y0 > baseY + 0.05f;
+      const bool front = o.wallEdge == parcels[b.parcel].frontageEdge;
+      if (front) {
+        ++frontDoors[o.building];
+        (raised ? stoops : grade) += 1;
+      } else {
+        ++rearDoors;
+        (raised ? platforms : rearAtGrade) += 1;
+      }
+      if (!raised) continue;
+      // A raised door's threshold: a walk surface right outside the wall at
+      // the door's base height, connected (itself or via a neighbour ramp)
+      // to the ground.
+      const glm::vec2 dir = (q - a) / len;
+      const glm::vec2 out(dir.y, -dir.x);
+      // Probe just outside the wall: the stoop ramp top / platform sits
+      // there at the door's base height (a stoop already slopes away, so
+      // allow its grade over the probe distance).
+      const glm::vec2 probe = a + dir * (0.5f * (o.u0 + o.u1)) + out * 0.12f;
+      int threshold = -1;
+      for (size_t s = 0; s < scene.walkSurfaces.size(); ++s) {
+        const WalkSurface& surface = scene.walkSurfaces[s];
+        if (!SurfaceContainsXZ(surface, probe.x, probe.y)) continue;
+        if (std::fabs(SurfaceHeightAt(surface, probe.x, probe.y) - o.y0) < 0.15f) {
+          threshold = static_cast<int>(s);
+          break;
+        }
+      }
+      CHECK(threshold >= 0);
+      if (threshold < 0) continue;
+      const WalkSurface& surface = scene.walkSurfaces[threshold];
+      bool grounded = surface.connectsToGround;
+      for (int ni : surface.neighbors) grounded |= scene.walkSurfaces[ni].connectsToGround;
+      CHECK(grounded);
+      if (!front && surface.neighbors.size() == 1) {
+        // Which of the platform's three free sides carries the ramp.
+        const WalkSurface& ramp = scene.walkSurfaces[surface.neighbors[0]];
+        const glm::vec3 pc = SurfaceCenter(surface), rc = SurfaceCenter(ramp);
+        const glm::vec2 d(rc.x - pc.x, rc.z - pc.z);
+        const float along = glm::dot(d, dir), outward = glm::dot(d, out);
+        rampSides.insert(std::fabs(along) > std::fabs(outward) ? (along < 0.0f ? 0 : 1) : 2);
+      }
+    }
+    CHECK(windows > 50);
+    int withDoor = 0;
+    for (int doors : frontDoors) {
+      CHECK(doors <= 1);
+      withDoor += doors;
+    }
+    // A street entrance per building, bar the rare frontage too small for one.
+    CHECK(withDoor > static_cast<int>(scene.buildings.size()) * 3 / 4);
+  }
+  // Across the pinned seeds: both entrance styles occur, rear doors exist
+  // and are usually raised, and ramps land on more than one platform side.
+  CHECK(stoops > 0 && grade > 0);
+  CHECK(rearDoors > 0 && platforms > rearAtGrade);
+  CHECK(rampSides.size() >= 2);
+  CHECK(loadingBays > 0);  // Warehouses get wide loading entrances.
+}
+
+// --- Street furniture and traffic props (issue #150, roadmap 2.4/2.6). ---
+
+constexpr float kPiTest = 3.14159265f;
+
+MapGeneratorConfig FurnitureConfig(FeatureMode mode) {
+  MapGeneratorConfig c;
+  c.elevatedHighway = OverpassMode::Off;
+  c.features.terrain.mode = FeatureMode::Off;  // Flat-city street graph; furniture on terrain is later work.
+  c.features.furniture.mode = mode;
+  return c;
+}
+
+float DistanceToConvexPolygon(glm::vec2 p, const std::vector<glm::vec2>& poly) {
+  if (InsideConvex(p, poly)) return 0.0f;
+  float best = 1e9f;
+  for (size_t i = 0; i < poly.size(); ++i) {
+    best = std::min(best, DistanceToSegment(p, poly[i], poly[(i + 1) % poly.size()]));
+  }
+  return best;
+}
+
+// Furniture only appends small curb-side obstacles: the rest of the scene is
+// untouched, every item hugs a sidewalk strip, keeps 2 * kAgentRadius of
+// clear sidewalk to every building, and stays off the spawn rows. The Auto
+// mode draws presence per seed, and a drawn seed matches the forced-on map.
+void TestFurnitureHugsSidewalksAndRespectsClearances() {
+  const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
+  const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
+  for (uint32_t seed : kSeeds) {
+    const Scene bare = GenerateUrbanMap(seed, off);
+    const Scene scene = GenerateUrbanMap(seed, on);
+    CHECK(bare.props.empty());
+    CHECK(scene.obstacles.size() > bare.obstacles.size() + 20);
+    for (size_t i = 0; i < bare.obstacles.size(); ++i) {
+      CHECK(scene.obstacles[i].bounds.min == bare.obstacles[i].bounds.min);
+      CHECK(scene.obstacles[i].bounds.max == bare.obstacles[i].bounds.max);
+      CHECK(scene.obstacles[i].footprint == bare.obstacles[i].footprint);
+      CHECK(scene.obstacles[i].kind == bare.obstacles[i].kind);
+    }
+    CHECK(SameScene(scene, GenerateUrbanMap(seed, on)));
+
+    const std::vector<UrbanBlock> blocks = UrbanBlocks(seed, on);
+    for (size_t i = bare.obstacles.size(); i < scene.obstacles.size(); ++i) {
+      const Obstacle& o = scene.obstacles[i];
+      CHECK(o.footprint.empty());
+      CHECK(!o.climbable);
+      CHECK(o.kind == ObstacleKind::StreetFurniture);
+      const glm::vec3 size = o.bounds.max - o.bounds.min;
+      CHECK(size.x <= 0.4f && size.z <= 0.4f);  // Post-sized, never cover-sized.
+      const glm::vec2 center(o.bounds.Center().x, o.bounds.Center().z);
+      bool signalPost = false;  // Traffic-control poles sit at junctions, not on sidewalks only.
+      for (const StreetProp& prop : scene.props) {
+        signalPost |= prop.kind != StreetPropKind::LampPost &&
+                      glm::distance(glm::vec2(prop.position.x, prop.position.z), center) < 1e-4f;
+      }
+      if (signalPost) continue;
+      const float halfOut = 0.5f * std::max(size.x, size.z);
+      bool onSidewalk = false;
+      for (const UrbanBlock& block : blocks) {
+        if (!InsideConvex(center, block.vertices)) continue;
+        float edgeDistance = 1e9f;
+        for (size_t e = 0; e < block.vertices.size(); ++e) {
+          edgeDistance = std::min(
+              edgeDistance, DistanceToSegment(center, block.vertices[e],
+                                              block.vertices[(e + 1) % block.vertices.size()]));
+        }
+        onSidewalk |= edgeDistance <= on.sidewalkWidth;
+      }
+      CHECK(onSidewalk);
+      for (const Obstacle& building : bare.obstacles) {
+        if (building.footprint.empty()) continue;
+        const float gap = DistanceToConvexPolygon(center, building.footprint) - halfOut;
+        CHECK(gap >= 2.0f * constants::kAgentRadius - kEps);
+      }
+      for (const Unit& unit : scene.units) {
+        CHECK(glm::distance(glm::vec2(unit.position.x, unit.position.z), center) >= 2.5f);
+      }
+    }
+  }
+
+  // Auto is unconditional: it matches the forced-On scene for every seed.
+  for (uint32_t seed = 1; seed <= 12; ++seed) {
+    MapGeneratorConfig base;
+    base.elevatedHighway = OverpassMode::Off;
+    base.features.terrain.mode = FeatureMode::Off;
+    const Scene scene = GenerateUrbanMap(seed, base);
+    CHECK(!scene.props.empty());
+    CHECK(SameScene(scene, GenerateUrbanMap(seed, FurnitureConfig(FeatureMode::On))));
+  }
+}
+
+// The required connectivity property (roadmap 2.4): everything walkable
+// without furniture stays walkable with it -- items never seal a sidewalk,
+// alley or opening.
+void TestFurnitureKeepsSidewalksConnected() {
+  for (uint32_t seed : kSeeds) {
+    const Scene bare = GenerateUrbanMap(seed, FurnitureConfig(FeatureMode::Off));
+    const Scene scene = GenerateUrbanMap(seed, FurnitureConfig(FeatureMode::On));
+    NavMesh bareNav, nav;
+    bareNav.Build(bare.obstacles, bare.mapHalfExtent, constants::kAgentRadius);
+    nav.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius);
+    const glm::vec3 blue = scene.units.front().position;
+    std::vector<glm::vec3> path;
+    CHECK(nav.FindPath(blue, scene.units.back().position, &path));
+    // One routed-distance flood per mesh (per-point FindPath would cost
+    // seconds each), then probe rings around every item: whatever was
+    // reachable right next to it without furniture must stay reachable.
+    const float budget = 4.0f * scene.mapHalfExtent;
+    const ReachField bareField = bareNav.ComputeReachField(blue, budget, 0.5f);
+    const ReachField field = nav.ComputeReachField(blue, budget, 0.5f);
+    auto reachedAt = [](const ReachField& f, glm::vec2 p) {
+      const int ix = static_cast<int>(std::round((p.x - f.minX) / f.step));
+      const int iz = static_cast<int>(std::round((p.y - f.minZ) / f.step));
+      return f.Reached(ix, iz);
+    };
+    int compared = 0, unreachable = 0;
+    for (size_t i = bare.obstacles.size(); i < scene.obstacles.size(); ++i) {
+      const glm::vec3 center = scene.obstacles[i].bounds.Center();
+      for (const float radius : {1.2f, 2.5f}) {
+        for (int k = 0; k < 8; ++k) {
+          const float angle = static_cast<float>(k) * 0.25f * kPiTest;
+          const glm::vec2 target(center.x + radius * std::cos(angle),
+                                 center.z + radius * std::sin(angle));
+          // Keep clear of every item so the furniture's own inflated
+          // footprint never explains a miss.
+          bool nearItem = false;
+          for (size_t j = bare.obstacles.size(); j < scene.obstacles.size(); ++j) {
+            const glm::vec3 other = scene.obstacles[j].bounds.Center();
+            nearItem |= j != i && glm::distance(glm::vec2(other.x, other.z), target) < 1.0f;
+          }
+          if (nearItem || !reachedAt(bareField, target)) continue;
+          ++compared;
+          if (!reachedAt(field, target)) ++unreachable;
+        }
+      }
+    }
+    CHECK(compared > 300);
+    if (unreachable) {
+      std::fprintf(stderr, "seed %u: furniture cut off %d probe points\n", seed, unreachable);
+    }
+    CHECK(unreachable == 0);
+  }
+}
+
+// Traffic lights stand on junction corners (two streets of distinct heading
+// within reach), stop/yield signs appear at artery tees, and every control
+// faces along one of those streets. Street-name blades reproduce both actual
+// corner headings (including skewed angles), while lamp arms point out over
+// the road from a taller collision pole.
+void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
+  const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
+  int lights = 0, stopYield = 0, names = 0, lamps = 0, skewedNames = 0;
+  const auto direction = [](float yaw) { return glm::vec2(std::cos(yaw), std::sin(yaw)); };
+  const auto parallel = [](glm::vec2 a, glm::vec2 b) {
+    return std::fabs(a.x * b.y - a.y * b.x) < 1.0e-4f;
+  };
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed, on);
+    CHECK(!scene.props.empty());
+    const std::vector<UrbanStreet> streets = UrbanStreets(seed, on);
+    const std::vector<UrbanBlock> blocks = UrbanBlocks(seed, on);
+    for (const StreetProp& prop : scene.props) {
+      const glm::vec2 p(prop.position.x, prop.position.z);
+      CHECK(std::fabs(p.x) < scene.mapHalfExtent - 0.4f);
+      CHECK(std::fabs(p.y) < scene.mapHalfExtent - 0.4f);
+      if (prop.kind == StreetPropKind::LampPost) {
+        ++lamps;
+        bool hasPole = false;
+        for (const Obstacle& o : scene.obstacles) {
+          const glm::vec3 center = o.bounds.Center();
+          if (glm::distance(glm::vec2(center.x, center.z), p) > 1.0e-3f) continue;
+          hasPole |= o.bounds.max.y - prop.position.y >= 5.39f;
+        }
+        CHECK(hasPole);
+        // The arm crosses its curb at a right angle and points out of the
+        // block over the road, including along oblique streets.
+        bool hasCurb = false;
+        float curbDistance = 1e9f;
+        glm::vec2 curbDirection(0.0f), blockInterior(0.0f);
+        for (const UrbanBlock& block : blocks) {
+          if (!InsideConvex(p, block.vertices)) continue;
+          glm::vec2 centroid(0.0f);
+          for (const glm::vec2& vertex : block.vertices) centroid += vertex;
+          centroid /= static_cast<float>(block.vertices.size());
+          for (size_t e = 0; e < block.vertices.size(); ++e) {
+            const glm::vec2 a = block.vertices[e];
+            const glm::vec2 b = block.vertices[(e + 1) % block.vertices.size()];
+            const float distance = DistanceToSegment(p, a, b);
+            if (distance >= curbDistance) continue;
+            curbDistance = distance;
+            curbDirection = glm::normalize(b - a);
+            blockInterior = centroid - p;
+            hasCurb = true;
+          }
+        }
+        CHECK(hasCurb);
+        if (hasCurb) {
+          const glm::vec2 armDirection = direction(prop.yaw);
+          CHECK(std::fabs(glm::dot(armDirection, curbDirection)) < 1.0e-4f);
+          CHECK(glm::dot(armDirection, blockInterior) < 0.0f);
+        }
+        continue;
+      }
+      for (const Obstacle& o : scene.obstacles) {
+        // A prop's own collision post sits exactly under it.
+        if (glm::distance(p, glm::vec2(o.bounds.Center().x, o.bounds.Center().z)) < 1e-4f) continue;
+        CHECK(DistanceToConvexPolygon(p, ObstacleFootprint(o)) > 0.2f);
+      }
+      // Signs and lights stand on a sidewalk corner, never out in the street.
+      bool onSidewalk = false;
+      for (const UrbanBlock& block : blocks) onSidewalk |= InsideConvex(p, block.vertices);
+      CHECK(onSidewalk);
+      if (prop.kind == StreetPropKind::StreetNameSign) {
+        ++names;
+        float corner = 1e9f;
+        const UrbanBlock* closestBlock = nullptr;
+        size_t closestVertex = 0;
+        for (const UrbanBlock& block : blocks) {
+          for (size_t v = 0; v < block.vertices.size(); ++v) {
+            const float distance = glm::distance(p, block.vertices[v]);
+            if (distance >= corner) continue;
+            corner = distance;
+            closestBlock = &block;
+            closestVertex = v;
+          }
+        }
+        CHECK(corner <= 1.0f);
+        CHECK(closestBlock != nullptr);
+        if (closestBlock) {
+          const std::vector<glm::vec2>& poly = closestBlock->vertices;
+          const glm::vec2 next =
+              glm::normalize(poly[(closestVertex + 1) % poly.size()] - poly[closestVertex]);
+          const glm::vec2 previous = glm::normalize(
+              poly[closestVertex] - poly[(closestVertex + poly.size() - 1) % poly.size()]);
+          CHECK(parallel(direction(prop.yaw), next));
+          CHECK(parallel(direction(prop.secondaryYaw), previous));
+          if (std::fabs(glm::dot(next, previous)) > 0.05f) ++skewedNames;
+        }
+        continue;
+      }
+      if (prop.kind == StreetPropKind::TrafficLight) {
+        ++lights;
+      } else {
+        CHECK(prop.kind == StreetPropKind::StopSign || prop.kind == StreetPropKind::YieldSign);
+        ++stopYield;
+      }
+      // A junction: two nearby streets with clearly different headings.
+      glm::vec2 firstDir(0.0f);
+      bool junction = false, aligned = false;
+      for (const UrbanStreet& street : streets) {
+        const glm::vec2 a(street.a.x, street.a.z), b(street.b.x, street.b.z);
+        if (DistanceToSegment(p, a, b) > street.width * 0.5f + 4.0f) continue;
+        const glm::vec2 dir = glm::normalize(b - a);
+        aligned |= parallel(direction(prop.yaw), dir);
+        if (firstDir == glm::vec2(0.0f)) {
+          firstDir = dir;
+        } else if (std::fabs(firstDir.x * dir.y - firstDir.y * dir.x) > 0.25f) {
+          junction = true;
+        }
+      }
+      CHECK(junction);
+      CHECK(aligned);
+    }
+  }
+  CHECK(lights > 0);
+  CHECK(stopYield > 0);
+  CHECK(names > 0);
+  CHECK(lamps > 0);
+  CHECK(skewedNames > 0);
+
+  // Traffic/sign fixtures add no gameplay surfaces; lamp collision remains
+  // the already-tested furniture pole. The off scene carries neither kind.
+  CHECK(GenerateUrbanMap(kSeeds[0], FurnitureConfig(FeatureMode::Off)).props.empty());
+}
+
+// Pinned per-seed furniture output (issue #150): a generator change that
+// alters item or prop placement shows up here first.
+void TestPinnedFurnitureFingerprints() {
+  struct Expected { uint32_t seed; size_t furniture; size_t props; };
+  const Expected expected[] = {{1u, 132, 65}, {42u, 150, 69}, {2024u, 168, 77}};
+  const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
+  const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
+  for (const auto& e : expected) {
+    const Scene scene = GenerateUrbanMap(e.seed, on);
+    const size_t furniture =
+        scene.obstacles.size() - GenerateUrbanMap(e.seed, off).obstacles.size();
+    if (furniture != e.furniture || scene.props.size() != e.props) {
+      std::fprintf(stderr, "seed %u: %zu furniture, %zu props (expected %zu, %zu)\n", e.seed,
+                   furniture, scene.props.size(), e.furniture, e.props);
+    }
+    CHECK(furniture == e.furniture);
+    CHECK(scene.props.size() == e.props);
+  }
+}
+
 int main() {
   TestFeatureFlagsAndStreetGraph();
+  TestFurnitureHugsSidewalksAndRespectsClearances();
+  TestFurnitureKeepsSidewalksConnected();
+  TestTrafficPropsSitAtJunctionsAndStayVisualOnly();
+  TestPinnedFurnitureFingerprints();
   TestDeterminismAndVariety();
   TestZiplinesAreDeterministicBoundedAndValid();
   TestZiplineStreetEndsReachableRoofsOnlyByLine();
   TestPinnedSeedFingerprints();
   TestParcelsMatchBuildingsAndFrontStreets();
   TestBuildingKindsFloorsAndHeights();
+  TestFacadeOpeningsDoorsStoopsAndPlatforms();
   TestMassingStaysOnItsBuilding();
   TestRoofMassingBlocksWalking();
   TestMassingBlocksSight();

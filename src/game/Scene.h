@@ -63,6 +63,11 @@ struct Scene {
   // awnings the renderer draws on/over them.
   std::vector<Building> buildings;
   std::vector<MassingDetail> massing;
+  // Facade windows and doors (issue #152): data records rendered as decals
+  // on the building walls. Doors raised on a stoop or rear platform have a
+  // matching WalkSurface in `walkSurfaces` (a short ramp or a platform plus
+  // its ramp) so a figure can walk up to them.
+  std::vector<FacadeOpening> facadeOpenings;
   // Flat, walkable, visual-only slabs (e.g. legacy rectangular sidewalks).
   std::vector<AABB> sidewalks;
   // Asphalt polygons at ground level, plus explicit ramp/deck layers. The
@@ -74,6 +79,8 @@ struct Scene {
   // Pre-built ziplines (extra nav-graph edges; see Zipline). Anchors are
   // clear ground spots; the straight line between them avoids obstacles.
   std::vector<Zipline> ziplines;
+  // Rendered street fixtures (issue #150); see StreetProp.
+  std::vector<StreetProp> props;
   std::vector<Unit> units;  // 3 Blue + 3 Red, in this order.
   // Playable area is [-mapHalfExtent, mapHalfExtent]^2 in XZ. Defaults to the
   // hand-authored scene's size; MapGenerator sets a much larger value.

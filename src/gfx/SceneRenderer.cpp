@@ -77,6 +77,8 @@ const glm::vec3 kSetupColor(0.2f, 1.0f, 0.3f);
 // Scene geometry base colors, shared by the opaque pass and the issue #136
 // see-through pass so a faded block keeps its normal tint.
 const glm::vec3 kObstacleColor(0.55f, 0.55f, 0.6f);
+// Facade openings (issue #152): window glazing, door leafs, and the
+// frame/sill/mullion trim extruded from (or lining a recess into) the walls.
 const glm::vec3 kDeckColor(0.44f, 0.45f, 0.48f);
 
 // Apparent temperatures are art-directed to the aerial black-hot reference,
@@ -565,6 +567,128 @@ glm::mat4 BoxModel(const glm::vec3& minCorner, const glm::vec3& size) {
   return glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
 }
 
+struct StreetPropPart {
+  glm::mat4 model{1.0f};
+  size_t material = 0;
+};
+
+enum class StreetPropMaterial : size_t {
+  Pole,
+  TrafficHousing,
+  TrafficRed,
+  TrafficYellow,
+  TrafficGreen,
+  StopRed,
+  YieldWhite,
+  YieldRed,
+  StreetName,
+  LampHousing,
+  LampGlow,
+  Count,
+};
+
+// Every street fixture shares the building color so props read as part of
+// the same urban fabric.
+const glm::vec4& StreetPropColor(StreetPropMaterial) {
+  static const glm::vec4 kColor(kObstacleColor, 1.0f);
+  return kColor;
+}
+
+struct StreetPropParts {
+  std::array<StreetPropPart, 8> values{};
+  size_t count = 0;
+
+  void Add(const glm::mat4& model, StreetPropMaterial material) {
+    values[count++] = {model, static_cast<size_t>(material)};
+  }
+  const StreetPropPart* begin() const { return values.data(); }
+  const StreetPropPart* end() const { return values.data() + count; }
+};
+
+// One geometry description feeds the lit, lighting-shadow, and shadow-map
+// FOV passes, so fixtures cannot drift between those views of the scene.
+StreetPropParts BuildStreetPropParts(const tactics::StreetProp& prop) {
+  StreetPropParts parts;
+  const auto base = [&](float yaw) {
+    // StreetProp yaw follows the gameplay convention: (cos(yaw), 0,
+    // sin(yaw)). A positive GLM rotation about +Y sends local +X toward -Z,
+    // so use -Y to keep the rendered fixture aligned with its stored yaw.
+    return glm::rotate(glm::translate(glm::mat4(1.0f), prop.position), yaw,
+                       glm::vec3(0.0f, -1.0f, 0.0f));
+  };
+  auto box = [&](float yaw, float cx, float y0, float cz, float sx, float sy, float sz,
+                 StreetPropMaterial material) {
+    const glm::mat4 model =
+        base(yaw) *
+        glm::translate(glm::mat4(1.0f), glm::vec3(cx - sx * 0.5f, y0, cz - sz * 0.5f)) *
+        glm::scale(glm::mat4(1.0f), glm::vec3(sx, sy, sz));
+    parts.Add(model, material);
+  };
+  // A square beam between two local XY points, used to approximate a curved
+  // lamp arm with short straight segments.
+  auto beam = [&](glm::vec2 a, glm::vec2 b, float thickness, StreetPropMaterial material) {
+    const glm::vec2 delta = b - a;
+    const float length = glm::length(delta);
+    const float angle = std::atan2(delta.y, delta.x);
+    const glm::mat4 model =
+        base(prop.yaw) * glm::translate(glm::mat4(1.0f), glm::vec3(a.x, a.y, 0.0f)) *
+        glm::rotate(glm::mat4(1.0f), angle, glm::vec3(0.0f, 0.0f, 1.0f)) *
+        glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -thickness * 0.5f,
+                                                  -thickness * 0.5f)) *
+        glm::scale(glm::mat4(1.0f), glm::vec3(length, thickness, thickness));
+    parts.Add(model, material);
+  };
+
+  switch (prop.kind) {
+    case tactics::StreetPropKind::TrafficLight:
+      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.14f, 3.1f, 0.14f, StreetPropMaterial::Pole);
+      // +X is both the controlled approach's facing and the head/lamp face.
+      box(prop.yaw, 0.24f, 2.35f, 0.0f, 0.30f, 0.80f, 0.26f,
+          StreetPropMaterial::TrafficHousing);
+      box(prop.yaw, 0.40f, 2.88f, 0.0f, 0.06f, 0.16f, 0.16f,
+          StreetPropMaterial::TrafficRed);
+      box(prop.yaw, 0.40f, 2.67f, 0.0f, 0.06f, 0.16f, 0.16f,
+          StreetPropMaterial::TrafficYellow);
+      box(prop.yaw, 0.40f, 2.46f, 0.0f, 0.06f, 0.16f, 0.16f,
+          StreetPropMaterial::TrafficGreen);
+      break;
+    case tactics::StreetPropKind::StopSign:
+      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.09f, 2.2f, 0.09f, StreetPropMaterial::Pole);
+      box(prop.yaw, 0.07f, 1.62f, 0.0f, 0.05f, 0.52f, 0.52f, StreetPropMaterial::StopRed);
+      break;
+    case tactics::StreetPropKind::YieldSign:
+      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.09f, 2.2f, 0.09f, StreetPropMaterial::Pole);
+      box(prop.yaw, 0.07f, 1.62f, 0.0f, 0.05f, 0.52f, 0.52f,
+          StreetPropMaterial::YieldWhite);
+      box(prop.yaw, 0.10f, 1.74f, 0.0f, 0.03f, 0.28f, 0.28f,
+          StreetPropMaterial::YieldRed);
+      break;
+    case tactics::StreetPropKind::StreetNameSign:
+      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.08f, 2.5f, 0.08f, StreetPropMaterial::Pole);
+      // Each blade follows its actual incident street; secondaryYaw is not
+      // assumed perpendicular, so skewed junctions remain skewed here.
+      box(prop.yaw, 0.0f, 2.28f, 0.0f, 0.80f, 0.14f, 0.04f,
+          StreetPropMaterial::StreetName);
+      box(prop.secondaryYaw, 0.0f, 2.10f, 0.0f, 0.80f, 0.14f, 0.04f,
+          StreetPropMaterial::StreetName);
+      break;
+    case tactics::StreetPropKind::LampPost:
+      // The nested obstacle remains the collision/LOS pole; this slightly
+      // wider visible pole hides its plain obstacle-box rendering.
+      box(prop.yaw, 0.0f, 0.0f, 0.0f, 0.18f, 5.40f, 0.18f, StreetPropMaterial::Pole);
+      beam({0.0f, 5.20f}, {0.32f, 5.52f}, 0.16f, StreetPropMaterial::Pole);
+      beam({0.32f, 5.52f}, {0.82f, 5.72f}, 0.16f, StreetPropMaterial::Pole);
+      beam({0.82f, 5.72f}, {1.48f, 5.72f}, 0.16f, StreetPropMaterial::Pole);
+      beam({1.48f, 5.72f}, {1.66f, 5.54f}, 0.16f, StreetPropMaterial::Pole);
+      box(prop.yaw, 1.66f, 5.38f, 0.0f, 0.54f, 0.18f, 0.32f,
+          StreetPropMaterial::LampHousing);
+      box(prop.yaw, 1.66f, 5.34f, 0.0f, 0.38f, 0.05f, 0.24f,
+          StreetPropMaterial::LampGlow);
+      break;
+  }
+  return parts;
+}
+
 using LitVertices = std::vector<LitTriangleMesh::Vertex>;
 
 void AppendTriangle(glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 normal,
@@ -576,8 +700,66 @@ void AppendTriangle(glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 normal,
   indices->insert(indices->end(), {base, base + 1, base + 2});
 }
 
+// A quad from corner `a` spanned by `right` and `up`, facing up-cross-right
+// (the clockwise-outward winding the scene meshes use throughout).
+void AppendQuad(glm::vec3 a, glm::vec3 right, glm::vec3 up, LitVertices* vertices,
+                std::vector<GLuint>* indices) {
+  const glm::vec3 n = glm::normalize(glm::cross(up, right));
+  AppendTriangle(a, a + right, a + right + up, n, vertices, indices);
+  AppendTriangle(a, a + right + up, a + up, n, vertices, indices);
+}
+
+// One wall face of a prism (edge a->b, heights lo..hi) minus the `holes`
+// rectangles (u0, y0, u1, y1 along the edge): recessed facade openings
+// (doors, factory windows) show their niche instead of a flat wall. The
+// face is split into vertical strips at every hole edge; each strip emits
+// the wall pieces between the holes stacked inside it.
+void AppendWallFaceWithHoles(glm::vec2 a, glm::vec2 b, float lo, float hi,
+                             const std::vector<glm::vec4>& holes, LitVertices* vertices,
+                             std::vector<GLuint>* indices) {
+  const float len = glm::distance(a, b);
+  if (len < 1e-4f) return;
+  const glm::vec2 dir = (b - a) / len;
+  const glm::vec3 right(dir.x, 0.0f, dir.y);
+  constexpr float kEps = 1e-3f;
+  std::vector<float> cuts{0.0f, len};
+  for (const glm::vec4& h : holes) {
+    cuts.push_back(glm::clamp(h.x, 0.0f, len));
+    cuts.push_back(glm::clamp(h.z, 0.0f, len));
+  }
+  std::sort(cuts.begin(), cuts.end());
+  const auto rect = [&](float u0, float u1, float y0, float y1) {
+    if (u1 - u0 < kEps || y1 - y0 < kEps) return;
+    const glm::vec2 p = a + dir * u0;
+    AppendQuad(glm::vec3(p.x, y0, p.y), right * (u1 - u0), glm::vec3(0.0f, y1 - y0, 0.0f),
+               vertices, indices);
+  };
+  for (size_t i = 0; i + 1 < cuts.size(); ++i) {
+    const float u0 = cuts[i], u1 = cuts[i + 1];
+    if (u1 - u0 < kEps) continue;
+    std::vector<glm::vec2> spans;  // y-ranges the holes cover in this strip.
+    for (const glm::vec4& h : holes) {
+      if (h.x <= u0 + kEps && h.z >= u1 - kEps) {
+        spans.emplace_back(glm::clamp(h.y, lo, hi), glm::clamp(h.w, lo, hi));
+      }
+    }
+    std::sort(spans.begin(), spans.end(),
+              [](const glm::vec2& p, const glm::vec2& q) { return p.x < q.x; });
+    float y = lo;
+    for (const glm::vec2& s : spans) {
+      rect(u0, u1, y, s.x);
+      y = std::max(y, s.y);
+    }
+    rect(u0, u1, y, hi);
+  }
+}
+
+// `holesPerEdge` (optional, indexed like the footprint's edges) cuts the
+// listed opening rectangles out of the wall faces; see
+// AppendWallFaceWithHoles. Box-bounds obstacles never carry openings.
 void AppendPolygonPrism(const tactics::Obstacle& obstacle, LitVertices* vertices,
-                        std::vector<GLuint>* indices) {
+                        std::vector<GLuint>* indices,
+                        const std::vector<std::vector<glm::vec4>>* holesPerEdge = nullptr) {
   const std::vector<glm::vec2> polygon = tactics::ObstacleFootprint(obstacle);
   auto triangle = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 normal) {
     AppendTriangle(a, b, c, normal, vertices, indices);
@@ -591,6 +773,11 @@ void AppendPolygonPrism(const tactics::Obstacle& obstacle, LitVertices* vertices
   }
   for (size_t i = 0; i < polygon.size(); ++i) {
     const glm::vec2 a = polygon[i], b = polygon[(i + 1) % polygon.size()];
+    if (holesPerEdge && i < holesPerEdge->size() && !(*holesPerEdge)[i].empty() &&
+        !obstacle.footprint.empty()) {
+      AppendWallFaceWithHoles(a, b, lo, hi, (*holesPerEdge)[i], vertices, indices);
+      continue;
+    }
     const glm::vec2 edge = glm::normalize(b - a);
     const glm::vec3 normal(edge.y, 0.0f, -edge.x);
     const glm::vec3 a0(a.x, lo, a.y), a1(a.x, hi, a.y);
@@ -600,11 +787,174 @@ void AppendPolygonPrism(const tactics::Obstacle& obstacle, LitVertices* vertices
   }
 }
 
-void BuildPolygonPrism(const tactics::Obstacle& obstacle, LitTriangleMesh* mesh) {
+void BuildPolygonPrism(const tactics::Obstacle& obstacle, LitTriangleMesh* mesh,
+                       const std::vector<std::vector<glm::vec4>>* holesPerEdge = nullptr) {
   LitVertices vertices;
   std::vector<GLuint> indices;
-  AppendPolygonPrism(obstacle, &vertices, &indices);
+  AppendPolygonPrism(obstacle, &vertices, &indices, holesPerEdge);
   mesh->SetMesh(vertices, indices);
+}
+
+// --- Facade openings as pane extrusions (issue #152 follow-up) ---------------
+//
+// Windows carry a rectangular frame extruded out of the wall (plus an
+// exterior sill on some residential buildings); doors and factory-style
+// commercial windows are pushed into the building body instead: the wall
+// face gets a real hole (see AppendWallFaceWithHoles) lined with reveal
+// faces, the leaf/glazing sits at the back of the niche, and factory
+// windows add a grid of mullion bars. Offices keep flatter, thinner frames
+// over their full-floor ribbon glazing. All of it stays visual-only: the
+// gameplay Obstacle prism is untouched.
+
+// The opening's frame on its wall: `base` is the world point at (u=0, y=0),
+// `right` runs along the edge, `normal` points out of the wall.
+struct OpeningBasis {
+  glm::vec3 base{0.0f};
+  glm::vec3 right{0.0f};
+  glm::vec3 normal{0.0f};
+  bool valid = false;
+};
+
+OpeningBasis OpeningBasisFor(const tactics::Scene& scene,
+                             const tactics::FacadeOpening& opening) {
+  OpeningBasis basis;
+  if (opening.obstacle < 0 ||
+      opening.obstacle >= static_cast<int>(scene.obstacles.size())) {
+    return basis;
+  }
+  const std::vector<glm::vec2> fp =
+      tactics::ObstacleFootprint(scene.obstacles[opening.obstacle]);
+  if (fp.size() < 3 || opening.wallEdge < 0 ||
+      opening.wallEdge >= static_cast<int>(fp.size()) || opening.u1 <= opening.u0 ||
+      opening.y1 <= opening.y0) {
+    return basis;
+  }
+  const glm::vec2 a = fp[opening.wallEdge];
+  const glm::vec2 b = fp[(opening.wallEdge + 1) % fp.size()];
+  const float len = glm::length(b - a);
+  if (len < 1e-4f) return basis;
+  const glm::vec2 dir = (b - a) / len;
+  basis.base = glm::vec3(a.x, 0.0f, a.y);
+  basis.right = glm::vec3(dir.x, 0.0f, dir.y);
+  basis.normal = glm::vec3(dir.y, 0.0f, -dir.x);  // Outward, as AppendPolygonPrism.
+  basis.valid = true;
+  return basis;
+}
+
+// How the opening is built, decided from its kind and building archetype.
+struct PaneStyle {
+  bool recessed = false;  // Pushed into the wall instead of extruded from it.
+  float depth = 0.0f;     // Extrusion out of / recess into the wall.
+  float bar = 0.0f;       // Frame bar width (0: no frame, doors).
+  bool sill = false;      // Exterior sill under the window.
+  int gridU = 1, gridV = 1;  // Mullion grid panes (factory windows).
+};
+
+PaneStyle PaneStyleFor(const tactics::Scene& scene, const tactics::FacadeOpening& opening) {
+  if (opening.kind == tactics::FacadeOpening::Kind::Door) return {true, 0.22f, 0.0f, false, 1, 1};
+  tactics::BuildingKind kind = tactics::BuildingKind::Residential;
+  if (opening.building >= 0 && opening.building < static_cast<int>(scene.buildings.size())) {
+    kind = scene.buildings[opening.building].kind;
+  }
+  // Stable per-building draw for the touches that only some buildings get
+  // (residential sills, a factory window's mullion grid).
+  uint32_t h = static_cast<uint32_t>(opening.building) * 2654435761u;
+  h ^= h >> 16;
+  switch (kind) {
+    case tactics::BuildingKind::Residential:
+      return {false, 0.09f, 0.08f, (h % 100u) < 55u, 1, 1};
+    case tactics::BuildingKind::MixedUse:
+    case tactics::BuildingKind::Civic:
+      return {false, 0.09f, 0.08f, false, 1, 1};
+    case tactics::BuildingKind::Office:  // Flatter, thinner ribbon framing.
+    case tactics::BuildingKind::Garage:
+      return {false, 0.03f, 0.05f, false, 1, 1};
+    case tactics::BuildingKind::Commercial: {  // Factory-style grid panes.
+      constexpr int kGrids[4][2] = {{3, 3}, {4, 4}, {3, 4}, {4, 3}};
+      const int* grid = kGrids[h % 4u];
+      return {true, 0.16f, 0.06f, false, grid[0], grid[1]};
+    }
+  }
+  return {false, 0.09f, 0.08f, false, 1, 1};
+}
+
+bool OpeningRecessed(const tactics::Scene& scene, const tactics::FacadeOpening& opening) {
+  return PaneStyleFor(scene, opening).recessed;
+}
+
+// A box in the opening's wall frame: u along the edge, y up, d along the
+// outward normal (negative reaches into the wall). `skipBack` leaves out the
+// -normal face when it rests flush against the wall.
+void AppendOpeningBox(const OpeningBasis& f, float u0, float u1, float y0, float y1, float d0,
+                      float d1, bool skipBack, LitVertices* vertices,
+                      std::vector<GLuint>* indices) {
+  if (u1 - u0 < 1e-4f || y1 - y0 < 1e-4f || d1 - d0 < 1e-4f) return;
+  const auto at = [&](float u, float y, float d) {
+    return f.base + f.right * u + glm::vec3(0.0f, y, 0.0f) + f.normal * d;
+  };
+  const glm::vec3 U = f.right * (u1 - u0);
+  const glm::vec3 Y(0.0f, y1 - y0, 0.0f);
+  const glm::vec3 D = f.normal * (d1 - d0);
+  AppendQuad(at(u0, y0, d1), U, Y, vertices, indices);                    // Front.
+  if (!skipBack) AppendQuad(at(u1, y0, d0), -U, Y, vertices, indices);    // Back.
+  AppendQuad(at(u0, y0, d0), D, Y, vertices, indices);                    // Left.
+  AppendQuad(at(u1, y0, d1), -D, Y, vertices, indices);                   // Right.
+  AppendQuad(at(u0, y1, d1), U, -D, vertices, indices);                   // Top.
+  AppendQuad(at(u0, y0, d0), U, D, vertices, indices);                    // Bottom.
+}
+
+// One facade opening's geometry for `part`; see the section comment above
+// for the shapes per kind.
+void AppendFacadeOpening(const tactics::Scene& scene, const tactics::FacadeOpening& opening,
+                         LitVertices* vertices, std::vector<GLuint>* indices) {
+  const OpeningBasis f = OpeningBasisFor(scene, opening);
+  if (!f.valid) return;
+  const PaneStyle style = PaneStyleFor(scene, opening);
+  const float u0 = opening.u0, u1 = opening.u1, y0 = opening.y0, y1 = opening.y1;
+  const auto quad = [&](float qu0, float qu1, float qy0, float qy1, float d) {
+    const glm::vec3 a = f.base + f.right * qu0 + glm::vec3(0.0f, qy0, 0.0f) + f.normal * d;
+    AppendQuad(a, f.right * (qu1 - qu0), glm::vec3(0.0f, qy1 - qy0, 0.0f), vertices, indices);
+  };
+  if (style.recessed) {
+    const float d = style.depth;
+    {
+      // Reveal faces lining the niche, wound to face into it.
+      const glm::vec3 Y(0.0f, y1 - y0, 0.0f);
+      const glm::vec3 U = f.right * (u1 - u0);
+      const glm::vec3 D = f.normal * d;
+      AppendQuad(f.base + f.right * u0 + glm::vec3(0.0f, y0, 0.0f), -D, Y, vertices, indices);
+      AppendQuad(f.base + f.right * u1 + glm::vec3(0.0f, y0, 0.0f) - D, D, Y, vertices, indices);
+      AppendQuad(f.base + f.right * u0 + glm::vec3(0.0f, y1, 0.0f) - D, U, D, vertices, indices);
+      AppendQuad(f.base + f.right * u0 + glm::vec3(0.0f, y0, 0.0f), U, -D, vertices, indices);
+      // Factory windows: mullion bars gridding the glazing at the niche back.
+      const float bar = style.bar;
+      for (int i = 1; i < style.gridU; ++i) {
+        const float u = u0 + (u1 - u0) * static_cast<float>(i) / style.gridU;
+        AppendOpeningBox(f, u - 0.5f * bar, u + 0.5f * bar, y0, y1, -d, -d + 0.10f, true,
+                         vertices, indices);
+      }
+      for (int i = 1; i < style.gridV; ++i) {
+        const float y = y0 + (y1 - y0) * static_cast<float>(i) / style.gridV;
+        AppendOpeningBox(f, u0, u1, y - 0.5f * bar, y + 0.5f * bar, -d, -d + 0.10f, true,
+                         vertices, indices);
+      }
+    }
+    quad(u0, u1, y0, y1, -d);  // Back of the niche.
+    return;
+  }
+  // Extruded frame: four bars ringing the rect.
+  const float bar = std::min({style.bar, 0.25f * (y1 - y0), 0.25f * (u1 - u0)});
+  if (bar > 1e-3f) {
+    const float d = style.depth;
+    AppendOpeningBox(f, u0, u1, y0, y0 + bar, 0.0f, d, true, vertices, indices);
+    AppendOpeningBox(f, u0, u1, y1 - bar, y1, 0.0f, d, true, vertices, indices);
+    AppendOpeningBox(f, u0, u0 + bar, y0 + bar, y1 - bar, 0.0f, d, true, vertices, indices);
+    AppendOpeningBox(f, u1 - bar, u1, y0 + bar, y1 - bar, 0.0f, d, true, vertices, indices);
+    if (style.sill) {
+      AppendOpeningBox(f, u0 - 0.08f, u1 + 0.08f, y0 - 0.08f, y0, 0.0f, 0.14f, true, vertices,
+                       indices);
+    }
+  }
 }
 
 // `hiddenEdges[i]` (optional) skips the side wall under polygon edge i, for
@@ -723,6 +1073,30 @@ void AppendBox(const AABB& box, LitVertices* vertices, std::vector<GLuint>* indi
   quad({hi.x, lo.y, lo.z}, {hi.x, hi.y, lo.z}, {hi.x, hi.y, hi.z}, {hi.x, lo.y, hi.z}, {1, 0, 0});
 }
 
+// Unit cube transformed exactly like CubeMesh. Used to batch street
+// fixtures into the single static mesh consumed by the FOV depth/receiver
+// passes.
+void AppendBoxModel(const glm::mat4& model, LitVertices* vertices,
+                    std::vector<GLuint>* indices) {
+  const glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(model)));
+  const auto p = [&](float x, float y, float z) {
+    return glm::vec3(model * glm::vec4(x, y, z, 1.0f));
+  };
+  const auto n = [&](float x, float y, float z) {
+    return glm::normalize(normalMatrix * glm::vec3(x, y, z));
+  };
+  auto quad = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d, glm::vec3 normal) {
+    AppendTriangle(a, b, c, normal, vertices, indices);
+    AppendTriangle(a, c, d, normal, vertices, indices);
+  };
+  quad(p(0, 1, 0), p(0, 1, 1), p(1, 1, 1), p(1, 1, 0), n(0, 1, 0));
+  quad(p(0, 0, 0), p(1, 0, 0), p(1, 0, 1), p(0, 0, 1), n(0, -1, 0));
+  quad(p(0, 0, 0), p(0, 1, 0), p(1, 1, 0), p(1, 0, 0), n(0, 0, -1));
+  quad(p(0, 0, 1), p(1, 0, 1), p(1, 1, 1), p(0, 1, 1), n(0, 0, 1));
+  quad(p(0, 0, 0), p(0, 0, 1), p(0, 1, 1), p(0, 1, 0), n(-1, 0, 0));
+  quad(p(1, 0, 0), p(1, 1, 0), p(1, 1, 1), p(1, 0, 1), n(1, 0, 0));
+}
+
 // Terrain overlays (FOV cones over hills) use the same triangles as the
 // ground, clipped to each footprint triangle.
 void AppendTerrainOverlay(const tactics::HeightField& terrain,
@@ -741,17 +1115,51 @@ void BuildPavementMesh(const std::vector<tactics::RoadSurface>& patches, float t
   mesh->SetMesh(vertices, indices);
 }
 
+void BuildStreetFixtureMeshes(
+    const std::vector<tactics::Obstacle>& obstacles,
+    const std::vector<tactics::StreetProp>& props, LitTriangleMesh* furnitureMesh,
+    LitTriangleMesh* depthMesh,
+    std::array<LitTriangleMesh, static_cast<size_t>(StreetPropMaterial::Count)>* materialMeshes) {
+  LitVertices furnitureVertices;
+  std::vector<GLuint> furnitureIndices;
+  for (const tactics::Obstacle& obstacle : obstacles) {
+    if (obstacle.kind != tactics::ObstacleKind::StreetFurniture) continue;
+    AppendBox(obstacle.bounds, &furnitureVertices, &furnitureIndices);
+  }
+  furnitureMesh->SetMesh(furnitureVertices, furnitureIndices);
+
+  LitVertices depthVertices;
+  std::vector<GLuint> depthIndices;
+  std::array<LitVertices, static_cast<size_t>(StreetPropMaterial::Count)> vertices;
+  std::array<std::vector<GLuint>, static_cast<size_t>(StreetPropMaterial::Count)> indices;
+  for (const tactics::StreetProp& prop : props) {
+    for (const StreetPropPart& part : BuildStreetPropParts(prop)) {
+      AppendBoxModel(part.model, &depthVertices, &depthIndices);
+      AppendBoxModel(part.model, &vertices[part.material], &indices[part.material]);
+    }
+  }
+  depthMesh->SetMesh(depthVertices, depthIndices);
+  for (size_t i = 0; i < materialMeshes->size(); ++i) {
+    (*materialMeshes)[i].SetMesh(vertices[i], indices[i]);
+  }
+}
+
 // Everything static the shadow-map FOV prototype (issue #110) casts from
 // and receives on, apart from the ground itself: obstacles (walls + roofs),
 // decks/ramps as 0.45-thick slabs (matching the gameplay LOS slab in
-// LineOfSightClear and the lit pass), sidewalk slabs and patches, and
-// roads. Built once per scene so each extra per-unit pass is one draw call.
+// LineOfSightClear and the lit pass), street fixtures, sidewalk slabs and
+// patches, and roads. Built once per scene so each per-unit pass is one draw.
 void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   LitVertices vertices;
   std::vector<GLuint> indices;
   for (const tactics::Obstacle& obstacle : scene.obstacles) {
     if (obstacle.navOnly) continue;  // A cliff edge: the terrain mesh is the caster.
     AppendPolygonPrism(obstacle, &vertices, &indices);
+  }
+  for (const tactics::StreetProp& prop : scene.props) {
+    for (const StreetPropPart& part : BuildStreetPropParts(prop)) {
+      AppendBoxModel(part.model, &vertices, &indices);
+    }
   }
   // Parapets, roof furniture and awnings occlude like the gameplay LOS.
   for (const tactics::MassingDetail& d : scene.massing) {
@@ -761,6 +1169,12 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
     prism.bounds.min.y = d.y0;
     prism.bounds.max.y = d.y1;
     AppendPolygonPrism(prism, &vertices, &indices);
+  }
+  // Facade pane extrusions receive the mask tint like the walls they sit
+  // on; the recessed parts are redundant casters inside the solid wall, but
+  // the extruded frames stand proud of it and need their own tint coverage.
+  for (const tactics::FacadeOpening& opening : scene.facadeOpenings) {
+    AppendFacadeOpening(scene, opening, &vertices, &indices);
   }
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
     AppendSurfacePatch(surface.vertices, 0.45f, &vertices, &indices);
@@ -797,10 +1211,24 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
     mix(&o.bounds, sizeof(o.bounds));
     mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
   }
+  for (const tactics::StreetProp& prop : scene.props) {
+    mix(&prop.kind, sizeof(prop.kind));
+    mix(&prop.position, sizeof(prop.position));
+    mix(&prop.yaw, sizeof(prop.yaw));
+    mix(&prop.secondaryYaw, sizeof(prop.secondaryYaw));
+  }
   for (const tactics::MassingDetail& d : scene.massing) {
     mix(d.footprint.data(), d.footprint.size() * sizeof(glm::vec2));
     mix(&d.y0, sizeof(d.y0));
     mix(&d.y1, sizeof(d.y1));
+  }
+  for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
+    mix(&o.obstacle, sizeof(o.obstacle));
+    mix(&o.wallEdge, sizeof(o.wallEdge));
+    mix(&o.u0, sizeof(o.u0));
+    mix(&o.u1, sizeof(o.u1));
+    mix(&o.y0, sizeof(o.y0));
+    mix(&o.y1, sizeof(o.y1));
   }
   for (const tactics::WalkSurface& s : scene.walkSurfaces) mixVec3s(s.vertices);
   for (const tactics::TerrainStair& s : scene.terrainStairs) {
@@ -832,6 +1260,100 @@ unsigned long long MassingFingerprint(const tactics::Scene& scene) {
     mix(d.footprint.data(), d.footprint.size() * sizeof(glm::vec2));
   }
   return h;
+}
+
+// Content hash of Scene::facadeOpenings, so the decal meshes rebuild only
+// when the openings themselves change.
+unsigned long long FacadeFingerprint(const tactics::Scene& scene) {
+  unsigned long long h = 1469598103934665603ULL ^ scene.facadeOpenings.size();
+  auto mix = [&](const void* data, size_t bytes) {
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < bytes; ++i) {
+      h ^= p[i];
+      h *= 1099511628211ULL;
+    }
+  };
+  for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
+    mix(&o.kind, sizeof(o.kind));
+    mix(&o.building, sizeof(o.building));  // The pane style reads the building's archetype.
+    mix(&o.obstacle, sizeof(o.obstacle));
+    mix(&o.wallEdge, sizeof(o.wallEdge));
+    mix(&o.u0, sizeof(o.u0));
+    mix(&o.u1, sizeof(o.u1));
+    mix(&o.y0, sizeof(o.y0));
+    mix(&o.y1, sizeof(o.y1));
+  }
+  return h;
+}
+
+// All facade opening geometry merged into a single mesh. `skipBuilding` (optional) leaves out openings of
+// camera-faded buildings.
+void BuildFacadeMesh(const tactics::Scene& scene, LitTriangleMesh* mesh,
+                         const std::vector<char>* skipBuilding = nullptr) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  for (const tactics::FacadeOpening& opening : scene.facadeOpenings) {
+    if (skipBuilding && opening.building >= 0 &&
+        opening.building < static_cast<int>(skipBuilding->size()) &&
+        (*skipBuilding)[opening.building]) {
+      continue;
+    }
+    AppendFacadeOpening(scene, opening, &vertices, &indices);
+  }
+  mesh->SetMesh(vertices, indices);
+}
+
+// Opening rectangles each obstacle's wall faces must cut out (recessed
+// doors and factory windows), keyed by obstacle index, per footprint edge:
+// (u0, y0, u1, y1) along the edge, as AppendWallFaceWithHoles reads them.
+std::unordered_map<int, std::vector<std::vector<glm::vec4>>> RecessHolesByObstacle(
+    const tactics::Scene& scene) {
+  std::unordered_map<int, std::vector<std::vector<glm::vec4>>> holes;
+  for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
+    if (!OpeningRecessed(scene, o)) continue;
+    if (o.obstacle < 0 || o.obstacle >= static_cast<int>(scene.obstacles.size())) continue;
+    const tactics::Obstacle& wall = scene.obstacles[o.obstacle];
+    if (wall.footprint.empty() || o.wallEdge < 0 ||
+        o.wallEdge >= static_cast<int>(wall.footprint.size())) {
+      continue;
+    }
+    auto& perEdge = holes[o.obstacle];
+    perEdge.resize(wall.footprint.size());
+    perEdge[o.wallEdge].emplace_back(o.u0, o.y0, o.u1, o.y1);
+  }
+  return holes;
+}
+
+// Content hash of Scene::walkSurfaces (vertices and neighbour links, which
+// SharedEdges reads), so the batched deck mesh rebuilds only on scene change.
+unsigned long long DeckFingerprint(const tactics::Scene& scene) {
+  unsigned long long h = 1469598103934665603ULL ^ scene.walkSurfaces.size();
+  auto mix = [&](const void* data, size_t bytes) {
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < bytes; ++i) {
+      h ^= p[i];
+      h *= 1099511628211ULL;
+    }
+  };
+  for (const tactics::WalkSurface& s : scene.walkSurfaces) {
+    mix(s.vertices.data(), s.vertices.size() * sizeof(glm::vec3));
+    mix(s.neighbors.data(), s.neighbors.size() * sizeof(int));
+  }
+  return h;
+}
+
+// Every walk surface as one static mesh (0.45-thick slabs, shared chain
+// edges hidden): decks, ramps, roof slabs, stoops and rear platforms are
+// scene-static, so re-tessellating them per frame (and per pane) is wasted
+// work once facade stoops multiply their count (issue #152).
+void BuildDeckMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
+    const std::vector<char> hidden = SharedEdges(scene.walkSurfaces, surface);
+    AppendSurfacePatch(surface.vertices, 0.45f, &vertices, &indices, &hidden);
+  }
+  mesh->SetMesh(vertices, indices);
 }
 
 // One prism per massing detail, merged into a single mesh.
@@ -1662,6 +2184,15 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
   std::vector<DeckOccluder> decks;
   for (const tactics::WalkSurface& surface : walkSurfaces) {
     if (surface.vertices.size() < 3) continue;
+    // Knee-high slabs (facade stoops and rear-door platforms, issue #152)
+    // cast no meaningful eye-level shadow; keeping them out of the occluder
+    // set keeps the per-ray cost at the deck/ramp/roof count, not the far
+    // larger stoop count. Gameplay LOS stays exact in Raycast.
+    float clearance = 0.0f;
+    for (const glm::vec3& v : surface.vertices) {
+      clearance = std::max(clearance, v.y - terrain.HeightAt(v.x, v.z));
+    }
+    if (clearance < 0.6f) continue;
     DeckOccluder deck;
     deck.surface = &surface;
     for (const glm::vec3& v : surface.vertices) deck.footprint.footprint.emplace_back(v.x, v.z);
@@ -2141,8 +2672,13 @@ bool SceneRenderer::Init() {
   terrainSidewalkMesh_.Init();
   terrainStairMesh_.Init();
   geometryMesh_.Init();
+  streetFurnitureMesh_.Init();
+  streetPropDepthMesh_.Init();
+  for (LitTriangleMesh& mesh : streetPropMeshes_) mesh.Init();
   fovSceneMesh_.Init();
   massingMesh_.Init();
+  facadeMesh_.Init();
+  deckMesh_.Init();
   highlightRing_.Init();
   highlightRing_.SetPoints(BuildRingPoints());
 
@@ -2230,10 +2766,20 @@ void SceneRenderer::Destroy() {
   terrainStairMesh_.Destroy();
   pavementKey_ = 0;
   geometryMesh_.Destroy();
+  streetFurnitureMesh_.Destroy();
+  streetPropDepthMesh_.Destroy();
+  for (LitTriangleMesh& mesh : streetPropMeshes_) mesh.Destroy();
+  streetFurnitureKey_.clear();
+  streetPropKey_.clear();
   fovSceneMesh_.Destroy();
   fovSceneKey_ = 0;
   massingMesh_.Destroy();
   massingKey_ = 0;
+  facadeMesh_.Destroy();
+  facadeRecessHoles_.clear();
+  facadeKey_ = 0;
+  deckMesh_.Destroy();
+  deckKey_ = 0;
   terrainKey_ = tactics::HeightField{};
   highlightRing_.Destroy();
   sphereMesh_.Destroy();
@@ -2411,6 +2957,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const ScopedDrawStats drawStats(debug.stats);
   const auto& obstacles = game.GetScene().obstacles;
   const auto& sidewalks = game.GetScene().sidewalks;
+  const auto& streetProps = game.GetScene().props;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;
   const tactics::HeightField& terrain = game.GetScene().ground;
   // (Re)triangulate the terrain only when the scene's heightfield changes.
@@ -2455,6 +3002,41 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
   const bool drawTerrain = !terrain.Empty() && terrainMesh_.HasGeometry();
 
+  // Street fixtures are static and consist of hundreds of tiny cubes in a
+  // typical city. Rebuild only when the scene changes, then submit one
+  // furniture mesh and one prop mesh per material instead of one draw per
+  // cube.
+  size_t furnitureIndex = 0;
+  bool sameStreetFurniture = true;
+  for (const tactics::Obstacle& obstacle : obstacles) {
+    if (obstacle.kind == tactics::ObstacleKind::StreetFurniture) {
+      sameStreetFurniture &= furnitureIndex < streetFurnitureKey_.size() &&
+                             obstacle.bounds.min == streetFurnitureKey_[furnitureIndex].min &&
+                             obstacle.bounds.max == streetFurnitureKey_[furnitureIndex].max;
+      ++furnitureIndex;
+    }
+  }
+  sameStreetFurniture &= furnitureIndex == streetFurnitureKey_.size();
+  const bool sameStreetProps =
+      streetProps.size() == streetPropKey_.size() &&
+      std::equal(streetProps.begin(), streetProps.end(), streetPropKey_.begin(),
+                 [](const tactics::StreetProp& a, const tactics::StreetProp& b) {
+                   return a.kind == b.kind && a.position == b.position && a.yaw == b.yaw &&
+                          a.secondaryYaw == b.secondaryYaw;
+                 });
+  if (!sameStreetFurniture || !sameStreetProps) {
+    BuildStreetFixtureMeshes(obstacles, streetProps, &streetFurnitureMesh_,
+                             &streetPropDepthMesh_, &streetPropMeshes_);
+    streetFurnitureKey_.clear();
+    streetFurnitureKey_.reserve(furnitureIndex);
+    for (const tactics::Obstacle& obstacle : obstacles) {
+      if (obstacle.kind == tactics::ObstacleKind::StreetFurniture) {
+        streetFurnitureKey_.push_back(obstacle.bounds);
+      }
+    }
+    streetPropKey_ = streetProps;
+  }
+
   // Fit the light frustum to the camera's current zoom instead of spreading
   // the shadow map over the whole scene. Cap it at the previous whole-map
   // coverage so zoomed-out views retain the same bounds.
@@ -2489,6 +3071,23 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       massingKey_ = massingKey;
     }
   }
+  // Facade decals (issue #152), rebuilt when the opening records change.
+  {
+    const unsigned long long facadeKey = FacadeFingerprint(game.GetScene());
+    if (facadeKey != facadeKey_) {
+      BuildFacadeMesh(game.GetScene(), &facadeMesh_);
+      facadeRecessHoles_ = RecessHolesByObstacle(game.GetScene());
+      facadeKey_ = facadeKey;
+    }
+  }
+  // Batched walk-surface slabs, rebuilt when the surfaces change.
+  {
+    const unsigned long long deckKey = DeckFingerprint(game.GetScene());
+    if (deckKey != deckKey_) {
+      BuildDeckMesh(game.GetScene(), &deckMesh_);
+      deckKey_ = deckKey;
+    }
+  }
 
   // Shadow pass: only casters this team can currently see.
   glDisable(GL_SCISSOR_TEST);
@@ -2506,7 +3105,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       terrainStairMesh_.Draw();
     }
     for (const auto& obstacle : obstacles) {
-      if (obstacle.navOnly) continue;
+      if (obstacle.navOnly || obstacle.kind == tactics::ObstacleKind::StreetFurniture) continue;
       const AABB& bounds = obstacle.bounds;
       if (obstacle.footprint.empty()) {
         DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min,
@@ -2517,17 +3116,23 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         geometryMesh_.Draw();
       }
     }
+    if (streetFurnitureMesh_.HasGeometry()) {
+      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+      streetFurnitureMesh_.Draw();
+    }
+    if (streetPropDepthMesh_.HasGeometry()) {
+      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+      streetPropDepthMesh_.Draw();
+    }
     if (massingMesh_.HasGeometry()) {
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
       massingMesh_.Draw();
     }
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(kDeckShadowSlopeBias, kDeckShadowConstantBias);
-    for (const tactics::WalkSurface& surface : game.GetScene().walkSurfaces) {
-      const std::vector<char> hidden = SharedEdges(game.GetScene().walkSurfaces, surface);
-      BuildSurfacePatch(surface.vertices, 0.45f, &geometryMesh_, &hidden);
+    if (deckMesh_.HasGeometry()) {
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
-      geometryMesh_.Draw();
+      deckMesh_.Draw();
     }
     glDisable(GL_POLYGON_OFFSET_FILL);
     for (const Unit& unit : game.GetScene().units) {
@@ -2601,7 +3206,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // not fade that wall.
     constexpr float kEndpointEpsilon = 1e-2f;
     for (size_t i = 0; i < obstacles.size(); ++i) {
-      if (obstacles[i].navOnly) continue;
+      // Post-sized furniture is too small to hide a useful target and is kept
+      // in one static render batch below.
+      if (obstacles[i].navOnly || obstacles[i].kind == tactics::ObstacleKind::StreetFurniture) {
+        continue;
+      }
       for (const ProbeRay& ray : rays) {
         float t = 0.0f;
         if (tactics::RayIntersectsObstacle(cameraPos, ray.direction, obstacles[i], &t) &&
@@ -2749,28 +3358,69 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                  glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
   }
   thermalMaterial(ThermalMaterial::Concrete);
-  for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-    if (fadeSurface[i]) continue;  // Re-drawn translucent below.
-    // Concrete, clearly lighter than the asphalt below: the elevated deck
-    // and its ramps must read as a bridge, not as more ground road.
-    const std::vector<char> hidden = SharedEdges(walkSurfaces, walkSurfaces[i]);
-    BuildSurfacePatch(walkSurfaces[i].vertices, kDeckThickness, &geometryMesh_, &hidden);
-    DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(kDeckColor, 1.0f));
+  // Concrete, clearly lighter than the asphalt below: the elevated deck and
+  // its ramps must read as a bridge, not as more ground road. One batched
+  // draw unless a surface is camera-faded (then the faded ones are skipped
+  // here and re-drawn translucent below).
+  if (!anyFaded) {
+    if (deckMesh_.HasGeometry()) {
+      DrawLitModel(litShader_, deckMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                   glm::vec4(kDeckColor, 1.0f));
+    }
+  } else {
+    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+      if (fadeSurface[i]) continue;  // Re-drawn translucent below.
+      const std::vector<char> hidden = SharedEdges(walkSurfaces, walkSurfaces[i]);
+      BuildSurfacePatch(walkSurfaces[i].vertices, kDeckThickness, &geometryMesh_, &hidden);
+      DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                   glm::vec4(kDeckColor, 1.0f));
+    }
   }
 
   thermalMaterial(ThermalMaterial::Building);
   for (size_t i = 0; i < obstacles.size(); ++i) {
-    if (fadeObstacle[i] || obstacles[i].navOnly) continue;  // Re-drawn translucent below / unseen.
+    if (obstacles[i].navOnly || obstacles[i].kind == tactics::ObstacleKind::StreetFurniture) continue;
+    if (fadeObstacle[i]) continue;  // Re-drawn translucent below.
     const AABB& bounds = obstacles[i].bounds;
     const glm::vec4 color(kObstacleColor, 1.0f);
     if (obstacles[i].footprint.empty()) {
       DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, bounds.min,
                  bounds.max - bounds.min, color);
     } else {
-      BuildPolygonPrism(obstacles[i], &geometryMesh_);
+      // Recessed facade openings (doors, factory windows) cut real holes
+      // into the drawn wall; the niche geometry lands with the facade
+      // meshes below. Shadow/FOV casters keep the solid wall: the niches
+      // are shallow and sit behind it.
+      const auto holes = facadeRecessHoles_.find(static_cast<int>(i));
+      BuildPolygonPrism(obstacles[i], &geometryMesh_,
+                        holes == facadeRecessHoles_.end() ? nullptr : &holes->second);
       DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f), color);
     }
+  }
+  if (streetFurnitureMesh_.HasGeometry()) {
+    DrawLitModel(litShader_, streetFurnitureMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(kObstacleColor, 1.0f));
+  }
+
+  // Visual-only street props (issue #150), batched by material.
+  for (size_t i = 0; i < streetPropMeshes_.size(); ++i) {
+    if (!streetPropMeshes_[i].HasGeometry()) continue;
+    DrawLitModel(litShader_, streetPropMeshes_[i], viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 StreetPropColor(static_cast<StreetPropMaterial>(i)));
+  }
+
+  // Facade pane extrusions (issue #152) over the walls just drawn. A
+  // camera-faded building keeps its openings out of both passes (they would
+  // otherwise hang opaque in front of its translucent walls).
+  if (!anyFaded) {
+    if (facadeMesh_.HasGeometry()) {
+      DrawLitModel(litShader_, facadeMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                   glm::vec4(kObstacleColor, 1.0f));
+    }
+  } else {
+    BuildFacadeMesh(game.GetScene(), &geometryMesh_, &fadeBuilding);
+    DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(kObstacleColor, 1.0f));
   }
 
   // Building massing: parapets, roof furniture, awnings (issue #151).

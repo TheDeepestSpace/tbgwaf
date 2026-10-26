@@ -1,6 +1,9 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include <GLES3/gl3.h>
@@ -189,6 +192,16 @@ class SceneRenderer {
   // is already in world space, so the same upload path works in shadow and
   // lit passes without approximating wedges by their AABB.
   LitTriangleMesh geometryMesh_;
+  // Static street fixtures are assembled once per scene instead of
+  // submitting every small cube separately each frame. The lit prop meshes
+  // are grouped by material because the shader color is a uniform. Keep this
+  // count in sync with StreetPropMaterial in the .cpp.
+  static constexpr size_t kStreetPropMaterialCount = 11;
+  LitTriangleMesh streetFurnitureMesh_;
+  LitTriangleMesh streetPropDepthMesh_;
+  std::array<LitTriangleMesh, kStreetPropMaterialCount> streetPropMeshes_;
+  std::vector<tactics::AABB> streetFurnitureKey_;
+  std::vector<tactics::StreetProp> streetPropKey_;
   tactics::HeightField terrainKey_;
   GLuint shadowFbo_ = 0;
   GLuint shadowDepthTex_ = 0;
@@ -212,6 +225,19 @@ class SceneRenderer {
   // change. Drawn in the shadow and lit passes only.
   LitTriangleMesh massingMesh_;
   unsigned long long massingKey_ = 0;
+  // Facade openings as pane extrusions (issue #152): one static mesh
+  // (frames, sills, mullions, niche reveals/backs; building color) rebuilt when the scene's opening records change. Drawn in the lit pass
+  // right after the building prisms. Recessed openings (doors, factory
+  // windows) also cut holes into their wall faces: the rectangles per
+  // obstacle/edge are cached alongside the meshes.
+  LitTriangleMesh facadeMesh_;
+  std::unordered_map<int, std::vector<std::vector<glm::vec4>>> facadeRecessHoles_;
+  unsigned long long facadeKey_ = 0;
+  // All walk surfaces (decks, ramps, roof slabs, facade stoops/platforms)
+  // batched into one static mesh for the shadow and lit passes; the
+  // per-surface path remains only for the camera-fade re-draw.
+  LitTriangleMesh deckMesh_;
+  unsigned long long deckKey_ = 0;
   // Renders the two depth maps for `unit` looking along `facingYaw`, then
   // re-draws the static scene into the pane with the mask shader, tinted
   // `color` within `halfFovDegrees` of that heading. Leaves the pane framebuffer,

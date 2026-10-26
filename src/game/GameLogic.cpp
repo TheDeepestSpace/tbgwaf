@@ -973,8 +973,10 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
     pendingShots_.erase(std::remove_if(pendingShots_.begin(), pendingShots_.end(),
                                        [](const PendingShot& shot) { return !shot.started; }),
                         pendingShots_.end());
-    if (pendingShots_.empty()) FinishRound();
   }
+  // Every round runs its full window, even with nothing left to do: the
+  // physics (falling figures, bullets, a dropped flag) keep playing out.
+  if (executionElapsed_ >= constants::kRoundDuration) FinishRound();
 }
 
 void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
@@ -1880,6 +1882,9 @@ void GameLogic::CommitRound() {
   executionElapsed_ = 0.0f;
   tracers_.clear();  // Last turn's shot lines and ghosts are gone.
   ClearSightings();
+  // Ghosts made by this commit's tick-0 shots must survive the first sighting
+  // update, so don't let it see a fresh "turn started" edge and clear them.
+  wasExecuting_ = true;
 
   // A figure already standing on the flag (e.g. a dropped one) grabs it now.
   std::vector<FlagTouch> startTouches;
@@ -1915,8 +1920,10 @@ void GameLogic::CommitRound() {
     pendingShots_.erase(std::remove_if(pendingShots_.begin(), pendingShots_.end(),
                                        [](const PendingShot& shot) { return !shot.started; }),
                         pendingShots_.end());
-    if (pendingShots_.empty()) FinishRound();
   }
+  // Every round runs its full window, even with nothing left to do: the
+  // physics (falling figures, bullets, a dropped flag) keep playing out.
+  if (executionElapsed_ >= constants::kRoundDuration) FinishRound();
 }
 
 void GameLogic::InitFlag() {

@@ -627,6 +627,15 @@ void TestRoundExecutesBothTeamsMovesConcurrently() {
   CHECK(game.RoundNumber() == 2);
 }
 
+void RunRound(GameLogic& game) {
+  int steps = 0;
+  while (game.Mode() == InputMode::Executing && steps < 10000) {
+    game.Update(0.02f);
+    ++steps;
+  }
+  CHECK(steps < 10000);
+}
+
 void TestShootRowsResolveSimultaneouslyAcrossTeams() {
   GameLogic game(LegacyScene());
   MakePassive(game);
@@ -652,8 +661,9 @@ void TestShootRowsResolveSimultaneouslyAcrossTeams() {
   CHECK(game.CanCommitRound());
   game.CommitRound();
 
-  // No moves were planned, so the round resolves and finishes in the commit
-  // call itself: still-blocked shots can never connect once nobody moves.
+  // No moves were planned, so still-blocked shots can never connect; the
+  // round still plays out its full window before finishing.
+  RunRound(game);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(game.FindUnit(0)->alive);
   CHECK(!game.FindUnit(1)->alive);  // Mutual open-lane exchange downs both...
@@ -663,6 +673,24 @@ void TestShootRowsResolveSimultaneouslyAcrossTeams() {
   CHECK(game.FindUnit(5)->alive);
   CHECK(!game.Winner().has_value());
   CHECK(game.RoundNumber() == 2);
+}
+
+// Every round takes the full kRoundDuration, even when nobody has anything left to do.
+void TestIdleRoundRunsFullDuration() {
+  GameLogic game(LegacyScene());
+  MakePassive(game);
+  for (const Unit& u : game.GetScene().units) {
+    game.ClickUnit(u.id, u.team);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  CHECK(game.Mode() == InputMode::Executing);
+  float elapsed = 0.0f;
+  while (game.Mode() == InputMode::Executing && elapsed < 10.0f) {
+    game.Update(0.02f);
+    elapsed += 0.02f;
+  }
+  CHECK(std::fabs(elapsed - constants::kRoundDuration) < 0.05f);
 }
 
 void TestMutualEliminationIsDraw() {
@@ -683,6 +711,7 @@ void TestMutualEliminationIsDraw() {
   game.ClickUnit(1, Team::Red);
   CHECK(game.CanCommitRound());
   game.CommitRound();
+  RunRound(game);
 
   // Both last figures down each other in the same tick: game over, no winner.
   CHECK(!game.FindUnit(1)->alive);
@@ -1172,15 +1201,6 @@ void SetStationaryShoot(GameLogic& game, Team team) {
 }
 
 // Runs the committed round to completion.
-void RunRound(GameLogic& game) {
-  int steps = 0;
-  while (game.Mode() == InputMode::Executing && steps < 10000) {
-    game.Update(0.02f);
-    ++steps;
-  }
-  CHECK(steps < 10000);
-}
-
 // Red4 walks east from behind blue1 (which faces +X). Applies `redPb` to red
 // and runs the round; returns red4's final distance to the destination.
 float RunRed4Walk(const SquadPlaybook& redPb, bool* red4Alive, bool* blue1Alive,
@@ -1504,6 +1524,7 @@ void TestGameLogicWinCondition() {
   }
   CHECK(game.CanCommitRound());
   game.CommitRound();
+  RunRound(game);
 
   CHECK(game.Mode() == InputMode::GameOver);
   CHECK(game.Winner() == Team::Blue);
@@ -2211,9 +2232,10 @@ void TestZiplineOccupiedLineBlocksSecondRider() {
   }
   CHECK(sawBlocked);
   CHECK(game.Mode() != InputMode::Executing);
-  // The second rider still gets across once the line frees up.
+  // The round window is fixed, so the second rider (held at the anchor) is
+  // cut off rather than extending the round.
   CHECK(glm::distance(game.FindUnit(0)->position, glm::vec3(20.0f, 0.0f, 0.0f)) < 0.05f);
-  CHECK(glm::distance(game.FindUnit(1)->position, glm::vec3(20.0f, 0.0f, 1.0f)) < 0.05f);
+  CHECK(glm::distance(game.FindUnit(1)->position, glm::vec3(20.0f, 0.0f, 1.0f)) > 0.05f);
 }
 
 void TestZiplineRiderCannotShoot() {
@@ -3303,6 +3325,7 @@ int main() {
   TestRoundExecutesBothTeamsMovesConcurrently();
   TestShootRowsResolveSimultaneouslyAcrossTeams();
   TestMutualEliminationIsDraw();
+  TestIdleRoundRunsFullDuration();
   TestMoveFrontierRoutesAroundObstacle();
   TestClickChainsLegsAcrossRounds();
   TestManualReplanClearsQueuedLegs();

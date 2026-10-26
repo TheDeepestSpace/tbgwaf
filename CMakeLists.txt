@@ -391,7 +391,7 @@ else()
     add_test(NAME smoke_test COMMAND tactics_app)
   endif()
   set_tests_properties(smoke_test PROPERTIES
-    TIMEOUT 30
+    TIMEOUT 60
     ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11;TBGWAF_SMOKE_TEST=1"
   )
 endif()

@@ -109,6 +109,25 @@ massing -- parapets, roof furniture, awnings over shopfronts, set-back office
 top floors. Massing blocks sight lines and FOV (`SightObstacles`) but not
 movement; the set-back top floor is full obstacle geometry.
 
+Buildings also carry **facade openings** (issue #152, `Scene::facadeOpenings`):
+a per-kind window grid per floor on every street facade (shopfront glazing on
+mixed-use ground floors, a sparser grid on the courtyard wall) and the doors,
+each recorded as data (wall edge, u-range, floor, kind) and rendered as pane
+extrusions -- window frames extruded out of the wall (with exterior sills on
+some residential buildings, flatter thinner frames on office ribbon glazing),
+while doors and the factory-style grid windows of commercial halls are
+recessed into the building body through a real hole in the drawn wall face --
+so a later stage can turn the same records into gameplay holes without
+re-rolling where they are. Nearly every building gets a street
+entrance on its frontage: some entrances climb a short stoop walk-up while
+the rest open straight off the ground, and some buildings add a rear
+courtyard door, usually raised on a little platform whose access ramp lands
+on one of its three free sides (seed-drawn). Stoops and platforms are real
+`WalkSurface`s -- knee-high concrete a figure can stand on -- while the
+windows and doors themselves stay visual for now. Switch the openings off
+with `MapGeneratorConfig::features.facades` or scenario YAML
+`map.generate.features: {facades: off}`.
+
 Urban maps carry pre-built **ziplines** (0-2 per block, seed-deterministic,
 `MapGeneratorConfig::maxZiplinesPerBlock`): two-way cables between anchor
 posts along the block sidewalks. A move plan may walk to one anchor, ride,

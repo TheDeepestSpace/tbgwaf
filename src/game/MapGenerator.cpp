@@ -1634,7 +1634,7 @@ struct Parcel {
   // Per-parcel draw from the layout rng (the same stream position the old
   // per-building height jitter used, so layouts never shift): picks the
   // BuildingKind from the weighted table.
-  float kindRoll = 0.0f;
+  float kindRoll = -1.0f;  // Negative until drawn.
 };
 
 // Street class of the street a block edge `a -> b` fronts (`inward` points
@@ -1784,9 +1784,32 @@ void PlanBlockParcels(const CityPlan& city, size_t blockIndex, const MapGenerato
   auto emit = [&](Parcel parcel) {
     if (parcel.footprint.size() < 3 || PolygonArea(parcel.footprint) < kMinBuildingArea) return;
     parcel.block = static_cast<int>(blockIndex);
-    parcel.kindRoll = rng->Unit01();
+    if (parcel.kindRoll < 0.0f) parcel.kindRoll = rng->Unit01();
     FinishParcel(&parcel);
     out->push_back(std::move(parcel));
+  };
+  // Sets the parcel's frontage edge and street: the longest edge lying on the
+  // building line (edges on it beat any chord), fronting the street beyond it.
+  auto placeFrontage = [&](Parcel* parcel) {
+    const std::vector<glm::vec2>& fp = parcel->footprint;
+    float best = -1.0f;
+    bool bestOnLine = false;
+    for (size_t i = 0; i < fp.size(); ++i) {
+      const glm::vec2 a = fp[i], b = fp[(i + 1) % fp.size()];
+      const float length = glm::length(b - a);
+      const bool onLine = DistanceToPolygonEdges(a, outer) < 1e-3f &&
+                          DistanceToPolygonEdges(b, outer) < 1e-3f &&
+                          DistanceToPolygonEdges((a + b) * 0.5f, outer) < 1e-3f;
+      if (onLine && !bestOnLine) best = -1.0f;
+      if ((onLine || !bestOnLine) && length > best) {
+        best = length;
+        bestOnLine = onLine;
+        parcel->frontageEdge = static_cast<int>(i);
+      }
+    }
+    const glm::vec2 fa = fp[parcel->frontageEdge];
+    const glm::vec2 fb = fp[(parcel->frontageEdge + 1) % fp.size()];
+    parcel->street = FrontageClass(city, fa, fb, inwardOf(fa, fb), c);
   };
   std::vector<glm::vec2> inner = InsetConvexPolygon(outer, c.buildingDepth);
   const std::vector<glm::vec2> courtyard = InsetConvexPolygon(outer, c.buildingDepth + 1.2f);
@@ -1837,28 +1860,11 @@ void PlanBlockParcels(const CityPlan& city, size_t blockIndex, const MapGenerato
       // The slab fronts the longest of its edges that lie on the building
       // line; it is a corner piece when it keeps one of the block's corners.
       Parcel parcel;
-      float best = -1.0f;
-      bool bestOnLine = false;
-      for (size_t i = 0; i < slab.size(); ++i) {
-        const glm::vec2 a = slab[i], b = slab[(i + 1) % slab.size()];
-        const float length = glm::length(b - a);
-        const bool onLine = DistanceToPolygonEdges(a, outer) < 1e-3f &&
-                            DistanceToPolygonEdges(b, outer) < 1e-3f &&
-                            DistanceToPolygonEdges((a + b) * 0.5f, outer) < 1e-3f;
-        if (onLine && !bestOnLine) best = -1.0f;  // Edges on the line beat any chord.
-        if ((onLine || !bestOnLine) && length > best) {
-          best = length;
-          bestOnLine = onLine;
-          parcel.frontageEdge = static_cast<int>(i);
-        }
-      }
-      for (const glm::vec2& v : slab) {
+      parcel.footprint = std::move(slab);
+      for (const glm::vec2& v : parcel.footprint) {
         for (const glm::vec2& o : outer) parcel.corner |= glm::distance(v, o) < 1e-3f;
       }
-      const glm::vec2 fa = slab[parcel.frontageEdge];
-      const glm::vec2 fb = slab[(parcel.frontageEdge + 1) % slab.size()];
-      parcel.street = FrontageClass(city, fa, fb, inwardOf(fa, fb), c);
-      parcel.footprint = std::move(slab);
+      placeFrontage(&parcel);
       emit(std::move(parcel));
     }
     return;
@@ -1883,13 +1889,26 @@ void PlanBlockParcels(const CityPlan& city, size_t blockIndex, const MapGenerato
     anyGap |= cornerGap[e];
   }
   if (!anyGap) cornerGap[blockIndex % edges] = true;
+  // A lone piece between two merged corners would chain them into one fat
+  // building; split it along the street instead so each corner gets its own.
+  for (size_t e = 0; e < edges; ++e) {
+    const float length = glm::distance(outer[e], outer[(e + 1) % edges]);
+    if (pieces[e] == 1 && !cornerGap[e] && !cornerGap[(e + 1) % edges] && length >= 8.0f) {
+      pieces[e] = 2;
+      innerGap[e].assign(1, false);
+    }
+  }
 
+  struct Piece {
+    std::vector<glm::vec2> footprint;
+    bool atStart, atEnd;  // Touches the corner at the edge's start/end.
+  };
+  std::vector<std::vector<Piece>> rows(edges);
+  std::vector<bool> lateSplit(edges, false);
   for (size_t e = 0; e < edges; ++e) {
     if (!pieces[e]) continue;
     const size_t next = (e + 1) % edges;
     const float length = glm::distance(outer[e], outer[next]);
-    const UrbanStreetClass street =
-        FrontageClass(city, outer[e], outer[next], inwardOf(outer[e], outer[next]), c);
     const int count = pieces[e];
     std::vector<float> bounds(count + 1);
     for (int i = 0; i <= count; ++i) {
@@ -1910,14 +1929,17 @@ void PlanBlockParcels(const CityPlan& city, size_t blockIndex, const MapGenerato
     for (int i = 1; i < count; ++i) {
       if (rng->Chance(0.2f)) wallSkew[i] = rng->Float(-0.5f, 0.5f) * c.buildingDepth;
     }
+    // Walls beside a merged corner stay square so the corner building's hull
+    // never reaches into its neighbor.
+    if (!cornerGap[e]) wallSkew[1] = 0.0f;
+    if (!cornerGap[next]) wallSkew[count - 1] = 0.0f;
     auto innerU = [&](float t, float skew) {
       const glm::vec2 foot = glm::mix(outer[e], outer[next], t);
       return std::clamp(glm::dot(foot - inner[e], innerDir) + skew, 0.0f, innerLen);
     };
     for (int i = 0; i < count; ++i) {
       float ta = bounds[i], tb = bounds[i + 1];
-      if (i == 0 && cornerGap[e]) ta += halfGapT;
-      if (i == count - 1 && cornerGap[next]) tb -= halfGapT;
+      // Corner alleys are cut square to a street below, not by trimming ends.
       if (i > 0 && innerGap[e][i - 1]) ta += halfGapT;
       if (i < count - 1 && innerGap[e][i]) tb -= halfGapT;
       if (tb - ta < 0.04f) continue;
@@ -1928,17 +1950,246 @@ void PlanBlockParcels(const CityPlan& city, size_t blockIndex, const MapGenerato
       tb = std::min(tb, 0.9995f);
       float ua = innerU(ta, wallSkew[i]), ub = innerU(tb, wallSkew[i + 1]);
       if (ub < ua) ua = ub = (ua + ub) * 0.5f;
-      Parcel parcel;
-      parcel.footprint = {glm::mix(outer[e], outer[next], ta), glm::mix(outer[e], outer[next], tb),
-                          inner[e] + innerDir * ub, inner[e] + innerDir * ua};
+      std::vector<glm::vec2> footprint = {
+          glm::mix(outer[e], outer[next], ta), glm::mix(outer[e], outer[next], tb),
+          inner[e] + innerDir * ub, inner[e] + innerDir * ua};
       // A back wall pinched to a point becomes a (still convex) triangle.
-      if (ub - ua < 0.05f) parcel.footprint.pop_back();
-      if (PolygonArea(parcel.footprint) < c.minPolygonArea * 0.18f) continue;
-      parcel.frontageEdge = 0;
-      parcel.street = street;
-      parcel.corner = (i == 0 && !cornerGap[e]) || (i == count - 1 && !cornerGap[next]);
-      emit(std::move(parcel));
+      if (ub - ua < 0.05f) footprint.pop_back();
+      if (PolygonArea(footprint) < c.minPolygonArea * 0.18f) continue;
+      rows[e].push_back({std::move(footprint), i == 0, i == count - 1});
     }
+  }
+
+  // Keep the part of `poly` on the side of the line (point, dir) that `keep` is on.
+  auto clipToSide = [](const std::vector<glm::vec2>& poly, glm::vec2 point, glm::vec2 dir,
+                       glm::vec2 keep) {
+    glm::vec2 n(-dir.y, dir.x);
+    if (glm::dot(keep - point, n) < 0.0f) n = -n;
+    // A hair's width of separation keeps the seam from reading as overlap to
+    // exact-collinearity tests.
+    point += n * 0.002f;
+    std::vector<glm::vec2> result;
+    for (size_t k = 0; k < poly.size(); ++k) {
+      const glm::vec2 a = poly[k], b = poly[(k + 1) % poly.size()];
+      const float da = glm::dot(a - point, n), db = glm::dot(b - point, n);
+      if (da >= 0.0f) result.push_back(a);
+      if ((da >= 0.0f) != (db >= 0.0f)) result.push_back(glm::mix(a, b, da / (da - db)));
+    }
+    return result;
+  };
+  const float minArea = c.minPolygonArea * 0.18f;
+  // Corner alleys: both walls are cut square to one of the two streets, so
+  // they run parallel and the passage keeps its full width. (Cutting each
+  // piece square to its own street leaves a wedge at non-right corners.) If
+  // neither orientation leaves usable pieces, the corner merges instead.
+  auto cutAlley = [&](size_t e, size_t next, bool randomFirst) {
+    if (next == e || rows[e].empty() || rows[next].empty()) return false;
+    if (!rows[e].back().atEnd || !rows[next].front().atStart) return false;
+    std::vector<glm::vec2>& pf = rows[e].back().footprint;
+    std::vector<glm::vec2>& qf = rows[next].front().footprint;
+    const glm::vec2 dirs[2] = {glm::normalize(outer[next] - outer[e]),
+                               glm::normalize(outer[(next + 1) % edges] - outer[next])};
+    const int first = randomFirst && rng->Chance(0.5f) ? 1 : 0;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      const int axis = (first + attempt) % 2;
+      const glm::vec2 n = dirs[axis];
+      const glm::vec2 along(-n.y, n.x);
+      // The piece running along `n` backs off by the alley width; the other
+      // piece is only trimmed where it would reach back past the corner (an
+      // acute one), so at a right angle its wall stays flush with the street.
+      const float pOff = axis == 0 ? -(c.gapWidth + 0.01f) : 0.01f;
+      const float qOff = axis == 0 ? -0.01f : c.gapWidth + 0.01f;
+      const glm::vec2 a = outer[next] + n * pOff;
+      const glm::vec2 b = outer[next] + n * qOff;
+      std::vector<glm::vec2> pt = clipToSide(pf, a, along, a - n * 1000.0f);
+      std::vector<glm::vec2> qt = clipToSide(qf, b, along, b + n * 1000.0f);
+      if (pt.size() < 3 || qt.size() < 3 || PolygonArea(pt) < minArea ||
+          PolygonArea(qt) < minArea) {
+        continue;
+      }
+      pf = std::move(pt);
+      qf = std::move(qt);
+      return true;
+    }
+    return false;
+  };
+  for (size_t e = 0; e < edges; ++e) {
+    const size_t next = (e + 1) % edges;
+    if (cornerGap[next] && !cutAlley(e, next, true)) cornerGap[next] = false;
+  }
+
+  // A corner alley can be planned but prove too short to cut, turning into a
+  // merge above. If that leaves one piece spanning two merged corners, split
+  // it now so two corner buildings cannot chain into a three-sided block.
+  for (size_t e = 0; e < edges; ++e) {
+    const size_t next = (e + 1) % edges;
+    if (cornerGap[e] || cornerGap[next] || rows[e].size() != 1 ||
+        !rows[e][0].atStart || !rows[e][0].atEnd) {
+      continue;
+    }
+    const std::vector<glm::vec2>& footprint = rows[e][0].footprint;
+    const glm::vec2 frontDir = glm::normalize(outer[next] - outer[e]);
+    const glm::vec2 cutDir(-frontDir.y, frontDir.x);
+    const glm::vec2 cutPoint = (footprint[0] + footprint[1]) * 0.5f;
+    std::vector<glm::vec2> first = clipToSide(footprint, cutPoint, cutDir, footprint[0]);
+    std::vector<glm::vec2> second = clipToSide(footprint, cutPoint, cutDir, footprint[1]);
+    if (first.size() < 3 || second.size() < 3 || PolygonArea(first) < minArea ||
+        PolygonArea(second) < minArea) {
+      continue;
+    }
+    rows[e].clear();
+    rows[e].push_back({std::move(first), true, false});
+    rows[e].push_back({std::move(second), false, true});
+    lateSplit[e] = true;
+  }
+
+  // Corners without an alley are one L-shaped building wrapping the corner,
+  // not two buildings meeting on the miter line. Footprints must stay convex,
+  // so the L is two pieces whose seam sits on the inner wall line of the
+  // corner-owning piece, away from the frontage corner: the owner grows to
+  // cover the whole corner and its neighbor is trimmed back to meet it.
+  std::vector<std::pair<size_t, size_t>> order;  // (edge, index) per piece.
+  std::vector<std::vector<size_t>> pieceId(edges);
+  for (size_t e = 0; e < edges; ++e) {
+    for (size_t i = 0; i < rows[e].size(); ++i) {
+      pieceId[e].push_back(order.size());
+      order.push_back({e, i});
+    }
+  }
+  std::vector<bool> trimmedStart(order.size(), false);
+  std::vector<float> rolls(order.size(), -1.0f);
+  // A late split replaces one RNG-planned piece, so its halves share one
+  // kind draw to keep every later block on the same RNG stream. Offset the
+  // second half deterministically so the neighboring Ls do not read as one.
+  std::vector<int> splitGroup(order.size(), -1);
+  std::vector<float> splitBaseRoll;
+  std::vector<size_t> splitBasePiece;
+  for (size_t e = 0; e < edges; ++e) {
+    if (!lateSplit[e]) continue;
+    const int group = static_cast<int>(splitBaseRoll.size());
+    splitGroup[pieceId[e][0]] = group;
+    splitGroup[pieceId[e][1]] = group;
+    splitBaseRoll.push_back(-1.0f);
+    splitBasePiece.push_back(order.size());
+  }
+  auto variedRoll = [](float roll) { return std::fmod(roll + 0.5f, 1.0f); };
+  auto rememberSplitRoll = [&](size_t p, float h) {
+    const int group = splitGroup[p];
+    if (group >= 0 && splitBaseRoll[static_cast<size_t>(group)] < 0.0f) {
+      splitBaseRoll[static_cast<size_t>(group)] = h;
+      splitBasePiece[static_cast<size_t>(group)] = p;
+    }
+  };
+  auto ensureRoll = [&](size_t p) {
+    if (rolls[p] >= 0.0f) return;
+    const int group = splitGroup[p];
+    if (group < 0) {
+      rolls[p] = rng->Unit01();
+      return;
+    }
+    const size_t g = static_cast<size_t>(group);
+    if (splitBaseRoll[g] < 0.0f) {
+      splitBaseRoll[g] = rng->Unit01();
+      splitBasePiece[g] = p;
+      rolls[p] = splitBaseRoll[g];
+    } else {
+      rolls[p] = p == splitBasePiece[g] ? splitBaseRoll[g] : variedRoll(splitBaseRoll[g]);
+    }
+  };
+  // Intersection parameter along `d1` from `p1` with the line (p2, d2).
+  auto lineHit = [](glm::vec2 p1, glm::vec2 d1, glm::vec2 p2, glm::vec2 d2, float* t) {
+    const float den = d1.x * d2.y - d1.y * d2.x;
+    if (std::abs(den) < 1.0e-4f) return false;
+    const glm::vec2 w = p2 - p1;
+    *t = (w.x * d2.y - w.y * d2.x) / den;
+    return true;
+  };
+  auto minimumWidth = [](const std::vector<glm::vec2>& poly) {
+    float result = std::numeric_limits<float>::infinity();
+    for (size_t i = 0; i < poly.size(); ++i) {
+      const glm::vec2 edge = poly[(i + 1) % poly.size()] - poly[i];
+      const float length = glm::length(edge);
+      if (length < 1.0e-4f) continue;
+      const glm::vec2 normal(-edge.y / length, edge.x / length);
+      float lo = std::numeric_limits<float>::infinity();
+      float hi = -lo;
+      for (const glm::vec2& point : poly) {
+        const float projection = glm::dot(point, normal);
+        lo = std::min(lo, projection);
+        hi = std::max(hi, projection);
+      }
+      result = std::min(result, hi - lo);
+    }
+    return result;
+  };
+  for (size_t e = 0; e < edges; ++e) {
+    const size_t next = (e + 1) % edges;
+    if (cornerGap[next] || next == e || rows[e].empty() || rows[next].empty()) continue;
+    if (!rows[e].back().atEnd || !rows[next].front().atStart) continue;
+    const size_t pid = pieceId[e].back(), qid = pieceId[next].front();
+    if (pid == qid) continue;
+    std::vector<glm::vec2>& pf = rows[e].back().footprint;
+    std::vector<glm::vec2>& qf = rows[next].front().footprint;
+    const size_t next2 = (next + 1) % edges;
+    const glm::vec2 dirE = glm::normalize(inner[next] - inner[e]);
+    const glm::vec2 dirN = glm::normalize(inner[next2] - inner[next]);
+    const glm::vec2 frontE = glm::normalize(outer[next] - outer[e]);
+    const glm::vec2 frontN = glm::normalize(outer[next2] - outer[next]);
+    // The first piece owns the corner unless its far end is already trimmed
+    // or the second piece is too short to give up the corner's depth.
+    bool joined = false;
+    for (int attempt = 0; attempt < 2 && !joined; ++attempt) {
+      const bool pOwns = (attempt == 0) == !trimmedStart[pid];
+      float t = 0.0f;
+      if (pOwns) {
+        // P's wall line runs on into the next street's frontage at G.
+        if (!lineHit(outer[next], frontN, inner[e], dirE, &t) || t <= 0.0f) continue;
+        if (glm::dot(qf[1] - outer[next], frontN) <= t + 0.5f) continue;
+        const glm::vec2 g = outer[next] + frontN * t;
+        std::vector<glm::vec2> trimmed = clipToSide(qf, inner[next], dirE, qf[1]);
+        if (trimmed.size() < 3 || PolygonArea(trimmed) < minArea) continue;
+        pf = {pf[0], pf[1], g, pf.back()};
+        qf = std::move(trimmed);
+        trimmedStart[qid] = true;
+      } else {
+        // Q's wall line runs back into the previous street's frontage at G.
+        if (!lineHit(outer[next], -frontE, inner[next], dirN, &t) || t <= 0.0f) continue;
+        if (glm::dot(outer[next] - pf[0], frontE) <= t + 0.5f) continue;
+        const glm::vec2 g = outer[next] - frontE * t;
+        std::vector<glm::vec2> trimmed = clipToSide(pf, inner[next], dirN, pf[0]);
+        if (trimmed.size() < 3 || PolygonArea(trimmed) < minArea) continue;
+        qf = {g, qf[0], qf[1], qf[2]};
+        pf = std::move(trimmed);
+      }
+      joined = true;
+    }
+    if (!joined) {
+      // Neither piece can give up the corner; open an alley instead of
+      // leaving the two meeting at a point.
+      cutAlley(e, next, false);
+      continue;
+    }
+    // One building: the L's two halves share a kind draw.
+    ensureRoll(pid);
+    rolls[qid] = rolls[pid];
+    rememberSplitRoll(qid, rolls[qid]);
+  }
+  for (size_t p = 0; p < order.size(); ++p) {
+    ensureRoll(p);
+    const size_t e = order[p].first;
+    std::vector<glm::vec2>& footprint = rows[e][order[p].second].footprint;
+    // Keep narrow temporary pieces available while resolving alleys and
+    // corner merges, but do not emit the tapered slivers that can remain at
+    // acute corners. Drawing their kind rolls above preserves the seeded RNG
+    // stream for every later block.
+    if (minimumWidth(footprint) < c.buildingDepth * 0.25f) continue;
+    Parcel parcel;
+    parcel.footprint = std::move(footprint);
+    parcel.kindRoll = rolls[p];
+    parcel.corner = (rows[e][order[p].second].atStart && !cornerGap[e]) ||
+                    (rows[e][order[p].second].atEnd && !cornerGap[(e + 1) % edges]);
+    placeFrontage(&parcel);
+    emit(std::move(parcel));
   }
 }
 
@@ -2094,6 +2345,11 @@ std::vector<Building> PlanBuildings(const std::vector<Parcel>& parcels,
     b.floorHeight = 3.5f;
     b.floorCount = std::max(2, static_cast<int>(std::lround(height / b.floorHeight)));
     b.groundFloorHeight = height - static_cast<float>(b.floorCount - 1) * b.floorHeight;
+    // Rounding the floor count up can leave a sliver of a ground floor.
+    if (b.groundFloorHeight <= 2.0f && b.floorCount > 2) {
+      --b.floorCount;
+      b.groundFloorHeight = height - static_cast<float>(b.floorCount - 1) * b.floorHeight;
+    }
     b.upperObstacle = -1;
     candidates.erase(candidates.begin() + pick);
   }

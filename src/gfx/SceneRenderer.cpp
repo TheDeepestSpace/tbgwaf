@@ -79,9 +79,6 @@ const glm::vec3 kSetupColor(0.2f, 1.0f, 0.3f);
 const glm::vec3 kObstacleColor(0.55f, 0.55f, 0.6f);
 // Facade openings (issue #152): window glazing, door leafs, and the
 // frame/sill/mullion trim extruded from (or lining a recess into) the walls.
-const glm::vec3 kWindowDecalColor(0.18f, 0.22f, 0.28f);
-const glm::vec3 kDoorDecalColor(0.30f, 0.24f, 0.18f);
-const glm::vec3 kFacadeTrimColor(0.66f, 0.64f, 0.60f);
 const glm::vec3 kDeckColor(0.44f, 0.45f, 0.48f);
 // Issue #136 camera-occlusion see-through: map geometry (buildings, deck/
 // ramp slabs) standing between the camera and something the player needs to
@@ -679,9 +676,6 @@ void BuildPolygonPrism(const tactics::Obstacle& obstacle, LitTriangleMesh* mesh,
 // over their full-floor ribbon glazing. All of it stays visual-only: the
 // gameplay Obstacle prism is untouched.
 
-// The geometry of one opening is split across three single-color meshes.
-enum class FacadePart : uint8_t { Glass, Door, Trim };
-
 // The opening's frame on its wall: `base` is the world point at (u=0, y=0),
 // `right` runs along the edge, `normal` points out of the wall.
 struct OpeningBasis {
@@ -782,8 +776,7 @@ void AppendOpeningBox(const OpeningBasis& f, float u0, float u1, float y0, float
 // One facade opening's geometry for `part`; see the section comment above
 // for the shapes per kind.
 void AppendFacadeOpening(const tactics::Scene& scene, const tactics::FacadeOpening& opening,
-                         FacadePart part, LitVertices* vertices,
-                         std::vector<GLuint>* indices) {
+                         LitVertices* vertices, std::vector<GLuint>* indices) {
   const OpeningBasis f = OpeningBasisFor(scene, opening);
   if (!f.valid) return;
   const PaneStyle style = PaneStyleFor(scene, opening);
@@ -794,7 +787,7 @@ void AppendFacadeOpening(const tactics::Scene& scene, const tactics::FacadeOpeni
   };
   if (style.recessed) {
     const float d = style.depth;
-    if (part == FacadePart::Trim) {
+    {
       // Reveal faces lining the niche, wound to face into it.
       const glm::vec3 Y(0.0f, y1 - y0, 0.0f);
       const glm::vec3 U = f.right * (u1 - u0);
@@ -816,15 +809,12 @@ void AppendFacadeOpening(const tactics::Scene& scene, const tactics::FacadeOpeni
                          vertices, indices);
       }
     }
-    const bool door = opening.kind == tactics::FacadeOpening::Kind::Door;
-    if ((door && part == FacadePart::Door) || (!door && part == FacadePart::Glass)) {
-      quad(u0, u1, y0, y1, -d);  // Leaf / glazing at the back of the niche.
-    }
+    quad(u0, u1, y0, y1, -d);  // Back of the niche.
     return;
   }
-  // Extruded frame: four bars ringing the rect, glazing behind them.
+  // Extruded frame: four bars ringing the rect.
   const float bar = std::min({style.bar, 0.25f * (y1 - y0), 0.25f * (u1 - u0)});
-  if (part == FacadePart::Trim && bar > 1e-3f) {
+  if (bar > 1e-3f) {
     const float d = style.depth;
     AppendOpeningBox(f, u0, u1, y0, y0 + bar, 0.0f, d, true, vertices, indices);
     AppendOpeningBox(f, u0, u1, y1 - bar, y1, 0.0f, d, true, vertices, indices);
@@ -834,9 +824,6 @@ void AppendFacadeOpening(const tactics::Scene& scene, const tactics::FacadeOpeni
       AppendOpeningBox(f, u0 - 0.08f, u1 + 0.08f, y0 - 0.08f, y0, 0.0f, 0.14f, true, vertices,
                        indices);
     }
-  }
-  if (part == FacadePart::Glass) {
-    quad(u0, u1, y0, y1, std::min(0.04f, 0.6f * style.depth));
   }
 }
 
@@ -1057,9 +1044,7 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   // on; the recessed parts are redundant casters inside the solid wall, but
   // the extruded frames stand proud of it and need their own tint coverage.
   for (const tactics::FacadeOpening& opening : scene.facadeOpenings) {
-    for (FacadePart part : {FacadePart::Glass, FacadePart::Door, FacadePart::Trim}) {
-      AppendFacadeOpening(scene, opening, part, &vertices, &indices);
-    }
+    AppendFacadeOpening(scene, opening, &vertices, &indices);
   }
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
     AppendSurfacePatch(surface.vertices, 0.45f, &vertices, &indices);
@@ -1171,10 +1156,9 @@ unsigned long long FacadeFingerprint(const tactics::Scene& scene) {
   return h;
 }
 
-// All facade geometry of one material (glass, door leafs or trim) merged
-// into a single mesh. `skipBuilding` (optional) leaves out openings of
+// All facade opening geometry merged into a single mesh. `skipBuilding` (optional) leaves out openings of
 // camera-faded buildings.
-void BuildFacadePartMesh(const tactics::Scene& scene, FacadePart part, LitTriangleMesh* mesh,
+void BuildFacadeMesh(const tactics::Scene& scene, LitTriangleMesh* mesh,
                          const std::vector<char>* skipBuilding = nullptr) {
   LitVertices vertices;
   std::vector<GLuint> indices;
@@ -1184,7 +1168,7 @@ void BuildFacadePartMesh(const tactics::Scene& scene, FacadePart part, LitTriang
         (*skipBuilding)[opening.building]) {
       continue;
     }
-    AppendFacadeOpening(scene, opening, part, &vertices, &indices);
+    AppendFacadeOpening(scene, opening, &vertices, &indices);
   }
   mesh->SetMesh(vertices, indices);
 }
@@ -2554,9 +2538,7 @@ bool SceneRenderer::Init() {
   for (LitTriangleMesh& mesh : streetPropMeshes_) mesh.Init();
   fovSceneMesh_.Init();
   massingMesh_.Init();
-  facadeWindowMesh_.Init();
-  facadeDoorMesh_.Init();
-  facadeTrimMesh_.Init();
+  facadeMesh_.Init();
   deckMesh_.Init();
   highlightRing_.Init();
   highlightRing_.SetPoints(BuildRingPoints());
@@ -2654,9 +2636,7 @@ void SceneRenderer::Destroy() {
   fovSceneKey_ = 0;
   massingMesh_.Destroy();
   massingKey_ = 0;
-  facadeWindowMesh_.Destroy();
-  facadeDoorMesh_.Destroy();
-  facadeTrimMesh_.Destroy();
+  facadeMesh_.Destroy();
   facadeRecessHoles_.clear();
   facadeKey_ = 0;
   deckMesh_.Destroy();
@@ -2913,9 +2893,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   {
     const unsigned long long facadeKey = FacadeFingerprint(game.GetScene());
     if (facadeKey != facadeKey_) {
-      BuildFacadePartMesh(game.GetScene(), FacadePart::Glass, &facadeWindowMesh_);
-      BuildFacadePartMesh(game.GetScene(), FacadePart::Door, &facadeDoorMesh_);
-      BuildFacadePartMesh(game.GetScene(), FacadePart::Trim, &facadeTrimMesh_);
+      BuildFacadeMesh(game.GetScene(), &facadeMesh_);
       facadeRecessHoles_ = RecessHolesByObstacle(game.GetScene());
       facadeKey_ = facadeKey;
     }
@@ -3208,28 +3186,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // camera-faded building keeps its openings out of both passes (they would
   // otherwise hang opaque in front of its translucent walls).
   if (!anyFaded) {
-    if (facadeWindowMesh_.HasGeometry()) {
-      DrawLitModel(litShader_, facadeWindowMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                   glm::vec4(kWindowDecalColor, 1.0f));
-    }
-    if (facadeDoorMesh_.HasGeometry()) {
-      DrawLitModel(litShader_, facadeDoorMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                   glm::vec4(kDoorDecalColor, 1.0f));
-    }
-    if (facadeTrimMesh_.HasGeometry()) {
-      DrawLitModel(litShader_, facadeTrimMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                   glm::vec4(kFacadeTrimColor, 1.0f));
+    if (facadeMesh_.HasGeometry()) {
+      DrawLitModel(litShader_, facadeMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                   glm::vec4(kObstacleColor, 1.0f));
     }
   } else {
-    BuildFacadePartMesh(game.GetScene(), FacadePart::Glass, &geometryMesh_, &fadeBuilding);
+    BuildFacadeMesh(game.GetScene(), &geometryMesh_, &fadeBuilding);
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(kWindowDecalColor, 1.0f));
-    BuildFacadePartMesh(game.GetScene(), FacadePart::Door, &geometryMesh_, &fadeBuilding);
-    DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(kDoorDecalColor, 1.0f));
-    BuildFacadePartMesh(game.GetScene(), FacadePart::Trim, &geometryMesh_, &fadeBuilding);
-    DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(kFacadeTrimColor, 1.0f));
+                 glm::vec4(kObstacleColor, 1.0f));
   }
 
   // Building massing: parapets, roof furniture, awnings (issue #151).

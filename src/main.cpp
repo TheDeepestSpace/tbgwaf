@@ -437,7 +437,8 @@ int main() {
     if (mapType == "urban-elevated") config.elevatedHighway = tactics::OverpassMode::On;
     if (mapType == "urban-full") {
       // Every optional detail layer forced on (issue #146).
-      for (const char* name : {"lanes", "curbs", "furniture", "terrain", "interiors", "rail"}) {
+      for (const char* name :
+           {"lanes", "curbs", "furniture", "terrain", "interiors", "rail", "facades"}) {
         tactics::UrbanFeatureByName(&config.features, name)->mode = tactics::FeatureMode::On;
       }
     }

@@ -114,8 +114,7 @@ def map_rows(current: dict, baselines: list[dict]) -> str:
             baseline = baseline_value(baselines, metric, seed)
             cells.append(f"<td>{fmt(current_value, decimals)}</td>")
             cells.append(f"<td>{baseline_cell(baseline, decimals)}</td>")
-            if metric in {"fps", "frame_ms"}:
-                cells.append(f"<td>{delta_cell(current_value, baseline, higher_is_better, decimals)}</td>")
+            cells.append(f"<td>{delta_cell(current_value, baseline, higher_is_better, decimals)}</td>")
         rows.append("<tr>" + "".join(cells) + "</tr>")
     return "\n".join(rows)
 
@@ -175,11 +174,8 @@ def build_page(current: dict, runs: list[dict], title: str = "Performance suite"
     header_cells = ["<th rowspan=\"2\">Seed</th>"]
     sub_cells = []
     for metric, label, _, _ in METRICS:
-        columns = 3 if metric in {"fps", "frame_ms"} else 2
-        header_cells.append(f'<th colspan="{columns}">{html.escape(label)}</th>')
-        sub_cells.extend(["<th>current</th>", "<th>master</th>"])
-        if columns == 3:
-            sub_cells.append("<th>Δ</th>")
+        header_cells.append(f'<th colspan="3">{html.escape(label)}</th>')
+        sub_cells.extend(["<th>current</th>", "<th>master</th>", "<th>Δ</th>"])
     commit = metadata.get("commit", "")
     renderer = environment.get("gl_renderer", "unknown")
     return f"""<!doctype html>

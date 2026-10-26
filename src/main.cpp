@@ -940,8 +940,8 @@ int main() {
       jevBuilder.reset();
     }
 
-    // Blue is the only simulator. In AI modes it commits exactly once as
-    // soon as every living figure has a plan, including Blue-human vs Red-AI.
+    // Blue is the only simulator. With no human player (Jev vs Jev) it commits once as
+    // soon as every living figure has a plan; human modes commit manually.
     // A server-mode client commits its own team's plans the same way; the
     // server runs the round once both clients have.
     if (remoteMode && remoteReady && tbgwaf_auto_commit() && !aiPaused &&

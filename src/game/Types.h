@@ -24,6 +24,10 @@ struct AABB {
   glm::vec3 HalfExtents() const { return (max - min) * 0.5f; }
 };
 
+// Semantic tag used only to group static render geometry; collision, LOS,
+// and navigation treat both kinds identically.
+enum class ObstacleKind { Generic, StreetFurniture };
+
 // A map obstacle. `climbable` obstacles get a navmesh connection from
 // ground level up to their top surface (see NavMesh); non-climbable
 // obstacles are simply impassable walls.
@@ -35,6 +39,9 @@ struct Obstacle {
   // phase and vertical extent; collision, LOS, navigation and rendering use
   // these vertices when present.
   std::vector<glm::vec2> footprint;
+  // Small curb-side items share collision/LOS semantics with every other
+  // obstacle but are tagged so the renderer can batch their static geometry.
+  ObstacleKind kind = ObstacleKind::Generic;
   // Index into Scene::buildings when this prism is (part of) a generated
   // building, else -1 (hand-placed boxes, rocks, pier columns, crates). The
   // renderer reads the building's facade style through it.
@@ -126,6 +133,21 @@ inline float ZiplineRideCost(const Zipline& zipline);
 // and the same.
 struct RoadSurface {
   std::vector<glm::vec3> vertices;
+};
+
+// A visual street fixture (issue #150): traffic lights at bigger junctions,
+// stop/yield signs at smaller ones, street-name signs at block corners, and
+// the curved arm/head of a lamp whose collision post remains an `Obstacle`.
+// Fixtures are ignored by collision/navmesh/gameplay LOS, but their rendered
+// geometry participates in both lighting shadows and the shadow-map FOV pass.
+enum class StreetPropKind { TrafficLight, StopSign, YieldSign, StreetNameSign, LampPost };
+struct StreetProp {
+  StreetPropKind kind = StreetPropKind::TrafficLight;
+  glm::vec3 position{0.0f};  // Foot of the post.
+  float yaw = 0.0f;          // Facing/primary street heading about Y (0 = +X).
+  // The other incident street's true heading for crossed street-name blades;
+  // ignored by the other fixture kinds.
+  float secondaryYaw = 0.0f;
 };
 
 inline std::vector<glm::vec2> ObstacleFootprint(const Obstacle& obstacle) {

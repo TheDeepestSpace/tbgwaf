@@ -34,7 +34,10 @@ enum class BranchEnd { Auto, Ramp, OffMap };
 // Per-feature switch for the optional urban detail layers (issue #146).
 // Auto lets the seed decide, with `chance` as the per-seed probability; Off/On
 // force it. Terrain defaults to On (levels are part of every arterial city;
-// issue #155); the remaining detail flags are reserved for their emitters.
+// issue #155). `furniture` is live (issue #150) but unconditional: Auto behaves
+// like On, only Off disables it. It gates the street furniture obstacles along
+// the sidewalk curbs and the visual-only traffic lights and signage
+// (Scene::props). The remaining detail flags are reserved for their emitters.
 enum class FeatureMode { Auto, Off, On };
 struct FeatureToggle {
   FeatureMode mode = FeatureMode::Auto;

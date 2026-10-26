@@ -29,6 +29,9 @@ namespace {
 //   0x6a09e667u   ramp channels   which avenue ramps through each level
 //   0x1eae1007u   terrain accesses stair flights
 //   0x21b1e5a7u   ziplines         roof/anchor selection
+//   0xa5c47e75u   archetypes       floors, facade variants, setbacks
+//   0x3a55196eu   massing          parapets, roof furniture, awnings
+//   0x51f0a3c9u   facades          door spots, stoops, rear platforms, window grids
 //   0x6c57f00du   furniture        feature presence, then curb-side item stations/kinds
 //   0x51674ea1u   traffic control  light-vs-sign draws per junction, street-name corners
 constexpr uint32_t kStreetStream = 0xb10c5eedu;
@@ -3647,6 +3650,371 @@ void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed
   }
 }
 
+// --- Facade openings (issue #152, roadmap 3.4) -------------------------------
+
+constexpr uint32_t kFacadeStream = 0x51f0a3c9u;  // Doors, stoops, platforms, window grids.
+
+// Per-kind window pane proportions: sill above the floor, pane height, pane
+// width, and the gap between panes along the facade.
+struct WindowSpec {
+  float sill, height, width, gap;
+};
+WindowSpec WindowSpecFor(BuildingKind kind) {
+  switch (kind) {
+    case BuildingKind::Residential: return {0.9f, 1.2f, 1.1f, 1.0f};
+    case BuildingKind::MixedUse: return {0.9f, 1.2f, 1.1f, 1.0f};  // Upper floors.
+    case BuildingKind::Office: return {0.5f, 2.4f, 2.6f, 0.45f};   // Full-floor ribbon glazing.
+    case BuildingKind::Commercial: return {1.2f, 1.9f, 2.6f, 0.9f};  // Large factory windows.
+    case BuildingKind::Civic: return {0.9f, 1.6f, 1.4f, 0.9f};
+    case BuildingKind::Garage: return {1.1f, 0.8f, 2.2f, 1.6f};  // Open deck slots.
+  }
+  return {0.9f, 1.2f, 1.1f, 1.0f};
+}
+
+// Street entrance per kind: door size, the chance the entrance gets a raised
+// stoop walk-up (instead of opening straight off the ground), and the chance
+// of a rear door onto the courtyard.
+struct DoorSpec {
+  float width, height, walkUpChance, rearChance;
+};
+DoorSpec DoorSpecFor(BuildingKind kind) {
+  switch (kind) {
+    case BuildingKind::Residential: return {1.2f, 2.2f, 0.55f, 0.60f};
+    case BuildingKind::MixedUse: return {1.6f, 2.6f, 0.10f, 0.70f};
+    case BuildingKind::Office: return {1.8f, 2.6f, 0.35f, 0.40f};
+    case BuildingKind::Commercial: return {5.0f, 4.2f, 0.00f, 0.55f};  // Warehouse loading bay.
+    case BuildingKind::Civic: return {1.8f, 2.8f, 0.50f, 0.30f};
+    case BuildingKind::Garage: return {2.6f, 2.4f, 0.00f, 0.35f};
+  }
+  return {1.2f, 2.2f, 0.3f, 0.5f};
+}
+
+// Evenly spaced pane u-ranges along an edge of length `len`, centered within
+// the end margins. Empty when even a 0.8-width pane does not fit.
+std::vector<std::pair<float, float>> FacadeColumns(float len, float w, float gap, float margin) {
+  std::vector<std::pair<float, float>> columns;
+  const float usable = len - 2.0f * margin;
+  if (usable < 0.8f * w) return columns;
+  const int count = std::max(1, static_cast<int>(std::floor((usable + gap) / (w + gap))));
+  const float width = std::min(w, usable);
+  const float total = count * width + (count - 1) * gap;
+  float u = 0.5f * (len - total);
+  for (int i = 0; i < count; ++i) {
+    columns.emplace_back(u, u + width);
+    u += width + gap;
+  }
+  return columns;
+}
+
+// Windows and doors per building, recorded as FacadeOpening data and drawn
+// as pane extrusions (roadmap 3.4): a window grid per floor on every street
+// facade, one entrance door on the frontage, and a rear/courtyard door for
+// some (warehouses get a wide loading bay and no windows). Entrances draw a short stoop ramp walk-up for some kinds; rear doors
+// are usually raised on a little platform whose access ramp sits on any of
+// its three free sides (both as WalkSurfaces, so figures use them). Own rng
+// stream: openings never move a wall or a zipline draw.
+void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& parcels,
+                 uint32_t seed, const MapGeneratorConfig& c, const GroundY& groundY) {
+  if (scene->buildings.empty()) return;
+  if (c.features.facades.mode == FeatureMode::Off) return;
+  Rng rng(seed ^ kFacadeStream);
+  if (c.features.facades.mode == FeatureMode::Auto && !rng.Chance(c.features.facades.chance)) {
+    return;
+  }
+  constexpr float kEndMargin = 0.7f;      // Openings keep clear of footprint corners.
+  constexpr float kDoorClearance = 0.35f; // Gap between a door and its flanking windows.
+  constexpr float kStoopGrade = 0.4f;     // Rise/run of stoop and platform ramps.
+  constexpr float kPlatformDepth = 1.4f;
+  constexpr float kPlatformChance = 0.8f; // Rear doors are usually raised.
+  constexpr float kRearDoorWidth = 1.2f, kRearDoorHeight = 2.2f;
+  constexpr float kWallGap = 0.03f;       // Walk surfaces stand just off the wall face.
+  constexpr float kSpawnClearance = 1.5f;
+
+  std::vector<std::vector<glm::vec2>> footprints;
+  footprints.reserve(scene->obstacles.size());
+  for (const Obstacle& o : scene->obstacles) footprints.push_back(ObstacleFootprint(o));
+  // The building line (block outline inset by the sidewalk) per block: a
+  // footprint edge lying on it faces a street and gets the window grid.
+  std::vector<std::vector<glm::vec2>> buildingLines(city.blocks.size());
+  for (size_t i = 0; i < city.blocks.size(); ++i) {
+    buildingLines[i] = InsetConvexPolygon(city.blocks[i].vertices, c.sidewalkWidth);
+  }
+  const auto onLine = [](const std::vector<glm::vec2>& line, glm::vec2 p) {
+    float best = std::numeric_limits<float>::infinity();
+    for (size_t e = 0; e < line.size(); ++e) {
+      best = std::min(best, PointSegmentDistance(p, line[e], line[(e + 1) % line.size()]));
+    }
+    return best < 0.03f;
+  };
+
+  // A stoop/platform/ramp footprint must sit on flat ground at the wall's
+  // base, inside the map, clear of every obstacle, every walk surface that
+  // is not far overhead (other stoops and platforms included), and the
+  // spawn points.
+  const auto clearFor = [&](const std::vector<glm::vec2>& poly, float baseY) {
+    for (const glm::vec2& p : poly) {
+      if (std::max(std::fabs(p.x), std::fabs(p.y)) > scene->mapHalfExtent - 0.2f) return false;
+      if (std::fabs(groundY(p.x, p.y) - baseY) > 0.05f) return false;
+    }
+    const glm::vec2 center = PolygonCenter(poly);
+    if (std::fabs(groundY(center.x, center.y) - baseY) > 0.05f) return false;
+    for (const auto& footprint : footprints) {
+      if (PolygonsOverlap(poly, footprint)) return false;
+    }
+    for (const WalkSurface& surface : scene->walkSurfaces) {
+      if (surface.vertices.size() < 3) continue;
+      float lowest = surface.vertices.front().y;
+      for (const glm::vec3& v : surface.vertices) lowest = std::min(lowest, v.y);
+      if (lowest > baseY + constants::kMinDeckHeadroom) continue;
+      std::vector<glm::vec2> xz;
+      for (const glm::vec3& v : surface.vertices) xz.emplace_back(v.x, v.z);
+      if (PolygonsOverlap(poly, xz)) return false;
+    }
+    for (const Unit& unit : scene->units) {
+      if (DistanceToPolygon(glm::vec2(unit.position.x, unit.position.z), poly) <
+          kSpawnClearance) {
+        return false;
+      }
+    }
+    return true;
+  };
+  // Counter-clockwise from above, as every WalkSurface consumer expects.
+  const auto pushSurface = [&](std::vector<glm::vec3> vertices, bool connectsToGround) {
+    float area = 0.0f;
+    for (size_t i = 0; i < vertices.size(); ++i) {
+      const glm::vec3& p = vertices[i];
+      const glm::vec3& q = vertices[(i + 1) % vertices.size()];
+      area += p.x * q.z - q.x * p.z;
+    }
+    if (area < 0.0f) std::reverse(vertices.begin(), vertices.end());
+    WalkSurface surface;
+    surface.vertices = std::move(vertices);
+    surface.connectsToGround = connectsToGround;
+    scene->walkSurfaces.push_back(std::move(surface));
+    return static_cast<int>(scene->walkSurfaces.size()) - 1;
+  };
+
+  for (size_t bi = 0; bi < scene->buildings.size(); ++bi) {
+    const Building& b = scene->buildings[bi];
+    const Parcel& parcel = parcels[b.parcel];
+    const Obstacle& base = scene->obstacles[b.obstacle];
+    const std::vector<glm::vec2>& fp = base.footprint;
+    const size_t n = fp.size();
+    const float baseY = base.bounds.min.y;
+    const float baseTop = base.bounds.max.y;
+    const std::vector<glm::vec2>& line = buildingLines[b.block];
+
+    // Street facades: edges on the block's building line. The frontage is
+    // one of them; corner parcels have two or more.
+    std::vector<char> street(n, 0);
+    for (size_t e = 0; e < n; ++e) {
+      const glm::vec2 a = fp[e], q = fp[(e + 1) % n];
+      street[e] = onLine(line, a) && onLine(line, q) && onLine(line, (a + q) * 0.5f);
+    }
+    const int frontage = parcel.frontageEdge;
+    // Rear edge: the longest non-street edge facing away from the frontage.
+    const glm::vec2 fa = fp[frontage], fb = fp[(frontage + 1) % n];
+    const glm::vec2 frontDir = glm::normalize(fb - fa);
+    const glm::vec2 frontOut(frontDir.y, -frontDir.x);
+    int rearEdge = -1;
+    float rearScore = 0.0f;
+    for (size_t e = 0; e < n; ++e) {
+      if (street[e] || static_cast<int>(e) == frontage) continue;
+      const glm::vec2 a = fp[e], q = fp[(e + 1) % n];
+      const float len = glm::distance(a, q);
+      if (len < kRearDoorWidth + 2.0f * kEndMargin) continue;
+      const glm::vec2 d = (q - a) / len;
+      const glm::vec2 out(d.y, -d.x);
+      const float facing = -glm::dot(out, frontOut);
+      if (facing < 0.3f) continue;
+      // The wall must actually face open ground: back-to-back slab parcels
+      // touch rear walls, where a door would open straight into the
+      // neighbour. Probe a thin strip just outside the edge.
+      const glm::vec2 s0 = a + d * kEndMargin + out * 0.05f;
+      const glm::vec2 s1 = q - d * kEndMargin + out * 0.05f;
+      const std::vector<glm::vec2> strip = {s0, s1, s1 + out * 0.8f, s0 + out * 0.8f};
+      bool open = true;
+      for (const auto& footprint : footprints) {
+        if (PolygonsOverlap(strip, footprint)) {
+          open = false;
+          break;
+        }
+      }
+      if (!open) continue;
+      const float score = facing * len;
+      if (score > rearScore) {
+        rearScore = score;
+        rearEdge = static_cast<int>(e);
+      }
+    }
+
+    const DoorSpec door = DoorSpecFor(b.kind);
+    // Door u-ranges per edge, so the ground-floor window grid skips them.
+    std::vector<glm::vec2> doorSpans(n, glm::vec2(0.0f, -1.0f));
+
+    // Street entrance on the frontage, with a stoop walk-up for some
+    // buildings and straight off the ground for the rest.
+    {
+      const glm::vec2 a = fp[frontage], q = fp[(frontage + 1) % n];
+      const float len = glm::distance(a, q);
+      const glm::vec2 dir = (q - a) / len;
+      const glm::vec2 out(dir.y, -dir.x);
+      const float width = std::min(door.width, len - 2.0f * kEndMargin);
+      if (width >= 0.9f) {
+        const float center = rng.Float(kEndMargin + width * 0.5f, len - kEndMargin - width * 0.5f);
+        const bool wantStoop = rng.Chance(door.walkUpChance);
+        const float stoopHeight = rng.Float(0.3f, 0.45f);
+        float doorBase = baseY;
+        if (wantStoop) {
+          const float run =
+              std::clamp(stoopHeight / kStoopGrade, 0.9f, std::max(0.9f, c.sidewalkWidth - 0.2f));
+          const float half = std::min(width * 0.5f + 0.5f,
+                                      std::min(center, len - center) - 0.15f);
+          const glm::vec2 s0 = a + dir * (center - half) + out * kWallGap;
+          const glm::vec2 s1 = a + dir * (center + half) + out * kWallGap;
+          const std::vector<glm::vec2> poly = {s0, s1, s1 + out * run, s0 + out * run};
+          if (clearFor(poly, baseY) &&
+              baseY + stoopHeight + 1.4f <= baseY + b.groundFloorHeight - 0.15f) {
+            pushSurface({{s0.x, baseY + stoopHeight, s0.y},
+                         {s1.x, baseY + stoopHeight, s1.y},
+                         {poly[2].x, baseY, poly[2].y},
+                         {poly[3].x, baseY, poly[3].y}},
+                        /*connectsToGround=*/true);
+            doorBase = baseY + stoopHeight;
+          }
+        }
+        const float head = std::min(doorBase + door.height, baseY + b.groundFloorHeight - 0.15f);
+        if (head - doorBase >= 1.4f) {
+          scene->facadeOpenings.push_back(FacadeOpening{
+              FacadeOpening::Kind::Door, static_cast<int>(bi), b.obstacle, frontage,
+              center - width * 0.5f, center + width * 0.5f, doorBase, head, 0});
+          doorSpans[frontage] = glm::vec2(center - width * 0.5f, center + width * 0.5f);
+        }
+      }
+    }
+
+    // Rear/courtyard door for some buildings: usually raised on a little
+    // platform with a ramp on one of its three free sides, otherwise (or
+    // when nothing fits) straight off the ground.
+    if (rearEdge >= 0 && rng.Chance(door.rearChance)) {
+      const glm::vec2 a = fp[rearEdge], q = fp[(rearEdge + 1) % n];
+      const float len = glm::distance(a, q);
+      const glm::vec2 dir = (q - a) / len;
+      const glm::vec2 out(dir.y, -dir.x);
+      const float center =
+          rng.Float(kEndMargin + kRearDoorWidth * 0.5f, len - kEndMargin - kRearDoorWidth * 0.5f);
+      const bool wantPlatform = rng.Chance(kPlatformChance);
+      const float platformHeight = rng.Float(0.4f, 0.5f);
+      const int sidePick = rng.Int(0, 2);  // 0: toward fp[e], 1: away, 2: front.
+      float doorBase = baseY;
+      if (wantPlatform) {
+        // Full-size first; a cramped courtyard (slab-row blocks, deep
+        // neighbours) gets a second, compact attempt before giving up.
+        const float fullHalf = std::min(kRearDoorWidth * 0.5f + 0.6f,
+                                        std::min(center, len - center) - 0.15f);
+        const float fullRun = std::clamp(platformHeight / kStoopGrade, 1.0f, 1.6f);
+        const struct { float half, depth, run; } sizes[] = {
+            {fullHalf, kPlatformDepth, fullRun},
+            {std::min(fullHalf, kRearDoorWidth * 0.5f + 0.3f), 1.0f, 0.9f},
+        };
+        for (const auto& size : sizes) {
+          const glm::vec2 p0 = a + dir * (center - size.half) + out * kWallGap;
+          const glm::vec2 p1 = a + dir * (center + size.half) + out * kWallGap;
+          const glm::vec2 p2 = p1 + out * size.depth;
+          const glm::vec2 p3 = p0 + out * size.depth;
+          const std::vector<glm::vec2> platform = {p0, p1, p2, p3};
+          for (int attempt = 0; attempt < 3 && doorBase == baseY; ++attempt) {
+            const int side = (sidePick + attempt) % 3;
+            std::vector<glm::vec2> ramp;
+            glm::vec2 top0, top1;  // The platform edge the ramp hangs off.
+            if (side == 0) {
+              top0 = p0, top1 = p3;
+              ramp = {p0, p3, p3 - dir * size.run, p0 - dir * size.run};
+            } else if (side == 1) {
+              top0 = p1, top1 = p2;
+              ramp = {p1, p2, p2 + dir * size.run, p1 + dir * size.run};
+            } else {
+              top0 = p2, top1 = p3;
+              ramp = {p2, p3, p3 + out * size.run, p2 + out * size.run};
+            }
+            if (!clearFor(platform, baseY) || !clearFor(ramp, baseY)) continue;
+            const float top = baseY + platformHeight;
+            const int platformIndex = pushSurface({{p0.x, top, p0.y},
+                                                   {p1.x, top, p1.y},
+                                                   {p2.x, top, p2.y},
+                                                   {p3.x, top, p3.y}},
+                                                  /*connectsToGround=*/false);
+            const int rampIndex = pushSurface({{top0.x, top, top0.y},
+                                               {top1.x, top, top1.y},
+                                               {ramp[2].x, baseY, ramp[2].y},
+                                               {ramp[3].x, baseY, ramp[3].y}},
+                                              /*connectsToGround=*/true);
+            scene->walkSurfaces[platformIndex].neighbors.push_back(rampIndex);
+            scene->walkSurfaces[rampIndex].neighbors.push_back(platformIndex);
+            doorBase = top;
+          }
+          if (doorBase > baseY) break;
+        }
+      }
+      const float head = std::min(doorBase + kRearDoorHeight, baseY + b.groundFloorHeight - 0.15f);
+      if (head - doorBase >= 1.4f) {
+        scene->facadeOpenings.push_back(FacadeOpening{
+            FacadeOpening::Kind::Door, static_cast<int>(bi), b.obstacle, rearEdge,
+            center - kRearDoorWidth * 0.5f, center + kRearDoorWidth * 0.5f, doorBase, head, 0});
+        doorSpans[rearEdge] = glm::vec2(center - kRearDoorWidth * 0.5f,
+                                        center + kRearDoorWidth * 0.5f);
+      }
+    }
+
+    // Window grids: floorCount x facade length on every street facade, plus
+    // a sparser grid on the rear wall's upper floors. Floors above the base
+    // prism (a set-back office top) keep their walls blank.
+    const WindowSpec spec = WindowSpecFor(b.kind);
+    // Commercial halls are warehouses: no windows, just the wide loading
+    // entrance on the frontage. Mixed-use shops stay glazed.
+    if (b.kind == BuildingKind::Commercial) continue;
+    const bool shopfront = b.kind == BuildingKind::MixedUse;
+    const bool rearWindows =
+        b.kind == BuildingKind::Residential || b.kind == BuildingKind::MixedUse ||
+        b.kind == BuildingKind::Office || b.kind == BuildingKind::Civic;
+    for (size_t e = 0; e < n; ++e) {
+      const bool rear = static_cast<int>(e) == rearEdge && rearWindows;
+      if (!street[e] && !rear) continue;
+      const glm::vec2 a = fp[e], q = fp[(e + 1) % n];
+      const float len = glm::distance(a, q);
+      const glm::vec2 doorSpan = doorSpans[e];
+      for (int floor = 0; floor < b.floorCount; ++floor) {
+        const float floorBase =
+            floor == 0 ? baseY : baseY + b.groundFloorHeight + (floor - 1) * b.floorHeight;
+        const float floorTop = floorBase + (floor == 0 ? b.groundFloorHeight : b.floorHeight);
+        if (floorTop > baseTop + 0.01f) break;
+        if (rear && floor == 0) continue;  // Courtyard ground floors stay blank.
+        float sill = spec.sill, head = spec.sill + spec.height, w = spec.width, gap = spec.gap;
+        if (floor == 0 && shopfront && street[e]) {
+          // Shopfront glazing: sill near the floor, panes nearly full height.
+          sill = 0.4f;
+          head = std::min(b.groundFloorHeight - 0.7f, 3.2f);
+          w = 2.0f;
+          gap = 0.35f;
+        }
+        if (rear) gap *= 2.0f;  // Sparser on the courtyard side.
+        const float y0 = floorBase + sill;
+        const float y1 = std::min(floorBase + head, floorTop - 0.2f);
+        if (y1 - y0 < 0.4f) continue;
+        for (const auto& [u0, u1] : FacadeColumns(len, w, gap, kEndMargin)) {
+          if (floor == 0 && doorSpan.y > doorSpan.x && u1 > doorSpan.x - kDoorClearance &&
+              u0 < doorSpan.y + kDoorClearance) {
+            continue;  // The entrance takes this bay.
+          }
+          scene->facadeOpenings.push_back(FacadeOpening{
+              FacadeOpening::Kind::Window, static_cast<int>(bi), b.obstacle,
+              static_cast<int>(e), u0, u1, y0, y1, floor});
+        }
+      }
+    }
+  }
+}
+
 // Squads at the artery's ends.
 void EmitSpawns(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
                 const GroundY& groundY) {
@@ -4001,6 +4369,9 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   EmitBuildings(&scene, city, parcels, PlanBuildings(parcels, characterRolls, seed, c, &rng), c,
                 groundY);
   EmitSpawns(&scene, city, c, groundY);
+  // Facades go before the ziplines so an anchor or cable never lands on a
+  // stoop or rear platform (their clearance pass checks the walk surfaces).
+  EmitFacades(&scene, city, parcels, seed, c, groundY);
   const size_t roofCount = scene.obstacles.size();
   EmitTerrainCliffs(&scene, city, c);
   // Furniture before ziplines: anchors and cables then keep clear of it.
@@ -4020,6 +4391,7 @@ FeatureToggle* UrbanFeatureByName(UrbanFeatures* f, const std::string& name) {
   if (name == "terrain") return &f->terrain;
   if (name == "interiors") return &f->interiors;
   if (name == "rail") return &f->rail;
+  if (name == "facades") return &f->facades;
   return nullptr;
 }
 

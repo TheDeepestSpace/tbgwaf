@@ -6,6 +6,7 @@
 #include "game/GameLogic.h"
 #include "game/Geometry.h"
 #include "game/MapGenerator.h"
+#include "OldSizeConfig.h"
 
 namespace {
 
@@ -264,7 +265,7 @@ void TestCompleteAiVsAiMatchAndTerminalStop() {
 // Every move must now stay on a walkable surface (never at grade under a deck
 // without headroom), and the ramp-ward bearing must climb the ramp.
 void TestJevMovesNeverCrossRampSlab() {
-  tactics::MapGeneratorConfig config;
+  tactics::MapGeneratorConfig config = tactics::OldSizeConfig();
   config.arteryCount = 2;
   config.elevatedHighway = tactics::OverpassMode::On;
   config.overpassLayout = tactics::OverpassLayout::RampUpRampDown;

@@ -66,13 +66,13 @@ bool ParseFeatureMode(const std::string& text, FeatureMode* mode);
 enum class BlockCharacter { Auto, Mixed, Downtown, Residential, Industrial };
 bool ParseBlockCharacter(const std::string& text, BlockCharacter* character);
 
-// Tuning for GenerateUrbanMap. Defaults give a 4x4 city of ~26-unit average
-// blocks (~144 units across, ~4.8x the default scene's 30). The overall
+// Tuning for GenerateUrbanMap. Defaults give an 8x8 city of ~26-unit average
+// blocks (~288 units across, ~9.6x the default scene's 30). The overall
 // extent is fixed by (blocks, blockSize, streetWidth); per-seed variation
 // redistributes it between blocks and streets.
 struct MapGeneratorConfig {
-  int blocksX = 4;
-  int blocksZ = 4;
+  int blocksX = 8;
+  int blocksZ = 8;
   float blockSize = 26.0f;      // Average block footprint; real sizes vary per column/row.
   float streetWidth = 8.0f;     // Average corridor between blocks; rim streets use exactly this.
   float streetWidthMin = 0.75f; // Interior street width range, as a multiple of streetWidth.

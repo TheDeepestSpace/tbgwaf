@@ -2006,6 +2006,7 @@ void TestSpawnHintsPlaceOppositeCornersAndCenterFlag() {
   const glm::vec3 before = plain.units[0].position;
   tactics::ApplySpawnHints(&plain);
   CHECK(plain.units[0].position == before);
+}
 
 // Issue #152 (roadmap 3.4): windows and doors are recorded per building as
 // FacadeOpening data on a wall edge, inside the wall's bounds. Most

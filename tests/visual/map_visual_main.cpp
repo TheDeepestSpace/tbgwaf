@@ -159,6 +159,12 @@ int main(int argc, char** argv) {
   cases.push_back({"city_terrain_elevated_seed_16",
                    tactics::GenerateUrbanMap(16, terrainElevatedConfig), 180.0f,
                    /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
+  // Street furniture and traffic props (issue #150), forced on (and framed
+  // closer) so the golden pins the layer regardless of the seed's Auto draw.
+  tactics::MapGeneratorConfig furnitureConfig = gradeConfig;
+  furnitureConfig.features.furniture.mode = tactics::FeatureMode::On;
+  cases.push_back({"city_furniture_seed_7", tactics::GenerateUrbanMap(7, furnitureConfig),
+                   45.0f, /*showNavMesh=*/false, /*pitchOffset=*/-0.45f});
   tactics::MapGeneratorConfig mergeConfig = gradeConfig;
   mergeConfig.arteryCount = 2;
   cases.push_back({"city_merge_seed_42", tactics::GenerateUrbanMap(42, mergeConfig),

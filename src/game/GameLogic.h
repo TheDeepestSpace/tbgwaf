@@ -232,14 +232,19 @@ class GameLogic {
   Unit* FindUnit(int id);
   const Unit* FindUnit(int id) const;
 
-  // Stage-B fog-of-war: which enemy figures/obstacles are currently inside
-  // the combined FOV of `team`'s living figures. Recomputed on demand from
-  // the current scene state (cheap given the handful of units/obstacles
-  // here), so callers always see a result consistent with the latest move.
+  // Stage-B fog-of-war: which enemy figures are currently inside the combined
+  // FOV of `team`'s living figures. Recomputed on demand from the current
+  // scene state, so callers always see a result consistent with the latest
+  // move. Obstacle visibility is not sampled (`reportedObstacles = 0`):
+  // every caller reads only `visibleUnit` -- obstacle dimming under fog is
+  // the GPU shadow-map overlay's job -- and sampling ~5 LOS rays per obstacle
+  // dominated the frame's FOV cost on furniture-dense urban maps. A future
+  // consumer that needs per-obstacle flags should call
+  // tactics::ComputeTeamVisibility directly with the count it wants sampled.
   TeamVisibility ComputeVisibility(Team team) const {
     return tactics::ComputeTeamVisibility(team, scene_.units, sightObstacles_,
                                           scene_.walkSurfaces, scene_.ground,
-                                          scene_.obstacles.size());
+                                          /*reportedObstacles=*/0);
   }
 
   // One remembered glimpse of an enemy figure in `viewingTeam`'s FOV.

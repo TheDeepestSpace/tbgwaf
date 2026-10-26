@@ -250,6 +250,7 @@ void LitTriangleMesh::Draw() const {
   if (indexCount_ == 0) return;
   glBindVertexArray(vao_);
   glDrawElements(GL_TRIANGLES, indexCount_, GL_UNSIGNED_INT, nullptr);
+  RecordDraw(indexCount_, indexCount_ / 3);
   glBindVertexArray(0);
 }
 

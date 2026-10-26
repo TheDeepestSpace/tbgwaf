@@ -1920,36 +1920,11 @@ void GameLogic::InitFlag() {
   if (config.position) {
     pos = *config.position;
   } else {
-    // Map center, or the nearest spot to it that no obstacle covers
-    // (searched in expanding rings, so the result is deterministic).
-    auto Free = [this](float x, float z) {
-      if (std::abs(x) > scene_.mapHalfExtent || std::abs(z) > scene_.mapHalfExtent) return false;
-      for (const Obstacle& o : scene_.obstacles) {
-        const float m = constants::kAgentRadius;
-        if (x > o.bounds.min.x - m && x < o.bounds.max.x + m && z > o.bounds.min.z - m &&
-            z < o.bounds.max.z + m) {
-          return false;
-        }
-      }
-      return true;
-    };
-    constexpr float kStep = 0.5f;
-    bool found = Free(0.0f, 0.0f);
-    for (int ring = 1; !found && ring * kStep <= scene_.mapHalfExtent * 1.5f; ++ring) {
-      float bestD = 1e30f;
-      for (int ix = -ring; ix <= ring; ++ix) {
-        for (int iz = -ring; iz <= ring; ++iz) {
-          if (std::max(std::abs(ix), std::abs(iz)) != ring) continue;
-          const float x = ix * kStep, z = iz * kStep;
-          const float d = x * x + z * z;
-          if (d < bestD && Free(x, z)) {
-            bestD = d;
-            pos = glm::vec3(x, 0.0f, z);
-            found = true;
-          }
-        }
-      }
-    }
+    // The generator's hinted spot (else the map center), or the nearest
+    // free spot to it.
+    const glm::vec2 want = scene_.spawnHints.flag.value_or(glm::vec2(0.0f));
+    const glm::vec2 spot = NearestFreeSpot(scene_, want);
+    pos = glm::vec3(spot.x, 0.0f, spot.y);
   }
   if (std::fabs(pos.y) < 1e-4f) pos.y = scene_.ground.HeightAt(pos.x, pos.z);
   flag_.position = pos;

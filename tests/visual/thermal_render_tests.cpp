@@ -159,6 +159,29 @@ void CheckRenderer() {
                        x, y, width, height, {}, fbo, options);
   Require(Capture(x, y, width, height) == blackHot, "AO exposed a fog-hidden enemy");
 
+  // "Baked thermal" looks shading up from a world-space bake: it must still
+  // darken the building's base like the live pass (loosely), leave open
+  // ground and roofs alone, and not depend on the camera.
+  options.thermalAo.baked = true;
+  renderer.RenderPane(game, tactics::Team::Blue, false, {}, camera, x, y, width, height, {}, fbo,
+                      options);
+  const auto baked = Capture(x, y, width, height);
+  Require(brightness(empty, contact) - brightness(baked, contact) > 12.0f,
+          "Baked thermal did not shade the building's base");
+  Require(std::abs(brightness(empty, openGround) - brightness(baked, openGround)) < 4.0f,
+          "Baked thermal spread shading across open ground");
+  Require(brightness(baked, glm::vec3(0.0f, 4.0f, 0.0f)) > 240.0f,
+          "Baked thermal occluded an exposed roof");
+  Require(std::abs(brightness(blackHot, contact) - brightness(baked, contact)) < 60.0f,
+          "Baked thermal diverged from the live shading at the contact point");
+  gfx::OrbitCamera moved = camera;
+  moved.Rotate(0.15f, 0.0f);
+  renderer.RenderPane(game, tactics::Team::Blue, false, {}, moved, x, y, width, height, {}, fbo,
+                      options);
+  const auto bakedMoved = Capture(x, y, width, height);
+  Require(bakedMoved != baked, "Baked thermal ignored a camera move");
+  options.thermalAo.baked = false;
+
   renderer.Destroy();
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   glDeleteRenderbuffers(1, &depth);

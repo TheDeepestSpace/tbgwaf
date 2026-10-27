@@ -1,7 +1,9 @@
 #include "gfx/AmbientOcclusion.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 
 #include "gfx/Mesh.h"
 
@@ -83,6 +85,52 @@ void main() {
 }
 )";
 
+// Horizon occlusion on the baked top-down heightmap (texel = world cell).
+// Same obscurance model as the screen-space pass with an up-facing normal,
+// but with fixed directions: nothing here depends on the camera.
+const char* kWorldOcclusion = R"(#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D uHeight;
+uniform float uTexel;   // World size of one texel.
+uniform float uRadius;  // World-space reach of the shading.
+uniform int uSteps;
+uniform int uRes;
+out vec4 FragColor;
+
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  float h = texelFetch(uHeight, c, 0).r;
+  float occlusion = 0.0;
+  for (int direction = 0; direction < 16; ++direction) {
+    float angle = (float(direction) + 0.5) * 0.39269908;
+    vec2 dir = vec2(cos(angle), sin(angle));
+    float horizon = 0.0;
+    for (int step = 0; step < uSteps; ++step) {
+      float fraction = (float(step) + 0.5) / float(uSteps);
+      float reach = uRadius * fraction * fraction;
+      ivec2 tc = c + ivec2(floor(dir * reach / uTexel + 0.5));
+      if (tc == c || any(lessThan(tc, ivec2(0))) || any(greaterThanEqual(tc, ivec2(uRes)))) continue;
+      float rise = texelFetch(uHeight, tc, 0).r - h;
+      if (rise <= 0.0) continue;
+      // A heightmap flattens a wall into one tall step, but the screen-space
+      // pass sees the wall's lower, nearer points too: score the step at a
+      // few heights up its face so tall buildings still shade their base.
+      float run = length(vec2(tc - c)) * uTexel;
+      for (int k = 0; k < 3; ++k) {
+        float dh = min(rise, uRadius * (0.2 + 0.3 * float(k)));
+        float distance = length(vec2(run, dh));
+        float falloff = 1.0 - smoothstep(0.0, uRadius, distance);
+        horizon = max(horizon, max(dh / distance - 0.08, 0.0) * falloff);
+      }
+    }
+    occlusion += horizon;
+  }
+  FragColor = vec4(vec3(clamp(occlusion / 16.0, 0.0, 1.0)), 1.0);
+}
+)";
+
 const char* kComposite = R"(#version 300 es
 precision highp float;
 precision highp sampler2D;
@@ -97,7 +145,38 @@ uniform vec2 uUvScale;   // Pane size / target texture size.
 uniform int uBlackHot;
 uniform float uStrength;  // Occlusion-to-darkening multiplier.
 uniform int uBlurRadius;  // Bilateral blur half-width in pixels.
+uniform int uBaked;       // Look shading up from the world bake instead.
+uniform sampler2D uWorldAo;
+uniform sampler2D uWorldHeight;
+uniform vec2 uWorldOrigin;
+uniform float uWorldTexel;
+uniform int uWorldRes;
+uniform float uWorldRadius;
 out vec4 FragColor;
+
+// Shading from the world bake: a depth-aware bilinear lookup at the surface
+// point (pushed out along a wall's normal), keeping only texels whose baked
+// surface is not above the point, and fading with the point's height over
+// that surface so walls and figures darken near their feet.
+float BakedOcclusion(vec3 p, vec3 n) {
+  vec2 xz = p.xz + n.xz * 0.3;
+  vec2 f = (xz - uWorldOrigin) / uWorldTexel - 0.5;
+  ivec2 i0 = ivec2(floor(f));
+  vec2 t = f - vec2(i0);
+  float sum = 0.0, weightSum = 0.0;
+  for (int k = 0; k < 4; ++k) {
+    ivec2 o = ivec2(k & 1, k >> 1);
+    ivec2 tc = i0 + o;
+    if (any(lessThan(tc, ivec2(0))) || any(greaterThanEqual(tc, ivec2(uWorldRes)))) continue;
+    float rise = p.y - texelFetch(uWorldHeight, tc, 0).r;
+    float w = (o.x == 0 ? 1.0 - t.x : t.x) * (o.y == 0 ? 1.0 - t.y : t.y) *
+              exp(-max(-rise - 0.1, 0.0) * 8.0);
+    sum += w * texelFetch(uWorldAo, tc, 0).r *
+           (1.0 - smoothstep(0.0, uWorldRadius, max(rise, 0.0)));
+    weightSum += w;
+  }
+  return sum / max(weightSum, 0.3);
+}
 
 vec3 WorldPosition(vec2 uv, float depth) {
   vec4 p = uInverseViewProjection * vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
@@ -110,6 +189,10 @@ void main() {
   if (depth < 1.0) {
     vec3 p = WorldPosition(vUV, depth);
     vec3 n = normalize(texture(uNormal, vUV * uUvScale).xyz * 2.0 - 1.0);
+    float ao;
+    if (uBaked != 0) {
+      ao = BakedOcclusion(p, n);
+    } else {
     vec2 texel = 1.0 / uPaneSize;
     float total = 0.0, weightSum = 0.0;
     // Bilateral blur removes sampling grain without smearing contact
@@ -127,7 +210,8 @@ void main() {
         weightSum += weight;
       }
     }
-    float ao = total / max(weightSum, 0.001);
+    ao = total / max(weightSum, 0.001);
+    }
     // Work in black-hot space so switching polarity inverts the complete
     // image, including contact shading; figures retain their hot signal.
     float black = uBlackHot != 0 ? gray : 1.0 - gray;
@@ -159,18 +243,22 @@ void Allocate(GLuint& texture, GLint format, GLenum channels, GLenum type, int w
 
 bool AmbientOcclusion::Init() {
   return occlusionShader_.Compile(kVertex, kOcclusion) &&
+         worldOcclusionShader_.Compile(kVertex, kWorldOcclusion) &&
          compositeShader_.Compile(kVertex, kComposite);
 }
 
-void AmbientOcclusion::DestroyBakes() {
-  for (BakeSlot& slot : bakes_) {
-    if (slot.texture) glDeleteTextures(1, &slot.texture);
-    slot = BakeSlot{};
-  }
+void AmbientOcclusion::DestroyWorldBake() {
+  const GLuint textures[] = {worldHeight_, worldAo_};
+  glDeleteTextures(2, textures);
+  if (worldFbo_) glDeleteFramebuffers(1, &worldFbo_);
+  worldHeight_ = worldAo_ = worldFbo_ = 0;
+  worldKey_ = 0;
+  worldRes_ = worldQuality_ = 0;
+  worldRadius_ = 0.0f;
 }
 
 void AmbientOcclusion::Destroy() {
-  DestroyBakes();
+  DestroyWorldBake();
   const GLuint textures[] = {color_, normal_, depth_, occlusion_};
   glDeleteTextures(4, textures);
   if (sceneFbo_) glDeleteFramebuffers(1, &sceneFbo_);
@@ -192,7 +280,6 @@ bool AmbientOcclusion::Begin(int width, int height, float background) {
       glGenFramebuffers(1, &occlusionFbo_);
       glGenVertexArrays(1, &vao_);
     }
-    DestroyBakes();  // Cached textures must match the new target size.
     glActiveTexture(GL_TEXTURE0);
     Allocate(color_, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, allocWidth, allocHeight);
     Allocate(normal_, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, allocWidth, allocHeight);
@@ -234,38 +321,169 @@ bool AmbientOcclusion::Begin(int width, int height, float background) {
   return true;
 }
 
+namespace {
+uint64_t HashScene(const tactics::Scene& scene) {
+  uint64_t hash = 1469598103934665603ull;
+  const auto mix = [&hash](float value) {
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof bits);
+    hash = (hash ^ bits) * 1099511628211ull;
+  };
+  mix(scene.mapHalfExtent);
+  for (const tactics::Obstacle& o : scene.obstacles) {
+    if (o.navOnly) continue;
+    mix(o.bounds.min.x); mix(o.bounds.min.y); mix(o.bounds.min.z);
+    mix(o.bounds.max.x); mix(o.bounds.max.y); mix(o.bounds.max.z);
+    for (const glm::vec2& v : o.footprint) { mix(v.x); mix(v.y); }
+  }
+  for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
+    for (const glm::vec3& v : surface.vertices) { mix(v.x); mix(v.y); mix(v.z); }
+  }
+  mix(scene.ground.minX); mix(scene.ground.minZ); mix(scene.ground.step);
+  mix(static_cast<float>(scene.ground.nx)); mix(static_cast<float>(scene.ground.nz));
+  for (float h : scene.ground.heights) mix(h);
+  return hash;
+}
+}  // namespace
+
+bool AmbientOcclusion::EnsureWorldBake(const tactics::Scene& scene, float radius, int quality) {
+  const uint64_t key = HashScene(scene);
+  const bool geometryChanged = !worldHeight_ || key != worldKey_;
+  if (!geometryChanged && radius == worldRadius_ && quality == worldQuality_) return true;
+
+  if (geometryChanged) {
+    // Top-down heightmap of everything opaque and static, ~4 texels a unit.
+    const float extent = 2.0f * (scene.mapHalfExtent + 2.0f);
+    const int res = std::clamp(static_cast<int>(std::ceil(extent * 4.0f)), 64, 2048);
+    const float texel = extent / static_cast<float>(res);
+    const glm::vec2 origin(-scene.mapHalfExtent - 2.0f);
+    std::vector<float> height(static_cast<size_t>(res) * res, 0.0f);
+    const auto center = [&](int i, int j) {
+      return origin + glm::vec2((static_cast<float>(i) + 0.5f) * texel,
+                                (static_cast<float>(j) + 0.5f) * texel);
+    };
+    const auto range = [&](float lo, float hi, int& a, int& b) {
+      a = std::max(static_cast<int>(std::floor(lo)), 0);
+      b = std::min(static_cast<int>(std::ceil(hi)), res - 1);
+    };
+    if (!scene.ground.Empty()) {
+      for (int j = 0; j < res; ++j) {
+        for (int i = 0; i < res; ++i) {
+          const glm::vec2 c = center(i, j);
+          height[static_cast<size_t>(j) * res + i] = scene.ground.MeshHeightAt(c.x, c.y);
+        }
+      }
+    }
+    for (const tactics::Obstacle& o : scene.obstacles) {
+      if (o.navOnly) continue;
+      const std::vector<glm::vec2> fp = tactics::ObstacleFootprint(o);
+      int i0, i1, j0, j1;
+      range((o.bounds.min.x - origin.x) / texel - 0.5f, (o.bounds.max.x - origin.x) / texel - 0.5f,
+            i0, i1);
+      range((o.bounds.min.z - origin.y) / texel - 0.5f, (o.bounds.max.z - origin.y) / texel - 0.5f,
+            j0, j1);
+      for (int j = j0; j <= j1; ++j) {
+        for (int i = i0; i <= i1; ++i) {
+          const glm::vec2 c = center(i, j);
+          bool inside = true;
+          for (size_t k = 0; k < fp.size() && inside; ++k) {
+            const glm::vec2 a = fp[k], b = fp[(k + 1) % fp.size()];
+            inside = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) >= -1e-4f;
+          }
+          if (inside) {
+            float& h = height[static_cast<size_t>(j) * res + i];
+            h = std::max(h, o.bounds.max.y);
+          }
+        }
+      }
+    }
+    for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
+      const auto& v = surface.vertices;
+      for (size_t k = 1; k + 1 < v.size(); ++k) {
+        const glm::vec3 a = v[0], b = v[k], c = v[k + 1];
+        const float det = (b.z - c.z) * (a.x - c.x) + (c.x - b.x) * (a.z - c.z);
+        if (std::abs(det) < 1e-8f) continue;
+        int i0, i1, j0, j1;
+        range((std::min({a.x, b.x, c.x}) - origin.x) / texel - 0.5f,
+              (std::max({a.x, b.x, c.x}) - origin.x) / texel - 0.5f, i0, i1);
+        range((std::min({a.z, b.z, c.z}) - origin.y) / texel - 0.5f,
+              (std::max({a.z, b.z, c.z}) - origin.y) / texel - 0.5f, j0, j1);
+        for (int j = j0; j <= j1; ++j) {
+          for (int i = i0; i <= i1; ++i) {
+            const glm::vec2 p = center(i, j);
+            const float l0 = ((b.z - c.z) * (p.x - c.x) + (c.x - b.x) * (p.y - c.z)) / det;
+            const float l1 = ((c.z - a.z) * (p.x - c.x) + (a.x - c.x) * (p.y - c.z)) / det;
+            const float l2 = 1.0f - l0 - l1;
+            if (l0 < -1e-3f || l1 < -1e-3f || l2 < -1e-3f) continue;
+            float& h = height[static_cast<size_t>(j) * res + i];
+            h = std::max(h, l0 * a.y + l1 * b.y + l2 * c.y);
+          }
+        }
+      }
+    }
+
+    if (!worldFbo_) glGenFramebuffers(1, &worldFbo_);
+    glActiveTexture(GL_TEXTURE0);
+    if (!worldHeight_) glGenTextures(1, &worldHeight_);
+    glBindTexture(GL_TEXTURE_2D, worldHeight_);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, res, res, 0, GL_RED, GL_FLOAT, height.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    Allocate(worldAo_, GL_R8, GL_RED, GL_UNSIGNED_BYTE, res, res);
+    glBindFramebuffer(GL_FRAMEBUFFER, worldFbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, worldAo_, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+      DestroyWorldBake();
+      return false;
+    }
+    worldKey_ = key;
+    worldRes_ = res;
+    worldTexel_ = texel;
+    worldOrigin_ = origin;
+  }
+
+  glBindFramebuffer(GL_FRAMEBUFFER, worldFbo_);
+  glViewport(0, 0, worldRes_, worldRes_);
+  glScissor(0, 0, worldRes_, worldRes_);
+  glDisable(GL_DEPTH_TEST);
+  glDepthMask(GL_FALSE);
+  BindTexture(worldHeight_, 0);
+  glBindVertexArray(vao_);
+  worldOcclusionShader_.Use();
+  worldOcclusionShader_.SetInt("uHeight", 0);
+  worldOcclusionShader_.SetFloat("uTexel", worldTexel_);
+  worldOcclusionShader_.SetFloat("uRadius", radius);
+  worldOcclusionShader_.SetInt("uSteps", quality);
+  worldOcclusionShader_.SetInt("uRes", worldRes_);
+  glDrawArrays(GL_TRIANGLES, 0, 3);
+  RecordDraw(3, 1);
+  worldRadius_ = radius;
+  worldQuality_ = quality;
+  return true;
+}
+
 void AmbientOcclusion::Composite(GLuint target, int x, int y, const glm::mat4& view,
                                  const glm::mat4& projection, bool blackHot,
-                                 const AmbientOcclusionSettings& settings, uint64_t sceneKey) {
+                                 const AmbientOcclusionSettings& settings,
+                                 const tactics::Scene* world) {
   const glm::mat4 inverse = glm::inverse(projection * view);
   const glm::vec2 paneSize(static_cast<float>(width_), static_cast<float>(height_));
   const glm::vec2 uvScale(paneSize.x / static_cast<float>(allocatedWidth_),
                           paneSize.y / static_cast<float>(allocatedHeight_));
   const float radius = std::max(settings.radius, 0.01f);
   const int quality = std::max(settings.quality, 1);
-  BakeSlot* bake = nullptr;
-  if (settings.baked) {
-    for (BakeSlot& slot : bakes_) {
-      if (slot.valid && slot.x == x && slot.y == y) { bake = &slot; break; }
-    }
-    if (!bake) {
-      for (BakeSlot& slot : bakes_) {
-        if (!slot.valid) { bake = &slot; break; }
-      }
-    }
-    if (!bake) bake = &bakes_[0];
-  }
-  const bool cached = bake && bake->valid && bake->x == x && bake->y == y &&
-                      bake->width == width_ && bake->height == height_ &&
-                      bake->inverse == inverse && bake->radius == radius &&
-                      bake->quality == quality && bake->sceneKey == sceneKey;
+  glBindVertexArray(vao_);
+  const bool baked =
+      settings.baked && world && EnsureWorldBake(*world, radius, quality);
 
   glDisable(GL_DEPTH_TEST);
   glDepthMask(GL_FALSE);
   BindTexture(depth_, 0);
   BindTexture(normal_, 1);
-  glBindVertexArray(vao_);
-  if (!cached) {
+  if (!baked) {
     glBindFramebuffer(GL_FRAMEBUFFER, occlusionFbo_);
     glViewport(0, 0, width_, height_);
     glScissor(0, 0, width_, height_);
@@ -281,16 +499,6 @@ void AmbientOcclusion::Composite(GLuint target, int x, int y, const glm::mat4& v
     occlusionShader_.SetInt("uSteps", quality);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     RecordDraw(3, 1);
-    if (bake) {
-      // Bake: snapshot the pass so later frames with identical inputs skip it.
-      if (!bake->texture) {
-        Allocate(bake->texture, GL_R8, GL_RED, GL_UNSIGNED_BYTE, allocatedWidth_, allocatedHeight_);
-      }
-      glBindTexture(GL_TEXTURE_2D, bake->texture);
-      glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width_, height_);
-      const GLuint texture = bake->texture;
-      *bake = BakeSlot{texture, true, x, y, width_, height_, inverse, radius, quality, sceneKey};
-    }
   }
 
   glBindFramebuffer(GL_FRAMEBUFFER, target);
@@ -300,12 +508,25 @@ void AmbientOcclusion::Composite(GLuint target, int x, int y, const glm::mat4& v
   glDepthMask(GL_TRUE);
   glDepthFunc(GL_ALWAYS);
   BindTexture(color_, 2);
-  BindTexture(cached ? bake->texture : occlusion_, 3);
+  BindTexture(occlusion_, 3);
+  if (baked) {
+    BindTexture(worldAo_, 4);
+    BindTexture(worldHeight_, 5);
+  }
   compositeShader_.Use();
   compositeShader_.SetInt("uDepth", 0);
   compositeShader_.SetInt("uNormal", 1);
   compositeShader_.SetInt("uScene", 2);
   compositeShader_.SetInt("uOcclusion", 3);
+  compositeShader_.SetInt("uWorldAo", 4);
+  compositeShader_.SetInt("uWorldHeight", 5);
+  compositeShader_.SetInt("uBaked", baked ? 1 : 0);
+  if (baked) {
+    compositeShader_.SetVec2("uWorldOrigin", worldOrigin_);
+    compositeShader_.SetFloat("uWorldTexel", worldTexel_);
+    compositeShader_.SetInt("uWorldRes", worldRes_);
+    compositeShader_.SetFloat("uWorldRadius", radius);
+  }
   compositeShader_.SetInt("uBlackHot", blackHot ? 1 : 0);
   compositeShader_.SetMat4("uInverseViewProjection", inverse);
   compositeShader_.SetVec2("uPaneSize", paneSize);
@@ -317,7 +538,7 @@ void AmbientOcclusion::Composite(GLuint target, int x, int y, const glm::mat4& v
   glBindVertexArray(0);
   glDepthFunc(GL_LESS);
   // No AO attachments stay bound when the next pane starts capturing.
-  for (int unit = 3; unit >= 0; --unit) BindTexture(0, unit);
+  for (int unit = 5; unit >= 0; --unit) BindTexture(0, unit);
 }
 
 }  // namespace gfx

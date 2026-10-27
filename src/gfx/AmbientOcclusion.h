@@ -1,8 +1,9 @@
 #pragma once
 
-#include <array>
 #include <cstdint>
+#include <vector>
 
+#include "game/Scene.h"
 #include "gfx/Shader.h"
 
 namespace gfx {
@@ -15,9 +16,10 @@ struct AmbientOcclusionSettings {
   float strength = 1.9f;  // Occlusion-to-darkening multiplier.
   int quality = 6;        // Depth samples marched per ray (more = smoother).
   int softness = 2;       // Bilateral blur half-width in pixels.
-  // "Baked thermal": cache each pane's occlusion pass and re-run it only
-  // when the camera, pane size, radius/quality or scene signature changes.
-  // Strength and softness are applied at composite time, so they stay live.
+  // "Baked thermal": skip the per-pixel screen-space march and look the
+  // shading up from a world-space map baked once per scene (re-baked only
+  // when the map geometry, radius or quality change, never for the camera).
+  // Strength stays live; softness is unused (the bake is already smooth).
   bool baked = false;
 };
 
@@ -33,7 +35,8 @@ class AmbientOcclusion {
   bool Begin(int width, int height, float background);
   void Composite(GLuint target, int x, int y, const glm::mat4& view,
                  const glm::mat4& projection, bool blackHot,
-                 const AmbientOcclusionSettings& settings, uint64_t sceneKey = 0);
+                 const AmbientOcclusionSettings& settings,
+                 const tactics::Scene* world = nullptr);
 
  private:
   Shader occlusionShader_, compositeShader_;
@@ -43,18 +46,18 @@ class AmbientOcclusion {
   int allocatedWidth_ = 0, allocatedHeight_ = 0;  // Target textures.
   bool warned_ = false;
 
-  // Baked occlusion, one slot per pane origin (a split window has two).
-  struct BakeSlot {
-    GLuint texture = 0;
-    bool valid = false;
-    int x = 0, y = 0, width = 0, height = 0;
-    glm::mat4 inverse{1.0f};
-    float radius = 0.0f;
-    int quality = 0;
-    uint64_t sceneKey = 0;
-  };
-  std::array<BakeSlot, 4> bakes_;
-  void DestroyBakes();
+  // World-space bake: a top-down heightmap of the static map (ground,
+  // obstacle tops, walk surfaces) and the horizon occlusion computed on it.
+  // Composite looks both up by world position, so the camera is irrelevant.
+  Shader worldOcclusionShader_;
+  GLuint worldFbo_ = 0, worldHeight_ = 0, worldAo_ = 0;
+  uint64_t worldKey_ = 0;
+  float worldRadius_ = 0.0f;
+  int worldQuality_ = 0, worldRes_ = 0;
+  glm::vec2 worldOrigin_{0.0f};
+  float worldTexel_ = 1.0f;
+  bool EnsureWorldBake(const tactics::Scene& scene, float radius, int quality);
+  void DestroyWorldBake();
 };
 
 }  // namespace gfx

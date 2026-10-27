@@ -484,7 +484,7 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
     ImGui::SliderInt("AO quality", &aoQuality, 2, 20);
     ImGui::SetNextItemWidth(130.0f);
     ImGui::SliderInt("AO softness", &aoSoftness, 0, 10);
-    // Heavy settings: reuse the occlusion pass while the view is still.
+    // Heavy settings: look shading up from a once-per-map world bake.
     ImGui::Checkbox("Baked thermal", &aoBaked);
   }
   ImGui::Checkbox("Disable occlusion fade", &disableOcclusionFade);

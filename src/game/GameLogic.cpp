@@ -334,6 +334,7 @@ GameSnapshot GameLogic::ExportState() const {
     u.id = unit.id;
     u.position = unit.position;
     u.facingYaw = unit.facingYaw;
+    u.turnLag = unit.turnLag;
     u.alive = unit.alive;
     u.planType = unit.plan.type;
     u.planShootTargetId = unit.plan.shootTargetId;
@@ -428,6 +429,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     Unit* unit = FindUnit(u.id);
     unit->position = u.position;
     unit->facingYaw = u.facingYaw;
+    unit->turnLag = u.turnLag;
     unit->alive = u.alive;
     unit->knockdownAxis = u.knockdownAxis;
     unit->knockdownElapsed = u.knockdownElapsed;
@@ -511,7 +513,7 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
         << u.knockdownElapsed << ' ' << u.walkPhase << ' ' << u.walkBlend << ' '
         << u.idleElapsed << ' ' << u.shootElapsed << ' ' << u.shootAimYaw << ' '
         << u.rideTravel << ' ' << u.rideLength << ' ' << u.rideSlope << ' '
-        << u.grabElapsed << ' ' << (u.moving ? 1 : 0) << ' '
+        << u.grabElapsed << ' ' << u.turnLag << ' ' << (u.moving ? 1 : 0) << ' '
         << u.planPath.size();
     for (const auto& p : u.planPath) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
     out << ' ' << u.planQueuedLegs.size();
@@ -561,7 +563,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
           u.planAimPoint.z >> u.planShots >> u.planEndFacingYaw >> u.knockdownAxis.x >>
           u.knockdownAxis.y >> u.knockdownAxis.z >> u.knockdownElapsed >> u.walkPhase >>
           u.walkBlend >> u.idleElapsed >> u.shootElapsed >> u.shootAimYaw >> u.rideTravel >> u.rideLength >>
-          u.rideSlope >> u.grabElapsed >> moving >>
+          u.rideSlope >> u.grabElapsed >> u.turnLag >> moving >>
           pathCount)) {
       return false;
     }
@@ -826,6 +828,13 @@ void GameLogic::Update(float dtSeconds) {
         unit.alive && IsUnitMoving(unit.id) && !IsUnitRiding(unit.id) ? 1.0f : 0.0f;
     unit.walkBlend +=
         (target - unit.walkBlend) * std::min(1.0f, constants::kWalkBlendRate * dtSeconds);
+    if (unit.turnLag != 0.0f) {
+      // Ease the drawn heading onto the sim facing (see Unit::turnLag).
+      const float lag = std::fabs(unit.turnLag);
+      const float step = std::max(constants::kTurnMinSpeed * dtSeconds,
+                                  lag * std::min(1.0f, constants::kTurnLagRate * dtSeconds));
+      unit.turnLag = step >= lag ? 0.0f : std::copysign(lag - step, unit.turnLag);
+    }
   }
 }
 
@@ -875,7 +884,7 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
 
       const glm::vec3 segDelta = segEnd - segStart;
       if (glm::length(glm::vec2(segDelta.x, segDelta.z)) > 1e-4f) {
-        mover->facingYaw = std::atan2(segDelta.z, segDelta.x);
+        mover->SetFacingYaw(std::atan2(segDelta.z, segDelta.x));
       }
 
       const glm::vec3 toEnd = segEnd - mover->position;
@@ -927,7 +936,7 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
     }
 
     if (mover->alive && move.segment + 1 >= move.path.size()) {
-      mover->facingYaw = move.endFacingYaw;
+      mover->SetFacingYaw(move.endFacingYaw);
     }
   }
 
@@ -1531,6 +1540,7 @@ void GameLogic::ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets
   // The turn outlives the shot: it is this figure's facing for the next
   // rounds' FOV and overwatch reactions.
   shooter.facingYaw = aimYaw;
+  shooter.turnLag = 0.0f;  // The shot turn is a snap; only walking turns animate.
   PlayShootBeat(shooter, aimYaw, sinceShot);
 
   for (Unit* hitTarget : hitTargets) {

@@ -1390,6 +1390,7 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
   Unit ghost = sighted;
   ghost.position = position;
   ghost.facingYaw = s.facingYaw;
+  ghost.turnLag = 0.0f;
   ghost.walkPhase = s.walkPhase;
   ghost.walkBlend = s.walkBlend;
   ghost.idleElapsed = s.idleElapsed;
@@ -2085,7 +2086,7 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
   for (const auto& obstacle : obstacles) {
     for (const glm::vec2& p : tactics::ObstacleFootprint(obstacle)) {
       const float delta =
-          std::remainder(std::atan2(p.y - eye.z, p.x - eye.x) - unit.facingYaw, kTwoPi);
+          std::remainder(std::atan2(p.y - eye.z, p.x - eye.x) - unit.VisualYaw(), kTwoPi);
       for (const float nudged : {delta - kCornerEpsilon, delta, delta + kCornerEpsilon}) {
         if (nudged >= -halfFovRad && nudged <= halfFovRad) offsets.push_back(nudged);
       }
@@ -2094,7 +2095,7 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
   for (const DeckOccluder& deck : decks) {
     for (const glm::vec2& p : deck.footprint.footprint) {
       const float delta =
-          std::remainder(std::atan2(p.y - eye.z, p.x - eye.x) - unit.facingYaw, kTwoPi);
+          std::remainder(std::atan2(p.y - eye.z, p.x - eye.x) - unit.VisualYaw(), kTwoPi);
       for (const float nudged : {delta - kCornerEpsilon, delta, delta + kCornerEpsilon}) {
         if (nudged >= -halfFovRad && nudged <= halfFovRad) offsets.push_back(nudged);
       }
@@ -2109,7 +2110,7 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
   dirs.reserve(offsets.size());
   spansPerRay.reserve(offsets.size());
   for (const float offset : offsets) {
-    const float angle = unit.facingYaw + offset;
+    const float angle = unit.VisualYaw() + offset;
     const glm::vec2 dir(std::cos(angle), std::sin(angle));
     dirs.push_back(dir);
     const float clippedRange = ClipToMap(eye, dir, range, mapHalfExtent);
@@ -3412,7 +3413,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         if (debug.disableFov || !unit.alive || unit.team != fovTeam) continue;
         const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 0.15f)
                                                             : glm::vec4(0.9f, 0.25f, 0.22f, 0.15f);
-        DrawFovShadowMask(game, unit, unit.facingYaw, tactics::constants::kShootHalfFovDegrees,
+        DrawFovShadowMask(game, unit, unit.VisualYaw(), tactics::constants::kShootHalfFovDegrees,
                           teamColor, viewProj, drawTerrain, targetFramebuffer, x, y, width, height);
       }
       colorShader_.Use();
@@ -3431,11 +3432,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                    [&](const auto& entry) { return entry.unitId == unit.id; });
         const glm::vec3 eye = unit.EyePosition();
         if (cached == terrainFovCache_.end()) {
-          terrainFovCache_.push_back({unit.id, eye, unit.facingYaw, build(unit)});
+          terrainFovCache_.push_back({unit.id, eye, unit.VisualYaw(), build(unit)});
           cached = terrainFovCache_.end() - 1;
-        } else if (cached->eye != eye || cached->facingYaw != unit.facingYaw) {
+        } else if (cached->eye != eye || cached->facingYaw != unit.VisualYaw()) {
           cached->eye = eye;
-          cached->facingYaw = unit.facingYaw;
+          cached->facingYaw = unit.VisualYaw();
           cached->points = build(unit);
         }
         DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, cached->points);
@@ -4050,6 +4051,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         Unit ghost = unit;
         ghost.position = unit.plan.movePath.back();
         ghost.facingYaw = unit.plan.endFacingYaw;
+        ghost.turnLag = 0.0f;
         DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost);
         // Chained legs for later rounds: yellow, with a marker at each leg
         // end so they read apart from the leg about to execute (green).

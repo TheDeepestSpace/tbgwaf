@@ -280,6 +280,12 @@ constexpr float kKnockdownDuration = 0.4f;  // Seconds for a hit unit to fall ov
 // figure stopping mid-stride settles instead of snapping to rest.
 constexpr float kWalkStrideLength = 1.5f;
 constexpr float kWalkBlendRate = 12.0f;  // Per second; ~90% settled after 0.2 s.
+// Turn animation (issue #237): the drawn heading trails the sim's discrete
+// facing and closes the gap with an ease-out (kTurnLagRate, exponential, so
+// big turns start fast) plus a linear floor (kTurnMinSpeed) so it finishes
+// promptly. Roughly 0.15 s for 45-90 degrees and 0.2 s for a 180 about-face.
+constexpr float kTurnLagRate = 14.0f;      // Per second.
+constexpr float kTurnMinSpeed = 6.0f;      // Radians per second.
 // Duration of the CC0 idle clip retargeted by the procedural figure rig.
 constexpr float kIdleAnimDuration = 3.3333333f;
 // Quick-draw pistol beat played by a shooter whose shot resolves: a short

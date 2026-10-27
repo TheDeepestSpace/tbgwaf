@@ -3108,11 +3108,9 @@ bool PlanarPatch(const std::vector<glm::vec2>& piece, const Ground& ground, Road
 
 struct DeckRailJoin {
   glm::vec2 outer{0.0f};  // The two outer rail faces meet here: the nose.
-  glm::vec2 inner{0.0f};  // Deck-side end of the cap edge both walls share.
-  // Deck-side corner of each wall's own end cap: where its inner face stops.
-  // At the obtuse fork both equal `inner` (a plain miter). At the acute fork
-  // each inner face stops where it runs into the other wall's outer face and
-  // the back is the straight line arteryBack-inner-branchBack.
+  // Deck-side corner of each wall's own end cap. At the obtuse fork both are
+  // the shared miter corner; at the acute fork each wall simply ends square
+  // to its own direction at the nose.
   glm::vec2 arteryBack{0.0f};
   glm::vec2 branchBack{0.0f};
   float arteryS = 0.0f;
@@ -3137,14 +3135,11 @@ bool IntersectLines(glm::vec2 a, glm::vec2 aDir, glm::vec2 b, glm::vec2 bDir,
 }
 
 // Where the two branch rails meet the rail on the branch-facing side of the
-// artery. At the obtuse (outer) fork the walls are mitered: outer and inner
-// faces intersected independently, so both walls share one end cap with no
-// overlap and no gap. At the acute (inner) fork a full miter would run the
-// inner faces on past each other into a long spike pointing down the merged
-// deck, so there each wall's inner face stops where it runs into the other
-// wall's outer face: the walls still share the half-miter from the nose
-// inward, and close with one straight back face across the two stops, so
-// they meet naturally without crossing into an X.
+// artery. Each wall runs straight along its own edge until its outer face
+// reaches the other's: the nose. At the obtuse (outer) fork the inner faces
+// are extended to meet too, a short miter. At the acute (inner) fork that
+// would run the inner faces on into a long spike down the merged deck, so
+// each wall just ends square at the nose, with no bend in either direction.
 DeckRailJunction BuildDeckRailJunction(const HighwayPlan& plan,
                                        const MapGeneratorConfig& c, PierForm pierForm) {
   DeckRailJunction junction;
@@ -3168,29 +3163,21 @@ DeckRailJunction BuildDeckRailJunction(const HighwayPlan& plan,
     DeckRailJoin& join = junction.branch[i];
     const glm::vec2 arteryInner = arteryOuter + arteryInward * kRailThickness;
     const glm::vec2 branchInner = branchOuter + branchInward * kRailThickness;
-    glm::vec2 arteryStop, branchStop;  // Each inner face against the other's outer face.
+    glm::vec2 miter;
     if (!IntersectLines(arteryOuter, plan.artery.dir, branchOuter, plan.branch.dir,
                         &join.outer) ||
-        !IntersectLines(arteryInner, plan.artery.dir, branchInner, plan.branch.dir,
-                        &join.inner) ||
-        !IntersectLines(arteryInner, plan.artery.dir, branchOuter, plan.branch.dir,
-                        &arteryStop) ||
-        !IntersectLines(branchInner, plan.branch.dir, arteryOuter, plan.artery.dir,
-                        &branchStop)) {
+        !IntersectLines(arteryInner, plan.artery.dir, branchInner, plan.branch.dir, &miter)) {
       return DeckRailJunction{};
     }
-    // The four intersections form a parallelogram; its diagonals bisect each
-    // other. The walls meet at an acute angle exactly when the nose-to-miter
-    // diagonal is the longer one.
-    const bool acute =
-        glm::distance(join.outer, join.inner) > glm::distance(arteryStop, branchStop) + 1e-4f;
+    // The walls meet at an acute angle when the miter runs on past a
+    // rail's own thickness from the nose.
+    const bool acute = glm::distance(join.outer, miter) > 2.0f * kRailThickness;
     if (acute) {
-      join.inner = 0.5f * (arteryStop + branchStop);
-      join.arteryBack = arteryStop;
-      join.branchBack = branchStop;
+      join.arteryBack = join.outer + arteryInward * kRailThickness;
+      join.branchBack = join.outer + branchInward * kRailThickness;
     } else {
-      join.arteryBack = join.inner;
-      join.branchBack = join.inner;
+      join.arteryBack = miter;
+      join.branchBack = miter;
     }
     join.arteryS = glm::dot(join.outer - plan.artery.origin, plan.artery.dir);
     join.branchU = glm::dot(join.outer - plan.branch.start, plan.branch.dir);
@@ -3210,8 +3197,7 @@ void EmitDeckRail(Scene* scene, WalkSurface* span, const HighwayPlan& plan,
   constexpr float kRailThickness = 0.3f;
   // One end of the strip: its outer corner, then the end cap's remaining
   // corners from the outer face round to the inner face, each with the deck
-  // height under it. A plain end has one (the inner corner); a fork join's
-  // cap may bend once at the shared half-miter's deck-side end.
+  // height under it. Every end has one (the inner corner).
   struct Endpoint {
     glm::vec3 outer{0.0f};
     std::vector<glm::vec3> cap;
@@ -3243,9 +3229,7 @@ void EmitDeckRail(Scene* scene, WalkSurface* span, const HighwayPlan& plan,
       return lift(point, deckY(glm::dot(point - roadOrigin, roadDir)));
     };
     out.outer = onPlane(join->outer);
-    out.cap = {onPlane(join->inner)};
-    const glm::vec2 back = roadIndex == 0 ? join->arteryBack : join->branchBack;
-    if (glm::distance(back, join->inner) > 1e-4f) out.cap.push_back(onPlane(back));
+    out.cap = {onPlane(roadIndex == 0 ? join->arteryBack : join->branchBack)};
     return out;
   };
   const auto emit = [&](float lo, float hi, const DeckRailJoin* loJoin,

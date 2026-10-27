@@ -1305,65 +1305,39 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
       const glm::vec2 ai = wallDir(a), aj = wallDir(b);
       if (std::fabs(ai.x * aj.y - ai.y * aj.x) < 0.2f) continue;
       size_t ia = 0, ib = 0;
-      if (!sharedEdge(a, b, &ia, &ib)) continue;
-      ++forkJoins;
-      const auto at = [](const std::vector<glm::vec2>& f, ptrdiff_t k) {
-        return f[static_cast<size_t>((k + static_cast<ptrdiff_t>(f.size())) % static_cast<ptrdiff_t>(f.size()))];
-      };
-      const glm::vec2 s0 = at(a, ia), s1 = at(a, ia + 1);
-      // The obtuse fork is a plain miter: two quads sharing the whole
-      // (short) mitered cap.
-      if (a.size() == 4 && b.size() == 4) {
+      if (sharedEdge(a, b, &ia, &ib)) {
+        // The obtuse fork is a plain miter: two quads sharing the whole
+        // (short) mitered cap.
+        ++forkJoins;
         ++obtuseForks;
-        CHECK(glm::distance(s0, s1) < 2.0f * kRailThickness);
+        CHECK(a.size() == 4 && b.size() == 4);
+        CHECK(glm::distance(a[ia], a[(ia + 1) % a.size()]) < 2.0f * kRailThickness);
         continue;
       }
-      // The acute fork: each wall's inner face stops where it runs into the
-      // other wall's outer face, the walls share the half-miter from the
-      // nose to the midpoint between the two stops, and that straight back
-      // face is the deepest the pair reaches into the deck: no miter spike.
+      // The acute fork: no shared edge, only the nose where both outer
+      // faces meet. Each wall runs straight and ends square at the nose, so
+      // nothing reaches past it along either wall: no miter spike, no bend.
+      glm::vec2 nose(0.0f);
+      bool touch = false;
+      for (const glm::vec2& pa : a) {
+        for (const glm::vec2& pb : b) {
+          if (glm::distance(pa, pb) < 0.02f) { nose = pa; touch = true; }
+        }
+      }
+      if (!touch) continue;
+      ++forkJoins;
       ++acuteForks;
-      CHECK(a.size() == 5 && b.size() == 5);
-      // Corners after the shared edge in a / before it in b hang off s1; the
-      // others off s0. The half-miter's deck-side end is the shared corner
-      // sitting midway between its two neighbours (one per rail).
-      const glm::vec2 a0 = at(a, ia - 1), a1 = at(a, ia + 2);
-      const glm::vec2 b1 = at(b, ib - 1), b0 = at(b, ib + 2);
-      const bool midIsS1 = glm::distance(s1, 0.5f * (a1 + b1)) < kEps;
-      const bool midIsS0 = glm::distance(s0, 0.5f * (a0 + b0)) < kEps;
-      CHECK(midIsS1 != midIsS0);
-      const glm::vec2 nose = midIsS1 ? s0 : s1;
-      const glm::vec2 aBack = midIsS1 ? a1 : a0, bBack = midIsS1 ? b1 : b0;
-      // Wall directions pointing away from the nose.
-      glm::vec2 centroidA(0.0f), centroidB(0.0f);
-      for (const glm::vec2& p : a) centroidA += p / static_cast<float>(a.size());
-      for (const glm::vec2& p : b) centroidB += p / static_cast<float>(b.size());
-      const glm::vec2 da = glm::dot(ai, centroidA - nose) > 0.0f ? ai : -ai;
-      const glm::vec2 db = glm::dot(aj, centroidB - nose) > 0.0f ? aj : -aj;
-      CHECK(glm::dot(da, db) > 0.0f);  // Acute.
-      // a's stop lies on b's outer face (the line through the nose along b)
-      // and vice versa.
-      const auto offLine = [](glm::vec2 p, glm::vec2 origin, glm::vec2 dir) {
-        return std::fabs((p.x - origin.x) * dir.y - (p.y - origin.y) * dir.x);
-      };
-      // A ribbon edge can skew a fraction of a degree off the planned road
-      // line where the twin-bent widening tapers, so the joins (built on the
-      // planned lines) sit millimetres off the drawn faces: a 2 cm tolerance
-      // still rules out the metre-long spike of a full miter.
-      constexpr float kJoinTolerance = 0.02f;
-      CHECK(offLine(aBack, nose, db) < kJoinTolerance);
-      CHECK(offLine(bBack, nose, da) < kJoinTolerance);
-      CHECK(glm::distance(aBack, bBack) < 2.0f * kRailThickness + kJoinTolerance);
-      // The walls recede from the nose around the notch; the deck (and the
-      // back face) is the other way. Nothing reaches further that way than
-      // the back face, which is square to the fork.
-      const glm::vec2 intoDeck = -glm::normalize(da + db);
-      const float backDepth = glm::dot(aBack - nose, intoDeck);
-      CHECK(backDepth > kRailThickness * 0.5f);
-      CHECK(std::fabs(glm::dot(bBack - nose, intoDeck) - backDepth) < kJoinTolerance);
-      for (const std::vector<glm::vec2>* poly : {&a, &b}) {
-        for (const glm::vec2& p : *poly) {
-          CHECK(glm::dot(p - nose, intoDeck) < backDepth + kJoinTolerance);
+      CHECK(a.size() == 4 && b.size() == 4);
+      for (const auto& pair : {std::make_pair(&a, ai), std::make_pair(&b, aj)}) {
+        // Walls extend away from the nose only.
+        const bool forward = [&] {
+          glm::vec2 c(0.0f);
+          for (const glm::vec2& p : *pair.first) c += p / 4.0f;
+          return glm::dot(c - nose, pair.second) > 0.0f;
+        }();
+        for (const glm::vec2& p : *pair.first) {
+          const float along = glm::dot(p - nose, pair.second) * (forward ? 1.0f : -1.0f);
+          CHECK(along > -0.02f);  // Square end at the nose.
         }
       }
     }

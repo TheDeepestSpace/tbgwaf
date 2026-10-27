@@ -123,7 +123,11 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 // The extra metrics: `frameMs` last frame time, `fovMs` time spent in the
 // visibility (FOV-cone) computation, and `stats`
 // draw-call/vertex/triangle counters for the frame.
+// The AO sliders (shown while the thermal view is on) tune the thermal
+// contact shading live: reach in world units, darkening strength, samples
+// per ray, and blur half-width (see gfx::AmbientOcclusionSettings).
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
+                    float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
                     bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,
                     float fovMs, const gfx::RenderFrameStats& stats, float top);
 

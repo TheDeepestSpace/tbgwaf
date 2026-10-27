@@ -457,6 +457,7 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 }
 
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
+                    float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
                     bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,
                     float fovMs, const gfx::RenderFrameStats& stats, float top) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
@@ -471,6 +472,17 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
     // Polarity toggle, like the white-hot/black-hot switch on a real FLIR.
     ImGui::SameLine();
     ImGui::Checkbox("Black hot", &thermalBlackHot);
+    // Contact-shading tuning (PR #178 review): radius is the world-space
+    // reach of the shadow, strength its darkness, quality the samples per
+    // ray (banding vs cost) and softness the blur width (grain vs detail).
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("AO radius", &aoRadius, 0.5f, 6.0f, "%.1f");
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("AO strength", &aoStrength, 0.0f, 4.0f, "%.1f");
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderInt("AO quality", &aoQuality, 2, 12);
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderInt("AO softness", &aoSoftness, 0, 4);
   }
   ImGui::Checkbox("Disable occlusion fade", &disableOcclusionFade);
   ImGui::Checkbox("Show FPS", &showFps);

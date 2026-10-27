@@ -47,6 +47,8 @@ struct RenderDebugOptions {
   // aerial reference footage), false is classic white-hot.
   bool thermal = false;
   bool thermalBlackHot = true;
+  // Contact-shading tunables for the thermal view's debug-panel sliders.
+  AmbientOcclusionSettings thermalAo;
   // Issue #136: skip the camera-occlusion see-through pass (occluding
   // blocks/decks are then always drawn fully opaque).
   bool disableOcclusionFade = false;

@@ -3488,7 +3488,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
 
   if (thermalAo) {
-    thermalOcclusion_.Composite(targetFramebuffer, x, y, view, proj, debug.thermalBlackHot);
+    thermalOcclusion_.Composite(targetFramebuffer, x, y, view, proj, debug.thermalBlackHot,
+                                debug.thermalAo);
     litShader_.Use();
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);

@@ -4,6 +4,16 @@
 
 namespace gfx {
 
+// Debug-panel tunables for the thermal contact shading (PR #178 review asked
+// for softer, less choppy occlusion with knobs to play with). Defaults are
+// the shipped look; the headless visual runner always renders defaults.
+struct AmbientOcclusionSettings {
+  float radius = 2.4f;    // World-space reach of the shading, in map units.
+  float strength = 1.9f;  // Occlusion-to-darkening multiplier.
+  int quality = 6;        // Depth samples marched per ray (more = smoother).
+  int softness = 2;       // Bilateral blur half-width in pixels.
+};
+
 // Pane-local, screen-space ambient occlusion for the thermal world. Capture
 // opaque color, world normals and depth; composite before translucent geometry
 // and sensor processing. Uses only core GLES3/WebGL2 attachment formats.
@@ -15,7 +25,8 @@ class AmbientOcclusion {
   void Destroy();
   bool Begin(int width, int height, float background);
   void Composite(GLuint target, int x, int y, const glm::mat4& view,
-                 const glm::mat4& projection, bool blackHot);
+                 const glm::mat4& projection, bool blackHot,
+                 const AmbientOcclusionSettings& settings);
 
  private:
   Shader occlusionShader_, compositeShader_;

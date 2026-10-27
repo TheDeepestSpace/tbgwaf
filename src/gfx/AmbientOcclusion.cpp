@@ -31,6 +31,8 @@ uniform mat4 uProjection;
 uniform mat4 uView;
 uniform vec2 uPaneSize;  // Pane size in pixels.
 uniform vec2 uUvScale;   // Pane size / target texture size.
+uniform float uRadius;   // World-space reach of the shading.
+uniform int uSteps;      // Depth samples marched per ray.
 out vec4 FragColor;
 
 vec3 WorldPosition(vec2 uv, float depth) {
@@ -44,7 +46,7 @@ void main() {
   vec3 p = WorldPosition(vUV, depth);
   vec3 normal = normalize(texture(uNormal, vUV * uUvScale).xyz * 2.0 - 1.0);
   // World-space radius: the contact shading keeps its scale as we zoom.
-  const float radius = 2.4;
+  float radius = uRadius;
   float viewDepth = -(uView * vec4(p, 1.0)).z;
   vec2 uvRadius = 0.5 * radius * vec2(uProjection[0][0], uProjection[1][1]) / viewDepth;
   vec2 size = uPaneSize;
@@ -58,8 +60,8 @@ void main() {
     float angle = rotation + float(direction) * 0.78539816;
     vec2 ray = vec2(cos(angle), sin(angle)) * uvRadius;
     float horizon = 0.0;
-    for (int step = 0; step < 4; ++step) {
-      float fraction = (float(step) + 0.5) / 4.0;
+    for (int step = 0; step < uSteps; ++step) {
+      float fraction = (float(step) + 0.5) / float(uSteps);
       vec2 uv = (floor((vUV + ray * fraction * fraction) * size) + 0.5) / size;
       // Missing/offscreen geometry contributes no occlusion, never a
       // clamped silhouette or information from the other player's pane.
@@ -93,6 +95,8 @@ uniform mat4 uInverseViewProjection;
 uniform vec2 uPaneSize;  // Pane size in pixels.
 uniform vec2 uUvScale;   // Pane size / target texture size.
 uniform int uBlackHot;
+uniform float uStrength;  // Occlusion-to-darkening multiplier.
+uniform int uBlurRadius;  // Bilateral blur half-width in pixels.
 out vec4 FragColor;
 
 vec3 WorldPosition(vec2 uv, float depth) {
@@ -110,8 +114,8 @@ void main() {
     float total = 0.0, weightSum = 0.0;
     // Bilateral blur removes sampling grain without smearing contact
     // shading across roof silhouettes, thin parapets or distant surfaces.
-    for (int y = -1; y <= 1; ++y) {
-      for (int x = -1; x <= 1; ++x) {
+    for (int y = -uBlurRadius; y <= uBlurRadius; ++y) {
+      for (int x = -uBlurRadius; x <= uBlurRadius; ++x) {
         vec2 uv = clamp(vUV + vec2(x, y) * texel, texel * 0.5, 1.0 - texel * 0.5);
         float d = texture(uDepth, uv * uUvScale).r;
         if (d >= 1.0) continue;
@@ -127,7 +131,7 @@ void main() {
     // Work in black-hot space so switching polarity inverts the complete
     // image, including contact shading; figures retain their hot signal.
     float black = uBlackHot != 0 ? gray : 1.0 - gray;
-    black *= 1.0 - min(ao * 1.9, 0.78);
+    black *= 1.0 - min(ao * uStrength, 0.78);
     gray = uBlackHot != 0 ? black : 1.0 - black;
   }
   FragColor = vec4(vec3(gray), 1.0);
@@ -222,7 +226,8 @@ bool AmbientOcclusion::Begin(int width, int height, float background) {
 }
 
 void AmbientOcclusion::Composite(GLuint target, int x, int y, const glm::mat4& view,
-                                 const glm::mat4& projection, bool blackHot) {
+                                 const glm::mat4& projection, bool blackHot,
+                                 const AmbientOcclusionSettings& settings) {
   const glm::mat4 inverse = glm::inverse(projection * view);
   const glm::vec2 paneSize(static_cast<float>(width_), static_cast<float>(height_));
   const glm::vec2 uvScale(paneSize.x / static_cast<float>(allocatedWidth_),
@@ -242,6 +247,8 @@ void AmbientOcclusion::Composite(GLuint target, int x, int y, const glm::mat4& v
   occlusionShader_.SetMat4("uView", view);
   occlusionShader_.SetVec2("uPaneSize", paneSize);
   occlusionShader_.SetVec2("uUvScale", uvScale);
+  occlusionShader_.SetFloat("uRadius", std::max(settings.radius, 0.01f));
+  occlusionShader_.SetInt("uSteps", std::max(settings.quality, 1));
   glBindVertexArray(vao_);
   glDrawArrays(GL_TRIANGLES, 0, 3);
   RecordDraw(3, 1);
@@ -263,6 +270,8 @@ void AmbientOcclusion::Composite(GLuint target, int x, int y, const glm::mat4& v
   compositeShader_.SetMat4("uInverseViewProjection", inverse);
   compositeShader_.SetVec2("uPaneSize", paneSize);
   compositeShader_.SetVec2("uUvScale", uvScale);
+  compositeShader_.SetFloat("uStrength", std::max(settings.strength, 0.0f));
+  compositeShader_.SetInt("uBlurRadius", std::max(settings.softness, 0));
   glDrawArrays(GL_TRIANGLES, 0, 3);
   RecordDraw(3, 1);
   glBindVertexArray(0);

@@ -152,6 +152,7 @@ struct UrbanBlock {
   // smaller blocks (divided by a short local street segment) or use this
   // angled, detached apartment-row layout.
   bool apartmentRow = false;
+  bool empty = false;  // Left unbuilt (the vacant half of a tight long block).
 };
 
 struct UrbanRoad {

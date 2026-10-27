@@ -271,6 +271,10 @@ bool IsLongBlock(const UrbanBlock& block, const MapGeneratorConfig& c, BlockAxis
 
 glm::vec2 Rotate(glm::vec2 v, float radians);
 
+// Shortest slab side: five residential windows (1.1 wide, 1.0 gap) across
+// with the facade end margins either side.
+constexpr float kMinSlabSpan = 5.0f * 1.1f + 4.0f * 1.0f + 2.0f * 0.7f;
+
 // Freestanding apartment slabs for a long block's sidewalk-inset polygon:
 // angled across the short dimension, well inside the block. Empty unless at
 // least three keep a decent size, so only blocks that really fit a row get one.
@@ -303,16 +307,17 @@ std::vector<std::vector<glm::vec2>> ApartmentRowSlabs(const std::vector<glm::vec
   }
   const float length = rowHi - rowLo;
   const float buildableDepth = crossHi - crossLo;
-  const float targetPitch = std::max(16.0f, c.blockSize * 0.6f);
-  const int count = std::clamp(static_cast<int>(std::lround(length / targetPitch)), 2, 6);
+  const float targetPitch = std::max(24.0f, c.blockSize * 0.95f);
+  const int count = std::clamp(static_cast<int>(std::floor(length / targetPitch)), 2, 6);
   const float pitch = length / static_cast<float>(count);
 
   const float lean = glm::radians((blockIndex & 1u) ? 18.0f : -18.0f);
   const glm::vec2 longAxis = Rotate(crossAxis, lean);
   const glm::vec2 shortAxis(-longAxis.y, longAxis.x);
-  const float slabLength = buildableDepth * 0.65f;
-  const float slabWidth = std::min({c.buildingDepth * 1.2f, pitch * 0.3f,
-                                    slabLength * 0.65f});
+  const float slabWidth = std::min(std::max(c.buildingDepth * 1.2f, kMinSlabSpan), pitch * 0.5f);
+  // Leaning slabs stay a clear alley apart along the row.
+  const float slabLength = std::min(
+      buildableDepth * 0.8f, (pitch - slabWidth * 0.95f - c.gapWidth * 2.0f) / 0.32f);
 
   // A convex block can taper near an end. Put every centre halfway across
   // its local cross-section and shorten only the slab at that position as
@@ -343,7 +348,7 @@ std::vector<std::vector<glm::vec2>> ApartmentRowSlabs(const std::vector<glm::vec
   };
   auto rectangle = [&](glm::vec2 center, float scale) {
     const glm::vec2 u = longAxis * (slabLength * scale * 0.5f);
-    const glm::vec2 v = shortAxis * (slabWidth * scale * 0.5f);
+    const glm::vec2 v = shortAxis * (slabWidth * 0.5f);  // Width never shrinks.
     return std::vector<glm::vec2>{center - u - v, center + u - v,
                                   center + u + v, center - u + v};
   };
@@ -376,13 +381,15 @@ std::vector<std::vector<glm::vec2>> ApartmentRowSlabs(const std::vector<glm::vec
     scales.push_back(scale);
   }
   std::vector<std::vector<glm::vec2>> slabs;
+  // Decent: most of the full length survives and the slab stays elongated.
+  auto decentSlab = [&](float scale) {
+    return scale >= 0.7f && slabLength * scale >= slabWidth * 1.3f;
+  };
   int decent = 0;
-  for (const float scale : scales) {
-    if (scale >= 0.7f && slabWidth * scale >= c.buildingDepth * 0.5f) ++decent;
-  }
+  for (const float scale : scales) decent += decentSlab(scale) ? 1 : 0;
   if (decent < 3) return slabs;
   for (size_t i = 0; i < centers.size(); ++i) {
-    if (scales[i] >= 0.7f) slabs.push_back(rectangle(centers[i], scales[i]));
+    if (decentSlab(scales[i])) slabs.push_back(rectangle(centers[i], scales[i]));
   }
   return slabs;
 }
@@ -1814,7 +1821,11 @@ std::vector<UrbanBlock> BuildBlocks(uint32_t seed, const MapGeneratorConfig& c,
     const bool rowViable =
         rowOuter.size() >= 3 && !ApartmentRowSlabs(rowOuter, c, 0).empty() &&
         !ApartmentRowSlabs(rowOuter, c, 1).empty();  // Either lean direction.
-    const bool apartmentRow = longBlockRng.Chance(0.5f) && rowViable;
+    const bool wantsRow = longBlockRng.Chance(0.5f);
+    const bool apartmentRow = wantsRow && rowViable;
+    // A row that was wanted but is too tight becomes two blocks: one left
+    // empty, the other built up as an ordinary block.
+    const bool tight = wantsRow && !rowViable;
     if (apartmentRow) {
       block.apartmentRow = rowViable;
       refined.push_back(std::move(block));
@@ -1822,7 +1833,9 @@ std::vector<UrbanBlock> BuildBlocks(uint32_t seed, const MapGeneratorConfig& c,
     }
 
     const float length = shape.hi - shape.lo;
-    const int count = std::clamp(static_cast<int>(std::lround(length / c.blockSize)), 2, 3);
+    const int count =
+        tight ? 2 : std::clamp(static_cast<int>(std::lround(length / c.blockSize)), 2, 3);
+    const size_t emptyPiece = tight ? (longBlockRng.Chance(0.5f) ? 0 : 1) : count;
     std::vector<std::vector<glm::vec2>> pieces = {block.vertices};
     const glm::vec2 cutDirection(-shape.direction.y, shape.direction.x);
     const float splitWidth = c.localStreetWidth;
@@ -1889,7 +1902,10 @@ std::vector<UrbanBlock> BuildBlocks(uint32_t seed, const MapGeneratorConfig& c,
       split.blockSplit = true;
       graph->cuts.push_back(std::move(split));
     }
-    for (auto& piece : pieces) refined.push_back(MakeUrbanBlock(std::move(piece)));
+    for (size_t i = 0; i < pieces.size(); ++i) {
+      refined.push_back(MakeUrbanBlock(std::move(pieces[i])));
+      refined.back().empty = i == emptyPiece;
+    }
   }
   return refined;
 }
@@ -2099,7 +2115,7 @@ void PlanBlockParcels(const CityPlan& city, size_t blockIndex, const MapGenerato
   const UrbanBlock& block = city.blocks[blockIndex];
   const bool park = rng->Chance(0.10f);  // Pocket park/open lot.
   *characterRoll = rng->Unit01();
-  if (park && !block.apartmentRow) return;
+  if (block.empty || (park && !block.apartmentRow)) return;
   std::vector<glm::vec2> outer = InsetConvexPolygon(block.vertices, c.sidewalkWidth);
   if (outer.size() < 3 || PolygonArea(outer) < c.minPolygonArea ||
       !PolygonClearOfRoads(outer, city.streets.roads, c.sidewalkWidth)) {
@@ -4207,6 +4223,8 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
     // Detached apartment rows have no wall on the street building line;
     // their selected long edge is still the principal, windowed facade.
     if (parcel.forceResidential) street[frontage] = true;
+    // ...and so is the opposite long face: slabs are glazed on both sides.
+    const int backEdge = parcel.forceResidential ? static_cast<int>((frontage + 2) % n) : -1;
     // Rear edge: the longest non-street edge facing away from the frontage.
     const glm::vec2 fa = fp[frontage], fb = fp[(frontage + 1) % n];
     const glm::vec2 frontDir = glm::normalize(fb - fa);
@@ -4374,7 +4392,8 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
         b.kind == BuildingKind::Office || b.kind == BuildingKind::Civic;
     for (size_t e = 0; e < n; ++e) {
       const bool rear = static_cast<int>(e) == rearEdge && rearWindows;
-      if (!street[e] && !rear) continue;
+      const bool back = static_cast<int>(e) == backEdge && rearWindows;
+      if (!street[e] && !rear && !back) continue;
       const glm::vec2 a = fp[e], q = fp[(e + 1) % n];
       const float len = glm::distance(a, q);
       const glm::vec2 doorSpan = doorSpans[e];
@@ -4392,7 +4411,7 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
           w = 2.0f;
           gap = 0.35f;
         }
-        if (rear) gap *= 2.0f;  // Sparser on the courtyard side.
+        if (rear && !back) gap *= 2.0f;  // Sparser on the courtyard side.
         const float y0 = floorBase + sill;
         const float y1 = std::min(floorBase + head, floorTop - 0.2f);
         if (y1 - y0 < 0.4f) continue;

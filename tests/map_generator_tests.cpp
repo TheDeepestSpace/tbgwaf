@@ -487,8 +487,8 @@ void TestPinnedKindHistograms() {
   struct Expected { uint32_t seed; size_t buildings; int kinds[kBuildingKindCount]; };
   const Expected expected[] = {
       // residential, mixed-use, office, commercial, civic, garage
-      {1u, 50, {14, 17, 9, 3, 2, 5}},
-      {42u, 80, {20, 18, 17, 16, 2, 7}},
+      {1u, 63, {10, 22, 13, 7, 2, 9}},
+      {42u, 73, {29, 18, 11, 6, 2, 7}},
       {2024u, 80, {21, 18, 15, 11, 2, 13}},
   };
   for (const auto& e : expected) {
@@ -2237,10 +2237,19 @@ void TestExtraArteries() {
 // sidewalk without a road or signal.
 void TestLongBlockApartmentRowsAndPedestrianSplits() {
   {
-    const MapGeneratorConfig c = FurnitureConfig(FeatureMode::Off);
-    const std::vector<UrbanBlock> blocks = UrbanBlocks(1, c);
-    const std::vector<UrbanParcel> parcels = UrbanParcels(1, c);
-    const Scene scene = GenerateUrbanMap(1, c);
+    // Rows need blocks big enough for 5-window-wide slabs, so use the
+    // default-size city and the first seed that has any (they're rare).
+    MapGeneratorConfig c;
+    c.features.furniture.mode = FeatureMode::Off;
+    uint32_t seed = 1;
+    for (; seed < 300; ++seed) {
+      bool any = false;
+      for (const UrbanBlock& b : UrbanBlocks(seed, c)) any |= b.apartmentRow;
+      if (any) break;
+    }
+    const std::vector<UrbanBlock> blocks = UrbanBlocks(seed, c);
+    const std::vector<UrbanParcel> parcels = UrbanParcels(seed, c);
+    const Scene scene = GenerateUrbanMap(seed, c);
     int rows = 0, minCount = 100;
     for (size_t block = 0; block < blocks.size(); ++block) {
       if (!blocks[block].apartmentRow) continue;
@@ -2299,6 +2308,14 @@ void TestLongBlockApartmentRowsAndPedestrianSplits() {
             slabAxis = delta / longestEdge;
           }
         }
+        // Five residential windows (1.1 wide, 1.0 gap, 0.7 margins) across.
+        float shortestEdge = 1.0e9f;
+        for (size_t edge = 0; edge < parcel->footprint.size(); ++edge) {
+          shortestEdge = std::min(
+              shortestEdge, glm::length(parcel->footprint[(edge + 1) % parcel->footprint.size()] -
+                                        parcel->footprint[edge]));
+        }
+        CHECK(shortestEdge >= 10.9f - 0.01f);
         const float alignment = std::fabs(glm::dot(rowAxis, slabAxis));
         CHECK(alignment > 0.2f && alignment < 0.55f);  // Neither square nor lengthwise.
         CHECK(parcelCrossHi - parcelCrossLo < (blockCrossHi - blockCrossLo) * 0.75f);
@@ -2613,7 +2630,7 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
 // alters item or prop placement shows up here first.
 void TestPinnedFurnitureFingerprints() {
   struct Expected { uint32_t seed; size_t furniture; size_t props; };
-  const Expected expected[] = {{1u, 147, 64}, {42u, 164, 69}, {2024u, 166, 75}};
+  const Expected expected[] = {{1u, 154, 75}, {42u, 160, 67}, {2024u, 166, 75}};
   const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
   const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
   for (const auto& e : expected) {

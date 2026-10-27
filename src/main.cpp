@@ -408,6 +408,7 @@ int main() {
 #endif
   auto makeMap = [&mapSeed, &mapType, &ctfMode, &makeBaseMap]() {
     tactics::Scene scene = makeBaseMap(mapSeed, mapType);
+    tactics::ApplySpawnHints(&scene);
     scene.flag.enabled = ctfMode;
     return scene;
   };
@@ -469,6 +470,10 @@ int main() {
   int observedAiGeneration = tbgwaf_ai_generation();
   bool jevErrorHold = false;
   int lastAutoCommittedRound = -1;
+  // Seconds every figure has had a plan; the auto-commit waits a beat so both
+  // teams' plan overlays are rendered before execution starts.
+  float autoCommitHold = 0.0f;
+  constexpr float kAutoCommitDelay = 0.75f;
   int lastReportedRound = -1;
   int lastReportedWinner = -2;
   InputMode lastReportedMode = InputMode::Executing;
@@ -528,6 +533,7 @@ int main() {
       jevBuilder.reset();
       jevErrorHold = false;
       lastAutoCommittedRound = -1;
+      autoCommitHold = 0.0f;
       lastSentState.clear();
       forceBroadcast = isSimulator;
       awaitingPeerSync = false;
@@ -851,8 +857,15 @@ int main() {
     // soon as every living figure has a plan; human modes commit manually.
     if (networked && isSimulator && tbgwaf_auto_commit() && !aiPaused &&
         game.CanCommitRound() && lastAutoCommittedRound != game.RoundNumber()) {
-      lastAutoCommittedRound = game.RoundNumber();
-      game.CommitRound();
+      if (autoCommitHold >= kAutoCommitDelay) {
+        autoCommitHold = 0.0f;
+        lastAutoCommittedRound = game.RoundNumber();
+        game.CommitRound();
+      } else {
+        autoCommitHold += dt;
+      }
+    } else {
+      autoCommitHold = 0.0f;
     }
 #endif
     // Turn timeline (issue #143): record the local game's history and
@@ -1037,7 +1050,8 @@ int main() {
         std::vector<Unit> pickableUnits;
         for (const Unit& unit : game.GetScene().units) {
           if (unit.alive && gfx::IsUnitVisibleForRender(unit, clickTeam, fogActive,
-                                                          paneVisibility[clickPane])) {
+                                                          paneVisibility[clickPane],
+                                                          game.GetScene())) {
             pickableUnits.push_back(unit);
           }
         }

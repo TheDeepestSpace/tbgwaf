@@ -162,7 +162,15 @@ bool AmbientOcclusion::Init() {
          compositeShader_.Compile(kVertex, kComposite);
 }
 
+void AmbientOcclusion::DestroyBakes() {
+  for (BakeSlot& slot : bakes_) {
+    if (slot.texture) glDeleteTextures(1, &slot.texture);
+    slot = BakeSlot{};
+  }
+}
+
 void AmbientOcclusion::Destroy() {
+  DestroyBakes();
   const GLuint textures[] = {color_, normal_, depth_, occlusion_};
   glDeleteTextures(4, textures);
   if (sceneFbo_) glDeleteFramebuffers(1, &sceneFbo_);
@@ -184,6 +192,7 @@ bool AmbientOcclusion::Begin(int width, int height, float background) {
       glGenFramebuffers(1, &occlusionFbo_);
       glGenVertexArrays(1, &vao_);
     }
+    DestroyBakes();  // Cached textures must match the new target size.
     glActiveTexture(GL_TEXTURE0);
     Allocate(color_, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, allocWidth, allocHeight);
     Allocate(normal_, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, allocWidth, allocHeight);
@@ -227,31 +236,62 @@ bool AmbientOcclusion::Begin(int width, int height, float background) {
 
 void AmbientOcclusion::Composite(GLuint target, int x, int y, const glm::mat4& view,
                                  const glm::mat4& projection, bool blackHot,
-                                 const AmbientOcclusionSettings& settings) {
+                                 const AmbientOcclusionSettings& settings, uint64_t sceneKey) {
   const glm::mat4 inverse = glm::inverse(projection * view);
   const glm::vec2 paneSize(static_cast<float>(width_), static_cast<float>(height_));
   const glm::vec2 uvScale(paneSize.x / static_cast<float>(allocatedWidth_),
                           paneSize.y / static_cast<float>(allocatedHeight_));
-  glBindFramebuffer(GL_FRAMEBUFFER, occlusionFbo_);
-  glViewport(0, 0, width_, height_);
-  glScissor(0, 0, width_, height_);
+  const float radius = std::max(settings.radius, 0.01f);
+  const int quality = std::max(settings.quality, 1);
+  BakeSlot* bake = nullptr;
+  if (settings.baked) {
+    for (BakeSlot& slot : bakes_) {
+      if (slot.valid && slot.x == x && slot.y == y) { bake = &slot; break; }
+    }
+    if (!bake) {
+      for (BakeSlot& slot : bakes_) {
+        if (!slot.valid) { bake = &slot; break; }
+      }
+    }
+    if (!bake) bake = &bakes_[0];
+  }
+  const bool cached = bake && bake->valid && bake->x == x && bake->y == y &&
+                      bake->width == width_ && bake->height == height_ &&
+                      bake->inverse == inverse && bake->radius == radius &&
+                      bake->quality == quality && bake->sceneKey == sceneKey;
+
   glDisable(GL_DEPTH_TEST);
   glDepthMask(GL_FALSE);
   BindTexture(depth_, 0);
   BindTexture(normal_, 1);
-  occlusionShader_.Use();
-  occlusionShader_.SetInt("uDepth", 0);
-  occlusionShader_.SetInt("uNormal", 1);
-  occlusionShader_.SetMat4("uInverseViewProjection", inverse);
-  occlusionShader_.SetMat4("uProjection", projection);
-  occlusionShader_.SetMat4("uView", view);
-  occlusionShader_.SetVec2("uPaneSize", paneSize);
-  occlusionShader_.SetVec2("uUvScale", uvScale);
-  occlusionShader_.SetFloat("uRadius", std::max(settings.radius, 0.01f));
-  occlusionShader_.SetInt("uSteps", std::max(settings.quality, 1));
   glBindVertexArray(vao_);
-  glDrawArrays(GL_TRIANGLES, 0, 3);
-  RecordDraw(3, 1);
+  if (!cached) {
+    glBindFramebuffer(GL_FRAMEBUFFER, occlusionFbo_);
+    glViewport(0, 0, width_, height_);
+    glScissor(0, 0, width_, height_);
+    occlusionShader_.Use();
+    occlusionShader_.SetInt("uDepth", 0);
+    occlusionShader_.SetInt("uNormal", 1);
+    occlusionShader_.SetMat4("uInverseViewProjection", inverse);
+    occlusionShader_.SetMat4("uProjection", projection);
+    occlusionShader_.SetMat4("uView", view);
+    occlusionShader_.SetVec2("uPaneSize", paneSize);
+    occlusionShader_.SetVec2("uUvScale", uvScale);
+    occlusionShader_.SetFloat("uRadius", radius);
+    occlusionShader_.SetInt("uSteps", quality);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    RecordDraw(3, 1);
+    if (bake) {
+      // Bake: snapshot the pass so later frames with identical inputs skip it.
+      if (!bake->texture) {
+        Allocate(bake->texture, GL_R8, GL_RED, GL_UNSIGNED_BYTE, allocatedWidth_, allocatedHeight_);
+      }
+      glBindTexture(GL_TEXTURE_2D, bake->texture);
+      glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width_, height_);
+      const GLuint texture = bake->texture;
+      *bake = BakeSlot{texture, true, x, y, width_, height_, inverse, radius, quality, sceneKey};
+    }
+  }
 
   glBindFramebuffer(GL_FRAMEBUFFER, target);
   glViewport(x, y, width_, height_);
@@ -260,7 +300,7 @@ void AmbientOcclusion::Composite(GLuint target, int x, int y, const glm::mat4& v
   glDepthMask(GL_TRUE);
   glDepthFunc(GL_ALWAYS);
   BindTexture(color_, 2);
-  BindTexture(occlusion_, 3);
+  BindTexture(cached ? bake->texture : occlusion_, 3);
   compositeShader_.Use();
   compositeShader_.SetInt("uDepth", 0);
   compositeShader_.SetInt("uNormal", 1);

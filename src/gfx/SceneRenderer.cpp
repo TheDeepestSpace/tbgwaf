@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 
 #include <glm/gtc/constants.hpp>
@@ -3488,8 +3489,24 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
 
   if (thermalAo) {
+    // Scene signature for the baked occlusion cache: anything that moves the
+    // opaque geometry besides the camera (which the cache keys on itself).
+    uint64_t sceneKey = 1469598103934665603ull;
+    const auto mix = [&sceneKey](float value) {
+      uint32_t bits;
+      std::memcpy(&bits, &value, sizeof bits);
+      sceneKey = (sceneKey ^ bits) * 1099511628211ull;
+    };
+    if (debug.thermalAo.baked) {
+      for (const Unit& unit : game.GetScene().units) {
+        if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
+        mix(unit.position.x); mix(unit.position.y); mix(unit.position.z);
+        mix(unit.facingYaw); mix(unit.alive ? 1.0f : 0.0f);
+        mix(unit.knockdownElapsed); mix(unit.walkPhase);
+      }
+    }
     thermalOcclusion_.Composite(targetFramebuffer, x, y, view, proj, debug.thermalBlackHot,
-                                debug.thermalAo);
+                                debug.thermalAo, sceneKey);
     litShader_.Use();
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);

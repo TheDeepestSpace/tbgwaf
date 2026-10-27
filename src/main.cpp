@@ -1088,7 +1088,8 @@ int main() {
     ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, debugOptions.thermal,
                        debugOptions.thermalBlackHot, debugOptions.thermalAo.radius,
                        debugOptions.thermalAo.strength, debugOptions.thermalAo.quality,
-                       debugOptions.thermalAo.softness, debugOptions.disableOcclusionFade, showFps,
+                       debugOptions.thermalAo.softness, debugOptions.thermalAo.baked,
+                       debugOptions.disableOcclusionFade, showFps,
                        smoothedFps, frameMs, fovMs, frameStats,
                        roundPanelBottom + 6.0f);
     // Pop against the pre-panel state: the checkbox may have just toggled

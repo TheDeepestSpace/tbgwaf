@@ -1,5 +1,8 @@
 #pragma once
 
+#include <array>
+#include <cstdint>
+
 #include "gfx/Shader.h"
 
 namespace gfx {
@@ -12,6 +15,10 @@ struct AmbientOcclusionSettings {
   float strength = 1.9f;  // Occlusion-to-darkening multiplier.
   int quality = 6;        // Depth samples marched per ray (more = smoother).
   int softness = 2;       // Bilateral blur half-width in pixels.
+  // "Baked thermal": cache each pane's occlusion pass and re-run it only
+  // when the camera, pane size, radius/quality or scene signature changes.
+  // Strength and softness are applied at composite time, so they stay live.
+  bool baked = false;
 };
 
 // Pane-local, screen-space ambient occlusion for the thermal world. Capture
@@ -26,7 +33,7 @@ class AmbientOcclusion {
   bool Begin(int width, int height, float background);
   void Composite(GLuint target, int x, int y, const glm::mat4& view,
                  const glm::mat4& projection, bool blackHot,
-                 const AmbientOcclusionSettings& settings);
+                 const AmbientOcclusionSettings& settings, uint64_t sceneKey = 0);
 
  private:
   Shader occlusionShader_, compositeShader_;
@@ -35,6 +42,19 @@ class AmbientOcclusion {
   int width_ = 0, height_ = 0;                    // Current pane.
   int allocatedWidth_ = 0, allocatedHeight_ = 0;  // Target textures.
   bool warned_ = false;
+
+  // Baked occlusion, one slot per pane origin (a split window has two).
+  struct BakeSlot {
+    GLuint texture = 0;
+    bool valid = false;
+    int x = 0, y = 0, width = 0, height = 0;
+    glm::mat4 inverse{1.0f};
+    float radius = 0.0f;
+    int quality = 0;
+    uint64_t sceneKey = 0;
+  };
+  std::array<BakeSlot, 4> bakes_;
+  void DestroyBakes();
 };
 
 }  // namespace gfx

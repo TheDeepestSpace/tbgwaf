@@ -458,6 +458,7 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
+                    bool& aoBaked,
                     bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,
                     float fovMs, const gfx::RenderFrameStats& stats, float top) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
@@ -483,6 +484,8 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
     ImGui::SliderInt("AO quality", &aoQuality, 2, 20);
     ImGui::SetNextItemWidth(130.0f);
     ImGui::SliderInt("AO softness", &aoSoftness, 0, 10);
+    // Heavy settings: reuse the occlusion pass while the view is still.
+    ImGui::Checkbox("Baked thermal", &aoBaked);
   }
   ImGui::Checkbox("Disable occlusion fade", &disableOcclusionFade);
   ImGui::Checkbox("Show FPS", &showFps);

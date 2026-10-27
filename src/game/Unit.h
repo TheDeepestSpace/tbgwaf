@@ -108,6 +108,12 @@ struct Unit {
   Team team = Team::Blue;
   glm::vec3 position{0.0f};  // Feet position; unit box spans [position, position + (0,height,0)].
   float facingYaw = 0.0f;    // Radians, measured from +X axis in the XZ plane.
+  // Visual-only turn animation (issue #237): how far (signed radians,
+  // wrapped to [-pi, pi]) the figure's drawn heading still trails the sim's
+  // discrete facingYaw. Set by SetFacingYaw, eased to 0 by GameLogic::Update.
+  // Stored (and mirrored in snapshots) like walkPhase so live, follower and
+  // replay frames all draw the same pose; the sim never reads it.
+  float turnLag = 0.0f;
   bool alive = true;
   // Visual-only fall state for a downed unit. Axis is horizontal; tipping
   // around it topples the figure in the shot's direction of travel.
@@ -161,6 +167,19 @@ struct Unit {
     const glm::vec3 right(-fwd.z, 0.0f, fwd.x);
     return position + fwd * constants::kMuzzleForward + right * constants::kMuzzleSide +
            glm::vec3(0.0f, constants::kMuzzleHeight, 0.0f);
+  }
+
+  // The animated heading the body, FoV cone and facing marker are drawn at.
+  float VisualYaw() const { return facingYaw - turnLag; }
+
+  // Turns the sim heading, keeping the drawn heading continuous: the angle
+  // between old and new facing is added to turnLag (shortest arc) so the
+  // visuals rotate there over the next few ticks instead of snapping.
+  void SetFacingYaw(float yaw) {
+    constexpr float kTwoPi = 6.28318530717958647692f;
+    if (yaw == facingYaw) return;
+    turnLag = std::remainder(turnLag + (yaw - facingYaw), kTwoPi);
+    facingYaw = yaw;
   }
 
   glm::vec3 FacingDirection() const {

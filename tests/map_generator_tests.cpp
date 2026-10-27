@@ -441,7 +441,7 @@ void TestMassingStaysOnItsBuilding() {
         }
         case MassingDetail::Kind::Awning: {
           ++awnings;
-          CHECK(b.kind == BuildingKind::MixedUse || b.kind == BuildingKind::Commercial);
+          CHECK(b.kind == BuildingKind::MixedUse);  // Warehouse loading doors get none.
           CHECK(d.y0 > 2.4f && d.y0 < b.groundFloorHeight);  // Above head height, below floor 2.
           // Over the sidewalk: outside the building, inside its block.
           const std::vector<glm::vec2> blockOutline = UrbanBlocks(seed, FlatConfig())[b.block].vertices;
@@ -2131,6 +2131,35 @@ void TestLocalStreetBandsReachMapEdgeAtFullWidth() {
   }
 }
 
+void TestSpawnHintsPlaceOppositeCornersAndCenterFlag() {
+  for (uint32_t seed : {1u, 7u, 42u, 1234u}) {
+    for (int hilly = 0; hilly < 2; ++hilly) {
+      tactics::Scene scene = hilly ? tactics::GenerateHillyMap(seed) : tactics::GenerateUrbanMap(seed);
+      CHECK(scene.spawnHints.blue && scene.spawnHints.red && scene.spawnHints.flag);
+      tactics::ApplySpawnHints(&scene);
+      const float e = scene.mapHalfExtent;
+      glm::vec2 blue(0.0f), red(0.0f);
+      for (const tactics::Unit& u : scene.units) {
+        CHECK(tactics::IsFreeSpot(scene, u.position.x, u.position.z));
+        (u.team == tactics::Team::Blue ? blue : red) += glm::vec2(u.position.x, u.position.z) / 3.0f;
+      }
+      // Opposite corners: each squad in its own quadrant, far from center.
+      CHECK(blue.x < -0.5f * e && blue.y < -0.5f * e);
+      CHECK(red.x > 0.5f * e && red.y > 0.5f * e);
+      tactics::Scene ctf = scene;
+      ctf.flag.enabled = true;
+      tactics::GameLogic logic(ctf);
+      const glm::vec3 flag = logic.FlagPosition();
+      CHECK(std::abs(flag.x) < 0.1f * e && std::abs(flag.z) < 0.1f * e);
+    }
+  }
+  // Without hints, units are untouched.
+  tactics::Scene plain = tactics::BuildDefaultScene();
+  const glm::vec3 before = plain.units[0].position;
+  tactics::ApplySpawnHints(&plain);
+  CHECK(plain.units[0].position == before);
+}
+
 // Issue #152 (roadmap 3.4): windows and doors are recorded per building as
 // FacadeOpening data on a wall edge, inside the wall's bounds. Most
 // buildings get a street entrance on their frontage; some entrances are
@@ -2597,6 +2626,7 @@ int main() {
   TestHillyReachFieldCostsIncludeSlope();
   TestHillyGameLogicMoveLandsOnTerrain();
   TestHillyShortSameCellMoveStaysOnTerrain();
+  TestSpawnHintsPlaceOppositeCornersAndCenterFlag();
   if (g_failures) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;

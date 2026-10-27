@@ -59,7 +59,7 @@ enum class BuildingKind : uint8_t {
   Residential,  // Apartments: 3.0 floors, brick/plaster.
   MixedUse,     // Shops under apartments: 4.0 ground floor, awning.
   Office,       // 3.5 floors, glassy; upper storeys may step back.
-  Commercial,   // Single-storey shop/warehouse hall, awning.
+  Commercial,   // Single-storey shop/warehouse hall, no awning (loading door).
   Civic,        // Landmark: the towers.
   Garage,       // Parking decks: low 2.8 floors, raw concrete.
 };
@@ -282,7 +282,12 @@ constexpr float kMuzzleHeight = 0.93f;
 constexpr float kMuzzleSide = 0.30f;
 constexpr float kConeStartAlpha = 0.5f;  // Shot-cone opacity at the gun tip; fades to 0 at kShootRange.
 constexpr float kShootHalfFovDegrees = 75.0f;  // 150 degree total FOV cone.
-constexpr float kKnockdownDuration = 0.4f;  // Seconds for a hit unit to fall over.
+constexpr float kKnockdownDuration = 0.4f;  // Seconds for the rigid (non-ragdoll) tip-over.
+// Longest a ragdoll fall can run (gfx/Ragdoll.h simulates at most this much);
+// knockdownElapsed stops here. It only advances while a round executes (or
+// the match is over), so a fall cut short by the end of a round freezes and
+// resumes with the next one.
+constexpr float kKnockdownMaxSeconds = 5.0f;
 // Visual-only figure animation (procedural humanoid, see gfx/SceneRenderer):
 // the walk cycle is driven by distance travelled -- one full stride cycle
 // (both legs) per kWalkStrideLength world units, so limbs stay in step with

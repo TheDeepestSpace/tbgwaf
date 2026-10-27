@@ -3945,8 +3945,9 @@ void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed
       }
     }
 
-    // Awning/canopy over the shopfront of commercial ground floors.
-    if (b.kind == BuildingKind::MixedUse || b.kind == BuildingKind::Commercial) {
+    // Awning/canopy over mixed-use shopfronts. Commercial halls are warehouses
+    // with a large loading door, which an awning would cut across.
+    if (b.kind == BuildingKind::MixedUse) {
       const float frontage = glm::distance(fa, fb);
       if (frontage > 2.0f) {
         const float trim = 0.4f;
@@ -4838,7 +4839,8 @@ float UrbanMapHalfExtent(const MapGeneratorConfig& c) {
   return std::max(width, depth) * 0.5f;
 }
 
-Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
+namespace {
+Scene GenerateUrbanMapImpl(uint32_t seed, const MapGeneratorConfig& c) {
   const GroundY groundY = [](float, float) { return 0.0f; };
   if (c.arteryCount > 0) return GenerateArterialUrbanMap(seed, c);
   Rng rng(seed);
@@ -5019,6 +5021,13 @@ Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   PlaceZiplines(&scene, UrbanBlocks(seed, c), seed, c);
   return scene;
 }
+}  // namespace
+
+Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
+  Scene scene = GenerateUrbanMapImpl(seed, c);
+  SuggestSpawnHints(&scene);
+  return scene;
+}
 
 namespace {
 
@@ -5056,7 +5065,9 @@ float ValueNoise(uint32_t seed, float x, float z) {
 
 }  // namespace
 
-Scene GenerateHillyMap(uint32_t seed, const HillyMapConfig& c) {
+namespace {
+
+Scene GenerateHillyMapImpl(uint32_t seed, const HillyMapConfig& c) {
   Scene scene;
   scene.mapHalfExtent = c.halfExtent;
 
@@ -5122,6 +5133,14 @@ Scene GenerateHillyMap(uint32_t seed, const HillyMapConfig& c) {
     red.facingYaw = kPi;
     scene.units.push_back(red);
   }
+  return scene;
+}
+
+}  // namespace
+
+Scene GenerateHillyMap(uint32_t seed, const HillyMapConfig& c) {
+  Scene scene = GenerateHillyMapImpl(seed, c);
+  SuggestSpawnHints(&scene);
   return scene;
 }
 

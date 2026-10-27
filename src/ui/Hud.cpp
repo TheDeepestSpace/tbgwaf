@@ -478,11 +478,11 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
     ImGui::SetNextItemWidth(130.0f);
     ImGui::SliderFloat("AO radius", &aoRadius, 0.5f, 6.0f, "%.1f");
     ImGui::SetNextItemWidth(130.0f);
-    ImGui::SliderFloat("AO strength", &aoStrength, 0.0f, 4.0f, "%.1f");
+    ImGui::SliderFloat("AO strength", &aoStrength, 0.0f, 10.0f, "%.1f");
     ImGui::SetNextItemWidth(130.0f);
-    ImGui::SliderInt("AO quality", &aoQuality, 2, 12);
+    ImGui::SliderInt("AO quality", &aoQuality, 2, 20);
     ImGui::SetNextItemWidth(130.0f);
-    ImGui::SliderInt("AO softness", &aoSoftness, 0, 4);
+    ImGui::SliderInt("AO softness", &aoSoftness, 0, 10);
   }
   ImGui::Checkbox("Disable occlusion fade", &disableOcclusionFade);
   ImGui::Checkbox("Show FPS", &showFps);

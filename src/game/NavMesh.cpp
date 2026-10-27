@@ -176,10 +176,41 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegio
     }
   }
 
+  // Polygon scenes: the cells must match what ground pathing (the padded
+  // polygons) treats as free, not the looser padded AABBs, or thin gaps
+  // between rotated footprints vanish from the mesh. Each polygon contributes
+  // its own z-extent per strip, with strips subdivided so slanted edges are
+  // followed closely; a cell is only ever emitted where the whole strip is free.
+  constexpr float kPolygonStripStep = 0.5f;
+  struct PolyBox {
+    const std::vector<glm::vec2>* polygon;
+    float xMin, xMax;
+  };
+  std::vector<PolyBox> polyBoxes;
+  if (polygonMode_) {
+    footprints.clear();
+    for (const auto& polygon : paddedPolygons_) {
+      if (polygon.size() < 3) continue;
+      PolyBox box{&polygon, polygon[0].x, polygon[0].x};
+      for (const glm::vec2& p : polygon) {
+        box.xMin = std::min(box.xMin, p.x);
+        box.xMax = std::max(box.xMax, p.x);
+      }
+      if (box.xMax < region.xMin || box.xMin > region.xMax) continue;
+      polyBoxes.push_back(box);
+    }
+  }
+
   std::vector<float> xs = {region.xMin, region.xMax};
   for (const auto& fp : footprints) {
     xs.push_back(fp.xMin);
     xs.push_back(fp.xMax);
+  }
+  for (const PolyBox& box : polyBoxes) {
+    for (const glm::vec2& p : *box.polygon) xs.push_back(std::clamp(p.x, region.xMin, region.xMax));
+    for (float x = box.xMin + kPolygonStripStep; x < box.xMax; x += kPolygonStripStep) {
+      xs.push_back(std::clamp(x, region.xMin, region.xMax));
+    }
   }
   std::sort(xs.begin(), xs.end());
   xs.erase(std::unique(xs.begin(), xs.end(),
@@ -199,6 +230,27 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegio
       if (fp.xMin <= stripCenterX && fp.xMax >= stripCenterX) {
         blocked.push_back({fp.zMin, fp.zMax});
       }
+    }
+    for (const PolyBox& box : polyBoxes) {
+      if (box.xMax <= stripXMin + kEps || box.xMin >= stripXMax - kEps) continue;
+      // z-extent of the convex polygon within the strip: vertices inside plus
+      // edge crossings of the two strip boundaries.
+      float lo = std::numeric_limits<float>::infinity();
+      float hi = -lo;
+      const auto& poly = *box.polygon;
+      auto take = [&](float z) {
+        lo = std::min(lo, z);
+        hi = std::max(hi, z);
+      };
+      for (size_t k = 0; k < poly.size(); ++k) {
+        const glm::vec2 a = poly[k];
+        const glm::vec2 b = poly[(k + 1) % poly.size()];
+        if (a.x >= stripXMin && a.x <= stripXMax) take(a.y);
+        for (float x : {stripXMin, stripXMax}) {
+          if ((a.x < x) != (b.x < x)) take(a.y + (b.y - a.y) * (x - a.x) / (b.x - a.x));
+        }
+      }
+      if (hi > lo) blocked.push_back({std::max(lo, region.zMin), std::min(hi, region.zMax)});
     }
     std::vector<ZInterval> merged = MergeIntervals(std::move(blocked));
 

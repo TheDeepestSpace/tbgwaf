@@ -252,8 +252,7 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
 
     const TeamVisibility visibility = ComputeVisibility(viewer);
     for (const Unit& unit : scene_.units) {
-      // A corpse is drawn as itself; sampling it would stamp a fading ghost on it.
-      if (unit.team == viewer || !unit.alive || unit.id < 0 ||
+      if (unit.team == viewer || unit.id < 0 ||
           static_cast<size_t>(unit.id) >= sightings_[t].size()) {
         continue;
       }
@@ -273,7 +272,10 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
           if (!sample) {
             glm::vec3 delta = unit.position - existing.back().position;
             delta.y = 0.0f;
-            sample = glm::length(delta) > 1e-4f;
+            // A falling body stays put but its pose keeps changing.
+            sample = glm::length(delta) > 1e-4f ||
+                     existing.back().alive != unit.alive ||
+                     existing.back().knockdownElapsed != unit.knockdownElapsed;
           }
         }
       }
@@ -286,6 +288,8 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
       s.walkPhase = unit.walkPhase;
       s.walkBlend = unit.walkBlend;
       s.idleElapsed = unit.idleElapsed;
+      s.alive = unit.alive;
+      s.knockdownElapsed = unit.knockdownElapsed;
       s.at = replayGhosts_ ? replayClock_ : executing ? executionElapsed_ : 0.0f;
       if (hasLastUnitPosition_) {
         glm::vec3 delta = unit.position - lastUnitPosition_[unit.id];
@@ -334,6 +338,7 @@ GameSnapshot GameLogic::ExportState() const {
     u.id = unit.id;
     u.position = unit.position;
     u.facingYaw = unit.facingYaw;
+    u.turnLag = unit.turnLag;
     u.alive = unit.alive;
     u.planType = unit.plan.type;
     u.planShootTargetId = unit.plan.shootTargetId;
@@ -428,6 +433,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     Unit* unit = FindUnit(u.id);
     unit->position = u.position;
     unit->facingYaw = u.facingYaw;
+    unit->turnLag = u.turnLag;
     unit->alive = u.alive;
     unit->knockdownAxis = u.knockdownAxis;
     unit->knockdownElapsed = u.knockdownElapsed;
@@ -511,7 +517,7 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
         << u.knockdownElapsed << ' ' << u.walkPhase << ' ' << u.walkBlend << ' '
         << u.idleElapsed << ' ' << u.shootElapsed << ' ' << u.shootAimYaw << ' '
         << u.rideTravel << ' ' << u.rideLength << ' ' << u.rideSlope << ' '
-        << u.grabElapsed << ' ' << (u.moving ? 1 : 0) << ' '
+        << u.grabElapsed << ' ' << u.turnLag << ' ' << (u.moving ? 1 : 0) << ' '
         << u.planPath.size();
     for (const auto& p : u.planPath) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
     out << ' ' << u.planQueuedLegs.size();
@@ -561,7 +567,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
           u.planAimPoint.z >> u.planShots >> u.planEndFacingYaw >> u.knockdownAxis.x >>
           u.knockdownAxis.y >> u.knockdownAxis.z >> u.knockdownElapsed >> u.walkPhase >>
           u.walkBlend >> u.idleElapsed >> u.shootElapsed >> u.shootAimYaw >> u.rideTravel >> u.rideLength >>
-          u.rideSlope >> u.grabElapsed >> moving >>
+          u.rideSlope >> u.grabElapsed >> u.turnLag >> moving >>
           pathCount)) {
       return false;
     }
@@ -776,27 +782,35 @@ void GameLogic::SetPlannedMoveFacing(int unitId, float yaw, Team byTeam) {
 }
 
 bool GameLogic::HasActiveKnockdown() const {
+  if (!KnockdownsAdvance()) return false;
   for (const Unit& unit : scene_.units) {
     if (!unit.alive && unit.knockdownElapsed >= 0.0f &&
-        unit.knockdownElapsed < constants::kKnockdownDuration) {
+        unit.knockdownElapsed < constants::kKnockdownMaxSeconds) {
       return true;
     }
   }
   return false;
 }
 
+bool GameLogic::KnockdownsAdvance() const {
+  return mode_ == InputMode::Executing || mode_ == InputMode::GameOver;
+}
+
 void GameLogic::Update(float dtSeconds) {
-  // Knockdowns and the quick-draw beat advance regardless of mode: they're
-  // purely visual and can outlast the round that caused them. A knockdown
-  // holds its final pose; the shoot beat returns to idle (<0) once done.
+  // Knockdowns and the quick-draw beat are purely visual. A fall only runs
+  // while a round executes (or once the match is over): if the round ends
+  // with a figure still in mid-air it freezes there through planning and
+  // carries on, same velocities and all, when the next round starts. A
+  // knockdown holds its final pose; the shoot beat returns to idle (<0) once
+  // done.
   for (Unit& unit : scene_.units) {
     if (unit.alive) {
       unit.idleElapsed =
           std::fmod(unit.idleElapsed + dtSeconds, constants::kIdleAnimDuration);
     }
-    if (!unit.alive && unit.knockdownElapsed >= 0.0f) {
+    if (!unit.alive && unit.knockdownElapsed >= 0.0f && KnockdownsAdvance()) {
       unit.knockdownElapsed =
-          std::min(unit.knockdownElapsed + dtSeconds, constants::kKnockdownDuration);
+          std::min(unit.knockdownElapsed + dtSeconds, constants::kKnockdownMaxSeconds);
     }
     if (unit.shootElapsed >= 0.0f) {
       unit.shootElapsed += dtSeconds;
@@ -826,6 +840,20 @@ void GameLogic::Update(float dtSeconds) {
         unit.alive && IsUnitMoving(unit.id) && !IsUnitRiding(unit.id) ? 1.0f : 0.0f;
     unit.walkBlend +=
         (target - unit.walkBlend) * std::min(1.0f, constants::kWalkBlendRate * dtSeconds);
+    // Ease the drawn heading onto the sim facing (see Unit::turnLag) -- or,
+    // while a shot beat is up, onto the shot bearing, so a mover turns
+    // smoothly to fire and smoothly back to its direction of travel after.
+    constexpr float kTwoPi = 6.28318530717958647692f;
+    const bool aiming = unit.shootElapsed >= 0.0f && unit.shootElapsed < constants::kShootTurnHold;
+    const float goalLag =
+        aiming ? std::remainder(unit.facingYaw - unit.shootAimYaw, kTwoPi) : 0.0f;
+    if (unit.turnLag != goalLag) {
+      const float gap = std::remainder(unit.turnLag - goalLag, kTwoPi);
+      const float lag = std::fabs(gap);
+      const float step = std::max(constants::kTurnMinSpeed * dtSeconds,
+                                  lag * std::min(1.0f, constants::kTurnLagRate * dtSeconds));
+      unit.turnLag = step >= lag ? goalLag : goalLag + std::copysign(lag - step, gap);
+    }
   }
 }
 
@@ -875,7 +903,7 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
 
       const glm::vec3 segDelta = segEnd - segStart;
       if (glm::length(glm::vec2(segDelta.x, segDelta.z)) > 1e-4f) {
-        mover->facingYaw = std::atan2(segDelta.z, segDelta.x);
+        mover->SetFacingYaw(std::atan2(segDelta.z, segDelta.x));
       }
 
       const glm::vec3 toEnd = segEnd - mover->position;
@@ -927,7 +955,7 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
     }
 
     if (mover->alive && move.segment + 1 >= move.path.size()) {
-      mover->facingYaw = move.endFacingYaw;
+      mover->SetFacingYaw(move.endFacingYaw);
     }
   }
 
@@ -961,8 +989,10 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
     pendingShots_.erase(std::remove_if(pendingShots_.begin(), pendingShots_.end(),
                                        [](const PendingShot& shot) { return !shot.started; }),
                         pendingShots_.end());
-    if (pendingShots_.empty()) FinishRound();
   }
+  // Every round runs its full window, even with nothing left to do: the
+  // physics (falling figures, bullets, a dropped flag) keep playing out.
+  if (executionElapsed_ >= constants::kRoundDuration) FinishRound();
 }
 
 void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
@@ -1530,7 +1560,7 @@ void GameLogic::ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets
   const float aimYaw = std::atan2(dir.z, dir.x);
   // The turn outlives the shot: it is this figure's facing for the next
   // rounds' FOV and overwatch reactions.
-  shooter.facingYaw = aimYaw;
+  shooter.SetFacingYaw(aimYaw);  // Drawn heading eases there (Update).
   PlayShootBeat(shooter, aimYaw, sinceShot);
 
   for (Unit* hitTarget : hitTargets) {
@@ -1868,6 +1898,9 @@ void GameLogic::CommitRound() {
   executionElapsed_ = 0.0f;
   tracers_.clear();  // Last turn's shot lines and ghosts are gone.
   ClearSightings();
+  // Ghosts made by this commit's tick-0 shots must survive the first sighting
+  // update, so don't let it see a fresh "turn started" edge and clear them.
+  wasExecuting_ = true;
 
   // A figure already standing on the flag (e.g. a dropped one) grabs it now.
   std::vector<FlagTouch> startTouches;
@@ -1903,8 +1936,10 @@ void GameLogic::CommitRound() {
     pendingShots_.erase(std::remove_if(pendingShots_.begin(), pendingShots_.end(),
                                        [](const PendingShot& shot) { return !shot.started; }),
                         pendingShots_.end());
-    if (pendingShots_.empty()) FinishRound();
   }
+  // Every round runs its full window, even with nothing left to do: the
+  // physics (falling figures, bullets, a dropped flag) keep playing out.
+  if (executionElapsed_ >= constants::kRoundDuration) FinishRound();
 }
 
 void GameLogic::InitFlag() {
@@ -1920,36 +1955,11 @@ void GameLogic::InitFlag() {
   if (config.position) {
     pos = *config.position;
   } else {
-    // Map center, or the nearest spot to it that no obstacle covers
-    // (searched in expanding rings, so the result is deterministic).
-    auto Free = [this](float x, float z) {
-      if (std::abs(x) > scene_.mapHalfExtent || std::abs(z) > scene_.mapHalfExtent) return false;
-      for (const Obstacle& o : scene_.obstacles) {
-        const float m = constants::kAgentRadius;
-        if (x > o.bounds.min.x - m && x < o.bounds.max.x + m && z > o.bounds.min.z - m &&
-            z < o.bounds.max.z + m) {
-          return false;
-        }
-      }
-      return true;
-    };
-    constexpr float kStep = 0.5f;
-    bool found = Free(0.0f, 0.0f);
-    for (int ring = 1; !found && ring * kStep <= scene_.mapHalfExtent * 1.5f; ++ring) {
-      float bestD = 1e30f;
-      for (int ix = -ring; ix <= ring; ++ix) {
-        for (int iz = -ring; iz <= ring; ++iz) {
-          if (std::max(std::abs(ix), std::abs(iz)) != ring) continue;
-          const float x = ix * kStep, z = iz * kStep;
-          const float d = x * x + z * z;
-          if (d < bestD && Free(x, z)) {
-            bestD = d;
-            pos = glm::vec3(x, 0.0f, z);
-            found = true;
-          }
-        }
-      }
-    }
+    // The generator's hinted spot (else the map center), or the nearest
+    // free spot to it.
+    const glm::vec2 want = scene_.spawnHints.flag.value_or(glm::vec2(0.0f));
+    const glm::vec2 spot = NearestFreeSpot(scene_, want);
+    pos = glm::vec3(spot.x, 0.0f, spot.y);
   }
   if (std::fabs(pos.y) < 1e-4f) pos.y = scene_.ground.HeightAt(pos.x, pos.z);
   flag_.position = pos;

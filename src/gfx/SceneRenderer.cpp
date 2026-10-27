@@ -1,5 +1,7 @@
 #include "gfx/SceneRenderer.h"
 
+#include "gfx/Ragdoll.h"
+
 #include "gfx/FigureRig.h"
 
 #include <algorithm>
@@ -1390,10 +1392,12 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
   Unit ghost = sighted;
   ghost.position = position;
   ghost.facingYaw = s.facingYaw;
+  ghost.turnLag = 0.0f;
   ghost.walkPhase = s.walkPhase;
   ghost.walkBlend = s.walkBlend;
   ghost.idleElapsed = s.idleElapsed;
-  ghost.knockdownElapsed = -1.0f;
+  ghost.alive = s.alive;
+  ghost.knockdownElapsed = s.knockdownElapsed;
   if (glm::length(s.moveDirection) > 0.0f) {
     const glm::vec3 d = s.moveDirection;
     const glm::vec3 side(-d.z, 0.0f, d.x);
@@ -2085,7 +2089,7 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
   for (const auto& obstacle : obstacles) {
     for (const glm::vec2& p : tactics::ObstacleFootprint(obstacle)) {
       const float delta =
-          std::remainder(std::atan2(p.y - eye.z, p.x - eye.x) - unit.facingYaw, kTwoPi);
+          std::remainder(std::atan2(p.y - eye.z, p.x - eye.x) - unit.VisualYaw(), kTwoPi);
       for (const float nudged : {delta - kCornerEpsilon, delta, delta + kCornerEpsilon}) {
         if (nudged >= -halfFovRad && nudged <= halfFovRad) offsets.push_back(nudged);
       }
@@ -2094,7 +2098,7 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
   for (const DeckOccluder& deck : decks) {
     for (const glm::vec2& p : deck.footprint.footprint) {
       const float delta =
-          std::remainder(std::atan2(p.y - eye.z, p.x - eye.x) - unit.facingYaw, kTwoPi);
+          std::remainder(std::atan2(p.y - eye.z, p.x - eye.x) - unit.VisualYaw(), kTwoPi);
       for (const float nudged : {delta - kCornerEpsilon, delta, delta + kCornerEpsilon}) {
         if (nudged >= -halfFovRad && nudged <= halfFovRad) offsets.push_back(nudged);
       }
@@ -2109,7 +2113,7 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
   dirs.reserve(offsets.size());
   spansPerRay.reserve(offsets.size());
   for (const float offset : offsets) {
-    const float angle = unit.facingYaw + offset;
+    const float angle = unit.VisualYaw() + offset;
     const glm::vec2 dir(std::cos(angle), std::sin(angle));
     dirs.push_back(dir);
     const float clippedRange = ClipToMap(eye, dir, range, mapHalfExtent);
@@ -2486,9 +2490,21 @@ std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team,
 }  // namespace
 
 bool IsUnitVisibleForRender(const Unit& unit, Team viewingTeam, bool fogActive,
-                            const TeamVisibility& visibility) {
+                            const TeamVisibility& visibility, const tactics::Scene& scene) {
   if (unit.team == viewingTeam) return true;
   if (!fogActive) return true;
+  if (RagdollActive(unit)) {
+    // The body has left the spot the unit was shot at: see it only if some
+    // part of it is in the viewing team's FOV with clear line of sight.
+    const RagdollPose pose = SampleRagdoll(unit);
+    for (const RagdollJoint joint : {kRagHead, kRagPelvis, kRagFootL, kRagFootR}) {
+      if (IsPointVisibleToTeam(viewingTeam, pose[joint], scene.units, scene.obstacles,
+                               scene.walkSurfaces, scene.ground)) {
+        return true;
+      }
+    }
+    return false;
+  }
   return visibility.UnitVisible(unit.id);
 }
 
@@ -2774,6 +2790,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                GLuint targetFramebuffer, const RenderDebugOptions& debug) {
   const ScopedDrawStats drawStats(debug.stats);
   const auto& obstacles = game.GetScene().obstacles;
+  SetRagdollObstacles(obstacles);
   const auto& sidewalks = game.GetScene().sidewalks;
   const auto& streetProps = game.GetScene().props;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;
@@ -2954,7 +2971,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
     glDisable(GL_POLYGON_OFFSET_FILL);
     for (const Unit& unit : game.GetScene().units) {
-      if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+      if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
       DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
     }
     DrawPlantedFlagDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, game);
@@ -3235,7 +3252,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   for (const Unit& unit : game.GetScene().units) {
-    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
     DrawUnit(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, unit);
   }
   DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
@@ -3412,7 +3429,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         if (debug.disableFov || !unit.alive || unit.team != fovTeam) continue;
         const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 0.15f)
                                                             : glm::vec4(0.9f, 0.25f, 0.22f, 0.15f);
-        DrawFovShadowMask(game, unit, unit.facingYaw, tactics::constants::kShootHalfFovDegrees,
+        DrawFovShadowMask(game, unit, unit.VisualYaw(), tactics::constants::kShootHalfFovDegrees,
                           teamColor, viewProj, drawTerrain, targetFramebuffer, x, y, width, height);
       }
       colorShader_.Use();
@@ -3431,11 +3448,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                    [&](const auto& entry) { return entry.unitId == unit.id; });
         const glm::vec3 eye = unit.EyePosition();
         if (cached == terrainFovCache_.end()) {
-          terrainFovCache_.push_back({unit.id, eye, unit.facingYaw, build(unit)});
+          terrainFovCache_.push_back({unit.id, eye, unit.VisualYaw(), build(unit)});
           cached = terrainFovCache_.end() - 1;
-        } else if (cached->eye != eye || cached->facingYaw != unit.facingYaw) {
+        } else if (cached->eye != eye || cached->facingYaw != unit.VisualYaw()) {
           cached->eye = eye;
-          cached->facingYaw = unit.facingYaw;
+          cached->facingYaw = unit.VisualYaw();
           cached->points = build(unit);
         }
         DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, cached->points);
@@ -3482,7 +3499,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     std::vector<const Unit*> lit;
     for (const Unit& other : game.GetScene().units) {
       if (other.id == shooter.id) continue;
-      if (!IsUnitVisibleForRender(other, team, fogActive, visibility)) continue;
+      if (!IsUnitVisibleForRender(other, team, fogActive, visibility, game.GetScene())) continue;
       lit.push_back(&other);
     }
     return lit;
@@ -3949,7 +3966,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
       if (!unit.alive || (!overlays.spectatorFov && unit.team != team)) continue;
-      if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+      if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
       const bool planned = unit.plan.type != tactics::PlannedActionType::None;
       const glm::vec4 color = planned ? glm::vec4(0.25f, 0.9f, 0.35f, 1.0f)
                                         : glm::vec4(1.0f, 1.0f, 1.0f, 0.6f);
@@ -3964,7 +3981,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (int m = 0; m < 2; ++m)
       for (int s = 0; s < 2; ++s) shoots |= tactics::ReactionShoots(pb.table[m][s]);
     if (!unit.alive || !shoots) continue;
-    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
     DrawHighlightOnSurface(unit.position, glm::vec4(0.85f, 0.1f, 0.85f, 1.0f));
   }
   // Selection/move-preview overlays belong to whichever pane the input
@@ -4050,6 +4067,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         Unit ghost = unit;
         ghost.position = unit.plan.movePath.back();
         ghost.facingYaw = unit.plan.endFacingYaw;
+        ghost.turnLag = 0.0f;
         DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost);
         // Chained legs for later rounds: yellow, with a marker at each leg
         // end so they read apart from the leg about to execute (green).

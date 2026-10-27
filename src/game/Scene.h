@@ -55,6 +55,14 @@ struct FlagConfig {
   bool winOnGrab = true;
 };
 
+// Generator-suggested placement (XZ). Unset hints keep a scene's own units and
+// the flag's default; see SuggestSpawnHints / ApplySpawnHints.
+struct SpawnHints {
+  std::optional<glm::vec2> blue;  // Center of Blue's spawn area.
+  std::optional<glm::vec2> red;   // Center of Red's spawn area (opposite corner).
+  std::optional<glm::vec2> flag;  // Preferred flag spot (map center).
+};
+
 struct Scene {
   std::vector<Obstacle> obstacles;
   // Typology of the generated buildings (issue #151): one record per
@@ -97,6 +105,7 @@ struct Scene {
   std::vector<std::vector<glm::vec2>> terrainCutouts;
   std::vector<TerrainStair> terrainStairs;
   FlagConfig flag;
+  SpawnHints spawnHints;
   // Round limit: when > 0 the match ends in a draw once this many rounds
   // have been played without a winner. 0 (the default) means unlimited.
   int roundLimit = 0;
@@ -116,6 +125,21 @@ std::vector<TerrainTier> TerrainTiers(const std::vector<TerrainWall>& walls,
                                       const std::vector<glm::vec2>& square);
 
 Scene BuildDefaultScene();
+
+// True when a figure can stand at (x, z): on the map and clear of obstacles.
+bool IsFreeSpot(const Scene& scene, float x, float z);
+
+// Nearest free spot to `target` (expanding square rings, deterministic), or
+// `target` itself if nothing within the map is free.
+glm::vec2 NearestFreeSpot(const Scene& scene, glm::vec2 target);
+
+// Fills `scene->spawnHints`: Blue and Red at opposite (south-west / north-east)
+// corners, flag at the map center.
+void SuggestSpawnHints(Scene* scene);
+
+// Moves each team's units to its hinted spawn area (nearest free spots, facing
+// the opposite corner). No-op for a team without a hint.
+void ApplySpawnHints(Scene* scene);
 
 // Obstacles plus the building massing (parapets, roof furniture, awnings) as
 // prisms, appended after the real obstacles so obstacle indices are

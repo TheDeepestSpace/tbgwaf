@@ -137,10 +137,13 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # Deploys the playable WASM build first; this creates pr-preview/pr-N (the
+  # action replaces the whole directory), so the publish_* jobs below wait
+  # for it and then add their results with plain commits.
   preview:
-    needs: [dev_image, scenario_shard]
+    needs: dev_image
     # The closed action skips the image builds and only cleans up the preview.
-    if: ${{ !cancelled() && github.event.pull_request.head.repo.full_name == github.repository && (needs.dev_image.result == 'success' || needs.dev_image.result == 'skipped') && (needs.scenario_shard.result == 'success' || needs.scenario_shard.result == 'skipped') }}
+    if: ${{ !cancelled() && github.event.pull_request.head.repo.full_name == github.repository && (needs.dev_image.result == 'success' || needs.dev_image.result == 'skipped') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/thedeepestspace/tbgwaf-dev:pr-${{ github.event.pull_request.number }}
@@ -161,8 +164,6 @@ jobs:
           fetch-depth: 0
 
       - name: Trust workspace for git
-        # Container runs as root but the workspace is owned by the runner user;
-        # without this `git diff` falls back to --no-index and exits 129.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Configure (Emscripten)
@@ -193,26 +194,6 @@ jobs:
           cp build-web/tactics_gallery.wasm site/gallery/
           cp build-web/map_seeds.js site/gallery/
           cp -r build-web/map_goldens site/gallery/
-
-      - name: Download scenario shards
-        if: github.event.action != 'closed'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: scenario-shard-*
-          path: site/scenarios
-          merge-multiple: true
-
-      - name: Generate scenario review page
-        if: github.event.action != 'closed'
-        run: |
-          python3 scripts/generate_scenario_review_page.py \
-            --base ${{ github.event.pull_request.base.sha }} \
-            --head ${{ github.event.pull_request.head.sha }} \
-            --out site/scenarios \
-            --collect \
-            --baseline-url ../../../scenario-baseline \
-            --performance-url ../../../performance/
-          rm -f site/scenarios/shard-*.json
 
       - name: Deploy PR preview
         uses: rossjrw/pr-preview-action@ffa7509e91a3ec8dfc2e5536c4d5c1acdf7a6de9 # v1.8.1
@@ -254,9 +235,8 @@ jobs:
           fi
 
   performance:
-    needs: preview
-    # The closed action skips the image builds and only cleans up the preview.
-    if: ${{ github.event.action != 'closed' && needs.preview.result == 'success' }}
+    needs: dev_image
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.action != 'closed' }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/thedeepestspace/tbgwaf-dev:pr-${{ github.event.pull_request.number }}
@@ -290,7 +270,7 @@ jobs:
       - name: Build performance runner
         run: cmake --build build --target tactics_performance_suite
 
-      - name: Measure and publish PR performance
+      - name: Measure PR performance
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           SDL_VIDEODRIVER: x11
@@ -322,6 +302,97 @@ jobs:
             --title "Performance suite · PR #${PR_NUMBER}" \
             --history-url ../../../performance/history/ \
             --current-url results.json
+
+      - name: Upload performance site
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: performance-site
+          path: site/performance
+          if-no-files-found: error
+          retention-days: 1
+
+  # Publish jobs run after the preview deploy (which replaces the whole
+  # pr-preview/pr-N directory) and add their files with a plain commit.
+  # Publishes share one concurrency group with `queue: max` (up to 100 pending
+  # jobs wait their turn instead of replacing each other), so gh-pages pushes
+  # are serialized; publish_to_preview.sh's fetch-and-retry covers other
+  # writers (e.g. pages.yml).
+  publish_scenarios:
+    needs: [preview, scenario_shard]
+    if: ${{ github.event.action != 'closed' && needs.preview.result == 'success' && needs.scenario_shard.result == 'success' }}
+    concurrency:
+      group: gh-pages-publish
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/thedeepestspace/tbgwaf-dev:pr-${{ github.event.pull_request.number }}
+      options: --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The review page classifies scenarios via `git diff <base>...<head>`.
+          fetch-depth: 0
+
+      - name: Trust workspace for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Download scenario shards
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: scenario-shard-*
+          path: site/scenarios
+          merge-multiple: true
+
+      - name: Generate scenario review page
+        run: |
+          python3 scripts/generate_scenario_review_page.py \
+            --base ${{ github.event.pull_request.base.sha }} \
+            --head ${{ github.event.pull_request.head.sha }} \
+            --out site/scenarios \
+            --collect \
+            --baseline-url ../../../scenario-baseline \
+            --performance-url ../../../performance/
+          rm -f site/scenarios/shard-*.json
+
+      - name: Publish into the PR preview
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: scripts/publish_to_preview.sh "pr-preview/pr-${PR_NUMBER}" site
+
+  publish_performance:
+    needs: [preview, performance]
+    if: ${{ github.event.action != 'closed' && needs.preview.result == 'success' && needs.performance.result == 'success' }}
+    concurrency:
+      group: gh-pages-publish
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/thedeepestspace/tbgwaf-dev:pr-${{ github.event.pull_request.number }}
+      options: --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download performance site
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: performance-site
+          path: site/performance
 
       - name: Publish into the PR preview
         env:

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 namespace tactics {
 
@@ -95,6 +96,80 @@ Scene BuildDefaultScene() {
   }
 
   return scene;
+}
+
+bool IsFreeSpot(const Scene& scene, float x, float z) {
+  if (std::abs(x) > scene.mapHalfExtent || std::abs(z) > scene.mapHalfExtent) return false;
+  const float m = constants::kAgentRadius;
+  for (const Obstacle& o : scene.obstacles) {
+    if (x > o.bounds.min.x - m && x < o.bounds.max.x + m && z > o.bounds.min.z - m &&
+        z < o.bounds.max.z + m) {
+      return false;
+    }
+  }
+  return true;
+}
+
+glm::vec2 NearestFreeSpot(const Scene& scene, glm::vec2 target) {
+  constexpr float kStep = 0.5f;
+  if (IsFreeSpot(scene, target.x, target.y)) return target;
+  for (int ring = 1; ring * kStep <= scene.mapHalfExtent * 2.0f; ++ring) {
+    float bestD = 1e30f;
+    glm::vec2 best = target;
+    for (int ix = -ring; ix <= ring; ++ix) {
+      for (int iz = -ring; iz <= ring; ++iz) {
+        if (std::max(std::abs(ix), std::abs(iz)) != ring) continue;
+        const glm::vec2 p = target + glm::vec2(ix, iz) * kStep;
+        const float d = ix * ix + iz * iz;
+        if (d < bestD && IsFreeSpot(scene, p.x, p.y)) {
+          bestD = d;
+          best = p;
+        }
+      }
+    }
+    if (bestD < 1e29f) return best;
+  }
+  return target;
+}
+
+void SuggestSpawnHints(Scene* scene) {
+  const float corner = scene->mapHalfExtent * 0.8f;
+  scene->spawnHints.blue = glm::vec2(-corner, -corner);
+  scene->spawnHints.red = glm::vec2(corner, corner);
+  scene->spawnHints.flag = glm::vec2(0.0f, 0.0f);
+}
+
+void ApplySpawnHints(Scene* scene) {
+  const auto& hints = scene->spawnHints;
+  for (const Team team : {Team::Blue, Team::Red}) {
+    const auto& hint = team == Team::Blue ? hints.blue : hints.red;
+    const auto& other = team == Team::Blue ? hints.red : hints.blue;
+    if (!hint) continue;
+    // Squad row perpendicular to the corner's diagonal, 2 units apart.
+    const glm::vec2 toCenter = glm::normalize(-*hint + glm::vec2(1e-3f));
+    const glm::vec2 across(-toCenter.y, toCenter.x);
+    const float yaw = other ? std::atan2(other->y - hint->y, other->x - hint->x)
+                            : std::atan2(toCenter.y, toCenter.x);
+    std::vector<glm::vec2> taken;
+    int slot = 0;
+    for (Unit& unit : scene->units) {
+      if (unit.team != team) continue;
+      const float offset = (slot++ % 3 - 1) * 2.0f;
+      glm::vec2 want = *hint + across * offset;
+      glm::vec2 p = NearestFreeSpot(*scene, want);
+      // Keep figures apart when a blocked spot snaps onto a neighbour.
+      for (int tries = 0; tries < 8; ++tries) {
+        bool clash = false;
+        for (const glm::vec2& t : taken) clash |= glm::distance(t, p) < 1.0f;
+        if (!clash) break;
+        want += toCenter * 1.0f;
+        p = NearestFreeSpot(*scene, want);
+      }
+      taken.push_back(p);
+      unit.position = glm::vec3(p.x, scene->ground.HeightAt(p.x, p.y), p.y);
+      unit.facingYaw = yaw;
+    }
+  }
 }
 
 namespace {

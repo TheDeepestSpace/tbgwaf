@@ -307,12 +307,17 @@ jobs:
 
   # Publish jobs run after the preview deploy (which replaces the whole
   # pr-preview/pr-N directory) and add their files with a plain commit.
-  # publish_to_preview.sh re-fetches and retries on a lost gh-pages push race,
-  # which is more reliable than concurrency groups (those keep only one pending
-  # run and would cancel the others).
+  # Publishes share one concurrency group with `queue: max` (up to 100 pending
+  # jobs wait their turn instead of replacing each other), so gh-pages pushes
+  # are serialized; publish_to_preview.sh's fetch-and-retry covers other
+  # writers (e.g. pages.yml).
   publish_scenarios:
     needs: [preview, scenario_shard]
     if: ${{ github.event.action != 'closed' && needs.preview.result == 'success' && needs.scenario_shard.result == 'success' }}
+    concurrency:
+      group: gh-pages-publish
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/thedeepestspace/tbgwaf-dev:pr-${{ github.event.pull_request.number }}
@@ -359,6 +364,10 @@ jobs:
   publish_performance:
     needs: [preview, performance]
     if: ${{ github.event.action != 'closed' && needs.preview.result == 'success' && needs.performance.result == 'success' }}
+    concurrency:
+      group: gh-pages-publish
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/thedeepestspace/tbgwaf-dev:pr-${{ github.event.pull_request.number }}

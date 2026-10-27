@@ -252,8 +252,7 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
 
     const TeamVisibility visibility = ComputeVisibility(viewer);
     for (const Unit& unit : scene_.units) {
-      // A corpse is drawn as itself; sampling it would stamp a fading ghost on it.
-      if (unit.team == viewer || !unit.alive || unit.id < 0 ||
+      if (unit.team == viewer || unit.id < 0 ||
           static_cast<size_t>(unit.id) >= sightings_[t].size()) {
         continue;
       }
@@ -273,7 +272,10 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
           if (!sample) {
             glm::vec3 delta = unit.position - existing.back().position;
             delta.y = 0.0f;
-            sample = glm::length(delta) > 1e-4f;
+            // A falling body stays put but its pose keeps changing.
+            sample = glm::length(delta) > 1e-4f ||
+                     existing.back().alive != unit.alive ||
+                     existing.back().knockdownElapsed != unit.knockdownElapsed;
           }
         }
       }
@@ -286,6 +288,8 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
       s.walkPhase = unit.walkPhase;
       s.walkBlend = unit.walkBlend;
       s.idleElapsed = unit.idleElapsed;
+      s.alive = unit.alive;
+      s.knockdownElapsed = unit.knockdownElapsed;
       s.at = replayGhosts_ ? replayClock_ : executing ? executionElapsed_ : 0.0f;
       if (hasLastUnitPosition_) {
         glm::vec3 delta = unit.position - lastUnitPosition_[unit.id];
@@ -776,27 +780,35 @@ void GameLogic::SetPlannedMoveFacing(int unitId, float yaw, Team byTeam) {
 }
 
 bool GameLogic::HasActiveKnockdown() const {
+  if (!KnockdownsAdvance()) return false;
   for (const Unit& unit : scene_.units) {
     if (!unit.alive && unit.knockdownElapsed >= 0.0f &&
-        unit.knockdownElapsed < constants::kKnockdownDuration) {
+        unit.knockdownElapsed < constants::kKnockdownMaxSeconds) {
       return true;
     }
   }
   return false;
 }
 
+bool GameLogic::KnockdownsAdvance() const {
+  return mode_ == InputMode::Executing || mode_ == InputMode::GameOver;
+}
+
 void GameLogic::Update(float dtSeconds) {
-  // Knockdowns and the quick-draw beat advance regardless of mode: they're
-  // purely visual and can outlast the round that caused them. A knockdown
-  // holds its final pose; the shoot beat returns to idle (<0) once done.
+  // Knockdowns and the quick-draw beat are purely visual. A fall only runs
+  // while a round executes (or once the match is over): if the round ends
+  // with a figure still in mid-air it freezes there through planning and
+  // carries on, same velocities and all, when the next round starts. A
+  // knockdown holds its final pose; the shoot beat returns to idle (<0) once
+  // done.
   for (Unit& unit : scene_.units) {
     if (unit.alive) {
       unit.idleElapsed =
           std::fmod(unit.idleElapsed + dtSeconds, constants::kIdleAnimDuration);
     }
-    if (!unit.alive && unit.knockdownElapsed >= 0.0f) {
+    if (!unit.alive && unit.knockdownElapsed >= 0.0f && KnockdownsAdvance()) {
       unit.knockdownElapsed =
-          std::min(unit.knockdownElapsed + dtSeconds, constants::kKnockdownDuration);
+          std::min(unit.knockdownElapsed + dtSeconds, constants::kKnockdownMaxSeconds);
     }
     if (unit.shootElapsed >= 0.0f) {
       unit.shootElapsed += dtSeconds;
@@ -961,8 +973,10 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
     pendingShots_.erase(std::remove_if(pendingShots_.begin(), pendingShots_.end(),
                                        [](const PendingShot& shot) { return !shot.started; }),
                         pendingShots_.end());
-    if (pendingShots_.empty()) FinishRound();
   }
+  // Every round runs its full window, even with nothing left to do: the
+  // physics (falling figures, bullets, a dropped flag) keep playing out.
+  if (executionElapsed_ >= constants::kRoundDuration) FinishRound();
 }
 
 void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
@@ -1868,6 +1882,9 @@ void GameLogic::CommitRound() {
   executionElapsed_ = 0.0f;
   tracers_.clear();  // Last turn's shot lines and ghosts are gone.
   ClearSightings();
+  // Ghosts made by this commit's tick-0 shots must survive the first sighting
+  // update, so don't let it see a fresh "turn started" edge and clear them.
+  wasExecuting_ = true;
 
   // A figure already standing on the flag (e.g. a dropped one) grabs it now.
   std::vector<FlagTouch> startTouches;
@@ -1903,8 +1920,10 @@ void GameLogic::CommitRound() {
     pendingShots_.erase(std::remove_if(pendingShots_.begin(), pendingShots_.end(),
                                        [](const PendingShot& shot) { return !shot.started; }),
                         pendingShots_.end());
-    if (pendingShots_.empty()) FinishRound();
   }
+  // Every round runs its full window, even with nothing left to do: the
+  // physics (falling figures, bullets, a dropped flag) keep playing out.
+  if (executionElapsed_ >= constants::kRoundDuration) FinishRound();
 }
 
 void GameLogic::InitFlag() {

@@ -122,6 +122,8 @@ class SceneRenderer {
   bool Init();
   void Destroy();
 
+  const AmbientOcclusionVolume& ThermalBake() const { return thermalOcclusion_.WorldBake(); }
+
   void SetFovOverlayMode(FovOverlayMode mode) { fovOverlayMode_ = mode; }
   FovOverlayMode GetFovOverlayMode() const { return fovOverlayMode_; }
   // ShadowMap mode only: height above an upward-facing fragment (ground,

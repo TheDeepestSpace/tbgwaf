@@ -155,6 +155,58 @@ gameplay overlays and HUD are drawn. The `thermal_urban_black_hot` and
 scenario YAML selects them with `render: {thermal: true, thermal_black_hot: false}`
 for white-hot (omit `thermal_black_hot` for black-hot).
 
+**Baked thermal** (off by default) replaces the screen-space march with a
+world-space ambient-cube volume (PR #178). Static FOV geometry and terrain
+are rasterized from directions covering the full sphere, so walls at eye
+level, open space under overpasses, and deck undersides receive shading.
+Camera moves and pane changes reuse the volume. Visible figures add two
+live contact spheres each; fog-hidden figures contribute nothing.
+
+- **AO radius** is the contact reach in world units (default 2.4).
+- **AO quality** sets `clamp(quality * 16, 16, 256)` directions (default 96).
+  Radius and quality apply on slider release and rebake once.
+- **AO strength** stays live (default 1.9); **AO softness** is disabled in
+  baked mode. Switching back restores the screen-space settings.
+- `AmbientOcclusionSettings::bake` exposes depth resolution (1024²), batch
+  layers (16, maximum 16), probe spacing (0.75), and a direction override
+  for tests (0 uses quality). The grid widens its spacing if necessary to
+  stay within 256 × 64 × 256. Geometry and bake-setting changes invalidate
+  the content hash; units and camera state do not.
+
+The bake is synchronous, including in WebGL2. It logs settings, bounds,
+completed GPU time and memory. On this change's llvmpipe runner,
+`city_elevated_seed_7` took **4.3 s** at defaults (203 × 33 × 203 probes,
+10.4 MiB resident volume, 64 MiB temporary depth maps). Ping-pong accumulation
+needs another volume pair during baking, plus the previous volume on a
+rebake. The test settings (16 directions, 256², spacing 1.5) took **0.35 s**
+on the same map; the thermal regression suite stays below its 30 s timeout.
+These are software-renderer measurements; the **under-2 s GPU target has
+not been measured on hardware**.
+
+Depth maps use exit faces toward the receiver: entry faces on the far side
+of a thick building would count its thickness as distance and lose contact
+shading. Terrain stays two-sided because its mesh is open underneath.
+This is still a directional-depth approximation, not ray-traced AO:
+a farther caster can hide a nearer one in a direction. Thin features below
+the probe/depth resolution are softened. Invalid solid probes are filled
+from neighbouring open probes in two passes before trilinear lookup.
+
+Native-only inspection (no files or PNG dependency in the game/WASM):
+
+```sh
+LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a build/tactics_map_visual_tests --dump-ao build/ao-dump
+# Faster diagnostic bake; --map accepts an existing map-case name.
+LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a build/tactics_map_visual_tests \
+  --dump-ao build/ao-dump-small --ao-test-settings --map city_elevated_seed_7
+```
+
+Dump mode defaults to `city_elevated_seed_7` and skips golden comparisons.
+It writes `thermal.png` and one `slice-NNN.png` per Z layer beneath the map's
+name: each XY slice has +X/+Y/+Z visibility in RGB on the left and -X/-Y/-Z
+on the right, with filled validity in alpha. Rows run from high to low Y;
+Z increases with the slice number. All normal thermal goldens continue to
+use screen-space defaults and are unchanged.
+
 ### Flag objective (CTF part 1)
 
 A scene (or scenario YAML `flag:` block) can enable a neutral flag at the map

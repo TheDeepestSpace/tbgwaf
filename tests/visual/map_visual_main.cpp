@@ -52,7 +52,49 @@ struct Options {
   fs::path goldensDir = "tests/map_goldens";
   fs::path outDir = "map_visual_out";
   bool updateBaselines = false;
+  fs::path dumpAo;
+  std::string mapName;
+  bool smallAo = false;
 };
+
+// PR #178: native test-only readback; no PNG or filesystem dependency in
+// the game/WASM. Each XY slice places +XYZ RGB beside -XYZ RGB; A is validity.
+bool DumpAo(const gfx::AmbientOcclusionVolume& volume, const fs::path& directory) {
+  if (!volume.positive || !volume.negative) return false;
+  fs::create_directories(directory);
+  GLuint fbo = 0;
+  GLint previous = 0;
+  glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous);
+  glGenFramebuffers(1, &fbo);
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+  const int w = volume.dims.x, h = volume.dims.y;
+  std::vector<unsigned char> pixels(static_cast<size_t>(w) * h * 4);
+  std::vector<unsigned char> paired(static_cast<size_t>(w) * h * 8);
+  bool ok = true;
+  for (int z = 0; z < volume.dims.z && ok; ++z) {
+    for (int side = 0; side < 2; ++side) {
+      glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                side == 0 ? volume.positive : volume.negative, 0, z);
+      if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        ok = false;
+        break;
+      }
+      glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+      for (int y = 0; y < h; ++y) {
+        std::copy_n(pixels.data() + static_cast<size_t>(y) * w * 4, w * 4,
+                    paired.data() + (static_cast<size_t>(h - 1 - y) * 2 * w + side * w) * 4);
+      }
+    }
+    char filename[32];
+    std::snprintf(filename, sizeof filename, "slice-%03d.png", z);
+    if (ok) ok = stbi_write_png((directory / filename).string().c_str(), w * 2, h, 4,
+                                paired.data(), w * 8) != 0;
+  }
+  ok = ok && glGetError() == GL_NO_ERROR;
+  glBindFramebuffer(GL_FRAMEBUFFER, previous);
+  glDeleteFramebuffers(1, &fbo);
+  return ok;
+}
 
 }  // namespace
 
@@ -66,10 +108,16 @@ int main(int argc, char** argv) {
       options.goldensDir = argv[++i];
     } else if (arg == "--out-dir" && i + 1 < argc) {
       options.outDir = argv[++i];
+    } else if (arg == "--dump-ao" && i + 1 < argc) {
+      options.dumpAo = argv[++i];
+    } else if (arg == "--map" && i + 1 < argc) {
+      options.mapName = argv[++i];
+    } else if (arg == "--ao-test-settings") {
+      options.smallAo = true;
     } else {
       std::fprintf(stderr,
                    "usage: tactics_map_visual_tests [--update-baselines] [--goldens-dir DIR] "
-                   "[--out-dir DIR]\n");
+                   "[--out-dir DIR] [--dump-ao DIR] [--map NAME] [--ao-test-settings]\n");
       return 1;
     }
   }
@@ -233,9 +281,12 @@ int main(int argc, char** argv) {
                      kHillyCameraZoom, /*showNavMesh=*/true});
   }
 
-  int failures = 0;
+  if (!options.dumpAo.empty() && options.mapName.empty()) options.mapName = "city_elevated_seed_7";
+  int failures = 0, rendered = 0;
   for (MapCase& mapCase : cases) {
     const std::string& name = mapCase.name;
+    if (!options.mapName.empty() && name != options.mapName) continue;
+    ++rendered;
     const fs::path goldenPath = options.goldensDir / (name + ".png");
 
     gfx::OrbitCamera camera;
@@ -263,9 +314,30 @@ int main(int argc, char** argv) {
                     &game.GetScene().walkSurfaces);
       overlays.navMeshDebug = &navMesh;
     }
+    gfx::RenderDebugOptions debug;
+    if (!options.dumpAo.empty()) {
+      debug.thermal = true;
+      debug.thermalAo.baked = true;
+      debug.disableFov = true;
+      if (options.smallAo) {
+        debug.thermalAo.bake.directions = 16;
+        debug.thermalAo.bake.depthResolution = 256;
+        debug.thermalAo.bake.spacing = 1.5f;
+      }
+    }
     renderer.RenderPane(game, tactics::Team::Blue, /*fogActive=*/false, tactics::TeamVisibility{},
-                        camera, 0, 0, kWindowWidth, kWindowHeight, overlays);
+                        camera, 0, 0, kWindowWidth, kWindowHeight, overlays, 0, debug);
     const visual::Image image = visual::CaptureFramebuffer(kWindowWidth, kWindowHeight);
+
+    if (!options.dumpAo.empty()) {
+      const fs::path directory = options.dumpAo / name;
+      if (!DumpAo(renderer.ThermalBake(), directory) ||
+          !visual::SavePng(directory / "thermal.png", image)) {
+        std::fprintf(stderr, "FAIL %s: AO dump failed\n", name.c_str());
+        ++failures;
+      }
+      continue;
+    }
 
     if (options.updateBaselines) {
       if (!visual::SavePng(goldenPath, image)) {
@@ -304,6 +376,10 @@ int main(int argc, char** argv) {
   SDL_DestroyWindow(window);
   SDL_Quit();
 
+  if (rendered == 0) {
+    std::fprintf(stderr, "No map matches %s\n", options.mapName.c_str());
+    return 1;
+  }
   if (failures > 0) {
     std::fprintf(stderr, "%d of %zu map(s) failed.\n", failures, cases.size());
     return 1;

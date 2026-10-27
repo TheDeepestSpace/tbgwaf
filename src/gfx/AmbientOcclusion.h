@@ -1,12 +1,32 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
 #include "game/Scene.h"
+#include "gfx/Mesh.h"
 #include "gfx/Shader.h"
 
 namespace gfx {
+
+// PR #178: production defaults; native tests can trade resolution for speed.
+struct AmbientOcclusionBakeSettings {
+  int directions = 0;  // 0 uses clamp(quality * 16, 16, 256); default quality = 96 rays.
+  int depthResolution = 1024;
+  int batchLayers = 16;  // At most 16 matrices in the ES 3.0 fragment uniforms.
+  float spacing = 0.75f;
+};
+
+// Read-only diagnostics. Textures belong to AmbientOcclusion, valid until a
+// rebake/Destroy. The native map test attaches each layer for PNG readback.
+struct AmbientOcclusionVolume {
+  GLuint positive = 0, negative = 0;
+  glm::ivec3 dims{0};
+  glm::vec3 origin{0.0f};
+  float spacing = 0.75f;
+  unsigned int bakeCount = 0;
+};
 
 // Debug-panel tunables for the thermal contact shading (PR #178 review asked
 // for softer, less choppy occlusion with knobs to play with). Defaults are
@@ -14,16 +34,17 @@ namespace gfx {
 struct AmbientOcclusionSettings {
   float radius = 2.4f;    // World-space reach of the shading, in map units.
   float strength = 1.9f;  // Occlusion-to-darkening multiplier.
-  int quality = 6;        // Depth samples marched per ray (more = smoother).
+  int quality = 6;       // Live: samples/ray. Baked: quality * 16 directions.
   int softness = 2;       // Bilateral blur half-width in pixels.
   // "Baked thermal": skip the per-pixel screen-space march and look the
   // shading up from a world-space map baked once per scene (re-baked only
   // when the map geometry, radius or quality change, never for the camera).
   // Strength stays live; softness is unused (the bake is already smooth).
   bool baked = false;
+  AmbientOcclusionBakeSettings bake;
 };
 
-// Pane-local, screen-space ambient occlusion for the thermal world. Capture
+// Ambient occlusion for the thermal world (screen-space or baked). Capture
 // opaque color, world normals and depth; composite before translucent geometry
 // and sensor processing. Uses only core GLES3/WebGL2 attachment formats.
 // Targets grow to the largest pane seen and are shared by every pane; a
@@ -36,7 +57,10 @@ class AmbientOcclusion {
   void Composite(GLuint target, int x, int y, const glm::mat4& view,
                  const glm::mat4& projection, bool blackHot,
                  const AmbientOcclusionSettings& settings,
-                 const tactics::Scene* world = nullptr);
+                 const tactics::Scene* world = nullptr,
+                 const Shader* depthShader = nullptr,
+                 const std::vector<glm::vec4>& contactSpheres = {});
+  const AmbientOcclusionVolume& WorldBake() const { return volume_; }
 
  private:
   Shader occlusionShader_, compositeShader_;
@@ -46,17 +70,15 @@ class AmbientOcclusion {
   int allocatedWidth_ = 0, allocatedHeight_ = 0;  // Target textures.
   bool warned_ = false;
 
-  // World-space bake: a top-down heightmap of the static map (ground,
-  // obstacle tops, walk surfaces) and the horizon occlusion computed on it.
-  // Composite looks both up by world position, so the camera is irrelevant.
-  Shader worldOcclusionShader_;
-  GLuint worldFbo_ = 0, worldHeight_ = 0, worldAo_ = 0;
-  uint64_t worldKey_ = 0;
-  float worldRadius_ = 0.0f;
-  int worldQuality_ = 0, worldRes_ = 0;
-  glm::vec2 worldOrigin_{0.0f};
-  float worldTexel_ = 1.0f;
-  bool EnsureWorldBake(const tactics::Scene& scene, float radius, int quality);
+  // Ambient-cube volume (PR #178): six hemispherical visibility channels,
+  // independent of the pane/camera. Intermediate depth maps are batch-sized.
+  Shader worldOcclusionShader_, worldFillShader_;
+  GLuint worldFbo_ = 0;
+  std::array<LitTriangleMesh, 3> worldMeshes_;
+  AmbientOcclusionVolume volume_;
+  uint64_t worldKey_ = 0, bakeKey_ = 0;
+  bool EnsureWorldBake(const tactics::Scene& scene, const Shader& depthShader,
+                       const AmbientOcclusionSettings& settings);
   void DestroyWorldBake();
 };
 

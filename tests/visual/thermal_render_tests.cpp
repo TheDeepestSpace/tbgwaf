@@ -116,7 +116,7 @@ void CheckRenderer() {
   renderer.RenderPane(emptyGame, tactics::Team::Blue, false, {}, camera,
                        x, y, width, height, {}, fbo, options);
   const auto empty = Capture(x, y, width, height);
-  const glm::mat4 vp = camera.ProjectionMatrix(float(width) / height) * camera.ViewMatrix();
+  glm::mat4 vp = camera.ProjectionMatrix(float(width) / height) * camera.ViewMatrix();
   auto brightness = [&](const auto& pixels, const glm::vec3& point) {
     const glm::vec4 clip = vp * glm::vec4(point, 1.0f);
     const int px = int((clip.x / clip.w * 0.5f + 0.5f) * width);
@@ -163,6 +163,9 @@ void CheckRenderer() {
   // darken the building's base like the live pass (loosely), leave open
   // ground and roofs alone, and not depend on the camera.
   options.thermalAo.baked = true;
+  options.thermalAo.bake.directions = 16;
+  options.thermalAo.bake.depthResolution = 256;
+  options.thermalAo.bake.spacing = 1.5f;
   renderer.RenderPane(game, tactics::Team::Blue, false, {}, camera, x, y, width, height, {}, fbo,
                       options);
   const auto baked = Capture(x, y, width, height);
@@ -174,12 +177,106 @@ void CheckRenderer() {
           "Baked thermal occluded an exposed roof");
   Require(std::abs(brightness(blackHot, contact) - brightness(baked, contact)) < 60.0f,
           "Baked thermal diverged from the live shading at the contact point");
+  const unsigned int firstBake = renderer.ThermalBake().bakeCount;
+  Require(firstBake == 1, "First baked frame did not produce exactly one volume");
+  renderer.RenderPane(hiddenGame, tactics::Team::Blue, true, {}, camera,
+                       x, y, width, height, {}, fbo, options);
+  Require(Capture(x, y, width, height) == baked, "Baked contact exposed a fog-hidden enemy");
+  Require(renderer.ThermalBake().bakeCount == firstBake, "Units invalidated the static bake");
+  renderer.RenderPane(hiddenGame, tactics::Team::Blue, false, {}, camera,
+                       x, y, width, height, {}, fbo, options);
+  const auto visibleFigure = Capture(x, y, width, height);
+  Require(brightness(baked, {5.7f, 0.0f, 0.0f}) -
+              brightness(visibleFigure, {5.7f, 0.0f, 0.0f}) > 3.0f,
+          "Visible figure did not cast live contact shading");
+  Require(renderer.ThermalBake().bakeCount == firstBake, "Visible units caused a rebake");
   gfx::OrbitCamera moved = camera;
   moved.Rotate(0.15f, 0.0f);
   renderer.RenderPane(game, tactics::Team::Blue, false, {}, moved, x, y, width, height, {}, fbo,
                       options);
   const auto bakedMoved = Capture(x, y, width, height);
   Require(bakedMoved != baked, "Baked thermal ignored a camera move");
+  Require(renderer.ThermalBake().bakeCount == firstBake, "Camera move caused a rebake");
+  options.thermalAo.softness = 9;
+  Require(render(x, width, height) == baked, "Softness changed the baked image");
+  options.thermalAo.strength = 0.0f;
+  const auto unshaded = render(x, width, height);
+  Require(brightness(unshaded, contact) - brightness(baked, contact) > 12.0f,
+          "Baked strength did not update live");
+  Require(renderer.ThermalBake().bakeCount == firstBake, "Live settings caused a rebake");
+  options.thermalAo.strength = 1.9f;
+  options.thermalAo.radius = 3.0f;
+  render(x, width, height);
+  Require(renderer.ThermalBake().bakeCount == firstBake + 1, "Radius did not rebake");
+  render(x, width, height);
+  Require(renderer.ThermalBake().bakeCount == firstBake + 1, "Unchanged radius rebaked again");
+  options.thermalAo.bake.directions = 0;
+  options.thermalAo.quality = 2;  // 32 directions, two batches.
+  render(x, width, height);
+  Require(renderer.ThermalBake().bakeCount == firstBake + 2, "Quality did not rebake");
+  render(x, width, height);
+  Require(renderer.ThermalBake().bakeCount == firstBake + 2, "Unchanged quality rebaked again");
+  options.thermalAo.radius = 2.4f;
+  options.thermalAo.bake.directions = 16;
+  options.thermalAo.bake.batchLayers = 8;
+  const auto twoBatches = render(x, width, height);
+  for (size_t i = 0; i < baked.size(); ++i) {
+    Require(std::abs(int(baked[i]) - int(twoBatches[i])) <= 5,
+            "Batch accumulation changed visibility beyond RGBA8 rounding");
+  }
+
+  // PR #178: the same vertical wall point viewed at eye level, first open
+  // to the sky and then under a floating deck. The old heightmap flattened
+  // the gap into a solid column and could not darken this receiver.
+  tactics::Scene coveredScene = scene;
+  tactics::WalkSurface slab;
+  slab.vertices = {{1.0f, 3.25f, -4.0f}, {5.0f, 3.25f, -4.0f},
+                   {5.0f, 3.25f, 4.0f}, {1.0f, 3.25f, 4.0f}};
+  coveredScene.walkSurfaces.push_back(slab);
+  tactics::GameLogic coveredGame(coveredScene);
+  gfx::OrbitCamera eyeCamera;
+  eyeCamera.Rotate(0.9f, -0.92f);
+  eyeCamera.Zoom(-6.0f);
+  eyeCamera.Update(1.0f);
+  eyeCamera.target = {2.0f, 1.2f, 0.0f};
+  vp = eyeCamera.ProjectionMatrix(float(width) / height) * eyeCamera.ViewMatrix();
+  options.disableOcclusionFade = true;
+  renderer.RenderPane(game, tactics::Team::Blue, false, {}, eyeCamera,
+                       x, y, width, height, {}, fbo, options);
+  const auto exposedWall = Capture(x, y, width, height);
+  renderer.RenderPane(coveredGame, tactics::Team::Blue, false, {}, eyeCamera,
+                       x, y, width, height, {}, fbo, options);
+  const auto covered = Capture(x, y, width, height);
+  const auto coveredBake = renderer.ThermalBake().bakeCount;
+  const glm::vec3 wallPoint(2.0f, 1.5f, 0.0f), underDeck(4.0f, 0.0f, 0.0f);
+  std::printf("Thermal overpass: wall %.1f -> %.1f, ground %.1f -> %.1f\n",
+              brightness(exposedWall, wallPoint), brightness(covered, wallPoint),
+              brightness(exposedWall, underDeck), brightness(covered, underDeck));
+  Require(brightness(exposedWall, wallPoint) - brightness(covered, wallPoint) > 8.0f,
+          "Floating slab did not darken the wall beneath it at eye level");
+  Require(brightness(exposedWall, underDeck) - brightness(covered, underDeck) > 8.0f,
+          "Floating slab did not darken the ground beneath it");
+  options.thermalAo.strength = 0.0f;
+  renderer.RenderPane(coveredGame, tactics::Team::Blue, false, {}, eyeCamera,
+                       x, y, width, height, {}, fbo, options);
+  const auto coveredUnshaded = Capture(x, y, width, height);
+  const glm::vec3 underside(4.0f, 2.8f, 0.0f);
+  Require(brightness(coveredUnshaded, underside) - brightness(covered, underside) > 8.0f,
+          "Deck underside did not receive ambient shading from the lower hemisphere");
+  Require(renderer.ThermalBake().bakeCount == coveredBake, "Strength rebuilt the overpass bake");
+
+  // Mutating geometry in-place must invalidate by contents, including props
+  // and facade/massing inputs omitted by the old heightmap hash.
+  tactics::Scene detailedScene = coveredScene;
+  tactics::MassingDetail detail;
+  detail.footprint = {{-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}};
+  detail.y0 = 4.0f; detail.y1 = 4.2f;
+  detailedScene.massing.push_back(detail);
+  tactics::GameLogic detailedGame(detailedScene);
+  renderer.RenderPane(detailedGame, tactics::Team::Blue, false, {}, eyeCamera,
+                       x, y, width, height, {}, fbo, options);
+  Capture(x, y, width, height);
+  Require(renderer.ThermalBake().bakeCount == coveredBake + 1, "Massing edit did not rebake");
   options.thermalAo.baked = false;
 
   renderer.Destroy();

@@ -475,15 +475,28 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
     ImGui::Checkbox("Black hot", &thermalBlackHot);
     // Contact-shading tuning (PR #178 review): radius is the world-space
     // reach of the shadow, strength its darkness, quality the samples per
-    // ray (banding vs cost) and softness the blur width (grain vs detail).
+    // ray (or 16 directions/step when baked); softness is live-mode blur.
+    // PR #178: keep editing values separate from the applied bake settings.
+    // Commit expensive sliders on release (including keyboard/text edits).
+    static float editedRadius = aoRadius;
+    static int editedQuality = aoQuality;
+    static bool editingRadius = false, editingQuality = false;
+    if (!editingRadius) editedRadius = aoRadius;
+    if (!editingQuality) editedQuality = aoQuality;
     ImGui::SetNextItemWidth(130.0f);
-    ImGui::SliderFloat("AO radius", &aoRadius, 0.5f, 6.0f, "%.1f");
+    ImGui::SliderFloat("AO radius", &editedRadius, 0.5f, 6.0f, "%.1f");
+    editingRadius = ImGui::IsItemActive();
+    if (!aoBaked || ImGui::IsItemDeactivatedAfterEdit()) aoRadius = editedRadius;
     ImGui::SetNextItemWidth(130.0f);
     ImGui::SliderFloat("AO strength", &aoStrength, 0.0f, 10.0f, "%.1f");
     ImGui::SetNextItemWidth(130.0f);
-    ImGui::SliderInt("AO quality", &aoQuality, 2, 20);
+    ImGui::SliderInt("AO quality", &editedQuality, 1, 20);
+    editingQuality = ImGui::IsItemActive();
+    if (!aoBaked || ImGui::IsItemDeactivatedAfterEdit()) aoQuality = editedQuality;
     ImGui::SetNextItemWidth(130.0f);
+    ImGui::BeginDisabled(aoBaked);
     ImGui::SliderInt("AO softness", &aoSoftness, 0, 10);
+    ImGui::EndDisabled();
     // Heavy settings: look shading up from a once-per-map world bake.
     ImGui::Checkbox("Baked thermal", &aoBaked);
   }

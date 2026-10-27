@@ -44,7 +44,10 @@ true overpass (ramps up, crosses on pier bents with usable ground beneath,
 ramps back down; the branch becomes an on-ramp merging mid-deck), and
 `TBGWAF_MAP=hilly` selects rolling hills. Urban code/scenarios can also
 tune artery count/width, local-street width/skew and elevation through
-`MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
+`MapGeneratorConfig` / `map.generate`. Some seeds (`extraArteries`, 0–2 drawn
+per seed) widen one or two avenues into extra arteries beside the main one,
+two or three in all; they run parallel to it, so they never cross its deck,
+and each always ramps through the levels it meets. Press **N** in-game to toggle a debug
 overlay of the navmesh's walkable-cell boundaries.
 
 Every arterial city has **terrain levels** (issue #155): 1–3 map-spanning
@@ -76,8 +79,8 @@ block; where that last street itself ends at the junction (an L), the street
 instead runs on as a dead end stopping just short of the band or corridor, so
 no street ever pokes into a block. Elongated blocks get one of two seeded
 treatments: a length-scaled row of short, angled apartment slabs with broad
-gaps around them, or a split into two or three smaller blocks joined by a
-double-width pedestrian sidewalk with no road or traffic controls. Sidewalk
+gaps around them, or a split into two or three smaller blocks divided by a
+short local street segment running from one side of the old block to the other. Sidewalk
 rings are one flat plane per strip, on the tier beside the cliff. Switch the
 levels off with `TBGWAF_TERRAIN=off`,
 `MapGeneratorConfig::features.terrain`, or scenario YAML:
@@ -90,6 +93,7 @@ map:
     elevated: false
     features: {terrain: on}
     terrain_levels: -1 # seeded 1–3; 0 keeps the city flat
+    extra_arteries: -1 # seeded 0–2 more arteries; 0 pins the single one
 ```
 
 The legacy orthogonal generator stays flat. `city_terrain_seed_*` goldens
@@ -104,7 +108,9 @@ office/mixed-use, back streets residential/warehouse), biased by its block's
 neighbourhood character (downtown, residential, industrial or mixed; drawn per
 block, or forced with `TBGWAF_BLOCK_CHARACTER=downtown` / scenario
 `map.generate.character`). Floor count and floor height per kind set the
-building height; the renderer colours facades per kind and draws
+building height; residential, mixed-use and office heights follow a smooth
+per-block skyline field (up to `skylineMaxHeight`, 24; landmark towers reach
+28–40), so tall and low districts cluster; the renderer colours facades per kind and draws
 massing -- parapets, roof furniture, awnings over shopfronts, set-back office
 top floors. Massing blocks sight lines and FOV (`SightObstacles`) but not
 movement; the set-back top floor is full obstacle geometry.

@@ -91,13 +91,20 @@ struct MapGeneratorConfig {
   // block's character; floor count/height per kind set the building height.
   BlockCharacter character = BlockCharacter::Auto;
   int towerCount = 2;           // Tall landmark buildings scattered across the city.
-  float towerMinHeight = 14.0f;
-  float towerMaxHeight = 20.0f;
+  // Arterial city: residential/mixed/office buildings follow a smooth height
+  // field, so similar heights cluster, up to this cap (maxBuildingHeight
+  // still bounds the other kinds).
+  float skylineMaxHeight = 24.0f;
+  float towerMinHeight = 28.0f;
+  float towerMaxHeight = 40.0f;
   float gapWidth = 3.0f;        // Passable alley between two buildings (> 2 * kAgentRadius).
   float gapProbability = 0.45f; // Chance a junction between adjacent buildings is a gap.
   // Hierarchical street layout. Set arteryCount=0 for the original orthogonal
   // grid generator; the default lays one oblique boundary-to-boundary artery.
   int arteryCount = 1;           // 1 oblique through-road; >=2 adds a wide branching avenue.
+  // Additional arteries (0-2) widened out of the avenues parallel to the main
+  // one, ramping through levels like it; -1 draws 0-2 per seed (half 0).
+  int extraArteries = -1;
   float arteryWidth = 14.0f;
   float localStreetWidth = 6.0f;
   float localStreetSkew = 0.45f; // Max radians a cross street deviates from square to the artery.
@@ -142,8 +149,8 @@ struct UrbanBlock {
   float x0, x1, z0, z1;
   std::vector<glm::vec2> vertices;
   // Long blocks left behind by a trimmed local street either split into
-  // smaller touching blocks (their shared edges become a pedestrian-only
-  // double sidewalk) or use this angled, detached apartment-row layout.
+  // smaller blocks (divided by a short local street segment) or use this
+  // angled, detached apartment-row layout.
   bool apartmentRow = false;
 };
 

@@ -241,6 +241,10 @@ void TestWallCoverAndCollision() {
       const glm::vec2 box = onLine;
       if (std::max(std::fabs(box.x), std::fabs(box.y)) > s.mapHalfExtent - 10.0f) continue;
       if (nav.IsWalkable(box.x, box.y)) continue;  // A gap or off the cliff.
+      // A sliver beside a ramp opening is unwalkable too (the cliff beside
+      // the ramp) but has no wall: only a continuous cliff counts.
+      const glm::vec2 before = box - wall.dir * 1.5f, after = box + wall.dir * 1.5f;
+      if (nav.IsWalkable(before.x, before.y) || nav.IsWalkable(after.x, after.y)) continue;
       // Probes just inside the level's sidewalk ring and just outside the
       // stair strip, where the profile must be a clean full step: a flight,
       // a ramp channel mouth or a building spoils the sample.

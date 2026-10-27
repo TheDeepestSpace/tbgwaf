@@ -265,7 +265,10 @@ void TestBuildingKindsFloorsAndHeights() {
       if (b.kind == BuildingKind::Civic) {
         CHECK(height >= c.towerMinHeight - kEps && height <= c.towerMaxHeight + kEps);
       } else {
-        CHECK(height >= c.minBuildingHeight - kEps && height <= c.maxBuildingHeight + kEps);
+        CHECK(height >= c.minBuildingHeight - kEps && height <= c.skylineMaxHeight + kEps);
+        if (b.kind == BuildingKind::Garage || b.kind == BuildingKind::Commercial) {
+          CHECK(height <= c.maxBuildingHeight + kEps);
+        }
       }
       if (b.kind == BuildingKind::Commercial) CHECK(b.floorCount == 1);
       if (b.upperObstacle >= 0) {
@@ -485,8 +488,8 @@ void TestPinnedKindHistograms() {
   const Expected expected[] = {
       // residential, mixed-use, office, commercial, civic, garage
       {1u, 44, {22, 8, 3, 7, 2, 2}},
-      {42u, 76, {33, 19, 9, 6, 2, 7}},
-      {2024u, 77, {22, 22, 17, 7, 2, 7}},
+      {42u, 63, {23, 15, 10, 6, 2, 7}},
+      {2024u, 80, {21, 18, 15, 11, 2, 13}},
   };
   for (const auto& e : expected) {
     const Scene scene = GenerateUrbanMap(e.seed, FlatConfig());
@@ -1989,6 +1992,7 @@ void TestLocalStreetBandsReachMapEdgeAtFullWidth() {
         minOffset = std::min(minOffset, offset);
         maxOffset = std::max(maxOffset, offset);
       }
+      if (minOffset > maxOffset) continue;  // An interior segment (block split).
       CHECK(minOffset <= -street.width * 0.5f + kEps);
       CHECK(maxOffset >= street.width * 0.5f - kEps);
     }
@@ -2153,6 +2157,80 @@ bool SharedBoundaryEdge(const UrbanBlock& a, const UrbanBlock& b, glm::vec2* fro
   return false;
 }
 
+// Taller skylines cluster: heights beyond the old 11-unit cap appear, and
+// buildings of one block are far closer in height than random pairs.
+void TestSkylineReachesHigherAndClusters() {
+  const MapGeneratorConfig c = FlatConfig();
+  float tallest = 0.0f;
+  double within = 0.0, across = 0.0;
+  int withinN = 0, acrossN = 0;
+  for (const uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed, c);
+    std::vector<const Building*> ordinary;
+    for (const Building& b : scene.buildings) {
+      if (b.kind == BuildingKind::Civic || b.kind == BuildingKind::Commercial ||
+          b.kind == BuildingKind::Garage) {
+        continue;
+      }
+      CHECK(b.Height() <= c.skylineMaxHeight + kEps);
+      tallest = std::max(tallest, b.Height());
+      ordinary.push_back(&b);
+    }
+    for (size_t i = 0; i < ordinary.size(); ++i) {
+      for (size_t j = i + 1; j < ordinary.size(); ++j) {
+        const float diff = std::fabs(ordinary[i]->Height() - ordinary[j]->Height());
+        if (ordinary[i]->block == ordinary[j]->block) {
+          within += diff;
+          ++withinN;
+        } else {
+          across += diff;
+          ++acrossN;
+        }
+      }
+    }
+  }
+  CHECK(tallest > c.maxBuildingHeight + 6.0f);
+  CHECK(withinN > 0 && acrossN > 0);
+  CHECK(within / withinN < 0.7 * across / acrossN);
+}
+
+// Extra arteries: wide avenues beside the main road, none when pinned to 0,
+// and 0-2 drawn per seed otherwise (so one to three arteries in all).
+void TestExtraArteries() {
+  auto wide = [](uint32_t seed, const MapGeneratorConfig& c) {
+    int count = 0;
+    std::set<std::pair<int, int>> lines;
+    for (const UrbanStreet& street : UrbanStreets(seed, c)) {
+      if (street.cls != UrbanStreetClass::Avenue || street.width < c.arteryWidth * 0.75f - kEps) {
+        continue;
+      }
+      // One avenue can be several trimmed segments: count distinct lines.
+      const glm::vec2 a(street.a.x, street.a.z), b(street.b.x, street.b.z);
+      const glm::vec2 n = glm::normalize(glm::vec2(-(b - a).y, (b - a).x));
+      lines.insert({static_cast<int>(std::lround(glm::dot(n, a) * 0.5f)),
+                    static_cast<int>(std::lround(std::atan2(n.y, n.x) * 20.0f))});
+    }
+    count = static_cast<int>(lines.size());
+    return count;
+  };
+  int none = 0, some = 0;
+  for (const uint32_t seed : kSeeds) {
+    MapGeneratorConfig off = FlatConfig();
+    off.extraArteries = 0;
+    CHECK(wide(seed, off) == 0);
+    MapGeneratorConfig two = FlatConfig();
+    two.extraArteries = 2;
+    CHECK(wide(seed, two) >= 1);
+  }
+  for (uint32_t seed = 1; seed <= 30; ++seed) {
+    const MapGeneratorConfig autoConfig = FlatConfig();
+    const int arteries = wide(seed, autoConfig);
+    CHECK(arteries <= 2);
+    (arteries == 0 ? none : some)++;
+  }
+  CHECK(none > 0 && some > 0);
+}
+
 // Long polygons no longer produce one empty perimeter-ring block. One seeded
 // variant is a length-scaled row of short, angled, widely separated apartment
 // slabs; the other is 2-3 touching blocks whose shared edges make a double
@@ -2240,35 +2318,41 @@ void TestLongBlockApartmentRowsAndPedestrianSplits() {
   {
     const MapGeneratorConfig c = FurnitureConfig(FeatureMode::On);
     const std::vector<UrbanBlock> blocks = UrbanBlocks(42, c);
+    // Split blocks are divided by a real street segment (the local street
+    // width exactly), not by touching double sidewalks.
     const std::vector<UrbanStreet> streets = UrbanStreets(42, c);
     const Scene scene = GenerateUrbanMap(42, c);
-    int pedestrianEdges = 0;
+    CHECK(scene.roads.size() == streets.size());
+    int splitRoads = 0;
     for (size_t i = 0; i < blocks.size(); ++i) {
       for (size_t j = i + 1; j < blocks.size(); ++j) {
         glm::vec2 from, to;
-        if (!SharedBoundaryEdge(blocks[i], blocks[j], &from, &to)) continue;
-        ++pedestrianEdges;
-        const glm::vec2 midpoint = (from + to) * 0.5f;
-        for (const UrbanStreet& street : streets) {
-          CHECK(DistanceToSegment(midpoint, XZ(street.a), XZ(street.b)) >
-                street.width * 0.5f + 0.1f);
-        }
-        int sidewalkLayers = 0;
-        for (const RoadSurface& sidewalk : scene.sidewalkSurfaces) {
-          std::vector<glm::vec2> polygon;
-          for (const glm::vec3& vertex : sidewalk.vertices) polygon.push_back(XZ(vertex));
-          sidewalkLayers += PointInConvexPolygon(midpoint, polygon);
-        }
-        CHECK(sidewalkLayers >= 2);
-        for (const StreetProp& prop : scene.props) {
-          if (prop.kind != StreetPropKind::TrafficLight) continue;
-          const glm::vec2 p = XZ(prop.position);
-          CHECK(glm::distance(p, from) > 1.0f);
-          CHECK(glm::distance(p, to) > 1.0f);
-        }
+        CHECK(!SharedBoundaryEdge(blocks[i], blocks[j], &from, &to));
       }
     }
-    CHECK(pedestrianEdges >= 2);
+    const float half = UrbanMapHalfExtent(c);
+    for (const UrbanStreet& street : streets) {
+      if (street.cls != UrbanStreetClass::Cross || std::fabs(street.width - c.localStreetWidth) > 1e-4f) {
+        continue;
+      }
+      const float reach = std::max({std::fabs(street.a.x), std::fabs(street.a.z),
+                                    std::fabs(street.b.x), std::fabs(street.b.z)});
+      if (reach > half - 4.0f) continue;  // Runs to the map edge: an ordinary street.
+      ++splitRoads;
+      const glm::vec2 a(street.a.x, street.a.z), b(street.b.x, street.b.z);
+      CHECK(glm::distance(a, b) < c.blockSize * 2.0f);
+      // Both sides of it are blocks: it is a street between two blocks.
+      const glm::vec2 mid = (a + b) * 0.5f;
+      const glm::vec2 side = glm::normalize(glm::vec2(-(b - a).y, (b - a).x)) *
+                             (c.localStreetWidth * 0.5f + 0.5f);
+      bool left = false, right = false;
+      for (const UrbanBlock& block : blocks) {
+        left |= PointInConvexPolygon(mid + side, block.vertices);
+        right |= PointInConvexPolygon(mid - side, block.vertices);
+      }
+      CHECK(left && right);
+    }
+    CHECK(splitRoads >= 1);
   }
 }
 
@@ -2530,7 +2614,7 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
 // alters item or prop placement shows up here first.
 void TestPinnedFurnitureFingerprints() {
   struct Expected { uint32_t seed; size_t furniture; size_t props; };
-  const Expected expected[] = {{1u, 124, 63}, {42u, 155, 64}, {2024u, 169, 78}};
+  const Expected expected[] = {{1u, 124, 63}, {42u, 149, 63}, {2024u, 166, 75}};
   const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
   const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
   for (const auto& e : expected) {
@@ -2559,6 +2643,8 @@ int main() {
   TestPinnedSeedFingerprints();
   TestParcelsMatchBuildingsAndFrontStreets();
   TestBuildingKindsFloorsAndHeights();
+  TestSkylineReachesHigherAndClusters();
+  TestExtraArteries();
   TestFacadeOpeningsDoorsStoopsAndPlatforms();
   TestMassingStaysOnItsBuilding();
   TestRoofMassingBlocksWalking();

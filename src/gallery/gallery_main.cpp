@@ -21,7 +21,11 @@
 #include <cstdio>
 #include <functional>
 
+#include <cstdint>
+#include <string>
+
 #include "gallery/GalleryScene.h"
+#include "gallery/MapExport.h"
 
 namespace {
 
@@ -67,6 +71,14 @@ extern "C" {
 #else
 #define GALLERY_EXPORT
 #endif
+
+// Geometry JSON of a map seed for the page's three.js viewer (see
+// gallery::MapToJson). The string is owned here and valid until the next call.
+GALLERY_EXPORT const char* gallery_map_json(unsigned seed, int x4) {
+  static std::string json;
+  json = gallery::UrbanMapJson(static_cast<uint32_t>(seed), x4 != 0);
+  return json.c_str();
+}
 
 GALLERY_EXPORT int gallery_item_count() {
   return static_cast<int>(gallery::Catalog().size());

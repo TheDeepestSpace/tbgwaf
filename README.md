@@ -75,12 +75,12 @@ one beyond it, and the blocks either side of the missing stretch stay one
 block; where that last street itself ends at the junction (an L), the street
 instead runs on as a dead end stopping just short of the band or corridor, so
 no street ever pokes into a block. Elongated blocks get one of two seeded
-treatments: a length-scaled row of detached apartment slabs, or a split into
-two or three smaller blocks joined by a double-width pedestrian sidewalk
-with no road or traffic controls. Sidewalk rings are one flat plane per strip,
-on the tier beside the cliff. Switch the levels off with
-`TBGWAF_TERRAIN=off`, `MapGeneratorConfig::features.terrain`, or scenario
-YAML:
+treatments: a length-scaled row of short, angled apartment slabs with broad
+gaps around them, or a split into two or three smaller blocks joined by a
+double-width pedestrian sidewalk with no road or traffic controls. Sidewalk
+rings are one flat plane per strip, on the tier beside the cliff. Switch the
+levels off with `TBGWAF_TERRAIN=off`,
+`MapGeneratorConfig::features.terrain`, or scenario YAML:
 
 ```yaml
 map:

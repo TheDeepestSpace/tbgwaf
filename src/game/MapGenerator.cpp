@@ -1725,7 +1725,7 @@ struct Parcel {
   float depth = 0.0f;
   bool corner = false;
   int block = -1;
-  bool forceResidential = false;  // Crosswise slabs in a long apartment-row block.
+  bool forceResidential = false;  // Detached slabs in a long apartment-row block.
   // Per-parcel draw from the layout rng (the same stream position the old
   // per-building height jitter used, so layouts never shift): picks the
   // BuildingKind from the weighted table.
@@ -1909,26 +1909,111 @@ void PlanBlockParcels(const CityPlan& city, size_t blockIndex, const MapGenerato
   };
 
   if (block.apartmentRow) {
-    // Detached apartment slabs run across the short dimension, matching the
-    // long-block schematic: their number grows with the usable length, with
-    // a pedestrian-width gap between slabs and at both ends of the row.
+    // Freestanding apartment slabs lean across the short dimension, matching
+    // the long-block schematic. They sit well inside the block instead of
+    // consuming its full depth, and their wide lawns/courts keep the row from
+    // reading as one partitioned warehouse.
     const BlockAxis shape = LongBlockAxis(outer);
-    const float margin = std::min(c.gapWidth, (shape.hi - shape.lo) * 0.1f);
-    const float lo = shape.lo + margin, hi = shape.hi - margin;
-    std::vector<glm::vec2> row = KeepSide(outer, shape.direction, lo);
-    row = KeepSide(row, -shape.direction, -hi);
-    const float targetPitch = std::max(12.0f, c.blockSize * 0.55f);
-    const int count = std::clamp(static_cast<int>(std::lround((hi - lo) / targetPitch)), 2, 6);
-    std::vector<std::vector<glm::vec2>> slabs = {std::move(row)};
-    const glm::vec2 cutDirection(-shape.direction.y, shape.direction.x);
-    for (int i = 1; i < count; ++i) {
-      const float at = lo + (hi - lo) * static_cast<float>(i) / static_cast<float>(count);
-      CutStreet(&slabs, shape.direction * at, cutDirection, c.gapWidth);
+    const float inset = std::min(c.gapWidth * 0.65f, shape.depth * 0.1f);
+    std::vector<glm::vec2> buildable = InsetConvexPolygon(outer, inset);
+    // Very short corner edges can invert when inset a second time. The first
+    // sidewalk inset is still a valid fallback and the smaller rectangles
+    // below provide their own edge clearance.
+    bool buildableValid = buildable.size() == outer.size() && PolygonSignedArea(buildable) > 0.0f;
+    for (size_t i = 0; buildableValid && i < buildable.size(); ++i) {
+      const glm::vec2 a =
+          buildable[i] - buildable[(i + buildable.size() - 1) % buildable.size()];
+      const glm::vec2 b = buildable[(i + 1) % buildable.size()] - buildable[i];
+      buildableValid = a.x * b.y - a.y * b.x > 0.0f;
     }
-    for (auto& slab : slabs) {
-      if (PolygonArea(slab) < c.minPolygonArea * 0.35f) continue;
+    if (!buildableValid) buildable = outer;
+    const glm::vec2 rowAxis = shape.direction;
+    const glm::vec2 crossAxis(-rowAxis.y, rowAxis.x);
+    float rowLo = std::numeric_limits<float>::infinity(), rowHi = -rowLo;
+    float crossLo = std::numeric_limits<float>::infinity(), crossHi = -crossLo;
+    for (const glm::vec2& point : buildable) {
+      rowLo = std::min(rowLo, glm::dot(rowAxis, point));
+      rowHi = std::max(rowHi, glm::dot(rowAxis, point));
+      crossLo = std::min(crossLo, glm::dot(crossAxis, point));
+      crossHi = std::max(crossHi, glm::dot(crossAxis, point));
+    }
+    const float length = rowHi - rowLo;
+    const float buildableDepth = crossHi - crossLo;
+    const float targetPitch = std::max(16.0f, c.blockSize * 0.6f);
+    const int count = std::clamp(static_cast<int>(std::lround(length / targetPitch)), 2, 6);
+    const float pitch = length / static_cast<float>(count);
+
+    const float lean = glm::radians((blockIndex & 1u) ? 18.0f : -18.0f);
+    const glm::vec2 longAxis = Rotate(crossAxis, lean);
+    const glm::vec2 shortAxis(-longAxis.y, longAxis.x);
+    const float slabLength = buildableDepth * 0.65f;
+    const float slabWidth = std::min({c.buildingDepth * 1.2f, pitch * 0.3f,
+                                      slabLength * 0.65f});
+
+    // A convex block can taper near an end. Put every centre halfway across
+    // its local cross-section and shorten only the slab at that position as
+    // needed to keep all four corners inside the inset buildable area.
+    auto crossSection = [&](float along, float* lo, float* hi) {
+      *lo = std::numeric_limits<float>::infinity();
+      *hi = -*lo;
+      for (size_t edge = 0; edge < buildable.size(); ++edge) {
+        const glm::vec2 a = buildable[edge];
+        const glm::vec2 b = buildable[(edge + 1) % buildable.size()];
+        const float ta = glm::dot(rowAxis, a), tb = glm::dot(rowAxis, b);
+        if (std::fabs(ta - along) < 1.0e-4f) {
+          const float across = glm::dot(crossAxis, a);
+          *lo = std::min(*lo, across);
+          *hi = std::max(*hi, across);
+        }
+        if (std::fabs(tb - ta) < 1.0e-5f ||
+            along < std::min(ta, tb) - 1.0e-4f ||
+            along > std::max(ta, tb) + 1.0e-4f) {
+          continue;
+        }
+        const float u = std::clamp((along - ta) / (tb - ta), 0.0f, 1.0f);
+        const float across = glm::dot(crossAxis, a + (b - a) * u);
+        *lo = std::min(*lo, across);
+        *hi = std::max(*hi, across);
+      }
+      return std::isfinite(*lo) && *hi > *lo;
+    };
+    auto rectangle = [&](glm::vec2 center, float scale) {
+      const glm::vec2 u = longAxis * (slabLength * scale * 0.5f);
+      const glm::vec2 v = shortAxis * (slabWidth * scale * 0.5f);
+      return std::vector<glm::vec2>{center - u - v, center + u - v,
+                                    center + u + v, center - u + v};
+    };
+    auto fits = [&](glm::vec2 center, float scale) {
+      for (const glm::vec2& corner : rectangle(center, scale)) {
+        if (!PointInConvexPolygon(corner, buildable)) return false;
+      }
+      return true;
+    };
+
+    std::vector<glm::vec2> centers;
+    std::vector<float> scales;
+    for (int i = 0; i < count; ++i) {
+      const float along = rowLo + pitch * (static_cast<float>(i) + 0.5f);
+      float localCrossLo = 0.0f, localCrossHi = 0.0f;
+      if (!crossSection(along, &localCrossLo, &localCrossHi)) continue;
+      const glm::vec2 center =
+          rowAxis * along + crossAxis * ((localCrossLo + localCrossHi) * 0.5f);
+      centers.push_back(center);
+      float scale = 1.0f;
+      if (!fits(center, scale)) {
+        float lo = 0.0f, hi = 1.0f;
+        for (int step = 0; step < 12; ++step) {
+          const float mid = (lo + hi) * 0.5f;
+          if (fits(center, mid)) lo = mid;
+          else hi = mid;
+        }
+        scale = lo;
+      }
+      scales.push_back(scale);
+    }
+    for (size_t i = 0; i < centers.size(); ++i) {
       Parcel parcel;
-      parcel.footprint = std::move(slab);
+      parcel.footprint = rectangle(centers[i], scales[i]);
       parcel.forceResidential = true;
       placeFrontage(&parcel);
       emit(std::move(parcel));
@@ -3922,6 +4007,9 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
       street[e] = onLine(line, a) && onLine(line, q) && onLine(line, (a + q) * 0.5f);
     }
     const int frontage = parcel.frontageEdge;
+    // Detached apartment rows have no wall on the street building line;
+    // their selected long edge is still the principal, windowed facade.
+    if (parcel.forceResidential) street[frontage] = true;
     // Rear edge: the longest non-street edge facing away from the frontage.
     const glm::vec2 fa = fp[frontage], fb = fp[(frontage + 1) % n];
     const glm::vec2 frontDir = glm::normalize(fb - fa);

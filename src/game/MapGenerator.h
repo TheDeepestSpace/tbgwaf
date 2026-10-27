@@ -143,7 +143,7 @@ struct UrbanBlock {
   std::vector<glm::vec2> vertices;
   // Long blocks left behind by a trimmed local street either split into
   // smaller touching blocks (their shared edges become a pedestrian-only
-  // double sidewalk) or use this crosswise apartment-row layout.
+  // double sidewalk) or use this angled, detached apartment-row layout.
   bool apartmentRow = false;
 };
 
@@ -226,12 +226,14 @@ struct UrbanLot { float x0, x1, z0, z1; bool empty, notch; };
 std::vector<UrbanLot> UrbanLots(uint32_t seed, const MapGeneratorConfig& config = {});
 
 // A parcel (issue #151, roadmap 3.1): one buildable lot of a block's frontage
-// ring (or slab row), the unit the plan sizes and counts buildings by.
+// ring (or detached apartment row), the unit the plan sizes and counts
+// buildings by.
 // `footprint` is the building's convex outline, counter-clockwise; edge
-// `frontageEdge` (footprint[i] -> footprint[i+1]) lies on the block's
-// building line along the street whose class is `street`. `depth` is the
-// footprint's extent behind the frontage; `corner` marks a piece at a block
-// corner (two street frontages). Buildings and parcels correspond 1:1:
+// `frontageEdge` (footprint[i] -> footprint[i+1]) normally lies on the block's
+// building line along the street whose class is `street`; a detached apartment
+// uses its principal long facade instead. `depth` is the footprint's extent
+// behind the frontage; `corner` marks a piece at a block corner (two street
+// frontages). Buildings and parcels correspond 1:1:
 // Scene::buildings[i].parcel == i and GenerateUrbanMap's obstacle for
 // parcel i has that footprint.
 struct UrbanParcel {

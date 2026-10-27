@@ -136,9 +136,9 @@ void TestPinnedSeedFingerprints() {
 }
 
 // Issue #151: parcels are the unit the plan sizes buildings by. Each maps
-// 1:1 onto a Building/Obstacle, its frontage edge lies on the block's
-// building line (sidewalkWidth in from the street), and its street class
-// matches the street it actually faces.
+// 1:1 onto a Building/Obstacle. Frontage-ring parcels lie on the block's
+// building line and match the street alongside it; detached apartment slabs
+// use a principal facade inside the block instead.
 void TestParcelsMatchBuildingsAndFrontStreets() {
   const MapGeneratorConfig c = OldSizeConfig();
   for (uint32_t seed : kSeeds) {
@@ -166,6 +166,7 @@ void TestParcelsMatchBuildingsAndFrontStreets() {
       const glm::vec2 bq = p.footprint[(p.frontageEdge + 1) % p.footprint.size()];
       const std::vector<glm::vec2> line =
           InsetConvexPolygon(blocks[p.block].vertices, c.sidewalkWidth);
+      const bool detached = blocks[p.block].apartmentRow;
       auto lineDistance = [&](glm::vec2 q) {
         float best = 1e9f;
         for (size_t e = 0; e < line.size(); ++e) {
@@ -173,9 +174,11 @@ void TestParcelsMatchBuildingsAndFrontStreets() {
         }
         return best;
       };
-      CHECK(lineDistance(a) < 0.01f);
-      CHECK(lineDistance(bq) < 0.01f);
-      CHECK(lineDistance((a + bq) * 0.5f) < 0.01f);
+      if (!detached) {
+        CHECK(lineDistance(a) < 0.01f);
+        CHECK(lineDistance(bq) < 0.01f);
+        CHECK(lineDistance((a + bq) * 0.5f) < 0.01f);
+      }
       const glm::vec2 mid = (a + bq) * 0.5f;
       const glm::vec2 dir = glm::normalize(bq - a);
       const glm::vec2 inward(-dir.y, dir.x);  // Left of a CCW edge: into the parcel.
@@ -208,7 +211,10 @@ void TestParcelsMatchBuildingsAndFrontStreets() {
           nearestClass = st.cls;
         }
       }
-      if (pedestrianFrontage) {
+      if (detached) {
+        // Its nominal street class informs styling, but the building itself
+        // is deliberately set back and rotated away from the building line.
+      } else if (pedestrianFrontage) {
         // Long blocks may be divided by a double sidewalk with no road.
         // Frontages along that shared edge intentionally have no street.
       } else if (onRim) {
@@ -478,8 +484,8 @@ void TestPinnedKindHistograms() {
   struct Expected { uint32_t seed; size_t buildings; int kinds[kBuildingKindCount]; };
   const Expected expected[] = {
       // residential, mixed-use, office, commercial, civic, garage
-      {1u, 48, {20, 9, 6, 8, 2, 3}},
-      {42u, 80, {28, 19, 14, 9, 2, 8}},
+      {1u, 44, {22, 8, 3, 7, 2, 2}},
+      {42u, 76, {33, 19, 9, 6, 2, 7}},
       {2024u, 77, {22, 22, 17, 7, 2, 7}},
   };
   for (const auto& e : expected) {
@@ -2148,8 +2154,9 @@ bool SharedBoundaryEdge(const UrbanBlock& a, const UrbanBlock& b, glm::vec2* fro
 }
 
 // Long polygons no longer produce one empty perimeter-ring block. One seeded
-// variant is a length-scaled row of apartments; the other is 2-3 touching
-// blocks whose shared edges make a double sidewalk without a road or signal.
+// variant is a length-scaled row of short, angled, widely separated apartment
+// slabs; the other is 2-3 touching blocks whose shared edges make a double
+// sidewalk without a road or signal.
 void TestLongBlockApartmentRowsAndPedestrianSplits() {
   {
     const MapGeneratorConfig c = FurnitureConfig(FeatureMode::Off);
@@ -2161,14 +2168,68 @@ void TestLongBlockApartmentRowsAndPedestrianSplits() {
       if (!blocks[block].apartmentRow) continue;
       ++rows;
       int parcelCount = 0, buildingCount = 0;
-      for (const UrbanParcel& parcel : parcels) parcelCount += parcel.block == static_cast<int>(block);
+      std::vector<const UrbanParcel*> row;
+      for (const UrbanParcel& parcel : parcels) {
+        if (parcel.block != static_cast<int>(block)) continue;
+        ++parcelCount;
+        row.push_back(&parcel);
+      }
       for (const Building& building : scene.buildings) {
         if (building.block != static_cast<int>(block)) continue;
         ++buildingCount;
         CHECK(building.kind == BuildingKind::Residential);
       }
+      if (parcelCount < 2 || parcelCount > 6) {
+        std::fprintf(stderr, "apartment-row block %zu: %d parcels\n", block, parcelCount);
+      }
       CHECK(parcelCount >= 2 && parcelCount <= 6);
       CHECK(buildingCount == parcelCount);
+
+      glm::vec2 rowAxis(1.0f, 0.0f);
+      float longest = 0.0f;
+      for (size_t edge = 0; edge < blocks[block].vertices.size(); ++edge) {
+        const glm::vec2 delta = blocks[block].vertices[(edge + 1) % blocks[block].vertices.size()] -
+                                blocks[block].vertices[edge];
+        if (glm::length(delta) > longest) {
+          longest = glm::length(delta);
+          rowAxis = delta / longest;
+        }
+      }
+      const glm::vec2 crossAxis(-rowAxis.y, rowAxis.x);
+      float blockCrossLo = 1.0e9f, blockCrossHi = -1.0e9f;
+      for (const glm::vec2& point : blocks[block].vertices) {
+        blockCrossLo = std::min(blockCrossLo, glm::dot(crossAxis, point));
+        blockCrossHi = std::max(blockCrossHi, glm::dot(crossAxis, point));
+      }
+      std::vector<std::pair<float, float>> intervals;
+      for (const UrbanParcel* parcel : row) {
+        float parcelRowLo = 1.0e9f, parcelRowHi = -1.0e9f;
+        float parcelCrossLo = 1.0e9f, parcelCrossHi = -1.0e9f;
+        float longestEdge = 0.0f;
+        glm::vec2 slabAxis(1.0f, 0.0f);
+        for (size_t edge = 0; edge < parcel->footprint.size(); ++edge) {
+          const glm::vec2 point = parcel->footprint[edge];
+          CHECK(PointInConvexPolygon(point, blocks[block].vertices));
+          parcelRowLo = std::min(parcelRowLo, glm::dot(rowAxis, point));
+          parcelRowHi = std::max(parcelRowHi, glm::dot(rowAxis, point));
+          parcelCrossLo = std::min(parcelCrossLo, glm::dot(crossAxis, point));
+          parcelCrossHi = std::max(parcelCrossHi, glm::dot(crossAxis, point));
+          const glm::vec2 delta =
+              parcel->footprint[(edge + 1) % parcel->footprint.size()] - point;
+          if (glm::length(delta) > longestEdge) {
+            longestEdge = glm::length(delta);
+            slabAxis = delta / longestEdge;
+          }
+        }
+        const float alignment = std::fabs(glm::dot(rowAxis, slabAxis));
+        CHECK(alignment > 0.2f && alignment < 0.55f);  // Neither square nor lengthwise.
+        CHECK(parcelCrossHi - parcelCrossLo < (blockCrossHi - blockCrossLo) * 0.75f);
+        intervals.emplace_back(parcelRowLo, parcelRowHi);
+      }
+      std::sort(intervals.begin(), intervals.end());
+      for (size_t i = 1; i < intervals.size(); ++i) {
+        CHECK(intervals[i].first - intervals[i - 1].second > c.gapWidth * 1.5f);
+      }
       minCount = std::min(minCount, parcelCount);
       maxCount = std::max(maxCount, parcelCount);
     }
@@ -2469,7 +2530,7 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
 // alters item or prop placement shows up here first.
 void TestPinnedFurnitureFingerprints() {
   struct Expected { uint32_t seed; size_t furniture; size_t props; };
-  const Expected expected[] = {{1u, 167, 70}, {42u, 168, 66}, {2024u, 169, 78}};
+  const Expected expected[] = {{1u, 124, 63}, {42u, 155, 64}, {2024u, 169, 78}};
   const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
   const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
   for (const auto& e : expected) {

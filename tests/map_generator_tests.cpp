@@ -1266,28 +1266,109 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   const auto samePoint = [](glm::vec2 a, glm::vec2 b) {
     return glm::distance(a, b) < kEps;
   };
-  const auto sharesEdge = [&](const std::vector<glm::vec2>& a,
-                              const std::vector<glm::vec2>& b) {
+  // The shared cap edge of two rails, if any: a[i] -> a[i + 1] traversed the
+  // other way round in b.
+  const auto sharedEdge = [&](const std::vector<glm::vec2>& a, const std::vector<glm::vec2>& b,
+                              size_t* ia, size_t* ib) {
     for (size_t i = 0; i < a.size(); ++i) {
       for (size_t j = 0; j < b.size(); ++j) {
         if (samePoint(a[i], b[(j + 1) % b.size()]) &&
             samePoint(a[(i + 1) % a.size()], b[j])) {
+          *ia = i;
+          *ib = j;
           return true;
         }
       }
     }
     return false;
   };
-  int forkJoins = 0;
+  // Direction of a rail's wall: its longest edge (a junction remnant can be
+  // shorter along the road than across its cap).
+  const auto wallDir = [](const std::vector<glm::vec2>& f) {
+    glm::vec2 best(1.0f, 0.0f);
+    float longest = 0.0f;
+    for (size_t e = 0; e < f.size(); ++e) {
+      const glm::vec2 d = f[(e + 1) % f.size()] - f[e];
+      if (glm::length(d) > longest) {
+        longest = glm::length(d);
+        best = glm::normalize(d);
+      }
+    }
+    return best;
+  };
+  constexpr float kRailThickness = 0.3f;
+  int forkJoins = 0, acuteForks = 0, obtuseForks = 0;
   for (size_t i = 0; i < rails.size(); ++i) {
-    const glm::vec2 ai = glm::normalize(rails[i]->footprint[1] - rails[i]->footprint[0]);
     for (size_t j = i + 1; j < rails.size(); ++j) {
-      const glm::vec2 aj = glm::normalize(rails[j]->footprint[1] - rails[j]->footprint[0]);
+      const std::vector<glm::vec2>& a = rails[i]->footprint;
+      const std::vector<glm::vec2>& b = rails[j]->footprint;
+      const glm::vec2 ai = wallDir(a), aj = wallDir(b);
       if (std::fabs(ai.x * aj.y - ai.y * aj.x) < 0.2f) continue;
-      forkJoins += sharesEdge(rails[i]->footprint, rails[j]->footprint) ? 1 : 0;
+      size_t ia = 0, ib = 0;
+      if (!sharedEdge(a, b, &ia, &ib)) continue;
+      ++forkJoins;
+      const auto at = [](const std::vector<glm::vec2>& f, ptrdiff_t k) {
+        return f[static_cast<size_t>((k + static_cast<ptrdiff_t>(f.size())) % static_cast<ptrdiff_t>(f.size()))];
+      };
+      const glm::vec2 s0 = at(a, ia), s1 = at(a, ia + 1);
+      // The obtuse fork is a plain miter: two quads sharing the whole
+      // (short) mitered cap.
+      if (a.size() == 4 && b.size() == 4) {
+        ++obtuseForks;
+        CHECK(glm::distance(s0, s1) < 2.0f * kRailThickness);
+        continue;
+      }
+      // The acute fork: each wall's inner face stops where it runs into the
+      // other wall's outer face, the walls share the half-miter from the
+      // nose to the midpoint between the two stops, and that straight back
+      // face is the deepest the pair reaches into the deck: no miter spike.
+      ++acuteForks;
+      CHECK(a.size() == 5 && b.size() == 5);
+      // Corners after the shared edge in a / before it in b hang off s1; the
+      // others off s0. The half-miter's deck-side end is the shared corner
+      // sitting midway between its two neighbours (one per rail).
+      const glm::vec2 a0 = at(a, ia - 1), a1 = at(a, ia + 2);
+      const glm::vec2 b1 = at(b, ib - 1), b0 = at(b, ib + 2);
+      const bool midIsS1 = glm::distance(s1, 0.5f * (a1 + b1)) < kEps;
+      const bool midIsS0 = glm::distance(s0, 0.5f * (a0 + b0)) < kEps;
+      CHECK(midIsS1 != midIsS0);
+      const glm::vec2 nose = midIsS1 ? s0 : s1;
+      const glm::vec2 aBack = midIsS1 ? a1 : a0, bBack = midIsS1 ? b1 : b0;
+      // Wall directions pointing away from the nose.
+      glm::vec2 centroidA(0.0f), centroidB(0.0f);
+      for (const glm::vec2& p : a) centroidA += p / static_cast<float>(a.size());
+      for (const glm::vec2& p : b) centroidB += p / static_cast<float>(b.size());
+      const glm::vec2 da = glm::dot(ai, centroidA - nose) > 0.0f ? ai : -ai;
+      const glm::vec2 db = glm::dot(aj, centroidB - nose) > 0.0f ? aj : -aj;
+      CHECK(glm::dot(da, db) > 0.0f);  // Acute.
+      // a's stop lies on b's outer face (the line through the nose along b)
+      // and vice versa.
+      const auto offLine = [](glm::vec2 p, glm::vec2 origin, glm::vec2 dir) {
+        return std::fabs((p.x - origin.x) * dir.y - (p.y - origin.y) * dir.x);
+      };
+      // A ribbon edge can skew a fraction of a degree off the planned road
+      // line where the twin-bent widening tapers, so the joins (built on the
+      // planned lines) sit millimetres off the drawn faces: a 2 cm tolerance
+      // still rules out the metre-long spike of a full miter.
+      constexpr float kJoinTolerance = 0.02f;
+      CHECK(offLine(aBack, nose, db) < kJoinTolerance);
+      CHECK(offLine(bBack, nose, da) < kJoinTolerance);
+      CHECK(glm::distance(aBack, bBack) < 2.0f * kRailThickness + kJoinTolerance);
+      // The walls recede from the nose around the notch; the deck (and the
+      // back face) is the other way. Nothing reaches further that way than
+      // the back face, which is square to the fork.
+      const glm::vec2 intoDeck = -glm::normalize(da + db);
+      const float backDepth = glm::dot(aBack - nose, intoDeck);
+      CHECK(backDepth > kRailThickness * 0.5f);
+      CHECK(std::fabs(glm::dot(bBack - nose, intoDeck) - backDepth) < kJoinTolerance);
+      for (const std::vector<glm::vec2>* poly : {&a, &b}) {
+        for (const glm::vec2& p : *poly) {
+          CHECK(glm::dot(p - nose, intoDeck) < backDepth + kJoinTolerance);
+        }
+      }
     }
   }
-  CHECK(forkJoins == 2);
+  CHECK(forkJoins == 2 && acuteForks == 1 && obtuseForks == 1);
 
   // Both artery ramp feet plus the on-ramp foot declare ground connections,
   // and the on-ramp merges mid-deck (a span with a third neighbor).

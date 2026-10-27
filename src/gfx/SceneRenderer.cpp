@@ -1,5 +1,7 @@
 #include "gfx/SceneRenderer.h"
 
+#include "gfx/Ragdoll.h"
+
 #include "gfx/FigureRig.h"
 
 #include <algorithm>
@@ -1394,7 +1396,8 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
   ghost.walkPhase = s.walkPhase;
   ghost.walkBlend = s.walkBlend;
   ghost.idleElapsed = s.idleElapsed;
-  ghost.knockdownElapsed = -1.0f;
+  ghost.alive = s.alive;
+  ghost.knockdownElapsed = s.knockdownElapsed;
   if (glm::length(s.moveDirection) > 0.0f) {
     const glm::vec3 d = s.moveDirection;
     const glm::vec3 side(-d.z, 0.0f, d.x);
@@ -2487,9 +2490,21 @@ std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team,
 }  // namespace
 
 bool IsUnitVisibleForRender(const Unit& unit, Team viewingTeam, bool fogActive,
-                            const TeamVisibility& visibility) {
+                            const TeamVisibility& visibility, const tactics::Scene& scene) {
   if (unit.team == viewingTeam) return true;
   if (!fogActive) return true;
+  if (RagdollActive(unit)) {
+    // The body has left the spot the unit was shot at: see it only if some
+    // part of it is in the viewing team's FOV with clear line of sight.
+    const RagdollPose pose = SampleRagdoll(unit);
+    for (const RagdollJoint joint : {kRagHead, kRagPelvis, kRagFootL, kRagFootR}) {
+      if (IsPointVisibleToTeam(viewingTeam, pose[joint], scene.units, scene.obstacles,
+                               scene.walkSurfaces, scene.ground)) {
+        return true;
+      }
+    }
+    return false;
+  }
   return visibility.UnitVisible(unit.id);
 }
 
@@ -2775,6 +2790,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                GLuint targetFramebuffer, const RenderDebugOptions& debug) {
   const ScopedDrawStats drawStats(debug.stats);
   const auto& obstacles = game.GetScene().obstacles;
+  SetRagdollObstacles(obstacles);
   const auto& sidewalks = game.GetScene().sidewalks;
   const auto& streetProps = game.GetScene().props;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;
@@ -2955,7 +2971,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
     glDisable(GL_POLYGON_OFFSET_FILL);
     for (const Unit& unit : game.GetScene().units) {
-      if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+      if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
       DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
     }
     DrawPlantedFlagDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, game);
@@ -3236,7 +3252,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   for (const Unit& unit : game.GetScene().units) {
-    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
     DrawUnit(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, unit);
   }
   DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
@@ -3483,7 +3499,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     std::vector<const Unit*> lit;
     for (const Unit& other : game.GetScene().units) {
       if (other.id == shooter.id) continue;
-      if (!IsUnitVisibleForRender(other, team, fogActive, visibility)) continue;
+      if (!IsUnitVisibleForRender(other, team, fogActive, visibility, game.GetScene())) continue;
       lit.push_back(&other);
     }
     return lit;
@@ -3950,7 +3966,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (planning) {
     for (const Unit& unit : game.GetScene().units) {
       if (!unit.alive || (!overlays.spectatorFov && unit.team != team)) continue;
-      if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+      if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
       const bool planned = unit.plan.type != tactics::PlannedActionType::None;
       const glm::vec4 color = planned ? glm::vec4(0.25f, 0.9f, 0.35f, 1.0f)
                                         : glm::vec4(1.0f, 1.0f, 1.0f, 0.6f);
@@ -3965,7 +3981,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (int m = 0; m < 2; ++m)
       for (int s = 0; s < 2; ++s) shoots |= tactics::ReactionShoots(pb.table[m][s]);
     if (!unit.alive || !shoots) continue;
-    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility)) continue;
+    if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
     DrawHighlightOnSurface(unit.position, glm::vec4(0.85f, 0.1f, 0.85f, 1.0f));
   }
   // Selection/move-preview overlays belong to whichever pane the input

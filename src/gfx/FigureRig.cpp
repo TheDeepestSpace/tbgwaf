@@ -1,10 +1,13 @@
 #include "gfx/FigureRig.h"
 
+#include "gfx/Ragdoll.h"
+
 #include <array>
 #include <cmath>
 
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 using tactics::Team;
 using tactics::Unit;
@@ -535,7 +538,86 @@ const float kTurnStepHip = glm::radians(35.0f);
 constexpr float kTurnBankMaxLag = 0.6f;       // Radians of lag that bank the body.
 constexpr float kTurnBank = 0.35f;            // Lean per radian of lag while moving.
 
+// Downed figure (issue #217): the same parts as the standing rig, but placed
+// by the render-side ragdoll's joint positions instead of the animation.
+FigureParts BuildRagdollFigure(const Unit& unit, bool compactWeapon) {
+  const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
+                                                      : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
+  const RagdollPose p = SampleRagdoll(unit);
+  FigureParts parts;
+  parts.reserve(32);
+
+  // Torso frame: origin at the pelvis, +Y toward the neck, +Z toward the
+  // right shoulder, same axes as the standing figure frame.
+  const glm::vec3 up = glm::normalize(p[kRagNeck] - p[kRagPelvis]);
+  glm::vec3 right = p[kRagShoulderR] - p[kRagShoulderL];
+  right = glm::normalize(right - up * glm::dot(right, up));
+  const glm::vec3 fwd = glm::cross(up, right);
+  glm::mat4 torso(1.0f);
+  torso[0] = glm::vec4(fwd, 0.0f);
+  torso[1] = glm::vec4(up, 0.0f);
+  torso[2] = glm::vec4(right, 0.0f);
+  torso[3] = glm::vec4(p[kRagPelvis], 1.0f);
+  parts.push_back({EllipsoidModel(torso, glm::vec3(0.0f, kTorsoHeight * 0.5f, 0.0f),
+                                  glm::vec3(kTorsoDepth * 0.5f, kTorsoHeight * 0.56f,
+                                            kTorsoWidth * 0.5f)),
+                   teamColor});
+  parts.push_back({EllipsoidModel(glm::translate(glm::mat4(1.0f), p[kRagHead]), glm::vec3(0.0f),
+                                  glm::vec3(kHeadRadius)),
+                   teamColor});
+
+  auto limb = [&](int from, int to, float radius) {
+    const float length = glm::length(p[to] - p[from]);
+    if (length < 1e-5f) return;
+    parts.push_back({RoundedSegment(BoneFrame(p[from], p[to]), length, radius), teamColor});
+  };
+  auto ball = [&](int at, float radius) {
+    parts.push_back({JointBall(glm::translate(glm::mat4(1.0f), p[at]), radius), teamColor});
+  };
+  limb(kRagHipL, kRagKneeL, kLegRadius);
+  ball(kRagKneeL, kLegRadius * 0.96f);
+  limb(kRagKneeL, kRagFootL, kLegRadius * 0.94f);
+  limb(kRagHipR, kRagKneeR, kLegRadius);
+  ball(kRagKneeR, kLegRadius * 0.96f);
+  limb(kRagKneeR, kRagFootR, kLegRadius * 0.94f);
+  limb(kRagShoulderL, kRagElbowL, kArmRadius);
+  ball(kRagElbowL, kArmRadius);
+  limb(kRagElbowL, kRagHandL, kArmRadius * 0.92f);
+  limb(kRagShoulderR, kRagElbowR, kArmRadius);
+  ball(kRagElbowR, kArmRadius);
+  limb(kRagElbowR, kRagHandR, kArmRadius * 0.92f);
+
+  // The weapon stays in the right hand, barrel along the forearm, unless the
+  // figure let go of it: then it is a free body from the ragdoll sim.
+  const RagdollGun gun = SampleRagdollGun(unit);
+  glm::vec3 x = p[kRagHandR] - p[kRagElbowR];
+  if (gun.dropped) {
+    glm::mat4 weapon = glm::mat4_cast(gun.rot);
+    weapon[3] = glm::vec4(gun.pos, 1.0f);
+    AppendWeapon(&parts, weapon, unit.weapon, compactWeapon);
+  } else if (glm::length(x) > 1e-5f) {
+    x = glm::normalize(x);
+    glm::vec3 z = glm::cross(x, glm::vec3(0.0f, 1.0f, 0.0f));
+    if (glm::length(z) < 1e-4f) z = glm::vec3(0.0f, 0.0f, 1.0f);
+    z = glm::normalize(z);
+    glm::mat4 weapon(1.0f);
+    weapon[0] = glm::vec4(x, 0.0f);
+    weapon[1] = glm::vec4(glm::cross(z, x), 0.0f);
+    weapon[2] = glm::vec4(z, 0.0f);
+    weapon[3] = glm::vec4(p[kRagHandR], 1.0f);
+    AppendWeapon(&parts, weapon, unit.weapon, compactWeapon);
+  }
+  if (unit.carryingFlag && !compactWeapon) {
+    AppendFlag(&parts,
+               torso * glm::translate(glm::mat4(1.0f), glm::vec3(-0.27f, -0.10f, 0.0f)) *
+                   glm::rotate(glm::mat4(1.0f), glm::radians(12.0f), glm::vec3(0.0f, 0.0f, 1.0f)),
+               0.6f, /*withFoot=*/false);
+  }
+  return parts;
+}
+
 FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
+  if (RagdollActive(unit)) return BuildRagdollFigure(unit, compactWeapon);
   // Every body part shares the one flat team color; only the weapon differs.
   const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
                                                       : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);

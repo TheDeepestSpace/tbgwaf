@@ -627,6 +627,15 @@ void TestRoundExecutesBothTeamsMovesConcurrently() {
   CHECK(game.RoundNumber() == 2);
 }
 
+void RunRound(GameLogic& game) {
+  int steps = 0;
+  while (game.Mode() == InputMode::Executing && steps < 10000) {
+    game.Update(0.02f);
+    ++steps;
+  }
+  CHECK(steps < 10000);
+}
+
 void TestShootRowsResolveSimultaneouslyAcrossTeams() {
   GameLogic game(LegacyScene());
   MakePassive(game);
@@ -652,8 +661,9 @@ void TestShootRowsResolveSimultaneouslyAcrossTeams() {
   CHECK(game.CanCommitRound());
   game.CommitRound();
 
-  // No moves were planned, so the round resolves and finishes in the commit
-  // call itself: still-blocked shots can never connect once nobody moves.
+  // No moves were planned, so still-blocked shots can never connect; the
+  // round still plays out its full window before finishing.
+  RunRound(game);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(game.FindUnit(0)->alive);
   CHECK(!game.FindUnit(1)->alive);  // Mutual open-lane exchange downs both...
@@ -663,6 +673,24 @@ void TestShootRowsResolveSimultaneouslyAcrossTeams() {
   CHECK(game.FindUnit(5)->alive);
   CHECK(!game.Winner().has_value());
   CHECK(game.RoundNumber() == 2);
+}
+
+// Every round takes the full kRoundDuration, even when nobody has anything left to do.
+void TestIdleRoundRunsFullDuration() {
+  GameLogic game(LegacyScene());
+  MakePassive(game);
+  for (const Unit& u : game.GetScene().units) {
+    game.ClickUnit(u.id, u.team);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  CHECK(game.Mode() == InputMode::Executing);
+  float elapsed = 0.0f;
+  while (game.Mode() == InputMode::Executing && elapsed < 10.0f) {
+    game.Update(0.02f);
+    elapsed += 0.02f;
+  }
+  CHECK(std::fabs(elapsed - constants::kRoundDuration) < 0.05f);
 }
 
 void TestMutualEliminationIsDraw() {
@@ -683,6 +711,7 @@ void TestMutualEliminationIsDraw() {
   game.ClickUnit(1, Team::Red);
   CHECK(game.CanCommitRound());
   game.CommitRound();
+  RunRound(game);
 
   // Both last figures down each other in the same tick: game over, no winner.
   CHECK(!game.FindUnit(1)->alive);
@@ -1172,15 +1201,6 @@ void SetStationaryShoot(GameLogic& game, Team team) {
 }
 
 // Runs the committed round to completion.
-void RunRound(GameLogic& game) {
-  int steps = 0;
-  while (game.Mode() == InputMode::Executing && steps < 10000) {
-    game.Update(0.02f);
-    ++steps;
-  }
-  CHECK(steps < 10000);
-}
-
 // Red4 walks east from behind blue1 (which faces +X). Applies `redPb` to red
 // and runs the round; returns red4's final distance to the destination.
 float RunRed4Walk(const SquadPlaybook& redPb, bool* red4Alive, bool* blue1Alive,
@@ -1504,6 +1524,7 @@ void TestGameLogicWinCondition() {
   }
   CHECK(game.CanCommitRound());
   game.CommitRound();
+  RunRound(game);
 
   CHECK(game.Mode() == InputMode::GameOver);
   CHECK(game.Winner() == Team::Blue);
@@ -1639,7 +1660,8 @@ void TestResolvedShotStartsShootAnimation() {
   CHECK(std::fabs(shooter->shootElapsed - 0.1f) < 1e-5f);
   game.Update(constants::kShootAnimDuration);
   CHECK(shooter->shootElapsed < 0.0f);  // Beat over: back to idle.
-  CHECK(target->knockdownElapsed == constants::kKnockdownDuration);
+  // Planning mode: the fall is frozen where it started (see below).
+  CHECK(target->knockdownElapsed == 0.0f);
 
   // A shot that can't connect (target behind the shooter) fires nothing.
   Unit* other = game.FindUnit(5);
@@ -1841,14 +1863,34 @@ void TestSightingRecordedImmediatelyOnEntry() {
   CHECK(game.Sightings(Team::Red, 4).empty());  // Own figures aren't "sighted".
 }
 
-void TestDeadFigureInFovLeavesNoGhost() {
+void TestDeadFigureInFovGetsGhost() {
   GameLogic game(LegacyScene());
   BlueLookAway(game, kPi);
   StepSightings(game, 1.0f);
   game.FindUnit(4)->alive = false;
   BlueLookAway(game, 0.0f);
   StepSightings(game, 1.0f);
-  CHECK(game.Sightings(Team::Blue, 4).empty());
+  CHECK(!game.Sightings(Team::Blue, 4).empty());
+}
+
+void TestFallingBodyKeepsSamplingItsPose() {
+  GameLogic game(LegacyScene());
+  StepSightings(game, 1.0f);
+  Unit* enemy = game.FindUnit(4);
+  enemy->alive = false;
+  enemy->knockdownElapsed = 0.0f;
+  // The body stays put while the fall plays out; each interval still stamps
+  // the pose of that instant.
+  for (int i = 0; i < 40; ++i) {
+    enemy->knockdownElapsed += 0.05f;
+    game.UpdateSightingMemory(0.05f);
+  }
+  const auto& samples = game.Sightings(Team::Blue, 4);
+  CHECK(samples.size() >= 4);
+  CHECK(samples.front().alive);
+  CHECK(!samples.back().alive);
+  CHECK(samples.back().knockdownElapsed > samples[samples.size() - 2].knockdownElapsed);
+  CHECK(samples.back().knockdownElapsed > 1.0f);
 }
 
 void TestSightingSamplesAccumulateWhileInFov() {
@@ -2249,9 +2291,10 @@ void TestZiplineOccupiedLineBlocksSecondRider() {
   }
   CHECK(sawBlocked);
   CHECK(game.Mode() != InputMode::Executing);
-  // The second rider still gets across once the line frees up.
+  // The round window is fixed, so the second rider (held at the anchor) is
+  // cut off rather than extending the round.
   CHECK(glm::distance(game.FindUnit(0)->position, glm::vec3(20.0f, 0.0f, 0.0f)) < 0.05f);
-  CHECK(glm::distance(game.FindUnit(1)->position, glm::vec3(20.0f, 0.0f, 1.0f)) < 0.05f);
+  CHECK(glm::distance(game.FindUnit(1)->position, glm::vec3(20.0f, 0.0f, 1.0f)) > 0.05f);
 }
 
 void TestZiplineRiderCannotShoot() {
@@ -3204,6 +3247,38 @@ void TestBulletsFlyToMapEdgeNotWeaponRange() {
   }
 }
 
+// A fall cut short by the end of a round freezes through planning and
+// resumes (from the same elapsed time) when the next round executes.
+void TestKnockdownFreezesBetweenRounds() {
+  GameLogic game(LegacyScene());
+  MakePassive(game);
+  Unit* downed = game.FindUnit(5);
+  downed->alive = false;
+  downed->knockdownElapsed = 0.3f;
+  CHECK(!game.HasActiveKnockdown());  // Planning: frozen.
+  game.Update(1.0f);
+  CHECK(downed->knockdownElapsed == 0.3f);
+
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(game.FindUnit(0)->position + glm::vec3(4.0f, 0.0f, 0.0f), Team::Blue);
+  game.FinishMovePlan();
+  for (int id : {1, 2, 3, 4}) {
+    game.ClickUnit(id, id < 3 ? Team::Blue : Team::Red);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  CHECK(game.Mode() == InputMode::Executing);
+  CHECK(game.HasActiveKnockdown());
+  game.Update(0.25f);
+  CHECK(std::fabs(downed->knockdownElapsed - 0.55f) < 1e-5f);  // Resumed.
+  game.Update(1.0e6f);
+  CHECK(game.Mode() != InputMode::Executing);
+  const float frozenAt = downed->knockdownElapsed;
+  game.Update(2.0f);
+  CHECK(downed->knockdownElapsed == frozenAt);
+}
+
 void TestBurstPlanSurvivesSnapshotAndClampsOnImport() {
   GameLogic game(LegacyScene());
   game.ClickUnit(1, Team::Blue);
@@ -3309,6 +3384,7 @@ int main() {
   TestRoundExecutesBothTeamsMovesConcurrently();
   TestShootRowsResolveSimultaneouslyAcrossTeams();
   TestMutualEliminationIsDraw();
+  TestIdleRoundRunsFullDuration();
   TestMoveFrontierRoutesAroundObstacle();
   TestClickChainsLegsAcrossRounds();
   TestManualReplanClearsQueuedLegs();
@@ -3342,7 +3418,8 @@ int main() {
   TestMuzzleIsAtGunTipNotHead();
   TestSnapshotMirrorsMatchAndTeamPlans();
   TestSightingRecordedImmediatelyOnEntry();
-  TestDeadFigureInFovLeavesNoGhost();
+  TestDeadFigureInFovGetsGhost();
+  TestFallingBodyKeepsSamplingItsPose();
   TestReplaySeekForwardKeepsFadingGhosts();
   TestSightingSamplesAccumulateWhileInFov();
   TestSightingMoveDirectionOnlyWhenMoving();
@@ -3385,6 +3462,7 @@ int main() {
   TestLiveTracerFadesWithinOneSecond();
   TestLockOnStagesUntilFireAndKeepsShotCount();
   TestBulletsFlyToMapEdgeNotWeaponRange();
+  TestKnockdownFreezesBetweenRounds();
   TestBurstPlanSurvivesSnapshotAndClampsOnImport();
   TestReachFieldManySurfacesPerformance();
 

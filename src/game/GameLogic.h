@@ -195,7 +195,9 @@ class GameLogic {
   // True once every living figure on *both* teams has a non-None plan,
   // i.e. CommitRound() is ready to be called.
   bool CanCommitRound() const;
-  // True while any killed unit is still mid-fall (knockdown animation running).
+  // True while any killed unit is still mid-fall *and* time is passing for it
+  // (a round executing, or the match over). Between rounds falls are frozen
+  // and this is false.
   bool HasActiveKnockdown() const;
 
   const std::vector<glm::vec3>& MovePreviewPath() const { return movePreviewPath_; }
@@ -259,6 +261,10 @@ class GameLogic {
     float walkPhase = 0.0f;
     float walkBlend = 0.0f;
     float idleElapsed = 0.0f;
+    // Downed state at sample time: a corpse's ghost holds the fallen (ragdoll)
+    // pose of that instant rather than the upright one.
+    bool alive = true;
+    float knockdownElapsed = -1.0f;
     float at = 0.0f;  // Seconds into the turn's execution when sampled.
   };
   // Oldest-first samples of `targetUnitId` as seen by `viewingTeam`, from the
@@ -558,6 +564,7 @@ class GameLogic {
   void ResolvePendingShots();
 
   void FinishRound();
+  bool KnockdownsAdvance() const;  // Falls only progress while executing / after game over.
 
   // Flag helpers. InitFlag places the flag at Reset; SyncFlag drops it if its
   // carrier has died and refreshes each unit's carryingFlag; a FlagTouch is a

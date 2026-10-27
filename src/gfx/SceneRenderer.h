@@ -39,14 +39,17 @@ struct RenderDebugOptions {
   bool disableFov = false;
   bool disableShadows = false;
   // Thermal camera prototype (issue #177): material-based grayscale with
-  // pale surfaces, ambient contact shading and figures the hottest signal.
-  // Sensor blur and grain precede the overlays; sunlight shadows are
-  // skipped. Gameplay overlays swap to monochrome sensor-green symbology. `thermalBlackHot`
-  // picks the polarity, like the toggle on a real FLIR: true renders hot
-  // objects dark on a washed-out bright world (matching the PR #178 review's
-  // aerial reference footage), false is classic white-hot.
+  // pale surfaces and ambient contact shading; figures keep their team
+  // color. Sensor blur and grain precede the overlays; sunlight shadows are
+  // skipped. Gameplay overlays keep their in-game colors (only the HUD goes
+  // green). `thermalBlackHot` picks the polarity, like the toggle on a real
+  // FLIR: true renders a washed-out bright world (matching the PR #178
+  // review's aerial reference footage), false is classic white-hot.
   bool thermal = false;
   bool thermalBlackHot = true;
+  // Alpha of the team FOV tint in thermal view (normal view uses 0.15);
+  // a debug-panel slider so it can be calibrated against the pale world.
+  float thermalFovAlpha = 0.25f;
   // Contact-shading tunables for the thermal view's debug-panel sliders.
   AmbientOcclusionSettings thermalAo;
   // Issue #136: skip the camera-occlusion see-through pass (occluding

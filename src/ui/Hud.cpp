@@ -457,6 +457,7 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 }
 
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
+                    float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
                     bool& aoBaked,
                     bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,
@@ -473,6 +474,9 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
     // Polarity toggle, like the white-hot/black-hot switch on a real FLIR.
     ImGui::SameLine();
     ImGui::Checkbox("Black hot", &thermalBlackHot);
+    // Team FOV tint opacity over the thermal world (normal view: 0.15).
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("FOV opacity", &thermalFovAlpha, 0.0f, 1.0f, "%.2f");
     // Contact-shading tuning (PR #178 review): radius is the world-space
     // reach of the shadow, strength its darkness, quality the samples per
     // ray (or 16 directions/step when baked); softness is live-mode blur.

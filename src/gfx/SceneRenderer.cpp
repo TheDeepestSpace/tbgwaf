@@ -85,7 +85,9 @@ const glm::vec3 kObstacleColor(0.55f, 0.55f, 0.6f);
 const glm::vec3 kDeckColor(0.44f, 0.45f, 0.48f);
 
 // Apparent temperatures are art-directed to the aerial black-hot reference,
-// independent of visible-light paint/team colors. Keep the shader IDs in sync.
+// independent of visible-light paint colors. Figures are the exception: they
+// keep their team color so sides stay readable (PR #178 review). Keep the
+// shader IDs in sync.
 enum class ThermalMaterial { Ground = 0, Concrete, Asphalt, Building, Metal, Figure };
 // Issue #136 camera-occlusion see-through: map geometry (buildings, deck/
 // ramp slabs) standing between the camera and something the player needs to
@@ -122,16 +124,9 @@ void main() {
 const char* kColorFragmentShaderSrc = R"(#version 300 es
 precision mediump float;
 in vec4 vColor;
-uniform int uThermal;
 out vec4 FragColor;
 void main() {
-  vec4 color = vColor;
-  // Thermal view: monochrome sensor-green symbology (see kUnlitFragmentShaderSrc).
-  if (uThermal != 0) {
-    float lum = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
-    color.rgb = vec3(0.25, 0.95, 0.35) * (0.30 + 0.70 * lum);
-  }
-  FragColor = color;
+  FragColor = vColor;
 }
 )";
 
@@ -161,7 +156,6 @@ uniform vec3 uAxis;
 uniform vec4 uCone;   // x = tan(half angle), y = clipped range, z = fade range, w = start alpha
 uniform vec3 uColor;
 uniform int uRequireFacing;
-uniform int uThermal;
 out vec4 FragColor;
 void main() {
   vec3 d = vWorld - uApex;
@@ -177,31 +171,16 @@ void main() {
   // the mask is where a shot is most likely to land.
   float angleFalloff = cos(atan(radial, t) / atan(uCone.x) * 1.57079632679);
   float rangeFalloff = pow(max(1.0 - t / uCone.z, 0.0), 4.0);
-  vec3 rgb = uColor;
-  // Thermal view: monochrome sensor-green symbology (see kUnlitFragmentShaderSrc).
-  if (uThermal != 0) {
-    float lum = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
-    rgb = vec3(0.25, 0.95, 0.35) * (0.30 + 0.70 * lum);
-  }
-  FragColor = vec4(rgb, uCone.w * angleFalloff * rangeFalloff);
+  FragColor = vec4(uColor, uCone.w * angleFalloff * rangeFalloff);
 }
 )";
 
 const char* kUnlitFragmentShaderSrc = R"(#version 300 es
 precision mediump float;
 uniform vec4 uColor;
-uniform int uThermal;
 out vec4 FragColor;
 void main() {
-  vec4 color = uColor;
-  // Thermal view: overlays drop their team/gameplay colors for the
-  // monochrome green symbology of real sensor footage, keeping their
-  // relative brightness so states stay distinguishable.
-  if (uThermal != 0) {
-    float lum = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
-    color.rgb = vec3(0.25, 0.95, 0.35) * (0.30 + 0.70 * lum);
-  }
-  FragColor = color;
+  FragColor = uColor;
 }
 )";
 
@@ -241,8 +220,11 @@ uniform sampler2D uShadowMap;
 uniform int uDisableShadows;
 uniform int uThermal;
 uniform int uThermalBlackHot;  // 1 = hot reads dark (the review reference), 0 = white-hot.
-uniform int uThermalMaterial;  // ThermalMaterial, independent of uColor.
+uniform int uThermalMaterial;  // ThermalMaterial; only figures use uColor.
 layout(location = 0) out vec4 FragColor;
+// Thermal G-buffer normal. Alpha 1 = grayscale heat surface; alpha 0 = a
+// surface drawn in its own color (figures), which the AO composite leaves
+// chromatic and never self-shades from the world bake.
 layout(location = 1) out vec4 WorldNormal;
 
 // Integer hash avoids sin()-dependent grain differences across GL drivers.
@@ -293,41 +275,44 @@ void main() {
   float lit = kAmbient + (1.0 - shadow) * diffuse * 0.65;
   if (uThermal != 0) {
     // Pale clay-like surroundings from the AO reference, with subtle
-    // material differences and hot figures from the aerial thermal view.
-    // Contact shading is applied in screen space after the opaque pass.
-    float heat;
+    // material differences. Contact shading is applied in screen space
+    // after the opaque pass.
     if (uThermalMaterial == 5) {
-      // A small view-dependent falloff rounds limbs without sun lighting
-      // or team-color differences in a thermal image.
-      heat = 0.91 + 0.07 * max(dot(normal, viewDir), 0.0);
-    } else {
-      float skyFacing = clamp(normal.y, 0.0, 1.0);
-      // Project onto the dominant face: walls get 2D texture too, instead
-      // of stretching ground noise into vertical stripes. Fine detail fades
-      // out when smaller than a pixel so distant roofs do not shimmer.
-      vec3 axis = abs(normal);
-      vec2 p = axis.y >= max(axis.x, axis.z) ? vWorldPos.xz :
-               (axis.x > axis.z ? vWorldPos.zy : vWorldPos.xy);
-      float fineWeight = 1.0 - smoothstep(0.15, 0.6, length(fwidth(p)));
-      float textureHeat = (ThermalNoise(p * 0.45) - 0.5) * 0.45 +
-                          (ThermalNoise(p * 2.5) - 0.5) * 0.35 +
-                          (ThermalNoise(p * 9.0) - 0.5) * 0.20 * fineWeight;
-      if (uThermalMaterial == 3) {
-        heat = mix(0.15, 0.018, skyFacing) +
-               textureHeat * mix(0.035, 0.015, skyFacing);
-        // Undersides retain a darker tone; never use visible-light shadows.
-        heat += max(-normal.y, 0.0) * 0.15;
-      } else if (uThermalMaterial == 2) {
-        heat = 0.20 + textureHeat * 0.045;
-      } else if (uThermalMaterial == 1) {
-        heat = mix(0.17, 0.07, skyFacing) + textureHeat * 0.03;
-      } else if (uThermalMaterial == 4) {
-        heat = 0.13 + textureHeat * 0.025;
-      } else {
-        heat = 0.09 + textureHeat * 0.05;
-      }
-      heat += (1.0 - max(dot(normal, viewDir), 0.0)) * 0.018;
+      // Figures keep their team color in both polarities so sides stay
+      // readable; a small view-dependent falloff rounds limbs without
+      // sun lighting.
+      float shade = 0.82 + 0.18 * max(dot(normal, viewDir), 0.0);
+      WorldNormal.a = 0.0;
+      FragColor = vec4(uColor.rgb * shade, uColor.a);
+      return;
     }
+    float heat;
+    float skyFacing = clamp(normal.y, 0.0, 1.0);
+    // Project onto the dominant face: walls get 2D texture too, instead
+    // of stretching ground noise into vertical stripes. Fine detail fades
+    // out when smaller than a pixel so distant roofs do not shimmer.
+    vec3 axis = abs(normal);
+    vec2 p = axis.y >= max(axis.x, axis.z) ? vWorldPos.xz :
+             (axis.x > axis.z ? vWorldPos.zy : vWorldPos.xy);
+    float fineWeight = 1.0 - smoothstep(0.15, 0.6, length(fwidth(p)));
+    float textureHeat = (ThermalNoise(p * 0.45) - 0.5) * 0.45 +
+                        (ThermalNoise(p * 2.5) - 0.5) * 0.35 +
+                        (ThermalNoise(p * 9.0) - 0.5) * 0.20 * fineWeight;
+    if (uThermalMaterial == 3) {
+      heat = mix(0.15, 0.018, skyFacing) +
+             textureHeat * mix(0.035, 0.015, skyFacing);
+      // Undersides retain a darker tone; never use visible-light shadows.
+      heat += max(-normal.y, 0.0) * 0.15;
+    } else if (uThermalMaterial == 2) {
+      heat = 0.20 + textureHeat * 0.045;
+    } else if (uThermalMaterial == 1) {
+      heat = mix(0.17, 0.07, skyFacing) + textureHeat * 0.03;
+    } else if (uThermalMaterial == 4) {
+      heat = 0.13 + textureHeat * 0.025;
+    } else {
+      heat = 0.09 + textureHeat * 0.05;
+    }
+    heat += (1.0 - max(dot(normal, viewDir), 0.0)) * 0.018;
     float gray = uThermalBlackHot != 0 ? 1.0 - heat : heat;
     FragColor = vec4(vec3(clamp(gray, 0.0, 1.0)), uColor.a);
     return;
@@ -356,16 +341,17 @@ out vec4 FragColor;
 void main() {
   vec2 size = vec2(textureSize(uScene, 0));
   vec2 texel = 1.0 / size;
-  float gray = texture(uScene, vUV).r * 0.40;
-  gray += texture(uScene, vUV + vec2(texel.x, 0.0)).r * 0.15;
-  gray += texture(uScene, vUV - vec2(texel.x, 0.0)).r * 0.15;
-  gray += texture(uScene, vUV + vec2(0.0, texel.y)).r * 0.15;
-  gray += texture(uScene, vUV - vec2(0.0, texel.y)).r * 0.15;
+  // Per channel: the world is gray, but figures carry their team color.
+  vec3 rgb = texture(uScene, vUV).rgb * 0.40;
+  rgb += texture(uScene, vUV + vec2(texel.x, 0.0)).rgb * 0.15;
+  rgb += texture(uScene, vUV - vec2(texel.x, 0.0)).rgb * 0.15;
+  rgb += texture(uScene, vUV + vec2(0.0, texel.y)).rgb * 0.15;
+  rgb += texture(uScene, vUV - vec2(0.0, texel.y)).rgb * 0.15;
   uvec2 p = uvec2(vUV * size);
   uint h = (p.x * 1664525u) ^ (p.y * 1013904223u);
   h = (h ^ (h >> 16u)) * 2246822519u;
-  gray += (float(h & 65535u) / 65535.0 - 0.5) * 0.012;
-  FragColor = vec4(vec3(clamp(gray, 0.0, 1.0)), 1.0);
+  rgb += (float(h & 65535u) / 65535.0 - 0.5) * 0.012;
+  FragColor = vec4(clamp(rgb, 0.0, 1.0), 1.0);
 }
 )";
 
@@ -441,7 +427,6 @@ uniform float uFar;
 uniform float uTexelPerDepth;  // World size of one map texel per unit of map depth.
 uniform float uProbeHeight;
 uniform vec4 uColor;
-uniform int uThermal;
 out vec4 FragColor;
 
 // Perspective depth-buffer value -> distance along the map's view axis.
@@ -507,13 +492,7 @@ void main() {
   // Binary edge: a partially lit fragment would claim the stencil with a
   // faint alpha and block a teammate with a clearer view of the same pixel.
   if (lit < 0.5) discard;
-  vec4 color = uColor;
-  // Thermal view: monochrome sensor-green symbology (see kUnlitFragmentShaderSrc).
-  if (uThermal != 0) {
-    float lum = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
-    color.rgb = vec3(0.25, 0.95, 0.35) * (0.30 + 0.70 * lum);
-  }
-  FragColor = color;
+  FragColor = uColor;
 }
 )";
 
@@ -3340,19 +3319,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   }
 
-  // Thermal view: every overlay shader swaps to monochrome sensor-green
-  // symbology. Uniform values stick to each program across Use() switches,
-  // so setting them once per pane covers all later draws.
+  // Thermal view only restyles the world: gameplay overlays (selection,
+  // paths, ropes, FOV, cones) keep their in-game colors on top of it.
+  // Uniform values stick to each program across Use() switches, so setting
+  // them once per pane covers all later draws.
   const int thermalFlag = debug.thermal ? 1 : 0;
-  unlitShader_.Use();
-  unlitShader_.SetInt("uThermal", thermalFlag);
-  colorShader_.Use();
-  colorShader_.SetInt("uThermal", thermalFlag);
-  coneSurfaceShader_.Use();
-  coneSurfaceShader_.SetInt("uThermal", thermalFlag);
-  fovMaskShader_.Use();
-  fovMaskShader_.SetInt("uThermal", thermalFlag);
-
   litShader_.Use();
   litShader_.SetVec3("uLightDir", lightDir_);
   litShader_.SetVec3("uViewPos", camera.Position());
@@ -3728,8 +3699,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       fovSceneKey_ = sceneKey;
     }
   }
-  // Keep the thermal image dominant; the FOV tint remains a light guide.
-  const float fovAlpha = debug.thermal ? 0.065f : 0.15f;
+  // Thermal view: the tint strength is a debug-panel slider (the pale
+  // black-hot world needs a different level than the normal view).
+  const float fovAlpha = debug.thermal ? debug.thermalFovAlpha : 0.15f;
   const auto drawTeamFov = [&](Team fovTeam) {
     if (fovOverlayMode_ == FovOverlayMode::ShadowMap) {
       // Issue #110 prototype: projective per-unit mask instead of the

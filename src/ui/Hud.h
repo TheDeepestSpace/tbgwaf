@@ -127,7 +127,9 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 // contact shading live: reach in world units, darkening strength, samples
 // per ray, and blur half-width (see gfx::AmbientOcclusionSettings). "Baked
 // thermal" caches the occlusion pass until the camera or scene changes.
+// `thermalFovAlpha` is the FOV tint opacity used while the thermal view is on.
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
+                    float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
                     bool& aoBaked,
                     bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,

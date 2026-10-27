@@ -75,10 +75,18 @@ void CheckRenderer() {
   Require(Capture(x, y, width, height) == blackHot, "Second pane changed the first pane");
   Require(Capture(0, 0, 1, 1) == std::vector<unsigned char>({255, 0, 255, 255}),
           "Thermal filtering wrote outside its viewport");
-  int paleRoofPixels = 0, midtonePixels = 0;
+  int paleRoofPixels = 0, midtonePixels = 0, coloredPixels = 0;
   for (size_t i = 0; i < blackHot.size(); i += 4) {
-    Require(blackHot[i] == blackHot[i + 1] && blackHot[i] == blackHot[i + 2],
-            "Thermal world has a color tint");
+    // Figures keep their team color (PR #178 review) in both polarities;
+    // everything else is gray and must invert with the polarity switch.
+    const bool colored =
+        !(blackHot[i] == blackHot[i + 1] && blackHot[i] == blackHot[i + 2]);
+    if (colored) {
+      ++coloredPixels;
+      Require(!(whiteHot[i] == whiteHot[i + 1] && whiteHot[i] == whiteHot[i + 2]),
+              "White-hot lost a figure's team color");
+      continue;
+    }
     // Sensor noise/8-bit rounding may differ by a few levels; the heat
     // image itself must invert, including the off-map background.
     Require(std::abs(int(blackHot[i]) + int(whiteHot[i]) - 255) <= 5,
@@ -88,6 +96,8 @@ void CheckRenderer() {
   }
   Require(paleRoofPixels > 20 && midtonePixels > 100,
           "Thermal scene lost its roof/surroundings contrast");
+  // No figures in this scene: the world itself carries no color.
+  Require(coloredPixels == 0, "Thermal world has a color tint");
   options.thermalBlackHot = true;
   // The AO targets grow to the largest pane and are shared: a smaller pane
   // (the other half of an odd-width window) must render into their corner
@@ -193,6 +203,16 @@ void CheckRenderer() {
   Require(brightness(baked, {5.7f, 0.0f, 0.0f}) -
               brightness(visibleFigure, {5.7f, 0.0f, 0.0f}) > 3.0f,
           "Visible figure did not cast live contact shading");
+  // The visible enemy keeps its team color (red) on the gray world (PR #178
+  // review): a team-colored figure is the only chroma in the pane.
+  int redFigurePixels = 0, otherColoredPixels = 0;
+  for (size_t i = 0; i < visibleFigure.size(); i += 4) {
+    const int r = visibleFigure[i], g = visibleFigure[i + 1], b = visibleFigure[i + 2];
+    if (r == g && r == b) continue;
+    if (r > g + 20 && r > b + 20) ++redFigurePixels; else ++otherColoredPixels;
+  }
+  Require(redFigurePixels > 10, "Visible figure lost its team color in thermal view");
+  Require(otherColoredPixels < redFigurePixels, "Thermal world has a color tint beyond the figure");
   Require(renderer.ThermalBake().bakeCount == firstBake, "Visible units caused a rebake");
   gfx::OrbitCamera moved = camera;
   moved.Rotate(0.15f, 0.0f);

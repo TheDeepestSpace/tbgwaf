@@ -240,14 +240,18 @@ vec3 WorldPosition(vec2 uv, float depth) {
 
 void main() {
   float depth = texture(uDepth, vUV * uUvScale).r;
-  float gray = texture(uScene, vUV * uUvScale).r;
+  vec3 rgb = texture(uScene, vUV * uUvScale).rgb;
   if (depth < 1.0) {
     vec3 p = WorldPosition(vUV, depth);
-    vec3 n = normalize(texture(uNormal, vUV * uUvScale).xyz * 2.0 - 1.0);
+    vec4 normalSample = texture(uNormal, vUV * uUvScale);
+    vec3 n = normalize(normalSample.xyz * 2.0 - 1.0);
+    // Alpha 0 marks a surface drawn in its own color (team-colored figures):
+    // it keeps its chroma and, being absent from the bake, gets no baked
+    // self-shading (see the lit shader's WorldNormal output).
+    bool keepsColor = normalSample.a < 0.5;
     float ao;
     if (uBaked != 0) {
-      float black = uBlackHot != 0 ? gray : 1.0 - gray;
-      ao = black < 0.1 ? 0.0 : BakedOcclusion(p, n);
+      ao = keepsColor ? 0.0 : BakedOcclusion(p, n);
     } else {
     vec2 texel = 1.0 / uPaneSize;
     float total = 0.0, weightSum = 0.0;
@@ -268,13 +272,19 @@ void main() {
     }
     ao = total / max(weightSum, 0.001);
     }
-    // Work in black-hot space so switching polarity inverts the complete
-    // image, including contact shading; figures retain their hot signal.
-    float black = uBlackHot != 0 ? gray : 1.0 - gray;
-    black *= 1.0 - min(ao * uStrength, 0.78);
-    gray = uBlackHot != 0 ? black : 1.0 - black;
+    float shade = 1.0 - min(ao * uStrength, 0.78);
+    if (keepsColor) {
+      // Contact shading darkens a figure's color in both polarities.
+      rgb *= shade;
+    } else {
+      // Work in black-hot space so switching polarity inverts the complete
+      // gray image, including contact shading.
+      float black = uBlackHot != 0 ? rgb.r : 1.0 - rgb.r;
+      black *= shade;
+      rgb = vec3(uBlackHot != 0 ? black : 1.0 - black);
+    }
   }
-  FragColor = vec4(vec3(gray), 1.0);
+  FragColor = vec4(rgb, 1.0);
   // Preserve opaque depth for see-through buildings and gameplay overlays.
   // Writing it avoids format-dependent depth blits to the browser canvas.
   gl_FragDepth = depth;

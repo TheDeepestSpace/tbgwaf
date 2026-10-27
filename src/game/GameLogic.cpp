@@ -828,12 +828,19 @@ void GameLogic::Update(float dtSeconds) {
         unit.alive && IsUnitMoving(unit.id) && !IsUnitRiding(unit.id) ? 1.0f : 0.0f;
     unit.walkBlend +=
         (target - unit.walkBlend) * std::min(1.0f, constants::kWalkBlendRate * dtSeconds);
-    if (unit.turnLag != 0.0f) {
-      // Ease the drawn heading onto the sim facing (see Unit::turnLag).
-      const float lag = std::fabs(unit.turnLag);
+    // Ease the drawn heading onto the sim facing (see Unit::turnLag) -- or,
+    // while a shot beat is up, onto the shot bearing, so a mover turns
+    // smoothly to fire and smoothly back to its direction of travel after.
+    constexpr float kTwoPi = 6.28318530717958647692f;
+    const bool aiming = unit.shootElapsed >= 0.0f && unit.shootElapsed < constants::kShootTurnHold;
+    const float goalLag =
+        aiming ? std::remainder(unit.facingYaw - unit.shootAimYaw, kTwoPi) : 0.0f;
+    if (unit.turnLag != goalLag) {
+      const float gap = std::remainder(unit.turnLag - goalLag, kTwoPi);
+      const float lag = std::fabs(gap);
       const float step = std::max(constants::kTurnMinSpeed * dtSeconds,
                                   lag * std::min(1.0f, constants::kTurnLagRate * dtSeconds));
-      unit.turnLag = step >= lag ? 0.0f : std::copysign(lag - step, unit.turnLag);
+      unit.turnLag = step >= lag ? goalLag : goalLag + std::copysign(lag - step, gap);
     }
   }
 }
@@ -1539,8 +1546,7 @@ void GameLogic::ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets
   const float aimYaw = std::atan2(dir.z, dir.x);
   // The turn outlives the shot: it is this figure's facing for the next
   // rounds' FOV and overwatch reactions.
-  shooter.facingYaw = aimYaw;
-  shooter.turnLag = 0.0f;  // The shot turn is a snap; only walking turns animate.
+  shooter.SetFacingYaw(aimYaw);  // Drawn heading eases there (Update).
   PlayShootBeat(shooter, aimYaw, sinceShot);
 
   for (Unit* hitTarget : hitTargets) {

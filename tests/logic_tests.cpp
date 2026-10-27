@@ -1591,6 +1591,28 @@ void TestTurnLagEasesDrawnHeading() {
   CHECK(game.Mode() == InputMode::Executing);
 }
 
+// A shot's turn is smooth too: the drawn heading eases onto the shot
+// bearing while the beat plays, then eases back to the sim facing.
+void TestShotTurnEasesAndReturns() {
+  const float kPi = 3.14159265358979323846f;
+  GameLogic game(LegacyScene());
+  Unit* u = game.FindUnit(0);
+  u->facingYaw = 0.0f;
+  u->turnLag = 0.0f;
+  u->SetFacingYaw(kPi / 2);  // Sim turn to the shot bearing...
+  u->shootAimYaw = kPi / 2;
+  u->shootElapsed = 0.0f;
+  CHECK(std::fabs(u->VisualYaw()) < 1e-4f);  // ...drawn heading hasn't snapped.
+  game.Update(0.03f);
+  CHECK(u->VisualYaw() > 0.1f && u->VisualYaw() < kPi / 2 - 0.05f);  // Mid-turn.
+  game.Update(0.2f);
+  CHECK(std::fabs(u->VisualYaw() - kPi / 2) < 1e-3f);  // Holds the aim.
+  u->SetFacingYaw(0.0f);  // Mover resumes its heading: no snap back.
+  CHECK(std::fabs(u->VisualYaw() - kPi / 2) < 1e-3f);
+  game.Update(0.6f);  // Past the hold.
+  CHECK(std::fabs(u->VisualYaw()) < 1e-3f && u->turnLag == 0.0f);
+}
+
 // A resolved (hitting) shot starts the shooter's quick-draw beat aimed at
 // the target's bearing; it times out back to idle. Hit resolution itself
 // is unchanged, and a blocked shot doesn't play anything.
@@ -3312,6 +3334,7 @@ int main() {
   TestGameLogicWinCondition();
   TestWalkCycleTracksInFlightMove();
   TestTurnLagEasesDrawnHeading();
+  TestShotTurnEasesAndReturns();
   TestResolvedShotStartsShootAnimation();
   TestShotHitChanceProfile();
   TestShotHitChanceGatesAndRoll();

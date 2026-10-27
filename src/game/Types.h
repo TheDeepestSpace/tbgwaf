@@ -286,6 +286,10 @@ constexpr float kWalkBlendRate = 12.0f;  // Per second; ~90% settled after 0.2 s
 // promptly. Roughly 0.15 s for 45-90 degrees and 0.2 s for a 180 about-face.
 constexpr float kTurnLagRate = 14.0f;      // Per second.
 constexpr float kTurnMinSpeed = 6.0f;      // Radians per second.
+// A shooter's drawn heading eases onto the shot bearing and holds it for this
+// long into the shot beat (the rest is the lower-weapon tail); after that it
+// eases back to the sim facing (e.g. the direction of travel).
+constexpr float kShootTurnHold = 0.45f;
 // Duration of the CC0 idle clip retargeted by the procedural figure rig.
 constexpr float kIdleAnimDuration = 3.3333333f;
 // Quick-draw pistol beat played by a shooter whose shot resolves: a short

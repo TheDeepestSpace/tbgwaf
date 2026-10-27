@@ -487,8 +487,8 @@ void TestPinnedKindHistograms() {
   struct Expected { uint32_t seed; size_t buildings; int kinds[kBuildingKindCount]; };
   const Expected expected[] = {
       // residential, mixed-use, office, commercial, civic, garage
-      {1u, 44, {22, 8, 3, 7, 2, 2}},
-      {42u, 63, {23, 15, 10, 6, 2, 7}},
+      {1u, 50, {14, 17, 9, 3, 2, 5}},
+      {42u, 80, {20, 18, 17, 16, 2, 7}},
       {2024u, 80, {21, 18, 15, 11, 2, 13}},
   };
   for (const auto& e : expected) {
@@ -2241,7 +2241,7 @@ void TestLongBlockApartmentRowsAndPedestrianSplits() {
     const std::vector<UrbanBlock> blocks = UrbanBlocks(1, c);
     const std::vector<UrbanParcel> parcels = UrbanParcels(1, c);
     const Scene scene = GenerateUrbanMap(1, c);
-    int rows = 0, minCount = 100, maxCount = 0;
+    int rows = 0, minCount = 100;
     for (size_t block = 0; block < blocks.size(); ++block) {
       if (!blocks[block].apartmentRow) continue;
       ++rows;
@@ -2257,10 +2257,10 @@ void TestLongBlockApartmentRowsAndPedestrianSplits() {
         ++buildingCount;
         CHECK(building.kind == BuildingKind::Residential);
       }
-      if (parcelCount < 2 || parcelCount > 6) {
+      if (parcelCount < 3 || parcelCount > 6) {
         std::fprintf(stderr, "apartment-row block %zu: %d parcels\n", block, parcelCount);
       }
-      CHECK(parcelCount >= 2 && parcelCount <= 6);
+      CHECK(parcelCount >= 3 && parcelCount <= 6);
       CHECK(buildingCount == parcelCount);
 
       glm::vec2 rowAxis(1.0f, 0.0f);
@@ -2309,10 +2309,9 @@ void TestLongBlockApartmentRowsAndPedestrianSplits() {
         CHECK(intervals[i].first - intervals[i - 1].second > c.gapWidth * 1.5f);
       }
       minCount = std::min(minCount, parcelCount);
-      maxCount = std::max(maxCount, parcelCount);
     }
-    CHECK(rows >= 2);
-    CHECK(minCount < maxCount);  // Longer rows receive more apartments.
+    CHECK(rows >= 1);
+    CHECK(minCount >= 3);  // A row is only spawned when 3+ decent slabs fit.
   }
 
   {
@@ -2614,7 +2613,7 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
 // alters item or prop placement shows up here first.
 void TestPinnedFurnitureFingerprints() {
   struct Expected { uint32_t seed; size_t furniture; size_t props; };
-  const Expected expected[] = {{1u, 124, 63}, {42u, 149, 63}, {2024u, 166, 75}};
+  const Expected expected[] = {{1u, 147, 64}, {42u, 164, 69}, {2024u, 166, 75}};
   const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
   const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
   for (const auto& e : expected) {

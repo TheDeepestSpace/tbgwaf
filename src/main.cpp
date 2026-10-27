@@ -402,6 +402,7 @@ int main() {
 #endif
   auto makeMap = [&mapSeed, &mapType, &ctfMode, &makeBaseMap]() {
     tactics::Scene scene = makeBaseMap(mapSeed, mapType);
+    tactics::ApplySpawnHints(&scene);
     scene.flag.enabled = ctfMode;
     return scene;
   };

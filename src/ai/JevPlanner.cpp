@@ -16,6 +16,7 @@ constexpr float kGridCellSize = 0.75f;  // World units per ASCII cell.
 constexpr int kMinGridCells = 32;
 constexpr int kMaxGridCells = 96;
 constexpr size_t kMaxListedObstacles = 48;
+constexpr float kMinMoveProgress = 1.5f;  // Smaller moves count as stuck.
 
 std::string JsonString(const std::string& value) {
   std::ostringstream out;
@@ -294,6 +295,38 @@ std::vector<JevCandidate> GenerateCandidateSpecs(const GameLogic& game, Team tea
     ++hunted;
   }
 
+  // Level connectors: stairs/ramps (walk surfaces) near the figure, so a
+  // figure walled off from its goal by another level can route to the nearest
+  // way up or down instead of pressing against the wall.
+  {
+    std::vector<std::pair<float, size_t>> near;
+    const auto& surfaces = game.GetScene().walkSurfaces;
+    for (size_t i = 0; i < surfaces.size(); ++i) {
+      if (surfaces[i].vertices.empty()) continue;
+      glm::vec3 best = surfaces[i].vertices.front();
+      for (const glm::vec3& v : surfaces[i].vertices) {
+        if (XZDistance(v, actor->position) < XZDistance(best, actor->position)) best = v;
+      }
+      const float d = XZDistance(best, actor->position);
+      if (d >= kMinMoveProgress && d <= actor->MoveBudget()) near.push_back({d, i});
+    }
+    std::sort(near.begin(), near.end());
+    for (size_t k = 0; k < near.size() && k < 2; ++k) {
+      const auto& surface = surfaces[near[k].second];
+      glm::vec3 best = surface.vertices.front();
+      for (const glm::vec3& v : surface.vertices) {
+        if (XZDistance(v, actor->position) < XZDistance(best, actor->position)) best = v;
+      }
+      JevCandidate candidate;
+      candidate.id = "connector_" + std::to_string(near[k].second);
+      candidate.kind = JevActionKind::Move;
+      candidate.actorId = actorId;
+      candidate.destination = best;
+      candidate.description = "Head to the nearest stair/ramp (level connector) to change level.";
+      candidates.push_back(std::move(candidate));
+    }
+  }
+
   JevCandidate wait;
   wait.id = "wait";
   wait.description = "Wait in place for this round; use only when movement or a visible shot is worse.";
@@ -327,7 +360,14 @@ bool ValidateCandidate(const GameLogic& game, Team team, JevCandidate* candidate
   if (candidate->kind != JevActionKind::Move) return true;
   const Unit* actor = game.FindUnit(candidate->actorId);
   const Unit* planned = trial.FindUnit(candidate->actorId);
+  // Level-aware progress check: a destination across a wall of another level
+  // can clamp to a path that barely leaves the start (figure stuck facing the
+  // wall). Such moves are not offered; connector candidates cover the detour.
+  const glm::vec3 requested = candidate->destination;
   candidate->destination = planned->plan.movePath.back();
+  const float wanted = XZDistance(requested, actor->position);
+  const float progress = XZDistance(candidate->destination, actor->position);
+  if (progress < std::min(kMinMoveProgress, wanted)) return false;
   const float forward = team == Team::Blue ? candidate->destination.x - actor->position.x
                                            : actor->position.x - candidate->destination.x;
   std::ostringstream description;

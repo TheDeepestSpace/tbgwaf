@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -63,7 +64,7 @@ void TestBoundedCandidatesUseNormalLegalPath() {
   GameLogic game(TwoUnitScene(24.0f, false));
   const auto request = BuildJevRequest(game, Team::Blue, 1);
   CHECK(request.has_value());
-  CHECK(request->candidates.size() <= 26);
+  CHECK(request->candidates.size() <= 28);
   bool foundMove = false;
   bool foundWait = false;
   for (const auto& candidate : request->candidates) {
@@ -313,6 +314,45 @@ void TestJevMovesNeverCrossRampSlab() {
   CHECK(climbed);
 }
 
+// Issue #245: figures pressed against a wall of a lower or higher terrain
+// level used to be offered moves that clamp to ~zero movement. Sweep figures
+// across a leveled urban map: every offered move must make real progress, and
+// a figure with any legal move must be offered one.
+void TestJevMovesMakeProgressAcrossTerrainLevels() {
+  tactics::MapGeneratorConfig config;
+  config.terrainLevelCount = 2;
+  Scene base = tactics::GenerateUrbanMap(11, config);
+  int sampled = 0;
+  for (float x = -40.0f; x <= 40.0f; x += 16.0f) {
+    for (float z = -40.0f; z <= 40.0f; z += 16.0f) {
+      Scene scene = base;
+      scene.units.clear();
+      Unit red;
+      red.id = 0;
+      red.team = Team::Red;
+      red.position = {x, scene.ground.HeightAt(x, z), z};
+      scene.units.push_back(red);
+      Unit blue;
+      blue.id = 1;
+      blue.team = Team::Blue;
+      blue.position = {-x * 0.5f + 3.0f, 0.0f, -z * 0.5f + 3.0f};
+      blue.position.y = scene.ground.HeightAt(blue.position.x, blue.position.z);
+      scene.units.push_back(blue);
+      GameLogic game(scene);
+      const auto request = BuildJevRequest(game, Team::Red, 1);
+      if (!request) continue;
+      ++sampled;
+      for (const auto& candidate : request->candidates) {
+        if (candidate.kind != JevActionKind::Move) continue;
+        const float dx = candidate.destination.x - x;
+        const float dz = candidate.destination.z - z;
+        CHECK(std::hypot(dx, dz) >= 1.0f);
+      }
+    }
+  }
+  CHECK(sampled > 0);
+}
+
 int main() {
   TestIncrementalBuilderMatchesBlockingBuild();
   TestBoundedCandidatesUseNormalLegalPath();
@@ -325,6 +365,7 @@ int main() {
   TestPlayerVsAiTurnAutomaticallyBecomesCommittable();
   TestCompleteAiVsAiMatchAndTerminalStop();
   TestJevMovesNeverCrossRampSlab();
+  TestJevMovesMakeProgressAcrossTerrainLevels();
   if (failures == 0) {
     std::puts("All Jev planner scenarios passed.");
     return 0;

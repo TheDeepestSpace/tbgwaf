@@ -1,6 +1,7 @@
 // Headless tests for the render-side ragdoll (issue #217). glm + game Unit
 // only; no GL.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -29,6 +30,12 @@ tactics::Unit Downed(int id, float elapsed) {
   u.knockdownAxis = glm::vec3(0.0f, 0.0f, -1.0f);  // dir = +X
   u.knockdownElapsed = elapsed;
   return u;
+}
+
+glm::vec3 PoseCentre(const gfx::RagdollPose& pose) {
+  glm::vec3 centre(0.0f);
+  for (const glm::vec3& p : pose) centre += p;
+  return centre / static_cast<float>(gfx::kRagJointCount);
 }
 
 void TestOnlyDownedUnitsRagdoll() {
@@ -79,6 +86,50 @@ void TestDeterministicAndCacheBounded() {
   // Different units fall differently.
   const gfx::RagdollPose c = gfx::SampleRagdoll(Downed(8, 0.2f));
   CHECK(c[gfx::kRagHead] != a[gfx::kRagHead]);
+}
+
+void TestDisplacementStaysOnShotAxisAndReplaysExactly() {
+  gfx::SetRagdollObstacles({});
+  const glm::vec3 shotDir = glm::normalize(glm::vec3(0.6f, 0.0f, -0.8f));
+  const glm::vec3 side(-shotDir.z, 0.0f, shotDir.x);
+
+  // Exercise every normal figure id. The varied launch may change how far a
+  // body travels, but without a replicated lateral force its centre must stay
+  // on the shot axis. Varying the hit position represents moving figures
+  // being shot at different points along their paths.
+  for (int id = 0; id < 40; ++id) {
+    tactics::Unit u = Downed(id, tactics::constants::kKnockdownMaxSeconds);
+    u.position += glm::vec3(0.17f * id, 0.0f, -0.11f * id);
+    u.facingYaw = 0.37f;
+    u.knockdownAxis = glm::vec3(shotDir.z, 0.0f, -shotDir.x);
+    const glm::vec3 start = PoseCentre(gfx::SampleRagdollStep(u, 0));
+    float maxSideways = 0.0f;
+    for (int step = 1; step <= gfx::kRagdollSteps; ++step) {
+      const glm::vec3 displacement = PoseCentre(gfx::SampleRagdollStep(u, step)) - start;
+      maxSideways = std::max(maxSideways, std::fabs(glm::dot(displacement, side)));
+    }
+    CHECK(maxSideways < 0.15f);
+    const glm::vec3 displacement = PoseCentre(gfx::SampleRagdoll(u)) - start;
+    CHECK(glm::dot(displacement, shotDir) > 0.2f);
+  }
+
+  // Replay may sample the fall out of order after the live trajectory has
+  // been evicted. It must reconstruct the identical physical frames.
+  tactics::Unit u = Downed(7, 0.0f);
+  u.position = glm::vec3(-1.3f, 0.0f, 4.7f);
+  u.knockdownAxis = glm::vec3(shotDir.z, 0.0f, -shotDir.x);
+  const int sampleSteps[] = {0, 7, 31, 79, 143, gfx::kRagdollSteps};
+  gfx::RagdollPose live[6];
+  for (int i = 0; i < 6; ++i) live[i] = gfx::SampleRagdollStep(u, sampleSteps[i]);
+  for (int id = 100; id < 100 + 2 * gfx::kRagdollMaxCached; ++id) {
+    gfx::SampleRagdoll(Downed(id, 0.3f));
+  }
+  for (int i = 5; i >= 0; --i) {
+    const gfx::RagdollPose replay = gfx::SampleRagdollStep(u, sampleSteps[i]);
+    for (int joint = 0; joint < gfx::kRagJointCount; ++joint) {
+      CHECK(replay[joint] == live[i][joint]);
+    }
+  }
 }
 
 void TestFigurePartsFollowRagdoll() {
@@ -150,6 +201,7 @@ int main() {
   TestFallsAlongShotAndRests();
   TestLimbLengthsPreserved();
   TestDeterministicAndCacheBounded();
+  TestDisplacementStaysOnShotAxisAndReplaysExactly();
   TestFigurePartsFollowRagdoll();
   if (g_failures == 0) std::puts("ragdoll_tests: OK");
   return g_failures == 0 ? 0 : 1;

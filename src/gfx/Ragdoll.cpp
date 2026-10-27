@@ -184,8 +184,12 @@ Trajectory Simulate(const Unit& unit) {
   glm::vec3 dir(-unit.knockdownAxis.z, 0.0f, unit.knockdownAxis.x);
   dir = glm::length(dir) < 1e-4f ? unit.FacingDirection() : glm::normalize(dir);
   const glm::vec3 side(-dir.z, 0.0f, dir.x);
-  // Deterministic per-unit sideways twist so neighbours don't fall identically.
-  const float twist = 0.35f * std::sin(static_cast<float>(unit.id) * 12.9898f);
+  // Vary the strength along the hit line so neighbours do not fall
+  // identically.  Do not add a sideways component here: there is no lateral
+  // force in the replicated hit state, and doing so made a body drift (and
+  // appear to snap) across the shot line as the fall played out.
+  const float impactScale =
+      1.0f + 0.12f * std::sin(static_cast<float>(unit.id) * 12.9898f);
 
   const glm::mat4 frame =
       glm::translate(glm::mat4(1.0f), unit.position) *
@@ -193,7 +197,7 @@ Trajectory Simulate(const Unit& unit) {
   RagdollPose pos, prev;
   for (int i = 0; i < kRagJointCount; ++i) {
     pos[i] = glm::vec3(frame * glm::vec4(kStanding[i], 1.0f));
-    const glm::vec3 v = (dir * kLaunchSpeed + side * (kLaunchSpeed * twist) +
+    const glm::vec3 v = (dir * (kLaunchSpeed * impactScale) +
                          glm::vec3(0.0f, kLaunchLift, 0.0f)) *
                         kLaunchWeight[i];
     prev[i] = pos[i] - v * kRagdollStep;
@@ -217,7 +221,7 @@ Trajectory Simulate(const Unit& unit) {
     // Tumble about the sideways axis (barrel flips over), plus a little yaw.
     const float s = std::sin(static_cast<float>(unit.id) * 7.531f);
     gunSpin = side * (kGunSpin * (0.5f + 0.5f * std::fabs(s)) * (s < 0 ? -1.0f : 1.0f)) +
-              glm::vec3(0.0f, 2.0f * twist, 0.0f);
+              glm::vec3(0.0f, 0.7f * std::sin(static_cast<float>(unit.id) * 12.9898f), 0.0f);
     gunVel += dir * 0.8f + glm::vec3(0.0f, 0.6f, 0.0f);
   }
   bool gunAsleep = false;

@@ -58,7 +58,7 @@ enum class BuildingKind : uint8_t {
   Residential,  // Apartments: 3.0 floors, brick/plaster.
   MixedUse,     // Shops under apartments: 4.0 ground floor, awning.
   Office,       // 3.5 floors, glassy; upper storeys may step back.
-  Commercial,   // Single-storey shop/warehouse hall, awning.
+  Commercial,   // Single-storey shop/warehouse hall, no awning (loading door).
   Civic,        // Landmark: the towers.
   Garage,       // Parking decks: low 2.8 floors, raw concrete.
 };

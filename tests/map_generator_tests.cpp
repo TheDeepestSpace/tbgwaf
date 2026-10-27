@@ -434,7 +434,7 @@ void TestMassingStaysOnItsBuilding() {
         }
         case MassingDetail::Kind::Awning: {
           ++awnings;
-          CHECK(b.kind == BuildingKind::MixedUse || b.kind == BuildingKind::Commercial);
+          CHECK(b.kind == BuildingKind::MixedUse);  // Warehouse loading doors get none.
           CHECK(d.y0 > 2.4f && d.y0 < b.groundFloorHeight);  // Above head height, below floor 2.
           // Over the sidewalk: outside the building, inside its block.
           const std::vector<glm::vec2> blockOutline = UrbanBlocks(seed, FlatConfig())[b.block].vertices;

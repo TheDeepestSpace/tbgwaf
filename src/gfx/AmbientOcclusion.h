@@ -12,7 +12,7 @@ namespace gfx {
 
 // PR #178: production defaults; native tests can trade resolution for speed.
 struct AmbientOcclusionBakeSettings {
-  int directions = 0;  // 0 uses clamp(quality * 16, 16, 256); default quality = 96 rays.
+  int directions = 0;  // 0 uses clamp(quality * 16, 16, 256); default quality = 48 rays.
   int depthResolution = 1024;
   int batchLayers = 16;  // At most 16 matrices in the ES 3.0 fragment uniforms.
   float spacing = 0.75f;
@@ -32,10 +32,10 @@ struct AmbientOcclusionVolume {
 // for softer, less choppy occlusion with knobs to play with). Defaults are
 // the shipped look; the headless visual runner always renders defaults.
 struct AmbientOcclusionSettings {
-  float radius = 2.4f;    // World-space reach of the shading, in map units.
-  float strength = 1.9f;  // Occlusion-to-darkening multiplier.
-  int quality = 6;       // Live: samples/ray. Baked: quality * 16 directions.
-  int softness = 2;       // Bilateral blur half-width in pixels.
+  float radius = 0.8f;    // World-space reach of the shading, in map units.
+  float strength = 0.8f;  // Occlusion-to-darkening multiplier.
+  int quality = 3;        // Live: samples/ray. Baked: quality * 16 directions.
+  int softness = 3;       // Bilateral blur half-width in pixels.
   // "Baked thermal": skip the per-pixel screen-space march and look the
   // shading up from a world-space map baked once per scene (re-baked only
   // when the map geometry, radius or quality change, never for the camera).

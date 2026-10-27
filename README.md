@@ -162,11 +162,11 @@ level, open space under overpasses, and deck undersides receive shading.
 Camera moves and pane changes reuse the volume. Visible figures add two
 live contact spheres each; fog-hidden figures contribute nothing.
 
-- **AO radius** is the contact reach in world units (default 2.4).
-- **AO quality** sets `clamp(quality * 16, 16, 256)` directions (default 96).
+- **AO radius** is the contact reach in world units (default 0.8).
+- **AO quality** sets `clamp(quality * 16, 16, 256)` directions (default 48).
   Radius and quality apply on slider release and rebake once.
-- **AO strength** stays live (default 1.9); **AO softness** is disabled in
-  baked mode. Switching back restores the screen-space settings.
+- **AO strength** stays live (default 0.8); **AO softness** defaults to 3 and
+  is disabled in baked mode. Switching back restores the screen-space settings.
 - `AmbientOcclusionSettings::bake` exposes depth resolution (1024²), batch
   layers (16, maximum 16), probe spacing (0.75), and a direction override
   for tests (0 uses quality). The grid widens its spacing if necessary to
@@ -175,10 +175,10 @@ live contact spheres each; fog-hidden figures contribute nothing.
 
 The bake is synchronous, including in WebGL2. It logs settings, bounds,
 completed GPU time and memory. On this change's llvmpipe runner,
-`city_elevated_seed_7` took **4.3 s** at defaults (203 × 33 × 203 probes,
+`city_elevated_seed_7` took **2.2 s** at defaults (203 × 33 × 203 probes,
 10.4 MiB resident volume, 64 MiB temporary depth maps). Ping-pong accumulation
 needs another volume pair during baking, plus the previous volume on a
-rebake. The test settings (16 directions, 256², spacing 1.5) took **0.35 s**
+rebake. The test settings (16 directions, 256², spacing 1.5) took **0.23 s**
 on the same map; the thermal regression suite stays below its 30 s timeout.
 These are software-renderer measurements; the **under-2 s GPU target has
 not been measured on hardware**.

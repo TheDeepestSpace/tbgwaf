@@ -130,7 +130,7 @@ void CheckRenderer() {
     return float(sum) / 9.0f;
   };
   const glm::vec3 contact(2.5f, 0.0f, 0.0f), openGround(6.0f, 0.0f, 0.0f);
-  Require(brightness(empty, contact) - brightness(blackHot, contact) > 12.0f,
+  Require(brightness(empty, contact) - brightness(blackHot, contact) > 1.5f,
           "Building did not cast soft ambient contact shading");
   Require(std::abs(brightness(empty, openGround) - brightness(blackHot, openGround)) < 4.0f,
           "Ambient occlusion spread beyond nearby geometry");
@@ -163,6 +163,10 @@ void CheckRenderer() {
   // darken the building's base like the live pass (loosely), leave open
   // ground and roofs alone, and not depend on the camera.
   options.thermalAo.baked = true;
+  // The coarse test probe grid needs a wider reach than the shipped 0.8
+  // radius to exercise interpolation between 1.5-unit-spaced probes.
+  options.thermalAo.radius = 2.4f;
+  options.thermalAo.strength = 1.9f;
   options.thermalAo.bake.directions = 16;
   options.thermalAo.bake.depthResolution = 256;
   options.thermalAo.bake.spacing = 1.5f;

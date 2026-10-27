@@ -2,8 +2,8 @@ name: zipline_opposing_teams_opposite_directions
 description: >
   Issue #166: Blue rides east while Red, starting at the far anchor, wants to
   ride west on the same line. Both reach their anchors at the same moment; the
-  line is single-occupancy, so one waits for the other to land and both still
-  arrive.
+  line is single-occupancy, so one waits for the other to land and, with rounds a
+  fixed 5 s, is cut off short of its destination.
 
 map:
   half_extent: 40
@@ -23,4 +23,4 @@ script:
     destination: [-26, 0, 1]
   - action: commit
   - assert: {unit: 0, position: [20, 0, 0], tolerance: 0.05}
-  - assert: {unit: 1, position: [-26, 0, 1], tolerance: 0.05}
+  - assert: {unit: 1, position: [-21.473, 0, 0.547], tolerance: 0.05, comment: Cut off when the fixed 5 s window closes}

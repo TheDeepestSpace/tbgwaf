@@ -156,6 +156,24 @@ hides it (a carried one shows with its carrier). `round_limit: N` ends the
 match as a draw after N rounds with no winner. Flag state travels in the
 snapshot text protocol (`ExportState`/`ImportState`).
 
+### Demo scenes (repro logs)
+
+Game Mode → **Demo Scenes** (issue #240) lists small fixed setups for
+reproducing odd behaviour: each card shows a rendered thumbnail, the scene's
+name and what to do in it. Playing one records everything needed to reproduce
+the session exactly -- scene id, RNG seed, build commit, every input with
+timestamps and round numbers, each frame's `dt`, the simulation's own log
+lines (bullets, knockdowns, round ends) and a state hash after every entry.
+**Download log** exports it as one JSON Lines file (format:
+[docs/repro-log.md](docs/repro-log.md)). `build/tactics_repro_replay
+<log.jsonl>` replays it headlessly and verifies every hash;
+`TBGWAF_REPRO_LOG=<log.jsonl> build/tactics_app` loads it into the app onto
+the turn timeline. Scenes live in the registry in `src/game/DemoScenes.cpp`
+(id, name, description, seed, scene builder, thumbnail camera); the first one
+is "Odd ragdoll behavior repro" (issue #239). Scenario YAML can pin a
+registry scene with `map: {demo_scene: <id>}`
+(`tests/scenarios/demo_odd_ragdoll_repro.yaml`).
+
 ### Gameplay scenario tests
 
 `tests/scenarios/*.yaml` are state-only (no rendering) gameplay regression
@@ -271,7 +289,7 @@ and removes the preview automatically when the PR closes.
 
 ## App flow
 
-Screen flow (Splash -> Game Mode -> Map Select -> Gameplay), declared in
+Screen flow (Splash -> Game Mode -> Map Select / Demo Scenes -> Gameplay), declared in
 `flow/app_flow.yaml`. The build regenerates `flow/app_flow.mmd` from it; paste
 that file's contents below if the flow changes.
 
@@ -281,14 +299,19 @@ flowchart TD
     splash("  Splash  ")
     game_mode("  Game Mode  ")
     map_select("  Map Select  ")
+    demo_scenes("  Demo Scenes  ")
     gameplay("  Gameplay  ")
     splash -->|new_game| game_mode
     game_mode -->|select_regular| map_select
     game_mode -->|select_ctf| map_select
+    game_mode -->|select_demo| demo_scenes
     game_mode -->|back| splash
     map_select -->|select_urban| gameplay
     map_select -->|select_hills| gameplay
     map_select -->|back| game_mode
+    demo_scenes -->|select_scene| gameplay
+    demo_scenes -->|back| game_mode
+    gameplay -->|exit_demo| demo_scenes
 ```
 
 ## Controls

@@ -8,6 +8,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include "game/DemoScenes.h"
 #include "game/MapGenerator.h"
 #include "game/GameLogic.h"
 #include "game/TurnTimeline.h"
@@ -88,6 +89,20 @@ Scene ParseScene(const YAML::Node& root) {
 
   bool generated = false;
   if (const YAML::Node mapNode = root["map"]) {
+    // `demo_scene: <id>` pins a registered demo scene (issue #240; see
+    // game/DemoScenes.h) -- map and units alike -- so the scenario tests
+    // exactly what the Demo Scenes screen hands the player. Units come from
+    // the registry unless the scenario lists its own.
+    if (const YAML::Node demoNode = mapNode["demo_scene"]) {
+      const std::string id = demoNode.as<std::string>();
+      const DemoScene* demo = FindDemoScene(id);
+      if (!demo) throw std::runtime_error("map.demo_scene: unknown demo scene '" + id + "'");
+      if (mapNode["generate"]) {
+        throw std::runtime_error("map.demo_scene cannot be combined with map.generate");
+      }
+      scene = demo->build();
+      generated = true;
+    }
     // `generate: {seed: N, type: urban|hilly}` builds a procedural map
     // (units come from the generator unless the scenario lists its own).
     // `type` defaults to the urban city generator.

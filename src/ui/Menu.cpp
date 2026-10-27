@@ -2,6 +2,7 @@
 
 #include <imgui.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <random>
@@ -12,9 +13,11 @@ using tbgwaf_flow::Event;
 using tbgwaf_flow::State;
 
 std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
-                                  uint32_t* mapSeed) {
+                                  uint32_t* mapSeed,
+                                  const std::vector<DemoSceneCard>& demoCards,
+                                  int* selectedDemoScene) {
   if (state != State::Splash && state != State::GameMode &&
-      state != State::MapSelect) return std::nullopt;
+      state != State::MapSelect && state != State::DemoScenes) return std::nullopt;
 
   const ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
@@ -36,6 +39,45 @@ std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
     ImGui::Begin("Game Mode", nullptr, flags);
     if (ImGui::Button("Regular", button)) fired = Event::SelectRegular;
     if (ImGui::Button("Capture the Flag", button)) fired = Event::SelectCtf;
+    if (ImGui::Button("Demo Scenes", button)) fired = Event::SelectDemo;
+    ImGui::Spacing();
+    if (ImGui::Button("Back", ImVec2(100.0f, 0.0f))) fired = Event::Back;
+    ImGui::End();
+  } else if (state == State::DemoScenes) {
+    // Issue #240: one card per registered demo scene -- thumbnail, a button
+    // with the scene's name, and its instructions -- in rows of up to three.
+    ImGui::Begin("Demo Scenes", nullptr, flags);
+    ImGui::TextUnformatted("Fixed repro setups. Play one out, then Download log.");
+    ImGui::Spacing();
+    constexpr float kCardWidth = 320.0f;
+    constexpr float kThumbHeight = 180.0f;
+    constexpr int kCardsPerRow = 3;
+    for (int i = 0; i < static_cast<int>(demoCards.size()); ++i) {
+      const DemoSceneCard& card = demoCards[i];
+      if (i % kCardsPerRow != 0) ImGui::SameLine(0.0f, 16.0f);
+      ImGui::PushID(i);
+      ImGui::BeginGroup();
+      if (card.thumbnailTexture != 0) {
+        // Offscreen renders come out bottom-up; flip the V axis.
+        ImGui::Image(static_cast<ImTextureID>(static_cast<std::uintptr_t>(card.thumbnailTexture)),
+                     ImVec2(kCardWidth, kThumbHeight), ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
+      } else {
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            p, ImVec2(p.x + kCardWidth, p.y + kThumbHeight), IM_COL32(40, 44, 52, 255));
+        ImGui::Dummy(ImVec2(kCardWidth, kThumbHeight));
+      }
+      if (ImGui::Button(card.name.c_str(), ImVec2(kCardWidth, 40.0f))) {
+        fired = Event::SelectScene;
+        if (selectedDemoScene) *selectedDemoScene = i;
+      }
+      ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + kCardWidth);
+      ImGui::TextUnformatted(card.description.c_str());
+      ImGui::PopTextWrapPos();
+      ImGui::EndGroup();
+      ImGui::PopID();
+    }
+    if (demoCards.empty()) ImGui::TextUnformatted("(no demo scenes registered)");
     ImGui::Spacing();
     if (ImGui::Button("Back", ImVec2(100.0f, 0.0f))) fired = Event::Back;
     ImGui::End();

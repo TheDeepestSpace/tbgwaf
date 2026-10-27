@@ -66,7 +66,25 @@ set(GAME_LOGIC_SOURCES
   src/game/Visibility.cpp
   src/game/GameLogic.cpp
   src/game/TurnTimeline.cpp
+  src/game/ReproLog.cpp
+  src/game/DemoScenes.cpp
 )
+
+# Demo-scene repro logs (issue #240) record which build made them. Resolved
+# at configure time (git short hash, or "unknown" outside a checkout) and
+# compiled into ReproLog.cpp only, so a new commit doesn't rebuild the world.
+execute_process(
+  COMMAND git rev-parse --short HEAD
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  OUTPUT_VARIABLE TBGWAF_BUILD_COMMIT
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+)
+if(NOT TBGWAF_BUILD_COMMIT)
+  set(TBGWAF_BUILD_COMMIT "unknown")
+endif()
+set_source_files_properties(src/game/ReproLog.cpp PROPERTIES
+  COMPILE_DEFINITIONS "TBGWAF_BUILD_COMMIT=\"${TBGWAF_BUILD_COMMIT}\"")
 
 add_library(tactics_logic STATIC ${GAME_LOGIC_SOURCES})
 target_include_directories(tactics_logic PUBLIC src)
@@ -281,6 +299,17 @@ else()
   target_link_libraries(tactics_ragdoll_tests PRIVATE tactics_logic glm::glm)
   add_test(NAME ragdoll_tests COMMAND tactics_ragdoll_tests)
 
+  # Demo-scene repro logs (issue #240): record -> replay equality, log
+  # format round-trip, and the headless replay CLI.
+  add_executable(tactics_repro_log_tests tests/repro_log_tests.cpp)
+  target_include_directories(tactics_repro_log_tests PRIVATE src)
+  target_link_libraries(tactics_repro_log_tests PRIVATE tactics_logic)
+  add_test(NAME repro_log_tests COMMAND tactics_repro_log_tests)
+
+  add_executable(tactics_repro_replay src/tools/repro_replay_main.cpp)
+  target_include_directories(tactics_repro_replay PRIVATE src)
+  target_link_libraries(tactics_repro_replay PRIVATE tactics_logic)
+
   # YAML gameplay scenarios (issue #14): a native-only, test-only dependency,
   # so it's kept out of tactics_logic (which the WASM build also links) to
   # avoid cross-compiling yaml-cpp for Emscripten.
@@ -403,4 +432,23 @@ else()
     TIMEOUT 30
     ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11;TBGWAF_SMOKE_TEST=1"
   )
+  # Demo-scenes smoke (issue #240): the app walks Splash -> Game Mode -> Demo
+  # Scenes (rendering the card thumbnails) -> the first scene, records the
+  # session, writes the log on exit; the headless CLI then replays it and
+  # checks every recorded state hash.
+  if(XVFB_RUN_EXECUTABLE)
+    add_test(
+      NAME demo_smoke_test
+      COMMAND ${CMAKE_COMMAND}
+              -DXVFB=${XVFB_RUN_EXECUTABLE}
+              -DAPP=$<TARGET_FILE:tactics_app>
+              -DREPLAY=$<TARGET_FILE:tactics_repro_replay>
+              -DLOG=${CMAKE_BINARY_DIR}/demo_smoke_repro.jsonl
+              -P ${CMAKE_SOURCE_DIR}/scripts/demo_smoke_test.cmake
+    )
+    set_tests_properties(demo_smoke_test PROPERTIES
+      TIMEOUT 60
+      ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11;TBGWAF_SMOKE_TEST=1;TBGWAF_SMOKE_DEMO=1;TBGWAF_REPRO_OUT=${CMAKE_BINARY_DIR}/demo_smoke_repro.jsonl"
+    )
+  endif()
 endif()

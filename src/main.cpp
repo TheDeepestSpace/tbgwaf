@@ -16,6 +16,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
+#include <fstream>
 #include <limits>
 #include <optional>
 #include <random>
@@ -24,10 +26,12 @@
 #include <vector>
 
 #include "ai/JevPlanner.h"
+#include "game/DemoScenes.h"
 #include "game/GameLogic.h"
 #include "game/Geometry.h"
 #include "game/MapGenerator.h"
 #include "game/Raycast.h"
+#include "game/ReproLog.h"
 #include "game/TurnTimeline.h"
 #include "game/Types.h"
 #include "game/Visibility.h"
@@ -153,6 +157,19 @@ EM_JS(void, tbgwaf_report_match, (const char* phase, int round, int winner), {
 });
 EM_JS(void, tbgwaf_ai_local_error, (const char* message), {
   if (Module.tbgwafReportAiError) Module.tbgwafReportAiError(UTF8ToString(message));
+});
+// Demo-scene repro log download (issue #240): hands the text to the browser
+// as a file download.
+EM_JS(void, tbgwaf_download_text, (const char* filename, const char* text), {
+  const blob = new Blob([UTF8ToString(text)], {type: "application/x-ndjson"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = UTF8ToString(filename);
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 #endif
 
@@ -280,6 +297,123 @@ int PaneForX(int x, int paneCount, int windowWidth) {
   return paneCount == 1 || x < windowWidth / 2 ? 0 : 1;
 }
 
+// Demo-scene card thumbnails (issue #240): each scene is rendered once,
+// offscreen, through the same SceneRenderer pass as gameplay (no fog, no
+// overlays) into a texture the Demo Scenes screen shows. Generated at
+// runtime so a new registry entry needs no asset.
+constexpr int kThumbnailWidth = 320;
+constexpr int kThumbnailHeight = 180;
+
+std::vector<tactics::ui::DemoSceneCard> RenderDemoThumbnails(gfx::SceneRenderer& renderer) {
+  std::vector<tactics::ui::DemoSceneCard> cards;
+  for (const tactics::DemoScene& demo : tactics::DemoScenes()) {
+    tactics::ui::DemoSceneCard card;
+    card.name = demo.name;
+    card.description = demo.description;
+    card.thumbnailWidth = kThumbnailWidth;
+    card.thumbnailHeight = kThumbnailHeight;
+
+    GLuint texture = 0, fbo = 0, depthStencil = 0;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kThumbnailWidth, kThumbnailHeight, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    // The scene pass uses depth and stencil.
+    glGenRenderbuffers(1, &depthStencil);
+    glBindRenderbuffer(GL_RENDERBUFFER, depthStencil);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, kThumbnailWidth, kThumbnailHeight);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
+                              depthStencil);
+    const bool complete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (complete) {
+      GameLogic preview(demo.build());
+      preview.UpdateSightingMemory(0.0f);
+      gfx::OrbitCamera camera;
+      camera.FitToExtent(preview.GetScene().mapHalfExtent);
+      camera.target = glm::vec3(demo.cameraTargetX, 0.0f, demo.cameraTargetZ);
+      camera.Zoom(demo.cameraZoom);
+      camera.Update(1.0e3f);
+      const gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(preview, Team::Blue, std::nullopt);
+      renderer.RenderPane(preview, Team::Blue, /*fogActive=*/false, TeamVisibility{}, camera, 0, 0,
+                          kThumbnailWidth, kThumbnailHeight, overlays, fbo);
+      card.thumbnailTexture = texture;
+#ifndef __EMSCRIPTEN__
+      // TBGWAF_THUMBNAIL_DUMP=<dir>: write each card's render as <dir>/<id>.ppm
+      // (debug aid for the offscreen path, which no golden covers).
+      if (const char* dumpDir = std::getenv("TBGWAF_THUMBNAIL_DUMP")) {
+        std::vector<unsigned char> pixels(static_cast<size_t>(kThumbnailWidth) * kThumbnailHeight * 4);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glReadPixels(0, 0, kThumbnailWidth, kThumbnailHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        std::ofstream out(std::string(dumpDir) + "/" + demo.id + ".ppm", std::ios::binary);
+        out << "P6\n" << kThumbnailWidth << ' ' << kThumbnailHeight << "\n255\n";
+        for (int y = kThumbnailHeight - 1; y >= 0; --y) {  // GL rows are bottom-up.
+          for (int x = 0; x < kThumbnailWidth; ++x) {
+            const unsigned char* p = &pixels[(static_cast<size_t>(y) * kThumbnailWidth + x) * 4];
+            out.write(reinterpret_cast<const char*>(p), 3);
+          }
+        }
+      }
+#endif
+    } else {
+      std::fprintf(stderr, "demo thumbnail framebuffer incomplete for %s\n", demo.id);
+      glDeleteTextures(1, &texture);
+    }
+    // The texture outlives the FBO; it is kept for the session.
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteRenderbuffers(1, &depthStencil);
+    cards.push_back(std::move(card));
+  }
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  return cards;
+}
+
+std::string UtcTimestamp(bool forFilename) {
+  const std::time_t now = std::time(nullptr);
+  char buf[32];
+  std::tm tm{};
+#ifdef _WIN32
+  gmtime_s(&tm, &now);
+#else
+  gmtime_r(&now, &tm);
+#endif
+  std::strftime(buf, sizeof buf, forFilename ? "%Y%m%d-%H%M%S" : "%Y-%m-%dT%H:%M:%SZ", &tm);
+  return buf;
+}
+
+// Hands the session's repro log to the user: a browser download on the web,
+// a file (TBGWAF_REPRO_DIR, else the working directory) natively. Returns
+// where it went, for the panel.
+std::string DownloadReproLog(tactics::ReproRecorder& recorder, const std::string& sceneId) {
+  const std::string text = recorder.Text();
+  const std::string filename = "repro-" + sceneId + "-" + UtcTimestamp(true) + ".jsonl";
+#ifdef __EMSCRIPTEN__
+  tbgwaf_download_text(filename.c_str(), text.c_str());
+  return filename;
+#else
+  std::string path = filename;
+  if (const char* dir = std::getenv("TBGWAF_REPRO_DIR")) path = std::string(dir) + "/" + filename;
+  std::ofstream out(path, std::ios::binary);
+  out << text;
+  if (!out) {
+    std::fprintf(stderr, "could not write repro log %s\n", path.c_str());
+    return "";
+  }
+  std::fprintf(stderr, "repro log written to %s\n", path.c_str());
+  return path;
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -400,7 +534,12 @@ int main() {
 #ifdef __EMSCRIPTEN__
   bool ctfFromPreview = false;
 #endif
-  auto makeMap = [&mapSeed, &mapType, &ctfMode, &makeBaseMap]() {
+  // Demo scenes (issue #240): the registry index of the scene in play (unset
+  // in a regular/CTF match). While one is in play makeMap() yields that
+  // scene, so every New Match path rebuilds it.
+  std::optional<int> demoSceneIndex;
+  auto makeMap = [&mapSeed, &mapType, &ctfMode, &makeBaseMap, &demoSceneIndex]() {
+    if (demoSceneIndex) return tactics::DemoScenes()[*demoSceneIndex].build();
     tactics::Scene scene = makeBaseMap(mapSeed, mapType);
     tactics::ApplySpawnHints(&scene);
     scene.flag.enabled = ctfMode;
@@ -409,6 +548,26 @@ int main() {
   GameLogic game(makeMap());
   // Start zoomed out far enough that the whole map is in view.
   for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
+
+  // Demo scenes (issue #240): the session recorder, the card thumbnails
+  // (rendered the first time the Demo Scenes screen shows) and the panel's
+  // status line.
+  int selectedDemoScene = 0;
+  tactics::ReproRecorder reproRecorder([] { return static_cast<uint64_t>(SDL_GetTicks()); });
+  std::vector<tactics::ui::DemoSceneCard> demoCards;
+  bool demoCardsRendered = false;
+  std::string demoStatus;
+  auto demoScene = [&]() -> const tactics::DemoScene* {
+    return demoSceneIndex ? &tactics::DemoScenes()[*demoSceneIndex] : nullptr;
+  };
+  auto fitCamerasToDemo = [&](const tactics::DemoScene& demo) {
+    for (auto& camera : cameras) {
+      camera.FitToExtent(game.GetScene().mapHalfExtent);
+      camera.target = glm::vec3(demo.cameraTargetX, 0.0f, demo.cameraTargetZ);
+      camera.Zoom(demo.cameraZoom);
+      camera.Update(1.0e3f);
+    }
+  };
 
   // Turn timeline (issue #143): this client's locally recorded match history
   // plus the view-only replay controller. One shared pair serves both panes
@@ -419,6 +578,25 @@ int main() {
   tactics::TurnTimeline timeline;
   timeline.Reset(game);
   tactics::TimelinePlayback timelinePlayback;
+
+  // Enters demo scene `index`: fresh game on the scene with its seed, a new
+  // recording, cameras framed as the card was.
+  auto enterDemoScene = [&](int index) {
+    demoSceneIndex = index;
+    const tactics::DemoScene& demo = tactics::DemoScenes()[index];
+    tactics::InitDemoGame(demo, &game);
+    reproRecorder.Start(game, demo.id, demo.seed, UtcTimestamp(false));
+    game.SetInputRecorder(&reproRecorder);
+    timeline.Reset(game);
+    timelinePlayback.Reset();
+    fitCamerasToDemo(demo);
+    demoStatus.clear();
+  };
+  auto leaveDemoScene = [&]() {
+    game.SetInputRecorder(nullptr);
+    demoSceneIndex.reset();
+    demoStatus.clear();
+  };
 
   // Navmesh boundary debug overlay ('N' toggles it): a full-map navmesh
   // built on first use (GameLogic's own is windowed per move, so the debug
@@ -490,12 +668,64 @@ int main() {
   // Headless CI (xvfb) has no real user input; bound the run so the smoke
   // test still exits on its own after exercising a few frames.
   const bool isSmokeTest = std::getenv("TBGWAF_SMOKE_TEST") != nullptr;
+  // TBGWAF_SMOKE_DEMO=1 walks into the first demo scene instead, plays a
+  // scripted round there, and TBGWAF_REPRO_OUT=<path> writes the recorded
+  // log on exit (ctest demo_smoke_test replays it; issue #240).
+  const bool isSmokeDemo = isSmokeTest && std::getenv("TBGWAF_SMOKE_DEMO") != nullptr;
   int frameCount = 0;
-  constexpr int kSmokeTestMaxFrames = 60;
+  const int kSmokeTestMaxFrames = isSmokeDemo ? 240 : 60;
   Uint32 lastFrameTicks = SDL_GetTicks();
   // App-level screen (Splash -> Map Select -> gameplay), generated from
   // flow/app_flow.yaml.
   tbgwaf_flow::State screen = tbgwaf_flow::kInitialState;
+#ifndef __EMSCRIPTEN__
+  // TBGWAF_REPRO_LOG=<file>: replay a recorded demo-scene session into the
+  // live game (the turn timeline records it, so it can be scrubbed) and open
+  // straight on the result. View-only: the loaded session is not re-recorded.
+  if (const char* logPath = std::getenv("TBGWAF_REPRO_LOG")) {
+    std::ifstream in(logPath, std::ios::binary);
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    if (!in) {
+      std::fprintf(stderr, "TBGWAF_REPRO_LOG: cannot read %s\n", logPath);
+      return 1;
+    }
+    // The same steps as ReplayDemoLog, with the timeline restarted on the
+    // scene's initial state so its Start tick is the session's.
+    tactics::ReproLog parsed;
+    std::string parseError;
+    if (!tactics::ParseReproLog(buffer.str(), &parsed, &parseError)) {
+      std::fprintf(stderr, "TBGWAF_REPRO_LOG: %s\n", parseError.c_str());
+      return 1;
+    }
+    for (int i = 0; i < static_cast<int>(tactics::DemoScenes().size()); ++i) {
+      if (parsed.header.scene == tactics::DemoScenes()[i].id) demoSceneIndex = i;
+    }
+    if (!demoSceneIndex) {
+      std::fprintf(stderr, "TBGWAF_REPRO_LOG: unknown demo scene '%s'\n",
+                   parsed.header.scene.c_str());
+      return 1;
+    }
+    tactics::InitDemoGame(*demoScene(), &game);
+    if (parsed.header.seed != demoScene()->seed) game.SeedShotRng(parsed.header.seed);
+    timeline.Reset(game);
+    const tactics::ReplayReport report = tactics::ReplayReproLog(
+        parsed, demoScene()->build(), &game, [&](const tactics::ReproEntry&, float dt) {
+          game.UpdateSightingMemory(dt);
+          timeline.Observe(game, dt);
+        });
+    if (!report.error.empty()) {
+      std::fprintf(stderr, "TBGWAF_REPRO_LOG: %s\n", report.error.c_str());
+      return 1;
+    }
+    timeline.Observe(game, 0.0f);
+    demoStatus = std::string("Loaded ") + logPath + ": " +
+                 std::to_string(report.mismatches.size()) + " hash mismatch(es)";
+    std::fprintf(stderr, "%s\n", demoStatus.c_str());
+    if (demoScene()) fitCamerasToDemo(*demoScene());
+    screen = tbgwaf_flow::State::Gameplay;
+  }
+#endif
   // Local-only debug panel state (defaults: FOV and shadows on, FPS shown).
   gfx::RenderDebugOptions debugOptions;
   bool showFps = true;
@@ -722,8 +952,12 @@ int main() {
     ImGui::NewFrame();
 
     if (screen != tbgwaf_flow::State::Gameplay) {
-      std::optional<tbgwaf_flow::Event> flowEvent =
-          tactics::ui::DrawMenu(screen, windowWidth, windowHeight, &mapSeed);
+      if (screen == tbgwaf_flow::State::DemoScenes && !demoCardsRendered) {
+        demoCards = RenderDemoThumbnails(renderer);
+        demoCardsRendered = true;
+      }
+      std::optional<tbgwaf_flow::Event> flowEvent = tactics::ui::DrawMenu(
+          screen, windowWidth, windowHeight, &mapSeed, demoCards, &selectedDemoScene);
       // Headless smoke run: walk the menu automatically so gameplay is exercised.
       bool autoEnterGameplay = isSmokeTest;
       bool autoCtf = false;
@@ -736,7 +970,13 @@ int main() {
         switch (screen) {
           case tbgwaf_flow::State::Splash: flowEvent = tbgwaf_flow::Event::NewGame; break;
           case tbgwaf_flow::State::GameMode:
-            flowEvent = autoCtf ? tbgwaf_flow::Event::SelectCtf : tbgwaf_flow::Event::SelectRegular;
+            flowEvent = isSmokeDemo ? tbgwaf_flow::Event::SelectDemo
+                        : autoCtf   ? tbgwaf_flow::Event::SelectCtf
+                                    : tbgwaf_flow::Event::SelectRegular;
+            break;
+          case tbgwaf_flow::State::DemoScenes:
+            selectedDemoScene = 0;
+            flowEvent = tbgwaf_flow::Event::SelectScene;
             break;
           default: flowEvent = tbgwaf_flow::Event::SelectUrban; break;
         }
@@ -745,6 +985,15 @@ int main() {
         if (*flowEvent == tbgwaf_flow::Event::SelectRegular ||
             *flowEvent == tbgwaf_flow::Event::SelectCtf) {
           ctfMode = *flowEvent == tbgwaf_flow::Event::SelectCtf;
+          leaveDemoScene();
+        }
+        if (*flowEvent == tbgwaf_flow::Event::SelectScene) {
+          if (selectedDemoScene >= 0 &&
+              selectedDemoScene < static_cast<int>(tactics::DemoScenes().size())) {
+            enterDemoScene(selectedDemoScene);
+          } else {
+            flowEvent.reset();
+          }
         }
         if (*flowEvent == tbgwaf_flow::Event::SelectUrban ||
             *flowEvent == tbgwaf_flow::Event::SelectHills) {
@@ -755,7 +1004,7 @@ int main() {
           timelinePlayback.Reset();
           for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
         }
-        screen = tbgwaf_flow::Next(screen, *flowEvent);
+        if (flowEvent) screen = tbgwaf_flow::Next(screen, *flowEvent);
         lastFrameTicks = SDL_GetTicks();
       }
       glViewport(0, 0, windowWidth, windowHeight);
@@ -859,6 +1108,26 @@ int main() {
       autoCommitHold = 0.0f;
     }
 #endif
+    // Demo smoke (issue #240): plan the scene's scripted round through the
+    // same input API a player's clicks reach (all recorded), then commit.
+    if (isSmokeDemo && demoSceneIndex && frameCount == 10 &&
+        game.Mode() == InputMode::AwaitingSelection) {
+      game.ClickUnit(2, Team::Red);
+      game.ChooseMove();
+      game.ClickGround(glm::vec3(5.0f, 0.0f, 6.0f), Team::Red);
+      game.FinishMovePlan();
+      game.ClickUnit(1, Team::Blue);
+      game.ChooseShoot();
+      game.SetPlannedShotCount(5, Team::Blue);
+      game.PlaceAimPoint(glm::vec3(5.0f, 1.0f, -2.0f), Team::Blue);
+      game.ConfirmAim(Team::Blue);
+      game.ClickUnit(0, Team::Blue);
+      game.ChoosePass();
+      game.ClickUnit(3, Team::Red);
+      game.ChoosePass();
+      game.CommitRound();
+    }
+
     // Turn timeline (issue #143): record the local game's history and
     // advance any replay in progress. While a replay is viewed, the panes
     // render `displayGame` (the replay instance) and game-action input is
@@ -1085,6 +1354,32 @@ int main() {
                        debugOptions.disableOcclusionFade, showFps,
                        smoothedFps, frameMs, fovMs, frameStats,
                        roundPanelBottom + 6.0f);
+    // Demo scene panel (issue #240): which scene is in play, Download log
+    // (the recording so far -- the simulator's; a web follower pane records
+    // nothing), and the way back to the card list.
+    if (const tactics::DemoScene* demo = demoScene()) {
+      ImGui::SetNextWindowPos(ImVec2(windowWidth * 0.5f, 10.0f), ImGuiCond_Always,
+                              ImVec2(0.5f, 0.0f));
+      ImGui::Begin("Demo scene", nullptr,
+                   ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                       ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                       ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar);
+      ImGui::Text("Demo scene: %s", demo->name);
+      ImGui::SameLine();
+      if (isSimulator && reproRecorder.Started()) {
+        if (ImGui::Button("Download log")) {
+          const std::string where = DownloadReproLog(reproRecorder, demo->id);
+          demoStatus = where.empty() ? "Download failed" : "Saved " + where;
+        }
+        ImGui::SameLine();
+      }
+      if (ImGui::Button("Scenes")) {
+        leaveDemoScene();
+        screen = tbgwaf_flow::Next(screen, tbgwaf_flow::Event::ExitDemo);
+      }
+      if (!demoStatus.empty()) ImGui::TextUnformatted(demoStatus.c_str());
+      ImGui::End();
+    }
 
     // --- Render: one shadow pass + one color pass per pane, both inside
     // SceneRenderer::RenderPane. Selection/move-preview overlays belong to
@@ -1139,6 +1434,15 @@ int main() {
     if (isSmokeTest && ++frameCount >= kSmokeTestMaxFrames) {
       quit = true;
     }
+#ifndef __EMSCRIPTEN__
+    if (quit && reproRecorder.Started()) {
+      if (const char* outPath = std::getenv("TBGWAF_REPRO_OUT")) {
+        std::ofstream out(outPath, std::ios::binary);
+        out << reproRecorder.Text();
+        std::fprintf(stderr, "repro log written to %s\n", outPath);
+      }
+    }
+#endif
 
 #ifdef __EMSCRIPTEN__
     if (quit) emscripten_cancel_main_loop();

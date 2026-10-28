@@ -125,7 +125,6 @@ class SceneRenderer {
   bool Init();
   void Destroy();
 
-  const AmbientOcclusionVolume& ThermalBake() const { return thermalOcclusion_.WorldBake(); }
 
   void SetFovOverlayMode(FovOverlayMode mode) { fovOverlayMode_ = mode; }
   FovOverlayMode GetFovOverlayMode() const { return fovOverlayMode_; }

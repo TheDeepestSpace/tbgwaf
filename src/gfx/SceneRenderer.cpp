@@ -1,5 +1,4 @@
 #include "gfx/SceneRenderer.h"
-#include "gfx/SceneGeometry.h"
 
 #include "gfx/Ragdoll.h"
 
@@ -224,7 +223,7 @@ uniform int uThermalMaterial;  // ThermalMaterial; only figures use uColor.
 layout(location = 0) out vec4 FragColor;
 // Thermal G-buffer normal. Alpha 1 = grayscale heat surface; alpha 0 = a
 // surface drawn in its own color (figures), which the AO composite leaves
-// chromatic and never self-shades from the world bake.
+// chromatic.
 layout(location = 1) out vec4 WorldNormal;
 
 // Integer hash avoids sin()-dependent grain differences across GL drivers.
@@ -2599,52 +2598,6 @@ std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team,
 
 }  // namespace
 
-// PR #178: the ambient volume uses the exact FOV/terrain geometry without
-// changing builders or layouts, including the open space below deck slabs.
-void BuildWorldSceneMeshes(const tactics::Scene& scene, LitTriangleMesh* objects,
-                          LitTriangleMesh* ground, LitTriangleMesh* raised) {
-  BuildFovSceneMesh(scene, objects);
-  if (!scene.ground.Empty()) {
-    BuildTerrainMesh(scene.ground, scene.terrainWalls, scene.terrainCutouts, ground, raised);
-  } else {
-    LitVertices vertices;
-    std::vector<GLuint> indices;
-    const float e = scene.mapHalfExtent;
-    AppendBox({{-e, -0.05f, -e}, {e, 0.0f, e}}, &vertices, &indices);
-    ground->SetMesh(vertices, indices);
-    raised->SetMesh({}, {});
-  }
-}
-
-uint64_t WorldSceneFingerprint(const tactics::Scene& scene) {
-  uint64_t h = FovSceneFingerprint(scene);
-  const auto mix = [&h](const auto& value) {
-    const auto* p = reinterpret_cast<const unsigned char*>(&value);
-    for (size_t i = 0; i < sizeof(value); ++i) h = (h ^ p[i]) * 1099511628211ull;
-  };
-  const auto mixVector = [&](const auto& values) {
-    mix(values.size());
-    for (const auto& value : values) mix(value);
-  };
-  // Include every additional geometry input (never units, camera or pointers).
-  mix(scene.mapHalfExtent);
-  mix(scene.ground.minX); mix(scene.ground.minZ); mix(scene.ground.step);
-  mix(scene.ground.nx); mix(scene.ground.nz); mixVector(scene.ground.heights);
-  mix(scene.terrainWalls.size());
-  for (const auto& wall : scene.terrainWalls) {
-    mix(wall.lineOrigin); mix(wall.raisedNormal); mix(wall.rise);
-  }
-  mix(scene.terrainCutouts.size());
-  for (const auto& cutout : scene.terrainCutouts) mixVector(cutout);
-  for (const auto& obstacle : scene.obstacles) mix(obstacle.navOnly);
-  for (const auto& stair : scene.terrainStairs) mix(stair.base);
-  for (const auto& building : scene.buildings) mix(building.kind);
-  for (const auto& opening : scene.facadeOpenings) {
-    mix(opening.kind); mix(opening.building);
-  }
-  return h;
-}
-
 bool IsUnitVisibleForRender(const Unit& unit, Team viewingTeam, bool fogActive,
                             const TeamVisibility& visibility, const tactics::Scene& scene) {
   if (unit.team == viewingTeam) return true;
@@ -3507,26 +3460,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
 
   if (thermalAo) {
-    // PR #178: live figure-to-map contact only for this pane's visible units.
-    // These spheres never enter the static bake/key (hidden enemies cast nothing).
-    std::vector<glm::vec4> contacts;
-    if (debug.thermalAo.baked) {
-      for (const Unit& unit : game.GetScene().units) {
-        if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
-        if (contacts.size() >= 12) break;
-        glm::vec3 hips = unit.position + glm::vec3(0.0f, 0.7f, 0.0f);
-        glm::vec3 chest = unit.position + glm::vec3(0.0f, 1.15f, 0.0f);
-        if (RagdollActive(unit)) {
-          const auto pose = SampleRagdoll(unit);
-          hips = pose[kRagPelvis];
-          chest = glm::mix(hips, pose[kRagNeck], 0.7f);
-        }
-        contacts.emplace_back(hips, 0.25f);
-        contacts.emplace_back(chest, 0.32f);
-      }
-    }
     thermalOcclusion_.Composite(targetFramebuffer, x, y, view, proj, debug.thermalBlackHot,
-                                debug.thermalAo, &game.GetScene(), &depthShader_, contacts);
+                                debug.thermalAo);
     litShader_.Use();
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);

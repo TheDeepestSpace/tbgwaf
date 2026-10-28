@@ -459,7 +459,6 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
                     float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
-                    bool& aoBaked,
                     bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,
                     float fovMs, const gfx::RenderFrameStats& stats, float top) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
@@ -469,7 +468,7 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove);
   ImGui::Checkbox("Disable FOV cones", &disableFov);
   ImGui::Checkbox("Disable shadows", &disableShadows);
-  ImGui::Checkbox("Thermal view", &thermal);
+  ImGui::Checkbox("AO", &thermal);
   if (thermal) {
     // Polarity toggle, like the white-hot/black-hot switch on a real FLIR.
     ImGui::SameLine();
@@ -477,32 +476,17 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
     // Team FOV tint opacity over the thermal world (normal view: 0.15).
     ImGui::SetNextItemWidth(130.0f);
     ImGui::SliderFloat("FOV opacity", &thermalFovAlpha, 0.0f, 1.0f, "%.2f");
-    // Contact-shading tuning (PR #178 review): radius is the world-space
-    // reach of the shadow, strength its darkness, quality the samples per
-    // ray (or 16 directions/step when baked); softness is live-mode blur.
-    // PR #178: keep editing values separate from the applied bake settings.
-    // Commit expensive sliders on release (including keyboard/text edits).
-    static float editedRadius = aoRadius;
-    static int editedQuality = aoQuality;
-    static bool editingRadius = false, editingQuality = false;
-    if (!editingRadius) editedRadius = aoRadius;
-    if (!editingQuality) editedQuality = aoQuality;
+    // Contact-shading tuning: radius is the world-space reach of the
+    // shadow, strength its darkness, quality the samples per ray, softness
+    // the blur half-width.
     ImGui::SetNextItemWidth(130.0f);
-    ImGui::SliderFloat("AO radius", &editedRadius, 0.5f, 6.0f, "%.1f");
-    editingRadius = ImGui::IsItemActive();
-    if (!aoBaked || ImGui::IsItemDeactivatedAfterEdit()) aoRadius = editedRadius;
+    ImGui::SliderFloat("AO radius", &aoRadius, 0.5f, 6.0f, "%.1f");
     ImGui::SetNextItemWidth(130.0f);
     ImGui::SliderFloat("AO strength", &aoStrength, 0.0f, 10.0f, "%.1f");
     ImGui::SetNextItemWidth(130.0f);
-    ImGui::SliderInt("AO quality", &editedQuality, 1, 20);
-    editingQuality = ImGui::IsItemActive();
-    if (!aoBaked || ImGui::IsItemDeactivatedAfterEdit()) aoQuality = editedQuality;
+    ImGui::SliderInt("AO quality", &aoQuality, 1, 20);
     ImGui::SetNextItemWidth(130.0f);
-    ImGui::BeginDisabled(aoBaked);
     ImGui::SliderInt("AO softness", &aoSoftness, 0, 10);
-    ImGui::EndDisabled();
-    // Heavy settings: look shading up from a once-per-map world bake.
-    ImGui::Checkbox("Baked thermal", &aoBaked);
   }
   ImGui::Checkbox("Disable occlusion fade", &disableOcclusionFade);
   ImGui::Checkbox("Show FPS", &showFps);

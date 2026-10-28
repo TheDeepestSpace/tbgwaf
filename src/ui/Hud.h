@@ -125,13 +125,11 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 // draw-call/vertex/triangle counters for the frame.
 // The AO sliders (shown while the thermal view is on) tune the thermal
 // contact shading live: reach in world units, darkening strength, samples
-// per ray, and blur half-width (see gfx::AmbientOcclusionSettings). "Baked
-// thermal" caches the occlusion pass until the camera or scene changes.
+// per ray, and blur half-width (see gfx::AmbientOcclusionSettings).
 // `thermalFovAlpha` is the FOV tint opacity used while the thermal view is on.
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
                     float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
-                    bool& aoBaked,
                     bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,
                     float fovMs, const gfx::RenderFrameStats& stats, float top);
 

@@ -525,7 +525,8 @@ void TestJevOffersWaitOnlyWithContact() {
 // two buildings; the navmesh blocks that ground, so Red had no move at all
 // and sat at the start. Spawn placement must keep figures out of it.
 void TestSpawnHintsAvoidGroundUnderLowDecks() {
-  Scene scene = tactics::GenerateUrbanMap(7111);
+ for (unsigned seed : {7111u, 8000u}) {
+  Scene scene = tactics::GenerateUrbanMap(seed);
   tactics::ApplySpawnHints(&scene);
   scene.flag.enabled = true;
   GameLogic game(scene);
@@ -542,6 +543,7 @@ void TestSpawnHintsAvoidGroundUnderLowDecks() {
       CHECK(canMove);
     }
   }
+ }
 }
 
 int main() {

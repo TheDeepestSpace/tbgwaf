@@ -114,11 +114,15 @@ bool IsFreeSpot(const Scene& scene, float x, float z) {
   constexpr float kFootSlack = 0.3f;
   const float groundY = scene.ground.HeightAt(x, z);
   for (const WalkSurface& surface : scene.walkSurfaces) {
-    for (const glm::vec2 d : {glm::vec2(0.0f), glm::vec2(m, 0.0f), glm::vec2(-m, 0.0f),
-                              glm::vec2(0.0f, m), glm::vec2(0.0f, -m)}) {
-      if (!SurfaceContainsXZ(surface, x + d.x, z + d.y)) continue;
-      const float clearance = SurfaceHeightAt(surface, x + d.x, z + d.y) - groundY;
-      if (clearance > kFootSlack && clearance < constants::kMinDeckHeadroom) return false;
+    // The navmesh pads the blocked band by the agent radius, so probe a grid
+    // over the whole padded square (slightly oversized), not just its edges.
+    for (int ix = -3; ix <= 3; ++ix) {
+      for (int iz = -3; iz <= 3; ++iz) {
+        const float px = x + ix * m * 0.4f, pz = z + iz * m * 0.4f;
+        if (!SurfaceContainsXZ(surface, px, pz)) continue;
+        const float clearance = SurfaceHeightAt(surface, px, pz) - groundY;
+        if (clearance > kFootSlack && clearance < constants::kMinDeckHeadroom) return false;
+      }
     }
   }
   return true;

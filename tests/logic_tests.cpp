@@ -3239,6 +3239,20 @@ void TestKnockdownOnZiplineRecordsDrop() {
   CHECK(found);
 }
 
+// A collapsed figure no longer fills its standing box: shots pass above it.
+void TestFallenBoundsCollapse() {
+  Unit u;
+  u.position = glm::vec3(0.0f, 3.0f, 0.0f);
+  const float standing = u.Bounds().max.y - u.Bounds().min.y;
+  u.alive = false;
+  u.knockdownElapsed = 0.0f;
+  u.knockdownDrop = 3.0f;
+  CHECK(std::abs((u.Bounds().max.y - u.Bounds().min.y) - standing) < 1e-4f);
+  u.knockdownElapsed = 1.0f;
+  CHECK(u.Bounds().max.y < 0.5f);  // Lying on the ground, not on the cable.
+  CHECK(u.Bounds().min.y < 0.01f);
+}
+
 // A fall cut short by the end of a round freezes through planning and
 // resumes (from the same elapsed time) when the next round executes.
 void TestKnockdownFreezesBetweenRounds() {
@@ -3455,6 +3469,7 @@ int main() {
   TestKnockdownFreezesBetweenRounds();
   TestSecondHitOnFallingBodyIsRecorded();
   TestKnockdownOnZiplineRecordsDrop();
+  TestFallenBoundsCollapse();
   TestBurstPlanSurvivesSnapshotAndClampsOnImport();
   TestReachFieldManySurfacesPerformance();
 

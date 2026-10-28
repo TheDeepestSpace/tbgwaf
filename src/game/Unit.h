@@ -181,7 +181,18 @@ struct Unit {
   AABB Bounds() const {
     glm::vec3 halfExtents(constants::kUnitHalfWidth, 0.0f, constants::kUnitHalfWidth);
     glm::vec3 base = position - halfExtents;
-    glm::vec3 top = position + halfExtents + glm::vec3(0.0f, constants::kUnitHeight, 0.0f);
+    float height = constants::kUnitHeight;
+    if (!alive && knockdownElapsed >= 0.0f) {
+      // A downed figure collapses: the box sinks to a lying thickness over the
+      // tip-over (and to the ground, for a rider shot off the cable) so shots
+      // pass through the air it no longer fills.
+      constexpr float kLyingHeight = 0.3f;
+      const float s = glm::clamp(knockdownElapsed / constants::kKnockdownDuration, 0.0f, 1.0f);
+      height = glm::mix(constants::kUnitHeight, kLyingHeight, s);
+      base.y -= knockdownDrop;
+    }
+    glm::vec3 top = glm::vec3(position.x, base.y, position.z) + halfExtents +
+                    glm::vec3(0.0f, height, 0.0f);
     return AABB{base, top};
   }
 };

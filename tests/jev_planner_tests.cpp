@@ -353,6 +353,48 @@ void TestJevMovesMakeProgressAcrossTerrainLevels() {
   CHECK(sampled > 0);
 }
 
+// Default seed 7 starts Blue on the small high plateau shown in issue #245.
+// Its usable exit is a road graded through the cliff, which is part of the
+// heightfield/road rendering rather than Scene::walkSurfaces. The complete
+// route is longer than one move: first enter the corridor, then descend it.
+void TestJevFindsGradedRoadOffTerrainIsland() {
+  Scene scene = tactics::GenerateUrbanMap(7);
+  tactics::ApplySpawnHints(&scene);
+  GameLogic game(scene);
+  const auto request = BuildJevRequest(game, Team::Blue, 1);
+  CHECK(request.has_value());
+  Scene atRamp = scene;
+  for (int actorId : request->actorIds) {
+    const auto connector = std::find_if(
+        request->candidates.begin(), request->candidates.end(), [&](const auto& candidate) {
+          return candidate.actorId == actorId && candidate.kind == JevActionKind::Move &&
+                 candidate.id.find("connector_road_") != std::string::npos;
+        });
+    CHECK(connector != request->candidates.end());
+    if (connector != request->candidates.end()) {
+      auto unit = std::find_if(atRamp.units.begin(), atRamp.units.end(),
+                              [&](const Unit& u) { return u.id == actorId; });
+      unit->position = connector->destination;
+    }
+  }
+
+  GameLogic rampGame(atRamp);
+  const auto rampRequest = BuildJevRequest(rampGame, Team::Blue, 2);
+  CHECK(rampRequest.has_value());
+  for (int actorId : rampRequest->actorIds) {
+    const Unit* actor = rampGame.FindUnit(actorId);
+    bool foundDescent = false;
+    for (const auto& candidate : rampRequest->candidates) {
+      if (candidate.actorId != actorId || candidate.kind != JevActionKind::Move ||
+          candidate.id.find("connector_road_") == std::string::npos) {
+        continue;
+      }
+      foundDescent |= candidate.destination.y < actor->position.y - 3.0f;
+    }
+    CHECK(foundDescent);
+  }
+}
+
 int main() {
   TestIncrementalBuilderMatchesBlockingBuild();
   TestBoundedCandidatesUseNormalLegalPath();
@@ -366,6 +408,7 @@ int main() {
   TestCompleteAiVsAiMatchAndTerminalStop();
   TestJevMovesNeverCrossRampSlab();
   TestJevMovesMakeProgressAcrossTerrainLevels();
+  TestJevFindsGradedRoadOffTerrainIsland();
   if (failures == 0) {
     std::puts("All Jev planner scenarios passed.");
     return 0;

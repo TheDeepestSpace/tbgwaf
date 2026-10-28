@@ -17,6 +17,7 @@ constexpr int kMinGridCells = 32;
 constexpr int kMaxGridCells = 96;
 constexpr size_t kMaxListedObstacles = 48;
 constexpr float kMinMoveProgress = 1.5f;  // Smaller moves count as stuck.
+constexpr float kMinConnectorRise = 0.75f;
 
 std::string JsonString(const std::string& value) {
   std::ostringstream out;
@@ -76,6 +77,22 @@ const char* ReactionName(ReactionAction action) {
 
 float XZDistance(const glm::vec3& a, const glm::vec3& b) {
   return std::hypot(a.x - b.x, a.z - b.z);
+}
+
+glm::vec3 ExtremeEdgeCenter(const std::vector<glm::vec3>& vertices, bool highest) {
+  if (vertices.empty()) return glm::vec3(0.0f);
+  float extreme = vertices.front().y;
+  for (const glm::vec3& vertex : vertices) {
+    extreme = highest ? std::max(extreme, vertex.y) : std::min(extreme, vertex.y);
+  }
+  glm::vec3 center(0.0f);
+  int count = 0;
+  for (const glm::vec3& vertex : vertices) {
+    if (std::fabs(vertex.y - extreme) > 0.1f) continue;
+    center += vertex;
+    ++count;
+  }
+  return count ? center / static_cast<float>(count) : vertices.front();
 }
 
 // Latest remembered position of an enemy that is not currently visible.
@@ -295,35 +312,83 @@ std::vector<JevCandidate> GenerateCandidateSpecs(const GameLogic& game, Team tea
     ++hunted;
   }
 
-  // Level connectors: stairs/ramps (walk surfaces) near the figure, so a
-  // figure walled off from its goal by another level can route to the nearest
-  // way up or down instead of pressing against the wall.
+  // Level connectors: explicit deck exits, terrain stairs, and the graded
+  // road patches that cut through terrain cliffs. The latter two follow the
+  // heightfield and therefore are not WalkSurfaces. A connector can take two
+  // rounds when its routed path is longer than the move budget: first aim at
+  // the same-level entrance, then across it to the opposite elevation.
   {
-    std::vector<std::pair<float, size_t>> near;
-    const auto& surfaces = game.GetScene().walkSurfaces;
-    for (size_t i = 0; i < surfaces.size(); ++i) {
-      if (surfaces[i].vertices.empty()) continue;
-      glm::vec3 best = surfaces[i].vertices.front();
-      for (const glm::vec3& v : surfaces[i].vertices) {
-        if (XZDistance(v, actor->position) < XZDistance(best, actor->position)) best = v;
+    struct Connector {
+      float distance;
+      std::string id;
+      glm::vec3 destination;
+      std::string description;
+    };
+    std::vector<Connector> connectors;
+    const Scene& scene = game.GetScene();
+    const auto addConnector = [&](std::string id, glm::vec3 destination,
+                                  std::string description) {
+      const float distance = XZDistance(destination, actor->position);
+      if (distance < kMinMoveProgress || distance > actor->MoveBudget()) return;
+      connectors.push_back(
+          {distance, std::move(id), destination, std::move(description)});
+    };
+    for (size_t wallIndex = 0; wallIndex < scene.terrainWalls.size(); ++wallIndex) {
+      const TerrainWall& wall = scene.terrainWalls[wallIndex];
+      for (size_t accessIndex = 0; accessIndex < wall.accesses.size(); ++accessIndex) {
+        const TerrainAccess& access = wall.accesses[accessIndex];
+        const bool nearBottom = std::fabs(actor->position.y - access.bottom.y) <
+                                std::fabs(actor->position.y - access.top.y);
+        const glm::vec3 entry = nearBottom ? access.bottom : access.top;
+        const glm::vec3 exit = nearBottom ? access.top : access.bottom;
+        addConnector("stair_" + std::to_string(wallIndex) + "_" +
+                         std::to_string(accessIndex),
+                     XZDistance(entry, actor->position) >= kMinMoveProgress ? entry : exit,
+                     "Head to and take the terrain stairs to the adjacent level.");
       }
-      const float d = XZDistance(best, actor->position);
-      if (d >= kMinMoveProgress && d <= actor->MoveBudget()) near.push_back({d, i});
     }
-    std::sort(near.begin(), near.end());
-    for (size_t k = 0; k < near.size() && k < 2; ++k) {
-      const auto& surface = surfaces[near[k].second];
-      glm::vec3 best = surface.vertices.front();
-      for (const glm::vec3& v : surface.vertices) {
-        if (XZDistance(v, actor->position) < XZDistance(best, actor->position)) best = v;
+    for (size_t roadIndex = 0; roadIndex < scene.roads.size(); ++roadIndex) {
+      const RoadSurface& road = scene.roads[roadIndex];
+      if (road.vertices.empty()) continue;
+      const glm::vec3 low = ExtremeEdgeCenter(road.vertices, false);
+      const glm::vec3 high = ExtremeEdgeCenter(road.vertices, true);
+      if (high.y - low.y < kMinConnectorRise) continue;
+      const bool nearLow = std::fabs(actor->position.y - low.y) <
+                           std::fabs(actor->position.y - high.y);
+      const glm::vec3 entry = nearLow ? low : high;
+      const glm::vec3 exit = nearLow ? high : low;
+      addConnector("road_" + std::to_string(roadIndex),
+                   XZDistance(entry, actor->position) >= kMinMoveProgress ? entry : exit,
+                   "Head to and follow the graded road off this terrain level.");
+    }
+    for (size_t surfaceIndex = 0; surfaceIndex < scene.walkSurfaces.size(); ++surfaceIndex) {
+      const WalkSurface& surface = scene.walkSurfaces[surfaceIndex];
+      if (!surface.connectsToGround || surface.vertices.empty()) continue;
+      const glm::vec3 foot = ExtremeEdgeCenter(surface.vertices, false);
+      if (std::fabs(foot.y - actor->position.y) < kMinConnectorRise) continue;
+      addConnector("deck_" + std::to_string(surfaceIndex), foot,
+                   "Head to the ramp foot that connects this deck to the ground.");
+    }
+    std::sort(connectors.begin(), connectors.end(), [](const Connector& a, const Connector& b) {
+      if (a.distance != b.distance) return a.distance < b.distance;
+      return a.id < b.id;
+    });
+    std::vector<glm::vec3> selected;
+    for (const Connector& connector : connectors) {
+      bool duplicate = false;
+      for (const glm::vec3& destination : selected) {
+        if (XZDistance(destination, connector.destination) < 1.0f) duplicate = true;
       }
+      if (duplicate) continue;
       JevCandidate candidate;
-      candidate.id = "connector_" + std::to_string(near[k].second);
+      candidate.id = "connector_" + connector.id;
       candidate.kind = JevActionKind::Move;
       candidate.actorId = actorId;
-      candidate.destination = best;
-      candidate.description = "Head to the nearest stair/ramp (level connector) to change level.";
+      candidate.destination = connector.destination;
+      candidate.description = connector.description;
       candidates.push_back(std::move(candidate));
+      selected.push_back(connector.destination);
+      if (selected.size() == 2) break;
     }
   }
 

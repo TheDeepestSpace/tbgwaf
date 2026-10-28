@@ -121,6 +121,9 @@ struct Unit {
     glm::vec3 axis{1.0f, 0.0f, 0.0f};
   };
   std::vector<KnockdownImpact> knockdownImpacts;
+  // How far above the ground the figure was when hit (a zipline rider hangs
+  // on the cable); the ragdoll falls this far before it lands. 0 = on the ground.
+  float knockdownDrop = 0.0f;
   // Visual-only walk cycle: phase in radians (advances with distance moved,
   // 2*pi per kWalkStrideLength) and a 0..1 blend of how much the walk pose
   // overrides the rest pose (eases toward 1 while a planned move is in

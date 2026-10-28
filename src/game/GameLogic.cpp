@@ -352,6 +352,7 @@ GameSnapshot GameLogic::ExportState() const {
     u.knockdownAxis = unit.knockdownAxis;
     u.knockdownElapsed = unit.knockdownElapsed;
     u.knockdownImpacts = unit.knockdownImpacts;
+    u.knockdownDrop = unit.knockdownDrop;
     u.walkPhase = unit.walkPhase;
     u.walkBlend = unit.walkBlend;
     u.idleElapsed = unit.idleElapsed;
@@ -437,6 +438,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     unit->knockdownAxis = u.knockdownAxis;
     unit->knockdownElapsed = u.knockdownElapsed;
     unit->knockdownImpacts = u.knockdownImpacts;
+    unit->knockdownDrop = u.knockdownDrop;
     unit->walkPhase = u.walkPhase;
     unit->walkBlend = u.walkBlend;
     unit->idleElapsed = u.idleElapsed;
@@ -536,6 +538,7 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
     for (const auto& im : u.knockdownImpacts) {
       out << ' ' << im.at << ' ' << im.axis.x << ' ' << im.axis.y << ' ' << im.axis.z;
     }
+    out << ' ' << u.knockdownDrop;
   }
   out << ' ' << snap.tracers.size();
   for (const Tracer& t : snap.tracers) {
@@ -619,6 +622,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
     for (auto& im : u.knockdownImpacts) {
       if (!(in >> im.at >> im.axis.x >> im.axis.y >> im.axis.z)) return false;
     }
+    if (!(in >> u.knockdownDrop)) return false;
   }
   size_t tracerCount = 0;
   if (!(in >> tracerCount) || tracerCount > kMaxEntries) return false;
@@ -1278,6 +1282,13 @@ void GameLogic::KnockDown(Unit& target, const glm::vec3& dir) {
   target.knockdownAxis = axis;
   target.knockdownElapsed = 0.0f;
   target.knockdownImpacts.clear();
+  // Shot on the cable: leave the ride and fall to the ground below it.
+  target.knockdownDrop = 0.0f;
+  if (target.rideTravel >= 0.0f) {
+    target.knockdownDrop = std::max(
+        0.0f, target.position.y - scene_.ground.HeightAt(target.position.x, target.position.z));
+    target.rideTravel = -1.0f;
+  }
 }
 
 void GameLogic::ApplyShot(Unit& shooter, Unit& target, bool hit) {

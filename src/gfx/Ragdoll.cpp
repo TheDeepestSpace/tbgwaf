@@ -189,7 +189,7 @@ bool SameImpacts(const std::vector<Unit::KnockdownImpact>& a,
 
 bool SameKey(const Trajectory& t, const Unit& u) {
   return t.id == u.id && t.position == u.position && t.yaw == u.facingYaw &&
-         t.axis == u.knockdownAxis && SameAnimation(t.anim, u) &&
+         t.axis == u.knockdownAxis && t.anim.knockdownDrop == u.knockdownDrop && SameAnimation(t.anim, u) &&
          SameImpacts(t.impacts, u.knockdownImpacts);
 }
 
@@ -254,7 +254,7 @@ Trajectory Simulate(const Unit& unit) {
 
   // A figure shot while standing on top of an obstacle falls to the real
   // ground (y = 0); otherwise the ground is wherever it was standing.
-  float groundY = unit.position.y;
+  float groundY = unit.position.y - unit.knockdownDrop;
   for (const tactics::AABB& b : Colliders()) {
     if (unit.position.x >= b.min.x && unit.position.x <= b.max.x && unit.position.z >= b.min.z &&
         unit.position.z <= b.max.z && std::fabs(unit.position.y - b.max.y) < 0.15f) {

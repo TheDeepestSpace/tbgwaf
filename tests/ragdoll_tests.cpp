@@ -256,7 +256,20 @@ void TestStartsFromAnimatedPose() {
   for (int i = 0; i < gfx::kRagJointCount; ++i) CHECK(glm::length(b[i] - live[i]) < 1e-4f);
 }
 
+// Shot on a zipline cable: the body drops to the ground below, not rest in mid-air.
+void TestRiderFallsToGroundBelowCable() {
+  gfx::SetRagdollObstacles({});
+  tactics::Unit u = Downed(3, tactics::constants::kKnockdownMaxSeconds);
+  u.position.y = 3.0f;
+  u.knockdownDrop = 3.0f;
+  const gfx::RagdollPose end = gfx::SampleRagdoll(u);
+  float lowest = 1e9f;
+  for (const glm::vec3& p : end) lowest = std::min(lowest, p.y);
+  CHECK(lowest < 0.3f);
+}
+
 int main() {
+  TestRiderFallsToGroundBelowCable();
   TestStartsFromAnimatedPose();
   TestWallPushOutDoesNotLaunchBody();
   TestSecondHitShovesFallingBody();

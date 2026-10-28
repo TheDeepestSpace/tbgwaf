@@ -3216,6 +3216,29 @@ void TestSecondHitOnFallingBodyIsRecorded() {
   CHECK(found);
 }
 
+// Killed on a zipline: leaves the ride and remembers the drop to the ground.
+void TestKnockdownOnZiplineRecordsDrop() {
+  GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.0f; });
+  Unit* shooter = game.FindUnit(1);
+  Unit* target = game.FindUnit(4);
+  const glm::vec3 toTarget = target->position - shooter->position;
+  shooter->facingYaw = std::atan2(toTarget.z, toTarget.x);
+  target->position.y = 3.0f;
+  target->rideTravel = 2.0f;
+  target->rideLength = 10.0f;
+  CHECK(game.ResolveShot(*shooter, *target));
+  CHECK(target->rideTravel < 0.0f);
+  CHECK(target->knockdownDrop > 2.9f);
+  GameSnapshot round;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &round));
+  bool found = false;
+  for (const auto& u : round.units) {
+    if (u.id == target->id) found = u.knockdownDrop > 2.9f;
+  }
+  CHECK(found);
+}
+
 // A fall cut short by the end of a round freezes through planning and
 // resumes (from the same elapsed time) when the next round executes.
 void TestKnockdownFreezesBetweenRounds() {
@@ -3431,6 +3454,7 @@ int main() {
   TestBulletsFlyToMapEdgeNotWeaponRange();
   TestKnockdownFreezesBetweenRounds();
   TestSecondHitOnFallingBodyIsRecorded();
+  TestKnockdownOnZiplineRecordsDrop();
   TestBurstPlanSurvivesSnapshotAndClampsOnImport();
   TestReachFieldManySurfacesPerformance();
 

@@ -188,7 +188,6 @@
     </div>
     <div id="seedModal">
       <div id="seedModalBox">
-        <canvas></canvas>
         <div id="seedModalTitle"></div>
         <div id="seedModalHint">left-drag to pan &middot; right-drag to rotate &middot; scroll to zoom</div>
         <button id="seedModalClose">Close</button>
@@ -197,7 +196,6 @@
     <!-- Generated at build time from tests/map_goldens/ (see
          scripts/gen_gallery_map_seeds.cmake); defines MAP_SEED_GOLDENS. -->
     <script>
-      var THREE_URL = "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
       // A PR gallery is nested three levels below the repository root;
       // performance history is shared at the production Pages root.
       if (location.pathname.indexOf("/pr-preview/") !== -1) {
@@ -302,13 +300,13 @@
         }
 
 
-        // 3D seed viewer: the WASM module regenerates the map and returns
-        // its geometry as JSON; three.js (loaded on first use) draws it
-        // with the game's camera feel -- left-drag grabs/pans the ground,
-        // right-drag rotates, wheel zooms.
+        // 3D seed viewer: the WASM module regenerates the map and draws it
+        // with the game's own renderer (greyscale) onto the gallery canvas,
+        // which is moved into the modal while it is open. Camera input is the
+        // game's: left-drag pans, right-drag rotates, wheel zooms.
         var seedModal = document.getElementById("seedModal");
-        var seedCanvas = seedModal.querySelector("canvas");
-        var seedViewer = null;
+        var seedBox = document.getElementById("seedModalBox");
+        var canvasEl = document.querySelector("#viewport canvas");
         document.getElementById("seedModalClose").onclick = closeSeedModal;
         seedModal.addEventListener("mousedown", function (e) {
           if (e.target === seedModal) closeSeedModal();
@@ -317,179 +315,16 @@
           if (e.key === "Escape") closeSeedModal();
         });
         function closeSeedModal() {
+          if (!seedModal.classList.contains("open")) return;
           seedModal.classList.remove("open");
-          if (seedViewer) seedViewer.stop();
+          mod.ccall("gallery_map_close", null, [], []);
+          viewportEl.insertBefore(canvasEl, viewportEl.firstChild);
         }
         function openSeedModal(title, seed, x4) {
-          var titleEl = document.getElementById("seedModalTitle");
-          titleEl.innerText = title + " \u2014 generating...";
+          document.getElementById("seedModalTitle").innerText = title;
+          seedBox.insertBefore(canvasEl, seedBox.firstChild);
           seedModal.classList.add("open");
-          Promise.all([import(THREE_URL), new Promise(function (r) { setTimeout(r, 30); })])
-            .then(function (res) {
-              var json = mod.ccall("gallery_map_json", "string", ["number", "number"], [seed, x4 ? 1 : 0]);
-              if (!seedViewer) seedViewer = createSeedViewer(res[0], seedCanvas);
-              seedViewer.show(JSON.parse(json));
-              titleEl.innerText = title;
-            })
-            .catch(function (err) {
-              titleEl.innerText = title + " \u2014 failed: " + err;
-            });
-        }
-
-        function createSeedViewer(THREE, canvas) {
-          var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
-          var scene = new THREE.Scene();
-          scene.background = new THREE.Color(0x15171a);
-          scene.add(new THREE.HemisphereLight(0xffffff, 0x555560, 1.6));
-          var sun = new THREE.DirectionalLight(0xffffff, 1.6);
-          sun.position.set(0.5, 1, 0.3);
-          scene.add(sun);
-          var camera = new THREE.PerspectiveCamera(45, 1, 1, 4000);
-          var content = null;
-          var target = new THREE.Vector3();
-          var yaw = 0.8, pitch = 0.9, dist = 200, maxDist = 1000;
-          var raf = 0;
-          var BUILDING_COLORS = [0x9a9a9a, 0xb5846b, 0xa9a28f, 0x6f8fa8, 0xa0a0a8, 0xd0b878, 0x8a8a84];
-          var POLY_COLORS = [0x33353a, 0x8c8c90, 0x6b7a8f];
-
-          function material(color, offset) {
-            return new THREE.MeshLambertMaterial({
-              color: color, side: THREE.DoubleSide, flatShading: true,
-              polygonOffset: !!offset, polygonOffsetFactor: -offset, polygonOffsetUnits: -offset
-            });
-          }
-
-          function build(map) {
-            var group = new THREE.Group();
-            var g = map.ground;
-            if (g) {
-              var pos = [], idx = [];
-              for (var iz = 0; iz < g.nz; ++iz)
-                for (var ix = 0; ix < g.nx; ++ix)
-                  pos.push(g.minX + ix * g.step, g.h[iz * g.nx + ix], g.minZ + iz * g.step);
-              for (var z = 0; z + 1 < g.nz; ++z)
-                for (var x = 0; x + 1 < g.nx; ++x) {
-                  var a = z * g.nx + x, b = a + 1, c = a + g.nx, d = c + 1;
-                  idx.push(a, c, b, b, c, d);
-                }
-              var gg = new THREE.BufferGeometry();
-              gg.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
-              gg.setIndex(idx);
-              gg.computeVertexNormals();
-              group.add(new THREE.Mesh(gg, material(0x4a5a46, 0)));
-            } else {
-              var plane = new THREE.Mesh(new THREE.PlaneGeometry(map.half * 2, map.half * 2),
-                                         material(0x4a5a46, 0));
-              plane.rotation.x = -Math.PI / 2;
-              plane.position.y = -0.05;
-              group.add(plane);
-            }
-
-            // Prisms batched per colour: top fan + side quads per footprint.
-            var byKind = {};
-            map.prisms.forEach(function (p) {
-              var arr = byKind[p.k] || (byKind[p.k] = []);
-              var n = p.fp.length / 2;
-              for (var i = 1; i + 1 < n; ++i)
-                arr.push(p.fp[0], p.y1, p.fp[1], p.fp[2 * i], p.y1, p.fp[2 * i + 1],
-                         p.fp[2 * i + 2], p.y1, p.fp[2 * i + 3]);
-              for (var j = 0; j < n; ++j) {
-                var k = (j + 1) % n;
-                var x0 = p.fp[2 * j], z0 = p.fp[2 * j + 1], x1 = p.fp[2 * k], z1 = p.fp[2 * k + 1];
-                arr.push(x0, p.y0, z0, x1, p.y0, z1, x1, p.y1, z1,
-                         x0, p.y0, z0, x1, p.y1, z1, x0, p.y1, z0);
-              }
-            });
-            Object.keys(byKind).forEach(function (k) {
-              var geo = new THREE.BufferGeometry();
-              geo.setAttribute("position", new THREE.Float32BufferAttribute(byKind[k], 3));
-              geo.computeVertexNormals();
-              group.add(new THREE.Mesh(geo, material(BUILDING_COLORS[k] || 0x9a9a9a, 0)));
-            });
-
-            // Flat polygons (roads, sidewalks, bridge decks/ramps), fan-triangulated.
-            var byType = [[], [], []];
-            map.polys.forEach(function (p) {
-              var v = p.v, n = v.length / 3, arr = byType[p.t];
-              for (var i = 1; i + 1 < n; ++i)
-                arr.push(v[0], v[1], v[2], v[3 * i], v[3 * i + 1], v[3 * i + 2],
-                         v[3 * i + 3], v[3 * i + 4], v[3 * i + 5]);
-            });
-            byType.forEach(function (arr, t) {
-              if (!arr.length) return;
-              var geo = new THREE.BufferGeometry();
-              geo.setAttribute("position", new THREE.Float32BufferAttribute(arr, 3));
-              geo.computeVertexNormals();
-              group.add(new THREE.Mesh(geo, material(POLY_COLORS[t], 1 + t)));
-            });
-            return group;
-          }
-
-          function resize() {
-            var w = canvas.clientWidth, h = canvas.clientHeight;
-            if (canvas.width !== w || canvas.height !== h) {
-              renderer.setPixelRatio(window.devicePixelRatio || 1);
-              renderer.setSize(w, h, false);
-              camera.aspect = w / h;
-              camera.updateProjectionMatrix();
-            }
-          }
-          function frame() {
-            resize();
-            var cp = Math.cos(pitch);
-            camera.position.set(target.x + dist * cp * Math.cos(yaw),
-                                target.y + dist * Math.sin(pitch),
-                                target.z + dist * cp * Math.sin(yaw));
-            camera.lookAt(target);
-            renderer.render(scene, camera);
-            raf = requestAnimationFrame(frame);
-          }
-
-          var drag = null;
-          canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
-          canvas.addEventListener("pointerdown", function (e) {
-            drag = { button: e.button, x: e.clientX, y: e.clientY };
-            canvas.setPointerCapture(e.pointerId);
-          });
-          canvas.addEventListener("pointerup", function () { drag = null; });
-          canvas.addEventListener("pointermove", function (e) {
-            if (!drag) return;
-            var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-            drag.x = e.clientX;
-            drag.y = e.clientY;
-            if (drag.button === 0) {
-              // Grab the ground: it follows the cursor.
-              var perPx = 2 * dist * Math.tan(camera.fov * Math.PI / 360) / canvas.clientHeight;
-              var fx = -Math.cos(yaw), fz = -Math.sin(yaw);  // ground-forward
-              var rx = -fz, rz = fx;                          // ground-right
-              target.x -= (dx * rx - dy * fx) * perPx;
-              target.z -= (dx * rz - dy * fz) * perPx;
-            } else {
-              yaw -= dx * 0.01;
-              pitch = Math.max(0.05, Math.min(1.5, pitch + dy * 0.01));
-            }
-          });
-          canvas.addEventListener("wheel", function (e) {
-            e.preventDefault();
-            dist = Math.max(10, Math.min(maxDist, dist * Math.exp(e.deltaY * 0.001)));
-          }, { passive: false });
-
-          return {
-            show: function (map) {
-              if (content) {
-                scene.remove(content);
-                content.traverse(function (o) { if (o.geometry) o.geometry.dispose(); });
-              }
-              content = build(map);
-              scene.add(content);
-              target.set(0, 0, 0);
-              maxDist = map.half * 5;
-              dist = map.half * 2.2;
-              cancelAnimationFrame(raf);
-              frame();
-            },
-            stop: function () { cancelAnimationFrame(raf); }
-          };
+          mod.ccall("gallery_map_open", null, ["number", "number"], [seed, x4 ? 1 : 0]);
         }
 
         function showMapSeeds() {

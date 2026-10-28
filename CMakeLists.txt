@@ -137,9 +137,11 @@ if(EMSCRIPTEN)
   add_executable(tactics_gallery_web
     src/gallery/gallery_main.cpp
     src/gallery/GalleryScene.cpp
-    src/gallery/MapExport.cpp
+    src/gallery/MapView.cpp
     src/gfx/Shader.cpp
     src/gfx/Mesh.cpp
+    src/gfx/Camera.cpp
+    src/gfx/SceneRenderer.cpp
     src/gfx/FigureRig.cpp
     src/gfx/Ragdoll.cpp
   )
@@ -331,7 +333,7 @@ else()
 
   # Asset & animation gallery (issue #126): shared catalog/renderer, a
   # native interactive viewer.
-  add_library(tactics_gallery STATIC src/gallery/GalleryScene.cpp src/gallery/MapExport.cpp)
+  add_library(tactics_gallery STATIC src/gallery/GalleryScene.cpp src/gallery/MapView.cpp)
   target_include_directories(tactics_gallery PUBLIC src)
   target_link_libraries(tactics_gallery PUBLIC tactics_gfx tactics_logic glm::glm)
 

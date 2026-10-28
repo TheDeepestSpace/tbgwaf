@@ -210,6 +210,7 @@ uniform vec3 uLightDir;  // Direction the light travels; surfaces face -uLightDi
 uniform vec3 uViewPos;
 uniform sampler2D uShadowMap;
 uniform int uDisableShadows;
+uniform int uMonochrome;
 out vec4 FragColor;
 
 float ComputeShadow(vec3 normal) {
@@ -241,7 +242,9 @@ void main() {
   float shadow = ComputeShadow(normal);
   const float kAmbient = 0.35;
   float lit = kAmbient + (1.0 - shadow) * diffuse * 0.65;
-  FragColor = vec4(uColor.rgb * lit, uColor.a);
+  vec3 base = uColor.rgb;
+  if (uMonochrome != 0) base = vec3(dot(base, vec3(0.299, 0.587, 0.114)));
+  FragColor = vec4(base * lit, uColor.a);
 }
 )";
 
@@ -3098,6 +3101,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   litShader_.SetVec3("uViewPos", camera.Position());
   litShader_.SetInt("uShadowMap", 0);
   litShader_.SetInt("uDisableShadows", debug.disableShadows ? 1 : 0);
+  litShader_.SetInt("uMonochrome", debug.monochrome ? 1 : 0);
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
 

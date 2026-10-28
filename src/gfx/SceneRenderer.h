@@ -40,6 +40,9 @@ struct RenderDebugOptions {
   // Issue #136: skip the camera-occlusion see-through pass (occluding
   // blocks/decks are then always drawn fully opaque).
   bool disableOcclusionFade = false;
+  // Drop all surface colour (lit geometry is drawn in greyscale); used by
+  // the gallery's map-seed viewer.
+  bool monochrome = false;
   // Optional sink for per-frame draw counters; accumulates across panes, so
   // the caller zeroes it once per frame. Null (default) = not collected.
   RenderFrameStats* stats = nullptr;

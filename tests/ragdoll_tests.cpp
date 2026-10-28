@@ -7,6 +7,7 @@
 
 #include "game/Types.h"
 #include "gfx/FigureRig.h"
+#include "game/Geometry.h"
 #include "gfx/Ragdoll.h"
 
 namespace {
@@ -268,12 +269,40 @@ void TestRiderFallsToGroundBelowCable() {
   CHECK(lowest < 0.3f);
 }
 
+// A figure killed on a ramp comes to rest lying on it, not hovering at its
+// starting height above the lower ground.
+void TestRestsOnRamp() {
+  tactics::WalkSurface ramp;  // Falls from y=1.6 at x=-2 to y=0 at x=14.
+  ramp.vertices = {{-2.0f, 1.6f, 4.0f}, {14.0f, 0.0f, 4.0f}, {14.0f, 0.0f, -4.0f},
+                   {-2.0f, 1.6f, -4.0f}};
+  gfx::SetRagdollObstacles({});
+  gfx::SetRagdollGround({ramp}, tactics::HeightField{});
+  for (int id = 1; id <= 10; ++id) {
+    tactics::Unit u = Downed(id, tactics::constants::kKnockdownMaxSeconds);
+    u.position = glm::vec3(0.0f, 1.6f * 14.0f / 16.0f, 0.0f);
+    const gfx::RagdollPose end = gfx::SampleRagdoll(u);
+    for (int s = 0; s <= gfx::kRagdollSteps; ++s) {
+      for (const glm::vec3& p : gfx::SampleRagdollStep(u, s)) {
+        if (p.x > -2.0f && p.x < 14.0f) {
+          CHECK(p.y > tactics::SurfaceHeightAt(ramp, p.x, p.z) - 0.35f);  // Never under it.
+        }
+      }
+    }
+    for (const glm::vec3& p : end) {
+      const float floorY = p.x < 14.0f ? tactics::SurfaceHeightAt(ramp, p.x, p.z) : 0.0f;
+      CHECK(p.y - floorY < 0.5f);  // Lying on the ramp, not levitating.
+    }
+  }
+  gfx::SetRagdollGround({}, tactics::HeightField{});
+}
+
 int main() {
   TestRiderFallsToGroundBelowCable();
   TestStartsFromAnimatedPose();
   TestWallPushOutDoesNotLaunchBody();
   TestSecondHitShovesFallingBody();
   TestFallsOffWallAndStaysOutside();
+  TestRestsOnRamp();
   TestGunReleaseAndDrop();
   TestOnlyDownedUnitsRagdoll();
   TestFallsAlongShotAndRests();

@@ -6,6 +6,7 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "game/Geometry.h"
 #include "game/Types.h"
 #include "gfx/FigureRig.h"
 
@@ -83,11 +84,37 @@ std::vector<tactics::AABB>& Colliders() {
   return boxes;
 }
 
-// Top of the highest obstacle a point of radius `r` at (x, z) can rest on: one
-// whose top it was already at or above (`refY`, the point's previous height),
-// so a body beside a wall is never lifted onto it. Falls back to `base`.
+// Ramps, decks and the terrain heightfield, set by the renderer alongside the
+// obstacles. Changing them drops every cached trajectory.
+struct Walkable {
+  tactics::WalkSurface surface;
+  glm::vec2 lo{0.0f}, hi{0.0f};  // XZ bounds, a cheap reject.
+};
+std::vector<Walkable>& Surfaces() {
+  static std::vector<Walkable> surfaces;
+  return surfaces;
+}
+tactics::HeightField& Terrain() {
+  static tactics::HeightField terrain;
+  return terrain;
+}
+
+// How far below a surface a point may be and still be lifted onto it, so a
+// body slides along a ramp instead of tunnelling under it.
+constexpr float kSurfaceStep = 0.3f;
+
+// Height of the walkable ground the body can rest on at (x, z): the terrain
+// (or `base` on a flat map), then any ramp/deck/obstacle top the point was
+// already at or above (`refY`, the point's previous height), so a body beside
+// a wall is never lifted onto it, nor one under a bridge onto the deck.
 float FloorAt(float x, float z, float refY, float r, float base) {
-  float floorY = base;
+  float floorY = Terrain().Empty() ? base : Terrain().HeightAt(x, z);
+  for (const Walkable& w : Surfaces()) {
+    if (x < w.lo.x || x > w.hi.x || z < w.lo.y || z > w.hi.y) continue;
+    if (!tactics::SurfaceContainsXZ(w.surface, x, z)) continue;
+    const float h = tactics::SurfaceHeightAt(w.surface, x, z);
+    if (refY >= h - kSurfaceStep) floorY = std::max(floorY, h);
+  }
   for (const tactics::AABB& b : Colliders()) {
     if (x < b.min.x - r || x > b.max.x + r || z < b.min.z - r || z > b.max.z + r) continue;
     if (refY >= b.max.y - 0.1f) floorY = std::max(floorY, b.max.y);
@@ -261,6 +288,15 @@ Trajectory Simulate(const Unit& unit) {
       groundY = 0.0f;
     }
   }
+  // Likewise a figure on a ramp or deck: the surface is a floor (FloorAt),
+  // not the flat ground the body lands on past its edge.
+  for (const Walkable& w : Surfaces()) {
+    if (tactics::SurfaceContainsXZ(w.surface, unit.position.x, unit.position.z) &&
+        std::fabs(unit.position.y -
+                  tactics::SurfaceHeightAt(w.surface, unit.position.x, unit.position.z)) < 0.15f) {
+      groundY = 0.0f;
+    }
+  }
   int still = 0;
   std::array<bool, kRagJointCount> onFloor{};
   // Later hits on the falling body, in time order, applied as extra shoves.
@@ -402,6 +438,36 @@ void SetRagdollObstacles(const std::vector<tactics::Obstacle>& obstacles) {
                                });
   if (same) return;
   cur = std::move(boxes);
+  Cache().clear();
+}
+
+void SetRagdollGround(const std::vector<tactics::WalkSurface>& surfaces,
+                      const tactics::HeightField& terrain) {
+  std::vector<Walkable>& cur = Surfaces();
+  const bool same =
+      surfaces.size() == cur.size() && terrain.heights == Terrain().heights &&
+      terrain.nx == Terrain().nx && terrain.nz == Terrain().nz &&
+      terrain.minX == Terrain().minX && terrain.minZ == Terrain().minZ &&
+      terrain.step == Terrain().step &&
+      std::equal(surfaces.begin(), surfaces.end(), cur.begin(),
+                 [](const tactics::WalkSurface& a, const Walkable& b) {
+                   return a.vertices == b.surface.vertices;
+                 });
+  if (same) return;
+  cur.clear();
+  for (const tactics::WalkSurface& surface : surfaces) {
+    if (surface.vertices.empty()) continue;
+    Walkable w{surface, glm::vec2(surface.vertices[0].x, surface.vertices[0].z), {}};
+    w.hi = w.lo;
+    for (const glm::vec3& v : surface.vertices) {
+      w.lo = glm::min(w.lo, glm::vec2(v.x, v.z));
+      w.hi = glm::max(w.hi, glm::vec2(v.x, v.z));
+    }
+    w.surface.neighbors.clear();
+    w.surface.blockers.clear();
+    cur.push_back(std::move(w));
+  }
+  Terrain() = terrain;
   Cache().clear();
 }
 

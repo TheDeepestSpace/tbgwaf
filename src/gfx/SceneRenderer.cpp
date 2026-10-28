@@ -4071,18 +4071,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     frontierFill_.Draw();
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
-    // Thermal view: same green for every leg, half-transparent after the first.
+    // Thermal view: same green for every leg, half-transparent after the
+    // first (blending is already on for the whole overlay section; turning it
+    // off here would flatten the zipline fill's alpha gradient below).
     const glm::vec3 frontierColor = debug.thermal ? thermalGreen : kSetupColor;
-    if (debug.thermal) {
-      glEnable(GL_BLEND);
-      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    }
     unlitShader_.SetVec4("uColor", overlays.moveFrontierSubsequentLeg
                                        ? (debug.thermal ? glm::vec4(frontierColor, 0.5f)
                                                         : glm::vec4(1.0f, 0.9f, 0.15f, 1.0f))
                                        : glm::vec4(frontierColor, 1.0f));
     frontierBorder_.DrawSegments();
-    if (debug.thermal) glDisable(GL_BLEND);
     glDisable(GL_POLYGON_OFFSET_FILL);
   }
   // Zipline regions: where a walk -> ride -> walk plan can reach, in a second

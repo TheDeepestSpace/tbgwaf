@@ -265,6 +265,7 @@ class GameLogic {
     // pose of that instant rather than the upright one.
     bool alive = true;
     float knockdownElapsed = -1.0f;
+    glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
     float at = 0.0f;  // Seconds into the turn's execution when sampled.
   };
   // Oldest-first samples of `targetUnitId` as seen by `viewingTeam`, from the
@@ -277,6 +278,10 @@ class GameLogic {
   // with the same spacing as it appeared. Driven by the clock that
   // UpdateSightingMemory advances, so replays and tests are deterministic.
   float GhostAlpha(float at) const;
+  // Snapshot of the pose a ghost freezes.
+  static EnemySighting CaptureSighting(const Unit& unit);
+  // Stamp a ghost now if `viewer` sees `target` for the first time (call before it dies).
+  void RecordFirstSight(Team viewer, const Unit& target);
   // Bullet lines fade linearly to nothing within kReplayTracerLife of their
   // shot, per shot, in live turns and replay alike (ghosts are unaffected).
   static float TracerAlphaForAge(float age);

@@ -1873,6 +1873,38 @@ void TestDeadFigureInFovGetsGhost() {
   CHECK(!game.Sightings(Team::Blue, 4).empty());
 }
 
+void TestFirstSightGhostSurvivesImmediateKill() {
+  GameLogic game(LegacyScene());
+  // Enemy 4 is in Blue's view but no frame has sampled it yet; it dies first.
+  Unit* enemy = game.FindUnit(4);
+  game.RecordFirstSight(Team::Blue, *enemy);
+  enemy->alive = false;
+  enemy->knockdownElapsed = 0.0f;
+  game.UpdateSightingMemory(0.05f);
+  const auto& samples = game.Sightings(Team::Blue, 4);
+  CHECK(!samples.empty());
+  CHECK(samples.front().alive);  // The ghost shows the figure as first seen.
+  // A second call does not stack a duplicate.
+  game.RecordFirstSight(Team::Blue, *enemy);
+  CHECK(game.Sightings(Team::Blue, 4).size() == samples.size());
+}
+
+void TestSightingSnapshotIsFrozen() {
+  GameLogic game(LegacyScene());
+  StepSightings(game, 1.0f);
+  Unit* enemy = game.FindUnit(4);
+  const GameLogic::EnemySighting before = game.Sightings(Team::Blue, 4).front();
+  // Live animation state keeps changing; a stored sighting must not.
+  enemy->walkPhase += 3.0f;
+  enemy->idleElapsed += 2.0f;
+  enemy->turnLag = 1.0f;
+  const GameLogic::EnemySighting& after = game.Sightings(Team::Blue, 4).front();
+  CHECK(after.walkPhase == before.walkPhase);
+  CHECK(after.idleElapsed == before.idleElapsed);
+  CHECK(after.position == before.position);
+  CHECK(after.facingYaw == before.facingYaw);
+}
+
 void TestFallingBodyKeepsSamplingItsPose() {
   GameLogic game(LegacyScene());
   StepSightings(game, 1.0f);
@@ -3419,6 +3451,8 @@ int main() {
   TestSnapshotMirrorsMatchAndTeamPlans();
   TestSightingRecordedImmediatelyOnEntry();
   TestDeadFigureInFovGetsGhost();
+  TestFirstSightGhostSurvivesImmediateKill();
+  TestSightingSnapshotIsFrozen();
   TestFallingBodyKeepsSamplingItsPose();
   TestReplaySeekForwardKeepsFadingGhosts();
   TestSightingSamplesAccumulateWhileInFov();

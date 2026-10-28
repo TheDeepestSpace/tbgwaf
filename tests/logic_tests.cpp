@@ -1575,6 +1575,65 @@ void TestWalkCycleTracksInFlightMove() {
   CHECK(mover->walkPhase >= 0.0f && mover->walkPhase < kTwoPi);
 }
 
+// Turn animation (issue #237): the sim facing changes at once, the drawn
+// heading trails it by turnLag (shortest arc) and eases to 0 without ever
+// touching the discrete facing; the lag survives a snapshot round trip.
+void TestTurnLagEasesDrawnHeading() {
+  const float kPi = 3.14159265358979323846f;
+  Unit u;
+  u.facingYaw = 3.0f;
+  u.SetFacingYaw(-3.0f);  // 0.28 rad the short way round, not 6.
+  CHECK(std::fabs(u.turnLag - (-6.0f + 2.0f * kPi)) < 1e-4f);
+  CHECK(std::fabs(std::remainder(u.VisualYaw() - 3.0f, 2.0f * kPi)) < 1e-4f);  // Still drawn at the old heading.
+
+  GameLogic game(LegacyScene());
+  MakePassive(game);
+  Unit* mover = game.FindUnit(0);
+  mover->facingYaw = 0.0f;
+  const glm::vec3 start = mover->position;
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(start - glm::vec3(4.0f, 0.0f, 0.0f), Team::Blue);  // 180 about-face.
+  game.FinishMovePlan();
+  for (int id : {1, 2, 3, 4, 5}) {
+    game.ClickUnit(id, id < 3 ? Team::Blue : Team::Red);
+    game.ChoosePass();
+  }
+  CHECK(mover->turnLag == 0.0f);
+  game.CommitRound();
+  game.Update(0.02f);
+  CHECK(std::fabs(std::fabs(mover->facingYaw) - kPi) < 1e-3f);  // Sim heading is already final.
+  CHECK(std::fabs(mover->turnLag) > 1.0f);                      // Drawn heading still turning.
+  GameSnapshot snap;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &snap));
+  CHECK(snap.units[0].turnLag == mover->turnLag);
+  game.Update(0.3f);
+  CHECK(mover->turnLag == 0.0f);  // Settled well inside the movement.
+  CHECK(game.Mode() == InputMode::Executing);
+}
+
+// A shot's turn is smooth too: the drawn heading eases onto the shot
+// bearing while the beat plays, then eases back to the sim facing.
+void TestShotTurnEasesAndReturns() {
+  const float kPi = 3.14159265358979323846f;
+  GameLogic game(LegacyScene());
+  Unit* u = game.FindUnit(0);
+  u->facingYaw = 0.0f;
+  u->turnLag = 0.0f;
+  u->SetFacingYaw(kPi / 2);  // Sim turn to the shot bearing...
+  u->shootAimYaw = kPi / 2;
+  u->shootElapsed = 0.0f;
+  CHECK(std::fabs(u->VisualYaw()) < 1e-4f);  // ...drawn heading hasn't snapped.
+  game.Update(0.03f);
+  CHECK(u->VisualYaw() > 0.1f && u->VisualYaw() < kPi / 2 - 0.05f);  // Mid-turn.
+  game.Update(0.2f);
+  CHECK(std::fabs(u->VisualYaw() - kPi / 2) < 1e-3f);  // Holds the aim.
+  u->SetFacingYaw(0.0f);  // Mover resumes its heading: no snap back.
+  CHECK(std::fabs(u->VisualYaw() - kPi / 2) < 1e-3f);
+  game.Update(0.6f);  // Past the hold.
+  CHECK(std::fabs(u->VisualYaw()) < 1e-3f && u->turnLag == 0.0f);
+}
+
 // A resolved (hitting) shot starts the shooter's quick-draw beat aimed at
 // the target's bearing; it times out back to idle. Hit resolution itself
 // is unchanged, and a blocked shot doesn't play anything.
@@ -3350,6 +3409,8 @@ int main() {
   TestSnapshotCarriesSquadPlaybook();
   TestGameLogicWinCondition();
   TestWalkCycleTracksInFlightMove();
+  TestTurnLagEasesDrawnHeading();
+  TestShotTurnEasesAndReturns();
   TestResolvedShotStartsShootAnimation();
   TestShotHitChanceProfile();
   TestShotHitChanceGatesAndRoll();

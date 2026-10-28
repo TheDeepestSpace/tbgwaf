@@ -163,7 +163,7 @@ ShootPose SampleShootPose(const Unit& unit) {
     pose.raise = 1.0f - EaseOutQuad((t - lowerStart) / kLowerDuration);
     pose.recoil = std::exp(-kRecoilDecayRate * (t - kAimRaiseDuration));
   }
-  pose.aimYawDelta = std::remainder(unit.shootAimYaw - unit.facingYaw, kTwoPi) * pose.raise;
+  pose.aimYawDelta = std::remainder(unit.shootAimYaw - unit.VisualYaw(), kTwoPi) * pose.raise;
   return pose;
 }
 
@@ -533,6 +533,14 @@ void AppendTrolley(FigureParts* parts, const glm::mat4& figure, float cableY, fl
   AddBox(parts, figure, {0.0f, handleY - 0.02f, -0.19f}, {0.05f, 0.04f, 0.38f}, kBlackMetal);
 }
 
+// Turn animation tuning (issue #237).
+constexpr float kTurnLegTrail = 0.35f;        // Legs lag this share of the remaining turn.
+constexpr float kTurnLegTwistMax = 0.9f;      // Radians.
+constexpr float kTurnStepFullAngle = 1.2f;    // Remaining turn at which the pivot step peaks.
+const float kTurnStepHip = glm::radians(35.0f);
+constexpr float kTurnBankMaxLag = 0.6f;       // Radians of lag that bank the body.
+constexpr float kTurnBank = 0.35f;            // Lean per radian of lag while moving.
+
 // Downed figure (issue #217): the same parts as the standing rig, but placed
 // by the render-side ragdoll's joint positions instead of the animation.
 FigureParts BuildRagdollFigure(const Unit& unit, bool compactWeapon) {
@@ -672,8 +680,25 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon, RagdollPose* j
     const float t = glm::clamp(unit.grabElapsed / tactics::constants::kGrabAnimDuration, 0.0f, 1.0f);
     grabLean = kGrabLean * std::sin(glm::pi<float>() * t);
   }
+  // Turn animation (issue #237). The body frame follows the animated heading
+  // (VisualYaw), so the torso, head and arms lead the turn; the legs trail it
+  // by a fraction of the remaining angle (legTwist) and then catch up, with
+  // the foot on the turning side stepping toward the new heading (pivot
+  // step, strongest when standing). Moving figures instead bank into the
+  // turn, which reads as an arc for shallow path corners.
+  const float lag = ride.riding ? 0.0f : unit.turnLag;
+  const float legTwist = -glm::clamp(lag * kTurnLegTrail, -kTurnLegTwistMax, kTurnLegTwistMax);
+  const float stepAmount = glm::clamp(std::fabs(lag) / kTurnStepFullAngle, 0.0f, 1.0f) *
+                           kTurnStepHip * (1.0f - walk);
+  if (lag > 0.0f) {
+    rightHip += stepAmount;  // Turning right (+Z side): plant the right foot.
+  } else if (lag < 0.0f) {
+    leftHip += stepAmount;
+  }
+  const float bank = -glm::clamp(lag, -kTurnBankMaxLag, kTurnBankMaxLag) * kTurnBank * walk;
   const glm::mat4 figure =
-      fall * YawFrame(unit.position + glm::vec3(0.0f, bob + ride.lift, 0.0f), unit.facingYaw) *
+      fall * YawFrame(unit.position + glm::vec3(0.0f, bob + ride.lift, 0.0f), unit.VisualYaw()) *
+      glm::rotate(glm::mat4(1.0f), bank, glm::vec3(1.0f, 0.0f, 0.0f)) *
       glm::rotate(glm::mat4(1.0f), -grabLean, glm::vec3(0.0f, 0.0f, 1.0f));
 
   // Rifle aim blades the torso/shoulders onto the target bearing plus
@@ -709,10 +734,10 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon, RagdollPose* j
   parts.push_back({EllipsoidModel(figure, headCenter, glm::vec3(kHeadRadius)), teamColor});
 
   const glm::mat4 leftThigh =
-      LimbFrame(figure, glm::vec3(0.0f, kHipHeight, -kLegSideOffset), leftHip);
+      LimbFrame(figure, glm::vec3(0.0f, kHipHeight, -kLegSideOffset), leftHip, legTwist);
   const glm::mat4 leftShin = ChildBoneFrame(leftThigh, kUpperLegLength, leftKnee);
   const glm::mat4 rightThigh =
-      LimbFrame(figure, glm::vec3(0.0f, kHipHeight, kLegSideOffset), rightHip);
+      LimbFrame(figure, glm::vec3(0.0f, kHipHeight, kLegSideOffset), rightHip, legTwist);
   const glm::mat4 rightShin = ChildBoneFrame(rightThigh, kUpperLegLength, rightKnee);
   // Where an IK-solved arm ends up, for the ragdoll's starting pose.
   auto armOut = [&](int elbow, int hand, glm::vec3** e, glm::vec3** h) {

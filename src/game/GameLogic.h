@@ -80,6 +80,7 @@ struct GameSnapshot {
     std::vector<PathRide> planRides;
     std::vector<std::vector<PathRide>> planQueuedLegRides;
     float planEndFacingYaw = 0.0f;
+    float turnLag = 0.0f;  // Visual-only turn animation (see Unit::turnLag).
     glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
     float knockdownElapsed = -1.0f;
     std::vector<Unit::KnockdownImpact> knockdownImpacts;

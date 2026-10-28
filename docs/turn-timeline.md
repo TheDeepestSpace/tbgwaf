@@ -81,3 +81,15 @@ moves, shot lines and plan rings are stripped from the replay instance.
 Shot lines (live and replay) share `GameLogic::TracerAlphaForAge`: each fades
 linearly to nothing within `kReplayTracerLife` (1 s) of its own shot. Ghosts
 keep their per-turn behaviour.
+
+## Turn animation (issue #237)
+
+Visual-only: the sim facing still changes at once, but `Unit::turnLag` holds
+the remaining angle (shortest arc, any heading change up to 180°) between it
+and the drawn heading. `GameLogic::Update` eases it to 0 (~0.15 s for
+45–90°, ~0.2 s for an about-face) while the figure is already walking, so a
+turn adds no dead time. `Unit::VisualYaw()` drives the body, FoV cone and
+shadow mask. The rig leads with torso/head, trails the legs, steps the foot
+on the turning side when standing (pivot) and banks into the turn when
+moving (path corners). `turnLag` is part of the snapshot, so followers and
+replays draw the same pose. Scenario: `turn_animation_angles`.

@@ -142,6 +142,25 @@ restores the analytic FOV-cone overlay. Visual scenarios still default to
 the analytic overlay and opt in
 with a `render: {fov_overlay: shadow_map}` block.
 
+The debug panel's **AO** view (formerly Thermal view) is on by default and uses black-hot polarity by default, based
+on the references in PR #178: pale clay-like surroundings, gray streets and
+figures in their team color. Screen-space ambient occlusion adds soft contact
+shading at building bases, parapets, roof furniture and feet. It samples
+nearby visible geometry, so hidden/offscreen surfaces cannot contribute.
+Uncheck **Black hot** to invert the gray world (figures keep their team
+color). Apparent heat is assigned by material; this is a visual
+approximation, not a temperature simulation. Light sensor blur and grain
+affect the shaded world before the gameplay overlays are drawn in their
+normal in-game colors (selection, paths, ropes, FOV); only the HUD switches
+to green. The **FOV opacity** slider (while AO is on) sets the team FOV tint strength over
+the thermal world (default 0.25; the normal view uses 0.15). The `thermal_urban_black_hot` and
+`thermal_urban_white_hot` scenarios show both polarities on the same city;
+scenario YAML selects them with `render: {thermal: true, thermal_black_hot: false}`
+for white-hot (omit `thermal_black_hot` for black-hot).
+
+The AO sliders in the debug panel tune the contact shading: radius (default
+0.8), strength (0.8), quality (3 samples per ray) and softness (3 px blur).
+
 ### Flag objective (CTF part 1)
 
 A scene (or scenario YAML `flag:` block) can enable a neutral flag at the map

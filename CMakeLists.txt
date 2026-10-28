@@ -141,6 +141,7 @@ if(EMSCRIPTEN)
     src/gfx/Mesh.cpp
     src/gfx/FigureRig.cpp
     src/gfx/Ragdoll.cpp
+    src/game/Geometry.cpp
   )
   target_include_directories(tactics_gallery_web PRIVATE src)
   target_link_libraries(tactics_gallery_web PRIVATE glm::glm)

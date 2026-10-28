@@ -1749,8 +1749,9 @@ constexpr float kMinBuildingArea = 1.0f;
 // Appends a prism over `footprint` from the ground (plus `baseLift`) up
 // `height`, tagged with its Building index; returns the obstacle index.
 int AddPolygonBuilding(Scene* scene, std::vector<glm::vec2> footprint, float baseLift,
-                       float height, int building, const GroundY& groundY) {
-  if (footprint.size() < 3 || PolygonArea(footprint) < kMinBuildingArea) return -1;
+                       float height, int building, const GroundY& groundY,
+                       float minArea = kMinBuildingArea) {
+  if (footprint.size() < 3 || PolygonArea(footprint) < minArea) return -1;
   if (PolygonSignedArea(footprint) < 0.0f) std::reverse(footprint.begin(), footprint.end());
   AABB bounds;
   bounds.min = glm::vec3(std::numeric_limits<float>::infinity(), 0.0f,
@@ -3014,8 +3015,11 @@ void EmitTerrainCliffs(Scene* scene, const CityPlan& city, const MapGeneratorCon
       if (top - base < 0.45f) continue;
       std::vector<glm::vec2> footprint = {p0 - n * kNavHalfWidth, p1 - n * kNavHalfWidth,
                                           p1 + n * kNavHalfWidth, p0 + n * kNavHalfWidth};
-      AddPolygonBuilding(scene, footprint, 0.0f, top - base, -1, [base](float, float) { return base; });
-      scene->obstacles.back().navOnly = true;
+      // Thin by design: no minimum area, or short pieces vanish and leave
+      // holes in the cliff line (and the flag lands on the wrong obstacle).
+      const int wall = AddPolygonBuilding(scene, footprint, 0.0f, top - base, -1,
+                                          [base](float, float) { return base; }, 1e-4f);
+      if (wall >= 0) scene->obstacles[wall].navOnly = true;
     }
   };
 
@@ -3023,18 +3027,14 @@ void EmitTerrainCliffs(Scene* scene, const CityPlan& city, const MapGeneratorCon
     const auto lineAt = [&](float t) { return w.lineOrigin + w.dir * t; };
     float tMin = 0.0f, tMax = 0.0f;
     ClipLineToSquare(w.lineOrigin, w.dir, half - 0.25f, &tMin, &tMax);
-    auto gaps = w.gaps;
-    std::sort(gaps.begin(), gaps.end());
+    // The step line is open only where a ramp zone or a stair landing lets
+    // onto the level. `w.gaps` also holds the margins that keep other things
+    // clear of a ramp; those stretches are still cliffs, so they get a wall.
+    std::vector<std::pair<float, float>> open;
     const auto emit = [&](float t0, float t1) {
       if (t1 - t0 < 0.1f) return;
       navWall(lineAt(t0), lineAt(t1), -w.raisedN * 0.6f, w.raisedN * 0.6f);
     };
-    float from = tMin;
-    for (const auto& gap : gaps) {
-      emit(from, std::min(gap.first, tMax));
-      from = std::max(from, gap.second);
-    }
-    emit(from, tMax);
 
     // A ramp corridor through this wall (an avenue's or a highway's): the
     // zone is cut out of the tier, and its two long sides are cliffs
@@ -3042,6 +3042,9 @@ void EmitTerrainCliffs(Scene* scene, const CityPlan& city, const MapGeneratorCon
     const auto rampCut = [&](glm::vec2 onLine, glm::vec2 along, float halfWidth) {
       const std::vector<glm::vec2> zone = w.RampZone(onLine, along, halfWidth);
       scene->terrainCutouts.push_back(zone);
+      const float t0 = glm::dot(zone[0] - w.lineOrigin, w.dir);
+      const float t1 = glm::dot(zone[1] - w.lineOrigin, w.dir);
+      open.emplace_back(std::min(t0, t1), std::max(t0, t1));
       const glm::vec2 across(-along.y, along.x);
       navWall(zone[0], zone[3], across * 0.6f, -across * 0.6f);
       navWall(zone[1], zone[2], -across * 0.6f, across * 0.6f);
@@ -3049,6 +3052,27 @@ void EmitTerrainCliffs(Scene* scene, const CityPlan& city, const MapGeneratorCon
     for (const TerrainChannel& channel : w.channels) {
       rampCut(channel.foot, channel.along, channel.width * 0.5f);
     }
+    const auto highwayCut = [&](glm::vec2 origin, glm::vec2 roadDir, float corridorHalf) {
+      const glm::vec2 foot = origin + roadDir * w.CrossingParam(origin, roadDir);
+      const glm::vec2 along = roadDir * (glm::dot(w.raisedN, roadDir) > 0.0f ? 1.0f : -1.0f);
+      rampCut(foot, along, corridorHalf);
+    };
+    if (w.arteryRamp) highwayCut(artery.origin, artery.dir, c.arteryWidth * 0.5f);
+    if (plan.hasBranch && w.branchRamp) {
+      highwayCut(plan.branch.start, plan.branch.dir, plan.branch.width * 0.5f);
+    }
+    for (const TerrainFlight& flight : w.flights) {
+      const float tLand0 = flight.tFoot + flight.dir * flight.run;
+      const float tLand1 = flight.tFoot + flight.dir * (flight.run + kLanding);
+      open.emplace_back(std::min(tLand0, tLand1) - 0.3f, std::max(tLand0, tLand1) + 0.3f);
+    }
+    std::sort(open.begin(), open.end());
+    float from = tMin;
+    for (const auto& span : open) {
+      emit(from, std::min(span.first, tMax));
+      from = std::max(from, span.second);
+    }
+    emit(from, tMax);
 
     // Stairs: the flight's outer edge over its climb and landing, and the
     // landing's far end, so the stair only lets off onto the level.
@@ -3058,16 +3082,6 @@ void EmitTerrainCliffs(Scene* scene, const CityPlan& city, const MapGeneratorCon
               -w.raisedN * 0.6f, w.raisedN * 0.6f);
       navWall(lineAt(tEnd) - w.raisedN * kFlightWidth, lineAt(tEnd), w.dir * (flight.dir * 0.6f),
               -w.dir * (flight.dir * 0.6f));
-    }
-
-    const auto highwayCut = [&](glm::vec2 origin, glm::vec2 roadDir, float corridorHalf) {
-      const glm::vec2 foot = origin + roadDir * w.CrossingParam(origin, roadDir);
-      const glm::vec2 along = roadDir * (glm::dot(w.raisedN, roadDir) > 0.0f ? 1.0f : -1.0f);
-      rampCut(foot, along, corridorHalf);
-    };
-    if (w.arteryRamp) highwayCut(artery.origin, artery.dir, c.arteryWidth * 0.5f);
-    if (plan.hasBranch && w.branchRamp) {
-      highwayCut(plan.branch.start, plan.branch.dir, plan.branch.width * 0.5f);
     }
   }
 }

@@ -498,7 +498,9 @@ int main() {
   tbgwaf_flow::State screen = tbgwaf_flow::kInitialState;
   // Local-only debug panel state (defaults: FOV and shadows on, FPS shown).
   gfx::RenderDebugOptions debugOptions;
-  debugOptions.thermal = true;  // AO view is on by default.
+  // AO view is on by default; the smoke test skips it because software GL
+  // can't render 60 AO frames inside the test timeout.
+  debugOptions.thermal = !isSmokeTest;
   bool showFps = true;
   float smoothedFps = 0.0f;
   float frameMs = 0.0f;

@@ -549,7 +549,32 @@ void TestMovementUpStair() {
 }
 }  // namespace
 
+void TestStairSidesSealed() {
+  // A stair's open sides are cliffs: its outer edge is walled along the
+  // whole flight and landing, however short the wall pieces are, so nothing
+  // steps off onto the lower ground beside it.
+  int checked = 0;
+  for (currentSeed = 1; currentSeed <= 40; ++currentSeed) {
+    const Scene s = GenerateUrbanMap(currentSeed, TerrainConfig());
+    NavMesh nav;
+    nav.Build(s.obstacles, s.mapHalfExtent, constants::kAgentRadius, &s.ground, &s.walkSurfaces);
+    for (const TerrainStair& stair : s.terrainStairs) {
+      const glm::vec3 a = stair.flight[1], b = stair.landing[2], inner = stair.flight[0];
+      const glm::vec2 n = glm::normalize(glm::vec2(a.x - inner.x, a.z - inner.z));
+      for (float k = 0.0f; k <= 1.0f; k += 0.05f) {
+        const glm::vec2 e = glm::mix(glm::vec2(a.x, a.z), glm::vec2(b.x, b.z), k);
+        const glm::vec2 on = e - n * 0.9f, off = e + n * 1.1f;
+        if (s.ground.HeightAt(on.x, on.y) - s.ground.HeightAt(off.x, off.y) < 1.0f) continue;
+        ++checked;
+        CHECK(!nav.IsWalkable(e.x, e.y));
+      }
+    }
+  }
+  CHECK(checked > 0);
+}
+
 int main() {
+  TestStairSidesSealed();
   TestControlsAndDeterminism();
   TestPinnedTerrainFingerprints();
   TestSeedInvariants();

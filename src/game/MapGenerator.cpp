@@ -1718,10 +1718,12 @@ UrbanParcel ToPublicParcel(const Parcel& parcel) {
 constexpr float kMinBuildingArea = 1.0f;
 
 // Appends a prism over `footprint` from the ground (plus `baseLift`) up
-// `height`, tagged with its Building index; returns the obstacle index.
+// `height`, tagged with its Building index; returns the obstacle index, or
+// -1 when the footprint is smaller than `minArea`.
 int AddPolygonBuilding(Scene* scene, std::vector<glm::vec2> footprint, float baseLift,
-                       float height, int building, const GroundY& groundY) {
-  if (footprint.size() < 3 || PolygonArea(footprint) < kMinBuildingArea) return -1;
+                       float height, int building, const GroundY& groundY,
+                       float minArea = kMinBuildingArea) {
+  if (footprint.size() < 3 || PolygonArea(footprint) < minArea) return -1;
   if (PolygonSignedArea(footprint) < 0.0f) std::reverse(footprint.begin(), footprint.end());
   AABB bounds;
   bounds.min = glm::vec3(std::numeric_limits<float>::infinity(), 0.0f,
@@ -2985,8 +2987,10 @@ void EmitTerrainCliffs(Scene* scene, const CityPlan& city, const MapGeneratorCon
       if (top - base < 0.45f) continue;
       std::vector<glm::vec2> footprint = {p0 - n * kNavHalfWidth, p1 - n * kNavHalfWidth,
                                           p1 + n * kNavHalfWidth, p0 + n * kNavHalfWidth};
-      AddPolygonBuilding(scene, footprint, 0.0f, top - base, -1, [base](float, float) { return base; });
-      scene->obstacles.back().navOnly = true;
+      // A thin wall is far below the building size floor; keep every piece.
+      const int wall = AddPolygonBuilding(scene, footprint, 0.0f, top - base, -1,
+                                          [base](float, float) { return base; }, 0.0f);
+      if (wall >= 0) scene->obstacles[wall].navOnly = true;
     }
   };
 

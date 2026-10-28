@@ -521,6 +521,29 @@ void TestJevOffersWaitOnlyWithContact() {
   CHECK(offers(contact, JevActionKind::Wait));
 }
 
+// Seed 7111 spawned Red on the ground under a low ramp/deck wedged between
+// two buildings; the navmesh blocks that ground, so Red had no move at all
+// and sat at the start. Spawn placement must keep figures out of it.
+void TestSpawnHintsAvoidGroundUnderLowDecks() {
+  Scene scene = tactics::GenerateUrbanMap(7111);
+  tactics::ApplySpawnHints(&scene);
+  scene.flag.enabled = true;
+  GameLogic game(scene);
+  for (Team team : {Team::Blue, Team::Red}) {
+    const auto request = BuildJevRequest(game, team, 1);
+    CHECK(request.has_value());
+    if (!request) continue;
+    for (const Unit& unit : game.GetScene().units) {
+      if (unit.team != team) continue;
+      bool canMove = false;
+      for (const auto& c : request->candidates) {
+        canMove |= c.actorId == unit.id && c.kind == JevActionKind::Move;
+      }
+      CHECK(canMove);
+    }
+  }
+}
+
 int main() {
   TestIncrementalBuilderMatchesBlockingBuild();
   TestBoundedCandidatesUseNormalLegalPath();
@@ -538,6 +561,7 @@ int main() {
   TestJevRoutesOffTerrainIslandTowardFlag();
   TestJevAdvanceRoutesOffTerrainIsland();
   TestJevOffersWaitOnlyWithContact();
+  TestSpawnHintsAvoidGroundUnderLowDecks();
   if (failures == 0) {
     std::puts("All Jev planner scenarios passed.");
     return 0;

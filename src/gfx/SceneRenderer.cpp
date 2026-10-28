@@ -37,7 +37,7 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
     overlays.moveFrontier = game.MoveFrontier();
     overlays.ziplineFrontiers = &game.ZiplineFrontiers();
     overlays.movePreviewRides = &game.MovePreviewRides();
-    // A later leg's boundary is yellow, matching the selector; the first leg's stays green.
+    // A later leg is drawn at 50% alpha; the first leg is solid green.
     overlays.moveFrontierSubsequentLeg = selected->plan.type == tactics::PlannedActionType::Move &&
                                          selected->plan.movePath.size() >= 2;
     if (game.MovePreviewValid()) {
@@ -4044,6 +4044,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // Overlay green in the thermal view; thermalKey tags it for the mesh caches.
   const int thermalKey = debug.thermal ? (debug.thermalBlackHot ? 2 : 1) : 0;
   const glm::vec3 thermalGreen = debug.thermalBlackHot ? kThermalGreenDark : kThermalGreen;
+  // Path/marker green: solid for the first leg, 50% alpha for later ones.
+  const glm::vec3 pathGreen = debug.thermal ? thermalGreen : glm::vec3(0.3f, 0.9f, 0.4f);
   // Movement frontier: a glow hugging the reach boundary -- brightest at the
   // boundary, fading to fully transparent within kFadeWidth inside it. The
   // boundary is the zero contour of a blurred signed-distance field, so it
@@ -4071,23 +4073,19 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     frontierFill_.Draw();
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
-    // Thermal view: same green for every leg, half-transparent after the
+    // Same green for every leg, half-transparent after the
     // first (blending is already on for the whole overlay section; turning it
     // off here would flatten the zipline fill's alpha gradient below).
     const glm::vec3 frontierColor = debug.thermal ? thermalGreen : kSetupColor;
-    unlitShader_.SetVec4("uColor", overlays.moveFrontierSubsequentLeg
-                                       ? (debug.thermal ? glm::vec4(frontierColor, 0.5f)
-                                                        : glm::vec4(1.0f, 0.9f, 0.15f, 1.0f))
-                                       : glm::vec4(frontierColor, 1.0f));
+    unlitShader_.SetVec4("uColor", glm::vec4(frontierColor,
+                                             overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f));
     frontierBorder_.DrawSegments();
     glDisable(GL_POLYGON_OFFSET_FILL);
   }
   // Zipline regions: where a walk -> ride -> walk plan can reach, in a second
   // (cyan) tint, with the usable line's cable highlighted.
   if (overlays.ziplineFrontiers && !overlays.ziplineFrontiers->empty()) {
-    const glm::vec3 kZiplineColor(0.2f, 0.75f, 1.0f);
-    // The reachable region matches the regular move frontier; only the cable
-    // and entry marker keep the zipline tint.
+    // Region, cable and entry marker all match the regular move frontier.
     const glm::vec3 regionColor = debug.thermal ? thermalGreen : kSetupColor;
     const auto& frontiers = *overlays.ziplineFrontiers;
     std::vector<glm::vec4> key;
@@ -4113,16 +4111,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     ziplineFill_.Draw();
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
-    unlitShader_.SetVec4("uColor", glm::vec4(regionColor, 1.0f));
+    const float legAlpha = overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f;
+    unlitShader_.SetVec4("uColor", glm::vec4(regionColor, legAlpha));
     ziplineBorder_.DrawSegments();
     glDisable(GL_POLYGON_OFFSET_FILL);
     for (const auto& fr : frontiers) {
       // The ring below overwrites uMVP/uColor, so restore them per line.
       unlitShader_.SetMat4("uMVP", viewProj);
-      unlitShader_.SetVec4("uColor", glm::vec4(kZiplineColor, 1.0f));
+      unlitShader_.SetVec4("uColor", glm::vec4(regionColor, legAlpha));
       pathLine_.SetPoints(cablePoints(game.GetScene().ziplines[fr.zipline]));
       pathLine_.Draw();
-      DrawHighlightOnSurface(fr.entry, glm::vec4(kZiplineColor, 1.0f));
+      DrawHighlightOnSurface(fr.entry, glm::vec4(regionColor, legAlpha));
     }
   }
   glDepthMask(GL_TRUE);
@@ -4251,7 +4250,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const auto drawMovePath = [&](const std::vector<glm::vec3>& path,
                                 const std::vector<tactics::PathRide>& rides,
                                 const glm::vec4& walkColor) {
-    const glm::vec4 rideColor(0.2f, 0.75f, 1.0f, 1.0f);
+    const glm::vec4& rideColor = walkColor;
     unlitShader_.SetMat4("uMVP", viewProj);
     const auto drawRange = [&](size_t first, size_t last, const glm::vec4& color) {
       if (last <= first) return;
@@ -4287,12 +4286,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   };
   if (overlays.movePreviewPath && overlays.movePreviewPath->size() >= 2) {
     static const std::vector<tactics::PathRide> kNoRides;
+    const glm::vec4 previewColor(pathGreen, overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     drawMovePath(*overlays.movePreviewPath,
                  overlays.movePreviewRides ? *overlays.movePreviewRides : kNoRides,
-                 glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
+                 previewColor);
     // Mark the final position with the same ring used for selection.
-    DrawHighlightOnSurface(overlays.movePreviewPath->back(),
-                  glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
+    DrawHighlightOnSurface(overlays.movePreviewPath->back(), previewColor);
+    glDisable(GL_BLEND);
   } else if (overlays.invalidHoverHighlight) {
     DrawHighlightOnSurface(*overlays.invalidHoverHighlight,
                   glm::vec4(0.9f, 0.15f, 0.15f, 1.0f));
@@ -4306,7 +4308,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       if (!unit.alive || (!overlays.spectatorFov && unit.team != team)) continue;
       if (unit.plan.type == tactics::PlannedActionType::Move && unit.plan.movePath.size() >= 2) {
         drawMovePath(unit.plan.movePath, unit.plan.moveRides,
-                     glm::vec4(debug.thermal ? thermalGreen : glm::vec3(0.3f, 0.9f, 0.4f), 1.0f));
+                     glm::vec4(pathGreen, 1.0f));
         // Wireframe stand-in at the destination, showing the planned final
         // facing (persists until the turn is committed).
         Unit ghost = unit;
@@ -4317,17 +4319,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost,
                           debug.thermal ? glm::vec4(thermalGreen, 1.0f)
                                         : glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
-        // Chained legs for later rounds: yellow, with a marker at each leg
-        // end so they read apart from the leg about to execute (green).
-        // Thermal view: the same green as the first leg, at 50% alpha.
-        const glm::vec4 yellow = debug.thermal ? glm::vec4(thermalGreen, 0.5f)
-                                               : glm::vec4(1.0f, 0.85f, 0.2f, 1.0f);
-        const glm::vec4 firstRingColor =
-            debug.thermal ? glm::vec4(thermalGreen, 1.0f) : yellow;
-        if (debug.thermal) {
-          glEnable(GL_BLEND);
-          glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        }
+        // Chained legs for later rounds: the same green at 50% alpha, with a
+        // marker at each leg end so they read apart from the leg about to
+        // execute (solid).
+        const glm::vec4 later(pathGreen, 0.5f);
+        const glm::vec4 firstRingColor(pathGreen, 1.0f);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         const bool chaining = game.Mode() == InputMode::AwaitingMoveDestination &&
                               game.SelectedUnitId() == unit.id;
         if (chaining || !unit.plan.queuedLegs.empty()) {
@@ -4344,12 +4342,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           drawMovePath(leg,
                        legIndex < unit.plan.queuedLegRides.size() ? unit.plan.queuedLegRides[legIndex]
                                                                   : kNoLegRides,
-                       yellow);
+                       later);
           DrawNumberedHighlight(unlitShader_, highlightRing_, cubeMesh_, viewProj, view,
-                                OnSurface(leg.back()), yellow, legNumber,
+                                OnSurface(leg.back()), later, legNumber,
                                 SurfaceNormal(leg.back()));
         }
-        if (debug.thermal) glDisable(GL_BLEND);
+        glDisable(GL_BLEND);
       }
       // Planned locked shots draw no line here: the shot cone aimed at the
       // target's torso (plus the "+" marker) is the whole preview, same as

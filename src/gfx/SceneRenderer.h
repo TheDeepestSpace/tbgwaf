@@ -68,7 +68,7 @@ struct PaneOverlays {
   std::optional<glm::vec3> invalidHoverHighlight;  // Red ring on an unreachable hover point.
   const std::vector<glm::vec3>* movePreviewPath = nullptr;  // Yellow preview polyline.
   const tactics::ReachField* moveFrontier = nullptr;  // Reachable-area gradient + border.
-  bool moveFrontierSubsequentLeg = false;             // Border drawn yellow instead of green.
+  bool moveFrontierSubsequentLeg = false;             // Border/path drawn at 50% alpha.
   // Zipline reach (walk -> ride -> walk), drawn as a second, cyan region with
   // the line itself highlighted; the preview/planned path marks its ride.
   const std::vector<tactics::GameLogic::ZiplineFrontier>* ziplineFrontiers = nullptr;

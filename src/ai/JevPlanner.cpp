@@ -1,11 +1,13 @@
 #include "ai/JevPlanner.h"
 #include "game/Geometry.h"
+#include "game/NavMesh.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 namespace tactics::ai {
@@ -18,6 +20,11 @@ constexpr int kMaxGridCells = 96;
 constexpr size_t kMaxListedObstacles = 48;
 constexpr float kMinMoveProgress = 1.5f;  // Smaller moves count as stuck.
 constexpr float kMinConnectorRise = 0.75f;
+// Goal-routed moves search the navmesh this many move budgets around the
+// figure, so a route that leaves a terrain level through a distant ramp or
+// stair is found and then followed round after round.
+constexpr float kRouteWindowBudgets = 3.0f;
+constexpr float kRouteSlack = 0.5f;  // Budget left unused so the leg validates.
 
 std::string JsonString(const std::string& value) {
   std::ostringstream out;
@@ -77,6 +84,144 @@ const char* ReactionName(ReactionAction action) {
 
 float XZDistance(const glm::vec3& a, const glm::vec3& b) {
   return std::hypot(a.x - b.x, a.z - b.z);
+}
+
+float PathLength(const std::vector<glm::vec3>& path) {
+  float length = 0.0f;
+  for (size_t i = 0; i + 1 < path.size(); ++i) length += glm::length(path[i + 1] - path[i]);
+  return length;
+}
+
+// Shortest navmesh route from the actor toward `goal` (around buildings,
+// along the graded roads and stairs between terrain levels), searched in a
+// window of kRouteWindowBudgets move budgets; a goal beyond the window is
+// replaced by the farthest routable point toward it. Yields the point one
+// move budget along the route (the goal itself when closer) and the route
+// length still ahead after that move.
+bool RouteToward(const GameLogic& game, const Unit& actor, const glm::vec3& goal,
+                 glm::vec3* destination, float* remaining) {
+  glm::vec3 toGoal = goal - actor.position;
+  toGoal.y = 0.0f;
+  const float distance = glm::length(toGoal);
+  if (distance < kMinMoveProgress) return false;
+
+  const Scene& scene = game.GetScene();
+  const float budget = actor.MoveBudget();
+  const float reach = kRouteWindowBudgets * budget + 2.0f * constants::kAgentRadius;
+  const float half = scene.mapHalfExtent;
+  NavRegion region;
+  region.xMin = std::max(-half, actor.position.x - reach);
+  region.xMax = std::min(half, actor.position.x + reach);
+  region.zMin = std::max(-half, actor.position.z - reach);
+  region.zMax = std::min(half, actor.position.z + reach);
+  NavMesh mesh;
+  mesh.Build(scene.obstacles, region, constants::kAgentRadius, &scene.ground,
+             &scene.walkSurfaces);
+
+  const float margin = 2.0f * constants::kAgentRadius;
+  const auto inWindow = [&](const glm::vec3& p) {
+    return p.x > region.xMin + margin && p.x < region.xMax - margin &&
+           p.z > region.zMin + margin && p.z < region.zMax - margin;
+  };
+  // A sample that falls inside a building (or just outside the window)
+  // snaps to the nearest free ground cell so it still has a route.
+  const auto snapped = [&](const glm::vec3& target) {
+    glm::vec3 best = target;
+    float bestDistance = std::numeric_limits<float>::infinity();
+    for (const NavCell& cell : mesh.Cells()) {
+      if (cell.climbTop) continue;
+      const glm::vec3 point(std::clamp(target.x, cell.xMin, cell.xMax), 0.0f,
+                            std::clamp(target.z, cell.zMin, cell.zMax));
+      const float cellDistance = XZDistance(point, target);
+      if (cellDistance < bestDistance) {
+        bestDistance = cellDistance;
+        best = point;
+      }
+    }
+    best.y = scene.ground.HeightAt(best.x, best.z);
+    return best;
+  };
+  std::vector<glm::vec3> targets;
+  if (inWindow(goal)) targets.push_back(goal);
+  for (const float fraction : {0.9f, 0.6f, 0.3f}) {
+    const float along = reach * fraction;
+    if (along >= distance) continue;
+    glm::vec3 target = actor.position + toGoal * (along / distance);
+    target.x = std::clamp(target.x, region.xMin + margin, region.xMax - margin);
+    target.z = std::clamp(target.z, region.zMin + margin, region.zMax - margin);
+    targets.push_back(snapped(target));
+  }
+  // A taut path hugs padded obstacle corners, and a leg may not end on that
+  // boundary (nor beside a cliff wall). Accept a point only with clear ground
+  // all around it, or when it stands on a deck or ramp surface.
+  const auto standable = [&](const glm::vec3& p) {
+    for (const WalkSurface& surface : scene.walkSurfaces) {
+      if (SurfaceContainsXZ(surface, p.x, p.z) &&
+          std::fabs(SurfaceHeightAt(surface, p.x, p.z) - p.y) < 0.5f) {
+        return true;
+      }
+    }
+    constexpr float kProbe = 0.35f;
+    for (const glm::vec2 d : {glm::vec2(0.0f, 0.0f), glm::vec2(kProbe, 0.0f),
+                              glm::vec2(-kProbe, 0.0f), glm::vec2(0.0f, kProbe),
+                              glm::vec2(0.0f, -kProbe)}) {
+      if (!mesh.IsWalkable(p.x + d.x, p.z + d.y)) return false;
+    }
+    return true;
+  };
+  const auto pointAlong = [](const std::vector<glm::vec3>& path, float along) {
+    float walked = 0.0f;
+    for (size_t i = 0; i + 1 < path.size(); ++i) {
+      const glm::vec3 segment = path[i + 1] - path[i];
+      const float length = glm::length(segment);
+      if (walked + length >= along) {
+        return path[i] + segment * ((along - walked) / std::max(length, 1e-4f));
+      }
+      walked += length;
+    }
+    return path.back();
+  };
+  for (const glm::vec3& target : targets) {
+    std::vector<glm::vec3> path;
+    if (!mesh.FindPath(actor.position, target, &path) || path.size() < 2) continue;
+    const float total = PathLength(path);
+    if (total < kMinMoveProgress) continue;
+    constexpr float kBackStep = 0.5f;
+    for (float along = std::min(total, budget - kRouteSlack); along >= kMinMoveProgress;
+         along -= kBackStep) {
+      const glm::vec3 point = pointAlong(path, along);
+      if (!standable(point)) continue;
+      *destination = point;
+      *remaining = total - along;
+      return true;
+    }
+  }
+  return false;
+}
+
+// Resolves a goal-routed candidate (JevCandidate::routeGoal) before
+// validation. False means drop it: no route, and the straight-line fallback
+// would not move the figure either.
+bool ResolveRoute(const GameLogic& game, JevCandidate* candidate) {
+  const Unit* actor = game.FindUnit(candidate->actorId);
+  if (!actor) return false;
+  glm::vec3 destination(0.0f);
+  float remaining = 0.0f;
+  if (!RouteToward(game, *actor, *candidate->routeGoal, &destination, &remaining)) {
+    return XZDistance(candidate->destination, actor->position) >= kMinMoveProgress;
+  }
+  candidate->destination = destination;
+  std::ostringstream note;
+  note << " Follows the shortest legal route there (around buildings, along the ramps, "
+          "graded roads and stairs between terrain levels); ";
+  if (remaining < 0.5f) {
+    note << "the route completes this round.";
+  } else {
+    note << "about " << static_cast<int>(remaining + 0.5f)
+         << " more units of route remain after this move.";
+  }
+  candidate->description += note.str();
+  return true;
 }
 
 glm::vec3 ExtremeEdgeCenter(const std::vector<glm::vec3>& vertices, bool highest) {
@@ -272,16 +417,19 @@ std::vector<JevCandidate> GenerateCandidateSpecs(const GameLogic& game, Team tea
     }
   }
   const Unit* flagCarrier = game.Flag().carrierId >= 0 ? game.FindUnit(game.Flag().carrierId) : nullptr;
+  bool flagOffered = false;
   if (game.Flag().enabled && (!flagCarrier || flagCarrier->team != team)) {
     const glm::vec3 flag = game.FlagPosition();
     glm::vec3 dir = flag - actor->position;
     dir.y = 0.0f;
     const float dist = glm::length(dir);
     if (dist >= 0.3f) {
+      flagOffered = true;
       JevCandidate candidate;
       candidate.id = "flag";
       candidate.kind = JevActionKind::Move;
       candidate.actorId = actorId;
+      candidate.routeGoal = flag;
       candidate.destination = dist <= actor->MoveBudget() ? flag : actor->position + dir / dist * actor->MoveBudget();
       candidate.description =
           std::string(dist <= actor->MoveBudget() ? "Run onto the flag at " : "Run toward the flag at ") +
@@ -305,11 +453,26 @@ std::vector<JevCandidate> GenerateCandidateSpecs(const GameLogic& game, Team tea
     candidate.id = "hunt_" + std::to_string(ghost.id);
     candidate.kind = JevActionKind::Move;
     candidate.actorId = actorId;
+    candidate.routeGoal = ghost.sighting->position;
     candidate.destination = actor->position + dir / dist * std::min(dist, actor->MoveBudget() * 0.8f);
     candidate.description = "Move toward ghost of enemy " + std::to_string(ghost.id) +
                             " (last seen at " + PointJson(ghost.sighting->position) + ").";
     candidates.push_back(std::move(candidate));
     ++hunted;
+  }
+  // Without a flag to run for, the routed advance is the one option that
+  // leaves a terrain level whose straight bearings all end at its cliffs.
+  if (!flagOffered) {
+    const float sign = team == Team::Blue ? 1.0f : -1.0f;
+    JevCandidate candidate;
+    candidate.id = "advance";
+    candidate.kind = JevActionKind::Move;
+    candidate.actorId = actorId;
+    candidate.destination = actor->position;  // No straight-line fallback: dropped if unroutable.
+    candidate.routeGoal = glm::vec3(sign * (game.GetScene().mapHalfExtent - 4.0f),
+                                    actor->position.y, actor->position.z);
+    candidate.description = "Advance toward the opposing deployment edge.";
+    candidates.push_back(std::move(candidate));
   }
 
   // Level connectors: explicit deck exits, terrain stairs, and the graded
@@ -693,7 +856,10 @@ bool JevRequestBuilder::Step(double budgetMs) {
   const auto start = std::chrono::steady_clock::now();
   while (next_ < pending_.size()) {
     JevCandidate candidate = std::move(pending_[next_++]);
-    if (ValidateCandidate(game_, team_, &candidate)) request_.candidates.push_back(std::move(candidate));
+    const bool usable = !candidate.routeGoal || ResolveRoute(game_, &candidate);
+    if (usable && ValidateCandidate(game_, team_, &candidate)) {
+      request_.candidates.push_back(std::move(candidate));
+    }
     const std::chrono::duration<double, std::milli> elapsed =
         std::chrono::steady_clock::now() - start;
     if (elapsed.count() >= budgetMs) break;
@@ -703,6 +869,31 @@ bool JevRequestBuilder::Step(double budgetMs) {
 
 std::optional<JevRequest> JevRequestBuilder::Finish() {
   if (!valid_ || next_ < pending_.size() || request_.candidates.empty()) return std::nullopt;
+  // With no enemy in sight or remembered there is nothing to hold position
+  // against, and a stateless planner that still answers "wait" every round
+  // parks the squad where it spawned (issue #246): a figure that can move
+  // must move. Wait stays on offer once there is contact.
+  {
+    const TeamVisibility visibility = game_.ComputeVisibility(team_);
+    bool contact = !HiddenEnemyGhosts(game_, team_, visibility).empty();
+    for (const Unit& unit : game_.GetScene().units) {
+      contact |= unit.alive && unit.team != team_ && visibility.UnitVisible(unit.id);
+    }
+    if (!contact) {
+      std::vector<int> movers;
+      for (const JevCandidate& candidate : request_.candidates) {
+        if (candidate.kind == JevActionKind::Move) movers.push_back(candidate.actorId);
+      }
+      request_.candidates.erase(
+          std::remove_if(request_.candidates.begin(), request_.candidates.end(),
+                         [&](const JevCandidate& candidate) {
+                           return candidate.kind == JevActionKind::Wait &&
+                                  std::find(movers.begin(), movers.end(), candidate.actorId) !=
+                                      movers.end();
+                         }),
+          request_.candidates.end());
+    }
+  }
   // Only figures that kept at least one legal option take part in the plan.
   for (const JevCandidate& candidate : request_.candidates) {
     if (std::find(request_.actorIds.begin(), request_.actorIds.end(), candidate.actorId) ==

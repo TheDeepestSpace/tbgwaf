@@ -47,6 +47,12 @@ reaction playbook, and `ghosts` (last-known enemy positions, rounds ago,
 movement direction). Move options say whether the destination is hidden from
 or exposed to the currently visible enemies; `cover_N` moves hide behind
 obstacle N away from the nearest threat and `hunt_N` moves toward a ghost.
+The `flag`, `hunt_N` and `advance` (no flag) options are routed on the navmesh
+rather than aimed in a straight line: each round's leg is one move budget along
+the shortest legal route (around buildings, down graded roads, up stairs), and
+the description states how much route remains, so a figure on a terrain level
+is walked off it over several rounds. `wait` is offered only once an enemy is
+visible or remembered; with no contact, a figure that can move must move.
 Only information the team could see is sent.
 
 ## Run locally

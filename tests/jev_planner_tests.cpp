@@ -30,6 +30,24 @@ using tactics::ai::BuildJevRequest;
 using tactics::ai::DeterministicFallbackChoice;
 using tactics::ai::JevActionKind;
 
+// Plans a pass for every unplanned figure of `team` (the opponent's turn is
+// not what these scenarios measure, and its planning is the slow part).
+void PassTeam(GameLogic* game, Team team) {
+  for (const Unit& unit : game->GetScene().units) {
+    if (unit.team != team || !unit.alive || unit.plan.type != PlannedActionType::None) continue;
+    game->ClickUnit(unit.id, team);
+    game->ChoosePass();
+  }
+}
+
+// Any legal option of `actorId` in `request` (wait is only offered with contact).
+std::string AnyChoiceFor(const tactics::ai::JevRequest& request, int actorId) {
+  for (const auto& candidate : request.candidates) {
+    if (candidate.actorId == actorId) return candidate.id;
+  }
+  return "";
+}
+
 Scene TwoUnitScene(float distance, bool faceEachOther) {
   Scene scene;
   scene.mapHalfExtent = 30.0f;
@@ -75,7 +93,7 @@ void TestBoundedCandidatesUseNormalLegalPath() {
     CHECK(copy.FindUnit(0)->plan.type != PlannedActionType::None);
   }
   CHECK(foundMove);
-  CHECK(foundWait);
+  CHECK(!foundWait);  // No enemy known: a figure that can move must move (issue #246).
 }
 
 void TestShootCandidateIsFullBurstAndStateDescribesWeapons() {
@@ -296,11 +314,12 @@ void TestJevMovesNeverCrossRampSlab() {
     if (candidate.kind != JevActionKind::Move) continue;
     std::vector<std::string> choices;
     for (int id : request->actorIds) {
-      choices.push_back(id == candidate.actorId ? candidate.id : "f" + std::to_string(id) + "_wait");
+      choices.push_back(id == candidate.actorId ? candidate.id : AnyChoiceFor(*request, id));
     }
     GameLogic copy = game;
     CHECK(ApplyJevChoice(&copy, *request, choices));
     const auto& path = copy.FindUnit(candidate.actorId)->plan.movePath;
+    if (path.empty()) continue;
     for (size_t i = 0; i + 1 < path.size(); ++i) {
       for (int k = 0; k <= 4; ++k) {
         const glm::vec3 q = path[i] + (path[i + 1] - path[i]) * (static_cast<float>(k) / 4.0f);
@@ -395,6 +414,113 @@ void TestJevFindsGradedRoadOffTerrainIsland() {
   }
 }
 
+// Issue #246: Blue spawns on seed 7's high plateau in Jev vs Jev (CTF). Its
+// "flag" option used to be a straight line that ended at the cliff (dropped
+// as no-progress), leaving same-level bearings and "wait" -- and a stateless
+// Jev that answered wait every round never left. The flag option now follows
+// the navmesh route down the graded road and the next rounds continue it, so
+// a planner that keeps favouring the flag walks the squad off the plateau and
+// steadily closer to the flag. Wait is not offered while no enemy is known.
+void TestJevRoutesOffTerrainIslandTowardFlag() {
+  Scene scene = tactics::GenerateUrbanMap(7);
+  tactics::ApplySpawnHints(&scene);
+  scene.flag.enabled = true;
+  GameLogic game(scene);
+  const glm::vec3 flag = game.FlagPosition();
+  std::vector<float> lastDistance(32, 1e9f);
+  for (int round = 1; round <= 3; ++round) {
+    const auto blue = BuildJevRequest(game, Team::Blue, static_cast<unsigned>(round));
+    CHECK(blue.has_value());
+    if (!blue) return;
+    std::vector<std::string> choices;
+    for (int actorId : blue->actorIds) {
+      const Unit* actor = game.FindUnit(actorId);
+      const std::string flagId = "f" + std::to_string(actorId) + "_flag";
+      const auto flagMove = std::find_if(blue->candidates.begin(), blue->candidates.end(),
+                                         [&](const auto& c) { return c.id == flagId; });
+      CHECK(flagMove != blue->candidates.end());
+      if (flagMove == blue->candidates.end()) return;
+      bool waitOffered = false;
+      for (const auto& c : blue->candidates) {
+        waitOffered |= c.actorId == actorId && c.kind == JevActionKind::Wait;
+      }
+      CHECK(!waitOffered);
+      CHECK(flagMove->description.find("route") != std::string::npos);
+      // The first leg already enters the graded road, below the plateau.
+      if (round == 1) CHECK(flagMove->destination.y < actor->position.y - 1.0f);
+      const float distance =
+          std::hypot(flagMove->destination.x - flag.x, flagMove->destination.z - flag.z);
+      CHECK(distance < lastDistance[actorId] - 3.0f);
+      lastDistance[actorId] = distance;
+      choices.push_back(flagMove->id);
+    }
+    CHECK(ApplyJevChoice(&game, *blue, choices));
+    PassTeam(&game, Team::Red);
+    CHECK(game.CanCommitRound());
+    game.CommitRound();
+    game.Update(10.0f);
+    if (game.Mode() == InputMode::GameOver) break;
+  }
+  for (const Unit& unit : game.GetScene().units) {
+    if (unit.team == Team::Blue) CHECK(unit.position.y < 0.5f);  // Down on the ground level.
+  }
+}
+
+// Without a flag, the routed "advance" option plays the same role. The
+// diagonal route down the road hugs the retaining walls, so its first leg
+// ends at the road entrance on the plateau; the next leg descends it.
+void TestJevAdvanceRoutesOffTerrainIsland() {
+  Scene scene = tactics::GenerateUrbanMap(7);
+  tactics::ApplySpawnHints(&scene);
+  GameLogic game(scene);
+  std::vector<glm::vec3> spawn(32);
+  for (const Unit& unit : scene.units) spawn[unit.id] = unit.position;
+  for (int round = 1; round <= 2; ++round) {
+    const auto request = BuildJevRequest(game, Team::Blue, static_cast<unsigned>(round));
+    CHECK(request.has_value());
+    if (!request) return;
+    std::vector<std::string> choices;
+    for (int actorId : request->actorIds) {
+      const std::string id = "f" + std::to_string(actorId) + "_advance";
+      const auto advance = std::find_if(request->candidates.begin(), request->candidates.end(),
+                                        [&](const auto& c) { return c.id == id; });
+      CHECK(advance != request->candidates.end());
+      if (advance == request->candidates.end()) return;
+      CHECK(advance->description.find("route") != std::string::npos);
+      choices.push_back(advance->id);
+    }
+    CHECK(ApplyJevChoice(&game, *request, choices));
+    PassTeam(&game, Team::Red);
+    CHECK(game.CanCommitRound());
+    game.CommitRound();
+    game.Update(10.0f);
+  }
+  for (const Unit& unit : game.GetScene().units) {
+    if (unit.team != Team::Blue) continue;
+    CHECK(unit.position.y < 0.5f);  // Down on the ground level...
+    CHECK(unit.position.x > spawn[unit.id].x + 10.0f);  // ...and east of the plateau.
+  }
+}
+
+// Wait is withheld only while no enemy is seen or remembered.
+void TestJevOffersWaitOnlyWithContact() {
+  const auto offers = [](const GameLogic& game, JevActionKind kind) {
+    const auto request = BuildJevRequest(game, Team::Blue, 1);
+    CHECK(request.has_value());
+    if (!request) return false;
+    for (const auto& candidate : request->candidates) {
+      if (candidate.kind == kind) return true;
+    }
+    return false;
+  };
+  GameLogic quiet(TwoUnitScene(24.0f, false));
+  CHECK(offers(quiet, JevActionKind::Move));
+  CHECK(!offers(quiet, JevActionKind::Wait));
+  GameLogic contact(TwoUnitScene(8.0f, true));
+  CHECK(offers(contact, JevActionKind::Shoot));
+  CHECK(offers(contact, JevActionKind::Wait));
+}
+
 int main() {
   TestIncrementalBuilderMatchesBlockingBuild();
   TestBoundedCandidatesUseNormalLegalPath();
@@ -409,6 +535,9 @@ int main() {
   TestJevMovesNeverCrossRampSlab();
   TestJevMovesMakeProgressAcrossTerrainLevels();
   TestJevFindsGradedRoadOffTerrainIsland();
+  TestJevRoutesOffTerrainIslandTowardFlag();
+  TestJevAdvanceRoutesOffTerrainIsland();
+  TestJevOffersWaitOnlyWithContact();
   if (failures == 0) {
     std::puts("All Jev planner scenarios passed.");
     return 0;

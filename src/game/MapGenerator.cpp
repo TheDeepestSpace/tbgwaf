@@ -3108,9 +3108,8 @@ bool PlanarPatch(const std::vector<glm::vec2>& piece, const Ground& ground, Road
 
 struct DeckRailJoin {
   glm::vec2 outer{0.0f};  // The two outer rail faces meet here: the nose.
-  // Deck-side corner of each wall's own end cap. At the obtuse fork both are
-  // the shared miter corner; at the acute fork each wall simply ends square
-  // to its own direction at the nose.
+  // Deck-side corner of each wall's end cap: the miter where the two inner
+  // faces meet, shared by both walls so the join has no gap.
   glm::vec2 arteryBack{0.0f};
   glm::vec2 branchBack{0.0f};
   float arteryS = 0.0f;
@@ -3136,10 +3135,8 @@ bool IntersectLines(glm::vec2 a, glm::vec2 aDir, glm::vec2 b, glm::vec2 bDir,
 
 // Where the two branch rails meet the rail on the branch-facing side of the
 // artery. Each wall runs straight along its own edge until its outer face
-// reaches the other's: the nose. At the obtuse (outer) fork the inner faces
-// are extended to meet too, a short miter. At the acute (inner) fork that
-// would run the inner faces on into a long spike down the merged deck, so
-// each wall just ends square at the nose, with no bend in either direction.
+// reaches the other's: the nose. The inner faces are extended to meet too,
+// so the two walls share one mitered end cap at both forks: no gap, no bend.
 DeckRailJunction BuildDeckRailJunction(const HighwayPlan& plan,
                                        const MapGeneratorConfig& c, PierForm pierForm) {
   DeckRailJunction junction;
@@ -3169,16 +3166,8 @@ DeckRailJunction BuildDeckRailJunction(const HighwayPlan& plan,
         !IntersectLines(arteryInner, plan.artery.dir, branchInner, plan.branch.dir, &miter)) {
       return DeckRailJunction{};
     }
-    // The walls meet at an acute angle when the miter runs on past a
-    // rail's own thickness from the nose.
-    const bool acute = glm::distance(join.outer, miter) > 2.0f * kRailThickness;
-    if (acute) {
-      join.arteryBack = join.outer + arteryInward * kRailThickness;
-      join.branchBack = join.outer + branchInward * kRailThickness;
-    } else {
-      join.arteryBack = miter;
-      join.branchBack = miter;
-    }
+    join.arteryBack = miter;
+    join.branchBack = miter;
     join.arteryS = glm::dot(join.outer - plan.artery.origin, plan.artery.dir);
     join.branchU = glm::dot(join.outer - plan.branch.start, plan.branch.dir);
   }

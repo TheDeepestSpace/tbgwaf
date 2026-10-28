@@ -1246,7 +1246,7 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
 
   // Rails are true sloped prisms, not a staircase of flat-topped boxes.
   // At the fork, each branch wall and its artery continuation share the
-  // exact same mitered end-cap edge.
+  // exact same mitered end-cap edge, at the acute fork too.
   std::vector<const MassingDetail*> rails;
   bool slopedRail = false;
   for (const MassingDetail& d : scene.massing) {
@@ -1296,8 +1296,7 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
     }
     return best;
   };
-  constexpr float kRailThickness = 0.3f;
-  int forkJoins = 0, acuteForks = 0, obtuseForks = 0;
+  int forkJoins = 0;
   for (size_t i = 0; i < rails.size(); ++i) {
     for (size_t j = i + 1; j < rails.size(); ++j) {
       const std::vector<glm::vec2>& a = rails[i]->footprint;
@@ -1306,43 +1305,14 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
       if (std::fabs(ai.x * aj.y - ai.y * aj.x) < 0.2f) continue;
       size_t ia = 0, ib = 0;
       if (sharedEdge(a, b, &ia, &ib)) {
-        // The obtuse fork is a plain miter: two quads sharing the whole
-        // (short) mitered cap.
+        // Both forks are plain miters: two quads sharing the whole cap, so
+        // no gap opens between the walls.
         ++forkJoins;
-        ++obtuseForks;
         CHECK(a.size() == 4 && b.size() == 4);
-        CHECK(glm::distance(a[ia], a[(ia + 1) % a.size()]) < 2.0f * kRailThickness);
-        continue;
-      }
-      // The acute fork: no shared edge, only the nose where both outer
-      // faces meet. Each wall runs straight and ends square at the nose, so
-      // nothing reaches past it along either wall: no miter spike, no bend.
-      glm::vec2 nose(0.0f);
-      bool touch = false;
-      for (const glm::vec2& pa : a) {
-        for (const glm::vec2& pb : b) {
-          if (glm::distance(pa, pb) < 0.02f) { nose = pa; touch = true; }
-        }
-      }
-      if (!touch) continue;
-      ++forkJoins;
-      ++acuteForks;
-      CHECK(a.size() == 4 && b.size() == 4);
-      for (const auto& pair : {std::make_pair(&a, ai), std::make_pair(&b, aj)}) {
-        // Walls extend away from the nose only.
-        const bool forward = [&] {
-          glm::vec2 c(0.0f);
-          for (const glm::vec2& p : *pair.first) c += p / 4.0f;
-          return glm::dot(c - nose, pair.second) > 0.0f;
-        }();
-        for (const glm::vec2& p : *pair.first) {
-          const float along = glm::dot(p - nose, pair.second) * (forward ? 1.0f : -1.0f);
-          CHECK(along > -0.02f);  // Square end at the nose.
-        }
       }
     }
   }
-  CHECK(forkJoins == 2 && acuteForks == 1 && obtuseForks == 1);
+  CHECK(forkJoins == 2);
 
   // Both artery ramp feet plus the on-ramp foot declare ground connections,
   // and the on-ramp merges mid-deck (a span with a third neighbor).

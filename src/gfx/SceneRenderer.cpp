@@ -79,6 +79,9 @@ const glm::vec3 kSetupColor(0.2f, 1.0f, 0.3f);
 // The thermal HUD's "bright" green (Hud.cpp PushThermalHudStyle), used for
 // move paths and reach frontiers in the AO view.
 const glm::vec3 kThermalGreen(0.30f, 0.90f, 0.40f);
+// Black-hot (light) view: the bright green washes out on the pale background,
+// so overlays use a darker shade of it.
+const glm::vec3 kThermalGreenDark(0.02f, 0.45f, 0.14f);
 // Scene geometry base colors, shared by the opaque pass and the issue #136
 // see-through pass so a faded block keeps its normal tint.
 const glm::vec3 kObstacleColor(0.55f, 0.55f, 0.6f);
@@ -1474,9 +1477,7 @@ void DrawFigureWirePart(const Shader& shader, LineMesh& lines, const glm::mat4& 
 }
 
 void DrawUnitWireframe(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
-                       const Unit& unit) {
-  // Common highlight green for both teams.
-  const glm::vec4 color(0.3f, 0.9f, 0.4f, 1.0f);
+                       const Unit& unit, const glm::vec4& color) {
   for (const FigurePart& part : BuildFigureWireframe(unit)) {
     DrawFigureWirePart(shader, lines, viewProj, part, color);
   }
@@ -4040,6 +4041,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   };
 
+  // Overlay green in the thermal view; thermalKey tags it for the mesh caches.
+  const int thermalKey = debug.thermal ? (debug.thermalBlackHot ? 2 : 1) : 0;
+  const glm::vec3 thermalGreen = debug.thermalBlackHot ? kThermalGreenDark : kThermalGreen;
   // Movement frontier: a glow hugging the reach boundary -- brightest at the
   // boundary, fading to fully transparent within kFadeWidth inside it. The
   // boundary is the zero contour of a blurred signed-distance field, so it
@@ -4048,14 +4052,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     const tactics::ReachField& f = *overlays.moveFrontier;
     const glm::vec2 origin(f.minX, f.minZ);
     if (frontierKeyField_ != &f || frontierKeyOrigin_ != origin ||
-        frontierKeyBudget_ != f.budget || frontierKeyThermal_ != debug.thermal) {
+        frontierKeyBudget_ != f.budget || frontierKeyThermal_ != thermalKey) {
       frontierKeyField_ = &f;
       frontierKeyOrigin_ = origin;
       frontierKeyBudget_ = f.budget;
-      frontierKeyThermal_ = debug.thermal;
+      frontierKeyThermal_ = thermalKey;
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
-      appendFrontier(f, debug.thermal ? kThermalGreen : kSetupColor, fill, border);
+      appendFrontier(f, debug.thermal ? thermalGreen : kSetupColor, fill, border);
       frontierFill_.SetVertices(fill);
       frontierBorder_.SetPoints(border);
     }
@@ -4068,7 +4072,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
     // Thermal view: same green for every leg, half-transparent after the first.
-    const glm::vec3 frontierColor = debug.thermal ? kThermalGreen : kSetupColor;
+    const glm::vec3 frontierColor = debug.thermal ? thermalGreen : kSetupColor;
     if (debug.thermal) {
       glEnable(GL_BLEND);
       glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -4087,10 +4091,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     const glm::vec3 kZiplineColor(0.2f, 0.75f, 1.0f);
     // The reachable region matches the regular move frontier; only the cable
     // and entry marker keep the zipline tint.
-    const glm::vec3 regionColor = debug.thermal ? kThermalGreen : kSetupColor;
+    const glm::vec3 regionColor = debug.thermal ? thermalGreen : kSetupColor;
     const auto& frontiers = *overlays.ziplineFrontiers;
     std::vector<glm::vec4> key;
-    key.emplace_back(debug.thermal ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    key.emplace_back(static_cast<float>(thermalKey), 0.0f, 0.0f, 0.0f);
     for (const auto& fr : frontiers) {
       key.emplace_back(fr.field.minX, fr.field.minZ, fr.field.budget,
                        static_cast<float>(fr.zipline));
@@ -4258,6 +4262,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                                             path.begin() + last + 1)));
       unlitShader_.SetVec4("uColor", color);
       pathLine_.Draw();
+      // GL line width is fixed at 1px, so thicken the path with parallel
+      // copies shifted sideways (screen-right) by a few centimetres.
+      const glm::vec3 right(view[0][0], view[1][0], view[2][0]);
+      for (const float offset : {-0.06f, -0.03f, 0.03f, 0.06f}) {
+        std::vector<glm::vec3> shifted = liftedPath(std::vector<glm::vec3>(
+            path.begin() + first, path.begin() + last + 1));
+        for (glm::vec3& p : shifted) p += right * offset;
+        pathLine_.SetPoints(shifted);
+        pathLine_.Draw();
+      }
     };
     std::vector<tactics::PathRide> sorted = rides;
     std::sort(sorted.begin(), sorted.end(),
@@ -4295,21 +4309,24 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       if (!unit.alive || (!overlays.spectatorFov && unit.team != team)) continue;
       if (unit.plan.type == tactics::PlannedActionType::Move && unit.plan.movePath.size() >= 2) {
         drawMovePath(unit.plan.movePath, unit.plan.moveRides,
-                     glm::vec4(debug.thermal ? kThermalGreen : glm::vec3(0.3f, 0.9f, 0.4f), 1.0f));
+                     glm::vec4(debug.thermal ? thermalGreen : glm::vec3(0.3f, 0.9f, 0.4f), 1.0f));
         // Wireframe stand-in at the destination, showing the planned final
         // facing (persists until the turn is committed).
         Unit ghost = unit;
         ghost.position = unit.plan.movePath.back();
         ghost.facingYaw = unit.plan.endFacingYaw;
         ghost.turnLag = 0.0f;
-        DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost);
+        // Common highlight green for both teams (darker in the black-hot view).
+        DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost,
+                          debug.thermal ? glm::vec4(thermalGreen, 1.0f)
+                                        : glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
         // Chained legs for later rounds: yellow, with a marker at each leg
         // end so they read apart from the leg about to execute (green).
         // Thermal view: the same green as the first leg, at 50% alpha.
-        const glm::vec4 yellow = debug.thermal ? glm::vec4(kThermalGreen, 0.5f)
+        const glm::vec4 yellow = debug.thermal ? glm::vec4(thermalGreen, 0.5f)
                                                : glm::vec4(1.0f, 0.85f, 0.2f, 1.0f);
         const glm::vec4 firstRingColor =
-            debug.thermal ? glm::vec4(kThermalGreen, 1.0f) : yellow;
+            debug.thermal ? glm::vec4(thermalGreen, 1.0f) : yellow;
         if (debug.thermal) {
           glEnable(GL_BLEND);
           glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);

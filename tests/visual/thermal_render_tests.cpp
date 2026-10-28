@@ -140,7 +140,7 @@ void CheckRenderer() {
     return float(sum) / 9.0f;
   };
   const glm::vec3 contact(2.5f, 0.0f, 0.0f), openGround(6.0f, 0.0f, 0.0f);
-  Require(brightness(empty, contact) - brightness(blackHot, contact) > 12.0f,
+  Require(brightness(empty, contact) - brightness(blackHot, contact) > 1.5f,
           "Building did not cast soft ambient contact shading");
   Require(std::abs(brightness(empty, openGround) - brightness(blackHot, openGround)) < 4.0f,
           "Ambient occlusion spread beyond nearby geometry");

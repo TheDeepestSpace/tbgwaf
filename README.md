@@ -159,7 +159,7 @@ scenario YAML selects them with `render: {thermal: true, thermal_black_hot: fals
 for white-hot (omit `thermal_black_hot` for black-hot).
 
 The AO sliders in the debug panel tune the contact shading: radius (default
-2.4), strength (1.9), quality (6 samples per ray) and softness (2 px blur).
+0.8), strength (0.8), quality (3 samples per ray) and softness (3 px blur).
 
 ### Flag objective (CTF part 1)
 

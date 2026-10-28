@@ -801,7 +801,10 @@ void GameLogic::Update(float dtSeconds) {
   // carries on, same velocities and all, when the next round starts. A
   // knockdown holds its final pose; the shoot beat returns to idle (<0) once
   // done.
+  // The pose a figure was hit in is frozen (the ragdoll starts from it), so
+  // the animation clocks below stop for a falling unit.
   for (Unit& unit : scene_.units) {
+    const bool falling = !unit.alive && unit.knockdownElapsed >= 0.0f;
     if (unit.alive) {
       unit.idleElapsed =
           std::fmod(unit.idleElapsed + dtSeconds, constants::kIdleAnimDuration);
@@ -810,11 +813,11 @@ void GameLogic::Update(float dtSeconds) {
       unit.knockdownElapsed =
           std::min(unit.knockdownElapsed + dtSeconds, constants::kKnockdownMaxSeconds);
     }
-    if (unit.shootElapsed >= 0.0f) {
+    if (unit.shootElapsed >= 0.0f && !falling) {
       unit.shootElapsed += dtSeconds;
       if (unit.shootElapsed >= constants::kShootAnimDuration) unit.shootElapsed = -1.0f;
     }
-    if (unit.grabElapsed >= 0.0f) {
+    if (unit.grabElapsed >= 0.0f && !falling) {
       unit.grabElapsed += dtSeconds;
       if (unit.grabElapsed >= constants::kGrabAnimDuration) unit.grabElapsed = -1.0f;
     }
@@ -834,6 +837,7 @@ void GameLogic::Update(float dtSeconds) {
   // OrbitCamera::Update's zoom damping: a large dt snaps straight to the
   // target, so a fast-forwarded round leaves everyone at rest.
   for (Unit& unit : scene_.units) {
+    if (!unit.alive && unit.knockdownElapsed >= 0.0f) continue;  // Pose frozen at the hit.
     const float target =
         unit.alive && IsUnitMoving(unit.id) && !IsUnitRiding(unit.id) ? 1.0f : 0.0f;
     unit.walkBlend +=

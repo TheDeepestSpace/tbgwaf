@@ -415,7 +415,8 @@ glm::mat4 BoneFrame(const glm::vec3& origin, const glm::vec3& toward) {
 // `target`, all in the figure-local frame; the elbow bends toward `pole`.
 // Appends the three parts transformed into `figure`'s space.
 void AppendArmIK(FigureParts* parts, const glm::mat4& figure, const glm::vec3& shoulder,
-                 const glm::vec3& target, const glm::vec3& pole, const glm::vec4& color) {
+                 const glm::vec3& target, const glm::vec3& pole, const glm::vec4& color,
+                 glm::vec3* elbowOut = nullptr, glm::vec3* handOut = nullptr) {
   const float a = kUpperArmLength;
   const float b = kLowerArmLength;
   glm::vec3 toTarget = target - shoulder;
@@ -437,6 +438,8 @@ void AppendArmIK(FigureParts* parts, const glm::mat4& figure, const glm::vec3& s
   const float sinA = std::sqrt(std::max(0.0f, 1.0f - cosA * cosA));
   const glm::vec3 elbow = shoulder + dir * (a * cosA) + bend * (a * sinA);
   const glm::vec3 hand = shoulder + dir * length;
+  if (elbowOut) *elbowOut = glm::vec3(figure * glm::vec4(elbow, 1.0f));
+  if (handOut) *handOut = glm::vec3(figure * glm::vec4(hand, 1.0f));
 
   parts->push_back({RoundedSegment(figure * BoneFrame(shoulder, elbow), a, kArmRadius), color});
   parts->push_back({JointBall(figure * glm::translate(glm::mat4(1.0f), elbow), kArmRadius),
@@ -608,8 +611,8 @@ FigureParts BuildRagdollFigure(const Unit& unit, bool compactWeapon) {
   return parts;
 }
 
-FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
-  if (RagdollActive(unit)) return BuildRagdollFigure(unit, compactWeapon);
+FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon, RagdollPose* joints = nullptr) {
+  if (!joints && RagdollActive(unit)) return BuildRagdollFigure(unit, compactWeapon);
   // Every body part shares the one flat team color; only the weapon differs.
   const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
                                                       : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
@@ -711,6 +714,25 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
   const glm::mat4 rightThigh =
       LimbFrame(figure, glm::vec3(0.0f, kHipHeight, kLegSideOffset), rightHip);
   const glm::mat4 rightShin = ChildBoneFrame(rightThigh, kUpperLegLength, rightKnee);
+  // Where an IK-solved arm ends up, for the ragdoll's starting pose.
+  auto armOut = [&](int elbow, int hand, glm::vec3** e, glm::vec3** h) {
+    *e = joints ? &(*joints)[elbow] : nullptr;
+    *h = joints ? &(*joints)[hand] : nullptr;
+  };
+  if (joints) {
+    auto at = [&](const glm::mat4& m, float down) {
+      return glm::vec3(m * glm::vec4(0.0f, -down, 0.0f, 1.0f));
+    };
+    (*joints)[kRagHead] = glm::vec3(figure * glm::vec4(headCenter, 1.0f));
+    (*joints)[kRagNeck] = glm::vec3(figure * glm::vec4(0.0f, kHipHeight + kTorsoHeight, 0.0f, 1.0f));
+    (*joints)[kRagPelvis] = glm::vec3(figure * glm::vec4(0.0f, kHipHeight, 0.0f, 1.0f));
+    (*joints)[kRagHipL] = at(leftThigh, 0.0f);
+    (*joints)[kRagHipR] = at(rightThigh, 0.0f);
+    (*joints)[kRagKneeL] = at(leftShin, 0.0f);
+    (*joints)[kRagKneeR] = at(rightShin, 0.0f);
+    (*joints)[kRagFootL] = at(leftShin, kLowerLegLength);
+    (*joints)[kRagFootR] = at(rightShin, kLowerLegLength);
+  }
   parts.push_back({RoundedSegment(leftThigh, kUpperLegLength, kLegRadius), teamColor});
   parts.push_back({JointBall(leftShin, kLegRadius * 0.96f), teamColor});
   parts.push_back({RoundedSegment(leftShin, kLowerLegLength, kLegRadius * 0.94f), teamColor});
@@ -759,6 +781,17 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
         LimbFrame(glm::mat4(1.0f), glm::vec3(0.0f, kShoulderHeight, kArmSideOffset),
                   gunArmSwing, shot.aimYawDelta + inward, -kArmSplay * (1.0f - shot.raise));
     const glm::mat4 gunForearm = ChildBoneFrame(gunUpperArm, kUpperArmLength, gunElbow);
+    if (joints) {
+      const glm::mat4 gunLocal = gunForearm;
+      (*joints)[kRagShoulderR] = glm::vec3(figure * glm::vec4(0.0f, kShoulderHeight, kArmSideOffset, 1.0f));
+      (*joints)[kRagShoulderL] = glm::vec3(figure * glm::vec4(leftShoulderPivot, 1.0f));
+      (*joints)[kRagElbowR] = glm::vec3(figure * gunLocal * glm::vec4(0, 0, 0, 1));
+      (*joints)[kRagHandR] =
+          glm::vec3(figure * gunLocal * glm::vec4(0.0f, -kLowerArmLength, 0.0f, 1.0f));
+      (*joints)[kRagElbowL] = glm::vec3(figure * leftForearm * glm::vec4(0, 0, 0, 1));
+      (*joints)[kRagHandL] =
+          glm::vec3(figure * leftForearm * glm::vec4(0.0f, -kLowerArmLength, 0.0f, 1.0f));
+    }
     if (ride.armsUp <= 0.0f) {
       parts.push_back({RoundedSegment(figure * gunUpperArm, kUpperArmLength, kArmRadius),
                        teamColor});
@@ -791,11 +824,14 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
           glm::vec3(gunForearm * glm::vec4(0.0f, -kLowerArmLength, 0.0f, 1.0f));
       const glm::vec3 swingHand =
           glm::vec3(leftForearm * glm::vec4(0.0f, -kLowerArmLength, 0.0f, 1.0f));
+      glm::vec3 *e, *h;
+      armOut(kRagElbowR, kRagHandR, &e, &h);
       AppendArmIK(&parts, figure, glm::vec3(0.0f, kShoulderHeight, kArmSideOffset),
                   glm::mix(gunHand, handleRight, ride.armsUp), glm::vec3(-0.3f, -0.6f, 0.8f),
-                  teamColor);
+                  teamColor, e, h);
+      armOut(kRagElbowL, kRagHandL, &e, &h);
       AppendArmIK(&parts, figure, leftShoulderPivot, glm::mix(swingHand, handleLeft, ride.armsUp),
-                  glm::vec3(-0.3f, -0.6f, -0.8f), teamColor);
+                  glm::vec3(-0.3f, -0.6f, -0.8f), teamColor, e, h);
     } else if (unit.shootElapsed >= 0.0f) {
       // Two-handed firing stance: the support hand leaves its gait swing and
       // clasps the front of the grip as the gun comes up (and rides the
@@ -804,9 +840,11 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
           glm::vec3(leftForearm * glm::vec4(0.0f, -kLowerArmLength, 0.0f, 1.0f));
       const glm::vec3 supportHand =
           glm::vec3(weaponFrame * glm::vec4(kPistolSupportHandLocal, 1.0f));
+      glm::vec3 *e, *h;
+      armOut(kRagElbowL, kRagHandL, &e, &h);
       AppendArmIK(&parts, figure, leftShoulderPivot,
                   glm::mix(swingHand, supportHand, shot.raise),
-                  glm::vec3(-0.6f, -0.8f, -0.3f), teamColor);
+                  glm::vec3(-0.6f, -0.8f, -0.3f), teamColor, e, h);
     } else {
       parts.push_back({RoundedSegment(figure * leftUpperArm, kUpperArmLength, kArmRadius),
                        teamColor});
@@ -858,12 +896,21 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
     // left shoulder forward toward the handguard while aiming.
     const glm::mat3 shoulderRot = glm::mat3(
         glm::rotate(glm::mat4(1.0f), torsoYaw, glm::vec3(0.0f, -1.0f, 0.0f)));
+    glm::vec3 *e, *h;
+    armOut(kRagElbowR, kRagHandR, &e, &h);
     AppendArmIK(&parts, figure,
                 shoulderRot * glm::vec3(0.0f, kShoulderHeight, kArmSideOffset), rightHand,
-                glm::vec3(-0.2f, -1.0f, 0.5f), teamColor);
+                glm::vec3(-0.2f, -1.0f, 0.5f), teamColor, e, h);
+    armOut(kRagElbowL, kRagHandL, &e, &h);
     AppendArmIK(&parts, figure,
                 shoulderRot * glm::vec3(0.0f, kShoulderHeight, -kArmSideOffset), leftHand,
-                glm::vec3(-0.2f, -1.0f, -0.5f), teamColor);
+                glm::vec3(-0.2f, -1.0f, -0.5f), teamColor, e, h);
+    if (joints) {
+      (*joints)[kRagShoulderR] =
+          glm::vec3(figure * glm::vec4(shoulderRot * glm::vec3(0.0f, kShoulderHeight, kArmSideOffset), 1.0f));
+      (*joints)[kRagShoulderL] =
+          glm::vec3(figure * glm::vec4(shoulderRot * glm::vec3(0.0f, kShoulderHeight, -kArmSideOffset), 1.0f));
+    }
   }
   if (unit.carryingFlag && !compactWeapon) {
     // Stowed backpack-style: pole strapped behind the torso, leaning back
@@ -874,6 +921,15 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
                0.6f, /*withFoot=*/false);
   }
   return parts;
+}
+
+RagdollPose AnimatedPose(const Unit& unit) {
+  Unit standing = unit;
+  standing.alive = true;
+  standing.knockdownElapsed = -1.0f;
+  RagdollPose pose{};
+  BuildFigureImpl(standing, true, &pose);
+  return pose;
 }
 
 FigureParts BuildFigure(const Unit& unit) { return BuildFigureImpl(unit, false); }

@@ -7,6 +7,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "game/Types.h"
+#include "gfx/FigureRig.h"
 
 using tactics::Unit;
 
@@ -163,14 +164,23 @@ struct Trajectory {
   glm::vec3 position{0.0f};
   float yaw = 0.0f;
   glm::vec3 axis{0.0f};
+  Unit anim;  // Only the animation fields that set the starting pose are compared.
   unsigned long stamp = 0;
   std::vector<RagdollPose> frames;  // Up to kRagdollSteps + 1 entries.
   std::vector<RagdollGun> guns;     // Same length as frames.
 };
 
+bool SameAnimation(const Unit& a, const Unit& b) {
+  return a.walkPhase == b.walkPhase && a.walkBlend == b.walkBlend &&
+         a.idleElapsed == b.idleElapsed && a.shootElapsed == b.shootElapsed &&
+         a.shootAimYaw == b.shootAimYaw && a.grabElapsed == b.grabElapsed &&
+         a.rideTravel == b.rideTravel && a.rideLength == b.rideLength &&
+         a.rideSlope == b.rideSlope && a.weapon == b.weapon;
+}
+
 bool SameKey(const Trajectory& t, const Unit& u) {
   return t.id == u.id && t.position == u.position && t.yaw == u.facingYaw &&
-         t.axis == u.knockdownAxis;
+         t.axis == u.knockdownAxis && SameAnimation(t.anim, u);
 }
 
 Trajectory Simulate(const Unit& unit) {
@@ -179,6 +189,7 @@ Trajectory Simulate(const Unit& unit) {
   traj.position = unit.position;
   traj.yaw = unit.facingYaw;
   traj.axis = unit.knockdownAxis;
+  traj.anim = unit;
 
   // KnockDown() stores axis = up x dir, so the shot direction is (-axis.z, axis.x).
   glm::vec3 dir(-unit.knockdownAxis.z, 0.0f, unit.knockdownAxis.x);
@@ -191,12 +202,10 @@ Trajectory Simulate(const Unit& unit) {
   const float impactScale =
       1.0f + 0.12f * std::sin(static_cast<float>(unit.id) * 12.9898f);
 
-  const glm::mat4 frame =
-      glm::translate(glm::mat4(1.0f), unit.position) *
-      glm::rotate(glm::mat4(1.0f), unit.facingYaw, glm::vec3(0.0f, -1.0f, 0.0f));
-  RagdollPose pos, prev;
+  // Start from the pose the figure was actually in when it was hit (the
+  // animation state is frozen from then on), not a neutral stand.
+  RagdollPose pos = AnimatedPose(unit), prev;
   for (int i = 0; i < kRagJointCount; ++i) {
-    pos[i] = glm::vec3(frame * glm::vec4(kStanding[i], 1.0f));
     const glm::vec3 v = (dir * (kLaunchSpeed * impactScale) +
                          glm::vec3(0.0f, kLaunchLift, 0.0f)) *
                         kLaunchWeight[i];

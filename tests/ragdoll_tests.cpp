@@ -217,7 +217,24 @@ void TestWallPushOutDoesNotLaunchBody() {
 
 }  // namespace
 
+// The fall begins from the pose held at the hit: a unit caught mid-stride
+// starts from different joint positions than one standing still.
+void TestStartsFromAnimatedPose() {
+  tactics::Unit still = Downed(1, 0.0f);
+  tactics::Unit running = still;
+  running.walkBlend = 1.0f;
+  running.walkPhase = 1.2f;
+  const gfx::RagdollPose a = gfx::SampleRagdollStep(still, 0);
+  const gfx::RagdollPose b = gfx::SampleRagdollStep(running, 0);
+  CHECK(glm::length(a[gfx::kRagFootL] - b[gfx::kRagFootL]) > 0.02f ||
+        glm::length(a[gfx::kRagHandL] - b[gfx::kRagHandL]) > 0.02f);
+  // Matches the live animated pose exactly (no snap to a neutral stand).
+  const gfx::RagdollPose live = gfx::AnimatedPose(running);
+  for (int i = 0; i < gfx::kRagJointCount; ++i) CHECK(glm::length(b[i] - live[i]) < 1e-4f);
+}
+
 int main() {
+  TestStartsFromAnimatedPose();
   TestWallPushOutDoesNotLaunchBody();
   TestFallsOffWallAndStaysOutside();
   TestGunReleaseAndDrop();

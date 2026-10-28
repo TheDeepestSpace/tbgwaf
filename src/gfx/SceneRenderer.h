@@ -188,6 +188,7 @@ class SceneRenderer {
   const tactics::ReachField* frontierKeyField_ = nullptr;
   glm::vec2 frontierKeyOrigin_{0.0f};
   float frontierKeyBudget_ = -1.0f;
+  glm::vec3 frontierKeyColor_{0.0f};
   ColorTriangleMesh ziplineFill_;
   LineMesh ziplineBorder_;
   std::vector<glm::vec4> ziplineKey_;  // (minX, minZ, budget, zipline) per region.

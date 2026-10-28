@@ -76,6 +76,11 @@ constexpr int kShadowMapSize = 2048;
 constexpr float kDeckShadowSlopeBias = 16.0f;
 constexpr float kDeckShadowConstantBias = 64.0f;
 const glm::vec3 kSetupColor(0.2f, 1.0f, 0.3f);
+// Team tints shared by the FOV overlay, tracers and (in thermal view) the
+// selection/setup symbology.
+glm::vec3 TeamColor(Team team) {
+  return team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f) : glm::vec3(0.9f, 0.25f, 0.22f);
+}
 // Scene geometry base colors, shared by the opaque pass and the issue #136
 // see-through pass so a faded block keeps its normal tint.
 const glm::vec3 kObstacleColor(0.55f, 0.55f, 0.6f);
@@ -2380,7 +2385,8 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
                   const std::vector<const Unit*>& litUnits,
                   const std::vector<tactics::Obstacle>& obstacles,
                   const std::vector<AABB>& sidewalks, float mapHalfExtent,
-                  const glm::vec3* aimPoint = nullptr) {
+                  const glm::vec3* aimPoint = nullptr,
+                  const glm::vec3& coneColor = kSetupColor) {
   constexpr int kSegments = 40;
   constexpr int kRings = 12;  // Along the axis, so the alpha fade interpolates smoothly.
   constexpr float kSurfaceAlpha = 0.18f;
@@ -2437,7 +2443,7 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
     const glm::vec3 p =
         apex + axis * t + (right * std::cos(a) + up * std::sin(a)) * (t * tanHalf);
     return ColorTriangleMesh::Vertex{
-        p, glm::vec4(kSetupColor, kSurfaceAlpha * ShotConeFade(t / fadeRange))};
+        p, glm::vec4(coneColor, kSurfaceAlpha * ShotConeFade(t / fadeRange))};
   };
   std::vector<ColorTriangleMesh::Vertex> vertices;
   vertices.reserve(static_cast<size_t>(kRings * kSegments * 6));
@@ -2461,7 +2467,7 @@ void DrawShotCone(const Shader& colorShader, const Shader& surfaceShader,
   surfaceShader.SetVec3("uAxis", axis);
   surfaceShader.SetVec4("uCone",
                        glm::vec4(tanHalf, range + 0.05f, fadeRange, kFootprintAlpha));
-  surfaceShader.SetVec3("uColor", kSetupColor);
+  surfaceShader.SetVec3("uColor", coneColor);
   const auto drawModel = [&](const glm::mat4& model, const auto& modelMesh, bool requireFacing) {
     surfaceShader.SetMat4("uModel", model);
     surfaceShader.SetMat4("uMVP", viewProj * model);
@@ -2496,12 +2502,13 @@ const glm::vec3 kAimColor(0.55f, 1.0f, 0.1f);
 // The "+" aim selector: a 3D plus sign (three thin axis-aligned bars) so a
 // point placed on a surface or in the sky reads from any camera angle.
 void DrawAimMarker(const Shader& colorShader, ColorTriangleMesh& mesh,
-                   const glm::mat4& viewProj, const glm::vec3& point) {
+                   const glm::mat4& viewProj, const glm::vec3& point,
+                   const glm::vec3& markerColor = kAimColor) {
   constexpr float kArm = 0.55f;
   constexpr float kThick = 0.06f;
   constexpr float kAlpha = 0.95f;
   std::vector<ColorTriangleMesh::Vertex> vertices;
-  const glm::vec4 color(kAimColor, kAlpha);
+  const glm::vec4 color(markerColor, kAlpha);
   const auto appendBox = [&](const glm::vec3& halfExtents) {
     const glm::vec3 mn = point - halfExtents;
     const glm::vec3 mx = point + halfExtents;
@@ -3278,6 +3285,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // Uniform values stick to each program across Use() switches, so setting
   // them once per pane covers all later draws.
   const int thermalFlag = debug.thermal ? 1 : 0;
+  // Thermal view recolors the green/yellow/acid-green setup symbology
+  // (selection, reach ranges, paths, shot cones) to the pane's team.
+  const glm::vec3 paneColor = TeamColor(team);
+  const glm::vec3 setupColor = debug.thermal ? paneColor : kSetupColor;
+  const glm::vec3 selectColor = debug.thermal ? paneColor : glm::vec3(1.0f, 0.9f, 0.15f);
+  const glm::vec3 aimColor = debug.thermal ? paneColor : kAimColor;
+  const auto shotColor = [&](const Unit& shooter) {
+    return debug.thermal ? TeamColor(shooter.team) : kSetupColor;
+  };
   litShader_.Use();
   litShader_.SetVec3("uLightDir", lightDir_);
   litShader_.SetVec3("uViewPos", camera.Position());
@@ -3698,7 +3714,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glClear(GL_STENCIL_BUFFER_BIT);
     for (int sector = 0; sector < 3; ++sector) {
       DrawFovShadowMask(game, shooter, shooter.facingYaw + glm::radians(120.0f * sector), 61.0f,
-                        glm::vec4(kAimColor, 0.22f), viewProj, drawTerrain, targetFramebuffer, x,
+                        glm::vec4(aimColor, 0.22f), viewProj, drawTerrain, targetFramebuffer, x,
                         y, width, height);
     }
     colorShader_.Use();
@@ -3735,7 +3751,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, sphereMesh_,
                      viewProj, *selected, coneLitUnits(*selected), obstacles,
                      game.GetScene().sidewalks, game.GetScene().mapHalfExtent,
-                     overlays.aimConeTarget ? &*overlays.aimConeTarget : nullptr);
+                     overlays.aimConeTarget ? &*overlays.aimConeTarget : nullptr,
+                     shotColor(*selected));
         glDepthFunc(GL_LESS);
         aimingShooter = selected;
       }
@@ -3764,12 +3781,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       DrawShotCone(colorShader_, coneSurfaceShader_, shotConeMesh_, cubeMesh_, sphereMesh_,
                    viewProj, unit, coneLitUnits(unit), obstacles,
                    game.GetScene().sidewalks, game.GetScene().mapHalfExtent,
-                   coneAim ? &*coneAim : nullptr);
+                   coneAim ? &*coneAim : nullptr, shotColor(unit));
       glDepthFunc(GL_LESS);
       // A planned shot keeps its "+" selector until the commit, like a
       // planned move keeps its destination ghost.
       if (coneAim) {
-        DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, *coneAim);
+        DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, *coneAim,
+                      debug.thermal ? TeamColor(unit.team) : kAimColor);
       }
     }
   }
@@ -3778,7 +3796,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (overlays.aimMarker) {
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
-    DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, *overlays.aimMarker);
+    DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, *overlays.aimMarker, aimColor);
     glDepthFunc(GL_LESS);
   }
   glDisable(GL_POLYGON_OFFSET_FILL);
@@ -4045,13 +4063,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     const tactics::ReachField& f = *overlays.moveFrontier;
     const glm::vec2 origin(f.minX, f.minZ);
     if (frontierKeyField_ != &f || frontierKeyOrigin_ != origin ||
-        frontierKeyBudget_ != f.budget) {
+        frontierKeyBudget_ != f.budget || frontierKeyColor_ != setupColor) {
       frontierKeyField_ = &f;
       frontierKeyOrigin_ = origin;
       frontierKeyBudget_ = f.budget;
+      frontierKeyColor_ = setupColor;
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
-      appendFrontier(f, kSetupColor, fill, border);
+      appendFrontier(f, setupColor, fill, border);
       frontierFill_.SetVertices(fill);
       frontierBorder_.SetPoints(border);
     }
@@ -4063,22 +4082,28 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     frontierFill_.Draw();
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
+    // Later legs of a chained move: yellow, or half-transparent team color
+    // in thermal view.
+    const glm::vec4 laterLegColor =
+        debug.thermal ? glm::vec4(paneColor, 0.5f) : glm::vec4(1.0f, 0.9f, 0.15f, 1.0f);
     unlitShader_.SetVec4("uColor", overlays.moveFrontierSubsequentLeg
-                                       ? glm::vec4(1.0f, 0.9f, 0.15f, 1.0f)
-                                       : glm::vec4(kSetupColor, 1.0f));
+                                       ? laterLegColor
+                                       : glm::vec4(setupColor, 1.0f));
     frontierBorder_.DrawSegments();
     glDisable(GL_POLYGON_OFFSET_FILL);
   }
   // Zipline regions: where a walk -> ride -> walk plan can reach, in a second
-  // (cyan) tint, with the usable line's cable highlighted.
+  // (cyan) tint, with the usable line's cable highlighted. Thermal view
+  // tints both ranges with the team color instead.
   if (overlays.ziplineFrontiers && !overlays.ziplineFrontiers->empty()) {
-    const glm::vec3 kZiplineColor(0.2f, 0.75f, 1.0f);
+    const glm::vec3 kZiplineColor = debug.thermal ? paneColor : glm::vec3(0.2f, 0.75f, 1.0f);
     const auto& frontiers = *overlays.ziplineFrontiers;
     std::vector<glm::vec4> key;
     for (const auto& fr : frontiers) {
       key.emplace_back(fr.field.minX, fr.field.minZ, fr.field.budget,
                        static_cast<float>(fr.zipline));
     }
+    key.emplace_back(kZiplineColor, -1.0f);
     if (key != ziplineKey_) {
       ziplineKey_ = key;
       std::vector<ColorTriangleMesh::Vertex> fill;
@@ -4204,16 +4229,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // Selection/move-preview overlays belong to whichever pane the input
   // layer says is acting; callers pass them only for that pane.
   if (overlays.selectionHighlight) {
-    DrawHighlightOnSurface(*overlays.selectionHighlight,
-                  glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
+    DrawHighlightOnSurface(*overlays.selectionHighlight, glm::vec4(selectColor, 1.0f));
   }
   // An executing round animates both teams' planned moves at once; each
   // pane highlights its own team's figures currently mid-move.
   if (game.Mode() == InputMode::Executing) {
     for (const Unit& unit : game.GetScene().units) {
       if (unit.team == team && game.IsUnitMoving(unit.id)) {
-        DrawHighlightOnSurface(unit.position,
-                      glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
+        DrawHighlightOnSurface(unit.position, glm::vec4(selectColor, 1.0f));
       }
     }
   }
@@ -4234,7 +4257,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const auto drawMovePath = [&](const std::vector<glm::vec3>& path,
                                 const std::vector<tactics::PathRide>& rides,
                                 const glm::vec4& walkColor) {
-    const glm::vec4 rideColor(0.2f, 0.75f, 1.0f, 1.0f);
+    const glm::vec4 rideColor = debug.thermal ? glm::vec4(paneColor, walkColor.a)
+                                              : glm::vec4(0.2f, 0.75f, 1.0f, 1.0f);
     unlitShader_.SetMat4("uMVP", viewProj);
     const auto drawRange = [&](size_t first, size_t last, const glm::vec4& color) {
       if (last <= first) return;
@@ -4262,10 +4286,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     static const std::vector<tactics::PathRide> kNoRides;
     drawMovePath(*overlays.movePreviewPath,
                  overlays.movePreviewRides ? *overlays.movePreviewRides : kNoRides,
-                 glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
+                 debug.thermal ? glm::vec4(paneColor, 1.0f) : glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
     // Mark the final position with the same ring used for selection.
-    DrawHighlightOnSurface(overlays.movePreviewPath->back(),
-                  glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
+    DrawHighlightOnSurface(overlays.movePreviewPath->back(), glm::vec4(selectColor, 1.0f));
   } else if (overlays.invalidHoverHighlight) {
     DrawHighlightOnSurface(*overlays.invalidHoverHighlight,
                   glm::vec4(0.9f, 0.15f, 0.15f, 1.0f));
@@ -4278,7 +4301,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (const Unit& unit : game.GetScene().units) {
       if (!unit.alive || (!overlays.spectatorFov && unit.team != team)) continue;
       if (unit.plan.type == tactics::PlannedActionType::Move && unit.plan.movePath.size() >= 2) {
-        drawMovePath(unit.plan.movePath, unit.plan.moveRides, glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
+        drawMovePath(unit.plan.movePath, unit.plan.moveRides,
+                     debug.thermal ? glm::vec4(TeamColor(unit.team), 1.0f)
+                                   : glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
         // Wireframe stand-in at the destination, showing the planned final
         // facing (persists until the turn is committed).
         Unit ghost = unit;
@@ -4288,12 +4313,21 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost);
         // Chained legs for later rounds: yellow, with a marker at each leg
         // end so they read apart from the leg about to execute (green).
-        const glm::vec4 yellow(1.0f, 0.85f, 0.2f, 1.0f);
+        // Thermal view: the leg about to execute (and its end ring) is solid
+        // team color; later legs are the same color at 50% alpha.
+        const glm::vec4 yellow = debug.thermal ? glm::vec4(TeamColor(unit.team), 0.5f)
+                                               : glm::vec4(1.0f, 0.85f, 0.2f, 1.0f);
+        const glm::vec4 firstRingColor =
+            debug.thermal ? glm::vec4(TeamColor(unit.team), 1.0f) : yellow;
+        if (debug.thermal) {
+          glEnable(GL_BLEND);
+          glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
         const bool chaining = game.Mode() == InputMode::AwaitingMoveDestination &&
                               game.SelectedUnitId() == unit.id;
         if (chaining || !unit.plan.queuedLegs.empty()) {
           DrawNumberedHighlight(unlitShader_, highlightRing_, cubeMesh_, viewProj, view,
-                                OnSurface(unit.plan.movePath.back()), yellow, 1,
+                                OnSurface(unit.plan.movePath.back()), firstRingColor, 1,
                                 SurfaceNormal(unit.plan.movePath.back()));
         }
         int legNumber = 1;
@@ -4310,6 +4344,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                 OnSurface(leg.back()), yellow, legNumber,
                                 SurfaceNormal(leg.back()));
         }
+        if (debug.thermal) glDisable(GL_BLEND);
       }
       // Planned locked shots draw no line here: the shot cone aimed at the
       // target's torso (plus the "+" marker) is the whole preview, same as

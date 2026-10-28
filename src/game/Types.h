@@ -254,6 +254,11 @@ constexpr float kUnitHeight = 1.8f;
 constexpr float kEyeHeight = 1.5f;
 // Ground beneath a deck/ramp is only walkable with at least this much headroom.
 constexpr float kMinDeckHeadroom = 2.2f;
+// Steepest ground a figure can walk (rise over run). Stair flights (0.8) and
+// road ramps (0.3) pass; the sheer sides of stair, ramp and level blocks do
+// not, so an upper level is reachable only by walking up its stair or ramp.
+// Equivalent to a 0.3 step over one 0.25 sample.
+constexpr float kMaxWalkSlope = 1.2f;
 // Where a locked-on shot aims on the target figure: torso center height.
 // Shared by the ballistics (burst aim point), the staged-lock "+" marker and
 // the planned-shot cone, so what the cone shader shows is what gets shot at.
@@ -285,6 +290,16 @@ constexpr float kKnockdownMaxSeconds = 5.0f;
 // figure stopping mid-stride settles instead of snapping to rest.
 constexpr float kWalkStrideLength = 1.5f;
 constexpr float kWalkBlendRate = 12.0f;  // Per second; ~90% settled after 0.2 s.
+// Turn animation (issue #237): the drawn heading trails the sim's discrete
+// facing and closes the gap with an ease-out (kTurnLagRate, exponential, so
+// big turns start fast) plus a linear floor (kTurnMinSpeed) so it finishes
+// promptly. Roughly 0.15 s for 45-90 degrees and 0.2 s for a 180 about-face.
+constexpr float kTurnLagRate = 14.0f;      // Per second.
+constexpr float kTurnMinSpeed = 6.0f;      // Radians per second.
+// A shooter's drawn heading eases onto the shot bearing and holds it for this
+// long into the shot beat (the rest is the lower-weapon tail); after that it
+// eases back to the sim facing (e.g. the direction of travel).
+constexpr float kShootTurnHold = 0.45f;
 // Duration of the CC0 idle clip retargeted by the procedural figure rig.
 constexpr float kIdleAnimDuration = 3.3333333f;
 // Quick-draw pistol beat played by a shooter whose shot resolves: a short

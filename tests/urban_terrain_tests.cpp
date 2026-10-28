@@ -600,6 +600,77 @@ void TestNoWalkableCliffLinks() {
   CHECK(checked > 0);
 }
 
+// Sheer faces are not walkable (issue #221). A plateau (x >= 6, 3 high)
+// stands over flat ground behind a cliff; with `ramp` a 2-wide strip at
+// z in [4, 6] climbs it at grade 0.5. No obstacles, so only the slope rule
+// can keep a figure off the cliff and off the strip's sheer sides.
+HeightField PlateauField(bool ramp) {
+  HeightField field;
+  field.minX = field.minZ = -10.0f;
+  field.step = 0.5f;
+  field.nx = field.nz = 41;
+  field.heights.assign(static_cast<size_t>(field.nx) * field.nz, 0.0f);
+  for (int iz = 0; iz < field.nz; ++iz) {
+    for (int ix = 0; ix < field.nx; ++ix) {
+      const float x = field.minX + ix * field.step, z = field.minZ + iz * field.step;
+      float h = x >= 6.0f ? 3.0f : 0.0f;
+      if (ramp && z >= 4.0f && z <= 6.0f && x < 6.0f) h = std::clamp(x * 0.5f, 0.0f, 3.0f);
+      field.heights[static_cast<size_t>(iz) * field.nx + ix] = h;
+    }
+  }
+  return field;
+}
+float WorstGrade(const HeightField& field, const std::vector<glm::vec3>& path) {
+  float worst = 0.0f;
+  for (size_t i = 0; i + 1 < path.size(); ++i) {
+    const glm::vec2 a(path[i].x, path[i].z), b(path[i + 1].x, path[i + 1].z);
+    const int pieces = std::max(1, static_cast<int>(std::ceil(glm::distance(a, b) / 0.25f)));
+    const float ds = glm::distance(a, b) / pieces;
+    for (int k = 0; k < pieces; ++k) {
+      const glm::vec2 p = a + (b - a) * (static_cast<float>(k) / pieces);
+      const glm::vec2 q = a + (b - a) * (static_cast<float>(k + 1) / pieces);
+      worst = std::max(worst, std::fabs(field.HeightAt(q.x, q.y) - field.HeightAt(p.x, p.y)) / ds);
+    }
+  }
+  return worst;
+}
+
+void TestSheerFacesAreImpassable() {
+  currentSeed = 0;
+  const glm::vec3 start(0.0f, 0.0f, 0.0f), top(10.0f, 3.0f, 0.0f);
+  std::vector<glm::vec3> path;
+
+  // No ramp: the plateau is sealed off, for paths and for the reach field.
+  HeightField sheer = PlateauField(false);
+  NavMesh sealed;
+  sealed.Build({}, 10.0f, constants::kAgentRadius, &sheer, nullptr);
+  CHECK(!sealed.FindPath(start, top, &path));
+  const auto reaches = [](const ReachField& field, float x, float z) {
+    return field.Reached(static_cast<int>(std::lround((x - field.minX) / field.step)),
+                         static_cast<int>(std::lround((z - field.minZ) / field.step)));
+  };
+  CHECK(reaches(sealed.ComputeReachField(start, 40.0f), -5.0f, 0.0f));
+  CHECK(!reaches(sealed.ComputeReachField(start, 40.0f), 7.0f, 0.0f));
+
+  // With the ramp the straight line is refused but the ramp reaches the top,
+  // never steeper than the walkable grade, entering at its low end.
+  HeightField stepped = PlateauField(true);
+  NavMesh open;
+  open.Build({}, 10.0f, constants::kAgentRadius, &stepped, nullptr);
+  CHECK(open.FindPath(start, top, &path));
+  CHECK(path.size() >= 2);
+  CHECK(WorstGrade(stepped, path) <= constants::kMaxWalkSlope + 0.05f);
+  bool throughRamp = false;
+  for (const glm::vec3& p : path) throughRamp |= p.x > 1.0f && p.x < 5.0f && p.z > 3.9f && p.z < 6.1f;
+  CHECK(throughRamp);
+  CHECK(reaches(open.ComputeReachField(start, 40.0f), 7.0f, 0.0f));
+  // And back down the same way: no stepping off the cliff or the strip's side.
+  CHECK(open.FindPath(top, start, &path));
+  CHECK(WorstGrade(stepped, path) <= constants::kMaxWalkSlope + 0.05f);
+  // A hop onto the ramp from its sheer side is refused when it is the only way.
+  CHECK(!sealed.FindPath(start, glm::vec3(7.0f, 3.0f, 0.0f), &path));
+}
+
 int main() {
   TestStairSidesSealed();
   TestNoWalkableCliffLinks();
@@ -614,6 +685,7 @@ int main() {
   TestSurfacesSitOnTiers();
   TestTerrainZiplines();
   TestMovementUpStair();
+  TestSheerFacesAreImpassable();
   if (failures) { std::fprintf(stderr, "%d terrain check(s) failed\n", failures); return 1; }
   std::puts("urban terrain tests passed (200 seeds)");
 }

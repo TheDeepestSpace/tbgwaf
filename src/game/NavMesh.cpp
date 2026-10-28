@@ -502,6 +502,11 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
         if (jx < 0 || jz < 0 || jx >= field.nx || jz >= field.nz) continue;
         if (!nodeWalkable(jx, jz)) continue;
         const glm::vec3 to = nodeWorld(jx, jz);
+        // Sheer faces (stair/ramp/level sides) are not walkable.
+        const float run = std::hypot(to.x - from.x, to.z - from.z);
+        const float midY = ground_.HeightAt(0.5f * (from.x + to.x), 0.5f * (from.z + to.z));
+        const float half = constants::kMaxWalkSlope * 0.5f * run + 1e-3f;
+        if (std::fabs(midY - from.y) > half || std::fabs(to.y - midY) > half) continue;
         const float nd = d + glm::distance(from, to);
         const int jdx = jz * field.nx + jx;
         if (nd > budget || nd >= field.dist[jdx]) continue;
@@ -1042,8 +1047,8 @@ bool NavMesh::GroundUnderLowDeck(float x, float z) const {
   return false;
 }
 
-bool NavMesh::FindGroundPath(glm::vec3 start, glm::vec3 goal,
-                             std::vector<glm::vec3>* outPath) const {
+bool NavMesh::FindPlanarGroundPath(glm::vec3 start, glm::vec3 goal,
+                                   std::vector<glm::vec3>* outPath) const {
   if (!outPath) return false;
   outPath->clear();
 
@@ -1182,6 +1187,134 @@ bool NavMesh::FindGroundPath(glm::vec3 start, glm::vec3 goal,
 
   LiftGroundPathOntoTerrain(outPath);
   return true;
+}
+
+bool NavMesh::GroundSegmentWalkable(glm::vec2 a, glm::vec2 b) const {
+  if (ground_.Empty()) return true;
+  constexpr float kSlopeSample = 0.25f;
+  const float length = glm::distance(a, b);
+  const int pieces = std::max(1, static_cast<int>(std::ceil(length / kSlopeSample)));
+  const float ds = length / static_cast<float>(pieces);
+  float prev = ground_.HeightAt(a.x, a.y);
+  for (int k = 1; k <= pieces; ++k) {
+    const glm::vec2 p = a + (b - a) * (static_cast<float>(k) / static_cast<float>(pieces));
+    const float h = ground_.HeightAt(p.x, p.y);
+    if (std::fabs(h - prev) > constants::kMaxWalkSlope * ds + 1e-3f) return false;
+    prev = h;
+  }
+  return true;
+}
+
+bool NavMesh::GroundSegmentClear(glm::vec2 a, glm::vec2 b) const {
+  if (!polygonMode_) {
+    return LineOfSightClear(glm::vec3(a.x, 0.0f, a.y), glm::vec3(b.x, 0.0f, b.y), paddedFootprints_);
+  }
+  for (const auto& polygon : paddedPolygons_) {
+    if (SegmentEntersConvexPolygon(a, b, polygon)) return false;
+  }
+  return true;
+}
+
+// Fallback for a planar route that would climb a sheer face: Dijkstra/A* over
+// a 0.25 lattice anchored at `start` (the ReachField moves), skipping any move
+// onto terrain steeper than the walkable slope, then pulled taut.
+bool NavMesh::FindSlopeAwareGroundPath(glm::vec3 start, glm::vec3 goal,
+                                       std::vector<glm::vec3>* outPath) const {
+  outPath->clear();
+  constexpr float kCell = 0.25f;
+  constexpr float kMargin = 8.0f;
+  constexpr float kGoalReach = 0.6f;
+  const glm::vec2 s(start.x, start.z), g(goal.x, goal.z);
+  if (!IsWalkable(s.x, s.y) || !IsWalkable(g.x, g.y)) return false;
+  const float xMin = std::max(region_.xMin, std::min(s.x, g.x) - kMargin);
+  const float xMax = std::min(region_.xMax, std::max(s.x, g.x) + kMargin);
+  const float zMin = std::max(region_.zMin, std::min(s.y, g.y) - kMargin);
+  const float zMax = std::min(region_.zMax, std::max(s.y, g.y) + kMargin);
+  const int ix0 = static_cast<int>(std::ceil((xMin - s.x) / kCell));
+  const int ix1 = static_cast<int>(std::floor((xMax - s.x) / kCell));
+  const int iz0 = static_cast<int>(std::ceil((zMin - s.y) / kCell));
+  const int iz1 = static_cast<int>(std::floor((zMax - s.y) / kCell));
+  const int nx = ix1 - ix0 + 1, nz = iz1 - iz0 + 1;
+  if (nx <= 0 || nz <= 0) return false;
+  const auto indexOf = [&](int ix, int iz) { return (iz - iz0) * nx + (ix - ix0); };
+  const auto pointOf = [&](int ix, int iz) { return s + glm::vec2(ix, iz) * kCell; };
+
+  static const int kMoves[16][2] = {{1, 0},  {-1, 0}, {0, 1},  {0, -1}, {1, 1},  {1, -1},
+                                    {-1, 1}, {-1, -1}, {2, 1},  {2, -1}, {-2, 1}, {-2, -1},
+                                    {1, 2},  {1, -2}, {-1, 2}, {-1, -2}};
+  const float inf = std::numeric_limits<float>::infinity();
+  std::vector<float> dist(static_cast<size_t>(nx) * nz, inf);
+  std::vector<int> parent(dist.size(), -1);
+  std::vector<char> walkable(dist.size(), -1);
+  using Entry = std::pair<float, int>;
+  std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+  const int startIdx = indexOf(0, 0);
+  dist[startIdx] = 0.0f;
+  open.push({glm::distance(s, g), startIdx});
+  int endIdx = -1;
+  while (!open.empty()) {
+    const int idx = open.top().second;
+    open.pop();
+    const int ix = idx % nx + ix0, iz = idx / nx + iz0;
+    const glm::vec2 p = pointOf(ix, iz);
+    if (glm::distance(p, g) <= kGoalReach && GroundSegmentClear(p, g) && GroundSegmentWalkable(p, g)) {
+      endIdx = idx;
+      break;
+    }
+    for (const auto& m : kMoves) {
+      const int jx = ix + m[0], jz = iz + m[1];
+      if (jx < ix0 || jx > ix1 || jz < iz0 || jz > iz1) continue;
+      const int jdx = indexOf(jx, jz);
+      const glm::vec2 q = pointOf(jx, jz);
+      const float nd = dist[idx] + glm::distance(p, q);
+      if (nd >= dist[jdx]) continue;
+      char& w = walkable[jdx];
+      if (w < 0) w = IsWalkable(q.x, q.y) ? 1 : 0;
+      if (!w || !GroundSegmentWalkable(p, q) || !GroundSegmentClear(p, q)) continue;
+      dist[jdx] = nd;
+      parent[jdx] = idx;
+      open.push({nd + glm::distance(q, g), jdx});
+    }
+  }
+  if (endIdx < 0) return false;
+
+  std::vector<glm::vec2> lattice;
+  for (int node = endIdx; node >= 0; node = parent[node]) {
+    lattice.push_back(pointOf(node % nx + ix0, node / nx + iz0));
+  }
+  std::reverse(lattice.begin(), lattice.end());
+  lattice.front() = s;
+  if (glm::distance(lattice.back(), g) > kEps) lattice.push_back(g);
+
+  // Pull taut: from each kept point, jump to the farthest later point that is
+  // still a clear, walkable straight line.
+  constexpr size_t kLookahead = 48;
+  outPath->push_back(glm::vec3(s.x, 0.0f, s.y));
+  size_t i = 0;
+  while (i + 1 < lattice.size()) {
+    size_t j = std::min(lattice.size() - 1, i + kLookahead);
+    while (j > i + 1 && !(GroundSegmentClear(lattice[i], lattice[j]) &&
+                          GroundSegmentWalkable(lattice[i], lattice[j]))) {
+      --j;
+    }
+    outPath->push_back(glm::vec3(lattice[j].x, 0.0f, lattice[j].y));
+    i = j;
+  }
+  LiftGroundPathOntoTerrain(outPath);
+  return true;
+}
+
+bool NavMesh::FindGroundPath(glm::vec3 start, glm::vec3 goal,
+                             std::vector<glm::vec3>* outPath) const {
+  if (!FindPlanarGroundPath(start, goal, outPath)) return false;
+  if (ground_.Empty()) return true;
+  bool walkable = true;
+  for (size_t i = 0; walkable && i + 1 < outPath->size(); ++i) {
+    walkable = GroundSegmentWalkable({(*outPath)[i].x, (*outPath)[i].z},
+                                     {(*outPath)[i + 1].x, (*outPath)[i + 1].z});
+  }
+  if (walkable) return true;
+  return FindSlopeAwareGroundPath(start, goal, outPath);
 }
 
 // Lift a flat-space ground path onto the terrain: every ground-level waypoint

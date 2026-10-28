@@ -1,0 +1,37 @@
+name: turn_animation_angles
+description: >
+  Turn animation (issue #237). Four blue figures start facing 45/90/135/180
+  degrees away from their move direction (+X) and pivot at turn start; blue4
+  routes around a wall and turns at the path corners. The drawn heading,
+  FoV cone and body pose ease toward the new heading while the figure is
+  already walking; sim state (positions) is unaffected.
+
+camera:
+  target: [0, 0]
+  zoom: 30
+
+map:
+  obstacles:
+    - {center: [6, -12], half_extent: [0.5, 4], height: 3}
+
+units:
+  - {id: 0, team: blue, position: [-10, 0, 10], facing_degrees: 45}
+  - {id: 1, team: blue, position: [-10, 0, 4], facing_degrees: 90}
+  - {id: 2, team: blue, position: [-10, 0, -2], facing_degrees: 135}
+  - {id: 3, team: blue, position: [-10, 0, -8], facing_degrees: 180}
+  - {id: 4, team: blue, position: [0, 0, -12], facing_degrees: 0}
+  - {id: 5, team: red, position: [12, 0, 12], facing_degrees: 180}
+
+script:
+  - {action: move, actor: 0, destination: [-4, 0, 10]}
+  - {action: move, actor: 1, destination: [-4, 0, 4]}
+  - {action: move, actor: 2, destination: [-4, 0, -2]}
+  - {action: move, actor: 3, destination: [-4, 0, -8]}
+  - {action: move, actor: 4, destination: [12, 0, -12]}
+  - action: pass
+    actor: 5
+  - action: commit
+  - assert: {unit: 0, position: [-4, 0, 10], tolerance: 0.1}
+  - assert: {unit: 3, position: [-4, 0, -8], tolerance: 0.1}
+  - assert: {round: 2}
+  - assert: {unit: 4, position: [12, 0, -12], tolerance: 0.5}

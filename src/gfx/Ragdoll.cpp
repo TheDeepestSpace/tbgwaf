@@ -315,7 +315,7 @@ Trajectory Simulate(const Unit& unit) {
         if (n != glm::vec3(0.0f)) {
           // Kill the velocity into the wall (Verlet: move prev onto pos along n).
           const float into = glm::dot(pos[i] - prev[i], n);
-          if (into < 0.0f) prev[i] -= into * n;
+          if (into < 0.0f) prev[i] += into * n;
         }
         const float floorY = FloorAt(pos[i].x, pos[i].z, refY, r, groundY) + r;
         if (pos[i].y < floorY) pos[i].y = floorY;

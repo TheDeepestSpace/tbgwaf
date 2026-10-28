@@ -192,9 +192,33 @@ void TestFallsOffWallAndStaysOutside() {
   gfx::SetRagdollObstacles({});
 }
 
+// Dying flush against a wall must not turn the wall push-out into velocity
+// (the body used to be flung away and through the map).
+void TestWallPushOutDoesNotLaunchBody() {
+  tactics::Obstacle wall;
+  wall.bounds.min = glm::vec3(0.4f, 0.0f, -3.0f);
+  wall.bounds.max = glm::vec3(3.0f, 3.0f, 3.0f);
+  gfx::SetRagdollObstacles({wall});
+  for (int id = 1; id <= 20; ++id) {
+    tactics::Unit u = Downed(id, tactics::constants::kKnockdownMaxSeconds);
+    u.position = glm::vec3(0.1f, 0.0f, 0.0f);  // Body overlaps the wall face.
+    gfx::RagdollPose last = gfx::SampleRagdollStep(u, 0);
+    for (int s = 1; s <= gfx::kRagdollSteps; ++s) {
+      const gfx::RagdollPose cur = gfx::SampleRagdollStep(u, s);
+      for (int i = 0; i < gfx::kRagJointCount; ++i) {
+        CHECK(glm::length(cur[i] - last[i]) < 0.3f);  // No per-step teleport/launch.
+        CHECK(glm::length(cur[i] - u.position) < 6.0f);
+      }
+      last = cur;
+    }
+  }
+  gfx::SetRagdollObstacles({});
+}
+
 }  // namespace
 
 int main() {
+  TestWallPushOutDoesNotLaunchBody();
   TestFallsOffWallAndStaysOutside();
   TestGunReleaseAndDrop();
   TestOnlyDownedUnitsRagdoll();

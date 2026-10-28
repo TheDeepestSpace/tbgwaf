@@ -3188,6 +3188,34 @@ void TestBulletsFlyToMapEdgeNotWeaponRange() {
   }
 }
 
+// Shots that land on a figure still falling hit it like a live one: they are
+// recorded as shoves on the fall (a settled/frozen body is not re-hit).
+void TestSecondHitOnFallingBodyIsRecorded() {
+  GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.0f; });
+  Unit* shooter = game.FindUnit(1);
+  Unit* target = game.FindUnit(4);
+  const glm::vec3 toTarget = target->position - shooter->position;
+  shooter->facingYaw = std::atan2(toTarget.z, toTarget.x);
+  CHECK(game.ResolveShot(*shooter, *target));
+  CHECK(target->knockdownImpacts.empty());
+  const glm::vec3 firstAxis = target->knockdownAxis;
+  target->knockdownElapsed = 0.2f;
+  CHECK(game.ResolveShot(*shooter, *target));
+  CHECK(target->knockdownImpacts.size() == 1);
+  CHECK(target->knockdownImpacts[0].at == 0.2f);
+  CHECK(target->knockdownAxis == firstAxis);  // The original fall is kept.
+  // Snapshots carry the shoves.
+  GameSnapshot snap = game.ExportState();
+  GameSnapshot round;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(snap), &round));
+  bool found = false;
+  for (const auto& u : round.units) {
+    if (u.id == target->id) found = u.knockdownImpacts.size() == 1;
+  }
+  CHECK(found);
+}
+
 // A fall cut short by the end of a round freezes through planning and
 // resumes (from the same elapsed time) when the next round executes.
 void TestKnockdownFreezesBetweenRounds() {
@@ -3402,6 +3430,7 @@ int main() {
   TestLockOnStagesUntilFireAndKeepsShotCount();
   TestBulletsFlyToMapEdgeNotWeaponRange();
   TestKnockdownFreezesBetweenRounds();
+  TestSecondHitOnFallingBodyIsRecorded();
   TestBurstPlanSurvivesSnapshotAndClampsOnImport();
   TestReachFieldManySurfacesPerformance();
 

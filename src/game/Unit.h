@@ -113,6 +113,14 @@ struct Unit {
   // around it topples the figure in the shot's direction of travel.
   glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
   float knockdownElapsed = -1.0f;  // Seconds since hit; <0 = not falling.
+  // Further hits that land on the figure while it is still falling (visual
+  // only): when (knockdownElapsed at the hit) and the horizontal fall axis,
+  // same convention as knockdownAxis. The ragdoll applies each as a shove.
+  struct KnockdownImpact {
+    float at = 0.0f;
+    glm::vec3 axis{1.0f, 0.0f, 0.0f};
+  };
+  std::vector<KnockdownImpact> knockdownImpacts;
   // Visual-only walk cycle: phase in radians (advances with distance moved,
   // 2*pi per kWalkStrideLength) and a 0..1 blend of how much the walk pose
   // overrides the rest pose (eases toward 1 while a planned move is in

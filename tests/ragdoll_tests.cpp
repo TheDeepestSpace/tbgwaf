@@ -215,6 +215,29 @@ void TestWallPushOutDoesNotLaunchBody() {
   gfx::SetRagdollObstacles({});
 }
 
+// A second hit on the falling body shoves it: same fall until the hit, then
+// a different one (here a hit from the opposite side).
+void TestSecondHitShovesFallingBody() {
+  const float kHitAt = 0.3f;
+  const tactics::Unit plain = Downed(7, tactics::constants::kKnockdownMaxSeconds);
+  tactics::Unit hit = plain;
+  hit.knockdownImpacts.push_back({kHitAt, glm::vec3(0.0f, 0.0f, 1.0f)});  // dir = -X
+  const int hitStep = static_cast<int>(std::lround(kHitAt / gfx::kRagdollStep));
+  const gfx::RagdollPose a = gfx::SampleRagdollStep(plain, hitStep);
+  const gfx::RagdollPose b = gfx::SampleRagdollStep(hit, hitStep);
+  for (int i = 0; i < gfx::kRagJointCount; ++i) CHECK(glm::length(a[i] - b[i]) < 1e-5f);
+  const gfx::RagdollPose endPlain = gfx::SampleRagdoll(plain);
+  const gfx::RagdollPose endHit = gfx::SampleRagdoll(hit);
+  CHECK(glm::length(endPlain[gfx::kRagHead] - endHit[gfx::kRagHead]) > 0.1f);
+  CHECK(endHit[gfx::kRagHead].x < endPlain[gfx::kRagHead].x);  // Pushed back.
+  // A hit after the body came to rest wakes it up again.
+  tactics::Unit late = plain;
+  late.knockdownImpacts.push_back({2.0f, glm::vec3(0.0f, 0.0f, -1.0f)});
+  const gfx::RagdollPose before = gfx::SampleRagdollStep(late, 119);
+  const gfx::RagdollPose after = gfx::SampleRagdollStep(late, 140);
+  CHECK(glm::length(after[gfx::kRagHead] - before[gfx::kRagHead]) > 0.05f);
+}
+
 }  // namespace
 
 // The fall begins from the pose held at the hit: a unit caught mid-stride
@@ -236,6 +259,7 @@ void TestStartsFromAnimatedPose() {
 int main() {
   TestStartsFromAnimatedPose();
   TestWallPushOutDoesNotLaunchBody();
+  TestSecondHitShovesFallingBody();
   TestFallsOffWallAndStaysOutside();
   TestGunReleaseAndDrop();
   TestOnlyDownedUnitsRagdoll();

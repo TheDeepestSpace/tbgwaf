@@ -165,6 +165,7 @@ struct Trajectory {
   float yaw = 0.0f;
   glm::vec3 axis{0.0f};
   Unit anim;  // Only the animation fields that set the starting pose are compared.
+  std::vector<Unit::KnockdownImpact> impacts;
   unsigned long stamp = 0;
   std::vector<RagdollPose> frames;  // Up to kRagdollSteps + 1 entries.
   std::vector<RagdollGun> guns;     // Same length as frames.
@@ -178,9 +179,18 @@ bool SameAnimation(const Unit& a, const Unit& b) {
          a.rideSlope == b.rideSlope && a.weapon == b.weapon;
 }
 
+bool SameImpacts(const std::vector<Unit::KnockdownImpact>& a,
+                 const std::vector<Unit::KnockdownImpact>& b) {
+  return a.size() == b.size() &&
+         std::equal(a.begin(), a.end(), b.begin(), [](const auto& x, const auto& y) {
+           return x.at == y.at && x.axis == y.axis;
+         });
+}
+
 bool SameKey(const Trajectory& t, const Unit& u) {
   return t.id == u.id && t.position == u.position && t.yaw == u.facingYaw &&
-         t.axis == u.knockdownAxis && SameAnimation(t.anim, u);
+         t.axis == u.knockdownAxis && SameAnimation(t.anim, u) &&
+         SameImpacts(t.impacts, u.knockdownImpacts);
 }
 
 Trajectory Simulate(const Unit& unit) {
@@ -190,10 +200,14 @@ Trajectory Simulate(const Unit& unit) {
   traj.yaw = unit.facingYaw;
   traj.axis = unit.knockdownAxis;
   traj.anim = unit;
+  traj.impacts = unit.knockdownImpacts;
 
   // KnockDown() stores axis = up x dir, so the shot direction is (-axis.z, axis.x).
-  glm::vec3 dir(-unit.knockdownAxis.z, 0.0f, unit.knockdownAxis.x);
-  dir = glm::length(dir) < 1e-4f ? unit.FacingDirection() : glm::normalize(dir);
+  const auto shotDir = [&unit](const glm::vec3& axis) {
+    const glm::vec3 d(-axis.z, 0.0f, axis.x);
+    return glm::length(d) < 1e-4f ? unit.FacingDirection() : glm::normalize(d);
+  };
+  const glm::vec3 dir = shotDir(unit.knockdownAxis);
   const glm::vec3 side(-dir.z, 0.0f, dir.x);
   // Vary the strength along the hit line so neighbours do not fall
   // identically.  Do not add a sideways component here: there is no lateral
@@ -249,10 +263,30 @@ Trajectory Simulate(const Unit& unit) {
   }
   int still = 0;
   std::array<bool, kRagJointCount> onFloor{};
+  // Later hits on the falling body, in time order, applied as extra shoves.
+  std::vector<Unit::KnockdownImpact> impacts = unit.knockdownImpacts;
+  std::stable_sort(impacts.begin(), impacts.end(),
+                   [](const auto& a, const auto& b) { return a.at < b.at; });
+  size_t nextImpact = 0;
   // Run until body and (dropped) gun are at rest, up to the cap: a fall from
   // an obstacle top takes a while.
   for (int step = 0; step < kMaxSimSteps; ++step) {
-    if (still >= kSleepSteps && (!drops || gunAsleep)) break;
+    while (nextImpact < impacts.size() &&
+           std::lround(impacts[nextImpact].at / kRagdollStep) <= step) {
+      const glm::vec3 hitDir = shotDir(impacts[nextImpact].axis);
+      const glm::vec3 hitV =
+          hitDir * (kLaunchSpeed * impactScale) + glm::vec3(0.0f, kLaunchLift, 0.0f);
+      for (int i = 0; i < kRagJointCount; ++i) {
+        prev[i] -= hitV * kLaunchWeight[i] * kRagdollStep;
+      }
+      if (drops) {
+        gunVel += hitDir * 0.8f + glm::vec3(0.0f, 0.6f, 0.0f);
+        gunAsleep = false;
+      }
+      still = 0;
+      ++nextImpact;
+    }
+    if (still >= kSleepSteps && (!drops || gunAsleep) && nextImpact >= impacts.size()) break;
     if (drops && !gunAsleep) {
       gunVel.y -= kGravity * kRagdollStep;
       const float gunRefY = gunPos.y;

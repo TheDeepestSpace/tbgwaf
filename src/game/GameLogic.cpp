@@ -351,6 +351,7 @@ GameSnapshot GameLogic::ExportState() const {
     u.planEndFacingYaw = unit.plan.endFacingYaw;
     u.knockdownAxis = unit.knockdownAxis;
     u.knockdownElapsed = unit.knockdownElapsed;
+    u.knockdownImpacts = unit.knockdownImpacts;
     u.walkPhase = unit.walkPhase;
     u.walkBlend = unit.walkBlend;
     u.idleElapsed = unit.idleElapsed;
@@ -435,6 +436,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     unit->alive = u.alive;
     unit->knockdownAxis = u.knockdownAxis;
     unit->knockdownElapsed = u.knockdownElapsed;
+    unit->knockdownImpacts = u.knockdownImpacts;
     unit->walkPhase = u.walkPhase;
     unit->walkBlend = u.walkBlend;
     unit->idleElapsed = u.idleElapsed;
@@ -530,6 +532,10 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
     writeRides(u.planRides);
     out << ' ' << u.planQueuedLegRides.size();
     for (const auto& rides : u.planQueuedLegRides) writeRides(rides);
+    out << ' ' << u.knockdownImpacts.size();
+    for (const auto& im : u.knockdownImpacts) {
+      out << ' ' << im.at << ' ' << im.axis.x << ' ' << im.axis.y << ' ' << im.axis.z;
+    }
   }
   out << ' ' << snap.tracers.size();
   for (const Tracer& t : snap.tracers) {
@@ -606,6 +612,12 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
     u.planQueuedLegRides.resize(legRideCount);
     for (auto& rides : u.planQueuedLegRides) {
       if (!readRides(&rides)) return false;
+    }
+    size_t impactCount = 0;
+    if (!(in >> impactCount) || impactCount > kMaxEntries) return false;
+    u.knockdownImpacts.resize(impactCount);
+    for (auto& im : u.knockdownImpacts) {
+      if (!(in >> im.at >> im.axis.x >> im.axis.y >> im.axis.z)) return false;
     }
   }
   size_t tracerCount = 0;
@@ -1246,11 +1258,26 @@ void GameLogic::PlayShootBeat(Unit& shooter, float aimYaw, float sinceShot) {
   shooter.shootAimYaw = aimYaw;
 }
 
+bool GameLogic::IsFalling(const Unit& unit) {
+  return !unit.alive && unit.knockdownElapsed >= 0.0f &&
+         unit.knockdownElapsed < constants::kKnockdownMaxSeconds;
+}
+
 void GameLogic::KnockDown(Unit& target, const glm::vec3& dir) {
-  target.alive = false;
   // up x dir: tipping around this axis leans the figure toward dir.
-  target.knockdownAxis = glm::vec3(dir.z, 0.0f, -dir.x);
+  const glm::vec3 axis(dir.z, 0.0f, -dir.x);
+  if (IsFalling(target)) {
+    // Already going down: the new hit shoves the falling body.
+    constexpr size_t kMaxImpacts = 8;
+    if (target.knockdownImpacts.size() < kMaxImpacts) {
+      target.knockdownImpacts.push_back({target.knockdownElapsed, axis});
+    }
+    return;
+  }
+  target.alive = false;
+  target.knockdownAxis = axis;
   target.knockdownElapsed = 0.0f;
+  target.knockdownImpacts.clear();
 }
 
 void GameLogic::ApplyShot(Unit& shooter, Unit& target, bool hit) {
@@ -1465,7 +1492,8 @@ std::vector<GameLogic::AimTraceCandidate> GameLogic::RayTraceCandidates(
     const glm::vec3& fwd) const {
   std::vector<AimTraceCandidate> candidates;
   for (const Unit& unit : scene_.units) {
-    if (!unit.alive || unit.id == shooter.id) continue;
+    // A body still falling is hit like a live figure (it gets shoved).
+    if ((!unit.alive && !IsFalling(unit)) || unit.id == shooter.id) continue;
     if (!friendlyFire_ && unit.team == shooter.team) continue;  // Transparent to the trace.
     float t = 0.0f;
     if (!RayIntersectsAABB(muzzle, dir, unit.Bounds(), &t)) continue;
@@ -1553,13 +1581,14 @@ void GameLogic::ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets
 
   for (Unit* hitTarget : hitTargets) {
     const bool wasVisible = visibility.UnitVisible(hitTarget->id);
+    const bool wasAlive = hitTarget->alive;
     glm::vec3 fall(hitTarget->position.x - shooter.position.x, 0.0f,
                    hitTarget->position.z - shooter.position.z);
     fall = glm::length(fall) < 1e-4f ? dir : glm::normalize(fall);
     KnockDown(*hitTarget, fall);
 
     const int viewerIndex = static_cast<int>(shooter.team);
-    if (!wasVisible && hitTarget->id >= 0 &&
+    if (wasAlive && !wasVisible && hitTarget->id >= 0 &&
         static_cast<size_t>(hitTarget->id) < sightings_[viewerIndex].size()) {
       EnemySighting s;
       s.position = hitTarget->position;

@@ -4085,8 +4085,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // (cyan) tint, with the usable line's cable highlighted.
   if (overlays.ziplineFrontiers && !overlays.ziplineFrontiers->empty()) {
     const glm::vec3 kZiplineColor(0.2f, 0.75f, 1.0f);
+    // The reachable region matches the regular move frontier; only the cable
+    // and entry marker keep the zipline tint.
+    const glm::vec3 regionColor = debug.thermal ? kThermalGreen : kSetupColor;
     const auto& frontiers = *overlays.ziplineFrontiers;
     std::vector<glm::vec4> key;
+    key.emplace_back(debug.thermal ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
     for (const auto& fr : frontiers) {
       key.emplace_back(fr.field.minX, fr.field.minZ, fr.field.budget,
                        static_cast<float>(fr.zipline));
@@ -4096,7 +4100,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
       for (const auto& fr : frontiers) {
-        if (fr.field.nx > 0) appendFrontier(fr.field, kZiplineColor, fill, border);
+        if (fr.field.nx > 0) appendFrontier(fr.field, regionColor, fill, border);
       }
       ziplineFill_.SetVertices(fill);
       ziplineBorder_.SetPoints(border);
@@ -4108,7 +4112,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     ziplineFill_.Draw();
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
-    unlitShader_.SetVec4("uColor", glm::vec4(kZiplineColor, 1.0f));
+    unlitShader_.SetVec4("uColor", glm::vec4(regionColor, 1.0f));
     ziplineBorder_.DrawSegments();
     glDisable(GL_POLYGON_OFFSET_FILL);
     for (const auto& fr : frontiers) {

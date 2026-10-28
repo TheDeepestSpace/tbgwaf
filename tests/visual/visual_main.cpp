@@ -196,7 +196,8 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
                                           : gfx::FovOverlayMode::CpuAnalytic);
   renderer.SetFovProbeHeight(scenario.fovProbeHeight);
   gfx::RenderDebugOptions renderDebug;
-  renderDebug.thermal = scenario.thermal;
+  // Every scenario renders in the AO view, like the live app default.
+  renderDebug.thermal = true;
   renderDebug.thermalBlackHot = scenario.thermalBlackHot;
   // --profile: per-pane RenderPane wall time (glFinish before and after)
   // and the number of own living units whose cones were drawn, so the cost
@@ -257,7 +258,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     std::array<ui::HudLayout, ui::kPaneCount> layouts;
     auto drawHud = [&](const GameLogic& g) {
       // Thermal scenarios get the same sensor-green HUD as the live app.
-      if (scenario.thermal) ui::PushThermalHudStyle();
+      if (renderDebug.thermal) ui::PushThermalHudStyle();
       for (int pane = 0; pane < ui::kPaneCount; ++pane) {
         layouts[pane] = ui::HudLayout{};
         ui::DrawHud(g, PaneTeam(pane), planning, ui::ComputePaneRect(pane, kWindowWidth),
@@ -268,7 +269,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
                            &layouts[pane]);
         }
       }
-      if (scenario.thermal) ui::PopThermalHudStyle();
+      if (renderDebug.thermal) ui::PopThermalHudStyle();
     };
     // Auto-resize windows need a couple of frames to settle on their content
     // size (and stay hidden meanwhile), as they would in the live app; run

@@ -573,8 +573,36 @@ void TestStairSidesSealed() {
   CHECK(checked > 0);
 }
 
+void TestNoWalkableCliffLinks() {
+  // No two neighbouring walkable points straddle a cliff: every drop is
+  // walled, including the wall stretch beside a road ramping through a step
+  // (seed 7 left it open). The map rim is skipped.
+  int checked = 0;
+  for (currentSeed = 1; currentSeed <= 12; ++currentSeed) {
+    MapGeneratorConfig c;
+    c.elevatedHighway = OverpassMode::Off;
+    const Scene s = GenerateUrbanMap(currentSeed, c);
+    NavMesh nav;
+    nav.Build(s.obstacles, s.mapHalfExtent, constants::kAgentRadius, &s.ground, &s.walkSurfaces);
+    const float lim = s.mapHalfExtent - 4.0f;
+    for (float x = -lim; x < lim; x += 0.5f) {
+      for (float z = -lim; z < lim; z += 0.5f) {
+        if (!nav.IsWalkable(x, z)) continue;
+        const float y = s.ground.HeightAt(x, z);
+        for (const glm::vec2 d : {glm::vec2(0.5f, 0.0f), glm::vec2(0.0f, 0.5f)}) {
+          if (!nav.IsWalkable(x + d.x, z + d.y)) continue;
+          ++checked;
+          CHECK(std::fabs(y - s.ground.HeightAt(x + d.x, z + d.y)) < 1.2f);
+        }
+      }
+    }
+  }
+  CHECK(checked > 0);
+}
+
 int main() {
   TestStairSidesSealed();
+  TestNoWalkableCliffLinks();
   TestControlsAndDeterminism();
   TestPinnedTerrainFingerprints();
   TestSeedInvariants();

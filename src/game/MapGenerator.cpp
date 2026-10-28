@@ -2775,11 +2775,11 @@ void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
     // Wall gaps where a road ramps through at grade.
     if (w.arteryRamp) {
       w.gaps.push_back(bandInterval(artery.normal, glm::dot(artery.normal, artery.origin),
-                                    c.arteryWidth * 0.5f + 2.7f));
+                                    c.arteryWidth * 0.5f + 0.6f));
     }
     if (plan.hasBranch && w.branchRamp) {
       w.gaps.push_back(bandInterval(branchN, glm::dot(branchN, plan.branch.start),
-                                    plan.branch.width * 0.5f + c.localStreetWidth * 0.4f + 1.1f));
+                                    plan.branch.width * 0.5f + c.localStreetWidth * 0.4f + 0.6f));
     }
 
     // Avenue ramp-throughs were chosen with the street graph: their gaps.

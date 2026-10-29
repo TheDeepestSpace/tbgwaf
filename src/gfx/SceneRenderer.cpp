@@ -1,5 +1,6 @@
 #include "gfx/SceneRenderer.h"
 
+#include "gfx/FrontierField.h"
 #include "gfx/Ragdoll.h"
 
 #include "gfx/FigureRig.h"
@@ -3598,96 +3599,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     constexpr float kFadeWidth = 0.8f;   // World units from boundary to transparent.
     constexpr float kEdgeAlpha = 0.65f;  // Fill alpha right at the boundary.
     const int nx = f.nx, nz = f.nz;
-    const float inf = std::numeric_limits<float>::infinity();
 
     // Nodes whose surface heights differ by more than a step belong to
     // different walk layers (deck vs. ground, or either side of a deck
     // edge). Nothing -- distance, blur, triangles -- may span them, or the
     // frontier hangs off the deck edge as vertical curtains.
     constexpr float kLayerStep = 0.6f;
-    constexpr float kMaxDepth = 4.0f;  // Caps distance when no same-layer boundary exists.
     const auto sameLayer = [&](int ax, int az, int bx, int bz) {
       if (f.surfaceY.size() != static_cast<size_t>(nx) * nz) return true;
       return std::abs(f.surfaceY[az * nx + ax] - f.surfaceY[bz * nx + bx]) <= kLayerStep;
     };
-    // A node on its layer's edge counts as touching the unreached class,
-    // one step away -- exactly like a reached ground node beside an
-    // obstacle -- so the contour lands half a step past the edge node.
-    const auto onLayerEdge = [&](int ix, int iz) {
-      constexpr int kDx[4] = {-1, 1, 0, 0}, kDz[4] = {0, 0, -1, 1};
-      for (int k = 0; k < 4; ++k) {
-        const int jx = ix + kDx[k], jz = iz + kDz[k];
-        if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) continue;
-        if (!sameLayer(ix, iz, jx, jz)) return true;
-      }
-      return false;
-    };
-
-    // Chamfer distance (in world units) from each node to the nearest node
-    // of the opposite reached/unreached class, within its own layer.
-    auto chamfer = [&](bool target) {
-      std::vector<float> d(static_cast<size_t>(nx) * nz, inf);
-      for (int iz = 0; iz < nz; ++iz)
-        for (int ix = 0; ix < nx; ++ix)
-          if (f.Reached(ix, iz) == target ||
-              (!target && f.Reached(ix, iz) && onLayerEdge(ix, iz)))
-            d[iz * nx + ix] = f.Reached(ix, iz) && !target ? f.step : 0.0f;
-      const float s = f.step, sd = f.step * 1.41421356f;
-      auto relax = [&](int ix, int iz, int dx, int dz, float w) {
-        const int jx = ix + dx, jz = iz + dz;
-        if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) return;
-        if (!sameLayer(ix, iz, jx, jz)) return;
-        float& v = d[iz * nx + ix];
-        v = std::min(v, d[jz * nx + jx] + w);
-      };
-      for (int iz = 0; iz < nz; ++iz)
-        for (int ix = 0; ix < nx; ++ix) {
-          relax(ix, iz, -1, 0, s);
-          relax(ix, iz, 0, -1, s);
-          relax(ix, iz, -1, -1, sd);
-          relax(ix, iz, 1, -1, sd);
-        }
-      for (int iz = nz - 1; iz >= 0; --iz)
-        for (int ix = nx - 1; ix >= 0; --ix) {
-          relax(ix, iz, 1, 0, s);
-          relax(ix, iz, 0, 1, s);
-          relax(ix, iz, 1, 1, sd);
-          relax(ix, iz, -1, 1, sd);
-        }
-      return d;
-    };
-    const std::vector<float> dIn = chamfer(false);   // Distance to nearest unreached.
-    const std::vector<float> dOut = chamfer(true);   // Distance to nearest reached.
-    std::vector<float> g(dIn.size());
-    for (int iz = 0; iz < nz; ++iz)
-      for (int ix = 0; ix < nx; ++ix) {
-        const int i = iz * nx + ix;
-        // Signed depth: positive inside, zero contour half a step out.
-        g[i] = f.Reached(ix, iz) ? std::min(dIn[i], kMaxDepth) - 0.5f * f.step
-                                 : -(std::min(dOut[i], kMaxDepth) - 0.5f * f.step);
-      }
-    // Separable box blur (radius 2, two passes) rounds off the grid steps.
-    std::vector<float> tmp(g.size());
-    for (int pass = 0; pass < 2; ++pass) {
-      for (int iz = 0; iz < nz; ++iz)
-        for (int ix = 0; ix < nx; ++ix) {
-          float sum = 0.0f;
-          for (int k = -2; k <= 2; ++k) {
-            const int jx = std::clamp(ix + k, 0, nx - 1);
-            sum += sameLayer(ix, iz, jx, iz) ? g[iz * nx + jx] : -0.5f * f.step;
-          }
-          tmp[iz * nx + ix] = sum / 5.0f;
-        }
-      for (int iz = 0; iz < nz; ++iz)
-        for (int ix = 0; ix < nx; ++ix) {
-          float sum = 0.0f;
-          for (int k = -2; k <= 2; ++k) {
-            const int jz = std::clamp(iz + k, 0, nz - 1);
-            sum += sameLayer(ix, iz, ix, jz) ? tmp[jz * nx + ix] : -0.5f * f.step;
-          }
-          g[iz * nx + ix] = sum / 5.0f;
-        }
-    }
+    const std::vector<float> g = SmoothFrontierSignedDepth(f);
 
     struct Pt {
       glm::vec3 p;

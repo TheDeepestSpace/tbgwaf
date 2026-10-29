@@ -79,6 +79,7 @@ set(APP_GFX_SOURCES
   src/gfx/Shader.cpp
   src/gfx/Mesh.cpp
   src/gfx/Camera.cpp
+  src/gfx/FrontierField.cpp
   src/gfx/FigureRig.cpp
   src/gfx/Ragdoll.cpp
   src/gfx/SceneRenderer.cpp
@@ -221,6 +222,7 @@ else()
     src/gfx/Shader.cpp
     src/gfx/Mesh.cpp
     src/gfx/Camera.cpp
+    src/gfx/FrontierField.cpp
     src/gfx/FigureRig.cpp
     src/gfx/Ragdoll.cpp
     src/gfx/SceneRenderer.cpp
@@ -275,6 +277,12 @@ else()
   target_include_directories(tactics_camera_tests PRIVATE src)
   target_link_libraries(tactics_camera_tests PRIVATE glm::glm)
   add_test(NAME camera_tests COMMAND tactics_camera_tests)
+
+  add_executable(tactics_frontier_field_tests tests/frontier_field_tests.cpp
+                 src/gfx/FrontierField.cpp)
+  target_include_directories(tactics_frontier_field_tests PRIVATE src)
+  target_link_libraries(tactics_frontier_field_tests PRIVATE glm::glm)
+  add_test(NAME frontier_field_tests COMMAND tactics_frontier_field_tests)
 
   add_executable(tactics_ragdoll_tests tests/ragdoll_tests.cpp src/gfx/Ragdoll.cpp
                  src/gfx/FigureRig.cpp)

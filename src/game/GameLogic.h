@@ -83,6 +83,8 @@ struct GameSnapshot {
     float turnLag = 0.0f;  // Visual-only turn animation (see Unit::turnLag).
     glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
     float knockdownElapsed = -1.0f;
+    std::vector<Unit::KnockdownImpact> knockdownImpacts;
+    float knockdownDrop = 0.0f;
     // Figure animation state (see Unit): a follower mirrors these rather
     // than re-simulating, so its panes play the same walk/shoot beats.
     float walkPhase = 0.0f;
@@ -549,7 +551,8 @@ class GameLogic {
   float RayReach(const glm::vec3& muzzle, const glm::vec3& ray) const;
   // Shoot beat start/re-trigger; `sinceShot` is how long ago the bullet left.
   static void PlayShootBeat(Unit& shooter, float aimYaw, float sinceShot = 0.0f);
-  static void KnockDown(Unit& target, const glm::vec3& dir);
+  static bool IsFalling(const Unit& unit);  // Downed and still mid-fall.
+  void KnockDown(Unit& target, const glm::vec3& dir);
 
   // Gate check only, no side effects (ShotHitChance > 0): "can this shooter
   // take the shot at all". Split out so a tick's simultaneous shots can all

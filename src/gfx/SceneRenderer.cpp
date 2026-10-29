@@ -1514,6 +1514,11 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
   ghost.idleElapsed = s.idleElapsed;
   ghost.alive = s.alive;
   ghost.knockdownElapsed = s.knockdownElapsed;
+  ghost.knockdownAxis = s.knockdownAxis;
+  // Ghosts are frozen snapshots: drop every live one-shot animation overlay.
+  ghost.shootElapsed = -1.0f;
+  ghost.rideTravel = -1.0f;
+  ghost.grabElapsed = -1.0f;
   if (glm::length(s.moveDirection) > 0.0f) {
     const glm::vec3 d = s.moveDirection;
     const glm::vec3 side(-d.z, 0.0f, d.x);
@@ -2959,6 +2964,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const ScopedDrawStats drawStats(debug.stats);
   const auto& obstacles = game.GetScene().obstacles;
   SetRagdollObstacles(obstacles);
+  SetRagdollGround(game.GetScene().walkSurfaces, game.GetScene().ground);
   const auto& sidewalks = game.GetScene().sidewalks;
   const auto& streetProps = game.GetScene().props;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;

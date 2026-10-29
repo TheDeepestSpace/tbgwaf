@@ -89,12 +89,15 @@ scene's name and is informational only; the replayer keys on `builder_scene`.
 
 * `half_extent`: playable area is `[-half_extent, half_extent]^2`, flat ground.
 * `round_limit`: draw after this many rounds; `0` is unlimited.
-* `boxes`: `[cx, cz, hx, hz, height]` each, all climbable, standing on the
-  ground (centre and half extents in XZ, height from y = 0).
+* `boxes`: `[cx, cz, hx, hz, height]` or `[cx, cz, hx, hz, height, y]` each,
+  all climbable (centre and half extents in XZ; the box spans `y` to
+  `y + height`, with `y` omitted = 0 = on the ground; `y > 0` stacks it on
+  the cubes beneath). There is no maximum height.
 * `figures`: in order, so the array index is the unit id. `team` is `blue` or
   `red`; `weapon` is `desert_eagle`, `assault_rifle` or `sniper_rifle`. A
   figure stands on the highest box covering its (x, z), else the ground, and
-  starts facing the enemy side (blue +X, red -X).
+  starts facing the enemy side (blue +X, red -X) unless it has a `yaw`
+  (radians from +X).
 
 Floats are written with 9 significant digits and read back exactly. The
 replayer builds the scene (`BuildScene`), seeds the shot RNG with `seed` and

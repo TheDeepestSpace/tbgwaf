@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cfloat>
 #include <cstdio>
 #include <cstring>
 
@@ -29,7 +30,7 @@ int TopBoxAt(const BuilderScene& bs, float x, float z) {
   int best = -1;
   for (int i = 0; i < static_cast<int>(bs.boxes.size()); ++i) {
     const BuilderBox& box = bs.boxes[i];
-    if (BoxContains(box, x, z) && (best < 0 || box.height > bs.boxes[best].height)) best = i;
+    if (BoxContains(box, x, z) && (best < 0 || BoxTop(box) > BoxTop(bs.boxes[best]))) best = i;
   }
   return best;
 }
@@ -37,7 +38,7 @@ int TopBoxAt(const BuilderScene& bs, float x, float z) {
 // Does a figure's footprint at (x, z) reach into a box taller than `standY`?
 bool ClipsCube(const BuilderScene& bs, float x, float z, float standY) {
   for (const BuilderBox& box : bs.boxes) {
-    if (box.height <= standY + 1e-3f) continue;
+    if (BoxTop(box) <= standY + 1e-3f) continue;
     const float dx = std::max(std::fabs(x - box.cx) - box.hx, 0.0f);
     const float dz = std::max(std::fabs(z - box.cz) - box.hz, 0.0f);
     if (dx * dx + dz * dz < constants::kAgentRadius * constants::kAgentRadius) return true;
@@ -57,6 +58,11 @@ bool FigureSpotFree(const BuilderScene& bs, float x, float z, int ignoreIndex) {
     }
   }
   return !ClipsCube(bs, x, z, SurfaceHeightAt(bs, x, z));
+}
+
+bool FootprintsOverlap(const BuilderBox& a, const BuilderBox& b) {
+  return std::fabs(a.cx - b.cx) < a.hx + b.hx - 1e-3f &&
+         std::fabs(a.cz - b.cz) < a.hz + b.hz - 1e-3f;
 }
 
 std::string FigureLabel(const BuilderScene& bs, int index) {
@@ -147,6 +153,61 @@ void PlaceBuilderFigure(BuilderScene* bs, int index, float x, float z) {
   }
   bs->figures[index].x = x;
   bs->figures[index].z = z;
+}
+
+void RotateBuilderFigure(BuilderScene* bs, int index, float yaw) {
+  if (index < 0 || index >= static_cast<int>(bs->figures.size()) || !std::isfinite(yaw)) return;
+  bs->figures[index].yaw = std::remainder(yaw, 2.0f * 3.14159265358979323846f);
+  bs->figures[index].hasYaw = true;
+}
+
+void UpdateBuilderBox(BuilderScene* bs, int index, const BuilderBox& next) {
+  if (index < 0 || index >= static_cast<int>(bs->boxes.size())) return;
+  const BuilderBox old = bs->boxes[index];
+
+  // Cubes resting on this one, transitively (underside at the top of the
+  // cube below, footprints overlapping).
+  std::vector<int> carried;
+  std::vector<bool> isCarried(bs->boxes.size(), false);
+  isCarried[index] = true;
+  for (size_t head = 0, n = 1; head < n; ++head) {
+    const BuilderBox below = head == 0 ? old : bs->boxes[carried[head - 1]];
+    for (int j = 0; j < static_cast<int>(bs->boxes.size()); ++j) {
+      if (isCarried[j] || std::fabs(bs->boxes[j].y - BoxTop(below)) > 1e-3f ||
+          !FootprintsOverlap(bs->boxes[j], below)) {
+        continue;
+      }
+      isCarried[j] = true;
+      carried.push_back(j);
+      ++n;
+    }
+  }
+
+  // Settle: rise from the ground over every non-carried cube it overlaps and
+  // would otherwise sink into.
+  BuilderBox settled = next;
+  settled.y = 0.0f;
+  for (int pass = 0; pass < static_cast<int>(bs->boxes.size()) + 1; ++pass) {
+    float y = 0.0f;
+    for (int j = 0; j < static_cast<int>(bs->boxes.size()); ++j) {
+      if (isCarried[j] || !FootprintsOverlap(settled, bs->boxes[j]) ||
+          bs->boxes[j].y >= settled.y + settled.height - 1e-3f) {
+        continue;
+      }
+      y = std::max(y, BoxTop(bs->boxes[j]));
+    }
+    if (y <= settled.y) break;
+    settled.y = y;
+  }
+
+  const float dx = settled.cx - old.cx, dz = settled.cz - old.cz;
+  const float dy = BoxTop(settled) - BoxTop(old);
+  bs->boxes[index] = settled;
+  for (const int j : carried) {
+    bs->boxes[j].cx += dx;
+    bs->boxes[j].cz += dz;
+    bs->boxes[j].y += dy;
+  }
 }
 
 int AddBuilderBox(BuilderScene* bs) {
@@ -248,9 +309,10 @@ BuilderEditorActions DrawBuilderEditor(BuilderScene* bs, BuilderEditorState* sta
   if (ImGui::BeginListBox("##cubes", ImVec2(-1.0f, 5.0f * ImGui::GetTextLineHeightWithSpacing()))) {
     for (int i = 0; i < static_cast<int>(bs->boxes.size()); ++i) {
       const BuilderBox& box = bs->boxes[i];
-      char label[96];
-      std::snprintf(label, sizeof label, "Cube %d  (%.1f, %.1f)  %.1f x %.1f x %.1f##cube%d",
-                    i + 1, box.cx, box.cz, 2.0f * box.hx, 2.0f * box.hz, box.height, i);
+      char label[112];
+      std::snprintf(label, sizeof label,
+                    "Cube %d  (%.1f, %.1f)  %.1f x %.1f x %.1f  base %.1f##cube%d", i + 1,
+                    box.cx, box.cz, 2.0f * box.hx, 2.0f * box.hz, box.height, box.y, i);
       if (ImGui::Selectable(label, state->selectedBox == i)) {
         state->selectedBox = i;
         state->selectedFigure = -1;
@@ -259,19 +321,22 @@ BuilderEditorActions DrawBuilderEditor(BuilderScene* bs, BuilderEditorState* sta
     ImGui::EndListBox();
   }
   if (state->selectedBox >= 0) {
-    BuilderBox& box = bs->boxes[state->selectedBox];
+    BuilderBox box = bs->boxes[state->selectedBox];
     const float limit = bs->mapHalfExtent;
+    bool changed = false;
     ImGui::PushItemWidth(-110.0f);
-    ImGui::DragFloat("Center X", &box.cx, 0.05f, -limit, limit, "%.2f",
-                     ImGuiSliderFlags_AlwaysClamp);
-    ImGui::DragFloat("Center Z", &box.cz, 0.05f, -limit, limit, "%.2f",
-                     ImGuiSliderFlags_AlwaysClamp);
-    ImGui::DragFloat("Half size X", &box.hx, 0.02f, kBuilderMinHalfExtent, kBuilderMaxHalfExtent,
-                     "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::DragFloat("Half size Z", &box.hz, 0.02f, kBuilderMinHalfExtent, kBuilderMaxHalfExtent,
-                     "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::DragFloat("Height", &box.height, 0.02f, kBuilderMinHeight, kBuilderMaxHeight, "%.2f",
-                     ImGuiSliderFlags_AlwaysClamp);
+    changed |= ImGui::DragFloat("Center X", &box.cx, 0.05f, -limit, limit, "%.2f",
+                                ImGuiSliderFlags_AlwaysClamp);
+    changed |= ImGui::DragFloat("Center Z", &box.cz, 0.05f, -limit, limit, "%.2f",
+                                ImGuiSliderFlags_AlwaysClamp);
+    changed |= ImGui::DragFloat("Half size X", &box.hx, 0.02f, kBuilderMinHalfExtent,
+                                kBuilderMaxHalfExtent, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    changed |= ImGui::DragFloat("Half size Z", &box.hz, 0.02f, kBuilderMinHalfExtent,
+                                kBuilderMaxHalfExtent, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    changed |= ImGui::DragFloat("Height", &box.height, 0.02f, kBuilderMinHeight, FLT_MAX, "%.2f",
+                                ImGuiSliderFlags_AlwaysClamp);
+    if (changed) UpdateBuilderBox(bs, state->selectedBox, box);
+    ImGui::Text("Base height %.2f (cubes stack on cubes beneath)", bs->boxes[state->selectedBox].y);
     ImGui::PopItemWidth();
     if (ImGui::Button("Delete Cube")) {
       bs->boxes.erase(bs->boxes.begin() + state->selectedBox);
@@ -321,7 +386,13 @@ BuilderEditorActions DrawBuilderEditor(BuilderScene* bs, BuilderEditorState* sta
                           "%.2f")) {
       PlaceBuilderFigure(bs, state->selectedFigure, position[0], position[1]);
     }
+    float facing = figure.hasYaw ? figure.yaw : (figure.team == Team::Blue ? 0.0f : 3.14159265f);
+    float facingDegrees = facing * 180.0f / 3.14159265f;
+    if (ImGui::SliderFloat("Facing", &facingDegrees, -180.0f, 180.0f, "%.0f deg")) {
+      RotateBuilderFigure(bs, state->selectedFigure, facingDegrees * 3.14159265f / 180.0f);
+    }
     ImGui::PopItemWidth();
+    if (figure.hasYaw && ImGui::Button("Face enemy side")) figure.hasYaw = false;
     ImGui::Text("Standing at height %.2f", SurfaceHeightAt(*bs, figure.x, figure.z));
     if (ImGui::Button("Delete Figure")) {
       bs->figures.erase(bs->figures.begin() + state->selectedFigure);
@@ -344,8 +415,10 @@ BuilderEditorActions DrawBuilderEditor(BuilderScene* bs, BuilderEditorState* sta
   if (ImGui::Button("Back", ImVec2(100.0f, 36.0f))) actions.back = true;
   ImGui::Spacing();
   ImGui::TextWrapped(
-      "Left-drag a figure to move it (it snaps onto the ground or a cube top); click a figure "
-      "or cube to select it. Right-drag rotates the view, left-drag pans, wheel zooms.");
+      "Left-drag a figure or cube to move it (figures snap onto the ground or a cube top; cubes "
+      "stack on cubes beneath them). Shift+left-drag a figure to turn it toward the cursor. "
+      "Click a figure or cube to select it. Right-drag rotates the view, left-drag the "
+      "background pans, wheel zooms.");
   ImGui::End();
   return actions;
 }
@@ -368,7 +441,7 @@ void DrawBuilderViewportOverlay(const BuilderScene& bs, const BuilderEditorState
     const BuilderBox& box = bs.boxes[state.selectedBox];
     glm::vec3 corners[8];
     for (int i = 0; i < 8; ++i) {
-      corners[i] = glm::vec3(box.cx + ((i & 1) ? box.hx : -box.hx), (i & 4) ? box.height : 0.0f,
+      corners[i] = glm::vec3(box.cx + ((i & 1) ? box.hx : -box.hx), (i & 4) ? BoxTop(box) : box.y,
                              box.cz + ((i & 2) ? box.hz : -box.hz));
     }
     constexpr int kEdges[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3},
@@ -387,6 +460,19 @@ void DrawBuilderViewportOverlay(const BuilderScene& bs, const BuilderEditorState
                            figure.z),
                  &p)) {
       continue;
+    }
+    {
+      // Facing arrow along the ground at the figure's feet.
+      const float yaw = figure.hasYaw ? figure.yaw
+                                      : (figure.team == Team::Blue ? 0.0f : 3.14159265f);
+      const float y = SurfaceHeightAt(bs, figure.x, figure.z) + 0.05f;
+      const glm::vec3 from(figure.x, y, figure.z);
+      const glm::vec3 to = from + glm::vec3(std::cos(yaw), 0.0f, std::sin(yaw)) * 1.2f;
+      ImVec2 a, b;
+      if (project(from, &a) && project(to, &b)) {
+        draw->AddLine(a, b, TeamColor(figure.team), 3.0f);
+        draw->AddCircleFilled(b, 4.0f, TeamColor(figure.team));
+      }
     }
     std::string label = FigureLabel(bs, i);
     label = std::string(1, label[0]) + label.substr(label.find(' ') + 1);  // "Blue 2" -> "B2".

@@ -13,6 +13,7 @@
 #include "game/BuilderScene.h"
 #include "game/DemoScenes.h"
 #include "game/GameLogic.h"
+#include "game/NavMesh.h"
 #include "game/ReproLog.h"
 
 namespace {
@@ -331,9 +332,55 @@ void TestOldFormatLogStillReplays() {
                        &parsed, &error));
 }
 
+// Stacked cubes (y > 0), explicit figure yaw, a cube taller than any old cap.
+void TestStackingAndYaw() {
+  BuilderScene bs;
+  bs.name = "Tower";
+  BuilderBox base;
+  base.cx = 0.0f;
+  base.cz = 0.0f;
+  base.hx = base.hz = 2.0f;
+  base.height = 1.2f;
+  BuilderBox upper = base;
+  upper.hx = upper.hz = 1.0f;
+  upper.height = 9.0f;  // Past the old 6.0 editor limit.
+  upper.y = 1.2f;
+  bs.boxes = {base, upper};
+  BuilderFigure facing{Team::Blue, WeaponType::AssaultRifle, 0.0f, 0.0f};
+  facing.yaw = 1.25f;
+  facing.hasYaw = true;
+  bs.figures = {facing, {Team::Red, WeaponType::AssaultRifle, 9.0f, 0.0f}};
+
+  CHECK(SurfaceHeightAt(bs, 0.0f, 0.0f) == 10.2f);
+  CHECK(SurfaceHeightAt(bs, 1.5f, 0.0f) == 1.2f);
+  const Scene scene = BuildScene(bs);
+  CHECK(scene.obstacles[1].bounds.min.y == 1.2f);
+  CHECK(scene.obstacles[1].bounds.max.y == 10.2f);
+  CHECK(scene.units[0].facingYaw == 1.25f);
+  CHECK(scene.units[0].position.y == 10.2f);
+  CHECK(std::fabs(scene.units[1].facingYaw - 3.14159265f) < 1e-5f);  // Default: face enemy.
+
+  const std::string text = SerializeBuilderScene(bs);
+  BuilderScene back;
+  std::string error;
+  CHECK(ParseBuilderScene(text, &back, &error));
+  CHECK(back.boxes.size() == 2 && back.boxes[1].y == 1.2f && back.boxes[0].y == 0.0f);
+  CHECK(back.figures[0].hasYaw && back.figures[0].yaw == 1.25f && !back.figures[1].hasYaw);
+  CHECK(SerializeBuilderScene(back) == text);
+  // Ground cubes keep the original 5-number form (old logs stay byte-identical).
+  CHECK(text.find("[0,0,2,2,1.20000005]") != std::string::npos);
+
+  // A figure can path up the stack: ground -> lower top -> upper top.
+  NavMesh nav;
+  nav.Build(scene.obstacles, 12.0f, constants::kAgentRadius);
+  std::vector<glm::vec3> path;
+  CHECK(nav.FindPath(glm::vec3(8.0f, 0.0f, 0.0f), glm::vec3(0.0f, 10.2f, 0.0f), &path));
+}
+
 }  // namespace
 
 int main() {
+  TestStackingAndYaw();
   TestBuildScene();
   TestSurfaceHeightAt();
   TestFigureStaysOnBoxAfterReset();

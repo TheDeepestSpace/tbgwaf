@@ -57,7 +57,7 @@ bool ReadNumberAt(const JsonValue& array, size_t index, float* out) {
 float SurfaceHeightAt(const BuilderScene& bs, float x, float z) {
   float top = 0.0f;
   for (const BuilderBox& box : bs.boxes) {
-    if (BoxContains(box, x, z) && box.height > top) top = box.height;
+    if (BoxContains(box, x, z) && BoxTop(box) > top) top = BoxTop(box);
   }
   return top;
 }
@@ -68,8 +68,8 @@ Scene BuildScene(const BuilderScene& bs) {
   scene.roundLimit = bs.roundLimit;
   for (const BuilderBox& box : bs.boxes) {
     Obstacle o;
-    o.bounds = AABB{glm::vec3(box.cx - box.hx, 0.0f, box.cz - box.hz),
-                    glm::vec3(box.cx + box.hx, box.height, box.cz + box.hz)};
+    o.bounds = AABB{glm::vec3(box.cx - box.hx, box.y, box.cz - box.hz),
+                    glm::vec3(box.cx + box.hx, BoxTop(box), box.cz + box.hz)};
     o.climbable = true;
     scene.obstacles.push_back(o);
   }
@@ -80,7 +80,7 @@ Scene BuildScene(const BuilderScene& bs) {
     u.team = figure.team;
     u.position = glm::vec3(figure.x, SurfaceHeightAt(bs, figure.x, figure.z), figure.z);
     // Blue faces +X, Red faces -X: toward the enemy side, as in the default scene.
-    u.facingYaw = figure.team == Team::Blue ? 0.0f : kPi;
+    u.facingYaw = figure.hasYaw ? figure.yaw : (figure.team == Team::Blue ? 0.0f : kPi);
     u.alive = true;
     u.weapon = figure.weapon;
     scene.units.push_back(u);
@@ -98,7 +98,9 @@ std::string SerializeBuilderScene(const BuilderScene& bs) {
     const BuilderBox& b = bs.boxes[i];
     if (i) out += ',';
     out += '[' + FloatText(b.cx) + ',' + FloatText(b.cz) + ',' + FloatText(b.hx) + ',' +
-           FloatText(b.hz) + ',' + FloatText(b.height) + ']';
+           FloatText(b.hz) + ',' + FloatText(b.height);
+    if (b.y != 0.0f) out += ',' + FloatText(b.y);  // Omitted for ground cubes.
+    out += ']';
   }
   out += "],\"figures\":[";
   for (size_t i = 0; i < bs.figures.size(); ++i) {
@@ -108,7 +110,9 @@ std::string SerializeBuilderScene(const BuilderScene& bs) {
     out += f.team == Team::Blue ? "blue" : "red";
     out += "\",\"weapon\":\"";
     out += WeaponWireName(f.weapon);
-    out += "\",\"x\":" + FloatText(f.x) + ",\"z\":" + FloatText(f.z) + '}';
+    out += "\",\"x\":" + FloatText(f.x) + ",\"z\":" + FloatText(f.z);
+    if (f.hasYaw) out += ",\"yaw\":" + FloatText(f.yaw);
+    out += '}';
   }
   out += "]}";
   return out;
@@ -136,13 +140,13 @@ bool ParseBuilderScene(const std::string& text, BuilderScene* out, std::string* 
   }
   for (const JsonValue& v : boxes->array) {
     BuilderBox b;
-    if (v.type != JsonValue::Type::Array || v.array.size() != 5 || !ReadNumberAt(v, 0, &b.cx) ||
+    if (v.type != JsonValue::Type::Array || (v.array.size() != 5 && v.array.size() != 6) || !ReadNumberAt(v, 0, &b.cx) ||
         !ReadNumberAt(v, 1, &b.cz) || !ReadNumberAt(v, 2, &b.hx) || !ReadNumberAt(v, 3, &b.hz) ||
-        !ReadNumberAt(v, 4, &b.height)) {
-      return FailWith(error, "box must be [cx, cz, hx, hz, height]");
+        !ReadNumberAt(v, 4, &b.height) || (v.array.size() == 6 && !ReadNumberAt(v, 5, &b.y))) {
+      return FailWith(error, "box must be [cx, cz, hx, hz, height] or [..., y]");
     }
-    if (b.hx <= 0.0f || b.hz <= 0.0f || b.height <= 0.0f) {
-      return FailWith(error, "box extents and height must be positive");
+    if (b.hx <= 0.0f || b.hz <= 0.0f || b.height <= 0.0f || b.y < 0.0f) {
+      return FailWith(error, "box extents and height must be positive and y non-negative");
     }
     bs.boxes.push_back(b);
   }
@@ -158,6 +162,12 @@ bool ParseBuilderScene(const std::string& text, BuilderScene* out, std::string* 
         !ReadString(v.Find("weapon"), &weapon) || !ReadFloat(v.Find("x"), &f.x) ||
         !ReadFloat(v.Find("z"), &f.z) || !std::isfinite(f.x) || !std::isfinite(f.z)) {
       return FailWith(error, "figure needs team, weapon, x, z");
+    }
+    if (const JsonValue* yaw = v.Find("yaw")) {
+      if (!ReadFloat(yaw, &f.yaw) || !std::isfinite(f.yaw)) {
+        return FailWith(error, "figure 'yaw' must be a number");
+      }
+      f.hasYaw = true;
     }
     if (team == "blue") f.team = Team::Blue;
     else if (team == "red") f.team = Team::Red;

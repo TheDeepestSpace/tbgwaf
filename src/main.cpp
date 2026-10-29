@@ -403,6 +403,17 @@ tactics::BuilderScene MakeSampleBuilderScene() {
   return bs;
 }
 
+// XZ where `ray` crosses the horizontal plane at height `y`; false if parallel
+// or behind the origin.
+bool RayHitsPlaneY(const gfx::Ray& ray, float y, float* x, float* z) {
+  if (std::fabs(ray.direction.y) < 1e-4f) return false;
+  const float t = (y - ray.origin.y) / ray.direction.y;
+  if (t <= 0.0f) return false;
+  *x = ray.origin.x + ray.direction.x * t;
+  *z = ray.origin.z + ray.direction.z * t;
+  return true;
+}
+
 // Editor picking: the figure whose standing box (feet at its surface, ~1.8
 // tall) the ray hits nearest, or -1; likewise for cubes.
 int PickBuilderFigure(const gfx::Ray& ray, const tactics::BuilderScene& bs) {
@@ -427,8 +438,8 @@ int PickBuilderBox(const gfx::Ray& ray, const tactics::BuilderScene& bs) {
   float bestT = std::numeric_limits<float>::infinity();
   for (int i = 0; i < static_cast<int>(bs.boxes.size()); ++i) {
     const tactics::BuilderBox& box = bs.boxes[i];
-    const tactics::AABB bounds{glm::vec3(box.cx - box.hx, 0.0f, box.cz - box.hz),
-                               glm::vec3(box.cx + box.hx, box.height, box.cz + box.hz)};
+    const tactics::AABB bounds{glm::vec3(box.cx - box.hx, box.y, box.cz - box.hz),
+                               glm::vec3(box.cx + box.hx, tactics::BoxTop(box), box.cz + box.hz)};
     float t = 0.0f;
     if (tactics::RayIntersectsAABB(ray.origin, ray.direction, bounds, &t) && t < bestT) {
       bestT = t;
@@ -641,6 +652,10 @@ int main() {
   gfx::OrbitCamera builderCamera;
   tactics::ui::BuilderEditorState builderEditor;
   int builderDragFigure = -1;
+  int builderDragBox = -1;           // Cube being dragged in the viewport (-1 = none).
+  bool builderDragRotate = false;    // Shift held on grab: the drag turns the figure instead.
+  glm::vec2 builderDragBoxGrab(0.0f);  // Cube center minus grab point (XZ).
+  float builderDragPlaneY = 0.0f;    // Height of the plane the cube is dragged along.
   auto addBuilderScene = [&](tactics::BuilderScene bs) {
     builderScenes.push_back(std::move(bs));
     builderThumbnails.push_back(0);
@@ -660,6 +675,7 @@ int main() {
     builderIndex = index;
     builderEditor = {};
     builderDragFigure = -1;
+    builderDragBox = -1;
     builderPreviewKey.clear();  // Rebuilt on the first editor frame.
     builderCamera = gfx::OrbitCamera();
     builderCamera.FitToExtent(builderScenes[index].mapHalfExtent);
@@ -1050,6 +1066,7 @@ int main() {
         aimedUnitId = -1;
         aimedPane = -1;
         builderDragFigure = -1;
+        builderDragBox = -1;
         if (builderEditing && !ImGui::GetIO().WantCaptureMouse &&
             event.button.x < editorRect.x + editorRect.width) {
           // Editor: pressing on a figure drags it (instead of panning) until
@@ -1058,9 +1075,28 @@ int main() {
               static_cast<float>(event.button.x - editorRect.x), static_cast<float>(event.button.y),
               static_cast<float>(editorRect.width), static_cast<float>(windowHeight));
           builderDragFigure = PickBuilderFigure(grabRay, builderScenes[builderIndex]);
+          builderDragRotate = (SDL_GetModState() & KMOD_SHIFT) != 0;
           if (builderDragFigure >= 0) {
             builderEditor.selectedFigure = builderDragFigure;
             builderEditor.selectedBox = -1;
+          } else {
+            // No figure under the cursor: a cube is dragged on a plane at its
+            // top, keeping the grab offset.
+            builderDragBox = PickBuilderBox(grabRay, builderScenes[builderIndex]);
+            if (builderDragBox >= 0) {
+              const tactics::BuilderBox& box = builderScenes[builderIndex].boxes[builderDragBox];
+              builderDragPlaneY = tactics::BoxTop(box);
+              builderDragBoxGrab = glm::vec2(box.cx, box.cz);
+              if (RayHitsPlaneY(grabRay, builderDragPlaneY, &builderDragBoxGrab.x,
+                                &builderDragBoxGrab.y)) {
+                const glm::vec2 center(box.cx, box.cz);
+                builderDragBoxGrab = center - builderDragBoxGrab;
+              } else {
+                builderDragBoxGrab = glm::vec2(0.0f);
+              }
+              builderEditor.selectedBox = builderDragBox;
+              builderEditor.selectedFigure = -1;
+            }
           }
         }
         if (screen == tbgwaf_flow::State::Gameplay && isPlanningMode(game.Mode()) &&
@@ -1097,7 +1133,7 @@ int main() {
         // While a ghost is grabbed, left-drag aims it (handled after the UI
         // pass) instead of panning the camera.
         if (leftDragPane >= 0 && !ImGui::GetIO().WantCaptureMouse) {
-          if (aimedUnitId < 0 && builderDragFigure < 0) {
+          if (aimedUnitId < 0 && builderDragFigure < 0 && builderDragBox < 0) {
             constexpr float kPanSpeed = 0.0015f;
             // Drag the world under the cursor: target moves opposite to the drag.
             cameraForPane(leftDragPane)
@@ -1132,6 +1168,7 @@ int main() {
         aimedUnitId = -1;
         aimedPane = -1;
         builderDragFigure = -1;
+        builderDragBox = -1;
         leftClickX = event.button.x;
         leftClickY = event.button.y;
       } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
@@ -1183,7 +1220,26 @@ int main() {
         glm::vec3 point;
         if (IntersectGroundOrClimbTop(editorRay(mouseX, mouseY), builderPreview.GetScene(),
                                       &point)) {
-          tactics::ui::PlaceBuilderFigure(&bs, builderDragFigure, point.x, point.z);
+          if (builderDragRotate) {
+            const tactics::BuilderFigure& figure = bs.figures[builderDragFigure];
+            if (std::hypot(point.x - figure.x, point.z - figure.z) > 0.1f) {
+              tactics::ui::RotateBuilderFigure(&bs, builderDragFigure,
+                                               std::atan2(point.z - figure.z, point.x - figure.x));
+            }
+          } else {
+            tactics::ui::PlaceBuilderFigure(&bs, builderDragFigure, point.x, point.z);
+          }
+        }
+      }
+      if (builderDragBox >= 0 && builderDragBox < static_cast<int>(bs.boxes.size()) &&
+          leftDragDistance >= kClickDragThresholdPx) {
+        float hitX = 0.0f, hitZ = 0.0f;
+        if (RayHitsPlaneY(editorRay(mouseX, mouseY), builderDragPlaneY, &hitX, &hitZ)) {
+          tactics::BuilderBox moved = bs.boxes[builderDragBox];
+          const float limit = bs.mapHalfExtent;
+          moved.cx = std::clamp(hitX + builderDragBoxGrab.x, -limit, limit);
+          moved.cz = std::clamp(hitZ + builderDragBoxGrab.y, -limit, limit);
+          tactics::ui::UpdateBuilderBox(&bs, builderDragBox, moved);
         }
       }
       if (leftClickPending && !uiWantsMouse && leftClickX < editorRect.x + editorRect.width) {
@@ -1200,6 +1256,7 @@ int main() {
       if (start || editor.back) {
         builderThumbnailDirty[builderIndex] = true;  // Its card shows the edits.
         builderDragFigure = -1;
+        builderDragBox = -1;
       }
       if (start) {
         if (const std::vector<std::string> problems = tactics::ui::BuilderSceneProblems(bs);

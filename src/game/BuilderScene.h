@@ -17,19 +17,26 @@
 
 namespace tactics {
 
-// A climbable box standing on the ground: centered at (cx, cz) with half
-// extents (hx, hz) in XZ, `height` tall (y from 0 to height).
+// A climbable box: centered at (cx, cz) with half extents (hx, hz) in XZ,
+// `height` tall, its underside at `y` (0 = on the ground; above 0 = stacked on
+// other boxes). Its top is BoxTop().
 struct BuilderBox {
   float cx = 0.0f, cz = 0.0f;
   float hx = 1.5f, hz = 1.5f;
   float height = 1.2f;
+  float y = 0.0f;
 };
+inline float BoxTop(const BuilderBox& box) { return box.y + box.height; }
 
 // A figure standing at (x, z) on whatever surface is highest there.
 struct BuilderFigure {
   Team team = Team::Blue;
   WeaponType weapon = WeaponType::AssaultRifle;
   float x = 0.0f, z = 0.0f;
+  // Facing in radians from +X (as Unit::facingYaw), used when `hasYaw`;
+  // otherwise the figure faces its enemy side (Blue +X, Red -X).
+  float yaw = 0.0f;
+  bool hasYaw = false;
 };
 
 struct BuilderScene {
@@ -43,8 +50,8 @@ struct BuilderScene {
 // Game Scene for `bs`: flat ground, `mapHalfExtent` as the playable area
 // (the map edge is enforced by the simulation, as in the default scene), one
 // climbable Obstacle per box, one Unit per figure with id == index, the
-// figure's explicit weapon, facing its enemy side (Blue +X, Red -X) and
-// standing at SurfaceHeightAt(x, z). No flag.
+// figure's explicit weapon, facing its explicit yaw (default: its enemy side,
+// Blue +X, Red -X) and standing at SurfaceHeightAt(x, z). No flag.
 Scene BuildScene(const BuilderScene& bs);
 
 // Top of the highest box whose XZ extent contains (x, z) (edges inclusive),

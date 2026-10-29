@@ -27,10 +27,10 @@ inline float BuilderPanelWidth(int windowWidth) {
 constexpr float kBuilderMapMargin = 1.0f;
 // Cube limits: half extents below ~0.4 leave no walkable top for the
 // navmesh (it insets climb tops), heights below 0.2 are barely visible.
+// There is no maximum height.
 constexpr float kBuilderMinHalfExtent = 0.4f;
 constexpr float kBuilderMaxHalfExtent = 8.0f;
 constexpr float kBuilderMinHeight = 0.2f;
-constexpr float kBuilderMaxHeight = 6.0f;
 
 // Selection in the editor (-1 = none). At most one of the two is set.
 struct BuilderEditorState {
@@ -54,6 +54,15 @@ std::vector<std::string> BuilderSceneProblems(const BuilderScene& bs);
 // inside the map margin and, when the spot is on a cube top, kept inside the
 // top's walkable inset so the figure stands on the cube rather than its edge.
 void PlaceBuilderFigure(BuilderScene* bs, int index, float x, float z);
+
+// Turns figure `index` to face `yaw` (radians from +X).
+void RotateBuilderFigure(BuilderScene* bs, int index, float yaw);
+
+// Replaces cube `index` with `next` (position, size, height; `next.y` is
+// ignored) and settles it: it rests on the highest cube beneath its
+// footprint (stacking) or on the ground. Cubes resting on it follow it
+// sideways and up/down, so stacks move and grow as a unit.
+void UpdateBuilderBox(BuilderScene* bs, int index, const BuilderBox& next);
 
 // Appends a default cube at a free spot near the map center / a figure of
 // `team` at a free spot on its side; returns the new index.

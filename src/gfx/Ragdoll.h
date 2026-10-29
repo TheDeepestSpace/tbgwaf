@@ -20,7 +20,8 @@ namespace gfx {
 // of which are already replicated/replayed state, so every client and every
 // replay reproduces the same result. Nothing here reads or writes game logic.
 // Collision is against the ground plane at unit.position.y plus the map's
-// obstacle boxes (see SetRagdollObstacles): a figure shot on top of an
+// obstacle boxes, ramps/decks and terrain (see SetRagdollObstacles,
+// SetRagdollGround): a figure shot on top of an
 // obstacle falls off its edge to the ground, and obstacle sides block it.
 
 enum RagdollJoint {
@@ -65,6 +66,12 @@ struct RagdollGun {
 // Obstacles the ragdolls collide with. Call before sampling (cheap when
 // unchanged; a change drops all cached trajectories).
 void SetRagdollObstacles(const std::vector<tactics::Obstacle>& obstacles);
+
+// Ramps/decks and the terrain heightfield the ragdolls rest on, so a body on
+// a ramp slides down it and one on hilly ground lies on the slope. Same
+// calling convention as SetRagdollObstacles.
+void SetRagdollGround(const std::vector<tactics::WalkSurface>& surfaces,
+                      const tactics::HeightField& terrain);
 
 // True for a downed unit whose knockdown animation has started: such units
 // are drawn as a ragdoll instead of a rigid tip-over.

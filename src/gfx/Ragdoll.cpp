@@ -6,7 +6,9 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "game/Geometry.h"
 #include "game/Types.h"
+#include "gfx/FigureRig.h"
 
 using tactics::Unit;
 
@@ -82,11 +84,37 @@ std::vector<tactics::AABB>& Colliders() {
   return boxes;
 }
 
-// Top of the highest obstacle a point of radius `r` at (x, z) can rest on: one
-// whose top it was already at or above (`refY`, the point's previous height),
-// so a body beside a wall is never lifted onto it. Falls back to `base`.
+// Ramps, decks and the terrain heightfield, set by the renderer alongside the
+// obstacles. Changing them drops every cached trajectory.
+struct Walkable {
+  tactics::WalkSurface surface;
+  glm::vec2 lo{0.0f}, hi{0.0f};  // XZ bounds, a cheap reject.
+};
+std::vector<Walkable>& Surfaces() {
+  static std::vector<Walkable> surfaces;
+  return surfaces;
+}
+tactics::HeightField& Terrain() {
+  static tactics::HeightField terrain;
+  return terrain;
+}
+
+// How far below a surface a point may be and still be lifted onto it, so a
+// body slides along a ramp instead of tunnelling under it.
+constexpr float kSurfaceStep = 0.3f;
+
+// Height of the walkable ground the body can rest on at (x, z): the terrain
+// (or `base` on a flat map), then any ramp/deck/obstacle top the point was
+// already at or above (`refY`, the point's previous height), so a body beside
+// a wall is never lifted onto it, nor one under a bridge onto the deck.
 float FloorAt(float x, float z, float refY, float r, float base) {
-  float floorY = base;
+  float floorY = Terrain().Empty() ? base : Terrain().HeightAt(x, z);
+  for (const Walkable& w : Surfaces()) {
+    if (x < w.lo.x || x > w.hi.x || z < w.lo.y || z > w.hi.y) continue;
+    if (!tactics::SurfaceContainsXZ(w.surface, x, z)) continue;
+    const float h = tactics::SurfaceHeightAt(w.surface, x, z);
+    if (refY >= h - kSurfaceStep) floorY = std::max(floorY, h);
+  }
   for (const tactics::AABB& b : Colliders()) {
     if (x < b.min.x - r || x > b.max.x + r || z < b.min.z - r || z > b.max.z + r) continue;
     if (refY >= b.max.y - 0.1f) floorY = std::max(floorY, b.max.y);
@@ -163,14 +191,33 @@ struct Trajectory {
   glm::vec3 position{0.0f};
   float yaw = 0.0f;
   glm::vec3 axis{0.0f};
+  Unit anim;  // Only the animation fields that set the starting pose are compared.
+  std::vector<Unit::KnockdownImpact> impacts;
   unsigned long stamp = 0;
   std::vector<RagdollPose> frames;  // Up to kRagdollSteps + 1 entries.
   std::vector<RagdollGun> guns;     // Same length as frames.
 };
 
+bool SameAnimation(const Unit& a, const Unit& b) {
+  return a.walkPhase == b.walkPhase && a.walkBlend == b.walkBlend &&
+         a.idleElapsed == b.idleElapsed && a.shootElapsed == b.shootElapsed &&
+         a.shootAimYaw == b.shootAimYaw && a.grabElapsed == b.grabElapsed &&
+         a.rideTravel == b.rideTravel && a.rideLength == b.rideLength &&
+         a.rideSlope == b.rideSlope && a.weapon == b.weapon;
+}
+
+bool SameImpacts(const std::vector<Unit::KnockdownImpact>& a,
+                 const std::vector<Unit::KnockdownImpact>& b) {
+  return a.size() == b.size() &&
+         std::equal(a.begin(), a.end(), b.begin(), [](const auto& x, const auto& y) {
+           return x.at == y.at && x.axis == y.axis;
+         });
+}
+
 bool SameKey(const Trajectory& t, const Unit& u) {
   return t.id == u.id && t.position == u.position && t.yaw == u.facingYaw &&
-         t.axis == u.knockdownAxis;
+         t.axis == u.knockdownAxis && t.anim.knockdownDrop == u.knockdownDrop && SameAnimation(t.anim, u) &&
+         SameImpacts(t.impacts, u.knockdownImpacts);
 }
 
 Trajectory Simulate(const Unit& unit) {
@@ -179,21 +226,28 @@ Trajectory Simulate(const Unit& unit) {
   traj.position = unit.position;
   traj.yaw = unit.facingYaw;
   traj.axis = unit.knockdownAxis;
+  traj.anim = unit;
+  traj.impacts = unit.knockdownImpacts;
 
   // KnockDown() stores axis = up x dir, so the shot direction is (-axis.z, axis.x).
-  glm::vec3 dir(-unit.knockdownAxis.z, 0.0f, unit.knockdownAxis.x);
-  dir = glm::length(dir) < 1e-4f ? unit.FacingDirection() : glm::normalize(dir);
+  const auto shotDir = [&unit](const glm::vec3& axis) {
+    const glm::vec3 d(-axis.z, 0.0f, axis.x);
+    return glm::length(d) < 1e-4f ? unit.FacingDirection() : glm::normalize(d);
+  };
+  const glm::vec3 dir = shotDir(unit.knockdownAxis);
   const glm::vec3 side(-dir.z, 0.0f, dir.x);
-  // Deterministic per-unit sideways twist so neighbours don't fall identically.
-  const float twist = 0.35f * std::sin(static_cast<float>(unit.id) * 12.9898f);
+  // Vary the strength along the hit line so neighbours do not fall
+  // identically.  Do not add a sideways component here: there is no lateral
+  // force in the replicated hit state, and doing so made a body drift (and
+  // appear to snap) across the shot line as the fall played out.
+  const float impactScale =
+      1.0f + 0.12f * std::sin(static_cast<float>(unit.id) * 12.9898f);
 
-  const glm::mat4 frame =
-      glm::translate(glm::mat4(1.0f), unit.position) *
-      glm::rotate(glm::mat4(1.0f), unit.facingYaw, glm::vec3(0.0f, -1.0f, 0.0f));
-  RagdollPose pos, prev;
+  // Start from the pose the figure was actually in when it was hit (the
+  // animation state is frozen from then on), not a neutral stand.
+  RagdollPose pos = AnimatedPose(unit), prev;
   for (int i = 0; i < kRagJointCount; ++i) {
-    pos[i] = glm::vec3(frame * glm::vec4(kStanding[i], 1.0f));
-    const glm::vec3 v = (dir * kLaunchSpeed + side * (kLaunchSpeed * twist) +
+    const glm::vec3 v = (dir * (kLaunchSpeed * impactScale) +
                          glm::vec3(0.0f, kLaunchLift, 0.0f)) *
                         kLaunchWeight[i];
     prev[i] = pos[i] - v * kRagdollStep;
@@ -217,7 +271,7 @@ Trajectory Simulate(const Unit& unit) {
     // Tumble about the sideways axis (barrel flips over), plus a little yaw.
     const float s = std::sin(static_cast<float>(unit.id) * 7.531f);
     gunSpin = side * (kGunSpin * (0.5f + 0.5f * std::fabs(s)) * (s < 0 ? -1.0f : 1.0f)) +
-              glm::vec3(0.0f, 2.0f * twist, 0.0f);
+              glm::vec3(0.0f, 0.7f * std::sin(static_cast<float>(unit.id) * 12.9898f), 0.0f);
     gunVel += dir * 0.8f + glm::vec3(0.0f, 0.6f, 0.0f);
   }
   bool gunAsleep = false;
@@ -227,19 +281,48 @@ Trajectory Simulate(const Unit& unit) {
 
   // A figure shot while standing on top of an obstacle falls to the real
   // ground (y = 0); otherwise the ground is wherever it was standing.
-  float groundY = unit.position.y;
+  float groundY = unit.position.y - unit.knockdownDrop;
   for (const tactics::AABB& b : Colliders()) {
     if (unit.position.x >= b.min.x && unit.position.x <= b.max.x && unit.position.z >= b.min.z &&
         unit.position.z <= b.max.z && std::fabs(unit.position.y - b.max.y) < 0.15f) {
       groundY = 0.0f;
     }
   }
+  // Likewise a figure on a ramp or deck: the surface is a floor (FloorAt),
+  // not the flat ground the body lands on past its edge.
+  for (const Walkable& w : Surfaces()) {
+    if (tactics::SurfaceContainsXZ(w.surface, unit.position.x, unit.position.z) &&
+        std::fabs(unit.position.y -
+                  tactics::SurfaceHeightAt(w.surface, unit.position.x, unit.position.z)) < 0.15f) {
+      groundY = 0.0f;
+    }
+  }
   int still = 0;
   std::array<bool, kRagJointCount> onFloor{};
+  // Later hits on the falling body, in time order, applied as extra shoves.
+  std::vector<Unit::KnockdownImpact> impacts = unit.knockdownImpacts;
+  std::stable_sort(impacts.begin(), impacts.end(),
+                   [](const auto& a, const auto& b) { return a.at < b.at; });
+  size_t nextImpact = 0;
   // Run until body and (dropped) gun are at rest, up to the cap: a fall from
   // an obstacle top takes a while.
   for (int step = 0; step < kMaxSimSteps; ++step) {
-    if (still >= kSleepSteps && (!drops || gunAsleep)) break;
+    while (nextImpact < impacts.size() &&
+           std::lround(impacts[nextImpact].at / kRagdollStep) <= step) {
+      const glm::vec3 hitDir = shotDir(impacts[nextImpact].axis);
+      const glm::vec3 hitV =
+          hitDir * (kLaunchSpeed * impactScale) + glm::vec3(0.0f, kLaunchLift, 0.0f);
+      for (int i = 0; i < kRagJointCount; ++i) {
+        prev[i] -= hitV * kLaunchWeight[i] * kRagdollStep;
+      }
+      if (drops) {
+        gunVel += hitDir * 0.8f + glm::vec3(0.0f, 0.6f, 0.0f);
+        gunAsleep = false;
+      }
+      still = 0;
+      ++nextImpact;
+    }
+    if (still >= kSleepSteps && (!drops || gunAsleep) && nextImpact >= impacts.size()) break;
     if (drops && !gunAsleep) {
       gunVel.y -= kGravity * kRagdollStep;
       const float gunRefY = gunPos.y;
@@ -311,7 +394,7 @@ Trajectory Simulate(const Unit& unit) {
         if (n != glm::vec3(0.0f)) {
           // Kill the velocity into the wall (Verlet: move prev onto pos along n).
           const float into = glm::dot(pos[i] - prev[i], n);
-          if (into < 0.0f) prev[i] -= into * n;
+          if (into < 0.0f) prev[i] += into * n;
         }
         const float floorY = FloorAt(pos[i].x, pos[i].z, refY, r, groundY) + r;
         if (pos[i].y < floorY) pos[i].y = floorY;
@@ -355,6 +438,36 @@ void SetRagdollObstacles(const std::vector<tactics::Obstacle>& obstacles) {
                                });
   if (same) return;
   cur = std::move(boxes);
+  Cache().clear();
+}
+
+void SetRagdollGround(const std::vector<tactics::WalkSurface>& surfaces,
+                      const tactics::HeightField& terrain) {
+  std::vector<Walkable>& cur = Surfaces();
+  const bool same =
+      surfaces.size() == cur.size() && terrain.heights == Terrain().heights &&
+      terrain.nx == Terrain().nx && terrain.nz == Terrain().nz &&
+      terrain.minX == Terrain().minX && terrain.minZ == Terrain().minZ &&
+      terrain.step == Terrain().step &&
+      std::equal(surfaces.begin(), surfaces.end(), cur.begin(),
+                 [](const tactics::WalkSurface& a, const Walkable& b) {
+                   return a.vertices == b.surface.vertices;
+                 });
+  if (same) return;
+  cur.clear();
+  for (const tactics::WalkSurface& surface : surfaces) {
+    if (surface.vertices.empty()) continue;
+    Walkable w{surface, glm::vec2(surface.vertices[0].x, surface.vertices[0].z), {}};
+    w.hi = w.lo;
+    for (const glm::vec3& v : surface.vertices) {
+      w.lo = glm::min(w.lo, glm::vec2(v.x, v.z));
+      w.hi = glm::max(w.hi, glm::vec2(v.x, v.z));
+    }
+    w.surface.neighbors.clear();
+    w.surface.blockers.clear();
+    cur.push_back(std::move(w));
+  }
+  Terrain() = terrain;
   Cache().clear();
 }
 

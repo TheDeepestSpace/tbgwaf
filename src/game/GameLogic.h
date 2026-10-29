@@ -141,6 +141,8 @@ struct GameSnapshot {
     float turnLag = 0.0f;  // Visual-only turn animation (see Unit::turnLag).
     glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
     float knockdownElapsed = -1.0f;
+    std::vector<Unit::KnockdownImpact> knockdownImpacts;
+    float knockdownDrop = 0.0f;
     // Figure animation state (see Unit): a follower mirrors these rather
     // than re-simulating, so its panes play the same walk/shoot beats.
     float walkPhase = 0.0f;
@@ -323,6 +325,7 @@ class GameLogic {
     // pose of that instant rather than the upright one.
     bool alive = true;
     float knockdownElapsed = -1.0f;
+    glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
     float at = 0.0f;  // Seconds into the turn's execution when sampled.
   };
   // Oldest-first samples of `targetUnitId` as seen by `viewingTeam`, from the
@@ -335,6 +338,10 @@ class GameLogic {
   // with the same spacing as it appeared. Driven by the clock that
   // UpdateSightingMemory advances, so replays and tests are deterministic.
   float GhostAlpha(float at) const;
+  // Snapshot of the pose a ghost freezes.
+  static EnemySighting CaptureSighting(const Unit& unit);
+  // Stamp a ghost now if `viewer` sees `target` for the first time (call before it dies).
+  void RecordFirstSight(Team viewer, const Unit& target);
   // Bullet lines fade linearly to nothing within kReplayTracerLife of their
   // shot, per shot, in live turns and replay alike (ghosts are unaffected).
   static float TracerAlphaForAge(float age);
@@ -612,6 +619,7 @@ class GameLogic {
   float RayReach(const glm::vec3& muzzle, const glm::vec3& ray) const;
   // Shoot beat start/re-trigger; `sinceShot` is how long ago the bullet left.
   static void PlayShootBeat(Unit& shooter, float aimYaw, float sinceShot = 0.0f);
+  static bool IsFalling(const Unit& unit);  // Downed and still mid-fall.
   void KnockDown(Unit& target, const glm::vec3& dir);
 
   // Gate check only, no side effects (ShotHitChance > 0): "can this shooter

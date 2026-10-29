@@ -233,6 +233,32 @@ const std::vector<GameLogic::EnemySighting>& GameLogic::Sightings(Team viewingTe
   return perUnit[targetUnitId];
 }
 
+GameLogic::EnemySighting GameLogic::CaptureSighting(const Unit& unit) {
+  EnemySighting s;
+  s.position = unit.position;
+  s.facingYaw = unit.facingYaw;
+  s.walkPhase = unit.walkPhase;
+  s.walkBlend = unit.walkBlend;
+  s.idleElapsed = unit.idleElapsed;
+  s.alive = unit.alive;
+  s.knockdownElapsed = unit.knockdownElapsed;
+  s.knockdownAxis = unit.knockdownAxis;
+  return s;
+}
+
+void GameLogic::RecordFirstSight(Team viewer, const Unit& target) {
+  const int t = static_cast<int>(viewer);
+  if (target.id < 0 || static_cast<size_t>(target.id) >= sightings_[t].size() ||
+      sightedLastFrame_[t][target.id] || !ComputeVisibility(viewer).UnitVisible(target.id)) {
+    return;
+  }
+  sightedLastFrame_[t][target.id] = true;
+  sightingTimer_[t][target.id] = 0.0f;
+  EnemySighting s = CaptureSighting(target);
+  s.at = replayGhosts_ ? replayClock_ : mode_ == InputMode::Executing ? executionElapsed_ : 0.0f;
+  sightings_[t][target.id].push_back(s);
+}
+
 void GameLogic::UpdateSightingMemory(float dtSeconds) {
   const bool executing = mode_ == InputMode::Executing;
   if (replayGhosts_) StepReplayGhosts(dtSeconds);
@@ -282,14 +308,7 @@ void GameLogic::UpdateSightingMemory(float dtSeconds) {
       sightedLastFrame_[t][unit.id] = visible;
       if (!sample) continue;
 
-      EnemySighting s;
-      s.position = unit.position;
-      s.facingYaw = unit.facingYaw;
-      s.walkPhase = unit.walkPhase;
-      s.walkBlend = unit.walkBlend;
-      s.idleElapsed = unit.idleElapsed;
-      s.alive = unit.alive;
-      s.knockdownElapsed = unit.knockdownElapsed;
+      EnemySighting s = CaptureSighting(unit);
       s.at = replayGhosts_ ? replayClock_ : executing ? executionElapsed_ : 0.0f;
       if (hasLastUnitPosition_) {
         glm::vec3 delta = unit.position - lastUnitPosition_[unit.id];
@@ -1274,7 +1293,11 @@ void GameLogic::ApplyShot(Unit& shooter, Unit& target, bool hit) {
   Unit aimed = shooter;
   aimed.facingYaw = shooter.shootAimYaw;
   RecordTracer(shooter, aimed.MuzzlePosition(), target.EyePosition());
-  if (hit) KnockDown(target, dir);
+  if (hit) {
+    // Sighting is recorded before the kill so first sight never loses its ghost.
+    RecordFirstSight(shooter.team, target);
+    KnockDown(target, dir);
+  }
 }
 
 namespace {

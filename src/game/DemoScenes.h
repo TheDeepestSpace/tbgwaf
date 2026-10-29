@@ -1,17 +1,15 @@
 #pragma once
 
 // Demo scenes (issue #240): small fixed setups -- a few figures on a minimal
-// map, normal game controls -- for reproducing odd behaviour and handing the
-// recorded session (see game/ReproLog.h) to developers/agents. The registry
-// is data-driven: a scene is an id, a name/description for its card on the
-// Demo Scenes screen, a shot-RNG seed and a function that builds its Scene.
-// To add one, append a DemoScene to kDemoScenes in DemoScenes.cpp (and,
-// per repo convention, a tests/scenarios/demo_<id>.yaml that pins it with
-// `map: {demo_scene: <id>}`).
-//
-// Thumbnails are rendered by the app itself the first time the Demo Scenes
-// screen opens (one offscreen RenderPane per card), so a new scene needs no
-// asset.
+// map, normal game controls -- for reproducing odd behaviour, recorded as
+// repro logs (see game/ReproLog.h). The registry is data-driven: a scene is
+// an id, a name/description, a shot-RNG seed and a function that builds its
+// Scene. The app no longer lists them (the user-facing repro flow is the
+// Builder, see game/BuilderScene.h); the registry stays for the scenario
+// tests (`map: {demo_scene: <id>}`), registry logs (ReplayDemoLog,
+// tactics_repro_replay, TBGWAF_REPRO_LOG) and repro_log_tests. To add one,
+// append a DemoScene to kDemoScenes in DemoScenes.cpp (and, per repo
+// convention, a tests/scenarios/demo_<id>.yaml that pins it).
 
 #include <cstdint>
 #include <string>
@@ -24,11 +22,11 @@ namespace tactics {
 
 struct DemoScene {
   const char* id;           // Stable; recorded in repro logs.
-  const char* name;         // Card button label.
+  const char* name;         // Display name.
   const char* description;  // What to do to reproduce.
   uint32_t seed;            // Shot-RNG seed for the session.
   Scene (*build)();
-  // Where the thumbnail camera looks (XZ) and its zoom delta from the
+  // Where a preview camera looks (XZ) and its zoom delta from the
   // map-fitted view (positive = further out), like a scenario's `camera:`.
   float cameraTargetX, cameraTargetZ, cameraZoom;
 };

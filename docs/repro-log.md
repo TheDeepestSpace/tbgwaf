@@ -1,13 +1,15 @@
-# Demo-scene repro logs
+# Repro logs
 
-The **Demo Scenes** game mode (issue #240) exists to reproduce odd behaviour
-and hand the evidence to a developer or an agent. Game Mode → Demo Scenes
-shows one card per registered scene (thumbnail, name, what to do); picking
-one starts a normal match on that small fixed setup with the usual controls,
-and everything needed to reproduce the session exactly is recorded. **Download
-log** in the top-center panel exports it: a single self-describing JSON Lines
-file. It is the VCD-file equivalent of a hardware simulation: a complete
-input trace with checkpoints, replayable headlessly.
+The **Builder** game mode records every hotseat game played on a player-built
+scene so odd behaviour can be reproduced and handed to a developer or an
+agent: everything needed to reproduce the session exactly is recorded, and
+**Download log** in the game's top-right panel (or "Download last game's log"
+on the Builder screen after **Stop**) exports it as a single self-describing
+JSON Lines file. It is the VCD-file equivalent of a hardware simulation: a
+complete input trace with checkpoints, replayable headlessly. Builder logs
+embed their scene (header `builder_scene`, below). Logs of the fixed demo
+scenes of issue #240 (a registry in `src/game/DemoScenes.cpp`, no longer
+listed in the app) name a registry scene instead and replay the same way.
 
 ## Replaying a log
 
@@ -25,13 +27,16 @@ TBGWAF_REPRO_LOG=repro-....jsonl build/tactics_app
 ```
 
 opens the app straight on the replayed final state with the whole session on
-the turn timeline, so it can be scrubbed and viewed through either team's
-fog. (Native only; the loaded session is not re-recorded.)
+the turn timeline, so it can be scrubbed (a Builder log opens hotseat, with
+its scene added to the Builder's cards; a demo-scene log opens in the usual
+two fogged panes). (Native only; the loaded session is not re-recorded.)
 
 `tests/repro_log_tests.cpp` proves record → replay equality on the first
-scene (and that a tampered log is caught); ctest's `demo_smoke_test` runs the
-real app headlessly through the Demo Scenes flow, writes a log and replays
-it.
+demo scene (and that a tampered log is caught), `tests/builder_scene_tests.cpp`
+the same for Builder logs; ctest's `builder_smoke_test` runs the real app
+headlessly through the Builder flow (cards, editor, a hotseat game with a
+scripted round, `TBGWAF_SMOKE_BUILDER=1`), writes a log
+(`TBGWAF_REPRO_OUT`) and replays it.
 
 ### Determinism
 
@@ -70,6 +75,31 @@ entry) and `t` (wall-clock milliseconds since the recording started).
 | `build` | Git short hash of the recording build (`unknown` outside a checkout). |
 | `created` | UTC timestamp, informational. |
 | `initial_hash` | State hash before the first input. |
+| `builder_scene` | Optional. Present on logs of a Builder (player-built) scene; see below. Absent on demo-scene logs, and logs written before the field existed parse and replay unchanged (version stays 1). |
+
+#### `builder_scene` (Builder logs)
+
+A Builder log carries its whole map in the header, as one nested JSON object,
+so it replays with no registry entry. `scene` is then `"builder:"` plus the
+scene's name and is informational only; the replayer keys on `builder_scene`.
+
+```jsonl
+{"type":"header","format":"tbgwaf-repro-log","version":1,"scene":"builder:Yard","seed":77,"build":"…","created":"…","builder_scene":{"name":"Yard","half_extent":20,"round_limit":0,"boxes":[[-8,0,1.5,1.5,2]],"figures":[{"team":"blue","weapon":"sniper_rifle","x":-8,"z":0},{"team":"red","weapon":"desert_eagle","x":8,"z":0.100000001}]},"initial_hash":"…"}
+```
+
+* `half_extent`: playable area is `[-half_extent, half_extent]^2`, flat ground.
+* `round_limit`: draw after this many rounds; `0` is unlimited.
+* `boxes`: `[cx, cz, hx, hz, height]` each, all climbable, standing on the
+  ground (centre and half extents in XZ, height from y = 0).
+* `figures`: in order, so the array index is the unit id. `team` is `blue` or
+  `red`; `weapon` is `desert_eagle`, `assault_rifle` or `sniper_rifle`. A
+  figure stands on the highest box covering its (x, z), else the ground, and
+  starts facing the enemy side (blue +X, red -X).
+
+Floats are written with 9 significant digits and read back exactly. The
+replayer builds the scene (`BuildScene`), seeds the shot RNG with `seed` and
+checks `initial_hash` and every later hash like any other log
+(`ReplayBuilderLog`; `tactics_repro_replay` picks the right path itself).
 
 ### `updates`
 
@@ -120,12 +150,12 @@ between its instances: every figure's position, facing, alive flag, plan,
 knockdown and animation clocks, the bullet lines, playbooks, mode, round,
 execution clock, winner and flag.
 
-## Adding a scene
+## Adding a registry scene
 
-Append a `DemoScene` to `kDemoScenes` in `src/game/DemoScenes.cpp`: id, name,
-description (the instructions on the card), RNG seed, a function building the
-`Scene`, and the thumbnail camera (look-at point, zoom delta). Add a
-`tests/scenarios/demo_<id>.yaml` with `map: {demo_scene: <id>}` that scripts
-the behaviour the scene is for, and regenerate its goldens with
-`scripts/update_golden_baselines.sh`. Thumbnails are rendered by the app the
-first time the Demo Scenes screen opens, so no asset is needed.
+Most repros need no code: build the setup in the Builder, play it and
+download the log. For a fixed scene that tests pin, append a `DemoScene` to
+`kDemoScenes` in `src/game/DemoScenes.cpp`: id, name, description (what to
+do), RNG seed, a function building the `Scene`, and a preview camera
+(look-at point, zoom delta). Add a `tests/scenarios/demo_<id>.yaml` with
+`map: {demo_scene: <id>}` that scripts the behaviour the scene is for, and
+regenerate its goldens with `scripts/update_golden_baselines.sh`.

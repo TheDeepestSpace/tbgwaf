@@ -34,6 +34,11 @@ struct ReproHeader {
   std::string build;       // ReproBuildId() of the recording build.
   std::string created;     // Free-form timestamp (informational only).
   uint64_t initialHash = 0;  // GameLogic::StateHash() before the first input.
+  // Optional (Builder scenes): the SerializeBuilderScene() JSON of the
+  // player-built scene this log starts from, embedded in the header as the
+  // "builder_scene" object. Empty for demo-scene logs (and for every log
+  // written before the field existed); `scene` is then a registry id.
+  std::string builderScene;
 };
 
 // One replayable line: an input (with the post-input hash), a batch of
@@ -76,9 +81,12 @@ class ReproRecorder : public InputRecorder {
   explicit ReproRecorder(std::function<uint64_t()> nowMs = {});
 
   // Starts a fresh log from `game`'s current state (which must already be
-  // the demo scene with its seed applied).
+  // the demo scene with its seed applied). For a Builder scene pass its
+  // SerializeBuilderScene() JSON as `builderScene` (and a descriptive
+  // `sceneId`, see BuilderSceneLogId): the log then embeds the scene and
+  // replays without any registry entry.
   void Start(const GameLogic& game, const std::string& sceneId, uint32_t seed,
-             const std::string& created = "");
+             const std::string& created = "", const std::string& builderScene = "");
   bool Started() const { return started_; }
 
   void OnInput(const GameLogic& game, const InputEvent& event) override;

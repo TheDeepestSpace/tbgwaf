@@ -1,8 +1,9 @@
-// Headless replay of a demo-scene repro log (issue #240):
+// Headless replay of a demo-scene or Builder repro log (issue #240):
 //
 //   tactics_repro_replay <log.jsonl> [--quiet]
 //
-// Rebuilds the log's demo scene, feeds every recorded input back through
+// Rebuilds the log's scene (a registry demo scene, or the Builder scene
+// embedded in its header), feeds every recorded input back through
 // GameLogic and checks the state hash after each one against the recorded
 // value. Exit 0 when every hash matched, 1 on a mismatch or a malformed /
 // unknown-scene log. Prints the sim log lines and the first few mismatches
@@ -14,7 +15,7 @@
 #include <sstream>
 #include <string>
 
-#include "game/DemoScenes.h"
+#include "game/BuilderScene.h"
 #include "game/ReproLog.h"
 
 int main(int argc, char** argv) {
@@ -47,7 +48,7 @@ int main(int argc, char** argv) {
 
   tactics::GameLogic game;
   tactics::ReproLog log;
-  const tactics::ReplayReport report = tactics::ReplayDemoLog(buffer.str(), &game, &log);
+  const tactics::ReplayReport report = tactics::ReplayAnyLog(buffer.str(), &game, &log);
   if (!report.error.empty()) {
     std::fprintf(stderr, "FAIL %s: %s\n", path, report.error.c_str());
     return 1;

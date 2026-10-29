@@ -2,6 +2,8 @@
 
 #include <imgui.h>
 
+#include <algorithm>
+#include <cfloat>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -13,11 +15,17 @@ using tbgwaf_flow::Event;
 using tbgwaf_flow::State;
 
 std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
-                                  uint32_t* mapSeed,
-                                  const std::vector<DemoSceneCard>& demoCards,
-                                  int* selectedDemoScene) {
-  if (state != State::Splash && state != State::GameMode &&
-      state != State::MapSelect && state != State::DemoScenes) return std::nullopt;
+                                  uint32_t* mapSeed, BuilderMenu* builder) {
+  if (builder) {
+    builder->openIndex = -1;
+    builder->newScene = false;
+    builder->deleteIndex = -1;
+    builder->downloadLastLog = false;
+  }
+  if (state != State::Splash && state != State::GameMode && state != State::MapSelect &&
+      state != State::Builder) {
+    return std::nullopt;
+  }
 
   const ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
@@ -39,47 +47,76 @@ std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
     ImGui::Begin("Game Mode", nullptr, flags);
     if (ImGui::Button("Regular", button)) fired = Event::SelectRegular;
     if (ImGui::Button("Capture the Flag", button)) fired = Event::SelectCtf;
-    if (ImGui::Button("Demo Scenes", button)) fired = Event::SelectDemo;
+    if (ImGui::Button("Builder", button)) fired = Event::SelectBuilder;
     ImGui::Spacing();
     if (ImGui::Button("Back", ImVec2(100.0f, 0.0f))) fired = Event::Back;
     ImGui::End();
-  } else if (state == State::DemoScenes) {
-    // Issue #240: one card per registered demo scene -- thumbnail, a button
-    // with the scene's name, and its instructions -- in rows of up to three.
-    ImGui::Begin("Demo Scenes", nullptr, flags);
-    ImGui::TextUnformatted("Fixed repro setups. Play one out, then Download log.");
+  } else if (state == State::Builder) {
+    // One card per player-built scene (thumbnail, a button with its name,
+    // Delete) plus the New Scene card, in as many columns as fit.
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f),
+                                        ImVec2(windowWidth - 20.0f, windowHeight - 20.0f));
+    ImGui::Begin("Builder", nullptr, flags);
+    ImGui::TextUnformatted("Build a scene, then play it hotseat: plan both teams on one screen.");
     ImGui::Spacing();
-    constexpr float kCardWidth = 320.0f;
-    constexpr float kThumbHeight = 180.0f;
-    constexpr int kCardsPerRow = 3;
-    for (int i = 0; i < static_cast<int>(demoCards.size()); ++i) {
-      const DemoSceneCard& card = demoCards[i];
-      if (i % kCardsPerRow != 0) ImGui::SameLine(0.0f, 16.0f);
+    constexpr float kCardWidth = 240.0f;
+    constexpr float kThumbHeight = 135.0f;
+    constexpr float kCardGap = 16.0f;
+    const int cardsPerRow = std::max(
+        1, std::min(4, static_cast<int>((windowWidth - 60.0f + kCardGap) / (kCardWidth + kCardGap))));
+    const int cardCount = builder ? static_cast<int>(builder->cards.size()) : 0;
+    auto placeholder = [&](const char* label) {
+      const ImVec2 p = ImGui::GetCursorScreenPos();
+      ImDrawList* draw = ImGui::GetWindowDrawList();
+      draw->AddRectFilled(p, ImVec2(p.x + kCardWidth, p.y + kThumbHeight),
+                          IM_COL32(40, 44, 52, 255));
+      if (label) {
+        const float fontSize = ImGui::GetFontSize() * 4.0f;
+        const ImVec2 size =
+            ImGui::GetFont()->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, label);
+        draw->AddText(ImGui::GetFont(), fontSize,
+                      ImVec2(p.x + (kCardWidth - size.x) * 0.5f,
+                             p.y + (kThumbHeight - size.y) * 0.5f),
+                      IM_COL32(200, 205, 215, 255), label);
+      }
+      ImGui::Dummy(ImVec2(kCardWidth, kThumbHeight));
+    };
+    for (int i = 0; i <= cardCount; ++i) {
+      if (i % cardsPerRow != 0) ImGui::SameLine(0.0f, kCardGap);
       ImGui::PushID(i);
       ImGui::BeginGroup();
-      if (card.thumbnailTexture != 0) {
-        // Offscreen renders come out bottom-up; flip the V axis.
-        ImGui::Image(static_cast<ImTextureID>(static_cast<std::uintptr_t>(card.thumbnailTexture)),
-                     ImVec2(kCardWidth, kThumbHeight), ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
+      if (i == cardCount) {
+        placeholder("+");
+        if (ImGui::Button("New Scene", ImVec2(kCardWidth, 36.0f))) {
+          fired = Event::OpenBuilderScene;
+          if (builder) builder->newScene = true;
+        }
       } else {
-        const ImVec2 p = ImGui::GetCursorScreenPos();
-        ImGui::GetWindowDrawList()->AddRectFilled(
-            p, ImVec2(p.x + kCardWidth, p.y + kThumbHeight), IM_COL32(40, 44, 52, 255));
-        ImGui::Dummy(ImVec2(kCardWidth, kThumbHeight));
+        const BuilderCard& card = builder->cards[i];
+        if (card.thumbnailTexture != 0) {
+          // Offscreen renders come out bottom-up; flip the V axis.
+          ImGui::Image(
+              static_cast<ImTextureID>(static_cast<std::uintptr_t>(card.thumbnailTexture)),
+              ImVec2(kCardWidth, kThumbHeight), ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
+        } else {
+          placeholder(nullptr);
+        }
+        if (ImGui::Button(card.name.empty() ? "(unnamed)" : card.name.c_str(),
+                          ImVec2(kCardWidth, 36.0f))) {
+          fired = Event::OpenBuilderScene;
+          builder->openIndex = i;
+        }
+        if (ImGui::SmallButton("Delete")) builder->deleteIndex = i;
       }
-      if (ImGui::Button(card.name.c_str(), ImVec2(kCardWidth, 40.0f))) {
-        fired = Event::SelectScene;
-        if (selectedDemoScene) *selectedDemoScene = i;
-      }
-      ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + kCardWidth);
-      ImGui::TextUnformatted(card.description.c_str());
-      ImGui::PopTextWrapPos();
       ImGui::EndGroup();
       ImGui::PopID();
     }
-    if (demoCards.empty()) ImGui::TextUnformatted("(no demo scenes registered)");
     ImGui::Spacing();
-    if (ImGui::Button("Back", ImVec2(100.0f, 0.0f))) fired = Event::Back;
+    if (builder && builder->lastLogAvailable) {
+      if (ImGui::Button("Download last game's log")) builder->downloadLastLog = true;
+    }
+    if (builder && !builder->status.empty()) ImGui::TextUnformatted(builder->status.c_str());
+    if (ImGui::Button("Back", ImVec2(100.0f, 0.0f))) fired = Event::ExitBuilder;
     ImGui::End();
   } else {
     ImGui::Begin("Map Select", nullptr, flags);

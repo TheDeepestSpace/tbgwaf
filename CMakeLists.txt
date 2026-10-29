@@ -66,11 +66,13 @@ set(GAME_LOGIC_SOURCES
   src/game/Visibility.cpp
   src/game/GameLogic.cpp
   src/game/TurnTimeline.cpp
+  src/game/Json.cpp
   src/game/ReproLog.cpp
   src/game/DemoScenes.cpp
+  src/game/BuilderScene.cpp
 )
 
-# Demo-scene repro logs (issue #240) record which build made them. Resolved
+# Repro logs (Builder and demo scenes) record which build made them. Resolved
 # at configure time (git short hash, or "unknown" outside a checkout) and
 # compiled into ReproLog.cpp only, so a new commit doesn't rebuild the world.
 execute_process(
@@ -94,6 +96,7 @@ set(APP_GFX_SOURCES
   src/main.cpp
   src/ui/Hud.cpp
   src/ui/Menu.cpp
+  src/ui/BuilderPanel.cpp
   src/gfx/Shader.cpp
   src/gfx/Mesh.cpp
   src/gfx/Camera.cpp
@@ -250,7 +253,7 @@ else()
 
   # Per-team HUD (Turn panel, action menu, team label), shared by the
   # interactive app and the visual scenario runner.
-  add_library(tactics_ui STATIC src/ui/Hud.cpp src/ui/Menu.cpp)
+  add_library(tactics_ui STATIC src/ui/Hud.cpp src/ui/Menu.cpp src/ui/BuilderPanel.cpp)
   target_include_directories(tactics_ui PUBLIC src)
   target_include_directories(tactics_ui PUBLIC ${FLOW_GEN_DIR})
   add_dependencies(tactics_ui app_flow_gen)
@@ -308,6 +311,13 @@ else()
   target_include_directories(tactics_repro_log_tests PRIVATE src)
   target_link_libraries(tactics_repro_log_tests PRIVATE tactics_logic)
   add_test(NAME repro_log_tests COMMAND tactics_repro_log_tests)
+
+  # Builder scenes: BuildScene, SurfaceHeightAt, JSON form, and builder logs
+  # (embedded scene) replaying through both replay paths.
+  add_executable(tactics_builder_scene_tests tests/builder_scene_tests.cpp)
+  target_include_directories(tactics_builder_scene_tests PRIVATE src)
+  target_link_libraries(tactics_builder_scene_tests PRIVATE tactics_logic)
+  add_test(NAME builder_scene_tests COMMAND tactics_builder_scene_tests)
 
   add_executable(tactics_repro_replay src/tools/repro_replay_main.cpp)
   target_include_directories(tactics_repro_replay PRIVATE src)
@@ -446,23 +456,24 @@ else()
     TIMEOUT 300
     ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11;TBGWAF_SMOKE_TEST=1"
   )
-  # Demo-scenes smoke (issue #240): the app walks Splash -> Game Mode -> Demo
-  # Scenes (rendering the card thumbnails) -> the first scene, records the
-  # session, writes the log on exit; the headless CLI then replays it and
-  # checks every recorded state hash.
+  # Builder smoke: the app walks Splash -> Game Mode -> Builder (rendering
+  # the card thumbnails) -> the editor -> a hotseat game on its hardcoded
+  # smoke scene, plays a scripted round, records the session and writes the
+  # log on exit; the headless CLI then replays it and checks every recorded
+  # state hash.
   if(XVFB_RUN_EXECUTABLE)
     add_test(
-      NAME demo_smoke_test
+      NAME builder_smoke_test
       COMMAND ${CMAKE_COMMAND}
               -DXVFB=${XVFB_RUN_EXECUTABLE}
               -DAPP=$<TARGET_FILE:tactics_app>
               -DREPLAY=$<TARGET_FILE:tactics_repro_replay>
-              -DLOG=${CMAKE_BINARY_DIR}/demo_smoke_repro.jsonl
-              -P ${CMAKE_SOURCE_DIR}/scripts/demo_smoke_test.cmake
+              -DLOG=${CMAKE_BINARY_DIR}/builder_smoke_repro.jsonl
+              -P ${CMAKE_SOURCE_DIR}/scripts/builder_smoke_test.cmake
     )
-    set_tests_properties(demo_smoke_test PROPERTIES
+    set_tests_properties(builder_smoke_test PROPERTIES
       TIMEOUT 60
-      ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11;TBGWAF_SMOKE_TEST=1;TBGWAF_SMOKE_DEMO=1;TBGWAF_REPRO_OUT=${CMAKE_BINARY_DIR}/demo_smoke_repro.jsonl"
+      ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11;TBGWAF_SMOKE_TEST=1;TBGWAF_SMOKE_BUILDER=1;TBGWAF_REPRO_OUT=${CMAKE_BINARY_DIR}/builder_smoke_repro.jsonl"
     )
   endif()
 endif()

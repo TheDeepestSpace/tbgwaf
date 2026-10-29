@@ -9,6 +9,7 @@
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#include <emscripten/heap.h>
 #include <functional>
 #endif
 
@@ -1087,6 +1088,12 @@ int main() {
       }
     }
     // Anchored under the Round panel so it follows collapse/expand.
+    // emscripten_get_heap_size() just reads the current memory size, so it is
+    // cheap enough to call every frame.
+    std::optional<size_t> wasmHeapBytes;
+#ifdef __EMSCRIPTEN__
+    wasmHeapBytes = emscripten_get_heap_size();
+#endif
     const bool hudWasThermal = debugOptions.thermal;
     ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, debugOptions.thermal,
                        debugOptions.thermalBlackHot, debugOptions.thermalFovAlpha,
@@ -1095,7 +1102,7 @@ int main() {
                        debugOptions.thermalAo.softness,
                        debugOptions.disableOcclusionFade, showFps,
                        smoothedFps, frameMs, fovMs, frameStats,
-                       roundPanelBottom + 6.0f);
+                       roundPanelBottom + 6.0f, wasmHeapBytes);
     // Pop against the pre-panel state: the checkbox may have just toggled
     // `thermal`, but the push at the top of this frame is what must unwind.
     if (hudWasThermal) ui::PopThermalHudStyle();

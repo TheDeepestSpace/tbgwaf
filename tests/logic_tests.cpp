@@ -1873,6 +1873,38 @@ void TestDeadFigureInFovGetsGhost() {
   CHECK(!game.Sightings(Team::Blue, 4).empty());
 }
 
+void TestFirstSightGhostSurvivesImmediateKill() {
+  GameLogic game(LegacyScene());
+  // Enemy 4 is in Blue's view but no frame has sampled it yet; it dies first.
+  Unit* enemy = game.FindUnit(4);
+  game.RecordFirstSight(Team::Blue, *enemy);
+  enemy->alive = false;
+  enemy->knockdownElapsed = 0.0f;
+  game.UpdateSightingMemory(0.05f);
+  const auto& samples = game.Sightings(Team::Blue, 4);
+  CHECK(!samples.empty());
+  CHECK(samples.front().alive);  // The ghost shows the figure as first seen.
+  // A second call does not stack a duplicate.
+  game.RecordFirstSight(Team::Blue, *enemy);
+  CHECK(game.Sightings(Team::Blue, 4).size() == samples.size());
+}
+
+void TestSightingSnapshotIsFrozen() {
+  GameLogic game(LegacyScene());
+  StepSightings(game, 1.0f);
+  Unit* enemy = game.FindUnit(4);
+  const GameLogic::EnemySighting before = game.Sightings(Team::Blue, 4).front();
+  // Live animation state keeps changing; a stored sighting must not.
+  enemy->walkPhase += 3.0f;
+  enemy->idleElapsed += 2.0f;
+  enemy->turnLag = 1.0f;
+  const GameLogic::EnemySighting& after = game.Sightings(Team::Blue, 4).front();
+  CHECK(after.walkPhase == before.walkPhase);
+  CHECK(after.idleElapsed == before.idleElapsed);
+  CHECK(after.position == before.position);
+  CHECK(after.facingYaw == before.facingYaw);
+}
+
 void TestFallingBodyKeepsSamplingItsPose() {
   GameLogic game(LegacyScene());
   StepSightings(game, 1.0f);
@@ -3247,6 +3279,71 @@ void TestBulletsFlyToMapEdgeNotWeaponRange() {
   }
 }
 
+// Shots that land on a figure still falling hit it like a live one: they are
+// recorded as shoves on the fall (a settled/frozen body is not re-hit).
+void TestSecondHitOnFallingBodyIsRecorded() {
+  GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.0f; });
+  Unit* shooter = game.FindUnit(1);
+  Unit* target = game.FindUnit(4);
+  const glm::vec3 toTarget = target->position - shooter->position;
+  shooter->facingYaw = std::atan2(toTarget.z, toTarget.x);
+  CHECK(game.ResolveShot(*shooter, *target));
+  CHECK(target->knockdownImpacts.empty());
+  const glm::vec3 firstAxis = target->knockdownAxis;
+  target->knockdownElapsed = 0.2f;
+  CHECK(game.ResolveShot(*shooter, *target));
+  CHECK(target->knockdownImpacts.size() == 1);
+  CHECK(target->knockdownImpacts[0].at == 0.2f);
+  CHECK(target->knockdownAxis == firstAxis);  // The original fall is kept.
+  // Snapshots carry the shoves.
+  GameSnapshot snap = game.ExportState();
+  GameSnapshot round;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(snap), &round));
+  bool found = false;
+  for (const auto& u : round.units) {
+    if (u.id == target->id) found = u.knockdownImpacts.size() == 1;
+  }
+  CHECK(found);
+}
+
+// Killed on a zipline: leaves the ride and remembers the drop to the ground.
+void TestKnockdownOnZiplineRecordsDrop() {
+  GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.0f; });
+  Unit* shooter = game.FindUnit(1);
+  Unit* target = game.FindUnit(4);
+  const glm::vec3 toTarget = target->position - shooter->position;
+  shooter->facingYaw = std::atan2(toTarget.z, toTarget.x);
+  target->position.y = 3.0f;
+  target->rideTravel = 2.0f;
+  target->rideLength = 10.0f;
+  CHECK(game.ResolveShot(*shooter, *target));
+  CHECK(target->rideTravel < 0.0f);
+  CHECK(target->knockdownDrop > 2.9f);
+  GameSnapshot round;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &round));
+  bool found = false;
+  for (const auto& u : round.units) {
+    if (u.id == target->id) found = u.knockdownDrop > 2.9f;
+  }
+  CHECK(found);
+}
+
+// A collapsed figure no longer fills its standing box: shots pass above it.
+void TestFallenBoundsCollapse() {
+  Unit u;
+  u.position = glm::vec3(0.0f, 3.0f, 0.0f);
+  const float standing = u.Bounds().max.y - u.Bounds().min.y;
+  u.alive = false;
+  u.knockdownElapsed = 0.0f;
+  u.knockdownDrop = 3.0f;
+  CHECK(std::abs((u.Bounds().max.y - u.Bounds().min.y) - standing) < 1e-4f);
+  u.knockdownElapsed = 1.0f;
+  CHECK(u.Bounds().max.y < 0.5f);  // Lying on the ground, not on the cable.
+  CHECK(u.Bounds().min.y < 0.01f);
+}
+
 // A fall cut short by the end of a round freezes through planning and
 // resumes (from the same elapsed time) when the next round executes.
 void TestKnockdownFreezesBetweenRounds() {
@@ -3419,6 +3516,8 @@ int main() {
   TestSnapshotMirrorsMatchAndTeamPlans();
   TestSightingRecordedImmediatelyOnEntry();
   TestDeadFigureInFovGetsGhost();
+  TestFirstSightGhostSurvivesImmediateKill();
+  TestSightingSnapshotIsFrozen();
   TestFallingBodyKeepsSamplingItsPose();
   TestReplaySeekForwardKeepsFadingGhosts();
   TestSightingSamplesAccumulateWhileInFov();
@@ -3463,6 +3562,9 @@ int main() {
   TestLockOnStagesUntilFireAndKeepsShotCount();
   TestBulletsFlyToMapEdgeNotWeaponRange();
   TestKnockdownFreezesBetweenRounds();
+  TestSecondHitOnFallingBodyIsRecorded();
+  TestKnockdownOnZiplineRecordsDrop();
+  TestFallenBoundsCollapse();
   TestBurstPlanSurvivesSnapshotAndClampsOnImport();
   TestReachFieldManySurfacesPerformance();
 

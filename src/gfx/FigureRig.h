@@ -6,6 +6,7 @@
 
 #include "game/Unit.h"
 #include "game/Weapon.h"
+#include "gfx/Ragdoll.h"
 
 namespace gfx {
 
@@ -33,6 +34,10 @@ using FigureParts = std::vector<FigurePart>;
 // two-handed (arms solved onto the weapon, no run swing), the handgun
 // one-handed at low ready with both arms swinging while running.
 FigureParts BuildFigure(const tactics::Unit& unit);
+
+// Joint positions (world space) of the figure as animated for the unit's
+// current state, ignoring its downed status: the ragdoll's starting pose.
+RagdollPose AnimatedPose(const tactics::Unit& unit);
 
 // Like BuildFigure, but with the carried weapon collapsed to its single
 // bounding box. Wireframe ghosts (plan previews, sighting memory) draw

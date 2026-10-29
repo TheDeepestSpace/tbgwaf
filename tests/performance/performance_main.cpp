@@ -395,6 +395,8 @@ Sample RenderFrame(gfx::SceneRenderer* renderer, const tactics::GameLogic& game,
   gfx::RenderFrameStats stats;
   gfx::RenderDebugOptions debug;
   debug.stats = collectStats ? &stats : nullptr;
+  // Benchmark the default AO view, like the live app.
+  debug.thermal = true;
   const tactics::Team teams[kPaneCount] = {tactics::Team::Blue, tactics::Team::Red};
   for (int pane = 0; pane < kPaneCount; ++pane) {
     renderer->RenderPane(game, teams[pane], /*fogActive=*/true, visibility[pane], cameras[pane],

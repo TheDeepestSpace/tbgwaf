@@ -868,6 +868,10 @@ Scenario LoadScenarioFromFile(const std::string& path) {
     if (render["fov_probe_height"]) {
       scenario.fovProbeHeight = render["fov_probe_height"].as<float>();
     }
+    if (render["thermal"]) scenario.thermal = render["thermal"].as<bool>();
+    if (render["thermal_black_hot"]) {
+      scenario.thermalBlackHot = render["thermal_black_hot"].as<bool>();
+    }
   }
 
   if (const YAML::Node scriptNode = root["script"]) {

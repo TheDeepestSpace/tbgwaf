@@ -1,0 +1,24 @@
+name: thermal_urban_black_hot
+description: >
+  Aerial black-hot reference on the generated city: pale roofs, darker asphalt,
+  concrete sidewalks, roof furniture, soft ambient contact shading, and dark
+  figures. Exercises the default shadow-map FOV overlay and building fade
+  alongside sensor filtering in both panes.
+map:
+  generate: {seed: 7, type: urban, elevated: false, features: {terrain: off}}
+units:
+  - {id: 0, team: blue, position: [-1, 0, 19], facing_degrees: 0}
+  - {id: 1, team: red, position: [40, 0, -30], facing_degrees: 180}
+  - {id: 2, team: blue, position: [-3, 0, 3], facing_degrees: 0}
+  - {id: 3, team: red, position: [0, 0, 3], facing_degrees: 180}
+camera:
+  target: [-1, 12]
+  zoom: -120
+render:
+  thermal: true
+  fov_overlay: shadow_map
+script:
+  - action: begin_move
+    actor: 0
+  - action: cancel
+    actor: 0

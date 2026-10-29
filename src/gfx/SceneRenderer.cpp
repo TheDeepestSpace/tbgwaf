@@ -38,7 +38,7 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
     overlays.moveFrontier = game.MoveFrontier();
     overlays.ziplineFrontiers = &game.ZiplineFrontiers();
     overlays.movePreviewRides = &game.MovePreviewRides();
-    // A later leg's boundary is yellow, matching the selector; the first leg's stays green.
+    // A later leg is drawn at 50% alpha; the first leg is solid green.
     overlays.moveFrontierSubsequentLeg = selected->plan.type == tactics::PlannedActionType::Move &&
                                          selected->plan.movePath.size() >= 2;
     if (game.MovePreviewValid()) {
@@ -77,12 +77,24 @@ constexpr int kShadowMapSize = 2048;
 constexpr float kDeckShadowSlopeBias = 16.0f;
 constexpr float kDeckShadowConstantBias = 64.0f;
 const glm::vec3 kSetupColor(0.2f, 1.0f, 0.3f);
+// The thermal HUD's "bright" green (Hud.cpp PushThermalHudStyle), used for
+// move paths and reach frontiers in the AO view.
+const glm::vec3 kThermalGreen(0.30f, 0.90f, 0.40f);
+// Black-hot (light) view: the bright green washes out on the pale background,
+// so overlays use a darker shade of it.
+const glm::vec3 kThermalGreenDark(0.02f, 0.45f, 0.14f);
 // Scene geometry base colors, shared by the opaque pass and the issue #136
 // see-through pass so a faded block keeps its normal tint.
 const glm::vec3 kObstacleColor(0.55f, 0.55f, 0.6f);
 // Facade openings (issue #152): window glazing, door leafs, and the
 // frame/sill/mullion trim extruded from (or lining a recess into) the walls.
 const glm::vec3 kDeckColor(0.44f, 0.45f, 0.48f);
+
+// Apparent temperatures are art-directed to the aerial black-hot reference,
+// independent of visible-light paint colors. Figures are the exception: they
+// keep their team color so sides stay readable (PR #178 review). Keep the
+// shader IDs in sync.
+enum class ThermalMaterial { Ground = 0, Concrete, Asphalt, Building, Metal, Figure };
 // Issue #136 camera-occlusion see-through: map geometry (buildings, deck/
 // ramp slabs) standing between the camera and something the player needs to
 // see is drawn at this opacity instead of fully opaque. First guess per the
@@ -203,6 +215,7 @@ void main() {
 
 const char* kLitFragmentShaderSrc = R"(#version 300 es
 precision highp float;
+precision highp int;
 in vec3 vWorldPos;
 in vec3 vWorldNormal;
 in vec4 vLightSpacePos;
@@ -211,7 +224,30 @@ uniform vec3 uLightDir;  // Direction the light travels; surfaces face -uLightDi
 uniform vec3 uViewPos;
 uniform sampler2D uShadowMap;
 uniform int uDisableShadows;
-out vec4 FragColor;
+uniform int uThermal;
+uniform int uThermalBlackHot;  // 1 = hot reads dark (the review reference), 0 = white-hot.
+uniform int uThermalMaterial;  // ThermalMaterial; only figures use uColor.
+layout(location = 0) out vec4 FragColor;
+// Thermal G-buffer normal. Alpha 1 = grayscale heat surface; alpha 0 = a
+// surface drawn in its own color (figures), which the AO composite leaves
+// chromatic.
+layout(location = 1) out vec4 WorldNormal;
+
+// Integer hash avoids sin()-dependent grain differences across GL drivers.
+float ThermalHash(vec2 p) {
+  uvec2 q = uvec2(ivec2(floor(p)));
+  uint h = (q.x * 1664525u) ^ (q.y * 1013904223u);
+  h = (h ^ (h >> 16u)) * 2246822519u;
+  return float(h & 65535u) / 65535.0;
+}
+
+float ThermalNoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(ThermalHash(i), ThermalHash(i + vec2(1.0, 0.0)), u.x),
+             mix(ThermalHash(i + vec2(0.0, 1.0)), ThermalHash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
 
 float ComputeShadow(vec3 normal) {
   if (uDisableShadows != 0) return 0.0;
@@ -237,12 +273,91 @@ void main() {
   vec3 normal = normalize(vWorldNormal);
   vec3 viewDir = normalize(uViewPos - vWorldPos);
   if (dot(normal, viewDir) < 0.0) normal = -normal;
+  WorldNormal = vec4(normal * 0.5 + 0.5, 1.0);
 
   float diffuse = max(dot(normal, -uLightDir), 0.0);
   float shadow = ComputeShadow(normal);
   const float kAmbient = 0.35;
   float lit = kAmbient + (1.0 - shadow) * diffuse * 0.65;
+  if (uThermal != 0) {
+    // Pale clay-like surroundings from the AO reference, with subtle
+    // material differences. Contact shading is applied in screen space
+    // after the opaque pass.
+    if (uThermalMaterial == 5) {
+      // Figures keep their team color in both polarities so sides stay
+      // readable; a small view-dependent falloff rounds limbs without
+      // sun lighting.
+      float shade = 0.82 + 0.18 * max(dot(normal, viewDir), 0.0);
+      WorldNormal.a = 0.0;
+      FragColor = vec4(uColor.rgb * shade, uColor.a);
+      return;
+    }
+    float heat;
+    float skyFacing = clamp(normal.y, 0.0, 1.0);
+    // Project onto the dominant face: walls get 2D texture too, instead
+    // of stretching ground noise into vertical stripes. Fine detail fades
+    // out when smaller than a pixel so distant roofs do not shimmer.
+    vec3 axis = abs(normal);
+    vec2 p = axis.y >= max(axis.x, axis.z) ? vWorldPos.xz :
+             (axis.x > axis.z ? vWorldPos.zy : vWorldPos.xy);
+    float fineWeight = 1.0 - smoothstep(0.15, 0.6, length(fwidth(p)));
+    float textureHeat = (ThermalNoise(p * 0.45) - 0.5) * 0.45 +
+                        (ThermalNoise(p * 2.5) - 0.5) * 0.35 +
+                        (ThermalNoise(p * 9.0) - 0.5) * 0.20 * fineWeight;
+    if (uThermalMaterial == 3) {
+      heat = mix(0.15, 0.018, skyFacing) +
+             textureHeat * mix(0.035, 0.015, skyFacing);
+      // Undersides retain a darker tone; never use visible-light shadows.
+      heat += max(-normal.y, 0.0) * 0.15;
+    } else if (uThermalMaterial == 2) {
+      heat = 0.20 + textureHeat * 0.045;
+    } else if (uThermalMaterial == 1) {
+      heat = mix(0.17, 0.07, skyFacing) + textureHeat * 0.03;
+    } else if (uThermalMaterial == 4) {
+      heat = 0.13 + textureHeat * 0.025;
+    } else {
+      heat = 0.09 + textureHeat * 0.05;
+    }
+    heat += (1.0 - max(dot(normal, viewDir), 0.0)) * 0.018;
+    float gray = uThermalBlackHot != 0 ? 1.0 - heat : heat;
+    FragColor = vec4(vec3(clamp(gray, 0.0, 1.0)), uColor.a);
+    return;
+  }
   FragColor = vec4(uColor.rgb * lit, uColor.a);
+}
+)";
+
+// Optics act on the world image before symbology is drawn. A small blur
+// removes razor-sharp polygon edges; subtle detector grain follows it.
+// No temporal noise: paused frames and regression captures stay stable.
+const char* kThermalSensorVertexShaderSrc = R"(#version 300 es
+out vec2 vUV;
+void main() {
+  vUV = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(vUV * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+
+const char* kThermalSensorFragmentShaderSrc = R"(#version 300 es
+precision highp float;
+precision highp int;
+in vec2 vUV;
+uniform sampler2D uScene;
+out vec4 FragColor;
+void main() {
+  vec2 size = vec2(textureSize(uScene, 0));
+  vec2 texel = 1.0 / size;
+  // Per channel: the world is gray, but figures carry their team color.
+  vec3 rgb = texture(uScene, vUV).rgb * 0.40;
+  rgb += texture(uScene, vUV + vec2(texel.x, 0.0)).rgb * 0.15;
+  rgb += texture(uScene, vUV - vec2(texel.x, 0.0)).rgb * 0.15;
+  rgb += texture(uScene, vUV + vec2(0.0, texel.y)).rgb * 0.15;
+  rgb += texture(uScene, vUV - vec2(0.0, texel.y)).rgb * 0.15;
+  uvec2 p = uvec2(vUV * size);
+  uint h = (p.x * 1664525u) ^ (p.y * 1013904223u);
+  h = (h ^ (h >> 16u)) * 2246822519u;
+  rgb += (float(h & 65535u) / 65535.0 - 0.5) * 0.012;
+  FragColor = vec4(clamp(rgb, 0.0, 1.0), 1.0);
 }
 )";
 
@@ -1363,9 +1478,7 @@ void DrawFigureWirePart(const Shader& shader, LineMesh& lines, const glm::mat4& 
 }
 
 void DrawUnitWireframe(const Shader& shader, LineMesh& lines, const glm::mat4& viewProj,
-                       const Unit& unit) {
-  // Common highlight green for both teams.
-  const glm::vec4 color(0.3f, 0.9f, 0.4f, 1.0f);
+                       const Unit& unit, const glm::vec4& color) {
   for (const FigurePart& part : BuildFigureWireframe(unit)) {
     DrawFigureWirePart(shader, lines, viewProj, part, color);
   }
@@ -1399,6 +1512,11 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
   ghost.idleElapsed = s.idleElapsed;
   ghost.alive = s.alive;
   ghost.knockdownElapsed = s.knockdownElapsed;
+  ghost.knockdownAxis = s.knockdownAxis;
+  // Ghosts are frozen snapshots: drop every live one-shot animation overlay.
+  ghost.shootElapsed = -1.0f;
+  ghost.rideTravel = -1.0f;
+  ghost.grabElapsed = -1.0f;
   if (glm::length(s.moveDirection) > 0.0f) {
     const glm::vec3 d = s.moveDirection;
     const glm::vec3 side(-d.z, 0.0f, d.x);
@@ -2534,6 +2652,15 @@ bool SceneRenderer::Init() {
     std::fprintf(stderr, "Failed to compile the FOV mask shader\n");
     return false;
   }
+  if (!thermalSensorShader_.Compile(kThermalSensorVertexShaderSrc,
+                                    kThermalSensorFragmentShaderSrc)) {
+    std::fprintf(stderr, "Failed to compile the thermal sensor shader\n");
+    return false;
+  }
+  if (!thermalOcclusion_.Init()) {
+    std::fprintf(stderr, "Failed to compile the thermal ambient occlusion shaders\n");
+    return false;
+  }
   cubeMesh_.Init();
   sphereMesh_.Init();
   frontierFill_.Init();
@@ -2670,6 +2797,49 @@ void SceneRenderer::Destroy() {
   if (fovFbo_[0]) glDeleteFramebuffers(2, fovFbo_);
   fovDepthTex_[0] = fovDepthTex_[1] = 0;
   fovFbo_[0] = fovFbo_[1] = 0;
+  if (thermalSceneTex_) glDeleteTextures(1, &thermalSceneTex_);
+  if (thermalSensorVao_) glDeleteVertexArrays(1, &thermalSensorVao_);
+  thermalSceneTex_ = thermalSensorVao_ = 0;
+  thermalSceneWidth_ = thermalSceneHeight_ = 0;
+  thermalOcclusion_.Destroy();
+}
+
+void SceneRenderer::ApplyThermalSensor(int x, int y, int width, int height) {
+  // Copy only this pane, including on non-default caller framebuffers. Its
+  // depth/stencil stay in place for the overlays that follow. Clamp sampling
+  // to the pane edges so the other team's image can never bleed into it.
+  glActiveTexture(GL_TEXTURE0);
+  if (!thermalSceneTex_) {
+    glGenTextures(1, &thermalSceneTex_);
+    glGenVertexArrays(1, &thermalSensorVao_);
+    glBindTexture(GL_TEXTURE_2D, thermalSceneTex_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  }
+  glBindTexture(GL_TEXTURE_2D, thermalSceneTex_);
+  if (width != thermalSceneWidth_ || height != thermalSceneHeight_) {
+    // RGB, not RGBA: CopyTexSubImage2D may only copy into a texture whose
+    // components the read buffer has, and the WebGL2 canvas has no alpha.
+    // An RGBA copy fails there with GL_INVALID_OPERATION and the sensor
+    // pass then shows an uninitialized (black) image. Only .r is sampled.
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB,
+                 GL_UNSIGNED_BYTE, nullptr);
+    thermalSceneWidth_ = width;
+    thermalSceneHeight_ = height;
+  }
+  glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, x, y, width, height);
+  glDisable(GL_DEPTH_TEST);
+  glDepthMask(GL_FALSE);
+  thermalSensorShader_.Use();
+  thermalSensorShader_.SetInt("uScene", 0);
+  glBindVertexArray(thermalSensorVao_);
+  glDrawArrays(GL_TRIANGLES, 0, 3);
+  RecordDraw(3, 1);
+  glBindVertexArray(0);
+  glDepthMask(GL_TRUE);
+  glEnable(GL_DEPTH_TEST);
 }
 
 void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, float facingYaw,
@@ -2792,6 +2962,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const ScopedDrawStats drawStats(debug.stats);
   const auto& obstacles = game.GetScene().obstacles;
   SetRagdollObstacles(obstacles);
+  SetRagdollGround(game.GetScene().walkSurfaces, game.GetScene().ground);
   const auto& sidewalks = game.GetScene().sidewalks;
   const auto& streetProps = game.GetScene().props;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;
@@ -2927,7 +3098,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
 
   // Shadow pass: only casters this team can currently see.
   glDisable(GL_SCISSOR_TEST);
-  if (!debug.disableShadows) {
+  if (!debug.disableShadows && !debug.thermal) {
     glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo_);
     glViewport(0, 0, kShadowMapSize, kShadowMapSize);
     glClear(GL_DEPTH_BUFFER_BIT);
@@ -2985,7 +3156,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glEnable(GL_SCISSOR_TEST);
   glViewport(x, y, width, height);
   glScissor(x, y, width, height);
-  glClearColor(0.10f, 0.11f, 0.13f, 1.0f);
+  if (debug.thermal) {
+    // Off-map void matches the scene's overall tone: washed-out bright for
+    // black-hot (the review's reference footage), near-black for white-hot.
+    const float voidGray = debug.thermalBlackHot ? 0.86f : 0.14f;
+    glClearColor(voidGray, voidGray, voidGray, 1.0f);
+  } else {
+    glClearColor(0.10f, 0.11f, 0.13f, 1.0f);
+  }
   glClearStencil(0);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
@@ -2993,6 +3171,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const glm::mat4 proj =
       camera.ProjectionMatrix(static_cast<float>(width) / static_cast<float>(height));
   const glm::mat4 viewProj = proj * view;
+
+  // Only opaque, visible geometry contributes to AO. Faded buildings are
+  // blended afterward, so they cannot leave opaque contact shadows over
+  // the figures and paths the see-through pass is meant to reveal.
+  const bool thermalAo = debug.thermal &&
+      thermalOcclusion_.Begin(width, height, debug.thermalBlackHot ? 0.86f : 0.14f);
+  if (debug.thermal && !thermalAo) {
+    glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
+    glViewport(x, y, width, height);
+    glScissor(x, y, width, height);
+  }
 
   // Issue #136 camera-occlusion see-through: per frame, raycast from the
   // camera to every point the player needs to see (own figures, movement
@@ -3095,11 +3284,21 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   }
 
+  // Thermal view only restyles the world: gameplay overlays (selection,
+  // paths, ropes, FOV, cones) keep their in-game colors on top of it.
+  // Uniform values stick to each program across Use() switches, so setting
+  // them once per pane covers all later draws.
+  const int thermalFlag = debug.thermal ? 1 : 0;
   litShader_.Use();
   litShader_.SetVec3("uLightDir", lightDir_);
   litShader_.SetVec3("uViewPos", camera.Position());
   litShader_.SetInt("uShadowMap", 0);
-  litShader_.SetInt("uDisableShadows", debug.disableShadows ? 1 : 0);
+  litShader_.SetInt("uDisableShadows", (debug.disableShadows || debug.thermal) ? 1 : 0);
+  litShader_.SetInt("uThermal", thermalFlag);
+  litShader_.SetInt("uThermalBlackHot", debug.thermalBlackHot ? 1 : 0);
+  const auto thermalMaterial = [&](ThermalMaterial material) {
+    if (debug.thermal) litShader_.SetInt("uThermalMaterial", static_cast<int>(material));
+  };
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
 
@@ -3112,20 +3311,24 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // floor; a city with levels is concrete throughout, base ground, raised
     // tiers, cliff faces and stairs alike, like its decks.
     const bool city = !game.GetScene().roads.empty();
+    thermalMaterial(city ? ThermalMaterial::Concrete : ThermalMaterial::Ground);
     DrawLitModel(litShader_, terrainMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  city ? glm::vec4(kDeckColor, 1.0f) : glm::vec4(0.30f, 0.36f, 0.22f, 1.0f));
+    thermalMaterial(ThermalMaterial::Concrete);
     DrawLitModel(litShader_, terrainRaisedMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(kDeckColor, 1.0f));
     DrawLitModel(litShader_, terrainStairMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(kDeckColor, 1.0f));
     glDisable(GL_POLYGON_OFFSET_FILL);
   } else {
+    thermalMaterial(ThermalMaterial::Ground);
     DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_,
                glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
                glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f),
                glm::vec4(0.16f, 0.18f, 0.20f, 1.0f));
   }
 
+  thermalMaterial(ThermalMaterial::Concrete);
   for (const AABB& slab : game.GetScene().sidewalks) {
     DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, slab.min, slab.max - slab.min,
                glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
@@ -3134,9 +3337,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (drawTerrain) {
     DrawLitModel(litShader_, terrainSidewalkMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
+    thermalMaterial(ThermalMaterial::Asphalt);
     DrawLitModel(litShader_, terrainRoadMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
   }
+  thermalMaterial(ThermalMaterial::Concrete);
   for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
     if (drawTerrain) break;
     BuildSurfacePatch(sidewalk.vertices, 0.10f, &geometryMesh_);
@@ -3144,12 +3349,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                  glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
   }
 
+  thermalMaterial(ThermalMaterial::Asphalt);
   for (const tactics::RoadSurface& road : game.GetScene().roads) {
     if (drawTerrain) break;
     BuildSurfacePatch(road.vertices, 0.0f, &geometryMesh_);
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
   }
+  thermalMaterial(ThermalMaterial::Concrete);
   // Concrete, clearly lighter than the asphalt below: the elevated deck and
   // its ramps must read as a bridge, not as more ground road. One batched
   // draw unless a surface is camera-faded (then the faded ones are skipped
@@ -3169,6 +3376,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   }
 
+  thermalMaterial(ThermalMaterial::Building);
   for (size_t i = 0; i < obstacles.size(); ++i) {
     if (obstacles[i].navOnly || obstacles[i].kind == tactics::ObstacleKind::StreetFurniture) continue;
     if (fadeObstacle[i]) continue;  // Re-drawn translucent below.
@@ -3221,6 +3429,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   };
   const auto drawDetail = [&](const tactics::MassingDetail& d, const glm::vec4& color) {
     if (d.footprint.size() < 3 || d.y1 <= d.y0) return;
+    thermalMaterial(ThermalMaterial::Building);
     tactics::Obstacle prism;
     prism.footprint = d.footprint;
     prism.bounds.min.y = d.y0;
@@ -3241,6 +3450,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   // Zipline anchor posts (the cable itself is drawn with the line overlays).
+  thermalMaterial(ThermalMaterial::Metal);
   for (const tactics::Zipline& line : game.GetScene().ziplines) {
     for (const glm::vec3& foot : {line.a, line.b}) {
       constexpr float kPostHalf = 0.12f;
@@ -3252,11 +3462,21 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   }
 
+  thermalMaterial(ThermalMaterial::Figure);
   for (const Unit& unit : game.GetScene().units) {
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
     DrawUnit(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, unit);
   }
+  thermalMaterial(ThermalMaterial::Metal);
   DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
+
+  if (thermalAo) {
+    thermalOcclusion_.Composite(targetFramebuffer, x, y, view, proj, debug.thermalBlackHot,
+                                debug.thermalAo);
+    litShader_.Use();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
+  }
 
   // Issue #136: alpha-blended re-draw of the occluders marked above, sorted
   // front-to-back and stencil-capped so each pixel is blended exactly once
@@ -3313,6 +3533,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
     for (const FadedOccluder& f : faded) {
       if (f.obstacle >= 0) {
+        thermalMaterial(ThermalMaterial::Building);
         const tactics::Obstacle& obstacle = obstacles[f.obstacle];
         const glm::vec4 color(kObstacleColor, kOccluderFadeOpacity);
         if (obstacle.footprint.empty()) {
@@ -3324,6 +3545,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                        color);
         }
       } else {
+        thermalMaterial(ThermalMaterial::Concrete);
         const std::vector<char> hidden = SharedEdges(walkSurfaces, walkSurfaces[f.surface]);
         BuildSurfacePatch(walkSurfaces[f.surface].vertices, kDeckThickness, &geometryMesh_,
                           &hidden);
@@ -3331,7 +3553,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                      glm::vec4(kDeckColor, kOccluderFadeOpacity));
       }
     }
-    litShader_.SetInt("uDisableShadows", debug.disableShadows ? 1 : 0);
+    litShader_.SetInt("uDisableShadows", (debug.disableShadows || debug.thermal) ? 1 : 0);
     glDisable(GL_CULL_FACE);
     glFrontFace(GL_CCW);
     glDisable(GL_STENCIL_TEST);
@@ -3339,6 +3561,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
   }
+
+  if (debug.thermal) ApplyThermalSensor(x, y, width, height);
 
   // Navmesh boundary debug overlay (opaque lines, depth-tested like the
   // scene geometry so cells hidden behind obstacles/hills read correctly).
@@ -3422,14 +3646,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       fovSceneKey_ = sceneKey;
     }
   }
+  // Thermal view: the tint strength is a debug-panel slider (the pale
+  // black-hot world needs a different level than the normal view).
+  const float fovAlpha = debug.thermal ? debug.thermalFovAlpha : 0.15f;
   const auto drawTeamFov = [&](Team fovTeam) {
     if (fovOverlayMode_ == FovOverlayMode::ShadowMap) {
       // Issue #110 prototype: projective per-unit mask instead of the
       // analytic ground overlay.
       for (const Unit& unit : game.GetScene().units) {
         if (debug.disableFov || !unit.alive || unit.team != fovTeam) continue;
-        const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 0.15f)
-                                                            : glm::vec4(0.9f, 0.25f, 0.22f, 0.15f);
+        const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, fovAlpha)
+                                                            : glm::vec4(0.9f, 0.25f, 0.22f, fovAlpha);
         DrawFovShadowMask(game, unit, unit.VisualYaw(), tactics::constants::kShootHalfFovDegrees,
                           teamColor, viewProj, drawTerrain, targetFramebuffer, x, y, width, height);
       }
@@ -3442,7 +3669,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       for (const Unit& unit : game.GetScene().units) {
         if (debug.disableFov || !unit.alive || unit.team != fovTeam) continue;
         if (terrain.Empty()) {
-          DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, build(unit));
+          DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, build(unit), nullptr, fovAlpha);
           continue;
         }
         auto cached = std::find_if(terrainFovCache_.begin(), terrainFovCache_.end(),
@@ -3456,7 +3683,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           cached->facingYaw = unit.VisualYaw();
           cached->points = build(unit);
         }
-        DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, cached->points);
+        DrawFovCone(colorShader_, fovConeMesh_, viewProj, unit, cached->points, nullptr, fovAlpha);
       }
     }
   };
@@ -3742,6 +3969,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   };
 
+  // Overlay green in the thermal view; thermalKey tags it for the mesh caches.
+  const int thermalKey = debug.thermal ? (debug.thermalBlackHot ? 2 : 1) : 0;
+  const glm::vec3 thermalGreen = debug.thermalBlackHot ? kThermalGreenDark : kThermalGreen;
+  // Path/marker green: solid for the first leg, 50% alpha for later ones.
+  const glm::vec3 pathGreen = debug.thermal ? thermalGreen : glm::vec3(0.3f, 0.9f, 0.4f);
   // Movement frontier: a glow hugging the reach boundary -- brightest at the
   // boundary, fading to fully transparent within kFadeWidth inside it. The
   // boundary is the zero contour of a blurred signed-distance field, so it
@@ -3750,13 +3982,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     const tactics::ReachField& f = *overlays.moveFrontier;
     const glm::vec2 origin(f.minX, f.minZ);
     if (frontierKeyField_ != &f || frontierKeyOrigin_ != origin ||
-        frontierKeyBudget_ != f.budget) {
+        frontierKeyBudget_ != f.budget || frontierKeyThermal_ != thermalKey) {
       frontierKeyField_ = &f;
       frontierKeyOrigin_ = origin;
       frontierKeyBudget_ = f.budget;
+      frontierKeyThermal_ = thermalKey;
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
-      appendFrontier(f, kSetupColor, fill, border);
+      appendFrontier(f, debug.thermal ? thermalGreen : kSetupColor, fill, border);
       frontierFill_.SetVertices(fill);
       frontierBorder_.SetPoints(border);
     }
@@ -3768,18 +4001,23 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     frontierFill_.Draw();
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
-    unlitShader_.SetVec4("uColor", overlays.moveFrontierSubsequentLeg
-                                       ? glm::vec4(1.0f, 0.9f, 0.15f, 1.0f)
-                                       : glm::vec4(kSetupColor, 1.0f));
+    // Same green for every leg, half-transparent after the
+    // first (blending is already on for the whole overlay section; turning it
+    // off here would flatten the zipline fill's alpha gradient below).
+    const glm::vec3 frontierColor = debug.thermal ? thermalGreen : kSetupColor;
+    unlitShader_.SetVec4("uColor", glm::vec4(frontierColor,
+                                             overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f));
     frontierBorder_.DrawSegments();
     glDisable(GL_POLYGON_OFFSET_FILL);
   }
   // Zipline regions: where a walk -> ride -> walk plan can reach, in a second
   // (cyan) tint, with the usable line's cable highlighted.
   if (overlays.ziplineFrontiers && !overlays.ziplineFrontiers->empty()) {
-    const glm::vec3 kZiplineColor(0.2f, 0.75f, 1.0f);
+    // Region, cable and entry marker all match the regular move frontier.
+    const glm::vec3 regionColor = debug.thermal ? thermalGreen : kSetupColor;
     const auto& frontiers = *overlays.ziplineFrontiers;
     std::vector<glm::vec4> key;
+    key.emplace_back(static_cast<float>(thermalKey), 0.0f, 0.0f, 0.0f);
     for (const auto& fr : frontiers) {
       key.emplace_back(fr.field.minX, fr.field.minZ, fr.field.budget,
                        static_cast<float>(fr.zipline));
@@ -3789,7 +4027,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
       for (const auto& fr : frontiers) {
-        if (fr.field.nx > 0) appendFrontier(fr.field, kZiplineColor, fill, border);
+        if (fr.field.nx > 0) appendFrontier(fr.field, regionColor, fill, border);
       }
       ziplineFill_.SetVertices(fill);
       ziplineBorder_.SetPoints(border);
@@ -3801,16 +4039,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     ziplineFill_.Draw();
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
-    unlitShader_.SetVec4("uColor", glm::vec4(kZiplineColor, 1.0f));
+    const float legAlpha = overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f;
+    unlitShader_.SetVec4("uColor", glm::vec4(regionColor, legAlpha));
     ziplineBorder_.DrawSegments();
     glDisable(GL_POLYGON_OFFSET_FILL);
     for (const auto& fr : frontiers) {
       // The ring below overwrites uMVP/uColor, so restore them per line.
       unlitShader_.SetMat4("uMVP", viewProj);
-      unlitShader_.SetVec4("uColor", glm::vec4(kZiplineColor, 1.0f));
+      unlitShader_.SetVec4("uColor", glm::vec4(regionColor, legAlpha));
       pathLine_.SetPoints(cablePoints(game.GetScene().ziplines[fr.zipline]));
       pathLine_.Draw();
-      DrawHighlightOnSurface(fr.entry, glm::vec4(kZiplineColor, 1.0f));
+      DrawHighlightOnSurface(fr.entry, glm::vec4(regionColor, legAlpha));
     }
   }
   glDepthMask(GL_TRUE);
@@ -3939,7 +4178,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const auto drawMovePath = [&](const std::vector<glm::vec3>& path,
                                 const std::vector<tactics::PathRide>& rides,
                                 const glm::vec4& walkColor) {
-    const glm::vec4 rideColor(0.2f, 0.75f, 1.0f, 1.0f);
+    const glm::vec4& rideColor = walkColor;
     unlitShader_.SetMat4("uMVP", viewProj);
     const auto drawRange = [&](size_t first, size_t last, const glm::vec4& color) {
       if (last <= first) return;
@@ -3947,6 +4186,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                                             path.begin() + last + 1)));
       unlitShader_.SetVec4("uColor", color);
       pathLine_.Draw();
+      // GL line width is fixed at 1px, so thicken the path with parallel
+      // copies shifted sideways (screen-right) by a few centimetres.
+      const glm::vec3 right(view[0][0], view[1][0], view[2][0]);
+      for (const float offset : {-0.06f, -0.03f, 0.03f, 0.06f}) {
+        std::vector<glm::vec3> shifted = liftedPath(std::vector<glm::vec3>(
+            path.begin() + first, path.begin() + last + 1));
+        for (glm::vec3& p : shifted) p += right * offset;
+        pathLine_.SetPoints(shifted);
+        pathLine_.Draw();
+      }
     };
     std::vector<tactics::PathRide> sorted = rides;
     std::sort(sorted.begin(), sorted.end(),
@@ -3965,12 +4214,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   };
   if (overlays.movePreviewPath && overlays.movePreviewPath->size() >= 2) {
     static const std::vector<tactics::PathRide> kNoRides;
+    const glm::vec4 previewColor(pathGreen, overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     drawMovePath(*overlays.movePreviewPath,
                  overlays.movePreviewRides ? *overlays.movePreviewRides : kNoRides,
-                 glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
+                 previewColor);
     // Mark the final position with the same ring used for selection.
-    DrawHighlightOnSurface(overlays.movePreviewPath->back(),
-                  glm::vec4(1.0f, 0.9f, 0.15f, 1.0f));
+    DrawHighlightOnSurface(overlays.movePreviewPath->back(), previewColor);
+    glDisable(GL_BLEND);
   } else if (overlays.invalidHoverHighlight) {
     DrawHighlightOnSurface(*overlays.invalidHoverHighlight,
                   glm::vec4(0.9f, 0.15f, 0.15f, 1.0f));
@@ -3983,22 +4235,30 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (const Unit& unit : game.GetScene().units) {
       if (!unit.alive || (!overlays.spectatorFov && unit.team != team)) continue;
       if (unit.plan.type == tactics::PlannedActionType::Move && unit.plan.movePath.size() >= 2) {
-        drawMovePath(unit.plan.movePath, unit.plan.moveRides, glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
+        drawMovePath(unit.plan.movePath, unit.plan.moveRides,
+                     glm::vec4(pathGreen, 1.0f));
         // Wireframe stand-in at the destination, showing the planned final
         // facing (persists until the turn is committed).
         Unit ghost = unit;
         ghost.position = unit.plan.movePath.back();
         ghost.facingYaw = unit.plan.endFacingYaw;
         ghost.turnLag = 0.0f;
-        DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost);
-        // Chained legs for later rounds: yellow, with a marker at each leg
-        // end so they read apart from the leg about to execute (green).
-        const glm::vec4 yellow(1.0f, 0.85f, 0.2f, 1.0f);
+        // Common highlight green for both teams (darker in the black-hot view).
+        DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost,
+                          debug.thermal ? glm::vec4(thermalGreen, 1.0f)
+                                        : glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
+        // Chained legs for later rounds: the same green at 50% alpha, with a
+        // marker at each leg end so they read apart from the leg about to
+        // execute (solid).
+        const glm::vec4 later(pathGreen, 0.5f);
+        const glm::vec4 firstRingColor(pathGreen, 1.0f);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         const bool chaining = game.Mode() == InputMode::AwaitingMoveDestination &&
                               game.SelectedUnitId() == unit.id;
         if (chaining || !unit.plan.queuedLegs.empty()) {
           DrawNumberedHighlight(unlitShader_, highlightRing_, cubeMesh_, viewProj, view,
-                                OnSurface(unit.plan.movePath.back()), yellow, 1,
+                                OnSurface(unit.plan.movePath.back()), firstRingColor, 1,
                                 SurfaceNormal(unit.plan.movePath.back()));
         }
         int legNumber = 1;
@@ -4010,11 +4270,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           drawMovePath(leg,
                        legIndex < unit.plan.queuedLegRides.size() ? unit.plan.queuedLegRides[legIndex]
                                                                   : kNoLegRides,
-                       yellow);
+                       later);
           DrawNumberedHighlight(unlitShader_, highlightRing_, cubeMesh_, viewProj, view,
-                                OnSurface(leg.back()), yellow, legNumber,
+                                OnSurface(leg.back()), later, legNumber,
                                 SurfaceNormal(leg.back()));
         }
+        glDisable(GL_BLEND);
       }
       // Planned locked shots draw no line here: the shot cone aimed at the
       // target's torso (plus the "+" marker) is the whole preview, same as

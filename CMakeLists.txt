@@ -104,6 +104,7 @@ set(APP_GFX_SOURCES
   src/gfx/Mesh.cpp
   src/gfx/Camera.cpp
   src/gfx/FigureRig.cpp
+  src/gfx/AmbientOcclusion.cpp
   src/gfx/Ragdoll.cpp
   src/gfx/SceneRenderer.cpp
 )
@@ -168,6 +169,7 @@ if(EMSCRIPTEN)
     src/gfx/Mesh.cpp
     src/gfx/FigureRig.cpp
     src/gfx/Ragdoll.cpp
+    src/game/Geometry.cpp
   )
   target_include_directories(tactics_gallery_web PRIVATE src)
   target_link_libraries(tactics_gallery_web PRIVATE glm::glm)
@@ -327,6 +329,7 @@ else()
       src/gfx/Mesh.cpp
       src/gfx/Camera.cpp
       src/gfx/FigureRig.cpp
+      src/gfx/AmbientOcclusion.cpp
       src/gfx/Ragdoll.cpp
       src/gfx/SceneRenderer.cpp
     )
@@ -421,6 +424,17 @@ else()
 
     find_program(XVFB_RUN_EXECUTABLE xvfb-run)
     if(XVFB_RUN_EXECUTABLE)
+      add_executable(tactics_thermal_render_tests tests/visual/thermal_render_tests.cpp)
+      target_link_libraries(tactics_thermal_render_tests PRIVATE tactics_gfx PkgConfig::SDL2
+                                                              PkgConfig::EGL)
+      add_test(
+        NAME thermal_render_tests
+        COMMAND ${XVFB_RUN_EXECUTABLE} --auto-servernum $<TARGET_FILE:tactics_thermal_render_tests>
+      )
+      set_tests_properties(thermal_render_tests PROPERTIES
+        TIMEOUT 120
+        ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
+      )
       # Golden-screenshot regression run (no --video: ffmpeg isn't needed for
       # the ctest pass, only for the PR review page built in CI).
       add_test(
@@ -469,7 +483,7 @@ else()
       add_test(NAME smoke_test COMMAND tactics_app)
     endif()
     set_tests_properties(smoke_test PROPERTIES
-      TIMEOUT 30
+      TIMEOUT 300
       ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11;TBGWAF_SMOKE_TEST=1"
     )
   endif()

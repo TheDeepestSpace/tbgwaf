@@ -140,8 +140,18 @@ class NavMesh {
   int FindCellContaining(float x, float z) const;
   int FindCellContaining(float x, float z, float yHint) const;
   int FindWalkSurfaceContaining(float x, float z, float yHint) const;
+  // Ground route that never crosses terrain steeper than constants::kMaxWalkSlope:
+  // the planar route when it is walkable, else a slope-aware grid search.
   bool FindGroundPath(glm::vec3 start, glm::vec3 goal,
                       std::vector<glm::vec3>* outPath) const;
+  bool FindPlanarGroundPath(glm::vec3 start, glm::vec3 goal,
+                            std::vector<glm::vec3>* outPath) const;
+  bool FindSlopeAwareGroundPath(glm::vec3 start, glm::vec3 goal,
+                                std::vector<glm::vec3>* outPath) const;
+  // True if the terrain along the XZ segment a -> b never exceeds the walkable slope.
+  bool GroundSegmentWalkable(glm::vec2 a, glm::vec2 b) const;
+  // True if the XZ segment a -> b clears every padded obstacle footprint.
+  bool GroundSegmentClear(glm::vec2 a, glm::vec2 b) const;
   void AddLowDeckBlockers(float agentRadius);
   void LiftGroundPathOntoTerrain(std::vector<glm::vec3>* outPath) const;
   bool FindPolygonGroundPath(glm::vec3 start, glm::vec3 goal,

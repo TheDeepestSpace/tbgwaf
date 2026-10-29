@@ -30,7 +30,7 @@ namespace {
 //   0x1eae1007u   terrain accesses stair flights
 //   0x21b1e5a7u   ziplines         roof/anchor selection
 //   0xa5c47e75u   archetypes       floors, facade variants, setbacks
-//   0x7d1f0b2du   enterable      which Commercial parcels are hollow
+//   0x7d1f0b2du   enterable      which parcels are hollow
 //   0x3a55196eu   massing          parapets, roof furniture, awnings
 //   0x51f0a3c9u   facades          door spots, stoops, rear platforms, window grids
 //   0x6c57f00du   furniture        feature presence, then curb-side item stations/kinds
@@ -3442,6 +3442,12 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, float height, int in
     addWall(a, q, u1, len, 0.0f, height);
     addWall(a, q, u0, u1, constants::kDoorHeight, height - constants::kDoorHeight);  // Lintel.
   }
+  // Interior floor slabs under each upper storey (a slab per floor above the
+  // ground one). Overhead, so they never block the ground navmesh.
+  for (size_t f = 1; f < b->floors.size(); ++f) {
+    AddPolygonBuilding(scene, fp, b->floors[f].y0 - kRoofThickness - b->baseY, kRoofThickness,
+                       index, groundY);
+  }
   b->enterable = true;
   b->obstacle = AddPolygonBuilding(scene, fp, height - kRoofThickness, kRoofThickness, index,
                                    groundY);
@@ -3539,7 +3545,9 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>
       b.floors.push_back({y0, b.baseY + b.groundFloorHeight + f * b.floorHeight});
     }
     b.floors.back().y1 = b.baseY + height;
-    if (wantEnterable && upper.empty() && b.kind == BuildingKind::Commercial &&
+    const bool hollowKind = b.kind == BuildingKind::Commercial ||
+                            b.kind == BuildingKind::MixedUse || b.kind == BuildingKind::Office;
+    if (wantEnterable && upper.empty() && hollowKind &&
         EmitHollowBuilding(scene, parcels[i], height, index, groundY, &b)) {
       scene->buildings.push_back(b);
       continue;

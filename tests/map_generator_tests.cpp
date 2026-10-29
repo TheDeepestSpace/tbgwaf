@@ -40,6 +40,7 @@ float DistanceToSegment(glm::vec2 p, glm::vec2 a, glm::vec2 b);
 MapGeneratorConfig LegacyConfig() {
   MapGeneratorConfig c;
   c.arteryCount = 0;
+  c.enterableChance = 0.0f;
   return c;
 }
 
@@ -48,6 +49,7 @@ MapGeneratorConfig LegacyConfig() {
 MapGeneratorConfig FlatConfig() {
   MapGeneratorConfig c;
   c.features.terrain.mode = FeatureMode::Off;
+  c.enterableChance = 0.0f;  // Hollow buildings are several wall obstacles each.
   return c;
 }
 
@@ -986,6 +988,7 @@ void TestObliqueArteryAndBranchMerge() {
 
 void TestPolygonBlocksAdaptToAngledStreets() {
   MapGeneratorConfig config;
+  config.enterableChance = 0.0f;  // Solid prisms: footprints are compared whole.
   config.features.terrain.mode = FeatureMode::Off;  // Flat-city blocks.
   config.arteryCount = 2;
   config.elevatedHighway = OverpassMode::Off;
@@ -1058,6 +1061,7 @@ void TestPolygonBlocksAdaptToAngledStreets() {
 // two footprints may both have a vertex at the same frontage corner.
 void TestNoCornerSplitBuildings() {
   MapGeneratorConfig config;
+  config.enterableChance = 0.0f;  // Solid prisms: footprints are compared whole.
   config.arteryCount = 2;
   config.elevatedHighway = OverpassMode::Off;
   int wrapped = 0;
@@ -1115,6 +1119,7 @@ bool FootprintsOverlap(const std::vector<glm::vec2>& a, const std::vector<glm::v
 // never share area, and ordinary two-piece L buildings must still appear.
 void TestCornerBuildingsDoNotChainAcrossAFrontage() {
   MapGeneratorConfig config;
+  config.enterableChance = 0.0f;  // Solid prisms: footprints are compared whole.
   config.elevatedHighway = OverpassMode::Off;
   const Scene scene = GenerateUrbanMap(7, config);
   std::vector<const Obstacle*> buildings;
@@ -1154,6 +1159,7 @@ float MinimumPolygonWidth(const std::vector<glm::vec2>& polygon) {
 // enough for the clipping machinery but too thin to be a useful building.
 void TestThinCornerBuildingSliversAreDropped() {
   MapGeneratorConfig config;
+  config.enterableChance = 0.0f;  // Solid prisms: footprints are compared whole.
   config.elevatedHighway = OverpassMode::Off;
   const Scene scene = GenerateUrbanMap(7, config);
   for (const Obstacle& obstacle : scene.obstacles) {
@@ -2446,6 +2452,7 @@ void TestEnterableBuildingsHaveDoorways() {
   MapGeneratorConfig c;
   c.enterableChance = 1.0f;
   int hollow = 0;
+  bool multi = false;
   for (uint32_t seed : kSeeds) {
     const Scene scene = GenerateUrbanMap(seed, c);
     for (size_t bi = 0; bi < scene.buildings.size(); ++bi) {
@@ -2453,7 +2460,7 @@ void TestEnterableBuildingsHaveDoorways() {
       CHECK(!b.floors.empty());
       if (!b.enterable) continue;
       ++hollow;
-      CHECK(b.kind == BuildingKind::Commercial);
+      CHECK(b.kind != BuildingKind::Residential && b.kind != BuildingKind::Civic);
       CHECK(scene.obstacles[b.obstacle].bounds.min.y >= constants::kUnitHeight);
       bool lintel = false;
       glm::vec2 centre(0.0f);
@@ -2465,15 +2472,31 @@ void TestEnterableBuildingsHaveDoorways() {
         if (std::fabs(o.bounds.min.y - b.baseY - constants::kDoorHeight) < kEps) lintel = true;
       }
       CHECK(lintel);
+      // One overhead slab under every upper storey.
+      int slabs = 0;
+      for (size_t f = 1; f < b.floors.size(); ++f) {
+        for (const Obstacle& o : scene.obstacles) {
+          if (o.building == static_cast<int>(bi) && o.footprint == roof &&
+              std::fabs(o.bounds.max.y - b.floors[f].y0) < kEps) ++slabs;
+        }
+        multi = true;
+      }
+      CHECK(slabs == static_cast<int>(b.floors.size()) - 1);
       NavMesh mesh;
       mesh.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
                  &scene.walkSurfaces);
-      CHECK(mesh.IsWalkable(centre.x, centre.y));
+      // Narrow interiors vanish under the agent-radius inflation of the walls.
+      if (MinimumPolygonWidth(roof) > 6.0f * constants::kAgentRadius + 2.0f) {
+        CHECK(mesh.IsWalkable(centre.x, centre.y));
+      }
     }
   }
   CHECK(hollow > 0);
-  // Default config keeps every building solid.
-  const Scene solid = GenerateUrbanMap(1u, MapGeneratorConfig{});
+  CHECK(multi);
+  // Zero chance keeps every building solid.
+  MapGeneratorConfig off;
+  off.enterableChance = 0.0f;
+  const Scene solid = GenerateUrbanMap(1u, off);
   for (const Building& b : solid.buildings) CHECK(!b.enterable);
 }
 

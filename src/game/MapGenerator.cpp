@@ -30,6 +30,7 @@ namespace {
 //   0x1eae1007u   terrain accesses stair flights
 //   0x21b1e5a7u   ziplines         roof/anchor selection
 //   0xa5c47e75u   archetypes       floors, facade variants, setbacks
+//   0x7d1f0b2du   enterable      which Commercial parcels are hollow
 //   0x3a55196eu   massing          parapets, roof furniture, awnings
 //   0x51f0a3c9u   facades          door spots, stoops, rear platforms, window grids
 //   0x6c57f00du   furniture        feature presence, then curb-side item stations/kinds
@@ -2216,6 +2217,7 @@ std::vector<Parcel> PlanParcels(const CityPlan& city, const MapGeneratorConfig& 
 // --- Building archetypes (issue #151, roadmap 3.2) -------------------------
 
 constexpr uint32_t kArchetypeStream = 0xa5c47e75u;  // Floors, variants, setbacks.
+constexpr uint32_t kEnterableStream = 0x7d1f0b2du;   // Which parcels are hollow.
 constexpr uint32_t kMassingStream = 0x3a55196eu;    // Parapets, roof furniture, awnings.
 
 // Street-class-weighted kind table, Residential/MixedUse/Office/Commercial/
@@ -3399,12 +3401,60 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
   }
 }
 
+// Hollow building (issue #157): one thin wall Obstacle per footprint edge,
+// the frontage wall split around a doorway (like SplitRun's alleys) with the
+// lintel as a wall piece starting at kDoorHeight, plus a roof slab over the
+// whole footprint (Building::obstacle). False (nothing emitted) when the
+// frontage is too short for a doorway or the footprint is not usable.
+bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, float height, int index,
+                        const GroundY& groundY, Building* b) {
+  constexpr float kWallThickness = 0.3f;
+  constexpr float kRoofThickness = 0.3f;
+  constexpr float kDoorWidth = 1.6f;
+  constexpr float kEndMargin = 0.8f;  // Wall left either side of the door.
+  std::vector<glm::vec2> fp = parcel.footprint;
+  if (fp.size() < 3 || PolygonArea(fp) < kMinBuildingArea) return false;
+  if (PolygonSignedArea(fp) < 0.0f) return false;  // Parcels are CCW; don't guess.
+  const size_t n = fp.size();
+  const size_t door = static_cast<size_t>(parcel.frontageEdge) % n;
+  const float doorEdgeLen = glm::distance(fp[door], fp[(door + 1) % n]);
+  if (doorEdgeLen < kDoorWidth + 2.0f * kEndMargin) return false;
+  for (size_t e = 0; e < n; ++e) {
+    if (glm::distance(fp[e], fp[(e + 1) % n]) < 1e-3f) return false;
+  }
+  constexpr float kMinPiece = 0.01f;
+  const auto addWall = [&](glm::vec2 a, glm::vec2 q, float u0, float u1, float lift, float h) {
+    const glm::vec2 d = glm::normalize(q - a);
+    const glm::vec2 in(-d.y, d.x);
+    const glm::vec2 p0 = a + d * u0, p1 = a + d * u1;
+    AddPolygonBuilding(scene, {p0, p1, p1 + in * kWallThickness, p0 + in * kWallThickness}, lift,
+                       h, index, groundY, kMinPiece);
+  };
+  for (size_t e = 0; e < n; ++e) {
+    const glm::vec2 a = fp[e], q = fp[(e + 1) % n];
+    const float len = glm::distance(a, q);
+    if (e != door) {
+      addWall(a, q, 0.0f, len, 0.0f, height);
+      continue;
+    }
+    const float u0 = 0.5f * (len - kDoorWidth), u1 = u0 + kDoorWidth;
+    addWall(a, q, 0.0f, u0, 0.0f, height);
+    addWall(a, q, u1, len, 0.0f, height);
+    addWall(a, q, u0, u1, constants::kDoorHeight, height - constants::kDoorHeight);  // Lintel.
+  }
+  b->enterable = true;
+  b->obstacle = AddPolygonBuilding(scene, fp, height - kRoofThickness, kRoofThickness, index,
+                                   groundY);
+  return b->obstacle >= 0;
+}
+
 // Sidewalk rings, then one Building per parcel: its base prism over the
 // whole footprint and, for a set-back office, the top floor as a second,
 // inset prism standing on it (both tagged with the Building index).
 void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>& parcels,
                    std::vector<Building> buildings, const MapGeneratorConfig& c,
-                   const GroundY& groundY) {
+                   const GroundY& groundY, uint32_t seed) {
+  Rng enterRng(seed ^ kEnterableStream);
   for (const UrbanBlock& block : city.blocks) {
     // Sidewalk ring only: the parcel interior stays at grade. Each block
     // edge owns the convex strip of the block within `sidewalkWidth` of it;
@@ -3480,6 +3530,20 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>
     b.upperObstacle = -1;
     const float height = b.Height();
     const float baseHeight = upper.empty() ? height : height - b.floorHeight;
+    // Drawn for every parcel so the stream never depends on eligibility.
+    const bool wantEnterable = enterRng.Chance(c.enterableChance);
+    b.baseY = groundY(PolygonCenter(parcels[i].footprint).x, PolygonCenter(parcels[i].footprint).y);
+    b.floors.clear();
+    for (int f = 0; f < b.floorCount; ++f) {
+      const float y0 = b.baseY + (f == 0 ? 0.0f : b.groundFloorHeight + (f - 1) * b.floorHeight);
+      b.floors.push_back({y0, b.baseY + b.groundFloorHeight + f * b.floorHeight});
+    }
+    b.floors.back().y1 = b.baseY + height;
+    if (wantEnterable && upper.empty() && b.kind == BuildingKind::Commercial &&
+        EmitHollowBuilding(scene, parcels[i], height, index, groundY, &b)) {
+      scene->buildings.push_back(b);
+      continue;
+    }
     b.obstacle = AddPolygonBuilding(scene, parcels[i].footprint, 0.0f, baseHeight, index, groundY);
     if (!upper.empty()) {
       b.upperObstacle =
@@ -3641,7 +3705,7 @@ void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed
       if (frontage > 2.0f) {
         const float trim = 0.4f;
         const glm::vec2 a = fa + along * trim, d = fb - along * trim;
-        const float base = scene->obstacles[b.obstacle].bounds.min.y;
+        const float base = b.baseY;
         const float y0 = base + std::min(b.groundFloorHeight - 0.9f, 3.4f);
         push(MassingDetail::Kind::Awning,
              {a, d, d + outward * kAwningDepth, a + outward * kAwningDepth}, y0,
@@ -3797,6 +3861,7 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
 
   for (size_t bi = 0; bi < scene->buildings.size(); ++bi) {
     const Building& b = scene->buildings[bi];
+    if (b.enterable) continue;  // Real doorway already; no painted openings.
     const Parcel& parcel = parcels[b.parcel];
     const Obstacle& base = scene->obstacles[b.obstacle];
     const std::vector<glm::vec2>& fp = base.footprint;
@@ -4368,7 +4433,7 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   std::vector<float> characterRolls;
   const std::vector<Parcel> parcels = PlanParcels(city, c, &rng, &characterRolls);
   EmitBuildings(&scene, city, parcels, PlanBuildings(parcels, characterRolls, seed, c, &rng), c,
-                groundY);
+                groundY, seed);
   EmitSpawns(&scene, city, c, groundY);
   // Facades go before the ziplines so an anchor or cable never lands on a
   // stoop or rear platform (their clearance pass checks the walk surfaces).

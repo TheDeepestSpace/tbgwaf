@@ -78,6 +78,17 @@ struct Building {
   int upperObstacle = -1;  // Top floor stepped back as its own prism (offices), else -1.
   int parcel = -1;         // Index into UrbanParcels(seed, config).
   int block = -1;
+  // Ground level of the footprint (the base prism's min.y for solid
+  // buildings; enterable ones have no such prism).
+  float baseY = 0.0f;
+  // Storeys, bottom-up: world y0..y1 of each floor.
+  struct Floor { float y0 = 0.0f, y1 = 0.0f; };
+  std::vector<Floor> floors;
+  // Hollow building (issue #157): thin wall Obstacles around the footprint
+  // with a doorway on the frontage edge, instead of a solid prism. `obstacle`
+  // is then the roof slab (full footprint, bounds.min.y above head height).
+  // Non-enterable buildings keep the solid-massing rendering.
+  bool enterable = false;
 
   float Height() const {
     return groundFloorHeight + static_cast<float>(floorCount - 1) * floorHeight;
@@ -251,6 +262,8 @@ constexpr float kMapHalfExtent = 15.0f;  // Default scene's half-size (~30x30); 
 constexpr float kAgentRadius = 0.4f;     // Padding used to inflate obstacles for the navmesh.
 constexpr float kUnitHalfWidth = 0.35f;
 constexpr float kUnitHeight = 1.8f;
+// Doorway clear height: lintels start here, above head height (kUnitHeight).
+constexpr float kDoorHeight = 2.4f;
 constexpr float kEyeHeight = 1.5f;
 // Ground beneath a deck/ramp is only walkable with at least this much headroom.
 constexpr float kMinDeckHeadroom = 2.2f;

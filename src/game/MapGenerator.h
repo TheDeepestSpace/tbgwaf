@@ -90,6 +90,10 @@ struct MapGeneratorConfig {
   // from a table weighted by the street class it fronts, biased by its
   // block's character; floor count/height per kind set the building height.
   BlockCharacter character = BlockCharacter::Auto;
+  // Enterable buildings (issue #157): P(a Commercial parcel is hollow: thin
+  // walls plus a frontage doorway, roof slab overhead). 0 keeps every
+  // building a solid prism.
+  float enterableChance = 0.0f;
   int towerCount = 2;           // Tall landmark buildings scattered across the city.
   float towerMinHeight = 14.0f;
   float towerMaxHeight = 20.0f;

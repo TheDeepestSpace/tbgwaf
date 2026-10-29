@@ -2424,7 +2424,62 @@ void TestPinnedFurnitureFingerprints() {
   }
 }
 
+// Issue #157: obstacles that start at head height don't block the navmesh.
+void TestNavMeshIgnoresOverheadObstacles() {
+  std::vector<Obstacle> obstacles;
+  Obstacle slab;
+  slab.bounds = AABB{glm::vec3(-2.0f, constants::kUnitHeight, -2.0f),
+                     glm::vec3(2.0f, 3.0f, 2.0f)};
+  obstacles.push_back(slab);
+  NavMesh mesh;
+  mesh.Build(obstacles, 10.0f, constants::kAgentRadius, nullptr, nullptr);
+  CHECK(mesh.IsWalkable(0.0f, 0.0f));
+  std::vector<glm::vec3> path;
+  CHECK(mesh.FindPath(glm::vec3(-5.0f, 0.0f, 0.0f), glm::vec3(5.0f, 0.0f, 0.0f), &path));
+  obstacles[0].bounds.min.y = 0.0f;
+  mesh.Build(obstacles, 10.0f, constants::kAgentRadius, nullptr, nullptr);
+  CHECK(!mesh.IsWalkable(0.0f, 0.0f));
+}
+
+// Issue #157: enterable buildings are thin walls with a walkable doorway.
+void TestEnterableBuildingsHaveDoorways() {
+  MapGeneratorConfig c;
+  c.enterableChance = 1.0f;
+  int hollow = 0;
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed, c);
+    for (size_t bi = 0; bi < scene.buildings.size(); ++bi) {
+      const Building& b = scene.buildings[bi];
+      CHECK(!b.floors.empty());
+      if (!b.enterable) continue;
+      ++hollow;
+      CHECK(b.kind == BuildingKind::Commercial);
+      CHECK(scene.obstacles[b.obstacle].bounds.min.y >= constants::kUnitHeight);
+      bool lintel = false;
+      glm::vec2 centre(0.0f);
+      const auto& roof = scene.obstacles[b.obstacle].footprint;
+      for (const glm::vec2& p : roof) centre += p;
+      centre /= static_cast<float>(roof.size());
+      for (const Obstacle& o : scene.obstacles) {
+        if (o.building != static_cast<int>(bi)) continue;
+        if (std::fabs(o.bounds.min.y - b.baseY - constants::kDoorHeight) < kEps) lintel = true;
+      }
+      CHECK(lintel);
+      NavMesh mesh;
+      mesh.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
+                 &scene.walkSurfaces);
+      CHECK(mesh.IsWalkable(centre.x, centre.y));
+    }
+  }
+  CHECK(hollow > 0);
+  // Default config keeps every building solid.
+  const Scene solid = GenerateUrbanMap(1u, MapGeneratorConfig{});
+  for (const Building& b : solid.buildings) CHECK(!b.enterable);
+}
+
 int main() {
+  TestNavMeshIgnoresOverheadObstacles();
+  TestEnterableBuildingsHaveDoorways();
   TestFeatureFlagsAndStreetGraph();
   TestFurnitureHugsSidewalksAndRespectsClearances();
   TestFurnitureKeepsSidewalksConnected();

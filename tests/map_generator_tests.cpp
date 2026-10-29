@@ -1187,6 +1187,53 @@ void TestPolygonCollisionLosAndNavigationUseRealFootprint() {
   CHECK(path.size() == 2);
 }
 
+// A fork rail must remain in the narrow strip along its own deck edge.
+// Checking only whether the two caps touch misses a join that detours off
+// the deck (especially a twin deck over raised terrain).
+void TestForkRailsFollowDeckEdges() {
+  for (const FeatureMode terrain : {FeatureMode::Off, FeatureMode::On}) {
+    for (const PierForm form : {PierForm::TBent, PierForm::Twin}) {
+      for (const uint32_t seed : {7u, 26u, 42u}) {
+        MapGeneratorConfig config;
+        config.arteryCount = 2;
+        config.elevatedHighway = OverpassMode::On;
+        config.pierForm = form;
+        config.features.terrain.mode = terrain;
+        config.features.facades.mode = FeatureMode::Off;
+        const Scene scene = GenerateUrbanMap(seed, config);
+        int checked = 0;
+        for (const WalkSurface& span : scene.walkSurfaces) {
+          if (span.vertices.size() != 4) continue;
+          const auto xz = [](glm::vec3 p) { return glm::vec2(p.x, p.z); };
+          for (const auto& blocker : span.blockers) {
+            bool isRail = false;
+            for (const MassingDetail& d : scene.massing) {
+              isRail |= d.kind == MassingDetail::Kind::DeckRail && d.footprint == blocker;
+            }
+            if (!isRail) continue;
+            ++checked;
+            bool followsEdge = false;
+            for (const auto ends : {std::pair<int, int>{0, 3}, {2, 1}}) {
+              const glm::vec2 a = xz(span.vertices[ends.first]);
+              const glm::vec2 b = xz(span.vertices[ends.second]);
+              const glm::vec2 dir = glm::normalize(b - a);
+              const glm::vec2 inward(dir.y, -dir.x);
+              bool inStrip = true;
+              for (const glm::vec2 p : blocker) {
+                const float d = glm::dot(p - a, inward);
+                inStrip &= d >= -kEps && d <= 0.3f + kEps;
+              }
+              followsEdge |= inStrip;
+            }
+            CHECK(followsEdge);
+          }
+        }
+        CHECK(checked > 0);
+      }
+    }
+  }
+}
+
 void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   MapGeneratorConfig config;
   config.arteryCount = 2;
@@ -2556,6 +2603,7 @@ int main() {
   TestCornerBuildingsDoNotChainAcrossAFrontage();
   TestThinCornerBuildingSliversAreDropped();
   TestPolygonCollisionLosAndNavigationUseRealFootprint();
+  TestForkRailsFollowDeckEdges();
   TestElevatedOverpassRampsPiersAndDistinctLayers();
   TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable();
   TestOverpassLayoutGeometryAndBranchRampOff();

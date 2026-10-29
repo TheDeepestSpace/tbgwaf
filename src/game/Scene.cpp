@@ -1,4 +1,5 @@
 #include "game/Scene.h"
+#include "game/Geometry.h"
 
 #include <algorithm>
 #include <cmath>
@@ -105,6 +106,23 @@ bool IsFreeSpot(const Scene& scene, float x, float z) {
     if (x > o.bounds.min.x - m && x < o.bounds.max.x + m && z > o.bounds.min.z - m &&
         z < o.bounds.max.z + m) {
       return false;
+    }
+  }
+  // Ground beneath the low part of a ramp or deck has no headroom (the
+  // navmesh blocks it, padded by the agent radius), so a figure spawned there
+  // could never move. Same clearance band as NavMesh::AddLowDeckBlockers.
+  constexpr float kFootSlack = 0.3f;
+  const float groundY = scene.ground.HeightAt(x, z);
+  for (const WalkSurface& surface : scene.walkSurfaces) {
+    // The navmesh pads the blocked band by the agent radius, so probe a grid
+    // over the whole padded square (slightly oversized), not just its edges.
+    for (int ix = -3; ix <= 3; ++ix) {
+      for (int iz = -3; iz <= 3; ++iz) {
+        const float px = x + ix * m * 0.4f, pz = z + iz * m * 0.4f;
+        if (!SurfaceContainsXZ(surface, px, pz)) continue;
+        const float clearance = SurfaceHeightAt(surface, px, pz) - groundY;
+        if (clearance > kFootSlack && clearance < constants::kMinDeckHeadroom) return false;
+      }
     }
   }
   return true;

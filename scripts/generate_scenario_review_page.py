@@ -24,10 +24,17 @@ outside that subset just loses its breakdown column, never the page.
 
 Must run with a working X display (CI wraps it in xvfb-run) and ffmpeg on
 PATH. Always writes an index.html, even when the PR touches no scenarios.
+
+Recording can be sharded across CI jobs: `--shard i/N` records only the i-th
+(0-based) round-robin slice of the sorted scenario list into --out/media and
+writes --out/shard-<i>.json instead of the page; `--collect` then builds the
+page from the merged shard outputs (no runner needed). Without either flag
+the script records everything and builds the page in one process.
 """
 
 import argparse
 import html
+import json
 import shutil
 import subprocess
 import sys
@@ -90,7 +97,8 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body data-baseline-url="{baseline_url}">
 <h1>Gameplay scenario review</h1>
-<p class="nav"><a href="../gallery/">Asset gallery &rarr;</a></p>
+<p class="nav"><a href="../gallery/">Asset gallery &rarr;</a> ·
+<a href="{performance_url}">Performance suite &rarr;</a></p>
 <p>Scenarios under <code>{scenario_dir}</code>, classified against this PR from
 git metadata on the YAML files. Every scenario present at the PR's head —
 new, modified, and unchanged — gets a video: the full scripted scenario as
@@ -328,6 +336,10 @@ def _parse_flow_value(s: str, i: int):
     i = _skip_ws(s, i)
     if i < len(s) and s[i] in "{[":
         return _parse_flow(s, i)
+    if i < len(s) and s[i] in "'\"":
+        end = s.find(s[i], i + 1)
+        if end >= 0:
+            return s[i + 1:end], end + 1
     j = i
     while j < len(s) and s[j] not in ",}]":
         j += 1
@@ -429,6 +441,11 @@ def _parse_block_seq(lines: list[tuple[int, str]], i: int, indent: int):
     return out, i
 
 
+def _open_flow(text: str) -> bool:
+    """True when a line opens a [...] / {...} flow collection it doesn't close."""
+    return (text.count("[") + text.count("{")) > (text.count("]") + text.count("}"))
+
+
 def load_yaml_subset(text: str):
     lines: list[tuple[int, str]] = []
     for raw in text.splitlines():
@@ -436,6 +453,10 @@ def load_yaml_subset(text: str):
             raise ValueError("tabs are outside the supported YAML subset")
         stripped = _strip_comment(raw).rstrip()
         if not stripped.strip():
+            continue
+        if lines and _open_flow(lines[-1][1]):
+            # Continuation of a flow collection wrapped over several lines.
+            lines[-1] = (lines[-1][0], lines[-1][1] + " " + stripped.strip())
             continue
         lines.append((len(stripped) - len(stripped.lstrip(" ")), stripped.strip()))
     if not lines:
@@ -719,6 +740,21 @@ def record_videos(paths: list[str], runner: Path, repo_root: Path, media_dir: Pa
     return results
 
 
+def parse_shard(text: str) -> tuple[int, int]:
+    try:
+        i, n = (int(x) for x in text.split("/"))
+    except ValueError:
+        raise argparse.ArgumentTypeError("expected i/N, e.g. 0/4") from None
+    if n < 1 or not 0 <= i < n:
+        raise argparse.ArgumentTypeError("need N >= 1 and 0 <= i < N")
+    return i, n
+
+
+def shard_slice(paths: list[str], index: int, count: int) -> list[str]:
+    """Deterministic round-robin partition of the sorted scenario list."""
+    return sorted(paths)[index::count]
+
+
 def scenario_entry(path: str, info: dict | None,
                    breakdown: tuple[str, str] | None = None) -> str:
     description, breakdown = breakdown or ("", "")
@@ -783,8 +819,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True, help="Base ref/sha of the PR")
     parser.add_argument("--head", required=True, help="Head ref/sha of the PR")
-    parser.add_argument("--runner", required=True, type=Path,
-                        help="Path to the built tactics_visual_tests binary")
+    parser.add_argument("--runner", type=Path,
+                        help="Path to the built tactics_visual_tests binary "
+                             "(required unless --collect)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--shard", type=parse_shard, metavar="i/N",
+                      help="Record only slice i of N (0-based); writes "
+                           "shard-<i>.json instead of the page")
+    mode.add_argument("--collect", action="store_true",
+                      help="Build the page from shard-*.json + media/ already "
+                           "present in --out; fails if a shard is missing")
     parser.add_argument("--out", required=True, type=Path,
                         help="Output directory for index.html + media/")
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
@@ -792,7 +836,11 @@ def main() -> int:
                         help="URL (relative to the page) of a directory holding "
                              "<scenario>.json master timing baselines; enables the "
                              "red baseline line in the frame-time graph")
+    parser.add_argument("--performance-url", default="../../../performance/",
+                        help="URL of the published Performance suite report")
     args = parser.parse_args()
+    if not args.collect and args.runner is None:
+        parser.error("--runner is required unless --collect")
 
     changes = classify_changes(args.base, args.head, args.repo_root)
     all_paths = list_scenario_paths(args.head, args.repo_root)
@@ -803,7 +851,25 @@ def main() -> int:
     media_dir = args.out / "media"
 
     renderable = changes["A"] + changes["M"] + changes["U"]
-    results = record_videos(renderable, args.runner.resolve(), args.repo_root, media_dir)
+    if args.collect:
+        results = {}
+        for f in sorted(args.out.glob("shard-*.json")):
+            results.update(json.loads(f.read_text()))
+        missing = [p for p in renderable if p not in results]
+        if missing:
+            print(f"[scenario-review] no shard results for: {missing}", file=sys.stderr)
+            return 1
+    elif args.shard:
+        index, count = args.shard
+        results = record_videos(shard_slice(renderable, index, count),
+                                args.runner.resolve(), args.repo_root, media_dir)
+        (args.out / f"shard-{index}.json").write_text(json.dumps(results))
+        print(f"[scenario-review] shard {index}/{count}: {len(results)} scenarios",
+              file=sys.stderr)
+        return 0
+    else:
+        results = record_videos(renderable, args.runner.resolve(), args.repo_root,
+                                media_dir)
     breakdowns = build_breakdowns(renderable, args.repo_root)
 
     if not any(changes.values()):
@@ -819,7 +885,8 @@ def main() -> int:
     (args.out / "index.html").write_text(
         PAGE_TEMPLATE.format(scenario_dir=SCENARIO_DIR, sections=sections,
                              page_js=PAGE_JS,
-                             baseline_url=html.escape(args.baseline_url, quote=True)))
+                             baseline_url=html.escape(args.baseline_url, quote=True),
+                             performance_url=html.escape(args.performance_url, quote=True)))
     print(f"[scenario-review] wrote {args.out / 'index.html'} "
           f"({len(changes['A'])} new, {len(changes['M'])} modified, "
           f"{len(changes['U'])} unchanged, {len(changes['D'])} deleted)", file=sys.stderr)

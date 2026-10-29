@@ -5,6 +5,7 @@
 #include <random>
 #include <string>
 #include <utility>
+#include <map>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -38,6 +39,31 @@ std::optional<Team> CheckWinner(const std::vector<Unit>& units);
 // (it alone commits and executes rounds); the Red instance mirrors its
 // snapshots instead of re-simulating so float divergence can't desync the
 // two. During planning each side only ships its own team's plans.
+// One fired bullet's path, shown for the turn it was fired in and faded out
+// after the turn ends (see GameLogic::GhostAlpha). `at` is when it was fired,
+// in seconds into the turn's execution.
+struct Tracer {
+  Team team = Team::Blue;
+  glm::vec3 from{0.0f};
+  glm::vec3 to{0.0f};
+  float at = 0.0f;
+  // Seconds since the bullet was fired (only ticks while the game updates);
+  // the renderer flashes fresh tracers so each shot of a burst reads on its own.
+  float age = 0.0f;
+};
+
+// Neutral flag objective state (see FlagConfig). Three states: at rest
+// (carrierId < 0, dropElapsed < 0), carried (carrierId >= 0; the figure's
+// position is the flag's), or dropped (carrierId < 0, dropElapsed >= 0: it
+// was just let fall where the carrier died and plays a short settle beat).
+// A dropped flag is picked up by any figure passing it, exactly like one at rest.
+struct FlagState {
+  bool enabled = false;
+  glm::vec3 position{0.0f};  // Where it lies; trails the carrier while carried.
+  int carrierId = -1;
+  float dropElapsed = -1.0f;  // Seconds since dropped (<0 = never dropped / at rest).
+};
+
 struct GameSnapshot {
   struct UnitState {
     int id = -1;
@@ -46,9 +72,15 @@ struct GameSnapshot {
     bool alive = true;
     PlannedActionType planType = PlannedActionType::None;
     int planShootTargetId = -1;
+    bool planHasAimPoint = false;  // Free-aim shot plan (issue #129).
+    glm::vec3 planAimPoint{0.0f};
+    int planShots = 1;  // Burst size of a Shoot plan (issue #138).
     std::vector<glm::vec3> planPath;
     std::vector<std::vector<glm::vec3>> planQueuedLegs;
+    std::vector<PathRide> planRides;
+    std::vector<std::vector<PathRide>> planQueuedLegRides;
     float planEndFacingYaw = 0.0f;
+    float turnLag = 0.0f;  // Visual-only turn animation (see Unit::turnLag).
     glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
     float knockdownElapsed = -1.0f;
     // Figure animation state (see Unit): a follower mirrors these rather
@@ -58,13 +90,20 @@ struct GameSnapshot {
     float idleElapsed = 0.0f;
     float shootElapsed = -1.0f;
     float shootAimYaw = 0.0f;
+    float rideTravel = -1.0f;
+    float rideLength = 0.0f;
+    float rideSlope = 0.0f;
+    float grabElapsed = -1.0f;  // Flag pickup reach beat (see Unit).
     bool moving = false;  // Has an in-flight move in the executing round.
   };
   std::vector<UnitState> units;
+  std::vector<Tracer> tracers;
   SquadPlaybook playbooks[2];  // Indexed by Team.
   InputMode mode = InputMode::AwaitingSelection;
   int roundNumber = 1;
+  float executionElapsed = 0.0f;
   int winner = -1;  // -1 = none, else static_cast<int>(Team).
+  FlagState flag;
 };
 
 // Text encoding of a snapshot (for the page-level message bus). Deserialize
@@ -124,18 +163,41 @@ class GameLogic {
   void Reset(Scene scene);
 
   const Scene& GetScene() const { return scene_; }
+  // Obstacles plus building massing: what blocks sight lines and FOV.
+  const std::vector<Obstacle>& SightObstacles() const { return sightObstacles_; }
   // The navmesh currently in use: windowed around the figure most recently
   // planned for (see EnsureNavMeshFor), empty until one has been.
   const NavMesh& GetNavMesh() const { return navMesh_; }
   InputMode Mode() const { return mode_; }
+  // The reach field is UI-only and costs ~75 ms per move click; headless
+  // callers that plan many moves (Jev) turn it off. On by default.
+  void SetMoveFrontierEnabled(bool enabled) { moveFrontierEnabled_ = enabled; }
   std::optional<int> SelectedUnitId() const { return selectedUnitId_; }
   std::optional<Team> Winner() const { return winner_; }
   int RoundNumber() const { return roundNumber_; }
 
+  // --- Neutral flag objective (CTF part 1). A living figure whose move
+  // passes through the flag's spot (anywhere along its path, not just where
+  // it stops) automatically grabs it: no action, no action cost. With
+  // FlagConfig::winOnGrab the grabber's team wins at once, ending the round.
+  // If several figures touch it in the same tick the earliest arrival (by
+  // distance walked / run speed) grabs it; an exact tie goes to the lowest
+  // unit id. A carrier can act exactly as normal (shooting, FOV and
+  // accuracy are unchanged). When the carrier dies the flag drops at that
+  // spot and anyone passing picks it up again. ---
+  const FlagState& Flag() const { return flag_; }
+  // Where the flag currently is (the carrier's feet while carried).
+  glm::vec3 FlagPosition() const;
+  // The flag is a neutral objective, so at rest or dropped it is visible to
+  // both teams regardless of fog. A carried flag is visible with its carrier.
+  bool FlagVisibleTo(Team team) const;
+
   // True once every living figure on *both* teams has a non-None plan,
   // i.e. CommitRound() is ready to be called.
   bool CanCommitRound() const;
-  // True while any killed unit is still mid-fall (knockdown animation running).
+  // True while any killed unit is still mid-fall *and* time is passing for it
+  // (a round executing, or the match over). Between rounds falls are frozen
+  // and this is false.
   bool HasActiveKnockdown() const;
 
   const std::vector<glm::vec3>& MovePreviewPath() const { return movePreviewPath_; }
@@ -148,16 +210,44 @@ class GameLogic {
                                                                               : nullptr;
   }
 
+  // Zipline region of the move frontier: where the selected figure can get by
+  // walking to one end of a zipline (`walkCost`), riding it (`rideCost`) and
+  // walking on from the other end with whatever budget remains. `field` is
+  // that onward walk region around `exit`. One entry per (zipline, entry
+  // end) whose entry is affordable.
+  struct ZiplineFrontier {
+    int zipline = -1;
+    glm::vec3 entry{0.0f};
+    glm::vec3 exit{0.0f};
+    float walkCost = 0.0f;
+    float rideCost = 0.0f;
+    ReachField field;
+  };
+  // Valid while planning a move (empty otherwise).
+  const std::vector<ZiplineFrontier>& ZiplineFrontiers() const;
+
+  // Rides in the current hover preview (MovePreviewPath()'s traverse steps).
+  const std::vector<PathRide>& MovePreviewRides() const { return movePreviewRides_; }
+
+  // True while `unitId` is mid-ride on a zipline in the executing round.
+  bool IsUnitRiding(int unitId) const;
+
   Unit* FindUnit(int id);
   const Unit* FindUnit(int id) const;
 
-  // Stage-B fog-of-war: which enemy figures/obstacles are currently inside
-  // the combined FOV of `team`'s living figures. Recomputed on demand from
-  // the current scene state (cheap given the handful of units/obstacles
-  // here), so callers always see a result consistent with the latest move.
+  // Stage-B fog-of-war: which enemy figures are currently inside the combined
+  // FOV of `team`'s living figures. Recomputed on demand from the current
+  // scene state, so callers always see a result consistent with the latest
+  // move. Obstacle visibility is not sampled (`reportedObstacles = 0`):
+  // every caller reads only `visibleUnit` -- obstacle dimming under fog is
+  // the GPU shadow-map overlay's job -- and sampling ~5 LOS rays per obstacle
+  // dominated the frame's FOV cost on furniture-dense urban maps. A future
+  // consumer that needs per-obstacle flags should call
+  // tactics::ComputeTeamVisibility directly with the count it wants sampled.
   TeamVisibility ComputeVisibility(Team team) const {
-    return tactics::ComputeTeamVisibility(team, scene_.units, scene_.obstacles,
-                                          scene_.walkSurfaces, scene_.ground);
+    return tactics::ComputeTeamVisibility(team, scene_.units, sightObstacles_,
+                                          scene_.walkSurfaces, scene_.ground,
+                                          /*reportedObstacles=*/0);
   }
 
   // One remembered glimpse of an enemy figure in `viewingTeam`'s FOV.
@@ -171,19 +261,121 @@ class GameLogic {
     float walkPhase = 0.0f;
     float walkBlend = 0.0f;
     float idleElapsed = 0.0f;
-    int ageRounds = 0;  // Completed rounds since the sample was taken.
+    // Downed state at sample time: a corpse's ghost holds the fallen (ragdoll)
+    // pose of that instant rather than the upright one.
+    bool alive = true;
+    float knockdownElapsed = -1.0f;
+    float at = 0.0f;  // Seconds into the turn's execution when sampled.
   };
-  // Oldest-first samples of `targetUnitId` as seen by `viewingTeam`; empty
-  // once all have aged past kSightingMemoryRounds.
+  // Oldest-first samples of `targetUnitId` as seen by `viewingTeam`, from the
+  // current/last turn only (cleared when the next turn starts executing).
   const std::vector<EnemySighting>& Sightings(Team viewingTeam, int targetUnitId) const;
 
-  // Ages sighting memory by completed rounds (tracked via the round number, so
-  // followers age too) and samples newly visible enemies. Must be called
+  // Opacity (0..1) of a ghost or tracer stamped `at` seconds into the turn.
+  // Fully opaque while the turn executes; once it ends, each item fades over
+  // kGhostFadeDuration starting at its own `at`, i.e. in the same order and
+  // with the same spacing as it appeared. Driven by the clock that
+  // UpdateSightingMemory advances, so replays and tests are deterministic.
+  float GhostAlpha(float at) const;
+  // Bullet lines fade linearly to nothing within kReplayTracerLife of their
+  // shot, per shot, in live turns and replay alike (ghosts are unaffected).
+  static float TracerAlphaForAge(float age);
+  // Seconds since the shot: live age, or replay clock minus its stamp.
+  float TracerAge(const Tracer& tracer) const;
+  float TracerAlpha(const Tracer& tracer) const;
+
+  // Timeline-replay instance: ghosts/tracers expire on a free-running clock
+  // (kReplayGhostHold / kReplayTracerLife after they appear) and carry over
+  // into the next turn instead of being cleared. Live play is unaffected.
+  void SetReplayGhostMode(bool enabled) { replayGhosts_ = enabled; }
+  // True while any ghost or bullet line is still visible (replay mode).
+  bool HasReplayGhosts() const {
+    if (!replayTracers_.empty()) return true;
+    for (const auto& perUnit : sightings_)
+      for (const auto& list : perUnit)
+        if (!list.empty()) return true;
+    return false;
+  }
+
+  // Advances the ghost clocks and samples newly visible enemies. Must be called
   // every frame on every page regardless of mode or simulator/follower role
   // (unlike Update(), a follower never runs the physics tick during
   // Executing, yet still needs its own memory built from imported state).
   void UpdateSightingMemory(float dtSeconds);
   void ResetSightingMemory();
+  // Drops the remembered ghosts and re-arms the fade clocks from the current
+  // mode (used when a replay seeks to another frame). With `keepFading`
+  // (replay mode, seeking forward) the current ghosts/bullets are kept so
+  // they finish their hold and fade instead of vanishing.
+  void RestartGhostPlayback(bool keepFading = false);
+
+  // Bullet lines of the current/last turn (see Tracer); cleared when the next
+  // turn starts executing.
+  const std::vector<Tracer>& Tracers() const { return replayGhosts_ ? replayTracers_ : tracers_; }
+
+  // --- Free-aim shooting (issue #129). While AwaitingShootTarget, the
+  // player may point-target any world position instead of locking onto a
+  // figure: the camera ray resolves to a surface point in the selected
+  // figure's 360-degree LOS (the figure turns to shoot, so its current
+  // facing doesn't gate the aim); rays with no aimable surface place
+  // nothing. A unit under the cursor beats
+  // the surface behind it, keeping the existing lock-on flow. Placing an aim
+  // point is a two-step plan (tap-to-place, then confirm), touch-friendly
+  // and shared by the scenario scripts. ---
+
+  // Where a camera ray would aim for the currently selected shooter.
+  struct AimRayResult {
+    enum class Kind { Unit, Surface, None };
+    Kind kind = Kind::None;
+    int unitId = -1;       // Kind::Unit: the enemy figure to lock onto.
+    glm::vec3 point{0.0f};  // Kind::Surface: the resolved aim point.
+  };
+  // Applies the aim-point rule for the selected figure: nearest enemy figure
+  // the ray hits (visible to the shooter's team) wins; else the nearest
+  // surface hit (ground/terrain, walk surfaces, slab tops, obstacle faces)
+  // within the shooter's 360-degree LOS and sight range; else nothing.
+  AimRayResult ResolveAimRay(const glm::vec3& origin, const glm::vec3& direction) const;
+
+  // True if the selected shooter has clear 360-degree line of sight to this
+  // surface point within sight range (the acid-green aimable region).
+  bool IsAimSurfaceVisible(const glm::vec3& point) const;
+
+  // Click while AwaitingShootTarget: resolves the ray and either locks onto
+  // the hit unit (plans immediately, as before) or places/moves the aim
+  // preview marker. ConfirmAim records the planned `shoot at` action.
+  void ClickAimRay(const glm::vec3& origin, const glm::vec3& direction, Team byTeam);
+  // Direct placement used by scenario scripts / the protocol action's replay
+  // (the already-resolved form of a click): no LOS gate, so deliberate blind
+  // fire at any world point is possible.
+  void PlaceAimPoint(const glm::vec3& point, Team byTeam);
+  void ConfirmAim(Team byTeam);
+
+  // The placed-but-unconfirmed aim marker ("+" selector).
+  struct AimPreview {
+    glm::vec3 point{0.0f};
+  };
+  const std::optional<AimPreview>& GetAimPreview() const { return aimPreview_; }
+
+  // --- Multi-shot bursts (issue #138). While AwaitingShootTarget the
+  // shot-level bar next to the shooter sets how many shots the planned
+  // action will fire; the count is folded into the plan when it is recorded
+  // (lock-on click or ConfirmAim) and resets to 1 for the next aim. ---
+
+  // Burst cap for the currently selected shooter's weapon over one round
+  // window (min(magazine, round time / fire interval)); 1 with no selection.
+  int MaxShotsForSelected() const;
+  // Clamps to [1, MaxShotsForSelected()]. Only the aiming figure's own team
+  // may set it, and only while that figure is picking its shot.
+  void SetPlannedShotCount(int count, Team byTeam);
+  int PlannedShotCount() const { return plannedShots_; }
+  // Enemy figure staged by a click (UI path) while AwaitingShootTarget; Fire
+  // (ConfirmAim) commits it with the chosen shot count.
+  const std::optional<int>& GetLockPreview() const { return lockPreviewId_; }
+
+  // Friendly fire config flag: when off, same-team figures are transparent
+  // to the free-aim ballistic trace. On by default.
+  bool FriendlyFireEnabled() const { return friendlyFire_; }
+  void SetFriendlyFireEnabled(bool enabled) { friendlyFire_ = enabled; }
 
   // Input events, driven by the input/render layer after it has resolved a
   // screen click into either a unit id or a ground-plane world point.
@@ -246,6 +438,9 @@ class GameLogic {
   GameSnapshot ExportState() const;
   bool ImportState(const GameSnapshot& snapshot);
   bool ImportTeamPlans(const GameSnapshot& snapshot, Team team);
+  // Drops every figure's plan (incl. queued legs). The timeline replay uses
+  // it so past turns don't show what was planned/armed next.
+  void ClearAllPlans();
 
   // True while `unitId` has an in-flight planned move animating as part of
   // the executing round (figures from both teams can be animating at once).
@@ -286,15 +481,70 @@ class GameLogic {
     std::vector<glm::vec3> path;
     size_t segment = 0;
     float endFacingYaw = 0.0f;  // Snapped to once the path is consumed.
+    std::vector<PathRide> rides;
+    int ridingZipline = -1;  // Zipline currently occupied by this rider, else -1.
   };
 
   // A planned shot waiting for its first tick with valid FOV+LOS. Expires
   // (as a miss / hold-fire) if the shooter or target dies first, or if the
-  // round ends with it still blocked.
+  // round ends with it still blocked. Free-aim shots (hasAimPoint) have no
+  // gates: they open fire on the first resolution tick, hit or miss.
+  //
+  // Once a burst opens fire it is paced in real time (issue #140): shot k
+  // fires at startTime + k * the weapon's shot interval, and every
+  // requested shot is taken -- a kill does not cut the burst short -- until
+  // the magazine level is spent, the round window closes (a burst that
+  // starts late fires only the shots that still fit), or the shooter dies.
   struct PendingShot {
     int shooterId = -1;
     int targetId = -1;
+    bool hasAimPoint = false;
+    glm::vec3 aimPoint{0.0f};
+    int shots = 1;  // Burst size (issue #138): independent rolls per shot.
+    // Burst runtime state, meaningful only while mode_ == Executing.
+    bool started = false;    // Gates passed; the schedule below is armed.
+    float startTime = 0.0f;  // Execution-clock time of the burst's shot 0.
+    int shotsFired = 0;
+    // Standing-reaction burst (shoot-on-sight): spends the whole magazine at
+    // the normal hit odds while the target stays in view; see
+    // ApplyPlaybookReactions.
+    bool reaction = false;
   };
+
+  // One figure the free-aim ballistic trace can reach, in ray order.
+  struct AimTraceCandidate {
+    int unitId = -1;
+    float chance = 0.0f;
+    float rayT = 0.0f;
+  };
+  // Every figure the trace from `shooter` toward `aimPoint` would pass
+  // through, nearest first: ray intersects the figure's bounds, the path up
+  // to it is unobstructed, and (unless friendly fire is on) it is an enemy.
+  // Unseen figures are included -- the bullet doesn't care about fog.
+  std::vector<AimTraceCandidate> AimTraceCandidates(const Unit& shooter,
+                                                    const glm::vec3& aimPoint) const;
+  // Everything but the trace itself, for a free-aim burst's tick: the
+  // shooter turns to face the aim point (persisting into later rounds'
+  // FOV/overwatch), (re)plays the shoot beat, and every hit figure goes
+  // down (`hitTargets`, nearest-first). A hit on a figure the shooter's
+  // team cannot currently see records a sighting sample -- the one bit of
+  // info a connecting blind shot reveals; misses reveal nothing.
+  void ApplyAimShot(Unit& shooter, const std::vector<Unit*>& hitTargets,
+                    const glm::vec3& aimPoint, float sinceShot);
+
+  // The figure turned toward `point` (for its muzzle position).
+  static Unit AimedAt(const Unit& shooter, const glm::vec3& point);
+  // Figures a bullet leaving `muzzle` along `dir` passes through (see
+  // AimTraceCandidates); `fwd` is the shooter's aimed facing.
+  std::vector<AimTraceCandidate> RayTraceCandidates(const Unit& shooter, const glm::vec3& muzzle,
+                                                    const glm::vec3& dir,
+                                                    const glm::vec3& fwd) const;
+  // Distance a bullet along `ray` from `muzzle` flies before a wall, deck,
+  // the ground or the range limit stops it.
+  float RayReach(const glm::vec3& muzzle, const glm::vec3& ray) const;
+  // Shoot beat start/re-trigger; `sinceShot` is how long ago the bullet left.
+  static void PlayShootBeat(Unit& shooter, float aimYaw, float sinceShot = 0.0f);
+  static void KnockDown(Unit& target, const glm::vec3& dir);
 
   // Gate check only, no side effects (ShotHitChance > 0): "can this shooter
   // take the shot at all". Split out so a tick's simultaneous shots can all
@@ -302,16 +552,33 @@ class GameLogic {
   bool ShotConnects(const Unit& shooter, const Unit& target) const;
 
   float RollShot();
-  // Applies a taken shot: shooter animation, plus knockdown if `hit`.
+  // Applies a taken playbook-reaction shot: shooter animation, tracer, plus
+  // knockdown if `hit`.
   void ApplyShot(Unit& shooter, Unit& target, bool hit);
 
-  // Judges every pending shot against the current (start-of-resolution)
-  // state, then applies all connecting hits at once: mutual shots in the
-  // same tick both land. Fired shots and shots whose shooter/target died
-  // are removed from pendingShots_.
+  // Fires every bullet due at the current execution clock -- across all
+  // bursts, in schedule order, judged against the same snapshot before any
+  // hit is applied (mutual shots in the same tick both land). Finished
+  // bursts and shots whose shooter died (or whose locked target died
+  // before the burst could start) are removed from pendingShots_.
   void ResolvePendingShots();
 
   void FinishRound();
+  bool KnockdownsAdvance() const;  // Falls only progress while executing / after game over.
+
+  // Flag helpers. InitFlag places the flag at Reset; SyncFlag drops it if its
+  // carrier has died and refreshes each unit's carryingFlag; a FlagTouch is a
+  // figure reaching the flag this tick (arrival = seconds on the execution
+  // clock), resolved by GrabFlagFrom.
+  struct FlagTouch {
+    int unitId = -1;
+    float arrival = 0.0f;
+  };
+  void InitFlag();
+  void SyncFlag();
+  bool TouchesFlag(const glm::vec3& position) const;
+  void CollectStationaryFlagTouches(float arrival, std::vector<FlagTouch>* touches) const;
+  void GrabFlagFrom(const std::vector<FlagTouch>& touches);
 
   // The Executing-mode body of Update(): advances every in-flight move,
   // re-checks held shots, and finishes the round once nothing is in flight.
@@ -322,6 +589,14 @@ class GameLogic {
   // the cached one already covers this figure at this origin.
   void EnsureNavMeshFor(const Unit& mover, const glm::vec3& origin);
   void RefreshMoveFrontier();
+  // Rebuilds ziplineFrontiers_ (and their navmeshes) for a leg from `origin`.
+  void BuildZiplineFrontiers(const Unit& mover, const glm::vec3& origin);
+  // Plans one leg from `from` to `goal`: a plain walk when affordable within
+  // the mover's budget, otherwise walk -> ride -> walk over the cheapest
+  // zipline. False if neither fits. Fills `rides` (empty for a walk).
+  bool PlanLeg(const Unit& mover, const glm::vec3& from, const glm::vec3& goal,
+               std::vector<glm::vec3>* path, std::vector<PathRide>* rides);
+  void ClearMoveOverlays();
 
   // Squad-playbook pass, run once per executing tick after every mover has
   // advanced: for each living figure with a living enemy in its FOV+LOS,
@@ -329,7 +604,10 @@ class GameLogic {
   // and shoots the nearest sighted enemy and/or cuts the figure's move short.
   // All reactions are judged against the same snapshot, then applied, so
   // mutual shots both land.
-  void ApplyPlaybookReactions();
+  void ApplyPlaybookReactions(bool roundStart = false);
+  // Opens a magazine-long burst at `target` unless `shooter` is already
+  // firing a reaction burst or has no rounds left this round.
+  void StartReactionBurst(const Unit& shooter, const Unit& target);
 
   Scene scene_;
   SquadPlaybook playbooks_[2];  // Indexed by Team; survives Reset().
@@ -339,30 +617,71 @@ class GameLogic {
   int navMeshUnitId_ = -1;
   glm::vec3 navMeshOrigin_{0.0f};
   int roundNumber_ = 1;
+  std::vector<Obstacle> sightObstacles_;  // See SightObstacles(); rebuilt in Reset.
   std::vector<AABB> obstacleBounds_;  // Retained for compatibility/debug broad-phase inspection.
 
   InputMode mode_ = InputMode::AwaitingSelection;
   std::optional<int> selectedUnitId_;
   std::optional<Team> winner_;
+  FlagState flag_;
+  std::optional<Team> flagWinner_;  // Set by a win-on-grab pickup until FinishRound.
 
   std::vector<glm::vec3> movePreviewPath_;
   bool movePreviewValid_ = false;
   ReachField moveFrontier_;
+  bool moveFrontierEnabled_ = true;
+  std::vector<ZiplineFrontier> ziplineFrontiers_;
+  std::vector<NavMesh> ziplineMeshes_;  // Parallel to ziplineFrontiers_: mesh around each exit.
+  int ziplineUnitId_ = -1;
+  glm::vec3 ziplineOrigin_{0.0f};
+  std::vector<PathRide> movePreviewRides_;
 
   // Every figure's in-flight planned move / not-yet-fired planned shot for
   // the executing round, valid only while mode_ == Executing; empty once
   // the round finishes.
   std::vector<ActiveMove> activeMoves_;
   std::vector<PendingShot> pendingShots_;
+  // Rounds left in each figure's magazine for reaction fire this round.
+  std::map<int, int> reactionAmmo_;
+  // When each figure's reaction burst may next fire: a dropped burst (target
+  // down or out of view) hands its trigger pace to the next one, so retargeting
+  // never beats the weapon's interval.
+  std::map<int, float> reactionNextShotAt_;
+  // Execution clock: seconds since the executing round's commit. Bursts
+  // schedule their shots against it; only the [0, kRoundDuration) window
+  // fires (issue #140).
+  float executionElapsed_ = 0.0f;
   std::mt19937 shotRng_{0x5eedu};
   std::function<float()> shotRollSource_;
+  // Free-aim state: the unconfirmed "+" marker (planning-local, never
+  // serialized -- like the selection) and the friendly fire config flag.
+  std::optional<AimPreview> aimPreview_;
+  std::optional<int> lockPreviewId_;  // Staged lock-on target, not yet confirmed.
+  void CommitLockedShot(Unit& shooter, int targetId);
+  // Burst size the shot-level bar has dialed in for the aim in progress
+  // (planning-local, like aimPreview_); folded into the plan on record.
+  int plannedShots_ = 1;
+  bool friendlyFire_ = constants::kFriendlyFireDefault;
   // Ids of figures a simulating peer reports as mid-move (ImportState only;
   // a follower has no activeMoves_ of its own).
   std::vector<int> mirroredMoving_;
 
   // Sighting memory, indexed [viewing team][target unit id].
   std::vector<std::vector<EnemySighting>> sightings_[2];
-  int lastSightingRound_ = 1;
+  std::vector<Tracer> tracers_;
+  void RecordTracer(const Unit& shooter, const glm::vec3& from, const glm::vec3& to,
+                    float age = 0.0f);
+  void ClearSightings();
+  static constexpr float kNeverExecuted = 1.0e6f;  // fadeClock_ before any turn has played.
+  bool wasExecuting_ = false;
+  // Replay-ghost mode state (see SetReplayGhostMode).
+  bool replayGhosts_ = false;
+  float replayClock_ = 0.0f;           // Free-running seconds; stamps ghosts/tracers.
+  std::vector<Tracer> replayTracers_;  // Absorbed from tracers_, `at` = replayClock_ stamp.
+  size_t replayTracersSeen_ = 0;       // Imported tracers of the current turn already absorbed.
+  int replayTracerRound_ = -1;
+  void StepReplayGhosts(float dtSeconds);
+  float fadeClock_ = 0.0f;  // Seconds since the last turn finished executing.
   std::vector<bool> sightedLastFrame_[2];
   std::vector<float> sightingTimer_[2];
   std::vector<glm::vec3> lastUnitPosition_;  // Previous frame's position per unit id.

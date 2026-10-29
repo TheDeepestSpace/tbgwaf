@@ -1,0 +1,21 @@
+name: playbook_ignore_idle_no_shots
+description: >
+  Same as playbook_stationary_shoots_idle_enemy but with ignore_idle on: stationary
+  watchers skip idle enemies, so nobody fires and everyone survives.
+
+playbook:
+  blue: {stationary_seen: shoot, stationary_unseen: shoot, ignore_idle: true}
+  red: {stationary_seen: shoot, stationary_unseen: shoot, ignore_idle: true}
+
+units:
+  - {id: 0, team: blue, position: [-4, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [4, 0, 0], facing_degrees: 180}
+
+script:
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, alive: true}
+  - assert: {unit: 1, alive: true}

@@ -10,6 +10,7 @@
 
 #include "game/MapGenerator.h"
 #include "game/GameLogic.h"
+#include "game/TurnTimeline.h"
 
 namespace tactics::scenario {
 namespace {
@@ -68,6 +69,10 @@ void ParsePlaybooks(const YAML::Node& root, SquadPlaybook (&out)[2]) {
     SquadPlaybook& pb = out[static_cast<int>(team)];
     for (const auto& slot : teamEntry.second) {
       const std::string key = slot.first.as<std::string>();
+      if (key == "ignore_idle") {
+        pb.ignoreIdle = slot.second.as<bool>();
+        continue;
+      }
       const ReactionAction action = ParseReaction(slot.second.as<std::string>());
       if (key == "moving_seen") pb.At(true, true) = action;
       else if (key == "moving_unseen") pb.At(true, false) = action;
@@ -127,6 +132,37 @@ Scene ParseScene(const YAML::Node& root) {
                 "map.generate.elevated_branch must be ramp/off-map, got '" + end + "'");
           }
         }
+        if (genNode["terrain_levels"]) config.terrainLevelCount = genNode["terrain_levels"].as<int>();
+        // `character: downtown|residential|industrial|mixed` forces every
+        // block's neighbourhood character (issue #151); omitted keeps the
+        // generator's per-block draw.
+        if (genNode["character"]) {
+          const std::string character = genNode["character"].as<std::string>();
+          if (!ParseBlockCharacter(character, &config.character)) {
+            throw std::runtime_error(
+                "map.generate.character must be auto/mixed/downtown/residential/industrial, "
+                "got '" + character + "'");
+          }
+        }
+        // `features: {lanes: on, curbs: {mode: auto, chance: 0.3}, ...}`
+        // sets the optional urban detail layers (see UrbanFeatures).
+        if (const YAML::Node featNode = genNode["features"]) {
+          for (const auto& entry : featNode) {
+            const std::string name = entry.first.as<std::string>();
+            FeatureToggle* toggle = UrbanFeatureByName(&config.features, name);
+            if (!toggle) {
+              throw std::runtime_error("map.generate.features: unknown feature '" + name + "'");
+            }
+            const YAML::Node value = entry.second;
+            const std::string mode = value.IsMap() ? value["mode"].as<std::string>("auto")
+                                                   : value.as<std::string>();
+            if (!ParseFeatureMode(mode, &toggle->mode)) {
+              throw std::runtime_error("map.generate.features." + name +
+                                       " must be auto/off/on, got '" + mode + "'");
+            }
+            if (value.IsMap() && value["chance"]) toggle->chance = value["chance"].as<float>();
+          }
+        }
         scene = GenerateUrbanMap(seed, config);
       } else if (type == "hilly") {
         scene = GenerateHillyMap(seed);
@@ -140,6 +176,14 @@ Scene ParseScene(const YAML::Node& root) {
     // units sit far apart must grow the map so every figure stands on it.
     if (const YAML::Node halfNode = mapNode["half_extent"]) {
       scene.mapHalfExtent = halfNode.as<float>();
+    }
+    // `ziplines: [{from: [x, y, z], to: [x, y, z]}, ...]`: pre-built two-way
+    // ziplines (anchor foot positions), on top of any generated map's own.
+    if (const YAML::Node ziplinesNode = mapNode["ziplines"]) {
+      for (const auto& zipNode : ziplinesNode) {
+        scene.ziplines.push_back(Zipline{ParseVec3(zipNode["from"], "map.ziplines[].from"),
+                                         ParseVec3(zipNode["to"], "map.ziplines[].to")});
+      }
     }
     if (const YAML::Node obstaclesNode = mapNode["obstacles"]) {
       for (const auto& obsNode : obstaclesNode) {
@@ -157,9 +201,33 @@ Scene ParseScene(const YAML::Node& root) {
                  glm::vec3(center.x + halfExtent.x, height, center.y + halfExtent.y)};
         obstacle.climbable = obsNode["climbable"] ? obsNode["climbable"].as<bool>() : false;
         scene.obstacles.push_back(obstacle);
+        // `roof_slab: true`: a flat walkable slab on the obstacle's top (a
+        // zipline's roof end), reachable only by line.
+        if (obsNode["roof_slab"] && obsNode["roof_slab"].as<bool>()) {
+          const AABB& b = obstacle.bounds;
+          const float y = b.max.y + 0.05f;
+          WalkSurface slab;
+          slab.vertices = {{b.min.x, y, b.min.z}, {b.min.x, y, b.max.z}, {b.max.x, y, b.max.z},
+                           {b.max.x, y, b.min.z}};
+          scene.walkSurfaces.push_back(std::move(slab));
+        }
       }
     }
   }
+
+  if (const YAML::Node flagNode = root["flag"]) {
+    scene.flag.enabled = flagNode["enabled"] ? flagNode["enabled"].as<bool>() : true;
+    if (const YAML::Node pos = flagNode["position"]) {
+      if (pos.IsSequence() && pos.size() == 2) {
+        const glm::vec2 xz = ParseVec2(pos, "flag.position");
+        scene.flag.position = glm::vec3(xz.x, 0.0f, xz.y);
+      } else {
+        scene.flag.position = ParseVec3(pos, "flag.position");
+      }
+    }
+    if (flagNode["win_on_grab"]) scene.flag.winOnGrab = flagNode["win_on_grab"].as<bool>();
+  }
+  if (root["round_limit"]) scene.roundLimit = root["round_limit"].as<int>();
 
   const YAML::Node unitsNode = root["units"];
   if (generated && !unitsNode) return scene;
@@ -203,6 +271,30 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     return action;
   }
 
+  // Turn-timeline steps (issue #143): drive the replay like the HUD strip.
+  if (kind == "timeline_seek") {
+    action.kind = ScenarioAction::Kind::TimelineSeek;
+    if (!node["tick"]) throw std::runtime_error("timeline_seek requires 'tick'");
+    action.timelineTick = node["tick"].as<int>();
+    return action;
+  }
+  if (kind == "timeline_play") {
+    action.kind = ScenarioAction::Kind::TimelinePlay;
+    if (node["seconds"]) action.playSeconds = node["seconds"].as<float>();
+    return action;
+  }
+  if (kind == "wait") {
+    // Advances live game time (ghosts/shot lines fade on this clock).
+    action.kind = ScenarioAction::Kind::Wait;
+    if (!node["seconds"]) throw std::runtime_error("wait requires 'seconds'");
+    action.playSeconds = node["seconds"].as<float>();
+    return action;
+  }
+  if (kind == "timeline_pause") {
+    action.kind = ScenarioAction::Kind::TimelinePause;
+    return action;
+  }
+
   if (!node["actor"]) throw std::runtime_error("script action step requires 'actor'");
   action.actor = node["actor"].as<int>();
   if (kind == "move") {
@@ -219,10 +311,28 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     if (node["final_facing_degrees"]) {
       action.finalFacingDegrees = node["final_facing_degrees"].as<float>();
     }
-  } else if (kind == "shoot") {
-    action.kind = ScenarioAction::Kind::Shoot;
-    if (!node["target"]) throw std::runtime_error("script 'shoot' action requires 'target'");
-    action.target = node["target"].as<int>();
+    action.expectUnreachable = node["expect_unreachable"] && node["expect_unreachable"].as<bool>();
+  } else if (kind == "shoot" || kind == "aim") {
+    action.kind = kind == "aim" ? ScenarioAction::Kind::Aim : ScenarioAction::Kind::Shoot;
+    if (node["at"]) action.shootAt = ParseVec3(node["at"], "script[].at");
+    if (node["aim_from"] || node["aim_dir"]) {
+      action.aimRayFrom = ParseVec3(node["aim_from"], "script[].aim_from");
+      action.aimRayDir = ParseVec3(node["aim_dir"], "script[].aim_dir");
+    }
+    if (node["target"]) action.target = node["target"].as<int>();
+    const bool freeAim = action.shootAt || action.aimRayFrom;
+    if (kind == "aim" && (action.target >= 0 || !freeAim)) {
+      throw std::runtime_error("script 'aim' action requires 'at' or 'aim_from'/'aim_dir'");
+    }
+    if (kind == "shoot" && action.target < 0 && !freeAim &&
+        !(node["confirm"] && node["confirm"].as<bool>())) {
+      throw std::runtime_error(
+          "script 'shoot' action requires 'target', 'at', 'aim_from'/'aim_dir', or 'confirm'");
+    }
+    if (action.target >= 0 && freeAim) {
+      throw std::runtime_error("script 'shoot' cannot mix 'target' with a free-aim point/ray");
+    }
+    if (node["shots"]) action.shots = node["shots"].as<int>();
     action.expectNoop = node["expect_noop"] && node["expect_noop"].as<bool>();
   } else if (kind == "begin_move") {
     action.kind = ScenarioAction::Kind::BeginMove;
@@ -233,8 +343,10 @@ ScenarioAction ParseAction(const YAML::Node& node) {
   } else if (kind == "focus") {
     action.kind = ScenarioAction::Kind::Focus;
   } else {
-    throw std::runtime_error("unknown script action '" + kind +
-                              "' (expected move/begin_move/shoot/pass/cancel/focus/commit/new_game)");
+    throw std::runtime_error(
+        "unknown script action '" + kind +
+        "' (expected move/begin_move/shoot/aim/pass/cancel/focus/commit/new_game/"
+        "timeline_seek/timeline_play/timeline_pause)");
   }
   return action;
 }
@@ -254,8 +366,30 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
     assertion.rememberedByTeam = ParseTeam(node["remembered_by"].as<std::string>(), "assert.remembered_by");
   }
   if (node["remembered"]) assertion.remembered = node["remembered"].as<bool>();
-  if (node["memory_age"]) assertion.memoryAge = node["memory_age"].as<int>();
+  if (node["ghost_alpha"]) assertion.ghostAlpha = node["ghost_alpha"].as<float>();
   if (node["round"]) assertion.round = node["round"].as<int>();
+  if (node["timeline_ticks"]) assertion.timelineTicks = node["timeline_ticks"].as<int>();
+  if (node["flag_carrier"]) assertion.flagCarrier = node["flag_carrier"].as<int>();
+  if (node["flag_state"]) {
+    assertion.flagState = node["flag_state"].as<std::string>();
+    if (*assertion.flagState != "rest" && *assertion.flagState != "carried" &&
+        *assertion.flagState != "dropped") {
+      throw std::runtime_error("assert.flag_state must be rest, carried or dropped");
+    }
+  }
+  if (node["flag_position"]) {
+    const YAML::Node pos = node["flag_position"];
+    if (pos.IsSequence() && pos.size() == 2) {
+      const glm::vec2 xz = ParseVec2(pos, "assert.flag_position");
+      assertion.flagPosition = glm::vec3(xz.x, 0.0f, xz.y);
+    } else {
+      assertion.flagPosition = ParseVec3(pos, "assert.flag_position");
+    }
+  }
+  if (node["flag_visible_to"]) {
+    assertion.flagVisibleTo =
+        ParseTeam(node["flag_visible_to"].as<std::string>(), "assert.flag_visible_to");
+  }
   if (node["winner"]) {
     assertion.checkWinner = true;
     const std::string raw = node["winner"].as<std::string>();
@@ -263,12 +397,12 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   }
 
   if ((assertion.alive || assertion.position || assertion.facingDegrees ||
-       assertion.visible || assertion.remembered || assertion.memoryAge) && !assertion.unit) {
+       assertion.visible || assertion.remembered || assertion.ghostAlpha) && !assertion.unit) {
     throw std::runtime_error(
-        "assert checking alive/position/facing_degrees/visible/remembered/memory_age requires 'unit'");
+        "assert checking alive/position/facing_degrees/visible/remembered/ghost_alpha requires 'unit'");
   }
-  if ((assertion.remembered || assertion.memoryAge) && !assertion.rememberedByTeam) {
-    throw std::runtime_error("assert 'remembered'/'memory_age' require 'remembered_by'");
+  if ((assertion.remembered || assertion.ghostAlpha) && !assertion.rememberedByTeam) {
+    throw std::runtime_error("assert 'remembered'/'ghost_alpha' require 'remembered_by'");
   }
   if (assertion.visible.has_value() != assertion.visibleToTeam.has_value()) {
     throw std::runtime_error("assert 'visible' and 'visible_to' must be set together");
@@ -277,7 +411,8 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
 }
 
 bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& action,
-                    int stepIndex, const PlaybackHooks& hooks, ScenarioResult* result) {
+                    int stepIndex, const PlaybackHooks& hooks, TurnTimeline& timeline,
+                    TimelinePlayback& playback, ScenarioResult* result) {
   auto Fail = [&](const std::string& msg) {
     result->failures.push_back("step " + std::to_string(stepIndex) + " (actor " +
                                 std::to_string(action.actor) + "): " + msg);
@@ -317,6 +452,7 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
       while (game.Mode() == InputMode::Executing && ++ticks <= kMaxMoveTicks) {
         game.Update(hooks.tickSeconds);
         game.UpdateSightingMemory(hooks.tickSeconds);
+        timeline.Observe(game, hooks.tickSeconds);
         if (hooks.onFrame) hooks.onFrame(game);
       }
       // Shots resolve at commit, so the fall may outlive (or entirely
@@ -324,6 +460,7 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
       while (game.HasActiveKnockdown() && ++ticks <= kMaxMoveTicks) {
         game.Update(hooks.tickSeconds);
         game.UpdateSightingMemory(hooks.tickSeconds);
+        timeline.Observe(game, hooks.tickSeconds);
         if (hooks.onFrame) hooks.onFrame(game);
       }
       if (game.Mode() == InputMode::Executing) {
@@ -332,24 +469,70 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
       }
     } else {
       // Fast-forward the executing round. Step coarsely (not one giant tick)
-      // so sighting memory still samples the figures along the way.
+      // so sighting memory still samples the figures along the way (and the
+      // turn timeline records replayable frames at the same granularity).
       constexpr float kFastStepSeconds = 0.1f;
       constexpr int kMaxFastSteps = 20000;
       for (int i = 0; game.Mode() == InputMode::Executing && i < kMaxFastSteps; ++i) {
         game.Update(kFastStepSeconds);
         game.UpdateSightingMemory(kFastStepSeconds);
+        timeline.Observe(game, kFastStepSeconds);
       }
       game.Update(1.0e6f);  // Settle anything still pending (e.g. knockdowns).
       game.UpdateSightingMemory(0.0f);
     }
+    // Catch the round-end (or game-over) transition the loops stopped on,
+    // the same way the app's frame loop observes it after Update().
+    timeline.Observe(game, 0.0f);
     return true;
   }
 
   if (action.kind == ScenarioAction::Kind::NewGame) {
-    // Same call the UI's new-game paths make (playbooks survive it).
+    // Same call the UI's new-game paths make (playbooks survive it). The
+    // timeline restarts with the match, as in main.cpp (issue #143).
     NotifyMenuClick(Team::Blue, "New Match");
     game.Reset(scene);
     game.UpdateSightingMemory(0.0f);
+    timeline.Reset(game);
+    playback.Reset();
+    return true;
+  }
+
+  if (action.kind == ScenarioAction::Kind::TimelineSeek) {
+    if (!playback.SeekTick(timeline, game, action.timelineTick)) {
+      return Fail("timeline_seek tick " + std::to_string(action.timelineTick) +
+                  " is out of range (timeline has " + std::to_string(timeline.Ticks().size()) +
+                  " ticks)");
+    }
+    return true;
+  }
+
+  if (action.kind == ScenarioAction::Kind::TimelinePlay) {
+    playback.Play(timeline, game);
+    if (!playback.Active()) return Fail("timeline_play: nothing recorded to play");
+    // Advance the replay the way the app's frame loop would, emitting
+    // frames so video mode captures the replay in motion.
+    const float step = hooks.tickSeconds > 0.0f ? hooks.tickSeconds : 0.05f;
+    for (float elapsed = 0.0f; elapsed < action.playSeconds; elapsed += step) {
+      playback.Update(timeline, step);
+      if (hooks.onFrame) hooks.onFrame(playback.Active() ? playback.Game() : game);
+    }
+    return true;
+  }
+
+  if (action.kind == ScenarioAction::Kind::Wait) {
+    const float step = hooks.tickSeconds > 0.0f ? hooks.tickSeconds : 0.05f;
+    for (float elapsed = 0.0f; elapsed < action.playSeconds - 1e-4f; elapsed += step) {
+      game.Update(step);
+      game.UpdateSightingMemory(step);
+      timeline.Observe(game, step);
+      if (hooks.onFrame) hooks.onFrame(game);
+    }
+    return true;
+  }
+
+  if (action.kind == ScenarioAction::Kind::TimelinePause) {
+    playback.SetPlaying(false);
     return true;
   }
 
@@ -368,9 +551,17 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
   }
   const Team actorTeam = actorUnit->team;
 
-  ClickUnitAt(action.actor, actorTeam);
-  if (game.SelectedUnitId() != action.actor || game.Mode() != InputMode::ActionMenu) {
-    return Fail("could not be selected (already game over?)");
+  // A shoot/aim step may continue an earlier `aim` step's unfinished
+  // placement: the actor is then already selected and mid-aim, so no fresh
+  // selection click happens (the real player is still in the same flow).
+  const bool continuingAim =
+      (action.kind == ScenarioAction::Kind::Shoot || action.kind == ScenarioAction::Kind::Aim) &&
+      game.Mode() == InputMode::AwaitingShootTarget && game.SelectedUnitId() == action.actor;
+  if (!continuingAim) {
+    ClickUnitAt(action.actor, actorTeam);
+    if (game.SelectedUnitId() != action.actor || game.Mode() != InputMode::ActionMenu) {
+      return Fail("could not be selected (already game over?)");
+    }
   }
 
   switch (action.kind) {
@@ -380,6 +571,7 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
       if (hooks.onMoveFrontier) {
         for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
           hooks.onMoveFrontier(game, actorTeam);
+          if (hooks.tickSeconds > 0.0f) game.UpdateSightingMemory(hooks.tickSeconds);
         }
       }
       for (const glm::vec3& waypoint : action.waypoints) {
@@ -391,6 +583,18 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
       }
       NotifyClick(actorTeam, action.destination);
       game.ClickGround(action.destination, actorTeam);
+      if (action.expectUnreachable) {
+        // Walk and zipline plans alike must have been rejected: nothing planned.
+        if (game.Mode() != InputMode::AwaitingMoveDestination ||
+            game.FindUnit(action.actor)->plan.type != PlannedActionType::None) {
+          return Fail("destination " + ToString(action.destination) +
+                      " was expected to be unreachable, but a move was planned");
+        }
+        NotifyMenuClick(actorTeam, "Cancel");
+        game.CancelAction();  // Back to the action menu, like a real player.
+        game.CancelAction();  // ...and deselect.
+        return true;
+      }
       game.FinishMovePlan();
       if (game.Mode() != InputMode::AwaitingSelection) {
         return Fail("has no path to destination " + ToString(action.destination) +
@@ -413,26 +617,85 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
       if (hooks.onMoveFrontier) {
         for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
           hooks.onMoveFrontier(game, actorTeam);
+          if (hooks.tickSeconds > 0.0f) game.UpdateSightingMemory(hooks.tickSeconds);
         }
       }
       return true;
     }
-    case ScenarioAction::Kind::Shoot: {
-      NotifyMenuClick(actorTeam, "Shoot");
-      game.ChooseShoot();
-      ClickUnitAt(action.target, actorTeam);
-      const bool planned = game.Mode() != InputMode::AwaitingShootTarget;
-      if (action.expectNoop && planned) {
-        return Fail("shot at " + std::to_string(action.target) +
-                    " was expected to be a gated no-op, but it was planned");
+    case ScenarioAction::Kind::Shoot:
+    case ScenarioAction::Kind::Aim: {
+      if (!continuingAim) {
+        NotifyMenuClick(actorTeam, "Shoot");
+        game.ChooseShoot();
       }
-      if (!action.expectNoop && !planned) {
-        return Fail("shot at " + std::to_string(action.target) +
-                    " could not be planned (invalid target, or outside the shooter's team FOV?)");
+      // Burst size (issue #138): the step's `shots` is the level the player
+      // dragged the shot bar to before picking the target; the same clamped
+      // setter the bar uses.
+      if (action.shots) game.SetPlannedShotCount(*action.shots, actorTeam);
+
+      // Locked-on figure target: the pre-#129 flow, unchanged.
+      if (action.target >= 0) {
+        ClickUnitAt(action.target, actorTeam);
+        const bool planned = game.Mode() != InputMode::AwaitingShootTarget;
+        if (action.expectNoop && planned) {
+          return Fail("shot at " + std::to_string(action.target) +
+                      " was expected to be a gated no-op, but it was planned");
+        }
+        if (!action.expectNoop && !planned) {
+          return Fail("shot at " + std::to_string(action.target) +
+                      " could not be planned (invalid target, or outside the shooter's team FOV?)");
+        }
+        if (action.expectNoop) {
+          NotifyMenuClick(actorTeam, "Cancel");
+          game.CancelAction();  // Return to ActionMenu, mirroring a real player.
+        }
+        return true;
       }
-      if (action.expectNoop) {
-        NotifyMenuClick(actorTeam, "Cancel");
-        game.CancelAction();  // Return to ActionMenu, mirroring a real player.
+
+      // Free-aim: place the "+" marker, either from the already-resolved
+      // world point (`at`) or by running a camera-style ray through the same
+      // ResolveAimRay the interactive click uses.
+      if (action.aimRayFrom) {
+        const tactics::GameLogic::AimRayResult aim =
+            game.ResolveAimRay(*action.aimRayFrom, *action.aimRayDir);
+        if (aim.kind == tactics::GameLogic::AimRayResult::Kind::Unit) {
+          // Unit under the cursor beats the surface behind it. Like the
+          // interactive click (issue #140), this stages the lock-on -- the
+          // shot-level bar stays up -- and Fire commits it.
+          game.ClickAimRay(*action.aimRayFrom, *action.aimRayDir, actorTeam);
+          if (!game.GetLockPreview()) {
+            return Fail("aim ray over unit " + std::to_string(aim.unitId) +
+                        " did not stage a lock-on");
+          }
+          if (action.kind == ScenarioAction::Kind::Aim) {
+            return true;  // Staged only; a later step confirms or cancels.
+          }
+          NotifyMenuClick(actorTeam, "Fire");
+          game.ConfirmAim(actorTeam);
+          if (game.Mode() != InputMode::AwaitingSelection) {
+            return Fail("staged lock-on onto unit " + std::to_string(aim.unitId) +
+                        " could not be confirmed");
+          }
+          return true;
+        }
+        if (aim.kind == tactics::GameLogic::AimRayResult::Kind::Surface) {
+          NotifyClick(actorTeam, aim.point);
+          game.PlaceAimPoint(aim.point, actorTeam);
+        }
+      } else if (action.shootAt) {
+        NotifyClick(actorTeam, *action.shootAt);
+        game.PlaceAimPoint(*action.shootAt, actorTeam);
+      }
+      if (!game.GetAimPreview() && !game.GetLockPreview()) {
+        return Fail("free-aim point could not be placed (actor not aiming?)");
+      }
+      if (action.kind == ScenarioAction::Kind::Aim) {
+        return true;  // Tap-to-place only; a later step confirms or cancels.
+      }
+      NotifyMenuClick(actorTeam, "Fire");
+      game.ConfirmAim(actorTeam);
+      if (game.Mode() != InputMode::AwaitingSelection) {
+        return Fail("free-aim shot could not be confirmed");
       }
       return true;
     }
@@ -448,13 +711,17 @@ bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& ac
     case ScenarioAction::Kind::Cancel:
     case ScenarioAction::Kind::Commit:
     case ScenarioAction::Kind::NewGame:
+    case ScenarioAction::Kind::TimelineSeek:
+    case ScenarioAction::Kind::TimelinePlay:
+    case ScenarioAction::Kind::TimelinePause:
+    case ScenarioAction::Kind::Wait:
       break;  // Handled above.
   }
   return true;
 }
 
 void CheckAssertion(const GameLogic& game, const ScenarioAssertion& a, int stepIndex,
-                     ScenarioResult* result) {
+                     const TurnTimeline* timeline, ScenarioResult* result) {
   auto Fail = [&](const std::string& msg) {
     result->failures.push_back("step " + std::to_string(stepIndex) + " (assert): " + msg);
   };
@@ -502,13 +769,14 @@ void CheckAssertion(const GameLogic& game, const ScenarioAssertion& a, int stepI
                ToString(a.rememberedByTeam) + "=" + (*a.remembered ? "true" : "false") + " but had " +
                std::to_string(samples.size()) + " samples");
         }
-        if (a.memoryAge) {
+        if (a.ghostAlpha) {
           if (samples.empty()) {
-            Fail("unit " + std::to_string(*a.unit) + " expected memory_age " +
-                 std::to_string(*a.memoryAge) + " but has no remembered samples");
-          } else if (samples.front().ageRounds != *a.memoryAge) {
-            Fail("unit " + std::to_string(*a.unit) + " expected memory_age " +
-                 std::to_string(*a.memoryAge) + " but was " + std::to_string(samples.front().ageRounds));
+            Fail("unit " + std::to_string(*a.unit) + " expected ghost_alpha " +
+                 std::to_string(*a.ghostAlpha) + " but has no remembered samples");
+          } else if (std::fabs(game.GhostAlpha(samples.front().at) - *a.ghostAlpha) > a.tolerance) {
+            Fail("unit " + std::to_string(*a.unit) + " expected ghost_alpha " +
+                 std::to_string(*a.ghostAlpha) + " but was " +
+                 std::to_string(game.GhostAlpha(samples.front().at)));
           }
         }
       }
@@ -519,9 +787,43 @@ void CheckAssertion(const GameLogic& game, const ScenarioAssertion& a, int stepI
     Fail("expected winner=" + ToString(a.expectedWinner) + " but was " + ToString(game.Winner()));
   }
 
+  const FlagState& flag = game.Flag();
+  if (a.flagCarrier && flag.carrierId != *a.flagCarrier) {
+    Fail("expected flag_carrier " + std::to_string(*a.flagCarrier) + " but was " +
+         std::to_string(flag.carrierId));
+  }
+  if (a.flagState) {
+    const std::string actual =
+        flag.carrierId >= 0 ? "carried" : (flag.dropElapsed >= 0.0f ? "dropped" : "rest");
+    if (actual != *a.flagState) {
+      Fail("expected flag_state " + *a.flagState + " but was " + actual);
+    }
+  }
+  if (a.flagPosition) {
+    // Y is only compared when the script gave a 3-element position (a 2-element
+    // one parses to y == 0, which on hilly terrain would not be the ground).
+    const glm::vec3 actual = game.FlagPosition();
+    const glm::vec3 d = actual - *a.flagPosition;
+    if (std::hypot(d.x, d.z) > a.tolerance) {
+      Fail("expected flag_position " + ToString(*a.flagPosition) + " but was " + ToString(actual));
+    }
+  }
+  if (a.flagVisibleTo && !game.FlagVisibleTo(*a.flagVisibleTo)) {
+    Fail("expected the flag to be visible to " + ToString(a.flagVisibleTo));
+  }
+
   if (a.round && game.RoundNumber() != *a.round) {
     Fail("expected round " + std::to_string(*a.round) + " but was " +
          std::to_string(game.RoundNumber()));
+  }
+
+  if (a.timelineTicks) {
+    if (!timeline) {
+      Fail("'timeline_ticks' assertion has no timeline to check");
+    } else if (static_cast<int>(timeline->Ticks().size()) != *a.timelineTicks) {
+      Fail("expected timeline_ticks " + std::to_string(*a.timelineTicks) + " but was " +
+           std::to_string(timeline->Ticks().size()));
+    }
   }
 }
 
@@ -540,6 +842,13 @@ Scenario LoadScenarioFromFile(const std::string& path) {
   scenario.name = root["name"] ? root["name"].as<std::string>() : path;
   scenario.scene = ParseScene(root);
   ParsePlaybooks(root, scenario.playbooks);
+  if (root["friendly_fire"]) scenario.friendlyFire = root["friendly_fire"].as<bool>();
+  if (const YAML::Node rolls = root["shot_rolls"]) {
+    if (!rolls.IsSequence() || rolls.size() == 0) {
+      throw std::runtime_error("shot_rolls must be a non-empty list of [0,1) rolls");
+    }
+    for (const auto& roll : rolls) scenario.shotRolls.push_back(roll.as<float>());
+  }
   if (const YAML::Node cam = root["camera"]) {
     if (cam["target"]) scenario.cameraTarget = ParseVec2(cam["target"], "camera.target");
     if (cam["zoom"]) scenario.cameraZoom = cam["zoom"].as<float>();
@@ -558,6 +867,10 @@ Scenario LoadScenarioFromFile(const std::string& path) {
     }
     if (render["fov_probe_height"]) {
       scenario.fovProbeHeight = render["fov_probe_height"].as<float>();
+    }
+    if (render["thermal"]) scenario.thermal = render["thermal"].as<bool>();
+    if (render["thermal_black_hot"]) {
+      scenario.thermalBlackHot = render["thermal_black_hot"].as<bool>();
     }
   }
 
@@ -582,6 +895,15 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
   GameLogic game(scenario.scene);
   game.SetPlaybook(Team::Blue, scenario.playbooks[0]);
   game.SetPlaybook(Team::Red, scenario.playbooks[1]);
+  game.SetFriendlyFireEnabled(scenario.friendlyFire);
+  // Pinned rolls make probabilistic shots deterministic: consumed in
+  // resolution order, repeating the list when it runs out.
+  size_t nextRoll = 0;
+  if (!scenario.shotRolls.empty()) {
+    game.SetShotRollSource([&scenario, &nextRoll]() {
+      return scenario.shotRolls[nextRoll++ % scenario.shotRolls.size()];
+    });
+  }
   // A second page that only mirrors the simulator's snapshots, like the
   // networked follower pane. Its sighting memory is checked too.
   GameLogic follower(scenario.scene);
@@ -590,35 +912,95 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
     follower.UpdateSightingMemory(0.0f);
   };
 
+  // Turn timeline (issue #143): recorded/replayed exactly as in main.cpp.
+  // While a `timeline_*` step has a replay active, observers and assertions
+  // see the replayed state -- what the app would be rendering.
+  TurnTimeline timeline;
+  timeline.Reset(game);
+  TimelinePlayback playback;
+  if (hooks.onTimeline) hooks.onTimeline(timeline, playback);
+  auto Display = [&]() -> const GameLogic& {
+    return playback.Active() ? playback.Game() : game;
+  };
+
   auto EmitHoldFrames = [&] {
     if (!hooks.onFrame) return;
-    for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) hooks.onFrame(game);
+    for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
+      hooks.onFrame(Display());
+      // Video mode: time passes while planning, so ghosts/bullets keep
+      // fading across the held frames instead of freezing mid-hold.
+      if (hooks.tickSeconds > 0.0f && !playback.Active()) {
+        game.UpdateSightingMemory(hooks.tickSeconds);
+      }
+    }
   };
 
   // Mirrors main.cpp's frame loop so captured frames include sighting memory.
   game.UpdateSightingMemory(0.0f);
   EmitHoldFrames();
-  if (hooks.onActionComplete) hooks.onActionComplete(game, 0);
+  if (hooks.onActionComplete) hooks.onActionComplete(Display(), 0);
 
   int completedActions = 0;
   for (int i = 0; i < static_cast<int>(scenario.steps.size()); ++i) {
     const ScenarioStep& step = scenario.steps[i];
     if (step.action) {
-      if (!ExecuteAction(game, scenario.scene, *step.action, i, hooks, &result)) {
+      if (!ExecuteAction(game, scenario.scene, *step.action, i, hooks, timeline, playback,
+                         &result)) {
         break;  // The script's own preconditions were violated; state past this point is unreliable.
       }
       SyncFollower();
       ++completedActions;
       EmitHoldFrames();
-      if (hooks.onActionComplete) hooks.onActionComplete(game, completedActions);
+      if (hooks.onActionComplete) hooks.onActionComplete(Display(), completedActions);
     } else {
-      CheckAssertion(game, *step.assertion, i, &result);
-      if (step.assertion->rememberedByTeam &&
-          (!step.assertion->memoryAge || *step.assertion->memoryAge == 0)) {
+      CheckAssertion(Display(), *step.assertion, i, &timeline, &result);
+            const ScenarioAssertion& as = *step.assertion;
+      if (as.flagCarrier || as.flagState || as.flagPosition || as.flagVisibleTo) {
+        // The follower mirrors the flag too (flag fields only; the rest of
+        // the assertion is already checked on the simulator).
+        ScenarioAssertion flagOnly;
+        flagOnly.flagCarrier = as.flagCarrier;
+        flagOnly.flagState = as.flagState;
+        flagOnly.flagPosition = as.flagPosition;
+        flagOnly.flagVisibleTo = as.flagVisibleTo;
+        flagOnly.tolerance = as.tolerance;
         ScenarioResult followerResult;
-        CheckAssertion(follower, *step.assertion, i, &followerResult);
+        CheckAssertion(follower, flagOnly, i, nullptr, &followerResult);
         for (auto& f : followerResult.failures) result.failures.push_back("follower " + f);
       }
+      if (step.assertion->rememberedByTeam &&
+          !step.assertion->ghostAlpha) {
+        ScenarioResult followerResult;
+        CheckAssertion(follower, *step.assertion, i, &timeline, &followerResult);
+        for (auto& f : followerResult.failures) result.failures.push_back("follower " + f);
+      }
+    }
+  }
+
+  // Video tail: the last action's fixed hold is shorter than a bullet line's
+  // life / the ghost fade, so a round that ends on a shot would cut off with
+  // the tracer and ghosts still on screen. Keep ticking (after the final
+  // golden capture, which therefore is unaffected) until they have faded.
+  if (hooks.onFrame && hooks.tickSeconds > 0.0f && !playback.Active()) {
+    auto StillFading = [&] {
+      for (const Tracer& tracer : game.Tracers()) {
+        if (game.TracerAlpha(tracer) > 0.0f) return true;
+      }
+      for (const Unit& unit : scenario.scene.units) {
+        for (Team viewer : {Team::Blue, Team::Red}) {
+          for (const auto& sample : game.Sightings(viewer, unit.id)) {
+            if (game.GhostAlpha(sample.at) > 0.0f) return true;
+          }
+        }
+      }
+      return false;
+    };
+    constexpr float kMaxTailSeconds = 4.0f;
+    for (float elapsed = 0.0f; elapsed < kMaxTailSeconds && StillFading();
+         elapsed += hooks.tickSeconds) {
+      hooks.onFrame(game);
+      game.Update(hooks.tickSeconds);  // Ages the bullet lines (UpdateSightingMemory doesn't).
+      game.UpdateSightingMemory(hooks.tickSeconds);
     }
   }
   return result;

@@ -1,0 +1,26 @@
+name: zipline_two_frontiers
+description: >
+  Issue #166: two lines affordable from one spot. begin_move leaves the
+  frontier up with a cyan region per line; every highlighted cable must sit
+  on its own line (regression: the second one was drawn offset because the
+  anchor ring overwrote the shader's MVP).
+
+map:
+  half_extent: 40
+  ziplines:
+    - {from: [-16, 0, 0], to: [10, 0, 0]}
+    - {from: [-18, 0, 4], to: [-18, 0, 30]}
+
+camera:
+  target: [0, 18]
+  zoom: 40
+
+units:
+  - {id: 0, team: blue, position: [-18, 0, 2], facing_degrees: 0}
+  - {id: 1, team: red, position: [30, 0, -30], facing_degrees: 180}
+
+script:
+  - action: begin_move
+    actor: 0
+    comment: Both cables highlighted on their own lines.
+  - assert: {unit: 0, position: [-18, 0, 2], tolerance: 0.05}

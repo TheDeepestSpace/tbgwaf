@@ -1,0 +1,28 @@
+name: playbook_shoot_nearest_first
+description: >
+  One red shooter with two blue opponents in its field of view, the far one listed first
+  (lower id). The shooter's reaction burst targets the closest visible opponent, then moves
+  on to the more distant one once the near one is down. Each shot turns the shooter to its target, so the final facing shows who was shot last.
+
+playbook:
+  red: {stationary_seen: shoot, stationary_unseen: shoot}
+  blue: {stationary_seen: do_nothing, stationary_unseen: do_nothing}
+
+units:
+  # Far opponent (~10.4 m, bearing -17 deg), listed first so id order would pick it.
+  - {id: 0, team: blue, position: [10, 0, -3], facing_degrees: 0}
+  # Near opponent (~4.5 m, bearing +27 deg).
+  - {id: 1, team: blue, position: [4, 0, 2], facing_degrees: 0}
+  - {id: 2, team: red, position: [0, 0, 0], facing_degrees: 0}
+
+script:
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {unit: 1, alive: false}
+  - assert: {unit: 0, alive: false}
+  - assert: {unit: 2, facing_degrees: -16.7, tolerance: 2.0, comment: Last aimed at the far opponent}

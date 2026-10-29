@@ -1,0 +1,43 @@
+name: flag_carry_and_shoot
+description: >
+  CTF part 1 (carry mode, win_on_grab off so play continues): blue0 runs through the flag
+  and grabs it mid-move (turn 1: the reach/pickup dip), then carries it stowed on its back
+  (turn 2) while shooting exactly as it would without the flag -- same FOV, same hit.
+
+flag:
+  enabled: true
+  win_on_grab: false
+
+shot_rolls: [0.0]
+
+units:
+  - {id: 0, team: blue, position: [-4, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [6, 0, 0], facing_degrees: 180}
+  - {id: 2, team: red, position: [8, 0, 8], facing_degrees: 180}
+
+script:
+  - action: move
+    actor: 0
+    destination: [0.8, 0, 0]
+    comment: Passes through the flag's spot, ending just beyond it.
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {flag_carrier: 0, flag_state: carried}
+  - assert: {winner: none, round: 2}
+  - assert: {unit: 0, position: [0.8, 0, 0]}
+  - assert: {flag_position: [0.8, 0], tolerance: 0.05, comment: A carried flag rides with its figure}
+  - assert: {unit: 1, visible_to: blue, visible: true, comment: Carrying does not change FOV}
+
+  - action: shoot
+    actor: 0
+    target: 1
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {unit: 1, alive: false, comment: The carrier's shot lands as usual}
+  - assert: {flag_carrier: 0, winner: none}

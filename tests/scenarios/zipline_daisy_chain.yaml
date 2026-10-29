@@ -1,0 +1,40 @@
+name: zipline_daisy_chain
+description: >
+  Issue #166: two lines end to end. Walk 2 + ride 4 + walk 2 + ride 4 + walk 2
+  = 14 would fit one round's 20-unit budget (38 on foot), but PlanLeg prices
+  at most one ride per leg, so the single-move chain is rejected and the
+  chain is planned as two legs, one per round: line 1 then line 2. Pins
+  today's behaviour; a one-round daisy chain is a follow-up.
+
+map:
+  half_extent: 50
+  ziplines:
+    - {from: [-16, 0, 0], to: [0, 0, 0]}
+    - {from: [2, 0, 0], to: [18, 0, 0]}
+
+units:
+  - {id: 0, team: blue, position: [-18, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [30, 0, 20], facing_degrees: 180}
+
+script:
+  - action: move
+    actor: 0
+    destination: [20, 0, 0]
+    expect_unreachable: true
+    comment: Both lines in one leg are not planned (one ride per leg).
+  - action: move
+    actor: 0
+    waypoints:
+      - [1, 0, 0]
+    destination: [20, 0, 0]
+    comment: Leg 1 rides line 1 (walk 2, ride 4, walk 1); leg 2 rides line 2.
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [1, 0, 0], tolerance: 0.05}
+  - assert: {round: 2}
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [20, 0, 0], tolerance: 0.05}
+  - assert: {round: 3}

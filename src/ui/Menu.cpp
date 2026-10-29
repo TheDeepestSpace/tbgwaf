@@ -13,7 +13,8 @@ using tbgwaf_flow::State;
 
 std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
                                   uint32_t* mapSeed) {
-  if (state != State::Splash && state != State::MapSelect) return std::nullopt;
+  if (state != State::Splash && state != State::GameMode &&
+      state != State::MapSelect) return std::nullopt;
 
   const ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
@@ -30,6 +31,13 @@ std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
     ImGui::SetWindowFontScale(1.0f);
     ImGui::Spacing();
     if (ImGui::Button("New Game", button)) fired = Event::NewGame;
+    ImGui::End();
+  } else if (state == State::GameMode) {
+    ImGui::Begin("Game Mode", nullptr, flags);
+    if (ImGui::Button("Regular", button)) fired = Event::SelectRegular;
+    if (ImGui::Button("Capture the Flag", button)) fired = Event::SelectCtf;
+    ImGui::Spacing();
+    if (ImGui::Button("Back", ImVec2(100.0f, 0.0f))) fired = Event::Back;
     ImGui::End();
   } else {
     ImGui::Begin("Map Select", nullptr, flags);

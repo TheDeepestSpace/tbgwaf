@@ -1,0 +1,28 @@
+name: free_aim_surface_hit
+description: >
+  Free-aim surface placement (issue #129): a camera ray onto open ground inside the
+  shooter's 360-degree LOS resolves to a "+" selector at the surface point (the acid-green
+  highlight state is captured by the aim step); confirming plans a shoot-at action, and
+  after the commit the figure has turned to face its aim point.
+
+units:
+  - {id: 0, team: blue, position: [-8, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [8, 0, 0], facing_degrees: 180}
+
+script:
+  - action: aim
+    description: Tap-to-place via the same ResolveAimRay a real click uses; the ray lands on open ground at [4, 0, 6], well inside the shooter's 360-degree LOS.
+    actor: 0
+    aim_from: [4, 20, 6]
+    aim_dir: [0, -1, 0]
+  - action: shoot
+    description: The Fire button confirms the placed point into a shoot-at plan.
+    actor: 0
+    confirm: true
+  - action: pass
+    actor: 1
+  - action: commit
+
+  - assert: {unit: 0, facing_degrees: 26.57, tolerance: 1.0, comment: Turned to face the aim point}
+  - assert: {unit: 1, alive: true, comment: Nobody stood in the bullet's path}
+  - assert: {round: 2}

@@ -11,6 +11,17 @@ permissions:
   packages: read
 
 jobs:
+  browser-and-adapter-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test browser controller and Jev adapter
+        run: |
+          npm run lint:jev
+          npm run test:jev
+
   # Same-repo PRs build a PR-specific image (tag pr-<number>) so changes to
   # the Dockerfile are tested immediately; everything else uses :latest.
   ci_image:

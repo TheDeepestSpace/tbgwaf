@@ -1,0 +1,65 @@
+name: ragdoll_free_fall_ghosts
+description: >
+  Issue #217 ragdoll: a figure walking along the top of a wall is seen by blue, which leaves a
+  trail of wireframe ghosts. Blue shoots it at t=1 s and the round ends 0.1 s later, so the
+  body is caught at the start of its free fall: the captures after the commit show the tumbling
+  ragdoll in free fall (blue4 stands on the far side of the wall, so it sees the body come down)
+  beside the ghosts of its walk. The fall is shot from the west and falls away from the shooter,
+  so the shooter alone could not see it; see ragdoll_shot_off_wall for that case.
+
+# A miss, then the killing hit on the 2nd bullet (t=1 s); the walker ends the round at t=1.1 s, just after it.
+shot_rolls: [0.9, 0.0, 0.0]
+
+map:
+  obstacles:
+    - {center: [0, 0], half_extent: [0.6, 5.0], height: 6.0, climbable: true}
+
+units:
+  - {id: 0, team: blue, position: [-8, 0, 1], facing_degrees: 0}    # Shooter, west of the wall.
+  - {id: 1, team: blue, position: [-12, 0, -8], facing_degrees: 0}  # Walker; keeps the round running.
+  - {id: 2, team: red, position: [0, 6.0, -4.5], facing_degrees: 90}  # On top of the wall.
+  - {id: 3, team: red, position: [12, 0, 12], facing_degrees: 180}  # Out of the way.
+  - {id: 4, team: blue, position: [7, 0, 0], facing_degrees: 180}   # Observer east of the wall: the fall comes towards it.
+
+camera:
+  target: [0, 2]
+  zoom: 3
+
+script:
+  - assert: {unit: 2, visible_to: blue, visible: true, comment: The wall-top figure is in plain view}
+  - action: move
+    description: Red2 walks along the top of the wall along it.
+    actor: 2
+    destination: [0, 6.0, 4.5]
+  - action: shoot
+    description: Blue0 fires a 3-shot burst at red2; the 2nd bullet kills.
+    actor: 0
+    target: 2
+    shots: 3
+  - action: move
+    actor: 1
+    destination: [-7.6, 0, -8]
+  - action: pass
+    actor: 3
+  - action: pass
+    actor: 4
+  - action: commit
+
+  - assert: {unit: 2, alive: false, comment: Downed at t=1 s; the round ends while it is still tumbling}
+  - assert: {unit: 2, remembered_by: blue, remembered: true, comment: Blue holds ghosts of the walk}
+  - assert: {round: 2}
+
+  - action: move
+    description: Next round; the fall resumes and the body lands beside the wall.
+    actor: 1
+    destination: [-12, 0, -8]
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 3
+  - action: pass
+    actor: 4
+  - action: commit
+
+  - assert: {round: 3}
+  - assert: {winner: none}

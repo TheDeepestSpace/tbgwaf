@@ -1,0 +1,22 @@
+name: flag_closer_team_wins_race
+description: >
+  CTF part 1 tiebreak, non-tie case: both teams reach the flag in the same round, but red1
+  is closer, so it arrives first and grabs it even though blue0 has the lower unit id.
+
+flag:
+  enabled: true
+
+units:
+  - {id: 0, team: blue, position: [-5, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [3, 0, 0], facing_degrees: 180}
+
+script:
+  - action: move
+    actor: 0
+    destination: [0, 0, 0]
+  - action: move
+    actor: 1
+    destination: [0, 0, 0]
+  - action: commit
+  - assert: {flag_carrier: 1}
+  - assert: {winner: red}

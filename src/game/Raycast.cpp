@@ -80,6 +80,8 @@ bool LineOfSightClear(const glm::vec3& from, const glm::vec3& to,
   constexpr float kEndpointEpsilon = 1e-3f;
   for (const Obstacle& obstacle : obstacles) {
     float t = 0.0f;
+    // Cheap box reject first: most obstacles (incl. roof massing) are far off the ray.
+    if (!RayIntersectsAABB(from, direction, obstacle.bounds, &t) || t >= segmentLength) continue;
     if (RayIntersectsObstacle(from, direction, obstacle, &t) && t > kEndpointEpsilon &&
         t < segmentLength - kEndpointEpsilon) {
       return false;

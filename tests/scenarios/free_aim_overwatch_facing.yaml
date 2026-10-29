@@ -1,0 +1,31 @@
+name: free_aim_overwatch_facing
+description: >
+  Issue #129 facing-after-shot feeding overwatch: round 1's free-aim shot (at an empty
+  point due north) turns blue0 from south to north, which immediately changes what it can
+  see -- red1 enters the new FOV. Rounds always play out their full 5 s, so the squad
+  playbook's stationary-shoot reaction (overwatch) fires on red1 within that same round
+  and re-aims blue0 at it.
+
+playbook:
+  blue: {stationary_seen: shoot, stationary_unseen: shoot}
+
+shot_rolls: [0.0]
+
+units:
+  - {id: 0, team: blue, position: [-6, 0, 0], facing_degrees: -90}
+  - {id: 1, team: red, position: [2, 0, 8], facing_degrees: 180}
+
+script:
+  - assert: {unit: 1, visible_to: blue, visible: false, comment: Behind blue's initial facing}
+
+  - action: shoot
+    description: Blind covering shot due north; nothing is there, but the turn re-points blue's FOV.
+    actor: 0
+    at: [-6, 0, 8]
+  - action: pass
+    actor: 1
+  - action: commit
+
+  - assert: {unit: 1, alive: false, comment: Overwatch fired on red1 under the new facing}
+  - assert: {unit: 0, facing_degrees: 45, tolerance: 1.0, comment: Re-aimed at red1}
+  - assert: {winner: blue}

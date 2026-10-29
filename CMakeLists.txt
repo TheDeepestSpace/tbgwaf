@@ -57,6 +57,7 @@ endif()
 # Pure game-logic sources: no SDL/GL/ImGui dependency, so they can be linked
 # into both the playable app and the headless logic test binary.
 set(GAME_LOGIC_SOURCES
+  src/ai/JevPlanner.cpp
   src/game/Scene.cpp
   src/game/Geometry.cpp
   src/game/MapGenerator.cpp
@@ -64,6 +65,7 @@ set(GAME_LOGIC_SOURCES
   src/game/Raycast.cpp
   src/game/Visibility.cpp
   src/game/GameLogic.cpp
+  src/game/TurnTimeline.cpp
 )
 
 add_library(tactics_logic STATIC ${GAME_LOGIC_SOURCES})
@@ -78,6 +80,8 @@ set(APP_GFX_SOURCES
   src/gfx/Mesh.cpp
   src/gfx/Camera.cpp
   src/gfx/FigureRig.cpp
+  src/gfx/AmbientOcclusion.cpp
+  src/gfx/Ragdoll.cpp
   src/gfx/SceneRenderer.cpp
 )
 
@@ -137,6 +141,8 @@ if(EMSCRIPTEN)
     src/gfx/Shader.cpp
     src/gfx/Mesh.cpp
     src/gfx/FigureRig.cpp
+    src/gfx/Ragdoll.cpp
+    src/game/Geometry.cpp
   )
   target_include_directories(tactics_gallery_web PRIVATE src)
   target_link_libraries(tactics_gallery_web PRIVATE glm::glm)
@@ -169,8 +175,15 @@ if(EMSCRIPTEN)
             ${CMAKE_SOURCE_DIR}/web/gallery.html ${CMAKE_BINARY_DIR}/gallery.html
     DEPENDS ${CMAKE_SOURCE_DIR}/web/gallery.html
   )
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/jev-preview.js
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_SOURCE_DIR}/web/jev-preview.js ${CMAKE_BINARY_DIR}/jev-preview.js
+    DEPENDS ${CMAKE_SOURCE_DIR}/web/jev-preview.js
+  )
   add_custom_target(tactics_web_page ALL
-    DEPENDS ${CMAKE_BINARY_DIR}/index.html ${CMAKE_BINARY_DIR}/gallery.html)
+    DEPENDS ${CMAKE_BINARY_DIR}/index.html ${CMAKE_BINARY_DIR}/gallery.html
+            ${CMAKE_BINARY_DIR}/jev-preview.js)
   # Map-seed goldens (issue #133): the gallery's "Map seeds" section is
   # driven by whatever PNGs sit under tests/map_goldens/. The script globs
   # at build time, so re-run it every build and a new golden shows up in
@@ -210,6 +223,8 @@ else()
     src/gfx/Mesh.cpp
     src/gfx/Camera.cpp
     src/gfx/FigureRig.cpp
+    src/gfx/AmbientOcclusion.cpp
+    src/gfx/Ragdoll.cpp
     src/gfx/SceneRenderer.cpp
   )
   target_include_directories(tactics_gfx PUBLIC src)
@@ -244,15 +259,30 @@ else()
   target_link_libraries(tactics_logic_tests PRIVATE tactics_logic)
   add_test(NAME logic_tests COMMAND tactics_logic_tests)
 
+  add_executable(tactics_jev_planner_tests tests/jev_planner_tests.cpp)
+  target_include_directories(tactics_jev_planner_tests PRIVATE src)
+  target_link_libraries(tactics_jev_planner_tests PRIVATE tactics_logic)
+  add_test(NAME jev_planner_tests COMMAND tactics_jev_planner_tests)
+
   add_executable(tactics_map_generator_tests tests/map_generator_tests.cpp)
   target_include_directories(tactics_map_generator_tests PRIVATE src)
   target_link_libraries(tactics_map_generator_tests PRIVATE tactics_logic)
   add_test(NAME map_generator_tests COMMAND tactics_map_generator_tests)
 
+  add_executable(tactics_urban_terrain_tests tests/urban_terrain_tests.cpp)
+  target_link_libraries(tactics_urban_terrain_tests PRIVATE tactics_logic)
+  add_test(NAME urban_terrain_tests COMMAND tactics_urban_terrain_tests)
+
   add_executable(tactics_camera_tests tests/camera_tests.cpp src/gfx/Camera.cpp)
   target_include_directories(tactics_camera_tests PRIVATE src)
   target_link_libraries(tactics_camera_tests PRIVATE glm::glm)
   add_test(NAME camera_tests COMMAND tactics_camera_tests)
+
+  add_executable(tactics_ragdoll_tests tests/ragdoll_tests.cpp src/gfx/Ragdoll.cpp
+                 src/gfx/FigureRig.cpp)
+  target_include_directories(tactics_ragdoll_tests PRIVATE src)
+  target_link_libraries(tactics_ragdoll_tests PRIVATE tactics_logic glm::glm)
+  add_test(NAME ragdoll_tests COMMAND tactics_ragdoll_tests)
 
   # YAML gameplay scenarios (issue #14): a native-only, test-only dependency,
   # so it's kept out of tactics_logic (which the WASM build also links) to
@@ -326,8 +356,31 @@ else()
     PkgConfig::EGL
   )
 
+  # Observational renderer benchmark (issue #202). Kept out of ctest: it
+  # intentionally samples hosted-runner timing and is dispatched manually,
+  # while normal CI remains deterministic and pass/fail.
+  add_executable(tactics_performance_suite tests/performance/performance_main.cpp)
+  target_include_directories(tactics_performance_suite PRIVATE src)
+  target_link_libraries(tactics_performance_suite PRIVATE
+    tactics_logic
+    tactics_gfx
+    PkgConfig::SDL2
+    PkgConfig::EGL
+  )
+
   find_program(XVFB_RUN_EXECUTABLE xvfb-run)
   if(XVFB_RUN_EXECUTABLE)
+    add_executable(tactics_thermal_render_tests tests/visual/thermal_render_tests.cpp)
+    target_link_libraries(tactics_thermal_render_tests PRIVATE tactics_gfx PkgConfig::SDL2
+                                                            PkgConfig::EGL)
+    add_test(
+      NAME thermal_render_tests
+      COMMAND ${XVFB_RUN_EXECUTABLE} --auto-servernum $<TARGET_FILE:tactics_thermal_render_tests>
+    )
+    set_tests_properties(thermal_render_tests PROPERTIES
+      TIMEOUT 120
+      ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
+    )
     # Golden-screenshot regression run (no --video: ffmpeg isn't needed for
     # the ctest pass, only for the PR review page built in CI).
     add_test(
@@ -361,7 +414,7 @@ else()
     add_test(NAME smoke_test COMMAND tactics_app)
   endif()
   set_tests_properties(smoke_test PROPERTIES
-    TIMEOUT 30
+    TIMEOUT 300
     ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11;TBGWAF_SMOKE_TEST=1"
   )
 endif()

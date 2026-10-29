@@ -16,6 +16,7 @@
 #include <imgui.h>
 
 #include "game/GameLogic.h"
+#include "game/TurnTimeline.h"
 #include "game/Types.h"
 #include "gfx/Camera.h"
 #include "gfx/Mesh.h"
@@ -58,6 +59,11 @@ struct HudActions {
   bool pass = false;
   bool cancel = false;
   bool done = false;
+  // Free-aim (issue #129): Fire confirms the placed aim point.
+  bool fire = false;
+  // Multi-shot bursts (issue #138): set when the player dragged the shot
+  // bar to a new level this frame; route to GameLogic::SetPlannedShotCount.
+  std::optional<int> shots;
   // Set when the pane's Playbook view edited its team's squad-wide reaction
   // table; a config edit, not a turn action.
   std::optional<tactics::SquadPlaybook> playbook;
@@ -89,17 +95,52 @@ HudActions DrawHud(const tactics::GameLogic& game, tactics::Team team, bool plan
                    const PaneRect& rect, int windowHeight, const gfx::OrbitCamera& camera,
                    HudLayout* layout = nullptr, float* roundPanelBottom = nullptr);
 
+// Button presses on the turn-timeline strip (issue #143); like HudActions,
+// reported back for the caller to apply to its TimelinePlayback.
+struct TimelineActions {
+  std::optional<int> seekTick;  // Unused by the HUD (scenarios seek by tick).
+  std::optional<size_t> seekFrame;  // Handle dragged here: show that frame.
+  bool togglePlay = false;      // Play/Pause pressed.
+  bool live = false;            // Back to live (Live pressed / handle at right end).
+};
+
+// Draws the turn-timeline strip (issue #143) bottom-centered in `rect`: a
+// Play/Pause button, a line with a circle at each turn boundary (Start, T1,
+// T2, ...) and a draggable handle that moves freely along it but magnetizes
+// to a circle when released/dragged near one, and a "Live" toggle that shows
+// pushed in while the live game is showing (handle parked at the right end).
+// Dragging the handle to the right end locks Live. Touch-friendly (tall frame padding, wide grab), and
+// anchored to the pane's bottom edge so it stays clear of the floating
+// action menu and the Round panel. Const w.r.t. the timeline/playback:
+// presses are reported back via TimelineActions.
+TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
+                             const tactics::TimelinePlayback& playback, tactics::Team team,
+                             const PaneRect& rect, int windowHeight,
+                             HudLayout* layout = nullptr);
+
 // Interactive-app-only debug panel (render toggles + FPS). Not called by the
 // visual runner. `fps` is a smoothed frames-per-second value; `top` is the
 // window-space y to place the panel at (just below the Round panel).
 // The extra metrics: `frameMs` last frame time, `fovMs` time spent in the
 // visibility (FOV-cone) computation, and `stats`
 // draw-call/vertex/triangle counters for the frame.
+// The AO sliders (shown while the thermal view is on) tune the thermal
+// contact shading live: reach in world units, darkening strength, samples
+// per ray, and blur half-width (see gfx::AmbientOcclusionSettings).
+// `thermalFovAlpha` is the FOV tint opacity used while the thermal view is on.
 // `wasmHeapBytes` is the WASM linear-memory size (nullopt on native builds,
 // shown as N/A). WASM memory never shrinks, so this is also the peak.
-void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& disableOcclusionFade,
-                    bool& showFps, float fps, float frameMs, float fovMs,
-                    const gfx::RenderFrameStats& stats, float top,
+void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
+                    float& thermalFovAlpha,
+                    float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
+                    bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,
+                    float fovMs, const gfx::RenderFrameStats& stats, float top,
                     std::optional<size_t> wasmHeapBytes);
+
+// Thermal view (issue #177): restyles every HUD window drawn in between to
+// the monochrome green symbology of real thermal footage, pane team label
+// included. Push before the frame's HUD windows, pop after.
+void PushThermalHudStyle();
+void PopThermalHudStyle();
 
 }  // namespace ui

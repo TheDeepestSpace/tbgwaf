@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <cstddef>
 #include <vector>
 
@@ -72,6 +73,9 @@ TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
 TeamVisibility ComputeTeamVisibility(Team team, const std::vector<Unit>& units,
                                      const std::vector<Obstacle>& obstacles,
                                      const std::vector<WalkSurface>& walkSurfaces,
-                                     const HeightField& terrain);
+                                     const HeightField& terrain,
+                                     size_t reportedObstacles = SIZE_MAX);
+// `reportedObstacles` caps how many leading `obstacles` get a visibleObstacle
+// entry; the rest (building massing) still occlude but are not sampled.
 
 }  // namespace tactics

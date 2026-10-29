@@ -17,15 +17,37 @@ namespace tactics {
 // plays out together.
 enum class PlannedActionType { None, Move, Shoot, Pass };
 
+// A traverse step inside a move path: the segment path[segment] ->
+// path[segment + 1] is a ride on scene.ziplines[zipline] rather than a walk.
+// Its cost is ZiplineRideCost (length * kZiplineCostFactor), not its length.
+struct PathRide {
+  int segment = 0;
+  int zipline = 0;
+  bool operator==(const PathRide& o) const { return segment == o.segment && zipline == o.zipline; }
+};
+
 struct PlannedAction {
   PlannedActionType type = PlannedActionType::None;
   std::vector<glm::vec3> movePath;  // Resolved via NavMesh::FindPath, for type == Move.
+  std::vector<PathRide> moveRides;  // Zipline traverse steps within movePath (usually empty).
+  // Rides of queuedLegs[i]; may be shorter than queuedLegs (missing = walk only).
+  std::vector<std::vector<PathRide>> queuedLegRides;
   // Further legs the player chained after movePath, one per later round.
   // Each leg is a polyline of at most MoveBudget() length that starts where
   // the previous leg (movePath for the first) ends; FinishRound arms the next.
   std::vector<std::vector<glm::vec3>> queuedLegs;
   float endFacingYaw = 0.0f;        // Final facing once the path ends, for type == Move.
-  int shootTargetId = -1;           // For type == Shoot.
+  int shootTargetId = -1;           // For type == Shoot at a locked-on figure.
+  // Free-aim shot (issue #129): type == Shoot with hasAimPoint fires a real
+  // ballistic trace from the muzzle toward aimPoint instead of resolving
+  // against a locked target. shootTargetId stays -1 for these.
+  bool hasAimPoint = false;
+  glm::vec3 aimPoint{0.0f};
+  // Burst size for type == Shoot (issue #138): how many shots this one
+  // action fires, clamped to [1, MaxShotsPerAction(weapon, kRoundDuration)]
+  // wherever a plan is recorded or imported. Default 1 keeps every
+  // pre-burst scenario/golden unchanged.
+  int shots = 1;
 };
 
 // What a figure does, on its own, on a tick where at least one living enemy
@@ -55,6 +77,10 @@ struct SquadPlaybook {
       {ReactionAction::Continue, ReactionAction::ShootContinue},   // Moving.
   };
 
+  // When true, a stationary figure ignores visible enemies that are idle
+  // (not mid-move) and only reacts to ones moving into view.
+  bool ignoreIdle = false;
+
   // All-neutral table (never shoots or stops); for tests/scenarios that
   // aren't about reactions.
   static SquadPlaybook Passive() {
@@ -72,7 +98,7 @@ struct SquadPlaybook {
     for (int m = 0; m < 2; ++m)
       for (int s = 0; s < 2; ++s)
         if (table[m][s] != o.table[m][s]) return false;
-    return true;
+    return ignoreIdle == o.ignoreIdle;
   }
   bool operator!=(const SquadPlaybook& o) const { return !(*this == o); }
 };
@@ -82,6 +108,12 @@ struct Unit {
   Team team = Team::Blue;
   glm::vec3 position{0.0f};  // Feet position; unit box spans [position, position + (0,height,0)].
   float facingYaw = 0.0f;    // Radians, measured from +X axis in the XZ plane.
+  // Visual-only turn animation (issue #237): how far (signed radians,
+  // wrapped to [-pi, pi]) the figure's drawn heading still trails the sim's
+  // discrete facingYaw. Set by SetFacingYaw, eased to 0 by GameLogic::Update.
+  // Stored (and mirrored in snapshots) like walkPhase so live, follower and
+  // replay frames all draw the same pose; the sim never reads it.
+  float turnLag = 0.0f;
   bool alive = true;
   // Visual-only fall state for a downed unit. Axis is horizontal; tipping
   // around it topples the figure in the shot's direction of travel.
@@ -101,9 +133,21 @@ struct Unit {
   // arm can swing onto the target even when it sits off-center in the FOV.
   float shootElapsed = -1.0f;
   float shootAimYaw = 0.0f;
+  // Visual-only zipline ride (drives the mount / hang / dismount pose):
+  // distance travelled along the cable (<0 = not riding), the cable's
+  // length and its slope (rise over run, + = riding uphill).
+  float rideTravel = -1.0f;
+  float rideLength = 0.0f;
+  float rideSlope = 0.0f;
+  // Neutral flag (CTF): true while this figure carries it (stowed on its
+  // back; derived from GameLogic's flag state), and seconds since it picked
+  // the flag up (<0 = none) for the visual reach beat.
+  bool carryingFlag = false;
+  float grabElapsed = -1.0f;
   float runSpeed = constants::kMoveSpeed;  // World units per second while moving.
-  // Visual-only loadout (issue #126): the model in the figure's hands and
-  // the carry/aim animation class. Creation sites assign
+  // Loadout (issue #126): the model in the figure's hands and the carry/aim
+  // animation class; since issue #138 also the magazine/fire-interval cap on
+  // one shooting action's burst (see WeaponStats). Creation sites assign
   // DefaultWeaponForUnit(id) once the id is known.
   WeaponType weapon = WeaponType::AssaultRifle;
   PlannedAction plan;  // This figure's plan for the current/upcoming round commit.
@@ -123,6 +167,19 @@ struct Unit {
     const glm::vec3 right(-fwd.z, 0.0f, fwd.x);
     return position + fwd * constants::kMuzzleForward + right * constants::kMuzzleSide +
            glm::vec3(0.0f, constants::kMuzzleHeight, 0.0f);
+  }
+
+  // The animated heading the body, FoV cone and facing marker are drawn at.
+  float VisualYaw() const { return facingYaw - turnLag; }
+
+  // Turns the sim heading, keeping the drawn heading continuous: the angle
+  // between old and new facing is added to turnLag (shortest arc) so the
+  // visuals rotate there over the next few ticks instead of snapping.
+  void SetFacingYaw(float yaw) {
+    constexpr float kTwoPi = 6.28318530717958647692f;
+    if (yaw == facingYaw) return;
+    turnLag = std::remainder(turnLag + (yaw - facingYaw), kTwoPi);
+    facingYaw = yaw;
   }
 
   glm::vec3 FacingDirection() const {

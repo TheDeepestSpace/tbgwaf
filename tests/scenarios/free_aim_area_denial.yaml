@@ -1,0 +1,29 @@
+name: free_aim_area_denial
+description: >
+  Issue #129 area denial / bluff: a free-aim shot at an empty point is a legal play. It
+  hits nobody (even with a guaranteed roll pinned -- there is simply nothing in the
+  trace), leaks no information about the unseen enemy, and still swings the figure to
+  cover the point it fired at.
+
+shot_rolls: [0.0]
+
+units:
+  - {id: 0, team: blue, position: [-6, 0, 0], facing_degrees: 180}
+  - {id: 1, team: red, position: [-6, 0, 8], facing_degrees: -90}
+
+script:
+  - assert: {unit: 1, visible_to: blue, visible: false}
+
+  - action: shoot
+    description: Blue0 covers the empty south-east corner.
+    actor: 0
+    at: [6, 0, -6]
+  - action: pass
+    actor: 1
+  - action: commit
+
+  - assert: {unit: 1, alive: true}
+  - assert: {unit: 1, remembered_by: blue, remembered: false, comment: No info leak either way}
+  - assert: {unit: 1, visible_to: blue, visible: false}
+  - assert: {unit: 0, facing_degrees: -26.57, tolerance: 1.0, comment: Faces the denied area}
+  - assert: {round: 2}

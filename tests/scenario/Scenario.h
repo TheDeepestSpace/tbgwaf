@@ -13,6 +13,12 @@
 // `action: commit` step, which mirrors clicking "Commit Round" and plays
 // out every figure's plan on both teams simultaneously.
 //
+// Optional top-level `flag: {position: [x, z] | [x, y, z], win_on_grab: bool}`
+// enables the neutral flag objective (position defaults to the map center or
+// the nearest free spot; win_on_grab defaults to true, false just carries/
+// drops it and play goes on). `round_limit: N` ends the match as a draw after
+// N rounds with no winner.
+//
 // `map.half_extent` sizes the ground square; units must start inside it.
 //
 // See tests/scenarios/*.yaml for the file format by example, and
@@ -30,17 +36,32 @@
 
 namespace tactics {
 class GameLogic;
+class TurnTimeline;
+class TimelinePlayback;
 }
 
 namespace tactics::scenario {
 
 struct ScenarioAction {
+  // Timeline* kinds (issue #143) drive the match's TurnTimeline replay the
+  // way the HUD strip does: `timeline_seek` (field `tick`) snaps the replay
+  // to a tick (0 = Start, 1 = T1, ...; the newest tick returns to the live
+  // view), `timeline_play` starts/resumes playback and advances it by
+  // `seconds` of replay time, `timeline_pause` pauses it. While the replay
+  // is active, subsequent `assert` steps check the *replayed* state.
+  // Aim (issue #129) is the tap-to-place half of a free-aim shot: it enters
+  // shoot-target mode and places the "+" aim marker without confirming, so
+  // the step ends mid-aim (for visual captures of the aiming UI). A
+  // following `shoot` step by the same actor confirms it (the Fire button).
   // BeginMove opens move planning (select + Move) and deliberately stops
   // there, leaving the movement frontier up for the visual runner's
   // post-action capture; no destination is clicked and no plan is recorded.
-  enum class Kind { Move, BeginMove, Shoot, Pass, Cancel, Commit, Focus, NewGame };
+  enum class Kind {
+    Move, BeginMove, Shoot, Aim, Pass, Cancel, Commit, Focus, NewGame,
+    TimelineSeek, TimelinePlay, TimelinePause, Wait,
+  };
 
-  int actor = -1;  // Unused (and not required in YAML) for Commit/NewGame.
+  int actor = -1;  // Unused (and not required in YAML) for Commit/NewGame/Timeline*.
   Kind kind = Kind::Pass;
   glm::vec3 destination{0.0f};  // Move only: the last leg's end.
   std::vector<glm::vec3> waypoints;  // Move only: earlier leg ends, clicked in
@@ -48,10 +69,33 @@ struct ScenarioAction {
                                       // plan, one leg executes per round).
   std::optional<float> finalFacingDegrees;  // Move only: re-aims the planned
                                              // wireframe before commit.
-  int target = -1;              // Shoot only.
+  bool expectUnreachable = false;           // Move only: `destination` must be
+                                             // rejected (no walk or zipline
+                                             // plan fits the budget); nothing
+                                             // is planned. Waypoints are
+                                             // clicked first as usual.
+  int target = -1;              // Shoot only: locked-on figure target.
   bool expectNoop = false;      // Shoot only: the click is expected not to
                                  // resolve (e.g. target outside the
                                  // shooter's team FOV) and not record a plan.
+  int timelineTick = 0;         // TimelineSeek only.
+  float playSeconds = 0.0f;     // TimelinePlay/Wait: time to advance.
+  // Shoot/Aim free-aim forms (issue #129), mutually exclusive with `target`:
+  // either the already-resolved world aim point (`at`, the protocol form --
+  // deliberate blind fire at any point), or a camera-style ray
+  // (`aim_from`/`aim_dir`) run through GameLogic::ResolveAimRay exactly like
+  // a real click, so unit-under-cursor/surface precedence is what the
+  // player would get; a ray with no aimable surface places nothing.
+  std::optional<glm::vec3> shootAt;
+  std::optional<glm::vec3> aimRayFrom;
+  std::optional<glm::vec3> aimRayDir;
+  // Shoot/Aim only (issue #138): burst size dialed in on the shot-level bar
+  // before the target click / Fire press. Routed through
+  // GameLogic::SetPlannedShotCount, so it clamps exactly like the UI
+  // (never below 1, never past the weapon's magazine/round-window cap).
+  // Absent means "bar untouched": the plan keeps whatever level is dialed in
+  // (1 unless an earlier step of the same aim set it).
+  std::optional<int> shots;
 };
 
 // Every field is optional; only the ones present in the YAML step are
@@ -71,13 +115,26 @@ struct ScenarioAssertion {
   std::optional<Team> expectedWinner;  // nullopt means "no winner yet".
 
   // Sighting memory: `remembered_by` team has (remembered=true) or has no
-  // (false) remembered trail of `unit`; `memory_age` is the oldest sample's
-  // ageRounds (rounds completed since it was recorded).
+  // (false) remembered trail of `unit`; `ghost_alpha` is the oldest
+  // sample's current opacity (GameLogic::GhostAlpha), within `tolerance`.
   std::optional<Team> rememberedByTeam;
   std::optional<bool> remembered;
-  std::optional<int> memoryAge;
+  std::optional<float> ghostAlpha;
 
   std::optional<int> round;
+
+  // Number of ticks on the match's turn timeline (game start + one per
+  // completed round; a new game resets it to 1). Issue #143.
+  std::optional<int> timelineTicks;
+  // Neutral flag (CTF part 1). `flag_carrier`: id of the carrying figure, or
+  // -1 when nobody carries it. `flag_state`: "rest" (never picked up),
+  // "carried" or "dropped". `flag_position`: where it is now (the carrier's
+  // feet while carried), within `tolerance`. `flag_visible_to`: the team's
+  // fog-of-war view includes the flag.
+  std::optional<int> flagCarrier;
+  std::optional<std::string> flagState;
+  std::optional<glm::vec3> flagPosition;
+  std::optional<Team> flagVisibleTo;
 };
 
 struct ScenarioStep {
@@ -90,6 +147,13 @@ struct Scenario {
   std::string sourcePath;
   Scene scene;
   SquadPlaybook playbooks[2] = {SquadPlaybook::Passive(), SquadPlaybook::Passive()};  // Indexed by Team; passive unless the YAML sets `playbook`.
+  // `friendly_fire: false` flips the single config flag that makes
+  // same-team figures transparent to free-aim ballistic traces.
+  bool friendlyFire = true;
+  // `shot_rolls: [0.1, 0.9, ...]`: pins the shot RNG for deterministic
+  // outcomes -- rolls are consumed in resolution order and the list repeats
+  // when exhausted. Empty keeps the default seeded RNG.
+  std::vector<float> shotRolls;
   std::vector<ScenarioStep> steps;
   // Optional visual-runner camera adjustments (both panes), applied after
   // the initial view is fitted to the map: orbit target on the ground plane,
@@ -100,9 +164,13 @@ struct Scenario {
   // the logic-only runner.
   //   fov_overlay: "cpu" (default) | "shadow_map" -- issue #110 prototype.
   //   fov_probe_height: shadow_map only; see SceneRenderer::SetFovProbeHeight.
+  //   thermal: false (default) | true -- thermal render prototype.
+  //   thermal_black_hot: true (default) | false -- white-hot when false.
   enum class FovOverlay { Cpu, ShadowMap };
   FovOverlay fovOverlay = FovOverlay::Cpu;
   float fovProbeHeight = 0.0f;
+  bool thermal = false;
+  bool thermalBlackHot = true;
 };
 
 // Throws std::runtime_error with a descriptive message on malformed YAML.
@@ -162,6 +230,14 @@ struct PlaybackHooks {
   // figure is selected. The visual runner eases the owning pane's camera
   // over the figure's movement frontier here, emitting its own frames.
   std::function<void(const GameLogic&, int unitId, Team team)> onFocus;
+
+  // Fired once before the first step with the turn-timeline recorder and
+  // replay controller that drive the scenario's `timeline_*` steps (both
+  // outlive the RunScenario call). Lets the visual runner draw the HUD
+  // timeline strip for scenarios that script it. When a replay is active,
+  // the GameLogic passed to onFrame/onActionComplete is the *replayed*
+  // state, exactly what the app would render.
+  std::function<void(const TurnTimeline&, const TimelinePlayback&)> onTimeline;
 };
 
 // Runs `scenario` against a fresh GameLogic instance built from its scene,

@@ -1,0 +1,52 @@
+name: timeline_new_game
+description: >
+  Turn timeline (issue #143): a new game truncates the recorded history. One round is
+  played and replayed from its Start tick, then `new_game` restarts the match the way
+  the UI does: the timeline resets to a single Start tick (any replay in progress is
+  dropped, back to the live view -- cf. issue #124's reset coverage), and the new match
+  records and replays its own history independently of the old one's.
+
+map:
+  obstacles: []
+
+units:
+  - {id: 0, team: blue, position: [-8, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [8, 0, 0], facing_degrees: 180}
+
+script:
+  # ---- Game 1: one recorded round, then view its start. ----
+  - action: move
+    actor: 0
+    destination: [0, 0, 0]
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {round: 2, timeline_ticks: 2}
+  - action: timeline_seek
+    tick: 0
+  - assert: {round: 1}
+  - assert: {unit: 0, position: [-8, 0, 0]}
+
+  # ---- New game: history resets to just the Start tick, replay is dropped. ----
+  - action: new_game
+  - assert: {round: 1, timeline_ticks: 1}
+  - assert: {unit: 0, position: [-8, 0, 0]}
+
+  # ---- Game 2 records its own history. ----
+  - action: move
+    actor: 0
+    destination: [-2, 0, 4]
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {round: 2, timeline_ticks: 2}
+  - assert: {unit: 0, position: [-2, 0, 4]}
+  - action: timeline_seek
+    tick: 0
+  - assert: {round: 1}
+  - assert: {unit: 0, position: [-8, 0, 0]}
+  - action: timeline_play
+    seconds: 10
+    comment: Replays game 2's round to the live end and pauses there.
+  - assert: {round: 2}
+  - assert: {unit: 0, position: [-2, 0, 4]}

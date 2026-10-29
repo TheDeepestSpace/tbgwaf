@@ -1,0 +1,54 @@
+name: burst_stops_on_early_death
+description: >
+  A burst keeps firing after its target goes down (the whole requested magazine level is
+  taken, issue #140) -- but a dead SHOOTER releases the trigger: blue 0 plans a full
+  30-shot AR mag dump, fires its first shot at t=0 (simultaneous with the red sniper's
+  pinned hit that kills it), and the remaining 29 shots are never taken. Roll alignment
+  proves it: the red Deagle's 2-shot burst fires its second shot at t=0.5, and only
+  because blue 0's trigger went silent does that shot draw the 4th pinned roll (a hit,
+  downing blue 1). Had blue 0 kept firing, its shots at t=0.16/0.32/0.48 would consume
+  the rolls in between and blue 1 would survive (and the wrapped roll list would down
+  red 3, failing that assert too). The duelists stand close (5 apart) so every scattered
+  bullet is geometrically certain to cross its figure -- a bullet that misses the body
+  outright would consume no roll and break the alignment.
+
+units:
+  - {id: 0, team: blue, position: [-2.5, 0, -4], facing_degrees: 0}  # Assault rifle, mag-dumps 30.
+  - {id: 1, team: blue, position: [-2.5, 0, 0], facing_degrees: 0}   # Sniper rifle; passes.
+  - {id: 2, team: blue, position: [-2.5, 0, 4], facing_degrees: 0}   # Desert Eagle; passes.
+  - {id: 3, team: red, position: [2.5, 0, -4], facing_degrees: 180}  # Passes.
+  - {id: 4, team: red, position: [2.5, 0, 0], facing_degrees: 180}   # Sniper: kills blue 0 at t=0.
+  - {id: 5, team: red, position: [2.5, 0, 4], facing_degrees: 180}   # Deagle: 2-shot burst at blue 1.
+
+# Schedule order at t=0: blue 0's shot 1 (miss), red 4's kill shot on blue 0
+# (hit), red 5's shot 1 (miss); then at t=0.5 red 5's shot 2 draws the 4th
+# roll (hit) -- blue 0's burst stopped with its shooter.
+shot_rolls: [0.9, 0.05, 0.9, 0.05]
+
+script:
+  - action: shoot
+    description: Full 30-shot mag dump planned; only shot 1 is ever taken -- the shooter dies to the simultaneous t=0 sniper shot.
+    actor: 0
+    target: 3
+    shots: 30
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: pass
+    actor: 3
+  - action: shoot
+    actor: 4
+    target: 0
+  - action: shoot
+    description: 2-shot Deagle burst; its 0.5 s-later second shot is the roll-alignment probe.
+    actor: 5
+    target: 1
+    shots: 2
+  - action: commit
+
+  - assert: {unit: 0, alive: false, comment: Killed at t=0 by the red sniper}
+  - assert: {unit: 3, alive: true, comment: Blue 0's single taken shot was a pinned miss}
+  - assert: {unit: 1, alive: false, comment: Down to the Deagle's 2nd shot drawing the 4th roll -- proof blue 0 stopped at 1}
+  - assert: {winner: none}
+  - assert: {round: 2}

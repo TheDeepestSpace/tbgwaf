@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -23,6 +24,10 @@ struct AABB {
   glm::vec3 HalfExtents() const { return (max - min) * 0.5f; }
 };
 
+// Semantic tag used only to group static render geometry; collision, LOS,
+// and navigation treat both kinds identically.
+enum class ObstacleKind { Generic, StreetFurniture };
+
 // A map obstacle. `climbable` obstacles get a navmesh connection from
 // ground level up to their top surface (see NavMesh); non-climbable
 // obstacles are simply impassable walls.
@@ -34,6 +39,82 @@ struct Obstacle {
   // phase and vertical extent; collision, LOS, navigation and rendering use
   // these vertices when present.
   std::vector<glm::vec2> footprint;
+  // Small curb-side items share collision/LOS semantics with every other
+  // obstacle but are tagged so the renderer can batch their static geometry.
+  ObstacleKind kind = ObstacleKind::Generic;
+  // Index into Scene::buildings when this prism is (part of) a generated
+  // building, else -1 (hand-placed boxes, rocks, pier columns, crates). The
+  // renderer reads the building's facade style through it.
+  int building = -1;
+  // Blocks movement and LOS but is never drawn: the unseen wall along a
+  // terrain cliff edge, whose face the terrain mesh itself renders.
+  bool navOnly = false;
+};
+
+// Building archetype (urban map issue #151, roadmap 3.2). Drawn per parcel
+// from a street-class-weighted table with a per-block character bias;
+// drives floor count/height (so the building's height) and the facade style.
+enum class BuildingKind : uint8_t {
+  Residential,  // Apartments: 3.0 floors, brick/plaster.
+  MixedUse,     // Shops under apartments: 4.0 ground floor, awning.
+  Office,       // 3.5 floors, glassy; upper storeys may step back.
+  Commercial,   // Single-storey shop/warehouse hall, no awning (loading door).
+  Civic,        // Landmark: the towers.
+  Garage,       // Parking decks: low 2.8 floors, raw concrete.
+};
+constexpr int kBuildingKindCount = 6;
+const char* BuildingKindName(BuildingKind kind);
+
+// One generated building: the gameplay geometry stays the solid Obstacle
+// prism(s); this record is the typology beside it.
+struct Building {
+  BuildingKind kind = BuildingKind::Residential;
+  int floorCount = 1;
+  float groundFloorHeight = 3.0f;  // First floor; the rest are floorHeight.
+  float floorHeight = 3.0f;
+  // Facade palette index the renderer reads (kind * variants + variant).
+  int style = 0;
+  int obstacle = -1;       // Base prism (full parcel footprint).
+  int upperObstacle = -1;  // Top floor stepped back as its own prism (offices), else -1.
+  int parcel = -1;         // Index into UrbanParcels(seed, config).
+  int block = -1;
+
+  float Height() const {
+    return groundFloorHeight + static_cast<float>(floorCount - 1) * floorHeight;
+  }
+};
+
+// Visual-only massing detail (roadmap 3.3): a prism over a convex XZ
+// footprint between y0 and y1. Blocks sight lines and FOV (see
+// SightObstacles). Parapets and roof fixtures also block walking: they are
+// copied into WalkSurface::blockers of their roof slab. Awnings are overhead.
+struct MassingDetail {
+  enum class Kind : uint8_t { Parapet, RoofFixture, Awning };
+  Kind kind = Kind::Parapet;
+  std::vector<glm::vec2> footprint;  // Counter-clockwise.
+  float y0 = 0.0f, y1 = 0.0f;
+  int building = -1;
+};
+
+// A window or door on a generated building's facade (issue #152, roadmap
+// 3.4). Openings are recorded as data; the renderer builds pane extrusions
+// from them (window frames extruded out of the wall, doors and factory
+// windows recessed into it), so stage 5 can turn the same records into real
+// holes without re-rolling where they are. The opening lies on footprint edge `wallEdge`
+// (footprint[wallEdge] -> footprint[wallEdge + 1]) of
+// Scene::obstacles[obstacle]: `u0..u1` world units along that edge from its
+// first vertex, `y0..y1` world heights. A door whose y0 sits above the wall
+// base opens onto a raised stoop or rear platform (a facade WalkSurface
+// emitted alongside it).
+struct FacadeOpening {
+  enum class Kind : uint8_t { Window, Door };
+  Kind kind = Kind::Window;
+  int building = -1;  // Index into Scene::buildings.
+  int obstacle = -1;  // Wall prism the opening sits on.
+  int wallEdge = 0;
+  float u0 = 0.0f, u1 = 0.0f;
+  float y0 = 0.0f, y1 = 0.0f;
+  int floor = 0;
 };
 
 // A convex, planar walkable patch above (or sloping away from) the ground.
@@ -44,13 +125,50 @@ struct WalkSurface {
   std::vector<glm::vec3> vertices;  // Counter-clockwise when viewed from above.
   std::vector<int> neighbors;
   bool connectsToGround = false;    // The lowest edge is a legal ground transition.
+  // Convex XZ footprints standing on the patch (roof parapets, furniture)
+  // that a figure can't walk into. Honoured on single-patch routes only.
+  std::vector<std::vector<glm::vec2>> blockers;
 };
+
+// A pre-built zipline: a two-way cable between a ground anchor post and a
+// rooftop anchor post (ground-to-roof access to a building). `a`/`b` are the
+// anchor foot positions (where a rider steps on/off: street level at one end,
+// the roof surface at the other, in either order); the cable runs between
+// the post tops (see constants::kZiplinePostHeight) and the rider glides
+// straight from one foot position to the other (hanging from the cable, see
+// constants::kZiplineHangLift). One rider at a time. Riding costs
+// ZiplineRideCost() of a figure's move budget.
+struct Zipline {
+  glm::vec3 a{0.0f};
+  glm::vec3 b{0.0f};
+
+  float Length() const { return glm::distance(a, b); }
+};
+
+// Move-budget cost of riding `zipline` end to end: proportional to its
+// length (constants::kZiplineCostFactor), in the same units as walking.
+inline float ZiplineRideCost(const Zipline& zipline);
 
 // Visual road pavement. Elevated/ramp pavement is represented by
 // WalkSurface instead so its rendered geometry and gameplay surface are one
 // and the same.
 struct RoadSurface {
   std::vector<glm::vec3> vertices;
+};
+
+// A visual street fixture (issue #150): traffic lights at bigger junctions,
+// stop/yield signs at smaller ones, street-name signs at block corners, and
+// the curved arm/head of a lamp whose collision post remains an `Obstacle`.
+// Fixtures are ignored by collision/navmesh/gameplay LOS, but their rendered
+// geometry participates in both lighting shadows and the shadow-map FOV pass.
+enum class StreetPropKind { TrafficLight, StopSign, YieldSign, StreetNameSign, LampPost };
+struct StreetProp {
+  StreetPropKind kind = StreetPropKind::TrafficLight;
+  glm::vec3 position{0.0f};  // Foot of the post.
+  float yaw = 0.0f;          // Facing/primary street heading about Y (0 = +X).
+  // The other incident street's true heading for crossed street-name blades;
+  // ignored by the other fixture kinds.
+  float secondaryYaw = 0.0f;
 };
 
 inline std::vector<glm::vec2> ObstacleFootprint(const Obstacle& obstacle) {
@@ -63,7 +181,7 @@ inline std::vector<glm::vec2> ObstacleFootprint(const Obstacle& obstacle) {
 
 // Sampled ground elevation over a regular XZ grid: sample (ix, iz) sits at
 // (minX + ix*step, minZ + iz*step). An empty field means flat ground at
-// y = 0 everywhere (the hand-authored and urban scenes), so every consumer
+// y = 0 everywhere (the hand-authored and terrain-disabled urban scenes), so every consumer
 // can sample unconditionally. Queries outside the grid clamp to the border.
 struct HeightField {
   float minX = 0.0f, minZ = 0.0f;
@@ -134,6 +252,17 @@ constexpr float kAgentRadius = 0.4f;     // Padding used to inflate obstacles fo
 constexpr float kUnitHalfWidth = 0.35f;
 constexpr float kUnitHeight = 1.8f;
 constexpr float kEyeHeight = 1.5f;
+// Ground beneath a deck/ramp is only walkable with at least this much headroom.
+constexpr float kMinDeckHeadroom = 2.2f;
+// Steepest ground a figure can walk (rise over run). Stair flights (0.8) and
+// road ramps (0.3) pass; the sheer sides of stair, ramp and level blocks do
+// not, so an upper level is reachable only by walking up its stair or ramp.
+// Equivalent to a 0.3 step over one 0.25 sample.
+constexpr float kMaxWalkSlope = 1.2f;
+// Where a locked-on shot aims on the target figure: torso center height.
+// Shared by the ballistics (burst aim point), the staged-lock "+" marker and
+// the planned-shot cone, so what the cone shader shows is what gets shot at.
+constexpr float kTorsoAimHeight = 0.9f;
 // Sighting range: effectively unlimited (exceeds any generated map's diagonal).
 // Visibility stays on this so capping the shot range doesn't shrink what a team sees.
 constexpr float kSightRange = 250.0f;
@@ -146,12 +275,13 @@ constexpr float kMuzzleForward = 0.85f;
 constexpr float kMuzzleHeight = 0.93f;
 constexpr float kMuzzleSide = 0.30f;
 constexpr float kConeStartAlpha = 0.5f;  // Shot-cone opacity at the gun tip; fades to 0 at kShootRange.
-// Half-angle of the drawn shot-dispersion cone: a narrow wedge at the gun tip
-// showing where a shot may stray from the aim line. Overlay only; the hard
-// shot gate stays kShootHalfFovDegrees.
-constexpr float kShotConeHalfAngleDegrees = 3.0f;
 constexpr float kShootHalfFovDegrees = 75.0f;  // 150 degree total FOV cone.
-constexpr float kKnockdownDuration = 0.4f;  // Seconds for a hit unit to fall over.
+constexpr float kKnockdownDuration = 0.4f;  // Seconds for the rigid (non-ragdoll) tip-over.
+// Longest a ragdoll fall can run (gfx/Ragdoll.h simulates at most this much);
+// knockdownElapsed stops here. It only advances while a round executes (or
+// the match is over), so a fall cut short by the end of a round freezes and
+// resumes with the next one.
+constexpr float kKnockdownMaxSeconds = 5.0f;
 // Visual-only figure animation (procedural humanoid, see gfx/SceneRenderer):
 // the walk cycle is driven by distance travelled -- one full stride cycle
 // (both legs) per kWalkStrideLength world units, so limbs stay in step with
@@ -160,12 +290,27 @@ constexpr float kKnockdownDuration = 0.4f;  // Seconds for a hit unit to fall ov
 // figure stopping mid-stride settles instead of snapping to rest.
 constexpr float kWalkStrideLength = 1.5f;
 constexpr float kWalkBlendRate = 12.0f;  // Per second; ~90% settled after 0.2 s.
+// Turn animation (issue #237): the drawn heading trails the sim's discrete
+// facing and closes the gap with an ease-out (kTurnLagRate, exponential, so
+// big turns start fast) plus a linear floor (kTurnMinSpeed) so it finishes
+// promptly. Roughly 0.15 s for 45-90 degrees and 0.2 s for a 180 about-face.
+constexpr float kTurnLagRate = 14.0f;      // Per second.
+constexpr float kTurnMinSpeed = 6.0f;      // Radians per second.
+// A shooter's drawn heading eases onto the shot bearing and holds it for this
+// long into the shot beat (the rest is the lower-weapon tail); after that it
+// eases back to the sim facing (e.g. the direction of travel).
+constexpr float kShootTurnHold = 0.45f;
 // Duration of the CC0 idle clip retargeted by the procedural figure rig.
 constexpr float kIdleAnimDuration = 3.3333333f;
 // Quick-draw pistol beat played by a shooter whose shot resolves: a short
 // draw/aim raise, then a recoil kick that decays back down. Purely
 // presentational; hit resolution itself stays instantaneous.
 constexpr float kShootAnimDuration = 0.7f;
+// Time into the shot beat at which the draw/raise ends and the muzzle
+// fires (the recoil kick starts). Follow-up shots of a burst (issue #140)
+// re-trigger the beat from here while it is still playing, so the weapon
+// stays shouldered between shots instead of re-drawing every time.
+constexpr float kShootRecoilStart = 0.12f;
 constexpr float kMoveSpeed = 4.0f;  // Default run speed, world units per second.
 // WEGO rounds: both teams' committed plans execute together over one
 // fixed-length window. A figure's plannable move distance is bounded by
@@ -176,12 +321,50 @@ constexpr float kRoundDuration = 5.0f;  // Seconds of execution per round.
 // where a unit stands or faces; the renderer clips each ray at the map
 // boundary.
 constexpr float kFovConeVisualRange = kSightRange;
-// Enemy sighting memory: a figure continuously in FOV leaves one sample per
-// interval (plus one on entry). Samples fade per completed round (not in
-// real time) and are forgotten once fully faded.
+// Enemy ghosts: a figure continuously in FOV leaves one sample per interval
+// (plus one on entry) during a turn. Ghosts and bullet tracers show for that
+// turn only: once it ends each fades out over kGhostFadeDuration, starting
+// at the moment it appeared (same order and spacing). Nothing carries over
+// to the next turn.
 constexpr float kSightingSampleInterval = 0.5f;
-constexpr float kSightingFadePerRound = 1.0f / 3.0f;  // Fraction of opacity lost each round.
-constexpr int kSightingMemoryRounds = 3;       // 1 / kSightingFadePerRound.
+constexpr float kGhostFadeDuration = kSightingSampleInterval;
+// Timeline replay has no planning phase to fade in, so ghosts and tracers
+// instead live on their own clock and carry over into the next turn: a ghost
+// holds kReplayGhostHold after appearing, then fades over kGhostFadeDuration;
+// a bullet line fades out over kReplayTracerLife after the shot.
+constexpr float kReplayGhostHold = 1.0f;
+constexpr float kReplayTracerLife = 1.0f;
+// Ziplines: ride cost per world unit of cable, as a fraction of the cost of
+// walking the same distance (0.25 = riding is 4x cheaper than running, so a
+// 20-unit line costs 5 units of the 20-unit round budget). Longer line =
+// more of the turn spent. Tune here; everything (planning, frontier,
+// execution speed) derives from it.
+constexpr float kZiplineCostFactor = 0.25f;
+constexpr float kZiplinePostHeight = 1.7f;  // Short anchor post: cable-end height above its foot position.
+// A rider hangs from a trolley on the cable with the feet this far above the
+// foot-to-foot line mid-ride; the lift eases in over the first (mount) and
+// out over the last (dismount) kZiplineMountDistance of the cable.
+constexpr float kZiplineHangLift = 0.2f;
+constexpr float kZiplineMountDistance = 1.4f;
+// Free-aim shooting (issue #129). Friendly fire is on by default; the single
+// flag below (mirrored per GameLogic instance, settable from scenarios) is
+// the one switch that disables it, making friendlies transparent to the
+// ballistic trace.
+constexpr bool kFriendlyFireDefault = true;
+// A free-aim trace flies until it hits something, capped at the sight range
+// (chance has long since fallen off by then; there is no hard shot range cap).
+constexpr float kAimTraceRange = kSightRange;
+// Neutral flag objective (CTF part 1). A living figure whose path touches
+// the flag -- within kFlagGrabRadius in XZ and kFlagGrabHeight vertically
+// (so a deck above/below the flag does not grab it) -- picks it up for free.
+constexpr float kFlagGrabRadius = 0.6f;
+constexpr float kFlagGrabHeight = 1.2f;
+constexpr float kGrabAnimDuration = 0.6f;  // Visual reach/pickup beat on the grabber.
+constexpr float kFlagDropDuration = 0.8f;  // Visual drop/plant settle of a dropped flag.
 }  // namespace constants
+
+inline float ZiplineRideCost(const Zipline& zipline) {
+  return zipline.Length() * constants::kZiplineCostFactor;
+}
 
 }  // namespace tactics

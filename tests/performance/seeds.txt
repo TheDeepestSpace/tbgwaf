@@ -1,0 +1,12 @@
+# Randomly selected once for issue #202. Keep this list stable so every run
+# renders the same urban-auto maps and remains directly comparable.
+857197117
+2626763209
+1363136209
+1916785565
+717769303
+1426808689
+1572775524
+828253415
+795514493
+4017845533

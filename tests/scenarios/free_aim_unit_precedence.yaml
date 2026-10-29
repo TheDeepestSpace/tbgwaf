@@ -1,0 +1,26 @@
+name: free_aim_unit_precedence
+description: >
+  Issue #129 aim-point rule: a visible enemy figure under the cursor beats the surface
+  behind it -- the same camera ray that would land on the ground at red1's feet locks on
+  to red1 instead, producing the existing shoot-target plan (which resolves with the
+  pinned roll).
+
+shot_rolls: [0.0]
+
+units:
+  - {id: 0, team: blue, position: [-8, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [8, 0, 0], facing_degrees: 180}
+
+script:
+  - assert: {unit: 1, visible_to: blue, visible: true}
+  - action: shoot
+    description: The ray passes straight through red1's figure before reaching the ground, so the click is the familiar lock-on, not a free-aim placement.
+    actor: 0
+    aim_from: [8, 20, 0]
+    aim_dir: [0, -1, 0]
+  - action: pass
+    actor: 1
+  - action: commit
+
+  - assert: {unit: 1, alive: false, comment: The locked-on shot resolves with the pinned hit roll}
+  - assert: {winner: blue}

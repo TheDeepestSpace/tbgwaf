@@ -1,0 +1,22 @@
+name: playbook_stationary_shoots_idle_enemy
+description: >
+  Both sides have a stationary "shoot" playbook and both pass in plain view. Stationary
+  watchers react to visible idle enemies by default, so the round opens with shots fired.
+  Counterpart: playbook_ignore_idle_no_shots.
+
+playbook:
+  blue: {stationary_seen: shoot, stationary_unseen: shoot}
+  red: {stationary_seen: shoot, stationary_unseen: shoot}
+
+units:
+  - {id: 0, team: blue, position: [-4, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [4, 0, 0], facing_degrees: 180}
+
+script:
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, alive: false}
+  - assert: {unit: 1, alive: false}

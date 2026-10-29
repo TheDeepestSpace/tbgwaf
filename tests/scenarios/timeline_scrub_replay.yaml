@@ -1,0 +1,68 @@
+name: timeline_scrub_replay
+description: >
+  Turn timeline (issue #143): two rounds of movement are recorded, then replayed. Covers
+  replay from the Start tick (initial positions restored, mover mid-walk one second in),
+  scrubbing to another tick while playback is running (snaps there, keeps playing),
+  resuming from a mid-game tick, playing to the live end (playback pauses there on the
+  final state), and returning to the live view by scrubbing to the newest tick while
+  paused. Assertions after a timeline step check the replayed state, exactly what the
+  app renders while the replay is active.
+
+map:
+  obstacles: []
+
+units:
+  - {id: 0, team: blue, position: [-8, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [8, 0, 0], facing_degrees: 180}
+
+script:
+  # ---- Round 1: blue walks 8 units to the center. ----
+  - action: move
+    actor: 0
+    destination: [0, 0, 0]
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {round: 2, timeline_ticks: 2}
+
+  # ---- Round 2: blue walks 6 units north. ----
+  - action: move
+    actor: 0
+    destination: [0, 0, 6]
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {round: 3, timeline_ticks: 3}
+  - assert: {unit: 0, position: [0, 0, 6]}
+
+  # ---- Replay from the start. ----
+  - action: timeline_seek
+    tick: 0
+  - assert: {round: 1}
+  - assert: {unit: 0, position: [-8, 0, 0]}
+  - action: timeline_play
+    seconds: 1.0
+    comment: One second into the replayed first round the mover is mid-walk (4 u/s).
+  - assert: {unit: 0, position: [-4, 0, 0], tolerance: 0.5}
+
+  # ---- Scrub while playing: snap to T1, playback continues from there. ----
+  - action: timeline_seek
+    tick: 1
+  - assert: {round: 2}
+  - assert: {unit: 0, position: [0, 0, 0], tolerance: 0.1}
+  - action: timeline_play
+    seconds: 1.0
+  - assert: {unit: 0, position: [0, 0, 4], tolerance: 0.5}
+
+  # ---- Pause, then play through to the live end: pauses on the final state. ----
+  - action: timeline_pause
+  - action: timeline_play
+    seconds: 10
+  - assert: {round: 3}
+  - assert: {unit: 0, position: [0, 0, 6]}
+
+  # ---- Scrubbing to the newest tick while paused returns to the live view. ----
+  - action: timeline_seek
+    tick: 2
+  - assert: {round: 3}
+  - assert: {unit: 0, position: [0, 0, 6]}

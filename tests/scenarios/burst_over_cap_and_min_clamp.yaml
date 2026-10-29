@@ -1,0 +1,59 @@
+name: burst_over_cap_and_min_clamp
+description: >
+  Burst-size clamping (issue #138): shots above the weapon's cap clamp down to it (the AR
+  asks for 99 but fires exactly 30), and shots below 1 clamp up to the single-shot minimum
+  (the sniper asks for 0 but still fires once). Rolls are consumed in shot-schedule order
+  (issue #140): the sniper's and Deagle's single shots fire at t=0 right after the AR's
+  first (rolls 2 and 3, both pinned hits), then the AR's remaining 29 shots pace out at
+  0.16 s. The proofs: a 0-shot sniper action would hand its hit roll to the Deagle one
+  slot early (unit 4 would survive), and an unclamped 31st AR shot at t=4.8 would consume
+  the trailing pinned hit roll and down unit 3. The duelists stand close (5 apart) so
+  every scattered bullet is geometrically certain to cross its figure -- a bullet that
+  misses the body outright would consume no roll and break the alignment.
+
+units:
+  - {id: 0, team: blue, position: [-2.5, 0, -4], facing_degrees: 0}  # Assault rifle, cap 30.
+  - {id: 1, team: blue, position: [-2.5, 0, 0], facing_degrees: 0}   # Sniper rifle.
+  - {id: 2, team: blue, position: [-2.5, 0, 4], facing_degrees: 0}   # Desert Eagle.
+  - {id: 3, team: red, position: [2.5, 0, -4], facing_degrees: 180}
+  - {id: 4, team: red, position: [2.5, 0, 0], facing_degrees: 180}
+  - {id: 5, team: red, position: [2.5, 0, 4], facing_degrees: 180}
+
+# Schedule order: AR shot 1 (t=0, miss), sniper's clamped single shot (t=0,
+# hit), Deagle's default single shot (t=0, hit), then the AR's 29 remaining
+# misses. The trailing 33rd roll is a tripwire only an unclamped 31st AR
+# shot could reach -- consuming it would down unit 3 and fail the assert.
+shot_rolls: [0.9, 0.05, 0.05,
+             0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9,
+             0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9,
+             0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9,
+             0.05]
+
+script:
+  - action: shoot
+    description: Asks for 99 shots; the bar/setter clamps to the AR's 30-shot cap.
+    actor: 0
+    target: 3
+    shots: 99
+  - action: shoot
+    description: Asks for 0 shots; clamps up to the 1-shot minimum (never 0).
+    actor: 1
+    target: 4
+    shots: 0
+  - action: shoot
+    description: No shots key at all keeps the pre-burst default of 1.
+    actor: 2
+    target: 5
+  - action: pass
+    actor: 3
+  - action: pass
+    actor: 4
+  - action: pass
+    actor: 5
+  - action: commit
+
+  - assert: {unit: 3, alive: true, comment: All 30 clamped AR shots were pinned misses -- and no 31st shot reached the tripwire hit roll}
+  - assert: {unit: 4, alive: false, comment: "The clamped-to-1 sniper shot got the 2nd roll, a hit"}
+  - assert: {unit: 5, alive: false, comment: "The default single shot got the 3rd roll, a hit"}
+  - assert: {winner: none}
+  - assert: {round: 2}

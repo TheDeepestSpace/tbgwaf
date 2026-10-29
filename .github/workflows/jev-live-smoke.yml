@@ -1,0 +1,36 @@
+name: Jev live smoke
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/jev-live-smoke.yml"
+      - "scripts/jev_live_smoke.mjs"
+      - "server/jev-adapter/**"
+      - "src/ai/**"
+      - "web/jev-preview.js"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-smoke:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      TBGWAF_JEV_API_KEY: ${{ secrets.TBGWAF_JEV_API_KEY }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Require repository Jev secret
+        shell: bash
+        run: |
+          if [ -z "$TBGWAF_JEV_API_KEY" ]; then
+            echo "::error::TBGWAF_JEV_API_KEY is not available to this workflow"
+            exit 1
+          fi
+
+      - name: Run one-request live smoke
+        run: node scripts/jev_live_smoke.mjs

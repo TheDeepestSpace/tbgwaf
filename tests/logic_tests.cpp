@@ -3,6 +3,7 @@
 // dependency, so this runs in plain CI without a display.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <initializer_list>
@@ -12,6 +13,7 @@
 #include "game/NavMesh.h"
 #include "game/Raycast.h"
 #include "game/Scene.h"
+#include "game/TurnTimeline.h"
 #include "game/Types.h"
 #include "game/Visibility.h"
 
@@ -517,6 +519,9 @@ void TestRoundPlanningTeamGating() {
 
 void TestRoundCommitRequiresBothTeamsPlanned() {
   GameLogic game(LegacyScene());
+  // Locked shots scatter like free-aim ones now; the sniper's tight cone is
+  // the one geometrically certain to intersect a figure across the lane.
+  game.FindUnit(1)->weapon = WeaponType::SniperRifle;
 
   const glm::vec3 blue0Start = game.FindUnit(0)->position;
 
@@ -622,9 +627,24 @@ void TestRoundExecutesBothTeamsMovesConcurrently() {
   CHECK(game.RoundNumber() == 2);
 }
 
+void RunRound(GameLogic& game) {
+  int steps = 0;
+  while (game.Mode() == InputMode::Executing && steps < 10000) {
+    game.Update(0.02f);
+    ++steps;
+  }
+  CHECK(steps < 10000);
+}
+
 void TestShootRowsResolveSimultaneouslyAcrossTeams() {
   GameLogic game(LegacyScene());
+  MakePassive(game);
   game.SetShotRollSource([] { return 0.0f; });  // Pin rolls to a hit.
+  // The open-lane duelists get snipers: a pinned roll decides the hit only
+  // once the scattered bullet actually crosses the figure, and only the
+  // sniper's cone guarantees that geometrically at this distance.
+  game.FindUnit(1)->weapon = WeaponType::SniperRifle;
+  game.FindUnit(4)->weapon = WeaponType::SniperRifle;
   // Every figure shoots its opposite number in the same round. Rows z=-4 and
   // z=4 are behind the walls (all four of those shots must miss); row z=0 is
   // the open lane, so blue1 and red4 fire at each other simultaneously --
@@ -641,8 +661,9 @@ void TestShootRowsResolveSimultaneouslyAcrossTeams() {
   CHECK(game.CanCommitRound());
   game.CommitRound();
 
-  // No moves were planned, so the round resolves and finishes in the commit
-  // call itself: still-blocked shots can never connect once nobody moves.
+  // No moves were planned, so still-blocked shots can never connect; the
+  // round still plays out its full window before finishing.
+  RunRound(game);
   CHECK(game.Mode() == InputMode::AwaitingSelection);
   CHECK(game.FindUnit(0)->alive);
   CHECK(!game.FindUnit(1)->alive);  // Mutual open-lane exchange downs both...
@@ -654,9 +675,31 @@ void TestShootRowsResolveSimultaneouslyAcrossTeams() {
   CHECK(game.RoundNumber() == 2);
 }
 
+// Every round takes the full kRoundDuration, even when nobody has anything left to do.
+void TestIdleRoundRunsFullDuration() {
+  GameLogic game(LegacyScene());
+  MakePassive(game);
+  for (const Unit& u : game.GetScene().units) {
+    game.ClickUnit(u.id, u.team);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  CHECK(game.Mode() == InputMode::Executing);
+  float elapsed = 0.0f;
+  while (game.Mode() == InputMode::Executing && elapsed < 10.0f) {
+    game.Update(0.02f);
+    elapsed += 0.02f;
+  }
+  CHECK(std::fabs(elapsed - constants::kRoundDuration) < 0.05f);
+}
+
 void TestMutualEliminationIsDraw() {
   GameLogic game(LegacyScene());
   game.SetShotRollSource([] { return 0.0f; });  // Pin rolls to a hit.
+  // Snipers: tight enough scatter that both opening bullets are
+  // geometrically certain to cross their figure (see the rows test above).
+  game.FindUnit(1)->weapon = WeaponType::SniperRifle;
+  game.FindUnit(4)->weapon = WeaponType::SniperRifle;
   // Leave only the open middle lane's pair alive, shooting each other.
   for (int id : {0, 2, 3, 5}) game.FindUnit(id)->alive = false;
 
@@ -668,6 +711,7 @@ void TestMutualEliminationIsDraw() {
   game.ClickUnit(1, Team::Red);
   CHECK(game.CanCommitRound());
   game.CommitRound();
+  RunRound(game);
 
   // Both last figures down each other in the same tick: game over, no winner.
   CHECK(!game.FindUnit(1)->alive);
@@ -830,16 +874,20 @@ void TestPendingShotFiresWhenTargetWalksIntoView() {
   game.ChoosePass();
   game.ClickUnit(1, Team::Blue);
   game.ChooseShoot();
+  // Full magazine: individual bullets scatter and the first few may clip
+  // the wall corner red4 is just clearing, but a 30-round burst across the
+  // walk is certain to connect while red4 is still far from its goal.
+  game.SetPlannedShotCount(30, Team::Blue);
   game.ClickUnit(4, Team::Blue);
   game.ClickUnit(2, Team::Blue);
   game.ChoosePass();
 
-  // Red sends red4 out of cover, north along x=5 into the open lane.
+  // Red sends red4 out of cover, north along x=5 across the open lane.
   game.ClickUnit(3, Team::Red);
   game.ChoosePass();
   game.ClickUnit(4, Team::Red);
   game.ChooseMove();
-  const glm::vec3 destination(5.0f, 0.0f, 0.0f);
+  const glm::vec3 destination(5.0f, 0.0f, 4.0f);
   game.ClickGround(destination, Team::Red);
   game.FinishMovePlan();
   game.ClickUnit(5, Team::Red);
@@ -1153,15 +1201,6 @@ void SetStationaryShoot(GameLogic& game, Team team) {
 }
 
 // Runs the committed round to completion.
-void RunRound(GameLogic& game) {
-  int steps = 0;
-  while (game.Mode() == InputMode::Executing && steps < 10000) {
-    game.Update(0.02f);
-    ++steps;
-  }
-  CHECK(steps < 10000);
-}
-
 // Red4 walks east from behind blue1 (which faces +X). Applies `redPb` to red
 // and runs the round; returns red4's final distance to the destination.
 float RunRed4Walk(const SquadPlaybook& redPb, bool* red4Alive, bool* blue1Alive,
@@ -1216,6 +1255,25 @@ void TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds() {
   CHECK(game.RoundNumber() == 2);
 }
 
+// Shoot-on-sight is a magazine-long burst at the normal odds, not one
+// guaranteed shot: with every roll a miss the watcher keeps firing (several
+// rolls), the walker survives and keeps walking to its destination.
+void TestGameLogicPlaybookShootOnSightFiresWholeMagAtNormalOdds() {
+  GameLogic game(LegacyScene());
+  int rolls = 0;
+  game.SetShotRollSource([&rolls] {
+    ++rolls;
+    return 0.999f;  // Always a miss.
+  });
+  SetStationaryShoot(game, Team::Blue);
+  const glm::vec3 destination(0.0f, 0.0f, 0.0f);
+  StartRed4WalkThroughBlue1Lane(game, destination);
+  RunRound(game);
+  CHECK(game.FindUnit(4)->alive);
+  CHECK(glm::distance(game.FindUnit(4)->position, destination) < 1e-3f);
+  CHECK(rolls > 1);
+}
+
 void TestGameLogicPlaybookDefaultTable() {
   GameLogic game(LegacyScene());
   for (Team t : {Team::Blue, Team::Red}) {
@@ -1226,6 +1284,7 @@ void TestGameLogicPlaybookDefaultTable() {
   }
   game.SetPlaybook(Team::Blue, SquadPlaybook::Passive());
   CHECK(game.Playbook(Team::Blue).At(false, true) == ReactionAction::DoNothing);
+  game.SetPlaybook(Team::Red, SquadPlaybook::Passive());  // Idle blue1 would draw red fire.
 
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
   StartRed4WalkThroughBlue1Lane(game, destination);
@@ -1465,6 +1524,7 @@ void TestGameLogicWinCondition() {
   }
   CHECK(game.CanCommitRound());
   game.CommitRound();
+  RunRound(game);
 
   CHECK(game.Mode() == InputMode::GameOver);
   CHECK(game.Winner() == Team::Blue);
@@ -1515,6 +1575,65 @@ void TestWalkCycleTracksInFlightMove() {
   CHECK(mover->walkPhase >= 0.0f && mover->walkPhase < kTwoPi);
 }
 
+// Turn animation (issue #237): the sim facing changes at once, the drawn
+// heading trails it by turnLag (shortest arc) and eases to 0 without ever
+// touching the discrete facing; the lag survives a snapshot round trip.
+void TestTurnLagEasesDrawnHeading() {
+  const float kPi = 3.14159265358979323846f;
+  Unit u;
+  u.facingYaw = 3.0f;
+  u.SetFacingYaw(-3.0f);  // 0.28 rad the short way round, not 6.
+  CHECK(std::fabs(u.turnLag - (-6.0f + 2.0f * kPi)) < 1e-4f);
+  CHECK(std::fabs(std::remainder(u.VisualYaw() - 3.0f, 2.0f * kPi)) < 1e-4f);  // Still drawn at the old heading.
+
+  GameLogic game(LegacyScene());
+  MakePassive(game);
+  Unit* mover = game.FindUnit(0);
+  mover->facingYaw = 0.0f;
+  const glm::vec3 start = mover->position;
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(start - glm::vec3(4.0f, 0.0f, 0.0f), Team::Blue);  // 180 about-face.
+  game.FinishMovePlan();
+  for (int id : {1, 2, 3, 4, 5}) {
+    game.ClickUnit(id, id < 3 ? Team::Blue : Team::Red);
+    game.ChoosePass();
+  }
+  CHECK(mover->turnLag == 0.0f);
+  game.CommitRound();
+  game.Update(0.02f);
+  CHECK(std::fabs(std::fabs(mover->facingYaw) - kPi) < 1e-3f);  // Sim heading is already final.
+  CHECK(std::fabs(mover->turnLag) > 1.0f);                      // Drawn heading still turning.
+  GameSnapshot snap;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &snap));
+  CHECK(snap.units[0].turnLag == mover->turnLag);
+  game.Update(0.3f);
+  CHECK(mover->turnLag == 0.0f);  // Settled well inside the movement.
+  CHECK(game.Mode() == InputMode::Executing);
+}
+
+// A shot's turn is smooth too: the drawn heading eases onto the shot
+// bearing while the beat plays, then eases back to the sim facing.
+void TestShotTurnEasesAndReturns() {
+  const float kPi = 3.14159265358979323846f;
+  GameLogic game(LegacyScene());
+  Unit* u = game.FindUnit(0);
+  u->facingYaw = 0.0f;
+  u->turnLag = 0.0f;
+  u->SetFacingYaw(kPi / 2);  // Sim turn to the shot bearing...
+  u->shootAimYaw = kPi / 2;
+  u->shootElapsed = 0.0f;
+  CHECK(std::fabs(u->VisualYaw()) < 1e-4f);  // ...drawn heading hasn't snapped.
+  game.Update(0.03f);
+  CHECK(u->VisualYaw() > 0.1f && u->VisualYaw() < kPi / 2 - 0.05f);  // Mid-turn.
+  game.Update(0.2f);
+  CHECK(std::fabs(u->VisualYaw() - kPi / 2) < 1e-3f);  // Holds the aim.
+  u->SetFacingYaw(0.0f);  // Mover resumes its heading: no snap back.
+  CHECK(std::fabs(u->VisualYaw() - kPi / 2) < 1e-3f);
+  game.Update(0.6f);  // Past the hold.
+  CHECK(std::fabs(u->VisualYaw()) < 1e-3f && u->turnLag == 0.0f);
+}
+
 // A resolved (hitting) shot starts the shooter's quick-draw beat aimed at
 // the target's bearing; it times out back to idle. Hit resolution itself
 // is unchanged, and a blocked shot doesn't play anything.
@@ -1541,7 +1660,8 @@ void TestResolvedShotStartsShootAnimation() {
   CHECK(std::fabs(shooter->shootElapsed - 0.1f) < 1e-5f);
   game.Update(constants::kShootAnimDuration);
   CHECK(shooter->shootElapsed < 0.0f);  // Beat over: back to idle.
-  CHECK(target->knockdownElapsed == constants::kKnockdownDuration);
+  // Planning mode: the fall is frozen where it started (see below).
+  CHECK(target->knockdownElapsed == 0.0f);
 
   // A shot that can't connect (target behind the shooter) fires nothing.
   Unit* other = game.FindUnit(5);
@@ -1728,15 +1848,6 @@ void StepSightings(GameLogic& game, float seconds, float dt = 0.05f) {
   for (int i = 0; i < steps; ++i) game.UpdateSightingMemory(dt);
 }
 
-// Simulates a round ending: bumps the round number the way a real round
-// transition would, then ticks memory once so it ages.
-void AdvanceRounds(GameLogic& game, int rounds) {
-  GameSnapshot snap = game.ExportState();
-  snap.roundNumber += rounds;
-  CHECK(game.ImportState(snap));
-  game.UpdateSightingMemory(0.0f);
-}
-
 void BlueLookAway(GameLogic& game, float yaw) {
   for (int id = 0; id <= 2; ++id) game.FindUnit(id)->facingYaw = yaw;
 }
@@ -1750,6 +1861,36 @@ void TestSightingRecordedImmediatelyOnEntry() {
   game.UpdateSightingMemory(0.05f);
   CHECK(game.Sightings(Team::Blue, 4).size() == 1);
   CHECK(game.Sightings(Team::Red, 4).empty());  // Own figures aren't "sighted".
+}
+
+void TestDeadFigureInFovGetsGhost() {
+  GameLogic game(LegacyScene());
+  BlueLookAway(game, kPi);
+  StepSightings(game, 1.0f);
+  game.FindUnit(4)->alive = false;
+  BlueLookAway(game, 0.0f);
+  StepSightings(game, 1.0f);
+  CHECK(!game.Sightings(Team::Blue, 4).empty());
+}
+
+void TestFallingBodyKeepsSamplingItsPose() {
+  GameLogic game(LegacyScene());
+  StepSightings(game, 1.0f);
+  Unit* enemy = game.FindUnit(4);
+  enemy->alive = false;
+  enemy->knockdownElapsed = 0.0f;
+  // The body stays put while the fall plays out; each interval still stamps
+  // the pose of that instant.
+  for (int i = 0; i < 40; ++i) {
+    enemy->knockdownElapsed += 0.05f;
+    game.UpdateSightingMemory(0.05f);
+  }
+  const auto& samples = game.Sightings(Team::Blue, 4);
+  CHECK(samples.size() >= 4);
+  CHECK(samples.front().alive);
+  CHECK(!samples.back().alive);
+  CHECK(samples.back().knockdownElapsed > samples[samples.size() - 2].knockdownElapsed);
+  CHECK(samples.back().knockdownElapsed > 1.0f);
 }
 
 void TestSightingSamplesAccumulateWhileInFov() {
@@ -1766,7 +1907,7 @@ void TestSightingSamplesAccumulateWhileInFov() {
   const auto& samples = game.Sightings(Team::Blue, 4);
   CHECK(samples.size() >= 6 && samples.size() <= 7);
   for (size_t i = 0; i + 1 < samples.size(); ++i) {
-    CHECK(samples[i].ageRounds == 0);  // No fading in real time.
+    CHECK(samples[i].at <= samples[i + 1].at);  // Oldest-first.
   }
 }
 
@@ -1810,35 +1951,100 @@ void TestSightingCapturesAnimationPose() {
   CHECK(game.Sightings(Team::Blue, 4).front().idleElapsed == 2.5f);
 }
 
-void TestSightingsPersistAfterLeavingFovThenExpire() {
+// Mirrors a follower page: the mode and clock come from imported snapshots,
+// then memory ticks once.
+void ImportTurnState(GameLogic& game, InputMode mode, float elapsed) {
+  GameSnapshot snap = game.ExportState();
+  snap.mode = mode;
+  snap.executionElapsed = elapsed;
+  CHECK(game.ImportState(snap));
+}
+
+void TestGhostsShowDuringTurnThenFadeInOrder() {
   GameLogic game(LegacyScene());
-  StepSightings(game, 2.0f);
-  const size_t count = game.Sightings(Team::Blue, 4).size();
-  CHECK(count > 0);
-  BlueLookAway(game, kPi);
-  StepSightings(game, 2.0f);
-  CHECK(game.Sightings(Team::Blue, 4).size() == count);  // Not cleared, none added.
-  StepSightings(game, 60.0f);
-  CHECK(game.Sightings(Team::Blue, 4).size() == count);  // Real time doesn't expire.
-  AdvanceRounds(game, constants::kSightingMemoryRounds - 1);
-  CHECK(game.Sightings(Team::Blue, 4).size() == count);
-  CHECK(game.Sightings(Team::Blue, 4).front().ageRounds == constants::kSightingMemoryRounds - 1);
-  AdvanceRounds(game, 1);
+  ImportTurnState(game, InputMode::Executing, 0.0f);
+  game.UpdateSightingMemory(0.0f);
+  Unit* enemy = game.FindUnit(4);
+  for (int i = 1; i <= 60; ++i) {
+    enemy->position.x += 0.01f;
+    ImportTurnState(game, InputMode::Executing, 0.05f * static_cast<float>(i));
+    game.UpdateSightingMemory(0.05f);
+  }
+  const auto samples = game.Sightings(Team::Blue, 4);
+  CHECK(samples.size() >= 6);
+  for (const auto& s : samples) CHECK(game.GhostAlpha(s.at) == 1.0f);  // Fully shown mid-turn.
+
+  // Turn ends: still fully visible, then each fades from its own start time.
+  ImportTurnState(game, InputMode::AwaitingSelection, 3.0f);
+  game.UpdateSightingMemory(0.0f);
+  for (const auto& s : samples) CHECK(game.GhostAlpha(s.at) == 1.0f);
+  const float step = 0.05f;
+  std::vector<float> previous(samples.size(), 1.0f);
+  bool sawMidFade = false;
+  for (float t = step; t < 6.0f; t += step) {
+    game.UpdateSightingMemory(step);
+    for (size_t i = 0; i < samples.size(); ++i) {
+      const float alpha = game.GhostAlpha(samples[i].at);
+      CHECK(alpha <= previous[i] + 1e-6f);
+      if (i > 0) CHECK(alpha >= game.GhostAlpha(samples[i - 1].at) - 1e-6f);  // Same order.
+      if (alpha > 0.01f && alpha < 0.99f) sawMidFade = true;
+      previous[i] = alpha;
+    }
+  }
+  CHECK(sawMidFade);
+  for (const auto& s : samples) CHECK(game.GhostAlpha(s.at) == 0.0f);
+
+  // Per-item delay matches the appearance spacing.
+  game.RestartGhostPlayback();
+  ImportTurnState(game, InputMode::AwaitingSelection, 3.0f);
+  const float a0 = samples.front().at, a1 = samples.back().at;
+  CHECK(a1 > a0);
+}
+
+void TestReplaySeekForwardKeepsFadingGhosts() {
+  GameLogic game(LegacyScene());
+  game.SetReplayGhostMode(true);
+  ImportTurnState(game, InputMode::Executing, 0.0f);
+  game.UpdateSightingMemory(0.05f);
+  CHECK(!game.Sightings(Team::Blue, 4).empty());
+  game.RestartGhostPlayback(/*keepFading=*/true);  // Next step begins.
+  CHECK(!game.Sightings(Team::Blue, 4).empty());
+  game.UpdateSightingMemory(0.0f);
+  CHECK(game.HasReplayGhosts());
+  game.UpdateSightingMemory(0.5f);  // Still inside the hold.
+  CHECK(game.HasReplayGhosts());
+  game.RestartGhostPlayback();  // Backward seek / fresh start drops them.
   CHECK(game.Sightings(Team::Blue, 4).empty());
 }
 
-void TestSightingReentryAppendsToAgingTrail() {
+void TestNextTurnStartsWithoutLastTurnsGhosts() {
   GameLogic game(LegacyScene());
+  ImportTurnState(game, InputMode::Executing, 0.0f);
+  game.UpdateSightingMemory(0.05f);
+  CHECK(!game.Sightings(Team::Blue, 4).empty());
+  ImportTurnState(game, InputMode::AwaitingSelection, 1.0f);
+  game.UpdateSightingMemory(0.0f);
+  BlueLookAway(game, kPi);  // Enemy leaves view before the next turn.
+  game.UpdateSightingMemory(0.05f);
+  CHECK(!game.Sightings(Team::Blue, 4).empty());  // Still around to fade.
+  ImportTurnState(game, InputMode::Executing, 0.0f);
+  game.UpdateSightingMemory(0.05f);
+  CHECK(game.Sightings(Team::Blue, 4).empty());  // Nothing persists across turns.
+}
+
+void TestSightingReentryAddsNewSample() {
+  GameLogic game(LegacyScene());
+  ImportTurnState(game, InputMode::Executing, 0.0f);
   StepSightings(game, 1.0f);
   const size_t before = game.Sightings(Team::Blue, 4).size();
   BlueLookAway(game, kPi);
-  AdvanceRounds(game, 2);
+  game.UpdateSightingMemory(0.05f);
   BlueLookAway(game, 0.0f);
+  ImportTurnState(game, InputMode::Executing, 2.0f);
   game.UpdateSightingMemory(0.05f);
   const auto& samples = game.Sightings(Team::Blue, 4);
   CHECK(samples.size() == before + 1);
-  CHECK(samples.front().ageRounds == 2);  // Kept aging, not reset.
-  CHECK(samples.back().ageRounds == 0);
+  CHECK(samples.back().at == 2.0f);
 }
 
 void TestResetClearsSightings() {
@@ -1896,6 +2102,1268 @@ void TestFollowerBuildsSightingsWithoutPhysicsUpdate() {
   CHECK(anyMoving);
 }
 
+// --- Ziplines (issue #166). ---
+
+// Open 80x80 field, a 26-unit line from (-16,0,0) to (10,0,0) and a figure at
+// (-18,0,0) with a 20-unit round budget: the far side (x = 20) is out of
+// walking reach (38 away) but in zipline reach (2 + 6.5 ride + 10 = 18.5).
+tactics::Scene ZiplineScene(float lineLength = 26.0f) {
+  tactics::Scene scene;
+  scene.mapHalfExtent = 40.0f;
+  scene.ziplines.push_back(
+      tactics::Zipline{glm::vec3(-16.0f, 0.0f, 0.0f), glm::vec3(-16.0f + lineLength, 0.0f, 0.0f)});
+  auto add = [&](int id, tactics::Team team, glm::vec3 position) {
+    tactics::Unit unit;
+    unit.id = id;
+    unit.team = team;
+    unit.position = position;
+    scene.units.push_back(unit);
+  };
+  add(0, tactics::Team::Blue, glm::vec3(-18.0f, 0.0f, 0.0f));
+  add(1, tactics::Team::Blue, glm::vec3(-18.0f, 0.0f, 1.0f));
+  add(3, tactics::Team::Red, glm::vec3(-2.0f, 0.0f, 12.0f));
+  scene.units.back().facingYaw = 1.5707963f;  // Looks away from the line, so no overwatch halts a rider.
+  return scene;
+}
+
+void PlanMove(GameLogic& game, int unitId, glm::vec3 destination) {
+  game.ClickUnit(unitId, game.FindUnit(unitId)->team);
+  game.ChooseMove();
+  game.ClickGround(destination, game.FindUnit(unitId)->team);
+  game.FinishMovePlan();
+}
+
+void PassRest(GameLogic& game) {
+  for (const Unit& u : game.GetScene().units) {
+    if (u.alive && u.plan.type == tactics::PlannedActionType::None) {
+      game.ClickUnit(u.id, u.team);
+      game.ChoosePass();
+    }
+  }
+}
+
+void TestZiplineExtendsReachBeyondWalking() {
+  const glm::vec3 far(20.0f, 0.0f, 0.0f);
+
+  // Without the line the click is out of the round's walking budget.
+  tactics::Scene noLine = ZiplineScene();
+  noLine.ziplines.clear();
+  GameLogic walkOnly(noLine);
+  walkOnly.ClickUnit(0, Team::Blue);
+  walkOnly.ChooseMove();
+  CHECK(walkOnly.ZiplineFrontiers().empty());
+  walkOnly.HoverGround(far, Team::Blue);
+  CHECK(!walkOnly.MovePreviewValid());
+  walkOnly.ClickGround(far, Team::Blue);
+  CHECK(walkOnly.FindUnit(0)->plan.type == tactics::PlannedActionType::None);
+
+  // With it, the same click plans walk -> ride -> walk.
+  GameLogic game(ZiplineScene());
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  // Only the near end is affordable (the far one is 28 units of walking away).
+  CHECK(game.ZiplineFrontiers().size() == 1);
+  const auto& region = game.ZiplineFrontiers()[0];
+  CHECK(region.zipline == 0);
+  CHECK(glm::distance(region.entry, game.GetScene().ziplines[0].a) < 1e-4f);
+  CHECK(glm::distance(region.exit, game.GetScene().ziplines[0].b) < 1e-4f);
+  CHECK(std::fabs(region.walkCost - 2.0f) < 0.05f);
+  // The walk region doesn't reach `far`; the zipline region does.
+  const ReachField* walk = game.MoveFrontier();
+  CHECK(walk != nullptr);
+  auto reaches = [](const ReachField& f, glm::vec3 p) {
+    const int ix = static_cast<int>(std::lround((p.x - f.minX) / f.step));
+    const int iz = static_cast<int>(std::lround((p.z - f.minZ) / f.step));
+    return f.Reached(ix, iz);
+  };
+  CHECK(!reaches(*walk, far));
+  CHECK(reaches(region.field, far));
+  CHECK(!reaches(region.field, glm::vec3(31.0f, 0.0f, 0.0f)));  // 21 beyond the exit: too far.
+
+  game.HoverGround(far, Team::Blue);
+  CHECK(game.MovePreviewValid());
+  CHECK(game.MovePreviewRides().size() == 1);
+
+  game.ClickGround(far, Team::Blue);
+  const Unit* mover = game.FindUnit(0);
+  CHECK(mover->plan.type == tactics::PlannedActionType::Move);
+  CHECK(mover->plan.moveRides.size() == 1);
+  const auto& path = mover->plan.movePath;
+  const tactics::PathRide ride = mover->plan.moveRides[0];
+  CHECK(ride.zipline == 0);
+  CHECK(static_cast<size_t>(ride.segment) + 1 < path.size());
+  CHECK(glm::distance(path[ride.segment], game.GetScene().ziplines[0].a) < 1e-4f);
+  CHECK(glm::distance(path[ride.segment + 1], game.GetScene().ziplines[0].b) < 1e-4f);
+  CHECK(glm::distance(path.back(), far) < 1e-3f);
+  game.FinishMovePlan();
+
+  PassRest(game);
+  game.CommitRound();
+  while (game.Mode() == InputMode::Executing) game.Update(0.05f);
+  CHECK(glm::distance(game.FindUnit(0)->position, far) < 0.05f);
+  CHECK(game.RoundNumber() == 2);
+}
+
+void TestZiplineCostScalesWithLength() {
+  auto frontierOf = [](float lineLength) {
+    GameLogic game(ZiplineScene(lineLength));
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseMove();
+    // The short line's far end is also within walking range; take the near-end entry.
+    for (const auto& region : game.ZiplineFrontiers()) {
+      if (glm::distance(region.entry, game.GetScene().ziplines[0].a) < 1e-4f) return region;
+    }
+    CHECK(false);
+    return GameLogic::ZiplineFrontier{};
+  };
+  const auto longLine = frontierOf(26.0f);
+  const auto shortLine = frontierOf(13.0f);
+  CHECK(std::fabs(longLine.rideCost - 26.0f * tactics::constants::kZiplineCostFactor) < 1e-4f);
+  CHECK(std::fabs(shortLine.rideCost - 13.0f * tactics::constants::kZiplineCostFactor) < 1e-4f);
+  CHECK(std::fabs(longLine.rideCost - 2.0f * shortLine.rideCost) < 1e-4f);
+  // The longer line leaves less budget for the onward walk: budget 20 - walk 2 - ride.
+  CHECK(std::fabs(longLine.field.budget - (20.0f - longLine.walkCost - longLine.rideCost)) < 1e-3f);
+  CHECK(std::fabs(shortLine.field.budget - (20.0f - shortLine.walkCost - shortLine.rideCost)) < 1e-3f);
+  CHECK(shortLine.field.budget > longLine.field.budget);
+
+  // A destination right at the edge of the short line's reach is out of the long line's.
+  GameLogic game(ZiplineScene(26.0f));
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  const glm::vec3 exit = game.GetScene().ziplines[0].b;
+  game.HoverGround(exit + glm::vec3(longLine.field.budget - 0.5f, 0.0f, 0.0f), Team::Blue);
+  CHECK(game.MovePreviewValid());
+  game.HoverGround(exit + glm::vec3(longLine.field.budget + 1.0f, 0.0f, 0.0f), Team::Blue);
+  CHECK(!game.MovePreviewValid());
+}
+
+void TestZiplineIsTwoWay() {
+  tactics::Scene scene = ZiplineScene();
+  scene.units[0].position = glm::vec3(12.0f, 0.0f, 0.0f);  // Near the b end.
+  GameLogic game(scene);
+  const glm::vec3 far(-26.0f, 0.0f, 0.0f);  // 38 away on foot; 2 + 6.5 + 10 by line.
+  PlanMove(game, 0, far);
+  const Unit* mover = game.FindUnit(0);
+  CHECK(mover->plan.type == tactics::PlannedActionType::Move);
+  CHECK(mover->plan.moveRides.size() == 1);
+  const auto& path = mover->plan.movePath;
+  const tactics::PathRide ride = mover->plan.moveRides[0];
+  CHECK(glm::distance(path[ride.segment], game.GetScene().ziplines[0].b) < 1e-4f);
+  CHECK(glm::distance(path[ride.segment + 1], game.GetScene().ziplines[0].a) < 1e-4f);
+  PassRest(game);
+  game.CommitRound();
+  while (game.Mode() == InputMode::Executing) game.Update(0.05f);
+  CHECK(glm::distance(game.FindUnit(0)->position, far) < 0.05f);
+}
+
+void TestZiplineRideIsFasterThanWalking() {
+  GameLogic game(ZiplineScene());
+  PlanMove(game, 0, glm::vec3(20.0f, 0.0f, 0.0f));
+  PassRest(game);
+  game.CommitRound();
+  // 0.5 s walks the 2 units to the anchor; riding then advances 1/kZiplineCostFactor
+  // world units per unit of budget (4 units/s of budget = 16 units/s of cable).
+  for (int i = 0; i < 10; ++i) game.Update(0.05f);  // t = 0.5 s
+  CHECK(game.FindUnit(0)->position.x < -15.5f);
+  for (int i = 0; i < 10; ++i) game.Update(0.05f);  // t = 1.0 s: 0.5 s riding.
+  const float expected = -16.0f + 0.5f * 4.0f / tactics::constants::kZiplineCostFactor;
+  CHECK(game.IsUnitRiding(0));
+  CHECK(std::fabs(game.FindUnit(0)->position.x - expected) < 0.5f);
+}
+
+void TestZiplineOccupiedLineBlocksSecondRider() {
+  GameLogic game(ZiplineScene());
+  MakePassive(game);
+  PlanMove(game, 0, glm::vec3(20.0f, 0.0f, 0.0f));
+  PlanMove(game, 1, glm::vec3(20.0f, 0.0f, 1.0f));
+  PassRest(game);
+  game.CommitRound();
+
+  const glm::vec3 anchor = game.GetScene().ziplines[0].a;
+  bool sawBlocked = false;
+  int ticks = 0;
+  while (game.Mode() == InputMode::Executing && ++ticks < 2000) {
+    game.Update(0.02f);
+    const bool r0 = game.IsUnitRiding(0), r1 = game.IsUnitRiding(1);
+    CHECK(!(r0 && r1));  // One rider at a time.
+    // Unit 1 reaches the anchor while unit 0 is still on the line: it waits there.
+    if (r0 && glm::distance(game.FindUnit(1)->position, anchor) < 1e-3f) sawBlocked = true;
+  }
+  CHECK(sawBlocked);
+  CHECK(game.Mode() != InputMode::Executing);
+  // The round window is fixed, so the second rider (held at the anchor) is
+  // cut off rather than extending the round.
+  CHECK(glm::distance(game.FindUnit(0)->position, glm::vec3(20.0f, 0.0f, 0.0f)) < 0.05f);
+  CHECK(glm::distance(game.FindUnit(1)->position, glm::vec3(20.0f, 0.0f, 1.0f)) > 0.05f);
+}
+
+void TestZiplineRiderCannotShoot() {
+  GameLogic game(ZiplineScene());
+  MakePassive(game);
+  Unit* rider = game.FindUnit(0);
+  Unit* enemy = game.FindUnit(3);
+  enemy->position = glm::vec3(-2.0f, 0.0f, 3.0f);
+  PlanMove(game, 0, glm::vec3(20.0f, 0.0f, 0.0f));
+  PassRest(game);
+  // Open ground, enemy in the cone: the shot connects while walking...
+  CHECK(game.ShotHitChance(*rider, *enemy) > 0.0f);
+  game.CommitRound();
+  bool sawRide = false;
+  for (int i = 0; i < 400 && game.Mode() == InputMode::Executing; ++i) {
+    game.Update(0.02f);
+    if (game.IsUnitRiding(0)) {
+      sawRide = true;
+      CHECK(game.ShotHitChance(*rider, *enemy) == 0.0f);  // ...but not while riding.
+    }
+  }
+  CHECK(sawRide);
+}
+
+void TestZiplinePlanSnapshotRoundTrip() {
+  GameLogic game(ZiplineScene());
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(glm::vec3(20.0f, 0.0f, 0.0f), Team::Blue);
+  game.ClickGround(glm::vec3(20.0f, 0.0f, 12.0f), Team::Blue);  // A later leg, walk only.
+  game.FinishMovePlan();
+  const auto& plan = game.FindUnit(0)->plan;
+  CHECK(plan.moveRides.size() == 1);
+  CHECK(plan.queuedLegs.size() == 1);
+
+  tactics::GameSnapshot out;
+  CHECK(tactics::DeserializeSnapshot(tactics::SerializeSnapshot(game.ExportState()), &out));
+  GameLogic mirror(ZiplineScene());
+  CHECK(mirror.ImportState(out));
+  CHECK(mirror.FindUnit(0)->plan.moveRides == plan.moveRides);
+  CHECK(mirror.FindUnit(0)->plan.queuedLegs.size() == 1);
+  CHECK(mirror.FindUnit(0)->plan.queuedLegRides.empty() ||
+        mirror.FindUnit(0)->plan.queuedLegRides[0].empty());
+
+  // A later leg that itself rides survives the round trip.
+  GameLogic chained(ZiplineScene());
+  chained.ClickUnit(0, Team::Blue);
+  chained.ChooseMove();
+  chained.ClickGround(glm::vec3(20.0f, 0.0f, 0.0f), Team::Blue);
+  chained.ClickGround(glm::vec3(-14.0f, 0.0f, 0.0f), Team::Blue);  // Back across the line.
+  chained.FinishMovePlan();
+  const auto& chainedPlan = chained.FindUnit(0)->plan;
+  CHECK(chainedPlan.queuedLegRides.size() == 1 && chainedPlan.queuedLegRides[0].size() == 1);
+  CHECK(tactics::DeserializeSnapshot(tactics::SerializeSnapshot(chained.ExportState()), &out));
+  CHECK(mirror.ImportState(out));
+  CHECK(mirror.FindUnit(0)->plan.moveRides == chainedPlan.moveRides);
+  CHECK(mirror.FindUnit(0)->plan.queuedLegRides == chainedPlan.queuedLegRides);
+}
+
+// Street-to-roof line: a 6-high building at x in [2,10] with a flat roof slab
+// and a line from the street (-7,0,0) up to the roof (3,6.05,0).
+tactics::Scene RoofZiplineScene() {
+  tactics::Scene scene;
+  scene.mapHalfExtent = 40.0f;
+  scene.obstacles.push_back(tactics::Obstacle{
+      tactics::AABB{glm::vec3(2.0f, 0.0f, -4.0f), glm::vec3(10.0f, 6.0f, 4.0f)}, false});
+  tactics::WalkSurface roof;
+  roof.vertices = {{2.25f, 6.05f, -3.75f}, {2.25f, 6.05f, 3.75f}, {9.75f, 6.05f, 3.75f},
+                   {9.75f, 6.05f, -3.75f}};
+  scene.walkSurfaces.push_back(roof);
+  scene.ziplines.push_back(
+      tactics::Zipline{glm::vec3(-7.0f, 0.0f, 0.0f), glm::vec3(3.0f, 6.05f, 0.0f)});
+  tactics::Unit blue;
+  blue.id = 0;
+  blue.team = tactics::Team::Blue;
+  blue.position = glm::vec3(-9.0f, 0.0f, 0.0f);
+  scene.units.push_back(blue);
+  tactics::Unit red;
+  red.id = 3;
+  red.team = tactics::Team::Red;
+  red.position = glm::vec3(-9.0f, 0.0f, 20.0f);
+  scene.units.push_back(red);
+  return scene;
+}
+
+// Rides the line street -> roof -> street, checking the ride pose state
+// (travel along the cable, slope sign) on the way and that the rider lands
+// on the roof / back on the street.
+void TestZiplineRoofAccessBothDirections() {
+  GameLogic game(RoofZiplineScene());
+  MakePassive(game);
+  const glm::vec3 roofSpot(7.0f, 6.05f, 0.0f);
+  PlanMove(game, 0, roofSpot);
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Move);
+  CHECK(game.FindUnit(0)->plan.moveRides.size() == 1);
+  PassRest(game);
+  game.CommitRound();
+  bool sawUphill = false;
+  float lastTravel = -1.0f;
+  for (int i = 0; i < 400 && game.Mode() == InputMode::Executing; ++i) {
+    game.Update(0.02f);
+    const Unit* u = game.FindUnit(0);
+    if (u->rideTravel >= 0.0f) {
+      sawUphill |= u->rideSlope > 0.5f && std::fabs(u->rideLength - 11.7f) < 0.2f;
+      CHECK(u->rideTravel >= lastTravel - 1e-4f && u->rideTravel <= u->rideLength + 1e-4f);
+      lastTravel = u->rideTravel;
+    }
+  }
+  CHECK(sawUphill);
+  CHECK(game.FindUnit(0)->rideTravel < 0.0f);
+  CHECK(glm::distance(game.FindUnit(0)->position, roofSpot) < 0.05f);
+
+  // And back down to the street.
+  const glm::vec3 street(-12.0f, 0.0f, 0.0f);
+  PlanMove(game, 0, street);
+  CHECK(game.FindUnit(0)->plan.type == tactics::PlannedActionType::Move);
+  CHECK(game.FindUnit(0)->plan.moveRides.size() == 1);
+  PassRest(game);
+  game.CommitRound();
+  bool sawDownhill = false;
+  for (int i = 0; i < 400 && game.Mode() == InputMode::Executing; ++i) {
+    game.Update(0.02f);
+    const Unit* u = game.FindUnit(0);
+    sawDownhill |= u->rideTravel >= 0.0f && u->rideSlope < -0.5f;
+  }
+  CHECK(sawDownhill);
+  CHECK(glm::distance(game.FindUnit(0)->position, street) < 0.05f);
+
+  // The roof is only reachable by the line: no walking route from the street.
+  tactics::Scene noLine = RoofZiplineScene();
+  noLine.ziplines.clear();
+  GameLogic noZip(noLine);
+  PlanMove(noZip, 0, roofSpot);
+  CHECK(noZip.FindUnit(0)->plan.type != tactics::PlannedActionType::Move);
+}
+
+// The ride pose state survives a snapshot, so a follower plays the same animation.
+void TestRideStateInSnapshot() {
+  GameLogic game(RoofZiplineScene());
+  Unit* u = game.FindUnit(0);
+  u->rideTravel = 3.5f;
+  u->rideLength = 11.7f;
+  u->rideSlope = -0.6f;
+  tactics::GameSnapshot snap;
+  CHECK(tactics::DeserializeSnapshot(tactics::SerializeSnapshot(game.ExportState()), &snap));
+  GameLogic mirror(RoofZiplineScene());
+  CHECK(mirror.ImportState(snap));
+  CHECK(mirror.FindUnit(0)->rideTravel == 3.5f);
+  CHECK(mirror.FindUnit(0)->rideLength == 11.7f);
+  CHECK(mirror.FindUnit(0)->rideSlope == -0.6f);
+}
+
+void TestZiplineLegsChainAcrossRounds() {
+  // Leg 1 rides across; leg 2 rides back. Each leg is priced separately.
+  GameLogic game(ZiplineScene());
+  MakePassive(game);
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(glm::vec3(20.0f, 0.0f, 0.0f), Team::Blue);
+  game.ClickGround(glm::vec3(-14.0f, 0.0f, 0.0f), Team::Blue);  // 34 on foot from leg 1's end: ride back.
+  game.FinishMovePlan();
+  const auto& plan = game.FindUnit(0)->plan;
+  CHECK(plan.queuedLegs.size() == 1);
+  CHECK(plan.moveRides.size() == 1);
+  CHECK(plan.queuedLegRides.size() == 1 && plan.queuedLegRides[0].size() == 1);
+  for (int round = 0; round < 2; ++round) {
+    PassRest(game);
+    game.CommitRound();
+    while (game.Mode() == InputMode::Executing) game.Update(0.05f);
+  }
+  CHECK(glm::distance(game.FindUnit(0)->position, glm::vec3(-14.0f, 0.0f, 0.0f)) < 0.05f);
+}
+
+// ---- Turn timeline: scrub/replay history (issue #143). ----
+
+tactics::Scene TwoUnitTimelineScene() {
+  tactics::Scene scene;
+  tactics::Unit blue;
+  blue.id = 0;
+  blue.team = tactics::Team::Blue;
+  blue.position = glm::vec3(-8.0f, 0.0f, 0.0f);
+  blue.facingYaw = 0.0f;
+  scene.units.push_back(blue);
+  tactics::Unit red;
+  red.id = 1;
+  red.team = tactics::Team::Red;
+  red.position = glm::vec3(8.0f, 0.0f, 0.0f);
+  red.facingYaw = 3.14159265f;
+  scene.units.push_back(red);
+  return scene;
+}
+
+// Plans blue 0's move to `destination` (red 1 passes), commits, and runs the
+// round to completion while the timeline observes each step -- the same
+// Observe-after-Update cadence as main.cpp's frame loop.
+void PlayTimelineRound(GameLogic& game, TurnTimeline& timeline, const glm::vec3& destination) {
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(destination, Team::Blue);
+  game.FinishMovePlan();
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+  int steps = 0;
+  while (game.Mode() == InputMode::Executing && ++steps < 10000) {
+    game.Update(0.05f);
+    game.UpdateSightingMemory(0.05f);
+    timeline.Observe(game, 0.05f);
+  }
+  CHECK(steps < 10000);
+  timeline.Observe(game, 0.0f);
+}
+
+void TestTurnTimelineRecordsTicksAndReplays() {
+  GameLogic game(TwoUnitTimelineScene());
+  MakePassive(game);
+  TurnTimeline timeline;
+  timeline.Reset(game);
+  TimelinePlayback playback;
+
+  CHECK(timeline.Ticks().size() == 1);
+  CHECK(timeline.Ticks()[0].label == "Start");
+  CHECK(timeline.FrameCount() == 1);
+
+  PlayTimelineRound(game, timeline, glm::vec3(0.0f, 0.0f, 0.0f));  // 8 units, ~2 s.
+  CHECK(game.RoundNumber() == 2);
+  CHECK(timeline.Ticks().size() == 2);
+  CHECK(timeline.Ticks()[1].label == "T1");
+  CHECK(timeline.FrameCount() > 10);  // The executing round was captured frame by frame.
+
+  // Seek back to the start: the replay shows the original state...
+  CHECK(playback.SeekTick(timeline, game, 0));
+  CHECK(playback.Active());
+  CHECK(!playback.Playing());
+  CHECK(playback.Game().RoundNumber() == 1);
+  CHECK(glm::distance(playback.Game().FindUnit(0)->position, glm::vec3(-8.0f, 0.0f, 0.0f)) <
+        1e-3f);
+  // ...while the live game is untouched.
+  CHECK(glm::distance(game.FindUnit(0)->position, glm::vec3(0.0f)) < 1e-3f);
+  CHECK(game.RoundNumber() == 2);
+
+  // Play one second: the replayed mover is mid-walk near x = -4 (4 u/s).
+  playback.Play(timeline, game);
+  CHECK(playback.Playing());
+  playback.Update(timeline, 1.0f);
+  CHECK(std::fabs(playback.Game().FindUnit(0)->position.x - (-4.0f)) < 0.5f);
+  CHECK(playback.Game().FindUnit(0)->position.x > -8.0f + 1e-3f);
+
+  // Fast-forward far past the end: playback pauses at the live end, on the
+  // round's final state.
+  playback.Update(timeline, 100.0f);
+  CHECK(playback.Active());
+  CHECK(!playback.Playing());
+  CHECK(playback.AtLiveEnd(timeline));
+  CHECK(glm::distance(playback.Game().FindUnit(0)->position, glm::vec3(0.0f)) < 1e-3f);
+
+  // Seeking to the newest tick while paused returns to the live view.
+  CHECK(playback.SeekTick(timeline, game, 1));
+  CHECK(!playback.Active());
+}
+
+void TestTurnTimelineReplayGhostLifetimes() {
+  GameLogic game(TwoUnitTimelineScene());
+  MakePassive(game);
+  TurnTimeline timeline;
+  timeline.Reset(game);
+  TimelinePlayback playback;
+  PlayTimelineRound(game, timeline, glm::vec3(0.0f, 0.0f, 0.0f));
+  PlayTimelineRound(game, timeline, glm::vec3(0.0f, 0.0f, 4.0f));
+
+  // Replay: no hold between turns; items stamped at the replay clock's 0
+  // live kReplayTracerLife (bullets) / kReplayGhostHold + fade (ghosts).
+  CHECK(playback.SeekFrame(timeline, game, 0));
+  playback.Play(timeline, game);
+  const GameLogic& replay = playback.Game();
+  Tracer stamp0{};
+  stamp0.at = 0.0f;
+  playback.Update(timeline, 0.25f);
+  CHECK(replay.TracerAlpha(stamp0) > 0.0f && replay.TracerAlpha(stamp0) < 1.0f);
+  CHECK(replay.GhostAlpha(0.0f) == 1.0f);
+  playback.Update(timeline, 0.75f);
+  CHECK(replay.TracerAlpha(stamp0) == 0.0f);
+  CHECK(replay.GhostAlpha(0.0f) == 1.0f);
+  playback.Update(timeline, 0.25f);  // 1.25 s: ghost has started to fade.
+  CHECK(replay.GhostAlpha(0.0f) < 1.0f && replay.GhostAlpha(0.0f) > 0.0f);
+  playback.Update(timeline, 0.5f);
+  CHECK(replay.GhostAlpha(0.0f) == 0.0f);
+
+  // The live game keeps the per-turn behaviour: opaque while executing.
+  CHECK(GameLogic::TracerAlphaForAge(0.0f) == 1.0f);
+
+  // Reaching the live end pauses, but leftovers keep fading until gone.
+  playback.SeekFrame(timeline, game, 0);
+  playback.Play(timeline, game);
+  playback.Update(timeline, 100.0f);
+  CHECK(!playback.Playing());
+  for (int i = 0; i < 40; ++i) playback.Update(timeline, 0.1f);
+  CHECK(!playback.Game().HasReplayGhosts());
+  CHECK(playback.Game().Tracers().empty());
+}
+
+void TestTurnTimelineResetsOnNewMatch() {
+  GameLogic game(TwoUnitTimelineScene());
+  MakePassive(game);
+  TurnTimeline timeline;
+  timeline.Reset(game);
+  TimelinePlayback playback;
+
+  PlayTimelineRound(game, timeline, glm::vec3(0.0f, 0.0f, 0.0f));
+  CHECK(timeline.Ticks().size() == 2);
+  CHECK(playback.SeekTick(timeline, game, 0));
+  CHECK(playback.Active());
+
+  // A new match is detected from observation alone (the round counter went
+  // backwards) -- how a follower, which gets no explicit Reset call, learns
+  // of it. Observe reports it so the caller can drop the replay.
+  game.Reset(TwoUnitTimelineScene());
+  CHECK(timeline.Observe(game, 0.016f));
+  playback.Reset();
+  CHECK(!playback.Active());
+  CHECK(timeline.Ticks().size() == 1);
+  CHECK(timeline.FrameCount() == 1);
+
+  // The new match records a fresh history replayable from its own start.
+  PlayTimelineRound(game, timeline, glm::vec3(-2.0f, 0.0f, 4.0f));
+  CHECK(timeline.Ticks().size() == 2);
+  CHECK(playback.SeekTick(timeline, game, 0));
+  CHECK(glm::distance(playback.Game().FindUnit(0)->position, glm::vec3(-8.0f, 0.0f, 0.0f)) <
+        1e-3f);
+  playback.Play(timeline, game);
+  playback.Update(timeline, 100.0f);
+  CHECK(glm::distance(playback.Game().FindUnit(0)->position, glm::vec3(-2.0f, 0.0f, 4.0f)) <
+        1e-3f);
+}
+
+// Minimal flat scene for the free-aim tests: unit ids are sequential from 0
+// so sighting memory indexes line up.
+tactics::Scene AimScene(const std::vector<std::pair<Team, glm::vec3>>& layout,
+                        std::initializer_list<tactics::Obstacle> obstacles = {}) {
+  tactics::Scene scene;
+  scene.mapHalfExtent = 30.0f;
+  for (const tactics::Obstacle& obstacle : obstacles) scene.obstacles.push_back(obstacle);
+  int id = 0;
+  for (const auto& [team, position] : layout) {
+    tactics::Unit unit;
+    unit.id = id++;
+    unit.team = team;
+    unit.position = position;
+    scene.units.push_back(unit);
+  }
+  return scene;
+}
+
+void TestAimRayResolvesUnitAndSurface() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+
+  // Camera ray onto open ground in the shooter's LOS: a surface aim.
+  auto down = [](float x, float z) {
+    return std::make_pair(glm::vec3(x, 20.0f, z), glm::vec3(0.0f, -1.0f, 0.0f));
+  };
+  auto [o1, d1] = down(0.0f, 0.0f);
+  GameLogic::AimRayResult aim = game.ResolveAimRay(o1, d1);
+  CHECK(aim.kind == GameLogic::AimRayResult::Kind::Surface);
+  CHECK(glm::distance(aim.point, glm::vec3(0.0f)) < 0.05f);
+
+  // Ground hidden behind the z=-4 wall: not aimable directly, so nothing.
+  auto [o2, d2] = down(4.0f, -4.0f);
+  aim = game.ResolveAimRay(o2, d2);
+  CHECK(aim.kind == GameLogic::AimRayResult::Kind::None);
+
+  // A visible enemy under the cursor beats the surface behind it.
+  auto [o3, d3] = down(8.0f, 0.0f);
+  aim = game.ResolveAimRay(o3, d3);
+  CHECK(aim.kind == GameLogic::AimRayResult::Kind::Unit);
+  CHECK(aim.unitId == 4);
+
+  // A sky ray has no aimable surface: nothing is placed.
+  const Unit* shooter = game.FindUnit(1);
+  aim = game.ResolveAimRay(shooter->EyePosition() + glm::vec3(0.0f, 0.5f, 0.0f),
+                           glm::vec3(0.3f, 1.0f, 0.0f));
+  CHECK(aim.kind == GameLogic::AimRayResult::Kind::None);
+  game.ClickAimRay(shooter->EyePosition() + glm::vec3(0.0f, 0.5f, 0.0f),
+                   glm::vec3(0.3f, 1.0f, 0.0f), Team::Blue);
+  CHECK(!game.GetAimPreview().has_value());
+}
+
+void TestFreeAimPreviewPlaceConfirmAndCancel() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+
+  // Confirm with nothing placed: no-op.
+  game.ConfirmAim(Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+
+  // Tap-to-place via the ray path, then cancel drops the marker.
+  game.ClickAimRay(glm::vec3(0.0f, 20.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), Team::Blue);
+  CHECK(game.GetAimPreview().has_value());
+  game.CancelAction();
+  CHECK(!game.GetAimPreview().has_value());
+  CHECK(game.Mode() == InputMode::ActionMenu);
+
+  // Place again, confirm: the plan is a free-aim shot, no locked target.
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(2.0f, 0.0f, 1.0f), Team::Blue);
+  // Only the shooter's own side can place/confirm.
+  game.ConfirmAim(Team::Red);
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+  game.ConfirmAim(Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  const Unit* shooter = game.FindUnit(1);
+  CHECK(shooter->plan.type == PlannedActionType::Shoot);
+  CHECK(shooter->plan.hasAimPoint);
+  CHECK(shooter->plan.shootTargetId == -1);
+  CHECK(glm::distance(shooter->plan.aimPoint, glm::vec3(2.0f, 0.0f, 1.0f)) < 1e-5f);
+
+  // Locking onto a figure instead clears any placed marker and the aim flag.
+  GameLogic g2(LegacyScene());
+  g2.ClickUnit(1, Team::Blue);
+  g2.ChooseShoot();
+  g2.PlaceAimPoint(glm::vec3(2.0f, 0.0f, 1.0f), Team::Blue);
+  CHECK(g2.GetAimPreview().has_value());
+  g2.ClickUnit(4, Team::Blue);
+  CHECK(!g2.GetAimPreview().has_value());
+  const Unit* locked = g2.FindUnit(1);
+  CHECK(locked->plan.shootTargetId == 4);
+  CHECK(!locked->plan.hasAimPoint);
+}
+
+void TestFreeAimShotFiresBehindShooterAndFacesAimPoint() {
+  // The shooter starts facing *away* from its aim point: a locked shot
+  // could never fire (hard cone gate), but a free-aim shot turns the figure.
+  GameLogic game(AimScene({{Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(10.0f, 0.0f, 0.0f)}}));
+  Unit* shooter = game.FindUnit(0);
+  shooter->facingYaw = kPi;  // Facing -X; red1 is at +X and unseen.
+  CHECK(!game.ComputeVisibility(Team::Blue).UnitVisible(1));
+
+  game.SetShotRollSource([] { return 0.0f; });
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
+  game.ConfirmAim(Team::Blue);
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  game.Update(10.0f);
+
+  CHECK(!game.FindUnit(1)->alive);
+  // After the shot the figure faces its aim point, feeding the next rounds'
+  // FOV/overwatch.
+  CHECK(std::fabs(game.FindUnit(0)->facingYaw) < 1e-3f);
+  CHECK(game.Winner() == Team::Blue);
+}
+
+void TestFreeAimBlindHitRevealsMissDoesNot() {
+  const auto layout = std::vector<std::pair<Team, glm::vec3>>{
+      {Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(12.0f, 0.0f, 0.0f)}};
+  // Hit: the one bit of info a connecting blind shot earns is a sighting
+  // sample of the figure it downed.
+  {
+    GameLogic game(AimScene(layout));
+    game.FindUnit(0)->facingYaw = kPi;  // Red1 is unseen throughout.
+    game.SetShotRollSource([] { return 0.0f; });
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseShoot();
+    game.PlaceAimPoint(glm::vec3(12.0f, 0.9f, 0.0f), Team::Blue);
+    game.ConfirmAim(Team::Blue);
+    game.ClickUnit(1, Team::Red);
+    game.ChoosePass();
+    game.CommitRound();
+    game.Update(10.0f);
+    CHECK(!game.FindUnit(1)->alive);
+    CHECK(!game.Sightings(Team::Blue, 1).empty());
+  }
+  // Miss: nothing is revealed -- the shooter learns nothing from a shot
+  // into the dark that doesn't connect.
+  {
+    GameLogic game(AimScene(layout));
+    game.FindUnit(0)->facingYaw = kPi;
+    game.SetShotRollSource([] { return 0.999999f; });
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseShoot();
+    game.PlaceAimPoint(glm::vec3(12.0f, 0.9f, 0.0f), Team::Blue);
+    game.ConfirmAim(Team::Blue);
+    game.ClickUnit(1, Team::Red);
+    game.ChoosePass();
+    game.CommitRound();
+    game.Update(10.0f);
+    CHECK(game.FindUnit(1)->alive);
+    CHECK(game.Sightings(Team::Blue, 1).empty());
+    // The shot was still taken: animation beat played and the figure turned.
+    CHECK(std::fabs(game.FindUnit(0)->facingYaw) < 1e-3f);
+  }
+}
+
+void TestFreeAimTraceStopsAtWalls() {
+  const tactics::Obstacle wall{
+      tactics::AABB{glm::vec3(5.0f, 0.0f, -2.0f), glm::vec3(6.0f, 2.5f, 2.0f)}, false};
+  GameLogic game(AimScene(
+      {{Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(10.0f, 0.0f, 0.0f)}}, {wall}));
+  game.SetShotRollSource([] { return 0.0f; });
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
+  game.ConfirmAim(Team::Blue);
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  game.Update(10.0f);
+  // Even a guaranteed roll can't reach through the wall; nothing is revealed.
+  CHECK(game.FindUnit(1)->alive);
+  CHECK(game.Sightings(Team::Blue, 1).empty());
+}
+
+void TestFreeAimFriendlyFireFlag() {
+  const auto layout = std::vector<std::pair<Team, glm::vec3>>{
+      {Team::Blue, glm::vec3(0.0f)},
+      {Team::Blue, glm::vec3(5.0f, 0.0f, 0.0f)},   // Teammate in the bullet's path.
+      {Team::Red, glm::vec3(10.0f, 0.0f, 0.0f)}};
+  // Friendly fire on (the default): the teammate absorbs the trace first.
+  {
+    GameLogic game(AimScene(layout));
+    CHECK(game.FriendlyFireEnabled());
+    game.SetShotRollSource([] { return 0.0f; });
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseShoot();
+    game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
+    game.ConfirmAim(Team::Blue);
+    game.ClickUnit(1, Team::Blue);
+    game.ChoosePass();
+    game.ClickUnit(2, Team::Red);
+    game.ChoosePass();
+    game.CommitRound();
+    game.Update(10.0f);
+    CHECK(!game.FindUnit(1)->alive);
+    CHECK(game.FindUnit(2)->alive);
+  }
+  // Flag off: teammates are transparent to the trace; the bullet flies on
+  // and takes the enemy behind them.
+  {
+    GameLogic game(AimScene(layout));
+    game.SetFriendlyFireEnabled(false);
+    game.SetShotRollSource([] { return 0.0f; });
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseShoot();
+    game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
+    game.ConfirmAim(Team::Blue);
+    game.ClickUnit(1, Team::Blue);
+    game.ChoosePass();
+    game.ClickUnit(2, Team::Red);
+    game.ChoosePass();
+    game.CommitRound();
+    game.Update(10.0f);
+    CHECK(game.FindUnit(1)->alive);
+    CHECK(!game.FindUnit(2)->alive);
+  }
+}
+
+void TestFreeAimAreaDenialShotLeaksNothing() {
+  GameLogic game(AimScene(
+      {{Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(12.0f, 0.0f, 12.0f)}}));
+  game.FindUnit(0)->facingYaw = kPi;
+  game.SetShotRollSource([] { return 0.0f; });  // Even a guaranteed roll hits nobody.
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(8.0f, 0.0f, 0.0f), Team::Blue);  // Empty lane.
+  game.ConfirmAim(Team::Blue);
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  game.Update(10.0f);
+  CHECK(game.FindUnit(1)->alive);
+  CHECK(game.Sightings(Team::Blue, 1).empty());
+  CHECK(game.RoundNumber() == 2);
+  // The bluff still swings the figure toward the point it covered.
+  CHECK(std::fabs(game.FindUnit(0)->facingYaw) < 1e-3f);
+}
+
+void TestFollowerMirrorsBlindHitReveal() {
+  // The reveal a blind hit earns is recorded by the simulating instance in
+  // ResolvePendingShots; a mirroring follower (snapshots carry no sighting
+  // memory) must reconstruct it from the death arriving out of its FOV.
+  const auto layout = std::vector<std::pair<Team, glm::vec3>>{
+      {Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(12.0f, 0.0f, 0.0f)}};
+  GameLogic simulator(AimScene(layout));
+  GameLogic follower(AimScene(layout));
+  simulator.FindUnit(0)->facingYaw = kPi;  // Red1 stays unseen by Blue.
+  CHECK(follower.ImportState(simulator.ExportState()));
+
+  simulator.SetShotRollSource([] { return 0.0f; });
+  simulator.ClickUnit(0, Team::Blue);
+  simulator.ChooseShoot();
+  simulator.PlaceAimPoint(glm::vec3(12.0f, 0.9f, 0.0f), Team::Blue);
+  simulator.ConfirmAim(Team::Blue);
+  simulator.ClickUnit(1, Team::Red);
+  simulator.ChoosePass();
+  simulator.CommitRound();
+  // The shooter turned toward +X, so the downed red is now inside its live
+  // FOV; reposition the body out of the cone before mirroring so the
+  // follower really is learning about an unseen death. (In the live game
+  // this is the around-cover case, where the body stays hidden.)
+  simulator.FindUnit(0)->facingYaw = kPi;
+  CHECK(!simulator.FindUnit(1)->alive);
+  CHECK(follower.ImportState(simulator.ExportState()));
+  CHECK(!follower.Sightings(Team::Blue, 1).empty());
+}
+
+void TestFreeAimPlanSnapshotAndProtocolRoundTrip() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(3.25f, 0.5f, -2.75f), Team::Blue);
+  game.ConfirmAim(Team::Blue);
+
+  // Export -> text protocol -> import lands the identical free-aim plan on
+  // a mirroring peer (the two-canvas page ships plans this way).
+  const GameSnapshot snapshot = game.ExportState();
+  const std::string wire = SerializeSnapshot(snapshot);
+  GameSnapshot decoded;
+  CHECK(DeserializeSnapshot(wire, &decoded));
+  bool checked = false;
+  for (const auto& u : decoded.units) {
+    if (u.id != 1) continue;
+    checked = true;
+    CHECK(u.planType == PlannedActionType::Shoot);
+    CHECK(u.planHasAimPoint);
+    CHECK(u.planShootTargetId == -1);
+    CHECK(glm::distance(u.planAimPoint, glm::vec3(3.25f, 0.5f, -2.75f)) < 1e-4f);
+  }
+  CHECK(checked);
+
+  GameLogic follower(LegacyScene());
+  CHECK(follower.ImportState(decoded));
+  const Unit* mirrored = follower.FindUnit(1);
+  CHECK(mirrored->plan.type == PlannedActionType::Shoot);
+  CHECK(mirrored->plan.hasAimPoint);
+  CHECK(glm::distance(mirrored->plan.aimPoint, glm::vec3(3.25f, 0.5f, -2.75f)) < 1e-4f);
+
+  // ImportTeamPlans (the mid-planning sync path) carries it too.
+  GameLogic peer(LegacyScene());
+  CHECK(peer.ImportTeamPlans(decoded, Team::Blue));
+  CHECK(peer.FindUnit(1)->plan.hasAimPoint);
+}
+
+// Flag state (carrier, position, drop beat) and the grab reach beat survive
+// the snapshot text protocol; a flag-less scene round-trips as disabled.
+void TestFlagSnapshotRoundTrip() {
+  GameLogic off(LegacyScene());
+  GameSnapshot decodedOff;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(off.ExportState()), &decodedOff));
+  CHECK(!decodedOff.flag.enabled);
+
+  Scene scene;
+  scene.flag.enabled = true;
+  scene.flag.winOnGrab = false;
+  scene.flag.position = glm::vec3(0.0f, 0.0f, 0.0f);
+  for (int id = 0; id < 2; ++id) {
+    Unit u;
+    u.id = id;
+    u.team = id == 0 ? Team::Blue : Team::Red;
+    u.position = glm::vec3(id == 0 ? -3.0f : 6.0f, 0.0f, 0.0f);
+    scene.units.push_back(u);
+  }
+  GameLogic game(scene);
+  CHECK(game.Flag().enabled);
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(glm::vec3(0.0f, 0.0f, 0.0f), Team::Blue);
+  game.FinishMovePlan();
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  game.Update(1.0f);
+  game.Update(1.0f);
+  CHECK(game.Flag().carrierId == 0);
+  CHECK(game.FindUnit(0)->carryingFlag);
+
+  GameSnapshot decoded;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &decoded));
+  CHECK(decoded.flag.enabled && decoded.flag.carrierId == 0);
+  GameLogic follower(scene);
+  CHECK(follower.ImportState(decoded));
+  CHECK(follower.Flag().carrierId == 0);
+  CHECK(follower.FindUnit(0)->carryingFlag);
+  CHECK(!follower.FindUnit(1)->carryingFlag);
+  CHECK(glm::distance(follower.FlagPosition(), game.FlagPosition()) < 1e-3f);
+}
+
+// A resolved shot leaves a tracer from the muzzle toward the target; it
+// survives the snapshot round trip (followers) and expires after
+// next turn's start.
+void TestLiveTracerFadesWithinOneSecond() {
+  GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.0f; });
+  CHECK(game.ResolveShot(*game.FindUnit(1), *game.FindUnit(4)));
+  const Tracer tracer = game.Tracers().front();
+  CHECK(game.TracerAlpha(tracer) == 1.0f);
+  game.Update(0.25f);
+  const float mid = game.TracerAlpha(game.Tracers().front());
+  CHECK(mid > 0.0f && mid < 1.0f);
+  game.Update(0.75f);
+  CHECK(game.TracerAlpha(game.Tracers().front()) == 0.0f);
+}
+
+void TestShotLeavesFadingTracer() {
+  GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.0f; });
+  Unit* shooter = game.FindUnit(1);
+  Unit* target = game.FindUnit(4);
+  CHECK(game.Tracers().empty());
+  CHECK(game.ResolveShot(*shooter, *target));
+  CHECK(game.Tracers().size() == 1);
+  const Tracer tracer = game.Tracers().front();
+  CHECK(tracer.team == Team::Blue);
+  CHECK(tracer.at == 0.0f);
+  CHECK(glm::length(tracer.to - target->EyePosition()) < 1e-4f);
+
+  GameSnapshot snap;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &snap));
+  GameLogic follower(LegacyScene());
+  CHECK(follower.ImportState(snap));
+  CHECK(follower.Tracers().size() == 1);
+  CHECK(glm::length(follower.Tracers().front().from - tracer.from) < 1e-4f);
+
+  // Not executing and never played a turn: nothing is shown. Tracers fade on
+  // the ghost clock after a turn ends.
+  CHECK(game.GhostAlpha(tracer.at) == 0.0f);
+}
+
+// Multi-shot bursts (issue #138): the per-weapon magazine and fire interval
+// cap how many shots one shooting action may fire within the round window.
+void TestWeaponBurstCaps() {
+  CHECK(StatsOf(WeaponType::DesertEagle).magazineSize == 8);
+  CHECK(StatsOf(WeaponType::AssaultRifle).magazineSize == 30);
+  CHECK(StatsOf(WeaponType::SniperRifle).magazineSize == 5);
+  // At the 5 s round: the Deagle's 8-round magazine binds (10 shots at its
+  // 0.5 s interval would fit), the AR's 30-round magazine binds before its
+  // interval (~31 shots fit), and the sniper bolt-cycles 5 times.
+  CHECK(MaxShotsPerAction(WeaponType::DesertEagle, constants::kRoundDuration) == 8);
+  CHECK(MaxShotsPerAction(WeaponType::AssaultRifle, constants::kRoundDuration) == 30);
+  CHECK(MaxShotsPerAction(WeaponType::SniperRifle, constants::kRoundDuration) == 5);
+  // A shorter window makes the fire interval the binding cap instead.
+  CHECK(MaxShotsPerAction(WeaponType::AssaultRifle, 1.0f) == 6);
+  CHECK(MaxShotsPerAction(WeaponType::DesertEagle, 1.0f) == 2);
+  // Never below 1: an action always gets its one shot.
+  CHECK(MaxShotsPerAction(WeaponType::SniperRifle, 0.25f) == 1);
+}
+
+void TestPlannedShotCountClampsToWeaponCap() {
+  GameLogic game(LegacyScene());
+  game.FindUnit(1)->weapon = WeaponType::DesertEagle;  // Cap 8.
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  CHECK(game.MaxShotsForSelected() == 8);
+  CHECK(game.PlannedShotCount() == 1);  // Default burst of 1 keeps old behavior.
+  game.SetPlannedShotCount(99, Team::Blue);  // Over-cap clamps to the magazine.
+  CHECK(game.PlannedShotCount() == 8);
+  game.SetPlannedShotCount(0, Team::Blue);  // Never 0: the minimum is one shot.
+  CHECK(game.PlannedShotCount() == 1);
+  game.SetPlannedShotCount(5, Team::Red);  // Only the shooter's own side sets it.
+  CHECK(game.PlannedShotCount() == 1);
+  game.SetPlannedShotCount(5, Team::Blue);
+  game.ClickUnit(4, Team::Blue);  // Lock on: the plan carries the level.
+  CHECK(game.FindUnit(1)->plan.shots == 5);
+  // The next aim starts back at the 1-shot default.
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  CHECK(game.PlannedShotCount() == 1);
+}
+
+// A locked-target burst fires every requested shot, paced at the weapon's
+// interval across the round window (issue #140): the round keeps executing
+// until the last scheduled shot, rolls run per shot while the target
+// stands, and a kill stops the rolling but not the trigger -- the rest of
+// the magazine still fires into the body.
+// True when no two tracers share both endpoints.
+bool AllTracersDistinct(const std::vector<Tracer>& tracers) {
+  for (size_t i = 0; i < tracers.size(); ++i) {
+    for (size_t j = i + 1; j < tracers.size(); ++j) {
+      if (glm::length(tracers[i].to - tracers[j].to) < 1e-3f) return false;
+    }
+  }
+  return true;
+}
+
+void TestLockedBurstFiresAllShotsOverTime() {
+  GameLogic game(LegacyScene());
+  MakePassive(game);
+  int rolls = 0;
+  const float sequence[] = {0.9f, 0.9f, 0.0f, 0.0f};
+  game.SetShotRollSource([&rolls, &sequence] { return sequence[rolls++ % 4]; });
+  game.FindUnit(1)->weapon = WeaponType::SniperRifle;  // 1 s bolt interval.
+  game.ClickUnit(1, Team::Blue);  // Open middle lane: blue1 bursts 4 at red4.
+  game.ChooseShoot();
+  game.SetPlannedShotCount(4, Team::Blue);
+  game.ClickUnit(4, Team::Blue);
+  for (int id : {0, 2}) {
+    game.ClickUnit(id, Team::Blue);
+    game.ChoosePass();
+  }
+  for (int id : {3, 4, 5}) {
+    game.ClickUnit(id, Team::Red);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  // Only shot 0 has fired at commit; the sniper's 1 s bolt interval paces
+  // the rest, so the round is still executing with one roll consumed.
+  CHECK(game.Mode() == InputMode::Executing);
+  CHECK(rolls == 1);
+  game.Update(0.5f);  // Shot 1 is scheduled at t=1.0: not due yet.
+  CHECK(game.Mode() == InputMode::Executing);
+  CHECK(rolls == 1);
+  game.Update(10.0f);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(game.RoundNumber() == 2);
+  CHECK(!game.FindUnit(4)->alive);
+  // Two misses, then the 3rd shot kills; the 4th still fires (the mag
+  // level is honored) but has nothing left to roll against.
+  CHECK(rolls == 3);
+  // One tracer per bullet, every one a different line; the first three
+  // (two scattered misses + the kill) came out one per second, the 4th
+  // fired into the body.
+  CHECK(game.Tracers().size() == 4);
+  CHECK(AllTracersDistinct(game.Tracers()));
+}
+
+// Free-aim bursts (point-target shots): every bullet flies its own scattered
+// line from the muzzle (issue #140) and only bullets whose line crosses the
+// figure roll; the downed figure is skipped by later bullets.
+void TestFreeAimBurstHitsPointTarget() {
+  GameLogic game(
+      AimScene({{Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(10.0f, 0.0f, 0.0f)}}));
+  int rolls = 0;
+  game.SetShotRollSource([&rolls] {
+    ++rolls;
+    return 0.0f;  // Every roll hits.
+  });
+  game.FindUnit(0)->weapon = WeaponType::DesertEagle;
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseShoot();
+  game.SetPlannedShotCount(8, Team::Blue);
+  game.PlaceAimPoint(glm::vec3(10.0f, 0.9f, 0.0f), Team::Blue);
+  game.ConfirmAim(Team::Blue);
+  CHECK(game.FindUnit(0)->plan.shots == 8);
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  game.Update(10.0f);
+  CHECK(!game.FindUnit(1)->alive);
+  // The figure only rolls until it drops: at most the bullets up to and
+  // including the kill, never all 8.
+  CHECK(rolls >= 1 && rolls < 8);
+  // Every one of the 8 bullets left its own tracer, no two the same line,
+  // all from the muzzle.
+  CHECK(game.Tracers().size() == 8);
+  CHECK(AllTracersDistinct(game.Tracers()));
+  for (const Tracer& t : game.Tracers()) {
+    CHECK(glm::length(t.from - game.Tracers().front().from) < 1e-4f);
+  }
+}
+
+// A full assault-rifle magazine dumped at a locked target (issue #140):
+// 30 bullets, 30 distinct tracer lines, each fired 0.16 s after the last --
+// the tracer ages in the snapshot show them spread over the round, not
+// piled into one tick.
+void TestFullMagDumpLeavesThirtyTracers() {
+  GameLogic game(LegacyScene());
+  MakePassive(game);
+  game.SetShotRollSource([] { return 0.99f; });  // Everything misses.
+  game.FindUnit(1)->weapon = WeaponType::AssaultRifle;
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.SetPlannedShotCount(30, Team::Blue);
+  game.ClickUnit(4, Team::Blue);
+  for (int id : {0, 2}) {
+    game.ClickUnit(id, Team::Blue);
+    game.ChoosePass();
+  }
+  for (int id : {3, 4, 5}) {
+    game.ClickUnit(id, Team::Red);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  // Stepped at the live frame rate: shots appear one at a time.
+  size_t previous = game.Tracers().size();
+  int steps = 0;
+  while (game.Mode() == InputMode::Executing && steps++ < 1000) {
+    game.Update(1.0f / 60.0f);
+    CHECK(game.Tracers().size() >= previous);
+    CHECK(game.Tracers().size() <= previous + 1);  // Never two bullets in one frame.
+    previous = game.Tracers().size();
+  }
+  CHECK(game.Tracers().size() == 30);
+  CHECK(AllTracersDistinct(game.Tracers()));
+  // Spread across the 4.64 s the magazine takes (30 shots at 0.16 s).
+  CHECK(steps > 4.5f * 60.0f && steps < 5.2f * 60.0f);
+}
+
+void TestLockOnStagesUntilFireAndKeepsShotCount() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  // Clicking an enemy figure stages the lock; the mode (and bar) stay up.
+  game.ClickAimRay(glm::vec3(8.0f, 20.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingShootTarget);
+  CHECK(game.GetLockPreview() == std::optional<int>(4));
+  CHECK(game.FindUnit(1)->plan.type != PlannedActionType::Shoot);
+  game.SetPlannedShotCount(7, Team::Blue);
+  game.ConfirmAim(Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(!game.GetLockPreview().has_value());
+  CHECK(game.FindUnit(1)->plan.shootTargetId == 4);
+  CHECK(game.FindUnit(1)->plan.shots == 7);
+
+  // Placing a surface aim point replaces a staged lock.
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.ClickAimRay(glm::vec3(8.0f, 20.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), Team::Blue);
+  game.ClickAimRay(glm::vec3(0.0f, 20.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), Team::Blue);
+  CHECK(!game.GetLockPreview().has_value());
+  CHECK(game.GetAimPreview().has_value());
+}
+
+void TestBulletsFlyToMapEdgeNotWeaponRange() {
+  GameLogic game(LegacyScene());
+  game.SetShotRollSource([] { return 0.99f; });
+  game.FindUnit(1)->weapon = WeaponType::SniperRifle;
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.PlaceAimPoint(glm::vec3(8.0f, 0.0f, 0.0f), Team::Blue);
+  game.ConfirmAim(Team::Blue);
+  for (int id : {0, 2}) {
+    game.ClickUnit(id, Team::Blue);
+    game.ChoosePass();
+  }
+  for (int id : {3, 4, 5}) {
+    game.ClickUnit(id, Team::Red);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  for (int i = 0; i < 1000 && game.Mode() == InputMode::Executing; ++i) game.Update(1.0f / 60.0f);
+  CHECK(!game.Tracers().empty());
+  const float half = game.GetScene().mapHalfExtent;
+  for (const Tracer& t : game.Tracers()) {
+    CHECK(std::fabs(t.to.x) <= half + 1e-3f && std::fabs(t.to.z) <= half + 1e-3f);
+  }
+}
+
+// A fall cut short by the end of a round freezes through planning and
+// resumes (from the same elapsed time) when the next round executes.
+void TestKnockdownFreezesBetweenRounds() {
+  GameLogic game(LegacyScene());
+  MakePassive(game);
+  Unit* downed = game.FindUnit(5);
+  downed->alive = false;
+  downed->knockdownElapsed = 0.3f;
+  CHECK(!game.HasActiveKnockdown());  // Planning: frozen.
+  game.Update(1.0f);
+  CHECK(downed->knockdownElapsed == 0.3f);
+
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(game.FindUnit(0)->position + glm::vec3(4.0f, 0.0f, 0.0f), Team::Blue);
+  game.FinishMovePlan();
+  for (int id : {1, 2, 3, 4}) {
+    game.ClickUnit(id, id < 3 ? Team::Blue : Team::Red);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  CHECK(game.Mode() == InputMode::Executing);
+  CHECK(game.HasActiveKnockdown());
+  game.Update(0.25f);
+  CHECK(std::fabs(downed->knockdownElapsed - 0.55f) < 1e-5f);  // Resumed.
+  game.Update(1.0e6f);
+  CHECK(game.Mode() != InputMode::Executing);
+  const float frozenAt = downed->knockdownElapsed;
+  game.Update(2.0f);
+  CHECK(downed->knockdownElapsed == frozenAt);
+}
+
+void TestBurstPlanSurvivesSnapshotAndClampsOnImport() {
+  GameLogic game(LegacyScene());
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseShoot();
+  game.SetPlannedShotCount(12, Team::Blue);  // LegacyScene units carry ARs (cap 30).
+  game.ClickUnit(4, Team::Blue);
+  CHECK(game.FindUnit(1)->plan.shots == 12);
+
+  GameSnapshot decoded;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &decoded));
+  bool checked = false;
+  for (const auto& u : decoded.units) {
+    if (u.id != 1) continue;
+    checked = true;
+    CHECK(u.planShots == 12);
+  }
+  CHECK(checked);
+
+  GameLogic follower(LegacyScene());
+  CHECK(follower.ImportState(decoded));
+  CHECK(follower.FindUnit(1)->plan.shots == 12);
+
+  GameLogic peer(LegacyScene());
+  CHECK(peer.ImportTeamPlans(decoded, Team::Blue));
+  CHECK(peer.FindUnit(1)->plan.shots == 12);
+
+  // A peer can't ship a plan past the weapon's cap: import re-clamps.
+  for (auto& u : decoded.units) {
+    if (u.id == 1) u.planShots = 200;
+  }
+  GameLogic clamped(LegacyScene());
+  CHECK(clamped.ImportState(decoded));
+  CHECK(clamped.FindUnit(1)->plan.shots == 30);
+}
+
+// Benchmark: ~300 small deck/ramp surfaces (interiors-scale). Guards the
+// per-Build route table and surface spatial index; the ceiling is generous
+// so only an algorithmic regression trips it (the pre-cache code took ~3.3 s here).
+void TestReachFieldManySurfacesPerformance() {
+  using Clock = std::chrono::steady_clock;
+  std::vector<tactics::WalkSurface> surfaces;
+  const int kCols = 20, kRows = 15;
+  for (int r = 0; r < kRows; ++r) {
+    for (int c = 0; c < kCols; ++c) {
+      tactics::WalkSurface s;
+      const float x = -20.0f + c * 2.0f, z = -15.0f + r * 2.0f, y = 1.0f;
+      s.vertices = {{x, y, z}, {x + 1.8f, y, z}, {x + 1.8f, y, z + 1.8f}, {x, y, z + 1.8f}};
+      const int id = r * kCols + c;
+      if (c > 0) s.neighbors.push_back(id - 1);
+      if (c + 1 < kCols) s.neighbors.push_back(id + 1);
+      if (r > 0) s.neighbors.push_back(id - kCols);
+      if (r + 1 < kRows) s.neighbors.push_back(id + kCols);
+      s.connectsToGround = (id == 0);
+      surfaces.push_back(std::move(s));
+    }
+  }
+  tactics::NavMesh nav;
+  const auto buildStart = Clock::now();
+  nav.Build(std::vector<tactics::Obstacle>{}, /*mapHalfExtent=*/30.0f, /*agentRadius=*/0.4f,
+            nullptr, &surfaces);
+  const double buildMs =
+      std::chrono::duration<double, std::milli>(Clock::now() - buildStart).count();
+
+  const auto start = Clock::now();
+  const tactics::ReachField onSurface = nav.ComputeReachField(glm::vec3(-19.0f, 1.0f, -14.0f), 30.0f);
+  const tactics::ReachField fromGround = nav.ComputeReachField(glm::vec3(-22.0f, 0.0f, -16.0f), 30.0f);
+  const double reachMs = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+  std::printf("  navmesh bench: build %.1f ms, 2x reach field %.1f ms\n", buildMs, reachMs);
+
+  const auto nodeAt = [](const tactics::ReachField& f, float x, float z) {
+    return std::make_pair(static_cast<int>(std::lround((x - f.minX) / f.step)),
+                          static_cast<int>(std::lround((z - f.minZ) / f.step)));
+  };
+  const auto far = nodeAt(onSurface, -19.0f + 10.0f, -14.0f + 10.0f);
+  CHECK(onSurface.Reached(far.first, far.second));
+  CHECK(onSurface.Dist(far.first, far.second) >= 14.0f);
+  const auto deck = nodeAt(fromGround, -19.0f, -14.0f);
+  CHECK(fromGround.Reached(deck.first, deck.second));
+#ifdef NDEBUG
+  CHECK(buildMs + reachMs < 1000.0);  // Release (CI): ~190 ms measured.
+#else
+  CHECK(buildMs + reachMs < 10000.0);  // Unoptimised builds are ~10x slower.
+#endif
+}
+
 int main() {
   TestNavMeshRoutesAroundObstacle();
   TestNavMeshDirectPathWhenUnobstructed();
@@ -1916,6 +3384,7 @@ int main() {
   TestRoundExecutesBothTeamsMovesConcurrently();
   TestShootRowsResolveSimultaneouslyAcrossTeams();
   TestMutualEliminationIsDraw();
+  TestIdleRoundRunsFullDuration();
   TestMoveFrontierRoutesAroundObstacle();
   TestClickChainsLegsAcrossRounds();
   TestManualReplanClearsQueuedLegs();
@@ -1930,6 +3399,7 @@ int main() {
   TestGameLogicIgnoresInputWhileExecuting();
   TestGameLogicMoveCanClimbOntoObstacle();
   TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds();
+  TestGameLogicPlaybookShootOnSightFiresWholeMagAtNormalOdds();
   TestGameLogicPlaybookDefaultTable();
   TestGameLogicPlaybookIgnoresSameTeamMover();
   TestGameLogicPlaybookMovingRows();
@@ -1939,6 +3409,8 @@ int main() {
   TestSnapshotCarriesSquadPlaybook();
   TestGameLogicWinCondition();
   TestWalkCycleTracksInFlightMove();
+  TestTurnLagEasesDrawnHeading();
+  TestShotTurnEasesAndReturns();
   TestResolvedShotStartsShootAnimation();
   TestShotHitChanceProfile();
   TestShotHitChanceGatesAndRoll();
@@ -1946,14 +3418,53 @@ int main() {
   TestMuzzleIsAtGunTipNotHead();
   TestSnapshotMirrorsMatchAndTeamPlans();
   TestSightingRecordedImmediatelyOnEntry();
+  TestDeadFigureInFovGetsGhost();
+  TestFallingBodyKeepsSamplingItsPose();
+  TestReplaySeekForwardKeepsFadingGhosts();
   TestSightingSamplesAccumulateWhileInFov();
   TestSightingMoveDirectionOnlyWhenMoving();
   TestSightingCapturesAnimationPose();
-  TestSightingsPersistAfterLeavingFovThenExpire();
-  TestSightingReentryAppendsToAgingTrail();
+  TestGhostsShowDuringTurnThenFadeInOrder();
+  TestNextTurnStartsWithoutLastTurnsGhosts();
+  TestSightingReentryAddsNewSample();
   TestResetClearsSightings();
   TestImportStateOfNewGameClearsFollowerSightings();
   TestFollowerBuildsSightingsWithoutPhysicsUpdate();
+  TestTurnTimelineRecordsTicksAndReplays();
+  TestTurnTimelineReplayGhostLifetimes();
+  TestTurnTimelineResetsOnNewMatch();
+  TestZiplineExtendsReachBeyondWalking();
+  TestZiplineCostScalesWithLength();
+  TestZiplineIsTwoWay();
+  TestZiplineRideIsFasterThanWalking();
+  TestZiplineOccupiedLineBlocksSecondRider();
+  TestZiplineRiderCannotShoot();
+  TestZiplinePlanSnapshotRoundTrip();
+  TestZiplineLegsChainAcrossRounds();
+  TestZiplineRoofAccessBothDirections();
+  TestRideStateInSnapshot();
+  TestAimRayResolvesUnitAndSurface();
+  TestFreeAimPreviewPlaceConfirmAndCancel();
+  TestFreeAimShotFiresBehindShooterAndFacesAimPoint();
+  TestFreeAimBlindHitRevealsMissDoesNot();
+  TestFreeAimTraceStopsAtWalls();
+  TestFreeAimFriendlyFireFlag();
+  TestFreeAimAreaDenialShotLeaksNothing();
+  TestFollowerMirrorsBlindHitReveal();
+  TestFreeAimPlanSnapshotAndProtocolRoundTrip();
+  TestFlagSnapshotRoundTrip();
+  TestShotLeavesFadingTracer();
+  TestWeaponBurstCaps();
+  TestPlannedShotCountClampsToWeaponCap();
+  TestLockedBurstFiresAllShotsOverTime();
+  TestFreeAimBurstHitsPointTarget();
+  TestFullMagDumpLeavesThirtyTracers();
+  TestLiveTracerFadesWithinOneSecond();
+  TestLockOnStagesUntilFireAndKeepsShotCount();
+  TestBulletsFlyToMapEdgeNotWeaponRange();
+  TestKnockdownFreezesBetweenRounds();
+  TestBurstPlanSurvivesSnapshotAndClampsOnImport();
+  TestReachFieldManySurfacesPerformance();
 
   if (g_failures == 0) {
     std::printf("All logic tests passed.\n");

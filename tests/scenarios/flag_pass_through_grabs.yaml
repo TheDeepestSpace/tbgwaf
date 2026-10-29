@@ -1,0 +1,23 @@
+name: flag_pass_through_grabs
+description: >
+  CTF part 1: the grab triggers anywhere along a move's path, not only where it stops. Red
+  runs straight through the flag's cell and ends well past it, but still wins.
+
+flag:
+  enabled: true
+
+units:
+  - {id: 0, team: blue, position: [-8, 0, 8], facing_degrees: 0}
+  - {id: 1, team: red, position: [3, 0, 0], facing_degrees: 180}
+
+script:
+  - action: pass
+    actor: 0
+  - action: move
+    actor: 1
+    destination: [-3, 0, 0]
+    comment: Crosses the flag at the origin mid-move.
+  - action: commit
+  - assert: {flag_carrier: 1}
+  - assert: {winner: red}
+  - assert: {unit: 1, position: [-3, 0, 0], tolerance: 3.0}

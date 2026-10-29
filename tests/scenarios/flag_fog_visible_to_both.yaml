@@ -1,0 +1,25 @@
+name: flag_fog_visible_to_both
+description: >
+  The flag is a neutral objective, so fog of war never hides it: both teams see it even
+  with a wall between them and the flag and their figures facing away. (Enemy figures stay
+  hidden by the same wall, as ever.)
+
+flag:
+  enabled: true
+  position: [0, 0]
+
+map:
+  obstacles:
+    - {center: [0, 0], half_extent: [0.3, 6], height: 3}
+    - {center: [-8, 0], half_extent: [0.3, 6], height: 3}
+    - {center: [8, 0], half_extent: [0.3, 6], height: 3}
+
+units:
+  - {id: 0, team: blue, position: [-12, 0, 0], facing_degrees: 180}
+  - {id: 1, team: red, position: [12, 0, 0], facing_degrees: 0}
+
+script:
+  - assert: {flag_visible_to: blue}
+  - assert: {flag_visible_to: red}
+  - assert: {unit: 1, visible_to: blue, visible: false}
+  - assert: {unit: 0, visible_to: red, visible: false}

@@ -1,0 +1,25 @@
+name: flag_walk_onto_wins
+description: >
+  CTF part 1: with the neutral flag enabled (default spot: map center) the first figure to
+  step onto it grabs it for free and its team wins at once -- no elimination needed.
+
+flag:
+  enabled: true
+
+units:
+  - {id: 0, team: blue, position: [-4, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [8, 0, 8], facing_degrees: 180}
+
+script:
+  - assert: {flag_state: rest, flag_position: [0, 0], flag_visible_to: blue}
+  - assert: {winner: none}
+  - action: move
+    actor: 0
+    destination: [0, 0, 0]
+    comment: Ends exactly on the flag.
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {flag_carrier: 0, flag_state: carried}
+  - assert: {winner: blue}
+  - assert: {unit: 1, alive: true, comment: Nobody was eliminated}

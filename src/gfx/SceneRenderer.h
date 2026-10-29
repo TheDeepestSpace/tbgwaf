@@ -253,6 +253,11 @@ class SceneRenderer {
   // per-surface path remains only for the camera-fade re-draw.
   LitTriangleMesh deckMesh_;
   unsigned long long deckKey_ = 0;
+  LitTriangleMesh obstacleMesh_;        // Drawn prisms, recessed openings cut out.
+  LitTriangleMesh obstacleCasterMesh_;  // The same, solid, for the shadow map.
+  unsigned long long obstacleKey_ = 0;
+  std::vector<int> surfaceBuilding_;  // Roof slab -> building, see RoofBuildings.
+  unsigned long long surfaceBuildingKey_ = 0;
   // Renders the two depth maps for `unit` looking along `facingYaw`, then
   // re-draws the static scene into the pane with the mask shader, tinted
   // `color` within `halfFovDegrees` of that heading. Leaves the pane framebuffer,

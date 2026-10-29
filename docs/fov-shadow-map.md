@@ -33,9 +33,14 @@ Per pane, for each living unit of the pane's team
    mesh, and a static mesh of obstacles, decks/ramps as 0.45-thick slabs
    (the `LineOfSightClear` slab thickness, same as the lit pass), sidewalk
    slabs/patches and roads. The static mesh is built once per scene
-   (content-hashed) rather than re-tessellated per draw. Units are not
-   casters: gameplay LOS ignores them, and so does the CPU overlay.
-2. One mask pass over the same geometry into the pane: depth test `LEQUAL`
+   (content-hashed) rather than re-tessellated per draw, and is split into
+   an 8x8 grid of chunks so each map draws only the chunks inside its own
+   frustum. Units are not casters: gameplay LOS ignores them, and so does
+   the CPU overlay. Facade openings (window frames, door niches) are not
+   casters either: the frames stand a few centimetres proud of the wall
+   and the niches sit inside it, yet they were most of a city's triangles.
+2. One mask pass over the same geometry, plus the facade openings, into
+   the pane (only chunks on screen and inside either map): depth test `LEQUAL`
    with a small polygon offset, no depth writes, the same stencil trick as
    the CPU path so teammates' masks don't stack. The fragment shader
    discards fragments facing away from the eye, fragments outside the

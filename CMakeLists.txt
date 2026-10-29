@@ -142,6 +142,7 @@ if(EMSCRIPTEN)
     src/gfx/Shader.cpp
     src/gfx/Mesh.cpp
     src/gfx/Camera.cpp
+    src/gfx/AmbientOcclusion.cpp
     src/gfx/SceneRenderer.cpp
     src/gfx/FigureRig.cpp
     src/gfx/Ragdoll.cpp

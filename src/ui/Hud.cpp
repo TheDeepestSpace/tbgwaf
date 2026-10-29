@@ -36,6 +36,10 @@ bool& PlaybookOpen(Team team) {
   return open[team == Team::Blue ? 0 : 1];
 }
 
+// Set while the thermal HUD style is pushed, so draw-list text (the pane
+// team label) can follow the green symbology too.
+bool g_thermalHudStyle = false;
+
 const char* ReactionName(tactics::ReactionAction a) {
   static const char* names[] = {"Do Nothing", "Shoot", "Stop", "Continue", "Shoot + Stop",
                                 "Shoot + Continue"};
@@ -306,8 +310,10 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
     }
   }
 
-  ImGui::GetForegroundDrawList()->AddText(ImVec2(left + 10.0f, windowHeight - 24.0f),
-                                           IM_COL32(255, 255, 255, 220), TeamName(team));
+  ImGui::GetForegroundDrawList()->AddText(
+      ImVec2(left + 10.0f, windowHeight - 24.0f),
+      g_thermalHudStyle ? IM_COL32(110, 255, 130, 230) : IM_COL32(255, 255, 255, 220),
+      TeamName(team));
   return actions;
 }
 
@@ -410,20 +416,28 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
   }
 
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  const ImU32 lineCol = IM_COL32(200, 200, 210, 200);
-  const ImU32 playedCol = IM_COL32(110, 190, 255, 255);
+  const ImU32 lineCol = g_thermalHudStyle ? IM_COL32(85, 145, 95, 200)
+                                         : IM_COL32(200, 200, 210, 200);
+  const ImU32 playedCol = g_thermalHudStyle ? IM_COL32(110, 255, 130, 255)
+                                           : IM_COL32(110, 190, 255, 255);
+  const ImU32 tickCol = g_thermalHudStyle ? IM_COL32(140, 255, 155, 255)
+                                         : IM_COL32(235, 235, 245, 255);
+  const ImU32 unplayedCol = g_thermalHudStyle ? IM_COL32(40, 70, 45, 255)
+                                             : IM_COL32(60, 60, 70, 255);
   dl->AddLine(ImVec2(x0, lineY), ImVec2(x1, lineY), lineCol, 3.0f);
   dl->AddLine(ImVec2(x0, lineY), ImVec2(handleX, lineY), playedCol, 3.0f);
   for (int i = 0; i < tickCount; ++i) {
     const float tx = TickX(i);
     dl->AddCircleFilled(ImVec2(tx, lineY), 6.0f,
-                        tx <= handleX + 0.5f ? playedCol : IM_COL32(60, 60, 70, 255));
-    dl->AddCircle(ImVec2(tx, lineY), 6.0f, IM_COL32(235, 235, 245, 255), 0, 2.0f);
+                        tx <= handleX + 0.5f ? playedCol : unplayedCol);
+    dl->AddCircle(ImVec2(tx, lineY), 6.0f, tickCol, 0, 2.0f);
     const char* label = ticks[i].label.c_str();
     const ImVec2 ts = ImGui::CalcTextSize(label);
-    dl->AddText(ImVec2(tx - ts.x * 0.5f, lineY + 12.0f), IM_COL32(230, 230, 240, 230), label);
+    dl->AddText(ImVec2(tx - ts.x * 0.5f, lineY + 12.0f),
+                g_thermalHudStyle ? tickCol : IM_COL32(230, 230, 240, 230), label);
   }
   dl->AddCircleFilled(ImVec2(handleX, lineY), 10.0f,
+                      g_thermalHudStyle ? tickCol :
                       dragging ? IM_COL32(255, 255, 255, 255) : IM_COL32(245, 245, 250, 255));
   dl->AddCircle(ImVec2(handleX, lineY), 10.0f, playedCol, 0, 3.0f);
 
@@ -442,9 +456,11 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
   return actions;
 }
 
-void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& disableOcclusionFade,
-                    bool& showFps, float fps, float frameMs, float fovMs,
-                    const gfx::RenderFrameStats& stats, float top) {
+void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
+                    float& thermalFovAlpha,
+                    float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
+                    bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,
+                    float fovMs, const gfx::RenderFrameStats& stats, float top) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
   // Once per run (not FirstUseEver) so a saved imgui.ini can't reopen it at startup.
   ImGui::SetNextWindowCollapsed(true, ImGuiCond_Once);
@@ -452,6 +468,26 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& disableOcclusi
                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove);
   ImGui::Checkbox("Disable FOV cones", &disableFov);
   ImGui::Checkbox("Disable shadows", &disableShadows);
+  ImGui::Checkbox("AO", &thermal);
+  if (thermal) {
+    // Polarity toggle, like the white-hot/black-hot switch on a real FLIR.
+    ImGui::SameLine();
+    ImGui::Checkbox("Black hot", &thermalBlackHot);
+    // Team FOV tint opacity over the thermal world (normal view: 0.15).
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("FOV opacity", &thermalFovAlpha, 0.0f, 1.0f, "%.2f");
+    // Contact-shading tuning: radius is the world-space reach of the
+    // shadow, strength its darkness, quality the samples per ray, softness
+    // the blur half-width.
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("AO radius", &aoRadius, 0.5f, 6.0f, "%.1f");
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("AO strength", &aoStrength, 0.0f, 10.0f, "%.1f");
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderInt("AO quality", &aoQuality, 1, 20);
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderInt("AO softness", &aoSoftness, 0, 10);
+  }
   ImGui::Checkbox("Disable occlusion fade", &disableOcclusionFade);
   ImGui::Checkbox("Show FPS", &showFps);
   if (showFps) ImGui::Text("%.1f FPS (%.2f ms)", fps, frameMs);
@@ -460,6 +496,42 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& disableOcclusi
   ImGui::Text("Vertices: %lld", stats.vertices);
   ImGui::Text("FOV cones: %.2f ms", fovMs);
   ImGui::End();
+}
+
+void PushThermalHudStyle() {
+  g_thermalHudStyle = true;
+  const ImVec4 text(0.55f, 1.00f, 0.60f, 1.00f);
+  const ImVec4 textDim(0.32f, 0.62f, 0.36f, 1.00f);
+  const ImVec4 bright(0.30f, 0.90f, 0.40f, 1.00f);
+  const ImVec4 bg(0.00f, 0.07f, 0.02f, 0.62f);
+  const ImVec4 bgSolid(0.02f, 0.12f, 0.05f, 1.00f);
+  const ImVec4 widget(0.05f, 0.24f, 0.10f, 1.00f);
+  const ImVec4 widgetHover(0.09f, 0.36f, 0.15f, 1.00f);
+  const ImVec4 widgetActive(0.13f, 0.48f, 0.20f, 1.00f);
+  ImGui::PushStyleColor(ImGuiCol_Text, text);
+  ImGui::PushStyleColor(ImGuiCol_TextDisabled, textDim);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, bg);
+  ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.70f, 0.32f, 0.55f));
+  ImGui::PushStyleColor(ImGuiCol_TitleBg, bgSolid);
+  ImGui::PushStyleColor(ImGuiCol_TitleBgActive, bgSolid);
+  ImGui::PushStyleColor(ImGuiCol_TitleBgCollapsed, bgSolid);
+  ImGui::PushStyleColor(ImGuiCol_FrameBg, widget);
+  ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, widgetHover);
+  ImGui::PushStyleColor(ImGuiCol_FrameBgActive, widgetActive);
+  ImGui::PushStyleColor(ImGuiCol_Button, widget);
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, widgetHover);
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, widgetActive);
+  ImGui::PushStyleColor(ImGuiCol_CheckMark, bright);
+  ImGui::PushStyleColor(ImGuiCol_Header, widget);
+  ImGui::PushStyleColor(ImGuiCol_HeaderHovered, widgetHover);
+  ImGui::PushStyleColor(ImGuiCol_HeaderActive, widgetActive);
+  ImGui::PushStyleColor(ImGuiCol_SliderGrab, bright);
+  ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, text);
+}
+
+void PopThermalHudStyle() {
+  ImGui::PopStyleColor(19);
+  g_thermalHudStyle = false;
 }
 
 }  // namespace ui

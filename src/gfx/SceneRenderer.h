@@ -13,6 +13,7 @@
 #include "game/Scene.h"
 #include "game/Types.h"
 #include "game/Visibility.h"
+#include "gfx/AmbientOcclusion.h"
 #include "gfx/Camera.h"
 #include "gfx/Mesh.h"
 #include "gfx/Shader.h"
@@ -37,6 +38,20 @@ bool IsUnitVisibleForRender(const tactics::Unit& unit, tactics::Team viewingTeam
 struct RenderDebugOptions {
   bool disableFov = false;
   bool disableShadows = false;
+  // Thermal camera prototype (issue #177): material-based grayscale with
+  // pale surfaces and ambient contact shading; figures keep their team
+  // color. Sensor blur and grain precede the overlays; sunlight shadows are
+  // skipped. Gameplay overlays keep their in-game colors (only the HUD goes
+  // green). `thermalBlackHot` picks the polarity, like the toggle on a real
+  // FLIR: true renders a washed-out bright world (matching the PR #178
+  // review's aerial reference footage), false is classic white-hot.
+  bool thermal = false;
+  bool thermalBlackHot = true;
+  // Alpha of the team FOV tint in thermal view (normal view uses 0.15);
+  // a debug-panel slider so it can be calibrated against the pale world.
+  float thermalFovAlpha = 0.25f;
+  // Contact-shading tunables for the thermal view's debug-panel sliders.
+  AmbientOcclusionSettings thermalAo;
   // Issue #136: skip the camera-occlusion see-through pass (occluding
   // blocks/decks are then always drawn fully opaque).
   bool disableOcclusionFade = false;
@@ -56,7 +71,7 @@ struct PaneOverlays {
   std::optional<glm::vec3> invalidHoverHighlight;  // Red ring on an unreachable hover point.
   const std::vector<glm::vec3>* movePreviewPath = nullptr;  // Yellow preview polyline.
   const tactics::ReachField* moveFrontier = nullptr;  // Reachable-area gradient + border.
-  bool moveFrontierSubsequentLeg = false;             // Border drawn yellow instead of green.
+  bool moveFrontierSubsequentLeg = false;             // Border/path drawn at 50% alpha.
   // Zipline reach (walk -> ride -> walk), drawn as a second, cyan region with
   // the line itself highlighted; the preview/planned path marks its ride.
   const std::vector<tactics::GameLogic::ZiplineFrontier>* ziplineFrontiers = nullptr;
@@ -113,6 +128,7 @@ class SceneRenderer {
   bool Init();
   void Destroy();
 
+
   void SetFovOverlayMode(FovOverlayMode mode) { fovOverlayMode_ = mode; }
   FovOverlayMode GetFovOverlayMode() const { return fovOverlayMode_; }
   // ShadowMap mode only: height above an upward-facing fragment (ground,
@@ -144,6 +160,13 @@ class SceneRenderer {
   Shader colorShader_;
   Shader coneSurfaceShader_;
   Shader depthShader_;
+  Shader thermalSensorShader_;
+  AmbientOcclusion thermalOcclusion_;
+  GLuint thermalSceneTex_ = 0;
+  GLuint thermalSensorVao_ = 0;
+  int thermalSceneWidth_ = 0;
+  int thermalSceneHeight_ = 0;
+  void ApplyThermalSensor(int x, int y, int width, int height);
   CubeMesh cubeMesh_;
   SphereMesh sphereMesh_;
   LineMesh pathLine_;
@@ -168,6 +191,7 @@ class SceneRenderer {
   const tactics::ReachField* frontierKeyField_ = nullptr;
   glm::vec2 frontierKeyOrigin_{0.0f};
   float frontierKeyBudget_ = -1.0f;
+  int frontierKeyThermal_ = 0;  // 0 off, 1 white-hot, 2 black-hot.
   ColorTriangleMesh ziplineFill_;
   LineMesh ziplineBorder_;
   std::vector<glm::vec4> ziplineKey_;  // (minX, minZ, budget, zipline) per region.

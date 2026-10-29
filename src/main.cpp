@@ -504,6 +504,9 @@ int main() {
   tbgwaf_flow::State screen = tbgwaf_flow::kInitialState;
   // Local-only debug panel state (defaults: FOV and shadows on, FPS shown).
   gfx::RenderDebugOptions debugOptions;
+  // AO view is on by default, including in the smoke test (software GL needs
+  // the longer smoke_test timeout).
+  debugOptions.thermal = true;
   bool showFps = true;
   float smoothedFps = 0.0f;
   float frameMs = 0.0f;
@@ -921,6 +924,9 @@ int main() {
             static_cast<float>(SDL_GetPerformanceFrequency());
 
     // --- UI ---
+    // Thermal view restyles the whole HUD (both panes and the debug panel
+    // below) to sensor-green symbology; popped after the debug panel.
+    if (debugOptions.thermal) ui::PushThermalHudStyle();
     float roundPanelBottom = 2.0f;
     for (int pane = 0; pane < paneCount; ++pane) {
       const ui::HudActions hud = ui::DrawHud(displayGame, paneTeam(pane), hudHumanPlanning,
@@ -1090,10 +1096,18 @@ int main() {
       }
     }
     // Anchored under the Round panel so it follows collapse/expand.
-    ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows,
+    const bool hudWasThermal = debugOptions.thermal;
+    ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, debugOptions.thermal,
+                       debugOptions.thermalBlackHot, debugOptions.thermalFovAlpha,
+                       debugOptions.thermalAo.radius,
+                       debugOptions.thermalAo.strength, debugOptions.thermalAo.quality,
+                       debugOptions.thermalAo.softness,
                        debugOptions.disableOcclusionFade, showFps,
                        smoothedFps, frameMs, fovMs, frameStats,
                        roundPanelBottom + 6.0f);
+    // Pop against the pre-panel state: the checkbox may have just toggled
+    // `thermal`, but the push at the top of this frame is what must unwind.
+    if (hudWasThermal) ui::PopThermalHudStyle();
 
     // --- Render: one shadow pass + one color pass per pane, both inside
     // SceneRenderer::RenderPane. Selection/move-preview overlays belong to

@@ -195,6 +195,10 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   renderer.SetFovOverlayMode(shadowMapFov ? gfx::FovOverlayMode::ShadowMap
                                           : gfx::FovOverlayMode::CpuAnalytic);
   renderer.SetFovProbeHeight(scenario.fovProbeHeight);
+  gfx::RenderDebugOptions renderDebug;
+  // Every scenario renders in the AO view, like the live app default.
+  renderDebug.thermal = true;
+  renderDebug.thermalBlackHot = scenario.thermalBlackHot;
   // --profile: per-pane RenderPane wall time (glFinish before and after)
   // and the number of own living units whose cones were drawn, so the cost
   // per pane and per unit can be read off.
@@ -229,7 +233,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
         glFinish();
         const auto start = std::chrono::steady_clock::now();
         renderer.RenderPane(game, team, fogActive, visibility, cameras[pane], pane * paneWidth,
-                            0, paneWidth, kWindowHeight, overlays);
+                            0, paneWidth, kWindowHeight, overlays, 0, renderDebug);
         glFinish();
         const auto end = std::chrono::steady_clock::now();
         PaneProfile& p = profiles[pane];
@@ -240,7 +244,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
         }
       } else {
         renderer.RenderPane(game, team, fogActive, visibility, cameras[pane], pane * paneWidth, 0,
-                            paneWidth, kWindowHeight, overlays);
+                            paneWidth, kWindowHeight, overlays, 0, renderDebug);
       }
     }
 
@@ -253,6 +257,8 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     const bool planning = game.Mode() != InputMode::Executing && game.Mode() != InputMode::GameOver;
     std::array<ui::HudLayout, ui::kPaneCount> layouts;
     auto drawHud = [&](const GameLogic& g) {
+      // Thermal scenarios get the same sensor-green HUD as the live app.
+      if (renderDebug.thermal) ui::PushThermalHudStyle();
       for (int pane = 0; pane < ui::kPaneCount; ++pane) {
         layouts[pane] = ui::HudLayout{};
         ui::DrawHud(g, PaneTeam(pane), planning, ui::ComputePaneRect(pane, kWindowWidth),
@@ -263,6 +269,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
                            &layouts[pane]);
         }
       }
+      if (renderDebug.thermal) ui::PopThermalHudStyle();
     };
     // Auto-resize windows need a couple of frames to settle on their content
     // size (and stay hidden meanwhile), as they would in the live app; run

@@ -133,6 +133,15 @@ EM_JS(char*, tbgwaf_server_room, (), {
   return ptr;
 });
 
+// "create" / "join" (Module.tbgwafRoomIntent) for the room page; empty otherwise.
+EM_JS(char*, tbgwaf_server_room_intent, (), {
+  const text = Module.tbgwafRoomIntent || "";
+  const size = lengthBytesUTF8(text) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(text, ptr, size);
+  return ptr;
+});
+
 // WebSocket plumbing: events are queued as "O" (open), "C" (closed) and
 // "M<text frame>" and drained by the frame loop.
 EM_JS(void, tbgwaf_ws_open, (const char* url), {
@@ -515,8 +524,10 @@ int main() {
     std::free(urlRaw);
     if (!serverUrl.empty()) {
       char* roomRaw = tbgwaf_server_room();
-      remote = std::make_unique<tactics::net::RemoteClient>(&game, roomRaw);
+      char* intentRaw = tbgwaf_server_room_intent();
+      remote = std::make_unique<tactics::net::RemoteClient>(&game, roomRaw, intentRaw);
       std::free(roomRaw);
+      std::free(intentRaw);
       fixedTeam = Team::Blue;  // Placeholder until the server's "start".
       tbgwaf_ws_open(serverUrl.c_str());
     }

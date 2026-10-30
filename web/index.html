@@ -71,6 +71,18 @@
         position: absolute; inset: 0; visibility: hidden; pointer-events: none;
       }
       #panes[data-spectator="true"] .pane + .pane { border-left: 0; }
+      #room-page {
+        position: fixed; inset: 0; z-index: 40;
+        display: flex; align-items: center; justify-content: center;
+        background: #16171a; font-size: 14px;
+      }
+      #room-page[hidden] { display: none; }
+      #room-page .card { display: flex; flex-direction: column; gap: 12px; width: min(340px, 90vw); }
+      #room-page h1 { margin: 0; font-size: 22px; }
+      #room-page button, #room-page input { padding: 9px 10px; font-size: 15px; }
+      #room-code { text-transform: uppercase; letter-spacing: 0.2em; text-align: center; }
+      #room-error { color: #ff9d9d; min-height: 1.2em; }
+      #leave-room { position: fixed; top: 8px; left: 10px; z-index: 30; color: #b9bbc2; font-size: 12px; }
       @media (max-width: 680px) {
         #control-panel { left: 6px; right: 6px; transform: none; width: auto; }
         #config { margin-left: 0; }
@@ -78,6 +90,20 @@
     </style>
   </head>
   <body>
+    <section id="room-page" aria-label="Online room" hidden>
+      <div class="card">
+        <h1>Online match</h1>
+        <button id="new-room" type="button">New room</button>
+        <div class="row">
+          <input id="room-code" type="text" maxlength="32" autocomplete="off" spellcheck="false"
+                 aria-label="Room code" placeholder="Room code" style="flex: 1" />
+          <button id="join-room" type="button">Join</button>
+        </div>
+        <div id="room-error" role="alert"></div>
+        <button id="room-back" type="button">Back</button>
+      </div>
+    </section>
+
     <main id="panes">
       <div class="pane" id="pane-blue" aria-label="Blue team view (Jev vs Jev: spectator view of all figures)">
         <canvas oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
@@ -93,6 +119,7 @@
         <button type="button" data-mode="human" aria-pressed="true">Human vs Human</button>
         <button type="button" data-mode="player-v-ai" aria-pressed="false">Blue vs Jev</button>
         <button type="button" data-mode="ai-v-ai" aria-pressed="false">Jev vs Jev</button>
+        <button id="open-room-page" type="button" hidden>Online (2 players)</button>
         <details id="config">
           <summary>Jev proxy</summary>
           <div class="row">
@@ -125,7 +152,8 @@
       //    port such as ?server=8080 means ws://localhost:8080), else from
       //    the build-time default (cmake -DTBGWAF_SERVER_URL=...). ?room=NAME
       //    picks which room to pair in (default: private to this page load
-      //    in split screen, the one shared room with ?solo=1).
+      //    in split screen, the one shared room with ?solo=1). ?online=1 opens
+      //    the room page (new room / join by code; sets ?solo=1&intent=).
       //  * Local preview (no server): both teams on this page, with the Jev
       //    controls, driven by jev-preview.js. Used when no server is
       //    configured, or forced with ?local=1.
@@ -142,10 +170,54 @@
       var serverUrl = resolveServerUrl();
       var statusEl = document.getElementById("status");
       var params = new URLSearchParams(window.location.search);
-      if (serverUrl && params.has("solo")) {
-        // One canvas, one player; a second player opens the same ?room=NAME.
+      // Room page (?online=1, or the panel's "Online" button): one pane per
+      // player and two players per room. "New room" asks the server for an
+      // unused code to share; "Join" enters an existing room by code.
+      function pageUrl(changes) {
+        var url = new URL(window.location.href);
+        ["online", "solo", "room", "intent"].forEach(function (k) { url.searchParams.delete(k); });
+        Object.keys(changes).forEach(function (k) { url.searchParams.set(k, changes[k]); });
+        return url.toString();
+      }
+      function setupRoomPage() {
+        var errorEl = document.getElementById("room-error");
+        var codeEl = document.getElementById("room-code");
+        document.getElementById("room-page").hidden = false;
         document.getElementById("pane-red").remove();
         document.getElementById("control-panel").remove();
+        document.getElementById("hud").remove();
+        document.getElementById("new-room").addEventListener("click", function () {
+          window.location.href = pageUrl({ solo: "1", intent: "create" });
+        });
+        function join() {
+          var code = codeEl.value.trim().toUpperCase();
+          if (!/^[A-Z0-9_-]{1,32}$/.test(code)) {
+            errorEl.textContent = "Enter the room code from the other player.";
+            return;
+          }
+          window.location.href = pageUrl({ solo: "1", room: code, intent: "join" });
+        }
+        document.getElementById("join-room").addEventListener("click", join);
+        codeEl.addEventListener("keydown", function (e) { if (e.key === "Enter") join(); });
+        document.getElementById("room-back").addEventListener("click", function () {
+          window.location.href = pageUrl({});
+        });
+        codeEl.focus();
+      }
+      if (serverUrl && params.has("online") && !params.has("solo")) {
+        setupRoomPage();
+      } else if (serverUrl && params.has("solo")) {
+        // One canvas, one player; a second player opens the same ?room=NAME
+        // (or joins the code shown by ?intent=create from the room page).
+        document.getElementById("pane-red").remove();
+        document.getElementById("control-panel").remove();
+        if (params.has("intent")) {
+          var leave = document.createElement("a");
+          leave.id = "leave-room";
+          leave.href = pageUrl({ online: "1" });
+          leave.textContent = "\u2190 Leave room";
+          document.body.appendChild(leave);
+        }
         statusEl.innerText = "Online match via " + serverUrl;
         window.onerror = function () {
           statusEl.innerText = "Failed to load -- check the browser console.";
@@ -154,6 +226,8 @@
           canvas: document.querySelector("#pane-blue canvas"),
           tbgwafServer: serverUrl,
           tbgwafRoom: params.get("room") || "",
+          tbgwafRoomIntent: params.get("intent") || "",
+          tbgwafAutoEnter: params.has("intent"),  // Straight to the match: it shows the room code.
           onRuntimeInitialized: function () { statusEl.innerText = ""; },
         });
       } else {
@@ -161,6 +235,11 @@
         // through a room private to this page load (so the mode controls,
         // including the Jev modes, work as in the local preview).
         if (serverUrl) {
+          var openRoomPage = document.getElementById("open-room-page");
+          openRoomPage.hidden = false;
+          openRoomPage.addEventListener("click", function () {
+            window.location.href = pageUrl({ online: "1" });
+          });
           var room = params.get("room") ||
             "p" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
           window.TBGWAF_SERVER = { url: serverUrl, room: room };

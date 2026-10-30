@@ -27,9 +27,11 @@ namespace tactics::net {
 // cannot currently see are parked far off-map, never reconstructed.
 class RemoteClient {
  public:
-  enum class Status { Connecting, Waiting, Playing, OpponentLeft, Disconnected };
+  enum class Status { Connecting, Waiting, Playing, OpponentLeft, Disconnected, Rejected };
 
-  RemoteClient(tactics::GameLogic* game, std::string room);
+  // `intent` is "create", "join" or empty (see Lobby::Join). With "create" and
+  // no room, the server picks the code (room_code() once waiting).
+  RemoteClient(tactics::GameLogic* game, std::string room, std::string intent = "");
 
   // Transport events.
   void OnOpen();
@@ -52,6 +54,7 @@ class RemoteClient {
   bool selfReady() const { return selfReady_; }
   bool peerReady() const { return peerReady_; }
   const std::string& lastError() const { return lastError_; }
+  const std::string& room_code() const { return room_; }
   // True once after a (new) match started so the host can re-frame cameras.
   bool ConsumeMatchStarted() {
     const bool v = matchStarted_;
@@ -104,6 +107,7 @@ class RemoteClient {
 
   tactics::GameLogic* game_;
   std::string room_;
+  std::string intent_;
   Status status_ = Status::Connecting;
   std::optional<tactics::Team> team_;
   std::vector<std::string> outgoing_;

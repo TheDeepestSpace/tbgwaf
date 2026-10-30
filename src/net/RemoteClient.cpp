@@ -35,8 +35,8 @@ std::string Signature(const Action& a) {
 
 }  // namespace
 
-RemoteClient::RemoteClient(tactics::GameLogic* game, std::string room)
-    : game_(game), room_(std::move(room)) {}
+RemoteClient::RemoteClient(tactics::GameLogic* game, std::string room, std::string intent)
+    : game_(game), room_(std::move(room)), intent_(std::move(intent)) {}
 
 std::vector<std::string> RemoteClient::TakeOutgoing() {
   std::vector<std::string> out;
@@ -48,18 +48,22 @@ void RemoteClient::OnOpen() {
   Json join;
   join.Set("t", "join");
   if (!room_.empty()) join.Set("room", room_);
+  if (!intent_.empty()) join.Set("intent", intent_);
   Queue(join);
 }
 
 void RemoteClient::OnClose() {
-  if (status_ != Status::OpponentLeft) status_ = Status::Disconnected;
+  if (status_ != Status::OpponentLeft && status_ != Status::Rejected) status_ = Status::Disconnected;
   playback_.reset();
 }
 
 std::string RemoteClient::StatusText() const {
   switch (status_) {
     case Status::Connecting: return "Connecting to server...";
-    case Status::Waiting: return "Waiting for an opponent to join...";
+    case Status::Waiting:
+      return room_.empty() ? "Waiting for an opponent to join..."
+                           : "Room code " + room_ + " -- waiting for an opponent to join...";
+    case Status::Rejected: return lastError_;
     case Status::OpponentLeft: return "Opponent left the match. Reload to play again.";
     case Status::Disconnected: return "Disconnected from server. Reload to reconnect.";
     case Status::Playing: break;
@@ -77,6 +81,7 @@ void RemoteClient::OnMessage(const std::string& text) {
   const std::string& type = m["t"].AsString();
   if (type == "waiting") {
     status_ = Status::Waiting;
+    if (m["room"].IsString()) room_ = m["room"].AsString();
   } else if (type == "start") {
     HandleStart(m);
   } else if (type == "plans") {
@@ -94,6 +99,7 @@ void RemoteClient::OnMessage(const std::string& text) {
     playback_.reset();
   } else if (type == "error") {
     lastError_ = m["error"].AsString();
+    if (status_ == Status::Connecting) status_ = Status::Rejected;  // The join was refused.
   }
 }
 

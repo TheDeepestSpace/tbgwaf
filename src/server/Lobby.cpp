@@ -18,6 +18,10 @@ bool ValidRoomName(const std::string& s) {
   return true;
 }
 
+// Room codes are short enough to read out loud; no 0/O/1/I/L lookalikes.
+constexpr char kCodeAlphabet[] = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+constexpr int kCodeLength = 5;
+
 Json Typed(const char* type) {
   Json j;
   j.Set("t", type);
@@ -50,14 +54,43 @@ void Lobby::OnMessage(int conn, const std::string& text) {
   HandleAction(conn, it->second, message);
 }
 
+std::string Lobby::NewRoomCode() {
+  if (!codeRng_) codeRng_.emplace(seed_());
+  std::uniform_int_distribution<int> pick(0, sizeof(kCodeAlphabet) - 2);
+  for (;;) {
+    std::string code;
+    for (int i = 0; i < kCodeLength; ++i) code += kCodeAlphabet[pick(*codeRng_)];
+    if (!rooms_.count(code)) return code;
+  }
+}
+
 void Lobby::Join(int conn, const Json& message) {
+  // "intent" (optional): "create" opens a room nobody else is in -- with no
+  // "room" the server picks an unused code; "join" only enters a room that
+  // already exists. Without it, join-or-create by name (split screen, tests).
+  const std::string intent = message["intent"].IsString() ? message["intent"].AsString() : "";
+  if (!intent.empty() && intent != "create" && intent != "join") {
+    SendError(conn, "unknown join intent");
+    return;
+  }
   std::string name = "default";
-  if (message.Has("room")) {
+  if (intent == "create" && !message.Has("room")) {
+    name = NewRoomCode();
+  } else if (message.Has("room")) {
     if (!message["room"].IsString() || !ValidRoomName(message["room"].AsString())) {
       SendError(conn, "invalid room name (1-32 chars of A-Z a-z 0-9 - _)");
       return;
     }
     name = message["room"].AsString();
+  }
+  const bool exists = rooms_.count(name) > 0;
+  if (intent == "create" && exists) {
+    SendError(conn, "room code already in use");
+    return;
+  }
+  if (intent == "join" && !exists) {
+    SendError(conn, "no such room");
+    return;
   }
   Room& room = rooms_[name];
   if (room.conns[0] >= 0 && room.conns[1] >= 0) {
@@ -67,7 +100,9 @@ void Lobby::Join(int conn, const Json& message) {
   if (room.conns[0] < 0) {
     room.conns[0] = conn;
     members_[conn] = Member{name, Team::Blue};
-    Send(conn, Typed("waiting"));
+    Json waiting = Typed("waiting");
+    waiting.Set("room", name);
+    Send(conn, waiting);
     return;
   }
   room.conns[1] = conn;

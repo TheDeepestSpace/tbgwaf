@@ -290,6 +290,35 @@ void TestLobbyPairing() {
   CHECK(Has(w.Drain(1), "waiting"));
 }
 
+// Room page: "create" gets a fresh server-picked code (or refuses a taken
+// name), "join" only enters a room that exists and has space.
+void TestRoomIntents() {
+  Wire w;
+  w.Send(1, R"({"t":"join","intent":"join","room":"NOPE1"})");
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");  // No such room.
+  CHECK(w.lobby.RoomCount() == 0);                   // ...and none was created.
+  w.Send(1, R"({"t":"join","intent":"bogus"})");
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");
+
+  std::string codes[3];
+  for (int i = 0; i < 3; ++i) {
+    w.Send(10 + i, R"({"t":"join","intent":"create"})");
+    const auto m = w.Drain(10 + i);
+    CHECK(m.size() == 1 && m[0]["t"].AsString() == "waiting");
+    codes[i] = m[0]["room"].AsString();
+    CHECK(codes[i].size() == 5);
+  }
+  CHECK(codes[0] != codes[1] && codes[1] != codes[2] && codes[0] != codes[2]);
+
+  w.Send(2, R"({"t":"join","intent":"create","room":")" + codes[0] + R"("})");
+  CHECK(w.Drain(2)[0]["t"].AsString() == "error");  // Code already in use.
+
+  w.Send(3, R"({"t":"join","intent":"join","room":")" + codes[0] + R"("})");
+  CHECK(Has(w.Drain(3), "start") && Has(w.Drain(10), "start"));
+  w.Send(4, R"({"t":"join","intent":"join","room":")" + codes[0] + R"("})");
+  CHECK(w.Drain(4)[0]["t"].AsString() == "error");  // Full.
+}
+
 // Test control tap: a scenario-loaded room runs on the explicit scene, the
 // start message carries it, and dump_state reports unfiltered ground truth.
 void TestControlTapScenarioRoom() {
@@ -570,6 +599,7 @@ int main() {
   TestSessionReadyAndRound();
   TestSessionFogHidesEnemyPlansAndUnits();
   TestLobbyPairing();
+  TestRoomIntents();
   TestControlTapScenarioRoom();
   TestClientServerRound();
   TestRejectedActionResyncs();

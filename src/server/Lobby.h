@@ -4,6 +4,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <random>
 #include <string>
 
 #include "server/GameSession.h"
@@ -45,6 +46,7 @@ class Lobby {
     Team team = Team::Blue;
   };
 
+  std::string NewRoomCode();  // A code no existing room uses.
   void Join(int conn, const net::Json& message);
   void HandleAction(int conn, Member& member, const net::Json& message);
   void StartMatch(Room& room);
@@ -55,6 +57,7 @@ class Lobby {
   SeedFn seed_;
   std::map<std::string, Room> rooms_;
   std::map<int, Member> members_;
+  std::optional<std::mt19937> codeRng_;
 };
 
 }  // namespace tactics::server

@@ -360,7 +360,14 @@ default only applies to the no-server preview.
 `?solo=1` shows a single pane instead, for two browsers: open
 `index.html?server=ws://localhost:8080&solo=1&room=mygame` in both; the first
 waits (Blue), the second is paired (Red). `?room=` picks the room (default for
-`solo`: one shared room). Without `?server=` the page runs the in-page demo
+`solo`: one shared room).
+
+`?online=1` (or the panel's **Online (2 players)** button) opens the room page:
+**New room** has the server pick an unused 5-character code (shown in the
+canvas while waiting; share it), and **Join** enters an existing room by code
+(unknown or full rooms are refused). Both go to the single-pane `solo` view via
+`?solo=1&intent=create` / `?solo=1&room=CODE&intent=join`; the wire `join`
+message carries `"intent"`, and `waiting` echoes the `room`. Without `?server=` the page runs the in-page demo
 (`?local=1` forces it). A default server can be baked in at build time:
 `emcmake cmake -B build-web -DTBGWAF_SERVER_URL=wss://...` (the query parameter
 still overrides it). An `https://` page can only reach `wss://` (or
@@ -424,7 +431,7 @@ and removes the preview automatically when the PR closes.
 
 ## App flow
 
-Screen flow (Splash -> Game Mode -> Map Select -> Gameplay), declared in
+Screen flow (Splash -> Game Mode -> Map Select -> Gameplay, plus the web Room page), declared in
 `flow/app_flow.yaml`. The build regenerates `flow/app_flow.mmd` from it; paste
 that file's contents below if the flow changes.
 
@@ -434,14 +441,19 @@ flowchart TD
     splash("  Splash  ")
     game_mode("  Game Mode  ")
     map_select("  Map Select  ")
+    room("  Room  ")
     gameplay("  Gameplay  ")
     splash -->|new_game| game_mode
     game_mode -->|select_regular| map_select
     game_mode -->|select_ctf| map_select
+    game_mode -->|select_online| room
     game_mode -->|back| splash
     map_select -->|select_urban| gameplay
     map_select -->|select_hills| gameplay
     map_select -->|back| game_mode
+    room -->|create_room| gameplay
+    room -->|join_room| gameplay
+    room -->|back| game_mode
 ```
 
 ## Controls

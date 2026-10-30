@@ -17,7 +17,10 @@
 // back locally.
 //
 // Client -> server (all may carry "seq", echoed in the "ack"):
-//   {"t":"join","room":"<name>"}                      first message
+//   {"t":"join","room":"<name>","intent":"create"|"join"}   first message; both optional.
+//                                                  create (no room): server picks an unused code;
+//                                                  create: fails if the room exists; join: fails
+//                                                  if it does not
 //   {"t":"move","unit":3,"waypoints":[[x,y,z],...],"facing":yaw}
 //   {"t":"shoot","unit":3,"target":4}
 //   {"t":"pass","unit":3}
@@ -32,7 +35,7 @@
 //   {"t":"new_match"}          only after game over
 //
 // Server -> client:
-//   {"t":"waiting"}
+//   {"t":"waiting","room":"<name>"}
 //   {"t":"start","team":"blue"|"red","seed":N,"protocol":1[,"scene":<spec>]}   scene only in
 //                                                  test-control rooms (net/SceneSpec.h)
 //   {"t":"ack","seq":N,"ok":true|false,"error":"..."}

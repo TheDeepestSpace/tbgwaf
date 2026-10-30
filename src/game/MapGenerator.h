@@ -25,6 +25,13 @@ enum class OverpassLayout {
   EnterRampDown,   // Enters off-map elevated, ramps down to grade on-map.
 };
 
+// Column form of the bents carrying the overpass (issue #223). Auto draws
+// one per seed (own sub-stream, so forcing it never reshuffles the rest of
+// a seed); TBent is one thick central column flaring into a hammerhead cap
+// under the deck, Twin is a pair of columns under the deck edges joined by
+// a crossbeam cap, with the deck widened so the columns visibly carry it.
+enum class PierForm { Auto, TBent, Twin };
+
 // How the overpass's branching avenue ends at its map-edge side. Auto draws
 // per seed; Ramp climbs from grade at the boundary up to the deck, OffMap
 // stays at deck height and runs off the map with no ramp (never drawn for
@@ -120,6 +127,16 @@ struct MapGeneratorConfig {
   float highwayElevation = 5.0f;
   float highwayThickness = 0.45f;
   float supportSpacing = 18.0f;  // Arc-length between pier bents under the deck.
+  // Overpass architecture (issue #223): the bents under the elevated spans
+  // and the deck's raised sides. Each bent is a footing (wider than its
+  // shaft), the shaft(s), and a cap wrapping the underside of the deck.
+  PierForm pierForm = PierForm::Auto;
+  float pierColumnWidth = 1.6f;     // Twin shaft width; the T-bent shaft is twice this across the road.
+  float pierBaseExtra = 0.45f;      // Footing (plinth) margin outside the shaft, each side.
+  float pierBaseHeight = 0.8f;      // Footing height above its ground.
+  float pierCapDepth = 0.9f;        // Hammerhead/crossbeam cap depth under the deck slab.
+  float twinDeckExtraWidth = 2.4f;  // Total extra deck width at full elevation on twin seeds.
+  float deckRailHeight = 0.9f;      // Guard parapet above the deck top along its sides; 0 disables.
   float minPolygonArea = 22.0f;  // Smaller inset/sliver regions remain open.
   // Ziplines (issue #166): each block draws 0..maxZiplinesPerBlock lines
   // uniformly, each from the street up to the roof of one of the block's
@@ -222,6 +239,11 @@ struct OverpassChoice {
   OverpassLayout layout = OverpassLayout::RampUpRampDown;
 };
 OverpassChoice UrbanOverpass(uint32_t seed, const MapGeneratorConfig& config = {});
+
+// The bent column form GenerateUrbanMap(seed, config) uses for the overpass
+// piers (issue #223): seed-driven under the Auto default, forced otherwise
+// (never returns Auto). Meaningful only when the seed's artery is elevated.
+PierForm UrbanPierForm(uint32_t seed, const MapGeneratorConfig& config = {});
 
 // A city block as built: one or more grid cells joined with the streets
 // between them (`x0..x1` / `z0..z1` is the bounding box). `notch` marks an

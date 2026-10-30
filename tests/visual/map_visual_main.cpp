@@ -197,6 +197,19 @@ int main(int argc, char** argv) {
     cases.push_back({name, tactics::GenerateUrbanMap(seed, mergeConfigAuto), 180.0f,
                      /*showNavMesh=*/false, /*pitchOffset=*/-0.55f, /*yawOffset=*/-1.6f});
   }
+  // A wide city shot hides a rail detouring away from the inner fork.
+  // Raised terrain narrows the twin deck here: the join must use the real
+  // slab edges, not the nominal full-width highway lines.
+  {
+    tactics::MapGeneratorConfig forkConfig = elevatedConfig;
+    forkConfig.features.terrain.mode = tactics::FeatureMode::On;
+    forkConfig.pierForm = tactics::PierForm::Twin;
+    MapCase fork{"city_overpass_inner_fork_terrain_seed_7",
+                 tactics::GenerateUrbanMap(7, forkConfig), 0.0f,
+                 /*showNavMesh=*/false, /*pitchOffset=*/-0.30f, /*yawOffset=*/-1.6f};
+    fork.cameraTarget = glm::vec3(-34.7f, 9.68059f, 0.3f);
+    cases.push_back(std::move(fork));
+  }
   // Frontier of a unit on the deck, framed low and side-on at the deck edge.
   {
     MapCase deckFrontier{"city_elevated_deck_frontier_seed_7",

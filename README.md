@@ -42,7 +42,12 @@ their frontage; `TBGWAF_MAP=urban-merge` adds a wide branching avenue that
 merges into the artery, `TBGWAF_MAP=urban-elevated` (default) turns the artery into a
 true overpass (ramps up, crosses on pier bents with usable ground beneath,
 ramps back down; the branch becomes an on-ramp merging mid-deck), and
-`TBGWAF_MAP=hilly` selects rolling hills. Urban code/scenarios can also
+`TBGWAF_MAP=hilly` selects rolling hills. Every elevated span carries
+raised sides (a guard parapet that is cover on the deck), and each seed
+draws its bent form (issue #223): one thick T-bent column flaring into a
+hammerhead cap under the deck, or twin columns under a widened deck joined
+by a crossbeam cap; shafts stand on stepped footings and are real obstacles
+(collision, LOS, navmesh), the caps overhead only. Urban code/scenarios can also
 tune artery count/width, local-street width/skew and elevation through
 `MapGeneratorConfig` / `map.generate`. Some seeds (`extraArteries`, 0–2 drawn
 per seed) widen one or two avenues into extra arteries beside the main one,

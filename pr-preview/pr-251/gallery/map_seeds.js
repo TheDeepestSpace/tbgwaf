@@ -10,6 +10,7 @@ window.MAP_SEED_GOLDENS = [
   "city_overpass_branch_off_map_seed_26.png",
   "city_overpass_enter_ramp_down_seed_22.png",
   "city_overpass_enter_ramp_up_seed_16.png",
+  "city_overpass_inner_fork_terrain_seed_7.png",
   "city_overpass_ramp_up_ramp_down_seed_33.png",
   "city_overpass_through_seed_4.png",
   "city_random_seed_13514.png",

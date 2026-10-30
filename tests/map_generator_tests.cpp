@@ -603,6 +603,7 @@ void TestEveryBlockHasWallToWallAndGappedRuns() {
 void TestVariedHeightsWithFewTowers() {
   MapGeneratorConfig c;
   c.features.terrain.mode = FeatureMode::Off;  // Buildings only: no retaining walls.
+  c.enterableChance = 0.0f;  // Hollow walls/lintels are short obstacles.
   for (uint32_t seed : kSeeds) {
     const Scene scene = GenerateUrbanMap(seed, c);
     int towers = 0, medium = 0, buildings = 0;
@@ -1942,6 +1943,7 @@ void TestZiplinesAreDeterministicBoundedAndValid() {
     for (uint32_t seed : kSeeds) {
       MapGeneratorConfig config = legacy ? LegacyConfig() : MapGeneratorConfig{};
       config.features.terrain.mode = FeatureMode::Off;  // Anchors at y = 0.
+      config.enterableChance = 0.0f;  // Zipline roofs assume solid prisms.
       const Scene scene = GenerateUrbanMap(seed, config);
       CHECK(SameScene(scene, GenerateUrbanMap(seed, config)));
       CHECK(!scene.ziplines.empty());
@@ -2596,6 +2598,7 @@ void TestEnterableBuildingsHaveDoorways() {
   c.enterableChance = 1.0f;
   int hollow = 0;
   bool multi = false;
+  std::set<BuildingKind> kinds;
   for (uint32_t seed : kSeeds) {
     const Scene scene = GenerateUrbanMap(seed, c);
     for (size_t bi = 0; bi < scene.buildings.size(); ++bi) {
@@ -2603,7 +2606,7 @@ void TestEnterableBuildingsHaveDoorways() {
       CHECK(!b.floors.empty());
       if (!b.enterable) continue;
       ++hollow;
-      CHECK(b.kind != BuildingKind::Residential && b.kind != BuildingKind::Civic);
+      kinds.insert(b.kind);
       CHECK(scene.obstacles[b.obstacle].bounds.min.y >= constants::kUnitHeight);
       bool lintel = false;
       glm::vec2 centre(0.0f);
@@ -2629,13 +2632,16 @@ void TestEnterableBuildingsHaveDoorways() {
       mesh.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
                  &scene.walkSurfaces);
       // Narrow interiors vanish under the agent-radius inflation of the walls.
-      if (MinimumPolygonWidth(roof) > 6.0f * constants::kAgentRadius + 2.0f) {
+      // Garages are skipped: their decks/ramps fill the interior.
+      if (b.kind != BuildingKind::Garage &&
+          MinimumPolygonWidth(roof) > 6.0f * constants::kAgentRadius + 2.0f) {
         CHECK(mesh.IsWalkable(centre.x, centre.y));
       }
     }
   }
   CHECK(hollow > 0);
   CHECK(multi);
+  CHECK(kinds.count(BuildingKind::Residential) > 0);
   // Zero chance keeps every building solid.
   MapGeneratorConfig off;
   off.enterableChance = 0.0f;

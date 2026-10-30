@@ -3788,9 +3788,7 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>
       b.floors.push_back({y0, b.baseY + b.groundFloorHeight + f * b.floorHeight});
     }
     b.floors.back().y1 = b.baseY + height;
-    const bool hollowKind = b.kind == BuildingKind::Commercial ||
-                            b.kind == BuildingKind::MixedUse || b.kind == BuildingKind::Office;
-    if (wantEnterable && upper.empty() && hollowKind &&
+    if (wantEnterable && upper.empty() &&
         EmitHollowBuilding(scene, parcels[i], height, index, groundY, &b)) {
       scene->buildings.push_back(b);
       continue;

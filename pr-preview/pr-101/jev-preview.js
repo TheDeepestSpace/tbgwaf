@@ -201,8 +201,10 @@ export class JevPreviewController {
     module.tbgwafAIFallback = this.fallback;
     module.tbgwafDefaultCtf = this.mode === "ai-v-ai";
     // Jev vs Jev: the Blue instance renders every figure and both FOVs in one
-    // pane; the Red instance keeps simulating off-screen.
-    module.tbgwafSpectator = this.mode === "ai-v-ai" && player === "blue";
+    // pane; the Red instance keeps simulating off-screen. On a server both
+    // Jev clients are fog-limited, so a separate spectator client takes that pane.
+    module.tbgwafSpectator =
+      this.mode === "ai-v-ai" && player === "blue" && !globalThis.TBGWAF_SERVER;
     // Only with no human player; Blue vs Jev needs a manual Commit round.
     module.tbgwafAutoCommit = this.mode === "ai-v-ai";
     module.tbgwafAIGeneration = this.generation;
@@ -217,6 +219,10 @@ export class JevPreviewController {
     if (!this.document) return;
     const spec = MODES[this.mode];
     this.document.getElementById("panes")?.setAttribute("data-spectator", String(this.mode === "ai-v-ai"));
+    const spectatorPane = this.mode === "ai-v-ai" && Boolean(globalThis.TBGWAF_SERVER);
+    this.document.getElementById("panes")?.setAttribute("data-spectator-pane", String(spectatorPane));
+    const spectatorEl = this.document.getElementById("pane-spectator");
+    if (spectatorEl) spectatorEl.hidden = !spectatorPane;
     const modeLabel = this.document.getElementById("mode-label");
     if (modeLabel) modeLabel.textContent = `Mode: ${spec.label}`;
     for (const button of this.document.querySelectorAll("[data-mode]")) {
@@ -307,7 +313,8 @@ function bootstrap() {
   // from here).
   const server = window.TBGWAF_SERVER;
   const bus = { inboxes: [] };
-  let pending = 2;
+  const spectate = Boolean(server) && config.mode === "ai-v-ai";
+  let pending = spectate ? 3 : 2;
   const startPlayer = (player) => {
     const pane = document.getElementById(`pane-${player}`);
     const moduleConfig = {
@@ -331,7 +338,22 @@ function bootstrap() {
   if (server) {
     // The first client to join a room plays Blue, so Red connects only once
     // Blue's join has gone out.
-    blueConfig.tbgwafOnFirstSend = () => createTbgwafModule(startPlayer("red"));
+    blueConfig.tbgwafOnFirstSend = () => {
+      createTbgwafModule(startPlayer("red"));
+      if (spectate) {
+        // Read-only third client: sees both teams unfiltered. It is not a
+        // player, so it never registers with the Jev controller.
+        createTbgwafModule({
+          canvas: document.querySelector("#pane-spectator canvas"),
+          tbgwafServer: server.url,
+          tbgwafRoom: server.room,
+          tbgwafServerSpectate: true,
+          tbgwafSpectator: true,
+          tbgwafAutoEnter: true,
+          onRuntimeInitialized() { if (--pending === 0) status.textContent = ""; },
+        });
+      }
+    };
     createTbgwafModule(blueConfig);
   } else {
     createTbgwafModule(blueConfig);

@@ -72,6 +72,11 @@
         position: absolute; inset: 0; visibility: hidden; pointer-events: none;
       }
       #panes[data-spectator="true"] .pane + .pane { border-left: 0; }
+      /* Jev vs Jev on a server: a third, read-only client (unfiltered view of both
+         teams) is the visible pane; the Blue and Red Jev clients run hidden. */
+      #panes[data-spectator-pane="true"] #pane-blue {
+        position: absolute; inset: 0; visibility: hidden; pointer-events: none;
+      }
       #room-page {
         position: fixed; inset: 0; z-index: 40;
         display: flex; align-items: center; justify-content: center;
@@ -110,6 +115,9 @@
         <canvas oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
       </div>
       <div class="pane" id="pane-red" aria-label="Red team view">
+        <canvas oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+      </div>
+      <div class="pane" id="pane-spectator" aria-label="Spectator view of both teams" hidden>
         <canvas oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
       </div>
     </main>

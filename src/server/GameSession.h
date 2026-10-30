@@ -44,12 +44,16 @@ class GameSession {
 
   // Commits and fully simulates the round (call when BothReady()). Returns
   // one "round" message per team, indexed by Team: a fog-filtered timeline
-  // (only what that team could see) plus the resulting rule state.
-  std::array<net::Json, 2> RunRound();
+  // (only what that team could see) plus the resulting rule state. Index 2 is
+  // the spectator's: the same round, unfiltered.
+  std::array<net::Json, 3> RunRound();
 
   // Rule-state views for one team (fog-filtered; own plans included).
   net::Json StateMessage(Team team) const;
   net::Json PlansMessage(Team team) const;
+  // Read-only spectator views: every unit, and both teams' plans.
+  net::Json SpectatorStateMessage() const;
+  net::Json SpectatorPlansMessage() const;
 
   // Unfiltered ground truth for tests: round/winner, every unit, and which
   // units each team currently sees (so tests can check the fog the clients
@@ -57,7 +61,7 @@ class GameSession {
   net::Json DumpState() const;
 
  private:
-  net::Json StateBody(Team team) const;
+  net::Json StateBody(std::optional<Team> viewer) const;  // nullopt: unfiltered.
 
   uint32_t seed_;
   std::optional<Scene> fixedScene_;

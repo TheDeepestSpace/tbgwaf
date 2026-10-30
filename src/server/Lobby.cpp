@@ -1,5 +1,7 @@
 #include "server/Lobby.h"
 
+#include <algorithm>
+
 #include "net/SceneSpec.h"
 
 namespace tactics::server {
@@ -64,7 +66,47 @@ std::string Lobby::NewRoomCode() {
   }
 }
 
+void Lobby::SendSpectatorView(int conn, const Room& room) {
+  Json start = Typed("start");
+  start.Set("team", "spectator");
+  start.Set("seed", static_cast<double>(room.session->seed()));
+  if (room.scene) start.Set("scene", room.sceneSpec);
+  start.Set("protocol", net::kProtocolVersion);
+  Send(conn, start);
+  Send(conn, room.session->SpectatorPlansMessage());
+  Send(conn, room.session->SpectatorStateMessage());
+}
+
+// A spectator attaches to a room that already has a player in it; if the
+// match has not started it just waits for the start.
+void Lobby::SpectatorJoin(int conn, const Json& message) {
+  if (!message["room"].IsString()) {
+    SendError(conn, "spectating needs a room");
+    return;
+  }
+  const std::string name = message["room"].AsString();
+  auto it = ValidRoomName(name) ? rooms_.find(name) : rooms_.end();
+  if (it == rooms_.end()) {
+    SendError(conn, "no such room");
+    return;
+  }
+  Room& room = it->second;
+  room.spectators.push_back(conn);
+  members_[conn] = Member{name, Team::Blue, true};
+  if (room.session) {
+    SendSpectatorView(conn, room);
+  } else {
+    Json waiting = Typed("waiting");
+    waiting.Set("room", name);
+    Send(conn, waiting);
+  }
+}
+
 void Lobby::Join(int conn, const Json& message) {
+  if (message["spectate"].AsBool()) {
+    SpectatorJoin(conn, message);
+    return;
+  }
   // "intent" (optional): "create" opens a room nobody else is in -- with no
   // "room" the server picks an unused code; "join" only enters a room that
   // already exists. Without it, join-or-create by name (split screen, tests).
@@ -125,9 +167,14 @@ void Lobby::StartMatch(Room& room) {
     Send(room.conns[ti], room.session->PlansMessage(team));
     Send(room.conns[ti], room.session->StateMessage(team));
   }
+  for (int spectator : room.spectators) SendSpectatorView(spectator, room);
 }
 
 void Lobby::HandleAction(int conn, Member& member, const Json& message) {
+  if (member.spectator) {
+    SendError(conn, "spectators are read-only");
+    return;
+  }
   auto roomIt = rooms_.find(member.room);
   if (roomIt == rooms_.end() || !roomIt->second.session) {
     SendError(conn, "waiting for an opponent");
@@ -161,6 +208,7 @@ void Lobby::HandleAction(int conn, Member& member, const Json& message) {
   // Always answer with the authoritative plans so a rejected action (or a
   // stale client) resyncs; the opponent only hears about readiness.
   Send(conn, session.PlansMessage(team));
+  for (int spectator : room.spectators) Send(spectator, session.SpectatorPlansMessage());
   if (session.Ready(team) != wasReady) {
     Json peer = Typed("peer");
     peer.Set("ready", Json(session.Ready(team)));
@@ -174,6 +222,10 @@ void Lobby::HandleAction(int conn, Member& member, const Json& message) {
       Send(room.conns[ti], reports[ti]);
       Send(room.conns[ti], session.PlansMessage(t));
       Send(room.conns[ti], Json(Json::Object{{"t", Json("peer")}, {"ready", Json(false)}}));
+    }
+    for (int spectator : room.spectators) {
+      Send(spectator, reports[2]);
+      Send(spectator, session.SpectatorPlansMessage());
     }
   }
 }
@@ -220,6 +272,15 @@ void Lobby::OnDisconnect(int conn) {
   auto roomIt = rooms_.find(member.room);
   if (roomIt == rooms_.end()) return;
   Room& room = roomIt->second;
+  if (member.spectator) {
+    room.spectators.erase(std::remove(room.spectators.begin(), room.spectators.end(), conn),
+                          room.spectators.end());
+    return;
+  }
+  for (int spectator : room.spectators) {
+    Send(spectator, Typed("opponent_left"));
+    members_.erase(spectator);
+  }
   const int otherConn = room.conns[static_cast<int>(OpposingTeam(member.team))];
   if (otherConn >= 0) {
     Send(otherConn, Typed("opponent_left"));

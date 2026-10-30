@@ -35,8 +35,9 @@ std::string Signature(const Action& a) {
 
 }  // namespace
 
-RemoteClient::RemoteClient(tactics::GameLogic* game, std::string room, std::string intent)
-    : game_(game), room_(std::move(room)), intent_(std::move(intent)) {}
+RemoteClient::RemoteClient(tactics::GameLogic* game, std::string room, std::string intent,
+                           bool spectate)
+    : game_(game), room_(std::move(room)), intent_(std::move(intent)), spectate_(spectate) {}
 
 std::vector<std::string> RemoteClient::TakeOutgoing() {
   std::vector<std::string> out;
@@ -49,6 +50,7 @@ void RemoteClient::OnOpen() {
   join.Set("t", "join");
   if (!room_.empty()) join.Set("room", room_);
   if (!intent_.empty()) join.Set("intent", intent_);
+  if (spectate_) join.Set("spectate", Json(true));
   Queue(join);
 }
 
@@ -61,6 +63,7 @@ std::string RemoteClient::StatusText() const {
   switch (status_) {
     case Status::Connecting: return "Connecting to server...";
     case Status::Waiting:
+      if (spectate_) return "Watching room " + room_ + " -- waiting for the players...";
       return room_.empty() ? "Waiting for an opponent to join..."
                            : "Room code " + room_ + " -- waiting for an opponent to join...";
     case Status::Rejected: return lastError_;
@@ -104,7 +107,8 @@ void RemoteClient::OnMessage(const std::string& text) {
 }
 
 void RemoteClient::HandleStart(const Json& m) {
-  const auto team = ParseTeamName(m["team"].AsString());
+  // A spectator is told "spectator"; it views from Blue's side but is no team.
+  const auto team = spectate_ ? std::optional<Team>(Team::Blue) : ParseTeamName(m["team"].AsString());
   if (!team || !m["seed"].IsNumber()) return;
   team_ = team;
   // Rooms loaded through the server's test control tap carry an explicit
@@ -143,10 +147,10 @@ void RemoteClient::ApplyPlans(const Json& m) {
     std::string error;
     if (!ParseAction(entry, &action, &error)) continue;
     Unit* unit = game_->FindUnit(action.unit);
-    if (!unit || unit->team != *team_ || !unit->alive) continue;
+    if (!unit || !unit->alive || (!spectate_ && unit->team != *team_)) continue;
     const std::string wanted = Signature(action);
     if (Signature(PlanToAction(*unit)) != wanted) {
-      ApplyPlanAction(*game_, *team_, action, &error);
+      ApplyPlanAction(*game_, unit->team, action, &error);
     }
     syncedPlan_[unit->id] = wanted;
   }
@@ -161,7 +165,7 @@ void RemoteClient::ApplyState(const Json& state) {
   GameSnapshot snap = game_->ExportState();
   for (auto& u : snap.units) {
     const Unit* unit = game_->FindUnit(u.id);
-    const bool own = team_ && unit->team == *team_;
+    const bool own = spectate_ || (team_ && unit->team == *team_);
     const Json* entry = nullptr;
     for (const Json& e : state["units"].AsArray()) {
       if (static_cast<int>(e["id"].AsNumber(-1)) == u.id) entry = &e;
@@ -323,7 +327,7 @@ void RemoteClient::AdvancePlayback(float dt) {
 }
 
 void RemoteClient::NormalizeEnemyPlans() {
-  if (!team_) return;
+  if (!team_ || spectate_) return;
   // Enemy plans are secret; the local mirror only needs them "non-empty" so
   // CanCommitRound() (which drives the HUD's Commit button) reflects whether
   // *our* figures are all planned.
@@ -339,7 +343,7 @@ void RemoteClient::QueueAction(Action action) {
 }
 
 void RemoteClient::SyncPlans() {
-  if (!team_) return;
+  if (!team_ || spectate_) return;
   const auto selected = game_->SelectedUnitId();
   const bool midPlan = game_->Mode() == InputMode::AwaitingMoveDestination ||
                        game_->Mode() == InputMode::AwaitingShootTarget;
@@ -378,7 +382,7 @@ void RemoteClient::Update(float dt) {
 }
 
 void RemoteClient::RequestCommit() {
-  if (status_ != Status::Playing || playback_) return;
+  if (spectate_ || status_ != Status::Playing || playback_) return;
   SyncPlans();  // The server must hold our latest plans before it counts the commit.
   Action commit;
   commit.kind = ActionKind::Commit;
@@ -386,7 +390,7 @@ void RemoteClient::RequestCommit() {
 }
 
 void RemoteClient::RequestNewMatch() {
-  if (status_ != Status::Playing || game_->Mode() != InputMode::GameOver) return;
+  if (spectate_ || status_ != Status::Playing || game_->Mode() != InputMode::GameOver) return;
   Action a;
   a.kind = ActionKind::NewMatch;
   QueueAction(a);

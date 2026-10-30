@@ -18,6 +18,9 @@ bool Visible(const GameLogic& game, Team viewer, const Unit& unit, const TeamVis
   return unit.team == viewer || vis.UnitVisible(unit.id);
 }
 
+// Report slot 2 is the spectator's: unfiltered, so it never needs a TeamVisibility.
+constexpr int kSpectatorSlot = 2;
+
 }  // namespace
 
 GameSession::GameSession(uint32_t seed) : seed_(seed), game_(GenerateUrbanMap(seed)) {}
@@ -63,11 +66,12 @@ GameSession::Result GameSession::Apply(Team team, const net::Action& action, uin
   return result;
 }
 
-std::array<Json, 2> GameSession::RunRound() {
-  std::array<Json, 2> out;
-  std::array<Json, 2> frames{Json(Json::Array{}), Json(Json::Array{})};
-  std::array<Json, 2> shots{Json(Json::Array{}), Json(Json::Array{})};
-  std::array<Json, 2> tracers{Json(Json::Array{}), Json(Json::Array{})};
+std::array<Json, 3> GameSession::RunRound() {
+  std::array<Json, 3> out;
+  const Json empty{Json::Array{}};
+  std::array<Json, 3> frames{empty, empty, empty};
+  std::array<Json, 3> shots{empty, empty, empty};
+  std::array<Json, 3> tracers{empty, empty, empty};
   ready_ = {false, false};
   game_.CommitRound();
 
@@ -79,12 +83,13 @@ std::array<Json, 2> GameSession::RunRound() {
   size_t tracersSent = 0;
 
   auto sampleFrame = [&]() {
-    for (int ti = 0; ti < 2; ++ti) {
-      const Team viewer = static_cast<Team>(ti);
+    for (int ti = 0; ti < 3; ++ti) {
+      const bool spectator = ti == kSpectatorSlot;
+      const Team viewer = spectator ? Team::Blue : static_cast<Team>(ti);
       const TeamVisibility vis = game_.ComputeVisibility(viewer);
       Json list{Json::Array{}};
       for (const Unit& u : units) {
-        if (!Visible(game_, viewer, u, vis)) continue;
+        if (!spectator && !Visible(game_, viewer, u, vis)) continue;
         list.Push(Json(Json::Array{Num(u.id), Num(u.position.x), Num(u.position.y), Num(u.position.z),
                                    Num(u.facingYaw), Num(u.alive ? 1 : 0),
                                    Num(game_.IsUnitMoving(u.id) ? 1 : 0)}));
@@ -108,9 +113,12 @@ std::array<Json, 2> GameSession::RunRound() {
       const bool fired = s >= 0.0f && (lastShoot[i] < 0.0f || s < lastShoot[i]);
       lastShoot[i] = s;
       if (!fired) continue;
-      for (int ti = 0; ti < 2; ++ti) {
-        const Team viewer = static_cast<Team>(ti);
-        if (!Visible(game_, viewer, units[i], game_.ComputeVisibility(viewer))) continue;
+      for (int ti = 0; ti < 3; ++ti) {
+        const Team viewer = static_cast<Team>(ti == kSpectatorSlot ? 0 : ti);
+        if (ti != kSpectatorSlot &&
+            !Visible(game_, viewer, units[i], game_.ComputeVisibility(viewer))) {
+          continue;
+        }
         Json shot;
         shot.Set("t", Num(std::round(t * 100.0) / 100.0));
         shot.Set("unit", Num(units[i].id));
@@ -123,9 +131,9 @@ std::array<Json, 2> GameSession::RunRound() {
       // The game clears its tracers when a turn starts, so all of them are this round's.
       for (; tracersSent < all.size(); ++tracersSent) {
         const Tracer& tr = all[tracersSent];
-        for (int ti = 0; ti < 2; ++ti) {
-          const Team viewer = static_cast<Team>(ti);
-          if (tr.team != viewer) {
+        for (int ti = 0; ti < 3; ++ti) {
+          const Team viewer = static_cast<Team>(ti == kSpectatorSlot ? 0 : ti);
+          if (ti != kSpectatorSlot && tr.team != viewer) {
             // Fog: an enemy's lines show only while some figure of theirs is in view.
             const TeamVisibility vis = game_.ComputeVisibility(viewer);
             bool seen = false;
@@ -144,8 +152,7 @@ std::array<Json, 2> GameSession::RunRound() {
     if (step % kFrameEvery == 0 || game_.Mode() != InputMode::Executing) sampleFrame();
   }
 
-  for (int ti = 0; ti < 2; ++ti) {
-    const Team team = static_cast<Team>(ti);
+  for (int ti = 0; ti < 3; ++ti) {
     Json msg;
     msg.Set("t", "round");
     msg.Set("round", Num(game_.RoundNumber()));
@@ -153,13 +160,15 @@ std::array<Json, 2> GameSession::RunRound() {
     msg.Set("frames", std::move(frames[ti]));
     msg.Set("shots", std::move(shots[ti]));
     msg.Set("tracers", std::move(tracers[ti]));
-    msg.Set("state", StateBody(team));
+    msg.Set("state", ti == kSpectatorSlot ? StateBody(std::nullopt)
+                                          : StateBody(static_cast<Team>(ti)));
     out[ti] = std::move(msg);
   }
   return out;
 }
 
-Json GameSession::StateBody(Team team) const {
+Json GameSession::StateBody(std::optional<Team> viewer) const {
+  const Team team = viewer.value_or(Team::Blue);
   const TeamVisibility vis = game_.ComputeVisibility(team);
   Json body;
   body.Set("round", Num(game_.RoundNumber()));
@@ -170,7 +179,7 @@ Json GameSession::StateBody(Team team) const {
   Json list{Json::Array{}};
   for (const Unit& u : game_.GetScene().units) {
     const bool own = u.team == team;
-    if (!own && !vis.UnitVisible(u.id)) continue;  // Fog: hidden enemies aren't reported at all.
+    if (viewer && !own && !vis.UnitVisible(u.id)) continue;  // Fog: hidden enemies aren't reported at all.
     Json j;
     j.Set("id", Num(u.id));
     j.Set("pos", net::EncodeVec3(u.position));
@@ -179,7 +188,7 @@ Json GameSession::StateBody(Team team) const {
     list.Push(std::move(j));
   }
   body.Set("units", std::move(list));
-  body.Set("playbook", net::EncodePlaybook(game_.Playbook(team)));
+  if (viewer) body.Set("playbook", net::EncodePlaybook(game_.Playbook(team)));
   return body;
 }
 
@@ -222,6 +231,26 @@ Json GameSession::DumpState() const {
 Json GameSession::StateMessage(Team team) const {
   Json msg = StateBody(team);
   msg.Set("t", "state");
+  return msg;
+}
+
+Json GameSession::SpectatorStateMessage() const {
+  Json msg = StateBody(std::nullopt);
+  msg.Set("t", "state");
+  return msg;
+}
+
+Json GameSession::SpectatorPlansMessage() const {
+  Json msg;
+  msg.Set("t", "plans");
+  msg.Set("round", Num(game_.RoundNumber()));
+  msg.Set("ready", Json(false));
+  Json list{Json::Array{}};
+  for (const Unit& u : game_.GetScene().units) {
+    if (!u.alive) continue;
+    list.Push(net::EncodeAction(net::PlanToAction(u)));
+  }
+  msg.Set("plans", std::move(list));
   return msg;
 }
 

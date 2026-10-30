@@ -21,6 +21,9 @@
 //                                                  create (no room): server picks an unused code;
 //                                                  create: fails if the room exists; join: fails
 //                                                  if it does not
+//   {"t":"join","room":"<name>","spectate":true}   watch an existing room read-only: gets
+//                                                  unfiltered state, both teams' plans and
+//                                                  unfiltered rounds; any other message is an error
 //   {"t":"move","unit":3,"waypoints":[[x,y,z],...],"facing":yaw}
 //   {"t":"shoot","unit":3,"target":4}
 //   {"t":"pass","unit":3}
@@ -36,7 +39,7 @@
 //
 // Server -> client:
 //   {"t":"waiting","room":"<name>"}
-//   {"t":"start","team":"blue"|"red","seed":N,"protocol":1[,"scene":<spec>]}   scene only in
+//   {"t":"start","team":"blue"|"red"|"spectator","seed":N,"protocol":1[,"scene":<spec>]}   scene only in
 //                                                  test-control rooms (net/SceneSpec.h)
 //   {"t":"ack","seq":N,"ok":true|false,"error":"..."}
 //   {"t":"plans","round":N,"ready":bool,"plans":[<action>...],"playbook":[a,b,c,d]}   own team only

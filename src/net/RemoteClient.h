@@ -31,7 +31,10 @@ class RemoteClient {
 
   // `intent` is "create", "join" or empty (see Lobby::Join). With "create" and
   // no room, the server picks the code (room_code() once waiting).
-  RemoteClient(tactics::GameLogic* game, std::string room, std::string intent = "");
+  // `spectate` attaches read-only to an existing room: every figure and both
+  // teams' plans are mirrored, and nothing is ever sent but the join.
+  RemoteClient(tactics::GameLogic* game, std::string room, std::string intent = "",
+               bool spectate = false);
 
   // Transport events.
   void OnOpen();
@@ -49,6 +52,7 @@ class RemoteClient {
   void RequestNewMatch();
 
   Status status() const { return status_; }
+  bool spectating() const { return spectate_; }
   std::optional<tactics::Team> team() const { return team_; }
   bool playingBack() const { return playback_.has_value(); }
   bool selfReady() const { return selfReady_; }
@@ -108,6 +112,7 @@ class RemoteClient {
   tactics::GameLogic* game_;
   std::string room_;
   std::string intent_;
+  bool spectate_ = false;
   Status status_ = Status::Connecting;
   std::optional<tactics::Team> team_;
   std::vector<std::string> outgoing_;

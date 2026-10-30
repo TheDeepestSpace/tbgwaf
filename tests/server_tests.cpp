@@ -319,6 +319,57 @@ void TestRoomIntents() {
   CHECK(w.Drain(4)[0]["t"].AsString() == "error");  // Full.
 }
 
+// Spectators: join an existing room read-only, see every unit and both teams'
+// plans, and never count as a player.
+void TestSpectator() {
+  Wire w;
+  w.Send(9, R"({"t":"join","spectate":true,"room":"nope"})");
+  CHECK(w.Drain(9)[0]["t"].AsString() == "error");  // No such room.
+  w.Send(9, R"({"t":"join","spectate":true})");
+  CHECK(w.Drain(9)[0]["t"].AsString() == "error");  // Needs a room.
+
+  w.Send(1, R"({"t":"join","room":"sp"})");
+  w.Send(9, R"({"t":"join","spectate":true,"room":"sp"})");  // Before the match starts.
+  CHECK(w.Drain(9)[0]["t"].AsString() == "waiting");
+  w.Send(2, R"({"t":"join","room":"sp"})");
+  w.Send(3, R"({"t":"join","room":"sp"})");
+  CHECK(w.Drain(3)[0]["t"].AsString() == "error");  // Full: the spectator took no seat.
+
+  const auto view = w.Drain(9);
+  CHECK(view.size() == 3 && view[0]["t"].AsString() == "start");
+  CHECK(view[0]["team"].AsString() == "spectator");
+  CHECK(view[2]["t"].AsString() == "state");
+  CHECK(view[2]["units"].AsArray().size() == 6);  // Unfiltered: both squads.
+  w.Drain(1);
+  w.Drain(2);
+
+  w.Send(9, R"({"t":"commit"})");
+  CHECK(w.Drain(9)[0]["t"].AsString() == "error");  // Read-only.
+
+  // A team's plan reaches the spectator; so does the whole round, unfiltered.
+  w.Send(1, R"({"t":"pass","unit":0,"seq":1})");
+  const auto plans = w.Drain(9);
+  CHECK(plans.size() == 1 && plans[0]["t"].AsString() == "plans");
+  CHECK(plans[0]["plans"].AsArray().size() == 6);
+  for (int unit = 1; unit < 6; ++unit) {
+    w.Send(unit < 3 ? 1 : 2, R"({"t":"pass","unit":)" + std::to_string(unit) + "}");
+  }
+  w.Send(1, R"({"t":"commit"})");
+  w.Send(2, R"({"t":"commit"})");
+  const auto after = w.Drain(9);
+  CHECK(Has(after, "round"));
+  for (const Json& m : after) {
+    if (m["t"].AsString() != "round") continue;
+    CHECK(m["state"]["units"].AsArray().size() == 6);
+    CHECK(m["frames"].AsArray()[0]["u"].AsArray().size() == 6);
+  }
+
+  w.lobby.OnDisconnect(9);  // A spectator leaving does not end the match.
+  CHECK(!Has(w.Drain(1), "opponent_left"));
+  w.lobby.OnDisconnect(1);
+  CHECK(Has(w.Drain(2), "opponent_left"));
+}
+
 // Test control tap: a scenario-loaded room runs on the explicit scene, the
 // start message carries it, and dump_state reports unfiltered ground truth.
 void TestControlTapScenarioRoom() {
@@ -600,6 +651,7 @@ int main() {
   TestSessionFogHidesEnemyPlansAndUnits();
   TestLobbyPairing();
   TestRoomIntents();
+  TestSpectator();
   TestControlTapScenarioRoom();
   TestClientServerRound();
   TestRejectedActionResyncs();

@@ -13,7 +13,10 @@ The browser preview has three modes on the same page and uses the same WASM
   in the existing WASM build (`Module.tbgwafSpectator`, set only on the Blue
   instance; the Red instance keeps simulating in a hidden pane), not a separate
   binary. It is rendering-only: Jev's request state still contains only
-  team-visible information. Other modes keep their two fog-limited panes.
+  team-visible information. With a server configured, the Blue and Red Jev
+  clients stay fog-limited and run in hidden panes; the visible pane is a
+  third, read-only client that joins the room with `"spectate":true` and is
+  sent unfiltered state, both teams' plans and unfiltered rounds. Other modes keep their two fog-limited panes.
 
 Game code builds a bounded set of legal actions (about 25 per figure) for every
 unplanned figure on the team (visible shots, navmesh-validated moves incl.

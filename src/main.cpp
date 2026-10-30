@@ -142,6 +142,9 @@ EM_JS(char*, tbgwaf_server_room_intent, (), {
   return ptr;
 });
 
+// Module.tbgwafServerSpectate: watch the room read-only (Jev vs Jev pane).
+EM_JS(int, tbgwaf_server_spectate, (), { return Module.tbgwafServerSpectate ? 1 : 0; });
+
 // WebSocket plumbing: events are queued as "O" (open), "C" (closed) and
 // "M<text frame>" and drained by the frame loop.
 EM_JS(void, tbgwaf_ws_open, (const char* url), {
@@ -525,7 +528,8 @@ int main() {
     if (!serverUrl.empty()) {
       char* roomRaw = tbgwaf_server_room();
       char* intentRaw = tbgwaf_server_room_intent();
-      remote = std::make_unique<tactics::net::RemoteClient>(&game, roomRaw, intentRaw);
+      remote = std::make_unique<tactics::net::RemoteClient>(&game, roomRaw, intentRaw,
+                                                              tbgwaf_server_spectate() != 0);
       std::free(roomRaw);
       std::free(intentRaw);
       fixedTeam = Team::Blue;  // Placeholder until the server's "start".
@@ -1000,8 +1004,10 @@ int main() {
     // after game over) neither pane takes action input. Camera
     // orbit/zoom/pan is never gated -- either player can look around their
     // own pane at any time.
+    // A spectator never plans, so it is not "playing" for input purposes.
     const bool remotePlaying =
-        !remoteMode || remote->status() == tactics::net::RemoteClient::Status::Playing;
+        !remoteMode || (remote->status() == tactics::net::RemoteClient::Status::Playing &&
+                        !remote->spectating());
     const bool planning =
         !replayActive && isPlanningMode(game.Mode()) && !awaitingPeerSync && remotePlaying;
     // The HUD reflects whatever state is on screen (replay or live); its

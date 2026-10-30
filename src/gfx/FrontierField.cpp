@@ -87,47 +87,49 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
     }
   }
 
-  // Separable box blur (radius 2, two passes) rounds off grid steps.
+  // Separable box blur rounds off grid steps. Out-of-layer taps count as
+  // just outside the contour.
+  const auto blurField = [&](int radius, int passes) {
+    std::vector<float> out = raw;
+    std::vector<float> tmp(out.size());
+    for (int pass = 0; pass < passes; ++pass) {
+      for (int iz = 0; iz < nz; ++iz) {
+        for (int ix = 0; ix < nx; ++ix) {
+          float sum = 0.0f;
+          for (int k = -radius; k <= radius; ++k) {
+            const int jx = std::clamp(ix + k, 0, nx - 1);
+            sum += sameLayer(ix, iz, jx, iz) ? out[iz * nx + jx] : -0.5f * field.step;
+          }
+          tmp[iz * nx + ix] = sum / (2 * radius + 1);
+        }
+      }
+      for (int iz = 0; iz < nz; ++iz) {
+        for (int ix = 0; ix < nx; ++ix) {
+          float sum = 0.0f;
+          for (int k = -radius; k <= radius; ++k) {
+            const int jz = std::clamp(iz + k, 0, nz - 1);
+            sum += sameLayer(ix, iz, ix, jz) ? tmp[jz * nx + ix] : -0.5f * field.step;
+          }
+          out[iz * nx + ix] = sum / (2 * radius + 1);
+        }
+      }
+    }
+    return out;
+  };
   constexpr int kBlurRadius = 2;
   constexpr int kBlurPasses = 2;
-  std::vector<float> depth = raw;
+  // Increasingly strong smoothing; level 0 is the grid-exact field.
+  const std::vector<float> levels[4] = {raw, blurField(1, 1), blurField(1, 2),
+                                        blurField(kBlurRadius, kBlurPasses)};
+  std::vector<float> depth = levels[3];
   std::vector<float> scratch(depth.size());
-  for (int pass = 0; pass < kBlurPasses; ++pass) {
-    for (int iz = 0; iz < nz; ++iz) {
-      for (int ix = 0; ix < nx; ++ix) {
-        float sum = 0.0f;
-        for (int k = -kBlurRadius; k <= kBlurRadius; ++k) {
-          const int jx = std::clamp(ix + k, 0, nx - 1);
-          sum += sameLayer(ix, iz, jx, iz) ? depth[iz * nx + jx]
-                                           : -0.5f * field.step;
-        }
-        scratch[iz * nx + ix] = sum / (2 * kBlurRadius + 1);
-      }
-    }
-    for (int iz = 0; iz < nz; ++iz) {
-      for (int ix = 0; ix < nx; ++ix) {
-        float sum = 0.0f;
-        for (int k = -kBlurRadius; k <= kBlurRadius; ++k) {
-          const int jz = std::clamp(iz + k, 0, nz - 1);
-          sum += sameLayer(ix, iz, ix, jz) ? scratch[jz * nx + ix]
-                                           : -0.5f * field.step;
-        }
-        depth[iz * nx + ix] = sum / (2 * kBlurRadius + 1);
-      }
-    }
-  }
 
-  // The blur erodes anything under about five samples across -- a ledge
-  // along a cliff wall, a sidewalk strip between a building and a drop --
-  // until every sample in it is negative and nothing is drawn. Measure
-  // each node's local thickness as the deepest inside-distance within the
-  // blur's support (within its own layer) and fall back to the unblurred
-  // field where that is small: thin bands keep their grid-exact outline,
-  // and everything at least kWideSamples across keeps the rounded one
-  // unchanged.
+  // The full blur erodes anything under about five samples across -- a
+  // ledge along a cliff wall, a sidewalk strip between a building and a
+  // drop -- until nothing is drawn. Measure each node's local thickness as
+  // the deepest inside-distance within the blur's support (within its own
+  // layer) and use weaker smoothing where that is small.
   constexpr int kSupport = kBlurRadius * kBlurPasses;
-  constexpr float kThinSamples = 2.0f;  // Fully unblurred: at most 4 across.
-  constexpr float kWideSamples = 4.0f;  // Fully blurred: at least 7 across.
   std::vector<float> thickness(dIn.size(), 0.0f);
   for (int iz = 0; iz < nz; ++iz) {
     for (int ix = 0; ix < nx; ++ix) {
@@ -151,22 +153,27 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
       thickness[iz * nx + ix] = best;
     }
   }
-  const float thinDepth = kThinSamples * field.step;
-  const float wideDepth = kWideSamples * field.step;
-  const float sampleDepth = 0.5f * field.step;
+  // Pick the smoothing strength from the local thickness (in samples),
+  // interpolating between neighbouring levels so the outline never jumps
+  // between a grid-exact and a rounded stretch. Thin bands get the
+  // strongest blur they can take, rather than none, so their edges are
+  // not stair-stepped either.
+  const float sampleDepth = 0.1f * field.step;
   for (int iz = 0; iz < nz; ++iz) {
     for (int ix = 0; ix < nx; ++ix) {
       const int i = iz * nx + ix;
-      const float w =
-          std::clamp((thickness[i] - thinDepth) / (wideDepth - thinDepth), 0.0f, 1.0f);
-      if (w >= 1.0f) continue;
-      float& value = depth[i];
-      value = raw[i] + (value - raw[i]) * w;
-      // Smoothing is visual only and must not change what is reachable:
-      // in the thin zone, where the blend may still cross zero at a
-      // corner, restore each sample's class.
-      if (field.Reached(ix, iz) && value <= 0.0f) value = sampleDepth;
-      if (!field.Reached(ix, iz) && value >= 0.0f) value = -sampleDepth;
+      const float level = std::clamp(thickness[i] / field.step - 1.0f, 0.0f, 3.0f);
+      const int lo = std::min(static_cast<int>(level), 2);
+      const float f = level - lo;
+      float value = levels[lo][i] + (levels[lo + 1][i] - levels[lo][i]) * f;
+      // Smoothing is visual only and must not change what is reachable;
+      // outside the fully blurred zone a small constant margin keeps the outline smooth where a thin band
+      // would otherwise be eroded across zero.
+      if (level < 3.0f) {
+        if (field.Reached(ix, iz)) value = std::max(value, sampleDepth);
+        else value = std::min(value, -sampleDepth);
+      }
+      depth[i] = value;
     }
   }
   return depth;

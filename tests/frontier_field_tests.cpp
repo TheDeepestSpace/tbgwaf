@@ -92,7 +92,25 @@ void TestLedgeBesideDeckSurvivesSmoothing() {
 
 }  // namespace
 
+void TestThinStraightBandHasSmoothOutline() {
+  // Away from its ends, a straight thin band must have the same depth
+  // along its whole length: no bumps from mixing smoothing levels.
+  for (int width = 1; width <= 6; ++width) {
+    tactics::ReachField field = EmptyField(31);
+    for (int iz = 12; iz < 12 + width; ++iz) {
+      for (int ix = 0; ix < field.nx; ++ix) field.dist[iz * field.nx + ix] = 0.0f;
+    }
+    const std::vector<float> depth = gfx::SmoothFrontierSignedDepth(field);
+    for (int iz = 8; iz < 20; ++iz) {
+      for (int ix = 5; ix < 25; ++ix) {
+        CHECK(std::abs(depth[iz * field.nx + ix] - depth[iz * field.nx + 15]) < 1e-4f);
+      }
+    }
+  }
+}
+
 int main() {
+  TestThinStraightBandHasSmoothOutline();
   TestNarrowReachableBandSurvivesSmoothing();
   TestWideRegionStaysRounded();
   TestLedgeBesideDeckSurvivesSmoothing();

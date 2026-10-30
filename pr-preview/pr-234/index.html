@@ -43,7 +43,8 @@
       button:hover { background: #363941; }
       button[aria-pressed="true"] { border-color: #7ba7ff; background: #253858; }
       button:disabled { cursor: default; opacity: 0.45; }
-      #mode-label { font-weight: 650; }
+      #mode-label { font-weight: 650; cursor: grab; touch-action: none; user-select: none; }
+      #control-panel.dragging #mode-label { cursor: grabbing; }
       #ai-status[data-kind="error"] { color: #ff9d9d; }
       #ai-status[data-kind="fallback"] { color: #ffd778; }
       #outcome { color: #a9d4ff; }
@@ -117,6 +118,80 @@
       <div>Blue uses the left canvas; Red uses the right (Jev vs Jev: one spectator view of both teams). Camera orbit and zoom stay available.</div>
       <div id="status">Loading game…</div>
     </div>
+    <script>
+      // Drag the control panel by its "Mode:" label; position persists in
+      // localStorage. Double-click the label to reset. UI-only: no game input.
+      (() => {
+        const panel = document.getElementById("control-panel");
+        const handle = document.getElementById("mode-label");
+        const KEY = "tbgwaf.controlPanelPos";
+        const clamp = (x, y) => {
+          const r = panel.getBoundingClientRect();
+          return [
+            Math.min(Math.max(0, x), Math.max(0, innerWidth - r.width)),
+            Math.min(Math.max(0, y), Math.max(0, innerHeight - r.height)),
+          ];
+        };
+        const place = (x, y) => {
+          [x, y] = clamp(x, y);
+          Object.assign(panel.style, {
+            left: x + "px", top: y + "px", right: "auto", transform: "none",
+          });
+          return [x, y];
+        };
+        const reset = () => {
+          for (const p of ["left", "top", "right", "transform"]) panel.style[p] = "";
+          try { localStorage.removeItem(KEY); } catch {}
+        };
+        const save = (x, y) => {
+          try { localStorage.setItem(KEY, JSON.stringify([x, y])); } catch {}
+        };
+        let saved = null;
+        try { saved = JSON.parse(localStorage.getItem(KEY)); } catch {}
+        const offscreen = (x, y) => {
+          const r = panel.getBoundingClientRect();
+          return x > innerWidth - 40 || y > innerHeight - 20 || x + r.width < 40 || y < 0;
+        };
+        const restore = () => {
+          if (!Array.isArray(saved) || !saved.every(Number.isFinite)) return;
+          place(saved[0], saved[1]);
+          const r = panel.getBoundingClientRect();
+          if (offscreen(r.left, r.top)) { reset(); saved = null; }
+        };
+        restore();
+        addEventListener("resize", () => {
+          if (!panel.style.left) return;
+          const r = panel.getBoundingClientRect();
+          if (offscreen(r.left, r.top)) { reset(); return; }
+          const [x, y] = place(r.left, r.top);
+          save(x, y);
+          saved = [x, y];
+        });
+        let drag = null;
+        handle.addEventListener("pointerdown", (e) => {
+          if (e.button > 0) return;
+          const r = panel.getBoundingClientRect();
+          drag = { id: e.pointerId, dx: e.clientX - r.left, dy: e.clientY - r.top };
+          handle.setPointerCapture(e.pointerId);
+          panel.classList.add("dragging");
+          e.preventDefault();
+        });
+        handle.addEventListener("pointermove", (e) => {
+          if (!drag || e.pointerId !== drag.id) return;
+          place(e.clientX - drag.dx, e.clientY - drag.dy);
+        });
+        const end = (e) => {
+          if (!drag || e.pointerId !== drag.id) return;
+          drag = null;
+          panel.classList.remove("dragging");
+          const r = panel.getBoundingClientRect();
+          if (panel.style.left) { saved = [r.left, r.top]; save(r.left, r.top); }
+        };
+        handle.addEventListener("pointerup", end);
+        handle.addEventListener("pointercancel", end);
+        handle.addEventListener("dblclick", () => { reset(); saved = null; });
+      })();
+    </script>
     <script src="tactics_app.js"></script>
     <script type="module" src="jev-preview.js"></script>
   </body>

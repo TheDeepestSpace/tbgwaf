@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <string>
 
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -383,12 +384,13 @@ void main() {}
 
 // Issue #110: per-unit projective FOV mask. The static scene is re-drawn
 // with this shader after the lit pass (depth test LEQUAL, no depth writes):
-// a fragment is tinted when it faces the unit's eye, lies inside the
-// 150-degree horizontal cone (analytic, so the cone's angular edges stay
-// crisp), and its eye sightline passes a depth test against one of the two
-// eye-space depth maps. Flat tint, no attenuation or N.L -- this is a mask,
-// not lighting. Everything else is discarded, which also keeps the stencil
-// untouched so overlapping teammates' masks don't stack (see RenderPane).
+// a fragment is tinted when, for any of the pass's figures, it faces that
+// figure's eye, lies inside its horizontal cone (analytic, so the cone's
+// angular edges stay crisp), and its eye sightline passes a depth test
+// against one of the figure's two eye-space depth maps. Flat tint, no
+// attenuation or N.L -- this is a mask, not lighting. Everything else is
+// discarded, which also keeps the stencil untouched so overlapping masks of
+// a team with more figures than one pass takes don't stack (see RenderPane).
 constexpr int kFovMapWidth = 1024;
 constexpr int kFovMapHeight = 2048;
 // Each of the two maps covers half the cone's azimuth plus a small overlap
@@ -401,6 +403,13 @@ constexpr float kFovMapHalfAzimuthDegrees = kFovMapHalfSplitDegrees + 1.5f;
 // degrees above the eye fall outside both maps and stay untinted.
 constexpr float kFovMapHalfElevationDegrees = 60.0f;
 constexpr float kFovMapNear = 0.2f;
+// Figures one mask pass tests (two depth maps each, on texture units 1..8).
+// Unrolled in the shader below: GLSL ES 3.00 only indexes sampler arrays
+// with constant expressions.
+constexpr int kFovMasksPerPass = 4;
+// A figure's cached depth maps are freed after this many RenderPane calls
+// without being used (it died, stopped aiming, or the scene changed).
+constexpr unsigned long long kFovMapIdlePanes = 120;
 
 const char* kFovMaskVertexShaderSrc = R"(#version 300 es
 layout(location = 0) in vec3 aPos;
@@ -421,12 +430,12 @@ const char* kFovMaskFragmentShaderSrc = R"(#version 300 es
 precision highp float;
 in vec3 vWorldPos;
 in vec3 vWorldNormal;
-uniform vec3 uEye;
-uniform vec3 uFacing;      // Unit forward, horizontal, normalized.
-uniform float uCosHalfFov;
-uniform float uRange;
-uniform mat4 uFovMatrix0;
-uniform mat4 uFovMatrix1;
+uniform int uCount;            // Figures in this pass, at most 4.
+uniform vec3 uEye[4];
+uniform vec3 uFacing[4];       // Unit forward, horizontal, normalized.
+uniform float uCosHalfFov[4];
+uniform mat4 uFovMatrix0[4];
+uniform mat4 uFovMatrix1[4];
 // highp is essential: GLSL ES defaults fragment samplers to lowp, and at
 // least Mesa llvmpipe then returns depth reads at half-float precision
 // (~11 bits), which after linearization is a 0.5-unit sawtooth at 15 units
@@ -434,6 +443,13 @@ uniform mat4 uFovMatrix1;
 // see docs/fov-shadow-map.md.)
 uniform highp sampler2D uFovMap0;
 uniform highp sampler2D uFovMap1;
+uniform highp sampler2D uFovMap2;
+uniform highp sampler2D uFovMap3;
+uniform highp sampler2D uFovMap4;
+uniform highp sampler2D uFovMap5;
+uniform highp sampler2D uFovMap6;
+uniform highp sampler2D uFovMap7;
+uniform float uRange;
 uniform float uNear;
 uniform float uFar;
 uniform float uTexelPerDepth;  // World size of one map texel per unit of map depth.
@@ -456,7 +472,7 @@ float SampleMap(highp sampler2D map, mat4 matrix, vec3 p, float slope) {
   if (any(greaterThan(abs(ndc), vec3(1.0)))) return -1.0;
   float depth = LinearDepth(ndc.z * 0.5 + 0.5);
   // Modest slope-scaled bias in linear depth. Grazing angles are handled
-  // mainly by the normal offset applied in main() (it pushes the sample
+  // mainly by the normal offset applied in Tinted() (it pushes the sample
   // along the surface by a couple of texels, however oblique the view);
   // this only has to absorb the residual depth variation across the 3x3
   // PCF kernel on moderately tilted surfaces, so the slope term is capped.
@@ -474,21 +490,23 @@ float SampleMap(highp sampler2D map, mat4 matrix, vec3 p, float slope) {
   return lit / 9.0;
 }
 
-void main() {
-  vec3 n = normalize(vWorldNormal);
-  vec3 toEye = uEye - vWorldPos;
+// Whether figure i (depth maps map0/map1) sees this fragment.
+bool Tinted(int i, highp sampler2D map0, highp sampler2D map1, vec3 n) {
+  vec3 toEye = uEye[i] - vWorldPos;
   float dist = length(toEye);
-  if (dist > uRange) discard;
+  if (dist > uRange) return false;
   vec3 dir = toEye / dist;
   // A face turned away from the eye is the back of something; the eye sees
   // its front, which is drawn (and tested) separately.
   float ndotl = dot(n, dir);
-  if (ndotl <= 0.0) discard;
+  if (ndotl <= 0.0) return false;
   // Analytic azimuth test: the fragment's bearing from the eye must be
   // within the half-FOV of the unit's facing.
   vec2 bearing = vec2(-dir.x, -dir.z);
   float bearingLen = length(bearing);
-  if (bearingLen > 1e-5 && dot(bearing / bearingLen, uFacing.xz) < uCosHalfFov) discard;
+  if (bearingLen > 1e-5 && dot(bearing / bearingLen, uFacing[i].xz) < uCosHalfFov[i]) {
+    return false;
+  }
   // Normal-offset sampling: lift the sample point off the surface along its
   // normal by ~2 texels' worth, scaled by sin(theta) so a surface seen
   // head-on isn't moved at all while a grazing one is moved enough that
@@ -499,11 +517,20 @@ void main() {
   float slope = sinTheta / max(ndotl, 1e-3);
   vec3 p = vWorldPos + n * (2.0 * uTexelPerDepth * dist * sinTheta);
   if (n.y > 0.7) p.y += uProbeHeight;
-  float lit = SampleMap(uFovMap0, uFovMatrix0, p, slope);
-  if (lit < 0.0) lit = SampleMap(uFovMap1, uFovMatrix1, p, slope);
+  float lit = SampleMap(map0, uFovMatrix0[i], p, slope);
+  if (lit < 0.0) lit = SampleMap(map1, uFovMatrix1[i], p, slope);
   // Binary edge: a partially lit fragment would claim the stencil with a
   // faint alpha and block a teammate with a clearer view of the same pixel.
-  if (lit < 0.5) discard;
+  return lit >= 0.5;
+}
+
+void main() {
+  vec3 n = normalize(vWorldNormal);
+  bool tinted = Tinted(0, uFovMap0, uFovMap1, n) ||
+                (uCount > 1 && Tinted(1, uFovMap2, uFovMap3, n)) ||
+                (uCount > 2 && Tinted(2, uFovMap4, uFovMap5, n)) ||
+                (uCount > 3 && Tinted(3, uFovMap6, uFovMap7, n));
+  if (!tinted) discard;
   FragColor = uColor;
 }
 )";
@@ -1175,7 +1202,7 @@ void BuildStreetFixtureMeshes(
 // LineOfSightClear and the lit pass), street fixtures, sidewalk slabs and
 // patches, and roads. Built once per scene so each per-unit pass is one draw.
 // Facade openings are left out: they only receive the tint (drawn from the
-// facade mesh, see DrawFovShadowMask). As casters the recessed parts sit
+// facade mesh, see DrawFovMasks). As casters the recessed parts sit
 // inside the solid wall and the frames stand a few centimetres proud of it,
 // yet they were most of a city's triangles in every depth map.
 void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
@@ -2796,32 +2823,6 @@ bool SceneRenderer::Init() {
   highlightRing_.Init();
   highlightRing_.SetPoints(BuildRingPoints());
 
-  // Issue #110: the two per-unit eye-space depth maps. Allocated up front
-  // (16 MB of depth) even in CPU mode so flipping the mode at runtime needs
-  // no re-init; they are only rendered to in ShadowMap mode.
-  glGenFramebuffers(2, fovFbo_);
-  glGenTextures(2, fovDepthTex_);
-  for (int i = 0; i < 2; ++i) {
-    glBindTexture(GL_TEXTURE_2D, fovDepthTex_[i]);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, kFovMapWidth, kFovMapHeight, 0,
-                 GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindFramebuffer(GL_FRAMEBUFFER, fovFbo_[i]);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, fovDepthTex_[i], 0);
-    const GLenum noColorBuffer = GL_NONE;
-    glDrawBuffers(1, &noColorBuffer);
-    glReadBuffer(GL_NONE);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-      std::fprintf(stderr, "FOV depth map framebuffer %d incomplete\n", i);
-      glBindFramebuffer(GL_FRAMEBUFFER, 0);
-      return false;
-    }
-  }
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
   // Stage-C: a single directional light (simulating overhead factory
   // lighting) casting a PCF-filtered shadow map. The
   // light and the static map geometry are shared by all panes; only the
@@ -2907,10 +2908,8 @@ void SceneRenderer::Destroy() {
   if (shadowFbo_) glDeleteFramebuffers(1, &shadowFbo_);
   shadowDepthTex_ = 0;
   shadowFbo_ = 0;
-  if (fovDepthTex_[0]) glDeleteTextures(2, fovDepthTex_);
-  if (fovFbo_[0]) glDeleteFramebuffers(2, fovFbo_);
-  fovDepthTex_[0] = fovDepthTex_[1] = 0;
-  fovFbo_[0] = fovFbo_[1] = 0;
+  for (FovMapSlot& slot : fovMaps_) DestroyFovMaps(&slot);
+  fovMaps_.clear();
   if (thermalSceneTex_) glDeleteTextures(1, &thermalSceneTex_);
   if (thermalSensorVao_) glDeleteVertexArrays(1, &thermalSensorVao_);
   thermalSceneTex_ = thermalSensorVao_ = 0;
@@ -2956,28 +2955,77 @@ void SceneRenderer::ApplyThermalSensor(int x, int y, int width, int height) {
   glEnable(GL_DEPTH_TEST);
 }
 
-void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, float facingYaw,
-                                      float halfFovDegrees, const glm::vec4& color,
-                                      const glm::mat4& viewProj, bool drawTerrain,
-                                      GLuint targetFramebuffer, int x, int y, int width,
-                                      int height) {
-  const tactics::Scene& scene = game.GetScene();
-  const float mapHalfExtent = scene.mapHalfExtent;
+void SceneRenderer::DestroyFovMaps(FovMapSlot* slot) {
+  if (slot->tex[0]) glDeleteTextures(2, slot->tex);
+  if (slot->fbo[0]) glDeleteFramebuffers(2, slot->fbo);
+  slot->tex[0] = slot->tex[1] = 0;
+  slot->fbo[0] = slot->fbo[1] = 0;
+}
+
+int SceneRenderer::AcquireFovMaps(const Unit& unit, int sector, float facingYaw, bool drawTerrain,
+                                  float mapHalfExtent) {
   const glm::vec3 eye = unit.EyePosition();
-  const float range = tactics::constants::kFovConeVisualRange;
+  int index = -1;
+  for (size_t i = 0; i < fovMaps_.size(); ++i) {
+    if (fovMaps_[i].unitId == unit.id && fovMaps_[i].sector == sector) index = static_cast<int>(i);
+  }
+  if (index < 0) {
+    // A new pair of maps (16 MB of depth), allocated on first use.
+    FovMapSlot slot;
+    slot.unitId = unit.id;
+    slot.sector = sector;
+    glGenFramebuffers(2, slot.fbo);
+    glGenTextures(2, slot.tex);
+    bool complete = true;
+    for (int half = 0; half < 2; ++half) {
+      glBindTexture(GL_TEXTURE_2D, slot.tex[half]);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, kFovMapWidth, kFovMapHeight, 0,
+                   GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      glBindFramebuffer(GL_FRAMEBUFFER, slot.fbo[half]);
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, slot.tex[half],
+                             0);
+      const GLenum noColorBuffer = GL_NONE;
+      glDrawBuffers(1, &noColorBuffer);
+      glReadBuffer(GL_NONE);
+      complete &= glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (!complete) {
+      std::fprintf(stderr, "FOV depth map framebuffer incomplete\n");
+      DestroyFovMaps(&slot);
+      return -1;
+    }
+    fovMaps_.push_back(slot);
+    index = static_cast<int>(fovMaps_.size()) - 1;
+  }
+  FovMapSlot& slot = fovMaps_[index];
+  slot.lastUsed = fovMapClock_;
+  if (slot.generation == fovMapGeneration_ && slot.eye == eye && slot.yaw == facingYaw &&
+      slot.drawTerrain == drawTerrain && slot.mapHalfExtent == mapHalfExtent) {
+    return index;  // Still current: nothing to render.
+  }
+  slot.eye = eye;
+  slot.yaw = facingYaw;
+  slot.drawTerrain = drawTerrain;
+  slot.mapHalfExtent = mapHalfExtent;
+  slot.generation = fovMapGeneration_;
+
   // Far plane: the cone's visual range, which already exceeds any map's
   // diagonal; the depth comparison is done in linearized depth so the
   // far-plane choice only affects precision, not correctness.
-  const float far = range;
+  const float far = tactics::constants::kFovConeVisualRange;
   const float aspect = std::tan(glm::radians(kFovMapHalfAzimuthDegrees)) /
                        std::tan(glm::radians(kFovMapHalfElevationDegrees));
   const glm::mat4 proj = glm::perspective(glm::radians(2.0f * kFovMapHalfElevationDegrees),
                                           aspect, kFovMapNear, far);
-  glm::mat4 mapMatrix[2];
   for (int half = 0; half < 2; ++half) {
     const float yaw = facingYaw + glm::radians(kFovMapHalfSplitDegrees) * (half == 0 ? -1.0f : 1.0f);
     const glm::vec3 dir(std::cos(yaw), 0.0f, std::sin(yaw));
-    mapMatrix[half] = proj * glm::lookAt(eye, eye + dir, glm::vec3(0.0f, 1.0f, 0.0f));
+    slot.matrix[half] = proj * glm::lookAt(eye, eye + dir, glm::vec3(0.0f, 1.0f, 0.0f));
   }
 
   // Depth passes: the static scene from the eye, into each half-map. The
@@ -2990,40 +3038,46 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, f
   glDepthMask(GL_TRUE);
   glDepthFunc(GL_LESS);
   // Each map sees only the wedge of the map in front of the eye, so the
-  // chunked static meshes are culled to it (and the mask below to the
-  // camera as well): on a large city most of the scene is skipped.
-  const Frustum mapFrustum[2] = {Frustum(mapMatrix[0]), Frustum(mapMatrix[1])};
+  // chunked static meshes are culled to it (and the mask to the camera as
+  // well): on a large city most of the scene is skipped.
   depthShader_.Use();
   for (int half = 0; half < 2; ++half) {
+    const Frustum mapFrustum(slot.matrix[half]);
     const auto inMap = [&](const glm::vec3& min, const glm::vec3& max) {
-      return mapFrustum[half].Intersects(min, max);
+      return mapFrustum.Intersects(min, max);
     };
-    glBindFramebuffer(GL_FRAMEBUFFER, fovFbo_[half]);
+    glBindFramebuffer(GL_FRAMEBUFFER, slot.fbo[half]);
     glViewport(0, 0, kFovMapWidth, kFovMapHeight);
     glClear(GL_DEPTH_BUFFER_BIT);
     if (drawTerrain) {
-      depthShader_.SetMat4("uLightMVP", mapMatrix[half]);
+      depthShader_.SetMat4("uLightMVP", slot.matrix[half]);
       terrainMesh_.DrawVisible(inMap);
       terrainRaisedMesh_.DrawVisible(inMap);
       terrainStairMesh_.Draw();
     } else {
-      DrawBoxDepth(depthShader_, cubeMesh_, mapMatrix[half],
+      DrawBoxDepth(depthShader_, cubeMesh_, slot.matrix[half],
                    glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
                    glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f));
     }
     if (fovSceneMesh_.HasGeometry()) {
-      depthShader_.SetMat4("uLightMVP", mapMatrix[half]);
+      depthShader_.SetMat4("uLightMVP", slot.matrix[half]);
       fovSceneMesh_.DrawVisible(inMap);
     }
   }
+  return index;
+}
 
-  // Back to the pane: same blend/stencil/no-depth-write state as the CPU
-  // overlay, with the mask drawn over the already-lit geometry (LEQUAL plus
-  // a small offset so the identical surfaces pass their own depth).
-  glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
-  glEnable(GL_SCISSOR_TEST);
-  glViewport(x, y, width, height);
-  glScissor(x, y, width, height);
+void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::vec4& color,
+                                 const glm::mat4& viewProj, bool drawTerrain,
+                                 float mapHalfExtent) {
+  std::vector<FovMask> live;
+  for (const FovMask& mask : masks) {
+    if (mask.slot >= 0) live.push_back(mask);
+  }
+  if (live.empty()) return;
+  // Same blend/stencil/no-depth-write state as the CPU overlay, with the
+  // mask drawn over the already-lit geometry (LEQUAL plus a small offset so
+  // the identical surfaces pass their own depth).
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glDepthMask(GL_FALSE);
@@ -3035,14 +3089,9 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, f
   glPolygonOffset(-1.0f, -2.0f);
 
   fovMaskShader_.Use();
-  fovMaskShader_.SetVec3("uEye", eye);
-  fovMaskShader_.SetVec3("uFacing", glm::vec3(std::cos(facingYaw), 0.0f, std::sin(facingYaw)));
-  fovMaskShader_.SetFloat("uCosHalfFov", std::cos(glm::radians(halfFovDegrees)));
-  fovMaskShader_.SetFloat("uRange", range);
-  fovMaskShader_.SetMat4("uFovMatrix0", mapMatrix[0]);
-  fovMaskShader_.SetMat4("uFovMatrix1", mapMatrix[1]);
+  fovMaskShader_.SetFloat("uRange", tactics::constants::kFovConeVisualRange);
   fovMaskShader_.SetFloat("uNear", kFovMapNear);
-  fovMaskShader_.SetFloat("uFar", far);
+  fovMaskShader_.SetFloat("uFar", tactics::constants::kFovConeVisualRange);
   // The larger of the two texel footprints (vertical: the whole elevation
   // range over the map's height) per unit of map depth.
   fovMaskShader_.SetFloat("uTexelPerDepth",
@@ -3052,40 +3101,67 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, f
                                        kFovMapWidth));
   fovMaskShader_.SetFloat("uProbeHeight", fovProbeHeight_);
   fovMaskShader_.SetVec4("uColor", color);
-  fovMaskShader_.SetInt("uFovMap0", 1);
-  fovMaskShader_.SetInt("uFovMap1", 2);
-  glActiveTexture(GL_TEXTURE1);
-  glBindTexture(GL_TEXTURE_2D, fovDepthTex_[0]);
-  glActiveTexture(GL_TEXTURE2);
-  glBindTexture(GL_TEXTURE_2D, fovDepthTex_[1]);
-  glActiveTexture(GL_TEXTURE0);
-
-  // A fragment outside both maps is always discarded, so only chunks on
-  // screen and inside either map can be tinted.
   const Frustum cameraFrustum(viewProj);
-  const auto receives = [&](const glm::vec3& min, const glm::vec3& max) {
-    return cameraFrustum.Intersects(min, max) &&
-           (mapFrustum[0].Intersects(min, max) || mapFrustum[1].Intersects(min, max));
-  };
-  const auto drawReceiver = [&](const LitTriangleMesh& mesh) {
-    fovMaskShader_.SetMat4("uModel", glm::mat4(1.0f));
-    fovMaskShader_.SetMat4("uMVP", viewProj);
-    mesh.DrawVisible(receives);
-  };
-  if (drawTerrain) {
-    drawReceiver(terrainMesh_);
-    drawReceiver(terrainRaisedMesh_);
-  } else {
-    const glm::mat4 model = BoxModel(glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
-                                     glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f));
-    fovMaskShader_.SetMat4("uModel", model);
-    fovMaskShader_.SetMat4("uMVP", viewProj * model);
-    cubeMesh_.Draw();
+  // Up to kFovMasksPerPass figures per pass; a larger team takes several
+  // passes, kept from stacking by the stencil cap.
+  for (size_t first = 0; first < live.size(); first += kFovMasksPerPass) {
+    const int count =
+        static_cast<int>(std::min<size_t>(kFovMasksPerPass, live.size() - first));
+    std::vector<Frustum> mapFrustums;
+    for (int i = 0; i < kFovMasksPerPass; ++i) {
+      // Unused figure slots still get valid depth textures bound (WebGL
+      // validates every sampler); the shader never reads them.
+      const FovMask& mask = live[first + std::min(i, count - 1)];
+      const FovMapSlot& slot = fovMaps_[mask.slot];
+      const std::string index = "[" + std::to_string(i) + "]";
+      fovMaskShader_.SetVec3(("uEye" + index).c_str(), slot.eye);
+      fovMaskShader_.SetVec3(("uFacing" + index).c_str(),
+                             glm::vec3(std::cos(slot.yaw), 0.0f, std::sin(slot.yaw)));
+      fovMaskShader_.SetFloat(("uCosHalfFov" + index).c_str(),
+                              std::cos(glm::radians(mask.halfFovDegrees)));
+      fovMaskShader_.SetMat4(("uFovMatrix0" + index).c_str(), slot.matrix[0]);
+      fovMaskShader_.SetMat4(("uFovMatrix1" + index).c_str(), slot.matrix[1]);
+      for (int half = 0; half < 2; ++half) {
+        const int unit = 1 + 2 * i + half;
+        fovMaskShader_.SetInt(("uFovMap" + std::to_string(2 * i + half)).c_str(), unit);
+        glActiveTexture(GL_TEXTURE0 + unit);
+        glBindTexture(GL_TEXTURE_2D, slot.tex[half]);
+        if (i < count) mapFrustums.emplace_back(slot.matrix[half]);
+      }
+    }
+    glActiveTexture(GL_TEXTURE0);
+    fovMaskShader_.SetInt("uCount", count);
+
+    // A fragment outside every figure's maps is always discarded, so only
+    // chunks on screen and inside some map can be tinted.
+    const auto receives = [&](const glm::vec3& min, const glm::vec3& max) {
+      if (!cameraFrustum.Intersects(min, max)) return false;
+      for (const Frustum& map : mapFrustums) {
+        if (map.Intersects(min, max)) return true;
+      }
+      return false;
+    };
+    const auto drawReceiver = [&](const LitTriangleMesh& mesh) {
+      fovMaskShader_.SetMat4("uModel", glm::mat4(1.0f));
+      fovMaskShader_.SetMat4("uMVP", viewProj);
+      mesh.DrawVisible(receives);
+    };
+    if (drawTerrain) {
+      drawReceiver(terrainMesh_);
+      drawReceiver(terrainRaisedMesh_);
+    } else {
+      const glm::mat4 model =
+          BoxModel(glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
+                   glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f));
+      fovMaskShader_.SetMat4("uModel", model);
+      fovMaskShader_.SetMat4("uMVP", viewProj * model);
+      cubeMesh_.Draw();
+    }
+    if (fovSceneMesh_.HasGeometry()) drawReceiver(fovSceneMesh_);
+    // Facade pane extrusions receive the tint like the walls they sit on: the
+    // extruded frames stand proud of the wall and need their own coverage.
+    if (facadeMesh_.HasGeometry()) drawReceiver(facadeMesh_);
   }
-  if (fovSceneMesh_.HasGeometry()) drawReceiver(fovSceneMesh_);
-  // Facade pane extrusions receive the tint like the walls they sit on: the
-  // extruded frames stand proud of the wall and need their own coverage.
-  if (facadeMesh_.HasGeometry()) drawReceiver(facadeMesh_);
   glDepthFunc(GL_LESS);
 }
 
@@ -3113,6 +3189,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
     terrainKey_ = terrain;
     fovSceneKey_ = 0;
+    ++fovMapGeneration_;
   }
   if (!terrain.Empty()) {
     const auto key = FovSceneFingerprint(game.GetScene());
@@ -3294,6 +3371,54 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
     }
     DrawPlantedFlagDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, game);
+  }
+
+  // Shadow-map FOV masks: this pane's figures' depth maps (and the free-aim
+  // sweep's), re-rendered only where stale, all before the main pass so the
+  // pane framebuffer is not switched away from once it is in use.
+  ++fovMapClock_;
+  std::vector<FovMask> teamFovMasks, otherFovMasks, aimFovMasks;
+  const bool shadowMapFov = fovOverlayMode_ == FovOverlayMode::ShadowMap && !debug.disableFov;
+  const bool aimSweep = overlays.aimShooter && overlays.aimShooter->alive && !debug.disableFov;
+  if (shadowMapFov || aimSweep) {
+    // Static receivers/casters for the shadow-map mask, cached per scene.
+    const unsigned long long sceneKey = FovSceneFingerprint(game.GetScene());
+    if (sceneKey != fovSceneKey_) {
+      BuildFovSceneMesh(game.GetScene(), &fovSceneMesh_);
+      fovSceneKey_ = sceneKey;
+      ++fovMapGeneration_;
+    }
+    // Free the maps of figures no pane has asked for in a while.
+    for (FovMapSlot& slot : fovMaps_) {
+      if (slot.lastUsed + kFovMapIdlePanes < fovMapClock_) DestroyFovMaps(&slot);
+    }
+    fovMaps_.erase(std::remove_if(fovMaps_.begin(), fovMaps_.end(),
+                                  [](const FovMapSlot& slot) { return slot.fbo[0] == 0; }),
+                   fovMaps_.end());
+    if (shadowMapFov) {
+      const Team otherTeam = team == Team::Blue ? Team::Red : Team::Blue;
+      for (const Unit& unit : game.GetScene().units) {
+        if (!unit.alive) continue;
+        std::vector<FovMask>* masks = unit.team == team ? &teamFovMasks
+                                      : overlays.spectatorFov && unit.team == otherTeam
+                                          ? &otherFovMasks
+                                          : nullptr;
+        if (!masks) continue;
+        masks->push_back({AcquireFovMaps(unit, -1, unit.VisualYaw(), drawTerrain, mapHalfExtent),
+                          tactics::constants::kShootHalfFovDegrees});
+      }
+    }
+    // Free-aim (issue #129): three 120-degree sectors (each within the two
+    // depth maps' reach) tile the full circle around the aiming figure.
+    if (aimSweep) {
+      const Unit& shooter = *overlays.aimShooter;
+      for (int sector = 0; sector < 3; ++sector) {
+        aimFovMasks.push_back(
+            {AcquireFovMaps(shooter, sector, shooter.facingYaw + glm::radians(120.0f * sector),
+                            drawTerrain, mapHalfExtent),
+             61.0f});
+      }
+    }
   }
   glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
 
@@ -3751,29 +3876,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // avoid z-fighting speckle.
   glEnable(GL_POLYGON_OFFSET_FILL);
   glPolygonOffset(-2.0f, -4.0f);
-  // Static receivers/casters for the shadow-map mask, cached per scene. Needed
-  // by the prototype FOV mode and by the free-aim highlight (always masked).
-  if (fovOverlayMode_ == FovOverlayMode::ShadowMap || overlays.aimShooter) {
-    const unsigned long long sceneKey = FovSceneFingerprint(game.GetScene());
-    if (sceneKey != fovSceneKey_) {
-      BuildFovSceneMesh(game.GetScene(), &fovSceneMesh_);
-      fovSceneKey_ = sceneKey;
-    }
-  }
   // Thermal view: the tint strength is a debug-panel slider (the pale
   // black-hot world needs a different level than the normal view).
   const float fovAlpha = debug.thermal ? debug.thermalFovAlpha : 0.15f;
   const auto drawTeamFov = [&](Team fovTeam) {
     if (fovOverlayMode_ == FovOverlayMode::ShadowMap) {
       // Issue #110 prototype: projective per-unit mask instead of the
-      // analytic ground overlay.
-      for (const Unit& unit : game.GetScene().units) {
-        if (debug.disableFov || !unit.alive || unit.team != fovTeam) continue;
-        const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, fovAlpha)
-                                                            : glm::vec4(0.9f, 0.25f, 0.22f, fovAlpha);
-        DrawFovShadowMask(game, unit, unit.VisualYaw(), tactics::constants::kShootHalfFovDegrees,
-                          teamColor, viewProj, drawTerrain, targetFramebuffer, x, y, width, height);
-      }
+      // analytic ground overlay, one pass for the whole team.
+      const glm::vec4 teamColor = fovTeam == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, fovAlpha)
+                                                        : glm::vec4(0.9f, 0.25f, 0.22f, fovAlpha);
+      DrawFovMasks(fovTeam == team ? teamFovMasks : otherFovMasks, teamColor, viewProj,
+                   drawTerrain, mapHalfExtent);
       colorShader_.Use();
     } else {
       const auto build = [&](const Unit& unit) {
@@ -3813,19 +3926,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // highlight -- the shadow-map mask shader, so it tints every surface the
   // figure could aim at directly (building walls and roofs included, not
   // just the ground). The figure turns to shoot, so its facing doesn't gate
-  // the sweep: three 120-degree sectors (each within the two depth maps'
-  // reach) tile the full circle. Own stencil pass so it layers over the
-  // team's FOV tint, while the sectors' seams still blend only once.
-  if (overlays.aimShooter && overlays.aimShooter->alive && !debug.disableFov) {
-    const Unit& shooter = *overlays.aimShooter;
+  // the sweep: three 120-degree sectors tile the full circle, in one pass.
+  // Own stencil pass so it layers over the team's FOV tint.
+  if (aimSweep) {
     glEnable(GL_STENCIL_TEST);
     glStencilMask(0xFF);
     glClear(GL_STENCIL_BUFFER_BIT);
-    for (int sector = 0; sector < 3; ++sector) {
-      DrawFovShadowMask(game, shooter, shooter.facingYaw + glm::radians(120.0f * sector), 61.0f,
-                        glm::vec4(kAimColor, 0.22f), viewProj, drawTerrain, targetFramebuffer, x,
-                        y, width, height);
-    }
+    DrawFovMasks(aimFovMasks, glm::vec4(kAimColor, 0.22f), viewProj, drawTerrain, mapHalfExtent);
     colorShader_.Use();
   }
   glDisable(GL_STENCIL_TEST);

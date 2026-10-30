@@ -3346,6 +3346,7 @@ void EmitHighwaySurfaces(Scene* scene, const CityPlan& city, const MapGeneratorC
       }
       WalkSurface surface;
       surface.vertices = {left[i], right[i], right[i + 1], left[i + 1]};
+      surface.overpass = true;
       // Raised deck sides (issue #223): guard parapets along both edges of
       // every genuinely lifted span, open across the merge junction. The
       // last half-meter of a ramp stays rail-free at its foot.

@@ -136,6 +136,9 @@ struct WalkSurface {
   std::vector<glm::vec3> vertices;  // Counter-clockwise when viewed from above.
   std::vector<int> neighbors;
   bool connectsToGround = false;    // The lowest edge is a legal ground transition.
+  // Elevated highway deck/ramp patch. The renderer uses this to fade the
+  // entire overpass (slabs, rails, caps and piers) as one occluder.
+  bool overpass = false;
   // Convex XZ footprints standing on the patch (roof parapets, furniture)
   // that a figure can't walk into. Honoured on single-patch routes only.
   std::vector<std::vector<glm::vec2>> blockers;

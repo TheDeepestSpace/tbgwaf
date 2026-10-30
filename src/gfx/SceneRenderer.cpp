@@ -3200,12 +3200,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
 
   // Issue #136 camera-occlusion see-through: per frame, raycast from the
   // camera to every point the player needs to see (own figures, movement
-  // frontier, move paths/ghosts, sighting ghosts) and mark each obstacle or
-  // deck slab actually crossing a sightline. Marked occluders are skipped by
-  // the opaque pass below and re-drawn translucent after the figures.
+  // frontier, move paths/ghosts, sighting ghosts) and mark each obstacle,
+  // deck slab or massing detail actually crossing a sightline. Marked
+  // occluders are skipped by the opaque pass below and re-drawn translucent
+  // after the figures.
   const auto& walkSurfaces = game.GetScene().walkSurfaces;
+  const auto& massing = game.GetScene().massing;
   std::vector<char> fadeObstacle(obstacles.size(), 0);
   std::vector<char> fadeSurface(walkSurfaces.size(), 0);
+  std::vector<char> fadeMassing(massing.size(), 0);
   std::vector<char> fadeBuilding;
   bool anyFaded = false;
   if (!debug.disableOcclusionFade) {
@@ -3227,20 +3230,25 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // at) the probe itself does not count, so a figure hugging a wall does
     // not fade that wall.
     constexpr float kEndpointEpsilon = 1e-2f;
+    const auto crossesProbeRay = [&](const tactics::Obstacle& obstacle) {
+      for (const ProbeRay& ray : rays) {
+        float t = 0.0f;
+        if (tactics::RayIntersectsObstacle(cameraPos, ray.direction, obstacle, &t) &&
+            t > kEndpointEpsilon && t < ray.length - kEndpointEpsilon) {
+          return true;
+        }
+      }
+      return false;
+    };
     for (size_t i = 0; i < obstacles.size(); ++i) {
       // Post-sized furniture is too small to hide a useful target and is kept
       // in one static render batch below.
       if (obstacles[i].navOnly || obstacles[i].kind == tactics::ObstacleKind::StreetFurniture) {
         continue;
       }
-      for (const ProbeRay& ray : rays) {
-        float t = 0.0f;
-        if (tactics::RayIntersectsObstacle(cameraPos, ray.direction, obstacles[i], &t) &&
-            t > kEndpointEpsilon && t < ray.length - kEndpointEpsilon) {
-          fadeObstacle[i] = 1;
-          anyFaded = true;
-          break;
-        }
+      if (crossesProbeRay(obstacles[i])) {
+        fadeObstacle[i] = 1;
+        anyFaded = true;
       }
     }
     for (size_t i = 0; i < walkSurfaces.size(); ++i) {
@@ -3255,9 +3263,31 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         }
       }
     }
-    // A building fades as a whole: if any part of it (either prism, its roof
-    // slab) blocks a sightline, all of it -- prisms, roof slab, massing --
-    // goes see-through together.
+    // Rails, pier caps and building massing can occlude a probe even when
+    // the slab/prism they belong to does not. Test the same conservative
+    // sight prisms used by gameplay LOS so those hits trigger group fading.
+    for (size_t i = 0; i < massing.size(); ++i) {
+      const tactics::MassingDetail& d = massing[i];
+      if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
+      tactics::Obstacle prism;
+      prism.footprint = d.footprint;
+      prism.bounds.min = glm::vec3(std::numeric_limits<float>::infinity(), d.y0,
+                                  std::numeric_limits<float>::infinity());
+      prism.bounds.max = glm::vec3(-std::numeric_limits<float>::infinity(), d.y1,
+                                  -std::numeric_limits<float>::infinity());
+      for (const glm::vec2& p : d.footprint) {
+        prism.bounds.min.x = std::min(prism.bounds.min.x, p.x);
+        prism.bounds.max.x = std::max(prism.bounds.max.x, p.x);
+        prism.bounds.min.z = std::min(prism.bounds.min.z, p.y);
+        prism.bounds.max.z = std::max(prism.bounds.max.z, p.y);
+      }
+      if (crossesProbeRay(prism)) {
+        fadeMassing[i] = 1;
+        anyFaded = true;
+      }
+    }
+    // A building fades as a whole: if any prism, roof slab or massing detail
+    // blocks a sightline, all of it goes see-through together.
     const auto roofBuilding = [&](const tactics::WalkSurface& surface) {
       for (const tactics::Obstacle& o : obstacles) {
         if (o.building < 0) continue;
@@ -3283,6 +3313,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (size_t i = 0; i < walkSurfaces.size(); ++i) {
       if (fadeSurface[i]) markBuilding(surfaceBuilding[i]);
     }
+    for (size_t i = 0; i < massing.size(); ++i) {
+      if (fadeMassing[i]) markBuilding(massing[i].building);
+    }
     for (size_t i = 0; i < obstacles.size(); ++i) {
       const int b = obstacles[i].building;
       if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
@@ -3296,6 +3329,42 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         fadeSurface[i] = 1;
         anyFaded = true;
       }
+    }
+    for (size_t i = 0; i < massing.size(); ++i) {
+      const int b = massing[i].building;
+      if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
+        fadeMassing[i] = 1;
+        anyFaded = true;
+      }
+    }
+
+    // The highway is one visual structure. A hit on any slab, deck rail,
+    // pier cap, column or footing fades every part, like a building group.
+    bool fadeOverpass = false;
+    for (size_t i = 0; i < obstacles.size(); ++i) {
+      fadeOverpass |= fadeObstacle[i] && obstacles[i].kind == tactics::ObstacleKind::Pier;
+    }
+    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+      fadeOverpass |= fadeSurface[i] && walkSurfaces[i].overpass;
+    }
+    const auto overpassDetail = [](const tactics::MassingDetail& d) {
+      return d.kind == tactics::MassingDetail::Kind::PierCap ||
+             d.kind == tactics::MassingDetail::Kind::DeckRail;
+    };
+    for (size_t i = 0; i < massing.size(); ++i) {
+      fadeOverpass |= fadeMassing[i] && overpassDetail(massing[i]);
+    }
+    if (fadeOverpass) {
+      for (size_t i = 0; i < obstacles.size(); ++i) {
+        if (obstacles[i].kind == tactics::ObstacleKind::Pier) fadeObstacle[i] = 1;
+      }
+      for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+        if (walkSurfaces[i].overpass) fadeSurface[i] = 1;
+      }
+      for (size_t i = 0; i < massing.size(); ++i) {
+        if (overpassDetail(massing[i])) fadeMassing[i] = 1;
+      }
+      anyFaded = true;
     }
   }
 
@@ -3437,10 +3506,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                  glm::vec4(kObstacleColor, 1.0f));
   }
 
-  // Building massing: parapets, roof furniture, awnings (issue #151).
-  const auto detailFaded = [&](const tactics::MassingDetail& d) {
-    return d.building >= 0 && d.building < static_cast<int>(fadeBuilding.size()) &&
-           fadeBuilding[d.building];
+  // Building and overpass massing: parapets, roof furniture, awnings,
+  // support bars and deck sides (issues #151 and #223).
+  const auto detailFaded = [&](size_t i) {
+    return i < fadeMassing.size() && fadeMassing[i];
   };
   const auto drawDetail = [&](const tactics::MassingDetail& d, const glm::vec4& color) {
     if (d.footprint.size() < 3 || d.y1 <= d.y0) return;
@@ -3454,8 +3523,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                    glm::vec4(kObstacleColor, 1.0f));
     } else {
       // Details of faded buildings are re-drawn translucent below.
-      for (const tactics::MassingDetail& d : game.GetScene().massing) {
-        if (!detailFaded(d)) drawDetail(d, glm::vec4(kObstacleColor, 1.0f));
+      for (size_t i = 0; i < massing.size(); ++i) {
+        if (!detailFaded(i)) drawDetail(massing[i], glm::vec4(kObstacleColor, 1.0f));
       }
     }
   }
@@ -3537,10 +3606,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // The faded block would otherwise be shadowed by its own shadow-map
     // entry (it is a caster), darkening its faces into patchy slabs.
     litShader_.SetInt("uDisableShadows", 1);
-    // Massing first: it stands proud of the building prisms, so it claims its
-    // pixels in the stencil cap instead of being hidden behind a roof face.
-    for (const tactics::MassingDetail& d : game.GetScene().massing) {
-      if (detailFaded(d)) drawDetail(d, glm::vec4(kObstacleColor, kOccluderFadeOpacity));
+    // Massing first: it stands proud of the grouped prisms/slabs, so it claims
+    // its pixels in the stencil cap instead of being hidden behind them.
+    for (size_t i = 0; i < massing.size(); ++i) {
+      if (detailFaded(i)) {
+        drawDetail(massing[i], glm::vec4(kObstacleColor, kOccluderFadeOpacity));
+      }
     }
     for (const FadedOccluder& f : faded) {
       if (f.obstacle >= 0) {

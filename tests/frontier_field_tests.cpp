@@ -41,15 +41,24 @@ void CheckSignsPreserved(const tactics::ReachField& field, const std::vector<flo
 }
 
 void TestNarrowReachableBandSurvivesSmoothing() {
-  // Bands one to four samples wide. Two radius-2 blur passes used to
+  // Bands two to four samples wide. Two radius-2 blur passes used to
   // average these entirely negative, so no fill or outline was emitted.
-  for (int width = 1; width <= 4; ++width) {
+  for (int width = 2; width <= 4; ++width) {
     tactics::ReachField field = EmptyField(15);
     for (int iz = 5; iz < 5 + width; ++iz) {
       for (int ix = 1; ix < field.nx - 1; ++ix) field.dist[iz * field.nx + ix] = 0.0f;
     }
     CheckSignsPreserved(field, gfx::SmoothFrontierSignedDepth(field));
   }
+}
+
+void TestOneSampleHairlineIsDropped() {
+  // A route grazing an obstacle's padded edge reaches a line of nodes one
+  // sample wide. It is not an area, and drawn it is a stray strip across the
+  // ground, so it must not produce any positive depth.
+  tactics::ReachField field = EmptyField(15);
+  for (int ix = 1; ix < field.nx - 1; ++ix) field.dist[7 * field.nx + ix] = 0.0f;
+  for (float d : gfx::SmoothFrontierSignedDepth(field)) CHECK(d < 0.0f);
 }
 
 void TestWideRegionStaysRounded() {
@@ -112,6 +121,7 @@ void TestThinStraightBandHasSmoothOutline() {
 int main() {
   TestThinStraightBandHasSmoothOutline();
   TestNarrowReachableBandSurvivesSmoothing();
+  TestOneSampleHairlineIsDropped();
   TestWideRegionStaysRounded();
   TestLedgeBesideDeckSurvivesSmoothing();
   if (gFailures == 0) {

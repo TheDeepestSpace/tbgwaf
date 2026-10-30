@@ -21,6 +21,24 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
     return std::abs(field.surfaceY[az * nx + ax] - field.surfaceY[bz * nx + bx]) <=
            kLayerStep;
   };
+  // The grid-exact reach can contain lines one node wide: a route that grazes
+  // an obstacle's padded edge reaches the nodes exactly along it and nothing
+  // beside them. Drawn, that is a hairline strip across the ground, so only
+  // nodes inside a fully reached 2x2 block of one layer count as reached.
+  std::vector<char> solid(static_cast<size_t>(nx) * nz, 0);
+  for (int iz = 0; iz + 1 < nz; ++iz) {
+    for (int ix = 0; ix + 1 < nx; ++ix) {
+      if (!field.Reached(ix, iz) || !field.Reached(ix + 1, iz) ||
+          !field.Reached(ix, iz + 1) || !field.Reached(ix + 1, iz + 1) ||
+          !sameLayer(ix, iz, ix + 1, iz) || !sameLayer(ix, iz, ix, iz + 1) ||
+          !sameLayer(ix, iz, ix + 1, iz + 1)) {
+        continue;
+      }
+      solid[iz * nx + ix] = solid[iz * nx + ix + 1] = 1;
+      solid[(iz + 1) * nx + ix] = solid[(iz + 1) * nx + ix + 1] = 1;
+    }
+  }
+  const auto reached = [&](int ix, int iz) { return solid[iz * nx + ix] != 0; };
   // A node on its layer's edge counts as touching the unreached class one
   // step away, just like a reached ground node beside an obstacle.
   const auto onLayerEdge = [&](int ix, int iz) {
@@ -40,9 +58,9 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
     std::vector<float> d(static_cast<size_t>(nx) * nz, inf);
     for (int iz = 0; iz < nz; ++iz) {
       for (int ix = 0; ix < nx; ++ix) {
-        if (field.Reached(ix, iz) == target ||
-            (!target && field.Reached(ix, iz) && onLayerEdge(ix, iz))) {
-          d[iz * nx + ix] = field.Reached(ix, iz) && !target ? field.step : 0.0f;
+        if (reached(ix, iz) == target ||
+            (!target && reached(ix, iz) && onLayerEdge(ix, iz))) {
+          d[iz * nx + ix] = reached(ix, iz) && !target ? field.step : 0.0f;
         }
       }
     }
@@ -81,7 +99,7 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
     for (int ix = 0; ix < nx; ++ix) {
       const int i = iz * nx + ix;
       // Signed depth: positive inside, zero contour half a step out.
-      raw[i] = field.Reached(ix, iz)
+      raw[i] = reached(ix, iz)
                    ? std::min(dIn[i], kMaxDepth) - 0.5f * field.step
                    : -(std::min(dOut[i], kMaxDepth) - 0.5f * field.step);
     }
@@ -137,7 +155,7 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
       for (int k = -kSupport; k <= kSupport; ++k) {
         const int jx = ix + k;
         if (jx < 0 || jx >= nx || !sameLayer(ix, iz, jx, iz)) continue;
-        if (field.Reached(jx, iz)) best = std::max(best, dIn[iz * nx + jx]);
+        if (reached(jx, iz)) best = std::max(best, dIn[iz * nx + jx]);
       }
       scratch[iz * nx + ix] = best;
     }
@@ -170,7 +188,7 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
       // outside the fully blurred zone a small constant margin keeps the outline smooth where a thin band
       // would otherwise be eroded across zero.
       if (level < 3.0f) {
-        if (field.Reached(ix, iz)) value = std::max(value, sampleDepth);
+        if (reached(ix, iz)) value = std::max(value, sampleDepth);
         else value = std::min(value, -sampleDepth);
       }
       depth[i] = value;

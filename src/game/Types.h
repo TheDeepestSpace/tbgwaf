@@ -25,8 +25,9 @@ struct AABB {
 };
 
 // Semantic tag used only to group static render geometry; collision, LOS,
-// and navigation treat both kinds identically.
-enum class ObstacleKind { Generic, StreetFurniture };
+// and navigation treat every kind identically. Pier marks the overpass
+// bents' columns and footings (issue #223).
+enum class ObstacleKind { Generic, StreetFurniture, Pier };
 
 // A map obstacle. `climbable` obstacles get a navmesh connection from
 // ground level up to their top surface (see NavMesh); non-climbable
@@ -95,16 +96,26 @@ struct Building {
   }
 };
 
-// Visual-only massing detail (roadmap 3.3): a prism over a convex XZ
-// footprint between y0 and y1. Blocks sight lines and FOV (see
-// SightObstacles). Parapets and roof fixtures also block walking: they are
-// copied into WalkSurface::blockers of their roof slab. Awnings are overhead.
+// Visual-only massing detail (roadmap 3.3): a vertical extrusion over a
+// convex XZ footprint, flat between y0/y1 unless `top` supplies its surface.
+// Blocks sight lines and FOV (see
+// SightObstacles). Parapets, roof fixtures and deck rails also block
+// walking: they are copied into WalkSurface::blockers of their roof slab or
+// deck span. Awnings and pier caps are overhead. PierCap (the bent's
+// hammerhead/crossbeam under the deck) and DeckRail (the overpass's raised
+// sides, issue #223) belong to the highway, not a building: building == -1.
 struct MassingDetail {
-  enum class Kind : uint8_t { Parapet, RoofFixture, Awning };
+  enum class Kind : uint8_t { Parapet, RoofFixture, Awning, PierCap, DeckRail };
   Kind kind = Kind::Parapet;
   std::vector<glm::vec2> footprint;  // Counter-clockwise.
   float y0 = 0.0f, y1 = 0.0f;
   int building = -1;
+  // Optional sloped top for details that follow a planar surface. When
+  // populated, the renderer extrudes this polygon vertically by `depth`
+  // instead of drawing the conservative y0..y1 sight prism. Deck rails use
+  // this so their top and bottom stay parallel to the ramp beneath them.
+  std::vector<glm::vec3> top;
+  float depth = 0.0f;
 };
 
 // A window or door on a generated building's facade (issue #152, roadmap
@@ -136,6 +147,9 @@ struct WalkSurface {
   std::vector<glm::vec3> vertices;  // Counter-clockwise when viewed from above.
   std::vector<int> neighbors;
   bool connectsToGround = false;    // The lowest edge is a legal ground transition.
+  // Elevated highway deck/ramp patch. The renderer uses this to fade the
+  // entire overpass (slabs, rails, caps and piers) as one occluder.
+  bool overpass = false;
   // Convex XZ footprints standing on the patch (roof parapets, furniture)
   // that a figure can't walk into. Honoured on single-patch routes only.
   std::vector<std::vector<glm::vec2>> blockers;

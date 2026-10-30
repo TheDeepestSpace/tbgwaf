@@ -271,8 +271,10 @@ void TestBuildingKindsFloorsAndHeights() {
     CHECK(perKind[static_cast<int>(BuildingKind::Civic)] == c.towerCount);
     for (int k = 0; k < kBuildingKindCount; ++k) CHECK(perKind[k] > 0);
     (void)setbacks;  // Seed-dependent; asserted on the forced-downtown city below.
-    // Every obstacle with a footprint is a building (piers are boxes).
-    for (const Obstacle& o : scene.obstacles) CHECK(o.footprint.empty() || o.building >= 0);
+    // Every obstacle with a footprint is a building or a pier column/footing.
+    for (const Obstacle& o : scene.obstacles) {
+      CHECK(o.footprint.empty() || o.building >= 0 || o.kind == ObstacleKind::Pier);
+    }
 
     // Street weighting: artery frontage is mostly office/mixed-use, back
     // streets mostly residential/commercial/garage, across the seeds.
@@ -400,9 +402,14 @@ void TestMassingStaysOnItsBuilding() {
     int parapets = 0, fixtures = 0, awnings = 0;
     std::vector<int> parapetsPerBuilding(scene.buildings.size(), 0);
     for (const MassingDetail& d : scene.massing) {
-      CHECK(d.building >= 0 && d.building < static_cast<int>(scene.buildings.size()));
       CHECK(d.footprint.size() >= 3 && d.y1 > d.y0);
       CHECK(PolygonSignedArea(d.footprint) > 0.0f);
+      // Overpass details (issue #223) belong to the highway, not a building.
+      if (d.kind == MassingDetail::Kind::PierCap || d.kind == MassingDetail::Kind::DeckRail) {
+        CHECK(d.building == -1);
+        continue;
+      }
+      CHECK(d.building >= 0 && d.building < static_cast<int>(scene.buildings.size()));
       const Building& b = scene.buildings[d.building];
       const Obstacle& roof = scene.obstacles[b.upperObstacle >= 0 ? b.upperObstacle : b.obstacle];
       switch (d.kind) {
@@ -601,7 +608,8 @@ void TestVariedHeightsWithFewTowers() {
     int towers = 0, medium = 0, buildings = 0;
     float lo = 1e9f, hi = 0.0f;
     for (const auto& o : scene.obstacles) {
-      if (o.footprint.empty()) continue;  // Pier columns (elevated seeds), not buildings.
+      if (o.kind == ObstacleKind::Pier) continue;  // Pier bents (elevated seeds), not buildings.
+      if (o.footprint.empty()) continue;
       ++buildings;
       const float h = o.bounds.max.y;
       lo = std::min(lo, h);
@@ -1018,7 +1026,8 @@ void TestPolygonBlocksAdaptToAngledStreets() {
   bool angledBuilding = false;
   bool acuteBuilding = false;
   for (const Obstacle& obstacle : scene.obstacles) {
-    if (obstacle.footprint.empty()) continue;  // Elevated pier columns are boxes.
+    if (obstacle.kind == ObstacleKind::Pier) continue;  // Elevated pier bents, not buildings.
+    if (obstacle.footprint.empty()) continue;
     CHECK(PolygonArea(obstacle.footprint) > 1.0f);
     CHECK(obstacle.bounds.min.x >= -scene.mapHalfExtent - kEps);
     CHECK(obstacle.bounds.max.x <= scene.mapHalfExtent + kEps);
@@ -1184,13 +1193,60 @@ void TestPolygonCollisionLosAndNavigationUseRealFootprint() {
   CHECK(path.size() == 2);
 }
 
+// A fork rail must remain in the narrow strip along its own deck edge.
+// Checking only whether the two caps touch misses a join that detours off
+// the deck (especially a twin deck over raised terrain).
+void TestForkRailsFollowDeckEdges() {
+  for (const FeatureMode terrain : {FeatureMode::Off, FeatureMode::On}) {
+    for (const PierForm form : {PierForm::TBent, PierForm::Twin}) {
+      for (const uint32_t seed : {7u, 26u, 42u}) {
+        MapGeneratorConfig config;
+        config.arteryCount = 2;
+        config.elevatedHighway = OverpassMode::On;
+        config.pierForm = form;
+        config.features.terrain.mode = terrain;
+        config.features.facades.mode = FeatureMode::Off;
+        const Scene scene = GenerateUrbanMap(seed, config);
+        int checked = 0;
+        for (const WalkSurface& span : scene.walkSurfaces) {
+          if (span.vertices.size() != 4) continue;
+          const auto xz = [](glm::vec3 p) { return glm::vec2(p.x, p.z); };
+          for (const auto& blocker : span.blockers) {
+            bool isRail = false;
+            for (const MassingDetail& d : scene.massing) {
+              isRail |= d.kind == MassingDetail::Kind::DeckRail && d.footprint == blocker;
+            }
+            if (!isRail) continue;
+            ++checked;
+            bool followsEdge = false;
+            for (const auto ends : {std::pair<int, int>{0, 3}, {2, 1}}) {
+              const glm::vec2 a = xz(span.vertices[ends.first]);
+              const glm::vec2 b = xz(span.vertices[ends.second]);
+              const glm::vec2 dir = glm::normalize(b - a);
+              const glm::vec2 inward(dir.y, -dir.x);
+              bool inStrip = true;
+              for (const glm::vec2 p : blocker) {
+                const float d = glm::dot(p - a, inward);
+                inStrip &= d >= -kEps && d <= 0.3f + kEps;
+              }
+              followsEdge |= inStrip;
+            }
+            CHECK(followsEdge);
+          }
+        }
+        CHECK(checked > 0);
+      }
+    }
+  }
+}
+
 void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   MapGeneratorConfig config;
   config.arteryCount = 2;
   config.elevatedHighway = OverpassMode::On;
   config.overpassLayout = OverpassLayout::RampUpRampDown;
-  // The pier checks below identify piers as the footprint-free obstacles;
-  // furniture items (issue #150) are footprint-free too, so pin them off.
+  // The pier checks below identify piers by their obstacle kind; furniture
+  // (issue #150) is pinned off so the scene stays piers + buildings only.
   config.features.furniture.mode = FeatureMode::Off;
   config.features.terrain.mode = FeatureMode::Off;  // Overpass vs terrain is roadmap 4.4.
   config.features.facades.mode = FeatureMode::Off;  // Count highway transitions only.
@@ -1218,9 +1274,12 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   // stand under a highway corridor rather than inside a block.
   int piers = 0;
   for (const Obstacle& obstacle : scene.obstacles) {
-    if (!obstacle.footprint.empty()) continue;
+    if (obstacle.kind != ObstacleKind::Pier) continue;
     ++piers;
-    CHECK(obstacle.bounds.max.y > 1.0f);
+    CHECK(!obstacle.footprint.empty());
+    // Shafts reach just below the slab; footings stay knee-high plinths.
+    const float height = obstacle.bounds.max.y - obstacle.bounds.min.y;
+    CHECK(height > 1.0f || height <= config.pierBaseHeight + kEps);
     CHECK(obstacle.bounds.max.y <
           config.highwayElevation - config.highwayThickness + kEps);
     const glm::vec2 center(obstacle.bounds.Center().x, obstacle.bounds.Center().z);
@@ -1237,6 +1296,76 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
     CHECK(nearest < config.arteryWidth * 0.5f);
   }
   CHECK(piers >= 6);
+
+  // Rails are true sloped prisms, not a staircase of flat-topped boxes.
+  // At the fork, each branch wall and its artery continuation share the
+  // exact same mitered end-cap edge, at the acute fork too.
+  std::vector<const MassingDetail*> rails;
+  bool slopedRail = false;
+  for (const MassingDetail& d : scene.massing) {
+    if (d.kind != MassingDetail::Kind::DeckRail) continue;
+    rails.push_back(&d);
+    CHECK(d.top.size() == d.footprint.size());
+    CHECK(std::fabs(d.depth - (config.deckRailHeight + 0.25f)) < kEps);
+    float lo = 1e9f, hi = -1e9f;
+    for (size_t i = 0; i < d.top.size(); ++i) {
+      CHECK(glm::distance(glm::vec2(d.top[i].x, d.top[i].z), d.footprint[i]) < kEps);
+      lo = std::min(lo, d.top[i].y);
+      hi = std::max(hi, d.top[i].y);
+    }
+    slopedRail |= hi - lo > kEps;
+  }
+  CHECK(!rails.empty() && slopedRail);
+  const auto samePoint = [](glm::vec2 a, glm::vec2 b) {
+    return glm::distance(a, b) < kEps;
+  };
+  // The shared cap edge of two rails, if any: a[i] -> a[i + 1] traversed the
+  // other way round in b.
+  const auto sharedEdge = [&](const std::vector<glm::vec2>& a, const std::vector<glm::vec2>& b,
+                              size_t* ia, size_t* ib) {
+    for (size_t i = 0; i < a.size(); ++i) {
+      for (size_t j = 0; j < b.size(); ++j) {
+        if (samePoint(a[i], b[(j + 1) % b.size()]) &&
+            samePoint(a[(i + 1) % a.size()], b[j])) {
+          *ia = i;
+          *ib = j;
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  // Direction of a rail's wall: its longest edge (a junction remnant can be
+  // shorter along the road than across its cap).
+  const auto wallDir = [](const std::vector<glm::vec2>& f) {
+    glm::vec2 best(1.0f, 0.0f);
+    float longest = 0.0f;
+    for (size_t e = 0; e < f.size(); ++e) {
+      const glm::vec2 d = f[(e + 1) % f.size()] - f[e];
+      if (glm::length(d) > longest) {
+        longest = glm::length(d);
+        best = glm::normalize(d);
+      }
+    }
+    return best;
+  };
+  int forkJoins = 0;
+  for (size_t i = 0; i < rails.size(); ++i) {
+    for (size_t j = i + 1; j < rails.size(); ++j) {
+      const std::vector<glm::vec2>& a = rails[i]->footprint;
+      const std::vector<glm::vec2>& b = rails[j]->footprint;
+      const glm::vec2 ai = wallDir(a), aj = wallDir(b);
+      if (std::fabs(ai.x * aj.y - ai.y * aj.x) < 0.2f) continue;
+      size_t ia = 0, ib = 0;
+      if (sharedEdge(a, b, &ia, &ib)) {
+        // Both forks are plain miters: two quads sharing the whole cap, so
+        // no gap opens between the walls.
+        ++forkJoins;
+        CHECK(a.size() == 4 && b.size() == 4);
+      }
+    }
+  }
+  CHECK(forkJoins == 2);
 
   // Both artery ramp feet plus the on-ramp foot declare ground connections,
   // and the on-ramp merges mid-deck (a span with a third neighbor).
@@ -1428,6 +1557,8 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
   config.elevatedHighway = OverpassMode::On;
   config.branchEnd = BranchEnd::Ramp;
   const float half = UrbanMapHalfExtent(config);
+  bool clippedPier = false;
+  bool clippedCap = false;
   for (const auto& tc : cases) {
     config.overpassLayout = tc.layout;
     for (uint32_t seed : kSeeds) {
@@ -1472,9 +1603,19 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
 
       // Pier columns stay on the map even when the deck runs past it.
       for (const Obstacle& o : scene.obstacles) {
-        if (!o.footprint.empty()) continue;
-        CHECK(std::max({std::fabs(o.bounds.min.x), std::fabs(o.bounds.max.x),
-                        std::fabs(o.bounds.min.z), std::fabs(o.bounds.max.z)}) < half);
+        if (o.kind != ObstacleKind::Pier) continue;
+        const float edge = std::max({std::fabs(o.bounds.min.x), std::fabs(o.bounds.max.x),
+                                     std::fabs(o.bounds.min.z), std::fabs(o.bounds.max.z)});
+        CHECK(edge <= half + kEps);
+        clippedPier |= edge >= half - kEps;
+      }
+      for (const MassingDetail& d : scene.massing) {
+        if (d.kind != MassingDetail::Kind::PierCap) continue;
+        for (const glm::vec2& p : d.footprint) {
+          const float edge = std::max(std::fabs(p.x), std::fabs(p.y));
+          CHECK(edge <= half + kEps);
+          clippedCap |= edge >= half - kEps;
+        }
       }
 
       // Ground transitions: one per on-map ramp foot plus the branch's foot.
@@ -1531,6 +1672,8 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
       }
     }
   }
+  CHECK(clippedPier);
+  CHECK(clippedCap);
 }
 
 void TestBranchMayRunOffMapWithoutRamp() {
@@ -2538,6 +2681,7 @@ int main() {
   TestCornerBuildingsDoNotChainAcrossAFrontage();
   TestThinCornerBuildingSliversAreDropped();
   TestPolygonCollisionLosAndNavigationUseRealFootprint();
+  TestForkRailsFollowDeckEdges();
   TestElevatedOverpassRampsPiersAndDistinctLayers();
   TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable();
   TestOverpassLayoutGeometryAndBranchRampOff();

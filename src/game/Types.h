@@ -27,7 +27,13 @@ struct AABB {
 // Semantic tag used only to group static render geometry; collision, LOS,
 // and navigation treat every kind identically. Pier marks the overpass
 // bents' columns and footings (issue #223).
-enum class ObstacleKind { Generic, StreetFurniture, Pier };
+enum class ObstacleKind { Generic, StreetFurniture, Pier, Cover };
+
+// Street fixtures the renderer batches as static boxes: post-sized furniture
+// and cover-sized street items (parked cars, planters, dumpsters, ...).
+inline bool IsStreetFixture(ObstacleKind kind) {
+  return kind == ObstacleKind::StreetFurniture || kind == ObstacleKind::Cover;
+}
 
 // A map obstacle. `climbable` obstacles get a navmesh connection from
 // ground level up to their top surface (see NavMesh); non-climbable

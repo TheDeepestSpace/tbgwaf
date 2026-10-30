@@ -1132,7 +1132,7 @@ void BuildStreetFixtureMeshes(
   LitVertices furnitureVertices;
   std::vector<GLuint> furnitureIndices;
   for (const tactics::Obstacle& obstacle : obstacles) {
-    if (obstacle.kind != tactics::ObstacleKind::StreetFurniture) continue;
+    if (!tactics::IsStreetFixture(obstacle.kind)) continue;
     AppendBox(obstacle.bounds, &furnitureVertices, &furnitureIndices);
   }
   furnitureMesh->SetMesh(furnitureVertices, furnitureIndices);
@@ -3031,7 +3031,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   size_t furnitureIndex = 0;
   bool sameStreetFurniture = true;
   for (const tactics::Obstacle& obstacle : obstacles) {
-    if (obstacle.kind == tactics::ObstacleKind::StreetFurniture) {
+    if (tactics::IsStreetFixture(obstacle.kind)) {
       sameStreetFurniture &= furnitureIndex < streetFurnitureKey_.size() &&
                              obstacle.bounds.min == streetFurnitureKey_[furnitureIndex].min &&
                              obstacle.bounds.max == streetFurnitureKey_[furnitureIndex].max;
@@ -3052,7 +3052,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     streetFurnitureKey_.clear();
     streetFurnitureKey_.reserve(furnitureIndex);
     for (const tactics::Obstacle& obstacle : obstacles) {
-      if (obstacle.kind == tactics::ObstacleKind::StreetFurniture) {
+      if (tactics::IsStreetFixture(obstacle.kind)) {
         streetFurnitureKey_.push_back(obstacle.bounds);
       }
     }
@@ -3127,7 +3127,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       terrainStairMesh_.Draw();
     }
     for (const auto& obstacle : obstacles) {
-      if (obstacle.navOnly || obstacle.kind == tactics::ObstacleKind::StreetFurniture) continue;
+      if (obstacle.navOnly || tactics::IsStreetFixture(obstacle.kind)) continue;
       const AABB& bounds = obstacle.bounds;
       if (obstacle.footprint.empty()) {
         DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min,
@@ -3243,7 +3243,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (size_t i = 0; i < obstacles.size(); ++i) {
       // Post-sized furniture is too small to hide a useful target and is kept
       // in one static render batch below.
-      if (obstacles[i].navOnly || obstacles[i].kind == tactics::ObstacleKind::StreetFurniture) {
+      if (obstacles[i].navOnly || tactics::IsStreetFixture(obstacles[i].kind)) {
         continue;
       }
       if (crossesProbeRay(obstacles[i])) {
@@ -3462,7 +3462,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
 
   thermalMaterial(ThermalMaterial::Building);
   for (size_t i = 0; i < obstacles.size(); ++i) {
-    if (obstacles[i].navOnly || obstacles[i].kind == tactics::ObstacleKind::StreetFurniture) continue;
+    if (obstacles[i].navOnly || tactics::IsStreetFixture(obstacles[i].kind)) continue;
     if (fadeObstacle[i]) continue;  // Re-drawn translucent below.
     const AABB& bounds = obstacles[i].bounds;
     const glm::vec4 color(kObstacleColor, 1.0f);

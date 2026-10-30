@@ -2316,6 +2316,7 @@ void TestFurnitureHugsSidewalksAndRespectsClearances() {
     const std::vector<UrbanBlock> blocks = UrbanBlocks(seed, on);
     for (size_t i = bare.obstacles.size(); i < scene.obstacles.size(); ++i) {
       const Obstacle& o = scene.obstacles[i];
+      if (o.kind == ObstacleKind::Cover) continue;  // Covered by the cover-item test.
       CHECK(o.footprint.empty());
       CHECK(!o.climbable);
       CHECK(o.kind == ObstacleKind::StreetFurniture);
@@ -2401,6 +2402,13 @@ void TestFurnitureKeepsSidewalksConnected() {
           for (size_t j = bare.obstacles.size(); j < scene.obstacles.size(); ++j) {
             const glm::vec3 other = scene.obstacles[j].bounds.Center();
             nearItem |= j != i && glm::distance(glm::vec2(other.x, other.z), target) < 1.0f;
+          }
+          // Cover-sized items swallow the ring points that land inside them.
+          for (size_t j = bare.obstacles.size(); j < scene.obstacles.size(); ++j) {
+            const Obstacle& other = scene.obstacles[j];
+            nearItem |= other.kind == ObstacleKind::Cover &&
+                        target.x > other.bounds.min.x - 0.9f && target.x < other.bounds.max.x + 0.9f &&
+                        target.y > other.bounds.min.z - 0.9f && target.y < other.bounds.max.z + 0.9f;
           }
           if (nearItem || !reachedAt(bareField, target)) continue;
           ++compared;
@@ -2547,6 +2555,49 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
   CHECK(GenerateUrbanMap(kSeeds[0], FurnitureConfig(FeatureMode::Off)).props.empty());
 }
 
+// Cover-sized street items (issue #153, roadmap 2.5): every item is a box
+// whose top clears a foot probe but not a standing eye, so a standing eye
+// sees over it while a low probe is hidden behind it; the Off switch removes
+// them all; and the layout is deterministic. Parked cars are climbable.
+void TestCoverItemsAreEyeLowAndFootHigh() {
+  const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
+  const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed, on);
+    CHECK(SameScene(scene, GenerateUrbanMap(seed, on)));
+    for (const Obstacle& o : GenerateUrbanMap(seed, off).obstacles) {
+      CHECK(o.kind != ObstacleKind::Cover);
+    }
+    int cover = 0, climbable = 0, large = 0;
+    for (const Obstacle& o : scene.obstacles) {
+      if (o.kind != ObstacleKind::Cover) continue;
+      ++cover;
+      CHECK(o.footprint.empty());
+      climbable += o.climbable;
+      const glm::vec3 size = o.bounds.max - o.bounds.min;
+      large += std::max(size.x, size.z) > 1.0f;
+      const float base = o.bounds.min.y;
+      CHECK(size.y > 0.5f);                     // Hides a low probe...
+      CHECK(o.bounds.max.y < base + 0.12f + constants::kEyeHeight);  // ...under eye level.
+      const glm::vec3 c = o.bounds.Center();
+      const float reachX = size.x * 0.5f + 1.0f, reachZ = size.z * 0.5f + 1.0f;
+      // Cross the box along its short axis at eye height (clear) and at
+      // foot-probe height (blocked). Other obstacles near the item could
+      // interfere, so test against the item alone.
+      const std::vector<Obstacle> alone = {o};
+      const bool acrossX = size.x <= size.z;
+      const glm::vec3 d = acrossX ? glm::vec3(reachX, 0.0f, 0.0f) : glm::vec3(0.0f, 0.0f, reachZ);
+      CHECK(LineOfSightClear(glm::vec3(c.x, base + constants::kEyeHeight, c.z) - d,
+                             glm::vec3(c.x, base + constants::kEyeHeight, c.z) + d, alone));
+      CHECK(!LineOfSightClear(glm::vec3(c.x, base + 0.3f, c.z) - d,
+                              glm::vec3(c.x, base + 0.3f, c.z) + d, alone));
+    }
+    CHECK(cover > 10);
+    CHECK(climbable > 0);
+    CHECK(large > 0);
+  }
+}
+
 // Pinned per-seed furniture output (issue #150): a generator change that
 // alters item or prop placement shows up here first.
 void TestPinnedFurnitureFingerprints() {
@@ -2556,8 +2607,8 @@ void TestPinnedFurnitureFingerprints() {
   const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
   for (const auto& e : expected) {
     const Scene scene = GenerateUrbanMap(e.seed, on);
-    const size_t furniture =
-        scene.obstacles.size() - GenerateUrbanMap(e.seed, off).obstacles.size();
+    size_t furniture = 0;
+    for (const Obstacle& o : scene.obstacles) furniture += o.kind == ObstacleKind::StreetFurniture;
     if (furniture != e.furniture || scene.props.size() != e.props) {
       std::fprintf(stderr, "seed %u: %zu furniture, %zu props (expected %zu, %zu)\n", e.seed,
                    furniture, scene.props.size(), e.furniture, e.props);
@@ -2572,6 +2623,7 @@ int main() {
   TestFurnitureHugsSidewalksAndRespectsClearances();
   TestFurnitureKeepsSidewalksConnected();
   TestTrafficPropsSitAtJunctionsAndStayVisualOnly();
+  TestCoverItemsAreEyeLowAndFootHigh();
   TestPinnedFurnitureFingerprints();
   TestDeterminismAndVariety();
   TestZiplinesAreDeterministicBoundedAndValid();

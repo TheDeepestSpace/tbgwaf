@@ -195,6 +195,56 @@ void TestLedgeAlongObliqueCliffOutlineIsStraight() {
   CHECK(CrossResidual(field, depth, 10, 50, true) < 0.15f);  // Open side.
 }
 
+// Number of 4-connected positive-depth pieces (same layer).
+int PositivePieces(const tactics::ReachField& f, const std::vector<float>& d) {
+  std::vector<char> seen(d.size(), 0);
+  int pieces = 0;
+  for (size_t s = 0; s < d.size(); ++s) {
+    if (d[s] <= 0.0f || seen[s]) continue;
+    ++pieces;
+    std::vector<int> stack{static_cast<int>(s)};
+    seen[s] = 1;
+    while (!stack.empty()) {
+      const int c = stack.back();
+      stack.pop_back();
+      const int dx[4] = {-1, 1, 0, 0}, dz[4] = {0, 0, -1, 1};
+      for (int k = 0; k < 4; ++k) {
+        const int x = c % f.nx + dx[k], z = c / f.nx + dz[k];
+        if (x < 0 || z < 0 || x >= f.nx || z >= f.nz) continue;
+        const int j = z * f.nx + x;
+        if (d[j] > 0.0f && !seen[j]) {
+          seen[j] = 1;
+          stack.push_back(j);
+        }
+      }
+    }
+  }
+  return pieces;
+}
+
+void TestThinNeckStaysConnectedToWideRegion() {
+  // A two-sample corridor leaving a wide block, and a second block touching
+  // the first only at a corner. Smoothing must keep each region whole.
+  for (int width = 2; width <= 3; ++width) {
+    tactics::ReachField field = EmptyField(41);
+    for (int iz = 5; iz <= 19; ++iz) {
+      for (int ix = 5; ix <= 19; ++ix) field.dist[iz * field.nx + ix] = 0.0f;
+    }
+    for (int iz = 12; iz < 12 + width; ++iz) {
+      for (int ix = 20; ix <= 36; ++ix) field.dist[iz * field.nx + ix] = 0.0f;
+    }
+    CHECK(PositivePieces(field, gfx::SmoothFrontierSignedDepth(field)) == 1);
+  }
+  tactics::ReachField field = EmptyField(41);
+  for (int iz = 5; iz <= 14; ++iz) {
+    for (int ix = 5; ix <= 14; ++ix) field.dist[iz * field.nx + ix] = 0.0f;
+  }
+  for (int iz = 15; iz <= 24; ++iz) {
+    for (int ix = 15; ix <= 24; ++ix) field.dist[iz * field.nx + ix] = 0.0f;
+  }
+  CHECK(PositivePieces(field, gfx::SmoothFrontierSignedDepth(field)) == 1);
+}
+
 }  // namespace
 
 void TestThinStraightBandHasSmoothOutline() {
@@ -216,6 +266,7 @@ void TestThinStraightBandHasSmoothOutline() {
 
 int main() {
   TestThinStraightBandHasSmoothOutline();
+  TestThinNeckStaysConnectedToWideRegion();
   TestNarrowReachableBandSurvivesSmoothing();
   TestOneSampleHairlineIsDropped();
   TestWideRegionStaysRounded();

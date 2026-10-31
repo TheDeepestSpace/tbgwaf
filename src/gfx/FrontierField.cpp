@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
 #include <limits>
 
 namespace gfx {
@@ -305,6 +306,127 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
       if (thickness[i] >= kThin) continue;
       if (reached(ix, iz)) depth[i] = std::max(depth[i], sampleDepth);
       else if (dOut[i] > 1.5f * field.step) depth[i] = std::min(depth[i], -sampleDepth);
+    }
+  }
+
+  // Connectivity guarantee. Smoothing is free to round and straighten, but
+  // it must not cut one reached region into pieces: a thin neck beside a
+  // wide area is eroded by the wide-area blur, and two reached blocks that
+  // meet only at a corner pinch off. Wherever the solid reach (8-connected,
+  // per layer) is split into several positive pieces, raise the cheapest
+  // chain of nodes (solid nodes first) joining them to just above zero.
+  const size_t total = static_cast<size_t>(nx) * nz;
+  constexpr int kDx4[4] = {-1, 1, 0, 0}, kDz4[4] = {0, 0, -1, 1};
+  std::vector<int> solidComp(total, -1);
+  int solidCount = 0;
+  {
+    std::vector<int> stack;
+    for (size_t s = 0; s < total; ++s) {
+      if (!solid[s] || solidComp[s] >= 0) continue;
+      solidComp[s] = solidCount;
+      stack.push_back(static_cast<int>(s));
+      while (!stack.empty()) {
+        const int cur = stack.back();
+        stack.pop_back();
+        const int cx = cur % nx, cz = cur / nx;
+        for (int dz = -1; dz <= 1; ++dz) {
+          for (int dx = -1; dx <= 1; ++dx) {
+            const int jx = cx + dx, jz = cz + dz;
+            if ((dx == 0 && dz == 0) || jx < 0 || jz < 0 || jx >= nx || jz >= nz) continue;
+            const int j = jz * nx + jx;
+            if (!solid[j] || solidComp[j] >= 0 || !sameLayer(cx, cz, jx, jz)) continue;
+            solidComp[j] = solidCount;
+            stack.push_back(j);
+          }
+        }
+      }
+      ++solidCount;
+    }
+  }
+  const auto labelPositive = [&](std::vector<int>& label) {
+    label.assign(total, -1);
+    int count = 0;
+    std::vector<int> stack;
+    for (size_t s = 0; s < total; ++s) {
+      if (depth[s] <= 0.0f || label[s] >= 0) continue;
+      label[s] = count;
+      stack.push_back(static_cast<int>(s));
+      while (!stack.empty()) {
+        const int cur = stack.back();
+        stack.pop_back();
+        const int cx = cur % nx, cz = cur / nx;
+        for (int k = 0; k < 4; ++k) {
+          const int jx = cx + kDx4[k], jz = cz + kDz4[k];
+          if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) continue;
+          const int j = jz * nx + jx;
+          if (depth[j] <= 0.0f || label[j] >= 0 || !sameLayer(cx, cz, jx, jz)) continue;
+          label[j] = count;
+          stack.push_back(j);
+        }
+      }
+      ++count;
+    }
+    return count;
+  };
+  std::vector<int> label;
+  for (int guard = 0; guard < 4 * static_cast<int>(total); ++guard) {
+    labelPositive(label);
+    // Find a solid component with two positive pieces: a node in the first
+    // piece and the label of another piece in the same component.
+    std::vector<int> firstLabel(solidCount, -1);
+    int seedLabel = -1, seedComp = -1;
+    for (size_t s = 0; s < total && seedLabel < 0; ++s) {
+      if (!solid[s] || label[s] < 0 || solidComp[s] < 0) continue;
+      int& f = firstLabel[solidComp[s]];
+      if (f < 0) f = label[s];
+      else if (f != label[s]) {
+        seedLabel = f;
+        seedComp = solidComp[s];
+      }
+    }
+    if (seedLabel < 0) break;
+    // 0-1 BFS from piece `seedLabel` to any node of another piece of this
+    // component. Entering a solid node is free, any other node costs one.
+    std::vector<int> cost(total, std::numeric_limits<int>::max()), prev(total, -1);
+    std::deque<int> queue;
+    for (size_t s = 0; s < total; ++s) {
+      if (label[s] == seedLabel) {
+        cost[s] = 0;
+        queue.push_back(static_cast<int>(s));
+      }
+    }
+    int hit = -1;
+    while (!queue.empty()) {
+      const int cur = queue.front();
+      queue.pop_front();
+      if (label[cur] >= 0 && label[cur] != seedLabel && solid[cur] &&
+          solidComp[cur] == seedComp) {
+        hit = cur;
+        break;
+      }
+      const int cx = cur % nx, cz = cur / nx;
+      for (int k = 0; k < 4; ++k) {
+        const int jx = cx + kDx4[k], jz = cz + kDz4[k];
+        if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) continue;
+        const int j = jz * nx + jx;
+        if (!sameLayer(cx, cz, jx, jz)) continue;
+        const int w = solid[j] ? 0 : 1;
+        if (cost[cur] + w >= cost[j]) continue;
+        cost[j] = cost[cur] + w;
+        prev[j] = cur;
+        if (w == 0) queue.push_front(j);
+        else queue.push_back(j);
+      }
+    }
+    if (hit < 0) {
+      // Unreachable on this layer: give up on this component.
+      for (size_t s = 0; s < total; ++s) {
+        if (solidComp[s] == seedComp) solidComp[s] = -1;
+      }
+      continue;
+    }
+    for (int cur = hit; cur >= 0; cur = prev[cur]) {
+      depth[cur] = std::max(depth[cur], sampleDepth);
     }
   }
   return depth;

@@ -3760,22 +3760,16 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, const std::vector<Pa
     addWall(a, q, 0.0f, u0, 0.0f, height);
     addWall(a, q, u1, len, 0.0f, height);
     if (shuttered && fullDoorHeight - doorHeight > 0.2f) {
-      // Lintel at the full door height; shutter panel and side returns set
-      // back kShutterDepth behind the wall's outer face.
-      constexpr float kShutterDepth = 0.9f, kShutterThickness = 0.15f;
+      // Lintel at the full door height; the shutter panel sits recessed
+      // inside the wall's own thickness (no returns, so the wall never looks
+      // thicker around the bay), between the jambs.
+      constexpr float kShutterDepth = 0.12f, kShutterThickness = 0.12f;
       addWall(a, q, u0, u1, fullDoorHeight, height - fullDoorHeight);
       const glm::vec2 d = glm::normalize(q - a);
       const glm::vec2 in(-d.y, d.x);
-      const auto addBox = [&](float ua, float ub, float d0, float d1, float lift, float h) {
-        const glm::vec2 p0 = a + d * ua + in * d0, p1 = a + d * ub + in * d0;
-        AddPolygonBuilding(scene, {p0, p1, p1 + in * (d1 - d0), p0 + in * (d1 - d0)}, lift, h,
-                           index, groundY, kMinPiece);
-      };
-      addBox(u0 - kShutterThickness, u1 + kShutterThickness, kShutterDepth,
-             kShutterDepth + kShutterThickness, doorHeight,
-             fullDoorHeight - doorHeight);
-      addBox(u0 - kShutterThickness, u0, kWallThickness, kShutterDepth, 0.0f, fullDoorHeight);
-      addBox(u1, u1 + kShutterThickness, kWallThickness, kShutterDepth, 0.0f, fullDoorHeight);
+      const glm::vec2 p0 = a + d * u0 + in * kShutterDepth, p1 = a + d * u1 + in * kShutterDepth;
+      AddPolygonBuilding(scene, {p0, p1, p1 + in * kShutterThickness, p0 + in * kShutterThickness},
+                         doorHeight, fullDoorHeight - doorHeight, index, groundY, kMinPiece);
     } else {
       addWall(a, q, u0, u1, doorHeight, height - doorHeight);  // Lintel.
     }

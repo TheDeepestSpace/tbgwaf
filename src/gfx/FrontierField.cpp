@@ -136,17 +136,16 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
   };
   constexpr int kBlurRadius = 2;
   constexpr int kBlurPasses = 2;
-  // Increasingly strong smoothing; level 0 is the grid-exact field.
-  const std::vector<float> levels[4] = {raw, blurField(1, 1), blurField(1, 2),
-                                        blurField(kBlurRadius, kBlurPasses)};
-  std::vector<float> depth = levels[3];
+  const std::vector<float> blurred = blurField(kBlurRadius, kBlurPasses);
+  std::vector<float> depth = blurred;
   std::vector<float> scratch(depth.size());
 
   // The full blur erodes anything under about five samples across -- a
   // ledge along a cliff wall, a sidewalk strip between a building and a
   // drop -- until nothing is drawn. Measure each node's local thickness as
   // the deepest inside-distance within the blur's support (within its own
-  // layer) and use weaker smoothing where that is small.
+  // layer); where that is small the result below leans on the anisotropic
+  // average instead, and the final sign guarantees apply.
   constexpr int kSupport = kBlurRadius * kBlurPasses;
   std::vector<float> thickness(dIn.size(), 0.0f);
   for (int iz = 0; iz < nz; ++iz) {
@@ -171,27 +170,141 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
       thickness[iz * nx + ix] = best;
     }
   }
-  // Pick the smoothing strength from the local thickness (in samples),
-  // interpolating between neighbouring levels so the outline never jumps
-  // between a grid-exact and a rounded stretch. Thin bands get the
-  // strongest blur they can take, rather than none, so their edges are
-  // not stair-stepped either.
+  // An oblique straight edge -- a building's padded side, a cliff line, a
+  // ramp's flank -- rasterises to a staircase in the node classification.
+  // The isotropic blur straightens it in wide areas but erodes thin bands,
+  // and any weaker fallback inherits the staircase as a wavy outline. So
+  // smooth anisotropically instead: average `raw` only along the
+  // boundary's local tangent, which straightens the staircase (bilinear
+  // samples taken along the true edge direction recover its sub-sample
+  // position) while never mixing across a thin band's profile.
+  //
+  // The tangent comes from the structure tensor of the blurred field over
+  // a small window: unlike the plain gradient it stays well-defined on a
+  // band's crest, where the gradient itself vanishes.
+  const auto tensorBlur = [&](std::vector<float>& v) {
+    constexpr int kR = 2;
+    for (int iz = 0; iz < nz; ++iz) {
+      for (int ix = 0; ix < nx; ++ix) {
+        float sum = 0.0f;
+        int count = 0;
+        for (int k = -kR; k <= kR; ++k) {
+          const int jx = std::clamp(ix + k, 0, nx - 1);
+          if (!sameLayer(ix, iz, jx, iz)) continue;
+          sum += v[iz * nx + jx];
+          ++count;
+        }
+        scratch[iz * nx + ix] = sum / count;
+      }
+    }
+    for (int iz = 0; iz < nz; ++iz) {
+      for (int ix = 0; ix < nx; ++ix) {
+        float sum = 0.0f;
+        int count = 0;
+        for (int k = -kR; k <= kR; ++k) {
+          const int jz = std::clamp(iz + k, 0, nz - 1);
+          if (!sameLayer(ix, iz, ix, jz)) continue;
+          sum += scratch[jz * nx + ix];
+          ++count;
+        }
+        v[iz * nx + ix] = sum / count;
+      }
+    }
+  };
+  std::vector<float> txx(depth.size()), txz(depth.size()), tzz(depth.size());
+  for (int iz = 0; iz < nz; ++iz) {
+    for (int ix = 0; ix < nx; ++ix) {
+      const int i = iz * nx + ix;
+      const auto at = [&](int jx, int jz) {
+        jx = std::clamp(jx, 0, nx - 1);
+        jz = std::clamp(jz, 0, nz - 1);
+        return sameLayer(ix, iz, jx, jz) ? blurred[jz * nx + jx] : blurred[i];
+      };
+      const float gx = at(ix + 1, iz) - at(ix - 1, iz);
+      const float gz = at(ix, iz + 1) - at(ix, iz - 1);
+      txx[i] = gx * gx;
+      txz[i] = gx * gz;
+      tzz[i] = gz * gz;
+    }
+  }
+  tensorBlur(txx);
+  tensorBlur(txz);
+  tensorBlur(tzz);
+
+  // Average of `raw` along the tangent. Bilinear corners on another layer
+  // count as just outside the contour, like the blur's taps: along a cliff
+  // edge the average then grades with how much of the staircase each
+  // sample row covers, which is exactly the edge's sub-sample position.
+  constexpr int kTangentRadius = 6;
+  const auto rawAlong = [&](int cx, int cz, float tx, float tz) {
+    const int c = cz * nx + cx;
+    const auto sampleAt = [&](float fx, float fz) {
+      const int ix = std::clamp(static_cast<int>(std::floor(fx)), 0, nx - 2);
+      const int iz = std::clamp(static_cast<int>(std::floor(fz)), 0, nz - 2);
+      const float ux = std::clamp(fx - ix, 0.0f, 1.0f);
+      const float uz = std::clamp(fz - iz, 0.0f, 1.0f);
+      const auto corner = [&](int jx, int jz) {
+        return sameLayer(cx, cz, jx, jz) ? raw[jz * nx + jx] : -0.5f * field.step;
+      };
+      return (corner(ix, iz) * (1 - ux) + corner(ix + 1, iz) * ux) * (1 - uz) +
+             (corner(ix, iz + 1) * (1 - ux) + corner(ix + 1, iz + 1) * ux) * uz;
+    };
+    float sum = raw[c] * (kTangentRadius + 1);
+    float weight = static_cast<float>(kTangentRadius + 1);
+    for (int k = 1; k <= kTangentRadius; ++k) {
+      const float w = static_cast<float>(kTangentRadius + 1 - k);
+      sum += w * sampleAt(cx + tx * k, cz + tz * k);
+      sum += w * sampleAt(cx - tx * k, cz - tz * k);
+      weight += 2.0f * w;
+    }
+    return sum / weight;
+  };
   const float sampleDepth = 0.1f * field.step;
   for (int iz = 0; iz < nz; ++iz) {
     for (int ix = 0; ix < nx; ++ix) {
       const int i = iz * nx + ix;
-      const float level = std::clamp(thickness[i] / field.step - 1.0f, 0.0f, 3.0f);
-      const int lo = std::min(static_cast<int>(level), 2);
-      const float f = level - lo;
-      float value = levels[lo][i] + (levels[lo + 1][i] - levels[lo][i]) * f;
-      // Smoothing is visual only and must not change what is reachable;
-      // outside the fully blurred zone a small constant margin keeps the outline smooth where a thin band
-      // would otherwise be eroded across zero.
-      if (level < 3.0f) {
-        if (reached(ix, iz)) value = std::max(value, sampleDepth);
-        else value = std::min(value, -sampleDepth);
+      const float a = txx[i], b = txz[i], c = tzz[i];
+      const float trace = a + c;
+      float value = depth[i];
+      // Only near-contour values are visible (the fill fades out well
+      // inside kMaxDepth); skip the sampling work elsewhere.
+      if (std::fabs(value) < 1.5f && trace > 1e-12f) {
+        const float disc = std::sqrt(0.25f * (a - c) * (a - c) + b * b);
+        // Dominant eigenvector of the tensor is the boundary normal.
+        float nxv = b, nzv = 0.5f * trace + disc - a;
+        if (nxv * nxv + nzv * nzv < 1e-20f) {
+          nxv = 0.5f * trace + disc - c;
+          nzv = b;
+        }
+        const float len = std::sqrt(nxv * nxv + nzv * nzv);
+        if (len > 1e-10f) {
+          // Anisotropy in [0, 1]: 1 on a straight edge or band, 0 at a
+          // corner. Corners keep the isotropic blur (rounded), straight
+          // stretches take the tangential average (straightened).
+          const float aniso = 2.0f * disc / trace;
+          const float avg = rawAlong(ix, iz, -nzv / len, nxv / len);
+          value = aniso * avg + (1.0f - aniso) * value;
+        }
       }
       depth[i] = value;
+    }
+  }
+
+  // Smoothing is visual only and must not drift from what is reachable.
+  // Outside the fully blurred wide zone (where convex corner samples are
+  // deliberately rounded off), every reached node stays positive -- a thin
+  // band can never be smoothed away -- and every node more than one sample
+  // outside the reach stays negative. The first ring of outside nodes
+  // floats free: a straight contour through an oblique staircase has to be
+  // able to pass just outside the stair-corner nodes, and that ring is
+  // within the half-step bias the contour carries by construction.
+  const float kThin = 4.0f * field.step;
+  for (int iz = 0; iz < nz; ++iz) {
+    for (int ix = 0; ix < nx; ++ix) {
+      const int i = iz * nx + ix;
+      if (thickness[i] >= kThin) continue;
+      if (reached(ix, iz)) depth[i] = std::max(depth[i], sampleDepth);
+      else if (dOut[i] > 1.5f * field.step) depth[i] = std::min(depth[i], -sampleDepth);
     }
   }
   return depth;

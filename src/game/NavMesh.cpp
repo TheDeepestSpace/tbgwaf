@@ -339,9 +339,11 @@ void NavMesh::BuildSurfaceCaches(float agentRadius) {
   surfaceBlockers_.assign(n, {});
   for (size_t i = 0; i < n; ++i) {
     for (const auto& blocker : walkSurfaces_[i].blockers) {
-      // Half the usual obstacle padding: roof furniture is knee-to-waist-high
-      // scenery, so a figure may stand close enough to brush it.
-      std::vector<glm::vec2> padded = ExpandConvexPolygon(blocker, 0.5f * agentRadius);
+      // Reduced padding: roof furniture and parapets are knee-to-waist-high
+      // scenery a figure may brush, and a half pad on top of the parapet's own
+      // thickness left a wide blank band between the wall and the reach.
+      std::vector<glm::vec2> padded =
+          ExpandConvexPolygon(blocker, std::min(agentRadius, constants::kNavWallPad));
       if (!padded.empty()) surfaceBlockers_[i].push_back(std::move(padded));
     }
   }

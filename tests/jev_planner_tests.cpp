@@ -7,6 +7,7 @@
 #include "game/GameLogic.h"
 #include "game/Geometry.h"
 #include "game/MapGenerator.h"
+#include "OldSizeConfig.h"
 
 namespace {
 
@@ -283,7 +284,7 @@ void TestCompleteAiVsAiMatchAndTerminalStop() {
 // Every move must now stay on a walkable surface (never at grade under a deck
 // without headroom), and the ramp-ward bearing must climb the ramp.
 void TestJevMovesNeverCrossRampSlab() {
-  tactics::MapGeneratorConfig config;
+  tactics::MapGeneratorConfig config = tactics::OldSizeConfig();
   config.arteryCount = 2;
   config.elevatedHighway = tactics::OverpassMode::On;
   config.overpassLayout = tactics::OverpassLayout::RampUpRampDown;
@@ -372,12 +373,19 @@ void TestJevMovesMakeProgressAcrossTerrainLevels() {
   CHECK(sampled > 0);
 }
 
+// The plateau layout these tests rely on belongs to the pre-#224 4x4 city.
+tactics::MapGeneratorConfig Seed7Config() {
+  tactics::MapGeneratorConfig config = tactics::OldSizeConfig();
+  config.extraArteries = 0;
+  return config;
+}
+
 // Default seed 7 starts Blue on the small high plateau shown in issue #245.
 // Its usable exit is a road graded through the cliff, which is part of the
 // heightfield/road rendering rather than Scene::walkSurfaces. The complete
 // route is longer than one move: first enter the corridor, then descend it.
 void TestJevFindsGradedRoadOffTerrainIsland() {
-  Scene scene = tactics::GenerateUrbanMap(7);
+  Scene scene = tactics::GenerateUrbanMap(7, Seed7Config());
   tactics::ApplySpawnHints(&scene);
   GameLogic game(scene);
   const auto request = BuildJevRequest(game, Team::Blue, 1);
@@ -422,7 +430,7 @@ void TestJevFindsGradedRoadOffTerrainIsland() {
 // a planner that keeps favouring the flag walks the squad off the plateau and
 // steadily closer to the flag. Wait is not offered while no enemy is known.
 void TestJevRoutesOffTerrainIslandTowardFlag() {
-  Scene scene = tactics::GenerateUrbanMap(7);
+  Scene scene = tactics::GenerateUrbanMap(7, Seed7Config());
   tactics::ApplySpawnHints(&scene);
   scene.flag.enabled = true;
   GameLogic game(scene);
@@ -470,7 +478,7 @@ void TestJevRoutesOffTerrainIslandTowardFlag() {
 // diagonal route down the road hugs the retaining walls, so its first leg
 // ends at the road entrance on the plateau; the next leg descends it.
 void TestJevAdvanceRoutesOffTerrainIsland() {
-  Scene scene = tactics::GenerateUrbanMap(7);
+  Scene scene = tactics::GenerateUrbanMap(7, Seed7Config());
   tactics::ApplySpawnHints(&scene);
   GameLogic game(scene);
   std::vector<glm::vec3> spawn(32);

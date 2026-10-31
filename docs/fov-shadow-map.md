@@ -24,25 +24,41 @@ it); the CPU path stays available and is still the default for visual scenarios.
 
 ## What it does
 
-Per pane, for each living unit of the pane's team
-(`SceneRenderer::DrawFovShadowMask`):
+Per pane, for the living units of the pane's team
+(`SceneRenderer::AcquireFovMaps`, then `SceneRenderer::DrawFovMasks`):
 
-1. Two eye-space depth passes into 1024x2048 `DEPTH_COMPONENT24` maps, one
+1. Per unit, two eye-space depth passes into 1024x2048 `DEPTH_COMPONENT24` maps, one
    per half of the 150-degree cone (each 78 degrees wide, so they overlap
    by 3 degrees; 120 degrees tall). Casters: the ground box or terrain
    mesh, and a static mesh of obstacles, decks/ramps as 0.45-thick slabs
    (the `LineOfSightClear` slab thickness, same as the lit pass), sidewalk
    slabs/patches and roads. The static mesh is built once per scene
-   (content-hashed) rather than re-tessellated per draw. Units are not
-   casters: gameplay LOS ignores them, and so does the CPU overlay.
-2. One mask pass over the same geometry into the pane: depth test `LEQUAL`
-   with a small polygon offset, no depth writes, the same stencil trick as
-   the CPU path so teammates' masks don't stack. The fragment shader
-   discards fragments facing away from the eye, fragments outside the
+   (content-hashed) rather than re-tessellated per draw, and is split into
+   an 8x8 grid of chunks so each map draws only the chunks inside its own
+   frustum. Units are not casters: gameplay LOS ignores them, and so does
+   the CPU overlay. Facade openings (window frames, door niches) are not
+   casters either: the frames stand a few centimetres proud of the wall
+   and the niches sit inside it, yet they were most of a city's triangles.
+   Each unit keeps its own pair of maps (16 MB of depth) across frames;
+   they are re-rendered only when its eye, heading or the scene changes,
+   and are freed once no pane has asked for them for 120 `RenderPane`
+   calls. All of a pane's stale maps are rendered before its main pass,
+   so the pane framebuffer is never switched away from mid-pass: on
+   tile-based (mobile) GPUs each switch stores and reloads the whole pane,
+   and writing the maps every frame was most of the overlay's memory
+   traffic. The free-aim sweep's three sectors are cached the same way.
+2. One mask pass for the whole team (up to four units per pass, each with
+   its own eye, heading and two maps) over the same geometry, plus the
+   facade openings, into the pane (only chunks on screen and inside some
+   unit's maps): depth test `LEQUAL` with a small polygon offset, no depth
+   writes, the same stencil trick as the CPU path so passes don't stack.
+   A fragment is tinted when any of the pass's units sees it: the shader
+   rejects fragments facing away from that unit's eye, outside its
    analytic 150-degree azimuth cone (so the cone's angular edges stay
-   crisp, as today), and fragments whose eye sightline fails a 3x3 PCF
-   depth test in linearized depth. Everything else gets the flat
-   team-colour tint at the CPU path's alpha. No attenuation, no N.L.
+   crisp, as today), or whose sightline fails a 3x3 PCF depth test in
+   linearized depth, and discards a fragment no unit sees. Everything else
+   gets the flat team-colour tint at the CPU path's alpha. No attenuation,
+   no N.L.
 
 ## Findings
 

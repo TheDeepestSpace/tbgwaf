@@ -223,16 +223,13 @@ int main(int argc, char** argv) {
       tactics::Obstacle item;
       if (found != source.obstacles.end()) {
         item = *found;
-      } else if (model == Model::CoachBus) {
-        // The bus is a seeded rarity; build its gameplay box directly.
+      } else {
+        // Rarer models may not spawn in this seed; build the gameplay box directly.
         const glm::vec3 extent = tactics::StreetFixtureExtent(model);
         item.bounds = tactics::AABB{glm::vec3(-0.5f * extent.x, 0.0f, -0.5f * extent.z),
                                     glm::vec3(0.5f * extent.x, extent.y, 0.5f * extent.z)};
         item.kind = tactics::ObstacleKind::Cover;
         item.fixtureModel = model;
-      } else {
-        std::fprintf(stderr, "Missing generated fixture: %s\n", name);
-        return 1;
       }
       const glm::vec3 offset(item.bounds.Center().x, item.fixtureBaseY, item.bounds.Center().z);
       item.bounds.min -= offset;

@@ -83,6 +83,7 @@ set(APP_GFX_SOURCES
   src/gfx/AmbientOcclusion.cpp
   src/gfx/Ragdoll.cpp
   src/gfx/SceneRenderer.cpp
+  src/gfx/StreetFixtureMesh.cpp
 )
 
 if(EMSCRIPTEN)

@@ -1106,12 +1106,10 @@ void GameLogic::BuildZiplineFrontiers(const Unit& mover, const glm::vec3& origin
     for (int end = 0; end < 2; ++end) {
       const glm::vec3 entry = end == 0 ? line.a : line.b;
       const glm::vec3 exit = end == 0 ? line.b : line.a;
-      // A walk is never shorter than the straight line (less a little slack
-      // for start/goal snapping), so skip the path search for line ends the
-      // mover clearly cannot afford. This dominates planning cost otherwise.
-      if (glm::distance(origin, entry) - 2.0f * constants::kAgentRadius + rideCost > budget) {
-        continue;
-      }
+      // No walk is shorter than the straight line to the entry, so a lower
+      // bound already over budget skips the pathfinding. The slack keeps an
+      // entry that FindPath would snap to a nearer walkable point.
+      if (glm::distance(origin, entry) - 2.0f + rideCost > budget) continue;
       std::vector<glm::vec3> walk;
       if (!navMesh_.FindPath(origin, entry, &walk)) continue;
       const float walkCost = PathLength(walk);

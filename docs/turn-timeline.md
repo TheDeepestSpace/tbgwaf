@@ -93,3 +93,25 @@ shadow mask. The rig leads with torso/head, trails the legs, steps the foot
 on the turning side when standing (pivot) and banks into the turn when
 moving (path corners). `turnLag` is part of the snapshot, so followers and
 replays draw the same pose. Scenario: `turn_animation_angles`.
+
+## Figures may not overlap while walking (issue #267)
+
+`GameLogic::PathOverlapsFigure` sweeps the round timeline in fixed 1/40 s
+steps: the mover follows its candidate path from t = 0 (zipline rides priced
+like the move budget), every other living figure follows its own planned move
+or stands still, and any time two figures come within 2 × `kAgentRadius`
+(and overlap vertically) the path is rejected. Pairs already overlapping at
+t = 0 are ignored.
+
+- **Crossing paths are rejected, not time-offset** -- walks all start at t = 0,
+  so the player must route around the other figure's path. Only the first leg
+  of a chain is checked (later legs run in later rounds).
+- Unplanned *teammates* are ignored when planning (they will move); unplanned
+  enemies count as standing. `CanCommitRound` is also false while any planned
+  move overlaps (`HasPlanOverlap`), and the HUD says why; hover previews
+  turn invalid (`MovePreviewBlockedByFigure`).
+- **Jev**: `ApplyJevChoice` plans non-movers first, then each mover; a
+  rejected move falls back to stopping 1-4 units short, the actor's other
+  offered moves, then waiting. Routed legs never end on another figure.
+- Tests/scenarios that deliberately collide use
+  `SetFigureOverlapCheckEnabled(false)` / `figure_overlap: false`.

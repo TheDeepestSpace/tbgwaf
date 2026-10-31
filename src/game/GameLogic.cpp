@@ -38,6 +38,44 @@ float MoveCost(const std::vector<glm::vec3>& path, const std::vector<PathRide>& 
   return cost;
 }
 
+// Where a figure following `path` (rides priced like MoveCost) is `t` seconds
+// into the round; it stands at the path's end afterwards.
+glm::vec3 PathPositionAt(const std::vector<glm::vec3>& path, const std::vector<PathRide>& rides,
+                         float runSpeed, float t) {
+  if (path.empty()) return glm::vec3(0.0f);
+  float budget = t * runSpeed;
+  for (size_t i = 0; i + 1 < path.size(); ++i) {
+    const float length = glm::distance(path[i], path[i + 1]);
+    const float cost = RideAtSegment(rides, i) ? length * constants::kZiplineCostFactor : length;
+    if (cost > budget) return cost > 1e-6f ? glm::mix(path[i], path[i + 1], budget / cost) : path[i];
+    budget -= cost;
+  }
+  return path.back();
+}
+
+// Deterministic fixed-step sweep: do two figures, each on its own path, come
+// closer than two agent radii (and overlap vertically) at the same time?
+// Pairs that already overlap at t = 0 are ignored (nothing to be done).
+constexpr float kOverlapStep = 1.0f / 40.0f;
+bool PathsOverlap(const std::vector<glm::vec3>& pathA, const std::vector<PathRide>& ridesA,
+                  float speedA, const std::vector<glm::vec3>& pathB,
+                  const std::vector<PathRide>& ridesB, float speedB) {
+  const float minDist = 2.0f * constants::kAgentRadius;
+  auto Close = [&](const glm::vec3& a, const glm::vec3& b) {
+    return glm::length(glm::vec2(a.x - b.x, a.z - b.z)) < minDist &&
+           std::abs(a.y - b.y) < constants::kUnitHeight;
+  };
+  if (Close(PathPositionAt(pathA, ridesA, speedA, 0.0f), PathPositionAt(pathB, ridesB, speedB, 0.0f))) {
+    return false;
+  }
+  for (float t = kOverlapStep; t <= constants::kRoundDuration + 1e-4f; t += kOverlapStep) {
+    if (Close(PathPositionAt(pathA, ridesA, speedA, t), PathPositionAt(pathB, ridesB, speedB, t))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Every place that rewrites a plan's legs keeps the parallel ride lists in step.
 void ClearPlannedMove(PlannedAction* plan) {
   plan->movePath.clear();
@@ -694,6 +732,35 @@ const Unit* GameLogic::FindUnit(int id) const {
   return nullptr;
 }
 
+bool GameLogic::PathOverlapsFigure(const Unit& mover, const std::vector<glm::vec3>& path,
+                                   const std::vector<PathRide>& rides) const {
+  if (!overlapCheckEnabled_) return false;
+  for (const Unit& other : scene_.units) {
+    if (other.id == mover.id || !other.alive) continue;
+    // A teammate with no plan yet is expected to move off; it is checked
+    // when it is planned (and again by CanCommitRound).
+    if (other.team == mover.team && other.plan.type == PlannedActionType::None) continue;
+    // A figure with a planned move walks it this round; anything else stands.
+    const bool walking = other.plan.type == PlannedActionType::Move && other.plan.movePath.size() >= 2;
+    const std::vector<glm::vec3> standing{other.position};
+    if (PathsOverlap(path, rides, mover.runSpeed, walking ? other.plan.movePath : standing,
+                     walking ? other.plan.moveRides : std::vector<PathRide>{}, other.runSpeed)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool GameLogic::HasPlanOverlap() const {
+  for (const Unit& unit : scene_.units) {
+    if (!unit.alive || unit.plan.type != PlannedActionType::Move || unit.plan.movePath.size() < 2) {
+      continue;
+    }
+    if (PathOverlapsFigure(unit, unit.plan.movePath, unit.plan.moveRides)) return true;
+  }
+  return false;
+}
+
 bool GameLogic::CanCommitRound() const {
   if (mode_ == InputMode::Executing || mode_ == InputMode::GameOver) return false;
   bool anyLiving = false;
@@ -702,7 +769,7 @@ bool GameLogic::CanCommitRound() const {
     anyLiving = true;
     if (unit.plan.type == PlannedActionType::None) return false;
   }
-  return anyLiving;
+  return anyLiving && !HasPlanOverlap();
 }
 
 void GameLogic::ClickUnit(int unitId, Team byTeam) {
@@ -770,6 +837,8 @@ void GameLogic::ClickGround(const glm::vec3& point, Team byTeam) {
   // reach as far as the figure can run in one round (a zipline ride costs
   // ZiplineRideCost of that, not its length).
   if (!PlanLeg(*mover, MoveChainEnd(), point, &path, &rides)) return;
+  // Only the first leg runs this round; chained legs run in later rounds.
+  if (!chaining && PathOverlapsFigure(*mover, path, rides)) return;
 
   // NavMesh::FindPath always returns at least [start, goal] on success.
   if (chaining) {
@@ -1035,6 +1104,7 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
 }
 
 void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
+  movePreviewBlocked_ = false;
   movePreviewPath_.clear();
   movePreviewRides_.clear();
   movePreviewValid_ = false;
@@ -1042,6 +1112,12 @@ void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
   const Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->team != byTeam) return;
   movePreviewValid_ = PlanLeg(*mover, MoveChainEnd(), point, &movePreviewPath_, &movePreviewRides_);
+  const bool chaining = mover->plan.type == PlannedActionType::Move && !mover->plan.movePath.empty();
+  if (movePreviewValid_ && !chaining &&
+      PathOverlapsFigure(*mover, movePreviewPath_, movePreviewRides_)) {
+    movePreviewValid_ = false;
+    movePreviewBlocked_ = true;
+  }
 }
 
 // Any manual touch of a figure's plan drops its queued multi-round route.

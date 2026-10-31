@@ -475,7 +475,8 @@ void TestJevAdvanceRoutesOffTerrainIsland() {
   GameLogic game(scene);
   std::vector<glm::vec3> spawn(32);
   for (const Unit& unit : scene.units) spawn[unit.id] = unit.position;
-  for (int round = 1; round <= 2; ++round) {
+  // Squad-mates sharing a road entrance stop a little short of each other (issue #267), so allow one more leg.
+  for (int round = 1; round <= 3; ++round) {
     const auto request = BuildJevRequest(game, Team::Blue, static_cast<unsigned>(round));
     CHECK(request.has_value());
     if (!request) return;
@@ -546,6 +547,34 @@ void TestSpawnHintsAvoidGroundUnderLowDecks() {
  }
 }
 
+// Issue #267: whatever moves the squad picks, the applied plan has no
+// figures overlapping while walking (movers fall back to a shorter move,
+// another move, or waiting).
+void TestJevSquadPlanNeverOverlaps() {
+  Scene scene = TwoUnitScene(40.0f, false);
+  for (int i = 1; i <= 2; ++i) {
+    Unit mate;
+    mate.id = 10 + i;
+    mate.team = Team::Blue;
+    mate.position = {-20.0f + 1.0f * static_cast<float>(i), 0.0f, 0.0f};
+    scene.units.push_back(mate);
+  }
+  GameLogic game(scene);
+  const auto request = BuildJevRequest(game, Team::Blue, 5);
+  CHECK(request.has_value());
+  if (!request) return;
+  for (const auto& first : request->candidates) {
+    if (first.kind != JevActionKind::Move) continue;
+    std::vector<std::string> choices;
+    for (int id : request->actorIds) {
+      choices.push_back(id == first.actorId ? first.id : AnyChoiceFor(*request, id));
+    }
+    GameLogic copy = game;
+    CHECK(ApplyJevChoice(&copy, *request, choices));
+    CHECK(!copy.HasPlanOverlap());
+  }
+}
+
 int main() {
   TestIncrementalBuilderMatchesBlockingBuild();
   TestBoundedCandidatesUseNormalLegalPath();
@@ -564,6 +593,7 @@ int main() {
   TestJevAdvanceRoutesOffTerrainIsland();
   TestJevOffersWaitOnlyWithContact();
   TestSpawnHintsAvoidGroundUnderLowDecks();
+  TestJevSquadPlanNeverOverlaps();
   if (failures == 0) {
     std::puts("All Jev planner scenarios passed.");
     return 0;

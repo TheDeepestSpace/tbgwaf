@@ -155,6 +155,15 @@ bool RouteToward(const GameLogic& game, const Unit& actor, const glm::vec3& goal
   // boundary (nor beside a cliff wall). Accept a point only with clear ground
   // all around it, or when it stands on a deck or ramp surface.
   const auto standable = [&](const glm::vec3& p) {
+    // Never end a leg on another figure (issue #267); the caller's back-off
+    // then stops short of it.
+    for (const Unit& other : game.GetScene().units) {
+      if (other.id != actor.id && other.alive &&
+          XZDistance(other.position, p) < 2.0f * constants::kAgentRadius + 0.1f &&
+          std::fabs(other.position.y - p.y) < constants::kUnitHeight) {
+        return false;
+      }
+    }
     for (const WalkSurface& surface : scene.walkSurfaces) {
       if (SurfaceContainsXZ(surface, p.x, p.z) &&
           std::fabs(SurfaceHeightAt(surface, p.x, p.z) - p.y) < 0.5f) {
@@ -945,11 +954,51 @@ bool ApplyJevChoice(GameLogic* game, const JevRequest& request,
 
   // Plans are applied in turn to a copy, so the whole squad plan lands or
   // none of it does.
+  // Issue #267: a move that would make figures overlap a planned walker or
+  // standing figure is rejected by GameLogic. Non-movers are planned first
+  // (they stand), then each mover falls back, in order, to the actor's other
+  // offered moves and finally to waiting in place (deterministic).
+  std::stable_partition(picked.begin(), picked.end(), [](const JevCandidate* c) {
+    return c->kind != JevActionKind::Move;
+  });
   GameLogic validated = *game;
   for (const JevCandidate* candidate : picked) {
-    GameLogic next;
-    if (!CandidateApplied(validated, request.team, *candidate, &next)) return false;
-    validated = std::move(next);
+    std::vector<JevCandidate> attempts{*candidate};
+    if (candidate->kind == JevActionKind::Move) {
+      // Squad-mates heading for the same spot: stop a little short of it.
+      const Unit* actor = game->FindUnit(candidate->actorId);
+      const glm::vec3 back = actor ? actor->position - candidate->destination : glm::vec3(0.0f);
+      const float backLength = std::hypot(back.x, back.z);
+      if (backLength > 1e-3f) {
+        for (const float shorten : {1.0f, 2.0f, 3.0f, 4.0f}) {
+          if (shorten >= backLength - kMinMoveProgress) break;
+          JevCandidate shorter = *candidate;
+          shorter.destination += glm::vec3(back.x, 0.0f, back.z) * (shorten / backLength);
+          shorter.destination.y = candidate->destination.y;
+          attempts.push_back(std::move(shorter));
+        }
+      }
+      for (const JevCandidate& other : request.candidates) {
+        if (other.actorId == candidate->actorId && other.kind == JevActionKind::Move &&
+            other.id != candidate->id) {
+          attempts.push_back(other);
+        }
+      }
+      JevCandidate wait;
+      wait.id = candidate->id + "_wait_fallback";
+      wait.kind = JevActionKind::Wait;
+      wait.actorId = candidate->actorId;
+      attempts.push_back(std::move(wait));
+    }
+    bool applied = false;
+    for (const JevCandidate& attempt : attempts) {
+      GameLogic next;
+      if (!CandidateApplied(validated, request.team, attempt, &next)) continue;
+      validated = std::move(next);
+      applied = true;
+      break;
+    }
+    if (!applied) return false;
   }
   validated.SetMoveFrontierEnabled(true);
   *game = std::move(validated);

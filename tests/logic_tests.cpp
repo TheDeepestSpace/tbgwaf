@@ -577,6 +577,49 @@ void MakePassive(GameLogic& game) {
   game.SetPlaybook(Team::Red, SquadPlaybook::Passive());
 }
 
+// Issue #267: planned walks must not make figures overlap.
+void TestMovePlansRejectFigureOverlap() {
+  // Simultaneous arrival at the same spot is rejected; a disjoint one is not.
+  {
+    GameLogic game(LegacyScene());
+    MakePassive(game);
+    game.ClickUnit(1, Team::Blue);
+    game.ChooseMove();
+    game.ClickGround(glm::vec3(0.0f, 0.0f, 0.0f), Team::Blue);
+    game.FinishMovePlan();
+    CHECK(game.FindUnit(1)->plan.type == PlannedActionType::Move);
+
+    game.ClickUnit(4, Team::Red);
+    game.ChooseMove();
+    game.HoverGround(glm::vec3(0.0f, 0.0f, 0.0f), Team::Red);
+    CHECK(!game.MovePreviewValid());
+    CHECK(game.MovePreviewBlockedByFigure());
+    game.ClickGround(glm::vec3(0.0f, 0.0f, 0.0f), Team::Red);
+    CHECK(game.FindUnit(4)->plan.type == PlannedActionType::None);
+    game.HoverGround(glm::vec3(4.0f, 0.0f, 0.0f), Team::Red);
+    CHECK(game.MovePreviewValid());
+    CHECK(!game.MovePreviewBlockedByFigure());
+    game.ClickGround(glm::vec3(4.0f, 0.0f, 0.0f), Team::Red);
+    CHECK(game.FindUnit(4)->plan.type == PlannedActionType::Move);
+    CHECK(!game.HasPlanOverlap());
+  }
+  // A figure standing still blocks paths through (or ending beside) it.
+  {
+    GameLogic game(LegacyScene());
+    MakePassive(game);
+    game.ClickUnit(2, Team::Blue);  // Unit 2 stands (passes) at (-8, 4).
+    game.ChoosePass();
+    game.ClickUnit(1, Team::Blue);  // At (-8, 0).
+    game.ChooseMove();
+    game.ClickGround(glm::vec3(-8.0f, 0.0f, 6.0f), Team::Blue);
+    CHECK(game.FindUnit(1)->plan.type == PlannedActionType::None);
+    game.ClickGround(glm::vec3(-8.0f, 0.0f, 3.5f), Team::Blue);
+    CHECK(game.FindUnit(1)->plan.type == PlannedActionType::None);
+    game.ClickGround(glm::vec3(-6.0f, 0.0f, 2.0f), Team::Blue);
+    CHECK(game.FindUnit(1)->plan.type == PlannedActionType::Move);
+  }
+}
+
 void TestRoundExecutesBothTeamsMovesConcurrently() {
   GameLogic game(LegacyScene());
   MakePassive(game);
@@ -777,7 +820,8 @@ void TestClickChainsLegsAcrossRounds() {
 
   // Each in-reach click adds a leg from the previous leg's end; the figure
   // stays selected until the chain is finished.
-  const glm::vec3 first = start + glm::vec3(budget * 0.9f, 0.0f, 0.0f);
+  // Aimed clear of the Red figure standing on this row (issue #267).
+  const glm::vec3 first = start + glm::vec3(10.0f, 0.0f, -6.0f);
   game.ClickGround(first, Team::Blue);
   CHECK(mover->plan.type == tactics::PlannedActionType::Move);
   CHECK(mover->plan.queuedLegs.empty());
@@ -814,7 +858,7 @@ void TestManualReplanClearsQueuedLegs() {
     game.ChooseMove();
     const glm::vec3 start = game.FindUnit(0)->position;
     const float budget = game.FindUnit(0)->MoveBudget();
-    game.ClickGround(start + glm::vec3(budget * 0.9f, 0.0f, 0.0f), Team::Blue);
+    game.ClickGround(start + glm::vec3(10.0f, 0.0f, -6.0f), Team::Blue);  // Clear of the Red figure on this row.
     game.ClickGround(game.MoveChainEnd() + glm::vec3(0.0f, 0.0f, budget * 0.9f), Team::Blue);
     CHECK(!game.FindUnit(0)->plan.queuedLegs.empty());
     game.FinishMovePlan();
@@ -842,7 +886,7 @@ void TestQueuedLegsSnapshotRoundTrip() {
   game.ChooseMove();
   const glm::vec3 start = game.FindUnit(0)->position;
   const float budget = game.FindUnit(0)->MoveBudget();
-  game.ClickGround(start + glm::vec3(budget * 0.9f, 0.0f, 0.0f), Team::Blue);
+  game.ClickGround(start + glm::vec3(10.0f, 0.0f, -6.0f), Team::Blue);  // Clear of the Red figure on this row.
   game.ClickGround(game.MoveChainEnd() + glm::vec3(0.0f, 0.0f, budget * 0.9f), Team::Blue);
   game.ClickGround(game.MoveChainEnd() + glm::vec3(-budget * 0.5f, 0.0f, 0.0f), Team::Blue);
   game.FinishMovePlan();
@@ -1176,6 +1220,7 @@ void TestGameLogicMoveCanClimbOntoObstacle() {
 // lane. Commits the round, leaving the move animating.
 void StartRed4WalkThroughBlue1Lane(GameLogic& game, const glm::vec3& destination) {
   game.FindUnit(4)->position = glm::vec3(-9.5f, 0.0f, 0.0f);
+  game.SetFigureOverlapCheckEnabled(false);  // The walk deliberately passes through blue1.
   for (int id : {0, 1, 2}) {
     game.ClickUnit(id, Team::Blue);
     game.ChoosePass();
@@ -1206,6 +1251,7 @@ void SetStationaryShoot(GameLogic& game, Team team) {
 float RunRed4Walk(const SquadPlaybook& redPb, bool* red4Alive, bool* blue1Alive,
                   bool blueShoots) {
   GameLogic game(LegacyScene());
+  game.SetFigureOverlapCheckEnabled(false);  // The walk deliberately passes through blue1.
   game.SetPlaybook(Team::Red, redPb);
   if (blueShoots) SetStationaryShoot(game, Team::Blue);
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
@@ -2306,6 +2352,7 @@ void TestZiplineRideIsFasterThanWalking() {
 void TestZiplineOccupiedLineBlocksSecondRider() {
   GameLogic game(ZiplineScene());
   MakePassive(game);
+  game.SetFigureOverlapCheckEnabled(false);  // Both riders share the anchor on purpose.
   PlanMove(game, 0, glm::vec3(20.0f, 0.0f, 0.0f));
   PlanMove(game, 1, glm::vec3(20.0f, 0.0f, 1.0f));
   PassRest(game);
@@ -3478,6 +3525,7 @@ int main() {
   TestCheckWinner();
   TestRoundPlanningTeamGating();
   TestRoundCommitRequiresBothTeamsPlanned();
+  TestMovePlansRejectFigureOverlap();
   TestRoundExecutesBothTeamsMovesConcurrently();
   TestShootRowsResolveSimultaneouslyAcrossTeams();
   TestMutualEliminationIsDraw();

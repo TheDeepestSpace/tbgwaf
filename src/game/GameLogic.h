@@ -174,6 +174,10 @@ class GameLogic {
   // The reach field is UI-only and costs ~75 ms per move click; headless
   // callers that plan many moves (Jev) turn it off. On by default.
   void SetMoveFrontierEnabled(bool enabled) { moveFrontierEnabled_ = enabled; }
+  // Figure-overlap rejection (issue #267) is on by default; tests that
+  // deliberately walk figures through each other (playbook / zipline-queue
+  // scenarios) turn it off.
+  void SetFigureOverlapCheckEnabled(bool enabled) { overlapCheckEnabled_ = enabled; }
   std::optional<int> SelectedUnitId() const { return selectedUnitId_; }
   std::optional<Team> Winner() const { return winner_; }
   int RoundNumber() const { return roundNumber_; }
@@ -197,6 +201,21 @@ class GameLogic {
   // True once every living figure on *both* teams has a non-None plan,
   // i.e. CommitRound() is ready to be called.
   bool CanCommitRound() const;
+  // Issue #267: figures may not overlap while walking. Sweeps the round's
+  // timeline (fixed 1/40 s steps; planned movers walk their path from t = 0,
+  // everyone else stands) and reports whether `mover` on `path` would come
+  // within two agent radii of another living figure. Moves are rejected at
+  // plan time (ClickGround ignores them, the hover preview turns invalid);
+  // CanCommitRound is also false while any planned move overlaps (e.g. from
+  // plans imported from the other side). Unplanned teammates are ignored
+  // (enemies without a plan count as standing). Crossing paths are rejected, not
+  // time-offset: the plan must route around the other figure's path.
+  bool PathOverlapsFigure(const Unit& mover, const std::vector<glm::vec3>& path,
+                          const std::vector<PathRide>& rides) const;
+  bool HasPlanOverlap() const;
+  // True when the hover preview is invalid only because it would overlap
+  // another figure (for UI messaging).
+  bool MovePreviewBlockedByFigure() const { return movePreviewBlocked_; }
   // True while any killed unit is still mid-fall *and* time is passing for it
   // (a round executing, or the match over). Between rounds falls are frozen
   // and this is false.
@@ -636,8 +655,10 @@ class GameLogic {
 
   std::vector<glm::vec3> movePreviewPath_;
   bool movePreviewValid_ = false;
+  bool movePreviewBlocked_ = false;
   ReachField moveFrontier_;
   bool moveFrontierEnabled_ = true;
+  bool overlapCheckEnabled_ = true;
   std::vector<ZiplineFrontier> ziplineFrontiers_;
   std::vector<NavMesh> ziplineMeshes_;  // Parallel to ziplineFrontiers_: mesh around each exit.
   int ziplineUnitId_ = -1;

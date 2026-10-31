@@ -131,9 +131,29 @@ void NavMesh::Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent,
   Build(obstacles, SquareRegion(mapHalfExtent), agentRadius, ground, walkSurfaces);
 }
 
-void NavMesh::Build(const std::vector<Obstacle>& obstacles, const NavRegion& region,
+void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& region,
                      float agentRadius, const HeightField* ground,
                      const std::vector<WalkSurface>* walkSurfaces) {
+  // Anything starting at or above head height over the ground beneath it
+  // (door lintels, roof slabs, upper storeys) can be walked under, so it
+  // never blocks the ground mesh. Measured above the highest ground under
+  // the bounds, so a prism standing on a raised terrain level still blocks.
+  static const HeightField kFlat;
+  const HeightField& heights = ground ? *ground : kFlat;
+  std::vector<Obstacle> obstacles;
+  obstacles.reserve(allObstacles.size());
+  for (const Obstacle& obstacle : allObstacles) {
+    const AABB& b = obstacle.bounds;
+    float groundTop = 0.0f;
+    if (!heights.Empty()) {
+      groundTop = heights.HeightAt(0.5f * (b.min.x + b.max.x), 0.5f * (b.min.z + b.max.z));
+      for (const float x : {b.min.x, b.max.x}) {
+        for (const float z : {b.min.z, b.max.z}) groundTop = std::max(groundTop, heights.HeightAt(x, z));
+      }
+    }
+    if (b.min.y - groundTop >= constants::kUnitHeight) continue;
+    obstacles.push_back(obstacle);
+  }
   ground_ = ground ? *ground : HeightField{};
   walkSurfaces_ = walkSurfaces ? *walkSurfaces : std::vector<WalkSurface>{};
   BuildSurfaceCaches(agentRadius);

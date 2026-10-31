@@ -79,6 +79,24 @@ struct Building {
   int upperObstacle = -1;  // Top floor stepped back as its own prism (offices), else -1.
   int parcel = -1;         // Index into UrbanParcels(seed, config).
   int block = -1;
+  // Ground level of the footprint (the base prism's min.y for solid
+  // buildings; enterable ones have no such prism).
+  float baseY = 0.0f;
+  // Storeys, bottom-up: world y0..y1 of each floor.
+  struct Floor { float y0 = 0.0f, y1 = 0.0f; };
+  std::vector<Floor> floors;
+  // Hollow building (issue #157): thin wall Obstacles around the footprint
+  // with a doorway on the frontage edge, instead of a solid prism. `obstacle`
+  // is then the roof slab (full footprint, bounds.min.y above head height).
+  // Non-enterable buildings keep the solid-massing rendering.
+  bool enterable = false;
+  float doorWidth = 0.0f;   // Enterable only: frontage doorway size, per BuildingKind.
+  float doorHeight = 0.0f;  // Lintel underside above the ground (>= kUnitHeight).
+  // Enterable only: optional rear doorway (-1 = none, wall stays solid),
+  // spanning u0..u1 along footprint edge `rearEdge`, same height as the
+  // other rear doors.
+  int rearEdge = -1;
+  float rearU0 = 0.0f, rearU1 = 0.0f;
 
   float Height() const {
     return groundFloorHeight + static_cast<float>(floorCount - 1) * floorHeight;

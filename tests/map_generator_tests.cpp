@@ -40,6 +40,7 @@ float DistanceToSegment(glm::vec2 p, glm::vec2 a, glm::vec2 b);
 MapGeneratorConfig LegacyConfig() {
   MapGeneratorConfig c;
   c.arteryCount = 0;
+  c.enterableChance = 0.0f;
   return c;
 }
 
@@ -48,6 +49,7 @@ MapGeneratorConfig LegacyConfig() {
 MapGeneratorConfig FlatConfig() {
   MapGeneratorConfig c;
   c.features.terrain.mode = FeatureMode::Off;
+  c.enterableChance = 0.0f;  // Hollow buildings are several wall obstacles each.
   return c;
 }
 
@@ -601,6 +603,7 @@ void TestEveryBlockHasWallToWallAndGappedRuns() {
 void TestVariedHeightsWithFewTowers() {
   MapGeneratorConfig c;
   c.features.terrain.mode = FeatureMode::Off;  // Buildings only: no retaining walls.
+  c.enterableChance = 0.0f;  // Hollow walls/lintels are short obstacles.
   for (uint32_t seed : kSeeds) {
     const Scene scene = GenerateUrbanMap(seed, c);
     int towers = 0, medium = 0, buildings = 0;
@@ -994,6 +997,7 @@ void TestObliqueArteryAndBranchMerge() {
 
 void TestPolygonBlocksAdaptToAngledStreets() {
   MapGeneratorConfig config;
+  config.enterableChance = 0.0f;  // Solid prisms: footprints are compared whole.
   config.features.terrain.mode = FeatureMode::Off;  // Flat-city blocks.
   config.arteryCount = 2;
   config.elevatedHighway = OverpassMode::Off;
@@ -1067,6 +1071,7 @@ void TestPolygonBlocksAdaptToAngledStreets() {
 // two footprints may both have a vertex at the same frontage corner.
 void TestNoCornerSplitBuildings() {
   MapGeneratorConfig config;
+  config.enterableChance = 0.0f;  // Solid prisms: footprints are compared whole.
   config.arteryCount = 2;
   config.elevatedHighway = OverpassMode::Off;
   int wrapped = 0;
@@ -1124,6 +1129,7 @@ bool FootprintsOverlap(const std::vector<glm::vec2>& a, const std::vector<glm::v
 // never share area, and ordinary two-piece L buildings must still appear.
 void TestCornerBuildingsDoNotChainAcrossAFrontage() {
   MapGeneratorConfig config;
+  config.enterableChance = 0.0f;  // Solid prisms: footprints are compared whole.
   config.elevatedHighway = OverpassMode::Off;
   const Scene scene = GenerateUrbanMap(7, config);
   std::vector<const Obstacle*> buildings;
@@ -1163,6 +1169,7 @@ float MinimumPolygonWidth(const std::vector<glm::vec2>& polygon) {
 // enough for the clipping machinery but too thin to be a useful building.
 void TestThinCornerBuildingSliversAreDropped() {
   MapGeneratorConfig config;
+  config.enterableChance = 0.0f;  // Solid prisms: footprints are compared whole.
   config.elevatedHighway = OverpassMode::Off;
   const Scene scene = GenerateUrbanMap(7, config);
   for (const Obstacle& obstacle : scene.obstacles) {
@@ -1936,6 +1943,7 @@ void TestZiplinesAreDeterministicBoundedAndValid() {
     for (uint32_t seed : kSeeds) {
       MapGeneratorConfig config = legacy ? LegacyConfig() : MapGeneratorConfig{};
       config.features.terrain.mode = FeatureMode::Off;  // Anchors at y = 0.
+      config.enterableChance = 0.0f;  // Zipline roofs assume solid prisms.
       const Scene scene = GenerateUrbanMap(seed, config);
       CHECK(SameScene(scene, GenerateUrbanMap(seed, config)));
       CHECK(!scene.ziplines.empty());
@@ -2567,7 +2575,87 @@ void TestPinnedFurnitureFingerprints() {
   }
 }
 
+// Issue #157: obstacles that start at head height don't block the navmesh.
+void TestNavMeshIgnoresOverheadObstacles() {
+  std::vector<Obstacle> obstacles;
+  Obstacle slab;
+  slab.bounds = AABB{glm::vec3(-2.0f, constants::kUnitHeight, -2.0f),
+                     glm::vec3(2.0f, 3.0f, 2.0f)};
+  obstacles.push_back(slab);
+  NavMesh mesh;
+  mesh.Build(obstacles, 10.0f, constants::kAgentRadius, nullptr, nullptr);
+  CHECK(mesh.IsWalkable(0.0f, 0.0f));
+  std::vector<glm::vec3> path;
+  CHECK(mesh.FindPath(glm::vec3(-5.0f, 0.0f, 0.0f), glm::vec3(5.0f, 0.0f, 0.0f), &path));
+  obstacles[0].bounds.min.y = 0.0f;
+  mesh.Build(obstacles, 10.0f, constants::kAgentRadius, nullptr, nullptr);
+  CHECK(!mesh.IsWalkable(0.0f, 0.0f));
+}
+
+// Issue #157: enterable buildings are thin walls with a walkable doorway.
+void TestEnterableBuildingsHaveDoorways() {
+  MapGeneratorConfig c;
+  c.enterableChance = 1.0f;
+  int hollow = 0;
+  bool multi = false;
+  bool wideBay = false;  // Warehouses keep their wide loading bay.
+  std::set<BuildingKind> kinds;
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed, c);
+    for (size_t bi = 0; bi < scene.buildings.size(); ++bi) {
+      const Building& b = scene.buildings[bi];
+      CHECK(!b.floors.empty());
+      if (!b.enterable) continue;
+      ++hollow;
+      kinds.insert(b.kind);
+      CHECK(scene.obstacles[b.obstacle].bounds.min.y >= constants::kUnitHeight);
+      bool lintel = false;
+      glm::vec2 centre(0.0f);
+      const auto& roof = scene.obstacles[b.obstacle].footprint;
+      for (const glm::vec2& p : roof) centre += p;
+      centre /= static_cast<float>(roof.size());
+      for (const Obstacle& o : scene.obstacles) {
+        if (o.building != static_cast<int>(bi)) continue;
+        if (std::fabs(o.bounds.min.y - b.baseY - b.doorHeight) < kEps) lintel = true;
+      }
+      CHECK(lintel);
+      CHECK(b.doorWidth >= 0.9f && b.doorHeight >= constants::kUnitHeight);
+      if (b.kind == BuildingKind::Commercial) wideBay = wideBay || b.doorWidth >= 4.0f;
+      // One overhead slab under every upper storey.
+      int slabs = 0;
+      for (size_t f = 1; f < b.floors.size(); ++f) {
+        for (const Obstacle& o : scene.obstacles) {
+          if (o.building == static_cast<int>(bi) && o.footprint == roof &&
+              std::fabs(o.bounds.max.y - b.floors[f].y0) < kEps) ++slabs;
+        }
+        multi = true;
+      }
+      CHECK(slabs == static_cast<int>(b.floors.size()) - 1);
+      NavMesh mesh;
+      mesh.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
+                 &scene.walkSurfaces);
+      // Narrow interiors vanish under the agent-radius inflation of the walls.
+      // Garages are skipped: their decks/ramps fill the interior.
+      if (b.kind != BuildingKind::Garage &&
+          MinimumPolygonWidth(roof) > 6.0f * constants::kAgentRadius + 2.0f) {
+        CHECK(mesh.IsWalkable(centre.x, centre.y));
+      }
+    }
+  }
+  CHECK(hollow > 0);
+  CHECK(multi);
+  CHECK(wideBay);
+  CHECK(kinds.count(BuildingKind::Residential) > 0);
+  // Zero chance keeps every building solid.
+  MapGeneratorConfig off;
+  off.enterableChance = 0.0f;
+  const Scene solid = GenerateUrbanMap(1u, off);
+  for (const Building& b : solid.buildings) CHECK(!b.enterable);
+}
+
 int main() {
+  TestNavMeshIgnoresOverheadObstacles();
+  TestEnterableBuildingsHaveDoorways();
   TestFeatureFlagsAndStreetGraph();
   TestFurnitureHugsSidewalksAndRespectsClearances();
   TestFurnitureKeepsSidewalksConnected();

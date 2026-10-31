@@ -84,6 +84,18 @@ std::vector<tactics::AABB>& Colliders() {
   return boxes;
 }
 
+// Bridge deck rails (MassingDetail::Kind::DeckRail): thin convex prisms that
+// are not in Scene::obstacles, so they need their own collider. Changing them
+// drops every cached trajectory.
+struct RailCollider {
+  std::vector<glm::vec2> footprint;  // Convex, counter-clockwise.
+  float yLo = 0.0f, yHi = 0.0f;
+};
+std::vector<RailCollider>& Rails() {
+  static std::vector<RailCollider> rails;
+  return rails;
+}
+
 // Ramps, decks and the terrain heightfield, set by the renderer alongside the
 // obstacles. Changing them drops every cached trajectory.
 struct Walkable {
@@ -137,6 +149,42 @@ glm::vec3 PushOutOfWalls(glm::vec3& p, float refY, float r) {
     else if (m == dxMax) { p.x += dxMax; normal = glm::vec3(1, 0, 0); }
     else if (m == dzMin) { p.z -= dzMin; normal = glm::vec3(0, 0, -1); }
     else { p.z += dzMax; normal = glm::vec3(0, 0, 1); }
+  }
+  return normal;
+}
+
+// Pushes a point of radius `r` out of any deck rail it overlaps, back through
+// the face on the side `prev` (its previous position) came from, so a thin
+// rail can't be tunnelled through or the body popped out the far side.
+// Returns the normal used (zero if none).
+glm::vec3 PushOutOfRails(glm::vec3& p, const glm::vec3& prev, float r) {
+  glm::vec3 normal(0.0f);
+  for (const RailCollider& rail : Rails()) {
+    if (p.y > rail.yHi + r || p.y < rail.yLo - r) continue;
+    const size_t n = rail.footprint.size();
+    // Signed distance (outside positive) of p and prev to each edge line.
+    float maxP = -1e30f;
+    float bestPrev = -1e30f;
+    glm::vec2 bestN(0.0f);
+    float bestD = 0.0f;  // Offset of the chosen edge line, from the origin.
+    for (size_t i = 0; i < n; ++i) {
+      const glm::vec2 a = rail.footprint[i], b = rail.footprint[(i + 1) % n];
+      const glm::vec2 e = b - a;
+      const float len = glm::length(e);
+      if (len < 1e-6f) continue;
+      const glm::vec2 en(e.y / len, -e.x / len);  // Outward for CCW.
+      const float d = glm::dot(en, a);
+      maxP = std::max(maxP, glm::dot(en, glm::vec2(p.x, p.z)) - d);
+      const float dp = glm::dot(en, glm::vec2(prev.x, prev.z)) - d;
+      if (dp > bestPrev) { bestPrev = dp; bestN = en; bestD = d; }
+    }
+    if (maxP >= r) continue;  // Clear of the rail (or beyond its end).
+    const float dist = glm::dot(bestN, glm::vec2(p.x, p.z)) - bestD;
+    const float push = r - dist;
+    if (push <= 0.0f) continue;
+    p.x += bestN.x * push;
+    p.z += bestN.y * push;
+    normal = glm::vec3(bestN.x, 0.0f, bestN.y);
   }
   return normal;
 }
@@ -328,7 +376,9 @@ Trajectory Simulate(const Unit& unit) {
       const float gunRefY = gunPos.y;
       gunPos += gunVel * kRagdollStep;
       {
-        const glm::vec3 n = PushOutOfWalls(gunPos, gunRefY, 0.15f);
+        glm::vec3 n = PushOutOfWalls(gunPos, gunRefY, 0.15f);
+        const glm::vec3 rn = PushOutOfRails(gunPos, gunPos - gunVel * kRagdollStep, 0.15f);
+        if (rn != glm::vec3(0.0f)) n = rn;
         const float into = glm::dot(gunVel, n);
         if (into < 0.0f) gunVel -= (1.0f + kGunRestitution) * into * n;
       }
@@ -390,7 +440,9 @@ Trajectory Simulate(const Unit& unit) {
       for (int i = 0; i < kRagJointCount; ++i) {
         const float r = kGroundOffset[i];
         const float refY = prev[i].y;
-        const glm::vec3 n = PushOutOfWalls(pos[i], refY, r);
+        glm::vec3 n = PushOutOfWalls(pos[i], refY, r);
+        const glm::vec3 rn = PushOutOfRails(pos[i], prev[i], r);
+        if (rn != glm::vec3(0.0f)) n = rn;
         if (n != glm::vec3(0.0f)) {
           // Kill the velocity into the wall (Verlet: move prev onto pos along n).
           const float into = glm::dot(pos[i] - prev[i], n);
@@ -438,6 +490,24 @@ void SetRagdollObstacles(const std::vector<tactics::Obstacle>& obstacles) {
                                });
   if (same) return;
   cur = std::move(boxes);
+  Cache().clear();
+}
+
+void SetRagdollRails(const std::vector<tactics::MassingDetail>& massing) {
+  std::vector<RailCollider> rails;
+  for (const tactics::MassingDetail& d : massing) {
+    if (d.kind != tactics::MassingDetail::Kind::DeckRail || d.footprint.size() < 3) continue;
+    rails.push_back({d.footprint, d.y0, d.y1});
+  }
+  std::vector<RailCollider>& cur = Rails();
+  const bool same = rails.size() == cur.size() &&
+                    std::equal(rails.begin(), rails.end(), cur.begin(),
+                               [](const RailCollider& a, const RailCollider& b) {
+                                 return a.footprint == b.footprint && a.yLo == b.yLo &&
+                                        a.yHi == b.yHi;
+                               });
+  if (same) return;
+  cur = std::move(rails);
   Cache().clear();
 }
 

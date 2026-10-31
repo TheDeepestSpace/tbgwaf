@@ -1,11 +1,12 @@
 # Source of truth for the app-level screen flow (Splash -> Game Mode -> Map Select -> gameplay,
-# plus the web-only Room page for online two-player matches).
+# plus the Room screen for online two-player matches, shown only when a game server is
+# configured).
 # Consumed at build time only (never parsed at runtime) by scripts/gen_flow.py,
 # which emits the C++ state enum/transition table and a Mermaid/SVG diagram.
 # Keep to this restricted shape: top-level `initial`, `states` list and
 # `transitions` list of flow-style maps.
-# `room` is rendered by the web page (web/index.html, ?online=1), not by ImGui: the
-# server picks the map, so a room goes straight to gameplay.
+# `room` is an ImGui screen like the others (src/ui/Menu.cpp): New room / join by code.
+# The server picks the map, so a room goes straight to gameplay.
 initial: splash
 states:
   - {id: splash, label: Splash}

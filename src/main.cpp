@@ -142,6 +142,9 @@ EM_JS(char*, tbgwaf_server_room_intent, (), {
   return ptr;
 });
 
+// Back to the page's start screen (drops the connection, fresh game).
+EM_JS(void, tbgwaf_reload_page, (), { window.location.reload(); });
+
 // Module.tbgwafServerSpectate: watch the room read-only (Jev vs Jev pane).
 EM_JS(int, tbgwaf_server_spectate, (), { return Module.tbgwafServerSpectate ? 1 : 0; });
 
@@ -167,6 +170,18 @@ EM_JS(void, tbgwaf_ws_send, (const char* msg), {
     Module.tbgwafSentOnce = true;
     if (Module.tbgwafOnFirstSend) Module.tbgwafOnFirstSend();
   }
+});
+
+// Drops the current connection without raising a "C" event (a refused join
+// goes back to the Room screen rather than showing "Disconnected").
+EM_JS(void, tbgwaf_ws_close, (), {
+  const ws = Module.tbgwafWs;
+  if (ws) {
+    ws.onopen = ws.onclose = ws.onmessage = null;
+    ws.close();
+  }
+  Module.tbgwafWs = null;
+  Module.tbgwafWsQueue = [];
 });
 
 // Returns a malloc'd event (caller frees) or null if none are queued.
@@ -520,6 +535,12 @@ int main() {
   // presentation mirror driven by net::RemoteClient; our team is assigned by
   // the server once an opponent has joined.
   std::unique_ptr<tactics::net::RemoteClient> remote;
+  // A server is configured but no room was named by the page: the in-game
+  // Room screen (Game Mode -> Online) picks one and connects (see
+  // connectOnline). Empty on native builds and when the page names a room.
+  std::string onlineServerUrl;
+  bool connectedFromMenu = false;
+  tactics::ui::RoomForm roomForm;
 #ifdef __EMSCRIPTEN__
   {
     char* urlRaw = tbgwaf_server_url();
@@ -528,21 +549,26 @@ int main() {
     if (!serverUrl.empty()) {
       char* roomRaw = tbgwaf_server_room();
       char* intentRaw = tbgwaf_server_room_intent();
-      remote = std::make_unique<tactics::net::RemoteClient>(&game, roomRaw, intentRaw,
-                                                              tbgwaf_server_spectate() != 0);
+      const bool spectate = tbgwaf_server_spectate() != 0;
+      if (roomRaw[0] == '\0' && intentRaw[0] == '\0' && !spectate && !tbgwaf_auto_enter()) {
+        onlineServerUrl = serverUrl;
+        fixedTeam = Team::Blue;  // One pane; a local mirror until a room is chosen.
+      } else {
+        remote = std::make_unique<tactics::net::RemoteClient>(&game, roomRaw, intentRaw, spectate);
+        fixedTeam = Team::Blue;  // Placeholder until the server's "start".
+        tbgwaf_ws_open(serverUrl.c_str());
+      }
       std::free(roomRaw);
       std::free(intentRaw);
-      fixedTeam = Team::Blue;  // Placeholder until the server's "start".
-      tbgwaf_ws_open(serverUrl.c_str());
     }
   }
 #endif
-  const bool remoteMode = remote != nullptr;
+  bool remoteMode = remote != nullptr;
   const bool networked = fixedTeam.has_value();
   // The Blue instance (or the lone native window) simulates rounds; the Red
   // instance mirrors it during execution. A server-mode client never
   // simulates: the server is the only authority.
-  const bool isSimulator = !remoteMode && (!networked || *fixedTeam == Team::Blue);
+  bool isSimulator = !remoteMode && (!networked || *fixedTeam == Team::Blue);
   const int paneCount = networked ? 1 : kMaxPanes;
   auto paneTeam = [&](int pane) {
     if (networked) return *fixedTeam;
@@ -671,6 +697,17 @@ int main() {
         timeline.Reset(game);
         timelinePlayback.Reset();
         for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
+      }
+      // A room picked in the menu that the server refused (unknown / full):
+      // back to the Room screen with the reason.
+      if (connectedFromMenu && remote->status() == tactics::net::RemoteClient::Status::Rejected) {
+        roomForm.error = remote->lastError();
+        tbgwaf_ws_close();
+        remote.reset();
+        remoteMode = false;
+        isSimulator = true;
+        connectedFromMenu = false;
+        screen = tbgwaf_flow::State::Room;
       }
     } else if (networked) {
       while (char* raw = tbgwaf_channel_next()) {
@@ -841,7 +878,8 @@ int main() {
 
     if (screen != tbgwaf_flow::State::Gameplay) {
       std::optional<tbgwaf_flow::Event> flowEvent =
-          tactics::ui::DrawMenu(screen, windowWidth, windowHeight, &mapSeed);
+          tactics::ui::DrawMenu(screen, windowWidth, windowHeight, &mapSeed,
+                                !onlineServerUrl.empty(), &roomForm);
       // Headless smoke run: walk the menu automatically so gameplay is exercised.
       bool autoEnterGameplay = isSmokeTest;
       bool autoCtf = false;
@@ -853,11 +891,28 @@ int main() {
       if (autoEnterGameplay && !flowEvent) {
         switch (screen) {
           case tbgwaf_flow::State::Splash: flowEvent = tbgwaf_flow::Event::NewGame; break;
+          case tbgwaf_flow::State::Room: break;  // Needs a typed code or a click.
           case tbgwaf_flow::State::GameMode:
             flowEvent = autoCtf ? tbgwaf_flow::Event::SelectCtf : tbgwaf_flow::Event::SelectRegular;
             break;
           default: flowEvent = tbgwaf_flow::Event::SelectUrban; break;
         }
+      }
+      if (flowEvent && (*flowEvent == tbgwaf_flow::Event::CreateRoom ||
+                        *flowEvent == tbgwaf_flow::Event::JoinRoom)) {
+#ifdef __EMSCRIPTEN__
+        // Connect now: "create" has the server pick the code (shown in-game
+        // while waiting); "join" enters an existing room by code. The server
+        // picks the map, so the room goes straight to gameplay.
+        const bool create = *flowEvent == tbgwaf_flow::Event::CreateRoom;
+        remote = std::make_unique<tactics::net::RemoteClient>(
+            &game, create ? "" : roomForm.code, create ? "create" : "join", false);
+        remoteMode = true;
+        isSimulator = false;
+        connectedFromMenu = true;
+        roomForm.error.clear();
+        tbgwaf_ws_open(onlineServerUrl.c_str());
+#endif
       }
       if (flowEvent) {
         if (*flowEvent == tbgwaf_flow::Event::SelectRegular ||
@@ -1115,6 +1170,17 @@ int main() {
           IM_COL32(255, 255, 255, 60), 2.0f);
     }
 
+    if (connectedFromMenu) {
+#ifdef __EMSCRIPTEN__
+      ImGui::SetNextWindowPos(ImVec2(10.0f, 8.0f), ImGuiCond_Always);
+      ImGui::SetNextWindowBgAlpha(0.5f);
+      ImGui::Begin("##leaveroom", nullptr,
+                   ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+      if (ImGui::Button("Leave room")) tbgwaf_reload_page();
+      ImGui::End();
+#endif
+    }
     if (remoteMode) {
       const std::string statusText = remote->StatusText();
       if (!statusText.empty()) {

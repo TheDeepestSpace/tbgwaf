@@ -360,14 +360,15 @@ default only applies to the no-server preview.
 `?solo=1` shows a single pane instead, for two browsers: open
 `index.html?server=ws://localhost:8080&solo=1&room=mygame` in both; the first
 waits (Blue), the second is paired (Red). `?room=` picks the room (default for
-`solo`: one shared room).
+`solo`: none -- use the Room screen or name one).
 
-`?online=1` (or the panel's **Online (2 players)** button) opens the room page:
-**New room** has the server pick an unused 5-character code (shown in the
-canvas while waiting; share it), and **Join** enters an existing room by code
-(unknown or full rooms are refused). Both go to the single-pane `solo` view via
-`?solo=1&intent=create` / `?solo=1&room=CODE&intent=join`; the wire `join`
-message carries `"intent"`, and `waiting` echoes the `room`. Without `?server=` the page runs the in-page demo
+`?online=1` (or the panel's **Online (2 players)** button) opens the single-pane game; its
+own menu (New Game -> **Online (2 players)**, shown only when a server is configured) leads to
+the in-game Room screen: **New room** has the server pick an unused 5-character code (shown
+in-game while waiting; share it), and **Join** enters an existing room by code (unknown or
+full rooms are refused and the Room screen shows why). **Leave room** (top-left) reloads to the
+start screen. The wire `join` message carries `"intent"`, and `waiting` echoes the `room`.
+`?room=NAME` skips the menu and connects straight to that room. Without `?server=` the page runs the in-page demo
 (`?local=1` forces it). A default server can be baked in at build time:
 `emcmake cmake -B build-web -DTBGWAF_SERVER_URL=wss://...` (the query parameter
 still overrides it). An `https://` page can only reach `wss://` (or
@@ -431,7 +432,7 @@ and removes the preview automatically when the PR closes.
 
 ## App flow
 
-Screen flow (Splash -> Game Mode -> Map Select -> Gameplay, plus the web Room page), declared in
+Screen flow (Splash -> Game Mode -> Map Select -> Gameplay, plus the in-game Room screen), declared in
 `flow/app_flow.yaml`. The build regenerates `flow/app_flow.mmd` from it; paste
 that file's contents below if the flow changes.
 

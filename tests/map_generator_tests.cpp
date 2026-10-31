@@ -2567,7 +2567,82 @@ void TestPinnedFurnitureFingerprints() {
   }
 }
 
+void TestTreesStayOnEmptyBlocksAndOutOfGameplay() {
+  std::set<int> variants;
+  for (const MapGeneratorConfig& config : {FlatConfig(), MapGeneratorConfig{}, LegacyConfig()}) {
+    size_t total = 0;
+    for (uint32_t seed : {1u, 7u, 42u, 2024u}) {
+      const Scene scene = GenerateUrbanMap(seed, config);
+      CHECK(scene.trees == GenerateUrbanMap(seed, config).trees);
+      MapGeneratorConfig off = config;
+      off.features.trees.mode = FeatureMode::Off;
+      const Scene bare = GenerateUrbanMap(seed, off);
+      CHECK(bare.trees.empty());
+      CHECK(SameScene(scene, bare));
+      CHECK(scene.ground.heights == bare.ground.heights);
+      const auto sight = SightObstacles(scene), bareSight = SightObstacles(bare);
+      CHECK(sight.size() == bareSight.size());
+      for (size_t i = 0; i < sight.size() && i < bareSight.size(); ++i) {
+        CHECK(sight[i].bounds.min == bareSight[i].bounds.min);
+        CHECK(sight[i].bounds.max == bareSight[i].bounds.max);
+        CHECK(sight[i].footprint == bareSight[i].footprint);
+      }
+      CHECK(SerializeSnapshot(GameLogic(scene).ExportState()) ==
+            SerializeSnapshot(GameLogic(bare).ExportState()));
+      auto blocks = UrbanBlocks(seed, config);
+      if (config.arteryCount == 0) {
+        blocks.clear();
+        for (const auto& lot : UrbanLots(seed, config)) {
+          if (lot.empty) blocks.push_back({lot.x0, lot.x1, lot.z0, lot.z1,
+              {{lot.x0, lot.z0}, {lot.x1, lot.z0}, {lot.x1, lot.z1}, {lot.x0, lot.z1}}});
+        }
+      }
+      std::vector<int> counts(blocks.size());
+      for (const TreeDecoration& tree : scene.trees) {
+        ++total;
+        variants.insert(tree.variant);
+        CHECK(tree.variant >= 0 && tree.variant < 3);
+        const glm::vec2 p(tree.position.x, tree.position.z);
+        CHECK(IsFreeSpot(scene, p.x, p.y));
+        const float y = scene.ground.HeightAt(p.x, p.y) + (config.arteryCount == 0 ? 0.12f : 0.0f);
+        CHECK(std::fabs(tree.position.y - y) < kEps);
+        int containing = 0;
+        for (size_t b = 0; b < blocks.size(); ++b) {
+          const auto& polygon = blocks[b].vertices;
+          if (!PointInConvexPolygon(p, polygon)) continue;
+          ++containing;
+          CHECK(++counts[b] <= 4);
+          const float margin = config.sidewalkWidth + kTreeCanopyRadius * tree.scale;
+          for (size_t e = 0; e < polygon.size(); ++e)
+            CHECK(DistanceToSegment(p, polygon[e], polygon[(e + 1) % polygon.size()]) >= margin);
+          for (const auto& o : scene.obstacles) {
+            if (!FootprintsOverlap(polygon, ObstacleFootprint(o))) continue;
+            // The only permitted obstacle is an existing traffic-sign pole
+            // on the wrapping sidewalk, never furniture in the open block.
+            CHECK(o.kind == ObstacleKind::StreetFurniture);
+            CHECK(std::any_of(scene.props.begin(), scene.props.end(), [&](const auto& prop) {
+              return prop.kind != StreetPropKind::LampPost &&
+                     prop.position.x == o.bounds.Center().x && prop.position.z == o.bounds.Center().z;
+            }));
+            CHECK(!FootprintsOverlap(InsetConvexPolygon(polygon, config.sidewalkWidth),
+                                      ObstacleFootprint(o)));
+          }
+          for (const auto& prop : scene.props)
+            CHECK(!PointInConvexPolygon({prop.position.x, prop.position.z},
+                                        InsetConvexPolygon(polygon, config.sidewalkWidth)));
+        }
+        CHECK(containing == 1);
+      }
+    }
+    CHECK(total > 0);  // Exercise default terrain, flat and legacy placement.
+  }
+  CHECK(variants.size() == 3);
+  CHECK(BuildDefaultScene().trees.empty());
+  CHECK(GenerateHillyMap(7).trees.empty());
+}
+
 int main() {
+  TestTreesStayOnEmptyBlocksAndOutOfGameplay();
   TestFeatureFlagsAndStreetGraph();
   TestFurnitureHugsSidewalksAndRespectsClearances();
   TestFurnitureKeepsSidewalksConnected();

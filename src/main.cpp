@@ -380,7 +380,7 @@ int main() {
     if (mapType == "urban-full") {
       // Every optional detail layer forced on (issue #146).
       for (const char* name :
-           {"lanes", "curbs", "furniture", "terrain", "interiors", "rail", "facades"}) {
+           {"lanes", "curbs", "furniture", "terrain", "interiors", "rail", "facades", "trees"}) {
         tactics::UrbanFeatureByName(&config.features, name)->mode = tactics::FeatureMode::On;
       }
     }

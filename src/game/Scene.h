@@ -63,6 +63,23 @@ struct SpawnHints {
   std::optional<glm::vec2> flag;  // Preferred flag spot (map center).
 };
 
+// Pure decoration: never added to obstacles, sight geometry or walk surfaces.
+// The renderer batches three procedural meshes using these seeded transforms.
+struct TreeDecoration {
+  glm::vec3 position{0.0f};
+  float scale = 1.0f;
+  float yaw = 0.0f;
+  float tint = 1.0f;
+  int variant = 0;
+
+  bool operator==(const TreeDecoration& other) const {
+    return position == other.position && scale == other.scale && yaw == other.yaw &&
+           tint == other.tint && variant == other.variant;
+  }
+};
+// Conservative horizontal extent of every procedural canopy, before scaling.
+constexpr float kTreeCanopyRadius = 2.4f;
+
 struct Scene {
   std::vector<Obstacle> obstacles;
   // Typology of the generated buildings (issue #151): one record per
@@ -89,6 +106,7 @@ struct Scene {
   std::vector<Zipline> ziplines;
   // Rendered street fixtures (issue #150); see StreetProp.
   std::vector<StreetProp> props;
+  std::vector<TreeDecoration> trees;
   std::vector<Unit> units;  // 3 Blue + 3 Red, in this order.
   // Playable area is [-mapHalfExtent, mapHalfExtent]^2 in XZ. Defaults to the
   // hand-authored scene's size; MapGenerator sets a much larger value.

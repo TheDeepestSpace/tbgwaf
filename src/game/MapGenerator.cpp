@@ -36,6 +36,7 @@ namespace {
 //   0x6c57f00du   furniture        feature presence, then curb-side item stations/kinds
 //   0x51674ea1u   traffic control  light-vs-sign draws per junction, street-name corners
 //   0x7d3a94c5u   pier form        T-bent vs twin-column bent draw (ResolvePierForm)
+//   0x74ee270bu   trees            visual-only placement, variant, scale, yaw, tint
 constexpr uint32_t kStreetStream = 0xb10c5eedu;
 constexpr uint32_t kPierFormStream = 0x7d3a94c5u;
 constexpr uint32_t kRampChannelStream = 0x6a09e667u;
@@ -4598,6 +4599,89 @@ void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorCo
   }
 }
 
+void EmitTrees(Scene* scene, const std::vector<UrbanBlock>& blocks,
+               uint32_t seed, const MapGeneratorConfig& c) {
+  if (c.features.trees.mode == FeatureMode::Off) return;
+  Rng rng(seed ^ 0x74ee270bu);
+  for (const UrbanBlock& block : blocks) {
+    const auto& polygon = block.vertices;
+    if (polygon.size() < 3) continue;
+    const auto blockInterior = InsetConvexPolygon(polygon, c.sidewalkWidth);
+    if (blockInterior.size() < 3) continue;
+    // Test the entire block, not just a candidate point: courtyards and gaps
+    // in an otherwise built-up block must stay bare. Include piers, furniture
+    // obstacles and walk surfaces. Corner traffic signs belong to the wrapping
+    // sidewalk; they don't occupy the otherwise empty block interior.
+    bool occupied = false;
+    for (const Obstacle& o : scene->obstacles) {
+      // EmitTrafficControl gives every corner sign a tiny collision pole,
+      // including on park blocks. Keep that existing curb detail intact.
+      const bool cornerSign = o.kind == ObstacleKind::StreetFurniture &&
+          std::any_of(scene->props.begin(), scene->props.end(), [&](const StreetProp& p) {
+            return p.kind != StreetPropKind::LampPost &&
+                   p.position.x == o.bounds.Center().x && p.position.z == o.bounds.Center().z &&
+                   !PointInConvexPolygon({p.position.x, p.position.z}, blockInterior);
+          });
+      if (cornerSign) continue;
+      if (PolygonsOverlap(polygon, ObstacleFootprint(o))) { occupied = true; break; }
+    }
+    for (const StreetProp& p : scene->props)
+      if (PointInConvexPolygon({p.position.x, p.position.z}, blockInterior)) occupied = true;
+    for (const WalkSurface& s : scene->walkSurfaces) {
+      std::vector<glm::vec2> footprint;
+      for (const glm::vec3& v : s.vertices) footprint.emplace_back(v.x, v.z);
+      if (PolygonSignedArea(footprint) < 0.0f) std::reverse(footprint.begin(), footprint.end());
+      if (footprint.size() >= 3 && PolygonsOverlap(polygon, footprint)) occupied = true;
+    }
+    if (occupied) continue;
+
+    const size_t first = scene->trees.size();
+    const int count = rng.Int(2, 4);
+    for (int attempt = 0; attempt < 128 && scene->trees.size() < first + count; ++attempt) {
+      TreeDecoration tree;
+      tree.scale = rng.Float(0.75f, 1.1f);
+      const float radius = kTreeCanopyRadius * tree.scale;
+      // Sequence RNG draws explicitly: argument evaluation order differs
+      // between native compilers and Emscripten.
+      const float x = rng.Float(block.x0, block.x1);
+      const float z = rng.Float(block.z0, block.z1);
+      const glm::vec2 p(x, z);
+      if (!PointInConvexPolygon(p, polygon)) continue;
+      bool clear = true;
+      // Measure the original edges directly: offset-line intersections can
+      // fold back inside a very narrow/sliver block when the inset is too large.
+      for (size_t e = 0; e < polygon.size(); ++e)
+        clear &= PointSegmentDistance(p, polygon[e], polygon[(e + 1) % polygon.size()]) >=
+                 c.sidewalkWidth + radius + 0.25f;
+      for (size_t i = first; i < scene->trees.size(); ++i) {
+        const TreeDecoration& other = scene->trees[i];
+        clear &= glm::distance(p, glm::vec2(other.position.x, other.position.z)) >
+                 radius + kTreeCanopyRadius * other.scale + 0.4f;
+      }
+      // A cable may cross an empty block even if both anchors are outside it.
+      for (const Zipline& line : scene->ziplines) {
+        const glm::vec2 a(line.a.x, line.a.z), b(line.b.x, line.b.z);
+        const glm::vec2 d = b - a;
+        const float t = glm::clamp(glm::dot(p - a, d) / std::max(glm::dot(d, d), 1e-6f),
+                                    0.0f, 1.0f);
+        clear &= glm::distance(p, a + d * t) > radius + 0.4f;
+      }
+      if (!clear) continue;
+      float y = scene->ground.HeightAt(p.x, p.y);
+      // Legacy empty lots are paved across their whole interior.
+      for (const AABB& slab : scene->sidewalks) {
+        if (p.x >= slab.min.x && p.x <= slab.max.x && p.y >= slab.min.z && p.y <= slab.max.z)
+          y = std::max(y, slab.max.y);
+      }
+      tree.position = {p.x, y, p.y};
+      tree.variant = rng.Int(0, 2);
+      tree.yaw = rng.Float(-kPi, kPi);
+      tree.tint = rng.Float(0.88f, 1.12f);
+      scene->trees.push_back(tree);
+    }
+  }
+}
+
 Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   Rng rng(seed);
   Scene scene;
@@ -4624,12 +4708,14 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   EmitTrafficControl(&scene, city, c, seed, groundY);
   PlaceZiplines(&scene, city.blocks, seed, c, roofCount);
   EmitMassing(&scene, parcels, seed);
+  EmitTrees(&scene, city.blocks, seed, c);
   return scene;
 }
 
 }  // namespace
 
 FeatureToggle* UrbanFeatureByName(UrbanFeatures* f, const std::string& name) {
+  if (name == "trees") return &f->trees;
   if (name == "lanes") return &f->lanes;
   if (name == "curbs") return &f->curbs;
   if (name == "furniture") return &f->furniture;
@@ -4957,6 +5043,16 @@ Scene GenerateUrbanMapImpl(uint32_t seed, const MapGeneratorConfig& c) {
 
 Scene GenerateUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   Scene scene = GenerateUrbanMapImpl(seed, c);
+  if (c.arteryCount == 0 && c.features.trees.mode != FeatureMode::Off) {
+    std::vector<UrbanBlock> emptyBlocks;
+    for (const UrbanLot& lot : UrbanLots(seed, c)) {
+      if (!lot.empty) continue;
+      emptyBlocks.push_back({lot.x0, lot.x1, lot.z0, lot.z1,
+                             {{lot.x0, lot.z0}, {lot.x1, lot.z0},
+                              {lot.x1, lot.z1}, {lot.x0, lot.z1}}});
+    }
+    EmitTrees(&scene, emptyBlocks, seed, c);
+  }
   SuggestSpawnHints(&scene);
   return scene;
 }

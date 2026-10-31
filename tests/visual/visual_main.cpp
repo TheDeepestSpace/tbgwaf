@@ -196,6 +196,8 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
                                           : gfx::FovOverlayMode::CpuAnalytic);
   renderer.SetFovProbeHeight(scenario.fovProbeHeight);
   gfx::RenderDebugOptions renderDebug;
+  // Decorative trees are covered separately; keep gameplay goldens unchanged.
+  renderDebug.disableTrees = true;
   // Every scenario renders in the AO view, like the live app default.
   renderDebug.thermal = true;
   renderDebug.thermalBlackHot = scenario.thermalBlackHot;

@@ -187,6 +187,23 @@ int main(int argc, char** argv) {
       cases.push_back(std::move(closeup));
     }
   }
+  // A coach bus stopped mid-street (seed 1 draws one): pins that it stands
+  // square in the lane with parked vehicles kept clear of it.
+  {
+    const tactics::Scene street = tactics::GenerateUrbanMap(1, furnitureConfig);
+    using Model = tactics::StreetFixtureModel;
+    const auto bus = std::find_if(street.obstacles.begin(), street.obstacles.end(),
+                                  [&](const auto& o) { return o.fixtureModel == Model::CoachBus; });
+    if (bus == street.obstacles.end()) {
+      std::fprintf(stderr, "Missing coach bus in seed 1\n");
+      return 1;
+    }
+    // Looking down the street from above, so no frontage hides the bus.
+    MapCase closeup{"city_coach_bus_seed_1", street, 10.0f, /*showNavMesh=*/false,
+                     /*pitchOffset=*/0.25f, /*yawOffset=*/bus->fixtureYaw + 0.35f};
+    closeup.cameraTarget = bus->bounds.Center();
+    cases.push_back(std::move(closeup));
+  }
   // Close views of actual generated fixtures catch a regression back to
   // collision boxes that would be almost invisible in a whole-city golden.
   // Render both normal and thermal: silhouette/detail must work without color.
@@ -194,17 +211,27 @@ int main(int argc, char** argv) {
     const tactics::Scene source = tactics::GenerateUrbanMap(1, furnitureConfig);
     using Model = tactics::StreetFixtureModel;
     const std::pair<Model, const char*> models[] = {
-        {Model::ParkedCar, "car"}, {Model::Bench, "bench"}, {Model::Dumpster, "dumpster"},
-        {Model::TrashBin, "trash_bin"}, {Model::Newsstand, "newsstand"},
-        {Model::Planter, "planter"}};
+        {Model::ParkedCar, "car"}, {Model::Suv, "suv"}, {Model::Pickup, "pickup"},
+        {Model::CoachBus, "coach_bus"}, {Model::Bench, "bench"},
+        {Model::Dumpster, "dumpster"}, {Model::TrashBin, "trash_bin"},
+        {Model::Newsstand, "newsstand"}, {Model::Planter, "planter"}};
     for (const auto& [model, name] : models) {
       const auto found = std::find_if(source.obstacles.begin(), source.obstacles.end(),
                                       [&](const auto& o) { return o.fixtureModel == model; });
-      if (found == source.obstacles.end()) {
+      tactics::Obstacle item;
+      if (found != source.obstacles.end()) {
+        item = *found;
+      } else if (model == Model::CoachBus) {
+        // The bus is a seeded rarity; build its gameplay box directly.
+        const glm::vec3 extent = tactics::StreetFixtureExtent(model);
+        item.bounds = tactics::AABB{glm::vec3(-0.5f * extent.x, 0.0f, -0.5f * extent.z),
+                                    glm::vec3(0.5f * extent.x, extent.y, 0.5f * extent.z)};
+        item.kind = tactics::ObstacleKind::Cover;
+        item.fixtureModel = model;
+      } else {
         std::fprintf(stderr, "Missing generated fixture: %s\n", name);
         return 1;
       }
-      tactics::Obstacle item = *found;
       const glm::vec3 offset(item.bounds.Center().x, item.fixtureBaseY, item.bounds.Center().z);
       item.bounds.min -= offset;
       item.bounds.max -= offset;
@@ -212,9 +239,13 @@ int main(int argc, char** argv) {
       tactics::Scene isolated;
       isolated.mapHalfExtent = 6.0f;
       isolated.obstacles.push_back(item);
+      // Frame each model to its own length: the sedan, SUV and pickup a
+      // little closer than the sidewalk items, the 12 m coach well back.
+      const float zoom = model == Model::CoachBus ? -2.0f
+                         : tactics::IsCurbVehicle(model) ? -12.0f : -14.0f;
       for (bool thermal : {false, true}) {
         MapCase closeup{std::string("street_fixture_") + name + (thermal ? "_thermal" : ""),
-                         isolated, model == Model::ParkedCar ? -12.0f : -14.0f,
+                         isolated, zoom,
                          /*showNavMesh=*/false, /*pitchOffset=*/-0.50f,
                          /*yawOffset=*/item.fixtureYaw};
         closeup.cameraTarget.y = 0.5f;

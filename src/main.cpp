@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -33,6 +34,7 @@
 #include "game/Visibility.h"
 #include "gfx/Camera.h"
 #include "gfx/SceneRenderer.h"
+#include "net/RemoteClient.h"
 #include "AppFlow.h"
 #include "ui/Hud.h"
 #include "ui/Menu.h"
@@ -111,6 +113,88 @@ EM_JS(char*, tbgwaf_channel_next, (), {
   return ptr;
 });
 
+// Server mode (real networking, as opposed to the in-page bus above): the
+// page passes the WebSocket URL as Module.tbgwafServer (and optionally a
+// room name as Module.tbgwafRoom). Returns a malloc'd string (caller frees),
+// empty when unset.
+EM_JS(int, tbgwaf_has_server, (), { return Module.tbgwafServer ? 1 : 0; });
+EM_JS(char*, tbgwaf_server_url, (), {
+  const text = Module.tbgwafServer || "";
+  const size = lengthBytesUTF8(text) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(text, ptr, size);
+  return ptr;
+});
+EM_JS(char*, tbgwaf_server_room, (), {
+  const text = Module.tbgwafRoom || "";
+  const size = lengthBytesUTF8(text) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(text, ptr, size);
+  return ptr;
+});
+
+// "create" / "join" (Module.tbgwafRoomIntent) for the room page; empty otherwise.
+EM_JS(char*, tbgwaf_server_room_intent, (), {
+  const text = Module.tbgwafRoomIntent || "";
+  const size = lengthBytesUTF8(text) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(text, ptr, size);
+  return ptr;
+});
+
+// Back to the page's start screen (drops the connection, fresh game).
+EM_JS(void, tbgwaf_reload_page, (), { window.location.reload(); });
+
+// Module.tbgwafServerSpectate: watch the room read-only (Jev vs Jev pane).
+EM_JS(int, tbgwaf_server_spectate, (), { return Module.tbgwafServerSpectate ? 1 : 0; });
+
+// WebSocket plumbing: events are queued as "O" (open), "C" (closed) and
+// "M<text frame>" and drained by the frame loop.
+EM_JS(void, tbgwaf_ws_open, (const char* url), {
+  const queue = [];
+  Module.tbgwafWsQueue = queue;
+  const ws = new WebSocket(UTF8ToString(url));
+  Module.tbgwafWs = ws;
+  ws.onopen = () => queue.push("O");
+  ws.onclose = () => queue.push("C");
+  ws.onerror = () => {};
+  ws.onmessage = (e) => { if (typeof e.data === "string") queue.push("M" + e.data); };
+});
+
+EM_JS(void, tbgwaf_ws_send, (const char* msg), {
+  const ws = Module.tbgwafWs;
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(UTF8ToString(msg));
+  // Lets a page that runs two clients order their joins (first = Blue).
+  if (!Module.tbgwafSentOnce) {
+    Module.tbgwafSentOnce = true;
+    if (Module.tbgwafOnFirstSend) Module.tbgwafOnFirstSend();
+  }
+});
+
+// Drops the current connection without raising a "C" event (a refused join
+// goes back to the Room screen rather than showing "Disconnected").
+EM_JS(void, tbgwaf_ws_close, (), {
+  const ws = Module.tbgwafWs;
+  if (ws) {
+    ws.onopen = ws.onclose = ws.onmessage = null;
+    ws.close();
+  }
+  Module.tbgwafWs = null;
+  Module.tbgwafWsQueue = [];
+});
+
+// Returns a malloc'd event (caller frees) or null if none are queued.
+EM_JS(char*, tbgwaf_ws_next, (), {
+  const queue = Module.tbgwafWsQueue;
+  if (!queue || queue.length === 0) return 0;
+  const msg = queue.shift();
+  const size = lengthBytesUTF8(msg) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(msg, ptr, size);
+  return ptr;
+});
+
 // CSS size of this instance's own canvas (each client renders into its own
 // <canvas>, so a global "#canvas" selector would not do).
 EM_JS(double, tbgwaf_canvas_css_width, (), {
@@ -124,6 +208,7 @@ EM_JS(int, tbgwaf_ai_enabled, (), { return Module.tbgwafAI ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_paused, (), { return Module.tbgwafAIPaused ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_fallback, (), { return Module.tbgwafAIFallback ? 1 : 0; });
 EM_JS(int, tbgwaf_auto_commit, (), { return Module.tbgwafAutoCommit ? 1 : 0; });
+EM_JS(int, tbgwaf_auto_enter, (), { return Module.tbgwafAutoEnter ? 1 : 0; });
 EM_JS(int, tbgwaf_spectator, (), { return Module.tbgwafSpectator ? 1 : 0; });
 EM_JS(int, tbgwaf_default_ctf, (), { return Module.tbgwafDefaultCtf ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_generation, (), { return Module.tbgwafAIGeneration || 0; });
@@ -436,7 +521,8 @@ int main() {
   bool awaitingPeerSync = false;
   Uint32 peerSyncDeadline = 0;
 #ifdef __EMSCRIPTEN__
-  if (const int requested = tbgwaf_requested_player(); requested >= 0) {
+  if (const int requested = tbgwaf_requested_player();
+      requested >= 0 && !tbgwaf_has_server()) {
     fixedTeam = requested == 0 ? Team::Blue : Team::Red;
     tbgwaf_channel_open();
     tbgwaf_channel_post("H");
@@ -444,10 +530,45 @@ int main() {
     peerSyncDeadline = SDL_GetTicks() + kPeerSyncTimeoutMs;
   }
 #endif
+  // Server mode: this client plays against a remote opponent through the
+  // authoritative server (src/server). The local GameLogic is only a
+  // presentation mirror driven by net::RemoteClient; our team is assigned by
+  // the server once an opponent has joined.
+  std::unique_ptr<tactics::net::RemoteClient> remote;
+  // A server is configured but no room was named by the page: the in-game
+  // Room screen (Game Mode -> Online) picks one and connects (see
+  // connectOnline). Empty on native builds and when the page names a room.
+  std::string onlineServerUrl;
+  bool connectedFromMenu = false;
+  tactics::ui::RoomForm roomForm;
+#ifdef __EMSCRIPTEN__
+  {
+    char* urlRaw = tbgwaf_server_url();
+    const std::string serverUrl(urlRaw);
+    std::free(urlRaw);
+    if (!serverUrl.empty()) {
+      char* roomRaw = tbgwaf_server_room();
+      char* intentRaw = tbgwaf_server_room_intent();
+      const bool spectate = tbgwaf_server_spectate() != 0;
+      if (roomRaw[0] == '\0' && intentRaw[0] == '\0' && !spectate && !tbgwaf_auto_enter()) {
+        onlineServerUrl = serverUrl;
+        fixedTeam = Team::Blue;  // One pane; a local mirror until a room is chosen.
+      } else {
+        remote = std::make_unique<tactics::net::RemoteClient>(&game, roomRaw, intentRaw, spectate);
+        fixedTeam = Team::Blue;  // Placeholder until the server's "start".
+        tbgwaf_ws_open(serverUrl.c_str());
+      }
+      std::free(roomRaw);
+      std::free(intentRaw);
+    }
+  }
+#endif
+  bool remoteMode = remote != nullptr;
   const bool networked = fixedTeam.has_value();
   // The Blue instance (or the lone native window) simulates rounds; the Red
-  // instance mirrors it during execution.
-  const bool isSimulator = !networked || *fixedTeam == Team::Blue;
+  // instance mirrors it during execution. A server-mode client never
+  // simulates: the server is the only authority.
+  bool isSimulator = !remoteMode && (!networked || *fixedTeam == Team::Blue);
   const int paneCount = networked ? 1 : kMaxPanes;
   auto paneTeam = [&](int pane) {
     if (networked) return *fixedTeam;
@@ -519,7 +640,9 @@ int main() {
       jevErrorHold = false;
     }
     if (tbgwaf_take_ai_retry()) jevErrorHold = false;
-    if (networked && tbgwaf_take_restart()) {
+    // A server-mode page restarts by reloading into a fresh room; the local
+    // game is only a mirror and must not be reset here.
+    if (tbgwaf_take_restart() && networked && !remoteMode) {
       // Jev vs Jev defaults to CTF; leaving it restores the menu's choice.
       const bool previewCtf = tbgwaf_default_ctf();
       if (previewCtf) ctfMode = true;
@@ -557,7 +680,36 @@ int main() {
       return mode != InputMode::Executing && mode != InputMode::GameOver;
     };
 #ifdef __EMSCRIPTEN__
-    if (networked) {
+    if (remoteMode) {
+      while (char* raw = tbgwaf_ws_next()) {
+        const std::string event(raw);
+        std::free(raw);
+        if (event == "O") remote->OnOpen();
+        else if (event == "C") remote->OnClose();
+        else if (event.size() > 1 && event[0] == 'M') remote->OnMessage(event.substr(1));
+      }
+      if (remote->team()) fixedTeam = remote->team();
+      if (remote->ConsumeMatchStarted()) {
+        pendingJevRequest.reset();
+        jevBuilder.reset();
+        jevErrorHold = false;
+        lastAutoCommittedRound = -1;
+        timeline.Reset(game);
+        timelinePlayback.Reset();
+        for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
+      }
+      // A room picked in the menu that the server refused (unknown / full):
+      // back to the Room screen with the reason.
+      if (connectedFromMenu && remote->status() == tactics::net::RemoteClient::Status::Rejected) {
+        roomForm.error = remote->lastError();
+        tbgwaf_ws_close();
+        remote.reset();
+        remoteMode = false;
+        isSimulator = true;
+        connectedFromMenu = false;
+        screen = tbgwaf_flow::State::Room;
+      }
+    } else if (networked) {
       while (char* raw = tbgwaf_channel_next()) {
         const std::string msg(raw);
         std::free(raw);
@@ -726,31 +878,49 @@ int main() {
 
     if (screen != tbgwaf_flow::State::Gameplay) {
       std::optional<tbgwaf_flow::Event> flowEvent =
-          tactics::ui::DrawMenu(screen, windowWidth, windowHeight, &mapSeed);
+          tactics::ui::DrawMenu(screen, windowWidth, windowHeight, &mapSeed,
+                                !onlineServerUrl.empty(), &roomForm);
       // Headless smoke run: walk the menu automatically so gameplay is exercised.
       bool autoEnterGameplay = isSmokeTest;
       bool autoCtf = false;
 #ifdef __EMSCRIPTEN__
-      autoEnterGameplay = autoEnterGameplay || aiEnabled;
+      autoEnterGameplay = autoEnterGameplay || aiEnabled || (remoteMode && tbgwaf_auto_enter());
       autoCtf = tbgwaf_default_ctf();
       ctfFromPreview = autoCtf;
 #endif
       if (autoEnterGameplay && !flowEvent) {
         switch (screen) {
           case tbgwaf_flow::State::Splash: flowEvent = tbgwaf_flow::Event::NewGame; break;
+          case tbgwaf_flow::State::Room: break;  // Needs a typed code or a click.
           case tbgwaf_flow::State::GameMode:
             flowEvent = autoCtf ? tbgwaf_flow::Event::SelectCtf : tbgwaf_flow::Event::SelectRegular;
             break;
           default: flowEvent = tbgwaf_flow::Event::SelectUrban; break;
         }
       }
+      if (flowEvent && (*flowEvent == tbgwaf_flow::Event::CreateRoom ||
+                        *flowEvent == tbgwaf_flow::Event::JoinRoom)) {
+#ifdef __EMSCRIPTEN__
+        // Connect now: "create" has the server pick the code (shown in-game
+        // while waiting); "join" enters an existing room by code. The server
+        // picks the map, so the room goes straight to gameplay.
+        const bool create = *flowEvent == tbgwaf_flow::Event::CreateRoom;
+        remote = std::make_unique<tactics::net::RemoteClient>(
+            &game, create ? "" : roomForm.code, create ? "create" : "join", false);
+        remoteMode = true;
+        isSimulator = false;
+        connectedFromMenu = true;
+        roomForm.error.clear();
+        tbgwaf_ws_open(onlineServerUrl.c_str());
+#endif
+      }
       if (flowEvent) {
         if (*flowEvent == tbgwaf_flow::Event::SelectRegular ||
             *flowEvent == tbgwaf_flow::Event::SelectCtf) {
           ctfMode = *flowEvent == tbgwaf_flow::Event::SelectCtf;
         }
-        if (*flowEvent == tbgwaf_flow::Event::SelectUrban ||
-            *flowEvent == tbgwaf_flow::Event::SelectHills) {
+        if (!remoteMode && (*flowEvent == tbgwaf_flow::Event::SelectUrban ||
+                            *flowEvent == tbgwaf_flow::Event::SelectHills)) {
           // The menu's Urban entry uses the seed-driven random overpass mode.
           mapType = *flowEvent == tbgwaf_flow::Event::SelectHills ? "hilly" : "urban-auto";
           game.Reset(makeMap());
@@ -787,6 +957,7 @@ int main() {
     if (!simulationPaused && (isSimulator || game.Mode() != InputMode::Executing)) game.Update(dt);
     // Sighting memory is per-page derived state: tick it unconditionally so
     // a follower (which skips Update() while Executing) still builds it.
+    if (remoteMode) remote->Update(dt);
     game.UpdateSightingMemory(dt);
     for (auto& camera : cameras) camera.Update(dt);
 
@@ -818,7 +989,9 @@ int main() {
       jevBuilder.reset();
     }
 
-    if (aiEnabled && !aiPaused && !jevErrorHold && !awaitingPeerSync &&
+    const bool remoteReady =
+        !remoteMode || remote->status() == tactics::net::RemoteClient::Status::Playing;
+    if (aiEnabled && !aiPaused && !jevErrorHold && !awaitingPeerSync && remoteReady &&
         game.Mode() == InputMode::AwaitingSelection) {
       if (!pendingJevRequest) {
         if (!jevBuilder) {
@@ -849,6 +1022,13 @@ int main() {
 
     // Blue is the only simulator. With no human player (Jev vs Jev) it commits once as
     // soon as every living figure has a plan; human modes commit manually.
+    // A server-mode client commits its own team's plans the same way; the
+    // server runs the round once both clients have.
+    if (remoteMode && remoteReady && tbgwaf_auto_commit() && !aiPaused &&
+        game.CanCommitRound() && lastAutoCommittedRound != game.RoundNumber()) {
+      lastAutoCommittedRound = game.RoundNumber();
+      remote->RequestCommit();
+    }
     if (networked && isSimulator && tbgwaf_auto_commit() && !aiPaused &&
         game.CanCommitRound() && lastAutoCommittedRound != game.RoundNumber()) {
       if (autoCommitHold >= kAutoCommitDelay) {
@@ -879,11 +1059,16 @@ int main() {
     // after game over) neither pane takes action input. Camera
     // orbit/zoom/pan is never gated -- either player can look around their
     // own pane at any time.
-    const bool planning = !replayActive && isPlanningMode(game.Mode()) && !awaitingPeerSync;
+    // A spectator never plans, so it is not "playing" for input purposes.
+    const bool remotePlaying =
+        !remoteMode || (remote->status() == tactics::net::RemoteClient::Status::Playing &&
+                        !remote->spectating());
+    const bool planning =
+        !replayActive && isPlanningMode(game.Mode()) && !awaitingPeerSync && remotePlaying;
     // The HUD reflects whatever state is on screen (replay or live); its
     // button presses are only applied to the live game when no replay is
     // active (replay is strictly view-only).
-    const bool hudPlanning = isPlanningMode(displayGame.Mode()) && !awaitingPeerSync;
+    const bool hudPlanning = isPlanningMode(displayGame.Mode()) && !awaitingPeerSync && remotePlaying;
 #ifdef __EMSCRIPTEN__
     const bool humanPlanning = planning && !aiEnabled;
     const bool hudHumanPlanning = hudPlanning && !aiEnabled;
@@ -927,7 +1112,9 @@ int main() {
       // into the live match (return to Live first).
       if (!replayActive) {
         if (hud.newMatch) {
-          if (isSimulator) {
+          if (remoteMode) {
+            remote->RequestNewMatch();
+          } else if (isSimulator) {
             game.Reset(makeMap());
             timeline.Reset(game);
             timelinePlayback.Reset();
@@ -940,7 +1127,9 @@ int main() {
           }
         }
         if (hud.commit) {
-          if (isSimulator) {
+          if (remoteMode) {
+            remote->RequestCommit();
+          } else if (isSimulator) {
             game.CommitRound();
           } else {
 #ifdef __EMSCRIPTEN__
@@ -979,6 +1168,33 @@ int main() {
           ImVec2(static_cast<float>(paneRects[1].x), 0.0f),
           ImVec2(static_cast<float>(paneRects[1].x), static_cast<float>(windowHeight)),
           IM_COL32(255, 255, 255, 60), 2.0f);
+    }
+
+    if (connectedFromMenu) {
+#ifdef __EMSCRIPTEN__
+      ImGui::SetNextWindowPos(ImVec2(10.0f, 8.0f), ImGuiCond_Always);
+      ImGui::SetNextWindowBgAlpha(0.5f);
+      ImGui::Begin("##leaveroom", nullptr,
+                   ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+      if (ImGui::Button("Leave room")) tbgwaf_reload_page();
+      ImGui::End();
+#endif
+    }
+    if (remoteMode) {
+      const std::string statusText = remote->StatusText();
+      if (!statusText.empty()) {
+        ImGui::SetNextWindowPos(
+            ImVec2(static_cast<float>(paneRects[0].x + paneRects[0].width / 2),
+                   static_cast<float>(windowHeight) - 12.0f),
+            ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+        ImGui::SetNextWindowBgAlpha(0.7f);
+        ImGui::Begin("##netstatus", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::TextUnformatted(statusText.c_str());
+        ImGui::End();
+      }
     }
 
     // --- Dispatch deferred input, now that WantCaptureMouse reflects the UI
@@ -1140,7 +1356,9 @@ int main() {
     }
     // Publish state changes: the simulator ships the whole match, the
     // follower just its plans (only while planning).
-    if (networked && !awaitingPeerSync && (isSimulator || isPlanningMode(game.Mode()))) {
+    if (remoteMode) {
+      for (const std::string& frame : remote->TakeOutgoing()) tbgwaf_ws_send(frame.c_str());
+    } else if (networked && !awaitingPeerSync && (isSimulator || isPlanningMode(game.Mode()))) {
       std::string state = SerializeSnapshot(game.ExportState());
       if (forceBroadcast || state != lastSentState) {
         tbgwaf_channel_post(((isSimulator ? "S " : "P ") + state).c_str());

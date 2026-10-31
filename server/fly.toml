@@ -1,0 +1,29 @@
+# Template for every backend app (master + one per PR). The app name is always
+# passed with `flyctl deploy --app`, so the value below is only a placeholder.
+app = "tbgwaf-server"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Scale to zero when nobody is connected: an idle backend costs ~nothing, so
+  # one app per PR is cheap. Match state is in memory and is lost on stop.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

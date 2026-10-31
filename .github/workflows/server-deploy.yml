@@ -1,0 +1,81 @@
+name: Deploy game server (Fly.io)
+
+# One Fly app per open PR (tbgwaf-server-pr-<N>) plus one for master
+# (tbgwaf-server). Apps scale to zero, so idle ones cost ~nothing, and each PR
+# runs its own server build (protocol changes can't clash with other PRs).
+# Cleanup: PR closed -> destroy here; nightly -> server-janitor.yml.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - src/**
+      - server/**
+      - CMakeLists.txt
+      - .github/workflows/server-deploy.yml
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-deploy-${{ github.event.pull_request.number || 'master' }}
+  cancel-in-progress: false
+
+env:
+  FLY_API_TOKEN: ${{ secrets.TBGWAF_FLYIO_TBGWAF_ORG_TOKEN }}
+  FLY_ORG: tbgwaf
+  FLY_APP: ${{ github.event_name == 'pull_request' && format('tbgwaf-server-pr-{0}', github.event.pull_request.number) || 'tbgwaf-server' }}
+
+jobs:
+  deploy:
+    # Forked PRs get no secrets; previews are limited to same-repo branches.
+    if: github.event_name != 'pull_request' || (github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Skip if this ref has no server yet
+        id: has_server
+        run: |
+          if [ -f server/Dockerfile ]; then echo "present=true" >> "$GITHUB_OUTPUT"
+          else echo "::notice::server/Dockerfile not found; nothing to deploy"; echo "present=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Require secrets
+        if: steps.has_server.outputs.present == 'true'
+        run: '[ -n "$FLY_API_TOKEN" ] || { echo "::error::TBGWAF_FLYIO_TBGWAF_ORG_TOKEN is not available"; exit 1; }'
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+        if: steps.has_server.outputs.present == 'true'
+
+      - name: Create app if missing
+        if: steps.has_server.outputs.present == 'true'
+        run: |
+          flyctl apps list --org "$FLY_ORG" --json | jq -e --arg a "$FLY_APP" 'any(.[]; .Name == $a)' > /dev/null \
+            || flyctl apps create "$FLY_APP" --org "$FLY_ORG"
+
+      - name: Deploy
+        if: steps.has_server.outputs.present == 'true'
+        run: |
+          flyctl deploy --remote-only --app "$FLY_APP" --config server/fly.toml --dockerfile server/Dockerfile .
+          echo "Server URL: wss://$FLY_APP.fly.dev (open the page with ?server=wss://$FLY_APP.fly.dev)" >> "$GITHUB_STEP_SUMMARY"
+
+  cleanup:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Destroy PR app
+        run: |
+          [ -n "$FLY_API_TOKEN" ] || { echo "::error::TBGWAF_FLYIO_TBGWAF_ORG_TOKEN is not available"; exit 1; }
+          if flyctl apps list --org "$FLY_ORG" --json | jq -e --arg a "$FLY_APP" 'any(.[]; .Name == $a)' > /dev/null; then
+            flyctl apps destroy "$FLY_APP" --yes
+          else
+            echo "$FLY_APP does not exist; nothing to clean up"
+          fi

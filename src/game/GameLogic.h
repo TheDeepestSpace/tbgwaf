@@ -204,17 +204,24 @@ class GameLogic {
   // Issue #267: figures may not overlap while walking. Sweeps the round's
   // timeline (fixed 1/40 s steps; planned movers walk their path from t = 0,
   // everyone else stands) and reports whether `mover` on `path` would come
-  // within two agent radii of another living figure. Moves are rejected at
-  // plan time (ClickGround ignores them, the hover preview turns invalid);
-  // CanCommitRound is also false while any planned move overlaps (e.g. from
-  // plans imported from the other side). Unplanned teammates are ignored
-  // (enemies without a plan count as standing). Crossing paths are rejected, not
-  // time-offset: the plan must route around the other figure's path.
+  // within two agent radii of another living figure. Unplanned teammates are
+  // ignored (enemies without a plan count as standing).
+  //
+  // Rather than simply rejecting such moves, planning routes around the
+  // other figures' already-planned movements in space *and time*: the move
+  // frontier is computed against their trajectories (MovingBlockers), so the
+  // displayed boundary is the genuinely allowed range -- cells another
+  // figure's plan still occupies when the mover would stop there are carved
+  // out -- and a click whose straight path would collide is re-routed along
+  // the time-aware field (PlanDodgeLeg) instead of ignored. Only when no
+  // such route exists is the click rejected (hover preview turns invalid).
+  // CanCommitRound stays false while any planned move overlaps (e.g. from
+  // plans imported from the other side).
   bool PathOverlapsFigure(const Unit& mover, const std::vector<glm::vec3>& path,
                           const std::vector<PathRide>& rides) const;
   bool HasPlanOverlap() const;
-  // True when the hover preview is invalid only because it would overlap
-  // another figure (for UI messaging).
+  // True when the hover preview is invalid only because every route to it
+  // would overlap another figure's planned movement (for UI messaging).
   bool MovePreviewBlockedByFigure() const { return movePreviewBlocked_; }
   // True while any killed unit is still mid-fall *and* time is passing for it
   // (a round executing, or the match over). Between rounds falls are frozen
@@ -623,6 +630,20 @@ class GameLogic {
   // zipline. False if neither fits. Fills `rides` (empty for a walk).
   bool PlanLeg(const Unit& mover, const glm::vec3& from, const glm::vec3& goal,
                std::vector<glm::vec3>* path, std::vector<PathRide>* rides);
+  // The other figures' planned movements as moving blockers for the
+  // time-aware reach field (issue #267): same inclusion rules as
+  // PathOverlapsFigure, sampled every kOverlapStep over the round. Empty
+  // trajectories when the overlap check is disabled. `origin` is where the
+  // mover starts the leg (figures already overlapping it at t = 0 are
+  // exempt, matching the sweep); `distanceOffset` see MovingBlockers.
+  MovingBlockers BuildMovingBlockers(const Unit& mover, const glm::vec3& origin,
+                                     float distanceOffset) const;
+  // Fallback for a first-leg walk whose straight path would overlap another
+  // figure's planned movement: extracts the time-aware route to `goal` from
+  // the current move frontier's parent grid, pulls it taut as far as the
+  // timing allows, and validates it with PathOverlapsFigure. False when the
+  // frontier has no valid route (the click is then rejected).
+  bool PlanDodgeLeg(const Unit& mover, const glm::vec3& goal, std::vector<glm::vec3>* outPath);
   void ClearMoveOverlays();
 
   // Squad-playbook pass, run once per executing tick after every mover has
@@ -659,6 +680,7 @@ class GameLogic {
   ReachField moveFrontier_;
   bool moveFrontierEnabled_ = true;
   bool overlapCheckEnabled_ = true;
+  int frontierRevision_ = 0;  // Stamped into recomputed fields (ReachField::revision).
   std::vector<ZiplineFrontier> ziplineFrontiers_;
   std::vector<NavMesh> ziplineMeshes_;  // Parallel to ziplineFrontiers_: mesh around each exit.
   int ziplineUnitId_ = -1;

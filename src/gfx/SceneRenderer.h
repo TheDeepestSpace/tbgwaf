@@ -204,6 +204,7 @@ class SceneRenderer {
   const tactics::ReachField* frontierKeyField_ = nullptr;
   glm::vec2 frontierKeyOrigin_{0.0f};
   float frontierKeyBudget_ = -1.0f;
+  int frontierKeyRevision_ = -1;  // Field contents change with blockers' plans.
   int frontierKeyThermal_ = 0;  // 0 off, 1 white-hot, 2 black-hot.
   ColorTriangleMesh ziplineFill_;
   LineMesh ziplineBorder_;

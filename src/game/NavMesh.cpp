@@ -387,11 +387,33 @@ const std::vector<int>& NavMesh::SurfaceCandidates(float x, float z) const {
   return surfaceGrid_[static_cast<size_t>(gz) * gridNx_ + gx];
 }
 
-ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, float step) const {
+ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, float step,
+                                      const MovingBlockers* blockers) const {
   ReachField field;
   field.step = step;
   field.budget = budget;
   if (budget <= 0.0f || step <= 0.0f) return field;
+  if (blockers && (blockers->trajectories.empty() || blockers->dt <= 0.0f ||
+                   blockers->speed <= 0.0f)) {
+    blockers = nullptr;
+  }
+  // Blocker position when the mover has walked `distance` of the field.
+  const auto blockerSampleAt = [&](const std::vector<glm::vec3>& traj, float distance) {
+    const float t = (blockers->distanceOffset + distance) / blockers->speed;
+    const size_t i = static_cast<size_t>(std::max(0L, std::lround(t / blockers->dt)));
+    return traj[std::min(i, traj.size() - 1)];
+  };
+  const auto blockedAt = [&](const glm::vec3& p, float distance) {
+    for (const auto& traj : blockers->trajectories) {
+      if (traj.empty()) continue;
+      const glm::vec3 s = blockerSampleAt(traj, distance);
+      if (glm::length(glm::vec2(p.x - s.x, p.z - s.z)) < blockers->radius &&
+          std::fabs(p.y - s.y) < blockers->height) {
+        return true;
+      }
+    }
+    return false;
+  };
   const int startSurface = FindWalkSurfaceContaining(start.x, start.z, start.y);
   if (startSurface < 0 && !IsWalkable(start.x, start.z)) return field;
 
@@ -403,6 +425,7 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
   const float inf = std::numeric_limits<float>::infinity();
   field.dist.assign(static_cast<size_t>(field.nx) * field.nz, inf);
   field.surfaceY.resize(field.dist.size(), 0.0f);
+  field.parent.assign(field.dist.size(), -1);
   for (int iz = 0; iz < field.nz; ++iz) {
     for (int ix = 0; ix < field.nx; ++ix) {
       const float x = field.minX + ix * field.step;
@@ -532,7 +555,14 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
           clear = LineOfSightClear(from, to, paddedFootprints_);
         }
         if (!clear) continue;
+        if (blockers) {
+          // Space-time gate: the step must keep clear of every moving figure
+          // both at its end and midpoint, at the times the mover is there.
+          const glm::vec3 mid(0.5f * (from.x + to.x), midY, 0.5f * (from.z + to.z));
+          if (blockedAt(to, nd) || blockedAt(mid, 0.5f * (d + nd))) continue;
+        }
         field.dist[jdx] = nd;
+        field.parent[jdx] = idx;
         open.push({nd, jdx});
       }
     }
@@ -611,6 +641,50 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
         if (distance <= budget && (startSurface >= 0 || distance < field.dist[idx] + 0.5f)) {
           field.dist[idx] = distance;
           field.surfaceY[idx] = goal.y;
+          field.parent[idx] = -1;  // Priced over the surface graph, not this grid.
+        }
+      }
+    }
+  }
+
+  if (blockers) {
+    // Endpoint pass: a mover stopping on a node stands there for the rest of
+    // the round, so the node is no valid destination if any blocker comes
+    // within radius after the mover's arrival. Trajectory bounding boxes
+    // (inflated by the radius) keep this pass to the nodes near a blocker.
+    field.endpointBlocked.assign(field.dist.size(), 0);
+    std::vector<glm::vec4> trajBounds;  // (xMin, zMin, xMax, zMax)
+    trajBounds.reserve(blockers->trajectories.size());
+    for (const auto& traj : blockers->trajectories) {
+      glm::vec4 b(inf, inf, -inf, -inf);
+      for (const glm::vec3& s : traj) {
+        b.x = std::min(b.x, s.x - blockers->radius);
+        b.y = std::min(b.y, s.z - blockers->radius);
+        b.z = std::max(b.z, s.x + blockers->radius);
+        b.w = std::max(b.w, s.z + blockers->radius);
+      }
+      trajBounds.push_back(b);
+    }
+    for (int iz = 0; iz < field.nz; ++iz) {
+      for (int ix = 0; ix < field.nx; ++ix) {
+        const int idx = iz * field.nx + ix;
+        if (field.dist[idx] > budget) continue;
+        const glm::vec3 p(field.minX + ix * step, field.surfaceY[idx], field.minZ + iz * step);
+        const float arrival = (blockers->distanceOffset + field.dist[idx]) / blockers->speed;
+        const size_t from = static_cast<size_t>(
+            std::max(0L, std::lround(arrival / blockers->dt)));
+        for (size_t k = 0; k < blockers->trajectories.size() && !field.endpointBlocked[idx]; ++k) {
+          const auto& traj = blockers->trajectories[k];
+          if (traj.empty()) continue;
+          const glm::vec4& b = trajBounds[k];
+          if (p.x < b.x || p.z < b.y || p.x > b.z || p.z > b.w) continue;
+          for (size_t i = std::min(from, traj.size() - 1); i < traj.size(); ++i) {
+            if (glm::length(glm::vec2(p.x - traj[i].x, p.z - traj[i].z)) < blockers->radius &&
+                std::fabs(p.y - traj[i].y) < blockers->height) {
+              field.endpointBlocked[idx] = 1;
+              break;
+            }
+          }
         }
       }
     }

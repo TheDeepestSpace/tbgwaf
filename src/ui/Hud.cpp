@@ -257,7 +257,7 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
                          "Planned paths make figures overlap; re-plan a move.");
     } else if (game.MovePreviewBlockedByFigure()) {
       ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1.0f),
-                         "Blocked: path would overlap another figure.");
+                         "Blocked: no route avoids the other figures' moves.");
     }
     ImGui::BeginDisabled(!game.CanCommitRound());
     if (Button("Commit Round")) actions.commit = true;

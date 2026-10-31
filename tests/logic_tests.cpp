@@ -577,9 +577,12 @@ void MakePassive(GameLogic& game) {
   game.SetPlaybook(Team::Red, SquadPlaybook::Passive());
 }
 
-// Issue #267: planned walks must not make figures overlap.
+// Issue #267: planned walks must not make figures overlap. Where a route
+// around the other figures' planned movements exists, planning re-routes
+// onto it; only destinations with no valid route are rejected.
 void TestMovePlansRejectFigureOverlap() {
-  // Simultaneous arrival at the same spot is rejected; a disjoint one is not.
+  // A destination another figure stops on stays rejected outright: wherever
+  // the mover routes, both would stand there once the round ends.
   {
     GameLogic game(LegacyScene());
     MakePassive(game);
@@ -603,7 +606,8 @@ void TestMovePlansRejectFigureOverlap() {
     CHECK(game.FindUnit(4)->plan.type == PlannedActionType::Move);
     CHECK(!game.HasPlanOverlap());
   }
-  // A figure standing still blocks paths through (or ending beside) it.
+  // A figure standing still: destinations beside it stay rejected, while a
+  // destination past it now plans a detour around it instead of failing.
   {
     GameLogic game(LegacyScene());
     MakePassive(game);
@@ -611,12 +615,83 @@ void TestMovePlansRejectFigureOverlap() {
     game.ChoosePass();
     game.ClickUnit(1, Team::Blue);  // At (-8, 0).
     game.ChooseMove();
+    game.ClickGround(glm::vec3(-8.0f, 0.0f, 3.5f), Team::Blue);  // 0.5 from the stander.
+    CHECK(game.FindUnit(1)->plan.type == PlannedActionType::None);
+    game.HoverGround(glm::vec3(-8.0f, 0.0f, 6.0f), Team::Blue);
+    CHECK(game.MovePreviewValid());  // Preview already shows the detour.
     game.ClickGround(glm::vec3(-8.0f, 0.0f, 6.0f), Team::Blue);
-    CHECK(game.FindUnit(1)->plan.type == PlannedActionType::None);
-    game.ClickGround(glm::vec3(-8.0f, 0.0f, 3.5f), Team::Blue);
-    CHECK(game.FindUnit(1)->plan.type == PlannedActionType::None);
-    game.ClickGround(glm::vec3(-6.0f, 0.0f, 2.0f), Team::Blue);
+    const Unit* mover = game.FindUnit(1);
+    CHECK(mover->plan.type == PlannedActionType::Move);
+    CHECK(!game.HasPlanOverlap());
+    // The leg detours around unit 2 rather than running straight through it.
+    float length = 0.0f;
+    for (size_t i = 0; i + 1 < mover->plan.movePath.size(); ++i) {
+      length += glm::distance(mover->plan.movePath[i], mover->plan.movePath[i + 1]);
+    }
+    CHECK(length > 6.05f);
+    CHECK(glm::distance(mover->plan.movePath.back(), glm::vec3(-8.0f, 0.0f, 6.0f)) < 0.7f);
+  }
+  // Two figures walking head-on along the same line: the second plan
+  // sidesteps the oncoming walker in time instead of being rejected.
+  {
+    GameLogic game(LegacyScene());
+    MakePassive(game);
+    game.ClickUnit(2, Team::Blue);  // From (-8, 4) down the lane unit 1 walks up.
+    game.ChooseMove();
+    game.ClickGround(glm::vec3(-8.0f, 0.0f, 0.5f), Team::Blue);
+    game.FinishMovePlan();
+    CHECK(game.FindUnit(2)->plan.type == PlannedActionType::Move);
+    game.ClickUnit(1, Team::Blue);  // At (-8, 0), heading to (-8, 8).
+    game.ChooseMove();
+    game.ClickGround(glm::vec3(-8.0f, 0.0f, 8.0f), Team::Blue);
     CHECK(game.FindUnit(1)->plan.type == PlannedActionType::Move);
+    CHECK(!game.HasPlanOverlap());
+  }
+}
+
+// Issue #267 rework: the move frontier itself accounts for the other
+// figures' planned movements, carving out what stays occupied and keeping
+// what is vacated in time.
+void TestMoveFrontierAccountsForPlannedFigures() {
+  const auto nodeAt = [](const ReachField& f, float x, float z) {
+    return std::make_pair(static_cast<int>(std::lround((x - f.minX) / f.step)),
+                          static_cast<int>(std::lround((z - f.minZ) / f.step)));
+  };
+  // A standing figure carves a hole: its spot is no destination, but ground
+  // past it stays reachable by routing around.
+  {
+    GameLogic game(LegacyScene());
+    MakePassive(game);
+    game.ClickUnit(2, Team::Blue);  // Stands (passes) at (-8, 4).
+    game.ChoosePass();
+    game.ClickUnit(1, Team::Blue);  // At (-8, 0).
+    game.ChooseMove();
+    const ReachField* f = game.MoveFrontier();
+    CHECK(f != nullptr);
+    const auto onStander = nodeAt(*f, -8.0f, 4.0f);
+    CHECK(!f->Reached(onStander.first, onStander.second));
+    const auto past = nodeAt(*f, -8.0f, 6.0f);
+    CHECK(f->Reached(past.first, past.second));
+    CHECK(f->Dist(past.first, past.second) > 6.0f);  // Routed around, not through.
+  }
+  // A figure walking away vacates its spot in time: the same cell is a valid
+  // destination because the mover only gets there after the figure has left.
+  {
+    GameLogic game(LegacyScene());
+    MakePassive(game);
+    game.ClickUnit(2, Team::Blue);
+    game.ChooseMove();
+    game.ClickGround(glm::vec3(-8.0f, 0.0f, 12.0f), Team::Blue);  // Walks off +z.
+    game.FinishMovePlan();
+    game.ClickUnit(1, Team::Blue);
+    game.ChooseMove();
+    const ReachField* f = game.MoveFrontier();
+    CHECK(f != nullptr);
+    const auto vacated = nodeAt(*f, -8.0f, 4.0f);
+    CHECK(f->Reached(vacated.first, vacated.second));
+    game.ClickGround(glm::vec3(-8.0f, 0.0f, 4.0f), Team::Blue);
+    CHECK(game.FindUnit(1)->plan.type == PlannedActionType::Move);
+    CHECK(!game.HasPlanOverlap());
   }
 }
 
@@ -3526,6 +3601,7 @@ int main() {
   TestRoundPlanningTeamGating();
   TestRoundCommitRequiresBothTeamsPlanned();
   TestMovePlansRejectFigureOverlap();
+  TestMoveFrontierAccountsForPlannedFigures();
   TestRoundExecutesBothTeamsMovesConcurrently();
   TestShootRowsResolveSimultaneouslyAcrossTeams();
   TestMutualEliminationIsDraw();

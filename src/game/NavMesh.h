@@ -133,7 +133,7 @@ class NavMesh {
   const std::vector<WalkSurface>& WalkSurfaces() const { return walkSurfaces_; }
 
  private:
-  void BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegion& region,
+  void BuildGroundMesh(const std::vector<Obstacle>& obstacles, const NavRegion& region,
                         float agentRadius);
   void AddClimbConnections(const std::vector<Obstacle>& obstacles, float agentRadius);
 

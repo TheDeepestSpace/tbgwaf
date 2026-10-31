@@ -77,13 +77,13 @@ bool ParseFeatureMode(const std::string& text, FeatureMode* mode);
 enum class BlockCharacter { Auto, Mixed, Downtown, Residential, Industrial };
 bool ParseBlockCharacter(const std::string& text, BlockCharacter* character);
 
-// Tuning for GenerateUrbanMap. Defaults give a 4x4 city of ~26-unit average
-// blocks (~144 units across, ~4.8x the default scene's 30). The overall
+// Tuning for GenerateUrbanMap. Defaults give an 8x8 city of ~26-unit average
+// blocks (~288 units across, ~9.6x the default scene's 30). The overall
 // extent is fixed by (blocks, blockSize, streetWidth); per-seed variation
 // redistributes it between blocks and streets.
 struct MapGeneratorConfig {
-  int blocksX = 4;
-  int blocksZ = 4;
+  int blocksX = 8;
+  int blocksZ = 8;
   float blockSize = 26.0f;      // Average block footprint; real sizes vary per column/row.
   float streetWidth = 8.0f;     // Average corridor between blocks; rim streets use exactly this.
   float streetWidthMin = 0.75f; // Interior street width range, as a multiple of streetWidth.
@@ -98,13 +98,20 @@ struct MapGeneratorConfig {
   // block's character; floor count/height per kind set the building height.
   BlockCharacter character = BlockCharacter::Auto;
   int towerCount = 2;           // Tall landmark buildings scattered across the city.
-  float towerMinHeight = 14.0f;
-  float towerMaxHeight = 20.0f;
+  // Arterial city: residential/mixed/office buildings follow a smooth height
+  // field, so similar heights cluster, up to this cap (maxBuildingHeight
+  // still bounds the other kinds).
+  float skylineMaxHeight = 24.0f;
+  float towerMinHeight = 28.0f;
+  float towerMaxHeight = 40.0f;
   float gapWidth = 3.0f;        // Passable alley between two buildings (> 2 * kAgentRadius).
   float gapProbability = 0.45f; // Chance a junction between adjacent buildings is a gap.
   // Hierarchical street layout. Set arteryCount=0 for the original orthogonal
   // grid generator; the default lays one oblique boundary-to-boundary artery.
   int arteryCount = 1;           // 1 oblique through-road; >=2 adds a wide branching avenue.
+  // Additional arteries (0-2) widened out of the avenues parallel to the main
+  // one, ramping through levels like it; -1 draws 0-2 per seed (half 0).
+  int extraArteries = -1;
   float arteryWidth = 14.0f;
   float localStreetWidth = 6.0f;
   float localStreetSkew = 0.45f; // Max radians a cross street deviates from square to the artery.
@@ -158,6 +165,11 @@ struct MapGeneratorConfig {
 struct UrbanBlock {
   float x0, x1, z0, z1;
   std::vector<glm::vec2> vertices;
+  // Long blocks left behind by a trimmed local street either split into
+  // smaller blocks (divided by a short local street segment) or use this
+  // angled, detached apartment-row layout.
+  bool apartmentRow = false;
+  bool empty = false;  // Left unbuilt (the vacant half of a tight long block).
 };
 
 struct UrbanRoad {
@@ -244,12 +256,14 @@ struct UrbanLot { float x0, x1, z0, z1; bool empty, notch; };
 std::vector<UrbanLot> UrbanLots(uint32_t seed, const MapGeneratorConfig& config = {});
 
 // A parcel (issue #151, roadmap 3.1): one buildable lot of a block's frontage
-// ring (or slab row), the unit the plan sizes and counts buildings by.
+// ring (or detached apartment row), the unit the plan sizes and counts
+// buildings by.
 // `footprint` is the building's convex outline, counter-clockwise; edge
-// `frontageEdge` (footprint[i] -> footprint[i+1]) lies on the block's
-// building line along the street whose class is `street`. `depth` is the
-// footprint's extent behind the frontage; `corner` marks a piece at a block
-// corner (two street frontages). Buildings and parcels correspond 1:1:
+// `frontageEdge` (footprint[i] -> footprint[i+1]) normally lies on the block's
+// building line along the street whose class is `street`; a detached apartment
+// uses its principal long facade instead. `depth` is the footprint's extent
+// behind the frontage; `corner` marks a piece at a block corner (two street
+// frontages). Buildings and parcels correspond 1:1:
 // Scene::buildings[i].parcel == i and GenerateUrbanMap's obstacle for
 // parcel i has that footprint.
 struct UrbanParcel {

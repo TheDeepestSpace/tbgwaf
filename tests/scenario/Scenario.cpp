@@ -97,6 +97,9 @@ Scene ParseScene(const YAML::Node& root) {
       const std::string type = genNode["type"] ? genNode["type"].as<std::string>() : "urban";
       if (type == "urban") {
         MapGeneratorConfig config;
+        // Scenario coordinates were authored on the pre-#224 4x4 city.
+        config.blocksX = config.blocksZ = 4;
+        if (genNode["blocks"]) config.blocksX = config.blocksZ = genNode["blocks"].as<int>();
         if (genNode["arteries"]) config.arteryCount = genNode["arteries"].as<int>();
         if (genNode["artery_width"]) config.arteryWidth = genNode["artery_width"].as<float>();
         if (genNode["local_street_width"]) {
@@ -133,6 +136,8 @@ Scene ParseScene(const YAML::Node& root) {
           }
         }
         if (genNode["terrain_levels"]) config.terrainLevelCount = genNode["terrain_levels"].as<int>();
+        // `extra_arteries: 0-2` pins the additional arteries; omitted draws per seed.
+        if (genNode["extra_arteries"]) config.extraArteries = genNode["extra_arteries"].as<int>();
         // `character: downtown|residential|industrial|mixed` forces every
         // block's neighbourhood character (issue #151); omitted keeps the
         // generator's per-block draw.

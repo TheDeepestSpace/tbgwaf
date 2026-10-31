@@ -479,6 +479,56 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
     }
   }
 
+  // Broadphase for the Dijkstra below (issue #256): testing every node and
+  // every short edge against every padded blocker polygon is
+  // O(nodes x polygons) and cost ~0.5 s per move click on urban maps. Bucket
+  // the polygons into a coarse grid over the field window so each query only
+  // tests the polygons whose bounding box overlaps its cell(s); skipping
+  // polygons whose box cannot touch the query leaves every result unchanged.
+  const float span = (field.nx - 1) * step;
+  const float gridCell = std::max(1.0f, 4.0f * step);
+  const int gridN = std::max(1, static_cast<int>(std::ceil(span / gridCell)));
+  std::vector<std::vector<int>> gridBuckets(static_cast<size_t>(gridN) * gridN);
+  const auto gridIndex = [&](float v, float minV) {
+    return std::clamp(static_cast<int>((v - minV) / gridCell), 0, gridN - 1);
+  };
+  if (polygonMode_) {
+    for (size_t p = 0; p < paddedPolygons_.size(); ++p) {
+      const std::vector<glm::vec2>& polygon = paddedPolygons_[p];
+      if (polygon.empty()) continue;
+      glm::vec2 lo = polygon[0], hi = polygon[0];
+      for (const glm::vec2& v : polygon) {
+        lo = glm::min(lo, v);
+        hi = glm::max(hi, v);
+      }
+      if (hi.x < field.minX || hi.y < field.minZ || lo.x > field.minX + span ||
+          lo.y > field.minZ + span) {
+        continue;
+      }
+      const int x0 = gridIndex(lo.x, field.minX), x1 = gridIndex(hi.x, field.minX);
+      const int z0 = gridIndex(lo.y, field.minZ), z1 = gridIndex(hi.y, field.minZ);
+      for (int gz = z0; gz <= z1; ++gz) {
+        for (int gx = x0; gx <= x1; ++gx) {
+          gridBuckets[static_cast<size_t>(gz) * gridN + gx].push_back(static_cast<int>(p));
+        }
+      }
+    }
+  }
+  // True if `test` holds for some polygon bucketed near the XZ rectangle
+  // [lo, hi] (which must lie inside the field window).
+  const auto anyPolygonNear = [&](const glm::vec2& lo, const glm::vec2& hi, const auto& test) {
+    const int x0 = gridIndex(lo.x, field.minX), x1 = gridIndex(hi.x, field.minX);
+    const int z0 = gridIndex(lo.y, field.minZ), z1 = gridIndex(hi.y, field.minZ);
+    for (int gz = z0; gz <= z1; ++gz) {
+      for (int gx = x0; gx <= x1; ++gx) {
+        for (int p : gridBuckets[static_cast<size_t>(gz) * gridN + gx]) {
+          if (test(paddedPolygons_[p])) return true;
+        }
+      }
+    }
+    return false;
+  };
+
   // 16-neighbour moves (8 king + 8 knight) keep grid distance close to
   // Euclidean (< ~2% error) while still routing around obstacles.
   static const int kMoves[16][2] = {{1, 0},  {-1, 0}, {0, 1},  {0, -1}, {1, 1},  {1, -1},
@@ -489,7 +539,20 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
     char& w = walkable[iz * field.nx + ix];
     if (w < 0) {
       const glm::vec3 p = field.Node(ix, iz);
-      w = IsWalkable(p.x, p.z) ? 1 : 0;
+      if (!polygonMode_) {
+        w = IsWalkable(p.x, p.z) ? 1 : 0;
+      } else if (p.x < region_.xMin || p.x > region_.xMax || p.z < region_.zMin ||
+                 p.z > region_.zMax) {
+        // Same answer as IsWalkable, through the grid broadphase.
+        w = 0;
+      } else {
+        w = anyPolygonNear({p.x, p.z}, {p.x, p.z},
+                           [&](const std::vector<glm::vec2>& polygon) {
+                             return PointInConvexPolygon({p.x, p.z}, polygon);
+                           })
+                ? 0
+                : 1;
+      }
     }
     return w == 1;
   };
@@ -528,12 +591,11 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
         if (nd > budget || nd >= field.dist[jdx]) continue;
         bool clear = true;
         if (polygonMode_) {
-          for (const auto& polygon : paddedPolygons_) {
-            if (SegmentEntersConvexPolygon({from.x, from.z}, {to.x, to.z}, polygon)) {
-              clear = false;
-              break;
-            }
-          }
+          const glm::vec2 a(from.x, from.z), b(to.x, to.z);
+          clear = !anyPolygonNear(glm::min(a, b), glm::max(a, b),
+                                  [&](const std::vector<glm::vec2>& polygon) {
+                                    return SegmentEntersConvexPolygon(a, b, polygon);
+                                  });
         } else {
           clear = LineOfSightClear(from, to, paddedFootprints_);
         }

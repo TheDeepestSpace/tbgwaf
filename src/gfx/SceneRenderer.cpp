@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <string>
 
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -70,6 +71,10 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
 namespace {
 
 constexpr int kShadowMapSize = 2048;
+// Large static meshes are split into this many cells per side (see
+// LitTriangleMesh::SetChunkedMesh) so passes that see only part of the map
+// -- each FOV depth map, the FOV mask, a zoomed-in camera -- skip the rest.
+constexpr int kCullGridCells = 8;
 // Deck/ramp slabs form one continuous ribbon but are submitted as separate
 // shadow casters. A stronger-than-default slope bias keeps each shallow
 // joint from shadowing the next slab while the deck still shadows geometry
@@ -224,6 +229,7 @@ uniform vec3 uLightDir;  // Direction the light travels; surfaces face -uLightDi
 uniform vec3 uViewPos;
 uniform sampler2D uShadowMap;
 uniform int uDisableShadows;
+uniform int uMonochrome;
 uniform int uThermal;
 uniform int uThermalBlackHot;  // 1 = hot reads dark (the review reference), 0 = white-hot.
 uniform int uThermalMaterial;  // ThermalMaterial; only figures use uColor.
@@ -323,7 +329,9 @@ void main() {
     FragColor = vec4(vec3(clamp(gray, 0.0, 1.0)), uColor.a);
     return;
   }
-  FragColor = vec4(uColor.rgb * lit, uColor.a);
+  vec3 base = uColor.rgb;
+  if (uMonochrome != 0) base = vec3(dot(base, vec3(0.299, 0.587, 0.114)));
+  FragColor = vec4(base * lit, uColor.a);
 }
 )";
 
@@ -377,12 +385,13 @@ void main() {}
 
 // Issue #110: per-unit projective FOV mask. The static scene is re-drawn
 // with this shader after the lit pass (depth test LEQUAL, no depth writes):
-// a fragment is tinted when it faces the unit's eye, lies inside the
-// 150-degree horizontal cone (analytic, so the cone's angular edges stay
-// crisp), and its eye sightline passes a depth test against one of the two
-// eye-space depth maps. Flat tint, no attenuation or N.L -- this is a mask,
-// not lighting. Everything else is discarded, which also keeps the stencil
-// untouched so overlapping teammates' masks don't stack (see RenderPane).
+// a fragment is tinted when, for any of the pass's figures, it faces that
+// figure's eye, lies inside its horizontal cone (analytic, so the cone's
+// angular edges stay crisp), and its eye sightline passes a depth test
+// against one of the figure's two eye-space depth maps. Flat tint, no
+// attenuation or N.L -- this is a mask, not lighting. Everything else is
+// discarded, which also keeps the stencil untouched so overlapping masks of
+// a team with more figures than one pass takes don't stack (see RenderPane).
 constexpr int kFovMapWidth = 1024;
 constexpr int kFovMapHeight = 2048;
 // Each of the two maps covers half the cone's azimuth plus a small overlap
@@ -395,6 +404,13 @@ constexpr float kFovMapHalfAzimuthDegrees = kFovMapHalfSplitDegrees + 1.5f;
 // degrees above the eye fall outside both maps and stay untinted.
 constexpr float kFovMapHalfElevationDegrees = 60.0f;
 constexpr float kFovMapNear = 0.2f;
+// Figures one mask pass tests (two depth maps each, on texture units 1..8).
+// Unrolled in the shader below: GLSL ES 3.00 only indexes sampler arrays
+// with constant expressions.
+constexpr int kFovMasksPerPass = 4;
+// A figure's cached depth maps are freed after this many RenderPane calls
+// without being used (it died, stopped aiming, or the scene changed).
+constexpr unsigned long long kFovMapIdlePanes = 120;
 
 const char* kFovMaskVertexShaderSrc = R"(#version 300 es
 layout(location = 0) in vec3 aPos;
@@ -415,12 +431,12 @@ const char* kFovMaskFragmentShaderSrc = R"(#version 300 es
 precision highp float;
 in vec3 vWorldPos;
 in vec3 vWorldNormal;
-uniform vec3 uEye;
-uniform vec3 uFacing;      // Unit forward, horizontal, normalized.
-uniform float uCosHalfFov;
-uniform float uRange;
-uniform mat4 uFovMatrix0;
-uniform mat4 uFovMatrix1;
+uniform int uCount;            // Figures in this pass, at most 4.
+uniform vec3 uEye[4];
+uniform vec3 uFacing[4];       // Unit forward, horizontal, normalized.
+uniform float uCosHalfFov[4];
+uniform mat4 uFovMatrix0[4];
+uniform mat4 uFovMatrix1[4];
 // highp is essential: GLSL ES defaults fragment samplers to lowp, and at
 // least Mesa llvmpipe then returns depth reads at half-float precision
 // (~11 bits), which after linearization is a 0.5-unit sawtooth at 15 units
@@ -428,6 +444,13 @@ uniform mat4 uFovMatrix1;
 // see docs/fov-shadow-map.md.)
 uniform highp sampler2D uFovMap0;
 uniform highp sampler2D uFovMap1;
+uniform highp sampler2D uFovMap2;
+uniform highp sampler2D uFovMap3;
+uniform highp sampler2D uFovMap4;
+uniform highp sampler2D uFovMap5;
+uniform highp sampler2D uFovMap6;
+uniform highp sampler2D uFovMap7;
+uniform float uRange;
 uniform float uNear;
 uniform float uFar;
 uniform float uTexelPerDepth;  // World size of one map texel per unit of map depth.
@@ -450,7 +473,7 @@ float SampleMap(highp sampler2D map, mat4 matrix, vec3 p, float slope) {
   if (any(greaterThan(abs(ndc), vec3(1.0)))) return -1.0;
   float depth = LinearDepth(ndc.z * 0.5 + 0.5);
   // Modest slope-scaled bias in linear depth. Grazing angles are handled
-  // mainly by the normal offset applied in main() (it pushes the sample
+  // mainly by the normal offset applied in Tinted() (it pushes the sample
   // along the surface by a couple of texels, however oblique the view);
   // this only has to absorb the residual depth variation across the 3x3
   // PCF kernel on moderately tilted surfaces, so the slope term is capped.
@@ -468,21 +491,23 @@ float SampleMap(highp sampler2D map, mat4 matrix, vec3 p, float slope) {
   return lit / 9.0;
 }
 
-void main() {
-  vec3 n = normalize(vWorldNormal);
-  vec3 toEye = uEye - vWorldPos;
+// Whether figure i (depth maps map0/map1) sees this fragment.
+bool Tinted(int i, highp sampler2D map0, highp sampler2D map1, vec3 n) {
+  vec3 toEye = uEye[i] - vWorldPos;
   float dist = length(toEye);
-  if (dist > uRange) discard;
+  if (dist > uRange) return false;
   vec3 dir = toEye / dist;
   // A face turned away from the eye is the back of something; the eye sees
   // its front, which is drawn (and tested) separately.
   float ndotl = dot(n, dir);
-  if (ndotl <= 0.0) discard;
+  if (ndotl <= 0.0) return false;
   // Analytic azimuth test: the fragment's bearing from the eye must be
   // within the half-FOV of the unit's facing.
   vec2 bearing = vec2(-dir.x, -dir.z);
   float bearingLen = length(bearing);
-  if (bearingLen > 1e-5 && dot(bearing / bearingLen, uFacing.xz) < uCosHalfFov) discard;
+  if (bearingLen > 1e-5 && dot(bearing / bearingLen, uFacing[i].xz) < uCosHalfFov[i]) {
+    return false;
+  }
   // Normal-offset sampling: lift the sample point off the surface along its
   // normal by ~2 texels' worth, scaled by sin(theta) so a surface seen
   // head-on isn't moved at all while a grazing one is moved enough that
@@ -493,11 +518,20 @@ void main() {
   float slope = sinTheta / max(ndotl, 1e-3);
   vec3 p = vWorldPos + n * (2.0 * uTexelPerDepth * dist * sinTheta);
   if (n.y > 0.7) p.y += uProbeHeight;
-  float lit = SampleMap(uFovMap0, uFovMatrix0, p, slope);
-  if (lit < 0.0) lit = SampleMap(uFovMap1, uFovMatrix1, p, slope);
+  float lit = SampleMap(map0, uFovMatrix0[i], p, slope);
+  if (lit < 0.0) lit = SampleMap(map1, uFovMatrix1[i], p, slope);
   // Binary edge: a partially lit fragment would claim the stencil with a
   // faint alpha and block a teammate with a clearer view of the same pixel.
-  if (lit < 0.5) discard;
+  return lit >= 0.5;
+}
+
+void main() {
+  vec3 n = normalize(vWorldNormal);
+  bool tinted = Tinted(0, uFovMap0, uFovMap1, n) ||
+                (uCount > 1 && Tinted(1, uFovMap2, uFovMap3, n)) ||
+                (uCount > 2 && Tinted(2, uFovMap4, uFovMap5, n)) ||
+                (uCount > 3 && Tinted(3, uFovMap6, uFovMap7, n));
+  if (!tinted) discard;
   FragColor = uColor;
 }
 )";
@@ -527,6 +561,19 @@ void DrawLitModel(const Shader& shader, const Mesh& mesh, const glm::mat4& viewP
   shader.SetMat4("uLightSpaceMatrix", lightSpaceMatrix);
   shader.SetVec4("uColor", color);
   mesh.Draw();
+}
+
+// DrawLitModel for a static world-space mesh, drawing only the chunks
+// `visible` accepts, minus the triangle groups `skipGroup` rejects.
+void DrawLitVisible(const Shader& shader, const LitTriangleMesh& mesh, const glm::mat4& viewProj,
+                    const glm::mat4& lightSpaceMatrix, const glm::vec4& color,
+                    const ChunkFilter& visible,
+                    const std::function<bool(int group)>& skipGroup = nullptr) {
+  shader.SetMat4("uModel", glm::mat4(1.0f));
+  shader.SetMat4("uMVP", viewProj);
+  shader.SetMat4("uLightSpaceMatrix", lightSpaceMatrix);
+  shader.SetVec4("uColor", color);
+  mesh.DrawVisible(visible, skipGroup);
 }
 
 void DrawBoxLitModel(const Shader& shader, const CubeMesh& cube, const glm::mat4& viewProj,
@@ -930,14 +977,32 @@ void AppendFacadeOpening(const tactics::Scene& scene, const tactics::FacadeOpeni
     quad(u0, u1, y0, y1, -d);  // Back of the niche.
     return;
   }
-  // Extruded frame: four bars ringing the rect.
+  // Extruded frame: four bars ringing the rect, emitted as one ring (its
+  // front, outer and inner faces) rather than four boxes, whose butted
+  // faces would only be hidden inside it. Frames are most of a city's
+  // facade triangles, so the 24 instead of 40 per window add up.
   const float bar = std::min({style.bar, 0.25f * (y1 - y0), 0.25f * (u1 - u0)});
   if (bar > 1e-3f) {
     const float d = style.depth;
-    AppendOpeningBox(f, u0, u1, y0, y0 + bar, 0.0f, d, true, vertices, indices);
-    AppendOpeningBox(f, u0, u1, y1 - bar, y1, 0.0f, d, true, vertices, indices);
-    AppendOpeningBox(f, u0, u0 + bar, y0 + bar, y1 - bar, 0.0f, d, true, vertices, indices);
-    AppendOpeningBox(f, u1 - bar, u1, y0 + bar, y1 - bar, 0.0f, d, true, vertices, indices);
+    const auto at = [&](float u, float y, float depth) {
+      return f.base + f.right * u + glm::vec3(0.0f, y, 0.0f) + f.normal * depth;
+    };
+    const glm::vec3 D = f.normal * d;
+    const glm::vec3 U = f.right * (u1 - u0), innerU = f.right * (u1 - u0 - 2.0f * bar);
+    const glm::vec3 Y(0.0f, y1 - y0, 0.0f), innerY(0.0f, y1 - y0 - 2.0f * bar, 0.0f);
+    const glm::vec3 barU = f.right * bar, barY(0.0f, bar, 0.0f);
+    AppendQuad(at(u0, y0, d), U, barY, vertices, indices);                    // Front: bottom bar,
+    AppendQuad(at(u0, y1 - bar, d), U, barY, vertices, indices);              // top bar,
+    AppendQuad(at(u0, y0 + bar, d), barU, innerY, vertices, indices);         // left bar,
+    AppendQuad(at(u1 - bar, y0 + bar, d), barU, innerY, vertices, indices);   // right bar.
+    AppendQuad(at(u0, y0, 0.0f), U, D, vertices, indices);                    // Outer: bottom,
+    AppendQuad(at(u0, y1, d), U, -D, vertices, indices);                      // top,
+    AppendQuad(at(u0, y0, 0.0f), D, Y, vertices, indices);                    // left,
+    AppendQuad(at(u1, y0, d), -D, Y, vertices, indices);                      // right.
+    AppendQuad(at(u0 + bar, y0 + bar, d), innerU, -D, vertices, indices);     // Inner: bottom,
+    AppendQuad(at(u0 + bar, y1 - bar, 0.0f), innerU, D, vertices, indices);   // top,
+    AppendQuad(at(u0 + bar, y0 + bar, d), -D, innerY, vertices, indices);     // left,
+    AppendQuad(at(u1 - bar, y0 + bar, 0.0f), D, innerY, vertices, indices);   // right.
     if (style.sill) {
       AppendOpeningBox(f, u0 - 0.08f, u1 + 0.08f, y0 - 0.08f, y0, 0.0f, 0.14f, true, vertices,
                        indices);
@@ -1122,7 +1187,7 @@ void BuildPavementMesh(const std::vector<tactics::RoadSurface>& patches, float t
   for (const auto& patch : patches) {
     AppendSurfacePatch(patch.vertices, thickness, &vertices, &indices);
   }
-  mesh->SetMesh(vertices, indices);
+  mesh->SetChunkedMesh(vertices, indices, kCullGridCells);
 }
 
 void BuildStreetFixtureMeshes(
@@ -1136,7 +1201,7 @@ void BuildStreetFixtureMeshes(
     if (obstacle.kind != tactics::ObstacleKind::StreetFurniture) continue;
     AppendBox(obstacle.bounds, &furnitureVertices, &furnitureIndices);
   }
-  furnitureMesh->SetMesh(furnitureVertices, furnitureIndices);
+  furnitureMesh->SetChunkedMesh(furnitureVertices, furnitureIndices, kCullGridCells);
 
   LitVertices depthVertices;
   std::vector<GLuint> depthIndices;
@@ -1148,9 +1213,9 @@ void BuildStreetFixtureMeshes(
       AppendBoxModel(part.model, &vertices[part.material], &indices[part.material]);
     }
   }
-  depthMesh->SetMesh(depthVertices, depthIndices);
+  depthMesh->SetChunkedMesh(depthVertices, depthIndices, kCullGridCells);
   for (size_t i = 0; i < materialMeshes->size(); ++i) {
-    (*materialMeshes)[i].SetMesh(vertices[i], indices[i]);
+    (*materialMeshes)[i].SetChunkedMesh(vertices[i], indices[i], kCullGridCells);
   }
 }
 
@@ -1159,6 +1224,10 @@ void BuildStreetFixtureMeshes(
 // decks/ramps as 0.45-thick slabs (matching the gameplay LOS slab in
 // LineOfSightClear and the lit pass), street fixtures, sidewalk slabs and
 // patches, and roads. Built once per scene so each per-unit pass is one draw.
+// Facade openings are left out: they only receive the tint (drawn from the
+// facade mesh, see DrawFovMasks). As casters the recessed parts sit
+// inside the solid wall and the frames stand a few centimetres proud of it,
+// yet they were most of a city's triangles in every depth map.
 void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   LitVertices vertices;
   std::vector<GLuint> indices;
@@ -1175,12 +1244,6 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   for (const tactics::MassingDetail& d : scene.massing) {
     AppendMassingDetail(d, &vertices, &indices);
   }
-  // Facade pane extrusions receive the mask tint like the walls they sit
-  // on; the recessed parts are redundant casters inside the solid wall, but
-  // the extruded frames stand proud of it and need their own tint coverage.
-  for (const tactics::FacadeOpening& opening : scene.facadeOpenings) {
-    AppendFacadeOpening(scene, opening, &vertices, &indices);
-  }
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
     AppendSurfacePatch(surface.vertices, 0.45f, &vertices, &indices);
   }
@@ -1194,7 +1257,7 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   for (const tactics::RoadSurface& road : scene.roads) {
     AppendSurfacePatch(road.vertices, 0.0f, &vertices, &indices);
   }
-  mesh->SetMesh(vertices, indices);
+  mesh->SetChunkedMesh(vertices, indices, kCullGridCells);
 }
 
 // Content hash of the static geometry BuildFovSceneMesh consumes, so the
@@ -1295,21 +1358,17 @@ unsigned long long FacadeFingerprint(const tactics::Scene& scene) {
   return h;
 }
 
-// All facade opening geometry merged into a single mesh. `skipBuilding` (optional) leaves out openings of
-// camera-faded buildings.
-void BuildFacadeMesh(const tactics::Scene& scene, LitTriangleMesh* mesh,
-                         const std::vector<char>* skipBuilding = nullptr) {
+// All facade opening geometry merged into a single mesh, its triangles
+// grouped by building so camera-faded buildings' openings can be skipped.
+void BuildFacadeMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   LitVertices vertices;
   std::vector<GLuint> indices;
+  std::vector<int> groups;
   for (const tactics::FacadeOpening& opening : scene.facadeOpenings) {
-    if (skipBuilding && opening.building >= 0 &&
-        opening.building < static_cast<int>(skipBuilding->size()) &&
-        (*skipBuilding)[opening.building]) {
-      continue;
-    }
     AppendFacadeOpening(scene, opening, &vertices, &indices);
+    groups.resize(indices.size() / 3, opening.building);
   }
-  mesh->SetMesh(vertices, indices);
+  mesh->SetChunkedMesh(vertices, indices, kCullGridCells, &groups);
 }
 
 // Opening rectangles each obstacle's wall faces must cut out (recessed
@@ -1358,21 +1417,97 @@ unsigned long long DeckFingerprint(const tactics::Scene& scene) {
 void BuildDeckMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   LitVertices vertices;
   std::vector<GLuint> indices;
-  for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
-    const std::vector<char> hidden = SharedEdges(scene.walkSurfaces, surface);
-    AppendSurfacePatch(surface.vertices, 0.45f, &vertices, &indices, &hidden);
+  std::vector<int> groups;
+  for (size_t i = 0; i < scene.walkSurfaces.size(); ++i) {
+    const std::vector<char> hidden = SharedEdges(scene.walkSurfaces, scene.walkSurfaces[i]);
+    AppendSurfacePatch(scene.walkSurfaces[i].vertices, 0.45f, &vertices, &indices, &hidden);
+    groups.resize(indices.size() / 3, static_cast<int>(i));
   }
-  mesh->SetMesh(vertices, indices);
+  mesh->SetChunkedMesh(vertices, indices, kCullGridCells, &groups);
 }
 
-// One prism per massing detail, merged into a single mesh.
+// One prism per massing detail, merged into a single mesh, grouped by
+// building like the facade mesh.
 void BuildMassingMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   LitVertices vertices;
   std::vector<GLuint> indices;
+  std::vector<int> groups;
   for (const tactics::MassingDetail& d : scene.massing) {
     AppendMassingDetail(d, &vertices, &indices);
+    groups.resize(indices.size() / 3, static_cast<int>(&d - scene.massing.data()));
   }
-  mesh->SetMesh(vertices, indices);
+  mesh->SetChunkedMesh(vertices, indices, kCullGridCells, &groups);
+}
+
+// For each walk surface, the building whose roof slab it is (all its
+// vertices on one building obstacle's top), or -1.
+std::vector<int> RoofBuildings(const tactics::Scene& scene) {
+  std::vector<int> buildings(scene.walkSurfaces.size(), -1);
+  for (size_t i = 0; i < scene.walkSurfaces.size(); ++i) {
+    const tactics::WalkSurface& surface = scene.walkSurfaces[i];
+    for (const tactics::Obstacle& o : scene.obstacles) {
+      if (o.building < 0) continue;
+      bool inside = !surface.vertices.empty();
+      for (const glm::vec3& v : surface.vertices) {
+        inside &= v.x >= o.bounds.min.x - 0.05f && v.x <= o.bounds.max.x + 0.05f &&
+                  v.z >= o.bounds.min.z - 0.05f && v.z <= o.bounds.max.z + 0.05f &&
+                  std::fabs(v.y - o.bounds.max.y) < 0.1f;
+      }
+      if (inside) {
+        buildings[i] = o.building;
+        break;
+      }
+    }
+  }
+  return buildings;
+}
+
+// Content hash of what BuildObstacleMeshes reads from Scene::obstacles.
+unsigned long long ObstacleFingerprint(const tactics::Scene& scene) {
+  unsigned long long h = 1469598103934665603ULL ^ scene.obstacles.size();
+  auto mix = [&](const void* data, size_t bytes) {
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < bytes; ++i) {
+      h ^= p[i];
+      h *= 1099511628211ULL;
+    }
+  };
+  for (const tactics::Obstacle& o : scene.obstacles) {
+    mix(&o.bounds, sizeof(o.bounds));
+    mix(&o.kind, sizeof(o.kind));
+    mix(&o.navOnly, sizeof(o.navOnly));
+    mix(&o.building, sizeof(o.building));
+    mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
+  }
+  return h;
+}
+
+// Every drawn obstacle (not nav-only cliff edges or street furniture, which
+// has its own batch) as one static mesh, grouped by obstacle index so the
+// camera-faded ones can be skipped: `drawn` with the recessed facade
+// openings cut into its walls, `caster` solid for the shadow map.
+void BuildObstacleMeshes(const tactics::Scene& scene,
+                         const std::unordered_map<int, std::vector<std::vector<glm::vec4>>>& holes,
+                         LitTriangleMesh* drawn, LitTriangleMesh* caster) {
+  LitVertices drawnVertices, casterVertices;
+  std::vector<GLuint> drawnIndices, casterIndices;
+  std::vector<int> groups;
+  for (size_t i = 0; i < scene.obstacles.size(); ++i) {
+    const tactics::Obstacle& obstacle = scene.obstacles[i];
+    if (obstacle.navOnly || obstacle.kind == tactics::ObstacleKind::StreetFurniture) continue;
+    if (obstacle.footprint.empty()) {
+      AppendBox(obstacle.bounds, &drawnVertices, &drawnIndices);
+      AppendBox(obstacle.bounds, &casterVertices, &casterIndices);
+    } else {
+      const auto obstacleHoles = holes.find(static_cast<int>(i));
+      AppendPolygonPrism(obstacle, &drawnVertices, &drawnIndices,
+                         obstacleHoles == holes.end() ? nullptr : &obstacleHoles->second);
+      AppendPolygonPrism(obstacle, &casterVertices, &casterIndices);
+    }
+    groups.resize(drawnIndices.size() / 3, static_cast<int>(i));
+  }
+  drawn->SetChunkedMesh(drawnVertices, drawnIndices, kCullGridCells, &groups);
+  caster->SetChunkedMesh(casterVertices, casterIndices, kCullGridCells);
 }
 
 bool PatchContainsXZ(const tactics::RoadSurface& patch, float x, float z) {
@@ -1756,8 +1891,8 @@ void BuildUrbanTierMeshes(const tactics::HeightField& hf,
     AppendPrism(tier.polygon, 0.0f, tier.height, /*topFace=*/true, &raisedVertices,
                 &raisedIndices);
   }
-  base->SetMesh(baseVertices, baseIndices);
-  raised->SetMesh(raisedVertices, raisedIndices);
+  base->SetChunkedMesh(baseVertices, baseIndices, kCullGridCells);
+  raised->SetChunkedMesh(raisedVertices, raisedIndices, kCullGridCells);
 }
 
 // Triangulated terrain heightfield with central-difference normals, plus a
@@ -1822,7 +1957,7 @@ void BuildTerrainMesh(const tactics::HeightField& hf,
     skirtQuad(0, iz, 0, iz + 1, glm::vec3(-1.0f, 0.0f, 0.0f));
     skirtQuad(nx - 1, iz, nx - 1, iz + 1, glm::vec3(1.0f, 0.0f, 0.0f));
   }
-  base->SetMesh(vertices, indices);
+  base->SetChunkedMesh(vertices, indices, kCullGridCells);
   raised->SetMesh({}, {});
 }
 
@@ -2622,6 +2757,46 @@ std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team,
   return probes;
 }
 
+// Issue #256: identity of the occluder geometry feeding the see-through fade
+// (everything the raycasts below depend on besides camera and probes).
+// Content-hashed (FNV-1a), not address-keyed: successive scenes can reuse the
+// same storage addresses.
+uint64_t FadeGeometryKey(const tactics::Scene& scene) {
+  uint64_t hash = 1469598103934665603ull;
+  const auto mix = [&hash](const void* data, size_t size) {
+    const unsigned char* bytes = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < size; ++i) {
+      hash ^= bytes[i];
+      hash *= 1099511628211ull;
+    }
+  };
+  for (const tactics::Obstacle& o : scene.obstacles) {
+    mix(&o.bounds, sizeof(o.bounds));
+    mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
+    mix(&o.building, sizeof(o.building));
+    const int kind = static_cast<int>(o.kind);
+    mix(&kind, sizeof(kind));
+    const char navOnly = o.navOnly ? 1 : 0;
+    mix(&navOnly, sizeof(navOnly));
+  }
+  for (const tactics::WalkSurface& s : scene.walkSurfaces) {
+    mix(s.vertices.data(), s.vertices.size() * sizeof(glm::vec3));
+    const char overpass = s.overpass ? 1 : 0;
+    mix(&overpass, sizeof(overpass));
+  }
+  for (const tactics::MassingDetail& d : scene.massing) {
+    mix(d.footprint.data(), d.footprint.size() * sizeof(glm::vec2));
+    mix(&d.y0, sizeof(d.y0));
+    mix(&d.y1, sizeof(d.y1));
+    mix(&d.building, sizeof(d.building));
+    const int kind = static_cast<int>(d.kind);
+    mix(&kind, sizeof(kind));
+  }
+  const size_t buildings = scene.buildings.size();
+  mix(&buildings, sizeof(buildings));
+  return hash;
+}
+
 }  // namespace
 
 bool IsUnitVisibleForRender(const Unit& unit, Team viewingTeam, bool fogActive,
@@ -2700,34 +2875,10 @@ bool SceneRenderer::Init() {
   massingMesh_.Init();
   facadeMesh_.Init();
   deckMesh_.Init();
+  obstacleMesh_.Init();
+  obstacleCasterMesh_.Init();
   highlightRing_.Init();
   highlightRing_.SetPoints(BuildRingPoints());
-
-  // Issue #110: the two per-unit eye-space depth maps. Allocated up front
-  // (16 MB of depth) even in CPU mode so flipping the mode at runtime needs
-  // no re-init; they are only rendered to in ShadowMap mode.
-  glGenFramebuffers(2, fovFbo_);
-  glGenTextures(2, fovDepthTex_);
-  for (int i = 0; i < 2; ++i) {
-    glBindTexture(GL_TEXTURE_2D, fovDepthTex_[i]);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, kFovMapWidth, kFovMapHeight, 0,
-                 GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindFramebuffer(GL_FRAMEBUFFER, fovFbo_[i]);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, fovDepthTex_[i], 0);
-    const GLenum noColorBuffer = GL_NONE;
-    glDrawBuffers(1, &noColorBuffer);
-    glReadBuffer(GL_NONE);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-      std::fprintf(stderr, "FOV depth map framebuffer %d incomplete\n", i);
-      glBindFramebuffer(GL_FRAMEBUFFER, 0);
-      return false;
-    }
-  }
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
   // Stage-C: a single directional light (simulating overhead factory
   // lighting) casting a PCF-filtered shadow map. The
@@ -2800,6 +2951,11 @@ void SceneRenderer::Destroy() {
   facadeRecessHoles_.clear();
   facadeKey_ = 0;
   deckMesh_.Destroy();
+  obstacleMesh_.Destroy();
+  obstacleCasterMesh_.Destroy();
+  obstacleKey_ = 0;
+  surfaceBuilding_.clear();
+  surfaceBuildingKey_ = 0;
   deckKey_ = 0;
   terrainKey_ = tactics::HeightField{};
   highlightRing_.Destroy();
@@ -2809,10 +2965,8 @@ void SceneRenderer::Destroy() {
   if (shadowFbo_) glDeleteFramebuffers(1, &shadowFbo_);
   shadowDepthTex_ = 0;
   shadowFbo_ = 0;
-  if (fovDepthTex_[0]) glDeleteTextures(2, fovDepthTex_);
-  if (fovFbo_[0]) glDeleteFramebuffers(2, fovFbo_);
-  fovDepthTex_[0] = fovDepthTex_[1] = 0;
-  fovFbo_[0] = fovFbo_[1] = 0;
+  for (FovMapSlot& slot : fovMaps_) DestroyFovMaps(&slot);
+  fovMaps_.clear();
   if (thermalSceneTex_) glDeleteTextures(1, &thermalSceneTex_);
   if (thermalSensorVao_) glDeleteVertexArrays(1, &thermalSensorVao_);
   thermalSceneTex_ = thermalSensorVao_ = 0;
@@ -2858,28 +3012,77 @@ void SceneRenderer::ApplyThermalSensor(int x, int y, int width, int height) {
   glEnable(GL_DEPTH_TEST);
 }
 
-void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, float facingYaw,
-                                      float halfFovDegrees, const glm::vec4& color,
-                                      const glm::mat4& viewProj, bool drawTerrain,
-                                      GLuint targetFramebuffer, int x, int y, int width,
-                                      int height) {
-  const tactics::Scene& scene = game.GetScene();
-  const float mapHalfExtent = scene.mapHalfExtent;
+void SceneRenderer::DestroyFovMaps(FovMapSlot* slot) {
+  if (slot->tex[0]) glDeleteTextures(2, slot->tex);
+  if (slot->fbo[0]) glDeleteFramebuffers(2, slot->fbo);
+  slot->tex[0] = slot->tex[1] = 0;
+  slot->fbo[0] = slot->fbo[1] = 0;
+}
+
+int SceneRenderer::AcquireFovMaps(const Unit& unit, int sector, float facingYaw, bool drawTerrain,
+                                  float mapHalfExtent) {
   const glm::vec3 eye = unit.EyePosition();
-  const float range = tactics::constants::kFovConeVisualRange;
+  int index = -1;
+  for (size_t i = 0; i < fovMaps_.size(); ++i) {
+    if (fovMaps_[i].unitId == unit.id && fovMaps_[i].sector == sector) index = static_cast<int>(i);
+  }
+  if (index < 0) {
+    // A new pair of maps (16 MB of depth), allocated on first use.
+    FovMapSlot slot;
+    slot.unitId = unit.id;
+    slot.sector = sector;
+    glGenFramebuffers(2, slot.fbo);
+    glGenTextures(2, slot.tex);
+    bool complete = true;
+    for (int half = 0; half < 2; ++half) {
+      glBindTexture(GL_TEXTURE_2D, slot.tex[half]);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, kFovMapWidth, kFovMapHeight, 0,
+                   GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      glBindFramebuffer(GL_FRAMEBUFFER, slot.fbo[half]);
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, slot.tex[half],
+                             0);
+      const GLenum noColorBuffer = GL_NONE;
+      glDrawBuffers(1, &noColorBuffer);
+      glReadBuffer(GL_NONE);
+      complete &= glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (!complete) {
+      std::fprintf(stderr, "FOV depth map framebuffer incomplete\n");
+      DestroyFovMaps(&slot);
+      return -1;
+    }
+    fovMaps_.push_back(slot);
+    index = static_cast<int>(fovMaps_.size()) - 1;
+  }
+  FovMapSlot& slot = fovMaps_[index];
+  slot.lastUsed = fovMapClock_;
+  if (slot.generation == fovMapGeneration_ && slot.eye == eye && slot.yaw == facingYaw &&
+      slot.drawTerrain == drawTerrain && slot.mapHalfExtent == mapHalfExtent) {
+    return index;  // Still current: nothing to render.
+  }
+  slot.eye = eye;
+  slot.yaw = facingYaw;
+  slot.drawTerrain = drawTerrain;
+  slot.mapHalfExtent = mapHalfExtent;
+  slot.generation = fovMapGeneration_;
+
   // Far plane: the cone's visual range, which already exceeds any map's
   // diagonal; the depth comparison is done in linearized depth so the
   // far-plane choice only affects precision, not correctness.
-  const float far = range;
+  const float far = tactics::constants::kFovConeVisualRange;
   const float aspect = std::tan(glm::radians(kFovMapHalfAzimuthDegrees)) /
                        std::tan(glm::radians(kFovMapHalfElevationDegrees));
   const glm::mat4 proj = glm::perspective(glm::radians(2.0f * kFovMapHalfElevationDegrees),
                                           aspect, kFovMapNear, far);
-  glm::mat4 mapMatrix[2];
   for (int half = 0; half < 2; ++half) {
     const float yaw = facingYaw + glm::radians(kFovMapHalfSplitDegrees) * (half == 0 ? -1.0f : 1.0f);
     const glm::vec3 dir(std::cos(yaw), 0.0f, std::sin(yaw));
-    mapMatrix[half] = proj * glm::lookAt(eye, eye + dir, glm::vec3(0.0f, 1.0f, 0.0f));
+    slot.matrix[half] = proj * glm::lookAt(eye, eye + dir, glm::vec3(0.0f, 1.0f, 0.0f));
   }
 
   // Depth passes: the static scene from the eye, into each half-map. The
@@ -2891,34 +3094,47 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, f
   glDisable(GL_POLYGON_OFFSET_FILL);
   glDepthMask(GL_TRUE);
   glDepthFunc(GL_LESS);
+  // Each map sees only the wedge of the map in front of the eye, so the
+  // chunked static meshes are culled to it (and the mask to the camera as
+  // well): on a large city most of the scene is skipped.
   depthShader_.Use();
   for (int half = 0; half < 2; ++half) {
-    glBindFramebuffer(GL_FRAMEBUFFER, fovFbo_[half]);
+    const Frustum mapFrustum(slot.matrix[half]);
+    const auto inMap = [&](const glm::vec3& min, const glm::vec3& max) {
+      return mapFrustum.Intersects(min, max);
+    };
+    glBindFramebuffer(GL_FRAMEBUFFER, slot.fbo[half]);
     glViewport(0, 0, kFovMapWidth, kFovMapHeight);
     glClear(GL_DEPTH_BUFFER_BIT);
     if (drawTerrain) {
-      depthShader_.SetMat4("uLightMVP", mapMatrix[half]);
-      terrainMesh_.Draw();
-      terrainRaisedMesh_.Draw();
+      depthShader_.SetMat4("uLightMVP", slot.matrix[half]);
+      terrainMesh_.DrawVisible(inMap);
+      terrainRaisedMesh_.DrawVisible(inMap);
       terrainStairMesh_.Draw();
     } else {
-      DrawBoxDepth(depthShader_, cubeMesh_, mapMatrix[half],
+      DrawBoxDepth(depthShader_, cubeMesh_, slot.matrix[half],
                    glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
                    glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f));
     }
     if (fovSceneMesh_.HasGeometry()) {
-      depthShader_.SetMat4("uLightMVP", mapMatrix[half]);
-      fovSceneMesh_.Draw();
+      depthShader_.SetMat4("uLightMVP", slot.matrix[half]);
+      fovSceneMesh_.DrawVisible(inMap);
     }
   }
+  return index;
+}
 
-  // Back to the pane: same blend/stencil/no-depth-write state as the CPU
-  // overlay, with the mask drawn over the already-lit geometry (LEQUAL plus
-  // a small offset so the identical surfaces pass their own depth).
-  glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
-  glEnable(GL_SCISSOR_TEST);
-  glViewport(x, y, width, height);
-  glScissor(x, y, width, height);
+void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::vec4& color,
+                                 const glm::mat4& viewProj, bool drawTerrain,
+                                 float mapHalfExtent) {
+  std::vector<FovMask> live;
+  for (const FovMask& mask : masks) {
+    if (mask.slot >= 0) live.push_back(mask);
+  }
+  if (live.empty()) return;
+  // Same blend/stencil/no-depth-write state as the CPU overlay, with the
+  // mask drawn over the already-lit geometry (LEQUAL plus a small offset so
+  // the identical surfaces pass their own depth).
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glDepthMask(GL_FALSE);
@@ -2930,14 +3146,9 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, f
   glPolygonOffset(-1.0f, -2.0f);
 
   fovMaskShader_.Use();
-  fovMaskShader_.SetVec3("uEye", eye);
-  fovMaskShader_.SetVec3("uFacing", glm::vec3(std::cos(facingYaw), 0.0f, std::sin(facingYaw)));
-  fovMaskShader_.SetFloat("uCosHalfFov", std::cos(glm::radians(halfFovDegrees)));
-  fovMaskShader_.SetFloat("uRange", range);
-  fovMaskShader_.SetMat4("uFovMatrix0", mapMatrix[0]);
-  fovMaskShader_.SetMat4("uFovMatrix1", mapMatrix[1]);
+  fovMaskShader_.SetFloat("uRange", tactics::constants::kFovConeVisualRange);
   fovMaskShader_.SetFloat("uNear", kFovMapNear);
-  fovMaskShader_.SetFloat("uFar", far);
+  fovMaskShader_.SetFloat("uFar", tactics::constants::kFovConeVisualRange);
   // The larger of the two texel footprints (vertical: the whole elevation
   // range over the map's height) per unit of map depth.
   fovMaskShader_.SetFloat("uTexelPerDepth",
@@ -2947,27 +3158,67 @@ void SceneRenderer::DrawFovShadowMask(const GameLogic& game, const Unit& unit, f
                                        kFovMapWidth));
   fovMaskShader_.SetFloat("uProbeHeight", fovProbeHeight_);
   fovMaskShader_.SetVec4("uColor", color);
-  fovMaskShader_.SetInt("uFovMap0", 1);
-  fovMaskShader_.SetInt("uFovMap1", 2);
-  glActiveTexture(GL_TEXTURE1);
-  glBindTexture(GL_TEXTURE_2D, fovDepthTex_[0]);
-  glActiveTexture(GL_TEXTURE2);
-  glBindTexture(GL_TEXTURE_2D, fovDepthTex_[1]);
-  glActiveTexture(GL_TEXTURE0);
+  const Frustum cameraFrustum(viewProj);
+  // Up to kFovMasksPerPass figures per pass; a larger team takes several
+  // passes, kept from stacking by the stencil cap.
+  for (size_t first = 0; first < live.size(); first += kFovMasksPerPass) {
+    const int count =
+        static_cast<int>(std::min<size_t>(kFovMasksPerPass, live.size() - first));
+    std::vector<Frustum> mapFrustums;
+    for (int i = 0; i < kFovMasksPerPass; ++i) {
+      // Unused figure slots still get valid depth textures bound (WebGL
+      // validates every sampler); the shader never reads them.
+      const FovMask& mask = live[first + std::min(i, count - 1)];
+      const FovMapSlot& slot = fovMaps_[mask.slot];
+      const std::string index = "[" + std::to_string(i) + "]";
+      fovMaskShader_.SetVec3(("uEye" + index).c_str(), slot.eye);
+      fovMaskShader_.SetVec3(("uFacing" + index).c_str(),
+                             glm::vec3(std::cos(slot.yaw), 0.0f, std::sin(slot.yaw)));
+      fovMaskShader_.SetFloat(("uCosHalfFov" + index).c_str(),
+                              std::cos(glm::radians(mask.halfFovDegrees)));
+      fovMaskShader_.SetMat4(("uFovMatrix0" + index).c_str(), slot.matrix[0]);
+      fovMaskShader_.SetMat4(("uFovMatrix1" + index).c_str(), slot.matrix[1]);
+      for (int half = 0; half < 2; ++half) {
+        const int unit = 1 + 2 * i + half;
+        fovMaskShader_.SetInt(("uFovMap" + std::to_string(2 * i + half)).c_str(), unit);
+        glActiveTexture(GL_TEXTURE0 + unit);
+        glBindTexture(GL_TEXTURE_2D, slot.tex[half]);
+        if (i < count) mapFrustums.emplace_back(slot.matrix[half]);
+      }
+    }
+    glActiveTexture(GL_TEXTURE0);
+    fovMaskShader_.SetInt("uCount", count);
 
-  const auto drawReceiver = [&](const auto& mesh, const glm::mat4& model) {
-    fovMaskShader_.SetMat4("uModel", model);
-    fovMaskShader_.SetMat4("uMVP", viewProj * model);
-    mesh.Draw();
-  };
-  if (drawTerrain) {
-    drawReceiver(terrainMesh_, glm::mat4(1.0f));
-    drawReceiver(terrainRaisedMesh_, glm::mat4(1.0f));
-  } else {
-    drawReceiver(cubeMesh_, BoxModel(glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
-                                     glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f)));
+    // A fragment outside every figure's maps is always discarded, so only
+    // chunks on screen and inside some map can be tinted.
+    const auto receives = [&](const glm::vec3& min, const glm::vec3& max) {
+      if (!cameraFrustum.Intersects(min, max)) return false;
+      for (const Frustum& map : mapFrustums) {
+        if (map.Intersects(min, max)) return true;
+      }
+      return false;
+    };
+    const auto drawReceiver = [&](const LitTriangleMesh& mesh) {
+      fovMaskShader_.SetMat4("uModel", glm::mat4(1.0f));
+      fovMaskShader_.SetMat4("uMVP", viewProj);
+      mesh.DrawVisible(receives);
+    };
+    if (drawTerrain) {
+      drawReceiver(terrainMesh_);
+      drawReceiver(terrainRaisedMesh_);
+    } else {
+      const glm::mat4 model =
+          BoxModel(glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
+                   glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f));
+      fovMaskShader_.SetMat4("uModel", model);
+      fovMaskShader_.SetMat4("uMVP", viewProj * model);
+      cubeMesh_.Draw();
+    }
+    if (fovSceneMesh_.HasGeometry()) drawReceiver(fovSceneMesh_);
+    // Facade pane extrusions receive the tint like the walls they sit on: the
+    // extruded frames stand proud of the wall and need their own coverage.
+    if (facadeMesh_.HasGeometry()) drawReceiver(facadeMesh_);
   }
-  if (fovSceneMesh_.HasGeometry()) drawReceiver(fovSceneMesh_, glm::mat4(1.0f));
   glDepthFunc(GL_LESS);
 }
 
@@ -2995,6 +3246,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
     terrainKey_ = terrain;
     fovSceneKey_ = 0;
+    ++fovMapGeneration_;
   }
   if (!terrain.Empty()) {
     const auto key = FovSceneFingerprint(game.GetScene());
@@ -3101,6 +3353,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       BuildFacadeMesh(game.GetScene(), &facadeMesh_);
       facadeRecessHoles_ = RecessHolesByObstacle(game.GetScene());
       facadeKey_ = facadeKey;
+      obstacleKey_ = 0;
+    }
+  }
+  // Building prisms and other obstacles, rebuilt when they (or the facade
+  // holes cut into them) change.
+  {
+    const unsigned long long obstacleKey = ObstacleFingerprint(game.GetScene());
+    if (obstacleKey != obstacleKey_) {
+      BuildObstacleMeshes(game.GetScene(), facadeRecessHoles_, &obstacleMesh_,
+                          &obstacleCasterMesh_);
+      obstacleKey_ = obstacleKey;
     }
   }
   // Batched walk-surface slabs, rebuilt when the surfaces change.
@@ -3111,10 +3374,20 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       deckKey_ = deckKey;
     }
   }
+  // The building whose roof each walk surface is (-1: none), for fading a
+  // building as a whole; it depends on both the surfaces and the obstacles.
+  if (surfaceBuildingKey_ != (deckKey_ ^ obstacleKey_)) {
+    surfaceBuilding_ = RoofBuildings(game.GetScene());
+    surfaceBuildingKey_ = deckKey_ ^ obstacleKey_;
+  }
 
   // Shadow pass: only casters this team can currently see.
   glDisable(GL_SCISSOR_TEST);
   if (!debug.disableShadows && !debug.thermal) {
+    const Frustum lightFrustum(lightSpaceMatrix_);
+    const auto inShadowMap = [&](const glm::vec3& min, const glm::vec3& max) {
+      return lightFrustum.Intersects(min, max);
+    };
     glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo_);
     glViewport(0, 0, kShadowMapSize, kShadowMapSize);
     glClear(GL_DEPTH_BUFFER_BIT);
@@ -3123,39 +3396,31 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // could, so flat scenes skip the extra caster exactly as before.
     if (drawTerrain) {
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
-      terrainMesh_.Draw();
-      terrainRaisedMesh_.Draw();
+      terrainMesh_.DrawVisible(inShadowMap);
+      terrainRaisedMesh_.DrawVisible(inShadowMap);
       terrainStairMesh_.Draw();
     }
-    for (const auto& obstacle : obstacles) {
-      if (obstacle.navOnly || obstacle.kind == tactics::ObstacleKind::StreetFurniture) continue;
-      const AABB& bounds = obstacle.bounds;
-      if (obstacle.footprint.empty()) {
-        DrawBoxDepth(depthShader_, cubeMesh_, lightSpaceMatrix_, bounds.min,
-                     bounds.max - bounds.min);
-      } else {
-        BuildPolygonPrism(obstacle, &geometryMesh_);
-        depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
-        geometryMesh_.Draw();
-      }
+    if (obstacleCasterMesh_.HasGeometry()) {
+      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+      obstacleCasterMesh_.DrawVisible(inShadowMap);
     }
     if (streetFurnitureMesh_.HasGeometry()) {
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
-      streetFurnitureMesh_.Draw();
+      streetFurnitureMesh_.DrawVisible(inShadowMap);
     }
     if (streetPropDepthMesh_.HasGeometry()) {
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
-      streetPropDepthMesh_.Draw();
+      streetPropDepthMesh_.DrawVisible(inShadowMap);
     }
     if (massingMesh_.HasGeometry()) {
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
-      massingMesh_.Draw();
+      massingMesh_.DrawVisible(inShadowMap);
     }
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(kDeckShadowSlopeBias, kDeckShadowConstantBias);
     if (deckMesh_.HasGeometry()) {
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
-      deckMesh_.Draw();
+      deckMesh_.DrawVisible(inShadowMap);
     }
     glDisable(GL_POLYGON_OFFSET_FILL);
     for (const Unit& unit : game.GetScene().units) {
@@ -3163,6 +3428,54 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
     }
     DrawPlantedFlagDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, game);
+  }
+
+  // Shadow-map FOV masks: this pane's figures' depth maps (and the free-aim
+  // sweep's), re-rendered only where stale, all before the main pass so the
+  // pane framebuffer is not switched away from once it is in use.
+  ++fovMapClock_;
+  std::vector<FovMask> teamFovMasks, otherFovMasks, aimFovMasks;
+  const bool shadowMapFov = fovOverlayMode_ == FovOverlayMode::ShadowMap && !debug.disableFov;
+  const bool aimSweep = overlays.aimShooter && overlays.aimShooter->alive && !debug.disableFov;
+  if (shadowMapFov || aimSweep) {
+    // Static receivers/casters for the shadow-map mask, cached per scene.
+    const unsigned long long sceneKey = FovSceneFingerprint(game.GetScene());
+    if (sceneKey != fovSceneKey_) {
+      BuildFovSceneMesh(game.GetScene(), &fovSceneMesh_);
+      fovSceneKey_ = sceneKey;
+      ++fovMapGeneration_;
+    }
+    // Free the maps of figures no pane has asked for in a while.
+    for (FovMapSlot& slot : fovMaps_) {
+      if (slot.lastUsed + kFovMapIdlePanes < fovMapClock_) DestroyFovMaps(&slot);
+    }
+    fovMaps_.erase(std::remove_if(fovMaps_.begin(), fovMaps_.end(),
+                                  [](const FovMapSlot& slot) { return slot.fbo[0] == 0; }),
+                   fovMaps_.end());
+    if (shadowMapFov) {
+      const Team otherTeam = team == Team::Blue ? Team::Red : Team::Blue;
+      for (const Unit& unit : game.GetScene().units) {
+        if (!unit.alive) continue;
+        std::vector<FovMask>* masks = unit.team == team ? &teamFovMasks
+                                      : overlays.spectatorFov && unit.team == otherTeam
+                                          ? &otherFovMasks
+                                          : nullptr;
+        if (!masks) continue;
+        masks->push_back({AcquireFovMaps(unit, -1, unit.VisualYaw(), drawTerrain, mapHalfExtent),
+                          tactics::constants::kShootHalfFovDegrees});
+      }
+    }
+    // Free-aim (issue #129): three 120-degree sectors (each within the two
+    // depth maps' reach) tile the full circle around the aiming figure.
+    if (aimSweep) {
+      const Unit& shooter = *overlays.aimShooter;
+      for (int sector = 0; sector < 3; ++sector) {
+        aimFovMasks.push_back(
+            {AcquireFovMaps(shooter, sector, shooter.facingYaw + glm::radians(120.0f * sector),
+                            drawTerrain, mapHalfExtent),
+             61.0f});
+      }
+    }
   }
   glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
 
@@ -3187,6 +3500,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const glm::mat4 proj =
       camera.ProjectionMatrix(static_cast<float>(width) / static_cast<float>(height));
   const glm::mat4 viewProj = proj * view;
+  // The static scene meshes are chunked; skip the chunks off screen.
+  const Frustum cameraFrustum(viewProj);
+  const auto onScreen = [&](const glm::vec3& min, const glm::vec3& max) {
+    return cameraFrustum.Intersects(min, max);
+  };
 
   // Only opaque, visible geometry contributes to AO. Faded buildings are
   // blended afterward, so they cannot leave opaque contact shadows over
@@ -3213,159 +3531,226 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   std::vector<char> fadeBuilding;
   bool anyFaded = false;
   if (!debug.disableOcclusionFade) {
-    const std::vector<glm::vec3> probes =
-        CollectSeeThroughProbes(game, team, fogActive, overlays);
+    std::vector<glm::vec3> probes = CollectSeeThroughProbes(game, team, fogActive, overlays);
     const glm::vec3 cameraPos = camera.Position();
-    struct ProbeRay {
-      glm::vec3 direction;
-      float length;
-    };
-    std::vector<ProbeRay> rays;
-    rays.reserve(probes.size());
-    for (const glm::vec3& probe : probes) {
-      const glm::vec3 segment = probe - cameraPos;
-      const float length = glm::length(segment);
-      if (length > 1e-4f) rays.push_back({segment / length, length});
-    }
-    // Same endpoint handling as LineOfSightClear: a hit at (or essentially
-    // at) the probe itself does not count, so a figure hugging a wall does
-    // not fade that wall.
-    constexpr float kEndpointEpsilon = 1e-2f;
-    const auto crossesProbeRay = [&](const tactics::Obstacle& obstacle) {
-      for (const ProbeRay& ray : rays) {
-        float t = 0.0f;
-        if (tactics::RayIntersectsObstacle(cameraPos, ray.direction, obstacle, &t) &&
-            t > kEndpointEpsilon && t < ray.length - kEndpointEpsilon) {
-          return true;
+    const uint64_t geometryKey = FadeGeometryKey(game.GetScene());
+    FadeCache& fadeCache = fadeCache_[team == tactics::Team::Blue ? 0 : 1];
+    if (fadeCache.valid && fadeCache.cameraPos == cameraPos &&
+        fadeCache.geometryKey == geometryKey && fadeCache.probes == probes) {
+      fadeObstacle = fadeCache.fadeObstacle;
+      fadeSurface = fadeCache.fadeSurface;
+      fadeMassing = fadeCache.fadeMassing;
+      fadeBuilding = fadeCache.fadeBuilding;
+      anyFaded = fadeCache.anyFaded;
+    } else {
+      struct ProbeRay {
+        glm::vec3 direction;
+        float length;
+        float azimuth;  // atan2(direction.z, direction.x).
+      };
+      std::vector<ProbeRay> rays;
+      rays.reserve(probes.size());
+      for (const glm::vec3& probe : probes) {
+        const glm::vec3 segment = probe - cameraPos;
+        const float length = glm::length(segment);
+        if (length > 1e-4f) {
+          const glm::vec3 direction = segment / length;
+          rays.push_back({direction, length, std::atan2(direction.z, direction.x)});
         }
       }
-      return false;
-    };
-    for (size_t i = 0; i < obstacles.size(); ++i) {
-      // Post-sized furniture is too small to hide a useful target and is kept
-      // in one static render batch below.
-      if (obstacles[i].navOnly || obstacles[i].kind == tactics::ObstacleKind::StreetFurniture) {
-        continue;
-      }
-      if (crossesProbeRay(obstacles[i])) {
-        fadeObstacle[i] = 1;
-        anyFaded = true;
-      }
-    }
-    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-      for (const ProbeRay& ray : rays) {
-        float t = 0.0f;
-        if (tactics::RayIntersectsWalkSurface(cameraPos, ray.direction, walkSurfaces[i],
-                                              kDeckThickness, &t) &&
-            t > kEndpointEpsilon && t < ray.length - kEndpointEpsilon) {
-          fadeSurface[i] = 1;
-          anyFaded = true;
-          break;
+      // Angular broadphase (issue #256): with the frontier open there are
+      // hundreds of probes, and testing every occluder against every ray is
+      // O(rays x occluders). Sorted by azimuth, an occluder only tests the
+      // rays inside its XZ angular span as seen from the camera; a crossing
+      // ray's hit lies in the occluder's bounding circle, hence inside that
+      // span, so the pruning cannot change any result.
+      std::sort(rays.begin(), rays.end(),
+                [](const ProbeRay& a, const ProbeRay& b) { return a.azimuth < b.azimuth; });
+      std::vector<float> rayAzimuths;
+      rayAzimuths.reserve(rays.size());
+      for (const ProbeRay& ray : rays) rayAzimuths.push_back(ray.azimuth);
+      const glm::vec2 cameraXZ(cameraPos.x, cameraPos.z);
+      const auto anyRayHits = [&](const glm::vec2& center, float radius, const auto& test) {
+        const glm::vec2 toCenter = center - cameraXZ;
+        const float distance = glm::length(toCenter);
+        // Padding absorbs float error at the span ends; camera over the
+        // occluder tests every ray (its span is the whole circle).
+        const float padded = radius + 0.05f;
+        if (distance <= padded) {
+          for (const ProbeRay& ray : rays) {
+            if (test(ray)) return true;
+          }
+          return false;
         }
-      }
-    }
-    // Rails, pier caps and building massing can occlude a probe even when
-    // the slab/prism they belong to does not. Test the same conservative
-    // sight prisms used by gameplay LOS so those hits trigger group fading.
-    for (size_t i = 0; i < massing.size(); ++i) {
-      const tactics::MassingDetail& d = massing[i];
-      if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
-      tactics::Obstacle prism;
-      prism.footprint = d.footprint;
-      prism.bounds.min = glm::vec3(std::numeric_limits<float>::infinity(), d.y0,
-                                  std::numeric_limits<float>::infinity());
-      prism.bounds.max = glm::vec3(-std::numeric_limits<float>::infinity(), d.y1,
-                                  -std::numeric_limits<float>::infinity());
-      for (const glm::vec2& p : d.footprint) {
-        prism.bounds.min.x = std::min(prism.bounds.min.x, p.x);
-        prism.bounds.max.x = std::max(prism.bounds.max.x, p.x);
-        prism.bounds.min.z = std::min(prism.bounds.min.z, p.y);
-        prism.bounds.max.z = std::max(prism.bounds.max.z, p.y);
-      }
-      if (crossesProbeRay(prism)) {
-        fadeMassing[i] = 1;
-        anyFaded = true;
-      }
-    }
-    // A building fades as a whole: if any prism, roof slab or massing detail
-    // blocks a sightline, all of it goes see-through together.
-    const auto roofBuilding = [&](const tactics::WalkSurface& surface) {
-      for (const tactics::Obstacle& o : obstacles) {
-        if (o.building < 0) continue;
-        bool inside = !surface.vertices.empty();
-        for (const glm::vec3& v : surface.vertices) {
-          inside &= v.x >= o.bounds.min.x - 0.05f && v.x <= o.bounds.max.x + 0.05f &&
-                    v.z >= o.bounds.min.z - 0.05f && v.z <= o.bounds.max.z + 0.05f &&
-                    std::fabs(v.y - o.bounds.max.y) < 0.1f;
+        const float halfSpan = std::asin(std::min(1.0f, padded / distance));
+        const float centerAzimuth = std::atan2(toCenter.y, toCenter.x);
+        const auto scan = [&](float lo, float hi) {
+          const size_t begin =
+              std::lower_bound(rayAzimuths.begin(), rayAzimuths.end(), lo) - rayAzimuths.begin();
+          const size_t end =
+              std::upper_bound(rayAzimuths.begin(), rayAzimuths.end(), hi) - rayAzimuths.begin();
+          for (size_t r = begin; r < end; ++r) {
+            if (test(rays[r])) return true;
+          }
+          return false;
+        };
+        constexpr float kPi = 3.14159265358979f;
+        const float lo = centerAzimuth - halfSpan;
+        const float hi = centerAzimuth + halfSpan;
+        if (lo < -kPi) return scan(lo + 2.0f * kPi, kPi) || scan(-kPi, hi);
+        if (hi > kPi) return scan(lo, kPi) || scan(-kPi, hi - 2.0f * kPi);
+        return scan(lo, hi);
+      };
+      // Same endpoint handling as LineOfSightClear: a hit at (or essentially
+      // at) the probe itself does not count, so a figure hugging a wall does
+      // not fade that wall.
+      constexpr float kEndpointEpsilon = 1e-2f;
+      const auto crossesProbeRay = [&](const tactics::Obstacle& obstacle) {
+        // Bounding circle over both the footprint and the bounds: hits are
+        // clipped by the footprint in XZ, but fall back to bounds corners.
+        glm::vec2 lo(obstacle.bounds.min.x, obstacle.bounds.min.z);
+        glm::vec2 hi(obstacle.bounds.max.x, obstacle.bounds.max.z);
+        for (const glm::vec2& p : obstacle.footprint) {
+          lo = glm::min(lo, p);
+          hi = glm::max(hi, p);
         }
-        if (inside) return o.building;
-      }
-      return -1;
-    };
-    std::vector<int> surfaceBuilding(walkSurfaces.size(), -1);
-    for (size_t i = 0; i < walkSurfaces.size(); ++i) surfaceBuilding[i] = roofBuilding(walkSurfaces[i]);
-    fadeBuilding.assign(game.GetScene().buildings.size(), 0);
-    const auto markBuilding = [&](int b) {
-      if (b >= 0 && b < static_cast<int>(fadeBuilding.size())) fadeBuilding[b] = 1;
-    };
-    for (size_t i = 0; i < obstacles.size(); ++i) {
-      if (fadeObstacle[i]) markBuilding(obstacles[i].building);
-    }
-    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-      if (fadeSurface[i]) markBuilding(surfaceBuilding[i]);
-    }
-    for (size_t i = 0; i < massing.size(); ++i) {
-      if (fadeMassing[i]) markBuilding(massing[i].building);
-    }
-    for (size_t i = 0; i < obstacles.size(); ++i) {
-      const int b = obstacles[i].building;
-      if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
-        fadeObstacle[i] = 1;
-        anyFaded = true;
-      }
-    }
-    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-      const int b = surfaceBuilding[i];
-      if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
-        fadeSurface[i] = 1;
-        anyFaded = true;
-      }
-    }
-    for (size_t i = 0; i < massing.size(); ++i) {
-      const int b = massing[i].building;
-      if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
-        fadeMassing[i] = 1;
-        anyFaded = true;
-      }
-    }
-
-    // The highway is one visual structure. A hit on any slab, deck rail,
-    // pier cap, column or footing fades every part, like a building group.
-    bool fadeOverpass = false;
-    for (size_t i = 0; i < obstacles.size(); ++i) {
-      fadeOverpass |= fadeObstacle[i] && obstacles[i].kind == tactics::ObstacleKind::Pier;
-    }
-    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-      fadeOverpass |= fadeSurface[i] && walkSurfaces[i].overpass;
-    }
-    const auto overpassDetail = [](const tactics::MassingDetail& d) {
-      return d.kind == tactics::MassingDetail::Kind::PierCap ||
-             d.kind == tactics::MassingDetail::Kind::DeckRail;
-    };
-    for (size_t i = 0; i < massing.size(); ++i) {
-      fadeOverpass |= fadeMassing[i] && overpassDetail(massing[i]);
-    }
-    if (fadeOverpass) {
+        return anyRayHits(0.5f * (lo + hi), 0.5f * glm::length(hi - lo), [&](const ProbeRay& ray) {
+          float t = 0.0f;
+          return tactics::RayIntersectsObstacle(cameraPos, ray.direction, obstacle, &t) &&
+                 t > kEndpointEpsilon && t < ray.length - kEndpointEpsilon;
+        });
+      };
       for (size_t i = 0; i < obstacles.size(); ++i) {
-        if (obstacles[i].kind == tactics::ObstacleKind::Pier) fadeObstacle[i] = 1;
+        // Post-sized furniture is too small to hide a useful target and is kept
+        // in one static render batch below.
+        if (obstacles[i].navOnly || obstacles[i].kind == tactics::ObstacleKind::StreetFurniture) {
+          continue;
+        }
+        if (crossesProbeRay(obstacles[i])) {
+          fadeObstacle[i] = 1;
+          anyFaded = true;
+        }
       }
       for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-        if (walkSurfaces[i].overpass) fadeSurface[i] = 1;
+        const tactics::WalkSurface& surface = walkSurfaces[i];
+        if (surface.vertices.size() < 3) continue;  // Never intersected.
+        glm::vec2 lo(surface.vertices[0].x, surface.vertices[0].z);
+        glm::vec2 hi = lo;
+        for (const glm::vec3& v : surface.vertices) {
+          lo = glm::min(lo, glm::vec2(v.x, v.z));
+          hi = glm::max(hi, glm::vec2(v.x, v.z));
+        }
+        const bool crossed =
+            anyRayHits(0.5f * (lo + hi), 0.5f * glm::length(hi - lo), [&](const ProbeRay& ray) {
+              float t = 0.0f;
+              return tactics::RayIntersectsWalkSurface(cameraPos, ray.direction, surface,
+                                                       kDeckThickness, &t) &&
+                     t > kEndpointEpsilon && t < ray.length - kEndpointEpsilon;
+            });
+        if (crossed) {
+          fadeSurface[i] = 1;
+          anyFaded = true;
+        }
+      }
+      // Rails, pier caps and building massing can occlude a probe even when
+      // the slab/prism they belong to does not. Test the same conservative
+      // sight prisms used by gameplay LOS so those hits trigger group fading.
+      for (size_t i = 0; i < massing.size(); ++i) {
+        const tactics::MassingDetail& d = massing[i];
+        if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
+        tactics::Obstacle prism;
+        prism.footprint = d.footprint;
+        prism.bounds.min = glm::vec3(std::numeric_limits<float>::infinity(), d.y0,
+                                    std::numeric_limits<float>::infinity());
+        prism.bounds.max = glm::vec3(-std::numeric_limits<float>::infinity(), d.y1,
+                                    -std::numeric_limits<float>::infinity());
+        for (const glm::vec2& p : d.footprint) {
+          prism.bounds.min.x = std::min(prism.bounds.min.x, p.x);
+          prism.bounds.max.x = std::max(prism.bounds.max.x, p.x);
+          prism.bounds.min.z = std::min(prism.bounds.min.z, p.y);
+          prism.bounds.max.z = std::max(prism.bounds.max.z, p.y);
+        }
+        if (crossesProbeRay(prism)) {
+          fadeMassing[i] = 1;
+          anyFaded = true;
+        }
+      }
+      // A building fades as a whole: if any part of it (either prism, its roof
+      // slab, massing detail) blocks a sightline, all of it goes see-through
+      // together.
+      const std::vector<int>& surfaceBuilding = surfaceBuilding_;
+      fadeBuilding.assign(game.GetScene().buildings.size(), 0);
+      const auto markBuilding = [&](int b) {
+        if (b >= 0 && b < static_cast<int>(fadeBuilding.size())) fadeBuilding[b] = 1;
+      };
+      for (size_t i = 0; i < obstacles.size(); ++i) {
+        if (fadeObstacle[i]) markBuilding(obstacles[i].building);
+      }
+      for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+        if (fadeSurface[i]) markBuilding(surfaceBuilding[i]);
       }
       for (size_t i = 0; i < massing.size(); ++i) {
-        if (overpassDetail(massing[i])) fadeMassing[i] = 1;
+        if (fadeMassing[i]) markBuilding(massing[i].building);
       }
-      anyFaded = true;
+      for (size_t i = 0; i < obstacles.size(); ++i) {
+        const int b = obstacles[i].building;
+        if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
+          fadeObstacle[i] = 1;
+          anyFaded = true;
+        }
+      }
+      for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+        const int b = surfaceBuilding[i];
+        if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
+          fadeSurface[i] = 1;
+          anyFaded = true;
+        }
+      }
+      for (size_t i = 0; i < massing.size(); ++i) {
+        const int b = massing[i].building;
+        if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
+          fadeMassing[i] = 1;
+          anyFaded = true;
+        }
+      }
+
+      // The highway is one visual structure. A hit on any slab, deck rail,
+      // pier cap, column or footing fades every part, like a building group.
+      bool fadeOverpass = false;
+      for (size_t i = 0; i < obstacles.size(); ++i) {
+        fadeOverpass |= fadeObstacle[i] && obstacles[i].kind == tactics::ObstacleKind::Pier;
+      }
+      for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+        fadeOverpass |= fadeSurface[i] && walkSurfaces[i].overpass;
+      }
+      const auto overpassDetail = [](const tactics::MassingDetail& d) {
+        return d.kind == tactics::MassingDetail::Kind::PierCap ||
+               d.kind == tactics::MassingDetail::Kind::DeckRail;
+      };
+      for (size_t i = 0; i < massing.size(); ++i) {
+        fadeOverpass |= fadeMassing[i] && overpassDetail(massing[i]);
+      }
+      if (fadeOverpass) {
+        for (size_t i = 0; i < obstacles.size(); ++i) {
+          if (obstacles[i].kind == tactics::ObstacleKind::Pier) fadeObstacle[i] = 1;
+        }
+        for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+          if (walkSurfaces[i].overpass) fadeSurface[i] = 1;
+        }
+        for (size_t i = 0; i < massing.size(); ++i) {
+          if (overpassDetail(massing[i])) fadeMassing[i] = 1;
+        }
+        anyFaded = true;
+      }
+      fadeCache.valid = true;
+      fadeCache.cameraPos = cameraPos;
+      fadeCache.geometryKey = geometryKey;
+      fadeCache.probes = std::move(probes);
+      fadeCache.fadeObstacle = fadeObstacle;
+      fadeCache.fadeSurface = fadeSurface;
+      fadeCache.fadeMassing = fadeMassing;
+      fadeCache.fadeBuilding = fadeBuilding;
+      fadeCache.anyFaded = anyFaded;
     }
   }
 
@@ -3379,6 +3764,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   litShader_.SetVec3("uViewPos", camera.Position());
   litShader_.SetInt("uShadowMap", 0);
   litShader_.SetInt("uDisableShadows", (debug.disableShadows || debug.thermal) ? 1 : 0);
+  litShader_.SetInt("uMonochrome", debug.monochrome ? 1 : 0);
   litShader_.SetInt("uThermal", thermalFlag);
   litShader_.SetInt("uThermalBlackHot", debug.thermalBlackHot ? 1 : 0);
   const auto thermalMaterial = [&](ThermalMaterial material) {
@@ -3397,11 +3783,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // tiers, cliff faces and stairs alike, like its decks.
     const bool city = !game.GetScene().roads.empty();
     thermalMaterial(city ? ThermalMaterial::Concrete : ThermalMaterial::Ground);
-    DrawLitModel(litShader_, terrainMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 city ? glm::vec4(kDeckColor, 1.0f) : glm::vec4(0.30f, 0.36f, 0.22f, 1.0f));
+    DrawLitVisible(litShader_, terrainMesh_, viewProj, lightSpaceMatrix_,
+                   city ? glm::vec4(kDeckColor, 1.0f) : glm::vec4(0.30f, 0.36f, 0.22f, 1.0f),
+                   onScreen);
     thermalMaterial(ThermalMaterial::Concrete);
-    DrawLitModel(litShader_, terrainRaisedMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(kDeckColor, 1.0f));
+    DrawLitVisible(litShader_, terrainRaisedMesh_, viewProj, lightSpaceMatrix_,
+                   glm::vec4(kDeckColor, 1.0f), onScreen);
     DrawLitModel(litShader_, terrainStairMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(kDeckColor, 1.0f));
     glDisable(GL_POLYGON_OFFSET_FILL);
@@ -3420,11 +3807,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
 
   if (drawTerrain) {
-    DrawLitModel(litShader_, terrainSidewalkMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(0.36f, 0.37f, 0.39f, 1.0f));
+    DrawLitVisible(litShader_, terrainSidewalkMesh_, viewProj, lightSpaceMatrix_,
+                   glm::vec4(0.36f, 0.37f, 0.39f, 1.0f), onScreen);
     thermalMaterial(ThermalMaterial::Asphalt);
-    DrawLitModel(litShader_, terrainRoadMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
+    DrawLitVisible(litShader_, terrainRoadMesh_, viewProj, lightSpaceMatrix_,
+                   glm::vec4(0.13f, 0.14f, 0.16f, 1.0f), onScreen);
   }
   thermalMaterial(ThermalMaterial::Concrete);
   for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
@@ -3442,69 +3829,53 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                  glm::vec4(0.13f, 0.14f, 0.16f, 1.0f));
   }
   thermalMaterial(ThermalMaterial::Concrete);
+  // Every static batch below is grouped (per surface, obstacle or building)
+  // so camera-faded occluders are skipped here and re-drawn translucent
+  // after the figures, without re-tessellating the rest every frame.
+  const auto fadedBuilding = [&](int b) {
+    return b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b];
+  };
+  const auto skipFadedBuilding = [&](int b) { return fadedBuilding(b); };
+  const auto skipFadedMassing = [&](int i) { return fadeMassing[i] != 0; };
+  const auto skipFadedSurface = [&](int i) { return fadeSurface[i] != 0; };
+  const auto skipFadedObstacle = [&](int i) { return fadeObstacle[i] != 0; };
+  const auto unlessFaded = [&](const std::function<bool(int)>& skip) {
+    return anyFaded ? skip : std::function<bool(int)>();
+  };
   // Concrete, clearly lighter than the asphalt below: the elevated deck and
-  // its ramps must read as a bridge, not as more ground road. One batched
-  // draw unless a surface is camera-faded (then the faded ones are skipped
-  // here and re-drawn translucent below).
-  if (!anyFaded) {
-    if (deckMesh_.HasGeometry()) {
-      DrawLitModel(litShader_, deckMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                   glm::vec4(kDeckColor, 1.0f));
-    }
-  } else {
-    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-      if (fadeSurface[i]) continue;  // Re-drawn translucent below.
-      const std::vector<char> hidden = SharedEdges(walkSurfaces, walkSurfaces[i]);
-      BuildSurfacePatch(walkSurfaces[i].vertices, kDeckThickness, &geometryMesh_, &hidden);
-      DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                   glm::vec4(kDeckColor, 1.0f));
-    }
+  // its ramps must read as a bridge, not as more ground road.
+  if (deckMesh_.HasGeometry()) {
+    DrawLitVisible(litShader_, deckMesh_, viewProj, lightSpaceMatrix_, glm::vec4(kDeckColor, 1.0f),
+                   onScreen, unlessFaded(skipFadedSurface));
   }
 
   thermalMaterial(ThermalMaterial::Building);
-  for (size_t i = 0; i < obstacles.size(); ++i) {
-    if (obstacles[i].navOnly || obstacles[i].kind == tactics::ObstacleKind::StreetFurniture) continue;
-    if (fadeObstacle[i]) continue;  // Re-drawn translucent below.
-    const AABB& bounds = obstacles[i].bounds;
-    const glm::vec4 color(kObstacleColor, 1.0f);
-    if (obstacles[i].footprint.empty()) {
-      DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, bounds.min,
-                 bounds.max - bounds.min, color);
-    } else {
-      // Recessed facade openings (doors, factory windows) cut real holes
-      // into the drawn wall; the niche geometry lands with the facade
-      // meshes below. Shadow/FOV casters keep the solid wall: the niches
-      // are shallow and sit behind it.
-      const auto holes = facadeRecessHoles_.find(static_cast<int>(i));
-      BuildPolygonPrism(obstacles[i], &geometryMesh_,
-                        holes == facadeRecessHoles_.end() ? nullptr : &holes->second);
-      DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f), color);
-    }
+  // Recessed facade openings (doors, factory windows) cut real holes into
+  // the drawn walls; the niche geometry lands with the facade mesh below.
+  // Shadow/FOV casters keep the solid wall: the niches are shallow and sit
+  // behind it.
+  if (obstacleMesh_.HasGeometry()) {
+    DrawLitVisible(litShader_, obstacleMesh_, viewProj, lightSpaceMatrix_,
+                   glm::vec4(kObstacleColor, 1.0f), onScreen, unlessFaded(skipFadedObstacle));
   }
   if (streetFurnitureMesh_.HasGeometry()) {
-    DrawLitModel(litShader_, streetFurnitureMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(kObstacleColor, 1.0f));
+    DrawLitVisible(litShader_, streetFurnitureMesh_, viewProj, lightSpaceMatrix_,
+                   glm::vec4(kObstacleColor, 1.0f), onScreen);
   }
 
   // Visual-only street props (issue #150), batched by material.
   for (size_t i = 0; i < streetPropMeshes_.size(); ++i) {
     if (!streetPropMeshes_[i].HasGeometry()) continue;
-    DrawLitModel(litShader_, streetPropMeshes_[i], viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 StreetPropColor(static_cast<StreetPropMaterial>(i)));
+    DrawLitVisible(litShader_, streetPropMeshes_[i], viewProj, lightSpaceMatrix_,
+                   StreetPropColor(static_cast<StreetPropMaterial>(i)), onScreen);
   }
 
   // Facade pane extrusions (issue #152) over the walls just drawn. A
   // camera-faded building keeps its openings out of both passes (they would
   // otherwise hang opaque in front of its translucent walls).
-  if (!anyFaded) {
-    if (facadeMesh_.HasGeometry()) {
-      DrawLitModel(litShader_, facadeMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                   glm::vec4(kObstacleColor, 1.0f));
-    }
-  } else {
-    BuildFacadeMesh(game.GetScene(), &geometryMesh_, &fadeBuilding);
-    DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(kObstacleColor, 1.0f));
+  if (facadeMesh_.HasGeometry()) {
+    DrawLitVisible(litShader_, facadeMesh_, viewProj, lightSpaceMatrix_,
+                   glm::vec4(kObstacleColor, 1.0f), onScreen, unlessFaded(skipFadedBuilding));
   }
 
   // Building and overpass massing: parapets, roof furniture, awnings,
@@ -3519,15 +3890,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f), color);
   };
   if (massingMesh_.HasGeometry()) {
-    if (!anyFaded) {
-      DrawLitModel(litShader_, massingMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                   glm::vec4(kObstacleColor, 1.0f));
-    } else {
-      // Details of faded buildings are re-drawn translucent below.
-      for (size_t i = 0; i < massing.size(); ++i) {
-        if (!detailFaded(i)) drawDetail(massing[i], glm::vec4(kObstacleColor, 1.0f));
-      }
-    }
+    DrawLitVisible(litShader_, massingMesh_, viewProj, lightSpaceMatrix_,
+                   glm::vec4(kObstacleColor, 1.0f), onScreen, unlessFaded(skipFadedMassing));
   }
 
   // Zipline anchor posts (the cable itself is drawn with the line overlays).
@@ -3720,29 +4084,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // avoid z-fighting speckle.
   glEnable(GL_POLYGON_OFFSET_FILL);
   glPolygonOffset(-2.0f, -4.0f);
-  // Static receivers/casters for the shadow-map mask, cached per scene. Needed
-  // by the prototype FOV mode and by the free-aim highlight (always masked).
-  if (fovOverlayMode_ == FovOverlayMode::ShadowMap || overlays.aimShooter) {
-    const unsigned long long sceneKey = FovSceneFingerprint(game.GetScene());
-    if (sceneKey != fovSceneKey_) {
-      BuildFovSceneMesh(game.GetScene(), &fovSceneMesh_);
-      fovSceneKey_ = sceneKey;
-    }
-  }
   // Thermal view: the tint strength is a debug-panel slider (the pale
   // black-hot world needs a different level than the normal view).
   const float fovAlpha = debug.thermal ? debug.thermalFovAlpha : 0.15f;
   const auto drawTeamFov = [&](Team fovTeam) {
     if (fovOverlayMode_ == FovOverlayMode::ShadowMap) {
       // Issue #110 prototype: projective per-unit mask instead of the
-      // analytic ground overlay.
-      for (const Unit& unit : game.GetScene().units) {
-        if (debug.disableFov || !unit.alive || unit.team != fovTeam) continue;
-        const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, fovAlpha)
-                                                            : glm::vec4(0.9f, 0.25f, 0.22f, fovAlpha);
-        DrawFovShadowMask(game, unit, unit.VisualYaw(), tactics::constants::kShootHalfFovDegrees,
-                          teamColor, viewProj, drawTerrain, targetFramebuffer, x, y, width, height);
-      }
+      // analytic ground overlay, one pass for the whole team.
+      const glm::vec4 teamColor = fovTeam == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, fovAlpha)
+                                                        : glm::vec4(0.9f, 0.25f, 0.22f, fovAlpha);
+      DrawFovMasks(fovTeam == team ? teamFovMasks : otherFovMasks, teamColor, viewProj,
+                   drawTerrain, mapHalfExtent);
       colorShader_.Use();
     } else {
       const auto build = [&](const Unit& unit) {
@@ -3782,19 +4134,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // highlight -- the shadow-map mask shader, so it tints every surface the
   // figure could aim at directly (building walls and roofs included, not
   // just the ground). The figure turns to shoot, so its facing doesn't gate
-  // the sweep: three 120-degree sectors (each within the two depth maps'
-  // reach) tile the full circle. Own stencil pass so it layers over the
-  // team's FOV tint, while the sectors' seams still blend only once.
-  if (overlays.aimShooter && overlays.aimShooter->alive && !debug.disableFov) {
-    const Unit& shooter = *overlays.aimShooter;
+  // the sweep: three 120-degree sectors tile the full circle, in one pass.
+  // Own stencil pass so it layers over the team's FOV tint.
+  if (aimSweep) {
     glEnable(GL_STENCIL_TEST);
     glStencilMask(0xFF);
     glClear(GL_STENCIL_BUFFER_BIT);
-    for (int sector = 0; sector < 3; ++sector) {
-      DrawFovShadowMask(game, shooter, shooter.facingYaw + glm::radians(120.0f * sector), 61.0f,
-                        glm::vec4(kAimColor, 0.22f), viewProj, drawTerrain, targetFramebuffer, x,
-                        y, width, height);
-    }
+    DrawFovMasks(aimFovMasks, glm::vec4(kAimColor, 0.22f), viewProj, drawTerrain, mapHalfExtent);
     colorShader_.Use();
   }
   glDisable(GL_STENCIL_TEST);

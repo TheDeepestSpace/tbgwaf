@@ -9,6 +9,7 @@ map:
     elevated: false
     features: {terrain: on}
     terrain_levels: -1
+    extra_arteries: 0
 units:
   - {id: 0, team: blue, position: [-39.2, 0, -51.26], facing_degrees: 100}
   - {id: 1, team: red, position: [-65, 0, 10], facing_degrees: 0}

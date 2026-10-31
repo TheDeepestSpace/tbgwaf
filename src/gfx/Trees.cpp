@@ -23,7 +23,7 @@ void main() {
   mat3 rotation = mat3(c, 0.0, -s, 0.0, 1.0, 0.0, s, 0.0, c);
   vec3 world = aPositionScale.xyz + rotation * aPos * aPositionScale.w;
   vNormal = rotation * aNormal;
-  vColor = vec4(aColor.rgb * aYawTint.y, aColor.a);
+  vColor = aColor;  // Same color as buildings: no per-tree tint.
   gl_Position = uViewProj * vec4(world, 1.0);
 }
 )";
@@ -65,7 +65,7 @@ void Branch(std::vector<Vertex>& mesh, glm::vec3 a, glm::vec3 b, float radius) {
   const glm::vec3 axis = glm::normalize(b - a);
   const glm::vec3 right = glm::normalize(glm::cross(axis, glm::vec3(0, 0, 1)));
   const glm::vec3 side = glm::cross(axis, right);
-  const glm::vec4 bark(0.34f, 0.23f, 0.14f, 0.0f);
+  const glm::vec4 bark(0.55f, 0.55f, 0.6f, 0.0f);  // Building color.
   for (int i = 0; i < 6; ++i) {
     const float t0 = i * 6.2831853f / 6, t1 = (i + 1) * 6.2831853f / 6;
     const glm::vec3 n0 = right * std::cos(t0) + side * std::sin(t0);
@@ -112,8 +112,8 @@ void Lobe(std::vector<Vertex>& mesh, glm::vec3 center, glm::vec3 size,
 
 std::vector<Vertex> BuildTree(int variant) {
   std::vector<Vertex> mesh;
-  const glm::vec3 colors[] = {{0.34f, 0.53f, 0.20f}, {0.23f, 0.43f, 0.25f},
-                             {0.48f, 0.58f, 0.25f}};
+  const glm::vec3 colors[] = {{0.55f, 0.55f, 0.6f}, {0.55f, 0.55f, 0.6f},
+                             {0.55f, 0.55f, 0.6f}};  // Building color.
   const glm::vec3 shapes[] = {{1.15f, 0.9f, 1.0f}, {0.82f, 1.3f, 0.85f},
                              {1.0f, 1.0f, 1.1f}};
   const glm::vec3 shape = shapes[variant], center(0.0f, 3.4f, 0.0f);

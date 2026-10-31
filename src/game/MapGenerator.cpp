@@ -4636,8 +4636,8 @@ void EmitTrees(Scene* scene, const std::vector<UrbanBlock>& blocks,
     if (occupied) continue;
 
     const size_t first = scene->trees.size();
-    const int count = rng.Int(2, 4);
-    for (int attempt = 0; attempt < 128 && scene->trees.size() < first + count; ++attempt) {
+    const int count = rng.Int(10, 16);
+    for (int attempt = 0; attempt < 600 && scene->trees.size() < first + count; ++attempt) {
       TreeDecoration tree;
       tree.scale = rng.Float(0.75f, 1.1f);
       const float radius = kTreeCanopyRadius * tree.scale;
@@ -4656,7 +4656,7 @@ void EmitTrees(Scene* scene, const std::vector<UrbanBlock>& blocks,
       for (size_t i = first; i < scene->trees.size(); ++i) {
         const TreeDecoration& other = scene->trees[i];
         clear &= glm::distance(p, glm::vec2(other.position.x, other.position.z)) >
-                 radius + kTreeCanopyRadius * other.scale + 0.4f;
+                 0.45f * (radius + kTreeCanopyRadius * other.scale);  // Crowns overlap.
       }
       // A cable may cross an empty block even if both anchors are outside it.
       for (const Zipline& line : scene->ziplines) {

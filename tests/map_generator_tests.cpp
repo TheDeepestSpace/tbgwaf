@@ -2611,7 +2611,7 @@ void TestTreesStayOnEmptyBlocksAndOutOfGameplay() {
           const auto& polygon = blocks[b].vertices;
           if (!PointInConvexPolygon(p, polygon)) continue;
           ++containing;
-          CHECK(++counts[b] <= 4);
+          CHECK(++counts[b] <= 16);
           const float margin = config.sidewalkWidth + kTreeCanopyRadius * tree.scale;
           for (size_t e = 0; e < polygon.size(); ++e)
             CHECK(DistanceToSegment(p, polygon[e], polygon[(e + 1) % polygon.size()]) >= margin);

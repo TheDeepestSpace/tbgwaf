@@ -63,6 +63,10 @@ constexpr float kGunRestitution = 0.35f;
 constexpr float kGunFriction = 0.7f;      // Horizontal velocity kept per contact step.
 constexpr float kGunSpinDamping = 0.6f;   // Angular velocity kept per contact step.
 constexpr float kGunInertia = 0.03f;      // Unit mass, roughly a thin box.
+constexpr float kGunRestSpeed = 0.6f;     // Slower contact approaches do not bounce.
+constexpr float kGunSettleSpeed = 0.5f;   // Contact speed/spin below which the gun is settling;
+constexpr float kGunSettleSpin = 2.5f;    // a few such steps in a row put it to sleep.
+constexpr int kGunSettleSteps = 8;
 constexpr float kGunSpin = 9.0f;          // Max tumble rate on release, rad/s.
 
 // Weapon-local extent of the (largest) weapon, used for ground contact. The
@@ -137,6 +141,12 @@ float FloorAt(float x, float z, float refY, float r, float base) {
 // Pushes a point of radius `r` out of any obstacle it is beside (below the
 // top, not resting on it) through the nearest side face. Returns the normal
 // of the last face used (zero if none).
+// Largest correction one push-out may apply. Overlapping colliders (a curb on
+// a sidewalk, a body spawned inside a box) would otherwise teleport a joint
+// metres in one step, which Verlet reads as a huge velocity.
+constexpr float kMaxJointStep = 0.25f;  // m per step (15 m/s).
+constexpr float kMaxPushPerIter = 0.015f;
+
 glm::vec3 PushOutOfWalls(glm::vec3& p, float refY, float r) {
   glm::vec3 normal(0.0f);
   for (const tactics::AABB& b : Colliders()) {
@@ -145,10 +155,11 @@ glm::vec3 PushOutOfWalls(glm::vec3& p, float refY, float r) {
     const float dzMin = p.z - (b.min.z - r), dzMax = (b.max.z + r) - p.z;
     if (dxMin <= 0.0f || dxMax <= 0.0f || dzMin <= 0.0f || dzMax <= 0.0f) continue;
     const float m = std::min(std::min(dxMin, dxMax), std::min(dzMin, dzMax));
-    if (m == dxMin) { p.x -= dxMin; normal = glm::vec3(-1, 0, 0); }
-    else if (m == dxMax) { p.x += dxMax; normal = glm::vec3(1, 0, 0); }
-    else if (m == dzMin) { p.z -= dzMin; normal = glm::vec3(0, 0, -1); }
-    else { p.z += dzMax; normal = glm::vec3(0, 0, 1); }
+    const float push = std::min(m, kMaxPushPerIter);
+    if (m == dxMin) { p.x -= push; normal = glm::vec3(-1, 0, 0); }
+    else if (m == dxMax) { p.x += push; normal = glm::vec3(1, 0, 0); }
+    else if (m == dzMin) { p.z -= push; normal = glm::vec3(0, 0, -1); }
+    else { p.z += push; normal = glm::vec3(0, 0, 1); }
   }
   return normal;
 }
@@ -323,6 +334,7 @@ Trajectory Simulate(const Unit& unit) {
     gunVel += dir * 0.8f + glm::vec3(0.0f, 0.6f, 0.0f);
   }
   bool gunAsleep = false;
+  int gunSettling = 0;
   auto gunFrame = [&]() { return RagdollGun{drops, gunPos, gunRot}; };
   traj.guns.reserve(kRagdollSteps + 1);
   traj.guns.push_back(gunFrame());
@@ -366,6 +378,7 @@ Trajectory Simulate(const Unit& unit) {
       if (drops) {
         gunVel += hitDir * 0.8f + glm::vec3(0.0f, 0.6f, 0.0f);
         gunAsleep = false;
+        gunSettling = 0;
       }
       still = 0;
       ++nextImpact;
@@ -400,8 +413,11 @@ Trajectory Simulate(const Unit& unit) {
         const glm::vec3 cv = gunVel + glm::cross(gunSpin, r);
         if (cv.y < 0.0f) {
           const glm::vec3 rn = glm::cross(r, glm::vec3(0.0f, 1.0f, 0.0f));
+          // No restitution for gentle contacts, or a resting gun micro-bounces
+          // (gravity alone adds ~0.23 per step) and never settles on a slope.
+          const float e = cv.y > -kGunRestSpeed ? 0.0f : kGunRestitution;
           const float j =
-              -(1.0f + kGunRestitution) * cv.y / (1.0f + glm::dot(rn, rn) / kGunInertia);
+              -(1.0f + e) * cv.y / (1.0f + glm::dot(rn, rn) / kGunInertia);
           gunVel.y += j;
           gunSpin += glm::cross(r, glm::vec3(0.0f, j, 0.0f)) / kGunInertia;
         }
@@ -411,7 +427,10 @@ Trajectory Simulate(const Unit& unit) {
         gunVel.x *= kGunFriction;
         gunVel.z *= kGunFriction;
         gunSpin *= kGunSpinDamping;
-        if (glm::length(gunVel) < 0.15f && glm::length(gunSpin) < 0.4f) {
+        const bool slow =
+            glm::length(gunVel) < kGunSettleSpeed && glm::length(gunSpin) < kGunSettleSpin;
+        gunSettling = slow ? gunSettling + 1 : 0;
+        if (gunSettling >= kGunSettleSteps) {
           gunAsleep = true;
           gunVel = glm::vec3(0.0f);
           gunSpin = glm::vec3(0.0f);
@@ -455,6 +474,10 @@ Trajectory Simulate(const Unit& unit) {
     }
     float maxSpeed = 0.0f;
     for (int i = 0; i < kRagJointCount; ++i) {
+      // Safety cap: no joint may move further than this in one step.
+      const glm::vec3 step = pos[i] - prev[i];
+      const float stepLen = glm::length(step);
+      if (stepLen > kMaxJointStep) prev[i] = pos[i] - step * (kMaxJointStep / stepLen);
       if (onFloor[i]) {
         // Resting on the ground: bleed off horizontal motion (friction).
         prev[i].x = pos[i].x - (pos[i].x - prev[i].x) * kGroundFriction;

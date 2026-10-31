@@ -246,6 +246,36 @@ void TestWallPushOutDoesNotLaunchBody() {
   gfx::SetRagdollObstacles({});
 }
 
+// Overlapping low slabs (sidewalk + curb) around a standing figure, with a
+// neighbour: neither body may be launched (issue #262).
+void TestOverlappingSidewalkDoesNotLaunch() {
+  tactics::Obstacle a, b, c;
+  a.bounds.min = glm::vec3(2.0f, 0.0f, -4.0f);
+  a.bounds.max = glm::vec3(3.6f, 0.15f, 4.0f);
+  b.bounds.min = glm::vec3(2.9f, 0.0f, -4.0f);  // Overlaps a.
+  b.bounds.max = glm::vec3(3.2f, 0.4f, 4.0f);
+  c.bounds.min = glm::vec3(2.5f, 0.0f, -2.5f);
+  c.bounds.max = glm::vec3(3.3f, 0.3f, -1.5f);
+  gfx::SetRagdollObstacles({a, b, c});
+  for (int id = 1; id <= 20; ++id) {
+    for (float x : {2.2f, 3.0f, 3.5f}) {
+      tactics::Unit u = Downed(id, tactics::constants::kKnockdownMaxSeconds);
+      u.position = glm::vec3(x, 0.0f, -2.0f);
+      u.knockdownImpacts.push_back({0.4f, glm::vec3(0.0f, 0.0f, 1.0f)});
+      gfx::RagdollPose last = gfx::SampleRagdollStep(u, 0);
+      for (int s = 1; s <= gfx::kRagdollSteps; ++s) {
+        const gfx::RagdollPose cur = gfx::SampleRagdollStep(u, s);
+        for (int i = 0; i < gfx::kRagJointCount; ++i) {
+          CHECK(glm::length(cur[i] - last[i]) < 0.3f);
+          CHECK(glm::length(cur[i] - u.position) < 6.0f);
+        }
+        last = cur;
+      }
+    }
+  }
+  gfx::SetRagdollObstacles({});
+}
+
 // A second hit on the falling body shoves it: same fall until the hit, then
 // a different one (here a hit from the opposite side).
 void TestSecondHitShovesFallingBody() {
@@ -326,14 +356,43 @@ void TestRestsOnRamp() {
   gfx::SetRagdollGround({}, tactics::HeightField{});
 }
 
+// Issue #257: a figure killed at the top of a ramp (platform box + ramp seam)
+// and its dropped rifle settle within ~2s instead of bouncing/jittering.
+void TestSettlesAtRampTop() {
+  tactics::WalkSurface ramp;  // Falls from y=1.6 at x=-2 to y=0 at x=14.
+  ramp.vertices = {{-2.0f, 1.6f, 4.0f}, {14.0f, 0.0f, 4.0f}, {14.0f, 0.0f, -4.0f},
+                   {-2.0f, 1.6f, -4.0f}};
+  tactics::Obstacle deck;
+  deck.bounds = tactics::AABB{glm::vec3(-10.0f, 0.0f, -4.0f), glm::vec3(-2.0f, 1.6f, 4.0f)};
+  gfx::SetRagdollObstacles({deck});
+  gfx::SetRagdollGround({ramp}, tactics::HeightField{});
+  const int from = 2 * 60;  // After 2s everything must be still.
+  for (int id = 1; id <= 12; ++id) {
+    for (float x : {-2.5f, -1.5f, -0.5f}) {
+      tactics::Unit u = Downed(id, tactics::constants::kKnockdownMaxSeconds);
+      u.position = glm::vec3(x, x < -2.0f ? 1.6f : tactics::SurfaceHeightAt(ramp, x, 0.0f), 0.0f);
+      const gfx::RagdollPose a = gfx::SampleRagdollStep(u, from);
+      const gfx::RagdollPose b = gfx::SampleRagdollStep(u, gfx::kRagdollSteps);
+      for (int j = 0; j < gfx::kRagJointCount; ++j) CHECK(glm::length(a[j] - b[j]) < 0.02f);
+      const gfx::RagdollGun ga = gfx::SampleRagdollGunStep(u, from);
+      const gfx::RagdollGun gb = gfx::SampleRagdollGunStep(u, gfx::kRagdollSteps);
+      CHECK(glm::length(ga.pos - gb.pos) < 0.02f);
+    }
+  }
+  gfx::SetRagdollObstacles({});
+  gfx::SetRagdollGround({}, tactics::HeightField{});
+}
+
 int main() {
   TestRiderFallsToGroundBelowCable();
   TestStartsFromAnimatedPose();
   TestWallPushOutDoesNotLaunchBody();
+  TestOverlappingSidewalkDoesNotLaunch();
   TestSecondHitShovesFallingBody();
   TestFallsOffWallAndStaysOutside();
   TestRestsOnRamp();
   TestDeckRailBlocksBody();
+  TestSettlesAtRampTop();
   TestGunReleaseAndDrop();
   TestOnlyDownedUnitsRagdoll();
   TestFallsAlongShotAndRests();

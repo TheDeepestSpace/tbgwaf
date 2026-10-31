@@ -1,6 +1,7 @@
 #include "server/Lobby.h"
 
 #include <algorithm>
+#include <chrono>
 
 #include "net/SceneSpec.h"
 
@@ -86,6 +87,11 @@ void Lobby::SpectatorJoin(int conn, const Json& message) {
   }
   const std::string name = message["room"].AsString();
   auto it = ValidRoomName(name) ? rooms_.find(name) : rooms_.end();
+  if (it == rooms_.end() && ValidRoomName(name) && message["mode"].IsString() &&
+      message["mode"].AsString() == "ai-v-ai") {
+    CreateBotRoom(conn, name, "ai-v-ai");  // Jev vs Jev: the first spectator opens the room.
+    return;
+  }
   if (it == rooms_.end()) {
     SendError(conn, "no such room");
     return;
@@ -103,6 +109,21 @@ void Lobby::SpectatorJoin(int conn, const Json& message) {
 }
 
 void Lobby::Join(int conn, const Json& message) {
+  const std::string mode = message["mode"].IsString() ? message["mode"].AsString() : "";
+  if (!mode.empty()) {
+    if (mode != "player-v-ai" && mode != "ai-v-ai") {
+      SendError(conn, "unknown mode");
+      return;
+    }
+    if (!bots_ || !bots_->enabled()) {
+      SendError(conn, "Jev is not configured on this server");
+      return;
+    }
+    if (mode == "ai-v-ai" && !message["spectate"].AsBool()) {
+      SendError(conn, "Jev vs Jev is watched: join as a spectator");
+      return;
+    }
+  }
   if (message["spectate"].AsBool()) {
     SpectatorJoin(conn, message);
     return;
@@ -134,8 +155,17 @@ void Lobby::Join(int conn, const Json& message) {
     SendError(conn, "no such room");
     return;
   }
+  if (mode == "player-v-ai") {
+    if (exists) {
+      SendError(conn, "room code already in use");
+      return;
+    }
+    CreateBotRoom(conn, name, mode);
+    return;
+  }
   Room& room = rooms_[name];
-  if (room.conns[0] >= 0 && room.conns[1] >= 0) {
+  if (!room.id) room.id = nextRoomId_++;
+  if (!room.botMode.empty() || (room.conns[0] >= 0 && room.conns[1] >= 0)) {
     SendError(conn, "room is full");
     return;
   }
@@ -156,6 +186,13 @@ void Lobby::Join(int conn, const Json& message) {
 }
 
 void Lobby::StartMatch(Room& room) {
+  // A new match: answers still in flight belong to the old one.
+  room.id = nextRoomId_++;
+  room.nextBotMs = 0;
+  for (BotSeat& seat : room.bot) {
+    seat.inFlight = false;
+    seat.error.clear();
+  }
   for (int ti = 0; ti < 2; ++ti) {
     const Team team = static_cast<Team>(ti);
     Json start = Typed("start");
@@ -163,14 +200,21 @@ void Lobby::StartMatch(Room& room) {
     start.Set("seed", static_cast<double>(room.session->seed()));
     if (room.scene) start.Set("scene", room.sceneSpec);
     start.Set("protocol", net::kProtocolVersion);
-    Send(room.conns[ti], start);
-    Send(room.conns[ti], room.session->PlansMessage(team));
-    Send(room.conns[ti], room.session->StateMessage(team));
+    SendSeat(room, team, start);
+    SendSeat(room, team, room.session->PlansMessage(team));
+    SendSeat(room, team, room.session->StateMessage(team));
   }
   for (int spectator : room.spectators) SendSpectatorView(spectator, room);
+  BroadcastBots(room);
 }
 
 void Lobby::HandleAction(int conn, Member& member, const Json& message) {
+  if (message["t"].IsString() && message["t"].AsString() == "bot_control") {
+    auto it = rooms_.find(member.room);
+    if (it == rooms_.end()) return;
+    HandleBotControl(conn, it->second, message);
+    return;
+  }
   if (member.spectator) {
     SendError(conn, "spectators are read-only");
     return;
@@ -212,22 +256,187 @@ void Lobby::HandleAction(int conn, Member& member, const Json& message) {
   if (session.Ready(team) != wasReady) {
     Json peer = Typed("peer");
     peer.Set("ready", Json(session.Ready(team)));
-    Send(room.conns[static_cast<int>(other)], peer);
+    SendSeat(room, other, peer);
   }
+  MaybeRunRound(room);
+}
 
-  if (session.BothReady()) {
-    const auto reports = session.RunRound();
-    for (int ti = 0; ti < 2; ++ti) {
-      const Team t = static_cast<Team>(ti);
-      Send(room.conns[ti], reports[ti]);
-      Send(room.conns[ti], session.PlansMessage(t));
-      Send(room.conns[ti], Json(Json::Object{{"t", Json("peer")}, {"ready", Json(false)}}));
-    }
-    for (int spectator : room.spectators) {
-      Send(spectator, reports[2]);
-      Send(spectator, session.SpectatorPlansMessage());
+void Lobby::MaybeRunRound(Room& room) {
+  GameSession& session = *room.session;
+  if (!session.BothReady()) return;
+  const auto reports = session.RunRound();
+  for (int ti = 0; ti < 2; ++ti) {
+    const Team t = static_cast<Team>(ti);
+    SendSeat(room, t, reports[ti]);
+    SendSeat(room, t, session.PlansMessage(t));
+    SendSeat(room, t, Json(Json::Object{{"t", Json("peer")}, {"ready", Json(false)}}));
+  }
+  for (int spectator : room.spectators) {
+    Send(spectator, reports[2]);
+    Send(spectator, session.SpectatorPlansMessage());
+  }
+  // With nobody playing, Jev would plan rounds faster than they play back.
+  if (pacePlayback_ && room.conns[0] < 0 && room.conns[1] < 0) {
+    const double seconds = reports[2]["duration"].AsNumber(constants::kRoundDuration);
+    room.nextBotMs = NowMs() + static_cast<int64_t>((seconds + 1.0) * 1000.0);
+  }
+  BroadcastBots(room);
+}
+
+int64_t Lobby::NowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+void Lobby::CreateBotRoom(int conn, const std::string& name, const std::string& mode) {
+  int botRooms = 0;
+  for (const auto& [roomName, existing] : rooms_) botRooms += existing.botMode.empty() ? 0 : 1;
+  if (botRooms >= maxBotRooms_) {
+    SendError(conn, "too many Jev matches are running; try again shortly");
+    return;
+  }
+  Room& room = rooms_[name];
+  room.name = name;
+  room.id = nextRoomId_++;
+  room.botMode = mode;
+  room.session = std::make_unique<GameSession>(seed_());
+  if (mode == "player-v-ai") {
+    // The human is Blue; Jev plays Red and starts thinking as the match opens.
+    room.conns[0] = conn;
+    members_[conn] = Member{name, Team::Blue};
+    room.bot[1].active = true;
+    room.botsRunning = true;
+    StartMatch(room);
+    return;
+  }
+  // Jev vs Jev starts paused, like the local preview; a spectator starts it.
+  room.bot[0].active = room.bot[1].active = true;
+  room.botsRunning = false;
+  room.spectators.push_back(conn);
+  members_[conn] = Member{name, Team::Blue, true};
+  SendSpectatorView(conn, room);
+  BroadcastBots(room);
+}
+
+void Lobby::BroadcastBots(const Room& room) {
+  if (room.botMode.empty()) return;
+  Json m = Typed("bots");
+  m.Set("mode", room.botMode);
+  m.Set("running", Json(room.botsRunning));
+  Json thinking{Json::Array{}};
+  std::string error;
+  bool fallback = false;
+  for (int ti = 0; ti < 2; ++ti) {
+    const BotSeat& seat = room.bot[ti];
+    if (!seat.active) continue;
+    const Team team = static_cast<Team>(ti);
+    if (seat.inFlight) thinking.Push(Json(net::TeamName(team)));
+    if (seat.fallback) fallback = true;
+    if (error.empty() && !seat.error.empty()) {
+      error = std::string(team == Team::Blue ? "Blue" : "Red") + ": " + seat.error;
     }
   }
+  m.Set("thinking", std::move(thinking));
+  m.Set("error", error);
+  m.Set("fallback", Json(fallback));
+  for (int ti = 0; ti < 2; ++ti) SendSeat(room, static_cast<Team>(ti), m);
+  for (int spectator : room.spectators) Send(spectator, m);
+}
+
+void Lobby::HandleBotControl(int conn, Room& room, const Json& message) {
+  if (room.botMode.empty()) {
+    SendError(conn, "this room has no Jev player");
+    return;
+  }
+  if (message["run"].IsBool()) {
+    if (room.botMode != "ai-v-ai") {
+      SendError(conn, "only Jev vs Jev can be started or paused");
+      return;
+    }
+    room.botsRunning = message["run"].AsBool();
+  }
+  if (message["fallback"].IsBool()) {
+    for (BotSeat& seat : room.bot) {
+      if (!seat.active) continue;
+      seat.fallback = message["fallback"].AsBool();
+      seat.error.clear();
+    }
+  }
+  if (message["retry"].AsBool()) {
+    for (BotSeat& seat : room.bot) seat.error.clear();
+  }
+  BroadcastBots(room);
+}
+
+void Lobby::AnnounceBotCommit(Room& room, Team bot) {
+  for (int spectator : room.spectators) Send(spectator, room.session->SpectatorPlansMessage());
+  Json peer = Typed("peer");
+  peer.Set("ready", Json(true));
+  SendSeat(room, OpposingTeam(bot), peer);
+}
+
+void Lobby::ScheduleBots(Room& room) {
+  if (!bots_ || room.botMode.empty() || !room.session || !room.botsRunning) return;
+  GameSession& session = *room.session;
+  if (!session.PlanningOpen()) return;
+  if (room.nextBotMs && NowMs() < room.nextBotMs) return;
+  bool changed = false;
+  for (int ti = 0; ti < 2; ++ti) {
+    BotSeat& seat = room.bot[ti];
+    const Team team = static_cast<Team>(ti);
+    if (!seat.active || seat.inFlight || !seat.error.empty() || session.Ready(team)) continue;
+    JevJob job;
+    job.roomId = room.id;
+    job.roomName = room.name;
+    job.team = team;
+    job.game = session.game();
+    job.nonce = ++botNonce_;
+    job.fallback = seat.fallback;
+    bots_->Submit(std::move(job));
+    seat.inFlight = true;
+    changed = true;
+  }
+  if (changed) BroadcastBots(room);
+}
+
+void Lobby::Tick() {
+  if (!bots_) return;
+  for (JevResult& result : bots_->TakeResults()) {
+    auto it = rooms_.find(result.roomName);
+    if (it == rooms_.end() || it->second.id != result.roomId || !it->second.session) continue;
+    Room& room = it->second;
+    BotSeat& seat = room.bot[static_cast<int>(result.team)];
+    GameSession& session = *room.session;
+    seat.inFlight = false;
+    // Paused, switched to the fallback planner, or no longer planning: drop
+    // the answer; the seat asks again when it is next due.
+    if (!seat.active || !room.botsRunning || seat.fallback != result.fallback ||
+        !session.PlanningOpen() || session.Ready(result.team)) {
+      BroadcastBots(room);
+      continue;
+    }
+    if (!result.error.empty()) {
+      seat.error = result.error;
+      BroadcastBots(room);
+      continue;
+    }
+    if (!result.nothingToAsk && result.request.round != session.game().RoundNumber()) {
+      BroadcastBots(room);  // Stale (the round moved on); re-asked on the next pass.
+      continue;
+    }
+    const GameSession::Result applied = session.ApplyBotPlan(
+        result.team, result.nothingToAsk ? nullptr : &result.request, result.choices);
+    if (!applied.ok) {
+      seat.error = applied.error;
+      BroadcastBots(room);
+      continue;
+    }
+    AnnounceBotCommit(room, result.team);
+    MaybeRunRound(room);
+    BroadcastBots(room);
+  }
+  for (auto& [name, room] : rooms_) ScheduleBots(room);
 }
 
 Json Lobby::OnControl(const Json& message) {
@@ -246,6 +455,7 @@ Json Lobby::OnControl(const Json& message) {
     std::string error;
     if (!net::SceneFromSpec(message["scene"], &scene, &error)) return reply(false, error);
     Room& room = rooms_[name];
+    room.id = nextRoomId_++;
     room.scene = std::move(scene);
     room.sceneSpec = message["scene"];
     if (message["friendly_fire"].IsBool()) room.friendlyFire = message["friendly_fire"].AsBool();
@@ -275,6 +485,8 @@ void Lobby::OnDisconnect(int conn) {
   if (member.spectator) {
     room.spectators.erase(std::remove(room.spectators.begin(), room.spectators.end(), conn),
                           room.spectators.end());
+    // Nobody left to watch a Jev vs Jev match: stop spending on it.
+    if (room.botMode == "ai-v-ai" && room.spectators.empty()) rooms_.erase(roomIt);
     return;
   }
   for (int spectator : room.spectators) {

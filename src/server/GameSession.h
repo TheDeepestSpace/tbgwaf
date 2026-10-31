@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 
+#include "ai/JevPlanner.h"
 #include "game/GameLogic.h"
 #include "net/Json.h"
 #include "net/Protocol.h"
@@ -38,6 +39,17 @@ class GameSession {
   // living figures must have a plan); NewMatch restarts after game over with
   // `newSeed`.
   Result Apply(Team team, const net::Action& action, uint32_t newSeed = 0);
+
+  // True while plans can still change (not simulating, not over).
+  bool PlanningOpen() const {
+    return game_.Mode() != InputMode::Executing && game_.Mode() != InputMode::GameOver;
+  }
+  // A bot-controlled team's plan: `choices` (one option id per acting figure)
+  // is rechecked against the live game and replayed through the normal
+  // click/plan path, whole or not at all; on success the team is committed.
+  // `request == nullptr` just commits (nothing was left to plan).
+  Result ApplyBotPlan(Team team, const ai::JevRequest* request,
+                      const std::vector<std::string>& choices);
 
   bool Ready(Team team) const { return ready_[static_cast<int>(team)]; }
   bool BothReady() const { return Ready(Team::Blue) && Ready(Team::Red); }

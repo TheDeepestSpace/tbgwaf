@@ -69,6 +69,18 @@ GameSession::Result GameSession::Apply(Team team, const net::Action& action, uin
   return result;
 }
 
+GameSession::Result GameSession::ApplyBotPlan(Team team, const ai::JevRequest* request,
+                                               const std::vector<std::string>& choices) {
+  if (!PlanningOpen()) return {false, "planning is closed"};
+  if (ready_[static_cast<int>(team)]) return {false, "team is already committed"};
+  if (request && !ai::ApplyJevChoice(&game_, *request, choices)) {
+    return {false, "Jev's plan is no longer legal"};
+  }
+  net::Action commit;
+  commit.kind = net::ActionKind::Commit;
+  return Apply(team, commit);
+}
+
 std::array<Json, 3> GameSession::RunRound() {
   std::array<Json, 3> out;
   const Json empty{Json::Array{}};

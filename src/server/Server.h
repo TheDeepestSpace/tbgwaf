@@ -23,6 +23,11 @@ struct ServerConfig {
   // the server's unfiltered state and shut the server down. -1 = disabled
   // (the shipped server never enables it), 0 = pick a free port.
   int controlPort = -1;
+  // Server-side Jev: base URL of the Jev adapter (server/jev-adapter), plain
+  // HTTP, e.g. "http://127.0.0.1:8787" (the sidecar in the shipped image).
+  // Empty disables the Jev vs Jev / Blue vs Jev modes.
+  std::string jevAdapterUrl;
+  int maxBotRooms = 4;  // Concurrent Jev matches; each one spends the Jev budget.
 };
 
 // Single-threaded poll() WebSocket server feeding a Lobby. Also answers
@@ -75,6 +80,7 @@ class Server {
   std::atomic<bool> stop_{false};
   int nextId_ = 1;
   std::map<int, Conn> conns_;
+  JevBotRunner bots_;  // Declared before lobby_, which holds a pointer to it.
   Lobby lobby_;
 };
 

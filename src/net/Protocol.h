@@ -24,6 +24,14 @@
 //   {"t":"join","room":"<name>","spectate":true}   watch an existing room read-only: gets
 //                                                  unfiltered state, both teams' plans and
 //                                                  unfiltered rounds; any other message is an error
+//   {"t":"join","room":"<name>","mode":"player-v-ai"}   Blue vs Jev: the server seats Jev as Red
+//   {"t":"join","room":"<name>","spectate":true,"mode":"ai-v-ai"}   Jev vs Jev: opens a room of two
+//                                                  server-side Jevs (starts paused) and watches it
+//                                                  (needs TBGWAF_JEV_ADAPTER_URL on the server)
+//   {"t":"bot_control","run":bool,"retry":bool,"fallback":bool}   Jev rooms only, any member:
+//                                                  run=false/true pauses/starts Jev vs Jev; retry
+//                                                  re-asks after an error; fallback=true switches to
+//                                                  the explicit deterministic (non-Jev) planner
 //   {"t":"move","unit":3,"waypoints":[[x,y,z],...],"facing":yaw}
 //   {"t":"shoot","unit":3,"target":4}
 //   {"t":"pass","unit":3}
@@ -48,6 +56,8 @@
 //   {"t":"peer","ready":bool}
 //   {"t":"round","round":N,"duration":s,"frames":[...],"shots":[...],"state":{...}}
 //   {"t":"state","round":N,"over":bool,"winner":"blue"|"red"|"none"|null,"units":[...]}
+//   {"t":"bots","mode":..,"running":bool,"thinking":["red"],"error":"..","fallback":bool}
+//                                                  Jev rooms: status after every change
 //   {"t":"opponent_left"}   {"t":"error","error":"..."}
 namespace tactics::net {
 

@@ -36,6 +36,11 @@ class RemoteClient {
   RemoteClient(tactics::GameLogic* game, std::string room, std::string intent = "",
                bool spectate = false);
 
+  // Ask the server to seat Jev: "player-v-ai" (we play Blue against Jev's Red)
+  // or, with `spectate`, "ai-v-ai" (watch two Jevs). Empty = a normal match.
+  // Call before OnOpen().
+  void SetBotMode(std::string mode) { botMode_ = std::move(mode); }
+
   // Transport events.
   void OnOpen();
   void OnMessage(const std::string& text);
@@ -117,6 +122,7 @@ class RemoteClient {
   tactics::GameLogic* game_;
   std::string room_;
   std::string intent_;
+  std::string botMode_;
   bool spectate_ = false;
   Status status_ = Status::Connecting;
   std::optional<tactics::Team> team_;

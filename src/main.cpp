@@ -200,6 +200,16 @@ EM_JS(char*, tbgwaf_server_room_intent, (), {
 // Back to the page's start screen (drops the connection, fresh game).
 EM_JS(void, tbgwaf_reload_page, (), { window.location.reload(); });
 
+// Module.tbgwafBotMode: "player-v-ai" / "ai-v-ai" asks the server to seat Jev
+// (it plans on the server; this client never talks to Jev).
+EM_JS(char*, tbgwaf_server_bot_mode, (), {
+  const text = Module.tbgwafBotMode || "";
+  const size = lengthBytesUTF8(text) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(text, ptr, size);
+  return ptr;
+});
+
 // Module.tbgwafServerSpectate: watch the room read-only (Jev vs Jev pane).
 EM_JS(int, tbgwaf_server_spectate, (), { return Module.tbgwafServerSpectate ? 1 : 0; });
 
@@ -616,6 +626,9 @@ int main() {
         fixedTeam = Team::Blue;  // One pane; a local mirror until a room is chosen.
       } else {
         remote = std::make_unique<tactics::net::RemoteClient>(&game, roomRaw, intentRaw, spectate);
+        char* botModeRaw = tbgwaf_server_bot_mode();
+        remote->SetBotMode(botModeRaw);
+        std::free(botModeRaw);
         fixedTeam = Team::Blue;  // Placeholder until the server's "start".
         tbgwaf_ws_open(serverUrl.c_str());
       }

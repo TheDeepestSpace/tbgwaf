@@ -272,6 +272,8 @@ else()
   if(TBGWAF_BUILD_SERVER)
     add_library(tactics_server_lib STATIC
       src/server/GameSession.cpp
+      src/server/HttpClient.cpp
+      src/server/JevBot.cpp
       src/server/Lobby.cpp
       src/server/WebSocket.cpp
       src/server/Server.cpp

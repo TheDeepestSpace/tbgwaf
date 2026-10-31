@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <functional>
 #include <map>
 #include <memory>
@@ -9,6 +10,7 @@
 #include <vector>
 
 #include "server/GameSession.h"
+#include "server/JevBot.h"
 
 namespace tactics::server {
 
@@ -24,6 +26,20 @@ class Lobby {
   using SeedFn = std::function<uint32_t()>;
   Lobby(SendFn send, SeedFn seed) : send_(std::move(send)), seed_(std::move(seed)) {}
 
+  // Enables the server-side Jev modes (join with "mode":"player-v-ai" or
+  // "ai-v-ai"). `bots` must outlive the Lobby. `pacePlayback` holds a
+  // spectator-only match's next round until the previous one has been played
+  // back (turn off in tests).
+  void SetBots(JevBotRunner* bots, int maxBotRooms = 4, bool pacePlayback = true) {
+    bots_ = bots;
+    maxBotRooms_ = maxBotRooms;
+    pacePlayback_ = pacePlayback;
+  }
+  // Call every loop iteration: applies finished Jev answers and starts new
+  // requests. Cheap when no room has a bot.
+  void Tick();
+  bool BotsBusy() const { return bots_ && bots_->Busy(); }
+
   // One inbound text message from `conn`. Never throws on bad input.
   void OnMessage(int conn, const std::string& text);
   void OnDisconnect(int conn);
@@ -36,8 +52,21 @@ class Lobby {
   size_t RoomCount() const { return rooms_.size(); }
 
  private:
+  // One Jev-controlled seat (a team with no connection).
+  struct BotSeat {
+    bool active = false;
+    bool inFlight = false;
+    bool fallback = false;  // User opted into the deterministic non-Jev planner.
+    std::string error;      // Held until a retry; the seat does not re-ask on its own.
+  };
   struct Room {
-    int conns[2] = {-1, -1};  // Indexed by Team.
+    std::string name;
+    uint64_t id = 0;  // Unique per room instance, so a late Jev answer can't hit a successor.
+    int conns[2] = {-1, -1};  // Indexed by Team; -1 = bot seat.
+    std::array<BotSeat, 2> bot;
+    std::string botMode;      // "", "player-v-ai" or "ai-v-ai".
+    bool botsRunning = true;  // ai-v-ai starts paused.
+    int64_t nextBotMs = 0;    // Playback pacing for rooms with no human player.
     std::vector<int> spectators;  // Read-only, unfiltered viewers.
     std::unique_ptr<GameSession> session;
     std::optional<Scene> scene;  // Set by load_scenario.
@@ -56,12 +85,27 @@ class Lobby {
   void HandleAction(int conn, Member& member, const net::Json& message);
   void StartMatch(Room& room);
   void SpectatorJoin(int conn, const net::Json& message);
+  void CreateBotRoom(int conn, const std::string& name, const std::string& mode);
+  void HandleBotControl(int conn, Room& room, const net::Json& message);
+  void MaybeRunRound(Room& room);
+  void ScheduleBots(Room& room);
+  void BroadcastBots(const Room& room);
+  void AnnounceBotCommit(Room& room, Team bot);
+  void SendSeat(const Room& room, Team team, const net::Json& message) {
+    if (room.conns[static_cast<int>(team)] >= 0) Send(room.conns[static_cast<int>(team)], message);
+  }
+  static int64_t NowMs();
   void SendSpectatorView(int conn, const Room& room);  // start + plans + state.
   void Send(int conn, const net::Json& message) { send_(conn, message.Dump()); }
   void SendError(int conn, const std::string& why);
 
   SendFn send_;
   SeedFn seed_;
+  JevBotRunner* bots_ = nullptr;
+  int maxBotRooms_ = 4;
+  bool pacePlayback_ = true;
+  uint64_t nextRoomId_ = 1;
+  unsigned botNonce_ = 0;
   std::map<std::string, Room> rooms_;
   std::map<int, Member> members_;
   std::optional<std::mt19937> codeRng_;

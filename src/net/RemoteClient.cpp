@@ -51,6 +51,7 @@ void RemoteClient::OnOpen() {
   if (!room_.empty()) join.Set("room", room_);
   if (!intent_.empty()) join.Set("intent", intent_);
   if (spectate_) join.Set("spectate", Json(true));
+  if (!botMode_.empty()) join.Set("mode", botMode_);
   Queue(join);
 }
 

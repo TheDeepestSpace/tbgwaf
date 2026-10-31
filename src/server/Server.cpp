@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "server/Server.h"
 
 #include <arpa/inet.h>
@@ -38,13 +39,16 @@ int64_t Server::NowMs() {
 
 Server::Server(ServerConfig config)
     : config_(std::move(config)),
+      bots_(JevBotConfig{config_.jevAdapterUrl}),
       lobby_(
           [this](int conn, const std::string& text) {
             auto it = conns_.find(conn);
             if (it == conns_.end() || !it->second.open) return;
             Queue(it->second, ws::EncodeFrame(ws::Opcode::Text, text));
           },
-          RandomSeed) {}
+          RandomSeed) {
+  lobby_.SetBots(&bots_, config_.maxBotRooms);
+}
 
 Server::~Server() {
   for (auto& [id, c] : conns_) close(c.fd);
@@ -262,7 +266,8 @@ void Server::RunOnce(int timeoutMs) {
     fds.push_back({c.fd, events, 0});
     ids.push_back(id);
   }
-  poll(fds.data(), fds.size(), timeoutMs);
+  // While Jev is thinking, wake often enough to deliver its answer promptly.
+  poll(fds.data(), fds.size(), lobby_.BotsBusy() ? std::min(timeoutMs, 50) : timeoutMs);
   const int64_t now = NowMs();
 
   if (fds[0].revents & POLLIN) Accept(listenFd_, false);
@@ -282,6 +287,8 @@ void Server::RunOnce(int timeoutMs) {
       OnReadable(ids[i], c, now);
     }
   }
+
+  lobby_.Tick();
 
   // Lobby callbacks may have queued output on any connection: flush all,
   // run keepalive/timeouts, and reap finished ones.

@@ -58,6 +58,34 @@ is walked off it over several rounds. `wait` is offered only once an enemy is
 visible or remembered; with no contact, a figure that can move must move.
 Only information the team could see is sent.
 
+## Server-hosted Jev (online play)
+
+When the page is served with a game server (`?server=...`, see the README), Blue vs Jev
+and Jev vs Jev run **on the server**, not in the browser:
+
+- The toolbar still selects the mode; picking one reloads into a fresh room with
+  `join {mode}` (`player-v-ai`: you are Blue, Jev is Red; `ai-v-ai`: a read-only
+  spectator watches two Jevs, starting paused).
+- The server (`src/server/JevBot.*`) builds the same bounded request from a copy of the
+  authoritative game (`JevRequestBuilder`, team-visible information only), POSTs it to the
+  Jev adapter (`TBGWAF_JEV_ADAPTER_URL`, plain HTTP), replays the chosen ids through
+  `ApplyJevChoice` and commits for Jev. The browser never talks to Jev or the proxy, and
+  the toolbar's **Jev proxy** box is hidden. All of that runs on worker threads; the poll
+  loop only applies finished answers.
+- Start/Pause/Retry/Fallback are relayed as `bot_control` messages; the server reports
+  `bots` status (thinking, error, fallback) back. After an adapter error the seat stops
+  asking until Retry; the deterministic fallback is still opt-in and labelled.
+- In Jev vs Jev the next round waits until the previous one has played back. Concurrent
+  Jev matches are capped by `TBGWAF_JEV_MAX_ROOMS` (default 4); the adapter's own rate and
+  daily limits still apply, so a public server cannot burn the Jev budget unboundedly.
+- The `server/Dockerfile` image bundles the adapter and starts it on `127.0.0.1:8787` when
+  the `TBGWAF_JEV_API_KEY` secret is set (the deploy workflow stages it; `entrypoint.sh`),
+  so Fly's server calls Jev directly and the key never leaves it. To use a separate adapter
+  instead, set `TBGWAF_JEV_ADAPTER_URL` (`http://` only: the adapter terminates TLS to
+  Jev). Without either, the Jev modes answer "Jev is not configured on this server".
+- Server games have no flag (CTF is not part of the server's match setup), so Jev uses its
+  no-flag `advance` option there.
+
 ## Run locally
 
 Build the WASM app as usual, then start the adapter in another terminal. The

@@ -7,7 +7,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <functional>
+#include <thread>
 #include <deque>
 #include <map>
 #include <string>
@@ -19,6 +23,8 @@
 #include "net/RemoteClient.h"
 #include "net/SceneSpec.h"
 #include "server/GameSession.h"
+#include "server/HttpClient.h"
+#include "server/JevBot.h"
 #include "server/Lobby.h"
 #include "server/Server.h"
 #include "server/WebSocket.h"
@@ -370,6 +376,240 @@ void TestSpectator() {
   CHECK(!Has(w.Drain(1), "opponent_left"));
   w.lobby.OnDisconnect(1);
   CHECK(Has(w.Drain(2), "opponent_left"));
+}
+
+
+// ---- Server-side Jev (Blue vs Jev / Jev vs Jev) ----
+
+// A stand-in for the Jev adapter: answers every figure with its first
+// candidate, like a model that always takes the first option.
+bool FirstOptionPoster(const std::string& requestJson, int* status, std::string* body,
+                       std::string* error) {
+  (void)error;
+  Json request;
+  if (!Json::Parse(requestJson, &request)) return false;
+  Json choices;
+  choices.Set("x", Json(0));  // Forces an object even if there are no candidates.
+  Json::Object picks;
+  for (const Json& c : request["candidates"].AsArray()) {
+    const std::string figure = std::to_string(static_cast<int>(c["figure"].AsNumber()));
+    if (!picks.count(figure)) picks[figure] = c["id"];
+  }
+  Json reply;
+  reply.Set("choices", Json(picks));
+  *status = 200;
+  *body = reply.Dump();
+  return true;
+}
+
+struct BotWire : Wire {
+  server::JevBotRunner runner;
+  explicit BotWire(server::JevBotRunner::Poster poster, int maxRooms = 4)
+      : runner(server::JevBotConfig{"http://fake"}, std::move(poster)) {
+    lobby.SetBots(&runner, maxRooms, /*pacePlayback=*/false);
+  }
+  // Ticks the lobby (as the poll loop does) until `done` or the timeout.
+  bool Pump(const std::function<bool()>& done, int timeoutMs = 60000) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    while (std::chrono::steady_clock::now() < end) {
+      lobby.Tick();
+      if (done()) return true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
+  }
+};
+
+void TestJevReplyParsing() {
+  ai::JevRequest request;
+  request.actorIds = {2, 5};
+  std::string error;
+  auto picks = server::JevBotRunner::ParseReply(
+      request, 200, R"({"choices":{"2":"f2_wait","5":"f5_move_1"}})", &error);
+  CHECK(error.empty() && picks.size() == 2 && picks[0] == "f2_wait" && picks[1] == "f5_move_1");
+  server::JevBotRunner::ParseReply(request, 200, R"({"choices":{"2":"f2_wait"}})", &error);
+  CHECK(!error.empty());  // A figure without a choice.
+  error.clear();
+  server::JevBotRunner::ParseReply(request, 429, R"({"error":"proxy is busy"})", &error);
+  CHECK(error == "Jev: proxy is busy");
+  error.clear();
+  server::JevBotRunner::ParseReply(request, 502, "<html>", &error);
+  CHECK(error == "Jev adapter returned HTTP 502");
+  error.clear();
+  server::JevBotRunner::ParseReply(request, 200, "nonsense", &error);
+  CHECK(!error.empty());
+}
+
+void TestHttpUrlParsing() {
+  server::HttpUrl url;
+  CHECK(server::ParseHttpUrl("http://127.0.0.1:8787", &url) && url.host == "127.0.0.1" &&
+        url.port == "8787" && url.basePath.empty());
+  CHECK(server::ParseHttpUrl("http://adapter.internal/api/", &url) && url.port == "80" &&
+        url.basePath == "/api");
+  CHECK(!server::ParseHttpUrl("https://adapter.example", &url));  // TLS lives in the adapter.
+  CHECK(!server::ParseHttpUrl("http://user@host", &url));
+  CHECK(!server::ParseHttpUrl("http://host:12x", &url));
+}
+
+// A real TCP round trip through the default poster: a one-shot loopback HTTP
+// server answers like the adapter does (Content-Length, Connection: close).
+void TestHttpPostLoopback() {
+  const int listener = socket(AF_INET, SOCK_STREAM, 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  CHECK(bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+  CHECK(listen(listener, 1) == 0);
+  socklen_t len = sizeof(addr);
+  getsockname(listener, reinterpret_cast<sockaddr*>(&addr), &len);
+  std::string seen;
+  std::thread serverThread([&] {
+    const int c = accept(listener, nullptr, nullptr);
+    char buf[4096];
+    ssize_t n;
+    while ((n = recv(c, buf, sizeof(buf), 0)) > 0) {
+      seen.append(buf, static_cast<size_t>(n));
+      if (seen.find("{\"ping\":1}") != std::string::npos) break;
+    }
+    const std::string body = R"({"pong":true})";
+    const std::string reply = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                              std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+    send(c, reply.data(), reply.size(), 0);
+    close(c);
+  });
+  server::HttpUrl url;
+  CHECK(server::ParseHttpUrl("http://127.0.0.1:" + std::to_string(ntohs(addr.sin_port)) + "/base", &url));
+  server::HttpResponse response;
+  std::string error;
+  CHECK(server::HttpPostJson(url, "/v1/choice", R"({"ping":1})", 5000, &response, &error));
+  serverThread.join();
+  close(listener);
+  CHECK(response.status == 200 && response.body == R"({"pong":true})");
+  CHECK(seen.rfind("POST /base/v1/choice HTTP/1.1", 0) == 0);
+  // Nothing listening: a clean transport error, not a hang.
+  server::HttpResponse refused;
+  CHECK(!server::HttpPostJson(url, "/v1/choice", "{}", 2000, &refused, &error) && !error.empty());
+}
+
+void TestBotModesNeedAdapter() {
+  Wire w;  // No bot runner configured.
+  w.Send(1, R"({"t":"join","room":"b","mode":"player-v-ai"})");
+  const auto reply = w.Drain(1);
+  CHECK(reply.size() == 1 && reply[0]["t"].AsString() == "error");
+  w.Send(2, R"({"t":"join","room":"b","spectate":true,"mode":"ai-v-ai"})");
+  CHECK(w.Drain(2)[0]["t"].AsString() == "error");
+  BotWire bw(FirstOptionPoster);
+  bw.Send(3, R"({"t":"join","room":"b","mode":"nope"})");
+  CHECK(bw.Drain(3)[0]["t"].AsString() == "error");
+  bw.Send(3, R"({"t":"join","room":"b","mode":"ai-v-ai"})");  // Must spectate.
+  CHECK(bw.Drain(3)[0]["t"].AsString() == "error");
+}
+
+// Blue vs Jev: the human is Blue, Jev plans Red on the server and commits;
+// the round runs once the human commits. The human never sees Red's plans.
+void TestBlueVsJev() {
+  std::atomic<int> posts{0};
+  BotWire w([&](const std::string& r, int* s, std::string* b, std::string* e) {
+    ++posts;
+    return FirstOptionPoster(r, s, b, e);
+  });
+  w.Send(1, R"({"t":"join","room":"pj","mode":"player-v-ai"})");
+  auto first = w.Drain(1);
+  CHECK(first.size() >= 3 && first[0]["t"].AsString() == "start" &&
+        first[0]["team"].AsString() == "blue");
+  CHECK(w.Pump([&] {
+    for (const Json& m : w.Drain(1)) {
+      if (m["t"].AsString() == "peer" && m["ready"].AsBool()) return true;
+    }
+    return false;
+  }));  // Jev (Red) planned and committed.
+  CHECK(posts == 1);
+  for (int unit = 0; unit < 3; ++unit) {
+    w.Send(1, R"({"t":"pass","unit":)" + std::to_string(unit) + "}");
+  }
+  w.Drain(1);
+  w.Send(1, R"({"t":"commit"})");
+  const auto after = w.Drain(1);
+  CHECK(Has(after, "round"));
+  for (const Json& m : after) {
+    if (m["t"].AsString() == "plans") CHECK(m["plans"].AsArray().size() <= 3);  // Own team only.
+  }
+  // A second human cannot take the bot's seat.
+  w.Send(2, R"({"t":"join","room":"pj"})");
+  CHECK(w.Drain(2)[0]["t"].AsString() == "error");
+  // The next round Jev asks again.
+  CHECK(w.Pump([&] { return posts >= 2; }));
+  w.lobby.OnDisconnect(1);
+  CHECK(w.lobby.RoomCount() == 0);
+}
+
+// Jev vs Jev: a spectator watches; the match starts paused, runs on
+// bot_control, retry/fallback recover from an adapter failure.
+void TestJevVsJev() {
+  std::atomic<bool> fail{true};
+  std::atomic<int> posts{0};
+  BotWire w([&](const std::string& r, int* s, std::string* b, std::string* e) {
+    ++posts;
+    if (fail) {
+      *e = "Jev adapter returned HTTP 503";
+      return false;
+    }
+    return FirstOptionPoster(r, s, b, e);
+  });
+  w.Send(9, R"({"t":"join","room":"aa","spectate":true,"mode":"ai-v-ai"})");
+  const auto opening = w.Drain(9);
+  CHECK(opening.size() >= 4 && opening[0]["team"].AsString() == "spectator");
+  CHECK(Has(opening, "bots"));
+  CHECK(!opening.back()["running"].AsBool());
+  w.Pump([] { return false; }, 100);
+  CHECK(posts == 0);  // Paused: nothing is spent.
+
+  w.Send(9, R"({"t":"bot_control","run":true})");
+  CHECK(w.Pump([&] {
+    for (const Json& m : w.Drain(9)) {
+      if (m["t"].AsString() == "bots" && !m["error"].AsString().empty()) return true;
+    }
+    return false;
+  }));
+  const int afterFailure = posts;
+  w.Pump([] { return false; }, 100);
+  CHECK(posts == afterFailure);  // An errored seat does not hammer the adapter.
+
+  fail = false;
+  w.Send(9, R"({"t":"bot_control","retry":true})");
+  CHECK(w.Pump([&] {
+    for (const Json& m : w.Drain(9)) {
+      if (m["t"].AsString() == "round") return true;
+    }
+    return false;
+  }));  // Both Jevs planned; the server ran the round.
+
+  // Opting into the deterministic fallback needs no adapter at all.
+  w.Send(9, R"({"t":"bot_control","fallback":true})");
+  const int before = posts;
+  CHECK(w.Pump([&] {
+    for (const Json& m : w.Drain(9)) {
+      if (m["t"].AsString() == "round") return true;
+    }
+    return false;
+  }));
+  CHECK(posts == before || posts == before + 2);  // At most in-flight asks from before the switch.
+
+  w.Send(9, R"({"t":"bot_control","run":false})");
+  w.lobby.OnDisconnect(9);
+  CHECK(w.lobby.RoomCount() == 0);  // Nobody watching: the match is dropped.
+}
+
+void TestBotRoomLimit() {
+  BotWire w(FirstOptionPoster, /*maxRooms=*/1);
+  w.Send(1, R"({"t":"join","room":"one","mode":"player-v-ai"})");
+  CHECK(Has(w.Drain(1), "start"));
+  w.Send(2, R"({"t":"join","room":"two","mode":"player-v-ai"})");
+  CHECK(w.Drain(2)[0]["t"].AsString() == "error");
+  w.Send(3, R"({"t":"bot_control","run":true})");
+  CHECK(w.Drain(3)[0]["t"].AsString() == "error");  // Not in a room.
+  w.Send(1, R"({"t":"bot_control","run":true})");  // Humans cannot pause Blue vs Jev.
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");
 }
 
 // Test control tap: a scenario-loaded room runs on the explicit scene, the
@@ -839,6 +1079,13 @@ int main() {
   TestLobbyPairing();
   TestRoomIntents();
   TestSpectator();
+  TestJevReplyParsing();
+  TestHttpUrlParsing();
+  TestHttpPostLoopback();
+  TestBotModesNeedAdapter();
+  TestBlueVsJev();
+  TestJevVsJev();
+  TestBotRoomLimit();
   TestControlTapScenarioRoom();
   TestClientServerRound();
   TestPlaybackFallFromCable();

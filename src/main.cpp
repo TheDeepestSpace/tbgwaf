@@ -325,7 +325,8 @@ constexpr int kThumbnailWidth = 320;
 constexpr int kThumbnailHeight = 180;
 
 void RenderBuilderThumbnail(gfx::SceneRenderer& renderer, const tactics::BuilderScene& bs,
-                            GLuint* texture, int index) {
+                            GLuint* texture, int index,
+                            gfx::RenderDebugOptions options) {
   if (*texture == 0) {
     glGenTextures(1, texture);
     glBindTexture(GL_TEXTURE_2D, *texture);
@@ -358,7 +359,7 @@ void RenderBuilderThumbnail(gfx::SceneRenderer& renderer, const tactics::Builder
     gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(preview, Team::Blue, std::nullopt);
     overlays.spectatorFov = true;
     renderer.RenderPane(preview, Team::Blue, /*fogActive=*/false, TeamVisibility{}, camera, 0, 0,
-                        kThumbnailWidth, kThumbnailHeight, overlays, fbo);
+                        kThumbnailWidth, kThumbnailHeight, overlays, fbo, options);
 #ifndef __EMSCRIPTEN__
     // TBGWAF_THUMBNAIL_DUMP=<dir>: write each card's render as
     // <dir>/builder-<index>.ppm (debug aid for the offscreen path, which no
@@ -756,8 +757,6 @@ int main() {
   float frameMs = 0.0f;
   float fovMs = 0.0f;
   gfx::RenderFrameStats frameStats;
-  // The thermal setting a builder game overrode, restored when it stops.
-  std::optional<bool> thermalBeforeBuilder;
 
   // Starts a hotseat game on builder scene `index`: per-session reset and a
   // fresh recording (the log embeds the scene), cameras framed on it.
@@ -782,11 +781,6 @@ int main() {
     builderStatus.clear();
     // Builder play is local to this instance: no peer sync to wait for.
     awaitingPeerSync = false;
-    // Hotseat shows both teams at once; the thermal view's monochrome would
-    // make them indistinguishable, so builder games start in normal colors
-    // (the debug panel can still turn it back on). Restored on Stop.
-    if (!thermalBeforeBuilder) thermalBeforeBuilder = debugOptions.thermal;
-    debugOptions.thermal = false;
   };
   // Ends a builder game (Stop): the recorder stops listening but keeps the
   // log for Download.
@@ -794,8 +788,6 @@ int main() {
     game.SetInputRecorder(nullptr);
     builderGameActive = false;
     timelinePlayback.Reset();
-    if (thermalBeforeBuilder) debugOptions.thermal = *thermalBeforeBuilder;
-    thermalBeforeBuilder.reset();
   };
   // Leaving the Builder for the Game Mode menu: drop the builder game so it
   // is never published, and (web) rejoin the peer's match -- ask it for its
@@ -905,8 +897,6 @@ int main() {
       builderIndex = addBuilderScene(loadedScene);
       builderGameActive = true;
       builderStatus = loaded;
-      thermalBeforeBuilder = debugOptions.thermal;
-      debugOptions.thermal = false;
       for (auto& camera : cameras) FitCameraToBuilderScene(&camera, loadedScene);
     } else {
       for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
@@ -1284,9 +1274,7 @@ int main() {
       if (const Unit* selected = builderPreview.FindUnit(builderEditor.selectedFigure)) {
         overlays.selectionHighlight = selected->position;
       }
-      // Normal colors (not the thermal view) so the teams read apart.
       gfx::RenderDebugOptions editorOptions = debugOptions;
-      editorOptions.thermal = false;
       editorOptions.stats = nullptr;
       glViewport(0, 0, windowWidth, windowHeight);
       glClearColor(0.08f, 0.09f, 0.11f, 1.0f);
@@ -1304,9 +1292,12 @@ int main() {
       // Builder cards: (re-)render the thumbnails of new or edited scenes.
       tactics::ui::BuilderMenu builderMenu;
       if (screen == tbgwaf_flow::State::Builder) {
+        gfx::RenderDebugOptions thumbnailOptions = debugOptions;
+        thumbnailOptions.stats = nullptr;
         for (int i = 0; i < static_cast<int>(builderScenes.size()); ++i) {
           if (!builderThumbnailDirty[i]) continue;
-          RenderBuilderThumbnail(renderer, builderScenes[i], &builderThumbnails[i], i);
+          RenderBuilderThumbnail(renderer, builderScenes[i], &builderThumbnails[i], i,
+                                 thumbnailOptions);
           builderThumbnailDirty[i] = false;
         }
         for (int i = 0; i < static_cast<int>(builderScenes.size()); ++i) {

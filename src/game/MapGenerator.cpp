@@ -3687,10 +3687,12 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, const std::vector<Pa
   float doorHeight = std::min(spec.height, b->groundFloorHeight - 0.15f);
   if (doorHeight < constants::kUnitHeight) return false;
   // A half-shuttered warehouse bay: the roll-up door sits half down, still
-  // passable (never below head height).
-  if (halfClosed && b->kind == BuildingKind::Commercial) {
-    doorHeight = std::max(constants::kUnitHeight, 0.5f * doorHeight);
-  }
+  // passable (never below head height). The facade keeps the full-height
+  // opening; the shutter panel is set back inside it (see below) so the bay
+  // still reads as a door rather than a wall with a gap under it.
+  const float fullDoorHeight = doorHeight;
+  const bool shuttered = halfClosed && b->kind == BuildingKind::Commercial;
+  if (shuttered) doorHeight = std::max(constants::kUnitHeight, 0.5f * doorHeight);
   // Rear doorway (50/50 via `rearOpen`): the longest edge facing away from the
   // frontage with open ground behind it (back-to-back parcels share walls).
   constexpr float kRearDoorWidth = 1.2f, kRearDoorHeight = 2.2f;
@@ -3757,7 +3759,26 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, const std::vector<Pa
     const float u0 = 0.5f * (len - doorWidth), u1 = u0 + doorWidth;
     addWall(a, q, 0.0f, u0, 0.0f, height);
     addWall(a, q, u1, len, 0.0f, height);
-    addWall(a, q, u0, u1, doorHeight, height - doorHeight);  // Lintel.
+    if (shuttered && fullDoorHeight - doorHeight > 0.2f) {
+      // Lintel at the full door height; shutter panel and side returns set
+      // back kShutterDepth behind the wall's outer face.
+      constexpr float kShutterDepth = 0.9f, kShutterThickness = 0.15f;
+      addWall(a, q, u0, u1, fullDoorHeight, height - fullDoorHeight);
+      const glm::vec2 d = glm::normalize(q - a);
+      const glm::vec2 in(-d.y, d.x);
+      const auto addBox = [&](float ua, float ub, float d0, float d1, float lift, float h) {
+        const glm::vec2 p0 = a + d * ua + in * d0, p1 = a + d * ub + in * d0;
+        AddPolygonBuilding(scene, {p0, p1, p1 + in * (d1 - d0), p0 + in * (d1 - d0)}, lift, h,
+                           index, groundY, kMinPiece);
+      };
+      addBox(u0 - kShutterThickness, u1 + kShutterThickness, kShutterDepth,
+             kShutterDepth + kShutterThickness, doorHeight,
+             fullDoorHeight - doorHeight);
+      addBox(u0 - kShutterThickness, u0, kWallThickness, kShutterDepth, 0.0f, fullDoorHeight);
+      addBox(u1, u1 + kShutterThickness, kWallThickness, kShutterDepth, 0.0f, fullDoorHeight);
+    } else {
+      addWall(a, q, u0, u1, doorHeight, height - doorHeight);  // Lintel.
+    }
   }
   // Interior floor slabs under each upper storey (a slab per floor above the
   // ground one). Overhead, so they never block the ground navmesh.

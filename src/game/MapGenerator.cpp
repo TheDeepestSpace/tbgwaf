@@ -4110,13 +4110,15 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
 
   for (size_t bi = 0; bi < scene->buildings.size(); ++bi) {
     const Building& b = scene->buildings[bi];
-    if (b.enterable) continue;  // Real doorway already; no painted openings.
+    // Enterable buildings have a real doorway (no painted door, stoop or rear
+    // platform) but still get window panes on their walls.
     const Parcel& parcel = parcels[b.parcel];
     const Obstacle& base = scene->obstacles[b.obstacle];
     const std::vector<glm::vec2>& fp = base.footprint;
     const size_t n = fp.size();
-    const float baseY = base.bounds.min.y;
-    const float baseTop = base.bounds.max.y;
+    // Enterable: `base` is the roof slab, so take the ground and top from the storeys.
+    const float baseY = b.enterable ? b.baseY : base.bounds.min.y;
+    const float baseTop = b.enterable ? b.floors.back().y1 : base.bounds.max.y;
     const std::vector<glm::vec2>& line = buildingLines[b.block];
 
     // Street facades: edges on the block's building line. The frontage is
@@ -4167,6 +4169,11 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
     // Door u-ranges per edge, so the ground-floor window grid skips them.
     std::vector<glm::vec2> doorSpans(n, glm::vec2(0.0f, -1.0f));
 
+    if (b.enterable) {
+      // The doorway EmitHollowBuilding cut: centred, 1.6 wide; keep its bay clear.
+      const float len = glm::distance(fp[frontage], fp[(frontage + 1) % n]);
+      doorSpans[frontage] = glm::vec2(0.5f * (len - 1.6f), 0.5f * (len + 1.6f));
+    } else {
     // Street entrance on the frontage, with a stoop walk-up for some
     // buildings and straight off the ground for the rest.
     {
@@ -4279,6 +4286,7 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
         doorSpans[rearEdge] = glm::vec2(center - kRearDoorWidth * 0.5f,
                                         center + kRearDoorWidth * 0.5f);
       }
+    }
     }
 
     // Window grids: floorCount x facade length on every street facade, plus

@@ -29,11 +29,15 @@ struct AABB {
 // bents' columns and footings (issue #223).
 enum class ObstacleKind { Generic, StreetFurniture, Pier, Cover };
 
-// Street fixtures the renderer batches as static boxes: post-sized furniture
+// Street fixtures the renderer batches as static geometry: post-sized furniture
 // and cover-sized street items (parked cars, planters, dumpsters, ...).
 inline bool IsStreetFixture(ObstacleKind kind) {
   return kind == ObstacleKind::StreetFurniture || kind == ObstacleKind::Cover;
 }
+
+// Visible model beside a conservative collision/LOS box. Explicit types keep
+// rendering independent of dimensions (and let tests verify each prop spawns).
+enum class StreetFixtureModel { None, ParkedCar, Bench, Newsstand, Planter, Dumpster, TrashBin };
 
 // A map obstacle. `climbable` obstacles get a navmesh connection from
 // ground level up to their top surface (see NavMesh); non-climbable
@@ -56,6 +60,9 @@ struct Obstacle {
   // Blocks movement and LOS but is never drawn: the unseen wall along a
   // terrain cliff edge, whose face the terrain mesh itself renders.
   bool navOnly = false;
+  StreetFixtureModel fixtureModel = StreetFixtureModel::None;
+  float fixtureYaw = 0.0f;    // Local +X heading; local +Z points toward the block.
+  float fixtureBaseY = 0.0f;  // Visible feet rest on the road/sidewalk above bounds.min.y.
 };
 
 // Building archetype (urban map issue #151, roadmap 3.2). Drawn per parcel

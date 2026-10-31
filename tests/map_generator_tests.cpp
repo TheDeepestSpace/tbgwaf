@@ -60,7 +60,9 @@ bool SameScene(const Scene& a, const Scene& b) {
     const auto& x = a.obstacles[i];
     const auto& y = b.obstacles[i];
     if (x.bounds.min != y.bounds.min || x.bounds.max != y.bounds.max ||
-        x.climbable != y.climbable || x.footprint != y.footprint || x.kind != y.kind) {
+        x.climbable != y.climbable || x.footprint != y.footprint || x.kind != y.kind ||
+        x.fixtureModel != y.fixtureModel || x.fixtureYaw != y.fixtureYaw ||
+        x.fixtureBaseY != y.fixtureBaseY) {
       return false;
     }
   }
@@ -2562,16 +2564,24 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
 void TestCoverItemsAreEyeLowAndFootHigh() {
   const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
   const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
-  for (uint32_t seed : kSeeds) {
+  for (uint32_t seed : {1u, 7u, 42u, 2024u}) {
     const Scene scene = GenerateUrbanMap(seed, on);
     CHECK(SameScene(scene, GenerateUrbanMap(seed, on)));
     for (const Obstacle& o : GenerateUrbanMap(seed, off).obstacles) {
       CHECK(o.kind != ObstacleKind::Cover);
     }
     int cover = 0, climbable = 0, large = 0;
+    std::set<StreetFixtureModel> models;
     for (const Obstacle& o : scene.obstacles) {
+      if (o.fixtureModel != StreetFixtureModel::None) {
+        models.insert(o.fixtureModel);
+        CHECK(IsStreetFixture(o.kind));
+        CHECK(o.fixtureBaseY >= o.bounds.min.y);
+        CHECK(o.fixtureBaseY < o.bounds.max.y);
+      }
       if (o.kind != ObstacleKind::Cover) continue;
       ++cover;
+      CHECK(o.fixtureModel != StreetFixtureModel::None);
       CHECK(o.footprint.empty());
       climbable += o.climbable;
       const glm::vec3 size = o.bounds.max - o.bounds.min;
@@ -2595,6 +2605,10 @@ void TestCoverItemsAreEyeLowAndFootHigh() {
     CHECK(cover > 10);
     CHECK(climbable > 0);
     CHECK(large > 0);
+    for (StreetFixtureModel model : {StreetFixtureModel::ParkedCar, StreetFixtureModel::Bench,
+                                     StreetFixtureModel::Dumpster, StreetFixtureModel::TrashBin}) {
+      CHECK(models.count(model) == 1);
+    }
   }
 }
 

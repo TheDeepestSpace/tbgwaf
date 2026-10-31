@@ -1,4 +1,4 @@
-# Source of truth for the app-level screen flow (Splash -> Game Mode -> Map Select -> gameplay).
+# Source of truth for the app-level screen flow (Splash -> Game Mode -> Map Select / Builder -> gameplay).
 # Consumed at build time only (never parsed at runtime) by scripts/gen_flow.py,
 # which emits the C++ state enum/transition table and a Mermaid/SVG diagram.
 # Keep to this restricted shape: top-level `initial`, `states` list and
@@ -8,12 +8,20 @@ states:
   - {id: splash, label: Splash}
   - {id: game_mode, label: Game Mode}
   - {id: map_select, label: Map Select}
+  - {id: builder, label: Builder}
+  - {id: builder_edit, label: Builder Editor}
   - {id: gameplay, label: Gameplay}
 transitions:
   - {from: splash, event: new_game, to: game_mode}
   - {from: game_mode, event: select_regular, to: map_select}
   - {from: game_mode, event: select_ctf, to: map_select}
+  - {from: game_mode, event: select_builder, to: builder}
   - {from: game_mode, event: back, to: splash}
   - {from: map_select, event: select_urban, to: gameplay}
   - {from: map_select, event: select_hills, to: gameplay}
   - {from: map_select, event: back, to: game_mode}
+  - {from: builder, event: open_builder_scene, to: builder_edit}
+  - {from: builder, event: exit_builder, to: game_mode}
+  - {from: builder_edit, event: start_builder_game, to: gameplay}
+  - {from: builder_edit, event: back_to_builder, to: builder}
+  - {from: gameplay, event: back_to_builder, to: builder}

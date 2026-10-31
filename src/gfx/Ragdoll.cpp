@@ -63,6 +63,10 @@ constexpr float kGunRestitution = 0.35f;
 constexpr float kGunFriction = 0.7f;      // Horizontal velocity kept per contact step.
 constexpr float kGunSpinDamping = 0.6f;   // Angular velocity kept per contact step.
 constexpr float kGunInertia = 0.03f;      // Unit mass, roughly a thin box.
+constexpr float kGunRestSpeed = 0.6f;     // Slower contact approaches do not bounce.
+constexpr float kGunSettleSpeed = 0.5f;   // Contact speed/spin below which the gun is settling;
+constexpr float kGunSettleSpin = 2.5f;    // a few such steps in a row put it to sleep.
+constexpr int kGunSettleSteps = 8;
 constexpr float kGunSpin = 9.0f;          // Max tumble rate on release, rad/s.
 
 // Weapon-local extent of the (largest) weapon, used for ground contact. The
@@ -275,6 +279,7 @@ Trajectory Simulate(const Unit& unit) {
     gunVel += dir * 0.8f + glm::vec3(0.0f, 0.6f, 0.0f);
   }
   bool gunAsleep = false;
+  int gunSettling = 0;
   auto gunFrame = [&]() { return RagdollGun{drops, gunPos, gunRot}; };
   traj.guns.reserve(kRagdollSteps + 1);
   traj.guns.push_back(gunFrame());
@@ -318,6 +323,7 @@ Trajectory Simulate(const Unit& unit) {
       if (drops) {
         gunVel += hitDir * 0.8f + glm::vec3(0.0f, 0.6f, 0.0f);
         gunAsleep = false;
+        gunSettling = 0;
       }
       still = 0;
       ++nextImpact;
@@ -350,8 +356,11 @@ Trajectory Simulate(const Unit& unit) {
         const glm::vec3 cv = gunVel + glm::cross(gunSpin, r);
         if (cv.y < 0.0f) {
           const glm::vec3 rn = glm::cross(r, glm::vec3(0.0f, 1.0f, 0.0f));
+          // No restitution for gentle contacts, or a resting gun micro-bounces
+          // (gravity alone adds ~0.23 per step) and never settles on a slope.
+          const float e = cv.y > -kGunRestSpeed ? 0.0f : kGunRestitution;
           const float j =
-              -(1.0f + kGunRestitution) * cv.y / (1.0f + glm::dot(rn, rn) / kGunInertia);
+              -(1.0f + e) * cv.y / (1.0f + glm::dot(rn, rn) / kGunInertia);
           gunVel.y += j;
           gunSpin += glm::cross(r, glm::vec3(0.0f, j, 0.0f)) / kGunInertia;
         }
@@ -361,7 +370,10 @@ Trajectory Simulate(const Unit& unit) {
         gunVel.x *= kGunFriction;
         gunVel.z *= kGunFriction;
         gunSpin *= kGunSpinDamping;
-        if (glm::length(gunVel) < 0.15f && glm::length(gunSpin) < 0.4f) {
+        const bool slow =
+            glm::length(gunVel) < kGunSettleSpeed && glm::length(gunSpin) < kGunSettleSpin;
+        gunSettling = slow ? gunSettling + 1 : 0;
+        if (gunSettling >= kGunSettleSteps) {
           gunAsleep = true;
           gunVel = glm::vec3(0.0f);
           gunSpin = glm::vec3(0.0f);

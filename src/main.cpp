@@ -88,7 +88,7 @@ EM_JS(void, tbgwaf_bind_canvas, (), {
     e.stopImmediatePropagation();
     g.x = e.clientX - c.getBoundingClientRect().left;
     if (e.ctrlKey) g.zoom += e.deltaY;  // Trackpad pinch (or ctrl+wheel).
-    else { g.rotX += e.deltaX; g.rotY += e.deltaY; }
+    else { g.rotX += e.deltaX; g.rotY -= e.deltaY; }
   }, {capture: true, passive: false});
   const touches = new Map();
   const dist = () => { const p = [...touches.values()]; return Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y); };

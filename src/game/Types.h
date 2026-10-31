@@ -95,6 +95,10 @@ struct Obstacle {
   StreetFixtureModel fixtureModel = StreetFixtureModel::None;
   float fixtureYaw = 0.0f;    // Local +X heading; local +Z points toward the block.
   float fixtureBaseY = 0.0f;  // Visible feet rest on the road/sidewalk above bounds.min.y.
+  // Roll about the heading axis: 0 upright, pi overturned on its roof, +-pi/2
+  // lying on a side (wrecks on the artery; their `footprint` is then an
+  // arbitrarily rotated rectangle and the bounds follow the rolled body).
+  float fixtureRoll = 0.0f;
 };
 
 // Building archetype (urban map issue #151, roadmap 3.2). Drawn per parcel

@@ -62,7 +62,7 @@ bool SameScene(const Scene& a, const Scene& b) {
     if (x.bounds.min != y.bounds.min || x.bounds.max != y.bounds.max ||
         x.climbable != y.climbable || x.footprint != y.footprint || x.kind != y.kind ||
         x.fixtureModel != y.fixtureModel || x.fixtureYaw != y.fixtureYaw ||
-        x.fixtureBaseY != y.fixtureBaseY) {
+        x.fixtureBaseY != y.fixtureBaseY || x.fixtureRoll != y.fixtureRoll) {
       return false;
     }
   }
@@ -273,7 +273,8 @@ void TestBuildingKindsFloorsAndHeights() {
     (void)setbacks;  // Seed-dependent; asserted on the forced-downtown city below.
     // Every obstacle with a footprint is a building or a pier column/footing.
     for (const Obstacle& o : scene.obstacles) {
-      CHECK(o.footprint.empty() || o.building >= 0 || o.kind == ObstacleKind::Pier);
+      CHECK(o.footprint.empty() || o.building >= 0 || o.kind == ObstacleKind::Pier ||
+            o.kind == ObstacleKind::Cover);  // Cover: artery wrecks.
     }
 
     // Street weighting: artery frontage is mostly office/mixed-use, back
@@ -609,7 +610,7 @@ void TestVariedHeightsWithFewTowers() {
     float lo = 1e9f, hi = 0.0f;
     for (const auto& o : scene.obstacles) {
       if (o.kind == ObstacleKind::Pier) continue;  // Pier bents (elevated seeds), not buildings.
-      if (o.footprint.empty()) continue;
+      if (o.footprint.empty() || o.kind == ObstacleKind::Cover) continue;  // Wrecks aren't buildings.
       ++buildings;
       const float h = o.bounds.max.y;
       lo = std::min(lo, h);
@@ -1026,7 +1027,7 @@ void TestPolygonBlocksAdaptToAngledStreets() {
   bool acuteBuilding = false;
   for (const Obstacle& obstacle : scene.obstacles) {
     if (obstacle.kind == ObstacleKind::Pier) continue;  // Elevated pier bents, not buildings.
-    if (obstacle.footprint.empty()) continue;
+    if (obstacle.footprint.empty() || obstacle.kind == ObstacleKind::Cover) continue;
     CHECK(PolygonArea(obstacle.footprint) > 1.0f);
     CHECK(obstacle.bounds.min.x >= -scene.mapHalfExtent - kEps);
     CHECK(obstacle.bounds.max.x <= scene.mapHalfExtent + kEps);
@@ -2583,7 +2584,7 @@ void TestCoverItemsAreEyeLowAndFootHigh() {
       }
       if (o.kind != ObstacleKind::Cover) continue;
       CHECK(o.fixtureModel != StreetFixtureModel::None);
-      CHECK(o.footprint.empty());
+      if (!o.footprint.empty()) continue;  // Artery wrecks: TestArteryWrecks.
       if (o.fixtureModel == StreetFixtureModel::CoachBus) continue;
       ++cover;
       climbable += o.climbable;
@@ -2630,7 +2631,8 @@ void TestCoachBusesStopMidStreet() {
     const Scene scene = GenerateUrbanMap(seed, on);
     std::vector<const Obstacle*> buses;
     for (const Obstacle& o : scene.obstacles) {
-      if (o.fixtureModel == StreetFixtureModel::CoachBus) buses.push_back(&o);
+      // Artery buses sit at any angle on the road (TestArteryWrecks).
+      if (o.fixtureModel == StreetFixtureModel::CoachBus && o.footprint.empty()) buses.push_back(&o);
     }
     CHECK(buses.size() <= 2);
     (buses.empty() ? mapsWithout : mapsWithBus) += 1;
@@ -2679,6 +2681,83 @@ void TestCoachBusesStopMidStreet() {
   CHECK(mapsWithout >= 4);
 }
 
+// Wrecks on the arteries: cars at any heading (upright, overturned or on a
+// side) and a coach bus more often than on a local street. Each is a rotated
+// convex footprint on level road at grade, clear of every other obstacle, the
+// spawn rows and the map edge, and generation is deterministic.
+void TestArteryWrecks() {
+  const float kPi = 3.14159265358979f;
+  const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
+  const float lane = 2.0f * constants::kAgentRadius + 0.2f;
+  int wrecks = 0, upright = 0, overturned = 0, onSide = 0, angled = 0, arteryBuses = 0;
+  int mapsWithArteryBus = 0;
+  for (uint32_t seed = 1; seed <= 24; ++seed) {
+    const Scene scene = GenerateUrbanMap(seed, on);
+    CHECK(SameScene(scene, GenerateUrbanMap(seed, on)));
+    const std::vector<UrbanRoad> roads = UrbanRoads(seed, on);
+    bool hasBus = false;
+    for (size_t i = 0; i < scene.obstacles.size(); ++i) {
+      const Obstacle& o = scene.obstacles[i];
+      if (o.kind != ObstacleKind::Cover || o.footprint.empty()) continue;
+      ++wrecks;
+      CHECK(!o.climbable);
+      CHECK(o.footprint.size() == 4);
+      CHECK(o.fixtureModel != StreetFixtureModel::None);
+      const bool bus = o.fixtureModel == StreetFixtureModel::CoachBus;
+      arteryBuses += bus;
+      hasBus |= bus;
+      const float roll = o.fixtureRoll;
+      const bool side = std::fabs(std::fabs(roll) - 0.5f * kPi) < 1e-4f;
+      CHECK(roll == 0.0f || side || std::fabs(roll - kPi) < 1e-4f);
+      CHECK(!bus || roll == 0.0f);
+      upright += roll == 0.0f;
+      overturned += std::fabs(roll - kPi) < 1e-4f;
+      onSide += side;
+      const glm::vec3 extent = StreetFixtureExtent(o.fixtureModel);
+      const float width = side ? extent.y : extent.z;
+      const float height = side ? extent.z : extent.y;
+      CHECK(std::fabs(PolygonArea(o.footprint) - extent.x * width) < 0.05f);
+      CHECK(std::fabs(o.bounds.max.y - o.fixtureBaseY - height) < 0.05f);
+      const glm::vec2 heading(std::cos(o.fixtureYaw), std::sin(o.fixtureYaw));
+      angled += std::fabs(heading.x) > 0.2f && std::fabs(heading.y) > 0.2f;
+      const glm::vec3 mid = o.bounds.Center();
+      CHECK(std::fabs(scene.ground.HeightAt(mid.x, mid.z) - o.bounds.min.y) < 0.05f);
+      for (const glm::vec2& v : o.footprint) {
+        CHECK(std::fabs(v.x) <= scene.mapHalfExtent && std::fabs(v.y) <= scene.mapHalfExtent);
+        // On the pavement of a road (the artery or its branch).
+        bool onRoad = false;
+        for (const UrbanRoad& road : roads) {
+          for (size_t k = 0; k + 1 < road.centerline.size(); ++k) {
+            onRoad |= DistanceToSegment(v, glm::vec2(road.centerline[k].x, road.centerline[k].z),
+                                        glm::vec2(road.centerline[k + 1].x,
+                                                  road.centerline[k + 1].z)) <= road.width * 0.5f;
+          }
+        }
+        CHECK(onRoad);
+      }
+      for (size_t j = 0; j < scene.obstacles.size(); ++j) {
+        if (j == i) continue;
+        const std::vector<glm::vec2> other = ObstacleFootprint(scene.obstacles[j]);
+        float gap = 1e9f;
+        for (const glm::vec2& v : o.footprint) gap = std::min(gap, DistanceToConvexPolygon(v, other));
+        for (const glm::vec2& v : other) gap = std::min(gap, DistanceToConvexPolygon(v, o.footprint));
+        CHECK(!FootprintsOverlap(o.footprint, other));
+        if (bus) CHECK(gap >= lane - 0.01f);
+      }
+      for (const Unit& unit : scene.units) {
+        CHECK(DistanceToConvexPolygon(glm::vec2(unit.position.x, unit.position.z), o.footprint) >=
+              5.0f - 0.01f);
+      }
+    }
+    mapsWithArteryBus += hasBus;
+  }
+  CHECK(wrecks > 40);
+  CHECK(upright > 0 && overturned > 0 && onSide > 0);
+  CHECK(angled > 0);
+  CHECK(arteryBuses >= 4);
+  CHECK(mapsWithArteryBus >= 4);
+}
+
 // Pinned per-seed furniture output (issue #150): a generator change that
 // alters item or prop placement shows up here first.
 void TestPinnedFurnitureFingerprints() {
@@ -2706,6 +2785,7 @@ int main() {
   TestTrafficPropsSitAtJunctionsAndStayVisualOnly();
   TestCoverItemsAreEyeLowAndFootHigh();
   TestCoachBusesStopMidStreet();
+  TestArteryWrecks();
   TestPinnedFurnitureFingerprints();
   TestDeterminismAndVariety();
   TestZiplinesAreDeterministicBoundedAndValid();

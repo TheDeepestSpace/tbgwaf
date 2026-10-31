@@ -1186,6 +1186,7 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
     mix(&o.fixtureModel, sizeof(o.fixtureModel));
     mix(&o.fixtureYaw, sizeof(o.fixtureYaw));
     mix(&o.fixtureBaseY, sizeof(o.fixtureBaseY));
+    mix(&o.fixtureRoll, sizeof(o.fixtureRoll));
     mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
   }
   for (const tactics::StreetProp& prop : scene.props) {
@@ -3050,7 +3051,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           obstacle.bounds.max == streetFurnitureKey_[furnitureIndex].bounds.max &&
           obstacle.fixtureModel == streetFurnitureKey_[furnitureIndex].fixtureModel &&
           obstacle.fixtureYaw == streetFurnitureKey_[furnitureIndex].fixtureYaw &&
-          obstacle.fixtureBaseY == streetFurnitureKey_[furnitureIndex].fixtureBaseY;
+          obstacle.fixtureBaseY == streetFurnitureKey_[furnitureIndex].fixtureBaseY &&
+          obstacle.fixtureRoll == streetFurnitureKey_[furnitureIndex].fixtureRoll;
       ++furnitureIndex;
     }
   }

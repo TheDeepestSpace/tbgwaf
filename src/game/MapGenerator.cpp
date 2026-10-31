@@ -35,6 +35,7 @@ namespace {
 //   0x51f0a3c9u   facades          door spots, stoops, rear platforms, window grids
 //   0x6c57f00du   furniture        feature presence, then curb-side item stations/kinds
 //   0x4c0b3a7du   cover items    parked cars, bus stops, newsstands, planters, dumpsters
+//   0x9e41c7b3u   artery wrecks  artery/branch bus draw, then car clusters (EmitArteryWrecks)
 //   0x51674ea1u   traffic control  light-vs-sign draws per junction, street-name corners
 //   0x7d3a94c5u   pier form        T-bent vs twin-column bent draw (ResolvePierForm)
 constexpr uint32_t kStreetStream = 0xb10c5eedu;
@@ -4602,6 +4603,176 @@ void EmitCoachBuses(Scene* scene, const CityPlan& city, const MapGeneratorConfig
   }
 }
 
+constexpr uint32_t kWreckStream = 0x9e41c7b3u;
+
+// Vehicles abandoned on the arteries (issue #153 follow-up): the main artery
+// and its branching avenue carry a coach bus now and then (more often than a
+// local street does) and clusters of cars in disarray: any heading, upright,
+// overturned on the roof or lying on a side. Own random stream, so the curb
+// furniture of a seed is untouched. Only pavement at road grade qualifies
+// (the deck of an overpass is its own walk surface and stays clear), and every
+// wreck is an arbitrarily rotated convex footprint with bounds that follow the
+// rolled body. Each wreck keeps the free-standing rules of the other cover:
+// level ground, a gap to every obstacle and wreck, clear of the spawn rows
+// and of stair flights; a bus also leaves a walkable lane beside it to both
+// curbs. Draws are made per attempt whether or not it is accepted.
+void EmitArteryWrecks(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
+                      uint32_t seed, const GroundY& groundY, float clearBehind,
+                      std::vector<glm::vec2>* placed) {
+  Rng rng(seed ^ kWreckStream);
+  const HighwayPlan& plan = city.highway;
+  const float half = scene->mapHalfExtent;
+  const float lane = clearBehind + 0.2f;
+
+  struct Road {
+    glm::vec2 origin, dir, normal;
+    float s0, s1, width;
+    bool branch;
+  };
+  std::vector<Road> roads;
+  roads.push_back({plan.artery.origin, plan.artery.dir, plan.artery.normal, plan.artery.sMin,
+                   plan.artery.sMax, c.arteryWidth, false});
+  if (plan.hasBranch) {
+    roads.push_back({plan.branch.start, plan.branch.dir,
+                     glm::vec2(-plan.branch.dir.y, plan.branch.dir.x), 0.0f, plan.branch.length,
+                     plan.branch.width, true});
+  }
+  const auto atGrade = [&](const Road& road, glm::vec2 p) {
+    const float s = glm::dot(p - road.origin, road.dir);
+    if (s < road.s0 || s > road.s1) return false;
+    const float lift = road.branch ? BranchElevationAt(plan, city.terrain, c, s)
+                                   : ArteryElevationAt(plan, city.terrain, c, s);
+    return lift < kGradeY + 0.02f;
+  };
+
+  // Accepts or rejects one vehicle laid on `road`; pushes it when accepted.
+  const auto place = [&](const Road& road, StreetFixtureModel model, float s, float lateral,
+                         float yaw, float roll, bool bus) {
+    const glm::vec3 extent = StreetFixtureExtent(model);
+    const bool onSide = std::fabs(std::sin(roll)) > 0.5f;
+    const float length = extent.x;
+    const float width = onSide ? extent.y : extent.z;
+    const float height = onSide ? extent.z : extent.y;
+    const glm::vec2 center = road.origin + road.dir * s + road.normal * lateral;
+    const glm::vec2 heading(std::cos(yaw), std::sin(yaw));
+    const glm::vec2 side(-heading.y, heading.x);
+    std::vector<glm::vec2> poly = {center - heading * (length * 0.5f) - side * (width * 0.5f),
+                                   center + heading * (length * 0.5f) - side * (width * 0.5f),
+                                   center + heading * (length * 0.5f) + side * (width * 0.5f),
+                                   center - heading * (length * 0.5f) + side * (width * 0.5f)};
+    if (PolygonSignedArea(poly) < 0.0f) std::reverse(poly.begin(), poly.end());
+
+    // Wholly on at-grade pavement; a bus also keeps a lane to both curbs.
+    const float edge = road.width * 0.5f - (bus ? lane : 0.3f);
+    glm::vec2 lo(1e9f), hi(-1e9f);
+    for (const glm::vec2& p : poly) {
+      if (std::fabs(glm::dot(p - road.origin, road.normal)) > edge) return false;
+      if (!atGrade(road, p)) return false;
+      lo = glm::min(lo, p);
+      hi = glm::max(hi, p);
+    }
+    if (std::max(std::max(std::fabs(lo.x), std::fabs(hi.x)),
+                 std::max(std::fabs(lo.y), std::fabs(hi.y))) > half - 0.6f) {
+      return false;
+    }
+    // Level ground under the footprint.
+    const float baseY = groundY(center.x, center.y);
+    std::vector<glm::vec2> pts = poly;
+    pts.push_back(center);
+    for (size_t i = 0; i < poly.size(); ++i) pts.push_back((poly[i] + poly[(i + 1) % 4]) * 0.5f);
+    for (const glm::vec2& q : pts) {
+      if (std::fabs(groundY(q.x, q.y) - baseY) >= 0.05f) return false;
+    }
+
+    const auto gap = [&](const std::vector<glm::vec2>& other) {
+      if (PolygonsOverlap(poly, other)) return 0.0f;
+      float best = std::numeric_limits<float>::infinity();
+      for (const glm::vec2& p : poly) best = std::min(best, DistanceToPolygon(p, other));
+      for (const glm::vec2& p : other) best = std::min(best, DistanceToPolygon(p, poly));
+      return best;
+    };
+    for (const Obstacle& o : scene->obstacles) {
+      const bool wreckOrBus = o.kind == ObstacleKind::Cover && !o.footprint.empty();
+      const float need = !IsStreetFixture(o.kind) ? 0.05f
+                         : bus || o.fixtureModel == StreetFixtureModel::CoachBus ? lane
+                         : wreckOrBus                                           ? 0.3f
+                                                                                : 0.9f;
+      if (gap(ObstacleFootprint(o)) < need) return false;
+    }
+    for (const Unit& unit : scene->units) {
+      if (DistanceToPolygon(glm::vec2(unit.position.x, unit.position.z), poly) < 5.0f) return false;
+    }
+    for (const TerrainWall& wall : scene->terrainWalls) {
+      for (const TerrainAccess& access : wall.accesses) {
+        for (const glm::vec3& end : {access.bottom, access.top}) {
+          if (DistanceToPolygon(glm::vec2(end.x, end.z), poly) < 2.5f) return false;
+        }
+      }
+    }
+
+    scene->obstacles.push_back(Obstacle{
+        AABB{glm::vec3(lo.x, baseY, lo.y), glm::vec3(hi.x, baseY + kGradeY + height, hi.y)},
+        /*climbable=*/false, poly, ObstacleKind::Cover});
+    Obstacle& item = scene->obstacles.back();
+    item.fixtureModel = model;
+    item.fixtureYaw = yaw;
+    item.fixtureBaseY = baseY + kGradeY;
+    item.fixtureRoll = roll;
+    placed->push_back(center);
+    return true;
+  };
+
+  // The artery bus: a coach jackknifed across the lanes, askew but never so
+  // far round that it closes the road to the curbs. Likelier than on a local
+  // street (those draw 55% for at least one).
+  {
+    const bool wanted = rng.Float(0.0f, 1.0f) < 0.7f;
+    const Road& road = roads[0];
+    const float slack = road.width * 0.5f;
+    for (int attempt = 0; attempt < 24; ++attempt) {
+      const float s = rng.Float(road.s0 + 10.0f, road.s1 - 10.0f);
+      const float lateral = rng.Float(-slack * 0.4f, slack * 0.4f);
+      const float turn = rng.Float(-0.9f, 0.9f);
+      const bool flip = rng.Chance(0.5f);
+      if (!wanted) continue;
+      const float yaw = std::atan2(road.dir.y, road.dir.x) + turn + (flip ? kPi : 0.0f);
+      if (place(road, StreetFixtureModel::CoachBus, s, lateral, yaw, 0.0f, true)) break;
+    }
+  }
+
+  // Car clusters: a pile-up of one to four vehicles around an anchor.
+  for (const Road& road : roads) {
+    const int clusters = road.branch ? 2 : 4;
+    for (int cluster = 0; cluster < clusters; ++cluster) {
+      const float anchor = rng.Float(road.s0 + 6.0f, road.s1 - 6.0f);
+      const float anchorLateral = rng.Float(-1.0f, 1.0f) * (road.width * 0.5f - 2.5f);
+      const int count = rng.Int(1, 4);
+      for (int i = 0; i < count; ++i) {
+        const float s = anchor + rng.Float(-5.0f, 5.0f);
+        const float lateral = anchorLateral + rng.Float(-2.5f, 2.5f);
+        const float modelRoll = rng.Float(0.0f, 1.0f);
+        const float rollRoll = rng.Float(0.0f, 1.0f);
+        const float headingRoll = rng.Float(0.0f, 1.0f);
+        const float headingFree = rng.Float(0.0f, 2.0f * kPi);
+        const float headingJitter = rng.Float(-0.35f, 0.35f);
+        const bool flip = rng.Chance(0.5f);
+        const StreetFixtureModel model = modelRoll < 0.5f   ? StreetFixtureModel::ParkedCar
+                                         : modelRoll < 0.75f ? StreetFixtureModel::Suv
+                                                             : StreetFixtureModel::Pickup;
+        const float roll = rollRoll < 0.55f ? 0.0f
+                           : rollRoll < 0.75f ? kPi
+                           : rollRoll < 0.875f ? 0.5f * kPi
+                                               : -0.5f * kPi;
+        // Mostly roughly along the lanes, the rest at any angle.
+        const float yaw = headingRoll < 0.5f
+                              ? std::atan2(road.dir.y, road.dir.x) + headingJitter + (flip ? kPi : 0.0f)
+                              : headingFree;
+        place(road, model, s, lateral, yaw, roll, false);
+      }
+    }
+  }
+}
+
 // Placement keeps every walkable thing walkable: sidewalk items leave
 // 2 * kAgentRadius behind them, dumpsters leave a lane beside them, cars sit
 // in the street outside every block and off the highway, and nothing lands
@@ -4809,6 +4980,7 @@ void EmitCoverItems(Scene* scene, const CityPlan& city, const MapGeneratorConfig
       }
     }
   }
+  EmitArteryWrecks(scene, city, c, seed, groundY, clearBehind, &placed);
 }
 
 // Centerline param range of a local street cut: clipped to the map square

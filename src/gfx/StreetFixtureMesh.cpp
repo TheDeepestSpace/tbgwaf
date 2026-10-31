@@ -60,15 +60,32 @@ void AppendStreetFixture(const tactics::Obstacle& obstacle, LitVertices* vertice
     AppendPlainBox(obstacle.bounds, vertices, indices);
     return;
   }
-  const glm::vec3 extent = obstacle.bounds.max - obstacle.bounds.min;
-  const bool alongX = std::fabs(std::cos(obstacle.fixtureYaw)) > 0.5f;
-  const glm::vec3 size(alongX ? extent.x : extent.z,
-                       obstacle.bounds.max.y - obstacle.fixtureBaseY,
-                       alongX ? extent.z : extent.x);
+  // A rolled wreck (or any obstacle with a rotated footprint) is sized from
+  // its model, not its axis-aligned bounds.
+  const bool rolled = obstacle.fixtureRoll != 0.0f;
+  glm::vec3 size;
+  if (rolled || !obstacle.footprint.empty()) {
+    size = tactics::StreetFixtureExtent(obstacle.fixtureModel);
+  } else {
+    const glm::vec3 extent = obstacle.bounds.max - obstacle.bounds.min;
+    const bool alongX = std::fabs(std::cos(obstacle.fixtureYaw)) > 0.5f;
+    size = glm::vec3(alongX ? extent.x : extent.z,
+                     obstacle.bounds.max.y - obstacle.fixtureBaseY,
+                     alongX ? extent.z : extent.x);
+  }
   const glm::vec3 center = obstacle.bounds.Center();
+  // Roll about the body's own centre, then lift so the lowest point rests on
+  // the road: upright and overturned keep the body height, a side-lying body
+  // stands as tall as it is wide.
+  const float roll = obstacle.fixtureRoll;
+  const float lift = 0.5f * (std::fabs(std::sin(roll)) * size.z + std::fabs(std::cos(roll)) * size.y);
   const glm::mat4 frame =
       glm::translate(glm::mat4(1.0f), {center.x, obstacle.fixtureBaseY, center.z}) *
       glm::rotate(glm::mat4(1.0f), obstacle.fixtureYaw, {0.0f, -1.0f, 0.0f}) *
+      (rolled ? glm::translate(glm::mat4(1.0f), {0.0f, lift, 0.0f}) *
+                    glm::rotate(glm::mat4(1.0f), roll, {1.0f, 0.0f, 0.0f}) *
+                    glm::translate(glm::mat4(1.0f), {0.0f, -0.5f * size.y, 0.0f})
+              : glm::mat4(1.0f)) *
       glm::scale(glm::mat4(1.0f), size);
   const auto point = [&](glm::vec3 p) { return glm::vec3(frame * glm::vec4(p, 1.0f)); };
   const auto triangle = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c) {

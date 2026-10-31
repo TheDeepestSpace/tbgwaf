@@ -100,7 +100,9 @@ struct MapGeneratorConfig {
   // Enterable buildings (issue #157): P(a parcel of any kind (set-back
   // offices excepted) is hollow: thin walls, a frontage doorway, interior floor slabs
   // and a roof slab overhead). 0 keeps every building a solid prism.
-  float enterableChance = 1.0f;  // Temporarily 100% for testing (#157).
+  float enterableChance = 0.5f;  // Share of parcels built hollow (#157).
+  float rearDoorOpenChance = 0.5f;     // Enterable: chance the rear wall has an open doorway.
+  float bayHalfClosedChance = 0.5f;    // Enterable warehouses: chance the bay is half shuttered.
   int towerCount = 2;           // Tall landmark buildings scattered across the city.
   float towerMinHeight = 14.0f;
   float towerMaxHeight = 20.0f;

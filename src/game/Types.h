@@ -92,6 +92,11 @@ struct Building {
   bool enterable = false;
   float doorWidth = 0.0f;   // Enterable only: frontage doorway size, per BuildingKind.
   float doorHeight = 0.0f;  // Lintel underside above the ground (>= kUnitHeight).
+  // Enterable only: optional rear doorway (-1 = none, wall stays solid),
+  // spanning u0..u1 along footprint edge `rearEdge`, same height as the
+  // other rear doors.
+  int rearEdge = -1;
+  float rearU0 = 0.0f, rearU1 = 0.0f;
 
   float Height() const {
     return groundFloorHeight + static_cast<float>(floorCount - 1) * floorHeight;

@@ -3667,8 +3667,9 @@ DoorSpec DoorSpecFor(BuildingKind kind) {
 // lintel as a wall piece starting at kDoorHeight, plus a roof slab over the
 // whole footprint (Building::obstacle). False (nothing emitted) when the
 // frontage is too short for a doorway or the footprint is not usable.
-bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, float height, int index,
-                        const GroundY& groundY, Building* b) {
+bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, const std::vector<Parcel>& parcels,
+                        float height, int index, const GroundY& groundY, bool halfClosed,
+                        bool rearOpen, Building* b) {
   constexpr float kWallThickness = 0.3f;
   constexpr float kRoofThickness = 0.3f;
   constexpr float kEndMargin = 0.8f;  // Wall left either side of the door.
@@ -3683,8 +3684,47 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, float height, int in
   const DoorSpec spec = DoorSpecFor(b->kind);
   const float doorWidth = std::min(spec.width, doorEdgeLen - 2.0f * kEndMargin);
   if (doorWidth < 0.9f) return false;
-  const float doorHeight = std::min(spec.height, b->groundFloorHeight - 0.15f);
+  float doorHeight = std::min(spec.height, b->groundFloorHeight - 0.15f);
   if (doorHeight < constants::kUnitHeight) return false;
+  // A half-shuttered warehouse bay: the roll-up door sits half down, still
+  // passable (never below head height).
+  if (halfClosed && b->kind == BuildingKind::Commercial) {
+    doorHeight = std::max(constants::kUnitHeight, 0.5f * doorHeight);
+  }
+  // Rear doorway (50/50 via `rearOpen`): the longest edge facing away from the
+  // frontage with open ground behind it (back-to-back parcels share walls).
+  constexpr float kRearDoorWidth = 1.2f, kRearDoorHeight = 2.2f;
+  int rearEdge = -1;
+  float rearScore = 0.0f;
+  if (rearOpen) {
+    const glm::vec2 fd = glm::normalize(fp[(door + 1) % n] - fp[door]);
+    const glm::vec2 frontOut(fd.y, -fd.x);
+    for (size_t e = 0; e < n; ++e) {
+      if (e == door) continue;
+      const glm::vec2 a = fp[e], q = fp[(e + 1) % n];
+      const float len = glm::distance(a, q);
+      if (len < kRearDoorWidth + 2.0f * kEndMargin) continue;
+      const glm::vec2 d = (q - a) / len;
+      const glm::vec2 out(d.y, -d.x);
+      const float facing = -glm::dot(out, frontOut);
+      if (facing < 0.3f) continue;
+      const glm::vec2 s0 = a + d * kEndMargin + out * 0.05f;
+      const glm::vec2 s1 = q - d * kEndMargin + out * 0.05f;
+      const std::vector<glm::vec2> strip = {s0, s1, s1 + out * 0.8f, s0 + out * 0.8f};
+      bool open = true;
+      for (const Parcel& other : parcels) {
+        if (&other == &parcel) continue;
+        if (PolygonsOverlap(strip, other.footprint)) {
+          open = false;
+          break;
+        }
+      }
+      if (open && facing * len > rearScore) {
+        rearScore = facing * len;
+        rearEdge = static_cast<int>(e);
+      }
+    }
+  }
   for (size_t e = 0; e < n; ++e) {
     if (glm::distance(fp[e], fp[(e + 1) % n]) < 1e-3f) return false;
   }
@@ -3699,6 +3739,17 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, float height, int in
   for (size_t e = 0; e < n; ++e) {
     const glm::vec2 a = fp[e], q = fp[(e + 1) % n];
     const float len = glm::distance(a, q);
+    if (static_cast<int>(e) == rearEdge) {
+      const float rearHeight = std::min(kRearDoorHeight, b->groundFloorHeight - 0.15f);
+      const float r0 = 0.5f * (len - kRearDoorWidth), r1 = r0 + kRearDoorWidth;
+      addWall(a, q, 0.0f, r0, 0.0f, height);
+      addWall(a, q, r1, len, 0.0f, height);
+      addWall(a, q, r0, r1, rearHeight, height - rearHeight);
+      b->rearEdge = rearEdge;
+      b->rearU0 = r0;
+      b->rearU1 = r1;
+      continue;
+    }
     if (e != door) {
       addWall(a, q, 0.0f, len, 0.0f, height);
       continue;
@@ -3806,6 +3857,8 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>
     const float baseHeight = upper.empty() ? height : height - b.floorHeight;
     // Drawn for every parcel so the stream never depends on eligibility.
     const bool wantEnterable = enterRng.Chance(c.enterableChance);
+    const bool halfClosed = enterRng.Chance(c.bayHalfClosedChance);
+    const bool rearOpen = enterRng.Chance(c.rearDoorOpenChance);
     b.baseY = groundY(PolygonCenter(parcels[i].footprint).x, PolygonCenter(parcels[i].footprint).y);
     b.floors.clear();
     for (int f = 0; f < b.floorCount; ++f) {
@@ -3814,7 +3867,8 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>
     }
     b.floors.back().y1 = b.baseY + height;
     if (wantEnterable && upper.empty() &&
-        EmitHollowBuilding(scene, parcels[i], height, index, groundY, &b)) {
+        EmitHollowBuilding(scene, parcels[i], parcels, height, index, groundY, halfClosed, rearOpen,
+                           &b)) {
       scene->buildings.push_back(b);
       continue;
     }
@@ -4180,6 +4234,7 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
       // The doorway EmitHollowBuilding cut (centred); keep its bay clear.
       const float len = glm::distance(fp[frontage], fp[(frontage + 1) % n]);
       doorSpans[frontage] = glm::vec2(0.5f * (len - b.doorWidth), 0.5f * (len + b.doorWidth));
+      if (b.rearEdge >= 0) doorSpans[b.rearEdge] = glm::vec2(b.rearU0, b.rearU1);
     } else {
     // Street entrance on the frontage, with a stoop walk-up for some
     // buildings and straight off the ground for the rest.

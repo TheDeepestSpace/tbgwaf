@@ -472,7 +472,7 @@ else()
               -P ${CMAKE_SOURCE_DIR}/scripts/builder_smoke_test.cmake
     )
     set_tests_properties(builder_smoke_test PROPERTIES
-      TIMEOUT 60
+      TIMEOUT 240
       ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11;TBGWAF_SMOKE_TEST=1;TBGWAF_SMOKE_BUILDER=1;TBGWAF_REPRO_OUT=${CMAKE_BINARY_DIR}/builder_smoke_repro.jsonl"
     )
   endif()

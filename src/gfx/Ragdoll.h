@@ -73,6 +73,21 @@ void SetRagdollObstacles(const std::vector<tactics::Obstacle>& obstacles);
 void SetRagdollGround(const std::vector<tactics::WalkSurface>& surfaces,
                       const tactics::HeightField& terrain);
 
+// A living figure as an abstracted collider (issue #266): a vertical capsule
+// standing on `base` (feet). Falling bodies are pushed out of it (bounded per
+// step) so they rest on / slide off a standing figure instead of passing
+// through it. Visual only: the figure itself is never moved.
+struct RagdollFigureCollider {
+  glm::vec3 base{0.0f};
+  float radius = 0.30f;
+  float height = 1.75f;
+};
+
+// Living figures at the moment a fall is first simulated. Unlike obstacles,
+// changing these does NOT drop cached trajectories (figures move every
+// frame); a fall uses the figures as they were when it was first evaluated.
+void SetRagdollFigures(const std::vector<RagdollFigureCollider>& figures);
+
 // True for a downed unit whose knockdown animation has started: such units
 // are drawn as a ragdoll instead of a rigid tip-over.
 bool RagdollActive(const tactics::Unit& unit);

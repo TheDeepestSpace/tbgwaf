@@ -152,6 +152,30 @@ glm::vec3 PushOutOfWalls(glm::vec3& p, float refY, float r) {
   return normal;
 }
 
+std::vector<RagdollFigureCollider>& Figures() {
+  static std::vector<RagdollFigureCollider> figures;
+  return figures;
+}
+
+// Pushes a joint of radius `r` out of every living-figure capsule (vertical
+// segment with hemispherical caps), through the nearest surface point and by
+// at most kMaxPushPerIter. Returns the summed contact normals (zero if none).
+glm::vec3 PushOutOfFigures(glm::vec3& p, float r) {
+  glm::vec3 total(0.0f);
+  for (const RagdollFigureCollider& f : Figures()) {
+    const float lo = f.base.y + f.radius, hi = f.base.y + f.height - f.radius;
+    const glm::vec3 axisPt(f.base.x, glm::clamp(p.y, lo, std::max(lo, hi)), f.base.z);
+    glm::vec3 d = p - axisPt;
+    const float len = glm::length(d);
+    const float minDist = f.radius + r;
+    if (len >= minDist) continue;
+    const glm::vec3 n = len > 1e-5f ? d / len : glm::vec3(1.0f, 0.0f, 0.0f);
+    p += n * std::min(minDist - len, kMaxPushPerIter);
+    total += n;
+  }
+  return total;
+}
+
 struct Link {
   int a, b;
   float rest;
@@ -415,6 +439,12 @@ Trajectory Simulate(const Unit& unit) {
           const float into = glm::dot(pos[i] - prev[i], n);
           if (into < 0.0f) prev[i] += into * n;
         }
+        const glm::vec3 fn = PushOutOfFigures(pos[i], r);
+        if (fn != glm::vec3(0.0f)) {
+          const glm::vec3 fnn = glm::normalize(fn);
+          const float into = glm::dot(pos[i] - prev[i], fnn);
+          if (into < 0.0f) prev[i] += into * fnn;
+        }
         const float floorY = FloorAt(pos[i].x, pos[i].z, refY, r, groundY) + r;
         if (pos[i].y < floorY) pos[i].y = floorY;
         onFloor[i] = pos[i].y <= floorY + 1e-3f;
@@ -462,6 +492,10 @@ void SetRagdollObstacles(const std::vector<tactics::Obstacle>& obstacles) {
   if (same) return;
   cur = std::move(boxes);
   Cache().clear();
+}
+
+void SetRagdollFigures(const std::vector<RagdollFigureCollider>& figures) {
+  Figures() = figures;
 }
 
 void SetRagdollGround(const std::vector<tactics::WalkSurface>& surfaces,

@@ -2756,6 +2756,46 @@ std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team,
   return probes;
 }
 
+// Issue #256: identity of the occluder geometry feeding the see-through fade
+// (everything the raycasts below depend on besides camera and probes).
+// Content-hashed (FNV-1a), not address-keyed: successive scenes can reuse the
+// same storage addresses.
+uint64_t FadeGeometryKey(const tactics::Scene& scene) {
+  uint64_t hash = 1469598103934665603ull;
+  const auto mix = [&hash](const void* data, size_t size) {
+    const unsigned char* bytes = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < size; ++i) {
+      hash ^= bytes[i];
+      hash *= 1099511628211ull;
+    }
+  };
+  for (const tactics::Obstacle& o : scene.obstacles) {
+    mix(&o.bounds, sizeof(o.bounds));
+    mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
+    mix(&o.building, sizeof(o.building));
+    const int kind = static_cast<int>(o.kind);
+    mix(&kind, sizeof(kind));
+    const char navOnly = o.navOnly ? 1 : 0;
+    mix(&navOnly, sizeof(navOnly));
+  }
+  for (const tactics::WalkSurface& s : scene.walkSurfaces) {
+    mix(s.vertices.data(), s.vertices.size() * sizeof(glm::vec3));
+    const char overpass = s.overpass ? 1 : 0;
+    mix(&overpass, sizeof(overpass));
+  }
+  for (const tactics::MassingDetail& d : scene.massing) {
+    mix(d.footprint.data(), d.footprint.size() * sizeof(glm::vec2));
+    mix(&d.y0, sizeof(d.y0));
+    mix(&d.y1, sizeof(d.y1));
+    mix(&d.building, sizeof(d.building));
+    const int kind = static_cast<int>(d.kind);
+    mix(&kind, sizeof(kind));
+  }
+  const size_t buildings = scene.buildings.size();
+  mix(&buildings, sizeof(buildings));
+  return hash;
+}
+
 }  // namespace
 
 bool IsUnitVisibleForRender(const Unit& unit, Team viewingTeam, bool fogActive,
@@ -3490,146 +3530,226 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   std::vector<char> fadeBuilding;
   bool anyFaded = false;
   if (!debug.disableOcclusionFade) {
-    const std::vector<glm::vec3> probes =
-        CollectSeeThroughProbes(game, team, fogActive, overlays);
+    std::vector<glm::vec3> probes = CollectSeeThroughProbes(game, team, fogActive, overlays);
     const glm::vec3 cameraPos = camera.Position();
-    struct ProbeRay {
-      glm::vec3 direction;
-      float length;
-    };
-    std::vector<ProbeRay> rays;
-    rays.reserve(probes.size());
-    for (const glm::vec3& probe : probes) {
-      const glm::vec3 segment = probe - cameraPos;
-      const float length = glm::length(segment);
-      if (length > 1e-4f) rays.push_back({segment / length, length});
-    }
-    // Same endpoint handling as LineOfSightClear: a hit at (or essentially
-    // at) the probe itself does not count, so a figure hugging a wall does
-    // not fade that wall.
-    constexpr float kEndpointEpsilon = 1e-2f;
-    const auto crossesProbeRay = [&](const tactics::Obstacle& obstacle) {
-      for (const ProbeRay& ray : rays) {
-        float t = 0.0f;
-        if (tactics::RayIntersectsObstacle(cameraPos, ray.direction, obstacle, &t) &&
-            t > kEndpointEpsilon && t < ray.length - kEndpointEpsilon) {
-          return true;
+    const uint64_t geometryKey = FadeGeometryKey(game.GetScene());
+    FadeCache& fadeCache = fadeCache_[team == tactics::Team::Blue ? 0 : 1];
+    if (fadeCache.valid && fadeCache.cameraPos == cameraPos &&
+        fadeCache.geometryKey == geometryKey && fadeCache.probes == probes) {
+      fadeObstacle = fadeCache.fadeObstacle;
+      fadeSurface = fadeCache.fadeSurface;
+      fadeMassing = fadeCache.fadeMassing;
+      fadeBuilding = fadeCache.fadeBuilding;
+      anyFaded = fadeCache.anyFaded;
+    } else {
+      struct ProbeRay {
+        glm::vec3 direction;
+        float length;
+        float azimuth;  // atan2(direction.z, direction.x).
+      };
+      std::vector<ProbeRay> rays;
+      rays.reserve(probes.size());
+      for (const glm::vec3& probe : probes) {
+        const glm::vec3 segment = probe - cameraPos;
+        const float length = glm::length(segment);
+        if (length > 1e-4f) {
+          const glm::vec3 direction = segment / length;
+          rays.push_back({direction, length, std::atan2(direction.z, direction.x)});
         }
       }
-      return false;
-    };
-    for (size_t i = 0; i < obstacles.size(); ++i) {
-      // Post-sized furniture is too small to hide a useful target and is kept
-      // in one static render batch below.
-      if (obstacles[i].navOnly || obstacles[i].kind == tactics::ObstacleKind::StreetFurniture) {
-        continue;
-      }
-      if (crossesProbeRay(obstacles[i])) {
-        fadeObstacle[i] = 1;
-        anyFaded = true;
-      }
-    }
-    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-      for (const ProbeRay& ray : rays) {
-        float t = 0.0f;
-        if (tactics::RayIntersectsWalkSurface(cameraPos, ray.direction, walkSurfaces[i],
-                                              kDeckThickness, &t) &&
-            t > kEndpointEpsilon && t < ray.length - kEndpointEpsilon) {
-          fadeSurface[i] = 1;
-          anyFaded = true;
-          break;
+      // Angular broadphase (issue #256): with the frontier open there are
+      // hundreds of probes, and testing every occluder against every ray is
+      // O(rays x occluders). Sorted by azimuth, an occluder only tests the
+      // rays inside its XZ angular span as seen from the camera; a crossing
+      // ray's hit lies in the occluder's bounding circle, hence inside that
+      // span, so the pruning cannot change any result.
+      std::sort(rays.begin(), rays.end(),
+                [](const ProbeRay& a, const ProbeRay& b) { return a.azimuth < b.azimuth; });
+      std::vector<float> rayAzimuths;
+      rayAzimuths.reserve(rays.size());
+      for (const ProbeRay& ray : rays) rayAzimuths.push_back(ray.azimuth);
+      const glm::vec2 cameraXZ(cameraPos.x, cameraPos.z);
+      const auto anyRayHits = [&](const glm::vec2& center, float radius, const auto& test) {
+        const glm::vec2 toCenter = center - cameraXZ;
+        const float distance = glm::length(toCenter);
+        // Padding absorbs float error at the span ends; camera over the
+        // occluder tests every ray (its span is the whole circle).
+        const float padded = radius + 0.05f;
+        if (distance <= padded) {
+          for (const ProbeRay& ray : rays) {
+            if (test(ray)) return true;
+          }
+          return false;
         }
-      }
-    }
-    // Rails, pier caps and building massing can occlude a probe even when
-    // the slab/prism they belong to does not. Test the same conservative
-    // sight prisms used by gameplay LOS so those hits trigger group fading.
-    for (size_t i = 0; i < massing.size(); ++i) {
-      const tactics::MassingDetail& d = massing[i];
-      if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
-      tactics::Obstacle prism;
-      prism.footprint = d.footprint;
-      prism.bounds.min = glm::vec3(std::numeric_limits<float>::infinity(), d.y0,
-                                  std::numeric_limits<float>::infinity());
-      prism.bounds.max = glm::vec3(-std::numeric_limits<float>::infinity(), d.y1,
-                                  -std::numeric_limits<float>::infinity());
-      for (const glm::vec2& p : d.footprint) {
-        prism.bounds.min.x = std::min(prism.bounds.min.x, p.x);
-        prism.bounds.max.x = std::max(prism.bounds.max.x, p.x);
-        prism.bounds.min.z = std::min(prism.bounds.min.z, p.y);
-        prism.bounds.max.z = std::max(prism.bounds.max.z, p.y);
-      }
-      if (crossesProbeRay(prism)) {
-        fadeMassing[i] = 1;
-        anyFaded = true;
-      }
-    }
-    // A building fades as a whole: if any part of it (either prism, its roof
-    // slab, massing detail) blocks a sightline, all of it goes see-through
-    // together.
-    const std::vector<int>& surfaceBuilding = surfaceBuilding_;
-    fadeBuilding.assign(game.GetScene().buildings.size(), 0);
-    const auto markBuilding = [&](int b) {
-      if (b >= 0 && b < static_cast<int>(fadeBuilding.size())) fadeBuilding[b] = 1;
-    };
-    for (size_t i = 0; i < obstacles.size(); ++i) {
-      if (fadeObstacle[i]) markBuilding(obstacles[i].building);
-    }
-    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-      if (fadeSurface[i]) markBuilding(surfaceBuilding[i]);
-    }
-    for (size_t i = 0; i < massing.size(); ++i) {
-      if (fadeMassing[i]) markBuilding(massing[i].building);
-    }
-    for (size_t i = 0; i < obstacles.size(); ++i) {
-      const int b = obstacles[i].building;
-      if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
-        fadeObstacle[i] = 1;
-        anyFaded = true;
-      }
-    }
-    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-      const int b = surfaceBuilding[i];
-      if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
-        fadeSurface[i] = 1;
-        anyFaded = true;
-      }
-    }
-    for (size_t i = 0; i < massing.size(); ++i) {
-      const int b = massing[i].building;
-      if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
-        fadeMassing[i] = 1;
-        anyFaded = true;
-      }
-    }
-
-    // The highway is one visual structure. A hit on any slab, deck rail,
-    // pier cap, column or footing fades every part, like a building group.
-    bool fadeOverpass = false;
-    for (size_t i = 0; i < obstacles.size(); ++i) {
-      fadeOverpass |= fadeObstacle[i] && obstacles[i].kind == tactics::ObstacleKind::Pier;
-    }
-    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-      fadeOverpass |= fadeSurface[i] && walkSurfaces[i].overpass;
-    }
-    const auto overpassDetail = [](const tactics::MassingDetail& d) {
-      return d.kind == tactics::MassingDetail::Kind::PierCap ||
-             d.kind == tactics::MassingDetail::Kind::DeckRail;
-    };
-    for (size_t i = 0; i < massing.size(); ++i) {
-      fadeOverpass |= fadeMassing[i] && overpassDetail(massing[i]);
-    }
-    if (fadeOverpass) {
+        const float halfSpan = std::asin(std::min(1.0f, padded / distance));
+        const float centerAzimuth = std::atan2(toCenter.y, toCenter.x);
+        const auto scan = [&](float lo, float hi) {
+          const size_t begin =
+              std::lower_bound(rayAzimuths.begin(), rayAzimuths.end(), lo) - rayAzimuths.begin();
+          const size_t end =
+              std::upper_bound(rayAzimuths.begin(), rayAzimuths.end(), hi) - rayAzimuths.begin();
+          for (size_t r = begin; r < end; ++r) {
+            if (test(rays[r])) return true;
+          }
+          return false;
+        };
+        constexpr float kPi = 3.14159265358979f;
+        const float lo = centerAzimuth - halfSpan;
+        const float hi = centerAzimuth + halfSpan;
+        if (lo < -kPi) return scan(lo + 2.0f * kPi, kPi) || scan(-kPi, hi);
+        if (hi > kPi) return scan(lo, kPi) || scan(-kPi, hi - 2.0f * kPi);
+        return scan(lo, hi);
+      };
+      // Same endpoint handling as LineOfSightClear: a hit at (or essentially
+      // at) the probe itself does not count, so a figure hugging a wall does
+      // not fade that wall.
+      constexpr float kEndpointEpsilon = 1e-2f;
+      const auto crossesProbeRay = [&](const tactics::Obstacle& obstacle) {
+        // Bounding circle over both the footprint and the bounds: hits are
+        // clipped by the footprint in XZ, but fall back to bounds corners.
+        glm::vec2 lo(obstacle.bounds.min.x, obstacle.bounds.min.z);
+        glm::vec2 hi(obstacle.bounds.max.x, obstacle.bounds.max.z);
+        for (const glm::vec2& p : obstacle.footprint) {
+          lo = glm::min(lo, p);
+          hi = glm::max(hi, p);
+        }
+        return anyRayHits(0.5f * (lo + hi), 0.5f * glm::length(hi - lo), [&](const ProbeRay& ray) {
+          float t = 0.0f;
+          return tactics::RayIntersectsObstacle(cameraPos, ray.direction, obstacle, &t) &&
+                 t > kEndpointEpsilon && t < ray.length - kEndpointEpsilon;
+        });
+      };
       for (size_t i = 0; i < obstacles.size(); ++i) {
-        if (obstacles[i].kind == tactics::ObstacleKind::Pier) fadeObstacle[i] = 1;
+        // Post-sized furniture is too small to hide a useful target and is kept
+        // in one static render batch below.
+        if (obstacles[i].navOnly || obstacles[i].kind == tactics::ObstacleKind::StreetFurniture) {
+          continue;
+        }
+        if (crossesProbeRay(obstacles[i])) {
+          fadeObstacle[i] = 1;
+          anyFaded = true;
+        }
       }
       for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-        if (walkSurfaces[i].overpass) fadeSurface[i] = 1;
+        const tactics::WalkSurface& surface = walkSurfaces[i];
+        if (surface.vertices.size() < 3) continue;  // Never intersected.
+        glm::vec2 lo(surface.vertices[0].x, surface.vertices[0].z);
+        glm::vec2 hi = lo;
+        for (const glm::vec3& v : surface.vertices) {
+          lo = glm::min(lo, glm::vec2(v.x, v.z));
+          hi = glm::max(hi, glm::vec2(v.x, v.z));
+        }
+        const bool crossed =
+            anyRayHits(0.5f * (lo + hi), 0.5f * glm::length(hi - lo), [&](const ProbeRay& ray) {
+              float t = 0.0f;
+              return tactics::RayIntersectsWalkSurface(cameraPos, ray.direction, surface,
+                                                       kDeckThickness, &t) &&
+                     t > kEndpointEpsilon && t < ray.length - kEndpointEpsilon;
+            });
+        if (crossed) {
+          fadeSurface[i] = 1;
+          anyFaded = true;
+        }
+      }
+      // Rails, pier caps and building massing can occlude a probe even when
+      // the slab/prism they belong to does not. Test the same conservative
+      // sight prisms used by gameplay LOS so those hits trigger group fading.
+      for (size_t i = 0; i < massing.size(); ++i) {
+        const tactics::MassingDetail& d = massing[i];
+        if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
+        tactics::Obstacle prism;
+        prism.footprint = d.footprint;
+        prism.bounds.min = glm::vec3(std::numeric_limits<float>::infinity(), d.y0,
+                                    std::numeric_limits<float>::infinity());
+        prism.bounds.max = glm::vec3(-std::numeric_limits<float>::infinity(), d.y1,
+                                    -std::numeric_limits<float>::infinity());
+        for (const glm::vec2& p : d.footprint) {
+          prism.bounds.min.x = std::min(prism.bounds.min.x, p.x);
+          prism.bounds.max.x = std::max(prism.bounds.max.x, p.x);
+          prism.bounds.min.z = std::min(prism.bounds.min.z, p.y);
+          prism.bounds.max.z = std::max(prism.bounds.max.z, p.y);
+        }
+        if (crossesProbeRay(prism)) {
+          fadeMassing[i] = 1;
+          anyFaded = true;
+        }
+      }
+      // A building fades as a whole: if any part of it (either prism, its roof
+      // slab, massing detail) blocks a sightline, all of it goes see-through
+      // together.
+      const std::vector<int>& surfaceBuilding = surfaceBuilding_;
+      fadeBuilding.assign(game.GetScene().buildings.size(), 0);
+      const auto markBuilding = [&](int b) {
+        if (b >= 0 && b < static_cast<int>(fadeBuilding.size())) fadeBuilding[b] = 1;
+      };
+      for (size_t i = 0; i < obstacles.size(); ++i) {
+        if (fadeObstacle[i]) markBuilding(obstacles[i].building);
+      }
+      for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+        if (fadeSurface[i]) markBuilding(surfaceBuilding[i]);
       }
       for (size_t i = 0; i < massing.size(); ++i) {
-        if (overpassDetail(massing[i])) fadeMassing[i] = 1;
+        if (fadeMassing[i]) markBuilding(massing[i].building);
       }
-      anyFaded = true;
+      for (size_t i = 0; i < obstacles.size(); ++i) {
+        const int b = obstacles[i].building;
+        if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
+          fadeObstacle[i] = 1;
+          anyFaded = true;
+        }
+      }
+      for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+        const int b = surfaceBuilding[i];
+        if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
+          fadeSurface[i] = 1;
+          anyFaded = true;
+        }
+      }
+      for (size_t i = 0; i < massing.size(); ++i) {
+        const int b = massing[i].building;
+        if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
+          fadeMassing[i] = 1;
+          anyFaded = true;
+        }
+      }
+
+      // The highway is one visual structure. A hit on any slab, deck rail,
+      // pier cap, column or footing fades every part, like a building group.
+      bool fadeOverpass = false;
+      for (size_t i = 0; i < obstacles.size(); ++i) {
+        fadeOverpass |= fadeObstacle[i] && obstacles[i].kind == tactics::ObstacleKind::Pier;
+      }
+      for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+        fadeOverpass |= fadeSurface[i] && walkSurfaces[i].overpass;
+      }
+      const auto overpassDetail = [](const tactics::MassingDetail& d) {
+        return d.kind == tactics::MassingDetail::Kind::PierCap ||
+               d.kind == tactics::MassingDetail::Kind::DeckRail;
+      };
+      for (size_t i = 0; i < massing.size(); ++i) {
+        fadeOverpass |= fadeMassing[i] && overpassDetail(massing[i]);
+      }
+      if (fadeOverpass) {
+        for (size_t i = 0; i < obstacles.size(); ++i) {
+          if (obstacles[i].kind == tactics::ObstacleKind::Pier) fadeObstacle[i] = 1;
+        }
+        for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+          if (walkSurfaces[i].overpass) fadeSurface[i] = 1;
+        }
+        for (size_t i = 0; i < massing.size(); ++i) {
+          if (overpassDetail(massing[i])) fadeMassing[i] = 1;
+        }
+        anyFaded = true;
+      }
+      fadeCache.valid = true;
+      fadeCache.cameraPos = cameraPos;
+      fadeCache.geometryKey = geometryKey;
+      fadeCache.probes = std::move(probes);
+      fadeCache.fadeObstacle = fadeObstacle;
+      fadeCache.fadeSurface = fadeSurface;
+      fadeCache.fadeMassing = fadeMassing;
+      fadeCache.fadeBuilding = fadeBuilding;
+      fadeCache.anyFaded = anyFaded;
     }
   }
 

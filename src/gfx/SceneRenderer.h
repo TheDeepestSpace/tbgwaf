@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -184,6 +185,21 @@ class SceneRenderer {
   std::vector<tactics::Obstacle> fovKeyObstacles_;
   std::vector<tactics::AABB> fovKeySidewalks_;
   float fovKeyMapHalfExtent_ = 0.0f;
+  // Issue #256: cached result of the camera-occlusion see-through raycasts,
+  // one slot per pane team. The fade flags are a pure function of (camera
+  // position, probe points, occluder geometry); while planning, frames
+  // usually repeat all three exactly, so the O(rays x occluders) pass is
+  // skipped. Geometry is content-hashed, not address-keyed, for the same
+  // reason as the terrain mesh key below.
+  struct FadeCache {
+    bool valid = false;
+    glm::vec3 cameraPos{0.0f};
+    uint64_t geometryKey = 0;
+    std::vector<glm::vec3> probes;
+    std::vector<char> fadeObstacle, fadeSurface, fadeMassing, fadeBuilding;
+    bool anyFaded = false;
+  };
+  FadeCache fadeCache_[2];
   TriangleMesh highlightRing_;
   ColorTriangleMesh frontierFill_;
   LineMesh frontierBorder_;

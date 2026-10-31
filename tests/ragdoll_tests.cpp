@@ -296,6 +296,33 @@ void TestRestsOnRamp() {
   gfx::SetRagdollGround({}, tactics::HeightField{});
 }
 
+// Issue #257: a figure killed at the top of a ramp (platform box + ramp seam)
+// and its dropped rifle settle within ~2s instead of bouncing/jittering.
+void TestSettlesAtRampTop() {
+  tactics::WalkSurface ramp;  // Falls from y=1.6 at x=-2 to y=0 at x=14.
+  ramp.vertices = {{-2.0f, 1.6f, 4.0f}, {14.0f, 0.0f, 4.0f}, {14.0f, 0.0f, -4.0f},
+                   {-2.0f, 1.6f, -4.0f}};
+  tactics::Obstacle deck;
+  deck.bounds = tactics::AABB{glm::vec3(-10.0f, 0.0f, -4.0f), glm::vec3(-2.0f, 1.6f, 4.0f)};
+  gfx::SetRagdollObstacles({deck});
+  gfx::SetRagdollGround({ramp}, tactics::HeightField{});
+  const int from = 2 * 60;  // After 2s everything must be still.
+  for (int id = 1; id <= 12; ++id) {
+    for (float x : {-2.5f, -1.5f, -0.5f}) {
+      tactics::Unit u = Downed(id, tactics::constants::kKnockdownMaxSeconds);
+      u.position = glm::vec3(x, x < -2.0f ? 1.6f : tactics::SurfaceHeightAt(ramp, x, 0.0f), 0.0f);
+      const gfx::RagdollPose a = gfx::SampleRagdollStep(u, from);
+      const gfx::RagdollPose b = gfx::SampleRagdollStep(u, gfx::kRagdollSteps);
+      for (int j = 0; j < gfx::kRagJointCount; ++j) CHECK(glm::length(a[j] - b[j]) < 0.02f);
+      const gfx::RagdollGun ga = gfx::SampleRagdollGunStep(u, from);
+      const gfx::RagdollGun gb = gfx::SampleRagdollGunStep(u, gfx::kRagdollSteps);
+      CHECK(glm::length(ga.pos - gb.pos) < 0.02f);
+    }
+  }
+  gfx::SetRagdollObstacles({});
+  gfx::SetRagdollGround({}, tactics::HeightField{});
+}
+
 int main() {
   TestRiderFallsToGroundBelowCable();
   TestStartsFromAnimatedPose();
@@ -303,6 +330,7 @@ int main() {
   TestSecondHitShovesFallingBody();
   TestFallsOffWallAndStaysOutside();
   TestRestsOnRamp();
+  TestSettlesAtRampTop();
   TestGunReleaseAndDrop();
   TestOnlyDownedUnitsRagdoll();
   TestFallsAlongShotAndRests();

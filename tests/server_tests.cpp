@@ -533,6 +533,51 @@ void TestClientServerRound() {
   CHECK(blue.client.status() == net::RemoteClient::Status::OpponentLeft);
 }
 
+// A figure shot dead in mid-air (a zipline rider) during round playback: the
+// mirror's knockdown clock must run the whole ragdoll window, not stop at the
+// rigid tip-over, and the drop to the ground must be reconstructed locally
+// (neither crosses the wire) -- otherwise the body hangs frozen on the cable
+// through the rest of the match and only finishes falling at game over.
+void TestPlaybackFallFromCable() {
+  Wire w;
+  ClientRig blue(1, "t"), red(2, "t");
+  blue.client.OnOpen();
+  red.client.OnOpen();
+  blue.Pump(w);
+  blue.Pump(w);
+  red.Pump(w);
+  blue.Pump(w);
+  red.Pump(w);
+  CHECK(blue.client.status() == net::RemoteClient::Status::Playing);
+  GameLogic& game = blue.game;
+  net::RemoteClient& client = blue.client;
+  const Unit* victim = game.FindUnit(0);
+  const float x = victim->position.x, z = victim->position.z;
+  const float yCable = game.GetScene().ground.HeightAt(x, z) + 3.0f;
+  char round[1024];
+  std::snprintf(
+      round, sizeof(round),
+      R"({"t":"round","duration":7,"frames":[)"
+      R"({"t":0,"u":[[0,%f,%f,%f,0,1,1]]},)"
+      R"({"t":1,"u":[[0,%f,%f,%f,0,0,0]]},)"
+      R"({"t":7,"u":[[0,%f,%f,%f,0,0,0]]}],"shots":[],"tracers":[],)"
+      R"("state":{"round":2,"over":false,"units":[{"id":0,"pos":[%f,%f,%f],"yaw":0,"alive":false}]}})",
+      x, yCable, z, x, yCable, z, x, yCable, z, x, yCable, z);
+  client.OnMessage(round);
+  CHECK(client.playingBack());
+  float maxElapsed = -1.0f;
+  for (int i = 0; i < 400 && client.playingBack(); ++i) {
+    client.Update(1.0f / 30.0f);
+    maxElapsed = std::max(maxElapsed, game.FindUnit(0)->knockdownElapsed);
+  }
+  CHECK(!client.playingBack());
+  const Unit* dead = game.FindUnit(0);
+  CHECK(!dead->alive);
+  CHECK(dead->knockdownDrop > 2.0f);                           // Falls to the real ground.
+  CHECK(maxElapsed > constants::kKnockdownDuration + 1.0f);    // Clock ran past the tip-over.
+  CHECK(dead->knockdownElapsed >= maxElapsed);                 // Round-end state kept the fall.
+}
+
 // Plans a short walk for `unitId` through the local click flow (as the UI
 // would); `radius` varies the destination so re-plans actually differ.
 bool PlanMoveLocally(ClientRig& rig, int unitId, float radius) {
@@ -796,6 +841,7 @@ int main() {
   TestSpectator();
   TestControlTapScenarioRoom();
   TestClientServerRound();
+  TestPlaybackFallFromCable();
   TestStaleEchoDoesNotRevertFreshPlans();
   TestEchoDoesNotInterruptEditing();
   TestCommitLockHandshake();

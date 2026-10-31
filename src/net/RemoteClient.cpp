@@ -200,9 +200,9 @@ void RemoteClient::ApplyState(const Json& state) {
       if (static_cast<int>(e["id"].AsNumber(-1)) == u.id) entry = &e;
     }
     u.moving = false;
-    u.walkBlend = 0.0f;
-    u.shootElapsed = -1.0f;
     if (!entry) {
+      u.walkBlend = 0.0f;
+      u.shootElapsed = -1.0f;
       if (!own) {
         u.position = HiddenPosition();
         u.alive = true;
@@ -213,9 +213,22 @@ void RemoteClient::ApplyState(const Json& state) {
     if (DecodeVec3((*entry)["pos"], &pos)) u.position = pos;
     u.facingYaw = static_cast<float>((*entry)["yaw"].AsNumber(u.facingYaw));
     const bool alive = (*entry)["alive"].AsBool(true);
-    if (!alive && u.alive) u.knockdownElapsed = constants::kKnockdownDuration;  // Already down.
+    if (alive) {
+      u.walkBlend = 0.0f;
+      u.shootElapsed = -1.0f;
+      u.knockdownElapsed = -1.0f;
+    } else if (u.alive) {
+      // First seen already down (it fell while hidden): render it settled on
+      // the ground, not mid-fall.
+      u.knockdownElapsed = constants::kKnockdownMaxSeconds;
+      u.knockdownDrop =
+          std::max(0.0f, u.position.y -
+                             game_->GetScene().ground.HeightAt(u.position.x, u.position.z));
+      u.rideTravel = -1.0f;
+    }
+    // A corpse keeps its frozen animation fields: the ragdoll replays from
+    // the pose the figure died in, so stomping them re-seeds its trajectory.
     u.alive = alive;
-    if (alive) u.knockdownElapsed = -1.0f;
   }
   snap.roundNumber = static_cast<int>(state["round"].AsNumber(snap.roundNumber));
   if (state["over"].AsBool()) {
@@ -324,9 +337,22 @@ void RemoteClient::AdvancePlayback(float dt) {
       u.alive = false;
       u.knockdownElapsed = 0.0f;
       u.knockdownAxis = glm::vec3(std::sin(yaw), 0.0f, -std::cos(yaw));
+      // Killed above the ground (a zipline rider): the ragdoll falls the
+      // whole way down, as GameLogic::KnockDown computes server-side.
+      u.knockdownDrop = std::max(
+          0.0f, pos.y - game_->GetScene().ground.HeightAt(pos.x, pos.z));
+      u.rideTravel = -1.0f;
     }
-    if (!u.alive && u.knockdownElapsed >= 0.0f && u.knockdownElapsed < constants::kKnockdownDuration) {
-      u.knockdownElapsed += dt;
+    if (!u.alive) {
+      // Same clock as GameLogic::Update: the whole ragdoll window, not just
+      // the rigid tip-over (a long fall froze mid-air at kKnockdownDuration).
+      // The other animation clocks freeze: the ragdoll replays from the pose
+      // the figure was hit in, so mutating them re-seeds its trajectory.
+      if (u.knockdownElapsed >= 0.0f) {
+        u.knockdownElapsed =
+            std::min(u.knockdownElapsed + dt, constants::kKnockdownMaxSeconds);
+      }
+      continue;
     }
     // Presentation derived locally: stride follows distance travelled.
     if (!IsHidden(before)) {

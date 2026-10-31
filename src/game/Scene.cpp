@@ -290,7 +290,7 @@ std::vector<TerrainTier> TerrainTiers(const std::vector<TerrainWall>& walls,
 
 std::vector<Obstacle> SightObstacles(const Scene& scene) {
   std::vector<Obstacle> out = scene.obstacles;
-  out.reserve(out.size() + scene.massing.size());
+  out.reserve(out.size() + scene.massing.size() + scene.trees.size());
   for (const MassingDetail& d : scene.massing) {
     if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
     Obstacle prism;
@@ -308,6 +308,21 @@ std::vector<Obstacle> SightObstacles(const Scene& scene) {
     }
     prism.building = d.building;
     out.push_back(std::move(prism));
+  }
+  // Tree canopies: an octagon within the crown, floating above eye
+  // height so figures can stand under it but not see through the leaves.
+  for (const TreeDecoration& t : scene.trees) {
+    Obstacle crown;
+    const float r = 1.4f * t.scale;
+    for (int i = 0; i < 8; ++i) {
+      const float a = 2.0f * 3.14159265f * static_cast<float>(i) / 8.0f;
+      crown.footprint.emplace_back(t.position.x + r * std::cos(a), t.position.z + r * std::sin(a));
+    }
+    crown.bounds.min = {t.position.x - 1.4f * t.scale, t.position.y + 2.2f * t.scale,
+                        t.position.z - 1.4f * t.scale};
+    crown.bounds.max = {t.position.x + 1.4f * t.scale, t.position.y + 5.0f * t.scale,
+                        t.position.z + 1.4f * t.scale};
+    out.push_back(std::move(crown));
   }
   return out;
 }

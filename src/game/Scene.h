@@ -63,7 +63,8 @@ struct SpawnHints {
   std::optional<glm::vec2> flag;  // Preferred flag spot (map center).
 };
 
-// Pure decoration: never added to obstacles, sight geometry or walk surfaces.
+// Never added to obstacles or walk surfaces (no collision), but the canopy
+// blocks sight lines via SightObstacles.
 // The renderer batches three procedural meshes using these seeded transforms.
 struct TreeDecoration {
   glm::vec3 position{0.0f};
@@ -160,8 +161,8 @@ void SuggestSpawnHints(Scene* scene);
 void ApplySpawnHints(Scene* scene);
 
 // Obstacles plus the building massing (parapets, roof furniture, awnings) as
-// prisms, appended after the real obstacles so obstacle indices are
-// unchanged. For sight lines and FOV only: massing never collides.
+// prisms and tree canopies, appended after the real obstacles so obstacle
+// indices are unchanged. For sight lines and FOV only: they never collide.
 std::vector<Obstacle> SightObstacles(const Scene& scene);
 
 }  // namespace tactics

@@ -332,7 +332,7 @@ void TestBuildingKindsFloorsAndHeights() {
 void TestMassingBlocksSight() {
   const Scene scene = GenerateUrbanMap(kSeeds[0]);
   const std::vector<Obstacle> sight = SightObstacles(scene);
-  CHECK(sight.size() == scene.obstacles.size() + scene.massing.size());
+  CHECK(sight.size() == scene.obstacles.size() + scene.massing.size() + scene.trees.size());
   for (size_t i = 0; i < scene.massing.size(); ++i) {
     const AABB& box = sight[scene.obstacles.size() + i].bounds;
     const glm::vec3 c = box.Center();
@@ -340,6 +340,20 @@ void TestMassingBlocksSight() {
     CHECK(!LineOfSightClear(glm::vec3(c.x - reach, c.y, c.z), glm::vec3(c.x + reach, c.y, c.z),
                             sight));
   }
+}
+
+// A tree canopy blocks sight above eye height but not below it.
+void TestTreesBlockSight() {
+  Scene scene = GenerateUrbanMap(kSeeds[0]);
+  CHECK(!scene.trees.empty());
+  const glm::vec3 p = scene.trees[0].position;
+  const float s = scene.trees[0].scale;
+  const std::vector<Obstacle> sight = SightObstacles(scene);
+  const float y = p.y + 3.5f * s;
+  CHECK(!LineOfSightClear(glm::vec3(p.x - 4.0f, y, p.z), glm::vec3(p.x + 4.0f, y, p.z), sight));
+  CHECK(sight.size() == scene.obstacles.size() + scene.massing.size() + scene.trees.size());
+  scene.trees.clear();
+  CHECK(SightObstacles(scene).size() == scene.obstacles.size() + scene.massing.size());
 }
 
 // Parapets and roof furniture block walking: every one is a blocker on a roof
@@ -2581,8 +2595,8 @@ void TestTreesStayOnEmptyBlocksAndOutOfGameplay() {
       CHECK(SameScene(scene, bare));
       CHECK(scene.ground.heights == bare.ground.heights);
       const auto sight = SightObstacles(scene), bareSight = SightObstacles(bare);
-      CHECK(sight.size() == bareSight.size());
-      for (size_t i = 0; i < sight.size() && i < bareSight.size(); ++i) {
+      CHECK(sight.size() == bareSight.size() + scene.trees.size());
+      for (size_t i = 0; i < bareSight.size(); ++i) {
         CHECK(sight[i].bounds.min == bareSight[i].bounds.min);
         CHECK(sight[i].bounds.max == bareSight[i].bounds.max);
         CHECK(sight[i].footprint == bareSight[i].footprint);
@@ -2658,6 +2672,7 @@ int main() {
   TestMassingStaysOnItsBuilding();
   TestRoofMassingBlocksWalking();
   TestMassingBlocksSight();
+  TestTreesBlockSight();
   TestPinnedKindHistograms();
   TestMapIsMuchLargerThanDefault();
   TestStreetsAndSidewalksAreObstacleFree();

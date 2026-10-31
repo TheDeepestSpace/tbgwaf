@@ -75,6 +75,61 @@ constexpr Uint32 kPeerSyncTimeoutMs = 500;
 // specialHTMLTargets table instead; must run before SDL_Init.
 EM_JS(void, tbgwaf_bind_canvas, (), {
   specialHTMLTargets["#canvas"] = Module.canvas;
+  // Gesture input SDL doesn't expose: touch pinch/drag and trackpad wheel
+  // gestures. Accumulated here, drained once per frame by tbgwaf_take_gesture.
+  const c = Module.canvas;
+  const g = Module.tbgwafGesture = {rotX: 0, rotY: 0, zoom: 0, panX: 0, panY: 0, x: 0, active: false};
+  c.style.touchAction = "none";
+  // Capture phase + stopImmediatePropagation keeps SDL's own wheel handler
+  // from also acting on events we consume.
+  c.addEventListener("wheel", (e) => {
+    const trackpadScroll = e.deltaMode === 0 && !e.ctrlKey &&
+        (e.deltaX !== 0 || !Number.isInteger(e.deltaY) || Math.abs(e.deltaY) < 50);
+    if (!e.ctrlKey && !trackpadScroll) return;  // Mouse wheel: SDL zooms as before.
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    g.x = e.clientX - c.getBoundingClientRect().left;
+    if (e.ctrlKey) g.zoom += e.deltaY;  // Trackpad pinch (or ctrl+wheel).
+    else { g.rotX += e.deltaX; g.rotY -= e.deltaY; }
+  }, {capture: true, passive: false});
+  const touches = new Map();
+  const dist = () => { const p = [...touches.values()]; return Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y); };
+  const mid = () => { const p = [...touches.values()]; return {x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2}; };
+  c.addEventListener("pointerdown", (e) => {
+    if (e.pointerType !== "touch") return;
+    touches.set(e.pointerId, {x: e.clientX, y: e.clientY});
+    if (touches.size >= 2) { e.stopImmediatePropagation(); e.preventDefault(); }
+  }, {capture: true, passive: false});
+  c.addEventListener("pointermove", (e) => {
+    if (e.pointerType !== "touch" || !touches.has(e.pointerId)) return;
+    if (touches.size < 2) { touches.set(e.pointerId, {x: e.clientX, y: e.clientY}); return; }
+    const d0 = dist(), m0 = mid();
+    touches.set(e.pointerId, {x: e.clientX, y: e.clientY});
+    const d1 = dist(), m1 = mid();
+    g.zoom += (d0 - d1) * 0.5;  // Fingers apart -> zoom in (negative delta).
+    g.rotX += (m0.x - m1.x) * -1; g.rotY += (m0.y - m1.y) * -1;
+    g.x = m1.x - c.getBoundingClientRect().left;
+    e.stopImmediatePropagation(); e.preventDefault();
+  }, {capture: true, passive: false});
+  const end = (e) => {
+    if (e.pointerType !== "touch") return;
+    if (touches.size >= 2) { e.stopImmediatePropagation(); }
+    touches.delete(e.pointerId);
+  };
+  c.addEventListener("pointerup", end, {capture: true});
+  c.addEventListener("pointercancel", end, {capture: true});
+  for (const t of ["touchstart", "touchmove"])
+    c.addEventListener(t, (e) => e.preventDefault(), {passive: false});
+});
+
+// Drains accumulated gesture deltas (CSS px / wheel units). Returns 1 if any.
+EM_JS(int, tbgwaf_take_gesture, (float* out), {
+  const g = Module.tbgwafGesture;
+  if (!g || (!g.rotX && !g.rotY && !g.zoom)) return 0;
+  HEAPF32[out >> 2] = g.rotX; HEAPF32[(out >> 2) + 1] = g.rotY;
+  HEAPF32[(out >> 2) + 2] = g.zoom; HEAPF32[(out >> 2) + 3] = g.x;
+  g.rotX = g.rotY = g.zoom = 0;
+  return 1;
 });
 
 // 0 = blue, 1 = red, -1 = not specified. The page assigns each client
@@ -457,6 +512,12 @@ int main() {
   auto makeBaseMap = [](uint32_t mapSeed, const std::string& mapType) {
     if (mapType == "hilly") return tactics::GenerateHillyMap(mapSeed);
     tactics::MapGeneratorConfig config;
+    // The regular menu entry keeps the original 4x4 city. Urban x4 uses
+    // the 8x8 generator default: twice each dimension, four times the area.
+    if (mapType == "urban-auto-x1") {
+      config.blocksX = 4;
+      config.blocksZ = 4;
+    }
     if (mapType == "urban-merge" || mapType == "urban-elevated") config.arteryCount = 2;
     if (mapType == "urban" || mapType == "urban-merge") {
       config.elevatedHighway = tactics::OverpassMode::Off;
@@ -771,6 +832,23 @@ int main() {
     int mouseX = 0, mouseY = 0;
     SDL_GetMouseState(&mouseX, &mouseY);
 
+#ifdef __EMSCRIPTEN__
+    {
+      // Touch pinch/drag and trackpad scroll/pinch gestures (see
+      // tbgwaf_bind_canvas). Scroll/two-finger drag rotates; pinch zooms.
+      float g[4];
+      if (tbgwaf_take_gesture(g) && !ImGui::GetIO().WantCaptureMouse) {
+        constexpr float kRotateSpeed = 0.005f;
+        constexpr float kPinchZoom = 0.01f;  // Fraction of distance per unit.
+        const float scale = tbgwaf_canvas_css_width() > 0
+                                ? static_cast<float>(windowWidth / tbgwaf_canvas_css_width())
+                                : 1.0f;
+        gfx::OrbitCamera& camera = cameras[PaneForX(static_cast<int>(g[3] * scale), paneCount, windowWidth)];
+        camera.Rotate(-g[0] * kRotateSpeed, g[1] * kRotateSpeed);
+        camera.Zoom(g[2] * kPinchZoom * camera.TargetDistance());
+      }
+    }
+#endif
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
       ImGui_ImplSDL2_ProcessEvent(&event);
@@ -920,9 +998,12 @@ int main() {
           ctfMode = *flowEvent == tbgwaf_flow::Event::SelectCtf;
         }
         if (!remoteMode && (*flowEvent == tbgwaf_flow::Event::SelectUrban ||
+                            *flowEvent == tbgwaf_flow::Event::SelectUrbanX4 ||
                             *flowEvent == tbgwaf_flow::Event::SelectHills)) {
-          // The menu's Urban entry uses the seed-driven random overpass mode.
-          mapType = *flowEvent == tbgwaf_flow::Event::SelectHills ? "hilly" : "urban-auto";
+          // Both urban entries use the seed-driven random overpass mode.
+          if (*flowEvent == tbgwaf_flow::Event::SelectHills) mapType = "hilly";
+          else if (*flowEvent == tbgwaf_flow::Event::SelectUrbanX4) mapType = "urban-auto";
+          else mapType = "urban-auto-x1";
           game.Reset(makeMap());
           timeline.Reset(game);
           timelinePlayback.Reset();

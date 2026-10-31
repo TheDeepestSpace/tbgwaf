@@ -37,6 +37,11 @@ bool SceneFromSpec(const Json& spec, tactics::Scene* out, std::string* error) {
     const std::string type = gen["type"].IsString() ? gen["type"].AsString() : "urban";
     if (type == "urban") {
       MapGeneratorConfig config;
+      // Scenario coordinates were authored on the pre-#224 4x4 city.
+      config.blocksX = config.blocksZ = 4;
+      if (gen["blocks"].IsNumber()) {
+        config.blocksX = config.blocksZ = static_cast<int>(gen["blocks"].AsNumber());
+      }
       if (gen.Has("arteries")) config.arteryCount = static_cast<int>(gen["arteries"].AsNumber());
       if (gen.Has("artery_width")) config.arteryWidth = static_cast<float>(gen["artery_width"].AsNumber());
       if (gen.Has("local_street_width")) {
@@ -68,6 +73,10 @@ bool SceneFromSpec(const Json& spec, tactics::Scene* out, std::string* error) {
         else {
           return Fail(error, "map.generate.elevated_branch must be ramp/off-map, got '" + end + "'");
         }
+      }
+      // `extra_arteries: 0-2` pins the additional arteries; omitted draws per seed.
+      if (gen["extra_arteries"].IsNumber()) {
+        config.extraArteries = static_cast<int>(gen["extra_arteries"].AsNumber());
       }
       if (gen["terrain_levels"].IsNumber()) {
         config.terrainLevelCount = static_cast<int>(gen["terrain_levels"].AsNumber());

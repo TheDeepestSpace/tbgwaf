@@ -101,6 +101,7 @@ std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
     if (ImGui::Button("Random")) *mapSeed = std::random_device{}();
     ImGui::Spacing();
     if (ImGui::Button("Urban", button)) fired = Event::SelectUrban;
+    if (ImGui::Button("Urban x4", button)) fired = Event::SelectUrbanX4;
     if (ImGui::Button("Hills", button)) fired = Event::SelectHills;
     ImGui::Spacing();
     if (ImGui::Button("Back", ImVec2(100.0f, 0.0f))) fired = Event::Back;

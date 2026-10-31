@@ -9,6 +9,7 @@
 #include "game/GameLogic.h"
 #include "game/Geometry.h"
 #include "game/MapGenerator.h"
+#include "OldSizeConfig.h"
 #include "game/NavMesh.h"
 #include "game/Raycast.h"
 
@@ -21,7 +22,7 @@ uint32_t currentSeed = 0;
 } } while (0)
 
 MapGeneratorConfig TerrainConfig() {
-  MapGeneratorConfig c;
+  MapGeneratorConfig c = OldSizeConfig();
   c.features.terrain.mode = FeatureMode::On;
   c.elevatedHighway = OverpassMode::Off;
   c.maxZiplinesPerBlock = 0;
@@ -240,6 +241,10 @@ void TestWallCoverAndCollision() {
       const glm::vec2 box = onLine;
       if (std::max(std::fabs(box.x), std::fabs(box.y)) > s.mapHalfExtent - 10.0f) continue;
       if (nav.IsWalkable(box.x, box.y)) continue;  // A gap or off the cliff.
+      // A sliver beside a ramp opening is unwalkable too (the cliff beside
+      // the ramp) but has no wall: only a continuous cliff counts.
+      const glm::vec2 before = box - wall.dir * 1.5f, after = box + wall.dir * 1.5f;
+      if (nav.IsWalkable(before.x, before.y) || nav.IsWalkable(after.x, after.y)) continue;
       // Probes just inside the level's sidewalk ring and just outside the
       // stair strip, where the profile must be a clean full step: a flight,
       // a ramp channel mouth or a building spoils the sample.
@@ -296,9 +301,9 @@ void TestHighwayTerrainInterplay() {
 
   // Terrain-enabled seeds draw the overpass with a boosted chance: raised
   // highways are more common over the levels.
-  MapGeneratorConfig withTerrain;
+  MapGeneratorConfig withTerrain = OldSizeConfig();
   withTerrain.features.terrain.mode = FeatureMode::On;
-  MapGeneratorConfig withoutTerrain;
+  MapGeneratorConfig withoutTerrain = OldSizeConfig();
   withoutTerrain.features.terrain.mode = FeatureMode::Off;
   int boosted = 0, plain = 0;
   for (uint32_t seed = 1; seed <= 80; ++seed) {
@@ -312,7 +317,7 @@ void TestHighwayProfilesOverLevels() {
   // With the overpass forced on, the deck is planned against the walls:
   // it never dips below the ground, flies clear over every wall it crosses
   // on the deck, ramps through the others at grade, and the layouts vary.
-  MapGeneratorConfig c;
+  MapGeneratorConfig c = OldSizeConfig();
   c.elevatedHighway = OverpassMode::On;
   c.arteryCount = 2;
   int layouts[5] = {};

@@ -139,15 +139,19 @@ if(EMSCRIPTEN)
   add_executable(tactics_gallery_web
     src/gallery/gallery_main.cpp
     src/gallery/GalleryScene.cpp
+    src/gallery/MapView.cpp
     src/gfx/Shader.cpp
     src/gfx/Mesh.cpp
+    src/gfx/Camera.cpp
+    src/gfx/AmbientOcclusion.cpp
+    src/gfx/SceneRenderer.cpp
     src/gfx/FigureRig.cpp
     src/gfx/Ragdoll.cpp
     src/gfx/StreetFixtureMesh.cpp
     src/game/Geometry.cpp
   )
   target_include_directories(tactics_gallery_web PRIVATE src)
-  target_link_libraries(tactics_gallery_web PRIVATE glm::glm)
+  target_link_libraries(tactics_gallery_web PRIVATE tactics_logic glm::glm)
   target_compile_options(tactics_gallery_web PRIVATE -sUSE_SDL=2)
   target_link_options(tactics_gallery_web PRIVATE
     -sUSE_SDL=2
@@ -336,9 +340,9 @@ else()
 
   # Asset & animation gallery (issue #126): shared catalog/renderer, a
   # native interactive viewer.
-  add_library(tactics_gallery STATIC src/gallery/GalleryScene.cpp)
+  add_library(tactics_gallery STATIC src/gallery/GalleryScene.cpp src/gallery/MapView.cpp)
   target_include_directories(tactics_gallery PUBLIC src)
-  target_link_libraries(tactics_gallery PUBLIC tactics_gfx glm::glm)
+  target_link_libraries(tactics_gallery PUBLIC tactics_gfx tactics_logic glm::glm)
 
   add_executable(tactics_gallery_app src/gallery/gallery_main.cpp)
   target_include_directories(tactics_gallery_app PRIVATE src)

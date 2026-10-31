@@ -371,6 +371,18 @@ else()
     PkgConfig::EGL
   )
 
+  # Move-planning frame/click profiler (issue #256). Also manual-run only:
+  # it times the frontier-open planning state (frontier raycast fade, move
+  # click latency) on a seed of choice, with and without occlusion fade.
+  add_executable(tactics_frontier_profile tests/performance/frontier_profile_main.cpp)
+  target_include_directories(tactics_frontier_profile PRIVATE src)
+  target_link_libraries(tactics_frontier_profile PRIVATE
+    tactics_logic
+    tactics_gfx
+    PkgConfig::SDL2
+    PkgConfig::EGL
+  )
+
   find_program(XVFB_RUN_EXECUTABLE xvfb-run)
   if(XVFB_RUN_EXECUTABLE)
     add_executable(tactics_thermal_render_tests tests/visual/thermal_render_tests.cpp)

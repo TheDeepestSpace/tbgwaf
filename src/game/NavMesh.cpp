@@ -118,9 +118,15 @@ NavRegion SquareRegion(float halfExtent) {
 }
 
 // Nav-only walls (cliff-edge guards) take the reduced kNavWallPad so figures
-// can stand at the brink of a level; everything else gets body clearance.
+// can stand at the brink of a level. Curb furniture is knee-to-head-high
+// scenery a figure may brush (like roof furniture), so it takes half the pad:
+// a full pad on both it and the building behind it sealed the strip between
+// them, leaving a blank stretch of navmesh instead of a hole around the item.
+// Everything else gets body clearance.
 float ObstaclePad(const Obstacle& obstacle, float agentRadius) {
-  return obstacle.navOnly ? std::min(agentRadius, constants::kNavWallPad) : agentRadius;
+  if (obstacle.navOnly) return std::min(agentRadius, constants::kNavWallPad);
+  if (obstacle.kind == ObstacleKind::StreetFurniture) return 0.5f * agentRadius;
+  return agentRadius;
 }
 }  // namespace
 

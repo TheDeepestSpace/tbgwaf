@@ -116,6 +116,12 @@ namespace {
 NavRegion SquareRegion(float halfExtent) {
   return NavRegion{-halfExtent, halfExtent, -halfExtent, halfExtent};
 }
+
+// Nav-only walls (cliff-edge guards) take the reduced kNavWallPad so figures
+// can stand at the brink of a level; everything else gets body clearance.
+float ObstaclePad(const Obstacle& obstacle, float agentRadius) {
+  return obstacle.navOnly ? std::min(agentRadius, constants::kNavWallPad) : agentRadius;
+}
 }  // namespace
 
 void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, float agentRadius) {
@@ -142,14 +148,15 @@ void NavMesh::Build(const std::vector<Obstacle>& obstacles, const NavRegion& reg
   paddedPolygons_.reserve(obstacles.size());
   for (const Obstacle& obstacle : obstacles) {
     polygonMode_ |= !obstacle.footprint.empty();
-    paddedPolygons_.push_back(ExpandConvexPolygon(ObstacleFootprint(obstacle), agentRadius));
+    paddedPolygons_.push_back(
+        ExpandConvexPolygon(ObstacleFootprint(obstacle), ObstaclePad(obstacle, agentRadius)));
   }
   AddLowDeckBlockers(agentRadius);
-  BuildGroundMesh(ObstacleBounds(obstacles), region, agentRadius);
+  BuildGroundMesh(obstacles, region, agentRadius);
   AddClimbConnections(obstacles, agentRadius);
 }
 
-void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegion& region,
+void NavMesh::BuildGroundMesh(const std::vector<Obstacle>& obstacles, const NavRegion& region,
                                float agentRadius) {
   cells_.clear();
   neighbors_.clear();
@@ -162,11 +169,12 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegio
   std::vector<Footprint> footprints;
   footprints.reserve(obstacles.size());
   for (const auto& obstacle : obstacles) {
+    const float pad = ObstaclePad(obstacle, agentRadius);
     Footprint fp;
-    fp.xMin = std::max(region.xMin, obstacle.min.x - agentRadius);
-    fp.xMax = std::min(region.xMax, obstacle.max.x + agentRadius);
-    fp.zMin = std::max(region.zMin, obstacle.min.z - agentRadius);
-    fp.zMax = std::min(region.zMax, obstacle.max.z + agentRadius);
+    fp.xMin = std::max(region.xMin, obstacle.bounds.min.x - pad);
+    fp.xMax = std::min(region.xMax, obstacle.bounds.max.x + pad);
+    fp.zMin = std::max(region.zMin, obstacle.bounds.min.z - pad);
+    fp.zMax = std::min(region.zMax, obstacle.bounds.max.z + pad);
     if (fp.xMax > fp.xMin + kEps && fp.zMax > fp.zMin + kEps) {
       footprints.push_back(fp);
       // Give the padded footprint a generous Y range so it can be reused

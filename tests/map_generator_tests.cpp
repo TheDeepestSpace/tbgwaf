@@ -2598,6 +2598,7 @@ void TestEnterableBuildingsHaveDoorways() {
   c.enterableChance = 1.0f;
   int hollow = 0;
   bool multi = false;
+  bool wideBay = false;  // Warehouses keep their wide loading bay.
   std::set<BuildingKind> kinds;
   for (uint32_t seed : kSeeds) {
     const Scene scene = GenerateUrbanMap(seed, c);
@@ -2615,9 +2616,11 @@ void TestEnterableBuildingsHaveDoorways() {
       centre /= static_cast<float>(roof.size());
       for (const Obstacle& o : scene.obstacles) {
         if (o.building != static_cast<int>(bi)) continue;
-        if (std::fabs(o.bounds.min.y - b.baseY - constants::kDoorHeight) < kEps) lintel = true;
+        if (std::fabs(o.bounds.min.y - b.baseY - b.doorHeight) < kEps) lintel = true;
       }
       CHECK(lintel);
+      CHECK(b.doorWidth >= 0.9f && b.doorHeight >= constants::kUnitHeight);
+      if (b.kind == BuildingKind::Commercial) wideBay = wideBay || b.doorWidth >= 4.0f;
       // One overhead slab under every upper storey.
       int slabs = 0;
       for (size_t f = 1; f < b.floors.size(); ++f) {
@@ -2641,6 +2644,7 @@ void TestEnterableBuildingsHaveDoorways() {
   }
   CHECK(hollow > 0);
   CHECK(multi);
+  CHECK(wideBay);
   CHECK(kinds.count(BuildingKind::Residential) > 0);
   // Zero chance keeps every building solid.
   MapGeneratorConfig off;

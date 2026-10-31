@@ -3644,6 +3644,24 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
   }
 }
 
+// Street entrance per kind: door size, the chance the entrance gets a raised
+// stoop walk-up (instead of opening straight off the ground), and the chance
+// of a rear door onto the courtyard.
+struct DoorSpec {
+  float width, height, walkUpChance, rearChance;
+};
+DoorSpec DoorSpecFor(BuildingKind kind) {
+  switch (kind) {
+    case BuildingKind::Residential: return {1.2f, 2.2f, 0.55f, 0.60f};
+    case BuildingKind::MixedUse: return {1.6f, 2.6f, 0.10f, 0.70f};
+    case BuildingKind::Office: return {1.8f, 2.6f, 0.35f, 0.40f};
+    case BuildingKind::Commercial: return {5.0f, 4.2f, 0.00f, 0.55f};  // Warehouse loading bay.
+    case BuildingKind::Civic: return {1.8f, 2.8f, 0.50f, 0.30f};
+    case BuildingKind::Garage: return {2.6f, 2.4f, 0.00f, 0.35f};
+  }
+  return {1.2f, 2.2f, 0.3f, 0.5f};
+}
+
 // Hollow building (issue #157): one thin wall Obstacle per footprint edge,
 // the frontage wall split around a doorway (like SplitRun's alleys) with the
 // lintel as a wall piece starting at kDoorHeight, plus a roof slab over the
@@ -3653,7 +3671,6 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, float height, int in
                         const GroundY& groundY, Building* b) {
   constexpr float kWallThickness = 0.3f;
   constexpr float kRoofThickness = 0.3f;
-  constexpr float kDoorWidth = 1.6f;
   constexpr float kEndMargin = 0.8f;  // Wall left either side of the door.
   std::vector<glm::vec2> fp = parcel.footprint;
   if (fp.size() < 3 || PolygonArea(fp) < kMinBuildingArea) return false;
@@ -3661,7 +3678,13 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, float height, int in
   const size_t n = fp.size();
   const size_t door = static_cast<size_t>(parcel.frontageEdge) % n;
   const float doorEdgeLen = glm::distance(fp[door], fp[(door + 1) % n]);
-  if (doorEdgeLen < kDoorWidth + 2.0f * kEndMargin) return false;
+  // Same per-kind doorway as the solid buildings' painted entrance
+  // (warehouse loading bays stay wide), narrowed to fit short frontages.
+  const DoorSpec spec = DoorSpecFor(b->kind);
+  const float doorWidth = std::min(spec.width, doorEdgeLen - 2.0f * kEndMargin);
+  if (doorWidth < 0.9f) return false;
+  const float doorHeight = std::min(spec.height, b->groundFloorHeight - 0.15f);
+  if (doorHeight < constants::kUnitHeight) return false;
   for (size_t e = 0; e < n; ++e) {
     if (glm::distance(fp[e], fp[(e + 1) % n]) < 1e-3f) return false;
   }
@@ -3680,10 +3703,10 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, float height, int in
       addWall(a, q, 0.0f, len, 0.0f, height);
       continue;
     }
-    const float u0 = 0.5f * (len - kDoorWidth), u1 = u0 + kDoorWidth;
+    const float u0 = 0.5f * (len - doorWidth), u1 = u0 + doorWidth;
     addWall(a, q, 0.0f, u0, 0.0f, height);
     addWall(a, q, u1, len, 0.0f, height);
-    addWall(a, q, u0, u1, constants::kDoorHeight, height - constants::kDoorHeight);  // Lintel.
+    addWall(a, q, u0, u1, doorHeight, height - doorHeight);  // Lintel.
   }
   // Interior floor slabs under each upper storey (a slab per floor above the
   // ground one). Overhead, so they never block the ground navmesh.
@@ -3692,6 +3715,8 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, float height, int in
                        index, groundY);
   }
   b->enterable = true;
+  b->doorWidth = doorWidth;
+  b->doorHeight = doorHeight;
   b->obstacle = AddPolygonBuilding(scene, fp, height - kRoofThickness, kRoofThickness, index,
                                    groundY);
   return b->obstacle >= 0;
@@ -3985,24 +4010,6 @@ WindowSpec WindowSpecFor(BuildingKind kind) {
   return {0.9f, 1.2f, 1.1f, 1.0f};
 }
 
-// Street entrance per kind: door size, the chance the entrance gets a raised
-// stoop walk-up (instead of opening straight off the ground), and the chance
-// of a rear door onto the courtyard.
-struct DoorSpec {
-  float width, height, walkUpChance, rearChance;
-};
-DoorSpec DoorSpecFor(BuildingKind kind) {
-  switch (kind) {
-    case BuildingKind::Residential: return {1.2f, 2.2f, 0.55f, 0.60f};
-    case BuildingKind::MixedUse: return {1.6f, 2.6f, 0.10f, 0.70f};
-    case BuildingKind::Office: return {1.8f, 2.6f, 0.35f, 0.40f};
-    case BuildingKind::Commercial: return {5.0f, 4.2f, 0.00f, 0.55f};  // Warehouse loading bay.
-    case BuildingKind::Civic: return {1.8f, 2.8f, 0.50f, 0.30f};
-    case BuildingKind::Garage: return {2.6f, 2.4f, 0.00f, 0.35f};
-  }
-  return {1.2f, 2.2f, 0.3f, 0.5f};
-}
-
 // Evenly spaced pane u-ranges along an edge of length `len`, centered within
 // the end margins. Empty when even a 0.8-width pane does not fit.
 std::vector<std::pair<float, float>> FacadeColumns(float len, float w, float gap, float margin) {
@@ -4170,9 +4177,9 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
     std::vector<glm::vec2> doorSpans(n, glm::vec2(0.0f, -1.0f));
 
     if (b.enterable) {
-      // The doorway EmitHollowBuilding cut: centred, 1.6 wide; keep its bay clear.
+      // The doorway EmitHollowBuilding cut (centred); keep its bay clear.
       const float len = glm::distance(fp[frontage], fp[(frontage + 1) % n]);
-      doorSpans[frontage] = glm::vec2(0.5f * (len - 1.6f), 0.5f * (len + 1.6f));
+      doorSpans[frontage] = glm::vec2(0.5f * (len - b.doorWidth), 0.5f * (len + b.doorWidth));
     } else {
     // Street entrance on the frontage, with a stoop walk-up for some
     // buildings and straight off the ground for the rest.

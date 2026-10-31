@@ -90,6 +90,8 @@ struct Building {
   // is then the roof slab (full footprint, bounds.min.y above head height).
   // Non-enterable buildings keep the solid-massing rendering.
   bool enterable = false;
+  float doorWidth = 0.0f;   // Enterable only: frontage doorway size, per BuildingKind.
+  float doorHeight = 0.0f;  // Lintel underside above the ground (>= kUnitHeight).
 
   float Height() const {
     return groundFloorHeight + static_cast<float>(floorCount - 1) * floorHeight;
@@ -276,8 +278,6 @@ constexpr float kMapHalfExtent = 15.0f;  // Default scene's half-size (~30x30); 
 constexpr float kAgentRadius = 0.4f;     // Padding used to inflate obstacles for the navmesh.
 constexpr float kUnitHalfWidth = 0.35f;
 constexpr float kUnitHeight = 1.8f;
-// Doorway clear height: lintels start here, above head height (kUnitHeight).
-constexpr float kDoorHeight = 2.4f;
 constexpr float kEyeHeight = 1.5f;
 // Ground beneath a deck/ramp is only walkable with at least this much headroom.
 constexpr float kMinDeckHeadroom = 2.2f;

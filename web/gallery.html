@@ -196,16 +196,16 @@
           itemsEl.appendChild(b);
           buttons[i] = b;
         }
-        // The catalog is weapon turntables first, then animations (see
-        // gallery::Catalog()); group the sidebar the same way.
-        addGroup("Weapon models");
-        for (var i = 0; i < count; ++i) {
-          if (mod.ccall("gallery_item_kind", "number", ["number"], [i]) === 0) addItem(i);
-        }
-        addGroup("Animations");
-        for (var j = 0; j < count; ++j) {
-          if (mod.ccall("gallery_item_kind", "number", ["number"], [j]) === 1) addItem(j);
-        }
+        // The catalog is weapon turntables first, then animations, then
+        // street fixtures (see gallery::Catalog()); group the sidebar the
+        // same way.
+        var kinds = [[0, "Weapon models"], [1, "Animations"], [2, "Street fixtures"]];
+        kinds.forEach(function (group) {
+          addGroup(group[1]);
+          for (var i = 0; i < count; ++i) {
+            if (mod.ccall("gallery_item_kind", "number", ["number"], [i]) === group[0]) addItem(i);
+          }
+        });
 
         // Map-seed goldens (issue #133): a static tile grid driven by the
         // build-time manifest, shown in place of the 3D viewport.

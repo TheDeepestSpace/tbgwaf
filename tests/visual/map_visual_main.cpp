@@ -9,6 +9,7 @@
 #include <SDL.h>
 #include <GLES3/gl3.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -124,6 +125,7 @@ int main(int argc, char** argv) {
     // (issue #102: it must stay on the deck, not spill over its edges).
     std::optional<glm::vec3> frontierFrom;
     float frontierBudget = 0.0f;
+    bool thermal = false;
   };
   std::vector<MapCase> cases;
   // Overpass presence is seed-driven by default (issue #130); every golden
@@ -165,6 +167,93 @@ int main(int argc, char** argv) {
   furnitureConfig.features.furniture.mode = tactics::FeatureMode::On;
   cases.push_back({"city_furniture_seed_7", tactics::GenerateUrbanMap(7, furnitureConfig),
                    45.0f, /*showNavMesh=*/false, /*pitchOffset=*/-0.45f});
+  {
+    const tactics::Scene street = tactics::GenerateUrbanMap(7, furnitureConfig);
+    using Model = tactics::StreetFixtureModel;
+    for (const auto& [model, name] : {
+             std::pair{Model::Bench, "bench"}, std::pair{Model::Dumpster, "dumpster"},
+             std::pair{Model::TrashBin, "trash_bin"}}) {
+      const auto item = std::find_if(street.obstacles.begin(), street.obstacles.end(),
+                                     [&](const auto& o) { return o.fixtureModel == model; });
+      if (item == street.obstacles.end()) {
+        std::fprintf(stderr, "Missing street fixture in seed 7: %s\n", name);
+        return 1;
+      }
+      MapCase closeup{std::string("city_") + name + "_seed_7", street, -8.0f,
+                       /*showNavMesh=*/false, /*pitchOffset=*/-0.3f,
+                       /*yawOffset=*/item->fixtureYaw - 0.4f};
+      closeup.cameraTarget = item->bounds.Center();
+      closeup.thermal = true;
+      cases.push_back(std::move(closeup));
+    }
+  }
+  // A coach bus stopped mid-street (seed 1 draws one): pins that it stands
+  // square in the lane with parked vehicles kept clear of it.
+  {
+    const tactics::Scene street = tactics::GenerateUrbanMap(1, furnitureConfig);
+    using Model = tactics::StreetFixtureModel;
+    const auto bus = std::find_if(street.obstacles.begin(), street.obstacles.end(),
+                                  [&](const auto& o) { return o.fixtureModel == Model::CoachBus; });
+    if (bus == street.obstacles.end()) {
+      std::fprintf(stderr, "Missing coach bus in seed 1\n");
+      return 1;
+    }
+    // Looking down the street from above, so no frontage hides the bus.
+    MapCase closeup{"city_coach_bus_seed_1", street, 10.0f, /*showNavMesh=*/false,
+                     /*pitchOffset=*/0.25f, /*yawOffset=*/bus->fixtureYaw + 0.35f};
+    closeup.cameraTarget = bus->bounds.Center();
+    cases.push_back(std::move(closeup));
+  }
+  // Close views of actual generated fixtures catch a regression back to
+  // collision boxes that would be almost invisible in a whole-city golden.
+  // Render both normal and thermal: silhouette/detail must work without color.
+  {
+    const tactics::Scene source = tactics::GenerateUrbanMap(1, furnitureConfig);
+    using Model = tactics::StreetFixtureModel;
+    const std::pair<Model, const char*> models[] = {
+        {Model::ParkedCar, "car"}, {Model::Suv, "suv"}, {Model::Pickup, "pickup"},
+        {Model::CoachBus, "coach_bus"}, {Model::Bench, "bench"},
+        {Model::Dumpster, "dumpster"}, {Model::TrashBin, "trash_bin"},
+        {Model::Newsstand, "newsstand"}, {Model::Planter, "planter"}};
+    for (const auto& [model, name] : models) {
+      const auto found = std::find_if(source.obstacles.begin(), source.obstacles.end(),
+                                      [&](const auto& o) { return o.fixtureModel == model; });
+      tactics::Obstacle item;
+      if (found != source.obstacles.end()) {
+        item = *found;
+      } else if (model == Model::CoachBus) {
+        // The bus is a seeded rarity; build its gameplay box directly.
+        const glm::vec3 extent = tactics::StreetFixtureExtent(model);
+        item.bounds = tactics::AABB{glm::vec3(-0.5f * extent.x, 0.0f, -0.5f * extent.z),
+                                    glm::vec3(0.5f * extent.x, extent.y, 0.5f * extent.z)};
+        item.kind = tactics::ObstacleKind::Cover;
+        item.fixtureModel = model;
+      } else {
+        std::fprintf(stderr, "Missing generated fixture: %s\n", name);
+        return 1;
+      }
+      const glm::vec3 offset(item.bounds.Center().x, item.fixtureBaseY, item.bounds.Center().z);
+      item.bounds.min -= offset;
+      item.bounds.max -= offset;
+      item.fixtureBaseY = 0.0f;
+      tactics::Scene isolated;
+      isolated.mapHalfExtent = 6.0f;
+      isolated.obstacles.push_back(item);
+      // Frame each model to its own length: the sedan, SUV and pickup a
+      // little closer than the sidewalk items, the 12 m coach well back.
+      const float zoom = model == Model::CoachBus ? -2.0f
+                         : tactics::IsCurbVehicle(model) ? -12.0f : -14.0f;
+      for (bool thermal : {false, true}) {
+        MapCase closeup{std::string("street_fixture_") + name + (thermal ? "_thermal" : ""),
+                         isolated, zoom,
+                         /*showNavMesh=*/false, /*pitchOffset=*/-0.50f,
+                         /*yawOffset=*/item.fixtureYaw};
+        closeup.cameraTarget.y = 0.5f;
+        closeup.thermal = thermal;
+        cases.push_back(std::move(closeup));
+      }
+    }
+  }
   tactics::MapGeneratorConfig mergeConfig = gradeConfig;
   mergeConfig.arteryCount = 2;
   cases.push_back({"city_merge_seed_42", tactics::GenerateUrbanMap(42, mergeConfig),
@@ -262,6 +351,8 @@ int main(int argc, char** argv) {
     tactics::GameLogic game(scene);
     tactics::NavMesh navMesh;
     gfx::PaneOverlays overlays;
+    gfx::RenderDebugOptions debug;
+    debug.thermal = mapCase.thermal;
     tactics::ReachField reach;
     if (mapCase.frontierFrom) {
       navMesh.Build(game.GetScene().obstacles, game.GetScene().mapHalfExtent,
@@ -277,7 +368,7 @@ int main(int argc, char** argv) {
       overlays.navMeshDebug = &navMesh;
     }
     renderer.RenderPane(game, tactics::Team::Blue, /*fogActive=*/false, tactics::TeamVisibility{},
-                        camera, 0, 0, kWindowWidth, kWindowHeight, overlays);
+                        camera, 0, 0, kWindowWidth, kWindowHeight, overlays, 0, debug);
     const visual::Image image = visual::CaptureFramebuffer(kWindowWidth, kWindowHeight);
 
     if (options.updateBaselines) {

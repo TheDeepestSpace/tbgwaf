@@ -34,6 +34,7 @@ namespace {
 //   0x3a55196eu   massing          parapets, roof furniture, awnings
 //   0x51f0a3c9u   facades          door spots, stoops, rear platforms, window grids
 //   0x6c57f00du   furniture        feature presence, then curb-side item stations/kinds
+//   0x4c0b3a7du   cover items    parked cars, bus stops, newsstands, planters, dumpsters
 //   0x51674ea1u   traffic control  light-vs-sign draws per junction, street-name corners
 //   0x7d3a94c5u   pier form        T-bent vs twin-column bent draw (ResolvePierForm)
 constexpr uint32_t kStreetStream = 0xb10c5eedu;
@@ -41,6 +42,7 @@ constexpr uint32_t kPierFormStream = 0x7d3a94c5u;
 constexpr uint32_t kRampChannelStream = 0x6a09e667u;
 constexpr uint32_t kFurnitureStream = 0x6c57f00du;
 constexpr uint32_t kTrafficStream = 0x51674ea1u;
+constexpr uint32_t kCoverStream = 0x4c0b3a7du;
 
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kSidewalkHeight = 0.12f;  // Curb: purely visual, well under a step.
@@ -4380,6 +4382,11 @@ void EmitStreetFurniture(Scene* scene, const CityPlan& city, const MapGeneratorC
             /*climbable=*/false,
             /*footprint=*/{},
             ObstacleKind::StreetFurniture});
+        if (kind == 0) {
+          scene->obstacles.back().fixtureModel = StreetFixtureModel::TrashBin;
+          scene->obstacles.back().fixtureYaw = std::atan2(-inward.x, inward.y);
+          scene->obstacles.back().fixtureBaseY = baseY + kSidewalkHeight;
+        }
         if (kind == 4) {
           // The thin obstacle is the physical pole. Its visible arm is a
           // fixture aimed out from the curb so the lamp hangs over the road.
@@ -4390,6 +4397,415 @@ void EmitStreetFurniture(Scene* scene, const CityPlan& city, const MapGeneratorC
                                             yaw, yaw});
         }
         placed.push_back(center);
+      }
+    }
+  }
+}
+
+// Cover-sized street items (issue #153, roadmap 2.5): parked vehicles (sedans,
+// SUVs and pickups) along the curb; on the sidewalk bus-stop benches,
+// newsstands and planters; dumpsters tucked into alleys; and now and then a
+// coach bus stopped in the middle of a street. Collision uses axis-aligned
+// boxes between knee and head height: lower than kEyeHeight so a standing eye
+// sees over them, taller than a foot probe so they still hide a low target.
+// The bus is the exception: a full wall of a vehicle that blocks sight
+// entirely. Tagged ObstacleKind::Cover, with no footprint (like the furniture).
+struct CoverSpec {
+  StreetFixtureModel model;
+  bool climbable;
+  // Extent along the curb, away from it, and tall (see StreetFixtureExtent).
+  float Along() const { return StreetFixtureExtent(model).x; }
+  float Depth() const { return StreetFixtureExtent(model).z; }
+  float Height() const { return StreetFixtureExtent(model).y; }
+};
+enum CoverKind { kParkedCar, kBusStop, kNewsstand, kPlanter, kDumpster, kSuv, kPickup, kCoachBus };
+constexpr CoverSpec kCoverSpecs[] = {
+    {StreetFixtureModel::ParkedCar, true},
+    {StreetFixtureModel::Bench, false},
+    {StreetFixtureModel::Newsstand, false},
+    {StreetFixtureModel::Planter, false},
+    {StreetFixtureModel::Dumpster, false},
+    {StreetFixtureModel::Suv, true},
+    {StreetFixtureModel::Pickup, true},
+    {StreetFixtureModel::CoachBus, false},
+};
+constexpr uint32_t kBusStream = 0x2b7a9c31u;
+
+// Gap between an axis-aligned rect (XZ) and a convex polygon; 0 on overlap.
+float RectPolygonGap(glm::vec2 lo, glm::vec2 hi, const std::vector<glm::vec2>& poly) {
+  float best = std::numeric_limits<float>::infinity();
+  const glm::vec2 mid = (lo + hi) * 0.5f;
+  const glm::vec2 samples[] = {lo, hi, {lo.x, hi.y}, {hi.x, lo.y}, mid,
+                               {mid.x, lo.y}, {mid.x, hi.y}, {lo.x, mid.y}, {hi.x, mid.y}};
+  for (const glm::vec2& q : samples) best = std::min(best, DistanceToPolygon(q, poly));
+  for (const glm::vec2& v : poly) {
+    const glm::vec2 d = glm::max(glm::max(lo - v, v - hi), glm::vec2(0.0f));
+    best = std::min(best, glm::length(d));
+  }
+  return best;
+}
+
+// A coach bus stopped in the middle of a local street: a seeded rarity (most
+// maps have none, some one, a few two) on its own random stream, so a map
+// with or without a bus keeps the same curb-side furniture except where the
+// bus itself displaces a car. Candidates are every axis-aligned curb station
+// whose street is a plain two-sided local street (a block or the map edge on
+// the far side, no artery, no ramp), and the bus is centered on it with a
+// walkable lane left on both sides and clear approaches at both ends. All
+// candidates are collected first, then drawn from, so the choice does not
+// depend on block order.
+void EmitCoachBuses(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
+                    uint32_t seed, const GroundY& groundY,
+                    const std::vector<std::vector<glm::vec2>>& buildings, float maxTilt,
+                    float clearBehind, std::vector<glm::vec2>* placed) {
+  Rng rng(seed ^ kBusStream);
+  const float presence = rng.Float(0.0f, 1.0f);
+  const int wanted = presence < 0.45f ? 0 : presence < 0.85f ? 1 : 2;
+  if (wanted == 0) return;
+
+  const CoverSpec& spec = kCoverSpecs[kCoachBus];
+  const float half = scene->mapHalfExtent;
+  const float lane = clearBehind + 0.2f;  // Walkable gap kept between bus and curb.
+  const float minStreet = spec.Depth() + 2.0f * lane;
+  const float maxStreet = c.streetWidth * c.streetWidthMax + 1.0f;  // Wider: a plaza or the artery.
+  constexpr float kEndClearance = 3.0f;    // Open road beyond both bumpers.
+  constexpr float kSpawnClearance = 5.0f;
+  constexpr float kStationStep = 4.0f;
+
+  struct Candidate {
+    glm::vec2 lo, hi, center;
+    bool alongX;
+    glm::vec2 axisIn;
+    float baseY;
+  };
+  std::vector<Candidate> candidates;
+  for (const UrbanBlock& block : city.blocks) {
+    const std::vector<glm::vec2>& poly = block.vertices;
+    glm::vec2 centroid(0.0f);
+    for (const glm::vec2& p : poly) centroid += p;
+    centroid /= static_cast<float>(poly.size());
+    for (size_t e = 0; e < poly.size(); ++e) {
+      const glm::vec2 a = poly[e], b = poly[(e + 1) % poly.size()];
+      const float length = glm::distance(a, b);
+      if (length < spec.Along() + 2.0f * kEndClearance) continue;
+      const glm::vec2 dir = (b - a) / length;
+      const bool alongX = std::fabs(dir.x) >= std::fabs(dir.y);
+      const float tilt = alongX ? std::fabs(dir.y / dir.x) : std::fabs(dir.x / dir.y);
+      if (tilt > maxTilt) continue;
+      glm::vec2 inward(-dir.y, dir.x);
+      if (glm::dot(inward, centroid - a) < 0.0f) inward = -inward;
+      const glm::vec2 axisDir = alongX ? glm::vec2(dir.x < 0.0f ? -1.0f : 1.0f, 0.0f)
+                                       : glm::vec2(0.0f, dir.y < 0.0f ? -1.0f : 1.0f);
+      const glm::vec2 axisIn = alongX ? glm::vec2(0.0f, inward.y < 0.0f ? -1.0f : 1.0f)
+                                      : glm::vec2(inward.x < 0.0f ? -1.0f : 1.0f, 0.0f);
+      for (float along = spec.Along() * 0.5f + kEndClearance;
+           along <= length - spec.Along() * 0.5f - kEndClearance; along += kStationStep) {
+        const glm::vec2 curb = a + dir * along;
+        // Street width: march out from the curb to the facing block. A rim
+        // street (map edge opposite) or anything wider than a local street
+        // is not a two-sided street.
+        float width = 0.0f;
+        bool facing = false;
+        for (float d = 0.5f; d <= maxStreet; d += 0.25f) {
+          const glm::vec2 q = curb - axisIn * d;
+          if (std::max(std::fabs(q.x), std::fabs(q.y)) > half) break;
+          bool inBlock = false;
+          for (const UrbanBlock& other : city.blocks) {
+            inBlock |= PointInConvexPolygon(q, other.vertices);
+          }
+          if (inBlock) {
+            width = d;
+            facing = true;
+            break;
+          }
+        }
+        if (!facing || width < minStreet) continue;
+        const glm::vec2 center = curb - axisIn * (width * 0.5f);
+        const glm::vec2 size = alongX ? glm::vec2(spec.Along(), spec.Depth())
+                                      : glm::vec2(spec.Depth(), spec.Along());
+        const glm::vec2 lo = center - size * 0.5f, hi = center + size * 0.5f;
+        // The lane on both sides and the open road at both ends must also be
+        // clear, so test the inflated rectangle against blocks and the highway.
+        const glm::vec2 pad = alongX ? glm::vec2(kEndClearance, lane) : glm::vec2(lane, kEndClearance);
+        const glm::vec2 plo = lo - pad, phi = hi + pad;
+        if (std::max(std::max(std::fabs(plo.x), std::fabs(phi.x)),
+                     std::max(std::fabs(plo.y), std::fabs(phi.y))) > half + 0.01f) {
+          continue;
+        }
+        const std::vector<glm::vec2> padded = {plo, {phi.x, plo.y}, phi, {plo.x, phi.y}};
+        bool ok = true;
+        for (const UrbanBlock& other : city.blocks) {
+          ok &= !PolygonsOverlap(padded, other.vertices);
+        }
+        ok = ok && PolygonClearOfRoads(padded, city.streets.roads, 0.0f);
+        if (!ok) continue;
+        // Level ground under the whole footprint.
+        const float baseY = groundY(center.x, center.y);
+        const glm::vec2 pts[] = {lo, hi, {lo.x, hi.y}, {hi.x, lo.y}, center,
+                                 {center.x, lo.y}, {center.x, hi.y}, {lo.x, center.y}, {hi.x, center.y}};
+        for (const glm::vec2& q : pts) ok &= std::fabs(groundY(q.x, q.y) - baseY) < 0.05f;
+        if (!ok) continue;
+        for (const std::vector<glm::vec2>& footprint : buildings) {
+          ok &= RectPolygonGap(lo, hi, footprint) >= lane;
+        }
+        for (const Obstacle& o : scene->obstacles) {
+          if (!o.footprint.empty()) continue;
+          const glm::vec2 olo(o.bounds.min.x, o.bounds.min.z), ohi(o.bounds.max.x, o.bounds.max.z);
+          const std::vector<glm::vec2> rect = {olo, {ohi.x, olo.y}, ohi, {olo.x, ohi.y}};
+          ok &= RectPolygonGap(lo, hi, rect) >= lane;
+        }
+        for (const Unit& unit : scene->units) {
+          const glm::vec2 u(unit.position.x, unit.position.z);
+          const glm::vec2 d = glm::max(glm::max(lo - u, u - hi), glm::vec2(0.0f));
+          ok &= glm::length(d) >= kSpawnClearance;
+        }
+        for (const TerrainWall& wall : scene->terrainWalls) {
+          for (const TerrainAccess& access : wall.accesses) {
+            for (const glm::vec3& end : {access.bottom, access.top}) {
+              const glm::vec2 d = glm::max(glm::max(lo - glm::vec2(end.x, end.z),
+                                                    glm::vec2(end.x, end.z) - hi),
+                                           glm::vec2(0.0f));
+              ok &= glm::length(d) >= 2.5f;
+            }
+          }
+        }
+        if (!ok) continue;
+        candidates.push_back({lo, hi, center, alongX, axisIn, baseY});
+      }
+    }
+  }
+  if (candidates.empty()) return;
+
+  // Two buses never share a street stretch; a few deterministic re-draws
+  // then give up rather than cram them together.
+  std::vector<glm::vec2> chosen;
+  for (int bus = 0; bus < wanted; ++bus) {
+    for (int attempt = 0; attempt < 6; ++attempt) {
+      const Candidate& pick = candidates[rng.Int(0, static_cast<int>(candidates.size()) - 1)];
+      bool apart = true;
+      for (const glm::vec2& q : chosen) apart &= glm::distance(q, pick.center) >= 2.0f * spec.Along();
+      if (!apart) continue;
+      scene->obstacles.push_back(Obstacle{
+          AABB{glm::vec3(pick.lo.x, pick.baseY, pick.lo.y),
+               glm::vec3(pick.hi.x, pick.baseY + kGradeY + spec.Height(), pick.hi.y)},
+          spec.climbable,
+          /*footprint=*/{},
+          ObstacleKind::Cover});
+      Obstacle& item = scene->obstacles.back();
+      item.fixtureModel = spec.model;
+      item.fixtureYaw = std::atan2(-pick.axisIn.x, pick.axisIn.y);
+      item.fixtureBaseY = pick.baseY + kGradeY;
+      chosen.push_back(pick.center);
+      placed->push_back(pick.center);
+      break;
+    }
+  }
+}
+
+// Placement keeps every walkable thing walkable: sidewalk items leave
+// 2 * kAgentRadius behind them, dumpsters leave a lane beside them, cars sit
+// in the street outside every block and off the highway, and nothing lands
+// on sloped ground, another obstacle or the spawn rows. Every random draw
+// happens per station whether or not it is accepted.
+void EmitCoverItems(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
+                    uint32_t seed, const GroundY& groundY) {
+  Rng rng(seed ^ kCoverStream);
+  if (!FurnitureEnabled(c)) return;
+
+  std::vector<std::vector<glm::vec2>> buildings;
+  for (const Obstacle& o : scene->obstacles) {
+    if (!o.footprint.empty()) buildings.push_back(o.footprint);
+  }
+  const float half = scene->mapHalfExtent;
+  constexpr float kCornerMargin = 4.8f;  // Past the crossing: clear of signals and a car's length.
+  constexpr float kCurbGap = 0.30f;      // Parked cars stand a little off the curb.
+  constexpr float kEdgeInset = 0.10f;
+  constexpr float kMaxTilt = 0.12f;      // Curb-aligned items skip skewed edges; dumpsters need only fit.
+  constexpr float kSpawnClearance = 4.0f;
+  constexpr float kItemSpacing = 3.0f;
+  const float clearBehind = 2.0f * constants::kAgentRadius;
+
+  std::vector<glm::vec2> placed;
+  EmitCoachBuses(scene, city, c, seed, groundY, buildings, kMaxTilt, clearBehind, &placed);
+  for (const UrbanBlock& block : city.blocks) {
+    const std::vector<glm::vec2>& poly = block.vertices;
+    glm::vec2 centroid(0.0f);
+    for (const glm::vec2& p : poly) centroid += p;
+    centroid /= static_cast<float>(poly.size());
+    for (size_t e = 0; e < poly.size(); ++e) {
+      const glm::vec2 a = poly[e], b = poly[(e + 1) % poly.size()];
+      const float length = glm::distance(a, b);
+      if (length < 2.0f * kCornerMargin) continue;
+      const glm::vec2 dir = (b - a) / length;
+      const bool alongX = std::fabs(dir.x) >= std::fabs(dir.y);
+      const float tilt = alongX ? std::fabs(dir.y / dir.x) : std::fabs(dir.x / dir.y);
+      glm::vec2 inward(-dir.y, dir.x);
+      if (glm::dot(inward, centroid - a) < 0.0f) inward = -inward;
+      // The edge's exact axes, so the boxes sit square to the street.
+      const glm::vec2 axisDir = alongX ? glm::vec2(dir.x < 0.0f ? -1.0f : 1.0f, 0.0f)
+                                       : glm::vec2(0.0f, dir.y < 0.0f ? -1.0f : 1.0f);
+      const glm::vec2 axisIn = alongX ? glm::vec2(0.0f, inward.y < 0.0f ? -1.0f : 1.0f)
+                                      : glm::vec2(inward.x < 0.0f ? -1.0f : 1.0f, 0.0f);
+
+      float along = kCornerMargin + rng.Float(0.0f, 3.0f);
+      while (along < length - kCornerMargin) {
+        const glm::vec2 curb = a + dir * along;
+        const float roll = rng.Float(0.0f, 1.0f);
+        const float lateralSign = rng.Chance(0.5f) ? 1.0f : -1.0f;
+        // More candidates than final items: clearance rejects most busy
+        // sidewalk sites. A sparse scan often left a whole city benchless.
+        along += rng.Float(3.0f, 5.0f);
+
+        const glm::vec2 probe = curb + inward * (c.sidewalkWidth + 0.5f * c.buildingDepth);
+        bool fronted = false;
+        for (const std::vector<glm::vec2>& footprint : buildings) {
+          fronted |= PointInConvexPolygon(probe, footprint);
+        }
+        int kind;
+        if (fronted) {
+          // The vehicle band splits by model, so adding SUVs and pickups left
+          // every non-vehicle station exactly where it was.
+          if (roll < 0.20f) kind = kParkedCar;
+          else if (roll < 0.29f) kind = kSuv;
+          else if (roll < 0.35f) kind = kPickup;
+          else if (roll < 0.50f) kind = kPlanter;
+          else if (roll < 0.80f) kind = kBusStop;
+          else if (roll < 0.95f) kind = kNewsstand;
+          else continue;
+        } else if (roll < 0.6f) {
+          kind = kDumpster;
+        } else {
+          continue;
+        }
+        // Cars and benches sit square to a curb. Dumpsters can stand square
+        // inside a skewed alley too, provided the footprint and lane fit.
+        if (kind != kDumpster && tilt > kMaxTilt) continue;
+        const CoverSpec& spec = kCoverSpecs[kind];
+        const bool vehicle = IsCurbVehicle(spec.model);
+        // Alley mouths rarely line up with a random station. Search either
+        // side of it deterministically before discarding a dumpster; every
+        // candidate still passes the same wall, lane and obstacle checks.
+        const float offsets[] = {lateralSign, 0.0f, -lateralSign,
+                                  2.0f * lateralSign, -2.0f * lateralSign};
+        for (int attempt = 0; attempt < (kind == kDumpster ? 5 : 1); ++attempt) {
+          glm::vec2 center;
+          float surface = kSidewalkHeight;
+          if (vehicle) {
+            center = curb - axisIn * (kCurbGap + spec.Depth() * 0.5f);
+            surface = kGradeY;
+          } else if (kind == kDumpster) {
+            center = curb + axisIn * (c.sidewalkWidth + 0.3f + spec.Depth() * 0.5f) +
+                     axisDir * offsets[attempt];
+          } else {
+            center = curb + axisIn * (kEdgeInset + spec.Depth() * 0.5f);
+          }
+          const glm::vec2 size = alongX ? glm::vec2(spec.Along(), spec.Depth())
+                                        : glm::vec2(spec.Depth(), spec.Along());
+          const glm::vec2 lo = center - size * 0.5f, hi = center + size * 0.5f;
+          if (std::max(std::max(std::fabs(lo.x), std::fabs(hi.x)),
+                       std::max(std::fabs(lo.y), std::fabs(hi.y))) > half - 0.6f) {
+            continue;
+          }
+
+          // Level ground only: no ramps, steps or retaining walls underfoot.
+          const glm::vec2 pts[] = {lo, hi, {lo.x, hi.y}, {hi.x, lo.y}, center};
+          const float baseY = groundY(center.x, center.y);
+          bool ok = true;
+          for (const glm::vec2& q : pts) ok &= std::fabs(groundY(q.x, q.y) - baseY) < 0.05f;
+          if (!ok) continue;
+
+          if (vehicle) {
+            for (const glm::vec2& q : pts) {
+              for (const UrbanBlock& other : city.blocks) {
+                ok &= !PointInConvexPolygon(q, other.vertices, 0.05f);
+              }
+            }
+            const std::vector<glm::vec2> rect = {lo, {hi.x, lo.y}, hi, {lo.x, hi.y}};
+            ok = ok && PolygonClearOfRoads(rect, city.streets.roads, 0.0f);
+          } else {
+            for (const std::vector<glm::vec2>& footprint : buildings) {
+              const float gap = RectPolygonGap(lo, hi, footprint);
+              ok &= kind == kDumpster ? gap >= 0.05f : gap >= clearBehind - 0.001f;
+            }
+          }
+          if (!ok) continue;
+          if (kind == kDumpster) {
+            // An alley, not an open lot: a wall within reach, and a lane of
+            // 2 * kAgentRadius (+ margin) left beside the dumpster on one side.
+            float wall = std::numeric_limits<float>::infinity();
+            for (const std::vector<glm::vec2>& footprint : buildings) {
+              wall = std::min(wall, DistanceToPolygon(center, footprint));
+            }
+            if (wall > 2.2f) continue;
+            bool lane = false;
+            const float laneWidth = clearBehind + 0.2f;
+            const glm::vec2 laneSize = alongX
+                ? glm::vec2(laneWidth, spec.Depth() + 2.0f * clearBehind)
+                : glm::vec2(spec.Depth() + 2.0f * clearBehind, laneWidth);
+            for (const float side : {-1.0f, 1.0f}) {
+              const glm::vec2 beside = center + axisDir *
+                  (side * (spec.Along() * 0.5f + laneWidth * 0.5f + 0.05f));
+              const glm::vec2 laneLo = beside - laneSize * 0.5f;
+              const glm::vec2 laneHi = beside + laneSize * 0.5f;
+              const std::vector<glm::vec2> corridor = {
+                  laneLo, {laneHi.x, laneLo.y}, laneHi, {laneLo.x, laneHi.y}};
+              bool laneClear = true;
+              // Check the entire lane, including a body length beyond both
+              // ends. Three probes alongside the bin miss diagonal walls
+              // that close its exit, and poles can obstruct the lane too.
+              for (const Obstacle& other : scene->obstacles) {
+                laneClear &= !PolygonsOverlap(corridor, ObstacleFootprint(other));
+              }
+              lane |= laneClear;
+            }
+            if (!lane) continue;
+          }
+          // Against everything else already placed (terrain walls, stairs,
+          // furniture, signal poles, a stopped bus): no overlap, a body width
+          // from the small fixtures so they never pinch the sidewalk, and a
+          // walkable lane between a parked vehicle and the bus beside it.
+          for (const Obstacle& o : scene->obstacles) {
+            if (!o.footprint.empty()) continue;  // Buildings: handled above.
+            const glm::vec2 olo(o.bounds.min.x, o.bounds.min.z), ohi(o.bounds.max.x, o.bounds.max.z);
+            const bool fixture = IsStreetFixture(o.kind);
+            const float gap = !fixture ? 0.05f
+                              : !vehicle ? 0.9f
+                              : o.fixtureModel == StreetFixtureModel::CoachBus ? clearBehind + 0.2f
+                                                                               : 0.2f;
+            const std::vector<glm::vec2> rect = {olo, {ohi.x, olo.y}, ohi, {olo.x, ohi.y}};
+            ok &= RectPolygonGap(lo, hi, rect) >= gap;
+          }
+          for (const Unit& unit : scene->units) {
+            ok &= glm::distance(glm::vec2(unit.position.x, unit.position.z), center) >=
+                  kSpawnClearance;
+          }
+          for (const glm::vec2& q : placed) ok &= glm::distance(q, center) >= kItemSpacing;
+          // Stair flights up the terrain walls keep their approach open.
+          for (const TerrainWall& wall : scene->terrainWalls) {
+            for (const TerrainAccess& access : wall.accesses) {
+              for (const glm::vec3& end : {access.bottom, access.top}) {
+                const glm::vec2 d = glm::max(glm::max(lo - glm::vec2(end.x, end.z),
+                                                      glm::vec2(end.x, end.z) - hi),
+                                             glm::vec2(0.0f));
+                ok &= glm::length(d) >= 2.5f;
+              }
+            }
+          }
+          if (!ok) continue;
+
+          scene->obstacles.push_back(Obstacle{
+              AABB{glm::vec3(lo.x, baseY, lo.y),
+                   glm::vec3(hi.x, baseY + surface + spec.Height(), hi.y)},
+              spec.climbable,
+              /*footprint=*/{},
+              ObstacleKind::Cover});
+          Obstacle& item = scene->obstacles.back();
+          item.fixtureModel = spec.model;
+          item.fixtureYaw = std::atan2(-axisIn.x, axisIn.y);
+          item.fixtureBaseY = baseY + surface;
+          placed.push_back(center);
+          break;
+        }
       }
     }
   }
@@ -4622,6 +5038,7 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   // Furniture before ziplines: anchors and cables then keep clear of it.
   EmitStreetFurniture(&scene, city, c, seed, groundY);
   EmitTrafficControl(&scene, city, c, seed, groundY);
+  EmitCoverItems(&scene, city, c, seed, groundY);
   PlaceZiplines(&scene, city.blocks, seed, c, roofCount);
   EmitMassing(&scene, parcels, seed);
   return scene;

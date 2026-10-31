@@ -60,7 +60,9 @@ bool SameScene(const Scene& a, const Scene& b) {
     const auto& x = a.obstacles[i];
     const auto& y = b.obstacles[i];
     if (x.bounds.min != y.bounds.min || x.bounds.max != y.bounds.max ||
-        x.climbable != y.climbable || x.footprint != y.footprint || x.kind != y.kind) {
+        x.climbable != y.climbable || x.footprint != y.footprint || x.kind != y.kind ||
+        x.fixtureModel != y.fixtureModel || x.fixtureYaw != y.fixtureYaw ||
+        x.fixtureBaseY != y.fixtureBaseY) {
       return false;
     }
   }
@@ -2316,6 +2318,7 @@ void TestFurnitureHugsSidewalksAndRespectsClearances() {
     const std::vector<UrbanBlock> blocks = UrbanBlocks(seed, on);
     for (size_t i = bare.obstacles.size(); i < scene.obstacles.size(); ++i) {
       const Obstacle& o = scene.obstacles[i];
+      if (o.kind == ObstacleKind::Cover) continue;  // Covered by the cover-item test.
       CHECK(o.footprint.empty());
       CHECK(!o.climbable);
       CHECK(o.kind == ObstacleKind::StreetFurniture);
@@ -2401,6 +2404,13 @@ void TestFurnitureKeepsSidewalksConnected() {
           for (size_t j = bare.obstacles.size(); j < scene.obstacles.size(); ++j) {
             const glm::vec3 other = scene.obstacles[j].bounds.Center();
             nearItem |= j != i && glm::distance(glm::vec2(other.x, other.z), target) < 1.0f;
+          }
+          // Cover-sized items swallow the ring points that land inside them.
+          for (size_t j = bare.obstacles.size(); j < scene.obstacles.size(); ++j) {
+            const Obstacle& other = scene.obstacles[j];
+            nearItem |= other.kind == ObstacleKind::Cover &&
+                        target.x > other.bounds.min.x - 0.9f && target.x < other.bounds.max.x + 0.9f &&
+                        target.y > other.bounds.min.z - 0.9f && target.y < other.bounds.max.z + 0.9f;
           }
           if (nearItem || !reachedAt(bareField, target)) continue;
           ++compared;
@@ -2547,6 +2557,128 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
   CHECK(GenerateUrbanMap(kSeeds[0], FurnitureConfig(FeatureMode::Off)).props.empty());
 }
 
+// Cover-sized street items (issue #153, roadmap 2.5): every item is a box
+// whose top clears a foot probe but not a standing eye, so a standing eye
+// sees over it while a low probe is hidden behind it; the Off switch removes
+// them all; and the layout is deterministic. Parked vehicles (sedans, SUVs,
+// pickups) are climbable. The coach bus is the one full-height exception,
+// covered by TestCoachBusesStopMidStreet.
+void TestCoverItemsAreEyeLowAndFootHigh() {
+  const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
+  const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
+  for (uint32_t seed : {1u, 7u, 42u, 2024u}) {
+    const Scene scene = GenerateUrbanMap(seed, on);
+    CHECK(SameScene(scene, GenerateUrbanMap(seed, on)));
+    for (const Obstacle& o : GenerateUrbanMap(seed, off).obstacles) {
+      CHECK(o.kind != ObstacleKind::Cover);
+    }
+    int cover = 0, climbable = 0, large = 0;
+    std::set<StreetFixtureModel> models;
+    for (const Obstacle& o : scene.obstacles) {
+      if (o.fixtureModel != StreetFixtureModel::None) {
+        models.insert(o.fixtureModel);
+        CHECK(IsStreetFixture(o.kind));
+        CHECK(o.fixtureBaseY >= o.bounds.min.y);
+        CHECK(o.fixtureBaseY < o.bounds.max.y);
+      }
+      if (o.kind != ObstacleKind::Cover) continue;
+      CHECK(o.fixtureModel != StreetFixtureModel::None);
+      CHECK(o.footprint.empty());
+      if (o.fixtureModel == StreetFixtureModel::CoachBus) continue;
+      ++cover;
+      climbable += o.climbable;
+      CHECK(o.climbable == IsCurbVehicle(o.fixtureModel));
+      const glm::vec3 size = o.bounds.max - o.bounds.min;
+      large += std::max(size.x, size.z) > 1.0f;
+      const float base = o.bounds.min.y;
+      CHECK(size.y > 0.5f);                     // Hides a low probe...
+      CHECK(o.bounds.max.y < base + 0.12f + constants::kEyeHeight);  // ...under eye level.
+      const glm::vec3 c = o.bounds.Center();
+      const float reachX = size.x * 0.5f + 1.0f, reachZ = size.z * 0.5f + 1.0f;
+      // Cross the box along its short axis at eye height (clear) and at
+      // foot-probe height (blocked). Other obstacles near the item could
+      // interfere, so test against the item alone.
+      const std::vector<Obstacle> alone = {o};
+      const bool acrossX = size.x <= size.z;
+      const glm::vec3 d = acrossX ? glm::vec3(reachX, 0.0f, 0.0f) : glm::vec3(0.0f, 0.0f, reachZ);
+      CHECK(LineOfSightClear(glm::vec3(c.x, base + constants::kEyeHeight, c.z) - d,
+                             glm::vec3(c.x, base + constants::kEyeHeight, c.z) + d, alone));
+      CHECK(!LineOfSightClear(glm::vec3(c.x, base + 0.3f, c.z) - d,
+                              glm::vec3(c.x, base + 0.3f, c.z) + d, alone));
+    }
+    CHECK(cover > 10);
+    CHECK(climbable > 0);
+    CHECK(large > 0);
+    for (StreetFixtureModel model : {StreetFixtureModel::ParkedCar, StreetFixtureModel::Suv,
+                                     StreetFixtureModel::Pickup, StreetFixtureModel::Bench,
+                                     StreetFixtureModel::Dumpster, StreetFixtureModel::TrashBin}) {
+      CHECK(models.count(model) == 1);
+    }
+  }
+}
+
+// A coach bus stopped mid-street is a seeded rarity: some maps have one or
+// two, many have none. Each one is a full-height wall of a vehicle (taller
+// than a standing eye, not climbable) standing on level road grade with a
+// walkable lane to every building and other obstacle, clear of the spawn
+// rows, and placed deterministically.
+void TestCoachBusesStopMidStreet() {
+  const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
+  const float lane = 2.0f * constants::kAgentRadius + 0.2f;
+  int mapsWithBus = 0, mapsWithout = 0;
+  for (uint32_t seed = 1; seed <= 24; ++seed) {
+    const Scene scene = GenerateUrbanMap(seed, on);
+    std::vector<const Obstacle*> buses;
+    for (const Obstacle& o : scene.obstacles) {
+      if (o.fixtureModel == StreetFixtureModel::CoachBus) buses.push_back(&o);
+    }
+    CHECK(buses.size() <= 2);
+    (buses.empty() ? mapsWithout : mapsWithBus) += 1;
+    for (const Obstacle* bus : buses) {
+      CHECK(bus->kind == ObstacleKind::Cover);
+      CHECK(!bus->climbable);
+      CHECK(bus->footprint.empty());
+      const glm::vec3 size = bus->bounds.max - bus->bounds.min;
+      CHECK(size.y > constants::kEyeHeight + 1.0f);
+      CHECK(std::max(size.x, size.z) > 10.0f);  // A coach, not a car.
+      CHECK(std::fabs(bus->fixtureBaseY - bus->bounds.min.y) < 0.1f);
+      const glm::vec2 lo(bus->bounds.min.x, bus->bounds.min.z);
+      const glm::vec2 hi(bus->bounds.max.x, bus->bounds.max.z);
+      // Level road under every corner and the middle.
+      const float base = bus->bounds.min.y;
+      for (const glm::vec2& q : {lo, hi, glm::vec2(lo.x, hi.y), glm::vec2(hi.x, lo.y),
+                                 (lo + hi) * 0.5f}) {
+        CHECK(std::fabs(scene.ground.HeightAt(q.x, q.y) - base) < 0.05f);
+      }
+      for (const Obstacle& o : scene.obstacles) {
+        if (&o == bus) continue;
+        float gap = 1e9f;
+        for (const glm::vec2& v : ObstacleFootprint(o)) {
+          const glm::vec2 d = glm::max(glm::max(lo - v, v - hi), glm::vec2(0.0f));
+          gap = std::min(gap, glm::length(d));
+        }
+        for (const glm::vec2& q : {lo, hi, glm::vec2(lo.x, hi.y), glm::vec2(hi.x, lo.y),
+                                   (lo + hi) * 0.5f}) {
+          gap = std::min(gap, DistanceToConvexPolygon(q, ObstacleFootprint(o)));
+        }
+        if (gap < lane - 0.01f) {
+          std::fprintf(stderr, "seed %u: bus at (%.1f, %.1f) only %.2f from an obstacle\n", seed,
+                       (lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, gap);
+        }
+        CHECK(gap >= lane - 0.01f);
+      }
+      for (const Unit& unit : scene.units) {
+        const glm::vec2 u(unit.position.x, unit.position.z);
+        const glm::vec2 d = glm::max(glm::max(lo - u, u - hi), glm::vec2(0.0f));
+        CHECK(glm::length(d) >= 5.0f - 0.01f);
+      }
+    }
+    if (!buses.empty()) CHECK(SameScene(scene, GenerateUrbanMap(seed, on)));
+  }
+  CHECK(mapsWithBus >= 4);
+  CHECK(mapsWithout >= 4);
+}
+
 // Pinned per-seed furniture output (issue #150): a generator change that
 // alters item or prop placement shows up here first.
 void TestPinnedFurnitureFingerprints() {
@@ -2556,8 +2688,8 @@ void TestPinnedFurnitureFingerprints() {
   const MapGeneratorConfig off = FurnitureConfig(FeatureMode::Off);
   for (const auto& e : expected) {
     const Scene scene = GenerateUrbanMap(e.seed, on);
-    const size_t furniture =
-        scene.obstacles.size() - GenerateUrbanMap(e.seed, off).obstacles.size();
+    size_t furniture = 0;
+    for (const Obstacle& o : scene.obstacles) furniture += o.kind == ObstacleKind::StreetFurniture;
     if (furniture != e.furniture || scene.props.size() != e.props) {
       std::fprintf(stderr, "seed %u: %zu furniture, %zu props (expected %zu, %zu)\n", e.seed,
                    furniture, scene.props.size(), e.furniture, e.props);
@@ -2572,6 +2704,8 @@ int main() {
   TestFurnitureHugsSidewalksAndRespectsClearances();
   TestFurnitureKeepsSidewalksConnected();
   TestTrafficPropsSitAtJunctionsAndStayVisualOnly();
+  TestCoverItemsAreEyeLowAndFootHigh();
+  TestCoachBusesStopMidStreet();
   TestPinnedFurnitureFingerprints();
   TestDeterminismAndVariety();
   TestZiplinesAreDeterministicBoundedAndValid();

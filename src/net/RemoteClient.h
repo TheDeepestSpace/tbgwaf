@@ -57,6 +57,10 @@ class RemoteClient {
   bool playingBack() const { return playback_.has_value(); }
   bool selfReady() const { return selfReady_; }
   bool peerReady() const { return peerReady_; }
+  // True from the moment RequestCommit() queues the commit until the server
+  // either refuses it or runs the round: the plans are locked in, so planning
+  // input (and the Commit button) must be disabled.
+  bool CommitLocked() const { return commitPending_ || selfReady_; }
   const std::string& lastError() const { return lastError_; }
   const std::string& room_code() const { return room_; }
   // True once after a (new) match started so the host can re-frame cameras.
@@ -99,7 +103,8 @@ class RemoteClient {
   };
 
   void Queue(const Json& message) { outgoing_.push_back(message.Dump()); }
-  void QueueAction(Action action);
+  // Assigns the next seq, queues the action, and returns that seq.
+  int QueueAction(Action action);
   void HandleStart(const Json& m);
   void HandlePlans(const Json& m);
   void HandleRound(const Json& m);
@@ -124,6 +129,15 @@ class RemoteClient {
   bool peerReady_ = false;
   bool matchStarted_ = false;
   int nextSeq_ = 1;
+  // In-flight window: a "plans" echo received while lastAckedSeq_ <
+  // lastSentSeq_ describes a server state older than the local mirror (our
+  // actions it hasn't processed yet), so it is held, not applied.
+  int lastSentSeq_ = 0;
+  int lastAckedSeq_ = 0;
+  // Commit lock: set when RequestCommit() queues the commit, cleared when the
+  // server refuses it (nack of commitSeq_), when a round runs, or on restart.
+  bool commitPending_ = false;
+  int commitSeq_ = 0;
   std::string lastError_;
 };
 

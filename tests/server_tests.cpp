@@ -164,10 +164,12 @@ void TestSessionReadyAndRound() {
   PlanEveryone(s, Team::Blue);
   CHECK(s.Apply(Team::Blue, commit).ok && s.Ready(Team::Blue) && !s.BothReady());
 
-  // Editing a plan un-readies that team.
-  CHECK(s.Apply(Team::Blue, Plan(ActionKind::Pass, 0)).ok);
-  CHECK(!s.Ready(Team::Blue));
-  CHECK(s.Apply(Team::Blue, commit).ok);
+  // A commit locks the team's plans in: late edits are refused, not silently
+  // un-readying the team, and a validated no-op (focus) is still fine.
+  CHECK(!s.Apply(Team::Blue, Plan(ActionKind::Pass, 0)).ok);
+  CHECK(s.Ready(Team::Blue));
+  CHECK(s.Apply(Team::Blue, Plan(ActionKind::Focus, 0)).ok);
+  CHECK(s.Ready(Team::Blue));
 
   // A team can't act for the other side.
   CHECK(!s.Apply(Team::Blue, Plan(ActionKind::Pass, 3)).ok);
@@ -531,6 +533,146 @@ void TestClientServerRound() {
   CHECK(blue.client.status() == net::RemoteClient::Status::OpponentLeft);
 }
 
+// Plans a short walk for `unitId` through the local click flow (as the UI
+// would); `radius` varies the destination so re-plans actually differ.
+bool PlanMoveLocally(ClientRig& rig, int unitId, float radius) {
+  const Team team = *rig.client.team();
+  for (int i = 0; i < 16; ++i) {
+    const float ang = i * 0.3927f;
+    const glm::vec3 from = rig.game.FindUnit(unitId)->position;
+    const glm::vec3 dest = from + glm::vec3(std::cos(ang) * radius, 0.0f, std::sin(ang) * radius);
+    rig.game.ClickUnit(unitId, team);
+    rig.game.ChooseMove();
+    rig.game.ClickGround(dest, team);
+    rig.game.FinishMovePlan();
+    if (rig.game.Mode() == InputMode::AwaitingSelection &&
+        rig.game.FindUnit(unitId)->plan.type == PlannedActionType::Move) {
+      return true;
+    }
+    rig.game.CancelAction();
+    rig.game.CancelAction();
+  }
+  return false;
+}
+
+// A "plans" echo that races our own in-flight actions must not revert the
+// fresher local plan (it used to: the stale echo re-applied the old plan,
+// losing edits and making figures "not move" in the committed round).
+void TestStaleEchoDoesNotRevertFreshPlans() {
+  Wire w;
+  ClientRig blue(1, "t"), red(2, "t");
+  blue.client.OnOpen();
+  red.client.OnOpen();
+  for (int i = 0; i < 3; ++i) { blue.Pump(w); red.Pump(w); }
+
+  // Plan A and queue its action, then re-plan to B and queue that too; only
+  // now ship both. The server answers each with an ack + a plans echo, so the
+  // first echo still describes plan A while B's ack is outstanding.
+  CHECK(PlanMoveLocally(blue, 0, 5.0f));
+  blue.client.Update(0.016f);
+  CHECK(PlanMoveLocally(blue, 0, 3.0f));
+  blue.client.Update(0.016f);
+  const glm::vec3 wantedDest = blue.game.FindUnit(0)->plan.movePath.back();
+  for (const auto& t : blue.client.TakeOutgoing()) w.Send(1, t);
+  CHECK(w.inbox[1].size() >= 4);  // ackA, plansA, ackB, plansB.
+
+  // Deliver only ackA + the stale plansA echo: plan B must survive.
+  blue.client.OnMessage(w.inbox[1][0]);
+  blue.client.OnMessage(w.inbox[1][1]);
+  CHECK(blue.game.FindUnit(0)->plan.type == PlannedActionType::Move);
+  CHECK(glm::distance(blue.game.FindUnit(0)->plan.movePath.back(), wantedDest) < 0.05f);
+
+  // The rest converges on B.
+  for (size_t i = 2; i < w.inbox[1].size(); ++i) blue.client.OnMessage(w.inbox[1][i]);
+  w.inbox[1].clear();
+  CHECK(glm::distance(blue.game.FindUnit(0)->plan.movePath.back(), wantedDest) < 0.05f);
+}
+
+// A plans echo must not interrupt a unit that is being edited right now (it
+// used to cancel the selection and re-apply the old plan: "kicked out of
+// planning mode").
+void TestEchoDoesNotInterruptEditing() {
+  Wire w;
+  ClientRig blue(1, "t"), red(2, "t");
+  blue.client.OnOpen();
+  red.client.OnOpen();
+  for (int i = 0; i < 3; ++i) { blue.Pump(w); red.Pump(w); }
+
+  // Plan unit 0 and fully sync it to the server.
+  CHECK(PlanMoveLocally(blue, 0, 5.0f));
+  blue.client.Update(0.016f);
+  blue.Pump(w);
+  blue.Pump(w);
+  CHECK(blue.game.FindUnit(0)->plan.type == PlannedActionType::Move);
+
+  // Start re-editing it: selection + move mode, plan cleared locally.
+  blue.game.ClickUnit(0, Team::Blue);
+  blue.game.ChooseMove();
+  CHECK(blue.game.Mode() == InputMode::AwaitingMoveDestination);
+
+  // Provoke a server echo (a validated no-op on another unit) and deliver it.
+  w.Send(1, R"({"t":"focus","unit":1,"seq":500})");
+  blue.Pump(w);
+  CHECK(blue.game.Mode() == InputMode::AwaitingMoveDestination);
+  CHECK(blue.game.SelectedUnitId() && *blue.game.SelectedUnitId() == 0);
+
+  // Finish the edit; the new plan syncs and sticks across further echoes.
+  CHECK(PlanMoveLocally(blue, 0, 3.0f));
+  const glm::vec3 dest = blue.game.FindUnit(0)->plan.movePath.back();
+  blue.client.Update(0.016f);
+  blue.Pump(w);
+  blue.Pump(w);
+  CHECK(glm::distance(blue.game.FindUnit(0)->plan.movePath.back(), dest) < 0.05f);
+}
+
+// Commit locks planning: the button state (CommitLocked) flips immediately,
+// locked clients ship no more plan edits, the server refuses late edits, and
+// the round unlocks everything again.
+void TestCommitLockHandshake() {
+  Wire w;
+  ClientRig blue(1, "t"), red(2, "t");
+  blue.client.OnOpen();
+  red.client.OnOpen();
+  for (int i = 0; i < 3; ++i) { blue.Pump(w); red.Pump(w); }
+  PlanAllLocally(blue);
+  PlanAllLocally(red);
+  blue.client.Update(0.016f);
+  red.client.Update(0.016f);
+  for (int i = 0; i < 2; ++i) { blue.Pump(w); red.Pump(w); }
+
+  CHECK(!blue.client.CommitLocked());
+  blue.client.RequestCommit();
+  CHECK(blue.client.CommitLocked());  // Greys out before any server reply.
+  blue.Pump(w);
+  blue.Pump(w);
+  CHECK(blue.client.selfReady() && blue.client.CommitLocked());
+
+  // Locked: local mirror changes are not shipped any more.
+  blue.game.FindUnit(0)->plan.type = PlannedActionType::Pass;
+  blue.client.Update(0.016f);
+  CHECK(blue.client.TakeOutgoing().empty());
+
+  // ...and the server refuses a late edit outright, staying ready.
+  w.Send(1, R"({"t":"pass","unit":1,"seq":900})");
+  bool nacked = false;
+  for (const Json& m : w.Drain(1)) {
+    if (m["t"].AsString() == "ack") nacked = !m["ok"].AsBool(true);
+  }
+  CHECK(nacked);
+
+  // The opponent's commit runs the round and unlocks both sides.
+  red.client.RequestCommit();
+  red.Pump(w);
+  blue.Pump(w);
+  red.Pump(w);
+  for (int i = 0; i < 600 && (blue.client.playingBack() || red.client.playingBack()); ++i) {
+    blue.client.Update(1.0f / 30.0f);
+    red.client.Update(1.0f / 30.0f);
+  }
+  CHECK(!blue.client.CommitLocked() && !blue.client.selfReady());
+  CHECK(!red.client.CommitLocked() && !red.client.selfReady());
+}
+
 void TestRejectedActionResyncs() {
   Wire w;
   ClientRig blue(1, "t"), red(2, "t");
@@ -654,6 +796,9 @@ int main() {
   TestSpectator();
   TestControlTapScenarioRoom();
   TestClientServerRound();
+  TestStaleEchoDoesNotRevertFreshPlans();
+  TestEchoDoesNotInterruptEditing();
+  TestCommitLockHandshake();
   TestRejectedActionResyncs();
   TestRealSocketLoopback();
   if (g_failures == 0) {

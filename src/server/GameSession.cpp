@@ -56,12 +56,15 @@ GameSession::Result GameSession::Apply(Team team, const net::Action& action, uin
     ready_ = {false, false};
     return result;
   }
+  // A commit locks the team's plans until the round runs: accepting later
+  // edits would silently un-ready the team (a "did my commit do anything?"
+  // trap for the client). Focus stays allowed as a validated no-op.
+  if (ready_[static_cast<int>(team)] && action.kind != net::ActionKind::Focus) {
+    return {false, "plans are locked in; waiting for the opponent to commit"};
+  }
   if (!net::ApplyPlanAction(game_, team, action, &result.error)) {
     result.ok = false;
     return result;
-  }
-  if (action.kind != net::ActionKind::Focus && action.kind != net::ActionKind::Reaction) {
-    ready_[static_cast<int>(team)] = false;
   }
   return result;
 }

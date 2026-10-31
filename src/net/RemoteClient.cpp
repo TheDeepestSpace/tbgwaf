@@ -73,7 +73,7 @@ std::string RemoteClient::StatusText() const {
   }
   if (playback_) return "Round in progress...";
   if (!lastError_.empty()) return lastError_;
-  if (selfReady_) return peerReady_ ? "Both ready..." : "Committed; waiting for opponent...";
+  if (CommitLocked()) return peerReady_ ? "Both ready..." : "Committed; waiting for opponent...";
   if (peerReady_) return "Opponent is ready.";
   return "";
 }
@@ -96,12 +96,20 @@ void RemoteClient::OnMessage(const std::string& text) {
   } else if (type == "peer") {
     peerReady_ = m["ready"].AsBool();
   } else if (type == "ack") {
-    lastError_ = m["ok"].AsBool(true) ? "" : m["error"].AsString();
+    const int seq = static_cast<int>(m["seq"].AsNumber(0));
+    // Only acks for seqs this client issued advance the in-flight window
+    // (test rigs inject barrier actions with out-of-band seqs).
+    if (seq > lastAckedSeq_ && seq <= lastSentSeq_) lastAckedSeq_ = seq;
+    const bool ok = m["ok"].AsBool(true);
+    lastError_ = ok ? "" : m["error"].AsString();
+    if (!ok && seq == commitSeq_) commitPending_ = false;  // Commit refused: unlock planning.
   } else if (type == "opponent_left") {
     status_ = Status::OpponentLeft;
     playback_.reset();
   } else if (type == "error") {
     lastError_ = m["error"].AsString();
+    // Errors carry no seq; don't let an unacked action wedge the plans window.
+    lastAckedSeq_ = lastSentSeq_;
     if (status_ == Status::Connecting) status_ = Status::Rejected;  // The join was refused.
   }
 }
@@ -125,6 +133,8 @@ void RemoteClient::HandleStart(const Json& m) {
   syncedPlan_.clear();
   syncedPlaybook_.reset();
   selfReady_ = peerReady_ = false;
+  commitPending_ = false;
+  lastAckedSeq_ = lastSentSeq_;  // Anything still in flight is void now.
   lastError_.clear();
   status_ = Status::Playing;
   matchStarted_ = true;
@@ -132,16 +142,28 @@ void RemoteClient::HandleStart(const Json& m) {
 }
 
 void RemoteClient::HandlePlans(const Json& m) {
-  if (playback_) {
+  // A "plans" echo that arrives mid-playback, or while our own actions are
+  // still in flight (queued/sent but not yet acked), describes a server state
+  // older than the local mirror -- applying it would revert fresh local plans
+  // and yank the player out of an in-progress edit. Hold the latest echo
+  // instead: the server answers every action with a fresh one, so the echo
+  // following the final ack supersedes it.
+  if (playback_ || lastAckedSeq_ < lastSentSeq_) {
     pendingPlans_ = m;
     return;
   }
+  pendingPlans_.reset();
   ApplyPlans(m);
 }
 
 void RemoteClient::ApplyPlans(const Json& m) {
   if (!team_) return;
   selfReady_ = m["ready"].AsBool();
+  if (selfReady_) commitPending_ = false;  // The lock is carried by selfReady_ now.
+  const auto selected = game_->SelectedUnitId();
+  const bool editing = game_->Mode() == InputMode::ActionMenu ||
+                       game_->Mode() == InputMode::AwaitingMoveDestination ||
+                       game_->Mode() == InputMode::AwaitingShootTarget;
   for (const Json& entry : m["plans"].AsArray()) {
     Action action;
     std::string error;
@@ -149,6 +171,13 @@ void RemoteClient::ApplyPlans(const Json& m) {
     Unit* unit = game_->FindUnit(action.unit);
     if (!unit || !unit->alive || (!spectate_ && unit->team != *team_)) continue;
     const std::string wanted = Signature(action);
+    if (editing && selected && *selected == unit->id) {
+      // The player is editing this unit right now: don't stomp the edit (or
+      // the selection). Recording the server's plan lets SyncPlans() diff the
+      // finished edit against it.
+      syncedPlan_[unit->id] = wanted;
+      continue;
+    }
     if (Signature(PlanToAction(*unit)) != wanted) {
       ApplyPlanAction(*game_, unit->team, action, &error);
     }
@@ -235,6 +264,7 @@ void RemoteClient::HandleRound(const Json& m) {
     pb.tracers.push_back(ev);
   }
   selfReady_ = peerReady_ = false;
+  commitPending_ = false;  // The round ran; planning reopens afterwards.
   if (pb.frames.empty()) {
     ApplyState(pb.finalState);
     return;
@@ -337,9 +367,11 @@ void RemoteClient::NormalizeEnemyPlans() {
   }
 }
 
-void RemoteClient::QueueAction(Action action) {
+int RemoteClient::QueueAction(Action action) {
   action.seq = nextSeq_++;
+  lastSentSeq_ = action.seq;
   Queue(EncodeAction(action));
+  return action.seq;
 }
 
 void RemoteClient::SyncPlans() {
@@ -376,17 +408,21 @@ void RemoteClient::Update(float dt) {
   if (status_ != Status::Playing) return;
   if (playback_) {
     AdvancePlayback(dt);
-  } else if (game_->Mode() != InputMode::GameOver && game_->Mode() != InputMode::Executing) {
+  } else if (game_->Mode() != InputMode::GameOver && game_->Mode() != InputMode::Executing &&
+             !CommitLocked()) {
+    // Once committed, the plans are locked in on the server; local mirror
+    // noise must not be shipped (a plan edit would be refused anyway).
     SyncPlans();
   }
 }
 
 void RemoteClient::RequestCommit() {
-  if (spectate_ || status_ != Status::Playing || playback_) return;
+  if (spectate_ || status_ != Status::Playing || playback_ || CommitLocked()) return;
   SyncPlans();  // The server must hold our latest plans before it counts the commit.
   Action commit;
   commit.kind = ActionKind::Commit;
-  QueueAction(commit);
+  commitSeq_ = QueueAction(commit);
+  commitPending_ = true;  // Lock planning (and grey the button) immediately.
 }
 
 void RemoteClient::RequestNewMatch() {

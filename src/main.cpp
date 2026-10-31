@@ -992,6 +992,7 @@ int main() {
     const bool remoteReady =
         !remoteMode || remote->status() == tactics::net::RemoteClient::Status::Playing;
     if (aiEnabled && !aiPaused && !jevErrorHold && !awaitingPeerSync && remoteReady &&
+        !(remoteMode && remote->CommitLocked()) &&
         game.Mode() == InputMode::AwaitingSelection) {
       if (!pendingJevRequest) {
         if (!jevBuilder) {
@@ -1063,12 +1064,17 @@ int main() {
     const bool remotePlaying =
         !remoteMode || (remote->status() == tactics::net::RemoteClient::Status::Playing &&
                         !remote->spectating());
-    const bool planning =
-        !replayActive && isPlanningMode(game.Mode()) && !awaitingPeerSync && remotePlaying;
+    // Once this side committed, its plans are locked in on the server until
+    // the opponent commits too: planning input must go inert, or edits would
+    // silently diverge the mirror (the server refuses them).
+    const bool remoteCommitLocked = remoteMode && remote->CommitLocked();
+    const bool planning = !replayActive && isPlanningMode(game.Mode()) && !awaitingPeerSync &&
+                          remotePlaying && !remoteCommitLocked;
     // The HUD reflects whatever state is on screen (replay or live); its
     // button presses are only applied to the live game when no replay is
     // active (replay is strictly view-only).
-    const bool hudPlanning = isPlanningMode(displayGame.Mode()) && !awaitingPeerSync && remotePlaying;
+    const bool hudPlanning = isPlanningMode(displayGame.Mode()) && !awaitingPeerSync &&
+                             remotePlaying && !remoteCommitLocked;
 #ifdef __EMSCRIPTEN__
     const bool humanPlanning = planning && !aiEnabled;
     const bool hudHumanPlanning = hudPlanning && !aiEnabled;
@@ -1105,9 +1111,19 @@ int main() {
     if (debugOptions.thermal) ui::PushThermalHudStyle();
     float roundPanelBottom = 2.0f;
     for (int pane = 0; pane < paneCount; ++pane) {
+      // Server mode: the HUD shows the commit handshake (greyed button +
+      // waiting line) that the local mirror alone cannot know about.
+      ui::NetHudInfo netInfo;
+      const ui::NetHudInfo* netInfoPtr = nullptr;
+      if (remoteMode && !remote->spectating()) {
+        netInfo.committed = remote->CommitLocked();
+        netInfo.peerReady = remote->peerReady();
+        netInfoPtr = &netInfo;
+      }
       const ui::HudActions hud = ui::DrawHud(displayGame, paneTeam(pane), hudHumanPlanning,
                                              paneRects[pane], windowHeight, cameras[pane],
-                                             nullptr, pane == 0 ? &roundPanelBottom : nullptr);
+                                             nullptr, pane == 0 ? &roundPanelBottom : nullptr,
+                                             netInfoPtr);
       // Replay is view-only: while it is showing, HUD presses must not leak
       // into the live match (return to Live first).
       if (!replayActive) {
@@ -1129,6 +1145,13 @@ int main() {
         if (hud.commit) {
           if (remoteMode) {
             remote->RequestCommit();
+            // Planning is locked now: close any action menu still open so it
+            // doesn't linger inert on screen.
+            for (int i = 0; i < 3 && isPlanningMode(game.Mode()) &&
+                            game.Mode() != InputMode::AwaitingSelection;
+                 ++i) {
+              game.CancelAction();
+            }
           } else if (isSimulator) {
             game.CommitRound();
           } else {
@@ -1140,14 +1163,18 @@ int main() {
 #endif
           }
         }
-        if (hud.move) game.ChooseMove();
-        if (hud.shoot) game.ChooseShoot();
-        if (hud.pass) game.ChoosePass();
-        if (hud.cancel) game.CancelAction();
-        if (hud.playbook) game.SetPlaybook(paneTeam(pane), *hud.playbook);
-        if (hud.done) game.FinishMovePlan();
-        if (hud.fire) game.ConfirmAim(paneTeam(pane));
-        if (hud.shots) game.SetPlannedShotCount(*hud.shots, paneTeam(pane));
+        // Plan edits only while planning is actually open (not while a round
+        // executes, a commit is locked in, or the peer sync is pending).
+        if (hudPlanning) {
+          if (hud.move) game.ChooseMove();
+          if (hud.shoot) game.ChooseShoot();
+          if (hud.pass) game.ChoosePass();
+          if (hud.cancel) game.CancelAction();
+          if (hud.playbook) game.SetPlaybook(paneTeam(pane), *hud.playbook);
+          if (hud.done) game.FinishMovePlan();
+          if (hud.fire) game.ConfirmAim(paneTeam(pane));
+          if (hud.shots) game.SetPlannedShotCount(*hud.shots, paneTeam(pane));
+        }
       }
 
       // Turn timeline strip (issue #143). Both panes drive the same shared
@@ -1199,8 +1226,8 @@ int main() {
 
     // --- Dispatch deferred input, now that WantCaptureMouse reflects the UI
     // actually built this frame. ---
-    if (escapePending && !replayActive) game.CancelAction();
-    if (enterPending && !replayActive) game.FinishMovePlan();
+    if (escapePending && humanPlanning) game.CancelAction();
+    if (enterPending && humanPlanning) game.FinishMovePlan();
 
     const bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse;
     if (!uiWantsMouse && humanPlanning) {

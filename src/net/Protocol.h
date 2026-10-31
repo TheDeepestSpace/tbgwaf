@@ -34,7 +34,9 @@
 //                                                     [moving,unseen] [moving,seen]; each one of
 //                                                     "none","shoot","stop","continue","shoot_stop","shoot_continue"
 //                                                     optional 5th element: ignore-idle bool
-//   {"t":"commit"}             this team is ready; the round runs once both are
+//   {"t":"commit"}             this team is ready; the round runs once both are.
+//                              Commit locks the team's plans: further plan
+//                              actions (all but focus) are nacked until the round runs
 //   {"t":"new_match"}          only after game over
 //
 // Server -> client:

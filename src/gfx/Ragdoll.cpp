@@ -129,6 +129,12 @@ float FloorAt(float x, float z, float refY, float r, float base) {
 // Pushes a point of radius `r` out of any obstacle it is beside (below the
 // top, not resting on it) through the nearest side face. Returns the normal
 // of the last face used (zero if none).
+// Largest correction one push-out may apply. Overlapping colliders (a curb on
+// a sidewalk, a body spawned inside a box) would otherwise teleport a joint
+// metres in one step, which Verlet reads as a huge velocity.
+constexpr float kMaxJointStep = 0.25f;  // m per step (15 m/s).
+constexpr float kMaxPushPerIter = 0.015f;
+
 glm::vec3 PushOutOfWalls(glm::vec3& p, float refY, float r) {
   glm::vec3 normal(0.0f);
   for (const tactics::AABB& b : Colliders()) {
@@ -137,10 +143,11 @@ glm::vec3 PushOutOfWalls(glm::vec3& p, float refY, float r) {
     const float dzMin = p.z - (b.min.z - r), dzMax = (b.max.z + r) - p.z;
     if (dxMin <= 0.0f || dxMax <= 0.0f || dzMin <= 0.0f || dzMax <= 0.0f) continue;
     const float m = std::min(std::min(dxMin, dxMax), std::min(dzMin, dzMax));
-    if (m == dxMin) { p.x -= dxMin; normal = glm::vec3(-1, 0, 0); }
-    else if (m == dxMax) { p.x += dxMax; normal = glm::vec3(1, 0, 0); }
-    else if (m == dzMin) { p.z -= dzMin; normal = glm::vec3(0, 0, -1); }
-    else { p.z += dzMax; normal = glm::vec3(0, 0, 1); }
+    const float push = std::min(m, kMaxPushPerIter);
+    if (m == dxMin) { p.x -= push; normal = glm::vec3(-1, 0, 0); }
+    else if (m == dxMax) { p.x += push; normal = glm::vec3(1, 0, 0); }
+    else if (m == dzMin) { p.z -= push; normal = glm::vec3(0, 0, -1); }
+    else { p.z += push; normal = glm::vec3(0, 0, 1); }
   }
   return normal;
 }
@@ -415,6 +422,10 @@ Trajectory Simulate(const Unit& unit) {
     }
     float maxSpeed = 0.0f;
     for (int i = 0; i < kRagJointCount; ++i) {
+      // Safety cap: no joint may move further than this in one step.
+      const glm::vec3 step = pos[i] - prev[i];
+      const float stepLen = glm::length(step);
+      if (stepLen > kMaxJointStep) prev[i] = pos[i] - step * (kMaxJointStep / stepLen);
       if (onFloor[i]) {
         // Resting on the ground: bleed off horizontal motion (friction).
         prev[i].x = pos[i].x - (pos[i].x - prev[i].x) * kGroundFriction;

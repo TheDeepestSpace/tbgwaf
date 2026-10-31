@@ -42,7 +42,12 @@ their frontage; `TBGWAF_MAP=urban-merge` adds a wide branching avenue that
 merges into the artery, `TBGWAF_MAP=urban-elevated` (default) turns the artery into a
 true overpass (ramps up, crosses on pier bents with usable ground beneath,
 ramps back down; the branch becomes an on-ramp merging mid-deck), and
-`TBGWAF_MAP=hilly` selects rolling hills. Urban code/scenarios can also
+`TBGWAF_MAP=hilly` selects rolling hills. Every elevated span carries
+raised sides (a guard parapet that is cover on the deck), and each seed
+draws its bent form (issue #223): one thick T-bent column flaring into a
+hammerhead cap under the deck, or twin columns under a widened deck joined
+by a crossbeam cap; shafts stand on stepped footings and are real obstacles
+(collision, LOS, navmesh), the caps overhead only. Urban code/scenarios can also
 tune artery count/width, local-street width/skew and elevation through
 `MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
 overlay of the navmesh's walkable-cell boundaries.
@@ -159,7 +164,7 @@ scenario YAML selects them with `render: {thermal: true, thermal_black_hot: fals
 for white-hot (omit `thermal_black_hot` for black-hot).
 
 The AO sliders in the debug panel tune the contact shading: radius (default
-0.8), strength (0.8), quality (3 samples per ray) and softness (3 px blur).
+6.0), strength (1.0), quality (4 samples per ray) and softness (3 px blur).
 
 ### Flag objective (CTF part 1)
 

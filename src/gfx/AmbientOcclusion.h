@@ -8,9 +8,9 @@ namespace gfx {
 // for softer, less choppy occlusion with knobs to play with). Defaults are
 // the shipped look; the headless visual runner always renders defaults.
 struct AmbientOcclusionSettings {
-  float radius = 0.8f;    // World-space reach of the shading, in map units.
-  float strength = 0.8f;  // Occlusion-to-darkening multiplier.
-  int quality = 3;        // Depth samples marched per ray (more = smoother).
+  float radius = 6.0f;    // World-space reach of the shading, in map units.
+  float strength = 1.0f;  // Occlusion-to-darkening multiplier.
+  int quality = 4;        // Depth samples marched per ray (more = smoother).
   int softness = 3;       // Bilateral blur half-width in pixels.
 };
 

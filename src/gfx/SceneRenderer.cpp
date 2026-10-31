@@ -3018,6 +3018,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const auto& obstacles = game.GetScene().obstacles;
   SetRagdollObstacles(obstacles);
   SetRagdollGround(game.GetScene().walkSurfaces, game.GetScene().ground);
+  {
+    std::vector<RagdollFigureCollider> figures;
+    for (const Unit& u : game.GetScene().units) {
+      if (u.alive) figures.push_back({u.position, 0.30f, 1.75f});
+    }
+    SetRagdollFigures(figures);
+  }
   const auto& sidewalks = game.GetScene().sidewalks;
   const auto& streetProps = game.GetScene().props;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;

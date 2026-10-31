@@ -353,7 +353,30 @@ void TestSettlesAtRampTop() {
   gfx::SetRagdollGround({}, tactics::HeightField{});
 }
 
+void TestRagdollRestsOnStandingFigure() {
+  gfx::SetRagdollObstacles({});
+  gfx::SetRagdollFigures({{glm::vec3(3.6f, 0.5f, -2.0f), 0.30f, 1.75f}});
+  const tactics::Unit u = Downed(21, tactics::constants::kKnockdownMaxSeconds);
+  float maxSpeed = 0.0f;
+  gfx::RagdollPose prev = gfx::SampleRagdollStep(u, 0);
+  for (int step = 1; step <= gfx::kRagdollSteps; ++step) {
+    const gfx::RagdollPose cur = gfx::SampleRagdollStep(u, step);
+    for (int i = 0; i < gfx::kRagJointCount; ++i) {
+      maxSpeed = std::max(maxSpeed, glm::length(cur[i] - prev[i]) / gfx::kRagdollStep);
+    }
+    prev = cur;
+  }
+  CHECK(maxSpeed < 20.0f);  // No launch from depenetration.
+  const gfx::RagdollPose end = gfx::SampleRagdoll(u);
+  for (int i = 0; i < gfx::kRagJointCount; ++i) {
+    const glm::vec3 axisPt(3.6f, glm::clamp(end[i].y, 0.5f + 0.30f, 0.5f + 1.45f), -2.0f);
+    CHECK(glm::length(end[i] - axisPt) >= 0.30f - 0.03f);  // Not inside the capsule.
+  }
+  gfx::SetRagdollFigures({});
+}
+
 int main() {
+  TestRagdollRestsOnStandingFigure();
   TestRiderFallsToGroundBelowCable();
   TestStartsFromAnimatedPose();
   TestWallPushOutDoesNotLaunchBody();

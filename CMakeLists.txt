@@ -138,14 +138,18 @@ if(EMSCRIPTEN)
   add_executable(tactics_gallery_web
     src/gallery/gallery_main.cpp
     src/gallery/GalleryScene.cpp
+    src/gallery/MapView.cpp
     src/gfx/Shader.cpp
     src/gfx/Mesh.cpp
+    src/gfx/Camera.cpp
+    src/gfx/AmbientOcclusion.cpp
+    src/gfx/SceneRenderer.cpp
     src/gfx/FigureRig.cpp
     src/gfx/Ragdoll.cpp
     src/game/Geometry.cpp
   )
   target_include_directories(tactics_gallery_web PRIVATE src)
-  target_link_libraries(tactics_gallery_web PRIVATE glm::glm)
+  target_link_libraries(tactics_gallery_web PRIVATE tactics_logic glm::glm)
   target_compile_options(tactics_gallery_web PRIVATE -sUSE_SDL=2)
   target_link_options(tactics_gallery_web PRIVATE
     -sUSE_SDL=2
@@ -333,9 +337,9 @@ else()
 
   # Asset & animation gallery (issue #126): shared catalog/renderer, a
   # native interactive viewer.
-  add_library(tactics_gallery STATIC src/gallery/GalleryScene.cpp)
+  add_library(tactics_gallery STATIC src/gallery/GalleryScene.cpp src/gallery/MapView.cpp)
   target_include_directories(tactics_gallery PUBLIC src)
-  target_link_libraries(tactics_gallery PUBLIC tactics_gfx glm::glm)
+  target_link_libraries(tactics_gallery PUBLIC tactics_gfx tactics_logic glm::glm)
 
   add_executable(tactics_gallery_app src/gallery/gallery_main.cpp)
   target_include_directories(tactics_gallery_app PRIVATE src)
@@ -362,6 +366,18 @@ else()
   add_executable(tactics_performance_suite tests/performance/performance_main.cpp)
   target_include_directories(tactics_performance_suite PRIVATE src)
   target_link_libraries(tactics_performance_suite PRIVATE
+    tactics_logic
+    tactics_gfx
+    PkgConfig::SDL2
+    PkgConfig::EGL
+  )
+
+  # Move-planning frame/click profiler (issue #256). Also manual-run only:
+  # it times the frontier-open planning state (frontier raycast fade, move
+  # click latency) on a seed of choice, with and without occlusion fade.
+  add_executable(tactics_frontier_profile tests/performance/frontier_profile_main.cpp)
+  target_include_directories(tactics_frontier_profile PRIVATE src)
+  target_link_libraries(tactics_frontier_profile PRIVATE
     tactics_logic
     tactics_gfx
     PkgConfig::SDL2

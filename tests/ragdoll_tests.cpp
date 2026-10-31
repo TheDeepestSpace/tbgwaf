@@ -216,6 +216,36 @@ void TestWallPushOutDoesNotLaunchBody() {
   gfx::SetRagdollObstacles({});
 }
 
+// Overlapping low slabs (sidewalk + curb) around a standing figure, with a
+// neighbour: neither body may be launched (issue #262).
+void TestOverlappingSidewalkDoesNotLaunch() {
+  tactics::Obstacle a, b, c;
+  a.bounds.min = glm::vec3(2.0f, 0.0f, -4.0f);
+  a.bounds.max = glm::vec3(3.6f, 0.15f, 4.0f);
+  b.bounds.min = glm::vec3(2.9f, 0.0f, -4.0f);  // Overlaps a.
+  b.bounds.max = glm::vec3(3.2f, 0.4f, 4.0f);
+  c.bounds.min = glm::vec3(2.5f, 0.0f, -2.5f);
+  c.bounds.max = glm::vec3(3.3f, 0.3f, -1.5f);
+  gfx::SetRagdollObstacles({a, b, c});
+  for (int id = 1; id <= 20; ++id) {
+    for (float x : {2.2f, 3.0f, 3.5f}) {
+      tactics::Unit u = Downed(id, tactics::constants::kKnockdownMaxSeconds);
+      u.position = glm::vec3(x, 0.0f, -2.0f);
+      u.knockdownImpacts.push_back({0.4f, glm::vec3(0.0f, 0.0f, 1.0f)});
+      gfx::RagdollPose last = gfx::SampleRagdollStep(u, 0);
+      for (int s = 1; s <= gfx::kRagdollSteps; ++s) {
+        const gfx::RagdollPose cur = gfx::SampleRagdollStep(u, s);
+        for (int i = 0; i < gfx::kRagJointCount; ++i) {
+          CHECK(glm::length(cur[i] - last[i]) < 0.3f);
+          CHECK(glm::length(cur[i] - u.position) < 6.0f);
+        }
+        last = cur;
+      }
+    }
+  }
+  gfx::SetRagdollObstacles({});
+}
+
 // A second hit on the falling body shoves it: same fall until the hit, then
 // a different one (here a hit from the opposite side).
 void TestSecondHitShovesFallingBody() {
@@ -300,6 +330,7 @@ int main() {
   TestRiderFallsToGroundBelowCable();
   TestStartsFromAnimatedPose();
   TestWallPushOutDoesNotLaunchBody();
+  TestOverlappingSidewalkDoesNotLaunch();
   TestSecondHitShovesFallingBody();
   TestFallsOffWallAndStaysOutside();
   TestRestsOnRamp();

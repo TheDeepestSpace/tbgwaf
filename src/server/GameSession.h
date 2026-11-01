@@ -25,7 +25,7 @@ class GameSession {
 
   // Test knobs (control tap): the friendly-fire flag and pinned shot rolls
   // (consumed in resolution order, repeating when exhausted; empty = seeded RNG).
-  void ConfigureForTest(bool friendlyFire, std::vector<float> shotRolls);
+  void ConfigureForTest(bool friendlyFire, bool figureOverlapCheck, std::vector<float> shotRolls);
 
   uint32_t seed() const { return seed_; }
   const GameLogic& game() const { return game_; }

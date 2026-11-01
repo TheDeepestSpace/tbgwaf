@@ -76,6 +76,7 @@ class Lobby {
     std::optional<Scene> scene;  // Set by load_scenario.
     net::Json sceneSpec;         // The same scene, sent to clients in `start`.
     bool friendlyFire = true;    // Test knobs from load_scenario.
+    bool figureOverlapCheck = true;
     std::vector<float> shotRolls;
   };
   struct Member {

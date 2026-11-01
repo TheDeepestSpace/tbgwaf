@@ -9,8 +9,13 @@ function trimEndpoint(value) {
 }
 
 export class JevPreviewController {
+  // serverMode: the page talks to the authoritative game server, which hosts
+  // Jev itself in the Blue vs Jev / Jev vs Jev modes (it builds the requests,
+  // calls the Jev adapter and plans for the Jev teams). This controller then
+  // only mirrors the server's status and relays Start/Pause/Retry/Fallback.
   constructor({ fetchImpl = globalThis.fetch?.bind(globalThis), endpoint = "", timeoutMs = 25000,
-                documentRef = globalThis.document } = {}) {
+                documentRef = globalThis.document,
+                serverMode = Boolean(globalThis.TBGWAF_SERVER) } = {}) {
     this.fetchImpl = fetchImpl;
     this.endpoint = trimEndpoint(endpoint);
     this.timeoutMs = timeoutMs;
@@ -22,6 +27,49 @@ export class JevPreviewController {
     this.modules = new Map();
     this.inFlight = new Map();
     this.lastError = "";
+    this.serverMode = serverMode;
+    this.serverThinking = [];
+    this.sockets = new Map();
+  }
+
+  get serverBots() { return this.serverMode && this.mode !== "human"; }
+
+  // Server Jev modes: watch the module's WebSocket for the server's `bots`
+  // status. The socket opens after the WASM runtime starts, so poll for it.
+  watchServer(module) {
+    const attach = () => {
+      const socket = module.tbgwafWs;
+      if (!socket || this.sockets.get(module) === socket) return Boolean(socket);
+      this.sockets.set(module, socket);
+      socket.addEventListener("message", (event) => {
+        if (typeof event.data !== "string" || !event.data.includes('"bots"')) return;
+        try {
+          const message = JSON.parse(event.data);
+          if (message.t === "bots") this.applyBotStatus(message);
+        } catch { /* not ours */ }
+      });
+      return true;
+    };
+    if (attach()) return;
+    const timer = setInterval(() => { if (attach()) clearInterval(timer); }, 100);
+  }
+
+  applyBotStatus(message) {
+    this.paused = message.mode === "ai-v-ai" && message.running === false;
+    this.serverThinking = Array.isArray(message.thinking) ? message.thinking : [];
+    this.lastError = typeof message.error === "string" ? message.error : "";
+    this.fallback = Boolean(message.fallback);
+    this.#render();
+  }
+
+  #sendControl(control) {
+    for (const module of this.sockets.keys()) {
+      const socket = module.tbgwafWs;
+      if (socket && socket.readyState === 1) {
+        socket.send(JSON.stringify({ t: "bot_control", ...control }));
+        return;
+      }
+    }
   }
 
   registerModule(player, module) {
@@ -42,6 +90,7 @@ export class JevPreviewController {
     if (!MODES[mode]) throw new Error(`Unknown preview mode: ${mode}`);
     this.mode = mode;
     this.fallback = false;
+    this.serverThinking = [];
     this.paused = mode === "ai-v-ai";
     this.restart();
   }
@@ -61,6 +110,7 @@ export class JevPreviewController {
 
   start() {
     if (this.mode !== "ai-v-ai") return;
+    if (this.serverBots) { this.#sendControl({ run: true }); return; }
     this.paused = false;
     this.generation += 1;
     this.#syncModules();
@@ -69,6 +119,7 @@ export class JevPreviewController {
 
   pause() {
     if (this.mode !== "ai-v-ai") return;
+    if (this.serverBots) { this.#sendControl({ run: false }); return; }
     this.paused = true;
     this.cancelAll();
     this.generation += 1;
@@ -77,6 +128,7 @@ export class JevPreviewController {
   }
 
   retry() {
+    if (this.serverBots) { this.#sendControl({ retry: true }); return; }
     this.cancelAll();
     this.generation += 1;
     this.lastError = "";
@@ -89,6 +141,7 @@ export class JevPreviewController {
   }
 
   useFallback() {
+    if (this.serverBots) { this.#sendControl({ fallback: true }); return; }
     this.cancelAll();
     this.fallback = true;
     this.paused = false;
@@ -193,18 +246,21 @@ export class JevPreviewController {
     this.#render();
   }
 
-  #isAiPlayer(player) { return MODES[this.mode].ai.includes(player); }
+  // In-browser planning only; with server-hosted Jev the server plans.
+  #isAiPlayer(player) { return !this.serverBots && MODES[this.mode].ai.includes(player); }
 
   #configureModule(player, module) {
     module.tbgwafAI = this.#isAiPlayer(player);
     module.tbgwafAIPaused = this.paused;
     module.tbgwafAIFallback = this.fallback;
-    module.tbgwafDefaultCtf = this.mode === "ai-v-ai";
+    module.tbgwafDefaultCtf = this.mode === "ai-v-ai" && !this.serverBots;
     // Jev vs Jev: the Blue instance renders every figure and both FOVs in one
-    // pane; the Red instance keeps simulating off-screen.
-    module.tbgwafSpectator = this.mode === "ai-v-ai" && player === "blue";
+    // pane; the Red instance keeps simulating off-screen. On a server both
+    // Jev clients are fog-limited, so a separate spectator client takes that pane.
+    module.tbgwafSpectator =
+      this.mode === "ai-v-ai" && player === "blue" && !globalThis.TBGWAF_SERVER;
     // Only with no human player; Blue vs Jev needs a manual Commit round.
-    module.tbgwafAutoCommit = this.mode === "ai-v-ai";
+    module.tbgwafAutoCommit = this.mode === "ai-v-ai" && !this.serverBots;
     module.tbgwafAIGeneration = this.generation;
   }
 
@@ -217,6 +273,13 @@ export class JevPreviewController {
     if (!this.document) return;
     const spec = MODES[this.mode];
     this.document.getElementById("panes")?.setAttribute("data-spectator", String(this.mode === "ai-v-ai"));
+    const spectatorPane = this.mode === "ai-v-ai" && Boolean(globalThis.TBGWAF_SERVER);
+    this.document.getElementById("panes")?.setAttribute("data-spectator-pane", String(spectatorPane));
+    const spectatorEl = this.document.getElementById("pane-spectator");
+    if (spectatorEl) spectatorEl.hidden = !spectatorPane;
+    // With server-hosted Jev the server owns the Jev connection: no proxy to configure.
+    const config = this.document.getElementById("config");
+    if (config) config.hidden = this.serverBots;
     const modeLabel = this.document.getElementById("mode-label");
     if (modeLabel) modeLabel.textContent = `Mode: ${spec.label}`;
     for (const button of this.document.querySelectorAll("[data-mode]")) {
@@ -244,8 +307,9 @@ export class JevPreviewController {
     } else if (this.paused) {
       status.textContent = "AI paused.";
       status.dataset.kind = "normal";
-    } else if (this.inFlight.size) {
-      status.textContent = `Jev thinking (${[...this.inFlight.keys()].join(", ")})…`;
+    } else if (this.inFlight.size || this.serverThinking.length) {
+      const thinking = [...this.inFlight.keys(), ...this.serverThinking];
+      status.textContent = `Jev thinking (${thinking.join(", ")})…`;
       status.dataset.kind = "normal";
     } else {
       status.textContent = "Live Jev ready.";
@@ -272,12 +336,24 @@ function bootstrap() {
   const endpointInput = document.getElementById("jev-endpoint");
   endpointInput.value = controller.endpoint;
 
+  const reloadInto = (mode) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("mode", mode);
+    url.searchParams.delete("room");
+    window.location.href = url.toString();
+  };
   document.querySelectorAll("[data-mode]").forEach((button) => {
-    button.addEventListener("click", () => controller.setMode(button.dataset.mode));
+    button.addEventListener("click", () => {
+      if (window.TBGWAF_SERVER) reloadInto(button.dataset.mode);
+      else controller.setMode(button.dataset.mode);
+    });
   });
   document.getElementById("start-ai").addEventListener("click", () => controller.start());
   document.getElementById("pause-ai").addEventListener("click", () => controller.pause());
-  document.getElementById("restart-match").addEventListener("click", () => controller.restart());
+  document.getElementById("restart-match").addEventListener("click", () => {
+    if (window.TBGWAF_SERVER) reloadInto(controller.mode);
+    else controller.restart();
+  });
   document.getElementById("retry-ai").addEventListener("click", () => controller.retry());
   document.getElementById("fallback-ai").addEventListener("click", () => controller.useFallback());
   document.getElementById("save-endpoint").addEventListener("click", () => {
@@ -288,14 +364,29 @@ function bootstrap() {
 
   const status = document.getElementById("status");
   window.onerror = () => { status.textContent = "Failed to load — check the browser console."; };
+  // Server mode (window.TBGWAF_SERVER = { url, room }): each pane is its own
+  // client of the authoritative server, paired through a private room, so
+  // there is no in-page bus. Changing mode or restarting reloads the page
+  // into a fresh room (the server owns the match, so it cannot be reset
+  // from here).
+  const server = window.TBGWAF_SERVER;
   const bus = { inboxes: [] };
-  let pending = 2;
-  for (const player of ["blue", "red"]) {
+  // Server-hosted Jev: the server seats Jev itself (Blue vs Jev: the human is
+  // Blue and Jev is Red; Jev vs Jev: two Jevs, watched by one read-only
+  // spectator), so only the human / spectator pane connects. The mode stays
+  // selectable in the toolbar: it just reloads into a fresh room.
+  const serverJev = Boolean(server) && config.mode !== "human";
+  controller.mode = config.mode;  // serverBots needs it before setMode() below.
+  const spectate = Boolean(server) && config.mode === "ai-v-ai";
+  let pending = serverJev ? 1 : spectate ? 3 : 2;
+  const startPlayer = (player) => {
     const pane = document.getElementById(`pane-${player}`);
     const moduleConfig = {
       canvas: pane.querySelector("canvas"),
       tbgwafPlayer: player,
-      tbgwafBus: bus,
+      ...(server
+        ? { tbgwafServer: server.url, tbgwafRoom: server.room, tbgwafAutoEnter: true }
+        : { tbgwafBus: bus }),
       tbgwafRequestDecision: (payload) => controller.requestDecision(player, payload),
       tbgwafReportMatch: (phase, round, winner) =>
         controller.reportMatch(player, phase, round, winner),
@@ -305,7 +396,48 @@ function bootstrap() {
         if (--pending === 0) status.textContent = "";
       },
     };
-    createTbgwafModule(moduleConfig);
+    return moduleConfig;
+  };
+  if (serverJev && spectate) {
+    // Jev vs Jev: one read-only client opens the room in the server's Jev mode.
+    document.getElementById("panes")?.setAttribute("data-spectator-pane", "true");
+    document.getElementById("pane-spectator").hidden = false;
+    const spectatorConfig = {
+      canvas: document.querySelector("#pane-spectator canvas"),
+      tbgwafServer: server.url,
+      tbgwafRoom: server.room,
+      tbgwafBotMode: "ai-v-ai",
+      tbgwafServerSpectate: true,
+      tbgwafSpectator: true,
+      tbgwafAutoEnter: true,
+      onRuntimeInitialized() {
+        controller.watchServer(spectatorConfig);
+        if (--pending === 0) status.textContent = "";
+      },
+    };
+    createTbgwafModule(spectatorConfig);
+  } else if (serverJev) {
+    // Blue vs Jev: the human's pane only; Red is Jev on the server.
+    document.getElementById("pane-red").hidden = true;
+    const blueConfig = startPlayer("blue");
+    blueConfig.tbgwafBotMode = "player-v-ai";
+    const registered = blueConfig.onRuntimeInitialized;
+    blueConfig.onRuntimeInitialized = () => {
+      registered();
+      controller.watchServer(blueConfig);
+    };
+    createTbgwafModule(blueConfig);
+  } else {
+    const blueConfig = startPlayer("blue");
+    if (server) {
+      // The first client to join a room plays Blue, so Red connects only once
+      // Blue's join has gone out.
+      blueConfig.tbgwafOnFirstSend = () => createTbgwafModule(startPlayer("red"));
+      createTbgwafModule(blueConfig);
+    } else {
+      createTbgwafModule(blueConfig);
+      createTbgwafModule(startPlayer("red"));
+    }
   }
   controller.setMode(config.mode);
 }

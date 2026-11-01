@@ -193,6 +193,36 @@ void TestFallsOffWallAndStaysOutside() {
   gfx::SetRagdollObstacles({});
 }
 
+// Issue #259: a body shot toward a bridge's side rail on the deck stays on the
+// deck side instead of clipping through. The rail is a thin diagonal prism.
+void TestDeckRailBlocksBody() {
+  tactics::WalkSurface deck;
+  deck.vertices = {glm::vec3(-10, 3, -10), glm::vec3(10, 3, -10), glm::vec3(10, 3, 10),
+                   glm::vec3(-10, 3, 10)};
+  tactics::HeightField none;
+  gfx::SetRagdollObstacles({});
+  gfx::SetRagdollGround({deck}, none);
+  tactics::MassingDetail rail;
+  rail.kind = tactics::MassingDetail::Kind::DeckRail;
+  rail.footprint = {glm::vec2(1.0f, -10.0f), glm::vec2(1.3f, -10.0f), glm::vec2(1.3f, 10.0f),
+                    glm::vec2(1.0f, 10.0f)};
+  rail.y0 = 2.75f;
+  rail.y1 = 3.9f;
+  gfx::SetRagdollRails({rail});
+  for (int id = 1; id <= 20; ++id) {
+    tactics::Unit u = Downed(id, tactics::constants::kKnockdownMaxSeconds);
+    u.position = glm::vec3(0.4f, 3.0f, 0.0f);  // Shot travels +X, into the rail.
+    for (int s = 0; s <= gfx::kRagdollSteps; ++s) {
+      for (const glm::vec3& p : gfx::SampleRagdollStep(u, s)) {
+        CHECK(!(p.x > 1.0f && p.y < 3.8f));  // Never past the rail.
+      }
+    }
+    CHECK(gfx::SampleRagdoll(u)[gfx::kRagHead].y > 2.9f);  // Stayed on the deck.
+  }
+  gfx::SetRagdollRails({});
+  gfx::SetRagdollGround({}, none);
+}
+
 // Dying flush against a wall must not turn the wall push-out into velocity
 // (the body used to be flung away and through the map).
 void TestWallPushOutDoesNotLaunchBody() {
@@ -361,6 +391,7 @@ int main() {
   TestSecondHitShovesFallingBody();
   TestFallsOffWallAndStaysOutside();
   TestRestsOnRamp();
+  TestDeckRailBlocksBody();
   TestSettlesAtRampTop();
   TestGunReleaseAndDrop();
   TestOnlyDownedUnitsRagdoll();

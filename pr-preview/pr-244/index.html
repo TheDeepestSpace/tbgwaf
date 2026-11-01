@@ -82,6 +82,11 @@
         position: absolute; inset: 0; visibility: hidden; pointer-events: none;
       }
       #panes[data-spectator="true"] .pane + .pane { border-left: 0; }
+      /* Jev vs Jev on a server: a third, read-only client (unfiltered view of both
+         teams) is the visible pane; the Blue and Red Jev clients run hidden. */
+      #panes[data-spectator-pane="true"] #pane-blue {
+        position: absolute; inset: 0; visibility: hidden; pointer-events: none;
+      }
       @media (max-width: 680px) {
         #control-panel { left: 6px; right: 6px; transform: none; width: auto; }
         #config { margin-left: 0; }
@@ -96,6 +101,9 @@
       <div class="pane" id="pane-red" aria-label="Red team view">
         <canvas oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
       </div>
+      <div class="pane" id="pane-spectator" aria-label="Spectator view of both teams" hidden>
+        <canvas oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+      </div>
     </main>
 
     <section id="control-panel" aria-label="Preview mode controls">
@@ -104,6 +112,7 @@
         <button type="button" data-mode="human" aria-pressed="true">Human vs Human</button>
         <button type="button" data-mode="player-v-ai" aria-pressed="false">Blue vs Jev</button>
         <button type="button" data-mode="ai-v-ai" aria-pressed="false">Jev vs Jev</button>
+        <button id="open-online" type="button" hidden>Online (2 players)</button>
         <details id="config">
           <summary>Jev proxy</summary>
           <div class="row">
@@ -203,6 +212,73 @@
       })();
     </script>
     <script src="tactics_app.js"></script>
-    <script type="module" src="jev-preview.js"></script>
+    <script type="text/javascript">
+      // Two ways to play:
+      //  * Server mode: both panes are separate clients of the authoritative
+      //    server over WebSockets (?solo=1: one pane, for two browsers). The URL comes from ?server=ws://host:port (a bare
+      //    port such as ?server=8080 means ws://localhost:8080), else from
+      //    the build-time default (cmake -DTBGWAF_SERVER_URL=...). ?room=NAME
+      //    picks which room to pair in (default: private to this page load
+      //    in split screen). ?online=1 (or ?solo=1) is the single-pane game
+      //    whose own menu (Game Mode -> Online) has the new-room / join-by-code
+      //    screen; with ?room=NAME it connects straight to that room.
+      //  * Local preview (no server): both teams on this page, with the Jev
+      //    controls, driven by jev-preview.js. Used when no server is
+      //    configured, or forced with ?local=1.
+      var BUILD_DEFAULT_SERVER = "wss://tbgwaf-server-pr-244.fly.dev"; // Left as-is when served from source.
+      function resolveServerUrl() {
+        var params = new URLSearchParams(window.location.search);
+        if (params.has("local")) return "";
+        var url = params.get("server");
+        if (url === null) url = BUILD_DEFAULT_SERVER.charAt(0) === "@" ? "" : BUILD_DEFAULT_SERVER;
+        url = url.trim();
+        if (/^\d+$/.test(url)) url = "ws://localhost:" + url;
+        return url;
+      }
+      var serverUrl = resolveServerUrl();
+      var statusEl = document.getElementById("status");
+      var params = new URLSearchParams(window.location.search);
+      function pageUrl(changes) {
+        var url = new URL(window.location.href);
+        ["online", "solo", "room", "intent"].forEach(function (k) { url.searchParams.delete(k); });
+        Object.keys(changes).forEach(function (k) { url.searchParams.set(k, changes[k]); });
+        return url.toString();
+      }
+      if (serverUrl && (params.has("online") || params.has("solo"))) {
+        // One canvas, one player. Without ?room= the game's own menu
+        // (New Game -> Online) creates or joins a room; ?room=NAME connects
+        // straight away (a second player opens the same URL).
+        document.getElementById("pane-red").remove();
+        document.getElementById("control-panel").remove();
+        statusEl.innerText = "Online match via " + serverUrl;
+        window.onerror = function () {
+          statusEl.innerText = "Failed to load -- check the browser console.";
+        };
+        createTbgwafModule({
+          canvas: document.querySelector("#pane-blue canvas"),
+          tbgwafServer: serverUrl,
+          tbgwafRoom: params.get("room") || "",
+          tbgwafRoomIntent: params.get("intent") || "",
+          tbgwafAutoEnter: params.has("intent"),  // Straight to the match: it shows the room code.
+          onRuntimeInitialized: function () { statusEl.innerText = ""; },
+        });
+      } else {
+        // Split screen: both panes are separate clients of the server, paired
+        // through a room private to this page load (so the mode controls,
+        // including the Jev modes, work as in the local preview).
+        if (serverUrl) {
+          // Online play is the single-pane game with its own Room menu.
+          var openOnline = document.getElementById("open-online");
+          openOnline.hidden = false;
+          openOnline.addEventListener("click", function () {
+            window.location.href = pageUrl({ online: "1" });
+          });
+          var room = params.get("room") ||
+            "p" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+          window.TBGWAF_SERVER = { url: serverUrl, room: room };
+        }
+        import("./jev-preview.js");
+      }
+    </script>
   </body>
 </html>

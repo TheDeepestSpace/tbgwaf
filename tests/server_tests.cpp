@@ -1,0 +1,1104 @@
+// Server tests: WebSocket primitives, authoritative session rules (fog
+// filtering, ready handshake), lobby pairing, a full client<->server round
+// through RemoteClient, and a real-socket loopback through Server.
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <functional>
+#include <thread>
+#include <deque>
+#include <map>
+#include <string>
+#include <vector>
+
+#include "game/GameLogic.h"
+#include "game/MapGenerator.h"
+#include "net/ActionApply.h"
+#include "net/RemoteClient.h"
+#include "net/SceneSpec.h"
+#include "server/GameSession.h"
+#include "server/HttpClient.h"
+#include "server/JevBot.h"
+#include "server/Lobby.h"
+#include "server/Server.h"
+#include "server/WebSocket.h"
+#include "test_util.h"
+
+using namespace tactics;
+using tactics::net::Action;
+using tactics::net::ActionKind;
+using tactics::net::Json;
+namespace ws = tactics::server::ws;
+
+namespace {
+
+std::string Hex(const std::string& raw) {
+  static const char* d = "0123456789abcdef";
+  std::string out;
+  for (unsigned char c : raw) {
+    out.push_back(d[c >> 4]);
+    out.push_back(d[c & 15]);
+  }
+  return out;
+}
+
+// Client-side (masked) frame, as a browser would send.
+std::string MaskedFrame(ws::Opcode op, const std::string& payload, bool fin = true) {
+  std::string out;
+  out.push_back(static_cast<char>((fin ? 0x80 : 0) | static_cast<uint8_t>(op)));
+  const char mask[4] = {0x12, 0x34, 0x56, 0x78};
+  if (payload.size() < 126) {
+    out.push_back(static_cast<char>(0x80 | payload.size()));
+  } else {
+    out.push_back(static_cast<char>(0x80 | 126));
+    out.push_back(static_cast<char>(payload.size() >> 8));
+    out.push_back(static_cast<char>(payload.size() & 0xFF));
+  }
+  out.append(mask, 4);
+  for (size_t i = 0; i < payload.size(); ++i) out.push_back(payload[i] ^ mask[i % 4]);
+  return out;
+}
+
+void TestWebSocketPrimitives() {
+  CHECK(Hex(ws::Sha1("abc")) == "a9993e364706816aba3e25717850c26c9cd0d89d");
+  CHECK(Hex(ws::Sha1("")) == "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+  CHECK(ws::Base64Encode("f") == "Zg==");
+  CHECK(ws::Base64Encode("fo") == "Zm8=");
+  CHECK(ws::Base64Encode("foo") == "Zm9v");
+  // RFC 6455 section 1.3 example.
+  CHECK(ws::AcceptKey("dGhlIHNhbXBsZSBub25jZQ==") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+
+  ws::HttpRequest req;
+  size_t used = 0;
+  const std::string head =
+      "GET /play HTTP/1.1\r\nHost: x\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\n"
+      "Sec-WebSocket-Key: abc\r\nSec-WebSocket-Version: 13\r\n\r\nEXTRA";
+  CHECK(ws::ParseHttpRequest(head, 8192, &req, &used) == ws::ParseStatus::Ok);
+  CHECK(req.upgrade == "websocket" && req.key == "abc" && req.path == "/play" && head.substr(used) == "EXTRA");
+  CHECK(ws::ParseHttpRequest("GET / HTTP/1.1\r\nHost", 8192, &req, &used) == ws::ParseStatus::NeedMore);
+  CHECK(ws::ParseHttpRequest(std::string(9000, 'a'), 8192, &req, &used) == ws::ParseStatus::Bad);
+  CHECK(ws::ParseHttpRequest("garbage\r\n\r\n", 8192, &req, &used) == ws::ParseStatus::Bad);
+}
+
+void TestFrameParser() {
+  ws::FrameParser p(1024);
+  const std::string frame = MaskedFrame(ws::Opcode::Text, "hello");
+  p.Feed(frame.data(), 3);  // Partial.
+  CHECK(!p.Next());
+  p.Feed(frame.data() + 3, frame.size() - 3);
+  auto m = p.Next();
+  CHECK(m && m->op == ws::Opcode::Text && m->payload == "hello");
+  CHECK(!p.Next() && !p.failed());
+
+  // Fragmented message with an interleaved ping.
+  const std::string f1 = MaskedFrame(ws::Opcode::Text, "foo", false);
+  const std::string ping = MaskedFrame(ws::Opcode::Ping, "p");
+  const std::string f2 = MaskedFrame(ws::Opcode::Continuation, "bar", true);
+  const std::string all = f1 + ping + f2;
+  p.Feed(all.data(), all.size());
+  m = p.Next();
+  CHECK(m && m->op == ws::Opcode::Ping);
+  m = p.Next();
+  CHECK(m && m->payload == "foobar");
+
+  // 126-length extended header.
+  const std::string big(300, 'z');
+  const std::string bf = MaskedFrame(ws::Opcode::Text, big);
+  p.Feed(bf.data(), bf.size());
+  m = p.Next();
+  CHECK(m && m->payload == big);
+
+  // Unmasked client frames are a protocol error.
+  ws::FrameParser unmasked(1024);
+  const std::string um = ws::EncodeFrame(ws::Opcode::Text, "x");
+  unmasked.Feed(um.data(), um.size());
+  CHECK(!unmasked.Next() && unmasked.failed() && unmasked.failure_code() == 1002);
+
+  // Oversize message.
+  ws::FrameParser small(16);
+  const std::string of = MaskedFrame(ws::Opcode::Text, std::string(100, 'a'));
+  small.Feed(of.data(), of.size());
+  CHECK(!small.Next() && small.failed() && small.failure_code() == 1009);
+
+  // Server encoder shape.
+  CHECK(ws::EncodeFrame(ws::Opcode::Text, "hi") == std::string("\x81\x02hi", 4));
+  CHECK(ws::EncodeFrame(ws::Opcode::Text, std::string(200, 'a')).size() == 204);
+}
+
+Action Plan(ActionKind kind, int unit, int target = -1) {
+  Action a;
+  a.kind = kind;
+  a.unit = unit;
+  a.target = target;
+  return a;
+}
+
+// Plans a short walk for `unit` by trying a few directions through the
+// validated action path; returns the accepted action.
+bool PlanSomeMove(server::GameSession& s, Team team, int unitId, Action* accepted = nullptr) {
+  const glm::vec3 p = s.game().FindUnit(unitId)->position;
+  for (int i = 0; i < 16; ++i) {
+    const float ang = i * 0.3927f;
+    Action mv = Plan(ActionKind::Move, unitId);
+    mv.waypoints = {p + glm::vec3(std::cos(ang) * 5.0f, 0.0f, std::sin(ang) * 5.0f)};
+    if (s.Apply(team, mv).ok) {
+      if (accepted) *accepted = mv;
+      return true;
+    }
+  }
+  return false;
+}
+
+void PlanEveryone(server::GameSession& s, Team team) {
+  for (const Unit& u : s.game().GetScene().units) {
+    if (u.team != team) continue;
+    if (!PlanSomeMove(s, team, u.id)) s.Apply(team, Plan(ActionKind::Pass, u.id));
+  }
+}
+
+void TestSessionReadyAndRound() {
+  server::GameSession s(1);
+  Action commit;
+  commit.kind = ActionKind::Commit;
+  CHECK(!s.Apply(Team::Blue, commit).ok);  // Nothing planned yet.
+  PlanEveryone(s, Team::Blue);
+  CHECK(s.Apply(Team::Blue, commit).ok && s.Ready(Team::Blue) && !s.BothReady());
+
+  // A commit locks the team's plans in: late edits are refused, not silently
+  // un-readying the team, and a validated no-op (focus) is still fine.
+  CHECK(!s.Apply(Team::Blue, Plan(ActionKind::Pass, 0)).ok);
+  CHECK(s.Ready(Team::Blue));
+  CHECK(s.Apply(Team::Blue, Plan(ActionKind::Focus, 0)).ok);
+  CHECK(s.Ready(Team::Blue));
+
+  // A team can't act for the other side.
+  CHECK(!s.Apply(Team::Blue, Plan(ActionKind::Pass, 3)).ok);
+
+  PlanEveryone(s, Team::Red);
+  CHECK(s.Apply(Team::Red, commit).ok && s.BothReady());
+
+  const auto round = s.RunRound();
+  CHECK(!s.Ready(Team::Blue) && !s.Ready(Team::Red));
+  for (int ti = 0; ti < 2; ++ti) {
+    CHECK(round[ti]["t"].AsString() == "round");
+    CHECK(round[ti]["frames"].AsArray().size() >= 2);
+    CHECK(round[ti]["state"]["round"].AsNumber() == 2 || round[ti]["state"]["over"].AsBool());
+    // Rule state only: no animation-interpolation fields anywhere in the message.
+    const std::string text = round[ti].Dump();
+    for (const char* banned : {"walkPhase", "walkBlend", "idleElapsed", "knockdown", "shootElapsed"}) {
+      CHECK(text.find(banned) == std::string::npos);
+    }
+    // Every unit sample is [id,x,y,z,yaw,alive,moving] and own units always appear.
+    for (const Json& f : round[ti]["frames"].AsArray()) {
+      int own = 0;
+      for (const Json& row : f["u"].AsArray()) {
+        CHECK(row.AsArray().size() == 7);
+        const int id = static_cast<int>(row.AsArray()[0].AsNumber());
+        if ((id < 3) == (ti == 0)) ++own;
+      }
+      CHECK(own == 3 || round[ti]["state"]["over"].AsBool() || own > 0);
+    }
+  }
+  // Planning reopened (or game over).
+  CHECK(s.game().Mode() != InputMode::Executing);
+}
+
+void TestSessionFogHidesEnemyPlansAndUnits() {
+  server::GameSession s(1);
+  PlanEveryone(s, Team::Red);
+  const Json plans = s.PlansMessage(Team::Blue);
+  CHECK(plans["plans"].AsArray().size() == 3);  // Own team only.
+  for (const Json& p : plans["plans"].AsArray()) CHECK(p["unit"].AsNumber() < 3);
+  // Squads start out of sight of each other, so no enemy appears in Blue's state.
+  const Json state = s.StateMessage(Team::Blue);
+  int enemies = 0;
+  for (const Json& u : state["units"].AsArray()) enemies += u["id"].AsNumber() >= 3;
+  CHECK(enemies == 0 || s.game().ComputeVisibility(Team::Blue).visibleUnit.size() > 0);
+  // Enemy figures are only reported if actually visible.
+  for (const Json& u : state["units"].AsArray()) {
+    const int id = static_cast<int>(u["id"].AsNumber());
+    if (id >= 3) CHECK(s.game().ComputeVisibility(Team::Blue).UnitVisible(id));
+  }
+}
+
+// In-memory transport for the lobby.
+struct Wire {
+  std::map<int, std::deque<std::string>> inbox;
+  server::Lobby lobby;
+  uint32_t nextSeed = 7;
+  Wire()
+      : lobby([this](int c, const std::string& t) { inbox[c].push_back(t); },
+              [this]() { return nextSeed++; }) {}
+  void Send(int conn, const std::string& text) { lobby.OnMessage(conn, text); }
+  std::vector<Json> Drain(int conn) {
+    std::vector<Json> out;
+    for (const auto& t : inbox[conn]) {
+      Json j;
+      CHECK(Json::Parse(t, &j));
+      out.push_back(j);
+    }
+    inbox[conn].clear();
+    return out;
+  }
+};
+
+bool Has(const std::vector<Json>& msgs, const char* type) {
+  for (const Json& m : msgs) if (m["t"].AsString() == type) return true;
+  return false;
+}
+
+void TestLobbyPairing() {
+  Wire w;
+  w.Send(1, R"({"t":"pass","unit":0})");
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");  // Must join first.
+  w.Send(1, "not json");
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");
+  w.Send(1, R"({"t":"join","room":"bad room!"})");
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");
+
+  w.Send(1, R"({"t":"join","room":"r1"})");
+  CHECK(Has(w.Drain(1), "waiting"));
+  w.Send(1, R"({"t":"pass","unit":0})");
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");  // No opponent yet.
+
+  w.Send(2, R"({"t":"join","room":"other"})");  // Different room: stays waiting.
+  CHECK(Has(w.Drain(2), "waiting"));
+  w.Send(3, R"({"t":"join","room":"r1"})");
+  const auto m1 = w.Drain(1), m3 = w.Drain(3);
+  CHECK(Has(m1, "start") && Has(m3, "start"));
+  CHECK(m1[0]["team"].AsString() == "blue" && m3[0]["team"].AsString() == "red");
+  CHECK(m1[0]["seed"].AsNumber() == m3[0]["seed"].AsNumber());
+  CHECK(Has(m1, "plans") && Has(m1, "state"));
+
+  w.Send(4, R"({"t":"join","room":"r1"})");
+  CHECK(w.Drain(4)[0]["t"].AsString() == "error");  // Full.
+
+  // Illegal action is nacked with the seq and the authoritative plans follow.
+  w.Send(1, R"({"t":"pass","unit":4,"seq":5})");
+  auto r = w.Drain(1);
+  CHECK(r[0]["t"].AsString() == "ack" && !r[0]["ok"].AsBool() && r[0]["seq"].AsNumber() == 5);
+  CHECK(Has(r, "plans"));
+  CHECK(w.Drain(3).empty());  // The opponent hears nothing about it.
+
+  // A legal plan reveals nothing to the opponent either.
+  w.Send(1, R"({"t":"pass","unit":0,"seq":6})");
+  CHECK(w.Drain(1)[0]["ok"].AsBool());
+  CHECK(w.Drain(3).empty());
+
+  w.lobby.OnDisconnect(3);
+  CHECK(Has(w.Drain(1), "opponent_left"));
+  CHECK(w.lobby.RoomCount() == 1);  // Only "other" remains.
+  w.Send(1, R"({"t":"join","room":"r1"})");  // Survivor may re-join.
+  CHECK(Has(w.Drain(1), "waiting"));
+}
+
+// Room page: "create" gets a fresh server-picked code (or refuses a taken
+// name), "join" only enters a room that exists and has space.
+void TestRoomIntents() {
+  Wire w;
+  w.Send(1, R"({"t":"join","intent":"join","room":"NOPE1"})");
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");  // No such room.
+  CHECK(w.lobby.RoomCount() == 0);                   // ...and none was created.
+  w.Send(1, R"({"t":"join","intent":"bogus"})");
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");
+
+  std::string codes[3];
+  for (int i = 0; i < 3; ++i) {
+    w.Send(10 + i, R"({"t":"join","intent":"create"})");
+    const auto m = w.Drain(10 + i);
+    CHECK(m.size() == 1 && m[0]["t"].AsString() == "waiting");
+    codes[i] = m[0]["room"].AsString();
+    CHECK(codes[i].size() == 5);
+  }
+  CHECK(codes[0] != codes[1] && codes[1] != codes[2] && codes[0] != codes[2]);
+
+  w.Send(2, R"({"t":"join","intent":"create","room":")" + codes[0] + R"("})");
+  CHECK(w.Drain(2)[0]["t"].AsString() == "error");  // Code already in use.
+
+  w.Send(3, R"({"t":"join","intent":"join","room":")" + codes[0] + R"("})");
+  CHECK(Has(w.Drain(3), "start") && Has(w.Drain(10), "start"));
+  w.Send(4, R"({"t":"join","intent":"join","room":")" + codes[0] + R"("})");
+  CHECK(w.Drain(4)[0]["t"].AsString() == "error");  // Full.
+}
+
+// Spectators: join an existing room read-only, see every unit and both teams'
+// plans, and never count as a player.
+void TestSpectator() {
+  Wire w;
+  w.Send(9, R"({"t":"join","spectate":true,"room":"nope"})");
+  CHECK(w.Drain(9)[0]["t"].AsString() == "error");  // No such room.
+  w.Send(9, R"({"t":"join","spectate":true})");
+  CHECK(w.Drain(9)[0]["t"].AsString() == "error");  // Needs a room.
+
+  w.Send(1, R"({"t":"join","room":"sp"})");
+  w.Send(9, R"({"t":"join","spectate":true,"room":"sp"})");  // Before the match starts.
+  CHECK(w.Drain(9)[0]["t"].AsString() == "waiting");
+  w.Send(2, R"({"t":"join","room":"sp"})");
+  w.Send(3, R"({"t":"join","room":"sp"})");
+  CHECK(w.Drain(3)[0]["t"].AsString() == "error");  // Full: the spectator took no seat.
+
+  const auto view = w.Drain(9);
+  CHECK(view.size() == 3 && view[0]["t"].AsString() == "start");
+  CHECK(view[0]["team"].AsString() == "spectator");
+  CHECK(view[2]["t"].AsString() == "state");
+  CHECK(view[2]["units"].AsArray().size() == 6);  // Unfiltered: both squads.
+  w.Drain(1);
+  w.Drain(2);
+
+  w.Send(9, R"({"t":"commit"})");
+  CHECK(w.Drain(9)[0]["t"].AsString() == "error");  // Read-only.
+
+  // A team's plan reaches the spectator; so does the whole round, unfiltered.
+  w.Send(1, R"({"t":"pass","unit":0,"seq":1})");
+  const auto plans = w.Drain(9);
+  CHECK(plans.size() == 1 && plans[0]["t"].AsString() == "plans");
+  CHECK(plans[0]["plans"].AsArray().size() == 6);
+  for (int unit = 1; unit < 6; ++unit) {
+    w.Send(unit < 3 ? 1 : 2, R"({"t":"pass","unit":)" + std::to_string(unit) + "}");
+  }
+  w.Send(1, R"({"t":"commit"})");
+  w.Send(2, R"({"t":"commit"})");
+  const auto after = w.Drain(9);
+  CHECK(Has(after, "round"));
+  for (const Json& m : after) {
+    if (m["t"].AsString() != "round") continue;
+    CHECK(m["state"]["units"].AsArray().size() == 6);
+    CHECK(m["frames"].AsArray()[0]["u"].AsArray().size() == 6);
+  }
+
+  w.lobby.OnDisconnect(9);  // A spectator leaving does not end the match.
+  CHECK(!Has(w.Drain(1), "opponent_left"));
+  w.lobby.OnDisconnect(1);
+  CHECK(Has(w.Drain(2), "opponent_left"));
+}
+
+
+// ---- Server-side Jev (Blue vs Jev / Jev vs Jev) ----
+
+// A stand-in for the Jev adapter: answers every figure with its first
+// candidate, like a model that always takes the first option.
+bool FirstOptionPoster(const std::string& requestJson, int* status, std::string* body,
+                       std::string* error) {
+  (void)error;
+  Json request;
+  if (!Json::Parse(requestJson, &request)) return false;
+  Json choices;
+  choices.Set("x", Json(0));  // Forces an object even if there are no candidates.
+  Json::Object picks;
+  for (const Json& c : request["candidates"].AsArray()) {
+    const std::string figure = std::to_string(static_cast<int>(c["figure"].AsNumber()));
+    if (!picks.count(figure)) picks[figure] = c["id"];
+  }
+  Json reply;
+  reply.Set("choices", Json(picks));
+  *status = 200;
+  *body = reply.Dump();
+  return true;
+}
+
+struct BotWire : Wire {
+  server::JevBotRunner runner;
+  explicit BotWire(server::JevBotRunner::Poster poster, int maxRooms = 4)
+      : runner(server::JevBotConfig{"http://fake"}, std::move(poster)) {
+    lobby.SetBots(&runner, maxRooms, /*pacePlayback=*/false);
+  }
+  // Ticks the lobby (as the poll loop does) until `done` or the timeout.
+  bool Pump(const std::function<bool()>& done, int timeoutMs = 60000) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    while (std::chrono::steady_clock::now() < end) {
+      lobby.Tick();
+      if (done()) return true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
+  }
+};
+
+void TestJevReplyParsing() {
+  ai::JevRequest request;
+  request.actorIds = {2, 5};
+  std::string error;
+  auto picks = server::JevBotRunner::ParseReply(
+      request, 200, R"({"choices":{"2":"f2_wait","5":"f5_move_1"}})", &error);
+  CHECK(error.empty() && picks.size() == 2 && picks[0] == "f2_wait" && picks[1] == "f5_move_1");
+  server::JevBotRunner::ParseReply(request, 200, R"({"choices":{"2":"f2_wait"}})", &error);
+  CHECK(!error.empty());  // A figure without a choice.
+  error.clear();
+  server::JevBotRunner::ParseReply(request, 429, R"({"error":"proxy is busy"})", &error);
+  CHECK(error == "Jev: proxy is busy");
+  error.clear();
+  server::JevBotRunner::ParseReply(request, 502, "<html>", &error);
+  CHECK(error == "Jev adapter returned HTTP 502");
+  error.clear();
+  server::JevBotRunner::ParseReply(request, 200, "nonsense", &error);
+  CHECK(!error.empty());
+}
+
+void TestHttpUrlParsing() {
+  server::HttpUrl url;
+  CHECK(server::ParseHttpUrl("http://127.0.0.1:8787", &url) && url.host == "127.0.0.1" &&
+        url.port == "8787" && url.basePath.empty());
+  CHECK(server::ParseHttpUrl("http://adapter.internal/api/", &url) && url.port == "80" &&
+        url.basePath == "/api");
+  CHECK(!server::ParseHttpUrl("https://adapter.example", &url));  // TLS lives in the adapter.
+  CHECK(!server::ParseHttpUrl("http://user@host", &url));
+  CHECK(!server::ParseHttpUrl("http://host:12x", &url));
+}
+
+// A real TCP round trip through the default poster: a one-shot loopback HTTP
+// server answers like the adapter does (Content-Length, Connection: close).
+void TestHttpPostLoopback() {
+  const int listener = socket(AF_INET, SOCK_STREAM, 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  CHECK(bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+  CHECK(listen(listener, 1) == 0);
+  socklen_t len = sizeof(addr);
+  getsockname(listener, reinterpret_cast<sockaddr*>(&addr), &len);
+  std::string seen;
+  std::thread serverThread([&] {
+    const int c = accept(listener, nullptr, nullptr);
+    char buf[4096];
+    ssize_t n;
+    while ((n = recv(c, buf, sizeof(buf), 0)) > 0) {
+      seen.append(buf, static_cast<size_t>(n));
+      if (seen.find("{\"ping\":1}") != std::string::npos) break;
+    }
+    const std::string body = R"({"pong":true})";
+    const std::string reply = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                              std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+    send(c, reply.data(), reply.size(), 0);
+    close(c);
+  });
+  server::HttpUrl url;
+  CHECK(server::ParseHttpUrl("http://127.0.0.1:" + std::to_string(ntohs(addr.sin_port)) + "/base", &url));
+  server::HttpResponse response;
+  std::string error;
+  CHECK(server::HttpPostJson(url, "/v1/choice", R"({"ping":1})", 5000, &response, &error));
+  serverThread.join();
+  close(listener);
+  CHECK(response.status == 200 && response.body == R"({"pong":true})");
+  CHECK(seen.rfind("POST /base/v1/choice HTTP/1.1", 0) == 0);
+  // Nothing listening: a clean transport error, not a hang.
+  server::HttpResponse refused;
+  CHECK(!server::HttpPostJson(url, "/v1/choice", "{}", 2000, &refused, &error) && !error.empty());
+}
+
+void TestBotModesNeedAdapter() {
+  Wire w;  // No bot runner configured.
+  w.Send(1, R"({"t":"join","room":"b","mode":"player-v-ai"})");
+  const auto reply = w.Drain(1);
+  CHECK(reply.size() == 1 && reply[0]["t"].AsString() == "error");
+  w.Send(2, R"({"t":"join","room":"b","spectate":true,"mode":"ai-v-ai"})");
+  CHECK(w.Drain(2)[0]["t"].AsString() == "error");
+  BotWire bw(FirstOptionPoster);
+  bw.Send(3, R"({"t":"join","room":"b","mode":"nope"})");
+  CHECK(bw.Drain(3)[0]["t"].AsString() == "error");
+  bw.Send(3, R"({"t":"join","room":"b","mode":"ai-v-ai"})");  // Must spectate.
+  CHECK(bw.Drain(3)[0]["t"].AsString() == "error");
+}
+
+// Blue vs Jev: the human is Blue, Jev plans Red on the server and commits;
+// the round runs once the human commits. The human never sees Red's plans.
+void TestBlueVsJev() {
+  std::atomic<int> posts{0};
+  BotWire w([&](const std::string& r, int* s, std::string* b, std::string* e) {
+    ++posts;
+    return FirstOptionPoster(r, s, b, e);
+  });
+  w.Send(1, R"({"t":"join","room":"pj","mode":"player-v-ai"})");
+  auto first = w.Drain(1);
+  CHECK(first.size() >= 3 && first[0]["t"].AsString() == "start" &&
+        first[0]["team"].AsString() == "blue");
+  CHECK(w.Pump([&] {
+    for (const Json& m : w.Drain(1)) {
+      if (m["t"].AsString() == "peer" && m["ready"].AsBool()) return true;
+    }
+    return false;
+  }));  // Jev (Red) planned and committed.
+  CHECK(posts == 1);
+  for (int unit = 0; unit < 3; ++unit) {
+    w.Send(1, R"({"t":"pass","unit":)" + std::to_string(unit) + "}");
+  }
+  w.Drain(1);
+  w.Send(1, R"({"t":"commit"})");
+  const auto after = w.Drain(1);
+  CHECK(Has(after, "round"));
+  for (const Json& m : after) {
+    if (m["t"].AsString() == "plans") CHECK(m["plans"].AsArray().size() <= 3);  // Own team only.
+  }
+  // A second human cannot take the bot's seat.
+  w.Send(2, R"({"t":"join","room":"pj"})");
+  CHECK(w.Drain(2)[0]["t"].AsString() == "error");
+  // The next round Jev asks again.
+  CHECK(w.Pump([&] { return posts >= 2; }));
+  w.lobby.OnDisconnect(1);
+  CHECK(w.lobby.RoomCount() == 0);
+}
+
+// Jev vs Jev: a spectator watches; the match starts paused, runs on
+// bot_control, retry/fallback recover from an adapter failure.
+void TestJevVsJev() {
+  std::atomic<bool> fail{true};
+  std::atomic<int> posts{0};
+  BotWire w([&](const std::string& r, int* s, std::string* b, std::string* e) {
+    ++posts;
+    if (fail) {
+      *e = "Jev adapter returned HTTP 503";
+      return false;
+    }
+    return FirstOptionPoster(r, s, b, e);
+  });
+  w.Send(9, R"({"t":"join","room":"aa","spectate":true,"mode":"ai-v-ai"})");
+  const auto opening = w.Drain(9);
+  CHECK(opening.size() >= 4 && opening[0]["team"].AsString() == "spectator");
+  CHECK(Has(opening, "bots"));
+  CHECK(!opening.back()["running"].AsBool());
+  w.Pump([] { return false; }, 100);
+  CHECK(posts == 0);  // Paused: nothing is spent.
+
+  w.Send(9, R"({"t":"bot_control","run":true})");
+  CHECK(w.Pump([&] {
+    for (const Json& m : w.Drain(9)) {
+      if (m["t"].AsString() == "bots" && !m["error"].AsString().empty()) return true;
+    }
+    return false;
+  }));
+  w.Pump([] { return false; }, 300);  // Let the other seat's in-flight request land.
+  const int afterFailure = posts;
+  w.Pump([] { return false; }, 100);
+  CHECK(posts == afterFailure);  // An errored seat does not hammer the adapter.
+
+  fail = false;
+  w.Send(9, R"({"t":"bot_control","retry":true})");
+  CHECK(w.Pump([&] {
+    for (const Json& m : w.Drain(9)) {
+      if (m["t"].AsString() == "round") return true;
+    }
+    return false;
+  }));  // Both Jevs planned; the server ran the round.
+
+  // Opting into the deterministic fallback needs no adapter at all.
+  w.Send(9, R"({"t":"bot_control","fallback":true})");
+  const int before = posts;
+  CHECK(w.Pump([&] {
+    for (const Json& m : w.Drain(9)) {
+      if (m["t"].AsString() == "round") return true;
+    }
+    return false;
+  }));
+  CHECK(posts == before || posts == before + 2);  // At most in-flight asks from before the switch.
+
+  w.Send(9, R"({"t":"bot_control","run":false})");
+  w.lobby.OnDisconnect(9);
+  CHECK(w.lobby.RoomCount() == 0);  // Nobody watching: the match is dropped.
+}
+
+void TestBotRoomLimit() {
+  BotWire w(FirstOptionPoster, /*maxRooms=*/1);
+  w.Send(1, R"({"t":"join","room":"one","mode":"player-v-ai"})");
+  CHECK(Has(w.Drain(1), "start"));
+  w.Send(2, R"({"t":"join","room":"two","mode":"player-v-ai"})");
+  CHECK(w.Drain(2)[0]["t"].AsString() == "error");
+  w.Send(3, R"({"t":"bot_control","run":true})");
+  CHECK(w.Drain(3)[0]["t"].AsString() == "error");  // Not in a room.
+  w.Send(1, R"({"t":"bot_control","run":true})");  // Humans cannot pause Blue vs Jev.
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");
+}
+
+// Test control tap: a scenario-loaded room runs on the explicit scene, the
+// start message carries it, and dump_state reports unfiltered ground truth.
+void TestControlTapScenarioRoom() {
+  const char* scene = R"({"map":{"obstacles":[]},"units":[
+    {"id":0,"team":"blue","position":[-5,0,0],"facing_degrees":0},
+    {"id":1,"team":"red","position":[5,0,0],"facing_degrees":180}]})";
+  Wire w;
+  Json load;
+  CHECK(Json::Parse(std::string(R"({"t":"load_scenario","room":"s1","scene":)") + scene + "}", &load));
+  CHECK(w.lobby.OnControl(load)["ok"].AsBool());
+  CHECK(!w.lobby.OnControl(load)["ok"].AsBool());  // Room already exists.
+  Json badScene;
+  CHECK(Json::Parse(R"({"t":"load_scenario","room":"s2","scene":{"units":[]}})", &badScene));
+  CHECK(!w.lobby.OnControl(badScene)["ok"].AsBool());
+
+  Json dumpReq;
+  CHECK(Json::Parse(R"({"t":"dump_state","room":"s1"})", &dumpReq));
+  CHECK(!w.lobby.OnControl(dumpReq)["ok"].AsBool());  // Nobody has joined yet.
+
+  w.Send(1, R"({"t":"join","room":"s1"})");
+  w.Send(2, R"({"t":"join","room":"s1"})");
+  const auto blue = w.Drain(1);
+  CHECK(Has(blue, "start"));
+  for (const Json& m : blue) {
+    if (m["t"].AsString() != "start") continue;
+    tactics::Scene built;
+    std::string error;
+    CHECK(net::SceneFromSpec(m["scene"], &built, &error));
+    CHECK(built.units.size() == 2);
+  }
+  const Json dump = w.lobby.OnControl(dumpReq);
+  CHECK(dump["t"].AsString() == "state_dump");
+  CHECK(dump["units"].AsArray().size() == 2);
+  CHECK(dump["round"].AsNumber() == 1);
+  CHECK(!dump["over"].AsBool());
+  // Both figures stand in the open facing each other, so each sees the other.
+  bool blueSeesRed = false;
+  for (const Json& id : dump["visible_blue"].AsArray()) blueSeesRed |= id.AsNumber() == 1;
+  CHECK(blueSeesRed);
+}
+
+// Drives a RemoteClient (with its own mirror game) through the lobby.
+struct ClientRig {
+  GameLogic game;
+  net::RemoteClient client;
+  int conn;
+  ClientRig(int c, const char* room) : game(GenerateUrbanMap(1)), client(&game, room), conn(c) {}
+  void Pump(Wire& w) {
+    for (const auto& t : client.TakeOutgoing()) w.Send(conn, t);
+    for (const auto& t : w.inbox[conn]) client.OnMessage(t);
+    w.inbox[conn].clear();
+  }
+};
+
+void PlanAllLocally(ClientRig& rig) {
+  const Team team = *rig.client.team();
+  for (const Unit& u : rig.game.GetScene().units) {
+    if (u.team != team) continue;
+    bool done = false;
+    for (int i = 0; i < 16 && !done; ++i) {
+      const float ang = i * 0.3927f;
+      const glm::vec3 dest = u.position + glm::vec3(std::cos(ang) * 5.0f, 0.0f, std::sin(ang) * 5.0f);
+      rig.game.ClickUnit(u.id, team);
+      rig.game.ChooseMove();
+      rig.game.ClickGround(dest, team);
+      rig.game.FinishMovePlan();
+      done = rig.game.Mode() == InputMode::AwaitingSelection;
+      if (!done) {
+        rig.game.CancelAction();
+        rig.game.CancelAction();
+      }
+    }
+    if (!done) {
+      rig.game.ClickUnit(u.id, team);
+      rig.game.ChoosePass();
+    }
+  }
+}
+
+void TestClientServerRound() {
+  Wire w;
+  ClientRig blue(1, "t"), red(2, "t");
+  blue.client.OnOpen();
+  red.client.OnOpen();
+  CHECK(blue.client.status() == net::RemoteClient::Status::Connecting);
+  blue.Pump(w);
+  blue.Pump(w);
+  CHECK(blue.client.status() == net::RemoteClient::Status::Waiting);
+  red.Pump(w);
+  blue.Pump(w);
+  red.Pump(w);
+  CHECK(blue.client.status() == net::RemoteClient::Status::Playing);
+  CHECK(red.client.status() == net::RemoteClient::Status::Playing);
+  CHECK(blue.client.team() == Team::Blue && red.client.team() == Team::Red);
+  CHECK(blue.client.ConsumeMatchStarted() && !blue.client.ConsumeMatchStarted());
+  // Both mirrors adopted the server's seed: identical maps.
+  CHECK(blue.game.GetScene().obstacles.size() == red.game.GetScene().obstacles.size());
+
+  // Plan locally through the normal click flow; the client turns that into actions.
+  PlanAllLocally(blue);
+  PlanAllLocally(red);
+  CHECK(blue.game.CanCommitRound());  // Enemy plans are placeholders: only our own gate the button.
+  blue.client.Update(0.016f);
+  red.client.Update(0.016f);
+  blue.Pump(w);
+  red.Pump(w);
+  blue.Pump(w);
+  red.Pump(w);
+
+  // Commit from Blue only: server waits for Red, tells Blue nothing more, Red sees "ready".
+  blue.client.RequestCommit();
+  blue.Pump(w);
+  red.Pump(w);
+  blue.Pump(w);
+  CHECK(blue.client.selfReady() && !blue.client.peerReady());
+  CHECK(red.client.peerReady() && !red.client.selfReady());
+  CHECK(!blue.client.playingBack());
+
+  red.client.RequestCommit();
+  red.Pump(w);
+  blue.Pump(w);
+  red.Pump(w);
+  CHECK(blue.client.playingBack() && red.client.playingBack());
+  CHECK(blue.game.Mode() == InputMode::Executing);
+
+  // Play it out frame by frame.
+  const Team bt = Team::Blue;
+  bool sawMotion = false;
+  const glm::vec3 start = blue.game.FindUnit(0)->position;
+  for (int i = 0; i < 600 && blue.client.playingBack(); ++i) {
+    blue.client.Update(1.0f / 30.0f);
+    red.client.Update(1.0f / 30.0f);
+    if (glm::distance(blue.game.FindUnit(0)->position, start) > 0.5f) sawMotion = true;
+  }
+  CHECK(sawMotion);
+  CHECK(!blue.client.playingBack() && !red.client.playingBack());
+  (void)bt;
+
+  // Mirror's own units equal the server's authoritative positions after the round.
+  // (No handle to the session here; compare the two mirrors' views of the same
+  // visible/own units instead: a unit visible to both agrees.)
+  CHECK(blue.game.Mode() != InputMode::Executing);
+  for (int id = 0; id < 3; ++id) {
+    const Unit* mine = blue.game.FindUnit(id);
+    CHECK(mine->position.x < 5000.0f);  // Own units never parked.
+    const Unit* theirs = red.game.FindUnit(id);
+    if (theirs->position.x < 5000.0f) CHECK(glm::distance(mine->position, theirs->position) < 0.05f);
+  }
+  // Unseen enemies are parked, not leaked.
+  for (int id = 3; id < 6; ++id) {
+    const Unit* e = blue.game.FindUnit(id);
+    if (e->position.x >= 5000.0f) CHECK(!blue.game.ComputeVisibility(Team::Blue).UnitVisible(id));
+  }
+  CHECK(blue.game.RoundNumber() == 2 || blue.game.Mode() == InputMode::GameOver);
+
+  // Disconnect propagates.
+  w.lobby.OnDisconnect(2);
+  blue.Pump(w);
+  CHECK(blue.client.status() == net::RemoteClient::Status::OpponentLeft);
+}
+
+// A figure shot dead in mid-air (a zipline rider) during round playback: the
+// mirror's knockdown clock must run the whole ragdoll window, not stop at the
+// rigid tip-over, and the drop to the ground must be reconstructed locally
+// (neither crosses the wire) -- otherwise the body hangs frozen on the cable
+// through the rest of the match and only finishes falling at game over.
+void TestPlaybackFallFromCable() {
+  Wire w;
+  ClientRig blue(1, "t"), red(2, "t");
+  blue.client.OnOpen();
+  red.client.OnOpen();
+  blue.Pump(w);
+  blue.Pump(w);
+  red.Pump(w);
+  blue.Pump(w);
+  red.Pump(w);
+  CHECK(blue.client.status() == net::RemoteClient::Status::Playing);
+  GameLogic& game = blue.game;
+  net::RemoteClient& client = blue.client;
+  const Unit* victim = game.FindUnit(0);
+  const float x = victim->position.x, z = victim->position.z;
+  const float yCable = game.GetScene().ground.HeightAt(x, z) + 3.0f;
+  char round[1024];
+  std::snprintf(
+      round, sizeof(round),
+      R"({"t":"round","duration":7,"frames":[)"
+      R"({"t":0,"u":[[0,%f,%f,%f,0,1,1]]},)"
+      R"({"t":1,"u":[[0,%f,%f,%f,0,0,0]]},)"
+      R"({"t":7,"u":[[0,%f,%f,%f,0,0,0]]}],"shots":[],"tracers":[],)"
+      R"("state":{"round":2,"over":false,"units":[{"id":0,"pos":[%f,%f,%f],"yaw":0,"alive":false}]}})",
+      x, yCable, z, x, yCable, z, x, yCable, z, x, yCable, z);
+  client.OnMessage(round);
+  CHECK(client.playingBack());
+  float maxElapsed = -1.0f;
+  for (int i = 0; i < 400 && client.playingBack(); ++i) {
+    client.Update(1.0f / 30.0f);
+    maxElapsed = std::max(maxElapsed, game.FindUnit(0)->knockdownElapsed);
+  }
+  CHECK(!client.playingBack());
+  const Unit* dead = game.FindUnit(0);
+  CHECK(!dead->alive);
+  CHECK(dead->knockdownDrop > 2.0f);                           // Falls to the real ground.
+  CHECK(maxElapsed > constants::kKnockdownDuration + 1.0f);    // Clock ran past the tip-over.
+  CHECK(dead->knockdownElapsed >= maxElapsed);                 // Round-end state kept the fall.
+}
+
+// Plans a short walk for `unitId` through the local click flow (as the UI
+// would); `radius` varies the destination so re-plans actually differ.
+bool PlanMoveLocally(ClientRig& rig, int unitId, float radius) {
+  const Team team = *rig.client.team();
+  for (int i = 0; i < 16; ++i) {
+    const float ang = i * 0.3927f;
+    const glm::vec3 from = rig.game.FindUnit(unitId)->position;
+    const glm::vec3 dest = from + glm::vec3(std::cos(ang) * radius, 0.0f, std::sin(ang) * radius);
+    rig.game.ClickUnit(unitId, team);
+    rig.game.ChooseMove();
+    rig.game.ClickGround(dest, team);
+    rig.game.FinishMovePlan();
+    if (rig.game.Mode() == InputMode::AwaitingSelection &&
+        rig.game.FindUnit(unitId)->plan.type == PlannedActionType::Move) {
+      return true;
+    }
+    rig.game.CancelAction();
+    rig.game.CancelAction();
+  }
+  return false;
+}
+
+// A "plans" echo that races our own in-flight actions must not revert the
+// fresher local plan (it used to: the stale echo re-applied the old plan,
+// losing edits and making figures "not move" in the committed round).
+void TestStaleEchoDoesNotRevertFreshPlans() {
+  Wire w;
+  ClientRig blue(1, "t"), red(2, "t");
+  blue.client.OnOpen();
+  red.client.OnOpen();
+  for (int i = 0; i < 3; ++i) { blue.Pump(w); red.Pump(w); }
+
+  // Plan A and queue its action, then re-plan to B and queue that too; only
+  // now ship both. The server answers each with an ack + a plans echo, so the
+  // first echo still describes plan A while B's ack is outstanding.
+  CHECK(PlanMoveLocally(blue, 0, 5.0f));
+  blue.client.Update(0.016f);
+  CHECK(PlanMoveLocally(blue, 0, 3.0f));
+  blue.client.Update(0.016f);
+  const glm::vec3 wantedDest = blue.game.FindUnit(0)->plan.movePath.back();
+  for (const auto& t : blue.client.TakeOutgoing()) w.Send(1, t);
+  CHECK(w.inbox[1].size() >= 4);  // ackA, plansA, ackB, plansB.
+
+  // Deliver only ackA + the stale plansA echo: plan B must survive.
+  blue.client.OnMessage(w.inbox[1][0]);
+  blue.client.OnMessage(w.inbox[1][1]);
+  CHECK(blue.game.FindUnit(0)->plan.type == PlannedActionType::Move);
+  CHECK(glm::distance(blue.game.FindUnit(0)->plan.movePath.back(), wantedDest) < 0.05f);
+
+  // The rest converges on B.
+  for (size_t i = 2; i < w.inbox[1].size(); ++i) blue.client.OnMessage(w.inbox[1][i]);
+  w.inbox[1].clear();
+  CHECK(glm::distance(blue.game.FindUnit(0)->plan.movePath.back(), wantedDest) < 0.05f);
+}
+
+// A plans echo must not interrupt a unit that is being edited right now (it
+// used to cancel the selection and re-apply the old plan: "kicked out of
+// planning mode").
+void TestEchoDoesNotInterruptEditing() {
+  Wire w;
+  ClientRig blue(1, "t"), red(2, "t");
+  blue.client.OnOpen();
+  red.client.OnOpen();
+  for (int i = 0; i < 3; ++i) { blue.Pump(w); red.Pump(w); }
+
+  // Plan unit 0 and fully sync it to the server.
+  CHECK(PlanMoveLocally(blue, 0, 5.0f));
+  blue.client.Update(0.016f);
+  blue.Pump(w);
+  blue.Pump(w);
+  CHECK(blue.game.FindUnit(0)->plan.type == PlannedActionType::Move);
+
+  // Start re-editing it: selection + move mode, plan cleared locally.
+  blue.game.ClickUnit(0, Team::Blue);
+  blue.game.ChooseMove();
+  CHECK(blue.game.Mode() == InputMode::AwaitingMoveDestination);
+
+  // Provoke a server echo (a validated no-op on another unit) and deliver it.
+  w.Send(1, R"({"t":"focus","unit":1,"seq":500})");
+  blue.Pump(w);
+  CHECK(blue.game.Mode() == InputMode::AwaitingMoveDestination);
+  CHECK(blue.game.SelectedUnitId() && *blue.game.SelectedUnitId() == 0);
+
+  // Finish the edit; the new plan syncs and sticks across further echoes.
+  CHECK(PlanMoveLocally(blue, 0, 3.0f));
+  const glm::vec3 dest = blue.game.FindUnit(0)->plan.movePath.back();
+  blue.client.Update(0.016f);
+  blue.Pump(w);
+  blue.Pump(w);
+  CHECK(glm::distance(blue.game.FindUnit(0)->plan.movePath.back(), dest) < 0.05f);
+}
+
+// Commit locks planning: the button state (CommitLocked) flips immediately,
+// locked clients ship no more plan edits, the server refuses late edits, and
+// the round unlocks everything again.
+void TestCommitLockHandshake() {
+  Wire w;
+  ClientRig blue(1, "t"), red(2, "t");
+  blue.client.OnOpen();
+  red.client.OnOpen();
+  for (int i = 0; i < 3; ++i) { blue.Pump(w); red.Pump(w); }
+  PlanAllLocally(blue);
+  PlanAllLocally(red);
+  blue.client.Update(0.016f);
+  red.client.Update(0.016f);
+  for (int i = 0; i < 2; ++i) { blue.Pump(w); red.Pump(w); }
+
+  CHECK(!blue.client.CommitLocked());
+  blue.client.RequestCommit();
+  CHECK(blue.client.CommitLocked());  // Greys out before any server reply.
+  blue.Pump(w);
+  blue.Pump(w);
+  CHECK(blue.client.selfReady() && blue.client.CommitLocked());
+
+  // Locked: local mirror changes are not shipped any more.
+  blue.game.FindUnit(0)->plan.type = PlannedActionType::Pass;
+  blue.client.Update(0.016f);
+  CHECK(blue.client.TakeOutgoing().empty());
+
+  // ...and the server refuses a late edit outright, staying ready.
+  w.Send(1, R"({"t":"pass","unit":1,"seq":900})");
+  bool nacked = false;
+  for (const Json& m : w.Drain(1)) {
+    if (m["t"].AsString() == "ack") nacked = !m["ok"].AsBool(true);
+  }
+  CHECK(nacked);
+
+  // The opponent's commit runs the round and unlocks both sides.
+  red.client.RequestCommit();
+  red.Pump(w);
+  blue.Pump(w);
+  red.Pump(w);
+  for (int i = 0; i < 600 && (blue.client.playingBack() || red.client.playingBack()); ++i) {
+    blue.client.Update(1.0f / 30.0f);
+    red.client.Update(1.0f / 30.0f);
+  }
+  CHECK(!blue.client.CommitLocked() && !blue.client.selfReady());
+  CHECK(!red.client.CommitLocked() && !red.client.selfReady());
+}
+
+void TestRejectedActionResyncs() {
+  Wire w;
+  ClientRig blue(1, "t"), red(2, "t");
+  blue.client.OnOpen();
+  red.client.OnOpen();
+  for (int i = 0; i < 3; ++i) { blue.Pump(w); red.Pump(w); }
+  // Forge an out-of-range plan locally; the client queues it as an action.
+  Unit* u = blue.game.FindUnit(0);
+  u->plan.type = PlannedActionType::Move;
+  u->plan.movePath = {u->position, u->position + glm::vec3(900.0f, 0.0f, 0.0f)};
+  blue.client.Update(0.016f);
+  blue.Pump(w);  // Sends the forged action; the server nacks and replies with its plans.
+  blue.Pump(w);
+  CHECK(blue.game.FindUnit(0)->plan.type == PlannedActionType::None);  // Authoritative plan restored.
+}
+
+// ---- Real sockets ----
+
+int ConnectLoopback(uint16_t port) {
+  const int fd = socket(AF_INET, SOCK_STREAM, 0);
+  sockaddr_in a{};
+  a.sin_family = AF_INET;
+  a.sin_port = htons(port);
+  inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+  if (connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof a) != 0) return -1;
+  return fd;
+}
+
+void SendAll(int fd, const std::string& s) { CHECK(send(fd, s.data(), s.size(), 0) == (ssize_t)s.size()); }
+
+// Pumps the server while reading from fd until `needle` shows up (or time out).
+std::string ReadUntil(server::Server& srv, int fd, const std::string& needle, std::string* acc) {
+  for (int i = 0; i < 200 && acc->find(needle) == std::string::npos; ++i) {
+    srv.RunOnce(10);
+    char buf[8192];
+    const ssize_t n = recv(fd, buf, sizeof buf, MSG_DONTWAIT);
+    if (n > 0) acc->append(buf, static_cast<size_t>(n));
+  }
+  return *acc;
+}
+
+void TestRealSocketLoopback() {
+  server::ServerConfig cfg;
+  cfg.port = 0;
+  cfg.bindAddress = "127.0.0.1";
+  server::Server srv(cfg);
+  std::string err;
+  CHECK(srv.Listen(&err));
+  const uint16_t port = srv.port();
+  CHECK(port != 0);
+
+  // Health endpoint.
+  int h = ConnectLoopback(port);
+  SendAll(h, "GET /health HTTP/1.1\r\nHost: x\r\n\r\n");
+  std::string hb;
+  ReadUntil(srv, h, "ok", &hb);
+  CHECK(hb.find("200 OK") != std::string::npos);
+  close(h);
+
+  const std::string handshake =
+      "GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+      "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+  int a = ConnectLoopback(port), b = ConnectLoopback(port);
+  SendAll(a, handshake);
+  SendAll(b, handshake);
+  std::string ra, rb;
+  ReadUntil(srv, a, "\r\n\r\n", &ra);
+  ReadUntil(srv, b, "\r\n\r\n", &rb);
+  CHECK(ra.find("101 Switching Protocols") != std::string::npos);
+  CHECK(ra.find("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") != std::string::npos);
+
+  SendAll(a, MaskedFrame(ws::Opcode::Text, R"({"t":"join","room":"loop"})"));
+  ReadUntil(srv, a, "waiting", &ra);
+  CHECK(ra.find("waiting") != std::string::npos);
+  SendAll(b, MaskedFrame(ws::Opcode::Text, R"({"t":"join","room":"loop"})"));
+  ReadUntil(srv, a, "\"team\":\"blue\"", &ra);
+  ReadUntil(srv, b, "\"team\":\"red\"", &rb);
+  CHECK(ra.find("\"team\":\"blue\"") != std::string::npos);
+  CHECK(rb.find("\"team\":\"red\"") != std::string::npos);
+
+  // Ping gets a pong; closing one side tells the other.
+  SendAll(a, MaskedFrame(ws::Opcode::Ping, "x"));
+  std::string before = ra;
+  for (int i = 0; i < 50; ++i) {
+    srv.RunOnce(10);
+    char buf[4096];
+    const ssize_t n = recv(a, buf, sizeof buf, MSG_DONTWAIT);
+    if (n > 0) ra.append(buf, static_cast<size_t>(n));
+  }
+  CHECK(ra.size() > before.size());
+  close(a);
+  ReadUntil(srv, b, "opponent_left", &rb);
+  CHECK(rb.find("opponent_left") != std::string::npos);
+  close(b);
+
+  // Non-websocket junk and garbage frames don't take the server down.
+  int junk = ConnectLoopback(port);
+  SendAll(junk, "\x01\x02\x03\r\n\r\n");
+  for (int i = 0; i < 20; ++i) srv.RunOnce(5);
+  close(junk);
+  int c = ConnectLoopback(port);
+  SendAll(c, handshake);
+  std::string rc;
+  ReadUntil(srv, c, "\r\n\r\n", &rc);
+  SendAll(c, ws::EncodeFrame(ws::Opcode::Text, "unmasked"));  // Protocol violation.
+  ReadUntil(srv, c, "\x88", &rc);
+  CHECK(rc.find('\x88') != std::string::npos);  // Close frame.
+  close(c);
+  for (int i = 0; i < 20; ++i) srv.RunOnce(5);
+}
+
+}  // namespace
+
+int main() {
+  TestWebSocketPrimitives();
+  TestFrameParser();
+  TestSessionReadyAndRound();
+  TestSessionFogHidesEnemyPlansAndUnits();
+  TestLobbyPairing();
+  TestRoomIntents();
+  TestSpectator();
+  TestJevReplyParsing();
+  TestHttpUrlParsing();
+  TestHttpPostLoopback();
+  TestBotModesNeedAdapter();
+  TestBlueVsJev();
+  TestJevVsJev();
+  TestBotRoomLimit();
+  TestControlTapScenarioRoom();
+  TestClientServerRound();
+  TestPlaybackFallFromCable();
+  TestStaleEchoDoesNotRevertFreshPlans();
+  TestEchoDoesNotInterruptEditing();
+  TestCommitLockHandshake();
+  TestRejectedActionResyncs();
+  TestRealSocketLoopback();
+  if (g_failures == 0) {
+    std::printf("All server tests passed.\n");
+    return 0;
+  }
+  std::fprintf(stderr, "%d check(s) failed.\n", g_failures);
+  return 1;
+}

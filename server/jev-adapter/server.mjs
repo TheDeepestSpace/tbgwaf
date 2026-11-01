@@ -203,9 +203,10 @@ export function createJevAdapter({ env = process.env, choose = chooseWithJev, lo
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = integerEnv(process.env, "PORT", 8787, 1, 65535);
   const server = createJevAdapter();
-  server.listen(port, "0.0.0.0", () => {
+  const host = process.env.TBGWAF_JEV_BIND || "0.0.0.0";
+  server.listen(port, host, () => {
     // Configuration only; never include request headers or the API key.
-    console.info(`tbgwaf Jev adapter listening on port ${port}`);
+    console.info(`tbgwaf Jev adapter listening on ${host}:${port}`);
   });
 }
 

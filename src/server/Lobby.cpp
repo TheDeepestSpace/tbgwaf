@@ -45,6 +45,10 @@ void Lobby::OnMessage(int conn, const std::string& text) {
     SendError(conn, "malformed message");
     return;
   }
+  if (message["t"].IsString() &&
+      HandleSceneMessage(conn, message["t"].AsString(), message)) {
+    return;
+  }
   auto it = members_.find(conn);
   if (it == members_.end()) {
     if (message["t"].IsString() && message["t"].AsString() == "join") {
@@ -55,6 +59,53 @@ void Lobby::OnMessage(int conn, const std::string& text) {
     return;
   }
   HandleAction(conn, it->second, message);
+}
+
+bool Lobby::HandleSceneMessage(int conn, const std::string& type, const Json& message) {
+  if (type != "scenes_list" && type != "scene_put" && type != "scene_delete") return false;
+  if (!sceneStore_) {
+    SendError(conn, "scene storage is not available");
+    return true;
+  }
+  std::string error;
+  if (type == "scenes_list") {
+    Json list = Typed("scenes");
+    Json::Array scenes;
+    for (const SceneStore::Entry& entry : sceneStore_->List()) {
+      Json item;
+      item.Set("id", entry.id);
+      item.Set("scene", entry.scene);
+      scenes.push_back(std::move(item));
+    }
+    list.Set("scenes", Json(std::move(scenes)));
+    Send(conn, list);
+    return true;
+  }
+  const Json& id = message["id"];
+  if (!id.IsString()) {
+    SendError(conn, "scene id required");
+    return true;
+  }
+  if (type == "scene_put") {
+    if (!message["scene"].IsString()) {
+      SendError(conn, "scene required");
+    } else if (!sceneStore_->Put(id.AsString(), message["scene"].AsString(), &error)) {
+      SendError(conn, error);
+    } else {
+      Json saved = Typed("scene_saved");
+      saved.Set("id", id.AsString());
+      Send(conn, saved);
+    }
+    return true;
+  }
+  if (!sceneStore_->Delete(id.AsString(), &error) && !error.empty()) {
+    SendError(conn, error);
+  } else {
+    Json deleted = Typed("scene_deleted");
+    deleted.Set("id", id.AsString());
+    Send(conn, deleted);
+  }
+  return true;
 }
 
 std::string Lobby::NewRoomCode() {

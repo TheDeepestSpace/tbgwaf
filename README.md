@@ -193,8 +193,7 @@ snapshot text protocol (`ExportState`/`ImportState`).
 ### Builder
 
 Game Mode → **Builder** shows one card per scene you have built (a rendered
-thumbnail and its name; scenes live in memory for the session, and the first
-card is a sample) plus a **New Scene** card. Opening one enters the editor: a
+thumbnail and its name; the first card is a sample) plus a **New Scene** card. Opening one enters the editor: a
 medium flat field (40 x 40) in 3D with a side panel to rename the scene, add
 cubes and edit their position, size and height, and add Blue/Red figures and
 pick each one's gun (Desert Eagle, Assault Rifle, Sniper Rifle). Drag a
@@ -213,6 +212,15 @@ every hash; `TBGWAF_REPRO_LOG=<log.jsonl> build/tactics_app` loads it into the
 app onto the turn timeline. On the web each canvas reaches the Builder from
 its own menu; a builder session is local to that canvas (it neither sends nor
 applies the two-canvas sync messages until it returns to Game Mode).
+**Scene storage:** when a game server is configured (web build), the Builder
+keeps scenes on the server instead of in memory: it fetches the list on entering
+the Builder, saves a scene when you leave its editor (Back or Start) and deletes
+it there with the card's Delete; an empty server is seeded with the sample.
+Without a server (native build) scenes live in memory for the session. The
+server (`scenes_list` / `scene_put` / `scene_delete` in `src/net/Protocol.h`)
+writes one JSON file per scene (max 100) under `TBGWAF_SCENES_DIR` (set in the
+server image; mount a volume there to survive machine restarts) and is
+memory-only when it is unset.
 The fixed demo scenes of issue #240 (registry in `src/game/DemoScenes.cpp`)
 are no longer listed in the app, but their logs still replay and scenario
 YAML can still pin one with `map: {demo_scene: <id>}`

@@ -42,6 +42,7 @@
 #include "gfx/SceneRenderer.h"
 #include "net/RemoteClient.h"
 #include "AppFlow.h"
+#include "net/BuilderSceneSync.h"
 #include "ui/BuilderPanel.h"
 #include "ui/Hud.h"
 #include "ui/Menu.h"
@@ -796,6 +797,11 @@ int main() {
   std::vector<tactics::BuilderScene> builderScenes = {MakeSampleBuilderScene()};
   std::vector<GLuint> builderThumbnails(builderScenes.size(), 0);
   std::vector<bool> builderThumbnailDirty(builderScenes.size(), true);
+  // With a game server configured the scenes are stored there (see
+  // net::BuilderSceneSync): the id each scene has on the server ("" = not
+  // stored yet), kept parallel to builderScenes.
+  tactics::net::BuilderSceneSync sceneSync;
+  std::vector<std::string> builderSceneIds(builderScenes.size());
   int builderIndex = -1;          // Scene open in the editor / played.
   bool builderGameActive = false;  // Gameplay was entered via start_builder_game.
   std::string builderLogSceneId;   // Scene id of the recorder's current log.
@@ -813,15 +819,20 @@ int main() {
   bool builderDragRotate = false;    // Shift held on grab: the drag turns the figure instead.
   glm::vec2 builderDragBoxGrab(0.0f);  // Cube center minus grab point (XZ).
   float builderDragPlaneY = 0.0f;    // Height of the plane the cube is dragged along.
-  auto addBuilderScene = [&](tactics::BuilderScene bs) {
+  auto addBuilderScene = [&](tactics::BuilderScene bs, std::string id = "") {
     builderScenes.push_back(std::move(bs));
+    builderSceneIds.push_back(std::move(id));
     builderThumbnails.push_back(0);
     builderThumbnailDirty.push_back(true);
     return static_cast<int>(builderScenes.size()) - 1;
   };
   auto deleteBuilderScene = [&](int index) {
     if (builderThumbnails[index] != 0) glDeleteTextures(1, &builderThumbnails[index]);
+    if (!builderSceneIds[index].empty() && !sceneSync.Remove(builderSceneIds[index])) {
+      builderStatus = "Server not connected: scene not deleted there";
+    }
     builderScenes.erase(builderScenes.begin() + index);
+    builderSceneIds.erase(builderSceneIds.begin() + index);
     builderThumbnails.erase(builderThumbnails.begin() + index);
     builderThumbnailDirty.erase(builderThumbnailDirty.begin() + index);
     if (builderIndex == index) builderIndex = -1;
@@ -916,6 +927,64 @@ int main() {
       if (const Unit* selected = game.FindUnit(*selectedId)) return selected->team;
     }
     return Team::Blue;
+  };
+  // Server-stored Builder scenes (web build, game server configured): the
+  // Builder keeps a short-lived socket to the server while its screens are
+  // up. The local scenes start empty and fill from the server's list (an
+  // empty store is seeded with the sample scene).
+  std::mt19937_64 sceneIdRng{std::random_device{}()};
+  [[maybe_unused]] bool sceneSocketOpen = false;  // Web build only.
+  bool sceneListSeeded = false;
+  [[maybe_unused]] std::optional<std::vector<tactics::net::BuilderSceneSync::Stored>>
+      pendingServerScenes;
+  if (!onlineServerUrl.empty()) {
+    for (GLuint texture : builderThumbnails) {
+      if (texture != 0) glDeleteTextures(1, &texture);
+    }
+    builderScenes.clear();
+    builderSceneIds.clear();
+    builderThumbnails.clear();
+    builderThumbnailDirty.clear();
+  }
+  // Stores scene `index` on the server (no-op without one). An editing
+  // session's changes are saved when the editor is left.
+  auto saveBuilderScene = [&](int index) {
+    if (onlineServerUrl.empty() || index < 0 || index >= static_cast<int>(builderScenes.size())) {
+      return;
+    }
+    if (builderSceneIds[index].empty()) {
+      builderSceneIds[index] = tactics::net::BuilderSceneSync::NewId(sceneIdRng());
+    }
+    if (!sceneSync.Save(builderSceneIds[index], builderScenes[index])) {
+      builderStatus = "Server not connected: scene not saved";
+    }
+  };
+  // Merges the server's list into the local scenes: the server's copy wins
+  // per id, local scenes the server doesn't have yet are kept and uploaded.
+  [[maybe_unused]] auto applyServerScenes = [&](std::vector<tactics::net::BuilderSceneSync::Stored> stored) {
+    std::vector<tactics::BuilderScene> localScenes = std::move(builderScenes);
+    std::vector<std::string> localIds = std::move(builderSceneIds);
+    for (GLuint texture : builderThumbnails) {
+      if (texture != 0) glDeleteTextures(1, &texture);
+    }
+    builderScenes.clear();
+    builderSceneIds.clear();
+    builderThumbnails.clear();
+    builderThumbnailDirty.clear();
+    builderIndex = -1;
+    for (auto& entry : stored) addBuilderScene(std::move(entry.scene), entry.id);
+    std::vector<int> toUpload;
+    for (size_t i = 0; i < localScenes.size(); ++i) {
+      bool onServer = false;
+      for (const auto& entry : stored) onServer = onServer || entry.id == localIds[i];
+      if (onServer && !localIds[i].empty()) continue;
+      toUpload.push_back(addBuilderScene(std::move(localScenes[i]), localIds[i]));
+    }
+    if (builderScenes.empty() && !sceneListSeeded) {
+      toUpload.push_back(addBuilderScene(MakeSampleBuilderScene()));
+    }
+    sceneListSeeded = true;
+    for (int index : toUpload) saveBuilderScene(index);
   };
   auto paneTeam = [&](int pane) {
     if (builderGameActive) return hotseatTeam();
@@ -1159,6 +1228,46 @@ int main() {
       return mode != InputMode::Executing && mode != InputMode::GameOver;
     };
 #ifdef __EMSCRIPTEN__
+    if (!onlineServerUrl.empty() && !remoteMode) {
+      const bool wantSceneSocket = inBuilderFlow(screen);
+      if (wantSceneSocket && !sceneSocketOpen) {
+        tbgwaf_ws_open(onlineServerUrl.c_str());
+        sceneSocketOpen = true;
+      }
+      while (sceneSocketOpen) {
+        char* raw = tbgwaf_ws_next();
+        if (!raw) break;
+        const std::string event(raw);
+        std::free(raw);
+        if (event == "O") {
+          sceneSync.OnOpen();
+        } else if (event == "C") {
+          sceneSync.OnClose();
+          sceneSocketOpen = false;
+        } else if (event.size() > 1 && event[0] == 'M') {
+          if (sceneSync.OnMessage(event.substr(1))) {
+            std::vector<tactics::net::BuilderSceneSync::Stored> stored;
+            if (sceneSync.TakeLoaded(&stored)) pendingServerScenes = std::move(stored);
+          } else if (!sceneSync.lastError().empty()) {
+            builderStatus = "Server: " + sceneSync.lastError();
+          }
+        }
+      }
+      // Apply a fresh list on the Builder screen only (never under the editor).
+      if (pendingServerScenes && screen == tbgwaf_flow::State::Builder) {
+        applyServerScenes(std::move(*pendingServerScenes));
+        pendingServerScenes.reset();
+      }
+      if (sceneSocketOpen) {
+        for (const std::string& frame : sceneSync.TakeOutgoing()) tbgwaf_ws_send(frame.c_str());
+      }
+      if (!wantSceneSocket && sceneSocketOpen) {
+        tbgwaf_ws_close();
+        sceneSync.OnClose();
+        sceneSocketOpen = false;
+        pendingServerScenes.reset();
+      }
+    }
     if (remoteMode) {
       while (char* raw = tbgwaf_ws_next()) {
         const std::string event(raw);
@@ -1496,10 +1605,12 @@ int main() {
             !problems.empty()) {
           std::fprintf(stderr, "builder scene not startable: %s\n", problems.front().c_str());
         }
+        saveBuilderScene(builderIndex);
         startBuilderGame(builderIndex);
         screen = tbgwaf_flow::Next(screen, tbgwaf_flow::Event::StartBuilderGame);
         lastFrameTicks = SDL_GetTicks();
       } else if (editor.back) {
+        saveBuilderScene(builderIndex);
         screen = tbgwaf_flow::Next(screen, tbgwaf_flow::Event::BackToBuilder);
       }
 

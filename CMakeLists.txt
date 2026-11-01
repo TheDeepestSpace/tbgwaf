@@ -112,6 +112,7 @@ add_library(tactics_net STATIC
   src/net/ActionApply.cpp
   src/net/RemoteClient.cpp
   src/net/SceneSpec.cpp
+  src/net/BuilderSceneSync.cpp
 )
 target_include_directories(tactics_net PUBLIC src)
 target_link_libraries(tactics_net PUBLIC tactics_logic glm::glm)
@@ -314,6 +315,7 @@ else()
       src/server/HttpClient.cpp
       src/server/JevBot.cpp
       src/server/Lobby.cpp
+      src/server/SceneStore.cpp
       src/server/WebSocket.cpp
       src/server/Server.cpp
     )

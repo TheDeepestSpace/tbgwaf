@@ -1934,8 +1934,13 @@ int main() {
 #endif
     // Builder hotseat: one screen plays both teams, so nothing is fogged and
     // both teams' FOV cones are drawn (the spectator view's rendering).
-    const bool fogActive =
-        !spectator && !builderHotseat && displayGame.Mode() != InputMode::GameOver;
+    // Once the live match is over (any mode), full information is revealed,
+    // replay included: both teams' movements and FOV (issue #284). Keyed on
+    // the live game so a replay scrubbed to an earlier moment stays revealed,
+    // while nothing leaks during play. Render-only.
+    const bool matchOver = game.Mode() == InputMode::GameOver;
+    const bool fogActive = !spectator && !builderHotseat && !matchOver &&
+                           displayGame.Mode() != InputMode::GameOver;
     // The team whose plan the shared selection/preview overlays currently
     // belong to (only one figure is ever mid-selection at a time).
     std::optional<Team> selectedTeam;
@@ -2242,7 +2247,7 @@ int main() {
       if (hasHoveredGroundPoint && !replayActive) hover = hoveredGroundPoint;
       gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(displayGame, paneTeam(pane), hover);
       if (showNavMeshDebug) overlays.navMeshDebug = &navMeshDebug;
-      overlays.spectatorFov = spectator || builderHotseat;
+      overlays.spectatorFov = spectator || builderHotseat || matchOver;
       renderer.RenderPane(displayGame, paneTeam(pane), fogActive, paneVisibility[pane],
                           cameras[pane], rect.x, 0, rect.width, windowHeight, overlays, 0,
                           debugOptions);

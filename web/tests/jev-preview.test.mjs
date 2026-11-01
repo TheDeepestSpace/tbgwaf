@@ -153,3 +153,74 @@ test("surfaces invalid responses and timeout failures for retry or fallback", as
   await timedOut.requestDecision("red", payload);
   assert.deepEqual(timedOutRed.tbgwafAiInbox, ["E r1-t1-n1"]);
 });
+
+// ---- Server-hosted Jev (the server plans; the page only relays controls) ----
+
+function socketStub() {
+  const listeners = [];
+  return {
+    readyState: 1,
+    sent: [],
+    send(text) { this.sent.push(JSON.parse(text)); },
+    addEventListener(type, fn) { if (type === "message") listeners.push(fn); },
+    deliver(message) { for (const fn of listeners) fn({ data: JSON.stringify(message) }); },
+  };
+}
+
+test("server-hosted Jev: no browser planning, controls go to the server", () => {
+  const controller = new JevPreviewController({ documentRef: null, serverMode: true });
+  const spectator = { tbgwafAiInbox: [], tbgwafWs: socketStub() };
+  controller.mode = "ai-v-ai";
+  controller.registerModule("blue", spectator);
+  controller.setMode("ai-v-ai");
+  assert.equal(spectator.tbgwafAI, false);
+  assert.equal(spectator.tbgwafAutoCommit, false);
+  controller.watchServer(spectator);
+
+  const socket = spectator.tbgwafWs;
+  controller.start();
+  controller.pause();
+  controller.retry();
+  controller.useFallback();
+  assert.deepEqual(socket.sent, [
+    { t: "bot_control", run: true },
+    { t: "bot_control", run: false },
+    { t: "bot_control", retry: true },
+    { t: "bot_control", fallback: true },
+  ]);
+});
+
+test("server-hosted Jev: mirrors the server's bots status", () => {
+  const controller = new JevPreviewController({ documentRef: null, serverMode: true });
+  const blue = { tbgwafAiInbox: [], tbgwafWs: socketStub() };
+  controller.mode = "player-v-ai";
+  controller.registerModule("blue", blue);
+  controller.watchServer(blue);
+
+  blue.tbgwafWs.deliver({ t: "bots", mode: "player-v-ai", running: true, thinking: ["red"], error: "", fallback: false });
+  assert.deepEqual(controller.serverThinking, ["red"]);
+  assert.equal(controller.paused, false);
+  blue.tbgwafWs.deliver({ t: "bots", mode: "player-v-ai", running: true, thinking: [], error: "Red: Jev adapter returned HTTP 503", fallback: false });
+  assert.equal(controller.lastError, "Red: Jev adapter returned HTTP 503");
+  blue.tbgwafWs.deliver({ t: "plans", plans: [] });  // Other traffic is ignored.
+  blue.tbgwafWs.deliver({ t: "bots", mode: "player-v-ai", running: true, thinking: [], error: "", fallback: true });
+  assert.equal(controller.lastError, "");
+  assert.equal(controller.fallback, true);
+
+  controller.mode = "ai-v-ai";
+  blue.tbgwafWs.deliver({ t: "bots", mode: "ai-v-ai", running: false, thinking: [], error: "", fallback: false });
+  assert.equal(controller.paused, true);
+});
+
+test("server-hosted Jev never calls the proxy", async () => {
+  let calls = 0;
+  const controller = new JevPreviewController({
+    documentRef: null, serverMode: true, endpoint: "http://adapter",
+    fetchImpl: async () => { calls += 1; return okChoice(); },
+  });
+  const red = moduleStub();
+  controller.registerModule("red", red);
+  controller.setMode("player-v-ai");
+  await controller.requestDecision("red", payload);
+  assert.equal(calls, 0);
+});

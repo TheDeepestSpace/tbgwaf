@@ -1892,7 +1892,12 @@ void GameLogic::ResolvePendingShots() {
                          const float next =
                              shot.startTime +
                              shot.shotsFired * StatsOf(shooter->weapon).shotIntervalSeconds;
-                         return next >= constants::kRoundDuration;
+                         if (next < constants::kRoundDuration) return false;
+                         // A reaction burst whose next shot falls past the
+                         // window still occupies the weapon until then: no
+                         // fresh burst may fire before `next` (issue #278).
+                         if (shot.reaction) reactionNextShotAt_[shot.shooterId] = next;
+                         return true;
                        }
                        if (shot.hasAimPoint) return false;
                        const Unit* target = FindUnit(shot.targetId);

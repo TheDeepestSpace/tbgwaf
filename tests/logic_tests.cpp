@@ -121,6 +121,43 @@ void TestNavMeshRoutesAroundObstacle() {
   CHECK(path.size() > 2);
 }
 
+// Two diamond (45-degree) footprints with a gap between their tips. The
+// padded AABBs cover the corridor flanking the gap, but ground pathing treats
+// it as free, so the mesh cells (and the debug overlay) must cover it too.
+void TestNavMeshCellsCoverThinLedgeBetweenRotatedFootprints() {
+  auto diamond = [](float cz) {
+    Obstacle o;
+    o.bounds = AABB{glm::vec3(-3.0f, 0.0f, cz - 3.0f), glm::vec3(3.0f, 3.0f, cz + 3.0f)};
+    o.footprint = {{0.0f, cz - 3.0f}, {3.0f, cz}, {0.0f, cz + 3.0f}, {-3.0f, cz}};
+    return o;
+  };
+  // Tips at z = -1 and z = +1.
+  const std::vector<Obstacle> obstacles = {diamond(-4.0f), diamond(4.0f)};
+  NavMesh nav;
+  nav.Build(obstacles, /*mapHalfExtent=*/12.0f, /*agentRadius=*/0.4f);
+
+  const glm::vec3 start(-9.0f, 0.0f, 0.0f);
+  const glm::vec3 goal(9.0f, 0.0f, 0.0f);
+  std::vector<glm::vec3> path;
+  CHECK(nav.FindPath(start, goal, &path));
+  // Every sample of the walked path must sit inside a mesh cell.
+  for (size_t i = 0; i + 1 < path.size(); ++i) {
+    for (int k = 0; k <= 20; ++k) {
+      const glm::vec3 p = glm::mix(path[i], path[i + 1], k / 20.0f);
+      bool covered = false;
+      for (const NavCell& cell : nav.Cells()) covered |= !cell.climbTop && cell.Contains(p.x, p.z);
+      CHECK(covered);
+    }
+  }
+  // Free flank beside the gap, outside the diamonds but inside their AABBs.
+  CHECK(nav.IsWalkable(2.0f, -2.0f));
+  bool flankCovered = false;
+  for (const NavCell& cell : nav.Cells()) flankCovered |= cell.Contains(2.0f, -2.0f);
+  CHECK(flankCovered);
+  // Inside a diamond stays uncovered.
+  for (const NavCell& cell : nav.Cells()) CHECK(!cell.Contains(0.0f, -4.0f));
+}
+
 void TestNavMeshDirectPathWhenUnobstructed() {
   std::vector<AABB> obstacles = {
       AABB{glm::vec3(-2.0f, 0.0f, 5.0f), glm::vec3(2.0f, 2.0f, 9.0f)},
@@ -3464,6 +3501,7 @@ void TestReachFieldManySurfacesPerformance() {
 int main() {
   TestNavMeshRoutesAroundObstacle();
   TestNavMeshDirectPathWhenUnobstructed();
+  TestNavMeshCellsCoverThinLedgeBetweenRotatedFootprints();
   TestNavMeshRejectsPointsInsideObstacle();
   TestNavMeshPathIsTight();
   TestNavMeshClimbsOntoClimbableObstacle();

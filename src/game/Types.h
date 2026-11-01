@@ -263,6 +263,10 @@ inline std::vector<AABB> ObstacleBounds(const std::vector<Obstacle>& obstacles) 
 namespace constants {
 constexpr float kMapHalfExtent = 15.0f;  // Default scene's half-size (~30x30); generated scenes set Scene::mapHalfExtent.
 constexpr float kAgentRadius = 0.4f;     // Padding used to inflate obstacles for the navmesh.
+// Navmesh padding for unseen nav-only walls (terrain cliff edges). They guard
+// a drop, not solid geometry a body could clip into, so a figure may stand at
+// the brink; the thin wall still blocks any path crossing it.
+constexpr float kNavWallPad = 0.1f;
 constexpr float kUnitHalfWidth = 0.35f;
 constexpr float kUnitHeight = 1.8f;
 constexpr float kEyeHeight = 1.5f;

@@ -601,7 +601,12 @@ constexpr float kFlightMargin = 1.5f; // Clear cliff line past a stair's ends.
 // rings and buildings keep a street's setback from the cliff. The low half
 // holds the stairs.
 constexpr float kLevelBand = 6.4f;
-constexpr float kGroundStep = 0.5f;   // Heightfield spacing: sharp steps, narrow flights.
+// Heightfield spacing. A cliff smears over one cell on each side of its step
+// line, and figures may stand anywhere the nav wall's padded band (half-width
+// kNavHalfWidth + constants::kNavWallPad = 0.25) doesn't block, so the smear
+// must fit inside that band or figures near a brink stand on interpolated
+// (sunken) heights.
+constexpr float kGroundStep = 0.25f;
 constexpr float kDeckClearMargin = 8.0f;  // Deck at full height this far either side of a wall it flies over.
 constexpr float kDeckUnderClearance = 2.2f;  // Headroom a deck keeps over any tier beneath it.
 constexpr float kFlatMargin = 9.0f;       // Flat corridor either side of a wall ramped through at grade.
@@ -2090,7 +2095,8 @@ UrbanParcel ToPublicParcel(const Parcel& parcel) {
 constexpr float kMinBuildingArea = 1.0f;
 
 // Appends a prism over `footprint` from the ground (plus `baseLift`) up
-// `height`, tagged with its Building index; returns the obstacle index.
+// `height`, tagged with its Building index; returns the obstacle index, or
+// -1 when the footprint is smaller than `minArea`.
 int AddPolygonBuilding(Scene* scene, std::vector<glm::vec2> footprint, float baseLift,
                        float height, int building, const GroundY& groundY,
                        float minArea = kMinBuildingArea) {
@@ -3225,11 +3231,11 @@ void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
     // Wall gaps where a road ramps through at grade.
     if (w.arteryRamp) {
       w.gaps.push_back(bandInterval(artery.normal, glm::dot(artery.normal, artery.origin),
-                                    c.arteryWidth * 0.5f + 2.7f));
+                                    c.arteryWidth * 0.5f + 0.6f));
     }
     if (plan.hasBranch && w.branchRamp) {
       w.gaps.push_back(bandInterval(branchN, glm::dot(branchN, plan.branch.start),
-                                    plan.branch.width * 0.5f + c.localStreetWidth * 0.4f + 1.1f));
+                                    plan.branch.width * 0.5f + c.localStreetWidth * 0.4f + 0.6f));
     }
 
     // Avenue ramp-throughs were chosen with the street graph: their gaps.
@@ -3421,11 +3427,17 @@ void EmitTerrainCliffs(Scene* scene, const CityPlan& city, const MapGeneratorCon
   // pieces follow the ground on each side; a stretch with no drop (a ramp or
   // landing meeting the level) gets none.
   const auto navWall = [&](glm::vec2 a, glm::vec2 b, glm::vec2 lowOff, glm::vec2 highOff) {
+    if (glm::distance(a, b) < 0.3f) return;
+    constexpr float kNavHalfWidth = 0.15f;
+    // Walls meet at corners (main line to a ramp corridor's or stair's side
+    // piece); grown by their half-width they overlap there instead of
+    // leaving a pinhole a ray or a figure slips through.
+    const glm::vec2 grow = glm::normalize(b - a) * kNavHalfWidth;
+    a -= grow;
+    b += grow;
     const float length = glm::distance(a, b);
-    if (length < 0.3f) return;
     const glm::vec2 dir = (b - a) / length;
     const glm::vec2 n(-dir.y, dir.x);
-    constexpr float kNavHalfWidth = 0.15f;
     const int pieces = std::max(1, static_cast<int>(std::ceil(length / 4.0f)));
     for (int i = 0; i < pieces; ++i) {
       const glm::vec2 p0 = a + dir * (length * i / pieces);

@@ -1494,6 +1494,45 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
 
 // --- Random overpass presence and off-map layouts (issue #130). ---
 
+// Issue #276: overpass columns never stand on a street. Streets under the
+// deck are cut where a column had to be restored to keep spans short, and
+// the result is deterministic per seed.
+void TestOverpassColumnsAvoidStreets() {
+  MapGeneratorConfig config = OldSizeConfig();
+  config.arteryCount = 2;
+  config.elevatedHighway = OverpassMode::On;
+  const auto inside = [](const std::vector<glm::vec3>& poly, glm::vec2 p) {
+    bool in = false;
+    for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) {
+      const glm::vec2 a(poly[i].x, poly[i].z), b(poly[j].x, poly[j].z);
+      if ((a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) {
+        in = !in;
+      }
+    }
+    return in;
+  };
+  for (uint32_t seed = 1; seed <= 25; ++seed) {
+    const Scene scene = GenerateUrbanMap(seed, config);
+    size_t shafts = 0;
+    for (const Obstacle& o : scene.obstacles) {
+      if (o.kind != ObstacleKind::Pier || o.bounds.max.y - o.bounds.min.y < 1.0f) continue;
+      ++shafts;
+      const glm::vec2 center(o.bounds.Center().x, o.bounds.Center().z);
+      for (const RoadSurface& road : scene.roads) {
+        // Ground-level asphalt only: the decks above pass over the shaft.
+        if (road.vertices.empty() || std::fabs(road.vertices[0].y - o.bounds.min.y) > 0.6f) {
+          continue;
+        }
+        CHECK(!inside(road.vertices, center));
+      }
+    }
+    CHECK(shafts > 0);
+    const Scene again = GenerateUrbanMap(seed, config);
+    CHECK(again.obstacles.size() == scene.obstacles.size());
+    CHECK(again.roads.size() == scene.roads.size());
+  }
+}
+
 void TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable() {
   MapGeneratorConfig autoConfig = OldSizeConfig();  // Auto presence + Auto layout.
   autoConfig.features.terrain.mode = FeatureMode::Off;  // Flat: the deck is the only climb.
@@ -2859,6 +2898,7 @@ int main() {
   TestPolygonCollisionLosAndNavigationUseRealFootprint();
   TestForkRailsFollowDeckEdges();
   TestElevatedOverpassRampsPiersAndDistinctLayers();
+  TestOverpassColumnsAvoidStreets();
   TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable();
   TestOverpassLayoutGeometryAndBranchRampOff();
   TestBranchMayRunOffMapWithoutRamp();

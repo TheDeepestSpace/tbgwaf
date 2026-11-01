@@ -46,6 +46,12 @@
 //                              Commit locks the team's plans: further plan
 //                              actions (all but focus) are nacked until the round runs
 //   {"t":"new_match"}          only after game over
+//   Builder scene storage (any connection, before or without a join; see
+//   server/SceneStore.h). Scenes are the Builder's serialized JSON text:
+//   {"t":"scenes_list"}                         -> {"t":"scenes","scenes":[{"id":"..","scene":"<json>"}]}
+//   {"t":"scene_put","id":"..","scene":"<json>"} -> {"t":"scene_saved","id":".."} (create or replace)
+//   {"t":"scene_delete","id":".."}              -> {"t":"scene_deleted","id":".."} (also if absent)
+//                              failures answer {"t":"error","error":".."}
 //
 // Server -> client:
 //   {"t":"waiting","room":"<name>"}

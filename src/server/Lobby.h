@@ -11,6 +11,7 @@
 
 #include "server/GameSession.h"
 #include "server/JevBot.h"
+#include "server/SceneStore.h"
 
 namespace tactics::server {
 
@@ -35,6 +36,9 @@ class Lobby {
     maxBotRooms_ = maxBotRooms;
     pacePlayback_ = pacePlayback;
   }
+  // Enables Builder scene storage (scenes_list / scene_put / scene_delete,
+  // usable by any connection, joined or not). `store` must outlive the Lobby.
+  void SetSceneStore(SceneStore* store) { sceneStore_ = store; }
   // Call every loop iteration: applies finished Jev answers and starts new
   // requests. Cheap when no room has a bot.
   void Tick();
@@ -83,6 +87,8 @@ class Lobby {
   std::string NewRoomCode();  // A code no existing room uses.
   void Join(int conn, const net::Json& message);
   void HandleAction(int conn, Member& member, const net::Json& message);
+  // scenes_list / scene_put / scene_delete; false if `type` is not one of them.
+  bool HandleSceneMessage(int conn, const std::string& type, const net::Json& message);
   void StartMatch(Room& room);
   void SpectatorJoin(int conn, const net::Json& message);
   void CreateBotRoom(int conn, const std::string& name, const std::string& mode);
@@ -102,6 +108,7 @@ class Lobby {
   SendFn send_;
   SeedFn seed_;
   JevBotRunner* bots_ = nullptr;
+  SceneStore* sceneStore_ = nullptr;
   int maxBotRooms_ = 4;
   bool pacePlayback_ = true;
   uint64_t nextRoomId_ = 1;

@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <filesystem>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -19,13 +20,16 @@
 
 #include "game/GameLogic.h"
 #include "game/MapGenerator.h"
+#include "game/BuilderScene.h"
 #include "net/ActionApply.h"
+#include "net/BuilderSceneSync.h"
 #include "net/RemoteClient.h"
 #include "net/SceneSpec.h"
 #include "server/GameSession.h"
 #include "server/HttpClient.h"
 #include "server/JevBot.h"
 #include "server/Lobby.h"
+#include "server/SceneStore.h"
 #include "server/Server.h"
 #include "server/WebSocket.h"
 #include "test_util.h"
@@ -251,6 +255,111 @@ struct Wire {
 bool Has(const std::vector<Json>& msgs, const char* type) {
   for (const Json& m : msgs) if (m["t"].AsString() == type) return true;
   return false;
+}
+
+BuilderScene SampleBuilderScene(const std::string& name) {
+  BuilderScene bs;
+  bs.name = name;
+  BuilderFigure blue, red;
+  blue.team = Team::Blue;
+  blue.x = -5.0f;
+  red.team = Team::Red;
+  red.x = 5.0f;
+  bs.figures = {blue, red};
+  return bs;
+}
+
+void TestSceneStore() {
+  const BuilderScene a = SampleBuilderScene("Yard");
+  const std::string text = SerializeBuilderScene(a);
+  std::string error;
+
+  server::SceneStore memory;
+  CHECK(memory.Put("s1", text, &error));
+  CHECK(!memory.Put("bad id!", text, &error) && !error.empty());
+  CHECK(!memory.Put("../x", text, &error));
+  CHECK(!memory.Put("s2", "{not a scene", &error));
+  CHECK(memory.size() == 1);
+  error.clear();
+  CHECK(!memory.Delete("nope", &error) && error.empty());  // Absent, not a failure.
+
+  // On disk: survives a restart (a new store on the same directory).
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / "tbgwaf_scene_store_test";
+  std::filesystem::remove_all(dir);
+  {
+    server::SceneStore disk(dir.string());
+    CHECK(disk.Put("yard", text, &error));
+    CHECK(disk.Put("gone", text, &error));
+    std::string deleteError;
+    CHECK(disk.Delete("gone", &deleteError));
+  }
+  {
+    server::SceneStore reopened(dir.string());
+    const auto list = reopened.List();
+    CHECK(list.size() == 1 && list[0].id == "yard");
+    BuilderScene back;
+    CHECK(ParseBuilderScene(list[0].scene, &back) && back.name == "Yard");
+  }
+  std::filesystem::remove_all(dir);
+
+  server::SceneStore full;
+  for (size_t i = 0; i < server::SceneStore::kMaxScenes; ++i) {
+    CHECK(full.Put("s" + std::to_string(i), text, &error));
+  }
+  CHECK(!full.Put("one-too-many", text, &error));
+  CHECK(full.Put("s0", text, &error));  // Replacing is fine when full.
+}
+
+void TestLobbySceneStorage() {
+  Wire w;
+  // Without a store the messages are refused (not "send join first").
+  w.Send(1, R"({"t":"scenes_list"})");
+  CHECK(w.Drain(1)[0]["error"].AsString() == "scene storage is not available");
+
+  server::SceneStore store;
+  w.lobby.SetSceneStore(&store);
+  net::BuilderSceneSync sync;
+  sync.OnOpen();
+  const auto relay = [&](int conn) {
+    for (const std::string& frame : sync.TakeOutgoing()) w.Send(conn, frame);
+    for (const auto& t : w.inbox[conn]) sync.OnMessage(t);
+    w.inbox[conn].clear();
+  };
+
+  relay(1);  // scenes_list -> empty.
+  std::vector<net::BuilderSceneSync::Stored> loaded;
+  CHECK(sync.TakeLoaded(&loaded) && loaded.empty());
+
+  const std::string id = net::BuilderSceneSync::NewId(0x123456789abcULL);
+  CHECK(id == "s123456789abc" && server::SceneStore::ValidId(id));
+  CHECK(sync.Save(id, SampleBuilderScene("Roof")));
+  relay(1);
+  CHECK(store.size() == 1);
+
+  // Another connection (never joined a room) sees it, then deletes it.
+  net::BuilderSceneSync other;
+  other.OnOpen();
+  for (const std::string& frame : other.TakeOutgoing()) w.Send(2, frame);
+  for (const auto& t : w.inbox[2]) other.OnMessage(t);
+  w.inbox[2].clear();
+  CHECK(other.TakeLoaded(&loaded) && loaded.size() == 1 && loaded[0].id == id &&
+        loaded[0].scene.name == "Roof");
+  CHECK(other.Remove(id));
+  for (const std::string& frame : other.TakeOutgoing()) w.Send(2, frame);
+  CHECK(store.size() == 0);
+
+  // Bad input is an error, never a crash.
+  w.Send(1, R"({"t":"scene_put","id":"x"})");
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");
+  w.Send(1, R"({"t":"scene_put","id":"x","scene":"junk"})");
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");
+  w.Send(1, R"({"t":"scene_delete"})");
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");
+
+  // Disconnected clients queue nothing.
+  sync.OnClose();
+  CHECK(!sync.Save(id, SampleBuilderScene("x")) && sync.TakeOutgoing().empty());
 }
 
 void TestLobbyPairing() {
@@ -1077,6 +1186,8 @@ int main() {
   TestFrameParser();
   TestSessionReadyAndRound();
   TestSessionFogHidesEnemyPlansAndUnits();
+  TestSceneStore();
+  TestLobbySceneStorage();
   TestLobbyPairing();
   TestRoomIntents();
   TestSpectator();

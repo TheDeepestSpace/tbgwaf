@@ -31,6 +31,7 @@ namespace {
 //   0x1eae1007u   terrain accesses stair flights
 //   0x21b1e5a7u   ziplines         roof/anchor selection
 //   0xa5c47e75u   archetypes       floors, facade variants, setbacks
+//   0x7d1f0b2du   enterable      which parcels are hollow
 //   0x3a55196eu   massing          parapets, roof furniture, awnings
 //   0x51f0a3c9u   facades          door spots, stoops, rear platforms, window grids
 //   0x6c57f00du   furniture        feature presence, then curb-side item stations/kinds
@@ -2605,6 +2606,7 @@ std::vector<Parcel> PlanParcels(const CityPlan& city, const MapGeneratorConfig& 
 // --- Building archetypes (issue #151, roadmap 3.2) -------------------------
 
 constexpr uint32_t kArchetypeStream = 0xa5c47e75u;  // Floors, variants, setbacks.
+constexpr uint32_t kEnterableStream = 0x7d1f0b2du;   // Which parcels are hollow.
 constexpr uint32_t kMassingStream = 0x3a55196eu;    // Parapets, roof furniture, awnings.
 
 // Street-class-weighted kind table, Residential/MixedUse/Office/Commercial/
@@ -4196,12 +4198,157 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
   restoreStreets();
 }
 
+// Street entrance per kind: door size, the chance the entrance gets a raised
+// stoop walk-up (instead of opening straight off the ground), and the chance
+// of a rear door onto the courtyard.
+struct DoorSpec {
+  float width, height, walkUpChance, rearChance;
+};
+DoorSpec DoorSpecFor(BuildingKind kind) {
+  switch (kind) {
+    case BuildingKind::Residential: return {1.2f, 2.2f, 0.55f, 0.60f};
+    case BuildingKind::MixedUse: return {1.6f, 2.6f, 0.10f, 0.70f};
+    case BuildingKind::Office: return {1.8f, 2.6f, 0.35f, 0.40f};
+    case BuildingKind::Commercial: return {5.0f, 4.2f, 0.00f, 0.55f};  // Warehouse loading bay.
+    case BuildingKind::Civic: return {1.8f, 2.8f, 0.50f, 0.30f};
+    case BuildingKind::Garage: return {2.6f, 2.4f, 0.00f, 0.35f};
+  }
+  return {1.2f, 2.2f, 0.3f, 0.5f};
+}
+
+// Hollow building (issue #157): one thin wall Obstacle per footprint edge,
+// the frontage wall split around a doorway (like SplitRun's alleys) with the
+// lintel as a wall piece starting at kDoorHeight, plus a roof slab over the
+// whole footprint (Building::obstacle). False (nothing emitted) when the
+// frontage is too short for a doorway or the footprint is not usable.
+bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, const std::vector<Parcel>& parcels,
+                        float height, int index, const GroundY& groundY, bool halfClosed,
+                        bool rearOpen, Building* b) {
+  constexpr float kWallThickness = 0.3f;
+  constexpr float kRoofThickness = 0.3f;
+  constexpr float kEndMargin = 0.8f;  // Wall left either side of the door.
+  std::vector<glm::vec2> fp = parcel.footprint;
+  if (fp.size() < 3 || PolygonArea(fp) < kMinBuildingArea) return false;
+  if (PolygonSignedArea(fp) < 0.0f) return false;  // Parcels are CCW; don't guess.
+  const size_t n = fp.size();
+  const size_t door = static_cast<size_t>(parcel.frontageEdge) % n;
+  const float doorEdgeLen = glm::distance(fp[door], fp[(door + 1) % n]);
+  // Same per-kind doorway as the solid buildings' painted entrance
+  // (warehouse loading bays stay wide), narrowed to fit short frontages.
+  const DoorSpec spec = DoorSpecFor(b->kind);
+  const float doorWidth = std::min(spec.width, doorEdgeLen - 2.0f * kEndMargin);
+  if (doorWidth < 0.9f) return false;
+  float doorHeight = std::min(spec.height, b->groundFloorHeight - 0.15f);
+  if (doorHeight < constants::kUnitHeight) return false;
+  // A half-shuttered warehouse bay: the roll-up door sits half down, still
+  // passable (never below head height). The facade keeps the full-height
+  // opening; the shutter panel is set back inside it (see below) so the bay
+  // still reads as a door rather than a wall with a gap under it.
+  const float fullDoorHeight = doorHeight;
+  const bool shuttered = halfClosed && b->kind == BuildingKind::Commercial;
+  if (shuttered) doorHeight = std::max(constants::kUnitHeight, 0.5f * doorHeight);
+  // Rear doorway (50/50 via `rearOpen`): the longest edge facing away from the
+  // frontage with open ground behind it (back-to-back parcels share walls).
+  constexpr float kRearDoorWidth = 1.2f, kRearDoorHeight = 2.2f;
+  int rearEdge = -1;
+  float rearScore = 0.0f;
+  if (rearOpen) {
+    const glm::vec2 fd = glm::normalize(fp[(door + 1) % n] - fp[door]);
+    const glm::vec2 frontOut(fd.y, -fd.x);
+    for (size_t e = 0; e < n; ++e) {
+      if (e == door) continue;
+      const glm::vec2 a = fp[e], q = fp[(e + 1) % n];
+      const float len = glm::distance(a, q);
+      if (len < kRearDoorWidth + 2.0f * kEndMargin) continue;
+      const glm::vec2 d = (q - a) / len;
+      const glm::vec2 out(d.y, -d.x);
+      const float facing = -glm::dot(out, frontOut);
+      if (facing < 0.3f) continue;
+      const glm::vec2 s0 = a + d * kEndMargin + out * 0.05f;
+      const glm::vec2 s1 = q - d * kEndMargin + out * 0.05f;
+      const std::vector<glm::vec2> strip = {s0, s1, s1 + out * 0.8f, s0 + out * 0.8f};
+      bool open = true;
+      for (const Parcel& other : parcels) {
+        if (&other == &parcel) continue;
+        if (PolygonsOverlap(strip, other.footprint)) {
+          open = false;
+          break;
+        }
+      }
+      if (open && facing * len > rearScore) {
+        rearScore = facing * len;
+        rearEdge = static_cast<int>(e);
+      }
+    }
+  }
+  for (size_t e = 0; e < n; ++e) {
+    if (glm::distance(fp[e], fp[(e + 1) % n]) < 1e-3f) return false;
+  }
+  constexpr float kMinPiece = 0.01f;
+  const auto addWall = [&](glm::vec2 a, glm::vec2 q, float u0, float u1, float lift, float h) {
+    const glm::vec2 d = glm::normalize(q - a);
+    const glm::vec2 in(-d.y, d.x);
+    const glm::vec2 p0 = a + d * u0, p1 = a + d * u1;
+    AddPolygonBuilding(scene, {p0, p1, p1 + in * kWallThickness, p0 + in * kWallThickness}, lift,
+                       h, index, groundY, kMinPiece);
+  };
+  for (size_t e = 0; e < n; ++e) {
+    const glm::vec2 a = fp[e], q = fp[(e + 1) % n];
+    const float len = glm::distance(a, q);
+    if (static_cast<int>(e) == rearEdge) {
+      const float rearHeight = std::min(kRearDoorHeight, b->groundFloorHeight - 0.15f);
+      const float r0 = 0.5f * (len - kRearDoorWidth), r1 = r0 + kRearDoorWidth;
+      addWall(a, q, 0.0f, r0, 0.0f, height);
+      addWall(a, q, r1, len, 0.0f, height);
+      addWall(a, q, r0, r1, rearHeight, height - rearHeight);
+      b->rearEdge = rearEdge;
+      b->rearU0 = r0;
+      b->rearU1 = r1;
+      continue;
+    }
+    if (e != door) {
+      addWall(a, q, 0.0f, len, 0.0f, height);
+      continue;
+    }
+    const float u0 = 0.5f * (len - doorWidth), u1 = u0 + doorWidth;
+    addWall(a, q, 0.0f, u0, 0.0f, height);
+    addWall(a, q, u1, len, 0.0f, height);
+    if (shuttered && fullDoorHeight - doorHeight > 0.2f) {
+      // Lintel at the full door height; the shutter panel sits recessed
+      // inside the wall's own thickness (no returns, so the wall never looks
+      // thicker around the bay), between the jambs.
+      constexpr float kShutterDepth = 0.12f, kShutterThickness = 0.12f;
+      addWall(a, q, u0, u1, fullDoorHeight, height - fullDoorHeight);
+      const glm::vec2 d = glm::normalize(q - a);
+      const glm::vec2 in(-d.y, d.x);
+      const glm::vec2 p0 = a + d * u0 + in * kShutterDepth, p1 = a + d * u1 + in * kShutterDepth;
+      AddPolygonBuilding(scene, {p0, p1, p1 + in * kShutterThickness, p0 + in * kShutterThickness},
+                         doorHeight, fullDoorHeight - doorHeight, index, groundY, kMinPiece);
+    } else {
+      addWall(a, q, u0, u1, doorHeight, height - doorHeight);  // Lintel.
+    }
+  }
+  // Interior floor slabs under each upper storey (a slab per floor above the
+  // ground one). Overhead, so they never block the ground navmesh.
+  for (size_t f = 1; f < b->floors.size(); ++f) {
+    AddPolygonBuilding(scene, fp, b->floors[f].y0 - kRoofThickness - b->baseY, kRoofThickness,
+                       index, groundY);
+  }
+  b->enterable = true;
+  b->doorWidth = doorWidth;
+  b->doorHeight = doorHeight;
+  b->obstacle = AddPolygonBuilding(scene, fp, height - kRoofThickness, kRoofThickness, index,
+                                   groundY);
+  return b->obstacle >= 0;
+}
+
 // Sidewalk rings, then one Building per parcel: its base prism over the
 // whole footprint and, for a set-back office, the top floor as a second,
 // inset prism standing on it (both tagged with the Building index).
 void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>& parcels,
                    std::vector<Building> buildings, const MapGeneratorConfig& c,
-                   const GroundY& groundY) {
+                   const GroundY& groundY, uint32_t seed) {
+  Rng enterRng(seed ^ kEnterableStream);
   for (const UrbanBlock& block : city.blocks) {
     // Sidewalk ring only: the parcel interior stays at grade. Each block
     // edge owns the convex strip of the block within `sidewalkWidth` of it;
@@ -4277,6 +4424,23 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>
     b.upperObstacle = -1;
     const float height = b.Height();
     const float baseHeight = upper.empty() ? height : height - b.floorHeight;
+    // Drawn for every parcel so the stream never depends on eligibility.
+    const bool wantEnterable = enterRng.Chance(c.enterableChance);
+    const bool halfClosed = enterRng.Chance(c.bayHalfClosedChance);
+    const bool rearOpen = enterRng.Chance(c.rearDoorOpenChance);
+    b.baseY = groundY(PolygonCenter(parcels[i].footprint).x, PolygonCenter(parcels[i].footprint).y);
+    b.floors.clear();
+    for (int f = 0; f < b.floorCount; ++f) {
+      const float y0 = b.baseY + (f == 0 ? 0.0f : b.groundFloorHeight + (f - 1) * b.floorHeight);
+      b.floors.push_back({y0, b.baseY + b.groundFloorHeight + f * b.floorHeight});
+    }
+    b.floors.back().y1 = b.baseY + height;
+    if (wantEnterable && upper.empty() &&
+        EmitHollowBuilding(scene, parcels[i], parcels, height, index, groundY, halfClosed, rearOpen,
+                           &b)) {
+      scene->buildings.push_back(b);
+      continue;
+    }
     b.obstacle = AddPolygonBuilding(scene, parcels[i].footprint, 0.0f, baseHeight, index, groundY);
     if (!upper.empty()) {
       b.upperObstacle =
@@ -4438,7 +4602,7 @@ void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed
       if (frontage > 2.0f) {
         const float trim = 0.4f;
         const glm::vec2 a = fa + along * trim, d = fb - along * trim;
-        const float base = scene->obstacles[b.obstacle].bounds.min.y;
+        const float base = b.baseY;
         const float y0 = base + std::min(b.groundFloorHeight - 0.9f, 3.4f);
         push(MassingDetail::Kind::Awning,
              {a, d, d + outward * kAwningDepth, a + outward * kAwningDepth}, y0,
@@ -4467,24 +4631,6 @@ WindowSpec WindowSpecFor(BuildingKind kind) {
     case BuildingKind::Garage: return {1.1f, 0.8f, 2.2f, 1.6f};  // Open deck slots.
   }
   return {0.9f, 1.2f, 1.1f, 1.0f};
-}
-
-// Street entrance per kind: door size, the chance the entrance gets a raised
-// stoop walk-up (instead of opening straight off the ground), and the chance
-// of a rear door onto the courtyard.
-struct DoorSpec {
-  float width, height, walkUpChance, rearChance;
-};
-DoorSpec DoorSpecFor(BuildingKind kind) {
-  switch (kind) {
-    case BuildingKind::Residential: return {1.2f, 2.2f, 0.55f, 0.60f};
-    case BuildingKind::MixedUse: return {1.6f, 2.6f, 0.10f, 0.70f};
-    case BuildingKind::Office: return {1.8f, 2.6f, 0.35f, 0.40f};
-    case BuildingKind::Commercial: return {5.0f, 4.2f, 0.00f, 0.55f};  // Warehouse loading bay.
-    case BuildingKind::Civic: return {1.8f, 2.8f, 0.50f, 0.30f};
-    case BuildingKind::Garage: return {2.6f, 2.4f, 0.00f, 0.35f};
-  }
-  return {1.2f, 2.2f, 0.3f, 0.5f};
 }
 
 // Evenly spaced pane u-ranges along an edge of length `len`, centered within
@@ -4594,12 +4740,15 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
 
   for (size_t bi = 0; bi < scene->buildings.size(); ++bi) {
     const Building& b = scene->buildings[bi];
+    // Enterable buildings have a real doorway (no painted door, stoop or rear
+    // platform) but still get window panes on their walls.
     const Parcel& parcel = parcels[b.parcel];
     const Obstacle& base = scene->obstacles[b.obstacle];
     const std::vector<glm::vec2>& fp = base.footprint;
     const size_t n = fp.size();
-    const float baseY = base.bounds.min.y;
-    const float baseTop = base.bounds.max.y;
+    // Enterable: `base` is the roof slab, so take the ground and top from the storeys.
+    const float baseY = b.enterable ? b.baseY : base.bounds.min.y;
+    const float baseTop = b.enterable ? b.floors.back().y1 : base.bounds.max.y;
     const std::vector<glm::vec2>& line = buildingLines[b.block];
 
     // Street facades: edges on the block's building line. The frontage is
@@ -4655,6 +4804,12 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
     // Door u-ranges per edge, so the ground-floor window grid skips them.
     std::vector<glm::vec2> doorSpans(n, glm::vec2(0.0f, -1.0f));
 
+    if (b.enterable) {
+      // The doorway EmitHollowBuilding cut (centred); keep its bay clear.
+      const float len = glm::distance(fp[frontage], fp[(frontage + 1) % n]);
+      doorSpans[frontage] = glm::vec2(0.5f * (len - b.doorWidth), 0.5f * (len + b.doorWidth));
+      if (b.rearEdge >= 0) doorSpans[b.rearEdge] = glm::vec2(b.rearU0, b.rearU1);
+    } else {
     // Street entrance on the frontage, with a stoop walk-up for some
     // buildings and straight off the ground for the rest.
     {
@@ -4767,6 +4922,7 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
         doorSpans[rearEdge] = glm::vec2(center - kRearDoorWidth * 0.5f,
                                         center + kRearDoorWidth * 0.5f);
       }
+    }
     }
 
     // Window grids: floorCount x facade length on every street facade, plus
@@ -5178,7 +5334,7 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   std::vector<float> characterRolls;
   const std::vector<Parcel> parcels = PlanParcels(city, c, &rng, &characterRolls);
   EmitBuildings(&scene, city, parcels, PlanBuildings(parcels, characterRolls, seed, c, &rng), c,
-                groundY);
+                groundY, seed);
   EmitSpawns(&scene, city, c, groundY);
   // Facades go before the ziplines so an anchor or cable never lands on a
   // stoop or rear platform (their clearance pass checks the walk surfaces).

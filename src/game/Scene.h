@@ -63,8 +63,8 @@ struct SpawnHints {
   std::optional<glm::vec2> flag;  // Preferred flag spot (map center).
 };
 
-// Visual instance only; each tree also gets a solid navOnly obstacle (see
-// EmitTrees) that blocks movement, sight lines and FOV.
+// Visual instance only; each tree also gets a solid navOnly obstacle
+// (TreeOccluder) that blocks movement, sight lines and FOV.
 // The renderer batches three procedural meshes using these seeded transforms.
 struct TreeDecoration {
   glm::vec3 position{0.0f};
@@ -80,6 +80,13 @@ struct TreeDecoration {
 };
 // Conservative horizontal extent of every procedural canopy, before scaling.
 constexpr float kTreeCanopyRadius = 2.4f;
+
+// The solid, opaque prism standing in for a tree, from the ground to the
+// crown top: blocks movement, LOS and the FOV overlays, never drawn (the
+// instanced tree is the visual). EmitTrees appends one per tree to
+// Scene::obstacles (navOnly); the shadow-map FOV mask casts the same prism
+// so overlay occlusion matches gameplay sight lines exactly.
+Obstacle TreeOccluder(const TreeDecoration& tree);
 
 struct Scene {
   std::vector<Obstacle> obstacles;

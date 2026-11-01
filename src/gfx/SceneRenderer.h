@@ -252,6 +252,10 @@ class SceneRenderer {
   float fovProbeHeight_ = 0.0f;
   Shader fovMaskShader_;
   LitTriangleMesh fovSceneMesh_;
+  // The trees' gameplay occluder prisms (TreeOccluder), casters only: they
+  // block the mask like gameplay LOS, but never receive the tint (the prism
+  // is not drawn, so tinting it would paint mid-air ghosts around trunks).
+  LitTriangleMesh fovTreeMesh_;
   unsigned long long fovSceneKey_ = 0;
   // Each figure's depth maps (and each free-aim sweep sector's) are kept
   // across frames and re-rendered only when its eye, heading or the scene

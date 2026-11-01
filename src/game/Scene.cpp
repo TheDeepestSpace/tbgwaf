@@ -32,6 +32,20 @@ Obstacle MakeObstacle(float centerX, float centerZ, float halfWidthX, float half
 
 }  // namespace
 
+Obstacle TreeOccluder(const TreeDecoration& tree) {
+  Obstacle solid;
+  const float r = 1.4f * tree.scale;
+  const float x = tree.position.x, y = tree.position.y, z = tree.position.z;
+  for (int i = 0; i < 8; ++i) {
+    const float a = 2.0f * kPi * static_cast<float>(i) / 8.0f;
+    solid.footprint.emplace_back(x + r * std::cos(a), z + r * std::sin(a));
+  }
+  solid.bounds.min = {x - r, y, z - r};
+  solid.bounds.max = {x + r, y + 5.0f * tree.scale, z + r};
+  solid.navOnly = true;
+  return solid;
+}
+
 Scene BuildDefaultScene() {
   Scene scene;
 

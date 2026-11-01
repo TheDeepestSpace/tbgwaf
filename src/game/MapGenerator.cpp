@@ -5119,19 +5119,8 @@ void EmitTrees(Scene* scene, const std::vector<UrbanBlock>& blocks,
       tree.variant = rng.Int(0, 2);
       tree.yaw = rng.Float(-kPi, kPi);
       tree.tint = rng.Float(0.88f, 1.12f);
+      scene->obstacles.push_back(TreeOccluder(tree));
       scene->trees.push_back(tree);
-      // Solid and opaque from the ground to the crown top: blocks movement,
-      // LOS and FOV, never drawn (the instanced tree is the visual).
-      Obstacle solid;
-      const float r = 1.4f * tree.scale;
-      for (int i = 0; i < 8; ++i) {
-        const float a = 2.0f * kPi * static_cast<float>(i) / 8.0f;
-        solid.footprint.emplace_back(p.x + r * std::cos(a), p.y + r * std::sin(a));
-      }
-      solid.bounds.min = {p.x - r, y, p.y - r};
-      solid.bounds.max = {p.x + r, y + 5.0f * tree.scale, p.y + r};
-      solid.navOnly = true;
-      scene->obstacles.push_back(std::move(solid));
     }
   }
 }

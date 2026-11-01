@@ -1259,6 +1259,19 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   mesh->SetChunkedMesh(vertices, indices, kCullGridCells);
 }
 
+// Caster-only companion to BuildFovSceneMesh: each tree's gameplay occluder
+// prism (TreeOccluder), so the shadow-map FOV mask is blocked exactly where
+// gameplay LOS is. Kept out of the receiver draw: the prism itself is never
+// lit, so tinting it would paint floating facets around the trunks.
+void BuildFovTreeMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  for (const tactics::TreeDecoration& tree : scene.trees) {
+    AppendPolygonPrism(tactics::TreeOccluder(tree), &vertices, &indices);
+  }
+  mesh->SetChunkedMesh(vertices, indices, kCullGridCells);
+}
+
 // Content hash of the static geometry BuildFovSceneMesh consumes, so the
 // mesh is rebuilt only when the scene actually changes (successive scenes
 // can reuse the same GameLogic address, so an address key won't do).
@@ -1307,6 +1320,12 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
   mix(scene.sidewalks.data(), scene.sidewalks.size() * sizeof(AABB));
   for (const tactics::RoadSurface& s : scene.sidewalkSurfaces) mixVec3s(s.vertices);
   for (const tactics::RoadSurface& s : scene.roads) mixVec3s(s.vertices);
+  // BuildFovTreeMesh input. Generated trees are covered through their solid
+  // obstacles already; this also catches hand-authored trees without one.
+  for (const tactics::TreeDecoration& t : scene.trees) {
+    mix(&t.position, sizeof(t.position));
+    mix(&t.scale, sizeof(t.scale));
+  }
   return h;
 }
 
@@ -2875,6 +2894,7 @@ bool SceneRenderer::Init() {
   streetPropDepthMesh_.Init();
   for (LitTriangleMesh& mesh : streetPropMeshes_) mesh.Init();
   fovSceneMesh_.Init();
+  fovTreeMesh_.Init();
   massingMesh_.Init();
   facadeMesh_.Init();
   deckMesh_.Init();
@@ -2947,6 +2967,7 @@ void SceneRenderer::Destroy() {
   streetFurnitureKey_.clear();
   streetPropKey_.clear();
   fovSceneMesh_.Destroy();
+  fovTreeMesh_.Destroy();
   fovSceneKey_ = 0;
   massingMesh_.Destroy();
   massingKey_ = 0;
@@ -3120,9 +3141,12 @@ int SceneRenderer::AcquireFovMaps(const Unit& unit, int sector, float facingYaw,
                    glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
                    glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f));
     }
-    if (fovSceneMesh_.HasGeometry()) {
+    if (fovSceneMesh_.HasGeometry() || fovTreeMesh_.HasGeometry()) {
       depthShader_.SetMat4("uLightMVP", slot.matrix[half]);
       fovSceneMesh_.DrawVisible(inMap);
+      // Trees block the mask like gameplay LOS (their TreeOccluder prisms),
+      // but are casters only -- see fovTreeMesh_.
+      fovTreeMesh_.DrawVisible(inMap);
     }
   }
   return index;
@@ -3448,6 +3472,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     const unsigned long long sceneKey = FovSceneFingerprint(game.GetScene());
     if (sceneKey != fovSceneKey_) {
       BuildFovSceneMesh(game.GetScene(), &fovSceneMesh_);
+      BuildFovTreeMesh(game.GetScene(), &fovTreeMesh_);
       fovSceneKey_ = sceneKey;
       ++fovMapGeneration_;
     }

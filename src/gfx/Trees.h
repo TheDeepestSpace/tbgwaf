@@ -17,7 +17,9 @@ class Trees {
   void SetTrees(const std::vector<tactics::TreeDecoration>& trees);
   void Draw(const glm::mat4& viewProj, const glm::vec3& lightDir,
             bool thermal, bool blackHot) const;
-  // Sunlight only; deliberately never used by the FOV shadow mask.
+  // Sunlight only. The FOV shadow mask does not cast these meshes: it casts
+  // each tree's gameplay occluder prism instead (BuildFovTreeMesh), so the
+  // overlay matches gameplay LOS rather than the visual silhouette.
   void DrawDepth(const glm::mat4& lightSpace) const;
 
  private:

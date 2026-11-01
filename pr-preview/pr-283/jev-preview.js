@@ -25,6 +25,7 @@ export class JevPreviewController {
     this.paused = false;
     this.fallback = false;
     this.generation = 1;
+    this.ctf = null;  // null: per-mode default; true/false: chosen on the splash.
     this.modules = new Map();
     this.inFlight = new Map();
     this.lastError = "";
@@ -254,7 +255,7 @@ export class JevPreviewController {
     module.tbgwafAI = this.#isAiPlayer(player);
     module.tbgwafAIPaused = this.paused;
     module.tbgwafAIFallback = this.fallback;
-    module.tbgwafDefaultCtf = this.mode === "ai-v-ai" && !this.serverBots;
+    module.tbgwafDefaultCtf = this.ctf ?? (this.mode === "ai-v-ai" && !this.serverBots);
     // Jev vs Jev: the Blue instance renders every figure and both FOVs in one
     // pane; the Red instance keeps simulating off-screen. On a server both
     // Jev clients are fog-limited, so a separate spectator client takes that pane.
@@ -326,6 +327,8 @@ function initialConfiguration() {
   const storedEndpoint = window.localStorage.getItem("tbgwafJevProxy") || "";
   return {
     mode: MODES[params.get("mode")] ? params.get("mode") : "human",
+    // ?ctf=1 / ?ctf=0 from the splash; absent keeps the per-mode default.
+    ctf: params.has("ctf") ? params.get("ctf") === "1" : null,
     endpoint: params.get("jev") || window.TBGWAF_JEV_PROXY_URL || storedEndpoint || DEFAULT_JEV_ENDPOINT,
   };
 }
@@ -377,6 +380,7 @@ function bootstrap() {
   // spectator), so only the human / spectator pane connects. The mode stays
   // selectable in the toolbar: it just reloads into a fresh room.
   const serverJev = Boolean(server) && config.mode !== "human";
+  controller.ctf = config.ctf;
   controller.mode = config.mode;  // serverBots needs it before setMode() below.
   const spectate = Boolean(server) && config.mode === "ai-v-ai";
   let pending = serverJev ? 1 : spectate ? 3 : 2;

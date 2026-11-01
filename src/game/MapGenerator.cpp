@@ -3936,9 +3936,80 @@ void EmitStreetSurfaces(Scene* scene, const CityPlan& city, const MapGeneratorCo
 // (navmesh, collision, LOS, cover); the cap wrapping the underside of the
 // deck is overhead massing, so the ground between bents -- and between twin
 // columns -- stays navigable.
+//
+// A column never stands on a street (the `streetBegin..streetEnd` range of
+// scene->roads). Should that leave a deck span longer than
+// kMaxUnsupportedSpan bent steps (more than one bent missing in a row), the
+// bent nearest the middle of the gap is restored instead and the street
+// under it is cut across the deck's width, so the column stands on bare
+// ground. Both decisions follow only the plan, so they are per map/seed.
 void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, PierForm form,
-               const GroundY& groundY) {
+               const GroundY& groundY, size_t streetBegin, size_t streetEnd) {
   const HighwayPlan& plan = city.highway;
+  // The street asphalt, taken out of scene->roads while piers are placed
+  // (cuts rewrite it) and put back at the end in the same position.
+  std::vector<RoadSurface> streets(
+      std::make_move_iterator(scene->roads.begin() + static_cast<std::ptrdiff_t>(streetBegin)),
+      std::make_move_iterator(scene->roads.begin() + static_cast<std::ptrdiff_t>(streetEnd)));
+  scene->roads.erase(scene->roads.begin() + static_cast<std::ptrdiff_t>(streetBegin),
+                     scene->roads.begin() + static_cast<std::ptrdiff_t>(streetEnd));
+  const auto restoreStreets = [&] {
+    scene->roads.insert(scene->roads.begin() + static_cast<std::ptrdiff_t>(streetBegin),
+                        std::make_move_iterator(streets.begin()),
+                        std::make_move_iterator(streets.end()));
+  };
+  const auto onStreet = [&](const std::vector<glm::vec2>& footprint) {
+    for (const RoadSurface& road : streets) {
+      std::vector<glm::vec2> poly;
+      for (const glm::vec3& v : road.vertices) poly.emplace_back(v.x, v.z);
+      if (poly.size() < 3) continue;
+      if (PolygonSignedArea(poly) < 0.0f) std::reverse(poly.begin(), poly.end());
+      if (PolygonsOverlap(footprint, poly)) return true;
+    }
+    return false;
+  };
+  // Removes the street asphalt inside `cutter` (convex, counter-clockwise).
+  // Each street patch is planar, so the pieces keep its plane.
+  const auto cutStreets = [&](const std::vector<glm::vec2>& cutter) {
+    std::vector<RoadSurface> out;
+    for (RoadSurface& road : streets) {
+      std::vector<glm::vec2> poly;
+      for (const glm::vec3& v : road.vertices) poly.emplace_back(v.x, v.z);
+      if (poly.size() >= 3 && PolygonSignedArea(poly) < 0.0f) std::reverse(poly.begin(), poly.end());
+      if (poly.size() < 3 || !PolygonsOverlap(cutter, poly)) {
+        out.push_back(std::move(road));
+        continue;
+      }
+      // y = a + bx*x + bz*z through the patch's first non-degenerate corner triple.
+      float a = road.vertices[0].y, bx = 0.0f, bz = 0.0f;
+      for (size_t i = 1; i + 1 < road.vertices.size(); ++i) {
+        const glm::vec3 &p0 = road.vertices[0], &p1 = road.vertices[i], &p2 = road.vertices[i + 1];
+        const float det = (p1.x - p0.x) * (p2.z - p0.z) - (p2.x - p0.x) * (p1.z - p0.z);
+        if (std::fabs(det) < 1e-6f) continue;
+        bx = ((p1.y - p0.y) * (p2.z - p0.z) - (p2.y - p0.y) * (p1.z - p0.z)) / det;
+        bz = ((p2.y - p0.y) * (p1.x - p0.x) - (p1.y - p0.y) * (p2.x - p0.x)) / det;
+        a = p0.y - bx * p0.x - bz * p0.z;
+        break;
+      }
+      // Whatever lies outside any one cutter edge survives; peel the
+      // cutter off edge by edge.
+      std::vector<glm::vec2> rest = poly;
+      for (size_t i = 0; i < cutter.size() && rest.size() >= 3; ++i) {
+        const glm::vec2 edge = cutter[(i + 1) % cutter.size()] - cutter[i];
+        const glm::vec2 n(-edge.y, edge.x);
+        const float d = glm::dot(n, cutter[i]);
+        std::vector<glm::vec2> outside = KeepSide(rest, -n, -d);
+        SimplifyPolygon(&outside);
+        if (outside.size() >= 3 && PolygonArea(outside) > 1e-3f) {
+          RoadSurface piece;
+          for (const glm::vec2& q : outside) piece.vertices.emplace_back(q.x, a + bx * q.x + bz * q.y, q.y);
+          out.push_back(std::move(piece));
+        }
+        rest = KeepSide(rest, n, d);
+      }
+    }
+    streets = std::move(out);
+  };
   // Bridge stands march under the high spans, leaving broad navigable
   // ground between bents. None near the on-ramp's merge, where the two
   // slabs overlap.
@@ -3989,7 +4060,9 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
     };
     // One bent at `center`: `deckHalf` is the road's half width, `along` its
     // direction, `deckY` the relative deck lift there.
-    auto addBent = [&](glm::vec2 center, glm::vec2 along, float deckHalf, float deckY) {
+    // `bare` restores a bent over a street: the street is cut away first.
+    auto addBent = [&](glm::vec2 center, glm::vec2 along, float deckHalf, float deckY,
+                       bool bare) {
       const float height = deckY - c.highwayThickness - 0.05f;
       const float shaftHalf = 0.5f * c.pierColumnWidth;
       // Footing + shaft; false where the column can't stand.
@@ -4003,6 +4076,7 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
         std::vector<glm::vec2> footing = ClipModelToMap(
             rect(foot, along, halfAlong + c.pierBaseExtra, halfAcross + c.pierBaseExtra),
             scene->mapHalfExtent);
+        if (!bare && onStreet(footing)) return false;
         std::vector<glm::vec2> shaft = ClipModelToMap(
             rect(foot, along, halfAlong, halfAcross), scene->mapHalfExtent);
         if (shaft.empty()) return false;
@@ -4024,7 +4098,12 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
       } else {
         stood = addColumn(center, shaftHalf, 2.0f * shaftHalf);
       }
-      if (!stood) return;
+      if (!stood) return false;
+      if (bare) {
+        // The street under the bent, across the whole deck width.
+        cutStreets(rect(center, along, 1.0f + c.pierBaseExtra + c.pierColumnWidth,
+                        deckHalf + 1.0f));
+      }
       // The cap joining the column(s) to the deck's underside: overhead
       // massing (drawn, blocks LOS), never a ground obstacle.
       const float underside = groundY(center.x, center.y) + deckY - c.highwayThickness;
@@ -4033,15 +4112,64 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
       cap.footprint = ClipModelToMap(
           rect(center, along, form == PierForm::Twin ? 0.7f : 1.0f, capHalfSpan),
           scene->mapHalfExtent);
-      if (cap.footprint.empty()) return;
+      if (cap.footprint.empty()) return true;
       cap.y0 = underside - c.pierCapDepth;
       cap.y1 = underside - 0.02f;
       scene->massing.push_back(std::move(cap));
+      return true;
     };
     // Bents march outward from the map-spanning corridor's midpoint and
     // continue down any ramps while there is still head clearance below the
     // slab. Always on-map, even when the deck itself runs past the boundary.
     constexpr float kMinClearance = 2.2f;
+    // The longest deck span left between standing bents, in bent steps: one
+    // bent may go missing (a street under it), two in a row may not.
+    constexpr float kMaxUnsupportedSpan = 2.05f;
+    struct Bent {
+      glm::vec2 center, along;
+      float deckHalf, deckY, u;  // u: arc-length along the line.
+      bool stood = false;
+      bool retried = false;  // Already attempted over a street.
+    };
+    // Places one line's bents, then restores any that leave too long a span.
+    const auto placeLine = [&](std::vector<Bent> bents, float step) {
+      for (Bent& b : bents) {
+        b.stood = addBent(b.center, b.along, b.deckHalf, b.deckY, false);
+      }
+      if (bents.empty()) return;
+      // Gaps between standing bents; the ramp ends count as supported, one
+      // step beyond the first and last bent.
+      std::vector<float> supports = {bents.front().u - step};
+      for (const Bent& b : bents) {
+        if (b.stood) supports.push_back(b.u);
+      }
+      supports.push_back(bents.back().u + step);
+      // Restores bents inside (lo, hi) until no span exceeds the maximum.
+      std::function<void(float, float)> resolve = [&](float lo, float hi) {
+        while (hi - lo > kMaxUnsupportedSpan * step) {
+          // The untried bent nearest the middle of the gap.
+          Bent* best = nullptr;
+          for (Bent& b : bents) {
+            if (b.stood || b.retried || b.u <= lo + 1e-3f || b.u >= hi - 1e-3f) continue;
+            if (!best || std::fabs(b.u - 0.5f * (lo + hi)) < std::fabs(best->u - 0.5f * (lo + hi))) {
+              best = &b;
+            }
+          }
+          if (!best) return;
+          best->retried = true;
+          best->stood = true;  // Provisional; cleared if it cannot stand.
+          if (!addBent(best->center, best->along, best->deckHalf, best->deckY, true)) {
+            best->stood = false;
+            continue;
+          }
+          resolve(lo, best->u);
+          resolve(best->u, hi);
+          return;
+        }
+      };
+      for (size_t k = 0; k + 1 < supports.size(); ++k) resolve(supports[k], supports[k + 1]);
+    };
+    std::vector<Bent> arteryBents;
     const float pierLo = plan.artery.sMin + 1.5f;
     const float pierHi = plan.artery.sMax - 1.5f;
     const float mid = 0.5f * (pierLo + pierHi);
@@ -4050,19 +4178,24 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
       const float deckY = ArteryElevationAt(plan, city.terrain, c, s);
       if (deckY < kMinClearance) continue;
       if (plan.hasBranch && std::fabs(s - plan.branch.mergeS) < c.supportSpacing * 0.6f) continue;
-      addBent(plan.artery.origin + plan.artery.dir * s, plan.artery.dir,
-              c.arteryWidth * 0.5f, deckY);
+      arteryBents.push_back({plan.artery.origin + plan.artery.dir * s, plan.artery.dir,
+                             c.arteryWidth * 0.5f, deckY, s});
     }
+    placeLine(std::move(arteryBents), c.supportSpacing);
     if (plan.hasBranch) {
+      std::vector<Bent> branchBents;
+      const float step = c.supportSpacing * 0.75f;
       for (float u = std::max(0.0f, plan.branch.riseStart); u < plan.branch.length - 8.0f;
-           u += c.supportSpacing * 0.75f) {
+           u += step) {
         const float deckY = BranchElevationAt(plan, city.terrain, c, u);
         if (deckY < kMinClearance) continue;
-        addBent(plan.branch.start + plan.branch.dir * u, plan.branch.dir,
-                plan.branch.width * 0.5f, deckY);
+        branchBents.push_back({plan.branch.start + plan.branch.dir * u, plan.branch.dir,
+                               plan.branch.width * 0.5f, deckY, u});
       }
+      placeLine(std::move(branchBents), step);
     }
   }
+  restoreStreets();
 }
 
 // Street entrance per kind: door size, the chance the entrance gets a raised
@@ -5195,8 +5328,9 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   const GroundY groundY = [&](float x, float z) { return scene.ground.HeightAt(x, z); };
   const PierForm pierForm = ResolvePierForm(seed, c);
   EmitHighwaySurfaces(&scene, city, c, pierForm, groundY);
+  const size_t streetBegin = scene.roads.size();
   EmitStreetSurfaces(&scene, city, c);
-  EmitPiers(&scene, city, c, pierForm, groundY);
+  EmitPiers(&scene, city, c, pierForm, groundY, streetBegin, scene.roads.size());
   std::vector<float> characterRolls;
   const std::vector<Parcel> parcels = PlanParcels(city, c, &rng, &characterRolls);
   EmitBuildings(&scene, city, parcels, PlanBuildings(parcels, characterRolls, seed, c, &rng), c,

@@ -5055,7 +5055,17 @@ void EmitTrees(Scene* scene, const std::vector<UrbanBlock>& blocks,
                    !PointInConvexPolygon({p.position.x, p.position.z}, blockInterior);
           });
       if (cornerSign) continue;
-      if (PolygonsOverlap(polygon, ObstacleFootprint(o))) { occupied = true; break; }
+      // Footprints clipped to the map can be slightly non-convex, which makes
+      // the half-plane overlap test miss; also treat any vertex inside the
+      // block as occupying it.
+      const std::vector<glm::vec2> footprint = ObstacleFootprint(o);
+      if (PolygonsOverlap(polygon, footprint) ||
+          std::any_of(footprint.begin(), footprint.end(), [&](const glm::vec2& v) {
+            return PointInConvexPolygon(v, polygon);
+          })) {
+        occupied = true;
+        break;
+      }
     }
     for (const StreetProp& p : scene->props)
       if (PointInConvexPolygon({p.position.x, p.position.z}, blockInterior)) occupied = true;

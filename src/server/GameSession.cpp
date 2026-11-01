@@ -23,8 +23,17 @@ constexpr int kSpectatorSlot = 2;
 
 }  // namespace
 
+namespace {
+// Seed-generated matches spawn at the map-suggested opposite corners (#226).
+Scene GenerateMatchScene(uint32_t seed, const std::string& kind) {
+  Scene scene = GenerateMapByKind(seed, kind);
+  ApplySpawnHints(&scene);
+  return scene;
+}
+}  // namespace
+
 GameSession::GameSession(uint32_t seed, std::string mapKind)
-    : seed_(seed), mapKind_(std::move(mapKind)), game_(GenerateMapByKind(seed, mapKind_)) {}
+    : seed_(seed), mapKind_(std::move(mapKind)), game_(GenerateMatchScene(seed, mapKind_)) {}
 
 GameSession::GameSession(const Scene& scene) : seed_(0), fixedScene_(scene), game_(scene) {}
 
@@ -53,7 +62,7 @@ GameSession::Result GameSession::Apply(Team team, const net::Action& action, uin
   if (action.kind == net::ActionKind::NewMatch) {
     if (game_.Mode() != InputMode::GameOver) return {false, "match is still running"};
     seed_ = newSeed;
-    game_.Reset(fixedScene_ ? *fixedScene_ : GenerateMapByKind(seed_, mapKind_));
+    game_.Reset(fixedScene_ ? *fixedScene_ : GenerateMatchScene(seed_, mapKind_));
     ready_ = {false, false};
     return result;
   }

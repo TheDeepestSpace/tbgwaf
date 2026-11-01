@@ -131,8 +131,10 @@ void RemoteClient::HandleStart(const Json& m) {
   if (m.Has("scene") && tactics::net::SceneFromSpec(m["scene"], &scene, &sceneError)) {
     game_->Reset(scene);
   } else {
-    game_->Reset(tactics::GenerateMapByKind(static_cast<uint32_t>(m["seed"].AsNumber()),
-                                      m["map"].IsString() ? m["map"].AsString() : ""));
+    scene = tactics::GenerateMapByKind(static_cast<uint32_t>(m["seed"].AsNumber()),
+                                       m["map"].IsString() ? m["map"].AsString() : "");
+    tactics::ApplySpawnHints(&scene);  // Same corner spawns as the server (#226).
+    game_->Reset(scene);
   }
   playback_.reset();
   pendingPlans_.reset();

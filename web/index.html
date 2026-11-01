@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <link rel="icon" href="data:," />
-    <title>tbgwaf · Jev preview</title>
+    <title>TBGWAF Dev Server</title>
     <style>
       :root { color-scheme: dark; }
       html, body {
@@ -87,6 +87,20 @@
       #panes[data-spectator-pane="true"] #pane-blue {
         position: absolute; inset: 0; visibility: hidden; pointer-events: none;
       }
+      #splash {
+        position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 14px; background: #16171a;
+      }
+      #splash[hidden] { display: none; }
+      #splash h1 { margin: 0 0 6px; font-size: 28px; }
+      #splash .modes { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+      #splash button, #splash input, #splash select { font-size: 15px; padding: 8px 14px; }
+      #splash select { border: 1px solid #5b5f69; border-radius: 4px; background: #292b31; color: inherit; }
+      #match-setup { display: flex; flex-direction: column; gap: 10px; align-items: stretch; width: min(320px, 90vw); }
+      #match-setup[hidden] { display: none; }
+      #match-setup label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+      #match-setup .row { margin-top: 0; }
+      #seed { flex: 1; min-width: 0; }
       @media (max-width: 680px) {
         #control-panel { left: 6px; right: 6px; transform: none; width: auto; }
         #config { margin-left: 0; }
@@ -94,6 +108,29 @@
     </style>
   </head>
   <body>
+    <section id="splash" hidden aria-label="TBGWAF Dev Server">
+      <h1>TBGWAF Dev Server</h1>
+      <div class="modes">
+        <button type="button" data-splash-mode="human">Human vs Human</button>
+        <button type="button" data-splash-mode="player-v-ai">Blue vs Jev</button>
+        <button type="button" data-splash-mode="ai-v-ai">Jev vs Jev</button>
+        <button type="button" id="splash-prealpha">Pre-alpha</button>
+      </div>
+      <form id="match-setup" hidden>
+        <strong id="setup-title"></strong>
+        <label>Map <select id="map-select"></select></label>
+        <label>Seed
+          <span class="row">
+            <input id="seed" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" />
+            <button type="button" id="seed-random">Random</button>
+          </span>
+        </label>
+        <div class="row">
+          <button type="submit" id="setup-start">Start</button>
+          <button type="button" id="setup-back">Back</button>
+        </div>
+      </form>
+    </section>
     <main id="panes">
       <div class="pane" id="pane-blue" aria-label="Blue team view (Jev vs Jev: spectator view of all figures)">
         <canvas oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
@@ -211,6 +248,49 @@
         handle.addEventListener("dblclick", () => { reset(); saved = null; });
       })();
     </script>
+    <script type="module">
+      import { MAPS, DEFAULT_MAP, DEFAULT_SEED, parseSeed, randomSeed } from "./maps.js";
+      var splash = document.getElementById("splash");
+      var form = document.getElementById("match-setup");
+      var mapSelect = document.getElementById("map-select");
+      var seedInput = document.getElementById("seed");
+      var chosen = "";
+      MAPS.forEach(function (m) {
+        var o = document.createElement("option");
+        o.value = m.id; o.textContent = m.label; mapSelect.appendChild(o);
+      });
+      mapSelect.value = DEFAULT_MAP;
+      seedInput.value = String(DEFAULT_SEED);
+      function go(changes) {
+        var url = new URL(window.location.href);
+        ["mode", "map", "seed", "online", "solo", "room", "intent", "prealpha"]
+          .forEach(function (k) { url.searchParams.delete(k); });
+        Object.keys(changes).forEach(function (k) { url.searchParams.set(k, changes[k]); });
+        window.location.href = url.toString();
+      }
+      document.querySelectorAll("[data-splash-mode]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          chosen = b.dataset.splashMode;
+          document.getElementById("setup-title").textContent = b.textContent;
+          form.hidden = false;
+        });
+      });
+      document.getElementById("seed-random").addEventListener("click", function () {
+        seedInput.value = String(randomSeed());
+      });
+      seedInput.addEventListener("input", function () {
+        seedInput.value = seedInput.value.replace(/\D/g, "");
+      });
+      document.getElementById("setup-back").addEventListener("click", function () { form.hidden = true; });
+      form.addEventListener("submit", function (e) {
+        e.preventDefault();
+        go({ mode: chosen, map: mapSelect.value, seed: String(parseSeed(seedInput.value)) });
+      });
+      document.getElementById("splash-prealpha").addEventListener("click", function () {
+        // Same as the old "Online (2 players)" button: the single-pane game with its own menu.
+        go(window.TBGWAF_HAS_SERVER ? { online: "1" } : { prealpha: "1" });
+      });
+    </script>
     <script src="tactics_app.js"></script>
     <script type="text/javascript">
       // Two ways to play:
@@ -238,13 +318,31 @@
       var serverUrl = resolveServerUrl();
       var statusEl = document.getElementById("status");
       var params = new URLSearchParams(window.location.search);
+      window.TBGWAF_HAS_SERVER = Boolean(serverUrl);
+      // Splash first; the match starts after a mode is picked (?mode=...),
+      // or straight away for ?online / ?solo / ?prealpha links.
+      var showSplash = !(params.has("mode") || params.has("online") ||
+                         params.has("solo") || params.has("prealpha"));
       function pageUrl(changes) {
         var url = new URL(window.location.href);
         ["online", "solo", "room", "intent"].forEach(function (k) { url.searchParams.delete(k); });
         Object.keys(changes).forEach(function (k) { url.searchParams.set(k, changes[k]); });
         return url.toString();
       }
-      if (serverUrl && (params.has("online") || params.has("solo"))) {
+      if (showSplash) {
+        document.getElementById("splash").hidden = false;
+        document.getElementById("control-panel").hidden = true;
+        document.getElementById("hud").hidden = true;
+      } else if (params.has("prealpha") && !serverUrl) {
+        // No server configured: launch the game directly, on its own menu.
+        document.getElementById("pane-red").remove();
+        document.getElementById("control-panel").remove();
+        statusEl.innerText = "Loading game…";
+        createTbgwafModule({
+          canvas: document.querySelector("#pane-blue canvas"),
+          onRuntimeInitialized: function () { statusEl.innerText = ""; },
+        });
+      } else if (serverUrl && (params.has("online") || params.has("solo"))) {
         // One canvas, one player. Without ?room= the game's own menu
         // (New Game -> Online) creates or joins a room; ?room=NAME connects
         // straight away (a second player opens the same URL).

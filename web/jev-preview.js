@@ -1,3 +1,4 @@
+import { matchOptions } from "./maps.js";
 const MODES = Object.freeze({
   human: { label: "Human vs Human", ai: [] },
   "player-v-ai": { label: "Blue vs Jev", ai: ["red"] },
@@ -379,11 +380,14 @@ function bootstrap() {
   controller.mode = config.mode;  // serverBots needs it before setMode() below.
   const spectate = Boolean(server) && config.mode === "ai-v-ai";
   let pending = serverJev ? 1 : spectate ? 3 : 2;
+  const match = matchOptions(new URLSearchParams(window.location.search));
   const startPlayer = (player) => {
     const pane = document.getElementById(`pane-${player}`);
     const moduleConfig = {
       canvas: pane.querySelector("canvas"),
       tbgwafPlayer: player,
+      tbgwafMap: match.map,
+      tbgwafMapSeed: match.seed,
       ...(server
         ? { tbgwafServer: server.url, tbgwafRoom: server.room, tbgwafAutoEnter: true }
         : { tbgwafBus: bus }),
@@ -407,6 +411,8 @@ function bootstrap() {
       tbgwafServer: server.url,
       tbgwafRoom: server.room,
       tbgwafBotMode: "ai-v-ai",
+      tbgwafMap: match.map,
+      tbgwafMapSeed: match.seed,
       tbgwafServerSpectate: true,
       tbgwafSpectator: true,
       tbgwafAutoEnter: true,

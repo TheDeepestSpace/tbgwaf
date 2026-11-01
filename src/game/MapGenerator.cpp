@@ -5037,7 +5037,7 @@ constexpr uint32_t kWreckStream = 0x9e41c7b3u;
 // local street does) and clusters of cars in disarray: any heading, upright,
 // overturned on the roof or lying on a side. Own random stream, so the curb
 // furniture of a seed is untouched. Only pavement at road grade qualifies
-// (the deck of an overpass is its own walk surface and stays clear), and every
+// (a flat stretch of the overpass deck counts too, never a ramp), and every
 // wreck is an arbitrarily rotated convex footprint with bounds that follow the
 // rolled body. Each wreck keeps the free-standing rules of the other cover:
 // level ground, a gap to every obstacle and wreck, clear of the spawn rows
@@ -5064,12 +5064,15 @@ void EmitArteryWrecks(Scene* scene, const CityPlan& city, const MapGeneratorConf
                      glm::vec2(-plan.branch.dir.y, plan.branch.dir.x), 0.0f, plan.branch.length,
                      plan.branch.width, true});
   }
-  const auto atGrade = [&](const Road& road, glm::vec2 p) {
+  const auto liftAt = [&](const Road& road, glm::vec2 p) {
     const float s = glm::dot(p - road.origin, road.dir);
-    if (s < road.s0 || s > road.s1) return false;
-    const float lift = road.branch ? BranchElevationAt(plan, city.terrain, c, s)
-                                   : ArteryElevationAt(plan, city.terrain, c, s);
-    return lift < kGradeY + 0.02f;
+    if (s < road.s0 || s > road.s1) return -1.0f;
+    return road.branch ? BranchElevationAt(plan, city.terrain, c, s)
+                       : ArteryElevationAt(plan, city.terrain, c, s);
+  };
+  // World height of the road surface at `p` (the deck when lifted).
+  const auto surfaceY = [&](const Road& road, glm::vec2 p) {
+    return HighwayGradeAt(city.terrain, p, road.dir, road.branch) + liftAt(road, p);
   };
 
   // Accepts or rejects one vehicle laid on `road`; pushes it when accepted.
@@ -5092,9 +5095,16 @@ void EmitArteryWrecks(Scene* scene, const CityPlan& city, const MapGeneratorConf
     // Wholly on at-grade pavement; a bus also keeps a lane to both curbs.
     const float edge = road.width * 0.5f - (bus ? lane : 0.3f);
     glm::vec2 lo(1e9f), hi(-1e9f);
+    bool onGround = false, onDeck = false;
     for (const glm::vec2& p : poly) {
       if (std::fabs(glm::dot(p - road.origin, road.normal)) > edge) return false;
-      if (!atGrade(road, p)) return false;
+      const float lift = liftAt(road, p);
+      if (lift < 0.0f) return false;
+      if (lift < kGradeY + 0.02f) {
+        onGround = true;
+      } else {
+        onDeck = true;
+      }
       lo = glm::min(lo, p);
       hi = glm::max(hi, p);
     }
@@ -5102,13 +5112,30 @@ void EmitArteryWrecks(Scene* scene, const CityPlan& city, const MapGeneratorConf
                  std::max(std::fabs(lo.y), std::fabs(hi.y))) > half - 0.6f) {
       return false;
     }
-    // Level ground under the footprint.
-    const float baseY = groundY(center.x, center.y);
+    // Level ground under the footprint, or a flat stretch of deck: wholly on
+    // one or the other, never straddling a ramp foot.
+    if (onGround && onDeck) return false;
+    if (onDeck) {
+      // Keep the narrow on-ramp, and the deck where it merges, passable.
+      if (road.branch) return false;
+      if (plan.hasBranch) {
+        for (const glm::vec2& p : poly) {
+          const float along = std::clamp(glm::dot(p - plan.branch.start, plan.branch.dir), 0.0f,
+                                         plan.branch.length);
+          const glm::vec2 nearest = plan.branch.start + plan.branch.dir * along;
+          if (glm::distance(p, nearest) < plan.branch.width * 0.5f + 6.0f) return false;
+        }
+      }
+    }
+    const auto levelAt = [&](glm::vec2 q) {
+      return onDeck ? surfaceY(road, q) - kGradeY : groundY(q.x, q.y);
+    };
+    const float baseY = levelAt(center);
     std::vector<glm::vec2> pts = poly;
     pts.push_back(center);
     for (size_t i = 0; i < poly.size(); ++i) pts.push_back((poly[i] + poly[(i + 1) % 4]) * 0.5f);
     for (const glm::vec2& q : pts) {
-      if (std::fabs(groundY(q.x, q.y) - baseY) >= 0.05f) return false;
+      if (std::fabs(levelAt(q) - baseY) >= 0.05f) return false;
     }
 
     const auto gap = [&](const std::vector<glm::vec2>& other) {
@@ -5145,6 +5172,17 @@ void EmitArteryWrecks(Scene* scene, const CityPlan& city, const MapGeneratorConf
     item.fixtureYaw = yaw;
     item.fixtureBaseY = baseY + kGradeY;
     item.fixtureRoll = roll;
+    // On the deck the car also stops figures walking through it, on every
+    // deck patch it overlaps.
+    if (onDeck) {
+      for (WalkSurface& span : scene->walkSurfaces) {
+        if (!span.overpass) continue;
+        std::vector<glm::vec2> patch;
+        for (const glm::vec3& v : span.vertices) patch.emplace_back(v.x, v.z);
+        if (PolygonSignedArea(patch) < 0.0f) std::reverse(patch.begin(), patch.end());
+        if (PolygonsOverlap(poly, patch)) span.blockers.push_back(poly);
+      }
+    }
     placed->push_back(center);
     return true;
   };

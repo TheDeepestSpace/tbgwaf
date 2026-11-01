@@ -374,7 +374,7 @@ void TestRoofMassingBlocksWalking() {
                &scene.walkSurfaces);
     for (const WalkSurface& slab : scene.walkSurfaces) {
       blockers += static_cast<int>(slab.blockers.size());
-      if (slab.blockers.empty()) continue;
+      if (slab.blockers.empty() || slab.overpass) continue;  // Deck wrecks: TestArteryWrecks.
       // Straight across the slab, between points outside every blocker.
       const glm::vec3 a = slab.vertices[0], b = slab.vertices[2];
       for (float t : {0.1f, 0.2f, 0.3f}) {
@@ -2941,10 +2941,11 @@ void TestCoachBusesStopMidStreet() {
 // spawn rows and the map edge, and generation is deterministic.
 void TestArteryWrecks() {
   const float kPi = 3.14159265358979f;
-  const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
+  MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
+  on.elevatedHighway = OverpassMode::On;  // Deck wrecks too.
   const float lane = 2.0f * constants::kAgentRadius + 0.2f;
   int wrecks = 0, upright = 0, overturned = 0, onSide = 0, angled = 0, arteryBuses = 0;
-  int mapsWithArteryBus = 0;
+  int mapsWithArteryBus = 0, deckWrecks = 0, deckBuses = 0;
   for (uint32_t seed = 1; seed <= 24; ++seed) {
     const Scene scene = GenerateUrbanMap(seed, on);
     CHECK(SameScene(scene, GenerateUrbanMap(seed, on)));
@@ -2975,7 +2976,26 @@ void TestArteryWrecks() {
       const glm::vec2 heading(std::cos(o.fixtureYaw), std::sin(o.fixtureYaw));
       angled += std::fabs(heading.x) > 0.2f && std::fabs(heading.y) > 0.2f;
       const glm::vec3 mid = o.bounds.Center();
-      CHECK(std::fabs(scene.ground.HeightAt(mid.x, mid.z) - o.bounds.min.y) < 0.05f);
+      // Either level ground, or a flat stretch of overpass deck that also
+      // carries the wreck as a walk blocker.
+      bool onDeck = false;
+      for (const WalkSurface& span : scene.walkSurfaces) {
+        if (!span.overpass || !SurfaceContainsXZ(span, mid.x, mid.z)) continue;
+        onDeck = true;
+        float lowY = 1e9f, highY = -1e9f;
+        for (const glm::vec3& v : span.vertices) {
+          lowY = std::min(lowY, v.y);
+          highY = std::max(highY, v.y);
+        }
+        CHECK(o.fixtureBaseY > lowY - 0.05f && o.fixtureBaseY < highY + 0.05f);
+        CHECK(!span.blockers.empty());
+      }
+      if (onDeck) {
+        ++deckWrecks;
+        deckBuses += bus;
+      } else {
+        CHECK(std::fabs(scene.ground.HeightAt(mid.x, mid.z) - o.bounds.min.y) < 0.05f);
+      }
       for (const glm::vec2& v : o.footprint) {
         CHECK(std::fabs(v.x) <= scene.mapHalfExtent && std::fabs(v.y) <= scene.mapHalfExtent);
         // On the pavement of a road (the artery or its branch).
@@ -2991,6 +3011,8 @@ void TestArteryWrecks() {
       }
       for (size_t j = 0; j < scene.obstacles.size(); ++j) {
         if (j == i) continue;
+        // Piers and buildings below a deck are not beside it.
+        if (onDeck && !IsStreetFixture(scene.obstacles[j].kind)) continue;
         const std::vector<glm::vec2> other = ObstacleFootprint(scene.obstacles[j]);
         float gap = 1e9f;
         for (const glm::vec2& v : o.footprint) gap = std::min(gap, DistanceToConvexPolygon(v, other));
@@ -3010,6 +3032,8 @@ void TestArteryWrecks() {
   CHECK(angled > 0);
   CHECK(arteryBuses >= 4);
   CHECK(mapsWithArteryBus >= 4);
+  CHECK(deckWrecks > 0);
+  CHECK(deckBuses > 0);
 }
 
 // Pinned per-seed furniture output (issue #150): a generator change that

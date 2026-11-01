@@ -147,6 +147,7 @@ if(EMSCRIPTEN)
     src/gfx/SceneRenderer.cpp
     src/gfx/FigureRig.cpp
     src/gfx/Ragdoll.cpp
+    src/gfx/Trees.cpp
     src/game/Geometry.cpp
   )
   target_include_directories(tactics_gallery_web PRIVATE src)

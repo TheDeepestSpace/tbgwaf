@@ -51,7 +51,11 @@ void RemoteClient::OnOpen() {
   if (!room_.empty()) join.Set("room", room_);
   if (!intent_.empty()) join.Set("intent", intent_);
   if (spectate_) join.Set("spectate", Json(true));
-  if (!botMode_.empty()) join.Set("mode", botMode_);
+  if (!botMode_.empty()) {
+    join.Set("mode", botMode_);
+    if (!mapKind_.empty()) join.Set("map", mapKind_);
+    if (mapSeed_) join.Set("seed", static_cast<double>(*mapSeed_));
+  }
   Queue(join);
 }
 
@@ -127,7 +131,8 @@ void RemoteClient::HandleStart(const Json& m) {
   if (m.Has("scene") && tactics::net::SceneFromSpec(m["scene"], &scene, &sceneError)) {
     game_->Reset(scene);
   } else {
-    game_->Reset(tactics::GenerateUrbanMap(static_cast<uint32_t>(m["seed"].AsNumber())));
+    game_->Reset(tactics::GenerateMapByKind(static_cast<uint32_t>(m["seed"].AsNumber()),
+                                      m["map"].IsString() ? m["map"].AsString() : ""));
   }
   playback_.reset();
   pendingPlans_.reset();

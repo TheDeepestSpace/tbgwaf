@@ -91,7 +91,8 @@ class Lobby {
   bool HandleSceneMessage(int conn, const std::string& type, const net::Json& message);
   void StartMatch(Room& room);
   void SpectatorJoin(int conn, const net::Json& message);
-  void CreateBotRoom(int conn, const std::string& name, const std::string& mode);
+  void CreateBotRoom(int conn, const std::string& name, const std::string& mode,
+                     const std::string& mapKind = "", std::optional<uint32_t> seed = std::nullopt);
   void HandleBotControl(int conn, Room& room, const net::Json& message);
   void MaybeRunRound(Room& room);
   void ScheduleBots(Room& room);

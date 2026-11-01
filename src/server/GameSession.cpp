@@ -23,7 +23,8 @@ constexpr int kSpectatorSlot = 2;
 
 }  // namespace
 
-GameSession::GameSession(uint32_t seed) : seed_(seed), game_(GenerateUrbanMap(seed)) {}
+GameSession::GameSession(uint32_t seed, std::string mapKind)
+    : seed_(seed), mapKind_(std::move(mapKind)), game_(GenerateMapByKind(seed, mapKind_)) {}
 
 GameSession::GameSession(const Scene& scene) : seed_(0), fixedScene_(scene), game_(scene) {}
 
@@ -52,7 +53,7 @@ GameSession::Result GameSession::Apply(Team team, const net::Action& action, uin
   if (action.kind == net::ActionKind::NewMatch) {
     if (game_.Mode() != InputMode::GameOver) return {false, "match is still running"};
     seed_ = newSeed;
-    game_.Reset(fixedScene_ ? *fixedScene_ : GenerateUrbanMap(seed_));
+    game_.Reset(fixedScene_ ? *fixedScene_ : GenerateMapByKind(seed_, mapKind_));
     ready_ = {false, false};
     return result;
   }

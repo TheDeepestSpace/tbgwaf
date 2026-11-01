@@ -614,6 +614,19 @@ void TestBotModesNeedAdapter() {
   CHECK(bw.Drain(3)[0]["t"].AsString() == "error");
 }
 
+// The splash's map and seed pick the bot room's match instead of a random city.
+void TestBotRoomHonoursMapAndSeed() {
+  BotWire w(FirstOptionPoster);
+  w.Send(1, R"({"t":"join","room":"m","mode":"player-v-ai","map":"hills","seed":4242})");
+  bool sawStart = false;
+  for (const auto& m : w.Drain(1)) {
+    if (m["t"].AsString() != "start") continue;
+    sawStart = true;
+    CHECK(m["seed"].AsNumber() == 4242 && m["map"].AsString() == "hills");
+  }
+  CHECK(sawStart);
+}
+
 // Blue vs Jev: the human is Blue, Jev plans Red on the server and commits;
 // the round runs once the human commits. The human never sees Red's plans.
 void TestBlueVsJev() {
@@ -1182,6 +1195,7 @@ void TestRealSocketLoopback() {
 }  // namespace
 
 int main() {
+  TestBotRoomHonoursMapAndSeed();
   TestWebSocketPrimitives();
   TestFrameParser();
   TestSessionReadyAndRound();

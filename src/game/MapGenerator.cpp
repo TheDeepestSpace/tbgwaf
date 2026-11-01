@@ -5655,3 +5655,17 @@ Scene GenerateHillyMap(uint32_t seed, const HillyMapConfig& c) {
 }
 
 }  // namespace tactics
+
+namespace tactics {
+
+Scene GenerateMapByKind(uint32_t seed, const std::string& kind) {
+  if (kind == "hills") return GenerateHillyMap(seed);
+  MapGeneratorConfig config;
+  if (kind == "urban") {
+    config.blocksX = 4;
+    config.blocksZ = 4;
+  }
+  return GenerateUrbanMap(seed, config);
+}
+
+}  // namespace tactics

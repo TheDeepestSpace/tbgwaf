@@ -744,6 +744,11 @@ int main() {
   // issue #130); TBGWAF_MAP=urban forces it off, urban-elevated forces it on;
   // urban-full forces every optional feature layer on.
   std::string mapType = "urban-auto";
+#ifdef __EMSCRIPTEN__
+  // Splash pick (the same ids the Map Select screen maps to below).
+  if (const int choice = tbgwaf_map_choice(); choice == 1) mapType = "urban-auto-x1";
+  else if (choice == 3) mapType = "hilly";
+#endif
   if (const char* mapEnv = std::getenv("TBGWAF_MAP")) mapType = mapEnv;
   auto makeBaseMap = [](uint32_t mapSeed, const std::string& mapType) {
     if (mapType == "hilly") return tactics::GenerateHillyMap(mapSeed);
@@ -915,6 +920,14 @@ int main() {
         remote = std::make_unique<tactics::net::RemoteClient>(&game, roomRaw, intentRaw, spectate);
         char* botModeRaw = tbgwaf_server_bot_mode();
         remote->SetBotMode(botModeRaw);
+        {
+          const int choice = tbgwaf_map_choice();
+          const double s = tbgwaf_map_seed();
+          remote->SetMatchSetup(choice == 1 ? "urban" : choice == 2 ? "urban-x4"
+                                                    : choice == 3 ? "hills" : "",
+                                s >= 0 ? std::optional<uint32_t>(static_cast<uint32_t>(s))
+                                       : std::nullopt);
+        }
         std::free(botModeRaw);
         fixedTeam = Team::Blue;  // Placeholder until the server's "start".
         tbgwaf_ws_open(serverUrl.c_str());

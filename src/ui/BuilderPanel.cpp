@@ -330,9 +330,9 @@ BuilderEditorActions DrawBuilderEditor(BuilderScene* bs, BuilderEditorState* sta
     changed |= ImGui::DragFloat("Center Z", &box.cz, 0.05f, -limit, limit, "%.2f",
                                 ImGuiSliderFlags_AlwaysClamp);
     changed |= ImGui::DragFloat("Half size X", &box.hx, 0.02f, kBuilderMinHalfExtent,
-                                kBuilderMaxHalfExtent, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+                                FLT_MAX, "%.2f", ImGuiSliderFlags_AlwaysClamp);
     changed |= ImGui::DragFloat("Half size Z", &box.hz, 0.02f, kBuilderMinHalfExtent,
-                                kBuilderMaxHalfExtent, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+                                FLT_MAX, "%.2f", ImGuiSliderFlags_AlwaysClamp);
     changed |= ImGui::DragFloat("Height", &box.height, 0.02f, kBuilderMinHeight, FLT_MAX, "%.2f",
                                 ImGuiSliderFlags_AlwaysClamp);
     if (changed) UpdateBuilderBox(bs, state->selectedBox, box);

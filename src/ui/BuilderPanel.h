@@ -25,11 +25,10 @@ inline float BuilderPanelWidth(int windowWidth) {
 }
 // Figures stay this far inside the map edge.
 constexpr float kBuilderMapMargin = 1.0f;
-// Cube limits: half extents below ~0.4 leave no walkable top for the
-// navmesh (it insets climb tops), heights below 0.2 are barely visible.
-// There is no maximum height.
-constexpr float kBuilderMinHalfExtent = 0.4f;
-constexpr float kBuilderMaxHalfExtent = 8.0f;
+// Cube limits: only a tiny positive minimum so a cube never degenerates
+// (very small cubes just get no walkable top); heights below 0.2 are barely
+// visible. There is no maximum width, depth or height.
+constexpr float kBuilderMinHalfExtent = 0.05f;
 constexpr float kBuilderMinHeight = 0.2f;
 
 // Selection in the editor (-1 = none). At most one of the two is set.

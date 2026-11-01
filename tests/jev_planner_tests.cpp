@@ -436,10 +436,13 @@ void TestJevRoutesOffTerrainIslandTowardFlag() {
   GameLogic game(scene);
   const glm::vec3 flag = game.FlagPosition();
   std::vector<float> lastDistance(32, 1e9f);
+  std::vector<float> firstDistance(32, 1e9f);
+  std::vector<int> blueIds;
   for (int round = 1; round <= 3; ++round) {
     const auto blue = BuildJevRequest(game, Team::Blue, static_cast<unsigned>(round));
     CHECK(blue.has_value());
     if (!blue) return;
+    blueIds = blue->actorIds;
     std::vector<std::string> choices;
     for (int actorId : blue->actorIds) {
       const Unit* actor = game.FindUnit(actorId);
@@ -458,7 +461,11 @@ void TestJevRoutesOffTerrainIslandTowardFlag() {
       if (round == 1) CHECK(flagMove->destination.y < actor->position.y - 1.0f);
       const float distance =
           std::hypot(flagMove->destination.x - flag.x, flagMove->destination.z - flag.z);
-      CHECK(distance < lastDistance[actorId] - 3.0f);
+      // A squad-mate held up behind another in the corridor (#267) may stop
+      // short for a round, so allow slack per round and require real progress
+      // over the whole walk (checked below).
+      CHECK(distance < lastDistance[actorId] + 5.0f);
+      if (round == 1) firstDistance[actorId] = distance;
       lastDistance[actorId] = distance;
       choices.push_back(flagMove->id);
     }
@@ -469,6 +476,7 @@ void TestJevRoutesOffTerrainIslandTowardFlag() {
     game.Update(10.0f);
     if (game.Mode() == InputMode::GameOver) break;
   }
+  for (int actorId : blueIds) CHECK(lastDistance[actorId] < firstDistance[actorId] - 10.0f);
   for (const Unit& unit : game.GetScene().units) {
     if (unit.team == Team::Blue) CHECK(unit.position.y < 0.5f);  // Down on the ground level.
   }

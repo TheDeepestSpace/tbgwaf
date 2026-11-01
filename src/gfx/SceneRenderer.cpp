@@ -3258,6 +3258,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (!debug.disableTrees) trees_.SetTrees(game.GetScene().trees);
   const auto& obstacles = game.GetScene().obstacles;
   SetRagdollObstacles(obstacles);
+  SetRagdollRails(game.GetScene().massing);
   SetRagdollGround(game.GetScene().walkSurfaces, game.GetScene().ground);
   const auto& sidewalks = game.GetScene().sidewalks;
   const auto& streetProps = game.GetScene().props;

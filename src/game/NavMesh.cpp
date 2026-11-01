@@ -116,6 +116,18 @@ namespace {
 NavRegion SquareRegion(float halfExtent) {
   return NavRegion{-halfExtent, halfExtent, -halfExtent, halfExtent};
 }
+
+// Nav-only walls (cliff-edge guards) take the reduced kNavWallPad so figures
+// can stand at the brink of a level. Curb furniture is knee-to-head-high
+// scenery a figure may brush (like roof furniture), so it takes half the pad:
+// a full pad on both it and the building behind it sealed the strip between
+// them, leaving a blank stretch of navmesh instead of a hole around the item.
+// Everything else gets body clearance.
+float ObstaclePad(const Obstacle& obstacle, float agentRadius) {
+  if (obstacle.navOnly) return std::min(agentRadius, constants::kNavWallPad);
+  if (obstacle.kind == ObstacleKind::StreetFurniture) return 0.5f * agentRadius;
+  return agentRadius;
+}
 }  // namespace
 
 void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, float agentRadius) {
@@ -142,14 +154,15 @@ void NavMesh::Build(const std::vector<Obstacle>& obstacles, const NavRegion& reg
   paddedPolygons_.reserve(obstacles.size());
   for (const Obstacle& obstacle : obstacles) {
     polygonMode_ |= !obstacle.footprint.empty();
-    paddedPolygons_.push_back(ExpandConvexPolygon(ObstacleFootprint(obstacle), agentRadius));
+    paddedPolygons_.push_back(
+        ExpandConvexPolygon(ObstacleFootprint(obstacle), ObstaclePad(obstacle, agentRadius)));
   }
   AddLowDeckBlockers(agentRadius);
-  BuildGroundMesh(ObstacleBounds(obstacles), region, agentRadius);
+  BuildGroundMesh(obstacles, region, agentRadius);
   AddClimbConnections(obstacles, agentRadius);
 }
 
-void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegion& region,
+void NavMesh::BuildGroundMesh(const std::vector<Obstacle>& obstacles, const NavRegion& region,
                                float agentRadius) {
   cells_.clear();
   neighbors_.clear();
@@ -162,11 +175,12 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegio
   std::vector<Footprint> footprints;
   footprints.reserve(obstacles.size());
   for (const auto& obstacle : obstacles) {
+    const float pad = ObstaclePad(obstacle, agentRadius);
     Footprint fp;
-    fp.xMin = std::max(region.xMin, obstacle.min.x - agentRadius);
-    fp.xMax = std::min(region.xMax, obstacle.max.x + agentRadius);
-    fp.zMin = std::max(region.zMin, obstacle.min.z - agentRadius);
-    fp.zMax = std::min(region.zMax, obstacle.max.z + agentRadius);
+    fp.xMin = std::max(region.xMin, obstacle.bounds.min.x - pad);
+    fp.xMax = std::min(region.xMax, obstacle.bounds.max.x + pad);
+    fp.zMin = std::max(region.zMin, obstacle.bounds.min.z - pad);
+    fp.zMax = std::min(region.zMax, obstacle.bounds.max.z + pad);
     if (fp.xMax > fp.xMin + kEps && fp.zMax > fp.zMin + kEps) {
       footprints.push_back(fp);
       // Give the padded footprint a generous Y range so it can be reused
@@ -176,10 +190,41 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegio
     }
   }
 
+  // Polygon scenes: the cells must match what ground pathing (the padded
+  // polygons) treats as free, not the looser padded AABBs, or thin gaps
+  // between rotated footprints vanish from the mesh. Each polygon contributes
+  // its own z-extent per strip, with strips subdivided so slanted edges are
+  // followed closely; a cell is only ever emitted where the whole strip is free.
+  constexpr float kPolygonStripStep = 0.5f;
+  struct PolyBox {
+    const std::vector<glm::vec2>* polygon;
+    float xMin, xMax;
+  };
+  std::vector<PolyBox> polyBoxes;
+  if (polygonMode_) {
+    footprints.clear();
+    for (const auto& polygon : paddedPolygons_) {
+      if (polygon.size() < 3) continue;
+      PolyBox box{&polygon, polygon[0].x, polygon[0].x};
+      for (const glm::vec2& p : polygon) {
+        box.xMin = std::min(box.xMin, p.x);
+        box.xMax = std::max(box.xMax, p.x);
+      }
+      if (box.xMax < region.xMin || box.xMin > region.xMax) continue;
+      polyBoxes.push_back(box);
+    }
+  }
+
   std::vector<float> xs = {region.xMin, region.xMax};
   for (const auto& fp : footprints) {
     xs.push_back(fp.xMin);
     xs.push_back(fp.xMax);
+  }
+  for (const PolyBox& box : polyBoxes) {
+    for (const glm::vec2& p : *box.polygon) xs.push_back(std::clamp(p.x, region.xMin, region.xMax));
+    for (float x = box.xMin + kPolygonStripStep; x < box.xMax; x += kPolygonStripStep) {
+      xs.push_back(std::clamp(x, region.xMin, region.xMax));
+    }
   }
   std::sort(xs.begin(), xs.end());
   xs.erase(std::unique(xs.begin(), xs.end(),
@@ -199,6 +244,27 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegio
       if (fp.xMin <= stripCenterX && fp.xMax >= stripCenterX) {
         blocked.push_back({fp.zMin, fp.zMax});
       }
+    }
+    for (const PolyBox& box : polyBoxes) {
+      if (box.xMax <= stripXMin + kEps || box.xMin >= stripXMax - kEps) continue;
+      // z-extent of the convex polygon within the strip: vertices inside plus
+      // edge crossings of the two strip boundaries.
+      float lo = std::numeric_limits<float>::infinity();
+      float hi = -lo;
+      const auto& poly = *box.polygon;
+      auto take = [&](float z) {
+        lo = std::min(lo, z);
+        hi = std::max(hi, z);
+      };
+      for (size_t k = 0; k < poly.size(); ++k) {
+        const glm::vec2 a = poly[k];
+        const glm::vec2 b = poly[(k + 1) % poly.size()];
+        if (a.x >= stripXMin && a.x <= stripXMax) take(a.y);
+        for (float x : {stripXMin, stripXMax}) {
+          if ((a.x < x) != (b.x < x)) take(a.y + (b.y - a.y) * (x - a.x) / (b.x - a.x));
+        }
+      }
+      if (hi > lo) blocked.push_back({std::max(lo, region.zMin), std::min(hi, region.zMax)});
     }
     std::vector<ZInterval> merged = MergeIntervals(std::move(blocked));
 
@@ -234,8 +300,11 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegio
 
 void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float agentRadius) {
   const int groundCellCount = static_cast<int>(cells_.size());
+  // Climb-top cell per obstacle (-1 = none), to link stacked obstacles.
+  std::vector<int> topCellOf(obstacles.size(), -1);
 
-  for (const auto& obstacle : obstacles) {
+  for (size_t obstacleIdx = 0; obstacleIdx < obstacles.size(); ++obstacleIdx) {
+    const auto& obstacle = obstacles[obstacleIdx];
     if (!obstacle.climbable) continue;
     const AABB& bounds = obstacle.bounds;
     // Windowed builds: skip obstacles entirely outside the region.
@@ -253,6 +322,11 @@ void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float 
     const int topIdx = static_cast<int>(cells_.size());
     cells_.push_back(NavCell{xMin, xMax, zMin, zMax, bounds.max.y, /*climbTop=*/true});
     neighbors_.emplace_back();
+    topCellOf[obstacleIdx] = topIdx;
+
+    // A raised obstacle (underside above the ground) is only reached from the
+    // top of what it rests on, linked below.
+    if (bounds.min.y > kEps) continue;
 
     const AABB padded{
         glm::vec3(std::max(region_.xMin, bounds.min.x - agentRadius), bounds.min.y,
@@ -266,6 +340,25 @@ void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float 
       neighbors_[topIdx].push_back(groundIdx);
     }
   }
+
+  // Stacked obstacles: the top of one connects to the top of every obstacle
+  // resting on it (underside at its top, footprints overlapping).
+  for (size_t upper = 0; upper < obstacles.size(); ++upper) {
+    if (topCellOf[upper] < 0) continue;
+    const AABB& u = obstacles[upper].bounds;
+    if (u.min.y <= kEps) continue;
+    for (size_t lower = 0; lower < obstacles.size(); ++lower) {
+      if (lower == upper || topCellOf[lower] < 0) continue;
+      const AABB& l = obstacles[lower].bounds;
+      if (std::fabs(l.max.y - u.min.y) > kEps) continue;
+      if (l.min.x >= u.max.x - kEps || l.max.x <= u.min.x + kEps ||
+          l.min.z >= u.max.z - kEps || l.max.z <= u.min.z + kEps) {
+        continue;
+      }
+      neighbors_[topCellOf[lower]].push_back(topCellOf[upper]);
+      neighbors_[topCellOf[upper]].push_back(topCellOf[lower]);
+    }
+  }
 }
 
 void NavMesh::BuildSurfaceCaches(float agentRadius) {
@@ -273,9 +366,11 @@ void NavMesh::BuildSurfaceCaches(float agentRadius) {
   surfaceBlockers_.assign(n, {});
   for (size_t i = 0; i < n; ++i) {
     for (const auto& blocker : walkSurfaces_[i].blockers) {
-      // Half the usual obstacle padding: roof furniture is knee-to-waist-high
-      // scenery, so a figure may stand close enough to brush it.
-      std::vector<glm::vec2> padded = ExpandConvexPolygon(blocker, 0.5f * agentRadius);
+      // Reduced padding: roof furniture and parapets are knee-to-waist-high
+      // scenery a figure may brush, and a half pad on top of the parapet's own
+      // thickness left a wide blank band between the wall and the reach.
+      std::vector<glm::vec2> padded =
+          ExpandConvexPolygon(blocker, std::min(agentRadius, constants::kNavWallPad));
       if (!padded.empty()) surfaceBlockers_[i].push_back(std::move(padded));
     }
   }

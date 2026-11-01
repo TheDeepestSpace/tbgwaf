@@ -21,8 +21,9 @@ instance of the game (own camera, input, and UI); the WASM module is
 instantiated once per canvas. Both teams plan at once: each instance sends
 its own team's plans to the other over an in-page message bus, and Commit
 Round (from either canvas) makes the Blue instance run the simulation and
-broadcast it, which the Red instance mirrors. Cross-machine play is not
-supported. See [Controls](#controls) below.
+broadcast it, which the Red instance mirrors. That in-page demo needs no
+server; for real cross-device play see [Online play](#online-play-server)
+below. See [Controls](#controls) below.
 
 ## Native build
 
@@ -49,7 +50,10 @@ hammerhead cap under the deck, or twin columns under a widened deck joined
 by a crossbeam cap; shafts stand on stepped footings and are real obstacles
 (collision, LOS, navmesh), the caps overhead only. Urban code/scenarios can also
 tune artery count/width, local-street width/skew and elevation through
-`MapGeneratorConfig` / `map.generate`. Press **N** in-game to toggle a debug
+`MapGeneratorConfig` / `map.generate`. Some seeds (`extraArteries`, 0–2 drawn
+per seed) widen one or two avenues into extra arteries beside the main one,
+two or three in all; they run parallel to it, so they never cross its deck,
+and each always ramps through the levels it meets. Press **N** in-game to toggle a debug
 overlay of the navmesh's walkable-cell boundaries.
 
 Every arterial city has **terrain levels** (issue #155): 1–3 map-spanning
@@ -79,10 +83,13 @@ the last street it crossed before it (a T, not an X) and resumes at the first
 one beyond it, and the blocks either side of the missing stretch stay one
 block; where that last street itself ends at the junction (an L), the street
 instead runs on as a dead end stopping just short of the band or corridor, so
-no street ever pokes into a block. Sidewalk rings are one flat plane per
-strip, on the tier beside the cliff. Switch the levels off with
-`TBGWAF_TERRAIN=off`, `MapGeneratorConfig::features.terrain`, or scenario
-YAML:
+no street ever pokes into a block. Elongated blocks get one of two seeded
+treatments: a length-scaled row of short, angled apartment slabs with broad
+gaps around them, or a split into two or three smaller blocks divided by a
+short local street segment running from one side of the old block to the other. Sidewalk
+rings are one flat plane per strip, on the tier beside the cliff. Switch the
+levels off with `TBGWAF_TERRAIN=off`,
+`MapGeneratorConfig::features.terrain`, or scenario YAML:
 
 ```yaml
 map:
@@ -92,6 +99,7 @@ map:
     elevated: false
     features: {terrain: on}
     terrain_levels: -1 # seeded 1–3; 0 keeps the city flat
+    extra_arteries: -1 # seeded 0–2 more arteries; 0 pins the single one
 ```
 
 The legacy orthogonal generator stays flat. `city_terrain_seed_*` goldens
@@ -106,7 +114,9 @@ office/mixed-use, back streets residential/warehouse), biased by its block's
 neighbourhood character (downtown, residential, industrial or mixed; drawn per
 block, or forced with `TBGWAF_BLOCK_CHARACTER=downtown` / scenario
 `map.generate.character`). Floor count and floor height per kind set the
-building height; the renderer colours facades per kind and draws
+building height; residential, mixed-use and office heights follow a smooth
+per-block skyline field (up to `skylineMaxHeight`, 24; landmark towers reach
+28–40), so tall and low districts cluster; the renderer colours facades per kind and draws
 massing -- parapets, roof furniture, awnings over shopfronts, set-back office
 top floors. Massing blocks sight lines and FOV (`SightObstacles`) but not
 movement; the set-back top floor is full obstacle geometry.
@@ -240,6 +250,83 @@ The runner (`build/tactics_visual_tests`) can also record a continuous
 per-team video of each scenario with `--video` (requires `ffmpeg`); see
 `--help` for the flags.
 
+With `--server build/tbgwaf_server_testctl --skip-goldens` the runner instead
+hosts a real backend and films each team's own `RemoteClient` mirror (one
+video per connected client), so the footage shows what a browser tab shows
+(server fog filtering, replayed rounds, shot tracers). The review page
+uses this mode; the `visual_server_tests` ctest runs it without video.
+Assertions stay with `net_scenario_tests`; click markers and move-frontier
+frames are not drawn in this mode, and timeline scenarios fall back to
+in-process.
+
+### Networked scenario tests
+
+`net_scenario_tests` (`tests/net_scenario_tests.cpp`) replays the same YAML
+scenarios through a **real `tbgwaf_server` process**, so the room, protocol,
+serialization and fog-of-war paths are covered too. No GL; it runs headless
+(also with `-DTBGWAF_BUILD_CLIENT=OFF`).
+
+- The runner spawns `tbgwaf_server_testctl`: the server built with the
+  loopback-only **control tap** (`--control-port`) compiled in. The shipped
+  `tbgwaf_server` has no such flag. The tap speaks the same WebSocket framing as
+  the game port and accepts `load_scenario` (scene + units, the same spec the
+  YAML uses; clients receive it in `start`), `dump_state` (unfiltered server
+  state) and `shutdown`.
+- Per scenario it connects one headless client per team on the normal game port
+  (`GameLogic` mirror + `net::RemoteClient` over a small native WebSocket client
+  in `tests/net/`). Each scripted action runs through the **acting team's own
+  mirror** (the same `ClickUnit`/`ChooseMove`/... calls as the in-process
+  runner); `RemoteClient` ships the resulting plans, and a no-op `reaction` acts
+  as a barrier so the next step starts after the server has applied them.
+- Assertions run against the server's `dump_state` using the shared assertion
+  code, plus checks that the server's fog matches a recomputation and that
+  each client's mirror shows exactly what its team may see. Sighting-memory
+  assertions run on the owning client's mirror (age 0 only; older ones are
+  in-process only).
+- All three runners advance rounds in the same fixed step
+  (`constants::kSimStepSeconds`, 1/30 s), so reactions resolve identically.
+
+```mermaid
+flowchart LR
+  Y[("tests/scenarios/*.yaml")]
+
+  subgraph L["scenario_tests - in-process, logic only"]
+    LR1[Scenario runner] --> LG[GameLogic]
+  end
+
+  subgraph V["visual_tests - xvfb + software GL"]
+    VR[Visual runner] --> VG[GameLogic] --> SR[SceneRenderer]
+    SR --> PNG[PNG goldens diff]
+    SR --> VID[per-team videos]
+  end
+
+  subgraph N["net_scenario_tests - real server process, no GL"]
+    NR[Net runner]
+    NR -->|"click API, per acting team"| CB["Blue client: GameLogic + RemoteClient"]
+    NR -->|"click API, per acting team"| CR["Red client: GameLogic + RemoteClient"]
+    CB <-->|"WebSocket, game port"| SV
+    CR <-->|"WebSocket, game port"| SV
+    NR -->|"WebSocket, control tap: load_scenario, dump_state"| SV["tbgwaf_server_testctl<br/>Lobby + GameSession"]
+    NR --> AS["assert on server state<br/>+ client fog mirrors"]
+  end
+
+  Y --> LR1
+  Y --> VR
+  Y --> NR
+
+  subgraph U["Unit-level ctests"]
+    UT["logic_tests, map_generator_tests,<br/>camera_tests, net_tests,<br/>server_tests (incl. real-socket loopback)"]
+  end
+
+  SM["smoke_test: tactics_app under xvfb"]
+  CI["GitHub Actions ci.yml:<br/>flow sync check, full build + ctest,<br/>headless server-only build + ctest"]
+  CI --> L
+  CI --> V
+  CI --> N
+  CI --> U
+  CI --> SM
+```
+
 ### Weapons & the asset/animation gallery
 
 Figures carry one of three procedural blocky weapons (issue #126), assigned
@@ -275,6 +362,65 @@ scenarios are listed by name), generated by
 `scripts/generate_scenario_review_page.py` and deployed to
 `pr-preview/pr-<number>/scenarios/` by the same PR-preview workflow. The
 workflow comments a direct link on the PR.
+
+## Online play (server)
+
+`tbgwaf_server` is a server-authoritative WebSocket backend: it pairs two
+connections per room ("two sockets, one game"), holds the match in a headless
+`tactics_logic` instance, and validates every action.
+
+```sh
+# Server only -- no SDL2/EGL/GLESv2 needed.
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DTBGWAF_BUILD_CLIENT=OFF
+cmake --build build
+./build/tbgwaf_server --port 8080     # PORT env var also works; GET /health -> 200
+```
+
+`-DTBGWAF_BUILD_CLIENT=OFF` skips the SDL2/GLES app and GL-based tests;
+`-DTBGWAF_BUILD_SERVER=OFF` skips the server. Both default to ON.
+
+**Local end-to-end test:** build the web client (below), serve the build dir,
+and open it with a server URL (a bare port means `ws://localhost:<port>`):
+
+```
+http://localhost:8000/index.html?server=8080
+```
+
+With a server configured the page is split screen: the left and right panes
+are two separate clients of the server, paired in a room private to the page
+load, and the Human vs Human / Blue vs Jev / Jev vs Jev controls work as in the
+local preview (the Jev side plans through the adapter and commits its own
+team). Switching mode or Restart reloads into a fresh room. Known gap: the
+server always plays its seed-driven map, so Jev vs Jev's capture-the-flag
+default only applies to the no-server preview.
+
+`?solo=1` shows a single pane instead, for two browsers: open
+`index.html?server=ws://localhost:8080&solo=1&room=mygame` in both; the first
+waits (Blue), the second is paired (Red). `?room=` picks the room (default for
+`solo`: none -- use the Room screen or name one).
+
+`?online=1` (or the panel's **Online (2 players)** button) opens the single-pane game; its
+own menu (New Game -> **Online (2 players)**, shown only when a server is configured) leads to
+the in-game Room screen: **New room** has the server pick an unused 5-character code (shown
+in-game while waiting; share it), and **Join** enters an existing room by code (unknown or
+full rooms are refused and the Room screen shows why). **Leave room** (top-left) reloads to the
+start screen. The wire `join` message carries `"intent"`, and `waiting` echoes the `room`.
+`?room=NAME` skips the menu and connects straight to that room. Without `?server=` the page runs the in-page demo
+(`?local=1` forces it). A default server can be baked in at build time:
+`emcmake cmake -B build-web -DTBGWAF_SERVER_URL=wss://...` (the query parameter
+still overrides it). An `https://` page can only reach `wss://` (or
+`ws://localhost`).
+
+**Protocol** (JSON text frames; full reference in `src/net/Protocol.h`).
+Clients send discrete actions -- `move` (waypoint legs + facing), `shoot`,
+`pass`, `cancel`, `focus`, `reaction`, `commit`, `new_match` --
+each validated through the same click/choose flow the game and scenario
+tests use. The server replies with rule state only: `ack`, the team's own
+`plans`, `peer` readiness, and after each round a fog-filtered `round`
+timeline (sampled positions, shot events, resulting state). Hidden enemy
+figures and enemy plans are never sent, and no animation fields cross the
+wire -- the client derives walk/shoot/fall animation locally. A round runs
+once both teams have committed.
 
 ### Performance suite
 
@@ -323,7 +469,7 @@ and removes the preview automatically when the PR closes.
 
 ## App flow
 
-Screen flow (Splash -> Game Mode -> Map Select / Builder -> Gameplay), declared in
+Screen flow (Splash -> Game Mode -> Map Select / Builder -> Gameplay, plus the in-game Room screen), declared in
 `flow/app_flow.yaml`. The build regenerates `flow/app_flow.mmd` from it; paste
 that file's contents below if the flow changes.
 
@@ -335,11 +481,13 @@ flowchart TD
     map_select("  Map Select  ")
     builder("  Builder  ")
     builder_edit("  Builder Editor  ")
+    room("  Room  ")
     gameplay("  Gameplay  ")
     splash -->|new_game| game_mode
     game_mode -->|select_regular| map_select
     game_mode -->|select_ctf| map_select
     game_mode -->|select_builder| builder
+    game_mode -->|select_online| room
     game_mode -->|back| splash
     map_select -->|select_urban| gameplay
     map_select -->|select_hills| gameplay
@@ -349,6 +497,9 @@ flowchart TD
     builder_edit -->|start_builder_game| gameplay
     builder_edit -->|back_to_builder| builder
     gameplay -->|back_to_builder| builder
+    room -->|create_room| gameplay
+    room -->|join_room| gameplay
+    room -->|back| game_mode
 ```
 
 ## Controls

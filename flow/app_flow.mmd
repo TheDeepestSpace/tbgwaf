@@ -5,13 +5,16 @@ flowchart TD
     map_select("  Map Select  ")
     builder("  Builder  ")
     builder_edit("  Builder Editor  ")
+    room("  Room  ")
     gameplay("  Gameplay  ")
     splash -->|new_game| game_mode
     game_mode -->|select_regular| map_select
     game_mode -->|select_ctf| map_select
     game_mode -->|select_builder| builder
+    game_mode -->|select_online| room
     game_mode -->|back| splash
     map_select -->|select_urban| gameplay
+    map_select -->|select_urban_x4| gameplay
     map_select -->|select_hills| gameplay
     map_select -->|back| game_mode
     builder -->|open_builder_scene| builder_edit
@@ -19,3 +22,6 @@ flowchart TD
     builder_edit -->|start_builder_game| gameplay
     builder_edit -->|back_to_builder| builder
     gameplay -->|back_to_builder| builder
+    room -->|create_room| gameplay
+    room -->|join_room| gameplay
+    room -->|back| game_mode

@@ -554,6 +554,57 @@ void TestMovementUpStair() {
 }
 }  // namespace
 
+void TestStairSidesSealed() {
+  // A stair's open sides are cliffs: its outer edge is walled along the
+  // whole flight and landing, however short the wall pieces are, so nothing
+  // steps off onto the lower ground beside it.
+  int checked = 0;
+  for (currentSeed = 1; currentSeed <= 40; ++currentSeed) {
+    const Scene s = GenerateUrbanMap(currentSeed, TerrainConfig());
+    NavMesh nav;
+    nav.Build(s.obstacles, s.mapHalfExtent, constants::kAgentRadius, &s.ground, &s.walkSurfaces);
+    for (const TerrainStair& stair : s.terrainStairs) {
+      const glm::vec3 a = stair.flight[1], b = stair.landing[2], inner = stair.flight[0];
+      const glm::vec2 n = glm::normalize(glm::vec2(a.x - inner.x, a.z - inner.z));
+      for (float k = 0.0f; k <= 1.0f; k += 0.05f) {
+        const glm::vec2 e = glm::mix(glm::vec2(a.x, a.z), glm::vec2(b.x, b.z), k);
+        const glm::vec2 on = e - n * 0.9f, off = e + n * 1.1f;
+        if (s.ground.HeightAt(on.x, on.y) - s.ground.HeightAt(off.x, off.y) < 1.0f) continue;
+        ++checked;
+        CHECK(!nav.IsWalkable(e.x, e.y));
+      }
+    }
+  }
+  CHECK(checked > 0);
+}
+
+void TestNoWalkableCliffLinks() {
+  // No two neighbouring walkable points straddle a cliff: every drop is
+  // walled, including the wall stretch beside a road ramping through a step
+  // (seed 7 left it open). The map rim is skipped.
+  int checked = 0;
+  for (currentSeed = 1; currentSeed <= 12; ++currentSeed) {
+    MapGeneratorConfig c;
+    c.elevatedHighway = OverpassMode::Off;
+    const Scene s = GenerateUrbanMap(currentSeed, c);
+    NavMesh nav;
+    nav.Build(s.obstacles, s.mapHalfExtent, constants::kAgentRadius, &s.ground, &s.walkSurfaces);
+    const float lim = s.mapHalfExtent - 4.0f;
+    for (float x = -lim; x < lim; x += 0.5f) {
+      for (float z = -lim; z < lim; z += 0.5f) {
+        if (!nav.IsWalkable(x, z)) continue;
+        const float y = s.ground.HeightAt(x, z);
+        for (const glm::vec2 d : {glm::vec2(0.5f, 0.0f), glm::vec2(0.0f, 0.5f)}) {
+          if (!nav.IsWalkable(x + d.x, z + d.y)) continue;
+          ++checked;
+          CHECK(std::fabs(y - s.ground.HeightAt(x + d.x, z + d.y)) < 1.2f);
+        }
+      }
+    }
+  }
+  CHECK(checked > 0);
+}
+
 // Sheer faces are not walkable (issue #221). A plateau (x >= 6, 3 high)
 // stands over flat ground behind a cliff; with `ramp` a 2-wide strip at
 // z in [4, 6] climbs it at grade 0.5. No obstacles, so only the slope rule
@@ -626,6 +677,8 @@ void TestSheerFacesAreImpassable() {
 }
 
 int main() {
+  TestStairSidesSealed();
+  TestNoWalkableCliffLinks();
   TestControlsAndDeterminism();
   TestPinnedTerrainFingerprints();
   TestSeedInvariants();

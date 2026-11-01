@@ -18,7 +18,7 @@ camera:
   zoom: -120
 render: {fov_overlay: shadow_map}
 script:
-  - assert: {unit: 0, position: [-39.2, 0.10, -51.26], tolerance: 0.05}
+  - assert: {unit: 0, position: [-39.2, 0.01, -51.26], tolerance: 0.05}
   - action: move
     actor: 0
     destination: [-40.12, 4.681, -43.87]

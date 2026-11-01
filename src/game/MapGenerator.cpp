@@ -5175,6 +5175,107 @@ void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorCo
   }
 }
 
+// Road patches from different emitters (crossing street bands, the artery's
+// shoulder overlap) cover the same ground, and each is fitted to its own
+// plane. Where two nearly coplanar patches overlap their depths differ by
+// millimetres and z-fight (issue #280). Later patches lose the part an
+// earlier, near-coplanar patch already covers; genuinely stacked layers
+// (apart by more than kRoadStackGap) and identical planes are left alone.
+void DedupeRoadOverlaps(Scene* scene) {
+  constexpr float kRoadStackGap = 0.15f;
+  // Identical planes (flat ground) render the same depth and cannot flicker.
+  const auto ZFights = [](float a, float b) {
+    const float dy = std::fabs(a - b);
+    return dy > 1e-4f && dy < kRoadStackGap;
+  };
+  struct Kept {
+    std::vector<glm::vec3> v;
+    glm::vec2 lo, hi;
+    float sign;
+  };
+  const auto planeY = [](const std::vector<glm::vec3>& v, glm::vec2 q) {
+    glm::vec3 n(0.0f);
+    for (size_t i = 0; i < v.size(); ++i) {
+      const glm::vec3 a = v[i], b = v[(i + 1) % v.size()];
+      n.x += (a.y - b.y) * (a.z + b.z);
+      n.y += (a.z - b.z) * (a.x + b.x);
+      n.z += (a.x - b.x) * (a.y + b.y);
+    }
+    if (std::fabs(n.y) < 1e-6f) return v[0].y;
+    return v[0].y - (n.x * (q.x - v[0].x) + n.z * (q.y - v[0].z)) / n.y;
+  };
+  const auto xz = [](const std::vector<glm::vec3>& v) {
+    std::vector<glm::vec2> out;
+    for (const glm::vec3& p : v) out.emplace_back(p.x, p.z);
+    return out;
+  };
+  std::vector<Kept> kept;
+  std::vector<RoadSurface> result;
+  for (const RoadSurface& road : scene->roads) {
+    std::vector<std::vector<glm::vec3>> pieces = {road.vertices};
+    for (const Kept& k : kept) {
+      std::vector<std::vector<glm::vec3>> next;
+      for (auto& piece : pieces) {
+        const std::vector<glm::vec2> flat = xz(piece);
+        glm::vec2 lo = flat[0], hi = flat[0], center(0.0f);
+        for (const glm::vec2& q : flat) {
+          lo = glm::min(lo, q);
+          hi = glm::max(hi, q);
+          center += q;
+        }
+        center /= static_cast<float>(flat.size());
+        if (hi.x <= k.lo.x || lo.x >= k.hi.x || hi.y <= k.lo.y || lo.y >= k.hi.y) {
+          next.push_back(std::move(piece));
+          continue;
+        }
+        // Subtract the convex `k` from the convex piece: peel off the part
+        // outside each of k's edges, shrinking the remainder to the inside.
+        const std::vector<glm::vec2> kf = xz(k.v);
+        std::vector<glm::vec2> rest = flat;
+        std::vector<std::vector<glm::vec2>> outside;
+        for (size_t e = 0; e < kf.size() && rest.size() >= 3; ++e) {
+          const glm::vec2 d = kf[(e + 1) % kf.size()] - kf[e];
+          const glm::vec2 n = glm::vec2(-d.y, d.x) * k.sign;
+          const float dMin = glm::dot(n, kf[e]);
+          auto out = KeepSide(rest, -n, -dMin);
+          rest = KeepSide(rest, n, dMin);
+          if (out.size() >= 3) outside.push_back(std::move(out));
+        }
+        glm::vec2 overlapCenter(0.0f);
+        for (const glm::vec2& q : rest) overlapCenter += q;
+        if (rest.size() >= 3) overlapCenter /= static_cast<float>(rest.size());
+        if (rest.size() < 3 || PolygonArea(rest) < 1e-4f ||
+            !ZFights(planeY(piece, overlapCenter), planeY(k.v, overlapCenter))) {
+          next.push_back(std::move(piece));  // Disjoint, identical or stacked: keep whole.
+          continue;
+        }
+        for (auto& o : outside) {
+          SimplifyPolygon(&o);
+          if (o.size() < 3 || PolygonArea(o) < 1e-3f) continue;
+          std::vector<glm::vec3> lifted;
+          for (const glm::vec2& q : o) lifted.emplace_back(q.x, planeY(piece, q), q.y);
+          next.push_back(std::move(lifted));
+        }
+      }
+      pieces = std::move(next);
+    }
+    for (auto& piece : pieces) {
+      Kept k;
+      k.v = piece;
+      const std::vector<glm::vec2> flat = xz(piece);
+      k.lo = k.hi = flat[0];
+      for (const glm::vec2& q : flat) {
+        k.lo = glm::min(k.lo, q);
+        k.hi = glm::max(k.hi, q);
+      }
+      k.sign = PolygonSignedArea(flat) >= 0.0f ? 1.0f : -1.0f;
+      kept.push_back(std::move(k));
+      result.push_back({std::move(piece)});
+    }
+  }
+  scene->roads = std::move(result);
+}
+
 Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   Rng rng(seed);
   Scene scene;
@@ -5187,6 +5288,7 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   const size_t streetBegin = scene.roads.size();
   EmitStreetSurfaces(&scene, city, c);
   EmitPiers(&scene, city, c, pierForm, groundY, streetBegin, scene.roads.size());
+  DedupeRoadOverlaps(&scene);
   std::vector<float> characterRolls;
   const std::vector<Parcel> parcels = PlanParcels(city, c, &rng, &characterRolls);
   EmitBuildings(&scene, city, parcels, PlanBuildings(parcels, characterRolls, seed, c, &rng), c,

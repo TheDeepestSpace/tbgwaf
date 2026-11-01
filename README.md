@@ -150,6 +150,24 @@ line spends more of the turn. The move frontier draws that reach as a second
 second rider waits at the anchor), and a rider can't shoot. Scenarios add
 lines with `map.ziplines: [{from: [x,y,z], to: [x,y,z]}]` and assert an
 out-of-reach move with `expect_unreachable: true`.
+
+Empty urban blocks now carry **trees** (issue #270): up to 2–4 per block,
+space permitting, with canopies set back behind the wrapping sidewalk.
+Blocks with buildings, furniture or deck structures stay bare; existing
+corner traffic signs on the sidewalk are retained. Three procedural blob
+canopies and trunks vary in size, rotation and color from a separate seeded
+stream. Trees are decoration only: they never enter collision, navigation,
+LOS, FOV shadow geometry or replay snapshots. No external assets are used.
+Disable placement with `MapGeneratorConfig::features.trees` or scenario
+`map.generate.features: {trees: off}`.
+
+Tree meshes and instance buffers are cached, with at most three draws per
+pane in AO view (plus three sunlight-shadow draws in color view), and no
+additional camera probes. Existing screenshot goldens omit this decoration;
+`tree_render_tests` covers instancing, scene changes and both AO polarities.
+For a native review capture, run
+`xvfb-run -a build/tactics_tree_render_tests /tmp/urban-trees.png`.
+
 The app defaults to the prototype per-unit shadow-map FOV mask (tints
 walls, roofs and deck sides too; see
 [docs/fov-shadow-map.md](docs/fov-shadow-map.md)); `TBGWAF_FOV_SHADOW_MAP=0`

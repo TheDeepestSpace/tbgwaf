@@ -18,6 +18,7 @@
 #include "gfx/Camera.h"
 #include "gfx/Mesh.h"
 #include "gfx/Shader.h"
+#include "gfx/Trees.h"
 
 namespace gfx {
 
@@ -37,6 +38,8 @@ bool IsUnitVisibleForRender(const tactics::Unit& unit, tactics::Team viewingTeam
 // Local-only rendering toggles for the interactive app's debug panel. Not
 // game state: never synced. Defaults render normally (visual runner never sets it).
 struct RenderDebugOptions {
+  // Existing golden suites pin the undecorated map; live rendering defaults on.
+  bool disableTrees = false;
   bool disableFov = false;
   bool disableShadows = false;
   // Thermal camera prototype (issue #177): material-based grayscale with
@@ -233,6 +236,11 @@ class SceneRenderer {
   std::array<LitTriangleMesh, kStreetPropMaterialCount> streetPropMeshes_;
   std::vector<tactics::AABB> streetFurnitureKey_;
   std::vector<tactics::StreetProp> streetPropKey_;
+  // Trees baked into a regular static mesh, like the street fixtures: the
+  // same mesh serves the lit pass, the sun shadow pass and the FOV mask
+  // (as caster and receiver), with no instancing or tree-specific shader.
+  LitTriangleMesh treeMesh_;
+  std::vector<tactics::TreeDecoration> treeKey_;
   tactics::HeightField terrainKey_;
   GLuint shadowFbo_ = 0;
   GLuint shadowDepthTex_ = 0;
@@ -310,7 +318,8 @@ class SceneRenderer {
   // framebuffer, viewport, scissor and the FOV-overlay blend/stencil state
   // as it found them.
   void DrawFovMasks(const std::vector<FovMask>& masks, const glm::vec4& color,
-                    const glm::mat4& viewProj, bool drawTerrain, float mapHalfExtent);
+                    const glm::mat4& viewProj, bool drawTerrain, float mapHalfExtent,
+                    bool drawTrees);
   void DestroyFovMaps(FovMapSlot* slot);
 };
 

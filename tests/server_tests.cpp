@@ -166,6 +166,17 @@ void PlanEveryone(server::GameSession& s, Team team) {
   }
 }
 
+// Regression (#285): seed-generated matches spawn at opposite corners (#226),
+// not at the ends of the main road.
+void TestSessionSpawnsAtOppositeCorners() {
+  server::GameSession s(1);
+  const float e = s.game().GetScene().mapHalfExtent;
+  for (const Unit& u : s.game().GetScene().units) {
+    const float sign = u.team == Team::Blue ? -1.0f : 1.0f;
+    CHECK(u.position.x * sign > 0.5f * e && u.position.z * sign > 0.5f * e);
+  }
+}
+
 void TestSessionReadyAndRound() {
   server::GameSession s(1);
   Action commit;
@@ -1184,6 +1195,7 @@ void TestRealSocketLoopback() {
 int main() {
   TestWebSocketPrimitives();
   TestFrameParser();
+  TestSessionSpawnsAtOppositeCorners();
   TestSessionReadyAndRound();
   TestSessionFogHidesEnemyPlansAndUnits();
   TestSceneStore();

@@ -127,7 +127,9 @@ void RemoteClient::HandleStart(const Json& m) {
   if (m.Has("scene") && tactics::net::SceneFromSpec(m["scene"], &scene, &sceneError)) {
     game_->Reset(scene);
   } else {
-    game_->Reset(tactics::GenerateUrbanMap(static_cast<uint32_t>(m["seed"].AsNumber())));
+    scene = tactics::GenerateUrbanMap(static_cast<uint32_t>(m["seed"].AsNumber()));
+    tactics::ApplySpawnHints(&scene);  // Same corner spawns as the server (#226).
+    game_->Reset(scene);
   }
   playback_.reset();
   pendingPlans_.reset();

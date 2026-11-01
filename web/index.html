@@ -119,6 +119,12 @@
       <form id="match-setup" hidden>
         <strong id="setup-title"></strong>
         <label>Map <select id="map-select"></select></label>
+        <label>Game
+          <select id="game-select">
+            <option value="0">Regular</option>
+            <option value="1">Capture the Flag</option>
+          </select>
+        </label>
         <label>Seed
           <span class="row">
             <input id="seed" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" />
@@ -254,6 +260,7 @@
       var form = document.getElementById("match-setup");
       var mapSelect = document.getElementById("map-select");
       var seedInput = document.getElementById("seed");
+      var gameSelect = document.getElementById("game-select");
       var chosen = "";
       MAPS.forEach(function (m) {
         var o = document.createElement("option");
@@ -263,7 +270,7 @@
       seedInput.value = String(DEFAULT_SEED);
       function go(changes) {
         var url = new URL(window.location.href);
-        ["mode", "map", "seed", "online", "solo", "room", "intent", "prealpha"]
+        ["mode", "map", "seed", "ctf", "online", "solo", "room", "intent", "prealpha"]
           .forEach(function (k) { url.searchParams.delete(k); });
         Object.keys(changes).forEach(function (k) { url.searchParams.set(k, changes[k]); });
         window.location.href = url.toString();
@@ -272,6 +279,8 @@
         b.addEventListener("click", function () {
           chosen = b.dataset.splashMode;
           document.getElementById("setup-title").textContent = b.textContent;
+          // Jev vs Jev has always defaulted to CTF; the other modes to Regular.
+          gameSelect.value = chosen === "ai-v-ai" ? "1" : "0";
           form.hidden = false;
         });
       });
@@ -284,7 +293,7 @@
       document.getElementById("setup-back").addEventListener("click", function () { form.hidden = true; });
       form.addEventListener("submit", function (e) {
         e.preventDefault();
-        go({ mode: chosen, map: mapSelect.value, seed: String(parseSeed(seedInput.value)) });
+        go({ mode: chosen, map: mapSelect.value, ctf: gameSelect.value, seed: String(parseSeed(seedInput.value)) });
       });
       document.getElementById("splash-prealpha").addEventListener("click", function () {
         // Same as the old "Online (2 players)" button: the single-pane game with its own menu.

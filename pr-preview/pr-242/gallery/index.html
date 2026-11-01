@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <link rel="icon" href="data:," />
     <title>tbgwaf — asset &amp; animation gallery</title>
     <style>
@@ -19,6 +19,7 @@
         display: flex;
         width: 100vw;
         height: 100vh;
+        height: 100dvh;
       }
       #sidebar {
         width: 230px;
@@ -111,6 +112,41 @@
       #mapSeeds img { display: block; width: 100%; height: auto; }
       #mapSeeds figcaption { font-size: 12px; padding: 8px 10px; }
       #mapSeeds figcaption .seed { color: #9aa0a6; }
+      #mapSeeds figure { cursor: pointer; }
+      #mapSeeds figure:hover { border-color: #8ab4ff; }
+      #seedModal {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0, 0, 0, 0.75);
+      }
+      #seedModal.open { display: flex; }
+      #seedModalBox {
+        position: relative;
+        width: min(1200px, 94vw);
+        height: min(800px, 90vh);
+        background: #15171a;
+        border: 1px solid #2a2c31;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      #seedModalBox canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+      #seedModalTitle { position: absolute; top: 10px; left: 14px; font-size: 13px; pointer-events: none; }
+      #seedModalHint { position: absolute; bottom: 10px; left: 14px; font-size: 12px; color: #9aa0a6; pointer-events: none; }
+      #seedModalClose {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        background: #2a2c31;
+        border: 1px solid #3a3c42;
+        border-radius: 6px;
+        color: #e6e6e6;
+        padding: 4px 10px;
+        cursor: pointer;
+      }
       #scrub { flex: 1 1 auto; }
       #timeLabel { font-size: 12px; color: #9aa0a6; width: 90px; text-align: right; }
       #hint {
@@ -149,6 +185,13 @@
           <span id="timeLabel"></span>
         </div>
         <div id="mapSeeds"><div class="grid"></div></div>
+      </div>
+    </div>
+    <div id="seedModal">
+      <div id="seedModalBox">
+        <div id="seedModalTitle"></div>
+        <div id="seedModalHint">left-drag to pan &middot; right-drag to rotate &middot; scroll to zoom</div>
+        <button id="seedModalClose">Close</button>
       </div>
     </div>
     <!-- Generated at build time from tests/map_goldens/ (see
@@ -244,8 +287,45 @@
             }
             fig.appendChild(img);
             fig.appendChild(cap);
+            if (m) {
+              // "city_random_x4_seed_6805" is an 8x8 map; every other
+              // seed golden is the 4x4 city.
+              fig.title = "Click to view in 3D";
+              fig.onclick = function () {
+                openSeedModal(m[1].replace(/_/g, " ") + " seed " + m[2], Number(m[2]),
+                              /_x4$/.test(m[1]));
+              };
+            }
             grid.appendChild(fig);
           });
+        }
+
+
+        // 3D seed viewer: the WASM module regenerates the map and draws it
+        // with the game's own renderer (greyscale) onto the gallery canvas,
+        // which is moved into the modal while it is open. Camera input is the
+        // game's: left-drag pans, right-drag rotates, wheel zooms.
+        var seedModal = document.getElementById("seedModal");
+        var seedBox = document.getElementById("seedModalBox");
+        var canvasEl = document.querySelector("#viewport canvas");
+        document.getElementById("seedModalClose").onclick = closeSeedModal;
+        seedModal.addEventListener("mousedown", function (e) {
+          if (e.target === seedModal) closeSeedModal();
+        });
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape") closeSeedModal();
+        });
+        function closeSeedModal() {
+          if (!seedModal.classList.contains("open")) return;
+          seedModal.classList.remove("open");
+          mod.ccall("gallery_map_close", null, [], []);
+          viewportEl.insertBefore(canvasEl, viewportEl.firstChild);
+        }
+        function openSeedModal(title, seed, x4) {
+          document.getElementById("seedModalTitle").innerText = title;
+          seedBox.insertBefore(canvasEl, seedBox.firstChild);
+          seedModal.classList.add("open");
+          mod.ccall("gallery_map_open", null, ["number", "number"], [seed, x4 ? 1 : 0]);
         }
 
         function showMapSeeds() {

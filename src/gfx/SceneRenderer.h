@@ -18,6 +18,7 @@
 #include "gfx/Camera.h"
 #include "gfx/Mesh.h"
 #include "gfx/Shader.h"
+#include "gfx/Trees.h"
 
 namespace gfx {
 
@@ -37,6 +38,8 @@ bool IsUnitVisibleForRender(const tactics::Unit& unit, tactics::Team viewingTeam
 // Local-only rendering toggles for the interactive app's debug panel. Not
 // game state: never synced. Defaults render normally (visual runner never sets it).
 struct RenderDebugOptions {
+  // Existing golden suites pin the undecorated map; live rendering defaults on.
+  bool disableTrees = false;
   bool disableFov = false;
   bool disableShadows = false;
   // Thermal camera prototype (issue #177): material-based grayscale with
@@ -170,6 +173,7 @@ class SceneRenderer {
   void ApplyThermalSensor(int x, int y, int width, int height);
   CubeMesh cubeMesh_;
   SphereMesh sphereMesh_;
+  Trees trees_;
   LineMesh pathLine_;
   ColorTriangleMesh fovConeMesh_;
   ColorTriangleMesh shotConeMesh_;

@@ -2853,6 +2853,10 @@ bool SceneRenderer::Init() {
   }
   cubeMesh_.Init();
   sphereMesh_.Init();
+  if (!trees_.Init()) {
+    std::fprintf(stderr, "Failed to compile the tree shaders\n");
+    return false;
+  }
   frontierFill_.Init();
   frontierBorder_.Init();
   ziplineFill_.Init();
@@ -2959,6 +2963,7 @@ void SceneRenderer::Destroy() {
   terrainKey_ = tactics::HeightField{};
   highlightRing_.Destroy();
   sphereMesh_.Destroy();
+  trees_.Destroy();
   cubeMesh_.Destroy();
   if (shadowDepthTex_) glDeleteTextures(1, &shadowDepthTex_);
   if (shadowFbo_) glDeleteFramebuffers(1, &shadowFbo_);
@@ -3226,6 +3231,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                int y, int width, int height, const PaneOverlays& overlays,
                                GLuint targetFramebuffer, const RenderDebugOptions& debug) {
   const ScopedDrawStats drawStats(debug.stats);
+  if (!debug.disableTrees) trees_.SetTrees(game.GetScene().trees);
   const auto& obstacles = game.GetScene().obstacles;
   SetRagdollObstacles(obstacles);
   SetRagdollGround(game.GetScene().walkSurfaces, game.GetScene().ground);
@@ -3427,6 +3433,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
     }
     DrawPlantedFlagDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, game);
+    if (!debug.disableTrees) trees_.DrawDepth(lightSpaceMatrix_);
   }
 
   // Shadow-map FOV masks: this pane's figures' depth maps (and the free-aim
@@ -3906,6 +3913,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   }
 
+  if (!debug.disableTrees) {
+    trees_.Draw(viewProj, lightDir_, debug.thermal, debug.thermalBlackHot);
+    litShader_.Use();
+  }
   thermalMaterial(ThermalMaterial::Figure);
   for (const Unit& unit : game.GetScene().units) {
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;

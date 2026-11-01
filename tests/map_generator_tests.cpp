@@ -41,6 +41,7 @@ float DistanceToSegment(glm::vec2 p, glm::vec2 a, glm::vec2 b);
 MapGeneratorConfig LegacyConfig() {
   MapGeneratorConfig c = OldSizeConfig();
   c.arteryCount = 0;
+  c.features.trees.mode = FeatureMode::Off;  // Fingerprints count building obstacles only.
   return c;
 }
 
@@ -289,7 +290,7 @@ void TestBuildingKindsFloorsAndHeights() {
     (void)setbacks;  // Seed-dependent; asserted on the forced-downtown city below.
     // Every obstacle with a footprint is a building or a pier column/footing.
     for (const Obstacle& o : scene.obstacles) {
-      CHECK(o.footprint.empty() || o.building >= 0 || o.kind == ObstacleKind::Pier);
+      CHECK(o.footprint.empty() || o.building >= 0 || o.kind == ObstacleKind::Pier || o.navOnly);  // navOnly: tree solids
     }
 
     // Street weighting: artery frontage is mostly office/mixed-use, back
@@ -357,6 +358,19 @@ void TestMassingBlocksSight() {
     const float reach = 0.5f * (box.max.x - box.min.x) + 0.5f;  // Endpoints outside the prism.
     CHECK(!LineOfSightClear(glm::vec3(c.x - reach, c.y, c.z), glm::vec3(c.x + reach, c.y, c.z),
                             sight));
+  }
+}
+
+// A tree blocks sight lines at eye height and in its crown.
+void TestTreesBlockSight() {
+  const Scene scene = GenerateUrbanMap(kSeeds[0]);
+  CHECK(!scene.trees.empty());
+  const glm::vec3 p = scene.trees[0].position;
+  const float s = scene.trees[0].scale;
+  const std::vector<Obstacle> sight = SightObstacles(scene);
+  for (float h : {1.5f, 3.5f * s}) {
+    const float y = p.y + h;
+    CHECK(!LineOfSightClear(glm::vec3(p.x - 4.0f, y, p.z), glm::vec3(p.x + 4.0f, y, p.z), sight));
   }
 }
 
@@ -1066,9 +1080,9 @@ void TestPolygonBlocksAdaptToAngledStreets() {
     }
   }
   for (size_t i = 0; i < scene.obstacles.size(); ++i) {
-    if (scene.obstacles[i].footprint.empty()) continue;
+    if (scene.obstacles[i].footprint.empty() || scene.obstacles[i].navOnly) continue;
     for (size_t j = i + 1; j < scene.obstacles.size(); ++j) {
-      if (scene.obstacles[j].footprint.empty()) continue;
+      if (scene.obstacles[j].footprint.empty() || scene.obstacles[j].navOnly) continue;  // Overlapping tree crowns are fine.
       for (size_t edge = 0; edge < scene.obstacles[i].footprint.size(); ++edge) {
         const glm::vec2 a = scene.obstacles[i].footprint[edge];
         const glm::vec2 b = scene.obstacles[i].footprint[
@@ -2301,6 +2315,7 @@ MapGeneratorConfig FurnitureConfig(FeatureMode mode) {
   c.elevatedHighway = OverpassMode::Off;
   c.features.terrain.mode = FeatureMode::Off;  // Flat-city street graph; furniture on terrain is later work.
   c.features.furniture.mode = mode;
+  c.features.trees.mode = FeatureMode::Off;  // Tree trunks would interleave with the furniture diff.
   return c;
 }
 
@@ -2608,6 +2623,7 @@ void TestFurnitureHugsSidewalksAndRespectsClearances() {
     MapGeneratorConfig base = OldSizeConfig();
     base.elevatedHighway = OverpassMode::Off;
     base.features.terrain.mode = FeatureMode::Off;
+    base.features.trees.mode = FeatureMode::Off;
     const Scene scene = GenerateUrbanMap(seed, base);
     CHECK(!scene.props.empty());
     CHECK(SameScene(scene, GenerateUrbanMap(seed, FurnitureConfig(FeatureMode::On))));
@@ -2818,7 +2834,85 @@ void TestPinnedFurnitureFingerprints() {
   }
 }
 
+void TestTreesStayOnEmptyBlocksAndAreSolid() {
+  std::set<int> variants;
+  MapGeneratorConfig legacyTrees = LegacyConfig();
+  legacyTrees.features.trees.mode = FeatureMode::On;
+  for (const MapGeneratorConfig& config : {FlatConfig(), MapGeneratorConfig{}, legacyTrees}) {
+    size_t total = 0;
+    for (uint32_t seed : {1u, 7u, 42u, 2024u}) {
+      const Scene scene = GenerateUrbanMap(seed, config);
+      CHECK(scene.trees == GenerateUrbanMap(seed, config).trees);
+      MapGeneratorConfig off = config;
+      off.features.trees.mode = FeatureMode::Off;
+      const Scene bare = GenerateUrbanMap(seed, off);
+      CHECK(bare.trees.empty());
+      CHECK(scene.ground.heights == bare.ground.heights);
+      // Trees only append solid obstacles; everything else is unchanged.
+      CHECK(scene.obstacles.size() == bare.obstacles.size() + scene.trees.size());
+      for (size_t i = 0; i < bare.obstacles.size(); ++i) {
+        CHECK(scene.obstacles[i].bounds.min == bare.obstacles[i].bounds.min);
+        CHECK(scene.obstacles[i].bounds.max == bare.obstacles[i].bounds.max);
+        CHECK(scene.obstacles[i].footprint == bare.obstacles[i].footprint);
+      }
+      for (size_t i = 0; i < scene.trees.size(); ++i) {
+        const Obstacle& o = scene.obstacles[bare.obstacles.size() + i];
+        CHECK(o.navOnly && !o.climbable);
+      }
+      auto blocks = UrbanBlocks(seed, config);
+      if (config.arteryCount == 0) {
+        blocks.clear();
+        for (const auto& lot : UrbanLots(seed, config)) {
+          if (lot.empty) blocks.push_back({lot.x0, lot.x1, lot.z0, lot.z1,
+              {{lot.x0, lot.z0}, {lot.x1, lot.z0}, {lot.x1, lot.z1}, {lot.x0, lot.z1}}});
+        }
+      }
+      std::vector<int> counts(blocks.size());
+      for (const TreeDecoration& tree : scene.trees) {
+        ++total;
+        variants.insert(tree.variant);
+        CHECK(tree.variant >= 0 && tree.variant < 3);
+        const glm::vec2 p(tree.position.x, tree.position.z);
+        CHECK(IsFreeSpot(bare, p.x, p.y));  // Free before its own trunk was added.
+        const float y = scene.ground.HeightAt(p.x, p.y) + (config.arteryCount == 0 ? 0.12f : 0.0f);
+        CHECK(std::fabs(tree.position.y - y) < kEps);
+        int containing = 0;
+        for (size_t b = 0; b < blocks.size(); ++b) {
+          const auto& polygon = blocks[b].vertices;
+          if (!PointInConvexPolygon(p, polygon)) continue;
+          ++containing;
+          CHECK(++counts[b] <= 16);
+          const float margin = config.sidewalkWidth + kTreeCanopyRadius * tree.scale;
+          for (size_t e = 0; e < polygon.size(); ++e)
+            CHECK(DistanceToSegment(p, polygon[e], polygon[(e + 1) % polygon.size()]) >= margin);
+          for (const auto& o : bare.obstacles) {
+            if (!FootprintsOverlap(polygon, ObstacleFootprint(o))) continue;
+            // The only permitted obstacle is an existing traffic-sign pole
+            // on the wrapping sidewalk, never furniture in the open block.
+            CHECK(o.kind == ObstacleKind::StreetFurniture);
+            CHECK(std::any_of(scene.props.begin(), scene.props.end(), [&](const auto& prop) {
+              return prop.kind != StreetPropKind::LampPost &&
+                     prop.position.x == o.bounds.Center().x && prop.position.z == o.bounds.Center().z;
+            }));
+            CHECK(!FootprintsOverlap(InsetConvexPolygon(polygon, config.sidewalkWidth),
+                                      ObstacleFootprint(o)));
+          }
+          for (const auto& prop : scene.props)
+            CHECK(!PointInConvexPolygon({prop.position.x, prop.position.z},
+                                        InsetConvexPolygon(polygon, config.sidewalkWidth)));
+        }
+        CHECK(containing == 1);
+      }
+    }
+    CHECK(total > 0);  // Exercise default terrain, flat and legacy placement.
+  }
+  CHECK(variants.size() == 3);
+  CHECK(BuildDefaultScene().trees.empty());
+  CHECK(GenerateHillyMap(7).trees.empty());
+}
+
 int main() {
+  TestTreesStayOnEmptyBlocksAndAreSolid();
   TestFeatureFlagsAndStreetGraph();
   TestLongBlockApartmentRowsAndPedestrianSplits();
   TestFurnitureHugsSidewalksAndRespectsClearances();
@@ -2837,6 +2931,7 @@ int main() {
   TestMassingStaysOnItsBuilding();
   TestRoofMassingBlocksWalking();
   TestMassingBlocksSight();
+  TestTreesBlockSight();
   TestPinnedKindHistograms();
   TestMapIsMuchLargerThanDefault();
   TestStreetsAndSidewalksAreObstacleFree();

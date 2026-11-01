@@ -2857,7 +2857,68 @@ void TestPinnedFurnitureFingerprints() {
   }
 }
 
+// Issue #280: nearly coplanar road patches overlapping in XZ z-fight. Seeds
+// 10, 35 and 36 used to overlap by several square metres at 1-10 mm apart.
+void TestRoadPatchesDoNotZFight() {
+  const auto signedArea = [](const std::vector<glm::vec2>& p) {
+    float a = 0.0f;
+    for (size_t i = 0; i < p.size(); ++i) {
+      const glm::vec2 u = p[i], v = p[(i + 1) % p.size()];
+      a += u.x * v.y - v.x * u.y;
+    }
+    return 0.5f * a;
+  };
+  const auto flat = [&](const RoadSurface& r) {
+    std::vector<glm::vec2> p;
+    for (const glm::vec3& v : r.vertices) p.emplace_back(v.x, v.z);
+    if (signedArea(p) < 0.0f) std::reverse(p.begin(), p.end());
+    return p;
+  };
+  const auto clip = [](const std::vector<glm::vec2>& s, glm::vec2 a, glm::vec2 b) {
+    const auto side = [&](glm::vec2 p) { return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x); };
+    std::vector<glm::vec2> out;
+    for (size_t i = 0; i < s.size(); ++i) {
+      const glm::vec2 p = s[i], q = s[(i + 1) % s.size()];
+      const float dp = side(p), dq = side(q);
+      if (dp >= 0.0f) out.push_back(p);
+      if ((dp >= 0.0f) != (dq >= 0.0f)) out.push_back(p + (q - p) * (dp / (dp - dq)));
+    }
+    return out;
+  };
+  for (uint32_t seed : {10u, 35u, 36u, 3u, 17u}) {
+    const Scene scene = GenerateUrbanMap(seed, OldSizeConfig());
+    float worst = 0.0f;
+    for (size_t i = 0; i < scene.roads.size(); ++i) {
+      for (size_t j = i + 1; j < scene.roads.size(); ++j) {
+        const auto a = flat(scene.roads[i]), b = flat(scene.roads[j]);
+        std::vector<glm::vec2> o = a;
+        for (size_t k = 0; k < b.size() && o.size() >= 3; ++k) o = clip(o, b[k], b[(k + 1) % b.size()]);
+        if (o.size() < 3 || signedArea(o) < 0.02f) continue;
+        // Coplanar overlap only; a deck far above ground is a different layer.
+        glm::vec2 c(0.0f);
+        for (const glm::vec2& p : o) c += p;
+        c /= static_cast<float>(o.size());
+        const auto yAt = [&](const RoadSurface& r) {
+          const auto& v = r.vertices;
+          glm::vec3 n(0.0f);
+          for (size_t m = 0; m < v.size(); ++m) {
+            const glm::vec3 p = v[m], q = v[(m + 1) % v.size()];
+            n.x += (p.y - q.y) * (p.z + q.z);
+            n.y += (p.z - q.z) * (p.x + q.x);
+            n.z += (p.x - q.x) * (p.y + q.y);
+          }
+          return v[0].y - (n.x * (c.x - v[0].x) + n.z * (c.y - v[0].z)) / n.y;
+        };
+        const float dy = std::fabs(yAt(scene.roads[i]) - yAt(scene.roads[j]));
+        if (dy > 1e-4f && dy < 0.15f) worst = std::max(worst, signedArea(o));
+      }
+    }
+    CHECK(worst < 0.02f);
+  }
+}
+
 int main() {
+  TestRoadPatchesDoNotZFight();
   TestFeatureFlagsAndStreetGraph();
   TestLongBlockApartmentRowsAndPedestrianSplits();
   TestFurnitureHugsSidewalksAndRespectsClearances();

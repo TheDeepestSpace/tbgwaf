@@ -208,6 +208,42 @@ hides it (a carried one shows with its carrier). `round_limit: N` ends the
 match as a draw after N rounds with no winner. Flag state travels in the
 snapshot text protocol (`ExportState`/`ImportState`).
 
+### Builder
+
+Game Mode → **Builder** shows one card per scene you have built (a rendered
+thumbnail and its name; the first card is a sample) plus a **New Scene** card. Opening one enters the editor: a
+medium flat field (40 x 40) in 3D with a side panel to rename the scene, add
+cubes and edit their position, size and height, and add Blue/Red figures and
+pick each one's gun (Desert Eagle, Assault Rifle, Sniper Rifle). Drag a
+figure in the 3D view to move it; it snaps onto the ground or a cube top
+(every cube is climbable). **Start** (enabled once both teams have a figure
+and every figure stands clear) plays the scene **hotseat** on one screen:
+both teams' figures and FOV cones are shown, any figure can be clicked and
+planned, and the HUD follows the selected figure's team; **Commit Round** once
+every figure has a plan. **Download log** (during or after the game) exports
+the session as a repro log -- the scene itself, the RNG seed, every input with
+timestamps, each frame's `dt`, the simulation's own log lines and a state hash
+after every entry ([docs/repro-log.md](docs/repro-log.md)); **Stop** returns to
+the Builder (whose screen keeps the last game's log downloadable).
+`build/tactics_repro_replay <log.jsonl>` replays a log headlessly and verifies
+every hash; `TBGWAF_REPRO_LOG=<log.jsonl> build/tactics_app` loads it into the
+app onto the turn timeline. On the web each canvas reaches the Builder from
+its own menu; a builder session is local to that canvas (it neither sends nor
+applies the two-canvas sync messages until it returns to Game Mode).
+**Scene storage:** when a game server is configured (web build), the Builder
+keeps scenes on the server instead of in memory: it fetches the list on entering
+the Builder, saves a scene when you leave its editor (Back or Start) and deletes
+it there with the card's Delete; an empty server is seeded with the sample.
+Without a server (native build) scenes live in memory for the session. The
+server (`scenes_list` / `scene_put` / `scene_delete` in `src/net/Protocol.h`)
+writes one JSON file per scene (max 100) under `TBGWAF_SCENES_DIR` (set in the
+server image; mount a volume there to survive machine restarts) and is
+memory-only when it is unset.
+The fixed demo scenes of issue #240 (registry in `src/game/DemoScenes.cpp`)
+are no longer listed in the app, but their logs still replay and scenario
+YAML can still pin one with `map: {demo_scene: <id>}`
+(`tests/scenarios/demo_odd_ragdoll_repro.yaml`).
+
 ### Gameplay scenario tests
 
 `tests/scenarios/*.yaml` are state-only (no rendering) gameplay regression
@@ -459,7 +495,7 @@ and removes the preview automatically when the PR closes.
 
 ## App flow
 
-Screen flow (Splash -> Game Mode -> Map Select -> Gameplay, plus the in-game Room screen), declared in
+Screen flow (Splash -> Game Mode -> Map Select / Builder -> Gameplay, plus the in-game Room screen), declared in
 `flow/app_flow.yaml`. The build regenerates `flow/app_flow.mmd` from it; paste
 that file's contents below if the flow changes.
 
@@ -469,16 +505,24 @@ flowchart TD
     splash("  Splash  ")
     game_mode("  Game Mode  ")
     map_select("  Map Select  ")
+    builder("  Builder  ")
+    builder_edit("  Builder Editor  ")
     room("  Room  ")
     gameplay("  Gameplay  ")
     splash -->|new_game| game_mode
     game_mode -->|select_regular| map_select
     game_mode -->|select_ctf| map_select
+    game_mode -->|select_builder| builder
     game_mode -->|select_online| room
     game_mode -->|back| splash
     map_select -->|select_urban| gameplay
     map_select -->|select_hills| gameplay
     map_select -->|back| game_mode
+    builder -->|open_builder_scene| builder_edit
+    builder -->|exit_builder| game_mode
+    builder_edit -->|start_builder_game| gameplay
+    builder_edit -->|back_to_builder| builder
+    gameplay -->|back_to_builder| builder
     room -->|create_room| gameplay
     room -->|join_room| gameplay
     room -->|back| game_mode

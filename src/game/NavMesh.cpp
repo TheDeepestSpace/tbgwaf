@@ -234,8 +234,11 @@ void NavMesh::BuildGroundMesh(const std::vector<AABB>& obstacles, const NavRegio
 
 void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float agentRadius) {
   const int groundCellCount = static_cast<int>(cells_.size());
+  // Climb-top cell per obstacle (-1 = none), to link stacked obstacles.
+  std::vector<int> topCellOf(obstacles.size(), -1);
 
-  for (const auto& obstacle : obstacles) {
+  for (size_t obstacleIdx = 0; obstacleIdx < obstacles.size(); ++obstacleIdx) {
+    const auto& obstacle = obstacles[obstacleIdx];
     if (!obstacle.climbable) continue;
     const AABB& bounds = obstacle.bounds;
     // Windowed builds: skip obstacles entirely outside the region.
@@ -253,6 +256,11 @@ void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float 
     const int topIdx = static_cast<int>(cells_.size());
     cells_.push_back(NavCell{xMin, xMax, zMin, zMax, bounds.max.y, /*climbTop=*/true});
     neighbors_.emplace_back();
+    topCellOf[obstacleIdx] = topIdx;
+
+    // A raised obstacle (underside above the ground) is only reached from the
+    // top of what it rests on, linked below.
+    if (bounds.min.y > kEps) continue;
 
     const AABB padded{
         glm::vec3(std::max(region_.xMin, bounds.min.x - agentRadius), bounds.min.y,
@@ -264,6 +272,25 @@ void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float 
       if (!RectsAdjacent(cells_[groundIdx], padded)) continue;
       neighbors_[groundIdx].push_back(topIdx);
       neighbors_[topIdx].push_back(groundIdx);
+    }
+  }
+
+  // Stacked obstacles: the top of one connects to the top of every obstacle
+  // resting on it (underside at its top, footprints overlapping).
+  for (size_t upper = 0; upper < obstacles.size(); ++upper) {
+    if (topCellOf[upper] < 0) continue;
+    const AABB& u = obstacles[upper].bounds;
+    if (u.min.y <= kEps) continue;
+    for (size_t lower = 0; lower < obstacles.size(); ++lower) {
+      if (lower == upper || topCellOf[lower] < 0) continue;
+      const AABB& l = obstacles[lower].bounds;
+      if (std::fabs(l.max.y - u.min.y) > kEps) continue;
+      if (l.min.x >= u.max.x - kEps || l.max.x <= u.min.x + kEps ||
+          l.min.z >= u.max.z - kEps || l.max.z <= u.min.z + kEps) {
+        continue;
+      }
+      neighbors_[topCellOf[lower]].push_back(topCellOf[upper]);
+      neighbors_[topCellOf[upper]].push_back(topCellOf[lower]);
     }
   }
 }

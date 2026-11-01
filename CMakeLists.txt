@@ -145,6 +145,7 @@ if(EMSCRIPTEN)
     src/gfx/Camera.cpp
     src/gfx/AmbientOcclusion.cpp
     src/gfx/SceneRenderer.cpp
+    src/gfx/FrontierField.cpp
     src/gfx/FigureRig.cpp
     src/gfx/Ragdoll.cpp
     src/game/Geometry.cpp

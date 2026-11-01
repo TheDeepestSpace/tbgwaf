@@ -173,7 +173,6 @@ class SceneRenderer {
   void ApplyThermalSensor(int x, int y, int width, int height);
   CubeMesh cubeMesh_;
   SphereMesh sphereMesh_;
-  Trees trees_;
   LineMesh pathLine_;
   ColorTriangleMesh fovConeMesh_;
   ColorTriangleMesh shotConeMesh_;
@@ -237,6 +236,11 @@ class SceneRenderer {
   std::array<LitTriangleMesh, kStreetPropMaterialCount> streetPropMeshes_;
   std::vector<tactics::AABB> streetFurnitureKey_;
   std::vector<tactics::StreetProp> streetPropKey_;
+  // Trees baked into a regular static mesh, like the street fixtures: the
+  // same mesh serves the lit pass, the sun shadow pass and the FOV mask
+  // (as caster and receiver), with no instancing or tree-specific shader.
+  LitTriangleMesh treeMesh_;
+  std::vector<tactics::TreeDecoration> treeKey_;
   tactics::HeightField terrainKey_;
   GLuint shadowFbo_ = 0;
   GLuint shadowDepthTex_ = 0;
@@ -251,15 +255,7 @@ class SceneRenderer {
   FovOverlayMode fovOverlayMode_ = FovOverlayMode::CpuAnalytic;
   float fovProbeHeight_ = 0.0f;
   Shader fovMaskShader_;
-  // Same mask fragment over the trees' instanced vertex layout, so the
-  // visible tree meshes receive the tint like any other scene surface.
-  Shader fovMaskTreeShader_;
   LitTriangleMesh fovSceneMesh_;
-  // The trees' gameplay occluder prisms (TreeOccluder), casters only: they
-  // block the mask like gameplay LOS, but never receive the tint (the prism
-  // is not drawn, so tinting it would paint mid-air ghosts around trunks).
-  // The visible tree meshes receive it instead, via fovMaskTreeShader_.
-  LitTriangleMesh fovTreeMesh_;
   unsigned long long fovSceneKey_ = 0;
   // Each figure's depth maps (and each free-aim sweep sector's) are kept
   // across frames and re-rendered only when its eye, heading or the scene

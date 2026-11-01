@@ -82,10 +82,10 @@ struct TreeDecoration {
 constexpr float kTreeCanopyRadius = 2.4f;
 
 // The solid, opaque prism standing in for a tree, from the ground to the
-// crown top: blocks movement, LOS and the FOV overlays, never drawn (the
-// instanced tree is the visual). EmitTrees appends one per tree to
-// Scene::obstacles (navOnly); the shadow-map FOV mask casts the same prism
-// so overlay occlusion matches gameplay sight lines exactly.
+// crown top: blocks movement, LOS and the CPU FOV overlay, never drawn (the
+// baked tree mesh is the visual). EmitTrees appends one per tree to
+// Scene::obstacles (navOnly). The shadow-map FOV mask casts the visible tree
+// mesh instead, so the overlay follows the visual silhouette.
 Obstacle TreeOccluder(const TreeDecoration& tree);
 
 struct Scene {

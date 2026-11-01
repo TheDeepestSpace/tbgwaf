@@ -1,5 +1,6 @@
-// Actual GLES instancing, cache invalidation and AO integration, independent
-// of the historical city/gameplay goldens. Optional review screenshot.
+// Tree rendering as a regular baked static mesh: cache invalidation, draw
+// batching and AO integration, independent of the historical city/gameplay
+// goldens. Optional review screenshot.
 #include <SDL.h>
 #include <GLES3/gl3.h>
 
@@ -40,19 +41,23 @@ void CheckTrees(gfx::SceneRenderer& renderer) {
   debug.disableTrees = false;
   const auto color = render(game);
   Require(color != bare, "Trees did not appear");
-  Require(stats.drawCalls == bareDraws + 6, "Trees exceeded three draws per color/depth pass");
+  // One baked static mesh: one lit draw plus one sun-shadow draw, however
+  // many trees the scene has (merged chunk ranges, like street furniture).
+  Require(stats.drawCalls == bareDraws + 2, "Trees exceeded one draw per color/depth pass");
   Require(render(game) == color, "Cached trees changed between identical frames");
 
-  // Many more instances must still cost the same number of submissions.
+  // Many more trees must still cost the same number of submissions.
   tactics::Scene crowded = scene;
   for (int i = 0; i < 30; ++i)
     crowded.trees.push_back({{float(i % 6) * 4 - 10, 0, float(i / 6) * 4 - 10},
                              0.8f, 0.1f * i, 1.0f, i % 3});
+  // Chunk culling can split the merged ranges into a few draws, but the
+  // submission count is bounded by the cull grid, never by the tree count.
   render(tactics::GameLogic(crowded));
-  Require(stats.drawCalls == bareDraws + 6, "Draw count grew with tree count");
-  Require(render(game) == color, "Switching scenes did not restore tree instances");
+  Require(stats.drawCalls <= bareDraws + 8, "Draw count grew with tree count");
+  Require(render(game) == color, "Switching scenes did not restore the tree mesh");
   scene.trees[0].position.z += 5.0f;
-  Require(render(tactics::GameLogic(scene)) != color, "Same-size tree update reused stale instances");
+  Require(render(tactics::GameLogic(scene)) != color, "Same-size tree update reused a stale mesh");
   scene.trees.clear();
   Require(render(tactics::GameLogic(scene)) == bare, "Empty scene retained old trees");
 
@@ -63,7 +68,7 @@ void CheckTrees(gfx::SceneRenderer& renderer) {
   const int bareThermalDraws = stats.drawCalls;
   debug.disableTrees = false;
   Require(render(game) != bareThermal, "Trees missing from AO view");
-  Require(stats.drawCalls == bareThermalDraws + 3, "AO trees must use three draws, no shadow pass");
+  Require(stats.drawCalls == bareThermalDraws + 1, "AO trees must be one draw, no shadow pass");
   debug.thermalBlackHot = false;
   const auto whiteHot = render(game);
   Require(blackHot != whiteHot, "Tree thermal polarity did not change");
@@ -121,7 +126,7 @@ void CheckTreeFovTint(gfx::SceneRenderer& renderer) {
   Require(silhouette > 0, "Tree not visible in the FOV tint scene");
   Require(tintedOnTree > 0, "FOV tint missing from the tree's eye-facing side");
   // The canopy top sits above the watcher's eye and the far side is behind
-  // the tree's own occluder, so the tint must not cover the whole tree.
+  // the tree's own near surfaces, so the tint must not cover the whole tree.
   Require(tintedOnTree < silhouette, "FOV tint covered the whole tree silhouette");
   renderer.SetFovOverlayMode(gfx::FovOverlayMode::CpuAnalytic);
 }
@@ -130,13 +135,26 @@ void Screenshot(gfx::SceneRenderer& renderer, const char* path) {
   auto scene = tactics::GenerateUrbanMap(42);
   Require(!scene.trees.empty(), "Review seed has no trees");
   scene.units.clear();
+  // A watcher aiming at the nearest tree, so the review screenshot shows the
+  // shadow-map FOV overlay landing on the trees themselves.
+  // Tree 8 of this seed sits in an open park block, so the watcher, several
+  // trees and their overlay shadows are all in frame.
+  const glm::vec3 tree = scene.trees[8 % scene.trees.size()].position;
+  tactics::Unit watcher;
+  watcher.id = 0;
+  watcher.team = tactics::Team::Blue;
+  watcher.position = tree + glm::vec3(9.0f, 0.0f, 2.0f);
+  watcher.facingYaw = std::atan2(tree.z - watcher.position.z, tree.x - watcher.position.x);
+  scene.units.push_back(watcher);
   gfx::OrbitCamera camera;
-  camera.target = scene.trees.front().position;
+  camera.target = tree;
   camera.Zoom(22.0f);
-  camera.Rotate(0.0f, -0.3f);
+  camera.Rotate(0.8f, -0.3f);
   camera.Update(1000.0f);
   tactics::GameLogic game(scene);
+  renderer.SetFovOverlayMode(gfx::FovOverlayMode::ShadowMap);
   renderer.RenderPane(game, tactics::Team::Blue, false, {}, camera, 0, 0, 1280, 720);
+  renderer.SetFovOverlayMode(gfx::FovOverlayMode::CpuAnalytic);
   Require(visual::SavePng(path, visual::CaptureFramebuffer(1280, 720)), "Screenshot write failed");
 }
 }  // namespace
@@ -164,7 +182,7 @@ int main(int argc, char** argv) {
       CheckTrees(renderer);
       CheckTreeFovTint(renderer);
       if (argc > 1) Screenshot(renderer, argv[1]);
-      std::puts("PASS tree rendering: instancing, scene replacement, AO, polarity, FOV tint, "
+      std::puts("PASS tree rendering: baked mesh, scene replacement, AO, polarity, FOV tint, "
                 "mode switching");
     } catch (const std::exception& e) {
       std::fprintf(stderr, "FAIL tree rendering: %s\n", e.what());

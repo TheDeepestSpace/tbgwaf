@@ -418,39 +418,11 @@ uniform mat4 uMVP;
 uniform mat4 uModel;
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
-out vec3 vSideAxis;  // Zero: static receivers use the plain backface gate.
 void main() {
   vec4 world = uModel * vec4(aPos, 1.0);
   vWorldPos = world.xyz;
   vWorldNormal = transpose(inverse(mat3(uModel))) * aNormal;
-  vSideAxis = vec3(0.0);
   gl_Position = uMVP * vec4(aPos, 1.0);
-}
-)";
-
-// Mask vertex shader over the trees' instanced layout (Trees.cpp): the same
-// per-instance translate/rotate/scale as the tree draw shader, emitting the
-// world position/normal the mask fragment shader tests.
-const char* kFovMaskTreeVertexShaderSrc = R"(#version 300 es
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-layout(location = 3) in vec4 aPositionScale;
-layout(location = 4) in vec2 aYawTint;
-uniform mat4 uViewProj;
-out vec3 vWorldPos;
-out vec3 vWorldNormal;
-// Horizontal offset from the tree's trunk axis: the fragment gate tints the
-// half of the tree facing the eye (a canopy pixel's own normal mostly points
-// up, which the ground-level eye would always "see the back of").
-out vec3 vSideAxis;
-void main() {
-  float c = cos(aYawTint.x), s = sin(aYawTint.x);
-  mat3 rotation = mat3(c, 0.0, -s, 0.0, 1.0, 0.0, s, 0.0, c);
-  vec3 world = aPositionScale.xyz + rotation * aPos * aPositionScale.w;
-  vWorldPos = world;
-  vWorldNormal = rotation * aNormal;
-  vSideAxis = vec3(world.x - aPositionScale.x, 0.0, world.z - aPositionScale.z);
-  gl_Position = uViewProj * vec4(world, 1.0);
 }
 )";
 
@@ -458,7 +430,6 @@ const char* kFovMaskFragmentShaderSrc = R"(#version 300 es
 precision highp float;
 in vec3 vWorldPos;
 in vec3 vWorldNormal;
-in vec3 vSideAxis;
 uniform int uCount;            // Figures in this pass, at most 4.
 uniform vec3 uEye[4];
 uniform vec3 uFacing[4];       // Unit forward, horizontal, normalized.
@@ -483,11 +454,6 @@ uniform float uNear;
 uniform float uFar;
 uniform float uTexelPerDepth;  // World size of one map texel per unit of map depth.
 uniform float uProbeHeight;
-// Extra linear-depth slack for receivers that sit inside their own caster:
-// 0 for the static scene (its drawn faces coincide with its casters), ~the
-// canopy-to-occluder-prism gap when re-drawing trees, so the whole eye-facing
-// canopy side tints instead of only the lobes bulging out of the prism.
-uniform float uSelfDepthSlack;
 uniform vec4 uColor;
 out vec4 FragColor;
 
@@ -511,7 +477,7 @@ float SampleMap(highp sampler2D map, mat4 matrix, vec3 p, float slope) {
   // this only has to absorb the residual depth variation across the 3x3
   // PCF kernel on moderately tilted surfaces, so the slope term is capped.
   float texelWorld = uTexelPerDepth * depth;
-  float bias = texelWorld * (1.0 + min(slope, 4.0)) + 0.02 + uSelfDepthSlack;
+  float bias = texelWorld * (1.0 + min(slope, 4.0)) + 0.02;
   vec2 uv = ndc.xy * 0.5 + 0.5;
   vec2 texel = 1.0 / vec2(textureSize(map, 0));
   float lit = 0.0;
@@ -531,22 +497,9 @@ bool Tinted(int i, highp sampler2D map0, highp sampler2D map1, vec3 n) {
   if (dist > uRange) return false;
   vec3 dir = toEye / dist;
   // A face turned away from the eye is the back of something; the eye sees
-  // its front, which is drawn (and tested) separately. Tree receivers gate
-  // on which side of the trunk axis the fragment is instead: the canopy's
-  // visible pixels are mostly tops whose own normals the ground-level eye
-  // always faces the back of, yet the near side of the tree is what the
-  // figure sees (the far side still fails the depth test).
+  // its front, which is drawn (and tested) separately.
   float ndotl = dot(n, dir);
-  if (dot(vSideAxis, vSideAxis) > 1e-4) {
-    vec2 toEyeFlat = vec2(dir.x, dir.z);
-    float flatLen = length(toEyeFlat);
-    if (flatLen > 1e-5 &&
-        dot(normalize(vSideAxis.xz), toEyeFlat / flatLen) <= 0.0) {
-      return false;
-    }
-  } else if (ndotl <= 0.0) {
-    return false;
-  }
+  if (ndotl <= 0.0) return false;
   // Analytic azimuth test: the fragment's bearing from the eye must be
   // within the half-FOV of the unit's facing.
   vec2 bearing = vec2(-dir.x, -dir.z);
@@ -1306,15 +1259,18 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   mesh->SetChunkedMesh(vertices, indices, kCullGridCells);
 }
 
-// Caster-only companion to BuildFovSceneMesh: each tree's gameplay occluder
-// prism (TreeOccluder), so the shadow-map FOV mask is blocked exactly where
-// gameplay LOS is. Kept out of the receiver draw: the prism itself is never
-// lit, so tinting it would paint floating facets around the trunks.
-void BuildFovTreeMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
+// The trees' visible meshes, baked once per scene like the street fixtures.
+// One mesh serves the lit pass, the sun shadow pass and the FOV mask -- where
+// it is both caster and receiver, so the overlay self-occludes against the
+// same surfaces it tints and trunks/canopies tint on their eye-facing side
+// through the plain static-receiver path. (Gameplay LOS still uses each
+// tree's TreeOccluder prism; the overlay now follows the visual silhouette.)
+void BuildTreeMesh(const std::vector<tactics::TreeDecoration>& trees,
+                   LitTriangleMesh* mesh) {
   LitVertices vertices;
   std::vector<GLuint> indices;
-  for (const tactics::TreeDecoration& tree : scene.trees) {
-    AppendPolygonPrism(tactics::TreeOccluder(tree), &vertices, &indices);
+  for (const tactics::TreeDecoration& tree : trees) {
+    AppendTreeMesh(tree, &vertices, &indices);
   }
   mesh->SetChunkedMesh(vertices, indices, kCullGridCells);
 }
@@ -1367,8 +1323,8 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
   mix(scene.sidewalks.data(), scene.sidewalks.size() * sizeof(AABB));
   for (const tactics::RoadSurface& s : scene.sidewalkSurfaces) mixVec3s(s.vertices);
   for (const tactics::RoadSurface& s : scene.roads) mixVec3s(s.vertices);
-  // BuildFovTreeMesh input. Generated trees are covered through their solid
-  // obstacles already; this also catches hand-authored trees without one.
+  // Trees change the FOV depth maps (the baked tree mesh is a caster), so a
+  // scene differing only in trees must invalidate the cached maps too.
   for (const tactics::TreeDecoration& t : scene.trees) {
     mix(&t.position, sizeof(t.position));
     mix(&t.scale, sizeof(t.scale));
@@ -2908,10 +2864,6 @@ bool SceneRenderer::Init() {
     std::fprintf(stderr, "Failed to compile the FOV mask shader\n");
     return false;
   }
-  if (!fovMaskTreeShader_.Compile(kFovMaskTreeVertexShaderSrc, kFovMaskFragmentShaderSrc)) {
-    std::fprintf(stderr, "Failed to compile the tree FOV mask shader\n");
-    return false;
-  }
   if (!thermalSensorShader_.Compile(kThermalSensorVertexShaderSrc,
                                     kThermalSensorFragmentShaderSrc)) {
     std::fprintf(stderr, "Failed to compile the thermal sensor shader\n");
@@ -2923,10 +2875,6 @@ bool SceneRenderer::Init() {
   }
   cubeMesh_.Init();
   sphereMesh_.Init();
-  if (!trees_.Init()) {
-    std::fprintf(stderr, "Failed to compile the tree shaders\n");
-    return false;
-  }
   frontierFill_.Init();
   frontierBorder_.Init();
   ziplineFill_.Init();
@@ -2945,7 +2893,7 @@ bool SceneRenderer::Init() {
   streetPropDepthMesh_.Init();
   for (LitTriangleMesh& mesh : streetPropMeshes_) mesh.Init();
   fovSceneMesh_.Init();
-  fovTreeMesh_.Init();
+  treeMesh_.Init();
   massingMesh_.Init();
   facadeMesh_.Init();
   deckMesh_.Init();
@@ -3018,7 +2966,8 @@ void SceneRenderer::Destroy() {
   streetFurnitureKey_.clear();
   streetPropKey_.clear();
   fovSceneMesh_.Destroy();
-  fovTreeMesh_.Destroy();
+  treeMesh_.Destroy();
+  treeKey_.clear();
   fovSceneKey_ = 0;
   massingMesh_.Destroy();
   massingKey_ = 0;
@@ -3035,7 +2984,6 @@ void SceneRenderer::Destroy() {
   terrainKey_ = tactics::HeightField{};
   highlightRing_.Destroy();
   sphereMesh_.Destroy();
-  trees_.Destroy();
   cubeMesh_.Destroy();
   if (shadowDepthTex_) glDeleteTextures(1, &shadowDepthTex_);
   if (shadowFbo_) glDeleteFramebuffers(1, &shadowFbo_);
@@ -3192,12 +3140,12 @@ int SceneRenderer::AcquireFovMaps(const Unit& unit, int sector, float facingYaw,
                    glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
                    glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f));
     }
-    if (fovSceneMesh_.HasGeometry() || fovTreeMesh_.HasGeometry()) {
+    if (fovSceneMesh_.HasGeometry() || treeMesh_.HasGeometry()) {
       depthShader_.SetMat4("uLightMVP", slot.matrix[half]);
       fovSceneMesh_.DrawVisible(inMap);
-      // Trees block the mask like gameplay LOS (their TreeOccluder prisms),
-      // but are casters only -- see fovTreeMesh_.
-      fovTreeMesh_.DrawVisible(inMap);
+      // Trees block the mask whether or not they are drawn, matching
+      // gameplay LOS (their solid obstacles always block sight lines).
+      treeMesh_.DrawVisible(inMap);
     }
   }
   return index;
@@ -3224,31 +3172,18 @@ void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::v
   glEnable(GL_POLYGON_OFFSET_FILL);
   glPolygonOffset(-1.0f, -2.0f);
 
-  // The mask fragment shader runs over two vertex layouts (the static scene
-  // meshes and the instanced trees), so its uniforms are set on each program.
-  const auto setSharedUniforms = [&](Shader& shader) {
-    shader.Use();
-    shader.SetFloat("uRange", tactics::constants::kFovConeVisualRange);
-    shader.SetFloat("uNear", kFovMapNear);
-    shader.SetFloat("uFar", tactics::constants::kFovConeVisualRange);
-    // The larger of the two texel footprints (vertical: the whole elevation
-    // range over the map's height) per unit of map depth.
-    shader.SetFloat("uTexelPerDepth",
-                    std::max(2.0f * std::tan(glm::radians(kFovMapHalfElevationDegrees)) /
-                                 kFovMapHeight,
-                             2.0f * std::tan(glm::radians(kFovMapHalfAzimuthDegrees)) /
-                                 kFovMapWidth));
-    shader.SetFloat("uProbeHeight", fovProbeHeight_);
-    shader.SetVec4("uColor", color);
-  };
-  setSharedUniforms(fovMaskShader_);
-  fovMaskShader_.SetFloat("uSelfDepthSlack", 0.0f);
-  if (drawTrees) {
-    setSharedUniforms(fovMaskTreeShader_);
-    // Roughly how far a canopy lobe can recess inside the tree's occluder
-    // prism (TreeOccluder r=1.4*scale vs lobes spanning ~2.1*scale).
-    fovMaskTreeShader_.SetFloat("uSelfDepthSlack", 0.8f);
-  }
+  fovMaskShader_.Use();
+  fovMaskShader_.SetFloat("uRange", tactics::constants::kFovConeVisualRange);
+  fovMaskShader_.SetFloat("uNear", kFovMapNear);
+  fovMaskShader_.SetFloat("uFar", tactics::constants::kFovConeVisualRange);
+  // The larger of the two texel footprints (vertical: the whole elevation
+  // range over the map's height) per unit of map depth.
+  fovMaskShader_.SetFloat(
+      "uTexelPerDepth",
+      std::max(2.0f * std::tan(glm::radians(kFovMapHalfElevationDegrees)) / kFovMapHeight,
+               2.0f * std::tan(glm::radians(kFovMapHalfAzimuthDegrees)) / kFovMapWidth));
+  fovMaskShader_.SetFloat("uProbeHeight", fovProbeHeight_);
+  fovMaskShader_.SetVec4("uColor", color);
   const Frustum cameraFrustum(viewProj);
   // Up to kFovMasksPerPass figures per pass; a larger team takes several
   // passes, kept from stacking by the stencil cap.
@@ -3318,17 +3253,10 @@ void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::v
     // Facade pane extrusions receive the tint like the walls they sit on: the
     // extruded frames stand proud of the wall and need their own coverage.
     if (facadeMesh_.HasGeometry()) drawReceiver(facadeMesh_);
-    // The visible tree meshes, with the instanced-layout variant of the mask
-    // shader. The depth maps hold each tree's gameplay occluder prism
-    // (fovTreeMesh_); uSelfDepthSlack absorbs how far a canopy lobe recesses
-    // inside that prism and the shader's side-of-trunk gate keeps the tint
-    // to the half of the tree the figure sees, so the eye-facing side tints
-    // while the far side stays occluded.
-    if (drawTrees) {
-      setPassUniforms(fovMaskTreeShader_);
-      fovMaskTreeShader_.SetMat4("uViewProj", viewProj);
-      trees_.DrawBatches();
-    }
+    // Trees receive the tint like any other static mesh: their own geometry
+    // is in the depth maps, so self-occlusion works the regular way (only
+    // when drawn -- tinting undrawn trees would paint mid-air ghosts).
+    if (drawTrees && treeMesh_.HasGeometry()) drawReceiver(treeMesh_);
   }
   glDepthFunc(GL_LESS);
 }
@@ -3338,7 +3266,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                int y, int width, int height, const PaneOverlays& overlays,
                                GLuint targetFramebuffer, const RenderDebugOptions& debug) {
   const ScopedDrawStats drawStats(debug.stats);
-  if (!debug.disableTrees) trees_.SetTrees(game.GetScene().trees);
+  // Bake the trees into a regular static mesh when the scene's trees change
+  // (contents, not address: GameLogic storage can be reused for a new map).
+  if (game.GetScene().trees != treeKey_) {
+    BuildTreeMesh(game.GetScene().trees, &treeMesh_);
+    treeKey_ = game.GetScene().trees;
+  }
   const auto& obstacles = game.GetScene().obstacles;
   SetRagdollObstacles(obstacles);
   SetRagdollRails(game.GetScene().massing);
@@ -3541,7 +3474,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
     }
     DrawPlantedFlagDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, game);
-    if (!debug.disableTrees) trees_.DrawDepth(lightSpaceMatrix_);
+    if (!debug.disableTrees && treeMesh_.HasGeometry()) {
+      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+      treeMesh_.DrawVisible(inShadowMap);
+    }
   }
 
   // Shadow-map FOV masks: this pane's figures' depth maps (and the free-aim
@@ -3556,7 +3492,6 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     const unsigned long long sceneKey = FovSceneFingerprint(game.GetScene());
     if (sceneKey != fovSceneKey_) {
       BuildFovSceneMesh(game.GetScene(), &fovSceneMesh_);
-      BuildFovTreeMesh(game.GetScene(), &fovTreeMesh_);
       fovSceneKey_ = sceneKey;
       ++fovMapGeneration_;
     }
@@ -4022,9 +3957,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   }
 
-  if (!debug.disableTrees) {
-    trees_.Draw(viewProj, lightDir_, debug.thermal, debug.thermalBlackHot);
-    litShader_.Use();
+  // Trees, as a regular static mesh in the building color (issue #270).
+  if (!debug.disableTrees && treeMesh_.HasGeometry()) {
+    thermalMaterial(ThermalMaterial::Building);
+    DrawLitVisible(litShader_, treeMesh_, viewProj, lightSpaceMatrix_,
+                   glm::vec4(kObstacleColor, 1.0f), onScreen);
   }
   thermalMaterial(ThermalMaterial::Figure);
   for (const Unit& unit : game.GetScene().units) {

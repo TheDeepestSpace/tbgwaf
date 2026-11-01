@@ -4,6 +4,7 @@
 // replay path and the generic one tactics_repro_replay uses. Old logs
 // without the field must still parse and replay. Headless.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -379,6 +380,54 @@ void TestStackingAndYaw() {
 
 }  // namespace
 
+// Issue #278: a shooter has one shot in flight at a time. A sniper that
+// spots several enemies while moving must not fire at two of them within
+// one bolt interval.
+void RunSniperCase(float yaw, bool hasYaw) {
+  BuilderScene bs;
+  bs.name = "Rooftop standoff";
+  bs.mapHalfExtent = 20.0f;
+  bs.boxes.push_back({-6.67f, 3.82f, 1.0f, 8.0f, 6.0f});
+  bs.boxes.push_back({2.74f, -3.50f, 1.0f, 4.0f, 6.0f});
+  bs.figures.push_back({Team::Blue, WeaponType::SniperRifle, -9.12f, 10.28f, yaw, hasYaw});
+  bs.figures.push_back({Team::Red, WeaponType::DesertEagle, 2.99f, -2.07f});
+  bs.figures.push_back({Team::Red, WeaponType::AssaultRifle, 6.61f, -3.61f});
+  bs.figures.push_back({Team::Red, WeaponType::AssaultRifle, 3.08f, -5.51f});
+  GameLogic game;
+  InitBuilderGame(&game, bs, 3079104832u);
+  SquadPlaybook pb;
+  pb.At(false, false) = ReactionAction::Shoot;
+  pb.At(false, true) = ReactionAction::Shoot;
+  pb.At(true, false) = ReactionAction::ShootContinue;
+  pb.At(true, true) = ReactionAction::ShootContinue;
+  game.SetPlaybook(Team::Blue, pb);
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(glm::vec3(-8.65f, 0.0f, -6.48f), Team::Blue);
+  game.SetPlannedMoveFacing(0, yaw, Team::Blue);
+  game.FinishMovePlan();
+  for (int id : {1, 2, 3}) {
+    game.ClickUnit(id, Team::Red);
+    game.ChoosePass();
+  }
+  game.CommitRound();
+  int steps = 0;
+  while (game.Mode() == InputMode::Executing && steps++ < 10000) game.Update(0.016f);
+  std::vector<float> times;
+  for (const Tracer& t : game.Tracers()) {
+    if (t.team == Team::Blue) times.push_back(t.at);
+  }
+  std::sort(times.begin(), times.end());
+  for (size_t i = 1; i < times.size(); ++i) {
+    CHECK(times[i] - times[i - 1] >= 1.0f - 1e-3f);
+  }
+}
+
+void TestSniperNeverFiresTwiceWithinInterval() {
+  RunSniperCase(0.0f, false);
+  for (int i = 0; i < 16; ++i) RunSniperCase(i * 0.3926991f, true);
+}
+
 int main() {
   TestStackingAndYaw();
   TestBuildScene();
@@ -387,6 +436,7 @@ int main() {
   TestJsonRoundTrip();
   TestRecordReplayRoundTrip();
   TestOldFormatLogStillReplays();
+  TestSniperNeverFiresTwiceWithinInterval();
   if (g_failures == 0) {
     std::printf("All builder scene tests passed.\n");
     return 0;

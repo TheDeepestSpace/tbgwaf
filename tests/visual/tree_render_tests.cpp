@@ -75,6 +75,57 @@ void CheckTrees(gfx::SceneRenderer& renderer) {
   Require(render(game) == color, "Trees changed after switching back from AO view");
 }
 
+// Issue #270 review follow-up: the shadow-map FOV tint must land on the
+// visible tree meshes themselves (the eye-facing canopy side), not only on
+// the ground and buildings around them.
+void CheckTreeFovTint(gfx::SceneRenderer& renderer) {
+  tactics::Scene scene;
+  scene.trees.push_back({{0.0f, 0.0f, 0.0f}, 1.0f, 0.0f, 1.0f, 0});
+  tactics::Unit watcher;
+  watcher.id = 0;
+  watcher.team = tactics::Team::Blue;
+  watcher.position = {8.0f, 0.0f, 0.0f};
+  watcher.facingYaw = 3.14159265f;  // Facing -X, straight at the tree.
+  scene.units.push_back(watcher);
+  tactics::GameLogic game(scene);
+  gfx::OrbitCamera camera;
+  camera.FitToExtent(10.0f);
+  renderer.SetFovOverlayMode(gfx::FovOverlayMode::ShadowMap);
+  gfx::RenderDebugOptions debug;
+  // No sun shadows: the trees-vs-bare diff must be the tree geometry alone,
+  // not the ground its canopy shades (which tints regardless of this fix).
+  debug.disableShadows = true;
+  auto render = [&](bool fov, bool trees) {
+    debug.disableFov = !fov;
+    debug.disableTrees = !trees;
+    renderer.RenderPane(game, tactics::Team::Blue, false, {}, camera, 0, 0, 320, 200,
+                        {}, 0, debug);
+    auto image = visual::CaptureFramebuffer(320, 200);
+    Require(glGetError() == GL_NO_ERROR, "Tree FOV render produced a GL error");
+    return image.rgb;
+  };
+  const auto bare = render(false, false);
+  const auto treesOnly = render(false, true);
+  const auto treesFov = render(true, true);
+  int silhouette = 0, tintedOnTree = 0;
+  for (size_t i = 0; i < bare.size(); i += 3) {
+    const bool treePixel = treesOnly[i] != bare[i] || treesOnly[i + 1] != bare[i + 1] ||
+                           treesOnly[i + 2] != bare[i + 2];
+    if (!treePixel) continue;
+    ++silhouette;
+    if (treesFov[i] != treesOnly[i] || treesFov[i + 1] != treesOnly[i + 1] ||
+        treesFov[i + 2] != treesOnly[i + 2]) {
+      ++tintedOnTree;
+    }
+  }
+  Require(silhouette > 0, "Tree not visible in the FOV tint scene");
+  Require(tintedOnTree > 0, "FOV tint missing from the tree's eye-facing side");
+  // The canopy top sits above the watcher's eye and the far side is behind
+  // the tree's own occluder, so the tint must not cover the whole tree.
+  Require(tintedOnTree < silhouette, "FOV tint covered the whole tree silhouette");
+  renderer.SetFovOverlayMode(gfx::FovOverlayMode::CpuAnalytic);
+}
+
 void Screenshot(gfx::SceneRenderer& renderer, const char* path) {
   auto scene = tactics::GenerateUrbanMap(42);
   Require(!scene.trees.empty(), "Review seed has no trees");
@@ -111,8 +162,10 @@ int main(int argc, char** argv) {
     try {
       Require(renderer.Init(), "Renderer initialization failed");
       CheckTrees(renderer);
+      CheckTreeFovTint(renderer);
       if (argc > 1) Screenshot(renderer, argv[1]);
-      std::puts("PASS tree rendering: instancing, scene replacement, AO, polarity, mode switching");
+      std::puts("PASS tree rendering: instancing, scene replacement, AO, polarity, FOV tint, "
+                "mode switching");
     } catch (const std::exception& e) {
       std::fprintf(stderr, "FAIL tree rendering: %s\n", e.what());
       result = 1;

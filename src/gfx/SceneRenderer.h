@@ -251,10 +251,14 @@ class SceneRenderer {
   FovOverlayMode fovOverlayMode_ = FovOverlayMode::CpuAnalytic;
   float fovProbeHeight_ = 0.0f;
   Shader fovMaskShader_;
+  // Same mask fragment over the trees' instanced vertex layout, so the
+  // visible tree meshes receive the tint like any other scene surface.
+  Shader fovMaskTreeShader_;
   LitTriangleMesh fovSceneMesh_;
   // The trees' gameplay occluder prisms (TreeOccluder), casters only: they
   // block the mask like gameplay LOS, but never receive the tint (the prism
   // is not drawn, so tinting it would paint mid-air ghosts around trunks).
+  // The visible tree meshes receive it instead, via fovMaskTreeShader_.
   LitTriangleMesh fovTreeMesh_;
   unsigned long long fovSceneKey_ = 0;
   // Each figure's depth maps (and each free-aim sweep sector's) are kept
@@ -318,7 +322,8 @@ class SceneRenderer {
   // framebuffer, viewport, scissor and the FOV-overlay blend/stencil state
   // as it found them.
   void DrawFovMasks(const std::vector<FovMask>& masks, const glm::vec4& color,
-                    const glm::mat4& viewProj, bool drawTerrain, float mapHalfExtent);
+                    const glm::mat4& viewProj, bool drawTerrain, float mapHalfExtent,
+                    bool drawTrees);
   void DestroyFovMaps(FovMapSlot* slot);
 };
 

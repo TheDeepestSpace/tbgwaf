@@ -445,6 +445,15 @@ else()
 
     find_program(XVFB_RUN_EXECUTABLE xvfb-run)
     if(XVFB_RUN_EXECUTABLE)
+      add_executable(tactics_tree_render_tests tests/visual/tree_render_tests.cpp)
+      target_include_directories(tactics_tree_render_tests PRIVATE tests ${stb_SOURCE_DIR})
+      target_link_libraries(tactics_tree_render_tests PRIVATE tactics_gfx PkgConfig::SDL2
+                                                              PkgConfig::EGL)
+      add_test(NAME tree_render_tests
+        COMMAND ${XVFB_RUN_EXECUTABLE} --auto-servernum $<TARGET_FILE:tactics_tree_render_tests>)
+      set_tests_properties(tree_render_tests PROPERTIES
+        TIMEOUT 120
+        ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11")
       add_executable(tactics_thermal_render_tests tests/visual/thermal_render_tests.cpp)
       target_link_libraries(tactics_thermal_render_tests PRIVATE tactics_gfx PkgConfig::SDL2
                                                               PkgConfig::EGL)

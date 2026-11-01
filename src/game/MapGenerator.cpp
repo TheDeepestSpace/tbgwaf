@@ -35,12 +35,18 @@ namespace {
 //   0x51f0a3c9u   facades          door spots, stoops, rear platforms, window grids
 //   0x6c57f00du   furniture        feature presence, then curb-side item stations/kinds
 //   0x51674ea1u   traffic control  light-vs-sign draws per junction, street-name corners
+//   0x5c71123eu   skyline         height-field waves, per-building floor jitter
+//   0x3a27e41bu   extra arteries  how many avenues are widened into arteries, and which
+//   0x4c4f4e47u   long blocks      apartment row vs. street-divided block subdivisions
 //   0x7d3a94c5u   pier form        T-bent vs twin-column bent draw (ResolvePierForm)
 constexpr uint32_t kStreetStream = 0xb10c5eedu;
 constexpr uint32_t kPierFormStream = 0x7d3a94c5u;
 constexpr uint32_t kRampChannelStream = 0x6a09e667u;
 constexpr uint32_t kFurnitureStream = 0x6c57f00du;
 constexpr uint32_t kTrafficStream = 0x51674ea1u;
+constexpr uint32_t kLongBlockStream = 0x4c4f4e47u;
+constexpr uint32_t kSkylineStream = 0x5c71123eu;
+constexpr uint32_t kExtraArteryStream = 0x3a27e41bu;
 
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kSidewalkHeight = 0.12f;  // Curb: purely visual, well under a step.
@@ -218,6 +224,177 @@ UrbanBlock MakeUrbanBlock(std::vector<glm::vec2> vertices) {
     block.z1 = std::max(block.z1, p.y);
   }
   return block;
+}
+
+struct BlockAxis {
+  glm::vec2 direction{1.0f, 0.0f};
+  float lo = 0.0f, hi = 0.0f;
+  float depth = 0.0f;
+};
+
+// Measures a convex block along the direction of its longest boundary.
+// Missing-street blocks are broad rectangles rather than thin wedges, so
+// the fill check below keeps acute/sliver polygons out of this treatment.
+BlockAxis LongBlockAxis(const std::vector<glm::vec2>& polygon) {
+  BlockAxis best;
+  float bestSpan = -1.0f;
+  for (size_t edge = 0; edge < polygon.size(); ++edge) {
+    const glm::vec2 delta = polygon[(edge + 1) % polygon.size()] - polygon[edge];
+    const float edgeLength = glm::length(delta);
+    if (edgeLength < 1.0e-4f) continue;
+    const glm::vec2 axis = delta / edgeLength;
+    const glm::vec2 across(-axis.y, axis.x);
+    float lo = std::numeric_limits<float>::infinity(), hi = -lo;
+    float crossLo = std::numeric_limits<float>::infinity(), crossHi = -crossLo;
+    for (const glm::vec2& point : polygon) {
+      const float along = glm::dot(axis, point);
+      const float cross = glm::dot(across, point);
+      lo = std::min(lo, along);
+      hi = std::max(hi, along);
+      crossLo = std::min(crossLo, cross);
+      crossHi = std::max(crossHi, cross);
+    }
+    if (hi - lo > bestSpan) {
+      bestSpan = hi - lo;
+      best = {axis, lo, hi, crossHi - crossLo};
+    }
+  }
+  return best;
+}
+
+bool IsLongBlock(const UrbanBlock& block, const MapGeneratorConfig& c, BlockAxis* shape) {
+  *shape = LongBlockAxis(block.vertices);
+  const float length = shape->hi - shape->lo;
+  if (length < c.blockSize * 1.65f || shape->depth < c.minBlockSize * 0.55f ||
+      length < shape->depth * 1.6f) {
+    return false;
+  }
+  return PolygonArea(block.vertices) >= length * shape->depth * 0.6f;
+}
+
+glm::vec2 Rotate(glm::vec2 v, float radians);
+
+// Shortest slab side: five residential windows (1.1 wide, 1.0 gap) across
+// with the facade end margins either side.
+constexpr float kMinSlabSpan = 5.0f * 1.1f + 4.0f * 1.0f + 2.0f * 0.7f;
+
+// Freestanding apartment slabs for a long block's sidewalk-inset polygon:
+// angled across the short dimension, well inside the block. Empty unless at
+// least three keep a decent size, so only blocks that really fit a row get one.
+std::vector<std::vector<glm::vec2>> ApartmentRowSlabs(const std::vector<glm::vec2>& outer,
+                                                      const MapGeneratorConfig& c,
+                                                      size_t blockIndex) {
+  const BlockAxis shape = LongBlockAxis(outer);
+  const float inset = std::min(c.gapWidth * 0.65f, shape.depth * 0.1f);
+  std::vector<glm::vec2> buildable = InsetConvexPolygon(outer, inset);
+  // Very short corner edges can invert when inset a second time. The first
+  // sidewalk inset is still a valid fallback and the smaller rectangles
+  // below provide their own edge clearance.
+  bool buildableValid = buildable.size() == outer.size() && PolygonSignedArea(buildable) > 0.0f;
+  for (size_t i = 0; buildableValid && i < buildable.size(); ++i) {
+    const glm::vec2 a =
+        buildable[i] - buildable[(i + buildable.size() - 1) % buildable.size()];
+    const glm::vec2 b = buildable[(i + 1) % buildable.size()] - buildable[i];
+    buildableValid = a.x * b.y - a.y * b.x > 0.0f;
+  }
+  if (!buildableValid) buildable = outer;
+  const glm::vec2 rowAxis = shape.direction;
+  const glm::vec2 crossAxis(-rowAxis.y, rowAxis.x);
+  float rowLo = std::numeric_limits<float>::infinity(), rowHi = -rowLo;
+  float crossLo = std::numeric_limits<float>::infinity(), crossHi = -crossLo;
+  for (const glm::vec2& point : buildable) {
+    rowLo = std::min(rowLo, glm::dot(rowAxis, point));
+    rowHi = std::max(rowHi, glm::dot(rowAxis, point));
+    crossLo = std::min(crossLo, glm::dot(crossAxis, point));
+    crossHi = std::max(crossHi, glm::dot(crossAxis, point));
+  }
+  const float length = rowHi - rowLo;
+  const float buildableDepth = crossHi - crossLo;
+  const float targetPitch = std::max(24.0f, c.blockSize * 0.95f);
+  const int count = std::clamp(static_cast<int>(std::floor(length / targetPitch)), 2, 6);
+  const float pitch = length / static_cast<float>(count);
+
+  const float lean = glm::radians((blockIndex & 1u) ? 18.0f : -18.0f);
+  const glm::vec2 longAxis = Rotate(crossAxis, lean);
+  const glm::vec2 shortAxis(-longAxis.y, longAxis.x);
+  const float slabWidth = std::min(std::max(c.buildingDepth * 1.2f, kMinSlabSpan), pitch * 0.5f);
+  // Leaning slabs stay a clear alley apart along the row.
+  const float slabLength = std::min(
+      buildableDepth * 0.8f, (pitch - slabWidth * 0.95f - c.gapWidth * 2.0f) / 0.32f);
+
+  // A convex block can taper near an end. Put every centre halfway across
+  // its local cross-section and shorten only the slab at that position as
+  // needed to keep all four corners inside the inset buildable area.
+  auto crossSection = [&](float along, float* lo, float* hi) {
+    *lo = std::numeric_limits<float>::infinity();
+    *hi = -*lo;
+    for (size_t edge = 0; edge < buildable.size(); ++edge) {
+      const glm::vec2 a = buildable[edge];
+      const glm::vec2 b = buildable[(edge + 1) % buildable.size()];
+      const float ta = glm::dot(rowAxis, a), tb = glm::dot(rowAxis, b);
+      if (std::fabs(ta - along) < 1.0e-4f) {
+        const float across = glm::dot(crossAxis, a);
+        *lo = std::min(*lo, across);
+        *hi = std::max(*hi, across);
+      }
+      if (std::fabs(tb - ta) < 1.0e-5f ||
+          along < std::min(ta, tb) - 1.0e-4f ||
+          along > std::max(ta, tb) + 1.0e-4f) {
+        continue;
+      }
+      const float u = std::clamp((along - ta) / (tb - ta), 0.0f, 1.0f);
+      const float across = glm::dot(crossAxis, a + (b - a) * u);
+      *lo = std::min(*lo, across);
+      *hi = std::max(*hi, across);
+    }
+    return std::isfinite(*lo) && *hi > *lo;
+  };
+  auto rectangle = [&](glm::vec2 center, float scale) {
+    const glm::vec2 u = longAxis * (slabLength * scale * 0.5f);
+    const glm::vec2 v = shortAxis * (slabWidth * 0.5f);  // Width never shrinks.
+    return std::vector<glm::vec2>{center - u - v, center + u - v,
+                                  center + u + v, center - u + v};
+  };
+  auto fits = [&](glm::vec2 center, float scale) {
+    for (const glm::vec2& corner : rectangle(center, scale)) {
+      if (!PointInConvexPolygon(corner, buildable)) return false;
+    }
+    return true;
+  };
+
+  std::vector<glm::vec2> centers;
+  std::vector<float> scales;
+  for (int i = 0; i < count; ++i) {
+    const float along = rowLo + pitch * (static_cast<float>(i) + 0.5f);
+    float localCrossLo = 0.0f, localCrossHi = 0.0f;
+    if (!crossSection(along, &localCrossLo, &localCrossHi)) continue;
+    const glm::vec2 center =
+        rowAxis * along + crossAxis * ((localCrossLo + localCrossHi) * 0.5f);
+    centers.push_back(center);
+    float scale = 1.0f;
+    if (!fits(center, scale)) {
+      float lo = 0.0f, hi = 1.0f;
+      for (int step = 0; step < 12; ++step) {
+        const float mid = (lo + hi) * 0.5f;
+        if (fits(center, mid)) lo = mid;
+        else hi = mid;
+      }
+      scale = lo;
+    }
+    scales.push_back(scale);
+  }
+  std::vector<std::vector<glm::vec2>> slabs;
+  // Decent: most of the full length survives and the slab stays elongated.
+  auto decentSlab = [&](float scale) {
+    return scale >= 0.7f && slabLength * scale >= slabWidth * 1.3f;
+  };
+  int decent = 0;
+  for (const float scale : scales) decent += decentSlab(scale) ? 1 : 0;
+  if (decent < 3) return slabs;
+  for (size_t i = 0; i < centers.size(); ++i) {
+    if (decentSlab(scales[i])) slabs.push_back(rectangle(centers[i], scales[i]));
+  }
+  return slabs;
 }
 
 // --- Hierarchical oblique city (issue #92). ---
@@ -1062,6 +1239,12 @@ struct StreetCut {
   // Param intervals its pavement may never cover: the level bands and ramp
   // corridors it would run into (what the gaps grew from). Sorted, disjoint.
   std::vector<std::pair<float, float>> blocked;
+  // An avenue widened into an additional artery (MapGeneratorConfig::
+  // extraArteries): ramps through every level it meets.
+  bool secondaryArtery = false;
+  // A short segment dividing a long block (its gaps are everything outside
+  // the segment): junction tests use only that segment.
+  bool blockSplit = false;
 
   bool InGap(float t, float tol = 0.0f) const {
     for (const auto& g : gaps) {
@@ -1103,8 +1286,8 @@ struct CityPlan {
 // Exact urban ground model. The sampled HeightField is for movement and
 // queries; emitters use this analytic form so a vertex next to a sheer edge
 // never picks up the grid's half-cell interpolation.
-float UrbanGroundAt(const CityPlan& city, const MapGeneratorConfig& c, glm::vec2 p) {
-  const HighwayPlan& plan = city.highway;
+float UrbanGroundAt(const HighwayPlan& plan, const TerrainPlan& terrain,
+                    const MapGeneratorConfig& c, glm::vec2 p) {
   const ArterySpec& artery = plan.artery;
   // The corridor the road grade owns is exactly the pavement: beside it the
   // tier stands at full height, so a ramp through a level is a clean cut.
@@ -1112,7 +1295,7 @@ float UrbanGroundAt(const CityPlan& city, const MapGeneratorConfig& c, glm::vec2
   const float sA = glm::dot(p - artery.origin, artery.dir);
   if (std::fabs(glm::dot(p - artery.origin, artery.normal)) < bandA &&
       sA > artery.sMin - 2.0f && sA < artery.sMax + 2.0f) {
-    return HighwayGradeAt(city.terrain, p, artery.dir, false);
+    return HighwayGradeAt(terrain, p, artery.dir, false);
   }
   if (plan.hasBranch) {
     const glm::vec2 branchN(-plan.branch.dir.y, plan.branch.dir.x);
@@ -1120,12 +1303,16 @@ float UrbanGroundAt(const CityPlan& city, const MapGeneratorConfig& c, glm::vec2
     const float u = glm::dot(p - plan.branch.start, plan.branch.dir);
     if (u > -1.0f && u < plan.branch.length + 1.0f &&
         std::fabs(glm::dot(p - plan.branch.start, branchN)) < bandB) {
-      return HighwayGradeAt(city.terrain, p, plan.branch.dir, true);
+      return HighwayGradeAt(terrain, p, plan.branch.dir, true);
     }
   }
   float y = 0.0f;
-  for (const TerrainWallSpec& wall : city.terrain.walls) y += wall.rise * wall.Factor(p);
+  for (const TerrainWallSpec& wall : terrain.walls) y += wall.rise * wall.Factor(p);
   return y;
+}
+
+float UrbanGroundAt(const CityPlan& city, const MapGeneratorConfig& c, glm::vec2 p) {
+  return UrbanGroundAt(city.highway, city.terrain, c, p);
 }
 
 float RimWidth(const MapGeneratorConfig& c) { return std::max(c.streetWidth, c.localStreetWidth); }
@@ -1179,11 +1366,21 @@ void ChooseRampChannels(uint32_t seed, const MapGeneratorConfig& c, const Highwa
   const glm::vec2 branchN(-plan.branch.dir.y, plan.branch.dir.x);
   for (TerrainWallSpec& w : terrain->walls) {
     for (const int side : {1, -1}) {
-      if (!rng.Chance(0.6f)) continue;
+      const bool drawn = rng.Chance(0.6f);
+      bool hasSecondary = false;
+      for (const StreetCut& cut : cuts) hasSecondary |= cut.side == side && cut.secondaryArtery;
+      if (!drawn && !hasSecondary) continue;
+      // Additional arteries always claim the climb when one fits (they are
+      // main roads: they should not dead-end at a level); other avenues only
+      // on the usual draw.
+      for (int pass = 0; pass < 2; ++pass) {
+      if (pass == 1 && !drawn) break;
+      bool placed = false;
       for (const StreetCut& cut : cuts) {
         if (cut.side != side || cut.cls == UrbanStreetClass::Highway || cut.terrainBoundary) {
           continue;
         }
+        if (pass == 0 && !cut.secondaryArtery) continue;
         const float denom = glm::dot(w.raisedN, cut.dir);
         if (std::fabs(denom) < 0.55f) continue;  // Too oblique for a straight climb.
         const glm::vec2 q = cut.origin + cut.dir * w.CrossingParam(cut.origin, cut.dir);
@@ -1213,7 +1410,10 @@ void ChooseRampChannels(uint32_t seed, const MapGeneratorConfig& c, const Highwa
         }
         if (!fits) continue;
         w.channels.push_back(TerrainChannel{q, along, cut.width, run});
+        placed = true;
         break;
+      }
+      if (placed) break;
       }
     }
   }
@@ -1419,6 +1619,17 @@ bool DropOrphanChannels(TerrainPlan* terrain, const std::vector<StreetCut>& cuts
   return dropped;
 }
 
+// How many avenues become additional arteries: pinned by
+// config.extraArteries, otherwise drawn per seed (half the seeds keep the
+// single artery, 30% add one, 20% add two).
+int ExtraArteryCount(uint32_t seed, const MapGeneratorConfig& c) {
+  if (c.arteryCount <= 0) return 0;
+  Rng rng(seed ^ kExtraArteryStream);
+  const float roll = rng.Float(0.0f, 1.0f);
+  if (c.extraArteries >= 0) return std::min(c.extraArteries, 2);
+  return roll < 0.5f ? 0 : (roll < 0.8f ? 1 : 2);
+}
+
 // Street pass: the branch corridor, avenues roughly parallel to the artery
 // and oblique cross streets for each side. Each side draws its own, so
 // junctions don't line up across the artery and block shapes differ.
@@ -1465,6 +1676,28 @@ StreetGraph BuildStreetGraph(uint32_t seed, const MapGeneratorConfig& c, const H
       s += c.blockSize * rng.Float(0.9f, 1.35f) + width;
     }
   }
+  // Additional arteries: some seeds widen one or two avenues into wide
+  // through roads beside the main one (two or three arteries in all). They
+  // parallel the artery, so they never cross its deck; levels are handled by
+  // ChooseRampChannels, which ramps them through every wall.
+  if (const int extra = ExtraArteryCount(seed, c); extra > 0) {
+    Rng extraRng(seed ^ kExtraArteryStream);
+    extraRng.Float(0.0f, 1.0f);  // The count draw (ExtraArteryCount).
+    std::vector<size_t> avenues;
+    for (size_t i = 0; i < graph.cuts.size(); ++i) {
+      const StreetCut& cut = graph.cuts[i];
+      if (cut.cls != UrbanStreetClass::Avenue || cut.terrainBoundary) continue;
+      const float offset = std::fabs(glm::dot(cut.origin - artery.origin, artery.normal));
+      if (offset < half - RimWidth(c) - c.arteryWidth) avenues.push_back(i);
+    }
+    for (int k = 0; k < extra && !avenues.empty(); ++k) {
+      const size_t pick = static_cast<size_t>(extraRng.Int(0, static_cast<int>(avenues.size()) - 1));
+      StreetCut& cut = graph.cuts[avenues[pick]];
+      cut.width = std::max(cut.width, c.arteryWidth * 0.75f);
+      cut.secondaryArtery = true;
+      avenues.erase(avenues.begin() + pick);
+    }
+  }
   ChooseRampChannels(seed, c, plan, terrainPlan, graph.cuts);
   // Trimmed against the channels; a channel left without its avenue over
   // the ramp is dropped and the streets trimmed again without it, so the
@@ -1483,7 +1716,8 @@ StreetGraph BuildStreetGraph(uint32_t seed, const MapGeneratorConfig& c, const H
 // Block pass. Convex polygon blocks: the rim rectangle is split by the
 // artery corridor and every street cut. Each surviving region is a block
 // whose shape follows whatever angles the streets around it happen to make.
-std::vector<UrbanBlock> BuildBlocks(const MapGeneratorConfig& c, const HighwayPlan& plan,
+std::vector<UrbanBlock> BuildBlocks(uint32_t seed, const MapGeneratorConfig& c,
+                                    const HighwayPlan& plan, const TerrainPlan& terrain,
                                     StreetGraph* graph) {
   const ArterySpec& artery = plan.artery;
   const float half = UrbanMapHalfExtent(c);
@@ -1593,14 +1827,119 @@ std::vector<UrbanBlock> BuildBlocks(const MapGeneratorConfig& c, const HighwayPl
       cut.gaps = std::move(gaps);
     }
   }
-  return blocks;
+
+  // A local street trimmed by terrain can leave what would have been two or
+  // three ordinary blocks joined into one long polygon. Half become rows of
+  // apartment slabs; the rest are split back into 2-3 blocks along a short
+  // local street segment (one StreetCut limited to the old block's extent).
+  Rng longBlockRng(seed ^ kLongBlockStream);
+  std::vector<UrbanBlock> refined;
+  for (UrbanBlock& block : blocks) {
+    BlockAxis shape;
+    if (!IsLongBlock(block, c, &shape)) {
+      refined.push_back(std::move(block));
+      continue;
+    }
+    // A row needs room for at least three decent slabs; a block that can't
+    // hold them is split or left ordinary.
+    std::vector<glm::vec2> rowOuter = InsetConvexPolygon(block.vertices, c.sidewalkWidth);
+    const bool rowViable =
+        rowOuter.size() >= 3 && !ApartmentRowSlabs(rowOuter, c, 0).empty() &&
+        !ApartmentRowSlabs(rowOuter, c, 1).empty();  // Either lean direction.
+    const bool wantsRow = longBlockRng.Chance(0.5f);
+    const bool apartmentRow = wantsRow && rowViable;
+    // A row that was wanted but is too tight becomes two blocks: one left
+    // empty, the other built up as an ordinary block.
+    const bool tight = wantsRow && !rowViable;
+    if (apartmentRow) {
+      block.apartmentRow = rowViable;
+      refined.push_back(std::move(block));
+      continue;
+    }
+
+    const float length = shape.hi - shape.lo;
+    const int count =
+        tight ? 2 : std::clamp(static_cast<int>(std::lround(length / c.blockSize)), 2, 3);
+    const size_t emptyPiece = tight ? (longBlockRng.Chance(0.5f) ? 0 : 1) : count;
+    std::vector<std::vector<glm::vec2>> pieces = {block.vertices};
+    const glm::vec2 cutDirection(-shape.direction.y, shape.direction.x);
+    const float splitWidth = c.localStreetWidth;
+    std::vector<glm::vec2> splitOrigins;
+    // A street never runs into a level: a split whose ends would reach a
+    // wall strip (a block lying along a level) keeps the apartment row.
+    bool clear = true;
+    for (int i = 1; i < count; ++i) {
+      const float at = shape.lo + length * static_cast<float>(i) / static_cast<float>(count);
+      const glm::vec2 origin = shape.direction * at;
+      float t0 = std::numeric_limits<float>::infinity(), t1 = -t0;
+      for (const glm::vec2& v : block.vertices) {
+        const float t = glm::dot(v - origin, cutDirection);
+        t0 = std::min(t0, t);
+        t1 = std::max(t1, t);
+      }
+      for (const StreetCut& wall : graph->cuts) {
+        if (!wall.terrainBoundary) continue;
+        const glm::vec2 n(-wall.dir.y, wall.dir.x);
+        for (const float t : {t0, t1}) {
+          const float d = std::fabs(glm::dot(origin + cutDirection * t - wall.origin, n));
+          if (d < wall.width * 0.5f + splitWidth * 0.5f + 0.5f) clear = false;
+        }
+      }
+      // ...and the road is level: both ends stand on one tier.
+      // (sampled along it and a little past the block, where the street
+      // meets its neighbours' corridors).
+      const float groundMid = UrbanGroundAt(plan, terrain, c, origin + cutDirection * (0.5f * (t0 + t1)));
+      for (const float t : {t0 - 4.0f, t0 - 1.0f, t0, t0 + 1.0f, t1 - 1.0f, t1, t1 + 1.0f, t1 + 4.0f}) {
+        if (std::fabs(UrbanGroundAt(plan, terrain, c, origin + cutDirection * t) - groundMid) > 0.05f) {
+          clear = false;
+        }
+      }
+      splitOrigins.push_back(origin);
+    }
+    if (!clear) {
+      block.apartmentRow = rowViable;
+      refined.push_back(std::move(block));
+      continue;
+    }
+    for (const glm::vec2& origin : splitOrigins) CutStreet(&pieces, origin, cutDirection, splitWidth);
+    bool usable = static_cast<int>(pieces.size()) == count;
+    for (const auto& piece : pieces) usable &= PolygonArea(piece) >= c.minPolygonArea;
+    if (!usable) {
+      block.apartmentRow = rowViable;
+      refined.push_back(std::move(block));
+      continue;
+    }
+    // Each split becomes one real street segment, spanning the old block
+    // from one bounding street to the other (nothing paved beyond it).
+    glm::vec2 centroid(0.0f);
+    for (const glm::vec2& v : block.vertices) centroid += v;
+    centroid /= static_cast<float>(block.vertices.size());
+    const int side = glm::dot(centroid - artery.origin, artery.normal) >= 0.0f ? 1 : -1;
+    for (const glm::vec2& origin : splitOrigins) {
+      float t0 = std::numeric_limits<float>::infinity(), t1 = -t0;
+      for (const glm::vec2& v : block.vertices) {
+        const float t = glm::dot(v - origin, cutDirection);
+        t0 = std::min(t0, t);
+        t1 = std::max(t1, t);
+      }
+      StreetCut split{origin, cutDirection, splitWidth, side, UrbanStreetClass::Cross};
+      split.gaps = {{-1.0e6f, t0}, {t1, 1.0e6f}};
+      split.blockSplit = true;
+      graph->cuts.push_back(std::move(split));
+    }
+    for (size_t i = 0; i < pieces.size(); ++i) {
+      refined.push_back(MakeUrbanBlock(std::move(pieces[i])));
+      refined.back().empty = i == emptyPiece;
+    }
+  }
+  return refined;
 }
 
 CityPlan BuildCityPlan(uint32_t seed, const MapGeneratorConfig& c) {
   CityPlan plan;
   plan.highway = BuildHighwayPlan(seed, c, &plan.terrain);
   plan.streets = BuildStreetGraph(seed, c, plan.highway, &plan.terrain);
-  plan.blocks = BuildBlocks(c, plan.highway, &plan.streets);
+  plan.blocks = BuildBlocks(seed, c, plan.highway, plan.terrain, &plan.streets);
   return plan;
 }
 
@@ -1608,7 +1947,7 @@ std::vector<UrbanBlock> BuildCityBlocks(uint32_t seed, const MapGeneratorConfig&
   TerrainPlan terrain;
   const HighwayPlan highway = BuildHighwayPlan(seed, c, &terrain);
   StreetGraph graph = BuildStreetGraph(seed, c, highway, &terrain);
-  return BuildBlocks(c, highway, &graph);
+  return BuildBlocks(seed, c, highway, terrain, &graph);
 }
 
 // Ribbon edge; an end vertex sitting exactly on the map boundary slides
@@ -1667,6 +2006,7 @@ struct Parcel {
   float depth = 0.0f;
   bool corner = false;
   int block = -1;
+  bool forceResidential = false;  // Detached slabs in a long apartment-row block.
   // Per-parcel draw from the layout rng (the same stream position the old
   // per-building height jitter used, so layouts never shift): picks the
   // BuildingKind from the weighted table.
@@ -1688,8 +2028,10 @@ UrbanStreetClass FrontageClass(const CityPlan& city, glm::vec2 a, glm::vec2 b, g
   UrbanStreetClass cls = UrbanStreetClass::Cross;
   // Rim streets: axis-aligned bands just inside the map square.
   if (std::fabs(edgeDir.y) > kParallel) {
+    if (std::fabs(probe.x) > half - rim) return UrbanStreetClass::Cross;
     best = std::fabs(std::fabs(probe.x) - (half - rim * 0.5f)) - rim * 0.5f;
   } else if (std::fabs(edgeDir.x) > kParallel) {
+    if (std::fabs(probe.y) > half - rim) return UrbanStreetClass::Cross;
     best = std::fabs(std::fabs(probe.y) - (half - rim * 0.5f)) - rim * 0.5f;
   }
   for (const UrbanRoad& road : city.streets.roads) {
@@ -1803,7 +2145,7 @@ void PlanBlockParcels(const CityPlan& city, size_t blockIndex, const MapGenerato
   const UrbanBlock& block = city.blocks[blockIndex];
   const bool park = rng->Chance(0.10f);  // Pocket park/open lot.
   *characterRoll = rng->Unit01();
-  if (park) return;
+  if (block.empty || (park && !block.apartmentRow)) return;
   std::vector<glm::vec2> outer = InsetConvexPolygon(block.vertices, c.sidewalkWidth);
   if (outer.size() < 3 || PolygonArea(outer) < c.minPolygonArea ||
       !PolygonClearOfRoads(outer, city.streets.roads, c.sidewalkWidth)) {
@@ -1847,6 +2189,24 @@ void PlanBlockParcels(const CityPlan& city, size_t blockIndex, const MapGenerato
     const glm::vec2 fb = fp[(parcel->frontageEdge + 1) % fp.size()];
     parcel->street = FrontageClass(city, fa, fb, inwardOf(fa, fb), c);
   };
+
+  if (block.apartmentRow) {
+    // Freestanding apartment slabs lean across the short dimension, matching
+    // the long-block schematic. They sit well inside the block instead of
+    // consuming its full depth, and their wide lawns/courts keep the row from
+    // reading as one partitioned warehouse.
+    bool any = false;
+    for (std::vector<glm::vec2>& slab : ApartmentRowSlabs(outer, c, blockIndex)) {
+      Parcel parcel;
+      parcel.footprint = std::move(slab);
+      parcel.forceResidential = true;
+      placeFrontage(&parcel);
+      emit(std::move(parcel));
+      any = true;
+    }
+    if (any) return;
+  }
+
   std::vector<glm::vec2> inner = InsetConvexPolygon(outer, c.buildingDepth);
   const std::vector<glm::vec2> courtyard = InsetConvexPolygon(outer, c.buildingDepth + 1.2f);
   // A deep inset can collapse an edge into a self-crossing "bowtie" while
@@ -2338,15 +2698,49 @@ void DrawFloors(Building* b, const MapGeneratorConfig& c, Rng* rng) {
   while (b->Height() < c.minBuildingHeight - 1e-3f) ++b->floorCount;
 }
 
+// A smooth city-wide height field in [0, 1]: two crossing low-frequency waves
+// with seeded direction, wavelength and phase, so neighbouring parcels land
+// at similar heights and the skyline rises and falls in broad clusters.
+struct SkylineField {
+  glm::vec2 dir[2];
+  float freq[2], phase[2];
+  explicit SkylineField(Rng* rng) {
+    for (int i = 0; i < 2; ++i) {
+      const float angle = rng->Float(0.0f, kPi);
+      dir[i] = glm::vec2(std::cos(angle), std::sin(angle));
+      freq[i] = 2.0f * kPi / rng->Float(70.0f, 130.0f);
+      phase[i] = rng->Float(0.0f, 2.0f * kPi);
+    }
+  }
+  float At(glm::vec2 p) const {
+    float v = 0.5f;
+    for (int i = 0; i < 2; ++i) v += 0.25f * std::sin(glm::dot(dir[i], p) * freq[i] + phase[i]);
+    return v;
+  }
+};
+
 // Kind, floors, facade variant and setback per parcel, then the landmark
 // towers (Civic, from the layout rng exactly where the old tower pick drew).
 std::vector<Building> PlanBuildings(const std::vector<Parcel>& parcels,
                                     const std::vector<float>& characterRolls, uint32_t seed,
                                     const MapGeneratorConfig& c, Rng* layoutRng) {
   Rng rng(seed ^ kArchetypeStream);
+  Rng skylineRng(seed ^ kSkylineStream);
+  const SkylineField skyline(&skylineRng);
   std::vector<bool> highwayFrontage(characterRolls.size(), false);
   for (const Parcel& parcel : parcels) {
     if (parcel.street == UrbanStreetClass::Highway) highwayFrontage[parcel.block] = true;
+  }
+  std::vector<glm::vec2> blockCenter(characterRolls.size(), glm::vec2(0.0f));
+  std::vector<int> blockParcels(characterRolls.size(), 0);
+  for (const Parcel& parcel : parcels) {
+    glm::vec2 center(0.0f);
+    for (const glm::vec2& v : parcel.footprint) center += v;
+    blockCenter[parcel.block] += center / static_cast<float>(parcel.footprint.size());
+    ++blockParcels[parcel.block];
+  }
+  for (size_t i = 0; i < blockCenter.size(); ++i) {
+    if (blockParcels[i] > 0) blockCenter[i] /= static_cast<float>(blockParcels[i]);
   }
   std::vector<Building> buildings;
   buildings.reserve(parcels.size());
@@ -2355,10 +2749,35 @@ std::vector<Building> PlanBuildings(const std::vector<Parcel>& parcels,
     const BlockCharacter character =
         DrawCharacter(characterRolls[parcel.block], highwayFrontage[parcel.block], c);
     Building b;
-    b.kind = DrawKind(parcel.kindRoll, parcel.street, character);
+    b.kind = parcel.forceResidential
+                 ? BuildingKind::Residential
+                 : DrawKind(parcel.kindRoll, parcel.street, character);
     b.parcel = static_cast<int>(i);
     b.block = parcel.block;
     DrawFloors(&b, c, &rng);
+    // Residential/mixed/office parcels follow the skyline field up to the
+    // config's skyline cap: low districts keep the old 2-3 floors, tall ones
+    // reach 6-8, with at most a floor of jitter inside a cluster.
+    if (b.kind == BuildingKind::Residential || b.kind == BuildingKind::MixedUse ||
+        b.kind == BuildingKind::Office) {
+      // One field sample per block (the mean of its parcels' centres), so a
+      // block's buildings share a height band and neighbours stay close.
+      const glm::vec2 center = blockCenter[parcel.block];
+      float v = skyline.At(center) + (characterRolls[parcel.block] - 0.5f) * 0.16f;
+      const BlockCharacter character =
+          DrawCharacter(characterRolls[parcel.block], highwayFrontage[parcel.block], c);
+      if (character == BlockCharacter::Downtown) v += 0.2f;
+      if (character == BlockCharacter::Industrial) v -= 0.2f;
+      v = std::clamp(v, 0.0f, 1.0f);
+      const float target = c.minBuildingHeight + (c.skylineMaxHeight - c.minBuildingHeight) * v * v;
+      int floors = static_cast<int>(
+                       std::lround((target - b.groundFloorHeight) / b.floorHeight)) + 1;
+      const float jitter = skylineRng.Float(0.0f, 1.0f);
+      if (jitter < 0.2f) --floors;
+      else if (jitter > 0.8f) ++floors;
+      b.floorCount = std::max(2, floors);
+      while (b.floorCount > 2 && b.Height() > c.skylineMaxHeight + 1e-3f) --b.floorCount;
+    }
     b.style = static_cast<int>(b.kind) * 2 + (rng.Chance(0.5f) ? 1 : 0);
     // Offices step their top floor back when there is room for it.
     if (b.kind == BuildingKind::Office && b.floorCount >= 3 && rng.Chance(0.6f)) {
@@ -2368,9 +2787,11 @@ std::vector<Building> PlanBuildings(const std::vector<Parcel>& parcels,
   }
 
   // Landmark towers: the same two picks the old generator made.
-  const int towers = std::min<int>(c.towerCount, static_cast<int>(buildings.size()));
-  std::vector<size_t> candidates(buildings.size());
-  for (size_t i = 0; i < candidates.size(); ++i) candidates[i] = i;
+  std::vector<size_t> candidates;
+  for (size_t i = 0; i < buildings.size(); ++i) {
+    if (!parcels[i].forceResidential) candidates.push_back(i);
+  }
+  const int towers = std::min<int>(c.towerCount, static_cast<int>(candidates.size()));
   for (int i = 0; i < towers && !candidates.empty(); ++i) {
     const size_t pick =
         static_cast<size_t>(layoutRng->Int(0, static_cast<int>(candidates.size()) - 1));
@@ -3513,9 +3934,80 @@ void EmitStreetSurfaces(Scene* scene, const CityPlan& city, const MapGeneratorCo
 // (navmesh, collision, LOS, cover); the cap wrapping the underside of the
 // deck is overhead massing, so the ground between bents -- and between twin
 // columns -- stays navigable.
+//
+// A column never stands on a street (the `streetBegin..streetEnd` range of
+// scene->roads). Should that leave a deck span longer than
+// kMaxUnsupportedSpan bent steps (more than one bent missing in a row), the
+// bent nearest the middle of the gap is restored instead and the street
+// under it is cut across the deck's width, so the column stands on bare
+// ground. Both decisions follow only the plan, so they are per map/seed.
 void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, PierForm form,
-               const GroundY& groundY) {
+               const GroundY& groundY, size_t streetBegin, size_t streetEnd) {
   const HighwayPlan& plan = city.highway;
+  // The street asphalt, taken out of scene->roads while piers are placed
+  // (cuts rewrite it) and put back at the end in the same position.
+  std::vector<RoadSurface> streets(
+      std::make_move_iterator(scene->roads.begin() + static_cast<std::ptrdiff_t>(streetBegin)),
+      std::make_move_iterator(scene->roads.begin() + static_cast<std::ptrdiff_t>(streetEnd)));
+  scene->roads.erase(scene->roads.begin() + static_cast<std::ptrdiff_t>(streetBegin),
+                     scene->roads.begin() + static_cast<std::ptrdiff_t>(streetEnd));
+  const auto restoreStreets = [&] {
+    scene->roads.insert(scene->roads.begin() + static_cast<std::ptrdiff_t>(streetBegin),
+                        std::make_move_iterator(streets.begin()),
+                        std::make_move_iterator(streets.end()));
+  };
+  const auto onStreet = [&](const std::vector<glm::vec2>& footprint) {
+    for (const RoadSurface& road : streets) {
+      std::vector<glm::vec2> poly;
+      for (const glm::vec3& v : road.vertices) poly.emplace_back(v.x, v.z);
+      if (poly.size() < 3) continue;
+      if (PolygonSignedArea(poly) < 0.0f) std::reverse(poly.begin(), poly.end());
+      if (PolygonsOverlap(footprint, poly)) return true;
+    }
+    return false;
+  };
+  // Removes the street asphalt inside `cutter` (convex, counter-clockwise).
+  // Each street patch is planar, so the pieces keep its plane.
+  const auto cutStreets = [&](const std::vector<glm::vec2>& cutter) {
+    std::vector<RoadSurface> out;
+    for (RoadSurface& road : streets) {
+      std::vector<glm::vec2> poly;
+      for (const glm::vec3& v : road.vertices) poly.emplace_back(v.x, v.z);
+      if (poly.size() >= 3 && PolygonSignedArea(poly) < 0.0f) std::reverse(poly.begin(), poly.end());
+      if (poly.size() < 3 || !PolygonsOverlap(cutter, poly)) {
+        out.push_back(std::move(road));
+        continue;
+      }
+      // y = a + bx*x + bz*z through the patch's first non-degenerate corner triple.
+      float a = road.vertices[0].y, bx = 0.0f, bz = 0.0f;
+      for (size_t i = 1; i + 1 < road.vertices.size(); ++i) {
+        const glm::vec3 &p0 = road.vertices[0], &p1 = road.vertices[i], &p2 = road.vertices[i + 1];
+        const float det = (p1.x - p0.x) * (p2.z - p0.z) - (p2.x - p0.x) * (p1.z - p0.z);
+        if (std::fabs(det) < 1e-6f) continue;
+        bx = ((p1.y - p0.y) * (p2.z - p0.z) - (p2.y - p0.y) * (p1.z - p0.z)) / det;
+        bz = ((p2.y - p0.y) * (p1.x - p0.x) - (p1.y - p0.y) * (p2.x - p0.x)) / det;
+        a = p0.y - bx * p0.x - bz * p0.z;
+        break;
+      }
+      // Whatever lies outside any one cutter edge survives; peel the
+      // cutter off edge by edge.
+      std::vector<glm::vec2> rest = poly;
+      for (size_t i = 0; i < cutter.size() && rest.size() >= 3; ++i) {
+        const glm::vec2 edge = cutter[(i + 1) % cutter.size()] - cutter[i];
+        const glm::vec2 n(-edge.y, edge.x);
+        const float d = glm::dot(n, cutter[i]);
+        std::vector<glm::vec2> outside = KeepSide(rest, -n, -d);
+        SimplifyPolygon(&outside);
+        if (outside.size() >= 3 && PolygonArea(outside) > 1e-3f) {
+          RoadSurface piece;
+          for (const glm::vec2& q : outside) piece.vertices.emplace_back(q.x, a + bx * q.x + bz * q.y, q.y);
+          out.push_back(std::move(piece));
+        }
+        rest = KeepSide(rest, n, d);
+      }
+    }
+    streets = std::move(out);
+  };
   // Bridge stands march under the high spans, leaving broad navigable
   // ground between bents. None near the on-ramp's merge, where the two
   // slabs overlap.
@@ -3566,7 +4058,9 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
     };
     // One bent at `center`: `deckHalf` is the road's half width, `along` its
     // direction, `deckY` the relative deck lift there.
-    auto addBent = [&](glm::vec2 center, glm::vec2 along, float deckHalf, float deckY) {
+    // `bare` restores a bent over a street: the street is cut away first.
+    auto addBent = [&](glm::vec2 center, glm::vec2 along, float deckHalf, float deckY,
+                       bool bare) {
       const float height = deckY - c.highwayThickness - 0.05f;
       const float shaftHalf = 0.5f * c.pierColumnWidth;
       // Footing + shaft; false where the column can't stand.
@@ -3580,6 +4074,7 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
         std::vector<glm::vec2> footing = ClipModelToMap(
             rect(foot, along, halfAlong + c.pierBaseExtra, halfAcross + c.pierBaseExtra),
             scene->mapHalfExtent);
+        if (!bare && onStreet(footing)) return false;
         std::vector<glm::vec2> shaft = ClipModelToMap(
             rect(foot, along, halfAlong, halfAcross), scene->mapHalfExtent);
         if (shaft.empty()) return false;
@@ -3601,7 +4096,12 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
       } else {
         stood = addColumn(center, shaftHalf, 2.0f * shaftHalf);
       }
-      if (!stood) return;
+      if (!stood) return false;
+      if (bare) {
+        // The street under the bent, across the whole deck width.
+        cutStreets(rect(center, along, 1.0f + c.pierBaseExtra + c.pierColumnWidth,
+                        deckHalf + 1.0f));
+      }
       // The cap joining the column(s) to the deck's underside: overhead
       // massing (drawn, blocks LOS), never a ground obstacle.
       const float underside = groundY(center.x, center.y) + deckY - c.highwayThickness;
@@ -3610,15 +4110,64 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
       cap.footprint = ClipModelToMap(
           rect(center, along, form == PierForm::Twin ? 0.7f : 1.0f, capHalfSpan),
           scene->mapHalfExtent);
-      if (cap.footprint.empty()) return;
+      if (cap.footprint.empty()) return true;
       cap.y0 = underside - c.pierCapDepth;
       cap.y1 = underside - 0.02f;
       scene->massing.push_back(std::move(cap));
+      return true;
     };
     // Bents march outward from the map-spanning corridor's midpoint and
     // continue down any ramps while there is still head clearance below the
     // slab. Always on-map, even when the deck itself runs past the boundary.
     constexpr float kMinClearance = 2.2f;
+    // The longest deck span left between standing bents, in bent steps: one
+    // bent may go missing (a street under it), two in a row may not.
+    constexpr float kMaxUnsupportedSpan = 2.05f;
+    struct Bent {
+      glm::vec2 center, along;
+      float deckHalf, deckY, u;  // u: arc-length along the line.
+      bool stood = false;
+      bool retried = false;  // Already attempted over a street.
+    };
+    // Places one line's bents, then restores any that leave too long a span.
+    const auto placeLine = [&](std::vector<Bent> bents, float step) {
+      for (Bent& b : bents) {
+        b.stood = addBent(b.center, b.along, b.deckHalf, b.deckY, false);
+      }
+      if (bents.empty()) return;
+      // Gaps between standing bents; the ramp ends count as supported, one
+      // step beyond the first and last bent.
+      std::vector<float> supports = {bents.front().u - step};
+      for (const Bent& b : bents) {
+        if (b.stood) supports.push_back(b.u);
+      }
+      supports.push_back(bents.back().u + step);
+      // Restores bents inside (lo, hi) until no span exceeds the maximum.
+      std::function<void(float, float)> resolve = [&](float lo, float hi) {
+        while (hi - lo > kMaxUnsupportedSpan * step) {
+          // The untried bent nearest the middle of the gap.
+          Bent* best = nullptr;
+          for (Bent& b : bents) {
+            if (b.stood || b.retried || b.u <= lo + 1e-3f || b.u >= hi - 1e-3f) continue;
+            if (!best || std::fabs(b.u - 0.5f * (lo + hi)) < std::fabs(best->u - 0.5f * (lo + hi))) {
+              best = &b;
+            }
+          }
+          if (!best) return;
+          best->retried = true;
+          best->stood = true;  // Provisional; cleared if it cannot stand.
+          if (!addBent(best->center, best->along, best->deckHalf, best->deckY, true)) {
+            best->stood = false;
+            continue;
+          }
+          resolve(lo, best->u);
+          resolve(best->u, hi);
+          return;
+        }
+      };
+      for (size_t k = 0; k + 1 < supports.size(); ++k) resolve(supports[k], supports[k + 1]);
+    };
+    std::vector<Bent> arteryBents;
     const float pierLo = plan.artery.sMin + 1.5f;
     const float pierHi = plan.artery.sMax - 1.5f;
     const float mid = 0.5f * (pierLo + pierHi);
@@ -3627,19 +4176,24 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
       const float deckY = ArteryElevationAt(plan, city.terrain, c, s);
       if (deckY < kMinClearance) continue;
       if (plan.hasBranch && std::fabs(s - plan.branch.mergeS) < c.supportSpacing * 0.6f) continue;
-      addBent(plan.artery.origin + plan.artery.dir * s, plan.artery.dir,
-              c.arteryWidth * 0.5f, deckY);
+      arteryBents.push_back({plan.artery.origin + plan.artery.dir * s, plan.artery.dir,
+                             c.arteryWidth * 0.5f, deckY, s});
     }
+    placeLine(std::move(arteryBents), c.supportSpacing);
     if (plan.hasBranch) {
+      std::vector<Bent> branchBents;
+      const float step = c.supportSpacing * 0.75f;
       for (float u = std::max(0.0f, plan.branch.riseStart); u < plan.branch.length - 8.0f;
-           u += c.supportSpacing * 0.75f) {
+           u += step) {
         const float deckY = BranchElevationAt(plan, city.terrain, c, u);
         if (deckY < kMinClearance) continue;
-        addBent(plan.branch.start + plan.branch.dir * u, plan.branch.dir,
-                plan.branch.width * 0.5f, deckY);
+        branchBents.push_back({plan.branch.start + plan.branch.dir * u, plan.branch.dir,
+                               plan.branch.width * 0.5f, deckY, u});
       }
+      placeLine(std::move(branchBents), step);
     }
   }
+  restoreStreets();
 }
 
 // Sidewalk rings, then one Building per parcel: its base prism over the
@@ -4056,6 +4610,11 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
       street[e] = onLine(line, a) && onLine(line, q) && onLine(line, (a + q) * 0.5f);
     }
     const int frontage = parcel.frontageEdge;
+    // Detached apartment rows have no wall on the street building line;
+    // their selected long edge is still the principal, windowed facade.
+    if (parcel.forceResidential) street[frontage] = true;
+    // ...and so is the opposite long face: slabs are glazed on both sides.
+    const int backEdge = parcel.forceResidential ? static_cast<int>((frontage + 2) % n) : -1;
     // Rear edge: the longest non-street edge facing away from the frontage.
     const glm::vec2 fa = fp[frontage], fb = fp[(frontage + 1) % n];
     const glm::vec2 frontDir = glm::normalize(fb - fa);
@@ -4223,7 +4782,8 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
         b.kind == BuildingKind::Office || b.kind == BuildingKind::Civic;
     for (size_t e = 0; e < n; ++e) {
       const bool rear = static_cast<int>(e) == rearEdge && rearWindows;
-      if (!street[e] && !rear) continue;
+      const bool back = static_cast<int>(e) == backEdge && rearWindows;
+      if (!street[e] && !rear && !back) continue;
       const glm::vec2 a = fp[e], q = fp[(e + 1) % n];
       const float len = glm::distance(a, q);
       const glm::vec2 doorSpan = doorSpans[e];
@@ -4241,7 +4801,7 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
           w = 2.0f;
           gap = 0.35f;
         }
-        if (rear) gap *= 2.0f;  // Sparser on the courtyard side.
+        if (rear && !back) gap *= 2.0f;  // Sparser on the courtyard side.
         const float y0 = floorBase + sill;
         const float y1 = std::min(floorBase + head, floorTop - 0.2f);
         if (y1 - y0 < 0.4f) continue;
@@ -4401,6 +4961,10 @@ void EmitStreetFurniture(Scene* scene, const CityPlan& city, const MapGeneratorC
 bool CutParamRange(const StreetCut& cut, const ArterySpec& artery, const MapGeneratorConfig& c,
                    float half, float* t0, float* t1) {
   ClipLineToSquare(cut.origin, cut.dir, half, t0, t1);
+  if (cut.blockSplit && cut.gaps.size() == 2) {
+    *t0 = std::max(*t0, cut.gaps[0].second);
+    *t1 = std::min(*t1, cut.gaps[1].first);
+  }
   const glm::vec2 n = artery.normal * static_cast<float>(cut.side);
   const float dMin = static_cast<float>(cut.side) * glm::dot(artery.normal, artery.origin) +
                      c.arteryWidth * 0.5f - 0.2f;
@@ -4587,7 +5151,8 @@ void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorCo
     for (const glm::vec2& p : poly) centroid += p;
     centroid /= static_cast<float>(poly.size());
     for (size_t v = 0; v < poly.size(); ++v) {
-      if (!rng.Chance(0.4f)) continue;
+      const bool place = rng.Chance(0.4f);
+      if (!place) continue;
       const glm::vec2 inward = glm::normalize(centroid - poly[v]);
       const glm::vec2 nextEdge = glm::normalize(poly[(v + 1) % poly.size()] - poly[v]);
       const glm::vec2 previousEdge =
@@ -4607,8 +5172,9 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   const GroundY groundY = [&](float x, float z) { return scene.ground.HeightAt(x, z); };
   const PierForm pierForm = ResolvePierForm(seed, c);
   EmitHighwaySurfaces(&scene, city, c, pierForm, groundY);
+  const size_t streetBegin = scene.roads.size();
   EmitStreetSurfaces(&scene, city, c);
-  EmitPiers(&scene, city, c, pierForm, groundY);
+  EmitPiers(&scene, city, c, pierForm, groundY, streetBegin, scene.roads.size());
   std::vector<float> characterRolls;
   const std::vector<Parcel> parcels = PlanParcels(city, c, &rng, &characterRolls);
   EmitBuildings(&scene, city, parcels, PlanBuildings(parcels, characterRolls, seed, c, &rng), c,

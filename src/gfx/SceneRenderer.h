@@ -56,6 +56,9 @@ struct RenderDebugOptions {
   // Issue #136: skip the camera-occlusion see-through pass (occluding
   // blocks/decks are then always drawn fully opaque).
   bool disableOcclusionFade = false;
+  // Drop all surface colour (lit geometry is drawn in greyscale); used by
+  // the gallery's map-seed viewer.
+  bool monochrome = false;
   // Optional sink for per-frame draw counters; accumulates across panes, so
   // the caller zeroes it once per frame. Null (default) = not collected.
   RenderFrameStats* stats = nullptr;
@@ -238,17 +241,42 @@ class SceneRenderer {
   glm::mat4 lightSpaceMatrix_{1.0f};
 
   // Issue #110 shadow-map FOV prototype. Two eye-space depth maps per unit
-  // (left/right halves of the cone), re-rendered for every unit of every
-  // pane, plus the projective mask shader and a static-geometry mesh
-  // (obstacles, decks, sidewalks, roads) built once per scene so the extra
-  // passes are a couple of draw calls rather than a re-tessellation.
+  // (left/right halves of the cone), plus the projective mask shader and a
+  // static-geometry mesh (obstacles, decks, sidewalks, roads) built once per
+  // scene so the extra passes are a couple of draw calls rather than a
+  // re-tessellation.
   FovOverlayMode fovOverlayMode_ = FovOverlayMode::CpuAnalytic;
   float fovProbeHeight_ = 0.0f;
   Shader fovMaskShader_;
-  GLuint fovFbo_[2] = {0, 0};
-  GLuint fovDepthTex_[2] = {0, 0};
   LitTriangleMesh fovSceneMesh_;
   unsigned long long fovSceneKey_ = 0;
+  // Each figure's depth maps (and each free-aim sweep sector's) are kept
+  // across frames and re-rendered only when its eye, heading or the scene
+  // changes: figures stand still most of the time, and on tile-based
+  // (mobile) GPUs writing 16 MB of depth per figure per frame is the costly
+  // part. Rendered before the pane's main pass so the pane framebuffer is
+  // never switched away from mid-pass.
+  struct FovMapSlot {
+    int unitId = -1;
+    int sector = -1;  // -1: the figure's FOV cone; 0-2: a free-aim sector.
+    glm::vec3 eye{0.0f};
+    float yaw = 0.0f;
+    bool drawTerrain = false;
+    float mapHalfExtent = 0.0f;
+    unsigned long long generation = 0;  // fovMapGeneration_ when rendered.
+    unsigned long long lastUsed = 0;    // fovMapClock_ when last requested.
+    GLuint fbo[2] = {0, 0};
+    GLuint tex[2] = {0, 0};
+    glm::mat4 matrix[2]{glm::mat4(1.0f), glm::mat4(1.0f)};
+  };
+  // One figure's mask in a DrawFovMasks call: its slot and cone half-angle.
+  struct FovMask {
+    int slot = -1;
+    float halfFovDegrees = 0.0f;
+  };
+  std::vector<FovMapSlot> fovMaps_;
+  unsigned long long fovMapGeneration_ = 1;  // Bumped when the casters change.
+  unsigned long long fovMapClock_ = 0;       // Counts RenderPane calls.
   // Visual-only building massing (issue #151: parapets, roof furniture,
   // awnings), one static mesh rebuilt when the scene's massing records
   // change. Drawn in the shadow and lit passes only.
@@ -267,15 +295,24 @@ class SceneRenderer {
   // per-surface path remains only for the camera-fade re-draw.
   LitTriangleMesh deckMesh_;
   unsigned long long deckKey_ = 0;
-  // Renders the two depth maps for `unit` looking along `facingYaw`, then
-  // re-draws the static scene into the pane with the mask shader, tinted
-  // `color` within `halfFovDegrees` of that heading. Leaves the pane framebuffer,
-  // viewport, scissor and the FOV-overlay blend/stencil state as it found
-  // them.
-  void DrawFovShadowMask(const tactics::GameLogic& game, const tactics::Unit& unit,
-                         float facingYaw, float halfFovDegrees, const glm::vec4& color,
-                         const glm::mat4& viewProj, bool drawTerrain, GLuint targetFramebuffer,
-                         int x, int y, int width, int height);
+  LitTriangleMesh obstacleMesh_;        // Drawn prisms, recessed openings cut out.
+  LitTriangleMesh obstacleCasterMesh_;  // The same, solid, for the shadow map.
+  unsigned long long obstacleKey_ = 0;
+  std::vector<int> surfaceBuilding_;  // Roof slab -> building, see RoofBuildings.
+  unsigned long long surfaceBuildingKey_ = 0;
+  // The slot holding `unit`'s depth maps looking along `facingYaw` (for
+  // `sector`, see FovMapSlot), rendering them first if the cached ones are
+  // stale. Binds the slot's framebuffers when it renders, so call it before
+  // the pane's main pass. -1 if the maps could not be allocated.
+  int AcquireFovMaps(const tactics::Unit& unit, int sector, float facingYaw, bool drawTerrain,
+                     float mapHalfExtent);
+  // Re-draws the static scene into the pane with the mask shader, tinted
+  // `color` wherever any of `masks`' figures sees it. Leaves the pane
+  // framebuffer, viewport, scissor and the FOV-overlay blend/stencil state
+  // as it found them.
+  void DrawFovMasks(const std::vector<FovMask>& masks, const glm::vec4& color,
+                    const glm::mat4& viewProj, bool drawTerrain, float mapHalfExtent);
+  void DestroyFovMaps(FovMapSlot* slot);
 };
 
 }  // namespace gfx

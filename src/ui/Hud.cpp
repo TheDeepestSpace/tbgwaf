@@ -176,7 +176,7 @@ void DrawShotLevelBar(const GameLogic& game, const Unit& shooter,
 
 HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRect& rect,
                    int windowHeight, const gfx::OrbitCamera& camera, HudLayout* layout,
-                   float* roundPanelBottom) {
+                   float* roundPanelBottom, const NetHudInfo* net) {
   HudActions actions;
   // Window ids are suffixed with the team so two panes can share one ImGui
   // context (the visual runner) without their windows colliding.
@@ -259,13 +259,21 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
       ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1.0f),
                          "Blocked: no route avoids the other figures' moves.");
     }
-    ImGui::BeginDisabled(!game.CanCommitRound());
+    const bool committed = net && net->committed;
+    ImGui::BeginDisabled(!game.CanCommitRound() || committed);
     if (Button("Commit Round")) actions.commit = true;
     ImGui::EndDisabled();
     // Squad-wide config, not tied to any figure: opens its own view.
     ImGui::SameLine();
     bool& playbookOpen = PlaybookOpen(team);
     if (Button(playbookOpen ? "Close Playbook" : "Playbook")) playbookOpen = !playbookOpen;
+    if (committed) {
+      ImGui::TextColored(ImVec4(0.55f, 0.9f, 0.55f, 1.0f),
+                         net->peerReady ? "Both committed -- round starting..."
+                                        : "Committed. Waiting for opponent...");
+    } else if (net && net->peerReady) {
+      ImGui::TextUnformatted("Opponent has committed.");
+    }
     // Window height tracks collapse, so anything anchored below follows.
     if (roundPanelBottom) *roundPanelBottom = ImGui::GetWindowPos().y + ImGui::GetWindowHeight();
     ImGui::End();

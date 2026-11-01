@@ -24,4 +24,4 @@ script:
     destination: [20, 0, 1]
   - action: commit
   - assert: {unit: 0, position: [20, 0, 0], tolerance: 0.05}
-  - assert: {unit: 1, position: [15.473, 0, 0.547], tolerance: 0.05, comment: Cut off when the fixed 5 s window closes}
+  - assert: {unit: 1, position: [15.207, 0, 0.521], tolerance: 0.05, comment: Cut off when the fixed 5 s window closes}

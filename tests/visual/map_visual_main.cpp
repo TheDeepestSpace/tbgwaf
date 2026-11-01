@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "../OldSizeConfig.h"
 #include "visual/ImageUtil.h"
 #include "game/GameLogic.h"
 #include "game/MapGenerator.h"
@@ -40,7 +41,8 @@ const std::vector<uint32_t> kCitySeeds = {7, 42, 2024};
 // navmesh regression shows up as a visual diff.
 const std::vector<uint32_t> kHillySeeds = {7, 2024};
 // 50 randomly drawn seeds of the default (seed-driven terrain / overpass)
-// city, so the gallery's map view samples what players actually get.
+// city (half of them at 8x8, see below), so the gallery's map view samples
+// what players actually get.
 const std::vector<uint32_t> kRandomCitySeeds = {
     6805,  7622,  13514, 15121, 16096, 16478, 16693, 18035, 19376, 22493,
     24711, 25257, 26421, 27757, 32252, 32727, 37632, 38105, 39138, 39683,
@@ -128,7 +130,7 @@ int main(int argc, char** argv) {
   std::vector<MapCase> cases;
   // Overpass presence is seed-driven by default (issue #130); every golden
   // here pins an explicit presence (and layout) so it tests one variant.
-  tactics::MapGeneratorConfig gradeConfig;
+  tactics::MapGeneratorConfig gradeConfig = tactics::OldSizeConfig();
   gradeConfig.elevatedHighway = tactics::OverpassMode::Off;
   // Terrain is seed-driven too; the flat-city goldens pin it off (terrain has its own).
   gradeConfig.features.terrain.mode = tactics::FeatureMode::Off;
@@ -146,7 +148,7 @@ int main(int argc, char** argv) {
   }
   // Default seed 7 is the reported combination of terrain, an elevated
   // artery and stairs. Keep its complete geometry pinned together.
-  tactics::MapGeneratorConfig terrainAutoConfig;
+  tactics::MapGeneratorConfig terrainAutoConfig = tactics::OldSizeConfig();
   cases.push_back({"city_terrain_auto_seed_7",
                    tactics::GenerateUrbanMap(7, terrainAutoConfig), 180.0f,
                    /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
@@ -169,7 +171,7 @@ int main(int argc, char** argv) {
   mergeConfig.arteryCount = 2;
   cases.push_back({"city_merge_seed_42", tactics::GenerateUrbanMap(42, mergeConfig),
                    kCityCameraZoom, /*showNavMesh=*/false});
-  tactics::MapGeneratorConfig mergeConfigAuto;  // Seed-driven overpass presence and layout.
+  tactics::MapGeneratorConfig mergeConfigAuto = tactics::OldSizeConfig();  // Seed-driven overpass presence and layout.
   mergeConfigAuto.arteryCount = 2;
   mergeConfigAuto.features.terrain.mode = tactics::FeatureMode::Off;  // Overpass vs terrain: roadmap 4.4.
   tactics::MapGeneratorConfig elevatedConfig = mergeConfig;
@@ -218,10 +220,18 @@ int main(int argc, char** argv) {
     deckFrontier.frontierBudget = 12.0f;
     cases.push_back(std::move(deckFrontier));
   }
-  for (const uint32_t seed : kRandomCitySeeds) {
-    cases.push_back({"city_random_seed_" + std::to_string(seed),
-                     tactics::GenerateUrbanMap(seed, terrainAutoConfig), 180.0f,
-                     /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
+  // Every other random seed uses the default 8x8 ("Urban x4") city, the rest
+  // the 4x4 one, so the gallery samples both Map Select entries. The x4 maps
+  // are twice as wide, so the camera pulls back twice as far.
+  const tactics::MapGeneratorConfig x4Config;
+  for (size_t i = 0; i < kRandomCitySeeds.size(); ++i) {
+    const uint32_t seed = kRandomCitySeeds[i];
+    const bool x4 = i % 2 == 0;
+    cases.push_back({std::string(x4 ? "city_random_x4_seed_" : "city_random_seed_") +
+                         std::to_string(seed),
+                     tactics::GenerateUrbanMap(seed, x4 ? x4Config : terrainAutoConfig),
+                     x4 ? 260.0f : 180.0f,
+                     /*showNavMesh=*/false, /*pitchOffset=*/x4 ? 0.6f : -0.4f, /*yawOffset=*/-1.0f});
   }
   // Building archetypes and massing (issue #151): one close-framed golden
   // per forced block character, so each archetype mix (and its parapets,

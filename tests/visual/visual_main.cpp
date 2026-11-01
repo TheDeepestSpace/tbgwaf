@@ -32,6 +32,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <memory>
+#include <signal.h>
 #include <filesystem>
 #include <string>
 #include <utility>
@@ -44,6 +46,7 @@
 #include "game/Visibility.h"
 #include "gfx/Camera.h"
 #include "gfx/SceneRenderer.h"
+#include "NetRig.h"
 #include "scenario/Scenario.h"
 #include "ui/Hud.h"
 
@@ -88,6 +91,9 @@ struct Options {
   bool updateBaselines = false;
   bool skipGoldens = false;
   bool video = false;
+  // --server <tbgwaf_server_testctl>: film the scenarios through a real
+  // server (one RemoteClient per team) instead of an in-process GameLogic.
+  std::string serverBinary;
   // Issue #110: force the shadow-map FOV mask for every scenario (normally
   // only scenarios with `render: {fov_overlay: shadow_map}` use it), and/or
   // print per-pane scene render timings (glFinish-bracketed, so they
@@ -154,8 +160,28 @@ struct ScenarioRunStats {
   int updatedImages = 0;
 };
 
+// Test-control server shared by all scenarios of a --server run.
+struct NetSession {
+  tactics::testing::ServerProcess server;
+  tactics::testing::WsClient control;
+  int nextRoom = 0;
+};
+
+// Scenarios that use the client-side turn timeline have nothing to round-trip
+// through a server (same exclusion as net_scenario_tests).
+bool UsesTimeline(const tactics::scenario::Scenario& scenario) {
+  using K = tactics::scenario::ScenarioAction::Kind;
+  return std::any_of(scenario.steps.begin(), scenario.steps.end(),
+                     [](const tactics::scenario::ScenarioStep& st) {
+                       if (st.assertion) return st.assertion->timelineTicks.has_value();
+                       return st.action->kind == K::TimelineSeek ||
+                              st.action->kind == K::TimelinePlay ||
+                              st.action->kind == K::TimelinePause;
+                     });
+}
+
 void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRenderer& renderer,
-                    ScenarioRunStats* stats) {
+                    NetSession* netSession, ScenarioRunStats* stats) {
   const std::string stem = SanitizedStem(file);
 
   tactics::scenario::Scenario scenario;
@@ -165,6 +191,10 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     std::fprintf(stderr, "FAIL %s: %s\n", file.string().c_str(), e.what());
     ++stats->failures;
     return;
+  }
+  NetSession* net = netSession && !UsesTimeline(scenario) ? netSession : nullptr;
+  if (netSession && !net) {
+    std::printf("NOTE %s uses the client-side timeline; filmed in-process\n", stem.c_str());
   }
 
   // Start from the same map-fitted view as the app. Scenario camera fields
@@ -222,9 +252,13 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   // Panes' overlays come from the same BuildPaneOverlays the interactive app
   // uses. Draws both 3D panes, then the same HUD the interactive app builds
   // (ui::DrawHud), then the click marker on the acting team's pane.
-  auto renderBothPanes = [&](const GameLogic& game, const ClickMarker* marker = nullptr) {
-    const bool fogActive = game.Mode() != InputMode::GameOver;
+  // Each pane draws its own GameLogic: the same one in the in-process runner,
+  // each team's own RemoteClient mirror in --server mode.
+  using PaneGames = std::array<const GameLogic*, ui::kPaneCount>;
+  auto renderPanes = [&](const PaneGames& games, const ClickMarker* marker = nullptr) {
     for (int pane = 0; pane < 2; ++pane) {
+      const GameLogic& game = *games[pane];
+      const bool fogActive = game.Mode() != InputMode::GameOver;
       const Team team = PaneTeam(pane);
       TeamVisibility visibility;
       if (fogActive) visibility = game.ComputeVisibility(team);
@@ -254,12 +288,14 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     // Each team's pane gets its own HUD, as in its own browser tab. Button
     // positions are collected per pane so a menu-click marker can land on
     // the actual button a player would press.
-    const bool planning = game.Mode() != InputMode::Executing && game.Mode() != InputMode::GameOver;
     std::array<ui::HudLayout, ui::kPaneCount> layouts;
-    auto drawHud = [&](const GameLogic& g) {
+    auto drawHud = [&]() {
       // Thermal scenarios get the same sensor-green HUD as the live app.
       if (renderDebug.thermal) ui::PushThermalHudStyle();
       for (int pane = 0; pane < ui::kPaneCount; ++pane) {
+        const GameLogic& g = *games[pane];
+        const bool planning =
+            g.Mode() != InputMode::Executing && g.Mode() != InputMode::GameOver;
         layouts[pane] = ui::HudLayout{};
         ui::DrawHud(g, PaneTeam(pane), planning, ui::ComputePaneRect(pane, kWindowWidth),
                     kWindowHeight, cameras[pane], &layouts[pane]);
@@ -277,12 +313,12 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     for (int warmup = 0; warmup < 3; ++warmup) {
       ImGui_ImplOpenGL3_NewFrame();
       ImGui::NewFrame();
-      drawHud(game);
+      drawHud();
       ImGui::EndFrame();
     }
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
-    drawHud(game);
+    drawHud();
     if (marker) {
       const int pane = marker->team == Team::Blue ? 0 : 1;
       glm::vec2 p;
@@ -319,6 +355,9 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
   };
+  auto renderBothPanes = [&](const GameLogic& game, const ClickMarker* marker = nullptr) {
+    renderPanes({&game, &game}, marker);
+  };
 
   std::array<VideoEncoder, 2> encoders;
   bool videoOk = true;
@@ -346,9 +385,9 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   std::vector<double> frameMs;
   tactics::scenario::PlaybackHooks hooks;
   // Declared outside the `if`: the hooks below outlive its scope.
-  auto writeVideoFrame = [&](const GameLogic& game, const ClickMarker* marker) {
+  auto writePaneFrames = [&](const PaneGames& games, const ClickMarker* marker) {
     const Uint64 t0 = SDL_GetPerformanceCounter();
-    renderBothPanes(game, marker);
+    renderPanes(games, marker);
     const Image frame = CaptureFramebuffer(kWindowWidth, kWindowHeight);
     frameMs.push_back(1000.0 * static_cast<double>(SDL_GetPerformanceCounter() - t0) /
                       static_cast<double>(SDL_GetPerformanceFrequency()));
@@ -358,6 +397,9 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
       }
     }
     ++framesWritten;
+  };
+  auto writeVideoFrame = [&](const GameLogic& game, const ClickMarker* marker) {
+    writePaneFrames({&game, &game}, marker);
   };
   if (options.video && videoOk) {
     hooks.tickSeconds = 1.0f / kVideoFps;
@@ -468,7 +510,101 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     }
   };
 
-  const auto result = tactics::scenario::RunScenario(scenario, hooks);
+  // --server: instead of one in-process GameLogic, play the script through a
+  // real server with one RemoteClient per team and film each team's own
+  // client mirror, so the video shows exactly what a connected browser tab
+  // would (server fog filtering, replayed rounds, tracers).
+  auto runThroughServer = [&]() {
+    using tactics::scenario::ScenarioAction;
+    tactics::scenario::ScenarioResult result;
+    const std::string room = "vis" + std::to_string(net->nextRoom++);
+    std::string error;
+    if (!tactics::testing::LoadRoom(net->control, scenario, room, &error)) {
+      result.failures.push_back(error);
+      return result;
+    }
+    tactics::testing::Rig rig(net->server.gamePort, &net->control);
+    auto drawFrame = [&] { writePaneFrames({&rig.Blue().game, &rig.Red().game}, nullptr); };
+    auto hold = [&] {
+      for (int i = 0; i < kHoldFrames; ++i) drawFrame();
+    };
+    auto done = [&] {
+      for (auto& f : rig.failures) result.failures.push_back(f);
+      return !result.failures.empty();
+    };
+    if (!rig.Join(scenario, room)) {
+      done();
+      return result;
+    }
+    for (Team team : {Team::Blue, Team::Red}) {
+      tactics::testing::Player& p = rig.For(team);
+      p.game.SetPlaybook(team, scenario.playbooks[static_cast<int>(team)]);
+      p.game.SetFigureOverlapCheckEnabled(scenario.rejectFigureOverlap);
+      if (!rig.Sync(p)) {
+        done();
+        return result;
+      }
+    }
+    rig.playDt = 1.0f / kVideoFps;
+    if (options.video && videoOk) rig.onFrame = drawFrame;
+    int completed = 0;
+    auto finishAction = [&] {
+      if (!options.video || !videoOk) return;
+      hold();
+      actionFrames.emplace_back(completed, framesWritten);
+    };
+    finishAction();
+    for (int i = 0; i < static_cast<int>(scenario.steps.size()); ++i) {
+      const auto& step = scenario.steps[i];
+      // Assertions are checked against the server's state by the
+      // net_scenario_tests target; this runner only films the script.
+      if (!step.action) continue;
+      const ScenarioAction& action = *step.action;
+      if (action.kind == ScenarioAction::Kind::Commit) {
+        rig.Commit();
+      } else if (action.kind == ScenarioAction::Kind::NewGame) {
+        rig.NewMatch();
+      } else if (action.kind == ScenarioAction::Kind::Wait) {
+        // Pure client-side time: ghosts fade on each mirror's own clock.
+        for (Team team : {Team::Blue, Team::Red}) {
+          for (float t = 0.0f; t < action.playSeconds - 1e-4f; t += 0.05f) {
+            rig.For(team).game.UpdateSightingMemory(0.05f);
+          }
+        }
+      } else {
+        const tactics::Unit* actor = nullptr;
+        for (const tactics::Unit& u : scenario.scene.units) {
+          if (u.id == action.actor) actor = &u;
+        }
+        if (!actor) {
+          result.failures.push_back("step " + std::to_string(i) + ": unknown actor");
+          break;
+        }
+        tactics::testing::Player& p = rig.For(actor->team);
+        const bool ok = tactics::scenario::ExecuteAction(p.game, scenario.scene, action, i, &result);
+        if (ok) rig.Sync(p);
+        if (ok && action.kind == ScenarioAction::Kind::Focus) {
+          if (const tactics::Unit* unit = p.game.FindUnit(action.actor)) {
+            gfx::OrbitCamera& camera = cameras[actor->team == Team::Blue ? 0 : 1];
+            camera.FocusOn(unit->position,
+                           unit->MoveBudget() + 2.0f * tactics::constants::kAgentRadius);
+            for (int f = 0; f < kFocusGlideFrames && options.video && videoOk; ++f) {
+              camera.Update(1.0f / kVideoFps);
+              drawFrame();
+            }
+            camera.Update(1.0e3f);
+          }
+        }
+      }
+      if (done()) break;
+      ++completed;
+      finishAction();
+    }
+    return result;
+  };
+
+  const auto result =
+      net ? runThroughServer() : tactics::scenario::RunScenario(scenario, hooks);
 
   if (options.profile) {
     for (int pane = 0; pane < ui::kPaneCount; ++pane) {
@@ -552,6 +688,10 @@ bool ParseArgs(int argc, char** argv, Options* options) {
       options->updateBaselines = true;
     } else if (arg == "--skip-goldens") {
       options->skipGoldens = true;
+    } else if (arg == "--server") {
+      const char* v = NextValue("--server");
+      if (!v) return false;
+      options->serverBinary = v;
     } else if (arg == "--video") {
       options->video = true;
     } else if (arg == "--fov-shadow-map") {
@@ -569,6 +709,7 @@ bool ParseArgs(int argc, char** argv, Options* options) {
     } else if (arg == "--help" || arg == "-h") {
       std::printf(
           "usage: tactics_visual_tests [--update-baselines] [--skip-goldens] [--video]\n"
+          "         [--server tbgwaf_server_testctl]\n"
           "         [--fov-shadow-map] [--profile]\n"
           "         [--goldens-dir DIR] [--out-dir DIR] [--pixel-threshold N]\n"
           "         [--max-diff-fraction F] [scenario.yaml ...]\n"
@@ -663,8 +804,31 @@ int main(int argc, char** argv) {
   if (!renderer.Init()) return 1;
 
   ScenarioRunStats stats;
+  std::unique_ptr<NetSession> netSession;
+  if (!options.serverBinary.empty()) {
+    // Goldens are of the in-process render; --server is for filming.
+    if (!options.skipGoldens && !options.updateBaselines) {
+      std::fprintf(stderr, "--server requires --skip-goldens (it only records video)\n");
+      return 1;
+    }
+    signal(SIGPIPE, SIG_IGN);
+    netSession = std::make_unique<NetSession>();
+    std::string error;
+    if (!netSession->server.Start(options.serverBinary, &error) ||
+        !netSession->control.Connect(netSession->server.controlPort, &error)) {
+      std::fprintf(stderr, "FAIL: could not start server: %s\n", error.c_str());
+      netSession->server.Stop();
+      return 1;
+    }
+  }
   for (const auto& file : options.scenarios) {
-    RunOneScenario(file, options, renderer, &stats);
+    RunOneScenario(file, options, renderer, netSession.get(), &stats);
+  }
+  if (netSession) {
+    netSession->control.Send(R"({"t":"shutdown"})");
+    std::vector<std::string> sink;
+    netSession->control.Poll(200, &sink);
+    netSession->server.Stop();
   }
 
   renderer.Destroy();

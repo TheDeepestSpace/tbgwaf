@@ -63,8 +63,8 @@ struct SpawnHints {
   std::optional<glm::vec2> flag;  // Preferred flag spot (map center).
 };
 
-// Never added to obstacles or walk surfaces (no collision), but the canopy
-// blocks sight lines via SightObstacles.
+// Visual instance only; each tree also gets a solid navOnly obstacle (see
+// EmitTrees) that blocks movement, sight lines and FOV.
 // The renderer batches three procedural meshes using these seeded transforms.
 struct TreeDecoration {
   glm::vec3 position{0.0f};
@@ -161,7 +161,7 @@ void SuggestSpawnHints(Scene* scene);
 void ApplySpawnHints(Scene* scene);
 
 // Obstacles plus the building massing (parapets, roof furniture, awnings) as
-// prisms and tree canopies, appended after the real obstacles so obstacle
+// prisms, appended after the real obstacles so obstacle
 // indices are unchanged. For sight lines and FOV only: they never collide.
 std::vector<Obstacle> SightObstacles(const Scene& scene);
 

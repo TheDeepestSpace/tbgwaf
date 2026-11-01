@@ -40,6 +40,7 @@ int64_t Server::NowMs() {
 Server::Server(ServerConfig config)
     : config_(std::move(config)),
       bots_(JevBotConfig{config_.jevAdapterUrl}),
+      scenes_(config_.scenesDir),
       lobby_(
           [this](int conn, const std::string& text) {
             auto it = conns_.find(conn);
@@ -48,6 +49,7 @@ Server::Server(ServerConfig config)
           },
           RandomSeed) {
   lobby_.SetBots(&bots_, config_.maxBotRooms);
+  lobby_.SetSceneStore(&scenes_);
 }
 
 Server::~Server() {

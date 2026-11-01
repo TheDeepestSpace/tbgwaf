@@ -7,6 +7,7 @@
 #include <string>
 
 #include "server/Lobby.h"
+#include "server/SceneStore.h"
 #include "server/WebSocket.h"
 
 namespace tactics::server {
@@ -28,6 +29,9 @@ struct ServerConfig {
   // Empty disables the Jev vs Jev / Blue vs Jev modes.
   std::string jevAdapterUrl;
   int maxBotRooms = 4;  // Concurrent Jev matches; each one spends the Jev budget.
+  // Directory for stored Builder scenes (one JSON file each); empty keeps
+  // them in memory only, lost on restart. See SceneStore.
+  std::string scenesDir;
 };
 
 // Single-threaded poll() WebSocket server feeding a Lobby. Also answers
@@ -81,6 +85,7 @@ class Server {
   int nextId_ = 1;
   std::map<int, Conn> conns_;
   JevBotRunner bots_;  // Declared before lobby_, which holds a pointer to it.
+  SceneStore scenes_;  // Declared before lobby_, which holds a pointer to it.
   Lobby lobby_;
 };
 

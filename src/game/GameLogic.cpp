@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <sstream>
 
@@ -140,6 +141,7 @@ bool SegmentEntersDisc(const glm::vec3& p0, const glm::vec3& p1, const glm::vec3
 void GameLogic::Reset() { Reset(BuildDefaultScene()); }
 
 void GameLogic::Reset(Scene scene) {
+  RecordScope record(this, InputEvent{InputEvent::Op::Reset});
   scene_ = std::move(scene);
   obstacleBounds_ = ObstacleBounds(scene_.obstacles);
   sightObstacles_ = tactics::SightObstacles(scene_);
@@ -471,12 +473,16 @@ void ApplyPlan(const GameSnapshot::UnitState& u, Unit* unit) {
 }  // namespace
 
 void GameLogic::ClearAllPlans() {
+  RecordScope record(this, InputEvent{InputEvent::Op::ClearAllPlans});
   for (auto& unit : scene_.units) unit.plan = PlannedAction{};
   movePreviewPath_.clear();
   movePreviewValid_ = false;
 }
 
 bool GameLogic::ImportState(const GameSnapshot& snap) {
+  InputEvent e{InputEvent::Op::ImportState};
+  if (recorder_.ptr) e.text = SerializeSnapshot(snap);
+  RecordScope record(this, std::move(e));
   if (!SnapshotMatchesUnits(snap, scene_.units)) return false;
   // Deaths arriving in this snapshot whose victim the opposing team cannot
   // see happened outside its FOV: a free-aim blind hit resolved on the
@@ -558,6 +564,10 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
 }
 
 bool GameLogic::ImportTeamPlans(const GameSnapshot& snap, Team team) {
+  InputEvent e{InputEvent::Op::ImportTeamPlans};
+  e.team = team;
+  if (recorder_.ptr) e.text = SerializeSnapshot(snap);
+  RecordScope record(this, std::move(e));
   if (!SnapshotMatchesUnits(snap, scene_.units)) return false;
   for (const auto& u : snap.units) {
     Unit* unit = FindUnit(u.id);
@@ -808,6 +818,10 @@ bool GameLogic::CanCommitRound() const {
 }
 
 void GameLogic::ClickUnit(int unitId, Team byTeam) {
+  InputEvent e{InputEvent::Op::ClickUnit};
+  e.unit = unitId;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
   if (winner_) return;
   if (mode_ == InputMode::Executing) return;  // The round is animating; input is inert.
   Unit* unit = FindUnit(unitId);
@@ -861,6 +875,10 @@ glm::vec3 GameLogic::MoveChainEnd() const {
 }
 
 void GameLogic::ClickGround(const glm::vec3& point, Team byTeam) {
+  InputEvent e{InputEvent::Op::ClickGround};
+  e.point = point;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
   if (mode_ != InputMode::AwaitingMoveDestination) return;
   Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->team != byTeam) return;
@@ -909,6 +927,7 @@ void GameLogic::ClickGround(const glm::vec3& point, Team byTeam) {
 }
 
 void GameLogic::FinishMovePlan() {
+  RecordScope record(this, InputEvent{InputEvent::Op::FinishMovePlan});
   if (mode_ != InputMode::AwaitingMoveDestination) return;
   const Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->plan.type != PlannedActionType::Move) return;
@@ -918,6 +937,11 @@ void GameLogic::FinishMovePlan() {
 }
 
 void GameLogic::SetPlannedMoveFacing(int unitId, float yaw, Team byTeam) {
+  InputEvent e{InputEvent::Op::SetMoveFacing};
+  e.unit = unitId;
+  e.value = yaw;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
   if (mode_ == InputMode::Executing || mode_ == InputMode::GameOver) return;
   Unit* unit = FindUnit(unitId);
   if (!unit || !unit->alive || unit->team != byTeam) return;
@@ -941,6 +965,15 @@ bool GameLogic::KnockdownsAdvance() const {
 }
 
 void GameLogic::Update(float dtSeconds) {
+  {
+    InputEvent e{InputEvent::Op::Update};
+    e.value = dtSeconds;
+    RecordScope record(this, std::move(e));
+    UpdateUnrecorded(dtSeconds);
+  }
+}
+
+void GameLogic::UpdateUnrecorded(float dtSeconds) {
   // Knockdowns and the quick-draw beat are purely visual. A fall only runs
   // while a round executes (or once the match is over): if the round ends
   // with a figure still in mid-air it freezes there through planning and
@@ -1401,6 +1434,7 @@ bool GameLogic::PlanDodgeLeg(const Unit& mover, const glm::vec3& goal,
 }
 
 void GameLogic::ChooseMove() {
+  RecordScope record(this, InputEvent{InputEvent::Op::ChooseMove});
   if (mode_ != InputMode::ActionMenu) return;
   // Start a fresh chain: drop any earlier move plan.
   if (Unit* unit = FindUnit(selectedUnitId_.value_or(-1))) {
@@ -1414,6 +1448,7 @@ void GameLogic::ChooseMove() {
 }
 
 void GameLogic::ChooseShoot() {
+  RecordScope record(this, InputEvent{InputEvent::Op::ChooseShoot});
   if (mode_ != InputMode::ActionMenu) return;
   ClearQueuedLegs(selectedUnitId_);
   aimPreview_.reset();
@@ -1429,6 +1464,10 @@ int GameLogic::MaxShotsForSelected() const {
 }
 
 void GameLogic::SetPlannedShotCount(int count, Team byTeam) {
+  InputEvent e{InputEvent::Op::SetShotCount};
+  e.count = count;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
   if (mode_ != InputMode::AwaitingShootTarget) return;
   const Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
   if (!shooter || shooter->team != byTeam) return;
@@ -1438,6 +1477,7 @@ void GameLogic::SetPlannedShotCount(int count, Team byTeam) {
 }
 
 void GameLogic::ChoosePass() {
+  RecordScope record(this, InputEvent{InputEvent::Op::ChoosePass});
   if (mode_ != InputMode::ActionMenu) return;
   Unit* unit = FindUnit(selectedUnitId_.value_or(-1));
   if (!unit) return;
@@ -1450,6 +1490,7 @@ void GameLogic::ChoosePass() {
 }
 
 void GameLogic::CancelAction() {
+  RecordScope record(this, InputEvent{InputEvent::Op::CancelAction});
   if (mode_ == InputMode::AwaitingMoveDestination) {
     // Esc abandons the whole chain being planned.
     if (Unit* unit = FindUnit(selectedUnitId_.value_or(-1))) {
@@ -1539,6 +1580,14 @@ bool GameLogic::IsFalling(const Unit& unit) {
 }
 
 void GameLogic::KnockDown(Unit& target, const glm::vec3& dir) {
+  if (recorder_.ptr) {
+    char buf[256];
+    std::snprintf(buf, sizeof buf,
+                  "knockdown unit=%d pos=(%.4f,%.4f,%.4f) dir=(%.4f,%.4f,%.4f) exec=%.4f round=%d",
+                  target.id, target.position.x, target.position.y, target.position.z, dir.x, dir.y,
+                  dir.z, executionElapsed_, roundNumber_);
+    LogSim(buf);
+  }
   // up x dir: tipping around this axis leans the figure toward dir.
   const glm::vec3 axis(dir.z, 0.0f, -dir.x);
   if (IsFalling(target)) {
@@ -1571,6 +1620,12 @@ void GameLogic::ApplyShot(Unit& shooter, Unit& target, bool hit) {
   Unit aimed = shooter;
   aimed.facingYaw = shooter.shootAimYaw;
   RecordTracer(shooter, aimed.MuzzlePosition(), target.EyePosition());
+  if (recorder_.ptr) {
+    char buf[160];
+    std::snprintf(buf, sizeof buf, "shot shooter=%d target=%d hit=%d exec=%.4f round=%d",
+                  shooter.id, target.id, hit ? 1 : 0, executionElapsed_, roundNumber_);
+    LogSim(buf);
+  }
   if (hit) {
     // Sighting is recorded before the kill so first sight never loses its ghost.
     RecordFirstSight(shooter.team, target);
@@ -1704,6 +1759,11 @@ GameLogic::AimRayResult GameLogic::ResolveAimRay(const glm::vec3& origin,
 }
 
 void GameLogic::ClickAimRay(const glm::vec3& origin, const glm::vec3& direction, Team byTeam) {
+  InputEvent e{InputEvent::Op::ClickAimRay};
+  e.point = origin;
+  e.direction = direction;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
   if (mode_ != InputMode::AwaitingShootTarget) return;
   const Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
   if (!shooter || shooter->team != byTeam) return;
@@ -1718,6 +1778,10 @@ void GameLogic::ClickAimRay(const glm::vec3& origin, const glm::vec3& direction,
 }
 
 void GameLogic::PlaceAimPoint(const glm::vec3& point, Team byTeam) {
+  InputEvent e{InputEvent::Op::PlaceAimPoint};
+  e.point = point;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
   if (mode_ != InputMode::AwaitingShootTarget) return;
   const Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
   if (!shooter || shooter->team != byTeam) return;
@@ -1726,6 +1790,9 @@ void GameLogic::PlaceAimPoint(const glm::vec3& point, Team byTeam) {
 }
 
 void GameLogic::ConfirmAim(Team byTeam) {
+  InputEvent e{InputEvent::Op::ConfirmAim};
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
   if (mode_ != InputMode::AwaitingShootTarget || (!aimPreview_ && !lockPreviewId_)) return;
   Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
   if (!shooter || shooter->team != byTeam) return;
@@ -2027,6 +2094,14 @@ void GameLogic::ResolvePendingShots() {
   for (const Bullet& bullet : bullets) {
     RecordTracer(*bursts[bullet.burst].shooter, bullet.from, bullet.to,
                  std::max(0.0f, executionElapsed_ - bullet.at));
+    if (recorder_.ptr) {
+      char buf[224];
+      std::snprintf(buf, sizeof buf,
+                    "bullet shooter=%d index=%d at=%.4f from=(%.4f,%.4f,%.4f) to=(%.4f,%.4f,%.4f)",
+                    bursts[bullet.burst].shooter->id, bullet.index, bullet.at, bullet.from.x,
+                    bullet.from.y, bullet.from.z, bullet.to.x, bullet.to.y, bullet.to.z);
+      LogSim(buf);
+    }
   }
   for (Burst& b : bursts) {
     const float sinceShot = std::max(0.0f, executionElapsed_ - b.lastAt);
@@ -2049,7 +2124,12 @@ void GameLogic::ResolvePendingShots() {
                          const float next =
                              shot.startTime +
                              shot.shotsFired * StatsOf(shooter->weapon).shotIntervalSeconds;
-                         return next >= constants::kRoundDuration;
+                         if (next < constants::kRoundDuration) return false;
+                         // A reaction burst whose next shot falls past the
+                         // window still occupies the weapon until then: no
+                         // fresh burst may fire before `next` (issue #278).
+                         if (shot.reaction) reactionNextShotAt_[shot.shooterId] = next;
+                         return true;
                        }
                        if (shot.hasAimPoint) return false;
                        const Unit* target = FindUnit(shot.targetId);
@@ -2165,6 +2245,7 @@ void GameLogic::StartReactionBurst(const Unit& shooter, const Unit& target) {
 }
 
 void GameLogic::CommitRound() {
+  RecordScope record(this, InputEvent{InputEvent::Op::CommitRound});
   if (!CanCommitRound()) return;
   reactionAmmo_.clear();
   reactionNextShotAt_.clear();
@@ -2338,6 +2419,11 @@ void GameLogic::GrabFlagFrom(const std::vector<FlagTouch>& touches) {
 }
 
 void GameLogic::FinishRound() {
+  if (recorder_.ptr) {
+    char buf[96];
+    std::snprintf(buf, sizeof buf, "round %d finished exec=%.4f", roundNumber_, executionElapsed_);
+    LogSim(buf);
+  }
   selectedUnitId_.reset();
   activeMoves_.clear();
   pendingShots_.clear();
@@ -2386,6 +2472,45 @@ void GameLogic::FinishRound() {
     return;
   }
   ++roundNumber_;
+}
+
+// --- Input recording (issue #240) ---
+
+GameLogic::RecordScope::RecordScope(GameLogic* game, InputEvent event)
+    : game_(game), event_(std::move(event)), outermost_(game->recordDepth_++ == 0) {}
+
+GameLogic::RecordScope::~RecordScope() {
+  --game_->recordDepth_;
+  if (outermost_ && game_->recorder_.ptr) game_->recorder_.ptr->OnInput(*game_, event_);
+}
+
+void GameLogic::LogSim(const std::string& message) const {
+  if (recorder_.ptr) recorder_.ptr->OnLog(*this, message);
+}
+
+uint64_t GameLogic::StateHash() const {
+  const std::string text = SerializeSnapshot(ExportState());
+  uint64_t hash = 1469598103934665603ULL;  // FNV-1a 64.
+  for (const unsigned char c : text) {
+    hash ^= c;
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
+void GameLogic::SetPlaybook(Team team, const SquadPlaybook& playbook) {
+  InputEvent e{InputEvent::Op::SetPlaybook};
+  e.team = team;
+  e.playbook = playbook;
+  RecordScope record(this, std::move(e));
+  playbooks_[static_cast<int>(team)] = playbook;
+}
+
+void GameLogic::SetFriendlyFireEnabled(bool enabled) {
+  InputEvent e{InputEvent::Op::SetFriendlyFire};
+  e.flag = enabled;
+  RecordScope record(this, std::move(e));
+  friendlyFire_ = enabled;
 }
 
 }  // namespace tactics

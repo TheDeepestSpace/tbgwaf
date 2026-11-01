@@ -68,6 +68,8 @@ class Lobby {
     uint64_t id = 0;  // Unique per room instance, so a late Jev answer can't hit a successor.
     int conns[2] = {-1, -1};  // Indexed by Team; -1 = bot seat.
     std::array<BotSeat, 2> bot;
+    std::string mapKind;      // Blue's splash pick for a human room ("" = default).
+    std::optional<uint32_t> mapSeed;
     std::string botMode;      // "", "player-v-ai" or "ai-v-ai".
     bool botsRunning = true;  // ai-v-ai starts paused.
     int64_t nextBotMs = 0;    // Playback pacing for rooms with no human player.

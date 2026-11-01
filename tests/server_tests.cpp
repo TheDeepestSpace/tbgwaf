@@ -627,6 +627,22 @@ void TestBotRoomHonoursMapAndSeed() {
   CHECK(sawStart);
 }
 
+// Human vs Human: Blue's map and seed (sent on its join) pick the match.
+void TestHumanRoomHonoursMapAndSeed() {
+  BotWire w(FirstOptionPoster);
+  w.Send(1, R"({"t":"join","room":"h","map":"hills","seed":4242})");
+  w.Send(2, R"({"t":"join","room":"h","map":"urban","seed":1})");
+  for (int conn : {1, 2}) {
+    bool sawStart = false;
+    for (const auto& m : w.Drain(conn)) {
+      if (m["t"].AsString() != "start") continue;
+      sawStart = true;
+      CHECK(m["seed"].AsNumber() == 4242 && m["map"].AsString() == "hills");
+    }
+    CHECK(sawStart);
+  }
+}
+
 // Blue vs Jev: the human is Blue, Jev plans Red on the server and commits;
 // the round runs once the human commits. The human never sees Red's plans.
 void TestBlueVsJev() {
@@ -1196,6 +1212,7 @@ void TestRealSocketLoopback() {
 
 int main() {
   TestBotRoomHonoursMapAndSeed();
+  TestHumanRoomHonoursMapAndSeed();
   TestWebSocketPrimitives();
   TestFrameParser();
   TestSessionReadyAndRound();

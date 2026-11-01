@@ -53,9 +53,9 @@ void RemoteClient::OnOpen() {
   if (spectate_) join.Set("spectate", Json(true));
   if (!botMode_.empty()) {
     join.Set("mode", botMode_);
-    if (!mapKind_.empty()) join.Set("map", mapKind_);
-    if (mapSeed_) join.Set("seed", static_cast<double>(*mapSeed_));
   }
+  if (!mapKind_.empty()) join.Set("map", mapKind_);
+  if (mapSeed_) join.Set("seed", static_cast<double>(*mapSeed_));
   Queue(join);
 }
 

@@ -237,6 +237,8 @@ void Lobby::Join(int conn, const Json& message) {
   }
   if (room.conns[0] < 0) {
     room.conns[0] = conn;
+    room.mapKind = MapKindOf(message);
+    room.mapSeed = SeedOf(message);
     members_[conn] = Member{name, Team::Blue};
     Json waiting = Typed("waiting");
     waiting.Set("room", name);
@@ -246,7 +248,8 @@ void Lobby::Join(int conn, const Json& message) {
   room.conns[1] = conn;
   members_[conn] = Member{name, Team::Red};
   room.session = room.scene ? std::make_unique<GameSession>(*room.scene)
-                            : std::make_unique<GameSession>(seed_());
+                            : std::make_unique<GameSession>(room.mapSeed ? *room.mapSeed : seed_(),
+                                                        room.mapKind);
   if (room.scene) room.session->ConfigureForTest(room.friendlyFire, room.shotRolls);
   StartMatch(room);
 }

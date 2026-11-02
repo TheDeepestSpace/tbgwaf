@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <filesystem>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -19,13 +20,16 @@
 
 #include "game/GameLogic.h"
 #include "game/MapGenerator.h"
+#include "game/BuilderScene.h"
 #include "net/ActionApply.h"
+#include "net/BuilderSceneSync.h"
 #include "net/RemoteClient.h"
 #include "net/SceneSpec.h"
 #include "server/GameSession.h"
 #include "server/HttpClient.h"
 #include "server/JevBot.h"
 #include "server/Lobby.h"
+#include "server/SceneStore.h"
 #include "server/Server.h"
 #include "server/WebSocket.h"
 #include "test_util.h"
@@ -162,6 +166,17 @@ void PlanEveryone(server::GameSession& s, Team team) {
   }
 }
 
+// Regression (#285): seed-generated matches spawn at opposite corners (#226),
+// not at the ends of the main road.
+void TestSessionSpawnsAtOppositeCorners() {
+  server::GameSession s(1);
+  const float e = s.game().GetScene().mapHalfExtent;
+  for (const Unit& u : s.game().GetScene().units) {
+    const float sign = u.team == Team::Blue ? -1.0f : 1.0f;
+    CHECK(u.position.x * sign > 0.5f * e && u.position.z * sign > 0.5f * e);
+  }
+}
+
 void TestSessionReadyAndRound() {
   server::GameSession s(1);
   Action commit;
@@ -251,6 +266,111 @@ struct Wire {
 bool Has(const std::vector<Json>& msgs, const char* type) {
   for (const Json& m : msgs) if (m["t"].AsString() == type) return true;
   return false;
+}
+
+BuilderScene SampleBuilderScene(const std::string& name) {
+  BuilderScene bs;
+  bs.name = name;
+  BuilderFigure blue, red;
+  blue.team = Team::Blue;
+  blue.x = -5.0f;
+  red.team = Team::Red;
+  red.x = 5.0f;
+  bs.figures = {blue, red};
+  return bs;
+}
+
+void TestSceneStore() {
+  const BuilderScene a = SampleBuilderScene("Yard");
+  const std::string text = SerializeBuilderScene(a);
+  std::string error;
+
+  server::SceneStore memory;
+  CHECK(memory.Put("s1", text, &error));
+  CHECK(!memory.Put("bad id!", text, &error) && !error.empty());
+  CHECK(!memory.Put("../x", text, &error));
+  CHECK(!memory.Put("s2", "{not a scene", &error));
+  CHECK(memory.size() == 1);
+  error.clear();
+  CHECK(!memory.Delete("nope", &error) && error.empty());  // Absent, not a failure.
+
+  // On disk: survives a restart (a new store on the same directory).
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / "tbgwaf_scene_store_test";
+  std::filesystem::remove_all(dir);
+  {
+    server::SceneStore disk(dir.string());
+    CHECK(disk.Put("yard", text, &error));
+    CHECK(disk.Put("gone", text, &error));
+    std::string deleteError;
+    CHECK(disk.Delete("gone", &deleteError));
+  }
+  {
+    server::SceneStore reopened(dir.string());
+    const auto list = reopened.List();
+    CHECK(list.size() == 1 && list[0].id == "yard");
+    BuilderScene back;
+    CHECK(ParseBuilderScene(list[0].scene, &back) && back.name == "Yard");
+  }
+  std::filesystem::remove_all(dir);
+
+  server::SceneStore full;
+  for (size_t i = 0; i < server::SceneStore::kMaxScenes; ++i) {
+    CHECK(full.Put("s" + std::to_string(i), text, &error));
+  }
+  CHECK(!full.Put("one-too-many", text, &error));
+  CHECK(full.Put("s0", text, &error));  // Replacing is fine when full.
+}
+
+void TestLobbySceneStorage() {
+  Wire w;
+  // Without a store the messages are refused (not "send join first").
+  w.Send(1, R"({"t":"scenes_list"})");
+  CHECK(w.Drain(1)[0]["error"].AsString() == "scene storage is not available");
+
+  server::SceneStore store;
+  w.lobby.SetSceneStore(&store);
+  net::BuilderSceneSync sync;
+  sync.OnOpen();
+  const auto relay = [&](int conn) {
+    for (const std::string& frame : sync.TakeOutgoing()) w.Send(conn, frame);
+    for (const auto& t : w.inbox[conn]) sync.OnMessage(t);
+    w.inbox[conn].clear();
+  };
+
+  relay(1);  // scenes_list -> empty.
+  std::vector<net::BuilderSceneSync::Stored> loaded;
+  CHECK(sync.TakeLoaded(&loaded) && loaded.empty());
+
+  const std::string id = net::BuilderSceneSync::NewId(0x123456789abcULL);
+  CHECK(id == "s123456789abc" && server::SceneStore::ValidId(id));
+  CHECK(sync.Save(id, SampleBuilderScene("Roof")));
+  relay(1);
+  CHECK(store.size() == 1);
+
+  // Another connection (never joined a room) sees it, then deletes it.
+  net::BuilderSceneSync other;
+  other.OnOpen();
+  for (const std::string& frame : other.TakeOutgoing()) w.Send(2, frame);
+  for (const auto& t : w.inbox[2]) other.OnMessage(t);
+  w.inbox[2].clear();
+  CHECK(other.TakeLoaded(&loaded) && loaded.size() == 1 && loaded[0].id == id &&
+        loaded[0].scene.name == "Roof");
+  CHECK(other.Remove(id));
+  for (const std::string& frame : other.TakeOutgoing()) w.Send(2, frame);
+  CHECK(store.size() == 0);
+
+  // Bad input is an error, never a crash.
+  w.Send(1, R"({"t":"scene_put","id":"x"})");
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");
+  w.Send(1, R"({"t":"scene_put","id":"x","scene":"junk"})");
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");
+  w.Send(1, R"({"t":"scene_delete"})");
+  CHECK(w.Drain(1)[0]["t"].AsString() == "error");
+
+  // Disconnected clients queue nothing.
+  sync.OnClose();
+  CHECK(!sync.Save(id, SampleBuilderScene("x")) && sync.TakeOutgoing().empty());
 }
 
 void TestLobbyPairing() {
@@ -505,6 +625,51 @@ void TestBotModesNeedAdapter() {
   CHECK(bw.Drain(3)[0]["t"].AsString() == "error");
 }
 
+// The splash's map and seed pick the bot room's match instead of a random city.
+void TestBotRoomHonoursMapAndSeed() {
+  BotWire w(FirstOptionPoster);
+  w.Send(1, R"({"t":"join","room":"m","mode":"player-v-ai","map":"hills","seed":4242})");
+  bool sawStart = false;
+  for (const auto& m : w.Drain(1)) {
+    if (m["t"].AsString() != "start") continue;
+    sawStart = true;
+    CHECK(m["seed"].AsNumber() == 4242 && m["map"].AsString() == "hills");
+  }
+  CHECK(sawStart);
+}
+
+// Capture the Flag on the splash reaches the Jev room: the flag is in play and start says so.
+void TestBotRoomHonoursCtf() {
+  for (bool ctf : {true, false}) {
+    BotWire w(FirstOptionPoster);
+    w.Send(1, ctf ? R"({"t":"join","room":"c","mode":"player-v-ai","ctf":true})"
+                  : R"({"t":"join","room":"c","mode":"player-v-ai"})");
+    bool sawStart = false;
+    for (const auto& m : w.Drain(1)) {
+      if (m["t"].AsString() != "start") continue;
+      sawStart = true;
+      CHECK(m["ctf"].IsBool() == ctf);
+    }
+    CHECK(sawStart);
+  }
+}
+
+// Human vs Human: Blue's map and seed (sent on its join) pick the match.
+void TestHumanRoomHonoursMapAndSeed() {
+  BotWire w(FirstOptionPoster);
+  w.Send(1, R"({"t":"join","room":"h","map":"hills","seed":4242})");
+  w.Send(2, R"({"t":"join","room":"h","map":"urban","seed":1})");
+  for (int conn : {1, 2}) {
+    bool sawStart = false;
+    for (const auto& m : w.Drain(conn)) {
+      if (m["t"].AsString() != "start") continue;
+      sawStart = true;
+      CHECK(m["seed"].AsNumber() == 4242 && m["map"].AsString() == "hills");
+    }
+    CHECK(sawStart);
+  }
+}
+
 // Blue vs Jev: the human is Blue, Jev plans Red on the server and commits;
 // the round runs once the human commits. The human never sees Red's plans.
 void TestBlueVsJev() {
@@ -571,7 +736,8 @@ void TestJevVsJev() {
     }
     return false;
   }));
-  w.Pump([] { return false; }, 300);  // Let the other seat's in-flight request land.
+  CHECK(w.Pump([&] { return posts >= 2; }));  // Let the other seat's in-flight request land.
+  w.Pump([] { return false; }, 100);
   const int afterFailure = posts;
   w.Pump([] { return false; }, 100);
   CHECK(posts == afterFailure);  // An errored seat does not hammer the adapter.
@@ -1073,10 +1239,16 @@ void TestRealSocketLoopback() {
 }  // namespace
 
 int main() {
+  TestBotRoomHonoursMapAndSeed();
+  TestBotRoomHonoursCtf();
+  TestHumanRoomHonoursMapAndSeed();
   TestWebSocketPrimitives();
   TestFrameParser();
+  TestSessionSpawnsAtOppositeCorners();
   TestSessionReadyAndRound();
   TestSessionFogHidesEnemyPlansAndUnits();
+  TestSceneStore();
+  TestLobbySceneStorage();
   TestLobbyPairing();
   TestRoomIntents();
   TestSpectator();

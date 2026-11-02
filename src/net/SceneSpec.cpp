@@ -3,6 +3,7 @@
 #include <cmath>
 #include <string>
 
+#include "game/DemoScenes.h"
 #include "game/MapGenerator.h"
 #include "game/Weapon.h"
 #include "net/Protocol.h"
@@ -30,6 +31,19 @@ bool SceneFromSpec(const Json& spec, tactics::Scene* out, std::string* error) {
   Scene scene;
   bool generated = false;
   const Json& map = spec["map"];
+  // `demo_scene: <id>` pins a registered demo scene (issue #240; see
+  // game/DemoScenes.h) -- map and units alike. Units come from the registry
+  // unless the scenario lists its own.
+  if (map["demo_scene"].IsString()) {
+    const std::string id = map["demo_scene"].AsString();
+    const DemoScene* demo = FindDemoScene(id);
+    if (!demo) return Fail(error, "map.demo_scene: unknown demo scene '" + id + "'");
+    if (map.Has("generate")) {
+      return Fail(error, "map.demo_scene cannot be combined with map.generate");
+    }
+    scene = demo->build();
+    generated = true;
+  }
   if (map.Has("generate")) {
     const Json& gen = map["generate"];
     if (!gen["seed"].IsNumber()) return Fail(error, "map.generate requires 'seed'");

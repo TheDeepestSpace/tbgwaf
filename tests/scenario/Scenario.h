@@ -20,6 +20,9 @@
 // N rounds with no winner.
 //
 // `map.half_extent` sizes the ground square; units must start inside it.
+// `map.demo_scene: <id>` uses a registered demo scene (issue #240) instead
+// of an authored/generated map; its figures are the scene's unless `units`
+// is given.
 //
 // See tests/scenarios/*.yaml for the file format by example, and
 // tests/scenario_tests.cpp for how these are run in CI.

@@ -255,7 +255,7 @@ export class JevPreviewController {
     module.tbgwafAI = this.#isAiPlayer(player);
     module.tbgwafAIPaused = this.paused;
     module.tbgwafAIFallback = this.fallback;
-    module.tbgwafDefaultCtf = this.ctf ?? (this.mode === "ai-v-ai" && !this.serverBots);
+    module.tbgwafDefaultCtf = this.ctf ?? this.mode === "ai-v-ai";
     // Jev vs Jev: the Blue instance renders every figure and both FOVs in one
     // pane; the Red instance keeps simulating off-screen. On a server both
     // Jev clients are fog-limited, so a separate spectator client takes that pane.

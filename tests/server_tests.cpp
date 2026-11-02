@@ -720,7 +720,8 @@ void TestJevVsJev() {
     }
     return false;
   }));
-  w.Pump([] { return false; }, 300);  // Let the other seat's in-flight request land.
+  CHECK(w.Pump([&] { return posts >= 2; }));  // Let the other seat's in-flight request land.
+  w.Pump([] { return false; }, 100);
   const int afterFailure = posts;
   w.Pump([] { return false; }, 100);
   CHECK(posts == afterFailure);  // An errored seat does not hammer the adapter.

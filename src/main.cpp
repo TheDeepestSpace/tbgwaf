@@ -1927,6 +1927,16 @@ int main() {
     // render `displayGame` (the replay instance) and game-action input is
     // inert; the live game keeps simulating/syncing untouched underneath.
     if (timeline.Observe(game, dt)) timelinePlayback.Reset();
+    // Online, the recorded history is this player's fogged view. Once the
+    // match is over the server sends the full one; swap it in so the replay
+    // shows both teams (issue #284).
+    if (remoteMode && remote->hasReveal() && !remote->playingBack() &&
+        game.Mode() == InputMode::GameOver && timeline.FrameCount() > 0) {
+      if (auto revealed = remote->TakeRevealedHistory(timeline.FrameSnapshot(0))) {
+        timeline.ReplaceHistory(game, std::move(revealed->frames), std::move(revealed->ticks));
+        timelinePlayback.Reset();
+      }
+    }
     timelinePlayback.Update(timeline, dt);
     const bool replayActive = timelinePlayback.Active();
     const GameLogic& displayGame = replayActive ? timelinePlayback.Game() : game;

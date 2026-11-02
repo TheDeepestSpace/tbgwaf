@@ -99,6 +99,8 @@ void RemoteClient::OnMessage(const std::string& text) {
     if (!playback_) ApplyState(m);
   } else if (type == "round") {
     HandleRound(m);
+  } else if (type == "reveal") {
+    HandleReveal(m);
   } else if (type == "peer") {
     peerReady_ = m["ready"].AsBool();
   } else if (type == "ack") {
@@ -253,7 +255,7 @@ void RemoteClient::ApplyState(const Json& state) {
   NormalizeEnemyPlans();
 }
 
-void RemoteClient::HandleRound(const Json& m) {
+RemoteClient::Playback RemoteClient::ParseRound(const Json& m) {
   Playback pb;
   pb.duration = static_cast<float>(m["duration"].AsNumber());
   pb.finalState = m["state"];
@@ -286,6 +288,11 @@ void RemoteClient::HandleRound(const Json& m) {
     ev.team = *team;
     pb.tracers.push_back(ev);
   }
+  return pb;
+}
+
+void RemoteClient::HandleRound(const Json& m) {
+  Playback pb = ParseRound(m);
   selfReady_ = peerReady_ = false;
   commitPending_ = false;  // The round ran; planning reopens afterwards.
   if (pb.frames.empty()) {
@@ -312,6 +319,14 @@ void RemoteClient::AdvancePlayback(float dt) {
     }
     return;
   }
+  GameSnapshot snap = game_->ExportState();
+  PosePlayback(&snap, pb, dt);
+  game_->ImportState(snap);
+  NormalizeEnemyPlans();
+}
+
+void RemoteClient::PosePlayback(GameSnapshot* snapOut, const Playback& pb, float dt) {
+  GameSnapshot& snap = *snapOut;
   size_t i = 0;
   while (i + 2 < pb.frames.size() && pb.frames[i + 1].t <= pb.clock) ++i;
   const Frame& a = pb.frames[i];
@@ -319,7 +334,6 @@ void RemoteClient::AdvancePlayback(float dt) {
   const float span = b.t - a.t;
   const float s = span > 1e-4f ? std::clamp((pb.clock - a.t) / span, 0.0f, 1.0f) : 1.0f;
 
-  GameSnapshot snap = game_->ExportState();
   snap.mode = InputMode::Executing;
   for (auto& u : snap.units) {
     const Sample* sa = nullptr;
@@ -388,8 +402,63 @@ void RemoteClient::AdvancePlayback(float dt) {
     if (ev.t > pb.clock) continue;
     snap.tracers.push_back(Tracer{ev.team, ev.from, ev.to, ev.t, pb.clock - ev.t});
   }
-  game_->ImportState(snap);
-  NormalizeEnemyPlans();
+}
+
+void RemoteClient::HandleReveal(const Json& m) {
+  if (!m["rounds"].IsArray()) return;
+  reveal_ = m;
+}
+
+std::optional<RemoteClient::RevealedHistory> RemoteClient::TakeRevealedHistory(
+    const GameSnapshot& start) {
+  if (!reveal_) return std::nullopt;
+  const Json reveal = *reveal_;
+  reveal_.reset();
+  RevealedHistory history;
+  history.frames.push_back({0.0f, start});
+  history.ticks.push_back({"Start", 0});
+  GameSnapshot snap = start;
+  float time = 0.0f;
+  constexpr float kStep = TurnTimeline::kCaptureInterval;
+  for (const Json& round : reveal["rounds"].AsArray()) {
+    Playback pb = ParseRound(round);
+    if (pb.frames.empty()) continue;
+    const float end = pb.frames.back().t;
+    snap.tracers.clear();
+    for (pb.clock = kStep; pb.clock < end; pb.clock += kStep) {
+      PosePlayback(&snap, pb, kStep);
+      history.frames.push_back({time + pb.clock, snap});
+    }
+    // Round end: the unfogged rule state, as the live game lands on it.
+    pb.clock = end;
+    PosePlayback(&snap, pb, kStep);
+    time += end;
+    const Json& state = pb.finalState;
+    for (auto& u : snap.units) {
+      for (const Json& e : state["units"].AsArray()) {
+        if (static_cast<int>(e["id"].AsNumber(-1)) != u.id) continue;
+        glm::vec3 pos;
+        if (DecodeVec3(e["pos"], &pos)) u.position = pos;
+        u.facingYaw = static_cast<float>(e["yaw"].AsNumber(u.facingYaw));
+        u.alive = e["alive"].AsBool(true);
+        u.moving = false;
+      }
+    }
+    snap.roundNumber = static_cast<int>(state["round"].AsNumber(snap.roundNumber));
+    if (state["over"].AsBool()) {
+      snap.mode = InputMode::GameOver;
+      const auto winner = ParseTeamName(state["winner"].AsString());
+      snap.winner = winner ? static_cast<int>(*winner) : -1;
+    } else {
+      snap.mode = InputMode::AwaitingSelection;
+      snap.roundNumber = std::max(snap.roundNumber, 1);
+    }
+    history.frames.push_back({time, snap});
+    const int finished = state["over"].AsBool() ? snap.roundNumber : snap.roundNumber - 1;
+    history.ticks.push_back({"T" + std::to_string(finished), history.frames.size() - 1});
+  }
+  if (history.ticks.size() < 2) return std::nullopt;
+  return history;
 }
 
 void RemoteClient::NormalizeEnemyPlans() {

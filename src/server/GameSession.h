@@ -62,6 +62,11 @@ class GameSession {
   // the spectator's: the same round, unfiltered.
   std::array<net::Json, 3> RunRound();
 
+  // After game over: every round's unfiltered timeline, so each player can
+  // replay the whole match with both teams visible (issue #284). Only send
+  // once the match is over; mid-match it would leak the fog.
+  net::Json RevealMessage() const;
+
   // Rule-state views for one team (fog-filtered; own plans included).
   net::Json StateMessage(Team team) const;
   net::Json PlansMessage(Team team) const;
@@ -83,6 +88,7 @@ class GameSession {
   std::optional<Scene> fixedScene_;
   GameLogic game_;
   std::array<bool, 2> ready_{false, false};
+  std::vector<net::Json> history_;  // Unfiltered round messages of this match.
 };
 
 constexpr float kSimStep = constants::kSimStepSeconds;

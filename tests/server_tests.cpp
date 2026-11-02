@@ -858,6 +858,44 @@ void PlanAllLocally(ClientRig& rig) {
   }
 }
 
+// Issue #284: after game over a player gets the unfogged history and can
+// rebuild a replay timeline showing every unit, not just what they saw.
+void TestRevealHistoryShowsBothTeams() {
+  server::GameSession s(1);
+  CHECK(s.RevealMessage()["rounds"].AsArray().empty());
+  Action commit;
+  commit.kind = ActionKind::Commit;
+  PlanEveryone(s, Team::Blue);
+  PlanEveryone(s, Team::Red);
+  CHECK(s.Apply(Team::Blue, commit).ok && s.Apply(Team::Red, commit).ok);
+  const auto round = s.RunRound();
+  const Json reveal = s.RevealMessage();
+  CHECK(reveal["t"].AsString() == "reveal");
+  CHECK(reveal["rounds"].AsArray().size() == 1);
+
+  GameLogic game(GenerateUrbanMap(1));
+  net::RemoteClient client(&game, "t");
+  CHECK(!client.hasReveal());
+  client.OnMessage(reveal.Dump());
+  CHECK(client.hasReveal());
+  const auto history = client.TakeRevealedHistory(game.ExportState());
+  CHECK(!client.hasReveal());
+  CHECK(history.has_value());
+  CHECK(history->ticks.size() == 2 && history->ticks[0].label == "Start");
+  CHECK(history->ticks[1].frame == history->frames.size() - 1);
+  CHECK(history->frames.size() > 3);
+  for (const auto& frame : history->frames) {
+    CHECK(frame.snapshot.units.size() == 6);
+    for (const auto& u : frame.snapshot.units) CHECK(u.position.x < 5000.0f);  // Nobody hidden.
+  }
+  // Both teams actually move across the replay.
+  for (int id : {0, 3}) {
+    CHECK(glm::distance(history->frames.front().snapshot.units[id].position,
+                        history->frames.back().snapshot.units[id].position) > 0.5f);
+  }
+  CHECK(history->frames.back().time > 0.0f);
+}
+
 void TestClientServerRound() {
   Wire w;
   ClientRig blue(1, "t"), red(2, "t");
@@ -1260,6 +1298,7 @@ int main() {
   TestJevVsJev();
   TestBotRoomLimit();
   TestControlTapScenarioRoom();
+  TestRevealHistoryShowsBothTeams();
   TestClientServerRound();
   TestPlaybackFallFromCable();
   TestStaleEchoDoesNotRevertFreshPlans();

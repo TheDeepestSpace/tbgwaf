@@ -166,6 +166,17 @@ void PlanEveryone(server::GameSession& s, Team team) {
   }
 }
 
+// Regression (#285): seed-generated matches spawn at opposite corners (#226),
+// not at the ends of the main road.
+void TestSessionSpawnsAtOppositeCorners() {
+  server::GameSession s(1);
+  const float e = s.game().GetScene().mapHalfExtent;
+  for (const Unit& u : s.game().GetScene().units) {
+    const float sign = u.team == Team::Blue ? -1.0f : 1.0f;
+    CHECK(u.position.x * sign > 0.5f * e && u.position.z * sign > 0.5f * e);
+  }
+}
+
 void TestSessionReadyAndRound() {
   server::GameSession s(1);
   Action commit;
@@ -614,6 +625,51 @@ void TestBotModesNeedAdapter() {
   CHECK(bw.Drain(3)[0]["t"].AsString() == "error");
 }
 
+// The splash's map and seed pick the bot room's match instead of a random city.
+void TestBotRoomHonoursMapAndSeed() {
+  BotWire w(FirstOptionPoster);
+  w.Send(1, R"({"t":"join","room":"m","mode":"player-v-ai","map":"hills","seed":4242})");
+  bool sawStart = false;
+  for (const auto& m : w.Drain(1)) {
+    if (m["t"].AsString() != "start") continue;
+    sawStart = true;
+    CHECK(m["seed"].AsNumber() == 4242 && m["map"].AsString() == "hills");
+  }
+  CHECK(sawStart);
+}
+
+// Capture the Flag on the splash reaches the Jev room: the flag is in play and start says so.
+void TestBotRoomHonoursCtf() {
+  for (bool ctf : {true, false}) {
+    BotWire w(FirstOptionPoster);
+    w.Send(1, ctf ? R"({"t":"join","room":"c","mode":"player-v-ai","ctf":true})"
+                  : R"({"t":"join","room":"c","mode":"player-v-ai"})");
+    bool sawStart = false;
+    for (const auto& m : w.Drain(1)) {
+      if (m["t"].AsString() != "start") continue;
+      sawStart = true;
+      CHECK(m["ctf"].IsBool() == ctf);
+    }
+    CHECK(sawStart);
+  }
+}
+
+// Human vs Human: Blue's map and seed (sent on its join) pick the match.
+void TestHumanRoomHonoursMapAndSeed() {
+  BotWire w(FirstOptionPoster);
+  w.Send(1, R"({"t":"join","room":"h","map":"hills","seed":4242})");
+  w.Send(2, R"({"t":"join","room":"h","map":"urban","seed":1})");
+  for (int conn : {1, 2}) {
+    bool sawStart = false;
+    for (const auto& m : w.Drain(conn)) {
+      if (m["t"].AsString() != "start") continue;
+      sawStart = true;
+      CHECK(m["seed"].AsNumber() == 4242 && m["map"].AsString() == "hills");
+    }
+    CHECK(sawStart);
+  }
+}
+
 // Blue vs Jev: the human is Blue, Jev plans Red on the server and commits;
 // the round runs once the human commits. The human never sees Red's plans.
 void TestBlueVsJev() {
@@ -680,7 +736,8 @@ void TestJevVsJev() {
     }
     return false;
   }));
-  w.Pump([] { return false; }, 300);  // Let the other seat's in-flight request land.
+  CHECK(w.Pump([&] { return posts >= 2; }));  // Let the other seat's in-flight request land.
+  w.Pump([] { return false; }, 100);
   const int afterFailure = posts;
   w.Pump([] { return false; }, 100);
   CHECK(posts == afterFailure);  // An errored seat does not hammer the adapter.
@@ -1182,8 +1239,12 @@ void TestRealSocketLoopback() {
 }  // namespace
 
 int main() {
+  TestBotRoomHonoursMapAndSeed();
+  TestBotRoomHonoursCtf();
+  TestHumanRoomHonoursMapAndSeed();
   TestWebSocketPrimitives();
   TestFrameParser();
+  TestSessionSpawnsAtOppositeCorners();
   TestSessionReadyAndRound();
   TestSessionFogHidesEnemyPlansAndUnits();
   TestSceneStore();

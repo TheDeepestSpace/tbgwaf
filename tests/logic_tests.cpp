@@ -3448,6 +3448,27 @@ void TestBurstPlanSurvivesSnapshotAndClampsOnImport() {
   CHECK(clamped.FindUnit(1)->plan.shots == 30);
 }
 
+// Issue #288: a start on a ramp must also reach ground beyond the ramp foot.
+void TestReachFieldFromRampIncludesGroundBeyondFoot() {
+  tactics::WalkSurface ramp;
+  ramp.vertices = {{0.0f, 0.0f, -1.0f}, {0.0f, 0.0f, 1.0f}, {4.0f, 0.5f, 1.0f}, {4.0f, 0.5f, -1.0f}};
+  ramp.connectsToGround = true;
+  std::vector<tactics::WalkSurface> surfaces{ramp};
+  tactics::NavMesh nav;
+  nav.Build(std::vector<tactics::Obstacle>{}, 30.0f, 0.4f, nullptr, &surfaces);
+  const glm::vec3 start(3.0f, 0.375f, 0.0f);
+  const tactics::ReachField f = nav.ComputeReachField(start, 10.0f);
+  const auto reached = [&](float x, float z) {
+    const int ix = static_cast<int>(std::lround((x - f.minX) / f.step));
+    const int iz = static_cast<int>(std::lround((z - f.minZ) / f.step));
+    return f.Reached(ix, iz);
+  };
+  CHECK(reached(1.0f, 0.0f));    // On the ramp.
+  CHECK(reached(-3.0f, 0.0f));   // Ground beyond the foot, within budget.
+  CHECK(reached(-3.0f, 3.0f));
+  CHECK(!reached(-9.0f, 0.0f));  // Past the budget.
+}
+
 // Benchmark: ~300 small deck/ramp surfaces (interiors-scale). Guards the
 // per-Build route table and surface spatial index; the ceiling is generous
 // so only an algorithmic regression trips it (the pre-cache code took ~3.3 s here).
@@ -3500,6 +3521,7 @@ void TestReachFieldManySurfacesPerformance() {
 
 int main() {
   TestNavMeshRoutesAroundObstacle();
+  TestReachFieldFromRampIncludesGroundBeyondFoot();
   TestNavMeshDirectPathWhenUnobstructed();
   TestNavMeshCellsCoverThinLedgeBetweenRotatedFootprints();
   TestNavMeshRejectsPointsInsideObstacle();

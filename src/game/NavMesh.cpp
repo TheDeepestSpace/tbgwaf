@@ -591,12 +591,40 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
     return p;
   };
 
-  if (startSurface < 0) {
+  {
     using Entry = std::pair<float, int>;
     std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
-    const int startIdx = radius * field.nx + radius;
-    field.dist[startIdx] = 0.0f;
-    open.push({0.0f, startIdx});
+    if (startSurface < 0) {
+      const int startIdx = radius * field.nx + radius;
+      field.dist[startIdx] = 0.0f;
+      open.push({0.0f, startIdx});
+    } else {
+      // Standing on a surface: ground is reachable by walking to any declared
+      // ground connection and stepping off there (as FindPath allows). Price
+      // the route to each foot and seed the ground search from it.
+      for (size_t entry = 0; entry < walkSurfaces_.size(); ++entry) {
+        if (!walkSurfaces_[entry].connectsToGround) continue;
+        const glm::vec3 connection = GroundConnectionPoint(static_cast<int>(entry));
+        std::vector<glm::vec3> path;
+        if (!FindSurfacePath(startSurface, start, static_cast<int>(entry), connection, &path)) {
+          continue;
+        }
+        float cost = 0.0f;
+        for (size_t i = 0; i + 1 < path.size(); ++i) cost += glm::distance(path[i], path[i + 1]);
+        if (cost > budget) continue;
+        const int ix = static_cast<int>(std::lround((connection.x - field.minX) / step));
+        const int iz = static_cast<int>(std::lround((connection.z - field.minZ) / step));
+        if (ix < 0 || iz < 0 || ix >= field.nx || iz >= field.nz) continue;
+        if (!nodeWalkable(ix, iz)) continue;
+        const glm::vec3 node = nodeWorld(ix, iz);
+        const float d = cost + glm::distance(glm::vec2(node.x, node.z),
+                                             glm::vec2(connection.x, connection.z));
+        const int idx = iz * field.nx + ix;
+        if (d > budget || d >= field.dist[idx]) continue;
+        field.dist[idx] = d;
+        open.push({d, idx});
+      }
+    }
     while (!open.empty()) {
       const auto [d, idx] = open.top();
       open.pop();

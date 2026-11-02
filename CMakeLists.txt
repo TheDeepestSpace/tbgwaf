@@ -218,6 +218,7 @@ if(EMSCRIPTEN)
   )
   configure_file(${CMAKE_SOURCE_DIR}/web/gallery.html ${CMAKE_BINARY_DIR}/gallery.html COPYONLY)
   configure_file(${CMAKE_SOURCE_DIR}/web/jev-preview.js ${CMAKE_BINARY_DIR}/jev-preview.js COPYONLY)
+  configure_file(${CMAKE_SOURCE_DIR}/web/maps.js ${CMAKE_BINARY_DIR}/maps.js COPYONLY)
   # Map-seed goldens (issue #133): the gallery's "Map seeds" section is
   # driven by whatever PNGs sit under tests/map_goldens/. The script globs
   # at build time, so re-run it every build and a new golden shows up in

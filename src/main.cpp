@@ -282,6 +282,16 @@ EM_JS(int, tbgwaf_ai_paused, (), { return Module.tbgwafAIPaused ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_fallback, (), { return Module.tbgwafAIFallback ? 1 : 0; });
 EM_JS(int, tbgwaf_auto_commit, (), { return Module.tbgwafAutoCommit ? 1 : 0; });
 EM_JS(int, tbgwaf_auto_enter, (), { return Module.tbgwafAutoEnter ? 1 : 0; });
+// Splash-page match setup: map id (0 none, 1 urban, 2 urban x4, 3 hills) and
+// seed (-1 none).
+EM_JS(int, tbgwaf_map_choice, (), {
+  const ids = {"urban": 1, "urban-x4": 2, "hills": 3};
+  return ids[Module.tbgwafMap] || 0;
+});
+EM_JS(double, tbgwaf_map_seed, (), {
+  const s = Module.tbgwafMapSeed;
+  return Number.isInteger(s) && s >= 0 && s <= 4294967295 ? s : -1;
+});
 EM_JS(int, tbgwaf_spectator, (), { return Module.tbgwafSpectator ? 1 : 0; });
 EM_JS(int, tbgwaf_default_ctf, (), { return Module.tbgwafDefaultCtf ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_generation, (), { return Module.tbgwafAIGeneration || 0; });
@@ -722,6 +732,9 @@ int main() {
 #ifndef __EMSCRIPTEN__
   mapSeed = std::random_device{}();
 #endif
+#ifdef __EMSCRIPTEN__
+  if (const double s = tbgwaf_map_seed(); s >= 0) mapSeed = static_cast<uint32_t>(s);
+#endif
   if (const char* seedEnv = std::getenv("TBGWAF_MAP_SEED")) {
     mapSeed = static_cast<uint32_t>(std::strtoul(seedEnv, nullptr, 10));
   }
@@ -731,6 +744,11 @@ int main() {
   // issue #130); TBGWAF_MAP=urban forces it off, urban-elevated forces it on;
   // urban-full forces every optional feature layer on.
   std::string mapType = "urban-auto";
+#ifdef __EMSCRIPTEN__
+  // Splash pick (the same ids the Map Select screen maps to below).
+  if (const int choice = tbgwaf_map_choice(); choice == 1) mapType = "urban-auto-x1";
+  else if (choice == 3) mapType = "hilly";
+#endif
   if (const char* mapEnv = std::getenv("TBGWAF_MAP")) mapType = mapEnv;
   auto makeBaseMap = [](uint32_t mapSeed, const std::string& mapType) {
     if (mapType == "hilly") return tactics::GenerateHillyMap(mapSeed);
@@ -902,6 +920,15 @@ int main() {
         remote = std::make_unique<tactics::net::RemoteClient>(&game, roomRaw, intentRaw, spectate);
         char* botModeRaw = tbgwaf_server_bot_mode();
         remote->SetBotMode(botModeRaw);
+        {
+          const int choice = tbgwaf_map_choice();
+          const double s = tbgwaf_map_seed();
+          remote->SetMatchSetup(choice == 1 ? "urban" : choice == 2 ? "urban-x4"
+                                                    : choice == 3 ? "hills" : "",
+                                s >= 0 ? std::optional<uint32_t>(static_cast<uint32_t>(s))
+                                       : std::nullopt,
+                                tbgwaf_default_ctf() != 0);
+        }
         std::free(botModeRaw);
         fixedTeam = Team::Blue;  // Placeholder until the server's "start".
         tbgwaf_ws_open(serverUrl.c_str());
@@ -1686,7 +1713,16 @@ int main() {
                         : autoCtf      ? tbgwaf_flow::Event::SelectCtf
                                        : tbgwaf_flow::Event::SelectRegular;
             break;
-          case tbgwaf_flow::State::MapSelect: flowEvent = tbgwaf_flow::Event::SelectUrban; break;
+          case tbgwaf_flow::State::MapSelect:
+            flowEvent = tbgwaf_flow::Event::SelectUrban;
+#ifdef __EMSCRIPTEN__
+            if (const int choice = tbgwaf_map_choice(); choice == 2) {
+              flowEvent = tbgwaf_flow::Event::SelectUrbanX4;
+            } else if (choice == 3) {
+              flowEvent = tbgwaf_flow::Event::SelectHills;
+            }
+#endif
+            break;
           case tbgwaf_flow::State::Builder:
             if (isSmokeBuilder && !builderScenes.empty()) {
               builderMenu.openIndex = 0;

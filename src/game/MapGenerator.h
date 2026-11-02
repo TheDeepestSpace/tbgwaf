@@ -304,4 +304,9 @@ struct HillyMapConfig {
 // The same (seed, config) always yields an identical Scene.
 Scene GenerateHillyMap(uint32_t seed, const HillyMapConfig& config = {});
 
+// Map by the splash/protocol name: "urban" (4x4 blocks), "hills", anything
+// else (including "" and "urban-x4") the default 8x8 city. Server and clients
+// both build matches through this so they agree on the map.
+Scene GenerateMapByKind(uint32_t seed, const std::string& kind);
+
 }  // namespace tactics

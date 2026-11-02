@@ -24,6 +24,7 @@
 //   {"t":"join","room":"<name>","spectate":true}   watch an existing room read-only: gets
 //                                                  unfiltered state, both teams' plans and
 //                                                  unfiltered rounds; any other message is an error
+//   {"t":"join",...,"mode":"player-v-ai"|"ai-v-ai"[,"map":"urban"|"urban-x4"|"hills"][,"seed":N][,"ctf":true]}   optional map/seed for the new Jev room; start echoes "map" and "ctf"
 //   {"t":"join","room":"<name>","mode":"player-v-ai"}   Blue vs Jev: the server seats Jev as Red
 //   {"t":"join","room":"<name>","spectate":true,"mode":"ai-v-ai"}   Jev vs Jev: opens a room of two
 //                                                  server-side Jevs (starts paused) and watches it

@@ -31,6 +31,21 @@ Json Typed(const char* type) {
   return j;
 }
 
+// Optional client-chosen match setup on a bot-room join (splash map + seed).
+std::string MapKindOf(const Json& message) {
+  const std::string kind = message["map"].IsString() ? message["map"].AsString() : "";
+  return kind == "urban" || kind == "urban-x4" || kind == "hills" ? kind : "";
+}
+bool CtfOf(const Json& message) { return message["ctf"].IsBool() && message["ctf"].AsBool(); }
+std::optional<uint32_t> SeedOf(const Json& message) {
+  if (!message["seed"].IsNumber()) return std::nullopt;
+  const double s = message["seed"].AsNumber();
+  if (s < 0 || s > 4294967295.0 || s != static_cast<double>(static_cast<uint32_t>(s))) {
+    return std::nullopt;
+  }
+  return static_cast<uint32_t>(s);
+}
+
 }  // namespace
 
 void Lobby::SendError(int conn, const std::string& why) {
@@ -122,6 +137,8 @@ void Lobby::SendSpectatorView(int conn, const Room& room) {
   Json start = Typed("start");
   start.Set("team", "spectator");
   start.Set("seed", static_cast<double>(room.session->seed()));
+  if (!room.session->mapKind().empty()) start.Set("map", room.session->mapKind());
+  if (room.session->ctf()) start.Set("ctf", Json(true));
   if (room.scene) start.Set("scene", room.sceneSpec);
   start.Set("protocol", net::kProtocolVersion);
   Send(conn, start);
@@ -140,7 +157,7 @@ void Lobby::SpectatorJoin(int conn, const Json& message) {
   auto it = ValidRoomName(name) ? rooms_.find(name) : rooms_.end();
   if (it == rooms_.end() && ValidRoomName(name) && message["mode"].IsString() &&
       message["mode"].AsString() == "ai-v-ai") {
-    CreateBotRoom(conn, name, "ai-v-ai");  // Jev vs Jev: the first spectator opens the room.
+    CreateBotRoom(conn, name, "ai-v-ai", MapKindOf(message), SeedOf(message), CtfOf(message));  // Jev vs Jev: the first spectator opens the room.
     return;
   }
   if (it == rooms_.end()) {
@@ -211,7 +228,7 @@ void Lobby::Join(int conn, const Json& message) {
       SendError(conn, "room code already in use");
       return;
     }
-    CreateBotRoom(conn, name, mode);
+    CreateBotRoom(conn, name, mode, MapKindOf(message), SeedOf(message), CtfOf(message));
     return;
   }
   Room& room = rooms_[name];
@@ -222,6 +239,9 @@ void Lobby::Join(int conn, const Json& message) {
   }
   if (room.conns[0] < 0) {
     room.conns[0] = conn;
+    room.mapKind = MapKindOf(message);
+    room.mapSeed = SeedOf(message);
+    room.ctf = CtfOf(message);
     members_[conn] = Member{name, Team::Blue};
     Json waiting = Typed("waiting");
     waiting.Set("room", name);
@@ -231,7 +251,8 @@ void Lobby::Join(int conn, const Json& message) {
   room.conns[1] = conn;
   members_[conn] = Member{name, Team::Red};
   room.session = room.scene ? std::make_unique<GameSession>(*room.scene)
-                            : std::make_unique<GameSession>(seed_());
+                            : std::make_unique<GameSession>(room.mapSeed ? *room.mapSeed : seed_(),
+                                                        room.mapKind, room.ctf);
   if (room.scene) room.session->ConfigureForTest(room.friendlyFire, room.shotRolls);
   StartMatch(room);
 }
@@ -249,6 +270,8 @@ void Lobby::StartMatch(Room& room) {
     Json start = Typed("start");
     start.Set("team", net::TeamName(team));
     start.Set("seed", static_cast<double>(room.session->seed()));
+    if (!room.session->mapKind().empty()) start.Set("map", room.session->mapKind());
+    if (room.session->ctf()) start.Set("ctf", Json(true));
     if (room.scene) start.Set("scene", room.sceneSpec);
     start.Set("protocol", net::kProtocolVersion);
     SendSeat(room, team, start);
@@ -340,7 +363,8 @@ int64_t Lobby::NowMs() {
       .count();
 }
 
-void Lobby::CreateBotRoom(int conn, const std::string& name, const std::string& mode) {
+void Lobby::CreateBotRoom(int conn, const std::string& name, const std::string& mode,
+                          const std::string& mapKind, std::optional<uint32_t> seed, bool ctf) {
   int botRooms = 0;
   for (const auto& [roomName, existing] : rooms_) botRooms += existing.botMode.empty() ? 0 : 1;
   if (botRooms >= maxBotRooms_) {
@@ -351,7 +375,7 @@ void Lobby::CreateBotRoom(int conn, const std::string& name, const std::string& 
   room.name = name;
   room.id = nextRoomId_++;
   room.botMode = mode;
-  room.session = std::make_unique<GameSession>(seed_());
+  room.session = std::make_unique<GameSession>(seed ? *seed : seed_(), mapKind, ctf);
   if (mode == "player-v-ai") {
     // The human is Blue; Jev plays Red and starts thinking as the match opens.
     room.conns[0] = conn;

@@ -5223,8 +5223,13 @@ void EmitTrees(Scene* scene, const std::vector<UrbanBlock>& blocks,
     if (occupied) continue;
 
     const size_t first = scene->trees.size();
-    const int count = rng.Int(10, 16);
-    for (int attempt = 0; attempt < 600 && scene->trees.size() < first + count; ++attempt) {
+    // Density, not a flat count: blocks larger than a typical one (~500 m^2
+    // of interior) get proportionally more trees, so they aren't sparse.
+    const int baseCount = rng.Int(10, 16);
+    const float areaScale = std::max(1.0f, PolygonSignedArea(blockInterior) / 500.0f);
+    const int count = static_cast<int>(std::lround(baseCount * areaScale));
+    const int maxAttempts = std::max(600, count * 50);
+    for (int attempt = 0; attempt < maxAttempts && scene->trees.size() < first + count; ++attempt) {
       TreeDecoration tree;
       tree.scale = rng.Float(0.75f, 1.1f);
       const float radius = kTreeCanopyRadius * tree.scale;

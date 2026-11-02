@@ -2920,7 +2920,9 @@ void TestTreesStayOnEmptyBlocksAndAreSolid() {
           const auto& polygon = blocks[b].vertices;
           if (!PointInConvexPolygon(p, polygon)) continue;
           ++containing;
-          CHECK(++counts[b] <= 16);
+          // 10-16 trees, scaled up for blocks larger than ~500 m^2 of interior.
+          CHECK(++counts[b] <=
+                std::lround(16.0f * std::max(1.0f, PolygonSignedArea(polygon) / 500.0f)));
           const float margin = config.sidewalkWidth + kTreeCanopyRadius * tree.scale;
           for (size_t e = 0; e < polygon.size(); ++e)
             CHECK(DistanceToSegment(p, polygon[e], polygon[(e + 1) % polygon.size()]) >= margin);

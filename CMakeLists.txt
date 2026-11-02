@@ -130,6 +130,7 @@ set(APP_GFX_SOURCES
   src/gfx/AmbientOcclusion.cpp
   src/gfx/Ragdoll.cpp
   src/gfx/SceneRenderer.cpp
+  src/gfx/StreetFixtureMesh.cpp
 )
 
 if(EMSCRIPTEN)
@@ -194,6 +195,7 @@ if(EMSCRIPTEN)
     src/gfx/Camera.cpp
     src/gfx/AmbientOcclusion.cpp
     src/gfx/SceneRenderer.cpp
+    src/gfx/StreetFixtureMesh.cpp
     src/gfx/FrontierField.cpp
     src/gfx/FigureRig.cpp
     src/gfx/Ragdoll.cpp
@@ -387,6 +389,7 @@ else()
       src/gfx/AmbientOcclusion.cpp
       src/gfx/Ragdoll.cpp
       src/gfx/SceneRenderer.cpp
+      src/gfx/StreetFixtureMesh.cpp
       src/gfx/FrontierField.cpp
     )
     target_include_directories(tactics_gfx PUBLIC src)

@@ -4,6 +4,7 @@
 
 #include <glm/glm.hpp>
 
+#include "game/Types.h"
 #include "game/Unit.h"
 #include "game/Weapon.h"
 #include "gfx/Mesh.h"
@@ -17,8 +18,9 @@ namespace gallery {
 // native viewer.
 
 enum class ItemKind {
-  WeaponModel,  // The weapon alone on an auto-rotating turntable.
-  Animation,    // A full figure looping one animation of its weapon class.
+  WeaponModel,    // The weapon alone on an auto-rotating turntable.
+  Animation,      // A full figure looping one animation of its weapon class.
+  StreetFixture,  // One street fixture model (vehicle, bench, ...) on a turntable.
 };
 
 // ZipDown / ZipUp: a whole zipline ride (mount, hang, dismount) going
@@ -33,13 +35,21 @@ struct GalleryItem {
   ItemKind kind;
   tactics::WeaponType weapon;
   AnimKind anim = AnimKind::Idle;  // Meaningful for Animation items only.
-  // Loop length in seconds: one turntable revolution for WeaponModel items,
-  // one animation cycle for Animation items.
+  // Loop length in seconds: one turntable revolution for WeaponModel and
+  // StreetFixture items, one animation cycle for Animation items.
   float duration = 1.0f;
+  // StreetFixture items: the model, shown at its in-game gameplay box
+  // (tactics::StreetFixtureExtent) with its feet on the stage floor.
+  tactics::StreetFixtureModel fixture = tactics::StreetFixtureModel::None;
 };
 
-// 3 weapon turntables followed by idle/run/shoot/zip-down/zip-up/empty-mag per weapon.
+// 3 weapon turntables, idle/run/shoot/zip-down/zip-up/empty-mag per weapon,
+// then every street fixture model (vehicles first).
 const std::vector<GalleryItem>& Catalog();
+
+// The obstacle a StreetFixture item renders: its gameplay box centered on
+// the origin, feet at Y=0, heading +X (shared with the golden close-ups).
+tactics::Obstacle FixtureObstacle(const GalleryItem& item);
 
 // Simple deterministic orbit framing: spherical offset from a look-at
 // target. Mutated by the web viewer's mouse input; the golden runner uses
@@ -74,6 +84,9 @@ class GalleryRenderer {
   gfx::Shader litShader_;
   gfx::CubeMesh cubeMesh_;
   gfx::SphereMesh sphereMesh_;
+  // The selected street fixture's triangles, rebuilt when the item changes.
+  gfx::LitTriangleMesh fixtureMesh_;
+  int fixtureMeshItem_ = -1;
 };
 
 }  // namespace gallery

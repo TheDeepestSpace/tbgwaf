@@ -1,5 +1,6 @@
 // Asset & animation gallery viewer (issue #126): one canvas/window showing
-// a single catalog item (weapon turntable or figure animation) at a time,
+// a single catalog item (weapon turntable, figure animation or street
+// fixture turntable) at a time,
 // with mouse orbit/zoom and loop playback. The item list, playback
 // controls, and labels live in the host page (web/gallery.html), which
 // drives this module through the small exported C API below; a native build
@@ -90,9 +91,14 @@ GALLERY_EXPORT const char* gallery_item_id(int index) {
 GALLERY_EXPORT const char* gallery_item_label(int index) {
   return gallery::Catalog()[index].label;
 }
-// 0 = weapon model (turntable), 1 = animation.
+// 0 = weapon model (turntable), 1 = animation, 2 = street fixture (turntable).
 GALLERY_EXPORT int gallery_item_kind(int index) {
-  return gallery::Catalog()[index].kind == gallery::ItemKind::WeaponModel ? 0 : 1;
+  switch (gallery::Catalog()[index].kind) {
+    case gallery::ItemKind::WeaponModel: return 0;
+    case gallery::ItemKind::Animation: return 1;
+    case gallery::ItemKind::StreetFixture: return 2;
+  }
+  return 1;
 }
 GALLERY_EXPORT double gallery_item_duration(int index) {
   return gallery::Catalog()[index].duration;

@@ -355,7 +355,9 @@ and `pr-preview/pr-<number>/gallery/` in each PR preview. The page lists
 the three weapon turntables plus idle/run/shoot/empty-mag and downhill/uphill zipline rides per weapon — the
 empty-mag clip dumps the whole magazine at the weapon's own fire interval,
 each bullet leaving its own scattered tracer line (drag to orbit,
-scroll to zoom, play/pause and scrub the loop). The catalog, framing, and
+scroll to zoom, play/pause and scrub the loop) — and a turntable for every
+street fixture model the urban map places (sedan, SUV, pickup, coach bus,
+bench, newsstand, planter, dumpster, trash bin), each at its in-game size. The catalog, framing, and
 renderer live in `src/gallery/GalleryScene.*`, shared verbatim between the
 web viewer (`src/gallery/gallery_main.cpp` + `web/gallery.html`) and a
 native interactive build, `build/tactics_gallery_app` (left/right switch item, space pauses).

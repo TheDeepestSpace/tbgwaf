@@ -231,7 +231,7 @@ class SceneRenderer {
   LitTriangleMesh streetFurnitureMesh_;
   LitTriangleMesh streetPropDepthMesh_;
   std::array<LitTriangleMesh, kStreetPropMaterialCount> streetPropMeshes_;
-  std::vector<tactics::AABB> streetFurnitureKey_;
+  std::vector<tactics::Obstacle> streetFurnitureKey_;
   std::vector<tactics::StreetProp> streetPropKey_;
   tactics::HeightField terrainKey_;
   GLuint shadowFbo_ = 0;

@@ -1,4 +1,5 @@
 #include "gfx/SceneRenderer.h"
+#include "gfx/StreetFixtureMesh.h"
 
 #include "gfx/FrontierField.h"
 #include "gfx/Ragdoll.h"
@@ -598,9 +599,6 @@ void DrawBoxDepth(const Shader& shader, const CubeMesh& cube, const glm::mat4& l
   cube.Draw();
 }
 
-glm::mat4 BoxModel(const glm::vec3& minCorner, const glm::vec3& size) {
-  return glm::translate(glm::mat4(1.0f), minCorner) * glm::scale(glm::mat4(1.0f), size);
-}
 
 struct StreetPropPart {
   glm::mat4 model{1.0f};
@@ -724,16 +722,6 @@ StreetPropParts BuildStreetPropParts(const tactics::StreetProp& prop) {
   return parts;
 }
 
-using LitVertices = std::vector<LitTriangleMesh::Vertex>;
-
-void AppendTriangle(glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 normal,
-                    LitVertices* vertices, std::vector<GLuint>* indices) {
-  const GLuint base = static_cast<GLuint>(vertices->size());
-  vertices->push_back({a, normal});
-  vertices->push_back({b, normal});
-  vertices->push_back({c, normal});
-  indices->insert(indices->end(), {base, base + 1, base + 2});
-}
 
 // A quad from corner `a` spanned by `right` and `up`, facing up-cross-right
 // (the clockwise-outward winding the scene meshes use throughout).
@@ -1148,29 +1136,6 @@ void AppendBox(const AABB& box, LitVertices* vertices, std::vector<GLuint>* indi
   quad({hi.x, lo.y, lo.z}, {hi.x, hi.y, lo.z}, {hi.x, hi.y, hi.z}, {hi.x, lo.y, hi.z}, {1, 0, 0});
 }
 
-// Unit cube transformed exactly like CubeMesh. Used to batch street
-// fixtures into the single static mesh consumed by the FOV depth/receiver
-// passes.
-void AppendBoxModel(const glm::mat4& model, LitVertices* vertices,
-                    std::vector<GLuint>* indices) {
-  const glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(model)));
-  const auto p = [&](float x, float y, float z) {
-    return glm::vec3(model * glm::vec4(x, y, z, 1.0f));
-  };
-  const auto n = [&](float x, float y, float z) {
-    return glm::normalize(normalMatrix * glm::vec3(x, y, z));
-  };
-  auto quad = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d, glm::vec3 normal) {
-    AppendTriangle(a, b, c, normal, vertices, indices);
-    AppendTriangle(a, c, d, normal, vertices, indices);
-  };
-  quad(p(0, 1, 0), p(0, 1, 1), p(1, 1, 1), p(1, 1, 0), n(0, 1, 0));
-  quad(p(0, 0, 0), p(1, 0, 0), p(1, 0, 1), p(0, 0, 1), n(0, -1, 0));
-  quad(p(0, 0, 0), p(0, 1, 0), p(1, 1, 0), p(1, 0, 0), n(0, 0, -1));
-  quad(p(0, 0, 1), p(1, 0, 1), p(1, 1, 1), p(0, 1, 1), n(0, 0, 1));
-  quad(p(0, 0, 0), p(0, 0, 1), p(0, 1, 1), p(0, 1, 0), n(-1, 0, 0));
-  quad(p(1, 0, 0), p(1, 1, 0), p(1, 1, 1), p(1, 0, 1), n(1, 0, 0));
-}
 
 // Terrain overlays (FOV cones over hills) use the same triangles as the
 // ground, clipped to each footprint triangle.
@@ -1198,8 +1163,8 @@ void BuildStreetFixtureMeshes(
   LitVertices furnitureVertices;
   std::vector<GLuint> furnitureIndices;
   for (const tactics::Obstacle& obstacle : obstacles) {
-    if (obstacle.kind != tactics::ObstacleKind::StreetFurniture) continue;
-    AppendBox(obstacle.bounds, &furnitureVertices, &furnitureIndices);
+    if (!tactics::IsStreetFixture(obstacle.kind)) continue;
+    AppendStreetFixture(obstacle, &furnitureVertices, &furnitureIndices);
   }
   furnitureMesh->SetChunkedMesh(furnitureVertices, furnitureIndices, kCullGridCells);
 
@@ -1233,7 +1198,11 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   std::vector<GLuint> indices;
   for (const tactics::Obstacle& obstacle : scene.obstacles) {
     if (obstacle.navOnly) continue;  // A cliff edge: the terrain mesh is the caster.
-    AppendPolygonPrism(obstacle, &vertices, &indices);
+    if (tactics::IsStreetFixture(obstacle.kind)) {
+      AppendStreetFixture(obstacle, &vertices, &indices);
+    } else {
+      AppendPolygonPrism(obstacle, &vertices, &indices);
+    }
   }
   for (const tactics::StreetProp& prop : scene.props) {
     for (const StreetPropPart& part : BuildStreetPropParts(prop)) {
@@ -1277,6 +1246,11 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
   };
   for (const tactics::Obstacle& o : scene.obstacles) {
     mix(&o.bounds, sizeof(o.bounds));
+    mix(&o.kind, sizeof(o.kind));
+    mix(&o.fixtureModel, sizeof(o.fixtureModel));
+    mix(&o.fixtureYaw, sizeof(o.fixtureYaw));
+    mix(&o.fixtureBaseY, sizeof(o.fixtureBaseY));
+    mix(&o.fixtureRoll, sizeof(o.fixtureRoll));
     mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
   }
   for (const tactics::StreetProp& prop : scene.props) {
@@ -1494,7 +1468,7 @@ void BuildObstacleMeshes(const tactics::Scene& scene,
   std::vector<int> groups;
   for (size_t i = 0; i < scene.obstacles.size(); ++i) {
     const tactics::Obstacle& obstacle = scene.obstacles[i];
-    if (obstacle.navOnly || obstacle.kind == tactics::ObstacleKind::StreetFurniture) continue;
+    if (obstacle.navOnly || tactics::IsStreetFixture(obstacle.kind)) continue;
     if (obstacle.footprint.empty()) {
       AppendBox(obstacle.bounds, &drawnVertices, &drawnIndices);
       AppendBox(obstacle.bounds, &casterVertices, &casterIndices);
@@ -3285,10 +3259,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   size_t furnitureIndex = 0;
   bool sameStreetFurniture = true;
   for (const tactics::Obstacle& obstacle : obstacles) {
-    if (obstacle.kind == tactics::ObstacleKind::StreetFurniture) {
+    if (tactics::IsStreetFixture(obstacle.kind)) {
       sameStreetFurniture &= furnitureIndex < streetFurnitureKey_.size() &&
-                             obstacle.bounds.min == streetFurnitureKey_[furnitureIndex].min &&
-                             obstacle.bounds.max == streetFurnitureKey_[furnitureIndex].max;
+          obstacle.bounds.min == streetFurnitureKey_[furnitureIndex].bounds.min &&
+          obstacle.bounds.max == streetFurnitureKey_[furnitureIndex].bounds.max &&
+          obstacle.fixtureModel == streetFurnitureKey_[furnitureIndex].fixtureModel &&
+          obstacle.fixtureYaw == streetFurnitureKey_[furnitureIndex].fixtureYaw &&
+          obstacle.fixtureBaseY == streetFurnitureKey_[furnitureIndex].fixtureBaseY &&
+          obstacle.fixtureRoll == streetFurnitureKey_[furnitureIndex].fixtureRoll;
       ++furnitureIndex;
     }
   }
@@ -3306,8 +3284,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     streetFurnitureKey_.clear();
     streetFurnitureKey_.reserve(furnitureIndex);
     for (const tactics::Obstacle& obstacle : obstacles) {
-      if (obstacle.kind == tactics::ObstacleKind::StreetFurniture) {
-        streetFurnitureKey_.push_back(obstacle.bounds);
+      if (tactics::IsStreetFixture(obstacle.kind)) {
+        streetFurnitureKey_.push_back(obstacle);
       }
     }
     streetPropKey_ = streetProps;
@@ -3624,7 +3602,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       for (size_t i = 0; i < obstacles.size(); ++i) {
         // Post-sized furniture is too small to hide a useful target and is kept
         // in one static render batch below.
-        if (obstacles[i].navOnly || obstacles[i].kind == tactics::ObstacleKind::StreetFurniture) {
+        if (obstacles[i].navOnly || tactics::IsStreetFixture(obstacles[i].kind)) {
           continue;
         }
         if (crossesProbeRay(obstacles[i])) {

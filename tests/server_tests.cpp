@@ -638,6 +638,22 @@ void TestBotRoomHonoursMapAndSeed() {
   CHECK(sawStart);
 }
 
+// Capture the Flag on the splash reaches the Jev room: the flag is in play and start says so.
+void TestBotRoomHonoursCtf() {
+  for (bool ctf : {true, false}) {
+    BotWire w(FirstOptionPoster);
+    w.Send(1, ctf ? R"({"t":"join","room":"c","mode":"player-v-ai","ctf":true})"
+                  : R"({"t":"join","room":"c","mode":"player-v-ai"})");
+    bool sawStart = false;
+    for (const auto& m : w.Drain(1)) {
+      if (m["t"].AsString() != "start") continue;
+      sawStart = true;
+      CHECK(m["ctf"].IsBool() == ctf);
+    }
+    CHECK(sawStart);
+  }
+}
+
 // Human vs Human: Blue's map and seed (sent on its join) pick the match.
 void TestHumanRoomHonoursMapAndSeed() {
   BotWire w(FirstOptionPoster);
@@ -1224,6 +1240,7 @@ void TestRealSocketLoopback() {
 
 int main() {
   TestBotRoomHonoursMapAndSeed();
+  TestBotRoomHonoursCtf();
   TestHumanRoomHonoursMapAndSeed();
   TestWebSocketPrimitives();
   TestFrameParser();

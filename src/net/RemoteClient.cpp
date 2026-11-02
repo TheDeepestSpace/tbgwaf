@@ -55,6 +55,7 @@ void RemoteClient::OnOpen() {
     join.Set("mode", botMode_);
   }
   if (!mapKind_.empty()) join.Set("map", mapKind_);
+  if (ctf_) join.Set("ctf", Json(true));
   if (mapSeed_) join.Set("seed", static_cast<double>(*mapSeed_));
   Queue(join);
 }
@@ -134,6 +135,7 @@ void RemoteClient::HandleStart(const Json& m) {
     scene = tactics::GenerateMapByKind(static_cast<uint32_t>(m["seed"].AsNumber()),
                                        m["map"].IsString() ? m["map"].AsString() : "");
     tactics::ApplySpawnHints(&scene);  // Same corner spawns as the server (#226).
+    scene.flag.enabled = m["ctf"].IsBool() && m["ctf"].AsBool();
     game_->Reset(scene);
   }
   playback_.reset();

@@ -42,7 +42,8 @@ class RemoteClient {
   void SetBotMode(std::string mode) { botMode_ = std::move(mode); }
   // Splash map ("urban"|"urban-x4"|"hills") and seed for the Jev room the
   // server opens; unset = the server's default random city.
-  void SetMatchSetup(std::string mapKind, std::optional<uint32_t> seed) {
+  void SetMatchSetup(std::string mapKind, std::optional<uint32_t> seed, bool ctf = false) {
+    ctf_ = ctf;
     mapKind_ = std::move(mapKind);
     mapSeed_ = seed;
   }
@@ -131,6 +132,7 @@ class RemoteClient {
   std::string botMode_;
   std::string mapKind_;
   std::optional<uint32_t> mapSeed_;
+  bool ctf_ = false;
   bool spectate_ = false;
   Status status_ = Status::Connecting;
   std::optional<tactics::Team> team_;

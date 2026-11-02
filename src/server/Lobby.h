@@ -70,6 +70,7 @@ class Lobby {
     std::array<BotSeat, 2> bot;
     std::string mapKind;      // Blue's splash pick for a human room ("" = default).
     std::optional<uint32_t> mapSeed;
+    bool ctf = false;
     std::string botMode;      // "", "player-v-ai" or "ai-v-ai".
     bool botsRunning = true;  // ai-v-ai starts paused.
     int64_t nextBotMs = 0;    // Playback pacing for rooms with no human player.
@@ -94,7 +95,8 @@ class Lobby {
   void StartMatch(Room& room);
   void SpectatorJoin(int conn, const net::Json& message);
   void CreateBotRoom(int conn, const std::string& name, const std::string& mode,
-                     const std::string& mapKind = "", std::optional<uint32_t> seed = std::nullopt);
+                     const std::string& mapKind = "", std::optional<uint32_t> seed = std::nullopt,
+                     bool ctf = false);
   void HandleBotControl(int conn, Room& room, const net::Json& message);
   void MaybeRunRound(Room& room);
   void ScheduleBots(Room& room);

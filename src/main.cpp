@@ -926,7 +926,8 @@ int main() {
           remote->SetMatchSetup(choice == 1 ? "urban" : choice == 2 ? "urban-x4"
                                                     : choice == 3 ? "hills" : "",
                                 s >= 0 ? std::optional<uint32_t>(static_cast<uint32_t>(s))
-                                       : std::nullopt);
+                                       : std::nullopt,
+                                tbgwaf_default_ctf() != 0);
         }
         std::free(botModeRaw);
         fixedTeam = Team::Blue;  // Placeholder until the server's "start".

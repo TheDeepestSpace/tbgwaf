@@ -722,6 +722,7 @@ Scenario LoadScenarioFromFile(const std::string& path) {
     throw std::runtime_error(path + ": " + sceneError);
   }
   ParsePlaybooks(root, scenario.playbooks);
+  if (root["figure_overlap"]) scenario.rejectFigureOverlap = root["figure_overlap"].as<bool>();
   if (root["friendly_fire"]) scenario.friendlyFire = root["friendly_fire"].as<bool>();
   if (const YAML::Node rolls = root["shot_rolls"]) {
     if (!rolls.IsSequence() || rolls.size() == 0) {
@@ -776,6 +777,7 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
   game.SetPlaybook(Team::Blue, scenario.playbooks[0]);
   game.SetPlaybook(Team::Red, scenario.playbooks[1]);
   game.SetFriendlyFireEnabled(scenario.friendlyFire);
+  game.SetFigureOverlapCheckEnabled(scenario.rejectFigureOverlap);
   // Pinned rolls make probabilistic shots deterministic: consumed in
   // resolution order, repeating the list when it runs out.
   size_t nextRoll = 0;

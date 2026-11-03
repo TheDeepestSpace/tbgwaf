@@ -184,6 +184,7 @@ std::vector<std::string> RunNetScenario(const Scenario& scenario, int index, Ser
   for (Team team : {Team::Blue, Team::Red}) {
     Player& p = rig.For(team);
     p.game.SetPlaybook(team, scenario.playbooks[static_cast<int>(team)]);
+    p.game.SetFigureOverlapCheckEnabled(scenario.rejectFigureOverlap);
     if (!rig.Sync(p)) return rig.failures;
   }
 

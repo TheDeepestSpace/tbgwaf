@@ -286,8 +286,10 @@ int main(int argc, char** argv) {
                     &game.GetScene().walkSurfaces);
       overlays.navMeshDebug = &navMesh;
     }
+    gfx::RenderDebugOptions debug;
+    debug.disableTrees = true;  // Tree rendering has its own coverage, preserving existing goldens.
     renderer.RenderPane(game, tactics::Team::Blue, /*fogActive=*/false, tactics::TeamVisibility{},
-                        camera, 0, 0, kWindowWidth, kWindowHeight, overlays);
+                        camera, 0, 0, kWindowWidth, kWindowHeight, overlays, 0, debug);
     const visual::Image image = visual::CaptureFramebuffer(kWindowWidth, kWindowHeight);
 
     if (options.updateBaselines) {

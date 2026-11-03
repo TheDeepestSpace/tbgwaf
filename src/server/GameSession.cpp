@@ -41,8 +41,10 @@ GameSession::GameSession(uint32_t seed, std::string mapKind, bool ctf)
 
 GameSession::GameSession(const Scene& scene) : seed_(0), fixedScene_(scene), game_(scene) {}
 
-void GameSession::ConfigureForTest(bool friendlyFire, std::vector<float> shotRolls) {
+void GameSession::ConfigureForTest(bool friendlyFire, bool figureOverlapCheck,
+                                   std::vector<float> shotRolls) {
   game_.SetFriendlyFireEnabled(friendlyFire);
+  game_.SetFigureOverlapCheckEnabled(figureOverlapCheck);
   if (shotRolls.empty()) return;
   game_.SetShotRollSource([rolls = std::move(shotRolls), next = size_t{0}]() mutable {
     return rolls[next++ % rolls.size()];

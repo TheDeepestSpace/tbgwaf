@@ -253,7 +253,7 @@ void Lobby::Join(int conn, const Json& message) {
   room.session = room.scene ? std::make_unique<GameSession>(*room.scene)
                             : std::make_unique<GameSession>(room.mapSeed ? *room.mapSeed : seed_(),
                                                         room.mapKind, room.ctf);
-  if (room.scene) room.session->ConfigureForTest(room.friendlyFire, room.shotRolls);
+  if (room.scene) room.session->ConfigureForTest(room.friendlyFire, room.figureOverlapCheck, room.shotRolls);
   StartMatch(room);
 }
 
@@ -534,6 +534,7 @@ Json Lobby::OnControl(const Json& message) {
     room.scene = std::move(scene);
     room.sceneSpec = message["scene"];
     if (message["friendly_fire"].IsBool()) room.friendlyFire = message["friendly_fire"].AsBool();
+    if (message["figure_overlap"].IsBool()) room.figureOverlapCheck = message["figure_overlap"].AsBool();
     if (message["shot_rolls"].IsArray()) {
       for (const net::Json& r : message["shot_rolls"].AsArray()) {
         if (r.IsNumber()) room.shotRolls.push_back(static_cast<float>(r.AsNumber()));

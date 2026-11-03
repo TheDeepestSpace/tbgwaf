@@ -436,10 +436,13 @@ void TestJevRoutesOffTerrainIslandTowardFlag() {
   GameLogic game(scene);
   const glm::vec3 flag = game.FlagPosition();
   std::vector<float> lastDistance(32, 1e9f);
+  std::vector<float> firstDistance(32, 1e9f);
+  std::vector<int> blueIds;
   for (int round = 1; round <= 3; ++round) {
     const auto blue = BuildJevRequest(game, Team::Blue, static_cast<unsigned>(round));
     CHECK(blue.has_value());
     if (!blue) return;
+    blueIds = blue->actorIds;
     std::vector<std::string> choices;
     for (int actorId : blue->actorIds) {
       const Unit* actor = game.FindUnit(actorId);
@@ -458,7 +461,11 @@ void TestJevRoutesOffTerrainIslandTowardFlag() {
       if (round == 1) CHECK(flagMove->destination.y < actor->position.y - 1.0f);
       const float distance =
           std::hypot(flagMove->destination.x - flag.x, flagMove->destination.z - flag.z);
-      CHECK(distance < lastDistance[actorId] - 3.0f);
+      // A squad-mate held up behind another in the corridor (#267) may stop
+      // short for a round, so allow slack per round and require real progress
+      // over the whole walk (checked below).
+      CHECK(distance < lastDistance[actorId] + 5.0f);
+      if (round == 1) firstDistance[actorId] = distance;
       lastDistance[actorId] = distance;
       choices.push_back(flagMove->id);
     }
@@ -469,6 +476,7 @@ void TestJevRoutesOffTerrainIslandTowardFlag() {
     game.Update(10.0f);
     if (game.Mode() == InputMode::GameOver) break;
   }
+  for (int actorId : blueIds) CHECK(lastDistance[actorId] < firstDistance[actorId] - 10.0f);
   for (const Unit& unit : game.GetScene().units) {
     if (unit.team == Team::Blue) CHECK(unit.position.y < 0.5f);  // Down on the ground level.
   }
@@ -483,7 +491,8 @@ void TestJevAdvanceRoutesOffTerrainIsland() {
   GameLogic game(scene);
   std::vector<glm::vec3> spawn(32);
   for (const Unit& unit : scene.units) spawn[unit.id] = unit.position;
-  for (int round = 1; round <= 2; ++round) {
+  // Squad-mates sharing a road entrance stop a little short of each other (issue #267), so allow extra legs.
+  for (int round = 1; round <= 4; ++round) {
     const auto request = BuildJevRequest(game, Team::Blue, static_cast<unsigned>(round));
     CHECK(request.has_value());
     if (!request) return;
@@ -492,8 +501,16 @@ void TestJevAdvanceRoutesOffTerrainIsland() {
       const std::string id = "f" + std::to_string(actorId) + "_advance";
       const auto advance = std::find_if(request->candidates.begin(), request->candidates.end(),
                                         [&](const auto& c) { return c.id == id; });
-      CHECK(advance != request->candidates.end());
-      if (advance == request->candidates.end()) return;
+      // A squad-mate held up behind another in the corridor (#267) can lose
+      // its advance option for a round; it simply stays put that round.
+      if (advance == request->candidates.end()) {
+        const auto any = std::find_if(request->candidates.begin(), request->candidates.end(),
+                                      [&](const auto& c) { return c.actorId == actorId; });
+        CHECK(any != request->candidates.end());
+        if (any == request->candidates.end()) return;
+        choices.push_back(any->id);
+        continue;
+      }
       CHECK(advance->description.find("route") != std::string::npos);
       choices.push_back(advance->id);
     }
@@ -554,6 +571,34 @@ void TestSpawnHintsAvoidGroundUnderLowDecks() {
  }
 }
 
+// Issue #267: whatever moves the squad picks, the applied plan has no
+// figures overlapping while walking (movers fall back to a shorter move,
+// another move, or waiting).
+void TestJevSquadPlanNeverOverlaps() {
+  Scene scene = TwoUnitScene(40.0f, false);
+  for (int i = 1; i <= 2; ++i) {
+    Unit mate;
+    mate.id = 10 + i;
+    mate.team = Team::Blue;
+    mate.position = {-20.0f + 1.0f * static_cast<float>(i), 0.0f, 0.0f};
+    scene.units.push_back(mate);
+  }
+  GameLogic game(scene);
+  const auto request = BuildJevRequest(game, Team::Blue, 5);
+  CHECK(request.has_value());
+  if (!request) return;
+  for (const auto& first : request->candidates) {
+    if (first.kind != JevActionKind::Move) continue;
+    std::vector<std::string> choices;
+    for (int id : request->actorIds) {
+      choices.push_back(id == first.actorId ? first.id : AnyChoiceFor(*request, id));
+    }
+    GameLogic copy = game;
+    CHECK(ApplyJevChoice(&copy, *request, choices));
+    CHECK(!copy.HasPlanOverlap());
+  }
+}
+
 int main() {
   TestIncrementalBuilderMatchesBlockingBuild();
   TestBoundedCandidatesUseNormalLegalPath();
@@ -572,6 +617,7 @@ int main() {
   TestJevAdvanceRoutesOffTerrainIsland();
   TestJevOffersWaitOnlyWithContact();
   TestSpawnHintsAvoidGroundUnderLowDecks();
+  TestJevSquadPlanNeverOverlaps();
   if (failures == 0) {
     std::puts("All Jev planner scenarios passed.");
     return 0;

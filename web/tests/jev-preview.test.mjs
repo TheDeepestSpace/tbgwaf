@@ -224,3 +224,15 @@ test("server-hosted Jev never calls the proxy", async () => {
   await controller.requestDecision("red", payload);
   assert.equal(calls, 0);
 });
+
+test("an explicit CTF choice overrides the per-mode default", () => {
+  const controller = new JevPreviewController({ documentRef: null, endpoint: "http://adapter" });
+  const blue = moduleStub();
+  controller.registerModule("blue", blue);
+  controller.ctf = false;
+  controller.setMode("ai-v-ai");
+  assert.equal(blue.tbgwafDefaultCtf, false);
+  controller.ctf = true;
+  controller.setMode("human");
+  assert.equal(blue.tbgwafDefaultCtf, true);
+});

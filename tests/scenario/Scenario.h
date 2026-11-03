@@ -155,6 +155,10 @@ struct Scenario {
   // `friendly_fire: false` flips the single config flag that makes
   // same-team figures transparent to free-aim ballistic traces.
   bool friendlyFire = true;
+  // `figure_overlap: false` turns off plan-time rejection of paths that make
+  // figures overlap (issue #267) for scenarios that deliberately race figures
+  // onto one spot or share a zipline.
+  bool rejectFigureOverlap = true;
   // `shot_rolls: [0.1, 0.9, ...]`: pins the shot RNG for deterministic
   // outcomes -- rolls are consumed in resolution order and the list repeats
   // when exhausted. Empty keeps the default seeded RNG.

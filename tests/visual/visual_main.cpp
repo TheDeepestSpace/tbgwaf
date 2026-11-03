@@ -226,6 +226,8 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
                                           : gfx::FovOverlayMode::CpuAnalytic);
   renderer.SetFovProbeHeight(scenario.fovProbeHeight);
   gfx::RenderDebugOptions renderDebug;
+  // Decorative trees are covered separately; keep gameplay goldens unchanged.
+  renderDebug.disableTrees = true;
   // Every scenario renders in the AO view, like the live app default.
   renderDebug.thermal = true;
   renderDebug.thermalBlackHot = scenario.thermalBlackHot;
@@ -539,6 +541,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     for (Team team : {Team::Blue, Team::Red}) {
       tactics::testing::Player& p = rig.For(team);
       p.game.SetPlaybook(team, scenario.playbooks[static_cast<int>(team)]);
+      p.game.SetFigureOverlapCheckEnabled(scenario.rejectFigureOverlap);
       if (!rig.Sync(p)) {
         done();
         return result;

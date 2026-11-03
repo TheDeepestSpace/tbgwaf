@@ -1229,6 +1229,22 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   mesh->SetChunkedMesh(vertices, indices, kCullGridCells);
 }
 
+// The trees' visible meshes, baked once per scene like the street fixtures.
+// One mesh serves the lit pass, the sun shadow pass and the FOV mask -- where
+// it is both caster and receiver, so the overlay self-occludes against the
+// same surfaces it tints and trunks/canopies tint on their eye-facing side
+// through the plain static-receiver path. (Gameplay LOS still uses each
+// tree's TreeOccluder prism; the overlay now follows the visual silhouette.)
+void BuildTreeMesh(const std::vector<tactics::TreeDecoration>& trees,
+                   LitTriangleMesh* mesh) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  for (const tactics::TreeDecoration& tree : trees) {
+    AppendTreeMesh(tree, &vertices, &indices);
+  }
+  mesh->SetChunkedMesh(vertices, indices, kCullGridCells);
+}
+
 // Content hash of the static geometry BuildFovSceneMesh consumes, so the
 // mesh is rebuilt only when the scene actually changes (successive scenes
 // can reuse the same GameLogic address, so an address key won't do).
@@ -1282,6 +1298,12 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
   mix(scene.sidewalks.data(), scene.sidewalks.size() * sizeof(AABB));
   for (const tactics::RoadSurface& s : scene.sidewalkSurfaces) mixVec3s(s.vertices);
   for (const tactics::RoadSurface& s : scene.roads) mixVec3s(s.vertices);
+  // Trees change the FOV depth maps (the baked tree mesh is a caster), so a
+  // scene differing only in trees must invalidate the cached maps too.
+  for (const tactics::TreeDecoration& t : scene.trees) {
+    mix(&t.position, sizeof(t.position));
+    mix(&t.scale, sizeof(t.scale));
+  }
   return h;
 }
 
@@ -2846,6 +2868,7 @@ bool SceneRenderer::Init() {
   streetPropDepthMesh_.Init();
   for (LitTriangleMesh& mesh : streetPropMeshes_) mesh.Init();
   fovSceneMesh_.Init();
+  treeMesh_.Init();
   massingMesh_.Init();
   facadeMesh_.Init();
   deckMesh_.Init();
@@ -2918,6 +2941,8 @@ void SceneRenderer::Destroy() {
   streetFurnitureKey_.clear();
   streetPropKey_.clear();
   fovSceneMesh_.Destroy();
+  treeMesh_.Destroy();
+  treeKey_.clear();
   fovSceneKey_ = 0;
   massingMesh_.Destroy();
   massingKey_ = 0;
@@ -3090,9 +3115,12 @@ int SceneRenderer::AcquireFovMaps(const Unit& unit, int sector, float facingYaw,
                    glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
                    glm::vec3(mapHalfExtent * 2.0f, 0.05f, mapHalfExtent * 2.0f));
     }
-    if (fovSceneMesh_.HasGeometry()) {
+    if (fovSceneMesh_.HasGeometry() || treeMesh_.HasGeometry()) {
       depthShader_.SetMat4("uLightMVP", slot.matrix[half]);
       fovSceneMesh_.DrawVisible(inMap);
+      // Trees block the mask whether or not they are drawn, matching
+      // gameplay LOS (their solid obstacles always block sight lines).
+      treeMesh_.DrawVisible(inMap);
     }
   }
   return index;
@@ -3100,7 +3128,7 @@ int SceneRenderer::AcquireFovMaps(const Unit& unit, int sector, float facingYaw,
 
 void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::vec4& color,
                                  const glm::mat4& viewProj, bool drawTerrain,
-                                 float mapHalfExtent) {
+                                 float mapHalfExtent, bool drawTrees) {
   std::vector<FovMask> live;
   for (const FovMask& mask : masks) {
     if (mask.slot >= 0) live.push_back(mask);
@@ -3125,11 +3153,10 @@ void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::v
   fovMaskShader_.SetFloat("uFar", tactics::constants::kFovConeVisualRange);
   // The larger of the two texel footprints (vertical: the whole elevation
   // range over the map's height) per unit of map depth.
-  fovMaskShader_.SetFloat("uTexelPerDepth",
-                          std::max(2.0f * std::tan(glm::radians(kFovMapHalfElevationDegrees)) /
-                                       kFovMapHeight,
-                                   2.0f * std::tan(glm::radians(kFovMapHalfAzimuthDegrees)) /
-                                       kFovMapWidth));
+  fovMaskShader_.SetFloat(
+      "uTexelPerDepth",
+      std::max(2.0f * std::tan(glm::radians(kFovMapHalfElevationDegrees)) / kFovMapHeight,
+               2.0f * std::tan(glm::radians(kFovMapHalfAzimuthDegrees)) / kFovMapWidth));
   fovMaskShader_.SetFloat("uProbeHeight", fovProbeHeight_);
   fovMaskShader_.SetVec4("uColor", color);
   const Frustum cameraFrustum(viewProj);
@@ -3144,24 +3171,33 @@ void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::v
       // validates every sampler); the shader never reads them.
       const FovMask& mask = live[first + std::min(i, count - 1)];
       const FovMapSlot& slot = fovMaps_[mask.slot];
-      const std::string index = "[" + std::to_string(i) + "]";
-      fovMaskShader_.SetVec3(("uEye" + index).c_str(), slot.eye);
-      fovMaskShader_.SetVec3(("uFacing" + index).c_str(),
-                             glm::vec3(std::cos(slot.yaw), 0.0f, std::sin(slot.yaw)));
-      fovMaskShader_.SetFloat(("uCosHalfFov" + index).c_str(),
-                              std::cos(glm::radians(mask.halfFovDegrees)));
-      fovMaskShader_.SetMat4(("uFovMatrix0" + index).c_str(), slot.matrix[0]);
-      fovMaskShader_.SetMat4(("uFovMatrix1" + index).c_str(), slot.matrix[1]);
       for (int half = 0; half < 2; ++half) {
-        const int unit = 1 + 2 * i + half;
-        fovMaskShader_.SetInt(("uFovMap" + std::to_string(2 * i + half)).c_str(), unit);
-        glActiveTexture(GL_TEXTURE0 + unit);
+        glActiveTexture(GL_TEXTURE0 + 1 + 2 * i + half);
         glBindTexture(GL_TEXTURE_2D, slot.tex[half]);
         if (i < count) mapFrustums.emplace_back(slot.matrix[half]);
       }
     }
     glActiveTexture(GL_TEXTURE0);
-    fovMaskShader_.SetInt("uCount", count);
+    const auto setPassUniforms = [&](Shader& shader) {
+      shader.Use();
+      for (int i = 0; i < kFovMasksPerPass; ++i) {
+        const FovMask& mask = live[first + std::min(i, count - 1)];
+        const FovMapSlot& slot = fovMaps_[mask.slot];
+        const std::string index = "[" + std::to_string(i) + "]";
+        shader.SetVec3(("uEye" + index).c_str(), slot.eye);
+        shader.SetVec3(("uFacing" + index).c_str(),
+                       glm::vec3(std::cos(slot.yaw), 0.0f, std::sin(slot.yaw)));
+        shader.SetFloat(("uCosHalfFov" + index).c_str(),
+                        std::cos(glm::radians(mask.halfFovDegrees)));
+        shader.SetMat4(("uFovMatrix0" + index).c_str(), slot.matrix[0]);
+        shader.SetMat4(("uFovMatrix1" + index).c_str(), slot.matrix[1]);
+        for (int half = 0; half < 2; ++half) {
+          shader.SetInt(("uFovMap" + std::to_string(2 * i + half)).c_str(), 1 + 2 * i + half);
+        }
+      }
+      shader.SetInt("uCount", count);
+    };
+    setPassUniforms(fovMaskShader_);
 
     // A fragment outside every figure's maps is always discarded, so only
     // chunks on screen and inside some map can be tinted.
@@ -3192,6 +3228,10 @@ void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::v
     // Facade pane extrusions receive the tint like the walls they sit on: the
     // extruded frames stand proud of the wall and need their own coverage.
     if (facadeMesh_.HasGeometry()) drawReceiver(facadeMesh_);
+    // Trees receive the tint like any other static mesh: their own geometry
+    // is in the depth maps, so self-occlusion works the regular way (only
+    // when drawn -- tinting undrawn trees would paint mid-air ghosts).
+    if (drawTrees && treeMesh_.HasGeometry()) drawReceiver(treeMesh_);
   }
   glDepthFunc(GL_LESS);
 }
@@ -3201,6 +3241,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                int y, int width, int height, const PaneOverlays& overlays,
                                GLuint targetFramebuffer, const RenderDebugOptions& debug) {
   const ScopedDrawStats drawStats(debug.stats);
+  // Bake the trees into a regular static mesh when the scene's trees change
+  // (contents, not address: GameLogic storage can be reused for a new map).
+  if (game.GetScene().trees != treeKey_) {
+    BuildTreeMesh(game.GetScene().trees, &treeMesh_);
+    treeKey_ = game.GetScene().trees;
+  }
   const auto& obstacles = game.GetScene().obstacles;
   SetRagdollObstacles(obstacles);
   SetRagdollRails(game.GetScene().massing);
@@ -3407,6 +3453,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
     }
     DrawPlantedFlagDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, game);
+    if (!debug.disableTrees && treeMesh_.HasGeometry()) {
+      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+      treeMesh_.DrawVisible(inShadowMap);
+    }
   }
 
   // Shadow-map FOV masks: this pane's figures' depth maps (and the free-aim
@@ -3886,6 +3936,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   }
 
+  // Trees, as a regular static mesh in the building color (issue #270).
+  if (!debug.disableTrees && treeMesh_.HasGeometry()) {
+    thermalMaterial(ThermalMaterial::Building);
+    DrawLitVisible(litShader_, treeMesh_, viewProj, lightSpaceMatrix_,
+                   glm::vec4(kObstacleColor, 1.0f), onScreen);
+  }
   thermalMaterial(ThermalMaterial::Figure);
   for (const Unit& unit : game.GetScene().units) {
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
@@ -4073,7 +4129,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       const glm::vec4 teamColor = fovTeam == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, fovAlpha)
                                                         : glm::vec4(0.9f, 0.25f, 0.22f, fovAlpha);
       DrawFovMasks(fovTeam == team ? teamFovMasks : otherFovMasks, teamColor, viewProj,
-                   drawTerrain, mapHalfExtent);
+                   drawTerrain, mapHalfExtent, !debug.disableTrees);
       colorShader_.Use();
     } else {
       const auto build = [&](const Unit& unit) {
@@ -4119,7 +4175,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glEnable(GL_STENCIL_TEST);
     glStencilMask(0xFF);
     glClear(GL_STENCIL_BUFFER_BIT);
-    DrawFovMasks(aimFovMasks, glm::vec4(kAimColor, 0.22f), viewProj, drawTerrain, mapHalfExtent);
+    DrawFovMasks(aimFovMasks, glm::vec4(kAimColor, 0.22f), viewProj, drawTerrain, mapHalfExtent,
+                 !debug.disableTrees);
     colorShader_.Use();
   }
   glDisable(GL_STENCIL_TEST);
@@ -4390,10 +4447,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     const tactics::ReachField& f = *overlays.moveFrontier;
     const glm::vec2 origin(f.minX, f.minZ);
     if (frontierKeyField_ != &f || frontierKeyOrigin_ != origin ||
-        frontierKeyBudget_ != f.budget || frontierKeyThermal_ != thermalKey) {
+        frontierKeyBudget_ != f.budget || frontierKeyRevision_ != f.revision ||
+        frontierKeyThermal_ != thermalKey) {
       frontierKeyField_ = &f;
       frontierKeyOrigin_ = origin;
       frontierKeyBudget_ = f.budget;
+      frontierKeyRevision_ = f.revision;
       frontierKeyThermal_ = thermalKey;
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
@@ -4429,6 +4488,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (const auto& fr : frontiers) {
       key.emplace_back(fr.field.minX, fr.field.minZ, fr.field.budget,
                        static_cast<float>(fr.zipline));
+      // Contents change with the other figures' plans even at a fixed window.
+      key.emplace_back(static_cast<float>(fr.field.revision), 0.0f, 0.0f, 0.0f);
     }
     if (key != ziplineKey_) {
       ziplineKey_ = key;

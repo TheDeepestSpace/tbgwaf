@@ -51,7 +51,12 @@ void RemoteClient::OnOpen() {
   if (!room_.empty()) join.Set("room", room_);
   if (!intent_.empty()) join.Set("intent", intent_);
   if (spectate_) join.Set("spectate", Json(true));
-  if (!botMode_.empty()) join.Set("mode", botMode_);
+  if (!botMode_.empty()) {
+    join.Set("mode", botMode_);
+  }
+  if (!mapKind_.empty()) join.Set("map", mapKind_);
+  if (ctf_) join.Set("ctf", Json(true));
+  if (mapSeed_) join.Set("seed", static_cast<double>(*mapSeed_));
   Queue(join);
 }
 
@@ -127,8 +132,10 @@ void RemoteClient::HandleStart(const Json& m) {
   if (m.Has("scene") && tactics::net::SceneFromSpec(m["scene"], &scene, &sceneError)) {
     game_->Reset(scene);
   } else {
-    scene = tactics::GenerateUrbanMap(static_cast<uint32_t>(m["seed"].AsNumber()));
+    scene = tactics::GenerateMapByKind(static_cast<uint32_t>(m["seed"].AsNumber()),
+                                       m["map"].IsString() ? m["map"].AsString() : "");
     tactics::ApplySpawnHints(&scene);  // Same corner spawns as the server (#226).
+    scene.flag.enabled = m["ctf"].IsBool() && m["ctf"].AsBool();
     game_->Reset(scene);
   }
   playback_.reset();

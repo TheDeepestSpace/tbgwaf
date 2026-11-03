@@ -106,6 +106,7 @@ inline bool LoadRoom(WsClient& control, const Scenario& scenario, const std::str
   load.Set("room", room);
   load.Set("scene", scenario.sceneSpec);
   load.Set("friendly_fire", Json(scenario.friendlyFire));
+  load.Set("figure_overlap", Json(scenario.rejectFigureOverlap));
   if (!scenario.shotRolls.empty()) {
     Json rolls{Json::Array{}};
     for (float r : scenario.shotRolls) rolls.Push(Json(static_cast<double>(r)));

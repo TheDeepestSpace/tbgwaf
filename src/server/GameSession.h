@@ -18,16 +18,18 @@ namespace tactics::server {
 // and the WebSocket layer stays a thin pipe.
 class GameSession {
  public:
-  explicit GameSession(uint32_t seed);
+  explicit GameSession(uint32_t seed, std::string mapKind = "", bool ctf = false);
   // A match on a fixed, explicitly built scene (test control tap); `new_match`
   // restarts on the same scene.
   explicit GameSession(const Scene& scene);
 
   // Test knobs (control tap): the friendly-fire flag and pinned shot rolls
   // (consumed in resolution order, repeating when exhausted; empty = seeded RNG).
-  void ConfigureForTest(bool friendlyFire, std::vector<float> shotRolls);
+  void ConfigureForTest(bool friendlyFire, bool figureOverlapCheck, std::vector<float> shotRolls);
 
   uint32_t seed() const { return seed_; }
+  const std::string& mapKind() const { return mapKind_; }
+  bool ctf() const { return ctf_; }
   const GameLogic& game() const { return game_; }
 
   struct Result {
@@ -76,6 +78,8 @@ class GameSession {
   net::Json StateBody(std::optional<Team> viewer) const;  // nullopt: unfiltered.
 
   uint32_t seed_;
+  std::string mapKind_;  // See GenerateMapByKind; "" = default city.
+  bool ctf_ = false;     // Capture the Flag objective on generated maps.
   std::optional<Scene> fixedScene_;
   GameLogic game_;
   std::array<bool, 2> ready_{false, false};

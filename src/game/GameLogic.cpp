@@ -39,6 +39,48 @@ float MoveCost(const std::vector<glm::vec3>& path, const std::vector<PathRide>& 
   return cost;
 }
 
+// Where a figure following `path` (rides priced like MoveCost) is `t` seconds
+// into the round; it stands at the path's end afterwards.
+glm::vec3 PathPositionAt(const std::vector<glm::vec3>& path, const std::vector<PathRide>& rides,
+                         float runSpeed, float t) {
+  if (path.empty()) return glm::vec3(0.0f);
+  float budget = t * runSpeed;
+  for (size_t i = 0; i + 1 < path.size(); ++i) {
+    const float length = glm::distance(path[i], path[i + 1]);
+    const float cost = RideAtSegment(rides, i) ? length * constants::kZiplineCostFactor : length;
+    if (cost > budget) return cost > 1e-6f ? glm::mix(path[i], path[i + 1], budget / cost) : path[i];
+    budget -= cost;
+  }
+  return path.back();
+}
+
+// Deterministic fixed-step sweep: do two figures, each on its own path, come
+// closer than two agent radii (and overlap vertically) at the same time?
+// Pairs that already overlap at t = 0 are ignored (nothing to be done).
+constexpr float kOverlapStep = 1.0f / 40.0f;
+// Safety margin added to the reach field's blocker radius over the sweep's
+// two-agent-radii threshold, absorbing the field's coarser space-time
+// sampling so a route the field accepts also passes the 1/40 s sweep.
+constexpr float kDodgeMargin = 0.1f;
+bool FiguresClose(const glm::vec3& a, const glm::vec3& b) {
+  return glm::length(glm::vec2(a.x - b.x, a.z - b.z)) < 2.0f * constants::kAgentRadius &&
+         std::abs(a.y - b.y) < constants::kUnitHeight;
+}
+bool PathsOverlap(const std::vector<glm::vec3>& pathA, const std::vector<PathRide>& ridesA,
+                  float speedA, const std::vector<glm::vec3>& pathB,
+                  const std::vector<PathRide>& ridesB, float speedB) {
+  auto Close = FiguresClose;
+  if (Close(PathPositionAt(pathA, ridesA, speedA, 0.0f), PathPositionAt(pathB, ridesB, speedB, 0.0f))) {
+    return false;
+  }
+  for (float t = kOverlapStep; t <= constants::kRoundDuration + 1e-4f; t += kOverlapStep) {
+    if (Close(PathPositionAt(pathA, ridesA, speedA, t), PathPositionAt(pathB, ridesB, speedB, t))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Every place that rewrites a plan's legs keeps the parallel ride lists in step.
 void ClearPlannedMove(PlannedAction* plan) {
   plan->movePath.clear();
@@ -532,6 +574,9 @@ bool GameLogic::ImportTeamPlans(const GameSnapshot& snap, Team team) {
     if (unit->team != team) continue;
     ApplyPlan(u, unit);
   }
+  // Imported plans move the blockers the frontier was computed against; a
+  // player mid-move-planning sees the allowed range update (issue #267).
+  if (mode_ == InputMode::AwaitingMoveDestination) RefreshMoveFrontier();
   return true;
 }
 
@@ -704,6 +749,63 @@ const Unit* GameLogic::FindUnit(int id) const {
   return nullptr;
 }
 
+bool GameLogic::PathOverlapsFigure(const Unit& mover, const std::vector<glm::vec3>& path,
+                                   const std::vector<PathRide>& rides) const {
+  if (!overlapCheckEnabled_) return false;
+  for (const Unit& other : scene_.units) {
+    if (other.id == mover.id || !other.alive) continue;
+    // A teammate with no plan yet is expected to move off; it is checked
+    // when it is planned (and again by CanCommitRound).
+    if (other.team == mover.team && other.plan.type == PlannedActionType::None) continue;
+    // A figure with a planned move walks it this round; anything else stands.
+    const bool walking = other.plan.type == PlannedActionType::Move && other.plan.movePath.size() >= 2;
+    const std::vector<glm::vec3> standing{other.position};
+    if (PathsOverlap(path, rides, mover.runSpeed, walking ? other.plan.movePath : standing,
+                     walking ? other.plan.moveRides : std::vector<PathRide>{}, other.runSpeed)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+MovingBlockers GameLogic::BuildMovingBlockers(const Unit& mover, const glm::vec3& origin,
+                                              float distanceOffset) const {
+  MovingBlockers blockers;
+  blockers.dt = kOverlapStep;
+  blockers.speed = mover.runSpeed;
+  blockers.distanceOffset = distanceOffset;
+  blockers.radius = 2.0f * constants::kAgentRadius + kDodgeMargin;
+  blockers.height = constants::kUnitHeight;
+  if (!overlapCheckEnabled_) return blockers;
+  const int samples = static_cast<int>(std::ceil(constants::kRoundDuration / kOverlapStep)) + 1;
+  for (const Unit& other : scene_.units) {
+    if (other.id == mover.id || !other.alive) continue;
+    if (other.team == mover.team && other.plan.type == PlannedActionType::None) continue;
+    if (FiguresClose(origin, other.position)) continue;  // Already overlapping at t = 0.
+    const bool walking =
+        other.plan.type == PlannedActionType::Move && other.plan.movePath.size() >= 2;
+    std::vector<glm::vec3> trajectory(samples, other.position);
+    if (walking) {
+      for (int i = 0; i < samples; ++i) {
+        trajectory[i] = PathPositionAt(other.plan.movePath, other.plan.moveRides,
+                                       other.runSpeed, i * kOverlapStep);
+      }
+    }
+    blockers.trajectories.push_back(std::move(trajectory));
+  }
+  return blockers;
+}
+
+bool GameLogic::HasPlanOverlap() const {
+  for (const Unit& unit : scene_.units) {
+    if (!unit.alive || unit.plan.type != PlannedActionType::Move || unit.plan.movePath.size() < 2) {
+      continue;
+    }
+    if (PathOverlapsFigure(unit, unit.plan.movePath, unit.plan.moveRides)) return true;
+  }
+  return false;
+}
+
 bool GameLogic::CanCommitRound() const {
   if (mode_ == InputMode::Executing || mode_ == InputMode::GameOver) return false;
   bool anyLiving = false;
@@ -712,7 +814,7 @@ bool GameLogic::CanCommitRound() const {
     anyLiving = true;
     if (unit.plan.type == PlannedActionType::None) return false;
   }
-  return anyLiving;
+  return anyLiving && !HasPlanOverlap();
 }
 
 void GameLogic::ClickUnit(int unitId, Team byTeam) {
@@ -788,6 +890,13 @@ void GameLogic::ClickGround(const glm::vec3& point, Team byTeam) {
   // reach as far as the figure can run in one round (a zipline ride costs
   // ZiplineRideCost of that, not its length).
   if (!PlanLeg(*mover, MoveChainEnd(), point, &path, &rides)) return;
+  // Only the first leg runs this round; chained legs run in later rounds.
+  // A first-leg path that would meet another figure is re-routed around the
+  // other figures' planned movements in space and time; only a click with no
+  // such route (e.g. onto a spot a figure will occupy) is ignored.
+  if (!chaining && PathOverlapsFigure(*mover, path, rides)) {
+    if (!rides.empty() || !PlanDodgeLeg(*mover, point, &path)) return;
+  }
 
   // NavMesh::FindPath always returns at least [start, goal] on success.
   if (chaining) {
@@ -1068,6 +1177,7 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
 }
 
 void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
+  movePreviewBlocked_ = false;
   movePreviewPath_.clear();
   movePreviewRides_.clear();
   movePreviewValid_ = false;
@@ -1075,6 +1185,18 @@ void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
   const Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->team != byTeam) return;
   movePreviewValid_ = PlanLeg(*mover, MoveChainEnd(), point, &movePreviewPath_, &movePreviewRides_);
+  const bool chaining = mover->plan.type == PlannedActionType::Move && !mover->plan.movePath.empty();
+  if (movePreviewValid_ && !chaining &&
+      PathOverlapsFigure(*mover, movePreviewPath_, movePreviewRides_)) {
+    // Preview the same re-route a click would take; blocked only when none exists.
+    std::vector<glm::vec3> dodge;
+    if (movePreviewRides_.empty() && PlanDodgeLeg(*mover, point, &dodge)) {
+      movePreviewPath_ = std::move(dodge);
+    } else {
+      movePreviewValid_ = false;
+      movePreviewBlocked_ = true;
+    }
+  }
 }
 
 // Any manual touch of a figure's plan drops its queued multi-round route.
@@ -1086,6 +1208,10 @@ void GameLogic::ClearQueuedLegs(std::optional<int> unitId) {
 }
 
 // Frontier of where the next leg can reach: built around the chain end.
+// For the first leg (the one that walks this round) it is computed against
+// the other figures' planned movements, so the displayed boundary already
+// accounts for where everyone else will be and when (issue #267); chained
+// legs run in later rounds and get the plain field.
 void GameLogic::RefreshMoveFrontier() {
   moveFrontier_ = ReachField();
   ziplineFrontiers_.clear();
@@ -1095,7 +1221,13 @@ void GameLogic::RefreshMoveFrontier() {
   if (const Unit* mover = FindUnit(selectedUnitId_.value_or(-1))) {
     const glm::vec3 origin = MoveChainEnd();
     EnsureNavMeshFor(*mover, origin);
-    moveFrontier_ = navMesh_.ComputeReachField(origin, mover->MoveBudget());
+    const bool firstLeg =
+        mover->plan.type != PlannedActionType::Move || mover->plan.movePath.empty();
+    const MovingBlockers blockers = BuildMovingBlockers(*mover, origin, 0.0f);
+    moveFrontier_ = navMesh_.ComputeReachField(
+        origin, mover->MoveBudget(), 0.25f,
+        firstLeg && !blockers.trajectories.empty() ? &blockers : nullptr);
+    moveFrontier_.revision = ++frontierRevision_;
     BuildZiplineFrontiers(*mover, origin);
   }
 }
@@ -1165,7 +1297,16 @@ void GameLogic::BuildZiplineFrontiers(const Unit& mover, const glm::vec3& origin
       frontier.exit = exit;
       frontier.walkCost = walkCost;
       frontier.rideCost = rideCost;
-      frontier.field = mesh.ComputeReachField(exit, remaining);
+      // The onward walk starts walkCost + rideCost into the mover's budget;
+      // the field dodges the other figures' plans from that offset (the
+      // entry walk itself is still validated by PathOverlapsFigure).
+      const bool firstLeg =
+          mover.plan.type != PlannedActionType::Move || mover.plan.movePath.empty();
+      const MovingBlockers blockers = BuildMovingBlockers(mover, origin, walkCost + rideCost);
+      frontier.field = mesh.ComputeReachField(
+          exit, remaining, 0.25f,
+          firstLeg && !blockers.trajectories.empty() ? &blockers : nullptr);
+      frontier.field.revision = ++frontierRevision_;
       ziplineFrontiers_.push_back(std::move(frontier));
       ziplineMeshes_.push_back(std::move(mesh));
     }
@@ -1199,6 +1340,97 @@ bool GameLogic::PlanLeg(const Unit& mover, const glm::vec3& from, const glm::vec
     path->insert(path->end(), walkOut.begin(), walkOut.end());
   }
   return std::isfinite(bestCost);
+}
+
+// Issue #267: time-aware re-route for a first-leg walk. The move frontier is
+// computed against the other figures' planned trajectories, so its parent
+// grid encodes, per ground node, a route that dodges them with the right
+// timing (the mover walks at run speed from t = 0; it cannot wait). Extract
+// the route to the node nearest `goal`, pull it taut as far as static
+// obstacles and the timing allow, and accept the first candidate the
+// authoritative sweep (PathOverlapsFigure) and budget admit.
+bool GameLogic::PlanDodgeLeg(const Unit& mover, const glm::vec3& goal,
+                             std::vector<glm::vec3>* outPath) {
+  outPath->clear();
+  const ReachField& f = moveFrontier_;
+  // Only a field computed against moving blockers encodes dodge timing.
+  if (f.nx == 0 || f.parent.empty() || f.endpointBlocked.empty()) return false;
+  const glm::vec3 origin = MoveChainEnd();
+
+  // Snap the click to the nearest reachable ground node (grid routes only;
+  // elevated walk-surface cells carry no parent chain). Kept barely above
+  // the grid's half-diagonal so a click inside a carved-out cell is
+  // rejected rather than quietly displaced outside it.
+  constexpr float kSnap = 0.35f;
+  const int gx = static_cast<int>(std::lround((goal.x - f.minX) / f.step));
+  const int gz = static_cast<int>(std::lround((goal.z - f.minZ) / f.step));
+  const int r = static_cast<int>(std::ceil(kSnap / f.step));
+  int best = -1;
+  float bestD = kSnap;
+  for (int iz = gz - r; iz <= gz + r; ++iz) {
+    for (int ix = gx - r; ix <= gx + r; ++ix) {
+      if (!f.Reached(ix, iz)) continue;
+      const int idx = iz * f.nx + ix;
+      if (f.parent[idx] < 0 && f.dist[idx] > 0.0f) continue;
+      const glm::vec3 node = f.Node(ix, iz);
+      const float d = glm::length(glm::vec2(node.x - goal.x, node.z - goal.z));
+      if (d < bestD) {
+        bestD = d;
+        best = idx;
+      }
+    }
+  }
+  if (best < 0) return false;
+
+  // Walk the parent chain back to the source, in flat space for the lift below.
+  std::vector<glm::vec2> lattice;
+  bool reachedSource = false;
+  for (int node = best, guard = f.nx * f.nz; node >= 0 && guard-- > 0; node = f.parent[node]) {
+    lattice.emplace_back(f.minX + (node % f.nx) * f.step, f.minZ + (node / f.nx) * f.step);
+    if (f.dist[node] <= 0.0f) {
+      reachedSource = true;
+      break;
+    }
+  }
+  if (!reachedSource) return false;
+  std::reverse(lattice.begin(), lattice.end());
+  lattice.front() = glm::vec2(origin.x, origin.z);  // The source node, minus grid rounding.
+  const glm::vec2 goalXZ(goal.x, goal.z);
+  const bool goalAppendable =
+      bestD > 1e-3f && navMesh_.GroundSegmentTraversable(lattice.back(), goalXZ);
+
+  // Pull taut (shortcuts past static obstacles only), lift onto the terrain,
+  // then let the sweep judge the changed timing. Failing that, retry with
+  // ever shorter shortcuts down to the raw lattice route, whose timing the
+  // field already validated up to sampling error; failing even that (e.g.
+  // the exact goal hop busts the budget), retry ending at the snapped node.
+  const float budget = mover.MoveBudget();
+  const auto tryCandidate = [&](size_t lookahead, bool includeGoal) {
+    std::vector<glm::vec2> points = lattice;
+    if (includeGoal && goalAppendable) points.push_back(goalXZ);
+    std::vector<glm::vec3> path{glm::vec3(points.front().x, 0.0f, points.front().y)};
+    size_t i = 0;
+    while (i + 1 < points.size()) {
+      size_t j = std::min(points.size() - 1, i + lookahead);
+      while (j > i + 1 && !navMesh_.GroundSegmentTraversable(points[i], points[j])) --j;
+      path.emplace_back(points[j].x, 0.0f, points[j].y);
+      i = j;
+    }
+    navMesh_.LiftGroundPathOntoTerrain(&path);
+    float length = 0.0f;
+    for (size_t k = 0; k + 1 < path.size(); ++k) length += glm::distance(path[k], path[k + 1]);
+    if (length > budget + 1e-3f || PathOverlapsFigure(mover, path, {})) return false;
+    *outPath = std::move(path);
+    return true;
+  };
+  for (const bool includeGoal : {true, false}) {
+    for (const size_t lookahead : {size_t{48}, size_t{12}, size_t{4}, size_t{1}}) {
+      if (tryCandidate(lookahead, includeGoal)) return true;
+    }
+    if (!goalAppendable) break;  // The two passes were identical.
+  }
+  outPath->clear();
+  return false;
 }
 
 void GameLogic::ChooseMove() {

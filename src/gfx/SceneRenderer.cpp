@@ -4412,10 +4412,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     const tactics::ReachField& f = *overlays.moveFrontier;
     const glm::vec2 origin(f.minX, f.minZ);
     if (frontierKeyField_ != &f || frontierKeyOrigin_ != origin ||
-        frontierKeyBudget_ != f.budget || frontierKeyThermal_ != thermalKey) {
+        frontierKeyBudget_ != f.budget || frontierKeyRevision_ != f.revision ||
+        frontierKeyThermal_ != thermalKey) {
       frontierKeyField_ = &f;
       frontierKeyOrigin_ = origin;
       frontierKeyBudget_ = f.budget;
+      frontierKeyRevision_ = f.revision;
       frontierKeyThermal_ = thermalKey;
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
@@ -4451,6 +4453,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (const auto& fr : frontiers) {
       key.emplace_back(fr.field.minX, fr.field.minZ, fr.field.budget,
                        static_cast<float>(fr.zipline));
+      // Contents change with the other figures' plans even at a fixed window.
+      key.emplace_back(static_cast<float>(fr.field.revision), 0.0f, 0.0f, 0.0f);
     }
     if (key != ziplineKey_) {
       ziplineKey_ = key;

@@ -48,9 +48,22 @@ struct ReachField {
   // World-space surface height selected for each reached node. This keeps a
   // ramp/deck frontier on its own layer instead of snapping it to terrain.
   std::vector<float> surfaceY;
+  // Predecessor of each ground node on its shortest route from the source
+  // (-1 for the source, unreached nodes, and nodes priced by the elevated
+  // walk-surface pass, which doesn't route over this grid).
+  std::vector<int> parent;
+  // Only filled when the field was computed against MovingBlockers: nodes a
+  // mover may pass through in time but not stop on, because some blocker
+  // comes too close after the mover would have arrived (it stands at its
+  // destination for the rest of the round). Empty otherwise.
+  std::vector<char> endpointBlocked;
+  // Bumped by the owner each recompute, so renderers caching geometry by
+  // (origin, budget) notice content-only changes (blockers moved).
+  int revision = 0;
 
   bool Reached(int ix, int iz) const {
-    return ix >= 0 && iz >= 0 && ix < nx && iz < nz && dist[iz * nx + ix] <= budget;
+    if (ix < 0 || iz < 0 || ix >= nx || iz >= nz || dist[iz * nx + ix] > budget) return false;
+    return endpointBlocked.empty() || !endpointBlocked[iz * nx + ix];
   }
   float Dist(int ix, int iz) const { return dist[iz * nx + ix]; }
   glm::vec3 Node(int ix, int iz) const {
@@ -60,6 +73,26 @@ struct ReachField {
                         : 0.0f;
     return glm::vec3(minX + ix * step, y, minZ + iz * step);
   }
+};
+
+// Time-dependent circular blockers for ComputeReachField (issue #267): the
+// other figures' already-planned movements. Blocker `k` stands at
+// trajectories[k][round(t / dt)] at time t (clamped to the last sample --
+// each figure stands at its path's end for the rest of the round). A mover
+// walking at `speed` from the field's source is at path distance d at
+// t = (distanceOffset + d) / speed; `distanceOffset` prices any travel spent
+// before entering the field (e.g. walking to and riding a zipline). While
+// routing, a step is rejected when it would put the mover within `radius`
+// (XZ) and `height` (Y) of a blocker at that moment; reached nodes are
+// additionally marked ReachField::endpointBlocked when a blocker passes that
+// close at any later time in the round.
+struct MovingBlockers {
+  float dt = 0.025f;
+  float speed = 1.0f;
+  float distanceOffset = 0.0f;
+  float radius = 1.0f;
+  float height = 2.0f;
+  std::vector<std::vector<glm::vec3>> trajectories;
 };
 
 // Free-space navmesh for a flat ground plane with axis-aligned box obstacles,
@@ -127,7 +160,22 @@ class NavMesh {
   // Dijkstra flood fill over ground-level free space from `start`, covering
   // everything within `budget` path distance. Climb-top surfaces are not
   // included. Returns an empty field if `start` isn't on walkable ground.
-  ReachField ComputeReachField(const glm::vec3& start, float budget, float step = 0.25f) const;
+  // With `blockers`, ground routing additionally dodges the given moving
+  // figures in time (see MovingBlockers); the elevated walk-surface pass only
+  // applies the endpoint check, not route-through blocking.
+  ReachField ComputeReachField(const glm::vec3& start, float budget, float step = 0.25f,
+                               const MovingBlockers* blockers = nullptr) const;
+
+  // True if the straight ground segment a -> b clears every padded obstacle
+  // and never crosses terrain steeper than the walkable slope.
+  bool GroundSegmentTraversable(glm::vec2 a, glm::vec2 b) const {
+    return GroundSegmentClear(a, b) && GroundSegmentWalkable(a, b);
+  }
+
+  // Lifts a flat-space ground path (y == 0 waypoints) onto the terrain
+  // heightfield, densifying segments so linear interpolation tracks the
+  // ground (public for callers assembling their own ground routes).
+  void LiftGroundPathOntoTerrain(std::vector<glm::vec3>* outPath) const;
 
   const std::vector<NavCell>& Cells() const { return cells_; }
   const std::vector<WalkSurface>& WalkSurfaces() const { return walkSurfaces_; }
@@ -153,7 +201,6 @@ class NavMesh {
   // True if the XZ segment a -> b clears every padded obstacle footprint.
   bool GroundSegmentClear(glm::vec2 a, glm::vec2 b) const;
   void AddLowDeckBlockers(float agentRadius);
-  void LiftGroundPathOntoTerrain(std::vector<glm::vec3>* outPath) const;
   bool FindPolygonGroundPath(glm::vec3 start, glm::vec3 goal,
                              std::vector<glm::vec3>* outPath) const;
   bool FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface,

@@ -1,0 +1,43 @@
+name: figure_overlap_reroute
+description: >
+  Showcases issue #267 (figures may not overlap while walking). Blue0 and red1 plan head-on
+  walks along nearly the same lane, passing each other; instead of rejecting the click, planning
+  re-routes each walk around the other's prepared movement in space and time. Blue2 stands
+  in the middle of the lane and blue3 walks past it, detouring around the standing figure.
+  The per-turn goldens show the time-aware movement boundary (holes where figures stand or
+  will still be) and the detoured paths. Everyone must end exactly on their destination.
+
+camera:
+  target: [0, 0]
+  zoom: 22
+
+map:
+  obstacles: []
+
+units:
+  - {id: 0, team: blue, position: [-5, 0, -0.4], facing_degrees: 0}
+  - {id: 1, team: red, position: [5, 0, 0.4], facing_degrees: 180}
+  - {id: 2, team: blue, position: [0, 0, 8], facing_degrees: 0}
+  - {id: 3, team: blue, position: [-4, 0, 8], facing_degrees: 0}
+
+script:
+  - action: move
+    actor: 0
+    destination: [3, 0, -0.4]
+    comment: Passes red1 head-on; the route sidesteps red1's plan
+  - action: move
+    actor: 1
+    destination: [-3, 0, 0.4]
+  - action: pass
+    actor: 2
+    comment: Planned first; an unplanned teammate is assumed to move off
+  - action: move
+    actor: 3
+    destination: [4, 0, 8]
+    comment: Walks the lane blue2 is standing in; detours around it
+  - action: commit
+  - assert: {unit: 0, position: [3, 0, -0.4], tolerance: 0.1}
+  - assert: {unit: 1, position: [-3, 0, 0.4], tolerance: 0.1}
+  - assert: {unit: 2, position: [0, 0, 8], tolerance: 0.05}
+  - assert: {unit: 3, position: [4, 0, 8], tolerance: 0.1}
+  - assert: {round: 2}

@@ -23,12 +23,28 @@ constexpr int kSpectatorSlot = 2;
 
 }  // namespace
 
-GameSession::GameSession(uint32_t seed) : seed_(seed), game_(GenerateUrbanMap(seed)) {}
+namespace {
+// Seed-generated matches spawn at the map-suggested opposite corners (#226).
+Scene GenerateMatchScene(uint32_t seed, const std::string& kind, bool ctf) {
+  Scene scene = GenerateMapByKind(seed, kind);
+  ApplySpawnHints(&scene);
+  scene.flag.enabled = ctf;
+  return scene;
+}
+}  // namespace
+
+GameSession::GameSession(uint32_t seed, std::string mapKind, bool ctf)
+    : seed_(seed),
+      mapKind_(std::move(mapKind)),
+      ctf_(ctf),
+      game_(GenerateMatchScene(seed, mapKind_, ctf_)) {}
 
 GameSession::GameSession(const Scene& scene) : seed_(0), fixedScene_(scene), game_(scene) {}
 
-void GameSession::ConfigureForTest(bool friendlyFire, std::vector<float> shotRolls) {
+void GameSession::ConfigureForTest(bool friendlyFire, bool figureOverlapCheck,
+                                   std::vector<float> shotRolls) {
   game_.SetFriendlyFireEnabled(friendlyFire);
+  game_.SetFigureOverlapCheckEnabled(figureOverlapCheck);
   if (shotRolls.empty()) return;
   game_.SetShotRollSource([rolls = std::move(shotRolls), next = size_t{0}]() mutable {
     return rolls[next++ % rolls.size()];
@@ -52,7 +68,7 @@ GameSession::Result GameSession::Apply(Team team, const net::Action& action, uin
   if (action.kind == net::ActionKind::NewMatch) {
     if (game_.Mode() != InputMode::GameOver) return {false, "match is still running"};
     seed_ = newSeed;
-    game_.Reset(fixedScene_ ? *fixedScene_ : GenerateUrbanMap(seed_));
+    game_.Reset(fixedScene_ ? *fixedScene_ : GenerateMatchScene(seed_, mapKind_, ctf_));
     ready_ = {false, false};
     return result;
   }

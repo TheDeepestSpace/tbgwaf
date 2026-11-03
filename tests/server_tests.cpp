@@ -878,7 +878,12 @@ void TestRevealHistoryShowsBothTeams() {
   CHECK(!client.hasReveal());
   client.OnMessage(reveal.Dump());
   CHECK(client.hasReveal());
-  const auto history = client.TakeRevealedHistory(game.ExportState());
+  // The client's own start snapshot is fogged: enemies are hidden in it.
+  GameSnapshot fogged = game.ExportState();
+  for (auto& u : fogged.units) {
+    if (u.id >= 3) u.position = glm::vec3(net::kHiddenCoord, 0.0f, net::kHiddenCoord);
+  }
+  const auto history = client.TakeRevealedHistory(fogged);
   CHECK(!client.hasReveal());
   CHECK(history.has_value());
   CHECK(history->ticks.size() == 2 && history->ticks[0].label == "Start");
@@ -886,7 +891,7 @@ void TestRevealHistoryShowsBothTeams() {
   CHECK(history->frames.size() > 3);
   for (const auto& frame : history->frames) {
     CHECK(frame.snapshot.units.size() == 6);
-    for (const auto& u : frame.snapshot.units) CHECK(u.position.x < 5000.0f);  // Nobody hidden.
+    for (const auto& u : frame.snapshot.units) CHECK(u.position.x < 5000.0f);  // Nobody hidden, Start tick included.
   }
   // Both teams actually move across the replay.
   for (int id : {0, 3}) {

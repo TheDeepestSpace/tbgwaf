@@ -415,9 +415,27 @@ std::optional<RemoteClient::RevealedHistory> RemoteClient::TakeRevealedHistory(
   const Json reveal = *reveal_;
   reveal_.reset();
   RevealedHistory history;
-  history.frames.push_back({0.0f, start});
-  history.ticks.push_back({"Start", 0});
   GameSnapshot snap = start;
+  // `start` is this player's fogged view, so enemies are still hidden in it.
+  // Place them where the first unfogged round frame has them, otherwise the
+  // Start tick shows no opponents until playback moves off it.
+  for (const Json& round : reveal["rounds"].AsArray()) {
+    const Playback first = ParseRound(round);
+    if (first.frames.empty()) continue;
+    for (auto& u : snap.units) {
+      if (!IsHidden(u.position)) continue;
+      for (const Sample& x : first.frames.front().units) {
+        if (x.id != u.id) continue;
+        u.position = x.pos;
+        u.facingYaw = x.yaw;
+        u.alive = x.alive;
+        u.moving = false;
+      }
+    }
+    break;
+  }
+  history.frames.push_back({0.0f, snap});
+  history.ticks.push_back({"Start", 0});
   float time = 0.0f;
   constexpr float kStep = TurnTimeline::kCaptureInterval;
   for (const Json& round : reveal["rounds"].AsArray()) {

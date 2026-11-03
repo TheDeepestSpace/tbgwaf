@@ -61,10 +61,12 @@ struct UrbanFeatures {
   // and raised rear-door platforms. On by default; Off keeps the walls bare
   // (and adds no stoop/platform walk surfaces).
   FeatureToggle facades{FeatureMode::On, 0.5f};
+  // Visual-only trees on sidewalk-only blocks. Auto behaves like On.
+  FeatureToggle trees{FeatureMode::On, 0.5f};
 };
 
 // Name lookups for scenario YAML / env plumbing. UrbanFeatureByName takes
-// lanes/curbs/furniture/terrain/interiors/rail/facades; both return
+// lanes/curbs/furniture/terrain/interiors/rail/facades/trees; both return
 // null/false for an unknown name. ParseFeatureMode takes auto/off/on.
 FeatureToggle* UrbanFeatureByName(UrbanFeatures* features, const std::string& name);
 bool ParseFeatureMode(const std::string& text, FeatureMode* mode);

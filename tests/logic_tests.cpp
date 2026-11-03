@@ -121,6 +121,43 @@ void TestNavMeshRoutesAroundObstacle() {
   CHECK(path.size() > 2);
 }
 
+// Two diamond (45-degree) footprints with a gap between their tips. The
+// padded AABBs cover the corridor flanking the gap, but ground pathing treats
+// it as free, so the mesh cells (and the debug overlay) must cover it too.
+void TestNavMeshCellsCoverThinLedgeBetweenRotatedFootprints() {
+  auto diamond = [](float cz) {
+    Obstacle o;
+    o.bounds = AABB{glm::vec3(-3.0f, 0.0f, cz - 3.0f), glm::vec3(3.0f, 3.0f, cz + 3.0f)};
+    o.footprint = {{0.0f, cz - 3.0f}, {3.0f, cz}, {0.0f, cz + 3.0f}, {-3.0f, cz}};
+    return o;
+  };
+  // Tips at z = -1 and z = +1.
+  const std::vector<Obstacle> obstacles = {diamond(-4.0f), diamond(4.0f)};
+  NavMesh nav;
+  nav.Build(obstacles, /*mapHalfExtent=*/12.0f, /*agentRadius=*/0.4f);
+
+  const glm::vec3 start(-9.0f, 0.0f, 0.0f);
+  const glm::vec3 goal(9.0f, 0.0f, 0.0f);
+  std::vector<glm::vec3> path;
+  CHECK(nav.FindPath(start, goal, &path));
+  // Every sample of the walked path must sit inside a mesh cell.
+  for (size_t i = 0; i + 1 < path.size(); ++i) {
+    for (int k = 0; k <= 20; ++k) {
+      const glm::vec3 p = glm::mix(path[i], path[i + 1], k / 20.0f);
+      bool covered = false;
+      for (const NavCell& cell : nav.Cells()) covered |= !cell.climbTop && cell.Contains(p.x, p.z);
+      CHECK(covered);
+    }
+  }
+  // Free flank beside the gap, outside the diamonds but inside their AABBs.
+  CHECK(nav.IsWalkable(2.0f, -2.0f));
+  bool flankCovered = false;
+  for (const NavCell& cell : nav.Cells()) flankCovered |= cell.Contains(2.0f, -2.0f);
+  CHECK(flankCovered);
+  // Inside a diamond stays uncovered.
+  for (const NavCell& cell : nav.Cells()) CHECK(!cell.Contains(0.0f, -4.0f));
+}
+
 void TestNavMeshDirectPathWhenUnobstructed() {
   std::vector<AABB> obstacles = {
       AABB{glm::vec3(-2.0f, 0.0f, 5.0f), glm::vec3(2.0f, 2.0f, 9.0f)},
@@ -577,6 +614,124 @@ void MakePassive(GameLogic& game) {
   game.SetPlaybook(Team::Red, SquadPlaybook::Passive());
 }
 
+// Issue #267: planned walks must not make figures overlap. Where a route
+// around the other figures' planned movements exists, planning re-routes
+// onto it; only destinations with no valid route are rejected.
+void TestMovePlansRejectFigureOverlap() {
+  // A destination another figure stops on stays rejected outright: wherever
+  // the mover routes, both would stand there once the round ends.
+  {
+    GameLogic game(LegacyScene());
+    MakePassive(game);
+    game.ClickUnit(1, Team::Blue);
+    game.ChooseMove();
+    game.ClickGround(glm::vec3(0.0f, 0.0f, 0.0f), Team::Blue);
+    game.FinishMovePlan();
+    CHECK(game.FindUnit(1)->plan.type == PlannedActionType::Move);
+
+    game.ClickUnit(4, Team::Red);
+    game.ChooseMove();
+    game.HoverGround(glm::vec3(0.0f, 0.0f, 0.0f), Team::Red);
+    CHECK(!game.MovePreviewValid());
+    CHECK(game.MovePreviewBlockedByFigure());
+    game.ClickGround(glm::vec3(0.0f, 0.0f, 0.0f), Team::Red);
+    CHECK(game.FindUnit(4)->plan.type == PlannedActionType::None);
+    game.HoverGround(glm::vec3(4.0f, 0.0f, 0.0f), Team::Red);
+    CHECK(game.MovePreviewValid());
+    CHECK(!game.MovePreviewBlockedByFigure());
+    game.ClickGround(glm::vec3(4.0f, 0.0f, 0.0f), Team::Red);
+    CHECK(game.FindUnit(4)->plan.type == PlannedActionType::Move);
+    CHECK(!game.HasPlanOverlap());
+  }
+  // A figure standing still: destinations beside it stay rejected, while a
+  // destination past it now plans a detour around it instead of failing.
+  {
+    GameLogic game(LegacyScene());
+    MakePassive(game);
+    game.ClickUnit(2, Team::Blue);  // Unit 2 stands (passes) at (-8, 4).
+    game.ChoosePass();
+    game.ClickUnit(1, Team::Blue);  // At (-8, 0).
+    game.ChooseMove();
+    game.ClickGround(glm::vec3(-8.0f, 0.0f, 3.5f), Team::Blue);  // 0.5 from the stander.
+    CHECK(game.FindUnit(1)->plan.type == PlannedActionType::None);
+    game.HoverGround(glm::vec3(-8.0f, 0.0f, 6.0f), Team::Blue);
+    CHECK(game.MovePreviewValid());  // Preview already shows the detour.
+    game.ClickGround(glm::vec3(-8.0f, 0.0f, 6.0f), Team::Blue);
+    const Unit* mover = game.FindUnit(1);
+    CHECK(mover->plan.type == PlannedActionType::Move);
+    CHECK(!game.HasPlanOverlap());
+    // The leg detours around unit 2 rather than running straight through it.
+    float length = 0.0f;
+    for (size_t i = 0; i + 1 < mover->plan.movePath.size(); ++i) {
+      length += glm::distance(mover->plan.movePath[i], mover->plan.movePath[i + 1]);
+    }
+    CHECK(length > 6.05f);
+    CHECK(glm::distance(mover->plan.movePath.back(), glm::vec3(-8.0f, 0.0f, 6.0f)) < 0.7f);
+  }
+  // Two figures walking head-on along the same line: the second plan
+  // sidesteps the oncoming walker in time instead of being rejected.
+  {
+    GameLogic game(LegacyScene());
+    MakePassive(game);
+    game.ClickUnit(2, Team::Blue);  // From (-8, 4) down the lane unit 1 walks up.
+    game.ChooseMove();
+    game.ClickGround(glm::vec3(-8.0f, 0.0f, 0.5f), Team::Blue);
+    game.FinishMovePlan();
+    CHECK(game.FindUnit(2)->plan.type == PlannedActionType::Move);
+    game.ClickUnit(1, Team::Blue);  // At (-8, 0), heading to (-8, 8).
+    game.ChooseMove();
+    game.ClickGround(glm::vec3(-8.0f, 0.0f, 8.0f), Team::Blue);
+    CHECK(game.FindUnit(1)->plan.type == PlannedActionType::Move);
+    CHECK(!game.HasPlanOverlap());
+  }
+}
+
+// Issue #267 rework: the move frontier itself accounts for the other
+// figures' planned movements, carving out what stays occupied and keeping
+// what is vacated in time.
+void TestMoveFrontierAccountsForPlannedFigures() {
+  const auto nodeAt = [](const ReachField& f, float x, float z) {
+    return std::make_pair(static_cast<int>(std::lround((x - f.minX) / f.step)),
+                          static_cast<int>(std::lround((z - f.minZ) / f.step)));
+  };
+  // A standing figure carves a hole: its spot is no destination, but ground
+  // past it stays reachable by routing around.
+  {
+    GameLogic game(LegacyScene());
+    MakePassive(game);
+    game.ClickUnit(2, Team::Blue);  // Stands (passes) at (-8, 4).
+    game.ChoosePass();
+    game.ClickUnit(1, Team::Blue);  // At (-8, 0).
+    game.ChooseMove();
+    const ReachField* f = game.MoveFrontier();
+    CHECK(f != nullptr);
+    const auto onStander = nodeAt(*f, -8.0f, 4.0f);
+    CHECK(!f->Reached(onStander.first, onStander.second));
+    const auto past = nodeAt(*f, -8.0f, 6.0f);
+    CHECK(f->Reached(past.first, past.second));
+    CHECK(f->Dist(past.first, past.second) > 6.0f);  // Routed around, not through.
+  }
+  // A figure walking away vacates its spot in time: the same cell is a valid
+  // destination because the mover only gets there after the figure has left.
+  {
+    GameLogic game(LegacyScene());
+    MakePassive(game);
+    game.ClickUnit(2, Team::Blue);
+    game.ChooseMove();
+    game.ClickGround(glm::vec3(-8.0f, 0.0f, 12.0f), Team::Blue);  // Walks off +z.
+    game.FinishMovePlan();
+    game.ClickUnit(1, Team::Blue);
+    game.ChooseMove();
+    const ReachField* f = game.MoveFrontier();
+    CHECK(f != nullptr);
+    const auto vacated = nodeAt(*f, -8.0f, 4.0f);
+    CHECK(f->Reached(vacated.first, vacated.second));
+    game.ClickGround(glm::vec3(-8.0f, 0.0f, 4.0f), Team::Blue);
+    CHECK(game.FindUnit(1)->plan.type == PlannedActionType::Move);
+    CHECK(!game.HasPlanOverlap());
+  }
+}
+
 void TestRoundExecutesBothTeamsMovesConcurrently() {
   GameLogic game(LegacyScene());
   MakePassive(game);
@@ -777,7 +932,8 @@ void TestClickChainsLegsAcrossRounds() {
 
   // Each in-reach click adds a leg from the previous leg's end; the figure
   // stays selected until the chain is finished.
-  const glm::vec3 first = start + glm::vec3(budget * 0.9f, 0.0f, 0.0f);
+  // Aimed clear of the Red figure standing on this row (issue #267).
+  const glm::vec3 first = start + glm::vec3(10.0f, 0.0f, -6.0f);
   game.ClickGround(first, Team::Blue);
   CHECK(mover->plan.type == tactics::PlannedActionType::Move);
   CHECK(mover->plan.queuedLegs.empty());
@@ -814,7 +970,7 @@ void TestManualReplanClearsQueuedLegs() {
     game.ChooseMove();
     const glm::vec3 start = game.FindUnit(0)->position;
     const float budget = game.FindUnit(0)->MoveBudget();
-    game.ClickGround(start + glm::vec3(budget * 0.9f, 0.0f, 0.0f), Team::Blue);
+    game.ClickGround(start + glm::vec3(10.0f, 0.0f, -6.0f), Team::Blue);  // Clear of the Red figure on this row.
     game.ClickGround(game.MoveChainEnd() + glm::vec3(0.0f, 0.0f, budget * 0.9f), Team::Blue);
     CHECK(!game.FindUnit(0)->plan.queuedLegs.empty());
     game.FinishMovePlan();
@@ -842,7 +998,7 @@ void TestQueuedLegsSnapshotRoundTrip() {
   game.ChooseMove();
   const glm::vec3 start = game.FindUnit(0)->position;
   const float budget = game.FindUnit(0)->MoveBudget();
-  game.ClickGround(start + glm::vec3(budget * 0.9f, 0.0f, 0.0f), Team::Blue);
+  game.ClickGround(start + glm::vec3(10.0f, 0.0f, -6.0f), Team::Blue);  // Clear of the Red figure on this row.
   game.ClickGround(game.MoveChainEnd() + glm::vec3(0.0f, 0.0f, budget * 0.9f), Team::Blue);
   game.ClickGround(game.MoveChainEnd() + glm::vec3(-budget * 0.5f, 0.0f, 0.0f), Team::Blue);
   game.FinishMovePlan();
@@ -1176,6 +1332,7 @@ void TestGameLogicMoveCanClimbOntoObstacle() {
 // lane. Commits the round, leaving the move animating.
 void StartRed4WalkThroughBlue1Lane(GameLogic& game, const glm::vec3& destination) {
   game.FindUnit(4)->position = glm::vec3(-9.5f, 0.0f, 0.0f);
+  game.SetFigureOverlapCheckEnabled(false);  // The walk deliberately passes through blue1.
   for (int id : {0, 1, 2}) {
     game.ClickUnit(id, Team::Blue);
     game.ChoosePass();
@@ -1206,6 +1363,7 @@ void SetStationaryShoot(GameLogic& game, Team team) {
 float RunRed4Walk(const SquadPlaybook& redPb, bool* red4Alive, bool* blue1Alive,
                   bool blueShoots) {
   GameLogic game(LegacyScene());
+  game.SetFigureOverlapCheckEnabled(false);  // The walk deliberately passes through blue1.
   game.SetPlaybook(Team::Red, redPb);
   if (blueShoots) SetStationaryShoot(game, Team::Blue);
   const glm::vec3 destination(0.0f, 0.0f, 0.0f);
@@ -2306,6 +2464,7 @@ void TestZiplineRideIsFasterThanWalking() {
 void TestZiplineOccupiedLineBlocksSecondRider() {
   GameLogic game(ZiplineScene());
   MakePassive(game);
+  game.SetFigureOverlapCheckEnabled(false);  // Both riders share the anchor on purpose.
   PlanMove(game, 0, glm::vec3(20.0f, 0.0f, 0.0f));
   PlanMove(game, 1, glm::vec3(20.0f, 0.0f, 1.0f));
   PassRest(game);
@@ -3464,6 +3623,7 @@ void TestReachFieldManySurfacesPerformance() {
 int main() {
   TestNavMeshRoutesAroundObstacle();
   TestNavMeshDirectPathWhenUnobstructed();
+  TestNavMeshCellsCoverThinLedgeBetweenRotatedFootprints();
   TestNavMeshRejectsPointsInsideObstacle();
   TestNavMeshPathIsTight();
   TestNavMeshClimbsOntoClimbableObstacle();
@@ -3478,6 +3638,8 @@ int main() {
   TestCheckWinner();
   TestRoundPlanningTeamGating();
   TestRoundCommitRequiresBothTeamsPlanned();
+  TestMovePlansRejectFigureOverlap();
+  TestMoveFrontierAccountsForPlannedFigures();
   TestRoundExecutesBothTeamsMovesConcurrently();
   TestShootRowsResolveSimultaneouslyAcrossTeams();
   TestMutualEliminationIsDraw();

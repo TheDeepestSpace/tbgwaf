@@ -29,6 +29,6 @@ script:
   - action: pass
     actor: 3
   - action: commit
-  - assert: {unit: 2, position: [8, 0, 0.4], tolerance: 0.1}
+  - assert: {unit: 2, position: [8, 0, 0.1333], tolerance: 0.05}
   - assert: {unit: 2, alive: true}
   - assert: {unit: 0, alive: true}

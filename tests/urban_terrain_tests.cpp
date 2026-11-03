@@ -9,6 +9,7 @@
 #include "game/GameLogic.h"
 #include "game/Geometry.h"
 #include "game/MapGenerator.h"
+#include "OldSizeConfig.h"
 #include "game/NavMesh.h"
 #include "game/Raycast.h"
 
@@ -21,7 +22,7 @@ uint32_t currentSeed = 0;
 } } while (0)
 
 MapGeneratorConfig TerrainConfig() {
-  MapGeneratorConfig c;
+  MapGeneratorConfig c = OldSizeConfig();
   c.features.terrain.mode = FeatureMode::On;
   c.elevatedHighway = OverpassMode::Off;
   c.maxZiplinesPerBlock = 0;
@@ -240,6 +241,10 @@ void TestWallCoverAndCollision() {
       const glm::vec2 box = onLine;
       if (std::max(std::fabs(box.x), std::fabs(box.y)) > s.mapHalfExtent - 10.0f) continue;
       if (nav.IsWalkable(box.x, box.y)) continue;  // A gap or off the cliff.
+      // A sliver beside a ramp opening is unwalkable too (the cliff beside
+      // the ramp) but has no wall: only a continuous cliff counts.
+      const glm::vec2 before = box - wall.dir * 1.5f, after = box + wall.dir * 1.5f;
+      if (nav.IsWalkable(before.x, before.y) || nav.IsWalkable(after.x, after.y)) continue;
       // Probes just inside the level's sidewalk ring and just outside the
       // stair strip, where the profile must be a clean full step: a flight,
       // a ramp channel mouth or a building spoils the sample.
@@ -296,9 +301,9 @@ void TestHighwayTerrainInterplay() {
 
   // Terrain-enabled seeds draw the overpass with a boosted chance: raised
   // highways are more common over the levels.
-  MapGeneratorConfig withTerrain;
+  MapGeneratorConfig withTerrain = OldSizeConfig();
   withTerrain.features.terrain.mode = FeatureMode::On;
-  MapGeneratorConfig withoutTerrain;
+  MapGeneratorConfig withoutTerrain = OldSizeConfig();
   withoutTerrain.features.terrain.mode = FeatureMode::Off;
   int boosted = 0, plain = 0;
   for (uint32_t seed = 1; seed <= 80; ++seed) {
@@ -312,7 +317,7 @@ void TestHighwayProfilesOverLevels() {
   // With the overpass forced on, the deck is planned against the walls:
   // it never dips below the ground, flies clear over every wall it crosses
   // on the deck, ramps through the others at grade, and the layouts vary.
-  MapGeneratorConfig c;
+  MapGeneratorConfig c = OldSizeConfig();
   c.elevatedHighway = OverpassMode::On;
   c.arteryCount = 2;
   int layouts[5] = {};
@@ -549,6 +554,57 @@ void TestMovementUpStair() {
 }
 }  // namespace
 
+void TestStairSidesSealed() {
+  // A stair's open sides are cliffs: its outer edge is walled along the
+  // whole flight and landing, however short the wall pieces are, so nothing
+  // steps off onto the lower ground beside it.
+  int checked = 0;
+  for (currentSeed = 1; currentSeed <= 40; ++currentSeed) {
+    const Scene s = GenerateUrbanMap(currentSeed, TerrainConfig());
+    NavMesh nav;
+    nav.Build(s.obstacles, s.mapHalfExtent, constants::kAgentRadius, &s.ground, &s.walkSurfaces);
+    for (const TerrainStair& stair : s.terrainStairs) {
+      const glm::vec3 a = stair.flight[1], b = stair.landing[2], inner = stair.flight[0];
+      const glm::vec2 n = glm::normalize(glm::vec2(a.x - inner.x, a.z - inner.z));
+      for (float k = 0.0f; k <= 1.0f; k += 0.05f) {
+        const glm::vec2 e = glm::mix(glm::vec2(a.x, a.z), glm::vec2(b.x, b.z), k);
+        const glm::vec2 on = e - n * 0.9f, off = e + n * 1.1f;
+        if (s.ground.HeightAt(on.x, on.y) - s.ground.HeightAt(off.x, off.y) < 1.0f) continue;
+        ++checked;
+        CHECK(!nav.IsWalkable(e.x, e.y));
+      }
+    }
+  }
+  CHECK(checked > 0);
+}
+
+void TestNoWalkableCliffLinks() {
+  // No two neighbouring walkable points straddle a cliff: every drop is
+  // walled, including the wall stretch beside a road ramping through a step
+  // (seed 7 left it open). The map rim is skipped.
+  int checked = 0;
+  for (currentSeed = 1; currentSeed <= 12; ++currentSeed) {
+    MapGeneratorConfig c;
+    c.elevatedHighway = OverpassMode::Off;
+    const Scene s = GenerateUrbanMap(currentSeed, c);
+    NavMesh nav;
+    nav.Build(s.obstacles, s.mapHalfExtent, constants::kAgentRadius, &s.ground, &s.walkSurfaces);
+    const float lim = s.mapHalfExtent - 4.0f;
+    for (float x = -lim; x < lim; x += 0.5f) {
+      for (float z = -lim; z < lim; z += 0.5f) {
+        if (!nav.IsWalkable(x, z)) continue;
+        const float y = s.ground.HeightAt(x, z);
+        for (const glm::vec2 d : {glm::vec2(0.5f, 0.0f), glm::vec2(0.0f, 0.5f)}) {
+          if (!nav.IsWalkable(x + d.x, z + d.y)) continue;
+          ++checked;
+          CHECK(std::fabs(y - s.ground.HeightAt(x + d.x, z + d.y)) < 1.2f);
+        }
+      }
+    }
+  }
+  CHECK(checked > 0);
+}
+
 // Sheer faces are not walkable (issue #221). A plateau (x >= 6, 3 high)
 // stands over flat ground behind a cliff; with `ramp` a 2-wide strip at
 // z in [4, 6] climbs it at grade 0.5. No obstacles, so only the slope rule
@@ -621,6 +677,8 @@ void TestSheerFacesAreImpassable() {
 }
 
 int main() {
+  TestStairSidesSealed();
+  TestNoWalkableCliffLinks();
   TestControlsAndDeterminism();
   TestPinnedTerrainFingerprints();
   TestSeedInvariants();

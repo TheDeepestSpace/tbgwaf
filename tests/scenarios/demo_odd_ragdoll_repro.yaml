@@ -1,0 +1,50 @@
+name: demo_odd_ragdoll_repro
+description: >
+  Issue #240 demo scene "Odd ragdoll behavior repro" (issue #239), pinned from the registry
+  (map.demo_scene) so the scenario exercises exactly what the Demo Scenes screen hands the
+  player. Red 2 walks north across blue 1's line of fire; blue 1 fires a full 5-shot sniper
+  burst at it (lock-on), the third bullet lands while red 2 is mid-walk. The knockdown
+  direction is the shot line (west -> east), so the body is expected to come down east of
+  where it was hit; turn_01 captures the fall, turn_02 the settled body.
+
+# Two misses, then the killing hit on the 3rd bullet (t=2 s, red 2 mid-walk).
+shot_rolls: [0.9, 0.9, 0.0]
+
+map:
+  demo_scene: odd-ragdoll-repro
+
+camera:
+  target: [1, 0]
+  zoom: -2
+
+script:
+  - assert: {unit: 2, visible_to: blue, visible: true, comment: Red 2 starts in blue 1's view}
+  - action: move
+    description: Red 2 walks north, across blue 1's line of fire.
+    actor: 2
+    destination: [5, 0, 6]
+  - action: shoot
+    description: Blue 1 fires a full sniper burst at red 2.
+    actor: 1
+    target: 2
+    shots: 5
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 3
+  - action: commit
+
+  - assert: {unit: 2, alive: false, comment: Hit mid-walk by the 3rd bullet}
+  - assert: {unit: 1, alive: true}
+  - assert: {round: 2}
+
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 3
+  - action: commit
+
+  - assert: {round: 3}
+  - assert: {winner: none}

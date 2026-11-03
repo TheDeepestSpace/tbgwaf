@@ -93,3 +93,47 @@ shadow mask. The rig leads with torso/head, trails the legs, steps the foot
 on the turning side when standing (pivot) and banks into the turn when
 moving (path corners). `turnLag` is part of the snapshot, so followers and
 replays draw the same pose. Scenario: `turn_animation_angles`.
+
+## Figures may not overlap while walking (issue #267)
+
+`GameLogic::PathOverlapsFigure` sweeps the round timeline in fixed 1/40 s
+steps: the mover follows its candidate path from t = 0 (zipline rides priced
+like the move budget), every other living figure follows its own planned move
+or stands still, and any time two figures come within 2 × `kAgentRadius`
+(and overlap vertically) the path overlaps. Pairs already overlapping at
+t = 0 are ignored.
+
+Rather than merely rejecting such moves, planning works around the other
+figures' already-prepared movements in space **and time**:
+
+- **The movement boundary shows the truly allowed range.** The move
+  frontier is computed against the other figures' sampled trajectories
+  (`MovingBlockers` in `NavMesh::ComputeReachField`): while flood-filling,
+  a step is rejected when the mover would be within two agent radii of
+  some figure *at the moment the mover is there* (arrival time = routed
+  distance / run speed -- figures walk at constant speed from t = 0 and
+  cannot wait), and a cell is carved out as a destination when a figure's
+  plan passes over it *after* the mover would have stopped there (it stands
+  at its destination for the rest of the round). So the navmesh overlay
+  shows holes around standers and around the still-contested parts of
+  planned paths, while space a figure vacates in time stays reachable.
+- **Clicks re-route instead of being ignored.** When the plain shortest
+  path would meet a figure, `PlanDodgeLeg` extracts the time-aware route
+  from the frontier's parent grid, pulls it taut as far as the timing
+  allows, and validates it with the 1/40 s sweep; the hover preview shows
+  the same detour. Only a click with no valid route at all (e.g. onto a
+  spot a figure will still occupy) is rejected, and the HUD says why
+  (`MovePreviewBlockedByFigure`). Only the first leg of a chain is checked
+  (later legs run in later rounds); elevated walk-surface cells get the
+  destination carve-out but not grid re-routing. `CanCommitRound` stays
+  false while any planned move overlaps (`HasPlanOverlap`), e.g. plans
+  imported from the other side; importing plans refreshes an open frontier.
+- Unplanned *teammates* are ignored when planning (they will move); unplanned
+  enemies count as standing.
+- **Jev**: `ApplyJevChoice` plans non-movers first, then each mover; a
+  rejected move falls back to stopping 1-4 units short, the actor's other
+  offered moves, then waiting (Jev plans with the frontier disabled for
+  speed, so it doesn't use dodge routes). Routed legs never end on another
+  figure.
+- Tests/scenarios that deliberately collide use
+  `SetFigureOverlapCheckEnabled(false)` / `figure_overlap: false`.

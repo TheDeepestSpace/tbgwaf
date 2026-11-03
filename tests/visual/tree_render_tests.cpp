@@ -1,0 +1,197 @@
+// Tree rendering as a regular baked static mesh: cache invalidation, draw
+// batching and AO integration, independent of the historical city/gameplay
+// goldens. Optional review screenshot.
+#include <SDL.h>
+#include <GLES3/gl3.h>
+
+#include <cstdio>
+#include <stdexcept>
+
+#include "game/MapGenerator.h"
+#include "gfx/SceneRenderer.h"
+#include "visual/ImageUtil.h"
+
+namespace {
+void Require(bool ok, const char* message) {
+  if (!ok) throw std::runtime_error(message);
+}
+
+void CheckTrees(gfx::SceneRenderer& renderer) {
+  tactics::Scene scene;
+  for (int variant = 0; variant < 3; ++variant)
+    scene.trees.push_back({{(variant - 1) * 5.0f, 0, 0}, 1.0f, 0.4f, 1.0f, variant});
+  tactics::GameLogic game(scene);
+  gfx::OrbitCamera camera;
+  camera.FitToExtent(10.0f);
+  gfx::RenderDebugOptions debug;
+  debug.disableFov = true;
+  gfx::RenderFrameStats stats;
+  debug.stats = &stats;
+  auto render = [&](const tactics::GameLogic& current) {
+    stats = {};
+    renderer.RenderPane(current, tactics::Team::Blue, false, {}, camera, 0, 0, 320, 200,
+                         {}, 0, debug);
+    auto image = visual::CaptureFramebuffer(320, 200);
+    Require(glGetError() == GL_NO_ERROR, "Tree render produced a GL error");
+    return image.rgb;
+  };
+  debug.disableTrees = true;
+  const auto bare = render(game);
+  const int bareDraws = stats.drawCalls;
+  debug.disableTrees = false;
+  const auto color = render(game);
+  Require(color != bare, "Trees did not appear");
+  // One baked static mesh: one lit draw plus one sun-shadow draw, however
+  // many trees the scene has (merged chunk ranges, like street furniture).
+  Require(stats.drawCalls == bareDraws + 2, "Trees exceeded one draw per color/depth pass");
+  Require(render(game) == color, "Cached trees changed between identical frames");
+
+  // Many more trees must still cost the same number of submissions.
+  tactics::Scene crowded = scene;
+  for (int i = 0; i < 30; ++i)
+    crowded.trees.push_back({{float(i % 6) * 4 - 10, 0, float(i / 6) * 4 - 10},
+                             0.8f, 0.1f * i, 1.0f, i % 3});
+  // Chunk culling can split the merged ranges into a few draws, but the
+  // submission count is bounded by the cull grid, never by the tree count.
+  render(tactics::GameLogic(crowded));
+  Require(stats.drawCalls <= bareDraws + 8, "Draw count grew with tree count");
+  Require(render(game) == color, "Switching scenes did not restore the tree mesh");
+  scene.trees[0].position.z += 5.0f;
+  Require(render(tactics::GameLogic(scene)) != color, "Same-size tree update reused a stale mesh");
+  scene.trees.clear();
+  Require(render(tactics::GameLogic(scene)) == bare, "Empty scene retained old trees");
+
+  debug.thermal = true;
+  const auto blackHot = render(game);
+  debug.disableTrees = true;
+  const auto bareThermal = render(game);
+  const int bareThermalDraws = stats.drawCalls;
+  debug.disableTrees = false;
+  Require(render(game) != bareThermal, "Trees missing from AO view");
+  Require(stats.drawCalls == bareThermalDraws + 1, "AO trees must be one draw, no shadow pass");
+  debug.thermalBlackHot = false;
+  const auto whiteHot = render(game);
+  Require(blackHot != whiteHot, "Tree thermal polarity did not change");
+  for (size_t i = 0; i < whiteHot.size(); i += 3) {
+    Require(whiteHot[i] == whiteHot[i + 1] && whiteHot[i] == whiteHot[i + 2],
+            "Foliage leaked color into AO view");
+  }
+  debug.thermal = false;
+  Require(render(game) == color, "Trees changed after switching back from AO view");
+}
+
+// Issue #270 review follow-up: the shadow-map FOV tint must land on the
+// visible tree meshes themselves (the eye-facing canopy side), not only on
+// the ground and buildings around them.
+void CheckTreeFovTint(gfx::SceneRenderer& renderer) {
+  tactics::Scene scene;
+  scene.trees.push_back({{0.0f, 0.0f, 0.0f}, 1.0f, 0.0f, 1.0f, 0});
+  tactics::Unit watcher;
+  watcher.id = 0;
+  watcher.team = tactics::Team::Blue;
+  watcher.position = {8.0f, 0.0f, 0.0f};
+  watcher.facingYaw = 3.14159265f;  // Facing -X, straight at the tree.
+  scene.units.push_back(watcher);
+  tactics::GameLogic game(scene);
+  gfx::OrbitCamera camera;
+  camera.FitToExtent(10.0f);
+  renderer.SetFovOverlayMode(gfx::FovOverlayMode::ShadowMap);
+  gfx::RenderDebugOptions debug;
+  // No sun shadows: the trees-vs-bare diff must be the tree geometry alone,
+  // not the ground its canopy shades (which tints regardless of this fix).
+  debug.disableShadows = true;
+  auto render = [&](bool fov, bool trees) {
+    debug.disableFov = !fov;
+    debug.disableTrees = !trees;
+    renderer.RenderPane(game, tactics::Team::Blue, false, {}, camera, 0, 0, 320, 200,
+                        {}, 0, debug);
+    auto image = visual::CaptureFramebuffer(320, 200);
+    Require(glGetError() == GL_NO_ERROR, "Tree FOV render produced a GL error");
+    return image.rgb;
+  };
+  const auto bare = render(false, false);
+  const auto treesOnly = render(false, true);
+  const auto treesFov = render(true, true);
+  int silhouette = 0, tintedOnTree = 0;
+  for (size_t i = 0; i < bare.size(); i += 3) {
+    const bool treePixel = treesOnly[i] != bare[i] || treesOnly[i + 1] != bare[i + 1] ||
+                           treesOnly[i + 2] != bare[i + 2];
+    if (!treePixel) continue;
+    ++silhouette;
+    if (treesFov[i] != treesOnly[i] || treesFov[i + 1] != treesOnly[i + 1] ||
+        treesFov[i + 2] != treesOnly[i + 2]) {
+      ++tintedOnTree;
+    }
+  }
+  Require(silhouette > 0, "Tree not visible in the FOV tint scene");
+  Require(tintedOnTree > 0, "FOV tint missing from the tree's eye-facing side");
+  // The canopy top sits above the watcher's eye and the far side is behind
+  // the tree's own near surfaces, so the tint must not cover the whole tree.
+  Require(tintedOnTree < silhouette, "FOV tint covered the whole tree silhouette");
+  renderer.SetFovOverlayMode(gfx::FovOverlayMode::CpuAnalytic);
+}
+
+void Screenshot(gfx::SceneRenderer& renderer, const char* path) {
+  auto scene = tactics::GenerateUrbanMap(42);
+  Require(!scene.trees.empty(), "Review seed has no trees");
+  scene.units.clear();
+  // A watcher aiming at the nearest tree, so the review screenshot shows the
+  // shadow-map FOV overlay landing on the trees themselves.
+  // Tree 8 of this seed sits in an open park block, so the watcher, several
+  // trees and their overlay shadows are all in frame.
+  const glm::vec3 tree = scene.trees[8 % scene.trees.size()].position;
+  tactics::Unit watcher;
+  watcher.id = 0;
+  watcher.team = tactics::Team::Blue;
+  watcher.position = tree + glm::vec3(9.0f, 0.0f, 2.0f);
+  watcher.facingYaw = std::atan2(tree.z - watcher.position.z, tree.x - watcher.position.x);
+  scene.units.push_back(watcher);
+  gfx::OrbitCamera camera;
+  camera.target = tree;
+  camera.Zoom(22.0f);
+  camera.Rotate(0.8f, -0.3f);
+  camera.Update(1000.0f);
+  tactics::GameLogic game(scene);
+  renderer.SetFovOverlayMode(gfx::FovOverlayMode::ShadowMap);
+  renderer.RenderPane(game, tactics::Team::Blue, false, {}, camera, 0, 0, 1280, 720);
+  renderer.SetFovOverlayMode(gfx::FovOverlayMode::CpuAnalytic);
+  Require(visual::SavePng(path, visual::CaptureFramebuffer(1280, 720)), "Screenshot write failed");
+}
+}  // namespace
+
+int main(int argc, char** argv) {
+  if (SDL_Init(SDL_INIT_VIDEO) != 0) return 1;
+  SDL_SetHint(SDL_HINT_VIDEO_X11_FORCE_EGL, "1");
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+  SDL_Window* window = SDL_CreateWindow("Tree renderer tests", 0, 0, 1280, 720,
+                                        SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+  SDL_GLContext context = window ? SDL_GL_CreateContext(window) : nullptr;
+  if (!context) {
+    std::fprintf(stderr, "GL context failed: %s\n", SDL_GetError());
+    if (window) SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 1;
+  }
+  int result = 0;
+  {
+    gfx::SceneRenderer renderer;
+    try {
+      Require(renderer.Init(), "Renderer initialization failed");
+      CheckTrees(renderer);
+      CheckTreeFovTint(renderer);
+      if (argc > 1) Screenshot(renderer, argv[1]);
+      std::puts("PASS tree rendering: baked mesh, scene replacement, AO, polarity, FOV tint, "
+                "mode switching");
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "FAIL tree rendering: %s\n", e.what());
+      result = 1;
+    }
+    renderer.Destroy();
+  }
+  SDL_GL_DeleteContext(context);
+  SDL_DestroyWindow(window);
+  SDL_Quit();
+  return result;
+}

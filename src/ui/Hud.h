@@ -83,6 +83,14 @@ struct HudLayout {
   }
 };
 
+// Server-authoritative play only: the commit handshake state the HUD cannot
+// read off the local GameLogic mirror (the mode stays "planning" until the
+// opponent commits too and the server runs the round).
+struct NetHudInfo {
+  bool committed = false;  // Our commit is sent/accepted: planning is locked.
+  bool peerReady = false;  // The opponent has committed.
+};
+
 // Draws `team`'s view of the HUD inside `rect`: the Round / Game Over panel,
 // the floating action menu (when `team` has a figure mid-selection), and the
 // team label. Both teams plan simultaneously, so every pane is always live;
@@ -90,9 +98,12 @@ struct HudLayout {
 // When `layout` is non-null it is filled with this frame's button positions.
 // When `roundPanelBottom` is non-null it receives the Round panel's bottom edge
 // (follows collapse); untouched if the panel isn't drawn (game over).
+// `net` (server mode only) greys the Commit button once this side committed
+// and shows the waiting/ready line under it.
 HudActions DrawHud(const tactics::GameLogic& game, tactics::Team team, bool planning,
                    const PaneRect& rect, int windowHeight, const gfx::OrbitCamera& camera,
-                   HudLayout* layout = nullptr, float* roundPanelBottom = nullptr);
+                   HudLayout* layout = nullptr, float* roundPanelBottom = nullptr,
+                   const NetHudInfo* net = nullptr);
 
 // Button presses on the turn-timeline strip (issue #143); like HudActions,
 // reported back for the caller to apply to its TimelinePlayback.

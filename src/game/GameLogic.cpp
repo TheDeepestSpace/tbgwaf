@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <sstream>
 
@@ -36,6 +37,48 @@ float MoveCost(const std::vector<glm::vec3>& path, const std::vector<PathRide>& 
     cost += RideAtSegment(rides, i) ? length * constants::kZiplineCostFactor : length;
   }
   return cost;
+}
+
+// Where a figure following `path` (rides priced like MoveCost) is `t` seconds
+// into the round; it stands at the path's end afterwards.
+glm::vec3 PathPositionAt(const std::vector<glm::vec3>& path, const std::vector<PathRide>& rides,
+                         float runSpeed, float t) {
+  if (path.empty()) return glm::vec3(0.0f);
+  float budget = t * runSpeed;
+  for (size_t i = 0; i + 1 < path.size(); ++i) {
+    const float length = glm::distance(path[i], path[i + 1]);
+    const float cost = RideAtSegment(rides, i) ? length * constants::kZiplineCostFactor : length;
+    if (cost > budget) return cost > 1e-6f ? glm::mix(path[i], path[i + 1], budget / cost) : path[i];
+    budget -= cost;
+  }
+  return path.back();
+}
+
+// Deterministic fixed-step sweep: do two figures, each on its own path, come
+// closer than two agent radii (and overlap vertically) at the same time?
+// Pairs that already overlap at t = 0 are ignored (nothing to be done).
+constexpr float kOverlapStep = 1.0f / 40.0f;
+// Safety margin added to the reach field's blocker radius over the sweep's
+// two-agent-radii threshold, absorbing the field's coarser space-time
+// sampling so a route the field accepts also passes the 1/40 s sweep.
+constexpr float kDodgeMargin = 0.1f;
+bool FiguresClose(const glm::vec3& a, const glm::vec3& b) {
+  return glm::length(glm::vec2(a.x - b.x, a.z - b.z)) < 2.0f * constants::kAgentRadius &&
+         std::abs(a.y - b.y) < constants::kUnitHeight;
+}
+bool PathsOverlap(const std::vector<glm::vec3>& pathA, const std::vector<PathRide>& ridesA,
+                  float speedA, const std::vector<glm::vec3>& pathB,
+                  const std::vector<PathRide>& ridesB, float speedB) {
+  auto Close = FiguresClose;
+  if (Close(PathPositionAt(pathA, ridesA, speedA, 0.0f), PathPositionAt(pathB, ridesB, speedB, 0.0f))) {
+    return false;
+  }
+  for (float t = kOverlapStep; t <= constants::kRoundDuration + 1e-4f; t += kOverlapStep) {
+    if (Close(PathPositionAt(pathA, ridesA, speedA, t), PathPositionAt(pathB, ridesB, speedB, t))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Every place that rewrites a plan's legs keeps the parallel ride lists in step.
@@ -98,6 +141,7 @@ bool SegmentEntersDisc(const glm::vec3& p0, const glm::vec3& p1, const glm::vec3
 void GameLogic::Reset() { Reset(BuildDefaultScene()); }
 
 void GameLogic::Reset(Scene scene) {
+  RecordScope record(this, InputEvent{InputEvent::Op::Reset});
   scene_ = std::move(scene);
   obstacleBounds_ = ObstacleBounds(scene_.obstacles);
   sightObstacles_ = tactics::SightObstacles(scene_);
@@ -429,12 +473,16 @@ void ApplyPlan(const GameSnapshot::UnitState& u, Unit* unit) {
 }  // namespace
 
 void GameLogic::ClearAllPlans() {
+  RecordScope record(this, InputEvent{InputEvent::Op::ClearAllPlans});
   for (auto& unit : scene_.units) unit.plan = PlannedAction{};
   movePreviewPath_.clear();
   movePreviewValid_ = false;
 }
 
 bool GameLogic::ImportState(const GameSnapshot& snap) {
+  InputEvent e{InputEvent::Op::ImportState};
+  if (recorder_.ptr) e.text = SerializeSnapshot(snap);
+  RecordScope record(this, std::move(e));
   if (!SnapshotMatchesUnits(snap, scene_.units)) return false;
   // Deaths arriving in this snapshot whose victim the opposing team cannot
   // see happened outside its FOV: a free-aim blind hit resolved on the
@@ -516,12 +564,19 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
 }
 
 bool GameLogic::ImportTeamPlans(const GameSnapshot& snap, Team team) {
+  InputEvent e{InputEvent::Op::ImportTeamPlans};
+  e.team = team;
+  if (recorder_.ptr) e.text = SerializeSnapshot(snap);
+  RecordScope record(this, std::move(e));
   if (!SnapshotMatchesUnits(snap, scene_.units)) return false;
   for (const auto& u : snap.units) {
     Unit* unit = FindUnit(u.id);
     if (unit->team != team) continue;
     ApplyPlan(u, unit);
   }
+  // Imported plans move the blockers the frontier was computed against; a
+  // player mid-move-planning sees the allowed range update (issue #267).
+  if (mode_ == InputMode::AwaitingMoveDestination) RefreshMoveFrontier();
   return true;
 }
 
@@ -694,6 +749,63 @@ const Unit* GameLogic::FindUnit(int id) const {
   return nullptr;
 }
 
+bool GameLogic::PathOverlapsFigure(const Unit& mover, const std::vector<glm::vec3>& path,
+                                   const std::vector<PathRide>& rides) const {
+  if (!overlapCheckEnabled_) return false;
+  for (const Unit& other : scene_.units) {
+    if (other.id == mover.id || !other.alive) continue;
+    // A teammate with no plan yet is expected to move off; it is checked
+    // when it is planned (and again by CanCommitRound).
+    if (other.team == mover.team && other.plan.type == PlannedActionType::None) continue;
+    // A figure with a planned move walks it this round; anything else stands.
+    const bool walking = other.plan.type == PlannedActionType::Move && other.plan.movePath.size() >= 2;
+    const std::vector<glm::vec3> standing{other.position};
+    if (PathsOverlap(path, rides, mover.runSpeed, walking ? other.plan.movePath : standing,
+                     walking ? other.plan.moveRides : std::vector<PathRide>{}, other.runSpeed)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+MovingBlockers GameLogic::BuildMovingBlockers(const Unit& mover, const glm::vec3& origin,
+                                              float distanceOffset) const {
+  MovingBlockers blockers;
+  blockers.dt = kOverlapStep;
+  blockers.speed = mover.runSpeed;
+  blockers.distanceOffset = distanceOffset;
+  blockers.radius = 2.0f * constants::kAgentRadius + kDodgeMargin;
+  blockers.height = constants::kUnitHeight;
+  if (!overlapCheckEnabled_) return blockers;
+  const int samples = static_cast<int>(std::ceil(constants::kRoundDuration / kOverlapStep)) + 1;
+  for (const Unit& other : scene_.units) {
+    if (other.id == mover.id || !other.alive) continue;
+    if (other.team == mover.team && other.plan.type == PlannedActionType::None) continue;
+    if (FiguresClose(origin, other.position)) continue;  // Already overlapping at t = 0.
+    const bool walking =
+        other.plan.type == PlannedActionType::Move && other.plan.movePath.size() >= 2;
+    std::vector<glm::vec3> trajectory(samples, other.position);
+    if (walking) {
+      for (int i = 0; i < samples; ++i) {
+        trajectory[i] = PathPositionAt(other.plan.movePath, other.plan.moveRides,
+                                       other.runSpeed, i * kOverlapStep);
+      }
+    }
+    blockers.trajectories.push_back(std::move(trajectory));
+  }
+  return blockers;
+}
+
+bool GameLogic::HasPlanOverlap() const {
+  for (const Unit& unit : scene_.units) {
+    if (!unit.alive || unit.plan.type != PlannedActionType::Move || unit.plan.movePath.size() < 2) {
+      continue;
+    }
+    if (PathOverlapsFigure(unit, unit.plan.movePath, unit.plan.moveRides)) return true;
+  }
+  return false;
+}
+
 bool GameLogic::CanCommitRound() const {
   if (mode_ == InputMode::Executing || mode_ == InputMode::GameOver) return false;
   bool anyLiving = false;
@@ -702,10 +814,14 @@ bool GameLogic::CanCommitRound() const {
     anyLiving = true;
     if (unit.plan.type == PlannedActionType::None) return false;
   }
-  return anyLiving;
+  return anyLiving && !HasPlanOverlap();
 }
 
 void GameLogic::ClickUnit(int unitId, Team byTeam) {
+  InputEvent e{InputEvent::Op::ClickUnit};
+  e.unit = unitId;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
   if (winner_) return;
   if (mode_ == InputMode::Executing) return;  // The round is animating; input is inert.
   Unit* unit = FindUnit(unitId);
@@ -759,6 +875,10 @@ glm::vec3 GameLogic::MoveChainEnd() const {
 }
 
 void GameLogic::ClickGround(const glm::vec3& point, Team byTeam) {
+  InputEvent e{InputEvent::Op::ClickGround};
+  e.point = point;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
   if (mode_ != InputMode::AwaitingMoveDestination) return;
   Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->team != byTeam) return;
@@ -770,6 +890,13 @@ void GameLogic::ClickGround(const glm::vec3& point, Team byTeam) {
   // reach as far as the figure can run in one round (a zipline ride costs
   // ZiplineRideCost of that, not its length).
   if (!PlanLeg(*mover, MoveChainEnd(), point, &path, &rides)) return;
+  // Only the first leg runs this round; chained legs run in later rounds.
+  // A first-leg path that would meet another figure is re-routed around the
+  // other figures' planned movements in space and time; only a click with no
+  // such route (e.g. onto a spot a figure will occupy) is ignored.
+  if (!chaining && PathOverlapsFigure(*mover, path, rides)) {
+    if (!rides.empty() || !PlanDodgeLeg(*mover, point, &path)) return;
+  }
 
   // NavMesh::FindPath always returns at least [start, goal] on success.
   if (chaining) {
@@ -800,6 +927,7 @@ void GameLogic::ClickGround(const glm::vec3& point, Team byTeam) {
 }
 
 void GameLogic::FinishMovePlan() {
+  RecordScope record(this, InputEvent{InputEvent::Op::FinishMovePlan});
   if (mode_ != InputMode::AwaitingMoveDestination) return;
   const Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->plan.type != PlannedActionType::Move) return;
@@ -809,6 +937,11 @@ void GameLogic::FinishMovePlan() {
 }
 
 void GameLogic::SetPlannedMoveFacing(int unitId, float yaw, Team byTeam) {
+  InputEvent e{InputEvent::Op::SetMoveFacing};
+  e.unit = unitId;
+  e.value = yaw;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
   if (mode_ == InputMode::Executing || mode_ == InputMode::GameOver) return;
   Unit* unit = FindUnit(unitId);
   if (!unit || !unit->alive || unit->team != byTeam) return;
@@ -832,6 +965,15 @@ bool GameLogic::KnockdownsAdvance() const {
 }
 
 void GameLogic::Update(float dtSeconds) {
+  {
+    InputEvent e{InputEvent::Op::Update};
+    e.value = dtSeconds;
+    RecordScope record(this, std::move(e));
+    UpdateUnrecorded(dtSeconds);
+  }
+}
+
+void GameLogic::UpdateUnrecorded(float dtSeconds) {
   // Knockdowns and the quick-draw beat are purely visual. A fall only runs
   // while a round executes (or once the match is over): if the round ends
   // with a figure still in mid-air it freezes there through planning and
@@ -1035,6 +1177,7 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
 }
 
 void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
+  movePreviewBlocked_ = false;
   movePreviewPath_.clear();
   movePreviewRides_.clear();
   movePreviewValid_ = false;
@@ -1042,6 +1185,18 @@ void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
   const Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->team != byTeam) return;
   movePreviewValid_ = PlanLeg(*mover, MoveChainEnd(), point, &movePreviewPath_, &movePreviewRides_);
+  const bool chaining = mover->plan.type == PlannedActionType::Move && !mover->plan.movePath.empty();
+  if (movePreviewValid_ && !chaining &&
+      PathOverlapsFigure(*mover, movePreviewPath_, movePreviewRides_)) {
+    // Preview the same re-route a click would take; blocked only when none exists.
+    std::vector<glm::vec3> dodge;
+    if (movePreviewRides_.empty() && PlanDodgeLeg(*mover, point, &dodge)) {
+      movePreviewPath_ = std::move(dodge);
+    } else {
+      movePreviewValid_ = false;
+      movePreviewBlocked_ = true;
+    }
+  }
 }
 
 // Any manual touch of a figure's plan drops its queued multi-round route.
@@ -1053,6 +1208,10 @@ void GameLogic::ClearQueuedLegs(std::optional<int> unitId) {
 }
 
 // Frontier of where the next leg can reach: built around the chain end.
+// For the first leg (the one that walks this round) it is computed against
+// the other figures' planned movements, so the displayed boundary already
+// accounts for where everyone else will be and when (issue #267); chained
+// legs run in later rounds and get the plain field.
 void GameLogic::RefreshMoveFrontier() {
   moveFrontier_ = ReachField();
   ziplineFrontiers_.clear();
@@ -1062,7 +1221,13 @@ void GameLogic::RefreshMoveFrontier() {
   if (const Unit* mover = FindUnit(selectedUnitId_.value_or(-1))) {
     const glm::vec3 origin = MoveChainEnd();
     EnsureNavMeshFor(*mover, origin);
-    moveFrontier_ = navMesh_.ComputeReachField(origin, mover->MoveBudget());
+    const bool firstLeg =
+        mover->plan.type != PlannedActionType::Move || mover->plan.movePath.empty();
+    const MovingBlockers blockers = BuildMovingBlockers(*mover, origin, 0.0f);
+    moveFrontier_ = navMesh_.ComputeReachField(
+        origin, mover->MoveBudget(), 0.25f,
+        firstLeg && !blockers.trajectories.empty() ? &blockers : nullptr);
+    moveFrontier_.revision = ++frontierRevision_;
     BuildZiplineFrontiers(*mover, origin);
   }
 }
@@ -1132,7 +1297,16 @@ void GameLogic::BuildZiplineFrontiers(const Unit& mover, const glm::vec3& origin
       frontier.exit = exit;
       frontier.walkCost = walkCost;
       frontier.rideCost = rideCost;
-      frontier.field = mesh.ComputeReachField(exit, remaining);
+      // The onward walk starts walkCost + rideCost into the mover's budget;
+      // the field dodges the other figures' plans from that offset (the
+      // entry walk itself is still validated by PathOverlapsFigure).
+      const bool firstLeg =
+          mover.plan.type != PlannedActionType::Move || mover.plan.movePath.empty();
+      const MovingBlockers blockers = BuildMovingBlockers(mover, origin, walkCost + rideCost);
+      frontier.field = mesh.ComputeReachField(
+          exit, remaining, 0.25f,
+          firstLeg && !blockers.trajectories.empty() ? &blockers : nullptr);
+      frontier.field.revision = ++frontierRevision_;
       ziplineFrontiers_.push_back(std::move(frontier));
       ziplineMeshes_.push_back(std::move(mesh));
     }
@@ -1168,7 +1342,99 @@ bool GameLogic::PlanLeg(const Unit& mover, const glm::vec3& from, const glm::vec
   return std::isfinite(bestCost);
 }
 
+// Issue #267: time-aware re-route for a first-leg walk. The move frontier is
+// computed against the other figures' planned trajectories, so its parent
+// grid encodes, per ground node, a route that dodges them with the right
+// timing (the mover walks at run speed from t = 0; it cannot wait). Extract
+// the route to the node nearest `goal`, pull it taut as far as static
+// obstacles and the timing allow, and accept the first candidate the
+// authoritative sweep (PathOverlapsFigure) and budget admit.
+bool GameLogic::PlanDodgeLeg(const Unit& mover, const glm::vec3& goal,
+                             std::vector<glm::vec3>* outPath) {
+  outPath->clear();
+  const ReachField& f = moveFrontier_;
+  // Only a field computed against moving blockers encodes dodge timing.
+  if (f.nx == 0 || f.parent.empty() || f.endpointBlocked.empty()) return false;
+  const glm::vec3 origin = MoveChainEnd();
+
+  // Snap the click to the nearest reachable ground node (grid routes only;
+  // elevated walk-surface cells carry no parent chain). Kept barely above
+  // the grid's half-diagonal so a click inside a carved-out cell is
+  // rejected rather than quietly displaced outside it.
+  constexpr float kSnap = 0.35f;
+  const int gx = static_cast<int>(std::lround((goal.x - f.minX) / f.step));
+  const int gz = static_cast<int>(std::lround((goal.z - f.minZ) / f.step));
+  const int r = static_cast<int>(std::ceil(kSnap / f.step));
+  int best = -1;
+  float bestD = kSnap;
+  for (int iz = gz - r; iz <= gz + r; ++iz) {
+    for (int ix = gx - r; ix <= gx + r; ++ix) {
+      if (!f.Reached(ix, iz)) continue;
+      const int idx = iz * f.nx + ix;
+      if (f.parent[idx] < 0 && f.dist[idx] > 0.0f) continue;
+      const glm::vec3 node = f.Node(ix, iz);
+      const float d = glm::length(glm::vec2(node.x - goal.x, node.z - goal.z));
+      if (d < bestD) {
+        bestD = d;
+        best = idx;
+      }
+    }
+  }
+  if (best < 0) return false;
+
+  // Walk the parent chain back to the source, in flat space for the lift below.
+  std::vector<glm::vec2> lattice;
+  bool reachedSource = false;
+  for (int node = best, guard = f.nx * f.nz; node >= 0 && guard-- > 0; node = f.parent[node]) {
+    lattice.emplace_back(f.minX + (node % f.nx) * f.step, f.minZ + (node / f.nx) * f.step);
+    if (f.dist[node] <= 0.0f) {
+      reachedSource = true;
+      break;
+    }
+  }
+  if (!reachedSource) return false;
+  std::reverse(lattice.begin(), lattice.end());
+  lattice.front() = glm::vec2(origin.x, origin.z);  // The source node, minus grid rounding.
+  const glm::vec2 goalXZ(goal.x, goal.z);
+  const bool goalAppendable =
+      bestD > 1e-3f && navMesh_.GroundSegmentTraversable(lattice.back(), goalXZ);
+
+  // Pull taut (shortcuts past static obstacles only), lift onto the terrain,
+  // then let the sweep judge the changed timing. Failing that, retry with
+  // ever shorter shortcuts down to the raw lattice route, whose timing the
+  // field already validated up to sampling error; failing even that (e.g.
+  // the exact goal hop busts the budget), retry ending at the snapped node.
+  const float budget = mover.MoveBudget();
+  const auto tryCandidate = [&](size_t lookahead, bool includeGoal) {
+    std::vector<glm::vec2> points = lattice;
+    if (includeGoal && goalAppendable) points.push_back(goalXZ);
+    std::vector<glm::vec3> path{glm::vec3(points.front().x, 0.0f, points.front().y)};
+    size_t i = 0;
+    while (i + 1 < points.size()) {
+      size_t j = std::min(points.size() - 1, i + lookahead);
+      while (j > i + 1 && !navMesh_.GroundSegmentTraversable(points[i], points[j])) --j;
+      path.emplace_back(points[j].x, 0.0f, points[j].y);
+      i = j;
+    }
+    navMesh_.LiftGroundPathOntoTerrain(&path);
+    float length = 0.0f;
+    for (size_t k = 0; k + 1 < path.size(); ++k) length += glm::distance(path[k], path[k + 1]);
+    if (length > budget + 1e-3f || PathOverlapsFigure(mover, path, {})) return false;
+    *outPath = std::move(path);
+    return true;
+  };
+  for (const bool includeGoal : {true, false}) {
+    for (const size_t lookahead : {size_t{48}, size_t{12}, size_t{4}, size_t{1}}) {
+      if (tryCandidate(lookahead, includeGoal)) return true;
+    }
+    if (!goalAppendable) break;  // The two passes were identical.
+  }
+  outPath->clear();
+  return false;
+}
+
 void GameLogic::ChooseMove() {
+  RecordScope record(this, InputEvent{InputEvent::Op::ChooseMove});
   if (mode_ != InputMode::ActionMenu) return;
   // Start a fresh chain: drop any earlier move plan.
   if (Unit* unit = FindUnit(selectedUnitId_.value_or(-1))) {
@@ -1182,6 +1448,7 @@ void GameLogic::ChooseMove() {
 }
 
 void GameLogic::ChooseShoot() {
+  RecordScope record(this, InputEvent{InputEvent::Op::ChooseShoot});
   if (mode_ != InputMode::ActionMenu) return;
   ClearQueuedLegs(selectedUnitId_);
   aimPreview_.reset();
@@ -1197,6 +1464,10 @@ int GameLogic::MaxShotsForSelected() const {
 }
 
 void GameLogic::SetPlannedShotCount(int count, Team byTeam) {
+  InputEvent e{InputEvent::Op::SetShotCount};
+  e.count = count;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
   if (mode_ != InputMode::AwaitingShootTarget) return;
   const Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
   if (!shooter || shooter->team != byTeam) return;
@@ -1206,6 +1477,7 @@ void GameLogic::SetPlannedShotCount(int count, Team byTeam) {
 }
 
 void GameLogic::ChoosePass() {
+  RecordScope record(this, InputEvent{InputEvent::Op::ChoosePass});
   if (mode_ != InputMode::ActionMenu) return;
   Unit* unit = FindUnit(selectedUnitId_.value_or(-1));
   if (!unit) return;
@@ -1218,6 +1490,7 @@ void GameLogic::ChoosePass() {
 }
 
 void GameLogic::CancelAction() {
+  RecordScope record(this, InputEvent{InputEvent::Op::CancelAction});
   if (mode_ == InputMode::AwaitingMoveDestination) {
     // Esc abandons the whole chain being planned.
     if (Unit* unit = FindUnit(selectedUnitId_.value_or(-1))) {
@@ -1307,6 +1580,14 @@ bool GameLogic::IsFalling(const Unit& unit) {
 }
 
 void GameLogic::KnockDown(Unit& target, const glm::vec3& dir) {
+  if (recorder_.ptr) {
+    char buf[256];
+    std::snprintf(buf, sizeof buf,
+                  "knockdown unit=%d pos=(%.4f,%.4f,%.4f) dir=(%.4f,%.4f,%.4f) exec=%.4f round=%d",
+                  target.id, target.position.x, target.position.y, target.position.z, dir.x, dir.y,
+                  dir.z, executionElapsed_, roundNumber_);
+    LogSim(buf);
+  }
   // up x dir: tipping around this axis leans the figure toward dir.
   const glm::vec3 axis(dir.z, 0.0f, -dir.x);
   if (IsFalling(target)) {
@@ -1339,6 +1620,12 @@ void GameLogic::ApplyShot(Unit& shooter, Unit& target, bool hit) {
   Unit aimed = shooter;
   aimed.facingYaw = shooter.shootAimYaw;
   RecordTracer(shooter, aimed.MuzzlePosition(), target.EyePosition());
+  if (recorder_.ptr) {
+    char buf[160];
+    std::snprintf(buf, sizeof buf, "shot shooter=%d target=%d hit=%d exec=%.4f round=%d",
+                  shooter.id, target.id, hit ? 1 : 0, executionElapsed_, roundNumber_);
+    LogSim(buf);
+  }
   if (hit) {
     // Sighting is recorded before the kill so first sight never loses its ghost.
     RecordFirstSight(shooter.team, target);
@@ -1472,6 +1759,11 @@ GameLogic::AimRayResult GameLogic::ResolveAimRay(const glm::vec3& origin,
 }
 
 void GameLogic::ClickAimRay(const glm::vec3& origin, const glm::vec3& direction, Team byTeam) {
+  InputEvent e{InputEvent::Op::ClickAimRay};
+  e.point = origin;
+  e.direction = direction;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
   if (mode_ != InputMode::AwaitingShootTarget) return;
   const Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
   if (!shooter || shooter->team != byTeam) return;
@@ -1486,6 +1778,10 @@ void GameLogic::ClickAimRay(const glm::vec3& origin, const glm::vec3& direction,
 }
 
 void GameLogic::PlaceAimPoint(const glm::vec3& point, Team byTeam) {
+  InputEvent e{InputEvent::Op::PlaceAimPoint};
+  e.point = point;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
   if (mode_ != InputMode::AwaitingShootTarget) return;
   const Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
   if (!shooter || shooter->team != byTeam) return;
@@ -1494,6 +1790,9 @@ void GameLogic::PlaceAimPoint(const glm::vec3& point, Team byTeam) {
 }
 
 void GameLogic::ConfirmAim(Team byTeam) {
+  InputEvent e{InputEvent::Op::ConfirmAim};
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
   if (mode_ != InputMode::AwaitingShootTarget || (!aimPreview_ && !lockPreviewId_)) return;
   Unit* shooter = FindUnit(selectedUnitId_.value_or(-1));
   if (!shooter || shooter->team != byTeam) return;
@@ -1795,6 +2094,14 @@ void GameLogic::ResolvePendingShots() {
   for (const Bullet& bullet : bullets) {
     RecordTracer(*bursts[bullet.burst].shooter, bullet.from, bullet.to,
                  std::max(0.0f, executionElapsed_ - bullet.at));
+    if (recorder_.ptr) {
+      char buf[224];
+      std::snprintf(buf, sizeof buf,
+                    "bullet shooter=%d index=%d at=%.4f from=(%.4f,%.4f,%.4f) to=(%.4f,%.4f,%.4f)",
+                    bursts[bullet.burst].shooter->id, bullet.index, bullet.at, bullet.from.x,
+                    bullet.from.y, bullet.from.z, bullet.to.x, bullet.to.y, bullet.to.z);
+      LogSim(buf);
+    }
   }
   for (Burst& b : bursts) {
     const float sinceShot = std::max(0.0f, executionElapsed_ - b.lastAt);
@@ -1817,7 +2124,12 @@ void GameLogic::ResolvePendingShots() {
                          const float next =
                              shot.startTime +
                              shot.shotsFired * StatsOf(shooter->weapon).shotIntervalSeconds;
-                         return next >= constants::kRoundDuration;
+                         if (next < constants::kRoundDuration) return false;
+                         // A reaction burst whose next shot falls past the
+                         // window still occupies the weapon until then: no
+                         // fresh burst may fire before `next` (issue #278).
+                         if (shot.reaction) reactionNextShotAt_[shot.shooterId] = next;
+                         return true;
                        }
                        if (shot.hasAimPoint) return false;
                        const Unit* target = FindUnit(shot.targetId);
@@ -1933,6 +2245,7 @@ void GameLogic::StartReactionBurst(const Unit& shooter, const Unit& target) {
 }
 
 void GameLogic::CommitRound() {
+  RecordScope record(this, InputEvent{InputEvent::Op::CommitRound});
   if (!CanCommitRound()) return;
   reactionAmmo_.clear();
   reactionNextShotAt_.clear();
@@ -2106,6 +2419,11 @@ void GameLogic::GrabFlagFrom(const std::vector<FlagTouch>& touches) {
 }
 
 void GameLogic::FinishRound() {
+  if (recorder_.ptr) {
+    char buf[96];
+    std::snprintf(buf, sizeof buf, "round %d finished exec=%.4f", roundNumber_, executionElapsed_);
+    LogSim(buf);
+  }
   selectedUnitId_.reset();
   activeMoves_.clear();
   pendingShots_.clear();
@@ -2154,6 +2472,45 @@ void GameLogic::FinishRound() {
     return;
   }
   ++roundNumber_;
+}
+
+// --- Input recording (issue #240) ---
+
+GameLogic::RecordScope::RecordScope(GameLogic* game, InputEvent event)
+    : game_(game), event_(std::move(event)), outermost_(game->recordDepth_++ == 0) {}
+
+GameLogic::RecordScope::~RecordScope() {
+  --game_->recordDepth_;
+  if (outermost_ && game_->recorder_.ptr) game_->recorder_.ptr->OnInput(*game_, event_);
+}
+
+void GameLogic::LogSim(const std::string& message) const {
+  if (recorder_.ptr) recorder_.ptr->OnLog(*this, message);
+}
+
+uint64_t GameLogic::StateHash() const {
+  const std::string text = SerializeSnapshot(ExportState());
+  uint64_t hash = 1469598103934665603ULL;  // FNV-1a 64.
+  for (const unsigned char c : text) {
+    hash ^= c;
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
+void GameLogic::SetPlaybook(Team team, const SquadPlaybook& playbook) {
+  InputEvent e{InputEvent::Op::SetPlaybook};
+  e.team = team;
+  e.playbook = playbook;
+  RecordScope record(this, std::move(e));
+  playbooks_[static_cast<int>(team)] = playbook;
+}
+
+void GameLogic::SetFriendlyFireEnabled(bool enabled) {
+  InputEvent e{InputEvent::Op::SetFriendlyFire};
+  e.flag = enabled;
+  RecordScope record(this, std::move(e));
+  friendlyFire_ = enabled;
 }
 
 }  // namespace tactics

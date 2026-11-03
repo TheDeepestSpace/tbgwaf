@@ -67,6 +67,11 @@ struct RagdollGun {
 // unchanged; a change drops all cached trajectories).
 void SetRagdollObstacles(const std::vector<tactics::Obstacle>& obstacles);
 
+// Bridge deck rails (the DeckRail entries of Scene::massing; others are
+// ignored), so a body on a deck is stopped by its side rail instead of
+// falling through it. Same calling convention as SetRagdollObstacles.
+void SetRagdollRails(const std::vector<tactics::MassingDetail>& massing);
+
 // Ramps/decks and the terrain heightfield the ragdolls rest on, so a body on
 // a ramp slides down it and one on hilly ground lies on the slope. Same
 // calling convention as SetRagdollObstacles.

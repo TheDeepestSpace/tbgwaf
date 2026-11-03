@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <random>
@@ -17,6 +18,63 @@
 #include "game/Visibility.h"
 
 namespace tactics {
+
+class GameLogic;
+
+// Demo-scene repro logs (issue #240): every player-equivalent input that
+// reaches GameLogic's public API is described by one of these so an attached
+// InputRecorder can serialize it and a replayer can feed it back through
+// the very same calls. Fields are meaningful per `op` (see
+// game/ReproLog.h for the on-disk form).
+struct InputEvent {
+  enum class Op {
+    Reset,            // Reset(scene): the scene is the demo scene itself.
+    Update,           // Update(dt): `value` = dt seconds.
+    ClickUnit,        // unit, team
+    ClickGround,      // point, team
+    FinishMovePlan,
+    ChooseMove,
+    ChooseShoot,
+    ChoosePass,
+    CancelAction,
+    SetMoveFacing,    // unit, value = yaw, team
+    ClickAimRay,      // point = origin, direction, team
+    PlaceAimPoint,    // point, team
+    ConfirmAim,       // team
+    SetShotCount,     // count, team
+    SetPlaybook,      // team, playbook
+    SetFriendlyFire,  // flag
+    CommitRound,
+    ClearAllPlans,
+    ImportTeamPlans,  // team, text = serialized snapshot
+    ImportState,      // text = serialized snapshot
+  };
+  Op op = Op::Update;
+  int unit = -1;
+  Team team = Team::Blue;
+  glm::vec3 point{0.0f};
+  glm::vec3 direction{0.0f};
+  float value = 0.0f;
+  int count = 0;
+  bool flag = false;
+  SquadPlaybook playbook;
+  std::string text;
+};
+
+// Observer of GameLogic inputs (issue #240). Attached with
+// GameLogic::SetInputRecorder; never copied along with the game (a timeline
+// replay instance or a planner's scratch copy must not record).
+class InputRecorder {
+ public:
+  virtual ~InputRecorder() = default;
+  // Fired after the input has been applied, with the post-input state.
+  // Nested public calls (ClickAimRay -> PlaceAimPoint) report only the
+  // outermost one.
+  virtual void OnInput(const GameLogic& game, const InputEvent& event) = 0;
+  // Free-form simulation log line (a shot fired, a figure knocked down, a
+  // round finished), emitted while an input is being applied.
+  virtual void OnLog(const GameLogic& game, const std::string& message) = 0;
+};
 
 enum class InputMode {
   AwaitingSelection,      // Waiting for a click on one of either team's living figures.
@@ -174,6 +232,10 @@ class GameLogic {
   // The reach field is UI-only and costs ~75 ms per move click; headless
   // callers that plan many moves (Jev) turn it off. On by default.
   void SetMoveFrontierEnabled(bool enabled) { moveFrontierEnabled_ = enabled; }
+  // Figure-overlap rejection (issue #267) is on by default; tests that
+  // deliberately walk figures through each other (playbook / zipline-queue
+  // scenarios) turn it off.
+  void SetFigureOverlapCheckEnabled(bool enabled) { overlapCheckEnabled_ = enabled; }
   std::optional<int> SelectedUnitId() const { return selectedUnitId_; }
   std::optional<Team> Winner() const { return winner_; }
   int RoundNumber() const { return roundNumber_; }
@@ -197,6 +259,28 @@ class GameLogic {
   // True once every living figure on *both* teams has a non-None plan,
   // i.e. CommitRound() is ready to be called.
   bool CanCommitRound() const;
+  // Issue #267: figures may not overlap while walking. Sweeps the round's
+  // timeline (fixed 1/40 s steps; planned movers walk their path from t = 0,
+  // everyone else stands) and reports whether `mover` on `path` would come
+  // within two agent radii of another living figure. Unplanned teammates are
+  // ignored (enemies without a plan count as standing).
+  //
+  // Rather than simply rejecting such moves, planning routes around the
+  // other figures' already-planned movements in space *and time*: the move
+  // frontier is computed against their trajectories (MovingBlockers), so the
+  // displayed boundary is the genuinely allowed range -- cells another
+  // figure's plan still occupies when the mover would stop there are carved
+  // out -- and a click whose straight path would collide is re-routed along
+  // the time-aware field (PlanDodgeLeg) instead of ignored. Only when no
+  // such route exists is the click rejected (hover preview turns invalid).
+  // CanCommitRound stays false while any planned move overlaps (e.g. from
+  // plans imported from the other side).
+  bool PathOverlapsFigure(const Unit& mover, const std::vector<glm::vec3>& path,
+                          const std::vector<PathRide>& rides) const;
+  bool HasPlanOverlap() const;
+  // True when the hover preview is invalid only because every route to it
+  // would overlap another figure's planned movement (for UI messaging).
+  bool MovePreviewBlockedByFigure() const { return movePreviewBlocked_; }
   // True while any killed unit is still mid-fall *and* time is passing for it
   // (a round executing, or the match over). Between rounds falls are frozen
   // and this is false.
@@ -382,7 +466,7 @@ class GameLogic {
   // Friendly fire config flag: when off, same-team figures are transparent
   // to the free-aim ballistic trace. On by default.
   bool FriendlyFireEnabled() const { return friendlyFire_; }
-  void SetFriendlyFireEnabled(bool enabled) { friendlyFire_ = enabled; }
+  void SetFriendlyFireEnabled(bool enabled);
 
   // Input events, driven by the input/render layer after it has resolved a
   // screen click into either a unit id or a ground-plane world point.
@@ -455,9 +539,7 @@ class GameLogic {
 
   // Squad-wide standing reaction table for `team` (see SquadPlaybook).
   const SquadPlaybook& Playbook(Team team) const { return playbooks_[static_cast<int>(team)]; }
-  void SetPlaybook(Team team, const SquadPlaybook& playbook) {
-    playbooks_[static_cast<int>(team)] = playbook;
-  }
+  void SetPlaybook(Team team, const SquadPlaybook& playbook);
 
   // Probabilistic hit resolution, applied immediately: if the shot passes
   // the hard gates (cone, LOS) it is fired (shooter animates) and a
@@ -476,6 +558,18 @@ class GameLogic {
   // Test seam: replaces the uniform [0,1) roll used by ResolveShot. Pass an
   // empty function to restore the default seeded RNG.
   void SetShotRollSource(std::function<float()> source) { shotRollSource_ = std::move(source); }
+  // Reseeds the shot RNG (demo scenes pin it so a recorded session replays
+  // with the same rolls, issue #240). Not reset by Reset(): a session's roll
+  // stream runs on across New Match, and the replay consumes it the same way.
+  void SeedShotRng(uint32_t seed) { shotRng_.seed(seed); }
+
+  // Issue #240: attaches (or detaches, with nullptr) the input observer.
+  // Never copied with the game.
+  void SetInputRecorder(InputRecorder* recorder) { recorder_.ptr = recorder; }
+  InputRecorder* GetInputRecorder() const { return recorder_.ptr; }
+  // FNV-1a hash of the serialized dynamic state (SerializeSnapshot of
+  // ExportState()): the per-event checksum repro logs carry.
+  uint64_t StateHash() const;
 
  private:
   void ClearQueuedLegs(std::optional<int> unitId);
@@ -604,6 +698,20 @@ class GameLogic {
   // zipline. False if neither fits. Fills `rides` (empty for a walk).
   bool PlanLeg(const Unit& mover, const glm::vec3& from, const glm::vec3& goal,
                std::vector<glm::vec3>* path, std::vector<PathRide>* rides);
+  // The other figures' planned movements as moving blockers for the
+  // time-aware reach field (issue #267): same inclusion rules as
+  // PathOverlapsFigure, sampled every kOverlapStep over the round. Empty
+  // trajectories when the overlap check is disabled. `origin` is where the
+  // mover starts the leg (figures already overlapping it at t = 0 are
+  // exempt, matching the sweep); `distanceOffset` see MovingBlockers.
+  MovingBlockers BuildMovingBlockers(const Unit& mover, const glm::vec3& origin,
+                                     float distanceOffset) const;
+  // Fallback for a first-leg walk whose straight path would overlap another
+  // figure's planned movement: extracts the time-aware route to `goal` from
+  // the current move frontier's parent grid, pulls it taut as far as the
+  // timing allows, and validates it with PathOverlapsFigure. False when the
+  // frontier has no valid route (the click is then rejected).
+  bool PlanDodgeLeg(const Unit& mover, const glm::vec3& goal, std::vector<glm::vec3>* outPath);
   void ClearMoveOverlays();
 
   // Squad-playbook pass, run once per executing tick after every mover has
@@ -616,6 +724,32 @@ class GameLogic {
   // Opens a magazine-long burst at `target` unless `shooter` is already
   // firing a reaction burst or has no rounds left this round.
   void StartReactionBurst(const Unit& shooter, const Unit& target);
+
+  // Reports `event` to the attached recorder once the enclosing public call
+  // returns (RAII); nested public calls are swallowed. See InputRecorder.
+  class RecordScope {
+   public:
+    RecordScope(GameLogic* game, InputEvent event);
+    ~RecordScope();
+    RecordScope(const RecordScope&) = delete;
+    RecordScope& operator=(const RecordScope&) = delete;
+
+   private:
+    GameLogic* game_;
+    InputEvent event_;
+    bool outermost_;
+  };
+  void LogSim(const std::string& message) const;
+  void UpdateUnrecorded(float dtSeconds);  // Update()'s body.
+  // The recorder pointer deliberately does not survive copying the game.
+  struct RecorderRef {
+    InputRecorder* ptr = nullptr;
+    RecorderRef() = default;
+    RecorderRef(const RecorderRef&) {}
+    RecorderRef& operator=(const RecorderRef&) { return *this; }
+  };
+  RecorderRef recorder_;
+  int recordDepth_ = 0;
 
   Scene scene_;
   SquadPlaybook playbooks_[2];  // Indexed by Team; survives Reset().
@@ -636,8 +770,11 @@ class GameLogic {
 
   std::vector<glm::vec3> movePreviewPath_;
   bool movePreviewValid_ = false;
+  bool movePreviewBlocked_ = false;
   ReachField moveFrontier_;
   bool moveFrontierEnabled_ = true;
+  bool overlapCheckEnabled_ = true;
+  int frontierRevision_ = 0;  // Stamped into recomputed fields (ReachField::revision).
   std::vector<ZiplineFrontier> ziplineFrontiers_;
   std::vector<NavMesh> ziplineMeshes_;  // Parallel to ziplineFrontiers_: mesh around each exit.
   int ziplineUnitId_ = -1;

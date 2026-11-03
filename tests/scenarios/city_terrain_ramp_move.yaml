@@ -9,6 +9,7 @@ map:
     elevated: false
     features: {terrain: on}
     terrain_levels: -1
+    extra_arteries: 0
 units:
   - {id: 0, team: blue, position: [-39.2, 0, -51.26], facing_degrees: 100}
   - {id: 1, team: red, position: [-65, 0, 10], facing_degrees: 0}
@@ -17,7 +18,7 @@ camera:
   zoom: -120
 render: {fov_overlay: shadow_map}
 script:
-  - assert: {unit: 0, position: [-39.2, 0.10, -51.26], tolerance: 0.05}
+  - assert: {unit: 0, position: [-39.2, 0.01, -51.26], tolerance: 0.05}
   - action: move
     actor: 0
     destination: [-40.12, 4.681, -43.87]

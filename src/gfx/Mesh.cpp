@@ -1,5 +1,6 @@
 #include "gfx/Mesh.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <vector>
@@ -21,6 +22,28 @@ ScopedDrawStats::ScopedDrawStats(RenderFrameStats* sink) : previous_(g_drawStats
   g_drawStatsSink = sink;
 }
 ScopedDrawStats::~ScopedDrawStats() { g_drawStatsSink = previous_; }
+
+Frustum::Frustum(const glm::mat4& m) {
+  // Gribb/Hartmann: each plane is the last row of the matrix plus or minus
+  // one of the others (glm is column-major, so row i is m[*][i]).
+  const auto row = [&](int i) { return glm::vec4(m[0][i], m[1][i], m[2][i], m[3][i]); };
+  for (int axis = 0; axis < 3; ++axis) {
+    planes_[2 * axis] = row(3) + row(axis);
+    planes_[2 * axis + 1] = row(3) - row(axis);
+  }
+}
+
+bool Frustum::Intersects(const glm::vec3& min, const glm::vec3& max) const {
+  for (const glm::vec4& plane : planes_) {
+    // The box corner furthest along the plane's normal.
+    const glm::vec3 corner(plane.x >= 0.0f ? max.x : min.x, plane.y >= 0.0f ? max.y : min.y,
+                           plane.z >= 0.0f ? max.z : min.z);
+    if (plane.x * corner.x + plane.y * corner.y + plane.z * corner.z + plane.w < 0.0f) {
+      return false;
+    }
+  }
+  return true;
+}
 
 void CubeMesh::Init() {
   // clang-format off
@@ -234,6 +257,8 @@ void LitTriangleMesh::Destroy() {
 
 void LitTriangleMesh::SetMesh(const std::vector<Vertex>& vertices,
                               const std::vector<GLuint>& indices) {
+  chunks_.clear();
+  groups_.clear();
   indexCount_ = static_cast<GLsizei>(indices.size());
   if (indexCount_ == 0) return;
   glBindVertexArray(vao_);
@@ -246,11 +271,111 @@ void LitTriangleMesh::SetMesh(const std::vector<Vertex>& vertices,
   glBindVertexArray(0);
 }
 
+void LitTriangleMesh::SetChunkedMesh(const std::vector<Vertex>& vertices,
+                                     const std::vector<GLuint>& indices, int gridCells,
+                                     const std::vector<int>* triangleGroups) {
+  const size_t triangles = indices.size() / 3;
+  if (triangles == 0 || gridCells < 2) {
+    SetMesh(vertices, indices);
+    return;
+  }
+  glm::vec2 lo(INFINITY), hi(-INFINITY);
+  for (GLuint index : indices) {
+    lo = glm::min(lo, glm::vec2(vertices[index].pos.x, vertices[index].pos.z));
+    hi = glm::max(hi, glm::vec2(vertices[index].pos.x, vertices[index].pos.z));
+  }
+  const glm::vec2 cellSize = glm::max((hi - lo) / static_cast<float>(gridCells), glm::vec2(1e-3f));
+  // Cells are numbered row by row, alternating direction, so a frustum's
+  // accepted cells in neighbouring rows tend to sit next to each other in
+  // the index buffer and merge into fewer draws.
+  const auto cellOf = [&](size_t triangle) {
+    glm::vec2 centroid(0.0f);
+    for (int k = 0; k < 3; ++k) {
+      const glm::vec3& p = vertices[indices[3 * triangle + k]].pos;
+      centroid += glm::vec2(p.x, p.z) / 3.0f;
+    }
+    const glm::ivec2 c = glm::clamp(glm::ivec2((centroid - lo) / cellSize), glm::ivec2(0),
+                                    glm::ivec2(gridCells - 1));
+    return c.y * gridCells + (c.y % 2 == 0 ? c.x : gridCells - 1 - c.x);
+  };
+  const auto groupOf = [&](size_t triangle) {
+    return triangleGroups ? (*triangleGroups)[triangle] : 0;
+  };
+  std::vector<int> cell(triangles);
+  std::vector<size_t> order(triangles);
+  for (size_t t = 0; t < triangles; ++t) {
+    cell[t] = cellOf(t);
+    order[t] = t;
+  }
+  std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+    return cell[a] != cell[b] ? cell[a] < cell[b] : groupOf(a) < groupOf(b);
+  });
+  std::vector<GLuint> sorted(triangles * 3);
+  for (size_t slot = 0; slot < triangles; ++slot) {
+    for (int k = 0; k < 3; ++k) sorted[3 * slot + k] = indices[3 * order[slot] + k];
+  }
+  SetMesh(vertices, sorted);
+  for (size_t slot = 0; slot < triangles; ++slot) {
+    const size_t t = order[slot];
+    const GLsizei first = static_cast<GLsizei>(3 * slot);
+    if (slot == 0 || cell[t] != cell[order[slot - 1]]) {
+      chunks_.push_back({glm::vec3(INFINITY), glm::vec3(-INFINITY), {first, 0}, groups_.size(), 0});
+    }
+    Chunk& chunk = chunks_.back();
+    for (int k = 0; k < 3; ++k) {
+      chunk.min = glm::min(chunk.min, vertices[indices[3 * t + k]].pos);
+      chunk.max = glm::max(chunk.max, vertices[indices[3 * t + k]].pos);
+    }
+    chunk.range.indexCount += 3;
+    if (!triangleGroups) continue;
+    if (chunk.groupCount == 0 || groups_.back().group != groupOf(t)) {
+      groups_.push_back({groupOf(t), {first, 0}});
+      ++chunk.groupCount;
+    }
+    groups_.back().range.indexCount += 3;
+  }
+}
+
+void LitTriangleMesh::DrawRange(GLsizei firstIndex, GLsizei indexCount) const {
+  glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT,
+                 reinterpret_cast<const void*>(static_cast<size_t>(firstIndex) * sizeof(GLuint)));
+  RecordDraw(indexCount, indexCount / 3);
+}
+
 void LitTriangleMesh::Draw() const {
   if (indexCount_ == 0) return;
   glBindVertexArray(vao_);
-  glDrawElements(GL_TRIANGLES, indexCount_, GL_UNSIGNED_INT, nullptr);
-  RecordDraw(indexCount_, indexCount_ / 3);
+  DrawRange(0, indexCount_);
+  glBindVertexArray(0);
+}
+
+void LitTriangleMesh::DrawVisible(const ChunkFilter& visible,
+                                  const std::function<bool(int group)>& skipGroup) const {
+  if (chunks_.empty()) {
+    Draw();
+    return;
+  }
+  glBindVertexArray(vao_);
+  Range run{0, 0};
+  const auto add = [&](const Range& range) {
+    if (run.indexCount > 0 && run.firstIndex + run.indexCount == range.firstIndex) {
+      run.indexCount += range.indexCount;
+      return;
+    }
+    if (run.indexCount > 0) DrawRange(run.firstIndex, run.indexCount);
+    run = range;
+  };
+  for (const Chunk& chunk : chunks_) {
+    if (!visible(chunk.min, chunk.max)) continue;
+    if (!skipGroup || chunk.groupCount == 0) {
+      add(chunk.range);
+      continue;
+    }
+    for (size_t g = chunk.firstGroup; g < chunk.firstGroup + chunk.groupCount; ++g) {
+      if (!skipGroup(groups_[g].group)) add(groups_[g].range);
+    }
+  }
+  if (run.indexCount > 0) DrawRange(run.firstIndex, run.indexCount);
   glBindVertexArray(0);
 }
 

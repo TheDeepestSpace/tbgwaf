@@ -503,6 +503,7 @@ void TestSurfacesSitOnTiers() {
 void TestTerrainZiplines() {
   auto c = TerrainConfig();
   c.maxZiplinesPerBlock = 2;
+  c.enterableChance = 0.0f;  // Zipline roofs assume solid prisms.
   for (uint32_t seed : {7u, 42u, 2024u}) {
     currentSeed = seed;
     const Scene s = GenerateUrbanMap(seed, c);

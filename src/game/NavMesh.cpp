@@ -143,9 +143,29 @@ void NavMesh::Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent,
   Build(obstacles, SquareRegion(mapHalfExtent), agentRadius, ground, walkSurfaces);
 }
 
-void NavMesh::Build(const std::vector<Obstacle>& obstacles, const NavRegion& region,
+void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& region,
                      float agentRadius, const HeightField* ground,
                      const std::vector<WalkSurface>* walkSurfaces) {
+  // Anything starting at or above head height over the ground beneath it
+  // (door lintels, roof slabs, upper storeys) can be walked under, so it
+  // never blocks the ground mesh. Measured above the highest ground under
+  // the bounds, so a prism standing on a raised terrain level still blocks.
+  static const HeightField kFlat;
+  const HeightField& heights = ground ? *ground : kFlat;
+  std::vector<Obstacle> obstacles;
+  obstacles.reserve(allObstacles.size());
+  for (const Obstacle& obstacle : allObstacles) {
+    const AABB& b = obstacle.bounds;
+    float groundTop = 0.0f;
+    if (!heights.Empty()) {
+      groundTop = heights.HeightAt(0.5f * (b.min.x + b.max.x), 0.5f * (b.min.z + b.max.z));
+      for (const float x : {b.min.x, b.max.x}) {
+        for (const float z : {b.min.z, b.max.z}) groundTop = std::max(groundTop, heights.HeightAt(x, z));
+      }
+    }
+    if (b.min.y - groundTop >= constants::kUnitHeight) continue;
+    obstacles.push_back(obstacle);
+  }
   ground_ = ground ? *ground : HeightField{};
   walkSurfaces_ = walkSurfaces ? *walkSurfaces : std::vector<WalkSurface>{};
   BuildSurfaceCaches(agentRadius);
@@ -614,12 +634,40 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
     return p;
   };
 
-  if (startSurface < 0) {
+  {
     using Entry = std::pair<float, int>;
     std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
-    const int startIdx = radius * field.nx + radius;
-    field.dist[startIdx] = 0.0f;
-    open.push({0.0f, startIdx});
+    if (startSurface < 0) {
+      const int startIdx = radius * field.nx + radius;
+      field.dist[startIdx] = 0.0f;
+      open.push({0.0f, startIdx});
+    } else {
+      // Standing on a surface: ground is reachable by walking to any declared
+      // ground connection and stepping off there (as FindPath allows). Price
+      // the route to each foot and seed the ground search from it.
+      for (size_t entry = 0; entry < walkSurfaces_.size(); ++entry) {
+        if (!walkSurfaces_[entry].connectsToGround) continue;
+        const glm::vec3 connection = GroundConnectionPoint(static_cast<int>(entry));
+        std::vector<glm::vec3> path;
+        if (!FindSurfacePath(startSurface, start, static_cast<int>(entry), connection, &path)) {
+          continue;
+        }
+        float cost = 0.0f;
+        for (size_t i = 0; i + 1 < path.size(); ++i) cost += glm::distance(path[i], path[i + 1]);
+        if (cost > budget) continue;
+        const int ix = static_cast<int>(std::lround((connection.x - field.minX) / step));
+        const int iz = static_cast<int>(std::lround((connection.z - field.minZ) / step));
+        if (ix < 0 || iz < 0 || ix >= field.nx || iz >= field.nz) continue;
+        if (!nodeWalkable(ix, iz)) continue;
+        const glm::vec3 node = nodeWorld(ix, iz);
+        const float d = cost + glm::distance(glm::vec2(node.x, node.z),
+                                             glm::vec2(connection.x, connection.z));
+        const int idx = iz * field.nx + ix;
+        if (d > budget || d >= field.dist[idx]) continue;
+        field.dist[idx] = d;
+        open.push({d, idx});
+      }
+    }
     while (!open.empty()) {
       const auto [d, idx] = open.top();
       open.pop();

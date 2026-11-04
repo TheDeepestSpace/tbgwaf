@@ -37,6 +37,7 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
   overlays.selectionHighlight = selected->position;
   if (game.Mode() == tactics::InputMode::AwaitingMoveDestination) {
     overlays.moveFrontier = game.MoveFrontier();
+    overlays.moveCover = game.MoveCover();
     overlays.ziplineFrontiers = &game.ZiplineFrontiers();
     overlays.movePreviewRides = &game.MovePreviewRides();
     // A later leg is drawn at 50% alpha; the first leg is solid green.
@@ -4482,12 +4483,61 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       frontierFill_.SetVertices(fill);
       frontierBorder_.SetPoints(border);
     }
+    // Cover tint (issue #290): each cover tile is a soft quad; a corner's
+    // alpha is the share of the four tiles around it that are cover, so the
+    // tint fades out into open ground. Flat and tactical differ in hue.
+    if (overlays.moveCover && overlays.moveCover->nx == f.nx && overlays.moveCover->nz == f.nz) {
+      if (coverKeyRevision_ != f.revision || frontierKeyThermal_ != thermalKey) {
+        coverKeyRevision_ = f.revision;
+        const tactics::CoverMap& cm = *overlays.moveCover;
+        const std::vector<AABB>& slabs = game.GetScene().sidewalks;
+        std::vector<ColorTriangleMesh::Vertex> cover;
+        const glm::vec3 kFlat(0.25f, 0.6f, 1.0f), kTactical(1.0f, 0.62f, 0.12f);
+        for (int iz = 0; iz < f.nz; ++iz) {
+          for (int ix = 0; ix < f.nx; ++ix) {
+            const tactics::CoverTile& t = cm.At(ix, iz);
+            if (t.kind == tactics::CoverKind::None) continue;
+            const glm::vec3 color = t.kind == tactics::CoverKind::Tactical ? kTactical : kFlat;
+            const float half = f.step * 0.5f;
+            const glm::vec3 c = f.Node(ix, iz);
+            // Neighbor-weighted corner alpha.
+            const auto corner = [&](int sx, int sz) {
+              float sum = 0.0f;
+              for (int dz = 0; dz <= 1; ++dz) {
+                for (int dx = 0; dx <= 1; ++dx) {
+                  const int jx = ix + (sx > 0 ? dx : -dx), jz = iz + (sz > 0 ? dz : -dz);
+                  if (jx < 0 || jz < 0 || jx >= f.nx || jz >= f.nz) continue;
+                  if (cm.At(jx, jz).kind != tactics::CoverKind::None) sum += 0.25f;
+                }
+              }
+              return 0.5f * sum;
+            };
+            float y = c.y + 0.045f;
+            for (const AABB& slab : slabs) {
+              if (c.x >= slab.min.x && c.x <= slab.max.x && c.z >= slab.min.z &&
+                  c.z <= slab.max.z) {
+                y = std::max(y, slab.max.y + 0.03f);
+              }
+            }
+            const auto vtx = [&](int sx, int sz) {
+              return ColorTriangleMesh::Vertex{
+                  glm::vec3(c.x + sx * half, y, c.z + sz * half),
+                  glm::vec4(color, corner(sx, sz))};
+            };
+            const auto v00 = vtx(-1, -1), v10 = vtx(1, -1), v11 = vtx(1, 1), v01 = vtx(-1, 1);
+            for (const auto& v : {v00, v10, v11, v00, v11, v01}) cover.push_back(v);
+          }
+        }
+        coverFill_.SetVertices(cover);
+      }
+    }
     // Same depth bias as the FOV cone, against z-fighting at distance.
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(-2.0f, -4.0f);
     colorShader_.Use();
     colorShader_.SetMat4("uMVP", viewProj);
     frontierFill_.Draw();
+    if (overlays.moveCover) coverFill_.Draw();
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
     // Same green for every leg, half-transparent after the

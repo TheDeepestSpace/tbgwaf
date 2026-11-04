@@ -973,6 +973,28 @@ void GameLogic::Update(float dtSeconds) {
   }
 }
 
+// Cover pose state (issue #290): a figure standing still on a cover tile eases
+// into the pose; moving or downed figures ease out. Classification is redone
+// only when the figure's position changes.
+void GameLogic::UpdateCoverPoses(float dtSeconds) {
+  for (Unit& unit : scene_.units) {
+    if (!unit.alive || unit.walkBlend > 0.01f || unit.rideTravel >= 0.0f) {
+      unit.coverBlend = std::max(0.0f, unit.coverBlend - dtSeconds * 4.0f);
+      continue;
+    }
+    if (unit.coverFrom != unit.position) {
+      unit.coverFrom = unit.position;
+      float yaw = 0.0f;
+      unit.coverKind = static_cast<uint8_t>(ClassifyCover(sightObstacles_, unit.position, &yaw).kind);
+      unit.coverYaw = yaw;
+    }
+    const float target = unit.coverKind != 0 ? 1.0f : 0.0f;
+    const float step = dtSeconds * 4.0f;
+    unit.coverBlend = unit.coverBlend < target ? std::min(target, unit.coverBlend + step)
+                                               : std::max(target, unit.coverBlend - step);
+  }
+}
+
 void GameLogic::UpdateUnrecorded(float dtSeconds) {
   // Knockdowns and the quick-draw beat are purely visual. A fall only runs
   // while a round executes (or once the match is over): if the round ends
@@ -1001,6 +1023,7 @@ void GameLogic::UpdateUnrecorded(float dtSeconds) {
       if (unit.grabElapsed >= constants::kGrabAnimDuration) unit.grabElapsed = -1.0f;
     }
   }
+  UpdateCoverPoses(dtSeconds);
   if (flag_.dropElapsed >= 0.0f) {
     flag_.dropElapsed = std::min(flag_.dropElapsed + dtSeconds, constants::kFlagDropDuration);
   }
@@ -1214,6 +1237,7 @@ void GameLogic::ClearQueuedLegs(std::optional<int> unitId) {
 // legs run in later rounds and get the plain field.
 void GameLogic::RefreshMoveFrontier() {
   moveFrontier_ = ReachField();
+  moveCover_ = CoverMap();
   ziplineFrontiers_.clear();
   ziplineMeshes_.clear();
   ziplineUnitId_ = -1;
@@ -1228,6 +1252,7 @@ void GameLogic::RefreshMoveFrontier() {
         origin, mover->MoveBudget(), 0.25f,
         firstLeg && !blockers.trajectories.empty() ? &blockers : nullptr);
     moveFrontier_.revision = ++frontierRevision_;
+    moveCover_ = ComputeCoverMap(sightObstacles_, moveFrontier_);
     BuildZiplineFrontiers(*mover, origin);
   }
 }

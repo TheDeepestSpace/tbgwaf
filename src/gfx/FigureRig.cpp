@@ -619,7 +619,7 @@ FigureParts BuildRagdollFigure(const Unit& unit, bool compactWeapon) {
   return parts;
 }
 
-FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon, RagdollPose* joints = nullptr) {
+FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* joints = nullptr) {
   if (!joints && RagdollActive(unit)) return BuildRagdollFigure(unit, compactWeapon);
   // Every body part shares the one flat team color; only the weapon differs.
   const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
@@ -953,8 +953,36 @@ RagdollPose AnimatedPose(const Unit& unit) {
   standing.alive = true;
   standing.knockdownElapsed = -1.0f;
   RagdollPose pose{};
-  BuildFigureImpl(standing, true, &pose);
+  BuildFigureBase(standing, true, &pose);
   return pose;
+}
+
+// Cover pose (issue #290): blends the whole posed figure rigidly about its
+// feet. Flat cover leans the back against the blocker (tilt away, nudge
+// toward it); tactical cover hugs the corner in a crouch (squash + lean
+// toward the blocker's edge, as if about to peek). No clips needed.
+FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon, RagdollPose* joints = nullptr) {
+  FigureParts parts = BuildFigureBase(unit, compactWeapon, joints);
+  if (joints || unit.coverBlend <= 0.0f || unit.coverKind == 0 || !unit.alive ||
+      unit.walkBlend > 0.05f) {
+    return parts;
+  }
+  const float b = unit.coverBlend;
+  const glm::vec3 toWall(std::cos(unit.coverYaw), 0.0f, std::sin(unit.coverYaw));
+  // Tilt axis: horizontal, perpendicular to the wall direction.
+  const glm::vec3 axis(-toWall.z, 0.0f, toWall.x);
+  const bool flat = unit.coverKind == 1;
+  // Positive rotation about `axis` leans the head toward +toWall; flat cover
+  // leans the back into the wall (head away), tactical leans toward it.
+  const float lean = glm::radians(flat ? -9.0f : 14.0f) * b;
+  const float squash = flat ? 1.0f : 1.0f - 0.18f * b;
+  const glm::vec3 shift = toWall * ((flat ? 0.12f : 0.05f) * b);
+  glm::mat4 xf = glm::translate(glm::mat4(1.0f), unit.position + shift) *
+                 glm::rotate(glm::mat4(1.0f), -lean, axis) *
+                 glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, squash, 1.0f)) *
+                 glm::translate(glm::mat4(1.0f), -unit.position);
+  for (FigurePart& part : parts) part.model = xf * part.model;
+  return parts;
 }
 
 FigureParts BuildFigure(const Unit& unit) { return BuildFigureImpl(unit, false); }

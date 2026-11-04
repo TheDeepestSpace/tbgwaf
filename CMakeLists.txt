@@ -74,6 +74,7 @@ set(GAME_LOGIC_SOURCES
   src/game/Geometry.cpp
   src/game/MapGenerator.cpp
   src/game/NavMesh.cpp
+  src/game/Cover.cpp
   src/game/Raycast.cpp
   src/game/Visibility.cpp
   src/game/GameLogic.cpp
@@ -240,6 +241,11 @@ else()
   target_include_directories(tactics_logic_tests PRIVATE src)
   target_link_libraries(tactics_logic_tests PRIVATE tactics_logic)
   add_test(NAME logic_tests COMMAND tactics_logic_tests)
+
+  add_executable(tactics_cover_tests tests/cover_tests.cpp)
+  target_include_directories(tactics_cover_tests PRIVATE src)
+  target_link_libraries(tactics_cover_tests PRIVATE tactics_logic)
+  add_test(NAME cover_tests COMMAND tactics_cover_tests)
 
   add_executable(tactics_jev_planner_tests tests/jev_planner_tests.cpp)
   target_include_directories(tactics_jev_planner_tests PRIVATE src)

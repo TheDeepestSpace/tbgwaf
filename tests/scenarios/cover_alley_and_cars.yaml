@@ -1,0 +1,29 @@
+name: cover_alley_and_cars
+description: >
+  Issue #290 cover tint: an alley with walls on both sides, two parked
+  car-sized blocks (tactical on all sides, short) and a low barrier that is
+  too low to give cover next to a tall wall that does.
+
+map:
+  obstacles:
+    - {center: [-8, -3], half_extent: [4.0, 0.5], height: 3.0, climbable: false}
+    - {center: [-8, 3], half_extent: [4.0, 0.5], height: 3.0, climbable: false}
+    - {center: [3, -1], half_extent: [1.2, 0.5], height: 1.3, climbable: false}
+    - {center: [3, 4], half_extent: [1.2, 0.5], height: 1.3, climbable: false}
+    - {center: [10, -2], half_extent: [3.0, 0.4], height: 0.5, climbable: false}
+    - {center: [10, 3], half_extent: [3.0, 0.4], height: 3.0, climbable: false}
+
+units:
+  - {id: 0, team: blue, position: [-2, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [0, 0, -14], facing_degrees: 180}
+
+camera:
+  target: [0, 0]
+  zoom: 4
+
+script:
+  - action: begin_move
+    actor: 0
+    comment: Alley tinted on both sides, cars tactical, low barrier untinted.
+  - assert: {unit: 0, position: [-2, 0, 0], tolerance: 0.05}
+  - assert: {round: 1}

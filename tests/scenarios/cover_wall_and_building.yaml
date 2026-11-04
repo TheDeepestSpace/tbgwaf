@@ -1,0 +1,25 @@
+name: cover_wall_and_building
+description: >
+  Issue #290 cover tint on the move frontier: a long wall gives flat (blue)
+  cover along its face, while the ends of the wall and the corners of the
+  building give tactical (orange) cover. Open ground stays untinted.
+
+map:
+  obstacles:
+    - {center: [-6, 0], half_extent: [5.0, 0.5], height: 3.0, climbable: false}
+    - {center: [6, 0], half_extent: [2.0, 2.0], height: 4.0, climbable: false}
+
+units:
+  - {id: 0, team: blue, position: [0, 0, 4], facing_degrees: 0}
+  - {id: 1, team: red, position: [0, 0, -14], facing_degrees: 180}
+
+camera:
+  target: [0, 0]
+  zoom: 4
+
+script:
+  - action: begin_move
+    actor: 0
+    comment: Tint hugs the wall face and building sides; corners turn tactical.
+  - assert: {unit: 0, position: [0, 0, 4], tolerance: 0.05}
+  - assert: {round: 1}

@@ -2878,6 +2878,7 @@ bool SceneRenderer::Init() {
   cubeMesh_.Init();
   sphereMesh_.Init();
   frontierFill_.Init();
+  coverFill_.Init();
   frontierBorder_.Init();
   ziplineFill_.Init();
   ziplineBorder_.Init();
@@ -2944,6 +2945,7 @@ bool SceneRenderer::Init() {
 
 void SceneRenderer::Destroy() {
   frontierFill_.Destroy();
+  coverFill_.Destroy();
   frontierBorder_.Destroy();
   ziplineFill_.Destroy();
   ziplineBorder_.Destroy();
@@ -4469,9 +4471,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (overlays.moveFrontier && overlays.moveFrontier->nx > 0) {
     const tactics::ReachField& f = *overlays.moveFrontier;
     const glm::vec2 origin(f.minX, f.minZ);
-    if (frontierKeyField_ != &f || frontierKeyOrigin_ != origin ||
-        frontierKeyBudget_ != f.budget || frontierKeyRevision_ != f.revision ||
-        frontierKeyThermal_ != thermalKey) {
+    const bool frontierRebuilt = frontierKeyField_ != &f || frontierKeyOrigin_ != origin ||
+                                 frontierKeyBudget_ != f.budget ||
+                                 frontierKeyRevision_ != f.revision ||
+                                 frontierKeyThermal_ != thermalKey;
+    if (frontierRebuilt) {
       frontierKeyField_ = &f;
       frontierKeyOrigin_ = origin;
       frontierKeyBudget_ = f.budget;
@@ -4487,7 +4491,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // alpha is the share of the four tiles around it that are cover, so the
     // tint fades out into open ground. Flat and tactical differ in hue.
     if (overlays.moveCover && overlays.moveCover->nx == f.nx && overlays.moveCover->nz == f.nz) {
-      if (coverKeyRevision_ != f.revision || frontierKeyThermal_ != thermalKey) {
+      if (frontierRebuilt || coverKeyRevision_ != f.revision) {
         coverKeyRevision_ = f.revision;
         const tactics::CoverMap& cm = *overlays.moveCover;
         const std::vector<AABB>& slabs = game.GetScene().sidewalks;

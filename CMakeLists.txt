@@ -249,9 +249,10 @@ else()
   target_link_libraries(tactics_cover_tests PRIVATE tactics_logic)
   add_test(NAME cover_tests COMMAND tactics_cover_tests)
 
-  add_executable(tactics_cover_pose_tests tests/cover_pose_tests.cpp)
+  add_executable(tactics_cover_pose_tests tests/cover_pose_tests.cpp src/gfx/FigureRig.cpp
+                 src/gfx/Ragdoll.cpp)
   target_include_directories(tactics_cover_pose_tests PRIVATE src)
-  target_link_libraries(tactics_cover_pose_tests PRIVATE tactics_gfx)
+  target_link_libraries(tactics_cover_pose_tests PRIVATE tactics_logic glm::glm)
   add_test(NAME cover_pose_tests COMMAND tactics_cover_pose_tests)
 
   add_executable(tactics_jev_planner_tests tests/jev_planner_tests.cpp)

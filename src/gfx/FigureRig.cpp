@@ -84,6 +84,14 @@ constexpr BipedCurve kIdleBob = {1.0f, 0.4f, 0.0f, 0.5f, 1.0f, 0.6f, 0.0f, 0.4f}
 constexpr float kWalkBobHeight = 0.04f;
 constexpr float kIdleBobHeight = 0.008f;
 
+// Cover poses (issue #290), joint angles in radians / degrees as named.
+constexpr float kCrouchHip = glm::radians(58.0f);   // Thigh forward.
+constexpr float kCrouchKnee = glm::radians(-116.0f);  // Shin folded back.
+constexpr float kCrouchLean = 16.0f;                // Spine toward the edge, degrees.
+constexpr float kFlatCoverLean = 11.0f;             // Spine toward the wall, degrees.
+constexpr float kFlatCoverKnee = glm::radians(-14.0f);
+constexpr float kFlatCoverStagger = glm::radians(14.0f);  // Free foot eased forward.
+
 constexpr float kTwoPi = 6.28318530717958647692f;
 constexpr float kGrabLean = glm::radians(32.0f);  // Peak forward dip of the flag-grab reach.
 
@@ -696,9 +704,51 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
     leftHip += stepAmount;
   }
   const float bank = -glm::clamp(lag, -kTurnBankMaxLag, kTurnBankMaxLag) * kTurnBank * walk;
-  const glm::mat4 figure =
-      fall * YawFrame(unit.position + glm::vec3(0.0f, bob + ride.lift, 0.0f), unit.VisualYaw()) *
+
+  // Cover pose (issue #290), made of joint angles rather than a distortion of
+  // the finished figure. Tactical cover is a crouch: thighs forward, knees
+  // folded, the pelvis dropped so the feet stay planted. Flat cover is a
+  // relaxed lean: one knee eased, the spine tilted from the hips so the
+  // shoulders rest on the wall. Both lean the spine toward the wall (in the
+  // figure's own frame, so the pose reads whichever way it is facing).
+  float coverDrop = 0.0f;
+  float spineLean = 0.0f;
+  glm::vec3 spineAxis(0.0f, 0.0f, 1.0f);
+  glm::vec3 coverShift(0.0f);
+  if (!joints && unit.coverBlend > 0.0f && unit.coverKind != 0 && unit.alive &&
+      unit.walkBlend <= 0.05f && !ride.riding) {
+    const float b = unit.coverBlend;
+    const bool flat = unit.coverKind == 1;
+    float hip = flat ? 0.0f : kCrouchHip;
+    float knee = flat ? kFlatCoverKnee : kCrouchKnee;
+    const auto reach = [](float h, float k) {
+      return kUpperLegLength * std::cos(h) + kLowerLegLength * std::cos(h + k);
+    };
+    leftHip = glm::mix(leftHip, hip, b);
+    rightHip = glm::mix(rightHip, flat ? hip - kFlatCoverStagger : hip, b);
+    leftKnee = glm::mix(leftKnee, knee, b);
+    rightKnee = glm::mix(rightKnee, flat ? kFlatCoverKnee * 2.2f : knee, b);
+    // Keep the lower foot on the ground: drop by the leg length lost.
+    const float standing = kUpperLegLength + kLowerLegLength * std::cos(glm::radians(12.0f));
+    coverDrop = std::max(0.0f, standing - std::min(reach(leftHip, leftKnee),
+                                                   reach(rightHip, rightKnee)));
+    const float cy = std::cos(unit.coverYaw - unit.VisualYaw());
+    const float sy = std::sin(unit.coverYaw - unit.VisualYaw());
+    spineAxis = glm::vec3(sy, 0.0f, -cy);  // Tips +Y toward the wall.
+    spineLean = glm::radians(flat ? kFlatCoverLean : kCrouchLean) * b;
+    coverShift = glm::vec3(cy, 0.0f, sy) * ((flat ? 0.10f : 0.04f) * b);
+  }
+
+  const glm::mat4 hipFrame =
+      fall * YawFrame(unit.position + glm::vec3(0.0f, bob + ride.lift - coverDrop, 0.0f),
+                      unit.VisualYaw()) *
       glm::rotate(glm::mat4(1.0f), bank, glm::vec3(1.0f, 0.0f, 0.0f)) *
+      glm::translate(glm::mat4(1.0f), glm::vec3(coverShift));
+  // Everything above the hips (torso, head, arms, weapon) rides the spine.
+  const glm::mat4 figure =
+      hipFrame * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, kHipHeight, 0.0f)) *
+      glm::rotate(glm::mat4(1.0f), spineLean, spineAxis) *
+      glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -kHipHeight, 0.0f)) *
       glm::rotate(glm::mat4(1.0f), -grabLean, glm::vec3(0.0f, 0.0f, 1.0f));
 
   // Rifle aim blades the torso/shoulders onto the target bearing plus
@@ -734,10 +784,10 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
   parts.push_back({EllipsoidModel(figure, headCenter, glm::vec3(kHeadRadius)), teamColor});
 
   const glm::mat4 leftThigh =
-      LimbFrame(figure, glm::vec3(0.0f, kHipHeight, -kLegSideOffset), leftHip, legTwist);
+      LimbFrame(hipFrame, glm::vec3(0.0f, kHipHeight, -kLegSideOffset), leftHip, legTwist);
   const glm::mat4 leftShin = ChildBoneFrame(leftThigh, kUpperLegLength, leftKnee);
   const glm::mat4 rightThigh =
-      LimbFrame(figure, glm::vec3(0.0f, kHipHeight, kLegSideOffset), rightHip, legTwist);
+      LimbFrame(hipFrame, glm::vec3(0.0f, kHipHeight, kLegSideOffset), rightHip, legTwist);
   const glm::mat4 rightShin = ChildBoneFrame(rightThigh, kUpperLegLength, rightKnee);
   // Where an IK-solved arm ends up, for the ragdoll's starting pose.
   auto armOut = [&](int elbow, int hand, glm::vec3** e, glm::vec3** h) {
@@ -957,32 +1007,8 @@ RagdollPose AnimatedPose(const Unit& unit) {
   return pose;
 }
 
-// Cover pose (issue #290): blends the whole posed figure rigidly about its
-// feet. Flat cover leans the back against the blocker (tilt away, nudge
-// toward it); tactical cover hugs the corner in a crouch (squash + lean
-// toward the blocker's edge, as if about to peek). No clips needed.
-FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon, RagdollPose* joints = nullptr) {
-  FigureParts parts = BuildFigureBase(unit, compactWeapon, joints);
-  if (joints || unit.coverBlend <= 0.0f || unit.coverKind == 0 || !unit.alive ||
-      unit.walkBlend > 0.05f) {
-    return parts;
-  }
-  const float b = unit.coverBlend;
-  const glm::vec3 toWall(std::cos(unit.coverYaw), 0.0f, std::sin(unit.coverYaw));
-  // Tilt axis: horizontal, perpendicular to the wall direction.
-  const glm::vec3 axis(-toWall.z, 0.0f, toWall.x);
-  const bool flat = unit.coverKind == 1;
-  // Positive rotation about `axis` leans the head toward +toWall; flat cover
-  // leans the back into the wall (head away), tactical leans toward it.
-  const float lean = glm::radians(flat ? -9.0f : 14.0f) * b;
-  const float squash = flat ? 1.0f : 1.0f - 0.18f * b;
-  const glm::vec3 shift = toWall * ((flat ? 0.12f : 0.05f) * b);
-  glm::mat4 xf = glm::translate(glm::mat4(1.0f), unit.position + shift) *
-                 glm::rotate(glm::mat4(1.0f), -lean, axis) *
-                 glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, squash, 1.0f)) *
-                 glm::translate(glm::mat4(1.0f), -unit.position);
-  for (FigurePart& part : parts) part.model = xf * part.model;
-  return parts;
+FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
+  return BuildFigureBase(unit, compactWeapon);
 }
 
 FigureParts BuildFigure(const Unit& unit) { return BuildFigureImpl(unit, false); }

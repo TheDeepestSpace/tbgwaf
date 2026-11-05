@@ -27,7 +27,49 @@ struct AABB {
 // Semantic tag used only to group static render geometry; collision, LOS,
 // and navigation treat every kind identically. Pier marks the overpass
 // bents' columns and footings (issue #223).
-enum class ObstacleKind { Generic, StreetFurniture, Pier };
+enum class ObstacleKind { Generic, StreetFurniture, Pier, Cover };
+
+// Street fixtures the renderer batches as static geometry: post-sized furniture
+// and cover-sized street items (parked cars, planters, dumpsters, ...).
+inline bool IsStreetFixture(ObstacleKind kind) {
+  return kind == ObstacleKind::StreetFurniture || kind == ObstacleKind::Cover;
+}
+
+// Visible model beside a conservative collision/LOS box. Explicit types keep
+// rendering independent of dimensions (and let tests verify each prop spawns).
+// ParkedCar, Suv and Pickup park along the curb; a CoachBus stands in the
+// middle of the street and, unlike every other cover item, is taller than a
+// standing eye.
+enum class StreetFixtureModel {
+  None, ParkedCar, Suv, Pickup, CoachBus, Bench, Newsstand, Planter, Dumpster, TrashBin
+};
+
+// Gameplay box of each fixture model: extent along its heading (local +X),
+// height above its feet, and depth across (local +Z). The generator sizes
+// collision boxes from this, and the asset gallery builds the same box, so
+// the two never drift apart.
+inline glm::vec3 StreetFixtureExtent(StreetFixtureModel model) {
+  switch (model) {
+    case StreetFixtureModel::ParkedCar: return {4.2f, 1.30f, 1.8f};
+    case StreetFixtureModel::Suv:       return {5.0f, 1.45f, 2.0f};
+    case StreetFixtureModel::Pickup:    return {5.4f, 1.42f, 1.95f};
+    case StreetFixtureModel::CoachBus:  return {12.0f, 3.30f, 2.5f};
+    case StreetFixtureModel::Bench:     return {2.4f, 1.10f, 0.55f};
+    case StreetFixtureModel::Newsstand: return {1.0f, 1.35f, 0.55f};
+    case StreetFixtureModel::Planter:   return {1.2f, 0.80f, 0.55f};
+    case StreetFixtureModel::Dumpster:  return {1.2f, 1.20f, 1.8f};
+    case StreetFixtureModel::TrashBin:  return {0.36f, 0.95f, 0.36f};
+    case StreetFixtureModel::None:      break;
+  }
+  return glm::vec3(0.0f);
+}
+
+// Vehicles parked along the curb: they sit in the street at road grade and
+// are low enough to climb onto.
+inline bool IsCurbVehicle(StreetFixtureModel model) {
+  return model == StreetFixtureModel::ParkedCar || model == StreetFixtureModel::Suv ||
+         model == StreetFixtureModel::Pickup;
+}
 
 // A map obstacle. `climbable` obstacles get a navmesh connection from
 // ground level up to their top surface (see NavMesh); non-climbable
@@ -50,6 +92,13 @@ struct Obstacle {
   // Blocks movement and LOS but is never drawn: the unseen wall along a
   // terrain cliff edge, whose face the terrain mesh itself renders.
   bool navOnly = false;
+  StreetFixtureModel fixtureModel = StreetFixtureModel::None;
+  float fixtureYaw = 0.0f;    // Local +X heading; local +Z points toward the block.
+  float fixtureBaseY = 0.0f;  // Visible feet rest on the road/sidewalk above bounds.min.y.
+  // Roll about the heading axis: 0 upright, pi overturned on its roof, +-pi/2
+  // lying on a side (wrecks on the artery; their `footprint` is then an
+  // arbitrarily rotated rectangle and the bounds follow the rolled body).
+  float fixtureRoll = 0.0f;
 };
 
 // Building archetype (urban map issue #151, roadmap 3.2). Drawn per parcel

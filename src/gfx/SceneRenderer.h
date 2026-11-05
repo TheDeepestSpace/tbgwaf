@@ -235,7 +235,7 @@ class SceneRenderer {
   LitTriangleMesh streetFurnitureMesh_;
   LitTriangleMesh streetPropDepthMesh_;
   std::array<LitTriangleMesh, kStreetPropMaterialCount> streetPropMeshes_;
-  std::vector<tactics::AABB> streetFurnitureKey_;
+  std::vector<tactics::Obstacle> streetFurnitureKey_;
   std::vector<tactics::StreetProp> streetPropKey_;
   // Trees baked into a regular static mesh, like the street fixtures: the
   // same mesh serves the lit pass, the sun shadow pass and the FOV mask

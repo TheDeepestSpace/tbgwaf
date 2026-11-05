@@ -10,6 +10,7 @@
 #include "game/Types.h"
 #include "game/Weapon.h"
 #include "gfx/FigureRig.h"
+#include "gfx/StreetFixtureMesh.h"
 
 using tactics::Unit;
 using tactics::WeaponType;
@@ -67,6 +68,40 @@ void main() {
 
 const glm::vec3 kLightDir = glm::normalize(glm::vec3(0.35f, -1.0f, 0.25f));
 const glm::vec4 kGroundColor(0.16f, 0.18f, 0.20f, 1.0f);
+
+// Street fixtures (issue #153). The game draws them all in its obstacle
+// grey; the gallery gives each model a flat colour of its own so the sheet
+// reads at a glance. Vehicles first, then the sidewalk and alley items.
+struct FixtureEntry {
+  tactics::StreetFixtureModel model;
+  const char* slug;
+  const char* label;
+  glm::vec4 color;
+};
+const FixtureEntry kFixtures[] = {
+    {tactics::StreetFixtureModel::ParkedCar, "car", "Parked car (sedan)",
+     {0.62f, 0.66f, 0.70f, 1.0f}},
+    {tactics::StreetFixtureModel::Suv, "suv", "SUV", {0.30f, 0.38f, 0.52f, 1.0f}},
+    {tactics::StreetFixtureModel::Pickup, "pickup", "Pickup truck",
+     {0.58f, 0.30f, 0.22f, 1.0f}},
+    {tactics::StreetFixtureModel::CoachBus, "coach_bus", "Coach bus",
+     {0.82f, 0.80f, 0.74f, 1.0f}},
+    {tactics::StreetFixtureModel::Bench, "bench", "Bench", {0.45f, 0.34f, 0.22f, 1.0f}},
+    {tactics::StreetFixtureModel::Newsstand, "newsstand", "Newsstand",
+     {0.28f, 0.45f, 0.32f, 1.0f}},
+    {tactics::StreetFixtureModel::Planter, "planter", "Planter", {0.50f, 0.46f, 0.40f, 1.0f}},
+    {tactics::StreetFixtureModel::Dumpster, "dumpster", "Dumpster",
+     {0.22f, 0.42f, 0.30f, 1.0f}},
+    {tactics::StreetFixtureModel::TrashBin, "trash_bin", "Trash bin",
+     {0.36f, 0.38f, 0.40f, 1.0f}},
+};
+
+glm::vec4 FixtureColor(tactics::StreetFixtureModel model) {
+  for (const FixtureEntry& f : kFixtures) {
+    if (f.model == model) return f.color;
+  }
+  return glm::vec4(0.5f, 0.5f, 0.5f, 1.0f);
+}
 
 // Empty-mag animation (issue #140): shot k leaves at k * the weapon's fire
 // interval, the same pacing a committed burst uses in the game.
@@ -188,9 +223,27 @@ const std::vector<GalleryItem>& Catalog() {
         v.push_back({id, label, ItemKind::Animation, w.type, a.kind, a.duration});
       }
     }
+    for (const FixtureEntry& f : kFixtures) {
+      GalleryItem item{f.slug, f.label, ItemKind::StreetFixture, WeaponType::DesertEagle,
+                       AnimKind::Idle, kTurntableSeconds};
+      item.fixture = f.model;
+      v.push_back(item);
+    }
     return v;
   }();
   return items;
+}
+
+tactics::Obstacle FixtureObstacle(const GalleryItem& item) {
+  const glm::vec3 extent = tactics::StreetFixtureExtent(item.fixture);
+  tactics::Obstacle obstacle;
+  obstacle.bounds = tactics::AABB{glm::vec3(-0.5f * extent.x, 0.0f, -0.5f * extent.z),
+                                  glm::vec3(0.5f * extent.x, extent.y, 0.5f * extent.z)};
+  obstacle.kind = tactics::ObstacleKind::Cover;
+  obstacle.fixtureModel = item.fixture;
+  obstacle.fixtureYaw = 0.0f;
+  obstacle.fixtureBaseY = 0.0f;
+  return obstacle;
 }
 
 glm::vec3 ViewState::Position() const {
@@ -219,6 +272,13 @@ ViewState DefaultView(int itemIndex) {
     view.yawRadians = glm::radians(90.0f);
     view.pitchRadians = glm::radians(10.0f);
     view.distance = glm::length(hi - lo) * 1.15f;
+  } else if (item.kind == ItemKind::StreetFixture) {
+    // Three-quarter view from a little above, far enough for the whole box.
+    const glm::vec3 extent = tactics::StreetFixtureExtent(item.fixture);
+    view.target = glm::vec3(0.0f, extent.y * 0.45f, 0.0f);
+    view.yawRadians = glm::radians(35.0f);
+    view.pitchRadians = glm::radians(18.0f);
+    view.distance = glm::length(extent) * 1.25f;
   } else {
     // Front-right three-quarter view of the whole figure (it faces +X).
     view.target = glm::vec3(0.0f, 0.8f, 0.0f);
@@ -279,11 +339,14 @@ bool GalleryRenderer::Init() {
   }
   cubeMesh_.Init();
   sphereMesh_.Init();
+  fixtureMesh_.Init();
   glEnable(GL_DEPTH_TEST);
   return true;
 }
 
 void GalleryRenderer::Destroy() {
+  fixtureMesh_.Destroy();
+  fixtureMeshItem_ = -1;
   sphereMesh_.Destroy();
   cubeMesh_.Destroy();
 }
@@ -304,6 +367,36 @@ void GalleryRenderer::Render(int itemIndex, double t, const ViewState& view, int
   litShader_.SetVec3("uViewPos", view.Position());
 
   gfx::FigureParts parts;
+  if (item.kind == ItemKind::StreetFixture) {
+    // Turntable like the weapons, with the stage floor sized to the model's
+    // footprint; the mesh is the game's own batched fixture geometry.
+    if (fixtureMeshItem_ != itemIndex) {
+      gfx::LitVertices vertices;
+      std::vector<GLuint> indices;
+      gfx::AppendStreetFixture(FixtureObstacle(item), &vertices, &indices);
+      fixtureMesh_.SetMesh(vertices, indices);
+      fixtureMeshItem_ = itemIndex;
+    }
+    const glm::vec3 extent = tactics::StreetFixtureExtent(item.fixture);
+    const float stage = std::max(extent.x, extent.z) * 0.8f + 1.0f;
+    const glm::mat4 spin =
+        glm::rotate(glm::mat4(1.0f), static_cast<float>(kTwoPi * t / item.duration),
+                    glm::vec3(0.0f, 1.0f, 0.0f));
+    gfx::FigurePart ground;
+    ground.model = spin * glm::translate(glm::mat4(1.0f), glm::vec3(-stage, -0.05f, -stage)) *
+                   glm::scale(glm::mat4(1.0f), glm::vec3(2.0f * stage, 0.05f, 2.0f * stage));
+    ground.color = kGroundColor;
+    ground.primitive = gfx::FigurePrimitive::Box;
+    litShader_.SetMat4("uModel", ground.model);
+    litShader_.SetMat4("uMVP", viewProj * ground.model);
+    litShader_.SetVec4("uColor", ground.color);
+    cubeMesh_.Draw();
+    litShader_.SetMat4("uModel", spin);
+    litShader_.SetMat4("uMVP", viewProj * spin);
+    litShader_.SetVec4("uColor", FixtureColor(item.fixture));
+    fixtureMesh_.Draw();
+    return;
+  }
   if (item.kind == ItemKind::WeaponModel) {
     // Turntable: one revolution per item.duration around the vertical axis
     // through the weapon's center.

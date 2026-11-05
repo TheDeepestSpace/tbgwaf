@@ -131,6 +131,7 @@ set(APP_GFX_SOURCES
   src/gfx/AmbientOcclusion.cpp
   src/gfx/Ragdoll.cpp
   src/gfx/SceneRenderer.cpp
+  src/gfx/StreetFixtureMesh.cpp
   src/gfx/Trees.cpp
 )
 
@@ -196,6 +197,7 @@ if(EMSCRIPTEN)
     src/gfx/Camera.cpp
     src/gfx/AmbientOcclusion.cpp
     src/gfx/SceneRenderer.cpp
+    src/gfx/StreetFixtureMesh.cpp
     src/gfx/Trees.cpp
     src/gfx/FrontierField.cpp
     src/gfx/FigureRig.cpp
@@ -396,6 +398,7 @@ else()
       src/gfx/AmbientOcclusion.cpp
       src/gfx/Ragdoll.cpp
       src/gfx/SceneRenderer.cpp
+      src/gfx/StreetFixtureMesh.cpp
       src/gfx/Trees.cpp
       src/gfx/FrontierField.cpp
     )

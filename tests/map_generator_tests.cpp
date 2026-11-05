@@ -515,7 +515,7 @@ void TestPinnedKindHistograms() {
   const Expected expected[] = {
       // residential, mixed-use, office, commercial, civic, garage
       {1u, 63, {10, 22, 13, 7, 2, 9}},
-      {42u, 73, {29, 18, 11, 6, 2, 7}},
+      {42u, 73, {28, 19, 11, 6, 2, 7}},
       {2024u, 80, {21, 18, 15, 11, 2, 13}},
   };
   for (const auto& e : expected) {
@@ -3277,8 +3277,38 @@ void TestTreesStayOnEmptyBlocksAndAreSolid() {
   CHECK(GenerateHillyMap(7).trees.empty());
 }
 
+// Issue #301: a tall building on a wedge/sliver parcel (an 11-floor tower
+// with a 0.8 m end wall on seed 618949235) rendered as a tapering, sheared
+// facade. Tall buildings need a compact footprint.
+void TestTallBuildingsHaveCompactFootprints() {
+  std::vector<Scene> scenes;
+  for (const char* kind : {"urban", "urban-elevated"}) {
+    scenes.push_back(GenerateMapByKind(618949235u, kind));
+  }
+  for (uint32_t seed : kSeeds) scenes.push_back(GenerateUrbanMap(seed, FlatConfig()));
+  for (const Scene& scene : scenes) {
+    for (const Building& b : scene.buildings) {
+      if (b.floorCount <= 3 || b.obstacle < 0) continue;
+      const std::vector<glm::vec2> fp = ObstacleFootprint(scene.obstacles[b.obstacle]);
+      float minWidth = 1e9f, minEdge = 1e9f;
+      for (size_t i = 0; i < fp.size(); ++i) {
+        const glm::vec2 a = fp[i], c = fp[(i + 1) % fp.size()];
+        const float len = glm::distance(a, c);
+        minEdge = std::min(minEdge, len);
+        const glm::vec2 d = (c - a) / len;
+        float far = 0.0f;
+        for (const glm::vec2& p : fp) far = std::max(far, std::fabs(d.x * (p - a).y - d.y * (p - a).x));
+        minWidth = std::min(minWidth, far);
+      }
+      CHECK(minWidth >= 3.0f - 1e-3f);
+      CHECK(minEdge >= 2.0f - 1e-3f);
+    }
+  }
+}
+
 int main() {
   TestNavMeshIgnoresOverheadObstacles();
+  TestTallBuildingsHaveCompactFootprints();
   TestEnterableBuildingsHaveDoorways();
   TestTreesStayOnEmptyBlocksAndAreSolid();
   TestFeatureFlagsAndStreetGraph();

@@ -2731,6 +2731,35 @@ struct SkylineField {
   }
 };
 
+// Narrowest width (min over edges of the farthest vertex's distance from the
+// edge line) and shortest edge of a convex parcel footprint. A wedge or sliver
+// parcel with a very short end reads as a tapering, sheared facade once built
+// tall (issue #301), so tall massing is kept off such parcels.
+struct ParcelShape {
+  float minWidth = 0.0f, minEdge = 0.0f;
+};
+ParcelShape MeasureParcelShape(const std::vector<glm::vec2>& fp) {
+  ParcelShape shape{std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity()};
+  for (size_t i = 0; i < fp.size(); ++i) {
+    const glm::vec2 a = fp[i], b = fp[(i + 1) % fp.size()];
+    const float len = glm::distance(a, b);
+    shape.minEdge = std::min(shape.minEdge, len);
+    if (len < 1e-4f) continue;
+    const glm::vec2 d = (b - a) / len;
+    float far = 0.0f;
+    for (const glm::vec2& p : fp) far = std::max(far, std::fabs(d.x * (p - a).y - d.y * (p - a).x));
+    shape.minWidth = std::min(shape.minWidth, far);
+  }
+  return shape;
+}
+constexpr float kTallMinWidth = 3.0f;  // Narrowest a tall building's footprint may be.
+constexpr float kTallMinEdge = 2.0f;   // Shortest wall a tall building may have.
+constexpr int kSlenderMaxFloors = 3;
+bool SuitableForTall(const std::vector<glm::vec2>& fp) {
+  const ParcelShape shape = MeasureParcelShape(fp);
+  return shape.minWidth >= kTallMinWidth && shape.minEdge >= kTallMinEdge;
+}
+
 // Kind, floors, facade variant and setback per parcel, then the landmark
 // towers (Civic, from the layout rng exactly where the old tower pick drew).
 std::vector<Building> PlanBuildings(const std::vector<Parcel>& parcels,
@@ -2790,6 +2819,10 @@ std::vector<Building> PlanBuildings(const std::vector<Parcel>& parcels,
       b.floorCount = std::max(2, floors);
       while (b.floorCount > 2 && b.Height() > c.skylineMaxHeight + 1e-3f) --b.floorCount;
     }
+    // Wedge/sliver parcels stay low (draws above are unaffected).
+    if (b.floorCount > kSlenderMaxFloors && !SuitableForTall(parcel.footprint)) {
+      b.floorCount = kSlenderMaxFloors;
+    }
     b.style = static_cast<int>(b.kind) * 2 + (rng.Chance(0.5f) ? 1 : 0);
     // Offices step their top floor back when there is room for it.
     if (b.kind == BuildingKind::Office && b.floorCount >= 3 && rng.Chance(0.6f)) {
@@ -2807,7 +2840,17 @@ std::vector<Building> PlanBuildings(const std::vector<Parcel>& parcels,
   for (int i = 0; i < towers && !candidates.empty(); ++i) {
     const size_t pick =
         static_cast<size_t>(layoutRng->Int(0, static_cast<int>(candidates.size()) - 1));
-    Building& b = buildings[candidates[pick]];
+    // A tower needs a compact parcel: advance to the next one that is (no
+    // extra rng draw, so seeds whose pick is already fine are unchanged).
+    size_t chosen = pick;
+    for (size_t k = 0; k < candidates.size(); ++k) {
+      const size_t cand = (pick + k) % candidates.size();
+      if (SuitableForTall(parcels[candidates[cand]].footprint)) {
+        chosen = cand;
+        break;
+      }
+    }
+    Building& b = buildings[candidates[chosen]];
     const float height = layoutRng->Float(c.towerMinHeight, c.towerMaxHeight);
     b.kind = BuildingKind::Civic;
     b.style = static_cast<int>(b.kind) * 2 + (b.style & 1);
@@ -2820,7 +2863,7 @@ std::vector<Building> PlanBuildings(const std::vector<Parcel>& parcels,
       b.groundFloorHeight = height - static_cast<float>(b.floorCount - 1) * b.floorHeight;
     }
     b.upperObstacle = -1;
-    candidates.erase(candidates.begin() + pick);
+    candidates.erase(candidates.begin() + chosen);
   }
   return buildings;
 }

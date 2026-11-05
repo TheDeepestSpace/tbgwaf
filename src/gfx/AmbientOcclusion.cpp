@@ -265,6 +265,39 @@ void main() {
 }
 )";
 
+// Outline-only pass for see-through geometry: only pixels the faded redraw
+// tagged (normal alpha 0.75) get an edge, blended as dark ink.
+const char* kFadedOutline = R"(#version 300 es
+precision highp float;
+precision highp sampler2D;
+in vec2 vUV;
+uniform sampler2D uNormal;
+uniform sampler2D uDepth;
+uniform mat4 uInverseViewProjection;
+uniform vec2 uPaneSize;
+uniform vec2 uUvScale;
+uniform float uThickness;
+uniform float uOutline;
+uniform float uOpacity;  // Opacity of the see-through geometry.
+out vec4 FragColor;
+
+vec3 WorldPosition(vec2 uv, float depth) {
+  vec4 p = uInverseViewProjection * vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+  return p.xyz / p.w;
+}
+//EDGE_FUNCTION
+
+void main() {
+  float depth = texture(uDepth, vUV * uUvScale).r;
+  vec4 normalSample = texture(uNormal, vUV * uUvScale);
+  if (depth >= 1.0 || abs(normalSample.a - 0.75) > 0.1) discard;
+  vec3 p = WorldPosition(vUV, depth);
+  vec3 n = normalize(normalSample.xyz * 2.0 - 1.0);
+  float amount = OutlineEdge(p, n) * uOutline * uOpacity;
+  FragColor = vec4(vec3(0.0), clamp(amount, 0.0, 1.0) * 0.88);
+}
+)";
+
 void BindTexture(GLuint texture, int unit) {
   glActiveTexture(GL_TEXTURE0 + unit);
   glBindTexture(GL_TEXTURE_2D, texture);
@@ -284,7 +317,8 @@ void Allocate(GLuint& texture, GLint format, GLenum channels, GLenum type, int w
 bool AmbientOcclusion::Init() {
   return occlusionShader_.Compile(kVertex, kOcclusion) &&
          compositeShader_.Compile(kVertex, WithEdgeFunction(kComposite).c_str()) &&
-         nprShader_.Compile(kVertex, WithEdgeFunction(kNpr).c_str());
+         nprShader_.Compile(kVertex, WithEdgeFunction(kNpr).c_str()) &&
+         fadedOutlineShader_.Compile(kVertex, WithEdgeFunction(kFadedOutline).c_str());
 }
 
 void AmbientOcclusion::Destroy() {
@@ -471,6 +505,56 @@ void AmbientOcclusion::CompositeNpr(GLuint target, int x, int y, const glm::mat4
   glBindVertexArray(0);
   glDepthFunc(GL_LESS);
   for (int unit = 3; unit >= 0; --unit) BindTexture(0, unit);
+}
+
+void AmbientOcclusion::BeginFaded() {
+  glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo_);
+  glViewport(0, 0, width_, height_);
+  glScissor(0, 0, width_, height_);
+  glDisable(GL_BLEND);
+  glDisable(GL_STENCIL_TEST);
+  glEnable(GL_DEPTH_TEST);
+  glDepthMask(GL_TRUE);
+  glDepthFunc(GL_LESS);
+}
+
+void AmbientOcclusion::CompositeFadedOutlines(GLuint target, int x, int y,
+                                              const glm::mat4& view,
+                                              const glm::mat4& projection,
+                                              const NprSettings& settings, float opacity) {
+  const glm::mat4 inverse = glm::inverse(projection * view);
+  const glm::vec2 paneSize(static_cast<float>(width_), static_cast<float>(height_));
+  const glm::vec2 uvScale(paneSize.x / static_cast<float>(allocatedWidth_),
+                          paneSize.y / static_cast<float>(allocatedHeight_));
+  glBindFramebuffer(GL_FRAMEBUFFER, target);
+  glViewport(x, y, width_, height_);
+  glScissor(x, y, width_, height_);
+  glDisable(GL_DEPTH_TEST);
+  glDepthMask(GL_FALSE);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  BindTexture(depth_, 0);
+  BindTexture(normal_, 1);
+  fadedOutlineShader_.Use();
+  fadedOutlineShader_.SetInt("uDepth", 0);
+  fadedOutlineShader_.SetInt("uNormal", 1);
+  fadedOutlineShader_.SetMat4("uInverseViewProjection", inverse);
+  fadedOutlineShader_.SetVec2("uPaneSize", paneSize);
+  fadedOutlineShader_.SetVec2("uUvScale", uvScale);
+  fadedOutlineShader_.SetFloat("uThickness", std::max(settings.outlineThickness, 0.0f));
+  fadedOutlineShader_.SetFloat("uOutline", std::clamp(settings.outlineStrength, 0.0f, 1.0f));
+  fadedOutlineShader_.SetFloat("uOpacity", opacity);
+  fadedOutlineShader_.SetFloat("uPixelScale", 2.0f / std::max(projection[1][1] * paneSize.y, 1e-4f));
+  fadedOutlineShader_.SetFloat("uDetailSize", std::max(settings.detailSize, 0.0f));
+  glBindVertexArray(vao_);
+  glDrawArrays(GL_TRIANGLES, 0, 3);
+  RecordDraw(3, 1);
+  glBindVertexArray(0);
+  glDisable(GL_BLEND);
+  glEnable(GL_DEPTH_TEST);
+  glDepthMask(GL_TRUE);
+  glDepthFunc(GL_LESS);
+  for (int unit = 1; unit >= 0; --unit) BindTexture(0, unit);
 }
 
 }  // namespace gfx

@@ -235,6 +235,7 @@ uniform int uThermal;
 uniform int uThermalBlackHot;  // 1 = hot reads dark (the review reference), 0 = white-hot.
 uniform int uThermalMaterial;  // ThermalMaterial; only figures use uColor.
 uniform int uNpr;
+uniform int uFadedMark;  // 1: G-buffer pass for outlining see-through geometry.
 uniform int uCelBands;
 uniform float uCelSoftness;
 layout(location = 0) out vec4 FragColor;
@@ -283,7 +284,8 @@ void main() {
   vec3 normal = normalize(vWorldNormal);
   vec3 viewDir = normalize(uViewPos - vWorldPos);
   if (dot(normal, viewDir) < 0.0) normal = -normal;
-  WorldNormal = vec4(normal * 0.5 + 0.5, 1.0);
+  // Alpha 0.75 tags see-through geometry for its outline-only pass.
+  WorldNormal = vec4(normal * 0.5 + 0.5, uFadedMark != 0 ? 0.75 : 1.0);
 
   float diffuse = max(dot(normal, -uLightDir), 0.0);
   float shadow = ComputeShadow(normal);
@@ -4030,12 +4032,6 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     std::sort(faded.begin(), faded.end(), [](const FadedOccluder& a, const FadedOccluder& b) {
       return a.viewDistance < b.viewDistance;
     });
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE);
-    glEnable(GL_STENCIL_TEST);
-    glStencilFunc(GL_EQUAL, 0, 0xFF);
-    glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
     // Front faces only: with no culling the stencil cap lets whichever
     // triangle draws first claim the pixel, often a back face, which shows as
     // striped bands and dark slabs through the faded block. Scene meshes use
@@ -4047,35 +4043,62 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // The faded block would otherwise be shadowed by its own shadow-map
     // entry (it is a caster), darkening its faces into patchy slabs.
     litShader_.SetInt("uDisableShadows", 1);
-    // Massing first: it stands proud of the grouped prisms/slabs, so it claims
-    // its pixels in the stencil cap instead of being hidden behind them.
-    for (size_t i = 0; i < massing.size(); ++i) {
-      if (detailFaded(i)) {
-        drawDetail(massing[i], glm::vec4(kObstacleColor, kOccluderFadeOpacity));
-      }
-    }
-    for (const FadedOccluder& f : faded) {
-      if (f.obstacle >= 0) {
-        thermalMaterial(ThermalMaterial::Building);
-        const tactics::Obstacle& obstacle = obstacles[f.obstacle];
-        const glm::vec4 color(kObstacleColor, kOccluderFadeOpacity);
-        if (obstacle.footprint.empty()) {
-          DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, obstacle.bounds.min,
-                     obstacle.bounds.max - obstacle.bounds.min, color);
-        } else {
-          BuildPolygonPrism(obstacle, &geometryMesh_);
-          DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                       color);
+    // Outlines apply to the see-through blocks in both the NPR view and the
+    // NPR-over-AO view.
+    const bool fadedOutlines = thermalAo && debug.npr;
+    const auto drawFadedGeometry = [&]() {
+      // Massing first: it stands proud of the grouped prisms/slabs, so it claims
+      // its pixels in the stencil cap instead of being hidden behind them.
+      for (size_t i = 0; i < massing.size(); ++i) {
+        if (detailFaded(i)) {
+          drawDetail(massing[i], glm::vec4(kObstacleColor, kOccluderFadeOpacity));
         }
-      } else {
-        thermalMaterial(ThermalMaterial::Concrete);
-        const std::vector<char> hidden = SharedEdges(walkSurfaces, walkSurfaces[f.surface]);
-        BuildSurfacePatch(walkSurfaces[f.surface].vertices, kDeckThickness, &geometryMesh_,
-                          &hidden);
-        DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                     glm::vec4(kDeckColor, kOccluderFadeOpacity));
       }
+      for (const FadedOccluder& f : faded) {
+        if (f.obstacle >= 0) {
+          thermalMaterial(ThermalMaterial::Building);
+          const tactics::Obstacle& obstacle = obstacles[f.obstacle];
+          const glm::vec4 color(kObstacleColor, kOccluderFadeOpacity);
+          if (obstacle.footprint.empty()) {
+            DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, obstacle.bounds.min,
+                       obstacle.bounds.max - obstacle.bounds.min, color);
+          } else {
+            BuildPolygonPrism(obstacle, &geometryMesh_);
+            DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                         color);
+          }
+        } else {
+          thermalMaterial(ThermalMaterial::Concrete);
+          const std::vector<char> hidden = SharedEdges(walkSurfaces, walkSurfaces[f.surface]);
+          BuildSurfacePatch(walkSurfaces[f.surface].vertices, kDeckThickness, &geometryMesh_,
+                            &hidden);
+          DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                       glm::vec4(kDeckColor, kOccluderFadeOpacity));
+        }
+      }
+    };
+    // NPR: the opaque composite never saw the faded blocks, so they would
+    // lose their edges. First re-draw them (depth-tested against the opaque
+    // scene) into the G-buffer, tagged; the outlines of just those pixels
+    // are composited over the blended result below, at the faded opacity.
+    if (fadedOutlines) {
+      thermalOcclusion_.BeginFaded();
+      litShader_.Use();
+      litShader_.SetInt("uFadedMark", 1);
+      drawFadedGeometry();
+      litShader_.SetInt("uFadedMark", 0);
+      glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
+      glViewport(x, y, width, height);
+      glScissor(x, y, width, height);
+      glDepthMask(GL_TRUE);
     }
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_STENCIL_TEST);
+    glStencilFunc(GL_EQUAL, 0, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+    drawFadedGeometry();
     litShader_.SetInt("uDisableShadows", (debug.disableShadows || debug.thermal) ? 1 : 0);
     glDisable(GL_CULL_FACE);
     glFrontFace(GL_CCW);
@@ -4083,6 +4106,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glClear(GL_STENCIL_BUFFER_BIT);  // Later passes expect a clean stencil.
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
+    if (fadedOutlines) {
+      thermalOcclusion_.CompositeFadedOutlines(targetFramebuffer, x, y, view, proj,
+                                               debug.nprSettings, kOccluderFadeOpacity);
+    }
   }
 
   if (debug.thermal) ApplyThermalSensor(x, y, width, height);

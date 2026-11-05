@@ -51,9 +51,17 @@ class AmbientOcclusion {
   // team color; only a lightly darkened rim is drawn on them.
   void CompositeNpr(GLuint target, int x, int y, const glm::mat4& view,
                     const glm::mat4& projection, const NprSettings& settings);
+  // See-through geometry: BeginFaded() rebinds the G-buffer (keeping the
+  // opaque depth) so the faded blocks can be drawn into it tagged
+  // (normal alpha 0.75); CompositeFadedOutlines() then blends outlines of
+  // just those pixels onto `target`, scaled by the blocks' `opacity`.
+  void BeginFaded();
+  void CompositeFadedOutlines(GLuint target, int x, int y, const glm::mat4& view,
+                              const glm::mat4& projection, const NprSettings& settings,
+                              float opacity);
 
  private:
-  Shader occlusionShader_, compositeShader_, nprShader_;
+  Shader occlusionShader_, compositeShader_, nprShader_, fadedOutlineShader_;
   GLuint sceneFbo_ = 0, occlusionFbo_ = 0, vao_ = 0;
   GLuint color_ = 0, normal_ = 0, depth_ = 0, occlusion_ = 0;
   int width_ = 0, height_ = 0;                    // Current pane.

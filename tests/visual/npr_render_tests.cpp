@@ -134,6 +134,38 @@ void CheckRenderer() {
   options.npr = false;
   Require(render() == normal, "NPR state leaked into normal rendering");
 
+  // See-through buildings keep their (fainter) outlines: a blue unit hidden
+  // behind the building makes it fade for the camera.
+  {
+    const glm::vec3 camPos = camera.Position();
+    glm::vec3 away = glm::normalize(glm::vec3(-camPos.x, 0.0f, -camPos.z));
+    tactics::Scene seeThrough = scene;
+    tactics::Unit friendly;
+    friendly.id = 3;
+    friendly.team = tactics::Team::Blue;
+    friendly.position = away * 3.0f;
+    seeThrough.units.push_back(friendly);
+    tactics::GameLogic fadeGame(seeThrough);
+    auto renderFaded = [&]() {
+      renderer.RenderPane(fadeGame, tactics::Team::Blue, false, {}, camera, x, y, width, height,
+                          {}, fbo, options);
+      return Capture(x, y, width, height);
+    };
+    options.npr = true;
+    const auto fadedNpr = renderFaded();
+    Dump("faded", fadedNpr, width, height);
+    options.nprSettings.outlineStrength = 0.0f;
+    const auto fadedNoLines = renderFaded();
+    options.nprSettings.outlineStrength = 0.85f;
+    Require(TotalRed(fadedNpr) < TotalRed(fadedNoLines) - 200,
+            "See-through building lost its outlines under NPR");
+    Require(renderFaded() == fadedNpr, "Faded NPR render is not deterministic");
+    options.disableOcclusionFade = true;
+    Require(renderFaded() != fadedNpr, "Building did not fade in the see-through test");
+    options.disableOcclusionFade = false;
+    options.npr = false;
+  }
+
   // NPR on top of the AO (thermal) view: outlines only, base view unchanged
   // when they are off.
   options.thermal = true;

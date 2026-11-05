@@ -145,9 +145,10 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
                     float fovMs, const gfx::RenderFrameStats& stats, float top);
 
 // Camera-rotation dome (issue #298): small corner widget in the bottom-right
-// of `rect`. The camera is a dot on a static half-sphere; dragging the dot
-// rotates `camera` (pitch clamped by OrbitCamera). The widget is an ImGui
-// window, so drags never reach the map pan/tap handlers.
+// of `rect`. A wireframe half-sphere with a compass circle at its base, drawn
+// as the camera sees the world; dragging it rotates `camera` (pitch clamped by
+// OrbitCamera). The widget is an ImGui window, so drags never reach the map
+// pan/tap handlers.
 void DrawRotationDome(gfx::OrbitCamera& camera, const PaneRect& rect, float windowHeight, int id);
 
 // Thermal view (issue #177): restyles every HUD window drawn in between to

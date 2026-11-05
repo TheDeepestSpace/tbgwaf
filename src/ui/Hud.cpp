@@ -518,12 +518,14 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
 void DrawRotationDome(gfx::OrbitCamera& camera, const PaneRect& rect, float windowHeight, int id) {
   constexpr float kRadius = 52.0f;
   constexpr float kPad = 10.0f;
-  const float side = kRadius * 2.0f + 8.0f;
+  constexpr float kRadiansPerPixel = 0.01f;
+  const float side = kRadius * 2.0f + 20.0f;
   ImGui::SetNextWindowPos(ImVec2(rect.x + rect.width - kPad, windowHeight - kPad),
                           ImGuiCond_Always, ImVec2(1.0f, 1.0f));
   ImGui::SetNextWindowSize(ImVec2(side, side), ImGuiCond_Always);
-  ImGui::SetNextWindowBgAlpha(0.35f);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
+  ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
   ImGui::PushID(id);
   ImGui::Begin("##rotation_dome", nullptr,
                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
@@ -534,47 +536,58 @@ void DrawRotationDome(gfx::OrbitCamera& camera, const PaneRect& rect, float wind
   if (ImGui::IsItemActive()) {
     const ImVec2 d = ImGui::GetIO().MouseDelta;
     if (d.x != 0.0f || d.y != 0.0f) {
-      const glm::vec2 da = gfx::DomeDragDelta(camera.Yaw(), camera.Pitch(),
-                                              glm::vec2(d.x, d.y) / kRadius);
+      const glm::vec2 da = gfx::DomeDragDelta(glm::vec2(d.x, d.y), kRadiansPerPixel);
       camera.Rotate(da.x, da.y);
     }
   }
+  const float yaw = camera.Yaw(), pitch = camera.Pitch();
   const ImVec2 c(origin.x + side * 0.5f, origin.y + side * 0.5f);
-  auto toScreen = [&](const glm::vec3& dir) {
-    const glm::vec2 v = gfx::DomeProject(dir);
+  auto toScreen = [&](const glm::vec3& p) {
+    const glm::vec2 v = gfx::DomeProject(p, yaw, pitch);
     return ImVec2(c.x + v.x * kRadius, c.y + v.y * kRadius);
   };
-  ImDrawList* dl = ImGui::GetWindowDrawList();
-  // Wireframe: latitude rings and longitude arcs; far side drawn fainter.
-  auto line = [&](const glm::vec3& a, const glm::vec3& b) {
-    const bool front = gfx::DomeDepth(a + b) > 0.0f;
-    dl->AddLine(toScreen(a), toScreen(b),
-                front ? IM_COL32(200, 220, 255, 170) : IM_COL32(200, 220, 255, 60), 1.0f);
+  // Menu color: the HUD window background, opaque.
+  const ImVec4 menu = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+  auto color = [&](bool front) {
+    return ImGui::ColorConvertFloat4ToU32(ImVec4(menu.x, menu.y, menu.z, front ? 1.0f : 0.35f));
   };
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  auto line = [&](const glm::vec3& a, const glm::vec3& b, float thickness) {
+    const bool front = gfx::DomeDepth(a + b, yaw, pitch) > 0.0f;
+    dl->AddLine(toScreen(a), toScreen(b), color(front), thickness);
+  };
+  // Dome wireframe: latitude rings and longitude arcs.
   constexpr int kSegs = 40;
   const float twoPi = 6.2831853f;
-  for (float lat : {0.0f, 0.5236f, 1.0472f}) {
+  for (float lat : {0.5236f, 1.0472f}) {
     for (int i = 0; i < kSegs; ++i)
       line(gfx::DomeDirection(twoPi * i / kSegs, lat),
-           gfx::DomeDirection(twoPi * (i + 1) / kSegs, lat));
+           gfx::DomeDirection(twoPi * (i + 1) / kSegs, lat), 1.0f);
   }
   for (int m = 0; m < 8; ++m) {
-    const float yaw = twoPi * m / 8.0f;
+    const float a = twoPi * m / 8.0f;
     for (int i = 0; i < 12; ++i)
-      line(gfx::DomeDirection(yaw, 1.5708f * i / 12),
-           gfx::DomeDirection(yaw, 1.5708f * (i + 1) / 12));
+      line(gfx::DomeDirection(a, 1.5708f * i / 12),
+           gfx::DomeDirection(a, 1.5708f * (i + 1) / 12), 1.0f);
   }
-  // North marker: world -Z (top of the default ground view).
-  const ImVec2 n = toScreen(gfx::DomeDirection(-1.5708f, 0.0f) * 1.12f);
-  dl->AddText(ImVec2(n.x - 3.5f, n.y - 7.0f), IM_COL32(255, 200, 80, 220), "N");
-  // Camera dot.
-  const glm::vec3 dir = gfx::DomeDirection(camera.Yaw(), camera.Pitch());
-  const bool front = gfx::DomeDepth(dir) > 0.0f;
-  const ImVec2 p = toScreen(dir);
-  dl->AddCircleFilled(p, 6.0f, front ? IM_COL32(255, 80, 60, 255) : IM_COL32(255, 80, 60, 150));
-  dl->AddCircle(p, 6.0f, IM_COL32(255, 255, 255, 230), 0, 1.5f);
+  // Compass circle at the dome's base: ring, tick marks, and N/E/S/W labels.
+  // North is world -Z (top of the default ground view), east +X.
+  for (int i = 0; i < kSegs; ++i)
+    line(gfx::DomeDirection(twoPi * i / kSegs, 0.0f),
+         gfx::DomeDirection(twoPi * (i + 1) / kSegs, 0.0f), 2.0f);
+  struct Cardinal { const char* label; float yaw; };
+  for (const Cardinal& k : {Cardinal{"N", -1.5708f}, Cardinal{"E", 0.0f},
+                            Cardinal{"S", 1.5708f}, Cardinal{"W", 3.1416f}}) {
+    const glm::vec3 edge = gfx::DomeDirection(k.yaw, 0.0f);
+    const bool front = gfx::DomeDepth(edge, yaw, pitch) > -0.05f;
+    dl->AddLine(toScreen(edge * 0.88f), toScreen(edge), color(front), 2.0f);
+    const ImVec2 t = toScreen(edge * 1.18f);
+    const ImVec2 sz = ImGui::CalcTextSize(k.label);
+    dl->AddText(ImVec2(t.x - sz.x * 0.5f, t.y - sz.y * 0.5f), color(front), k.label);
+  }
   ImGui::End();
   ImGui::PopID();
+  ImGui::PopStyleColor(2);
   ImGui::PopStyleVar();
 }
 

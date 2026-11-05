@@ -56,36 +56,24 @@ void TestRotateCancelsFocusGlide() {
   CHECK(glm::length(cam.target - held) < 1e-6f);
 }
 
-void TestDomeAngleMapping() {
+void TestDomeProjection() {
   gfx::OrbitCamera cam;
-  // Camera position direction matches the dome direction for its angles.
-  const glm::vec3 d = gfx::DomeDirection(cam.Yaw(), cam.Pitch());
+  const float y = cam.Yaw(), p = cam.Pitch();
+  // Camera direction matches OrbitCamera::Position().
+  const glm::vec3 d = gfx::DomeDirection(y, p);
   CHECK(glm::length(d * 18.0f - (cam.Position() - cam.target)) < 1e-4f);
-  // Angles round-trip through the dome direction.
-  for (float yaw : {-3.0f, -0.9f, 0.0f, 1.2f, 3.0f}) {
-    for (float pitch : {0.05f, 0.5f, 0.96f, 1.4f}) {
-      float y = 0, p = 0;
-      gfx::DomeAngles(gfx::DomeDirection(yaw, pitch), &y, &p);
-      CHECK(std::fabs(y - yaw) < 1e-4f);
-      CHECK(std::fabs(p - pitch) < 1e-4f);
-    }
-  }
-  // Zenith projects to the dome-view center line; dot stays within the unit disc.
-  CHECK(glm::length(gfx::DomeProjectAngles(0.3f, 1.5707963f)) < 0.9f);
-  CHECK(glm::length(gfx::DomeProjectAngles(0.7f, 0.3f)) <= 1.0001f);
-  // Front (+z) is viewer-facing, back (-z) is not.
-  CHECK(gfx::DomeDepth(gfx::DomeDirection(1.5707963f, 0.3f)) > 0.0f);
-  CHECK(gfx::DomeDepth(gfx::DomeDirection(-1.5707963f, 0.3f)) < 0.0f);
-  // Dragging the dot moves it by (about) the drag delta, and rotating the
-  // camera by the resulting angles is reflected in Yaw()/Pitch().
-  const glm::vec2 before = gfx::DomeProjectAngles(cam.Yaw(), cam.Pitch());
-  const glm::vec2 delta(0.004f, -0.003f);  // Per-frame sized drag.
-  const glm::vec2 da = gfx::DomeDragDelta(cam.Yaw(), cam.Pitch(), delta);
-  const float y0 = cam.Yaw();
-  cam.Rotate(da.x, da.y);
-  CHECK(std::fabs(cam.Yaw() - (y0 + da.x)) < 1e-6f);
-  const glm::vec2 after = gfx::DomeProjectAngles(cam.Yaw(), cam.Pitch());
-  CHECK(glm::length(after - before - delta) < 3e-4f);
+  // The point toward the camera projects to the center and faces the viewer.
+  CHECK(glm::length(gfx::DomeProject(d, y, p) - glm::vec2(0.0f)) < 1e-5f);
+  CHECK(gfx::DomeDepth(d, y, p) > 0.99f);
+  CHECK(gfx::DomeDepth(-d, y, p) < -0.99f);
+  // Projection matches the real camera's screen axes: world up is screen up.
+  CHECK(gfx::DomeProject(glm::vec3(0, 1, 0), y, p).y < 0.0f);
+  // Everything on the unit sphere stays within the unit disc.
+  CHECK(glm::length(gfx::DomeProject(glm::vec3(0.6f, 0.0f, -0.8f), y, p)) <= 1.0001f);
+  // Dragging right yaws the camera the same way as map drag-rotate.
+  const glm::vec2 da = gfx::DomeDragDelta(glm::vec2(10.0f, -4.0f), 0.005f);
+  CHECK(std::fabs(da.x - (-10.0f * 0.005f)) < 1e-6f);
+  CHECK(std::fabs(da.y - (-4.0f * 0.005f)) < 1e-6f);
   // Pitch stays clamped no matter how far the drag pushes.
   cam.Rotate(0.0f, 10.0f);
   CHECK(cam.Pitch() <= 1.4835f + 1e-6f);
@@ -96,7 +84,7 @@ void TestDomeAngleMapping() {
 }  // namespace
 
 int main() {
-  TestDomeAngleMapping();
+  TestDomeProjection();
   TestFocusOnEasesToPointAndZoom();
   TestPanCancelsFocusGlide();
   TestRotateCancelsFocusGlide();

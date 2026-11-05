@@ -511,6 +511,10 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
     ImGui::SliderFloat("Outline px", &nprSettings.outlineThickness, 0.0f, 4.0f, "%.1f");
     ImGui::SetNextItemWidth(130.0f);
     ImGui::SliderFloat("Outline strength", &nprSettings.outlineStrength, 0.0f, 1.0f, "%.2f");
+    // Distance LOD: edges on features smaller than this (world units) fade
+    // out from afar instead of aliasing into dotted lines. 0 disables.
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("Outline LOD", &nprSettings.detailSize, 0.0f, 0.5f, "%.2f");
   }
   if (npr && !thermal) {
     ImGui::SetNextItemWidth(130.0f);

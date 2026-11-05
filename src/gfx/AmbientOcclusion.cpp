@@ -87,12 +87,22 @@ void main() {
 // Shared by the thermal and NPR composites (spliced at //EDGE_FUNCTION):
 // depth/normal discontinuities from 4 neighbour taps at uThickness pixels.
 // Plane-distance depth test so sloped ground never outlines itself.
+// Distance LOD: once a uDetailSize-sized feature spans under ~3 pixels its
+// edges alias into dotted lines, so fine edges (normal creases, shallow
+// depth steps: window frames, sills, niches) fade out with distance and
+// only steps large in world units -- silhouettes -- keep their outline.
 const char* kEdgeFunction = R"(
+uniform float uPixelScale;  // World size of one pixel at unit view distance.
+uniform float uDetailSize;  // World size of the finest outlined detail (0 = no LOD).
+
 float OutlineEdge(vec3 p, vec3 n) {
   float edge = 0.0;
   if (uThickness > 0.0 && uOutline > 0.0) {
     vec2 texel = 1.0 / uPaneSize;
     float viewDist = max(length(p - WorldPosition(vUV, 0.0)), 0.001);
+    float detail = uDetailSize > 0.0
+        ? smoothstep(1.5, 3.0, uDetailSize / max(viewDist * uPixelScale, 1e-6))
+        : 1.0;
     vec2 offsets[4] = vec2[4](vec2(1, 0), vec2(-1, 0), vec2(0, 1), vec2(0, -1));
     for (int i = 0; i < 4; ++i) {
       vec2 uv = vUV + offsets[i] * uThickness * texel;
@@ -100,10 +110,11 @@ float OutlineEdge(vec3 p, vec3 n) {
       float d = texture(uDepth, uv * uUvScale).r;
       if (d >= 1.0) { edge = 1.0; continue; }  // Silhouette against the void.
       vec3 q = WorldPosition(uv, d);
-      float plane = abs(dot(q - p, n)) / viewDist;
-      float depthEdge = smoothstep(0.006, 0.03, plane);
+      float plane = abs(dot(q - p, n));
+      float major = smoothstep(0.3, 0.9, plane);  // Step size in world units.
+      float depthEdge = smoothstep(0.006, 0.03, plane / viewDist) * max(detail, major);
       vec3 sn = normalize(texture(uNormal, uv * uUvScale).xyz * 2.0 - 1.0);
-      float normalEdge = smoothstep(0.3, 0.7, 1.0 - dot(n, sn));
+      float normalEdge = smoothstep(0.3, 0.7, 1.0 - dot(n, sn)) * detail;
       edge = max(edge, max(depthEdge, normalEdge));
     }
   }
@@ -391,6 +402,9 @@ void AmbientOcclusion::Composite(GLuint target, int x, int y, const glm::mat4& v
                             outlines ? std::max(outlines->outlineThickness, 0.0f) : 0.0f);
   compositeShader_.SetFloat("uOutline",
                             outlines ? std::clamp(outlines->outlineStrength, 0.0f, 1.0f) : 0.0f);
+  compositeShader_.SetFloat("uPixelScale", 2.0f / std::max(projection[1][1] * paneSize.y, 1e-4f));
+  compositeShader_.SetFloat("uDetailSize",
+                            outlines ? std::max(outlines->detailSize, 0.0f) : 0.0f);
   glDrawArrays(GL_TRIANGLES, 0, 3);
   RecordDraw(3, 1);
   glBindVertexArray(0);
@@ -450,6 +464,8 @@ void AmbientOcclusion::CompositeNpr(GLuint target, int x, int y, const glm::mat4
   nprShader_.SetInt("uBlurRadius", std::max(settings.ao.softness, 0));
   nprShader_.SetFloat("uThickness", std::max(settings.outlineThickness, 0.0f));
   nprShader_.SetFloat("uOutline", std::clamp(settings.outlineStrength, 0.0f, 1.0f));
+  nprShader_.SetFloat("uPixelScale", 2.0f / std::max(projection[1][1] * paneSize.y, 1e-4f));
+  nprShader_.SetFloat("uDetailSize", std::max(settings.detailSize, 0.0f));
   glDrawArrays(GL_TRIANGLES, 0, 3);
   RecordDraw(3, 1);
   glBindVertexArray(0);

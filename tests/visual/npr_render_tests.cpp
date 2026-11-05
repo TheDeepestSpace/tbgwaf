@@ -121,6 +121,16 @@ void CheckRenderer() {
   Require(render() != npr, "Cel band count had no effect");
   options.nprSettings.celBands = 4;
   Require(render() == npr, "NPR settings leaked state");
+
+  // At the fitted overview distance the LOD has already faded the fine
+  // normal-driven edges; turning it off (detail size 0) outlines every
+  // crease again and darkens the image.
+  options.nprSettings.detailSize = 0.0f;
+  const auto noLod = render();
+  Require(noLod != npr, "Outline distance LOD had no effect from afar");
+  Require(TotalRed(noLod) < TotalRed(npr), "Disabling the outline LOD should add edges");
+  options.nprSettings.detailSize = gfx::NprSettings{}.detailSize;
+  Require(render() == npr, "Outline LOD setting leaked state");
   options.npr = false;
   Require(render() == normal, "NPR state leaked into normal rendering");
 

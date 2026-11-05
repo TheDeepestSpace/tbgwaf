@@ -20,6 +20,11 @@ struct AmbientOcclusionSettings {
 struct NprSettings {
   float outlineThickness = 1.5f;  // Outline reach in screen pixels (0 = off).
   float outlineStrength = 0.85f;  // Outline opacity, 0..1.
+  // World size of the finest detail worth outlining (window frames, sills).
+  // From afar, edges on features near/below this size would alias into
+  // dotted lines, so they fade out and only large steps (silhouettes) keep
+  // their outline -- a distance LOD that declutters small screens. 0 = off.
+  float detailSize = 0.1f;
   int celBands = 4;               // Lit tone steps (>= 2).
   float celSoftness = 0.5f;       // Band edge width, 0 (hard) .. 1 (fully smooth).
   // Cheaper than the thermal defaults: the AO is evaluated at half

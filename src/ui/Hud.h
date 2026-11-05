@@ -17,6 +17,7 @@
 #include "game/GameLogic.h"
 #include "game/TurnTimeline.h"
 #include "game/Types.h"
+#include "gfx/AmbientOcclusion.h"
 #include "gfx/Camera.h"
 #include "gfx/Mesh.h"
 
@@ -141,7 +142,8 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
                     float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
-                    bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,
+                    bool& disableOcclusionFade, bool& npr, gfx::NprSettings& nprSettings,
+                    bool& showFps, float fps, float frameMs,
                     float fovMs, const gfx::RenderFrameStats& stats, float top);
 
 // Thermal view (issue #177): restyles every HUD window drawn in between to

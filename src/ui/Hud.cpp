@@ -523,6 +523,8 @@ void DrawRotationDome(gfx::OrbitCamera& camera, const PaneRect& rect, float wind
   ImGui::SetNextWindowPos(ImVec2(rect.x + rect.width - kPad, windowHeight - kPad),
                           ImGuiCond_Always, ImVec2(1.0f, 1.0f));
   ImGui::SetNextWindowSize(ImVec2(side, side), ImGuiCond_Always);
+  // Menu green: read the HUD text color before the transparent overrides below.
+  const ImVec4 menu = ImGui::GetStyleColorVec4(ImGuiCol_Text);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
   ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
   ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
@@ -548,8 +550,6 @@ void DrawRotationDome(gfx::OrbitCamera& camera, const PaneRect& rect, float wind
     const glm::vec2 v = gfx::DomeProject(p, yaw, pitch);
     return ImVec2(c.x + v.x * kRadius, c.y + v.y * kRadius);
   };
-  // Menu color: the HUD window background, opaque.
-  const ImVec4 menu = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
   auto color = [&](bool front) {
     return ImGui::ColorConvertFloat4ToU32(ImVec4(menu.x, menu.y, menu.z, front ? 1.0f : 0.35f));
   };

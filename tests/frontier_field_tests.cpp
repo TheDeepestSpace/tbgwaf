@@ -245,6 +245,50 @@ void TestThinNeckStaysConnectedToWideRegion() {
   CHECK(PositivePieces(field, gfx::SmoothFrontierSignedDepth(field)) == 1);
 }
 
+void TestWallBoundaryIsExact() {
+  // The reach ends at a wall on +x and at the budget elsewhere (issue
+  // #292). Where an obstacle causes the boundary the contour must hug it:
+  // the last reached column sits at +step/2 and the wall column at -step/2
+  // along the whole face, instead of the blur's rounded pull-back.
+  tactics::ReachField field = EmptyField(31);
+  field.walkable.assign(field.dist.size(), 1);
+  for (int iz = 5; iz <= 25; ++iz) {
+    for (int ix = 5; ix <= 15; ++ix) field.dist[iz * field.nx + ix] = 0.0f;
+    for (int ix = 16; ix <= 20; ++ix) field.walkable[iz * field.nx + ix] = 0;
+  }
+  const std::vector<float> depth = gfx::SmoothFrontierSignedDepth(field);
+  const float half = 0.5f * field.step;
+  for (int iz = 10; iz <= 20; ++iz) {
+    CHECK(std::abs(depth[iz * field.nx + 15] - half) < 0.02f);
+    CHECK(std::abs(depth[iz * field.nx + 16] + half) < 0.02f);
+  }
+  // Away from the wall the budget edge keeps its smoothing: the block's
+  // convex corner sample is still rounded off.
+  CHECK(depth[5 * field.nx + 5] < 0.0f);
+}
+
+void TestCoverStyleWeights() {
+  // A wall column of cover tiles: flat along the middle, tactical at the
+  // ends. Nearby nodes take the nearest tile's kind; open ground stays
+  // unstyled (no gradient on the budget boundary).
+  tactics::ReachField field = EmptyField(21);
+  for (float& d : field.dist) d = 0.0f;
+  tactics::CoverMap cover;
+  cover.nx = cover.nz = field.nx;
+  cover.tiles.assign(field.dist.size(), tactics::CoverTile{});
+  for (int iz = 5; iz <= 15; ++iz) {
+    cover.tiles[iz * field.nx + 15].kind =
+        (iz == 5 || iz == 15) ? tactics::CoverKind::Tactical : tactics::CoverKind::Flat;
+  }
+  const std::vector<glm::vec2> style = gfx::FrontierCoverStyle(field, cover, 0.8f);
+  CHECK(style.size() == field.dist.size());
+  if (style.size() != field.dist.size()) return;
+  const auto at = [&](int ix, int iz) { return style[iz * field.nx + ix]; };
+  CHECK(at(14, 10).y == 1.0f && at(14, 10).x == 0.0f);  // Mid-wall: striped (flat).
+  CHECK(at(14, 15).x == 1.0f && at(14, 15).y == 0.0f);  // Wall end: full gradient.
+  CHECK(at(10, 10).x == 0.0f && at(10, 10).y == 0.0f);  // Open ground: none.
+}
+
 }  // namespace
 
 void TestThinStraightBandHasSmoothOutline() {
@@ -273,6 +317,8 @@ int main() {
   TestLedgeBesideDeckSurvivesSmoothing();
   TestObliqueThinBandOutlineIsStraight();
   TestLedgeAlongObliqueCliffOutlineIsStraight();
+  TestWallBoundaryIsExact();
+  TestCoverStyleWeights();
   if (gFailures == 0) {
     std::printf("All frontier field tests passed.\n");
     return 0;

@@ -604,9 +604,9 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
   static const int kMoves[16][2] = {{1, 0},  {-1, 0}, {0, 1},  {0, -1}, {1, 1},  {1, -1},
                                     {-1, 1}, {-1, -1}, {2, 1},  {2, -1}, {-2, 1}, {-2, -1},
                                     {1, 2},  {1, -2}, {-1, 2}, {-1, -2}};
-  std::vector<char> walkable(field.dist.size(), -1);  // -1 unknown, 0/1 cached.
+  field.walkable.assign(field.dist.size(), -1);  // -1 unknown, 0/1 cached.
   auto nodeWalkable = [&](int ix, int iz) {
-    char& w = walkable[iz * field.nx + ix];
+    char& w = field.walkable[iz * field.nx + ix];
     if (w < 0) {
       const glm::vec3 p = field.Node(ix, iz);
       if (!polygonMode_) {

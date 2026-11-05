@@ -57,6 +57,12 @@ struct ReachField {
   // comes too close after the mover would have arrived (it stands at its
   // destination for the rest of the round). Empty otherwise.
   std::vector<char> endpointBlocked;
+  // Ground walkability per node (-1 unknown, 0 obstacle-blocked, 1 free),
+  // cached by the reach computation for the nodes it inspected. Blocked
+  // nodes mark where the frontier is a wall rather than the budget running
+  // out, so the drawn boundary can hug obstacles exactly. Empty for fields
+  // built by hand (tests).
+  std::vector<char> walkable;
   // Bumped by the owner each recompute, so renderers caching geometry by
   // (origin, budget) notice content-only changes (blockers moved).
   int revision = 0;

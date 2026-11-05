@@ -2852,7 +2852,6 @@ bool SceneRenderer::Init() {
   cubeMesh_.Init();
   sphereMesh_.Init();
   frontierFill_.Init();
-  coverFill_.Init();
   frontierBorder_.Init();
   ziplineFill_.Init();
   ziplineBorder_.Init();
@@ -2919,7 +2918,6 @@ bool SceneRenderer::Init() {
 
 void SceneRenderer::Destroy() {
   frontierFill_.Destroy();
-  coverFill_.Destroy();
   frontierBorder_.Destroy();
   ziplineFill_.Destroy();
   ziplineBorder_.Destroy();
@@ -4285,8 +4283,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
 
   // Builds one reach field's glow + boundary geometry (see below) in `color`,
   // appending to `fill`/`border`. Shared by the walk region and the zipline
-  // regions, which only differ in tint.
-  const auto appendFrontier = [&](const tactics::ReachField& f, const glm::vec3& color,
+  // regions, which only differ in tint. With `cover` given, the glow itself
+  // identifies what the positions along the boundary offer (issue #292):
+  // full gradient at tactical cover (a corner or car side to peek from),
+  // slanted stripes along flat wall cover, and no gradient at all where the
+  // boundary is only the movement budget running out.
+  const auto appendFrontier = [&](const tactics::ReachField& f,
+                                  const tactics::CoverMap* cover, const glm::vec3& color,
                                   std::vector<ColorTriangleMesh::Vertex>& fill,
                                   std::vector<glm::vec3>& border) {
     constexpr float kY = 0.03f;
@@ -4305,10 +4308,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       return std::abs(f.surfaceY[az * nx + ax] - f.surfaceY[bz * nx + bx]) <= kLayerStep;
     };
     const std::vector<float> g = SmoothFrontierSignedDepth(f);
+    std::vector<glm::vec2> style;
+    if (cover) style = FrontierCoverStyle(f, *cover, kFadeWidth);
+    const bool styled = style.size() == g.size();
 
     struct Pt {
       glm::vec3 p;
       float g;
+      glm::vec2 s;  // (tactical, flat) cover style weights.
     };
     const std::vector<AABB>& slabs = game.GetScene().sidewalks;
     // Clips a convex polygon to a slab's XZ footprint (Sutherland-Hodgman),
@@ -4328,7 +4335,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           const Pt& prev = poly[(v + poly.size() - 1) % poly.size()];
           if (inside(cur) != inside(prev)) {
             const float t = (bound - coord(prev)) / (coord(cur) - coord(prev));
-            out.push_back({prev.p + (cur.p - prev.p) * t, prev.g + (cur.g - prev.g) * t});
+            out.push_back({prev.p + (cur.p - prev.p) * t, prev.g + (cur.g - prev.g) * t,
+                           prev.s + (cur.s - prev.s) * t});
           }
           if (inside(cur)) out.push_back(cur);
         }
@@ -4338,7 +4346,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       return poly;
     };
     auto toVertex = [&](const Pt& q) {
-      const float a = kEdgeAlpha * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
+      float factor = 1.0f;
+      if (styled) {
+        // 45-degree world-space stripes tag flat cover; tactical cover gets
+        // the full gradient and open ground none.
+        const float wave =
+            0.5f + 0.5f * std::sin((q.p.x + q.p.z) * (6.2831853f / 1.2f));
+        const float stripe = std::clamp(1.8f * wave - 0.4f, 0.0f, 1.0f);
+        factor = std::min(1.0f, q.s.x + q.s.y * stripe);
+      }
+      const float a =
+          kEdgeAlpha * factor * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
       return ColorTriangleMesh::Vertex{q.p, glm::vec4(color, a)};
     };
     for (int iz = 0; iz + 1 < nz; ++iz) {
@@ -4348,7 +4366,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         Pt quad[4];
         bool anyIn = false;
         for (int k = 0; k < 4; ++k) {
-          quad[k] = {f.Node(cx[k], cz[k]), g[cz[k] * nx + cx[k]]};
+          quad[k] = {f.Node(cx[k], cz[k]), g[cz[k] * nx + cx[k]],
+                     styled ? style[cz[k] * nx + cx[k]] : glm::vec2(0.0f)};
           // Each node rides the terrain under it (HeightAt is 0 on flat
           // maps); the 0.25-unit grid is fine enough that the linear
           // contour/edge interpolation below stays on the slope.
@@ -4374,6 +4393,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           if (sameLayer(cx[dom], cz[dom], cx[k], cz[k])) continue;
           quad[k].p.y = quad[dom].p.y;
           quad[k].g = -0.5f * f.step;
+          quad[k].s = quad[dom].s;
         }
         // Clip the cell to g >= 0 (Sutherland-Hodgman against the field).
         std::vector<Pt> poly;
@@ -4385,7 +4405,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           if (ain) poly.push_back(a);
           if (ain != bin) {
             const float t = a.g / (a.g - b.g);
-            const Pt c{a.p + (b.p - a.p) * t, 0.0f};
+            const Pt c{a.p + (b.p - a.p) * t, 0.0f, a.s + (b.s - a.s) * t};
             poly.push_back(c);
             cut.push_back(c);
           }
@@ -4448,70 +4468,28 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // is smooth rather than following the sampling grid.
   if (overlays.moveFrontier && overlays.moveFrontier->nx > 0) {
     const tactics::ReachField& f = *overlays.moveFrontier;
+    const tactics::CoverMap* cover =
+        overlays.moveCover && overlays.moveCover->nx == f.nx && overlays.moveCover->nz == f.nz
+            ? overlays.moveCover
+            : nullptr;
     const glm::vec2 origin(f.minX, f.minZ);
     const bool frontierRebuilt = frontierKeyField_ != &f || frontierKeyOrigin_ != origin ||
                                  frontierKeyBudget_ != f.budget ||
                                  frontierKeyRevision_ != f.revision ||
-                                 frontierKeyThermal_ != thermalKey;
+                                 frontierKeyThermal_ != thermalKey ||
+                                 frontierKeyCover_ != (cover != nullptr);
     if (frontierRebuilt) {
       frontierKeyField_ = &f;
       frontierKeyOrigin_ = origin;
       frontierKeyBudget_ = f.budget;
       frontierKeyRevision_ = f.revision;
       frontierKeyThermal_ = thermalKey;
+      frontierKeyCover_ = cover != nullptr;
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
-      appendFrontier(f, debug.thermal ? thermalGreen : kSetupColor, fill, border);
+      appendFrontier(f, cover, debug.thermal ? thermalGreen : kSetupColor, fill, border);
       frontierFill_.SetVertices(fill);
       frontierBorder_.SetPoints(border);
-    }
-    // Cover tint (issue #290): each cover tile is a soft quad; a corner's
-    // alpha is the share of the four tiles around it that are cover, so the
-    // tint fades out into open ground. Flat and tactical differ in hue.
-    if (overlays.moveCover && overlays.moveCover->nx == f.nx && overlays.moveCover->nz == f.nz) {
-      if (frontierRebuilt || coverKeyRevision_ != f.revision) {
-        coverKeyRevision_ = f.revision;
-        const tactics::CoverMap& cm = *overlays.moveCover;
-        const std::vector<AABB>& slabs = game.GetScene().sidewalks;
-        std::vector<ColorTriangleMesh::Vertex> cover;
-        const glm::vec3 kFlat(0.25f, 0.6f, 1.0f), kTactical(1.0f, 0.62f, 0.12f);
-        for (int iz = 0; iz < f.nz; ++iz) {
-          for (int ix = 0; ix < f.nx; ++ix) {
-            const tactics::CoverTile& t = cm.At(ix, iz);
-            if (t.kind == tactics::CoverKind::None) continue;
-            const glm::vec3 color = t.kind == tactics::CoverKind::Tactical ? kTactical : kFlat;
-            const float half = f.step * 0.5f;
-            const glm::vec3 c = f.Node(ix, iz);
-            // Neighbor-weighted corner alpha.
-            const auto corner = [&](int sx, int sz) {
-              float sum = 0.0f;
-              for (int dz = 0; dz <= 1; ++dz) {
-                for (int dx = 0; dx <= 1; ++dx) {
-                  const int jx = ix + (sx > 0 ? dx : -dx), jz = iz + (sz > 0 ? dz : -dz);
-                  if (jx < 0 || jz < 0 || jx >= f.nx || jz >= f.nz) continue;
-                  if (cm.At(jx, jz).kind != tactics::CoverKind::None) sum += 0.25f;
-                }
-              }
-              return 0.5f * sum;
-            };
-            float y = c.y + 0.045f;
-            for (const AABB& slab : slabs) {
-              if (c.x >= slab.min.x && c.x <= slab.max.x && c.z >= slab.min.z &&
-                  c.z <= slab.max.z) {
-                y = std::max(y, slab.max.y + 0.03f);
-              }
-            }
-            const auto vtx = [&](int sx, int sz) {
-              return ColorTriangleMesh::Vertex{
-                  glm::vec3(c.x + sx * half, y, c.z + sz * half),
-                  glm::vec4(color, corner(sx, sz))};
-            };
-            const auto v00 = vtx(-1, -1), v10 = vtx(1, -1), v11 = vtx(1, 1), v01 = vtx(-1, 1);
-            for (const auto& v : {v00, v10, v11, v00, v11, v01}) cover.push_back(v);
-          }
-        }
-        coverFill_.SetVertices(cover);
-      }
     }
     // Same depth bias as the FOV cone, against z-fighting at distance.
     glEnable(GL_POLYGON_OFFSET_FILL);
@@ -4519,7 +4497,6 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     colorShader_.Use();
     colorShader_.SetMat4("uMVP", viewProj);
     frontierFill_.Draw();
-    if (overlays.moveCover) coverFill_.Draw();
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
     // Same green for every leg, half-transparent after the
@@ -4550,7 +4527,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
       for (const auto& fr : frontiers) {
-        if (fr.field.nx > 0) appendFrontier(fr.field, regionColor, fill, border);
+        if (fr.field.nx > 0) appendFrontier(fr.field, nullptr, regionColor, fill, border);
       }
       ziplineFill_.SetVertices(fill);
       ziplineBorder_.SetPoints(border);

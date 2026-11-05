@@ -7,6 +7,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "game/Unit.h"
+#include "gfx/RotationDome.h"
 
 using tactics::GameLogic;
 using tactics::InputMode;
@@ -474,7 +475,7 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
                     float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
-                    bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,
+                    bool& disableOcclusionFade, bool& showFps, bool& showRotationDome, float fps, float frameMs,
                     float fovMs, const gfx::RenderFrameStats& stats, float top) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
   // Once per run (not FirstUseEver) so a saved imgui.ini can't reopen it at startup.
@@ -504,6 +505,7 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
     ImGui::SliderInt("AO softness", &aoSoftness, 0, 10);
   }
   ImGui::Checkbox("Disable occlusion fade", &disableOcclusionFade);
+  ImGui::Checkbox("Rotation dome", &showRotationDome);
   ImGui::Checkbox("Show FPS", &showFps);
   if (showFps) ImGui::Text("%.1f FPS (%.2f ms)", fps, frameMs);
   ImGui::Text("Draw calls: %d", stats.drawCalls);
@@ -511,6 +513,69 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
   ImGui::Text("Vertices: %lld", stats.vertices);
   ImGui::Text("FOV cones: %.2f ms", fovMs);
   ImGui::End();
+}
+
+void DrawRotationDome(gfx::OrbitCamera& camera, const PaneRect& rect, float windowHeight, int id) {
+  constexpr float kRadius = 52.0f;
+  constexpr float kPad = 10.0f;
+  const float side = kRadius * 2.0f + 8.0f;
+  ImGui::SetNextWindowPos(ImVec2(rect.x + rect.width - kPad, windowHeight - kPad),
+                          ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+  ImGui::SetNextWindowSize(ImVec2(side, side), ImGuiCond_Always);
+  ImGui::SetNextWindowBgAlpha(0.35f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+  ImGui::PushID(id);
+  ImGui::Begin("##rotation_dome", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                   ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoScrollbar);
+  const ImVec2 origin = ImGui::GetCursorScreenPos();
+  ImGui::InvisibleButton("drag", ImVec2(side, side));
+  if (ImGui::IsItemActive()) {
+    const ImVec2 d = ImGui::GetIO().MouseDelta;
+    if (d.x != 0.0f || d.y != 0.0f) {
+      const glm::vec2 da = gfx::DomeDragDelta(camera.Yaw(), camera.Pitch(),
+                                              glm::vec2(d.x, d.y) / kRadius);
+      camera.Rotate(da.x, da.y);
+    }
+  }
+  const ImVec2 c(origin.x + side * 0.5f, origin.y + side * 0.5f);
+  auto toScreen = [&](const glm::vec3& dir) {
+    const glm::vec2 v = gfx::DomeProject(dir);
+    return ImVec2(c.x + v.x * kRadius, c.y + v.y * kRadius);
+  };
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  // Wireframe: latitude rings and longitude arcs; far side drawn fainter.
+  auto line = [&](const glm::vec3& a, const glm::vec3& b) {
+    const bool front = gfx::DomeDepth(a + b) > 0.0f;
+    dl->AddLine(toScreen(a), toScreen(b),
+                front ? IM_COL32(200, 220, 255, 170) : IM_COL32(200, 220, 255, 60), 1.0f);
+  };
+  constexpr int kSegs = 40;
+  const float twoPi = 6.2831853f;
+  for (float lat : {0.0f, 0.5236f, 1.0472f}) {
+    for (int i = 0; i < kSegs; ++i)
+      line(gfx::DomeDirection(twoPi * i / kSegs, lat),
+           gfx::DomeDirection(twoPi * (i + 1) / kSegs, lat));
+  }
+  for (int m = 0; m < 8; ++m) {
+    const float yaw = twoPi * m / 8.0f;
+    for (int i = 0; i < 12; ++i)
+      line(gfx::DomeDirection(yaw, 1.5708f * i / 12),
+           gfx::DomeDirection(yaw, 1.5708f * (i + 1) / 12));
+  }
+  // North marker: world -Z (top of the default ground view).
+  const ImVec2 n = toScreen(gfx::DomeDirection(-1.5708f, 0.0f) * 1.12f);
+  dl->AddText(ImVec2(n.x - 3.5f, n.y - 7.0f), IM_COL32(255, 200, 80, 220), "N");
+  // Camera dot.
+  const glm::vec3 dir = gfx::DomeDirection(camera.Yaw(), camera.Pitch());
+  const bool front = gfx::DomeDepth(dir) > 0.0f;
+  const ImVec2 p = toScreen(dir);
+  dl->AddCircleFilled(p, 6.0f, front ? IM_COL32(255, 80, 60, 255) : IM_COL32(255, 80, 60, 150));
+  dl->AddCircle(p, 6.0f, IM_COL32(255, 255, 255, 230), 0, 1.5f);
+  ImGui::End();
+  ImGui::PopID();
+  ImGui::PopStyleVar();
 }
 
 void PushThermalHudStyle() {

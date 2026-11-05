@@ -141,8 +141,14 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
                     float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
-                    bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,
+                    bool& disableOcclusionFade, bool& showFps, bool& showRotationDome, float fps, float frameMs,
                     float fovMs, const gfx::RenderFrameStats& stats, float top);
+
+// Camera-rotation dome (issue #298): small corner widget in the bottom-right
+// of `rect`. The camera is a dot on a static half-sphere; dragging the dot
+// rotates `camera` (pitch clamped by OrbitCamera). The widget is an ImGui
+// window, so drags never reach the map pan/tap handlers.
+void DrawRotationDome(gfx::OrbitCamera& camera, const PaneRect& rect, float windowHeight, int id);
 
 // Thermal view (issue #177): restyles every HUD window drawn in between to
 // the monochrome green symbology of real thermal footage, pane team label

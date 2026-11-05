@@ -523,8 +523,8 @@ void DrawRotationDome(gfx::OrbitCamera& camera, const PaneRect& rect, float wind
   ImGui::SetNextWindowPos(ImVec2(rect.x + rect.width - kPad, windowHeight - kPad),
                           ImGuiCond_Always, ImVec2(1.0f, 1.0f));
   ImGui::SetNextWindowSize(ImVec2(side, side), ImGuiCond_Always);
-  // Menu green: read the HUD text color before the transparent overrides below.
-  const ImVec4 menu = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+  // Darker menu green, same as the movement boundary (kThermalGreen).
+  const ImVec4 menu(0.30f, 0.90f, 0.40f, 1.0f);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
   ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
   ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));

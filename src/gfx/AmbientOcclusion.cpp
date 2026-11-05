@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <string>
 
 #include "gfx/Mesh.h"
 
@@ -83,6 +84,51 @@ void main() {
 }
 )";
 
+// Shared by the thermal and NPR composites (spliced at //EDGE_FUNCTION):
+// depth/normal discontinuities from 4 neighbour taps at uThickness pixels.
+// Plane-distance depth test so sloped ground never outlines itself.
+// Distance LOD: once a uDetailSize-sized feature spans under ~3 pixels its
+// edges alias into dotted lines, so fine edges (normal creases, shallow
+// depth steps: window frames, sills, niches) fade out with distance and
+// only steps large in world units -- silhouettes -- keep their outline.
+const char* kEdgeFunction = R"(
+uniform float uPixelScale;  // World size of one pixel at unit view distance.
+uniform float uDetailSize;  // World size of the finest outlined detail (0 = no LOD).
+
+float OutlineEdge(vec3 p, vec3 n) {
+  float edge = 0.0;
+  if (uThickness > 0.0 && uOutline > 0.0) {
+    vec2 texel = 1.0 / uPaneSize;
+    float viewDist = max(length(p - WorldPosition(vUV, 0.0)), 0.001);
+    float detail = uDetailSize > 0.0
+        ? smoothstep(1.5, 3.0, uDetailSize / max(viewDist * uPixelScale, 1e-6))
+        : 1.0;
+    vec2 offsets[4] = vec2[4](vec2(1, 0), vec2(-1, 0), vec2(0, 1), vec2(0, -1));
+    for (int i = 0; i < 4; ++i) {
+      vec2 uv = vUV + offsets[i] * uThickness * texel;
+      if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) continue;
+      float d = texture(uDepth, uv * uUvScale).r;
+      if (d >= 1.0) { edge = 1.0; continue; }  // Silhouette against the void.
+      vec3 q = WorldPosition(uv, d);
+      float plane = abs(dot(q - p, n));
+      float major = smoothstep(0.3, 0.9, plane);  // Step size in world units.
+      float depthEdge = smoothstep(0.006, 0.03, plane / viewDist) * max(detail, major);
+      vec3 sn = normalize(texture(uNormal, uv * uUvScale).xyz * 2.0 - 1.0);
+      float normalEdge = smoothstep(0.3, 0.7, 1.0 - dot(n, sn)) * detail;
+      edge = max(edge, max(depthEdge, normalEdge));
+    }
+  }
+  return edge;
+}
+)";
+
+std::string WithEdgeFunction(const char* source) {
+  std::string text = source;
+  const std::string marker = "//EDGE_FUNCTION";
+  text.replace(text.find(marker), marker.size(), kEdgeFunction);
+  return text;
+}
+
 const char* kComposite = R"(#version 300 es
 precision highp float;
 precision highp sampler2D;
@@ -97,12 +143,15 @@ uniform vec2 uUvScale;   // Pane size / target texture size.
 uniform int uBlackHot;
 uniform float uStrength;  // Occlusion-to-darkening multiplier.
 uniform int uBlurRadius;  // Bilateral blur half-width in pixels.
+uniform float uThickness;  // NPR outline reach in pixels (0 = no outlines).
+uniform float uOutline;    // NPR outline opacity.
 out vec4 FragColor;
 
 vec3 WorldPosition(vec2 uv, float depth) {
   vec4 p = uInverseViewProjection * vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
   return p.xyz / p.w;
 }
+//EDGE_FUNCTION
 
 void main() {
   float depth = texture(uDepth, vUV * uUvScale).r;
@@ -142,11 +191,110 @@ void main() {
       black *= shade;
       rgb = vec3(uBlackHot != 0 ? black : 1.0 - black);
     }
+    // NPR outlines over the AO view (no-op unless enabled).
+    float amount = OutlineEdge(p, n) * uOutline * (keepsColor ? 0.5 : 1.0);
+    rgb = mix(rgb, rgb * 0.12, clamp(amount, 0.0, 1.0));
   }
   FragColor = vec4(rgb, 1.0);
   // Preserve opaque depth for see-through buildings and gameplay overlays.
   // Writing it avoids format-dependent depth blits to the browser canvas.
   gl_FragDepth = depth;
+}
+)";
+
+// One full-res pass: half-res AO (small bilateral blur) + outlines from
+// depth/normal discontinuities. 4 neighbour taps at the configured pixel
+// offset; plane-distance depth test so sloped ground never outlines itself.
+const char* kNpr = R"(#version 300 es
+precision highp float;
+precision highp sampler2D;
+in vec2 vUV;
+uniform sampler2D uScene;
+uniform sampler2D uNormal;
+uniform sampler2D uDepth;
+uniform sampler2D uOcclusion;
+uniform mat4 uInverseViewProjection;
+uniform vec2 uPaneSize;
+uniform vec2 uUvScale;
+uniform float uAoScale;   // Occlusion texture resolution relative to the pane.
+uniform float uStrength;
+uniform int uBlurRadius;
+uniform float uThickness;  // Pixels.
+uniform float uOutline;    // Opacity.
+out vec4 FragColor;
+
+vec3 WorldPosition(vec2 uv, float depth) {
+  vec4 p = uInverseViewProjection * vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+  return p.xyz / p.w;
+}
+//EDGE_FUNCTION
+
+void main() {
+  float depth = texture(uDepth, vUV * uUvScale).r;
+  vec3 rgb = texture(uScene, vUV * uUvScale).rgb;
+  if (depth < 1.0) {
+    vec3 p = WorldPosition(vUV, depth);
+    vec4 normalSample = texture(uNormal, vUV * uUvScale);
+    vec3 n = normalize(normalSample.xyz * 2.0 - 1.0);
+    bool keepsColor = normalSample.a < 0.5;
+    vec2 texel = 1.0 / uPaneSize;
+    float total = 0.0, weightSum = 0.0;
+    for (int y = -uBlurRadius; y <= uBlurRadius; ++y) {
+      for (int x = -uBlurRadius; x <= uBlurRadius; ++x) {
+        vec2 uv = clamp(vUV + vec2(x, y) * texel * 2.0, texel * 0.5, 1.0 - texel * 0.5);
+        float d = texture(uDepth, uv * uUvScale).r;
+        if (d >= 1.0) continue;
+        vec3 q = WorldPosition(uv, d);
+        vec3 sn = normalize(texture(uNormal, uv * uUvScale).xyz * 2.0 - 1.0);
+        float w = pow(max(dot(n, sn), 0.0), 8.0) * exp(-abs(dot(q - p, n)) * 20.0) /
+                  float(1 + x * x + y * y);
+        total += texture(uOcclusion, uv * uUvScale * uAoScale).r * w;
+        weightSum += w;
+      }
+    }
+    float ao = total / max(weightSum, 0.001);
+    float shade = 1.0 - min(ao * uStrength, 0.7);
+    rgb *= shade;
+
+    // Figures keep their saturated team color: a lighter outline.
+    float amount = OutlineEdge(p, n) * uOutline * (keepsColor ? 0.5 : 1.0);
+    rgb = mix(rgb, rgb * 0.12, clamp(amount, 0.0, 1.0));
+  }
+  FragColor = vec4(rgb, 1.0);
+  gl_FragDepth = depth;
+}
+)";
+
+// Outline-only pass for see-through geometry: only pixels the faded redraw
+// tagged (normal alpha 0.75) get an edge, blended as dark ink.
+const char* kFadedOutline = R"(#version 300 es
+precision highp float;
+precision highp sampler2D;
+in vec2 vUV;
+uniform sampler2D uNormal;
+uniform sampler2D uDepth;
+uniform mat4 uInverseViewProjection;
+uniform vec2 uPaneSize;
+uniform vec2 uUvScale;
+uniform float uThickness;
+uniform float uOutline;
+uniform float uOpacity;  // Opacity of the see-through geometry.
+out vec4 FragColor;
+
+vec3 WorldPosition(vec2 uv, float depth) {
+  vec4 p = uInverseViewProjection * vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+  return p.xyz / p.w;
+}
+//EDGE_FUNCTION
+
+void main() {
+  float depth = texture(uDepth, vUV * uUvScale).r;
+  vec4 normalSample = texture(uNormal, vUV * uUvScale);
+  if (depth >= 1.0 || abs(normalSample.a - 0.75) > 0.1) discard;
+  vec3 p = WorldPosition(vUV, depth);
+  vec3 n = normalize(normalSample.xyz * 2.0 - 1.0);
+  float amount = OutlineEdge(p, n) * uOutline * uOpacity;
+  FragColor = vec4(vec3(0.0), clamp(amount, 0.0, 1.0) * 0.88);
 }
 )";
 
@@ -168,7 +316,9 @@ void Allocate(GLuint& texture, GLint format, GLenum channels, GLenum type, int w
 
 bool AmbientOcclusion::Init() {
   return occlusionShader_.Compile(kVertex, kOcclusion) &&
-         compositeShader_.Compile(kVertex, kComposite);
+         compositeShader_.Compile(kVertex, WithEdgeFunction(kComposite).c_str()) &&
+         nprShader_.Compile(kVertex, WithEdgeFunction(kNpr).c_str()) &&
+         fadedOutlineShader_.Compile(kVertex, WithEdgeFunction(kFadedOutline).c_str());
 }
 
 void AmbientOcclusion::Destroy() {
@@ -236,7 +386,8 @@ bool AmbientOcclusion::Begin(int width, int height, float background) {
 
 void AmbientOcclusion::Composite(GLuint target, int x, int y, const glm::mat4& view,
                                  const glm::mat4& projection, bool blackHot,
-                                 const AmbientOcclusionSettings& settings) {
+                                 const AmbientOcclusionSettings& settings,
+                                 const NprSettings* outlines) {
   const glm::mat4 inverse = glm::inverse(projection * view);
   const glm::vec2 paneSize(static_cast<float>(width_), static_cast<float>(height_));
   const glm::vec2 uvScale(paneSize.x / static_cast<float>(allocatedWidth_),
@@ -281,12 +432,129 @@ void AmbientOcclusion::Composite(GLuint target, int x, int y, const glm::mat4& v
   compositeShader_.SetVec2("uUvScale", uvScale);
   compositeShader_.SetFloat("uStrength", std::max(settings.strength, 0.0f));
   compositeShader_.SetInt("uBlurRadius", std::max(settings.softness, 0));
+  compositeShader_.SetFloat("uThickness",
+                            outlines ? std::max(outlines->outlineThickness, 0.0f) : 0.0f);
+  compositeShader_.SetFloat("uOutline",
+                            outlines ? std::clamp(outlines->outlineStrength, 0.0f, 1.0f) : 0.0f);
+  compositeShader_.SetFloat("uPixelScale", 2.0f / std::max(projection[1][1] * paneSize.y, 1e-4f));
+  compositeShader_.SetFloat("uDetailSize",
+                            outlines ? std::max(outlines->detailSize, 0.0f) : 0.0f);
   glDrawArrays(GL_TRIANGLES, 0, 3);
   RecordDraw(3, 1);
   glBindVertexArray(0);
   glDepthFunc(GL_LESS);
   // No AO attachments stay bound when the next pane starts capturing.
   for (int unit = 3; unit >= 0; --unit) BindTexture(0, unit);
+}
+
+void AmbientOcclusion::CompositeNpr(GLuint target, int x, int y, const glm::mat4& view,
+                                    const glm::mat4& projection, const NprSettings& settings) {
+  const glm::mat4 inverse = glm::inverse(projection * view);
+  const glm::vec2 paneSize(static_cast<float>(width_), static_cast<float>(height_));
+  const glm::vec2 uvScale(paneSize.x / static_cast<float>(allocatedWidth_),
+                          paneSize.y / static_cast<float>(allocatedHeight_));
+  // Half-res AO: the occlusion shader renders into the lower-left corner of
+  // its target; the pane UVs still span the whole pane.
+  const int halfW = std::max(width_ / 2, 1), halfH = std::max(height_ / 2, 1);
+  glBindFramebuffer(GL_FRAMEBUFFER, occlusionFbo_);
+  glViewport(0, 0, halfW, halfH);
+  glScissor(0, 0, halfW, halfH);
+  glDisable(GL_DEPTH_TEST);
+  glDepthMask(GL_FALSE);
+  BindTexture(depth_, 0);
+  BindTexture(normal_, 1);
+  occlusionShader_.Use();
+  occlusionShader_.SetInt("uDepth", 0);
+  occlusionShader_.SetInt("uNormal", 1);
+  occlusionShader_.SetMat4("uInverseViewProjection", inverse);
+  occlusionShader_.SetMat4("uProjection", projection);
+  occlusionShader_.SetMat4("uView", view);
+  occlusionShader_.SetVec2("uPaneSize", paneSize);
+  occlusionShader_.SetVec2("uUvScale", uvScale);
+  occlusionShader_.SetFloat("uRadius", std::max(settings.ao.radius, 0.01f));
+  occlusionShader_.SetInt("uSteps", std::max(settings.ao.quality, 1));
+  glBindVertexArray(vao_);
+  glDrawArrays(GL_TRIANGLES, 0, 3);
+  RecordDraw(3, 1);
+
+  glBindFramebuffer(GL_FRAMEBUFFER, target);
+  glViewport(x, y, width_, height_);
+  glScissor(x, y, width_, height_);
+  glEnable(GL_DEPTH_TEST);
+  glDepthMask(GL_TRUE);
+  glDepthFunc(GL_ALWAYS);
+  BindTexture(color_, 2);
+  BindTexture(occlusion_, 3);
+  nprShader_.Use();
+  nprShader_.SetInt("uDepth", 0);
+  nprShader_.SetInt("uNormal", 1);
+  nprShader_.SetInt("uScene", 2);
+  nprShader_.SetInt("uOcclusion", 3);
+  nprShader_.SetMat4("uInverseViewProjection", inverse);
+  nprShader_.SetVec2("uPaneSize", paneSize);
+  nprShader_.SetVec2("uUvScale", uvScale);
+  nprShader_.SetFloat("uAoScale", static_cast<float>(halfW) / paneSize.x);
+  nprShader_.SetFloat("uStrength", std::max(settings.ao.strength, 0.0f));
+  nprShader_.SetInt("uBlurRadius", std::max(settings.ao.softness, 0));
+  nprShader_.SetFloat("uThickness", std::max(settings.outlineThickness, 0.0f));
+  nprShader_.SetFloat("uOutline", std::clamp(settings.outlineStrength, 0.0f, 1.0f));
+  nprShader_.SetFloat("uPixelScale", 2.0f / std::max(projection[1][1] * paneSize.y, 1e-4f));
+  nprShader_.SetFloat("uDetailSize", std::max(settings.detailSize, 0.0f));
+  glDrawArrays(GL_TRIANGLES, 0, 3);
+  RecordDraw(3, 1);
+  glBindVertexArray(0);
+  glDepthFunc(GL_LESS);
+  for (int unit = 3; unit >= 0; --unit) BindTexture(0, unit);
+}
+
+void AmbientOcclusion::BeginFaded() {
+  glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo_);
+  glViewport(0, 0, width_, height_);
+  glScissor(0, 0, width_, height_);
+  glDisable(GL_BLEND);
+  glDisable(GL_STENCIL_TEST);
+  glEnable(GL_DEPTH_TEST);
+  glDepthMask(GL_TRUE);
+  glDepthFunc(GL_LESS);
+}
+
+void AmbientOcclusion::CompositeFadedOutlines(GLuint target, int x, int y,
+                                              const glm::mat4& view,
+                                              const glm::mat4& projection,
+                                              const NprSettings& settings, float opacity) {
+  const glm::mat4 inverse = glm::inverse(projection * view);
+  const glm::vec2 paneSize(static_cast<float>(width_), static_cast<float>(height_));
+  const glm::vec2 uvScale(paneSize.x / static_cast<float>(allocatedWidth_),
+                          paneSize.y / static_cast<float>(allocatedHeight_));
+  glBindFramebuffer(GL_FRAMEBUFFER, target);
+  glViewport(x, y, width_, height_);
+  glScissor(x, y, width_, height_);
+  glDisable(GL_DEPTH_TEST);
+  glDepthMask(GL_FALSE);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  BindTexture(depth_, 0);
+  BindTexture(normal_, 1);
+  fadedOutlineShader_.Use();
+  fadedOutlineShader_.SetInt("uDepth", 0);
+  fadedOutlineShader_.SetInt("uNormal", 1);
+  fadedOutlineShader_.SetMat4("uInverseViewProjection", inverse);
+  fadedOutlineShader_.SetVec2("uPaneSize", paneSize);
+  fadedOutlineShader_.SetVec2("uUvScale", uvScale);
+  fadedOutlineShader_.SetFloat("uThickness", std::max(settings.outlineThickness, 0.0f));
+  fadedOutlineShader_.SetFloat("uOutline", std::clamp(settings.outlineStrength, 0.0f, 1.0f));
+  fadedOutlineShader_.SetFloat("uOpacity", opacity);
+  fadedOutlineShader_.SetFloat("uPixelScale", 2.0f / std::max(projection[1][1] * paneSize.y, 1e-4f));
+  fadedOutlineShader_.SetFloat("uDetailSize", std::max(settings.detailSize, 0.0f));
+  glBindVertexArray(vao_);
+  glDrawArrays(GL_TRIANGLES, 0, 3);
+  RecordDraw(3, 1);
+  glBindVertexArray(0);
+  glDisable(GL_BLEND);
+  glEnable(GL_DEPTH_TEST);
+  glDepthMask(GL_TRUE);
+  glDepthFunc(GL_LESS);
+  for (int unit = 1; unit >= 0; --unit) BindTexture(0, unit);
 }
 
 }  // namespace gfx

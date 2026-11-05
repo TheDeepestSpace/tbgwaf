@@ -234,6 +234,10 @@ uniform int uMonochrome;
 uniform int uThermal;
 uniform int uThermalBlackHot;  // 1 = hot reads dark (the review reference), 0 = white-hot.
 uniform int uThermalMaterial;  // ThermalMaterial; only figures use uColor.
+uniform int uNpr;
+uniform int uFadedMark;  // 1: G-buffer pass for outlining see-through geometry.
+uniform int uCelBands;
+uniform float uCelSoftness;
 layout(location = 0) out vec4 FragColor;
 // Thermal G-buffer normal. Alpha 1 = grayscale heat surface; alpha 0 = a
 // surface drawn in its own color (figures), which the AO composite leaves
@@ -280,12 +284,37 @@ void main() {
   vec3 normal = normalize(vWorldNormal);
   vec3 viewDir = normalize(uViewPos - vWorldPos);
   if (dot(normal, viewDir) < 0.0) normal = -normal;
-  WorldNormal = vec4(normal * 0.5 + 0.5, 1.0);
+  // Alpha 0.75 tags see-through geometry for its outline-only pass.
+  WorldNormal = vec4(normal * 0.5 + 0.5, uFadedMark != 0 ? 0.75 : 1.0);
 
   float diffuse = max(dot(normal, -uLightDir), 0.0);
   float shadow = ComputeShadow(normal);
   const float kAmbient = 0.35;
   float lit = kAmbient + (1.0 - shadow) * diffuse * 0.65;
+  if (uNpr != 0) {
+    // Soft cel bands: quantise the sun term with smoothstep steps whose
+    // width is uCelSoftness of a band, so tones step without harsh seams.
+    float bands = float(max(uCelBands, 2));
+    float t = (1.0 - shadow) * diffuse * bands;
+    float width = max(uCelSoftness, 0.02) * 0.5;
+    float stepped = 0.0;
+    for (int i = 1; i < 16; ++i) {
+      if (i >= uCelBands) break;
+      stepped += smoothstep(float(i) - width, float(i) + width, t);
+    }
+    float cel = stepped / (bands - 1.0);
+    if (uThermalMaterial == 5) {
+      WorldNormal.a = 0.0;
+      float shade = 0.82 + 0.18 * max(dot(normal, viewDir), 0.0);
+      FragColor = vec4(uColor.rgb * shade, uColor.a);
+      return;
+    }
+    float gray = dot(uColor.rgb, vec3(0.299, 0.587, 0.114));
+    // Lift toward mid-gray so the comic palette stays soft, not harsh.
+    gray = mix(0.55, gray, 0.6);
+    FragColor = vec4(vec3(gray * (kAmbient + cel * 0.65)), uColor.a);
+    return;
+  }
   if (uThermal != 0) {
     // Pale clay-like surroundings from the AO reference, with subtle
     // material differences. Contact shading is applied in screen space
@@ -3251,6 +3280,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   SetRagdollObstacles(obstacles);
   SetRagdollRails(game.GetScene().massing);
   SetRagdollGround(game.GetScene().walkSurfaces, game.GetScene().ground);
+  {
+    std::vector<RagdollFigureCollider> figures;
+    for (const Unit& u : game.GetScene().units) {
+      if (u.alive) figures.push_back({u.position, 0.30f, 1.75f});
+    }
+    SetRagdollFigures(figures);
+  }
   const auto& sidewalks = game.GetScene().sidewalks;
   const auto& streetProps = game.GetScene().props;
   const float mapHalfExtent = game.GetScene().mapHalfExtent;
@@ -3538,9 +3574,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // Only opaque, visible geometry contributes to AO. Faded buildings are
   // blended afterward, so they cannot leave opaque contact shadows over
   // the figures and paths the see-through pass is meant to reveal.
-  const bool thermalAo = debug.thermal &&
-      thermalOcclusion_.Begin(width, height, debug.thermalBlackHot ? 0.86f : 0.14f);
-  if (debug.thermal && !thermalAo) {
+  // NPR on its own replaces the lit look; with the AO (thermal) view on it
+  // layers screen-space outlines over that view instead.
+  const bool npr = debug.npr && !debug.thermal;
+  const bool thermalAo = debug.thermal
+      ? thermalOcclusion_.Begin(width, height, debug.thermalBlackHot ? 0.86f : 0.14f)
+      : (npr && thermalOcclusion_.Begin(width, height, 0.10f));
+  if ((debug.thermal || npr) && !thermalAo) {
     glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
     glViewport(x, y, width, height);
     glScissor(x, y, width, height);
@@ -3796,8 +3836,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   litShader_.SetInt("uMonochrome", debug.monochrome ? 1 : 0);
   litShader_.SetInt("uThermal", thermalFlag);
   litShader_.SetInt("uThermalBlackHot", debug.thermalBlackHot ? 1 : 0);
+  const bool nprActive = npr && thermalAo;
+  litShader_.SetInt("uNpr", nprActive ? 1 : 0);
+  litShader_.SetInt("uCelBands", std::clamp(debug.nprSettings.celBands, 2, 16));
+  litShader_.SetFloat("uCelSoftness", std::clamp(debug.nprSettings.celSoftness, 0.0f, 1.0f));
   const auto thermalMaterial = [&](ThermalMaterial material) {
-    if (debug.thermal) litShader_.SetInt("uThermalMaterial", static_cast<int>(material));
+    if (debug.thermal || nprActive) {
+      litShader_.SetInt("uThermalMaterial", static_cast<int>(material));
+    }
   };
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
@@ -3951,8 +3997,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
 
   if (thermalAo) {
-    thermalOcclusion_.Composite(targetFramebuffer, x, y, view, proj, debug.thermalBlackHot,
-                                debug.thermalAo);
+    if (nprActive) {
+      thermalOcclusion_.CompositeNpr(targetFramebuffer, x, y, view, proj, debug.nprSettings);
+    } else {
+      thermalOcclusion_.Composite(targetFramebuffer, x, y, view, proj, debug.thermalBlackHot,
+                                  debug.thermalAo, debug.npr ? &debug.nprSettings : nullptr);
+    }
     litShader_.Use();
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
@@ -3989,12 +4039,6 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     std::sort(faded.begin(), faded.end(), [](const FadedOccluder& a, const FadedOccluder& b) {
       return a.viewDistance < b.viewDistance;
     });
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE);
-    glEnable(GL_STENCIL_TEST);
-    glStencilFunc(GL_EQUAL, 0, 0xFF);
-    glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
     // Front faces only: with no culling the stencil cap lets whichever
     // triangle draws first claim the pixel, often a back face, which shows as
     // striped bands and dark slabs through the faded block. Scene meshes use
@@ -4006,35 +4050,62 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // The faded block would otherwise be shadowed by its own shadow-map
     // entry (it is a caster), darkening its faces into patchy slabs.
     litShader_.SetInt("uDisableShadows", 1);
-    // Massing first: it stands proud of the grouped prisms/slabs, so it claims
-    // its pixels in the stencil cap instead of being hidden behind them.
-    for (size_t i = 0; i < massing.size(); ++i) {
-      if (detailFaded(i)) {
-        drawDetail(massing[i], glm::vec4(kObstacleColor, kOccluderFadeOpacity));
-      }
-    }
-    for (const FadedOccluder& f : faded) {
-      if (f.obstacle >= 0) {
-        thermalMaterial(ThermalMaterial::Building);
-        const tactics::Obstacle& obstacle = obstacles[f.obstacle];
-        const glm::vec4 color(kObstacleColor, kOccluderFadeOpacity);
-        if (obstacle.footprint.empty()) {
-          DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, obstacle.bounds.min,
-                     obstacle.bounds.max - obstacle.bounds.min, color);
-        } else {
-          BuildPolygonPrism(obstacle, &geometryMesh_);
-          DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                       color);
+    // Outlines apply to the see-through blocks in both the NPR view and the
+    // NPR-over-AO view.
+    const bool fadedOutlines = thermalAo && debug.npr;
+    const auto drawFadedGeometry = [&]() {
+      // Massing first: it stands proud of the grouped prisms/slabs, so it claims
+      // its pixels in the stencil cap instead of being hidden behind them.
+      for (size_t i = 0; i < massing.size(); ++i) {
+        if (detailFaded(i)) {
+          drawDetail(massing[i], glm::vec4(kObstacleColor, kOccluderFadeOpacity));
         }
-      } else {
-        thermalMaterial(ThermalMaterial::Concrete);
-        const std::vector<char> hidden = SharedEdges(walkSurfaces, walkSurfaces[f.surface]);
-        BuildSurfacePatch(walkSurfaces[f.surface].vertices, kDeckThickness, &geometryMesh_,
-                          &hidden);
-        DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                     glm::vec4(kDeckColor, kOccluderFadeOpacity));
       }
+      for (const FadedOccluder& f : faded) {
+        if (f.obstacle >= 0) {
+          thermalMaterial(ThermalMaterial::Building);
+          const tactics::Obstacle& obstacle = obstacles[f.obstacle];
+          const glm::vec4 color(kObstacleColor, kOccluderFadeOpacity);
+          if (obstacle.footprint.empty()) {
+            DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, obstacle.bounds.min,
+                       obstacle.bounds.max - obstacle.bounds.min, color);
+          } else {
+            BuildPolygonPrism(obstacle, &geometryMesh_);
+            DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                         color);
+          }
+        } else {
+          thermalMaterial(ThermalMaterial::Concrete);
+          const std::vector<char> hidden = SharedEdges(walkSurfaces, walkSurfaces[f.surface]);
+          BuildSurfacePatch(walkSurfaces[f.surface].vertices, kDeckThickness, &geometryMesh_,
+                            &hidden);
+          DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                       glm::vec4(kDeckColor, kOccluderFadeOpacity));
+        }
+      }
+    };
+    // NPR: the opaque composite never saw the faded blocks, so they would
+    // lose their edges. First re-draw them (depth-tested against the opaque
+    // scene) into the G-buffer, tagged; the outlines of just those pixels
+    // are composited over the blended result below, at the faded opacity.
+    if (fadedOutlines) {
+      thermalOcclusion_.BeginFaded();
+      litShader_.Use();
+      litShader_.SetInt("uFadedMark", 1);
+      drawFadedGeometry();
+      litShader_.SetInt("uFadedMark", 0);
+      glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
+      glViewport(x, y, width, height);
+      glScissor(x, y, width, height);
+      glDepthMask(GL_TRUE);
     }
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_STENCIL_TEST);
+    glStencilFunc(GL_EQUAL, 0, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+    drawFadedGeometry();
     litShader_.SetInt("uDisableShadows", (debug.disableShadows || debug.thermal) ? 1 : 0);
     glDisable(GL_CULL_FACE);
     glFrontFace(GL_CCW);
@@ -4042,6 +4113,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glClear(GL_STENCIL_BUFFER_BIT);  // Later passes expect a clean stencil.
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
+    if (fadedOutlines) {
+      thermalOcclusion_.CompositeFadedOutlines(targetFramebuffer, x, y, view, proj,
+                                               debug.nprSettings, kOccluderFadeOpacity);
+    }
   }
 
   if (debug.thermal) ApplyThermalSensor(x, y, width, height);

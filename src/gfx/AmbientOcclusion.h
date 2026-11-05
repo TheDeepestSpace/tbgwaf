@@ -39,7 +39,8 @@ class AmbientOcclusion {
   bool Begin(int width, int height, float background);
   void Composite(GLuint target, int x, int y, const glm::mat4& view,
                  const glm::mat4& projection, bool blackHot,
-                 const AmbientOcclusionSettings& settings);
+                 const AmbientOcclusionSettings& settings,
+                 const NprSettings* outlines = nullptr);  // Non-null: NPR outlines on top.
   // NPR variant: half-res AO, then one full-res pass that applies the AO
   // and draws depth/normal outlines. Figures (normal alpha 0) keep their
   // team color; only a lightly darkened rim is drawn on them.

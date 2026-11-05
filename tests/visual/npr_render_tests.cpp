@@ -124,6 +124,20 @@ void CheckRenderer() {
   options.npr = false;
   Require(render() == normal, "NPR state leaked into normal rendering");
 
+  // NPR on top of the AO (thermal) view: outlines only, base view unchanged
+  // when they are off.
+  options.thermal = true;
+  const auto aoOnly = render();
+  options.npr = true;
+  const auto aoNpr = render();
+  Require(aoNpr != aoOnly, "NPR did nothing on top of the AO view");
+  Require(TotalRed(aoNpr) < TotalRed(aoOnly), "AO-view outlines did not darken silhouettes");
+  options.nprSettings.outlineStrength = 0.0f;
+  Require(render() == aoOnly, "NPR without outlines changed the AO view");
+  options.nprSettings.outlineStrength = 0.85f;
+  options.thermal = false;
+  options.npr = false;
+
   renderer.Destroy();
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   glDeleteRenderbuffers(1, &depth);

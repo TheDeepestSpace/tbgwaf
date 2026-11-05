@@ -65,8 +65,8 @@ struct RenderDebugOptions {
   // Grayscale NPR look: soft cel shading, half-res AO and screen-space
   // outlines on the opaque world; figures keep saturated team colors and
   // overlays/ghosts/FOV are drawn after the outline pass. Off by default so
-  // the headless visual runner (and its goldens) is unchanged; ignored
-  // while `thermal` is on.
+  // the headless visual runner (and its goldens) is unchanged. With
+  // `thermal` (the AO view) on, only the outlines are layered on top of it.
   bool npr = false;
   NprSettings nprSettings;
   // Optional sink for per-frame draw counters; accumulates across panes, so

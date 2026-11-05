@@ -3565,6 +3565,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // Only opaque, visible geometry contributes to AO. Faded buildings are
   // blended afterward, so they cannot leave opaque contact shadows over
   // the figures and paths the see-through pass is meant to reveal.
+  // NPR on its own replaces the lit look; with the AO (thermal) view on it
+  // layers screen-space outlines over that view instead.
   const bool npr = debug.npr && !debug.thermal;
   const bool thermalAo = debug.thermal
       ? thermalOcclusion_.Begin(width, height, debug.thermalBlackHot ? 0.86f : 0.14f)
@@ -3990,7 +3992,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       thermalOcclusion_.CompositeNpr(targetFramebuffer, x, y, view, proj, debug.nprSettings);
     } else {
       thermalOcclusion_.Composite(targetFramebuffer, x, y, view, proj, debug.thermalBlackHot,
-                                  debug.thermalAo);
+                                  debug.thermalAo, debug.npr ? &debug.nprSettings : nullptr);
     }
     litShader_.Use();
     glActiveTexture(GL_TEXTURE0);

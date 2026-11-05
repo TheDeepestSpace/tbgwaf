@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <string>
 
 #include "gfx/Mesh.h"
 
@@ -83,6 +84,40 @@ void main() {
 }
 )";
 
+// Shared by the thermal and NPR composites (spliced at //EDGE_FUNCTION):
+// depth/normal discontinuities from 4 neighbour taps at uThickness pixels.
+// Plane-distance depth test so sloped ground never outlines itself.
+const char* kEdgeFunction = R"(
+float OutlineEdge(vec3 p, vec3 n) {
+  float edge = 0.0;
+  if (uThickness > 0.0 && uOutline > 0.0) {
+    vec2 texel = 1.0 / uPaneSize;
+    float viewDist = max(length(p - WorldPosition(vUV, 0.0)), 0.001);
+    vec2 offsets[4] = vec2[4](vec2(1, 0), vec2(-1, 0), vec2(0, 1), vec2(0, -1));
+    for (int i = 0; i < 4; ++i) {
+      vec2 uv = vUV + offsets[i] * uThickness * texel;
+      if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) continue;
+      float d = texture(uDepth, uv * uUvScale).r;
+      if (d >= 1.0) { edge = 1.0; continue; }  // Silhouette against the void.
+      vec3 q = WorldPosition(uv, d);
+      float plane = abs(dot(q - p, n)) / viewDist;
+      float depthEdge = smoothstep(0.006, 0.03, plane);
+      vec3 sn = normalize(texture(uNormal, uv * uUvScale).xyz * 2.0 - 1.0);
+      float normalEdge = smoothstep(0.3, 0.7, 1.0 - dot(n, sn));
+      edge = max(edge, max(depthEdge, normalEdge));
+    }
+  }
+  return edge;
+}
+)";
+
+std::string WithEdgeFunction(const char* source) {
+  std::string text = source;
+  const std::string marker = "//EDGE_FUNCTION";
+  text.replace(text.find(marker), marker.size(), kEdgeFunction);
+  return text;
+}
+
 const char* kComposite = R"(#version 300 es
 precision highp float;
 precision highp sampler2D;
@@ -97,12 +132,15 @@ uniform vec2 uUvScale;   // Pane size / target texture size.
 uniform int uBlackHot;
 uniform float uStrength;  // Occlusion-to-darkening multiplier.
 uniform int uBlurRadius;  // Bilateral blur half-width in pixels.
+uniform float uThickness;  // NPR outline reach in pixels (0 = no outlines).
+uniform float uOutline;    // NPR outline opacity.
 out vec4 FragColor;
 
 vec3 WorldPosition(vec2 uv, float depth) {
   vec4 p = uInverseViewProjection * vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
   return p.xyz / p.w;
 }
+//EDGE_FUNCTION
 
 void main() {
   float depth = texture(uDepth, vUV * uUvScale).r;
@@ -142,6 +180,9 @@ void main() {
       black *= shade;
       rgb = vec3(uBlackHot != 0 ? black : 1.0 - black);
     }
+    // NPR outlines over the AO view (no-op unless enabled).
+    float amount = OutlineEdge(p, n) * uOutline * (keepsColor ? 0.5 : 1.0);
+    rgb = mix(rgb, rgb * 0.12, clamp(amount, 0.0, 1.0));
   }
   FragColor = vec4(rgb, 1.0);
   // Preserve opaque depth for see-through buildings and gameplay overlays.
@@ -175,6 +216,7 @@ vec3 WorldPosition(vec2 uv, float depth) {
   vec4 p = uInverseViewProjection * vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
   return p.xyz / p.w;
 }
+//EDGE_FUNCTION
 
 void main() {
   float depth = texture(uDepth, vUV * uUvScale).r;
@@ -203,25 +245,8 @@ void main() {
     float shade = 1.0 - min(ao * uStrength, 0.7);
     rgb *= shade;
 
-    float edge = 0.0;
-    if (uThickness > 0.0 && uOutline > 0.0) {
-      float viewDist = max(length(p - WorldPosition(vUV, 0.0)), 0.001);
-      vec2 offsets[4] = vec2[4](vec2(1, 0), vec2(-1, 0), vec2(0, 1), vec2(0, -1));
-      for (int i = 0; i < 4; ++i) {
-        vec2 uv = vUV + offsets[i] * uThickness * texel;
-        if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) continue;
-        float d = texture(uDepth, uv * uUvScale).r;
-        if (d >= 1.0) { edge = 1.0; continue; }  // Silhouette against the void.
-        vec3 q = WorldPosition(uv, d);
-        float plane = abs(dot(q - p, n)) / viewDist;
-        float depthEdge = smoothstep(0.006, 0.03, plane);
-        vec3 sn = normalize(texture(uNormal, uv * uUvScale).xyz * 2.0 - 1.0);
-        float normalEdge = smoothstep(0.3, 0.7, 1.0 - dot(n, sn));
-        edge = max(edge, max(depthEdge, normalEdge));
-      }
-    }
     // Figures keep their saturated team color: a lighter outline.
-    float amount = edge * uOutline * (keepsColor ? 0.5 : 1.0);
+    float amount = OutlineEdge(p, n) * uOutline * (keepsColor ? 0.5 : 1.0);
     rgb = mix(rgb, rgb * 0.12, clamp(amount, 0.0, 1.0));
   }
   FragColor = vec4(rgb, 1.0);
@@ -247,7 +272,8 @@ void Allocate(GLuint& texture, GLint format, GLenum channels, GLenum type, int w
 
 bool AmbientOcclusion::Init() {
   return occlusionShader_.Compile(kVertex, kOcclusion) &&
-         compositeShader_.Compile(kVertex, kComposite) && nprShader_.Compile(kVertex, kNpr);
+         compositeShader_.Compile(kVertex, WithEdgeFunction(kComposite).c_str()) &&
+         nprShader_.Compile(kVertex, WithEdgeFunction(kNpr).c_str());
 }
 
 void AmbientOcclusion::Destroy() {
@@ -315,7 +341,8 @@ bool AmbientOcclusion::Begin(int width, int height, float background) {
 
 void AmbientOcclusion::Composite(GLuint target, int x, int y, const glm::mat4& view,
                                  const glm::mat4& projection, bool blackHot,
-                                 const AmbientOcclusionSettings& settings) {
+                                 const AmbientOcclusionSettings& settings,
+                                 const NprSettings* outlines) {
   const glm::mat4 inverse = glm::inverse(projection * view);
   const glm::vec2 paneSize(static_cast<float>(width_), static_cast<float>(height_));
   const glm::vec2 uvScale(paneSize.x / static_cast<float>(allocatedWidth_),
@@ -360,6 +387,10 @@ void AmbientOcclusion::Composite(GLuint target, int x, int y, const glm::mat4& v
   compositeShader_.SetVec2("uUvScale", uvScale);
   compositeShader_.SetFloat("uStrength", std::max(settings.strength, 0.0f));
   compositeShader_.SetInt("uBlurRadius", std::max(settings.softness, 0));
+  compositeShader_.SetFloat("uThickness",
+                            outlines ? std::max(outlines->outlineThickness, 0.0f) : 0.0f);
+  compositeShader_.SetFloat("uOutline",
+                            outlines ? std::clamp(outlines->outlineStrength, 0.0f, 1.0f) : 0.0f);
   glDrawArrays(GL_TRIANGLES, 0, 3);
   RecordDraw(3, 1);
   glBindVertexArray(0);

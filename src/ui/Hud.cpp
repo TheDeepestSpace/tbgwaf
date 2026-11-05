@@ -504,13 +504,15 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
     ImGui::SetNextItemWidth(130.0f);
     ImGui::SliderInt("AO softness", &aoSoftness, 0, 10);
   }
-  // Grayscale NPR look (ignored while the thermal view is on).
+  // Grayscale NPR look; with the AO view on, only its outlines are layered on top.
   ImGui::Checkbox("NPR", &npr);
-  if (npr && !thermal) {
+  if (npr) {
     ImGui::SetNextItemWidth(130.0f);
     ImGui::SliderFloat("Outline px", &nprSettings.outlineThickness, 0.0f, 4.0f, "%.1f");
     ImGui::SetNextItemWidth(130.0f);
     ImGui::SliderFloat("Outline strength", &nprSettings.outlineStrength, 0.0f, 1.0f, "%.2f");
+  }
+  if (npr && !thermal) {
     ImGui::SetNextItemWidth(130.0f);
     ImGui::SliderInt("Cel bands", &nprSettings.celBands, 2, 8);
     ImGui::SetNextItemWidth(130.0f);

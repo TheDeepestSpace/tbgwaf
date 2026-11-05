@@ -1042,7 +1042,8 @@ int main() {
   gfx::RenderDebugOptions debugOptions;
   // AO view is on by default, including in the smoke test (software GL needs
   // the longer smoke_test timeout).
-  debugOptions.thermal = true;
+  debugOptions.thermal = false;
+  debugOptions.npr = true;  // Grayscale NPR look by default (thermal stays a toggle).
   bool showFps = true;
   float smoothedFps = 0.0f;
   float frameMs = 0.0f;
@@ -2226,7 +2227,8 @@ int main() {
                        debugOptions.thermalAo.radius,
                        debugOptions.thermalAo.strength, debugOptions.thermalAo.quality,
                        debugOptions.thermalAo.softness,
-                       debugOptions.disableOcclusionFade, showFps,
+                       debugOptions.disableOcclusionFade, debugOptions.npr,
+                       debugOptions.nprSettings, showFps,
                        smoothedFps, frameMs, fovMs, frameStats,
                        roundPanelBottom + 6.0f);
     // Pop against the pre-panel state: the checkbox may have just toggled

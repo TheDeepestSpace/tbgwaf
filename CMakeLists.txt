@@ -519,6 +519,17 @@ else()
         TIMEOUT 120
         ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
       )
+      add_executable(tactics_npr_render_tests tests/visual/npr_render_tests.cpp)
+      target_link_libraries(tactics_npr_render_tests PRIVATE tactics_gfx PkgConfig::SDL2
+                                                          PkgConfig::EGL)
+      add_test(
+        NAME npr_render_tests
+        COMMAND ${XVFB_RUN_EXECUTABLE} --auto-servernum $<TARGET_FILE:tactics_npr_render_tests>
+      )
+      set_tests_properties(npr_render_tests PROPERTIES
+        TIMEOUT 120
+        ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
+      )
       # Golden-screenshot regression run (no --video: ffmpeg isn't needed for
       # the ctest pass, only for the PR review page built in CI).
       add_test(

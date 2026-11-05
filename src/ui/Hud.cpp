@@ -474,7 +474,8 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
                     float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
-                    bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,
+                    bool& disableOcclusionFade, bool& npr, gfx::NprSettings& nprSettings,
+                    bool& showFps, float fps, float frameMs,
                     float fovMs, const gfx::RenderFrameStats& stats, float top) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
   // Once per run (not FirstUseEver) so a saved imgui.ini can't reopen it at startup.
@@ -502,6 +503,22 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
     ImGui::SliderInt("AO quality", &aoQuality, 1, 20);
     ImGui::SetNextItemWidth(130.0f);
     ImGui::SliderInt("AO softness", &aoSoftness, 0, 10);
+  }
+  // Grayscale NPR look (ignored while the thermal view is on).
+  ImGui::Checkbox("NPR", &npr);
+  if (npr && !thermal) {
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("Outline px", &nprSettings.outlineThickness, 0.0f, 4.0f, "%.1f");
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("Outline strength", &nprSettings.outlineStrength, 0.0f, 1.0f, "%.2f");
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderInt("Cel bands", &nprSettings.celBands, 2, 8);
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("Cel softness", &nprSettings.celSoftness, 0.0f, 1.0f, "%.2f");
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("NPR AO radius", &nprSettings.ao.radius, 0.5f, 6.0f, "%.1f");
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("NPR AO strength", &nprSettings.ao.strength, 0.0f, 3.0f, "%.2f");
   }
   ImGui::Checkbox("Disable occlusion fade", &disableOcclusionFade);
   ImGui::Checkbox("Show FPS", &showFps);

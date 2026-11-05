@@ -234,6 +234,9 @@ uniform int uMonochrome;
 uniform int uThermal;
 uniform int uThermalBlackHot;  // 1 = hot reads dark (the review reference), 0 = white-hot.
 uniform int uThermalMaterial;  // ThermalMaterial; only figures use uColor.
+uniform int uNpr;
+uniform int uCelBands;
+uniform float uCelSoftness;
 layout(location = 0) out vec4 FragColor;
 // Thermal G-buffer normal. Alpha 1 = grayscale heat surface; alpha 0 = a
 // surface drawn in its own color (figures), which the AO composite leaves
@@ -286,6 +289,30 @@ void main() {
   float shadow = ComputeShadow(normal);
   const float kAmbient = 0.35;
   float lit = kAmbient + (1.0 - shadow) * diffuse * 0.65;
+  if (uNpr != 0) {
+    // Soft cel bands: quantise the sun term with smoothstep steps whose
+    // width is uCelSoftness of a band, so tones step without harsh seams.
+    float bands = float(max(uCelBands, 2));
+    float t = (1.0 - shadow) * diffuse * bands;
+    float width = max(uCelSoftness, 0.02) * 0.5;
+    float stepped = 0.0;
+    for (int i = 1; i < 16; ++i) {
+      if (i >= uCelBands) break;
+      stepped += smoothstep(float(i) - width, float(i) + width, t);
+    }
+    float cel = stepped / (bands - 1.0);
+    if (uThermalMaterial == 5) {
+      WorldNormal.a = 0.0;
+      float shade = 0.82 + 0.18 * max(dot(normal, viewDir), 0.0);
+      FragColor = vec4(uColor.rgb * shade, uColor.a);
+      return;
+    }
+    float gray = dot(uColor.rgb, vec3(0.299, 0.587, 0.114));
+    // Lift toward mid-gray so the comic palette stays soft, not harsh.
+    gray = mix(0.55, gray, 0.6);
+    FragColor = vec4(vec3(gray * (kAmbient + cel * 0.65)), uColor.a);
+    return;
+  }
   if (uThermal != 0) {
     // Pale clay-like surroundings from the AO reference, with subtle
     // material differences. Contact shading is applied in screen space
@@ -3538,9 +3565,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // Only opaque, visible geometry contributes to AO. Faded buildings are
   // blended afterward, so they cannot leave opaque contact shadows over
   // the figures and paths the see-through pass is meant to reveal.
-  const bool thermalAo = debug.thermal &&
-      thermalOcclusion_.Begin(width, height, debug.thermalBlackHot ? 0.86f : 0.14f);
-  if (debug.thermal && !thermalAo) {
+  const bool npr = debug.npr && !debug.thermal;
+  const bool thermalAo = debug.thermal
+      ? thermalOcclusion_.Begin(width, height, debug.thermalBlackHot ? 0.86f : 0.14f)
+      : (npr && thermalOcclusion_.Begin(width, height, 0.10f));
+  if ((debug.thermal || npr) && !thermalAo) {
     glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
     glViewport(x, y, width, height);
     glScissor(x, y, width, height);
@@ -3796,8 +3825,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   litShader_.SetInt("uMonochrome", debug.monochrome ? 1 : 0);
   litShader_.SetInt("uThermal", thermalFlag);
   litShader_.SetInt("uThermalBlackHot", debug.thermalBlackHot ? 1 : 0);
+  const bool nprActive = npr && thermalAo;
+  litShader_.SetInt("uNpr", nprActive ? 1 : 0);
+  litShader_.SetInt("uCelBands", std::clamp(debug.nprSettings.celBands, 2, 16));
+  litShader_.SetFloat("uCelSoftness", std::clamp(debug.nprSettings.celSoftness, 0.0f, 1.0f));
   const auto thermalMaterial = [&](ThermalMaterial material) {
-    if (debug.thermal) litShader_.SetInt("uThermalMaterial", static_cast<int>(material));
+    if (debug.thermal || nprActive) {
+      litShader_.SetInt("uThermalMaterial", static_cast<int>(material));
+    }
   };
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
@@ -3951,8 +3986,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
 
   if (thermalAo) {
-    thermalOcclusion_.Composite(targetFramebuffer, x, y, view, proj, debug.thermalBlackHot,
-                                debug.thermalAo);
+    if (nprActive) {
+      thermalOcclusion_.CompositeNpr(targetFramebuffer, x, y, view, proj, debug.nprSettings);
+    } else {
+      thermalOcclusion_.Composite(targetFramebuffer, x, y, view, proj, debug.thermalBlackHot,
+                                  debug.thermalAo);
+    }
     litShader_.Use();
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);

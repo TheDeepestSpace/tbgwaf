@@ -62,6 +62,13 @@ struct RenderDebugOptions {
   // Drop all surface colour (lit geometry is drawn in greyscale); used by
   // the gallery's map-seed viewer.
   bool monochrome = false;
+  // Grayscale NPR look: soft cel shading, half-res AO and screen-space
+  // outlines on the opaque world; figures keep saturated team colors and
+  // overlays/ghosts/FOV are drawn after the outline pass. Off by default so
+  // the headless visual runner (and its goldens) is unchanged; ignored
+  // while `thermal` is on.
+  bool npr = false;
+  NprSettings nprSettings;
   // Optional sink for per-frame draw counters; accumulates across panes, so
   // the caller zeroes it once per frame. Null (default) = not collected.
   RenderFrameStats* stats = nullptr;

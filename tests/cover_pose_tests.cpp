@@ -48,6 +48,15 @@ int main() {
   CHECK(lean.z > stand.z + 0.1f);
   CHECK(lean.y > stand.y - 0.1f);  // Still upright-ish, not crouched.
 
+  // The cover poses are looping retargeted clips, not static poses: the
+  // figure keeps breathing/shifting while holding cover.
+  u.coverKind = 2;
+  const glm::vec3 crouchA = Head(u);
+  u.idleElapsed = 0.4f * gfx::kCoverCrouchLoopSeconds;
+  const glm::vec3 crouchB = Head(u);
+  CHECK(glm::length(crouchB - crouchA) > 1e-3f);
+  u.idleElapsed = 0.0f;
+
   u.coverBlend = 0.0f;
   CHECK(std::fabs(Head(u).z - stand.z) < 1e-4f);
 

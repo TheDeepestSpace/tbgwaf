@@ -9,6 +9,7 @@
 #include <SDL.h>
 #include <GLES3/gl3.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -17,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "../OldSizeConfig.h"
 #include "visual/ImageUtil.h"
 #include "game/GameLogic.h"
 #include "game/MapGenerator.h"
@@ -40,7 +42,8 @@ const std::vector<uint32_t> kCitySeeds = {7, 42, 2024};
 // navmesh regression shows up as a visual diff.
 const std::vector<uint32_t> kHillySeeds = {7, 2024};
 // 50 randomly drawn seeds of the default (seed-driven terrain / overpass)
-// city, so the gallery's map view samples what players actually get.
+// city (half of them at 8x8, see below), so the gallery's map view samples
+// what players actually get.
 const std::vector<uint32_t> kRandomCitySeeds = {
     6805,  7622,  13514, 15121, 16096, 16478, 16693, 18035, 19376, 22493,
     24711, 25257, 26421, 27757, 32252, 32727, 37632, 38105, 39138, 39683,
@@ -124,11 +127,12 @@ int main(int argc, char** argv) {
     // (issue #102: it must stay on the deck, not spill over its edges).
     std::optional<glm::vec3> frontierFrom;
     float frontierBudget = 0.0f;
+    bool thermal = false;
   };
   std::vector<MapCase> cases;
   // Overpass presence is seed-driven by default (issue #130); every golden
   // here pins an explicit presence (and layout) so it tests one variant.
-  tactics::MapGeneratorConfig gradeConfig;
+  tactics::MapGeneratorConfig gradeConfig = tactics::OldSizeConfig();
   gradeConfig.elevatedHighway = tactics::OverpassMode::Off;
   // Terrain is seed-driven too; the flat-city goldens pin it off (terrain has its own).
   gradeConfig.features.terrain.mode = tactics::FeatureMode::Off;
@@ -146,7 +150,7 @@ int main(int argc, char** argv) {
   }
   // Default seed 7 is the reported combination of terrain, an elevated
   // artery and stairs. Keep its complete geometry pinned together.
-  tactics::MapGeneratorConfig terrainAutoConfig;
+  tactics::MapGeneratorConfig terrainAutoConfig = tactics::OldSizeConfig();
   cases.push_back({"city_terrain_auto_seed_7",
                    tactics::GenerateUrbanMap(7, terrainAutoConfig), 180.0f,
                    /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
@@ -165,11 +169,95 @@ int main(int argc, char** argv) {
   furnitureConfig.features.furniture.mode = tactics::FeatureMode::On;
   cases.push_back({"city_furniture_seed_7", tactics::GenerateUrbanMap(7, furnitureConfig),
                    45.0f, /*showNavMesh=*/false, /*pitchOffset=*/-0.45f});
+  {
+    const tactics::Scene street = tactics::GenerateUrbanMap(7, furnitureConfig);
+    using Model = tactics::StreetFixtureModel;
+    for (const auto& [model, name] : {
+             std::pair{Model::Bench, "bench"}, std::pair{Model::Dumpster, "dumpster"},
+             std::pair{Model::TrashBin, "trash_bin"}}) {
+      const auto item = std::find_if(street.obstacles.begin(), street.obstacles.end(),
+                                     [&](const auto& o) { return o.fixtureModel == model; });
+      if (item == street.obstacles.end()) {
+        std::fprintf(stderr, "Missing street fixture in seed 7: %s\n", name);
+        return 1;
+      }
+      MapCase closeup{std::string("city_") + name + "_seed_7", street, -8.0f,
+                       /*showNavMesh=*/false, /*pitchOffset=*/-0.3f,
+                       /*yawOffset=*/item->fixtureYaw - 0.4f};
+      closeup.cameraTarget = item->bounds.Center();
+      closeup.thermal = true;
+      cases.push_back(std::move(closeup));
+    }
+  }
+  // A coach bus stopped mid-street (seed 1 draws one): pins that it stands
+  // square in the lane with parked vehicles kept clear of it.
+  {
+    const tactics::Scene street = tactics::GenerateUrbanMap(1, furnitureConfig);
+    using Model = tactics::StreetFixtureModel;
+    const auto bus = std::find_if(street.obstacles.begin(), street.obstacles.end(),
+                                  [&](const auto& o) { return o.fixtureModel == Model::CoachBus; });
+    if (bus == street.obstacles.end()) {
+      std::fprintf(stderr, "Missing coach bus in seed 1\n");
+      return 1;
+    }
+    // Looking down the street from above, so no frontage hides the bus.
+    MapCase closeup{"city_coach_bus_seed_1", street, 10.0f, /*showNavMesh=*/false,
+                     /*pitchOffset=*/0.25f, /*yawOffset=*/bus->fixtureYaw + 0.35f};
+    closeup.cameraTarget = bus->bounds.Center();
+    cases.push_back(std::move(closeup));
+  }
+  // Close views of actual generated fixtures catch a regression back to
+  // collision boxes that would be almost invisible in a whole-city golden.
+  // Render both normal and thermal: silhouette/detail must work without color.
+  {
+    const tactics::Scene source = tactics::GenerateUrbanMap(1, furnitureConfig);
+    using Model = tactics::StreetFixtureModel;
+    const std::pair<Model, const char*> models[] = {
+        {Model::ParkedCar, "car"}, {Model::Suv, "suv"}, {Model::Pickup, "pickup"},
+        {Model::CoachBus, "coach_bus"}, {Model::Bench, "bench"},
+        {Model::Dumpster, "dumpster"}, {Model::TrashBin, "trash_bin"},
+        {Model::Newsstand, "newsstand"}, {Model::Planter, "planter"}};
+    for (const auto& [model, name] : models) {
+      const auto found = std::find_if(source.obstacles.begin(), source.obstacles.end(),
+                                      [&](const auto& o) { return o.fixtureModel == model; });
+      tactics::Obstacle item;
+      if (found != source.obstacles.end()) {
+        item = *found;
+      } else {
+        // Rarer models may not spawn in this seed; build the gameplay box directly.
+        const glm::vec3 extent = tactics::StreetFixtureExtent(model);
+        item.bounds = tactics::AABB{glm::vec3(-0.5f * extent.x, 0.0f, -0.5f * extent.z),
+                                    glm::vec3(0.5f * extent.x, extent.y, 0.5f * extent.z)};
+        item.kind = tactics::ObstacleKind::Cover;
+        item.fixtureModel = model;
+      }
+      const glm::vec3 offset(item.bounds.Center().x, item.fixtureBaseY, item.bounds.Center().z);
+      item.bounds.min -= offset;
+      item.bounds.max -= offset;
+      item.fixtureBaseY = 0.0f;
+      tactics::Scene isolated;
+      isolated.mapHalfExtent = 6.0f;
+      isolated.obstacles.push_back(item);
+      // Frame each model to its own length: the sedan, SUV and pickup a
+      // little closer than the sidewalk items, the 12 m coach well back.
+      const float zoom = model == Model::CoachBus ? -2.0f
+                         : tactics::IsCurbVehicle(model) ? -12.0f : -14.0f;
+      for (bool thermal : {false, true}) {
+        MapCase closeup{std::string("street_fixture_") + name + (thermal ? "_thermal" : ""),
+                         isolated, zoom,
+                         /*showNavMesh=*/false, /*pitchOffset=*/-0.50f,
+                         /*yawOffset=*/item.fixtureYaw};
+        closeup.cameraTarget.y = 0.5f;
+        closeup.thermal = thermal;
+        cases.push_back(std::move(closeup));
+      }
+    }
+  }
   tactics::MapGeneratorConfig mergeConfig = gradeConfig;
   mergeConfig.arteryCount = 2;
   cases.push_back({"city_merge_seed_42", tactics::GenerateUrbanMap(42, mergeConfig),
                    kCityCameraZoom, /*showNavMesh=*/false});
-  tactics::MapGeneratorConfig mergeConfigAuto;  // Seed-driven overpass presence and layout.
+  tactics::MapGeneratorConfig mergeConfigAuto = tactics::OldSizeConfig();  // Seed-driven overpass presence and layout.
   mergeConfigAuto.arteryCount = 2;
   mergeConfigAuto.features.terrain.mode = tactics::FeatureMode::Off;  // Overpass vs terrain: roadmap 4.4.
   tactics::MapGeneratorConfig elevatedConfig = mergeConfig;
@@ -195,6 +283,19 @@ int main(int argc, char** argv) {
     cases.push_back({name, tactics::GenerateUrbanMap(seed, mergeConfigAuto), 180.0f,
                      /*showNavMesh=*/false, /*pitchOffset=*/-0.55f, /*yawOffset=*/-1.6f});
   }
+  // A wide city shot hides a rail detouring away from the inner fork.
+  // Raised terrain narrows the twin deck here: the join must use the real
+  // slab edges, not the nominal full-width highway lines.
+  {
+    tactics::MapGeneratorConfig forkConfig = elevatedConfig;
+    forkConfig.features.terrain.mode = tactics::FeatureMode::On;
+    forkConfig.pierForm = tactics::PierForm::Twin;
+    MapCase fork{"city_overpass_inner_fork_terrain_seed_7",
+                 tactics::GenerateUrbanMap(7, forkConfig), 0.0f,
+                 /*showNavMesh=*/false, /*pitchOffset=*/-0.30f, /*yawOffset=*/-1.6f};
+    fork.cameraTarget = glm::vec3(-34.7f, 9.68059f, 0.3f);
+    cases.push_back(std::move(fork));
+  }
   // Frontier of a unit on the deck, framed low and side-on at the deck edge.
   {
     MapCase deckFrontier{"city_elevated_deck_frontier_seed_7",
@@ -205,10 +306,18 @@ int main(int argc, char** argv) {
     deckFrontier.frontierBudget = 12.0f;
     cases.push_back(std::move(deckFrontier));
   }
-  for (const uint32_t seed : kRandomCitySeeds) {
-    cases.push_back({"city_random_seed_" + std::to_string(seed),
-                     tactics::GenerateUrbanMap(seed, terrainAutoConfig), 180.0f,
-                     /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
+  // Every other random seed uses the default 8x8 ("Urban x4") city, the rest
+  // the 4x4 one, so the gallery samples both Map Select entries. The x4 maps
+  // are twice as wide, so the camera pulls back twice as far.
+  const tactics::MapGeneratorConfig x4Config;
+  for (size_t i = 0; i < kRandomCitySeeds.size(); ++i) {
+    const uint32_t seed = kRandomCitySeeds[i];
+    const bool x4 = i % 2 == 0;
+    cases.push_back({std::string(x4 ? "city_random_x4_seed_" : "city_random_seed_") +
+                         std::to_string(seed),
+                     tactics::GenerateUrbanMap(seed, x4 ? x4Config : terrainAutoConfig),
+                     x4 ? 260.0f : 180.0f,
+                     /*showNavMesh=*/false, /*pitchOffset=*/x4 ? 0.6f : -0.4f, /*yawOffset=*/-1.0f});
   }
   // Building archetypes and massing (issue #151): one close-framed golden
   // per forced block character, so each archetype mix (and its parapets,
@@ -249,6 +358,8 @@ int main(int argc, char** argv) {
     tactics::GameLogic game(scene);
     tactics::NavMesh navMesh;
     gfx::PaneOverlays overlays;
+    gfx::RenderDebugOptions debug;
+    debug.thermal = mapCase.thermal;
     tactics::ReachField reach;
     if (mapCase.frontierFrom) {
       navMesh.Build(game.GetScene().obstacles, game.GetScene().mapHalfExtent,
@@ -263,8 +374,9 @@ int main(int argc, char** argv) {
                     &game.GetScene().walkSurfaces);
       overlays.navMeshDebug = &navMesh;
     }
+    debug.disableTrees = true;  // Tree rendering has its own coverage, preserving existing goldens.
     renderer.RenderPane(game, tactics::Team::Blue, /*fogActive=*/false, tactics::TeamVisibility{},
-                        camera, 0, 0, kWindowWidth, kWindowHeight, overlays);
+                        camera, 0, 0, kWindowWidth, kWindowHeight, overlays, 0, debug);
     const visual::Image image = visual::CaptureFramebuffer(kWindowWidth, kWindowHeight);
 
     if (options.updateBaselines) {

@@ -13,7 +13,7 @@ units:
   # Watcher, faces the lane (-Z) so it sees red1 and red1 sees it back.
   - {id: 0, team: blue, position: [8, 0, 6], facing_degrees: -90}
   # Keeps blue alive when red shoots, so the game isn't over.
-  - {id: 1, team: blue, position: [-9, 0, 9], facing_degrees: 0}
+  - {id: 1, team: blue, position: [-12, 0, 6], facing_degrees: 0}
   # Walks +Z toward the watcher.
   - {id: 2, team: red, position: [8, 0, 0], facing_degrees: 90}
   - {id: 3, team: red, position: [9, 0, -9], facing_degrees: 0}
@@ -31,3 +31,4 @@ script:
   - action: commit
   - assert: {unit: 0, alive: false}
   - assert: {unit: 2, position: [8, 0, 3], tolerance: 0.1}
+  - assert: {unit: 1, alive: true}

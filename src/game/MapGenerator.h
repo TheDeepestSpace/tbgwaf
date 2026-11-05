@@ -25,6 +25,13 @@ enum class OverpassLayout {
   EnterRampDown,   // Enters off-map elevated, ramps down to grade on-map.
 };
 
+// Column form of the bents carrying the overpass (issue #223). Auto draws
+// one per seed (own sub-stream, so forcing it never reshuffles the rest of
+// a seed); TBent is one thick central column flaring into a hammerhead cap
+// under the deck, Twin is a pair of columns under the deck edges joined by
+// a crossbeam cap, with the deck widened so the columns visibly carry it.
+enum class PierForm { Auto, TBent, Twin };
+
 // How the overpass's branching avenue ends at its map-edge side. Auto draws
 // per seed; Ramp climbs from grade at the boundary up to the deck, OffMap
 // stays at deck height and runs off the map with no ramp (never drawn for
@@ -54,10 +61,12 @@ struct UrbanFeatures {
   // and raised rear-door platforms. On by default; Off keeps the walls bare
   // (and adds no stoop/platform walk surfaces).
   FeatureToggle facades{FeatureMode::On, 0.5f};
+  // Visual-only trees on sidewalk-only blocks. Auto behaves like On.
+  FeatureToggle trees{FeatureMode::On, 0.5f};
 };
 
 // Name lookups for scenario YAML / env plumbing. UrbanFeatureByName takes
-// lanes/curbs/furniture/terrain/interiors/rail/facades; both return
+// lanes/curbs/furniture/terrain/interiors/rail/facades/trees; both return
 // null/false for an unknown name. ParseFeatureMode takes auto/off/on.
 FeatureToggle* UrbanFeatureByName(UrbanFeatures* features, const std::string& name);
 bool ParseFeatureMode(const std::string& text, FeatureMode* mode);
@@ -70,13 +79,13 @@ bool ParseFeatureMode(const std::string& text, FeatureMode* mode);
 enum class BlockCharacter { Auto, Mixed, Downtown, Residential, Industrial };
 bool ParseBlockCharacter(const std::string& text, BlockCharacter* character);
 
-// Tuning for GenerateUrbanMap. Defaults give a 4x4 city of ~26-unit average
-// blocks (~144 units across, ~4.8x the default scene's 30). The overall
+// Tuning for GenerateUrbanMap. Defaults give an 8x8 city of ~26-unit average
+// blocks (~288 units across, ~9.6x the default scene's 30). The overall
 // extent is fixed by (blocks, blockSize, streetWidth); per-seed variation
 // redistributes it between blocks and streets.
 struct MapGeneratorConfig {
-  int blocksX = 4;
-  int blocksZ = 4;
+  int blocksX = 8;
+  int blocksZ = 8;
   float blockSize = 26.0f;      // Average block footprint; real sizes vary per column/row.
   float streetWidth = 8.0f;     // Average corridor between blocks; rim streets use exactly this.
   float streetWidthMin = 0.75f; // Interior street width range, as a multiple of streetWidth.
@@ -90,14 +99,27 @@ struct MapGeneratorConfig {
   // from a table weighted by the street class it fronts, biased by its
   // block's character; floor count/height per kind set the building height.
   BlockCharacter character = BlockCharacter::Auto;
+  // Enterable buildings (issue #157): P(a parcel of any kind (set-back
+  // offices excepted) is hollow: thin walls, a frontage doorway, interior floor slabs
+  // and a roof slab overhead). 0 keeps every building a solid prism.
+  float enterableChance = 0.5f;  // Share of parcels built hollow (#157).
+  float rearDoorOpenChance = 0.5f;     // Enterable: chance the rear wall has an open doorway.
+  float bayHalfClosedChance = 0.5f;    // Enterable warehouses: chance the bay is half shuttered.
   int towerCount = 2;           // Tall landmark buildings scattered across the city.
-  float towerMinHeight = 14.0f;
-  float towerMaxHeight = 20.0f;
+  // Arterial city: residential/mixed/office buildings follow a smooth height
+  // field, so similar heights cluster, up to this cap (maxBuildingHeight
+  // still bounds the other kinds).
+  float skylineMaxHeight = 24.0f;
+  float towerMinHeight = 28.0f;
+  float towerMaxHeight = 40.0f;
   float gapWidth = 3.0f;        // Passable alley between two buildings (> 2 * kAgentRadius).
   float gapProbability = 0.45f; // Chance a junction between adjacent buildings is a gap.
   // Hierarchical street layout. Set arteryCount=0 for the original orthogonal
   // grid generator; the default lays one oblique boundary-to-boundary artery.
   int arteryCount = 1;           // 1 oblique through-road; >=2 adds a wide branching avenue.
+  // Additional arteries (0-2) widened out of the avenues parallel to the main
+  // one, ramping through levels like it; -1 draws 0-2 per seed (half 0).
+  int extraArteries = -1;
   float arteryWidth = 14.0f;
   float localStreetWidth = 6.0f;
   float localStreetSkew = 0.45f; // Max radians a cross street deviates from square to the artery.
@@ -113,6 +135,16 @@ struct MapGeneratorConfig {
   float highwayElevation = 5.0f;
   float highwayThickness = 0.45f;
   float supportSpacing = 18.0f;  // Arc-length between pier bents under the deck.
+  // Overpass architecture (issue #223): the bents under the elevated spans
+  // and the deck's raised sides. Each bent is a footing (wider than its
+  // shaft), the shaft(s), and a cap wrapping the underside of the deck.
+  PierForm pierForm = PierForm::Auto;
+  float pierColumnWidth = 1.6f;     // Twin shaft width; the T-bent shaft is twice this across the road.
+  float pierBaseExtra = 0.45f;      // Footing (plinth) margin outside the shaft, each side.
+  float pierBaseHeight = 0.8f;      // Footing height above its ground.
+  float pierCapDepth = 0.9f;        // Hammerhead/crossbeam cap depth under the deck slab.
+  float twinDeckExtraWidth = 2.4f;  // Total extra deck width at full elevation on twin seeds.
+  float deckRailHeight = 0.9f;      // Guard parapet above the deck top along its sides; 0 disables.
   float minPolygonArea = 22.0f;  // Smaller inset/sliver regions remain open.
   // Ziplines (issue #166): each block draws 0..maxZiplinesPerBlock lines
   // uniformly, each from the street up to the roof of one of the block's
@@ -141,6 +173,11 @@ struct MapGeneratorConfig {
 struct UrbanBlock {
   float x0, x1, z0, z1;
   std::vector<glm::vec2> vertices;
+  // Long blocks left behind by a trimmed local street either split into
+  // smaller blocks (divided by a short local street segment) or use this
+  // angled, detached apartment-row layout.
+  bool apartmentRow = false;
+  bool empty = false;  // Left unbuilt (the vacant half of a tight long block).
 };
 
 struct UrbanRoad {
@@ -211,6 +248,11 @@ struct OverpassChoice {
 };
 OverpassChoice UrbanOverpass(uint32_t seed, const MapGeneratorConfig& config = {});
 
+// The bent column form GenerateUrbanMap(seed, config) uses for the overpass
+// piers (issue #223): seed-driven under the Auto default, forced otherwise
+// (never returns Auto). Meaningful only when the seed's artery is elevated.
+PierForm UrbanPierForm(uint32_t seed, const MapGeneratorConfig& config = {});
+
 // A city block as built: one or more grid cells joined with the streets
 // between them (`x0..x1` / `z0..z1` is the bounding box). `notch` marks an
 // L of three cells (the box minus one corner cell); `empty` an open area
@@ -222,12 +264,14 @@ struct UrbanLot { float x0, x1, z0, z1; bool empty, notch; };
 std::vector<UrbanLot> UrbanLots(uint32_t seed, const MapGeneratorConfig& config = {});
 
 // A parcel (issue #151, roadmap 3.1): one buildable lot of a block's frontage
-// ring (or slab row), the unit the plan sizes and counts buildings by.
+// ring (or detached apartment row), the unit the plan sizes and counts
+// buildings by.
 // `footprint` is the building's convex outline, counter-clockwise; edge
-// `frontageEdge` (footprint[i] -> footprint[i+1]) lies on the block's
-// building line along the street whose class is `street`. `depth` is the
-// footprint's extent behind the frontage; `corner` marks a piece at a block
-// corner (two street frontages). Buildings and parcels correspond 1:1:
+// `frontageEdge` (footprint[i] -> footprint[i+1]) normally lies on the block's
+// building line along the street whose class is `street`; a detached apartment
+// uses its principal long facade instead. `depth` is the footprint's extent
+// behind the frontage; `corner` marks a piece at a block corner (two street
+// frontages). Buildings and parcels correspond 1:1:
 // Scene::buildings[i].parcel == i and GenerateUrbanMap's obstacle for
 // parcel i has that footprint.
 struct UrbanParcel {
@@ -267,5 +311,10 @@ struct HillyMapConfig {
 // the west (Blue) and east (Red) edges, each figure standing on the terrain.
 // The same (seed, config) always yields an identical Scene.
 Scene GenerateHillyMap(uint32_t seed, const HillyMapConfig& config = {});
+
+// Map by the splash/protocol name: "urban" (4x4 blocks), "hills", anything
+// else (including "" and "urban-x4") the default 8x8 city. Server and clients
+// both build matches through this so they agree on the map.
+Scene GenerateMapByKind(uint32_t seed, const std::string& kind);
 
 }  // namespace tactics

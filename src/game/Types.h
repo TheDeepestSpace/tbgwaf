@@ -25,8 +25,51 @@ struct AABB {
 };
 
 // Semantic tag used only to group static render geometry; collision, LOS,
-// and navigation treat both kinds identically.
-enum class ObstacleKind { Generic, StreetFurniture };
+// and navigation treat every kind identically. Pier marks the overpass
+// bents' columns and footings (issue #223).
+enum class ObstacleKind { Generic, StreetFurniture, Pier, Cover };
+
+// Street fixtures the renderer batches as static geometry: post-sized furniture
+// and cover-sized street items (parked cars, planters, dumpsters, ...).
+inline bool IsStreetFixture(ObstacleKind kind) {
+  return kind == ObstacleKind::StreetFurniture || kind == ObstacleKind::Cover;
+}
+
+// Visible model beside a conservative collision/LOS box. Explicit types keep
+// rendering independent of dimensions (and let tests verify each prop spawns).
+// ParkedCar, Suv and Pickup park along the curb; a CoachBus stands in the
+// middle of the street and, unlike every other cover item, is taller than a
+// standing eye.
+enum class StreetFixtureModel {
+  None, ParkedCar, Suv, Pickup, CoachBus, Bench, Newsstand, Planter, Dumpster, TrashBin
+};
+
+// Gameplay box of each fixture model: extent along its heading (local +X),
+// height above its feet, and depth across (local +Z). The generator sizes
+// collision boxes from this, and the asset gallery builds the same box, so
+// the two never drift apart.
+inline glm::vec3 StreetFixtureExtent(StreetFixtureModel model) {
+  switch (model) {
+    case StreetFixtureModel::ParkedCar: return {4.2f, 1.30f, 1.8f};
+    case StreetFixtureModel::Suv:       return {5.0f, 1.45f, 2.0f};
+    case StreetFixtureModel::Pickup:    return {5.4f, 1.42f, 1.95f};
+    case StreetFixtureModel::CoachBus:  return {12.0f, 3.30f, 2.5f};
+    case StreetFixtureModel::Bench:     return {2.4f, 1.10f, 0.55f};
+    case StreetFixtureModel::Newsstand: return {1.0f, 1.35f, 0.55f};
+    case StreetFixtureModel::Planter:   return {1.2f, 0.80f, 0.55f};
+    case StreetFixtureModel::Dumpster:  return {1.2f, 1.20f, 1.8f};
+    case StreetFixtureModel::TrashBin:  return {0.36f, 0.95f, 0.36f};
+    case StreetFixtureModel::None:      break;
+  }
+  return glm::vec3(0.0f);
+}
+
+// Vehicles parked along the curb: they sit in the street at road grade and
+// are low enough to climb onto.
+inline bool IsCurbVehicle(StreetFixtureModel model) {
+  return model == StreetFixtureModel::ParkedCar || model == StreetFixtureModel::Suv ||
+         model == StreetFixtureModel::Pickup;
+}
 
 // A map obstacle. `climbable` obstacles get a navmesh connection from
 // ground level up to their top surface (see NavMesh); non-climbable
@@ -49,6 +92,13 @@ struct Obstacle {
   // Blocks movement and LOS but is never drawn: the unseen wall along a
   // terrain cliff edge, whose face the terrain mesh itself renders.
   bool navOnly = false;
+  StreetFixtureModel fixtureModel = StreetFixtureModel::None;
+  float fixtureYaw = 0.0f;    // Local +X heading; local +Z points toward the block.
+  float fixtureBaseY = 0.0f;  // Visible feet rest on the road/sidewalk above bounds.min.y.
+  // Roll about the heading axis: 0 upright, pi overturned on its roof, +-pi/2
+  // lying on a side (wrecks on the artery; their `footprint` is then an
+  // arbitrarily rotated rectangle and the bounds follow the rolled body).
+  float fixtureRoll = 0.0f;
 };
 
 // Building archetype (urban map issue #151, roadmap 3.2). Drawn per parcel
@@ -78,22 +128,50 @@ struct Building {
   int upperObstacle = -1;  // Top floor stepped back as its own prism (offices), else -1.
   int parcel = -1;         // Index into UrbanParcels(seed, config).
   int block = -1;
+  // Ground level of the footprint (the base prism's min.y for solid
+  // buildings; enterable ones have no such prism).
+  float baseY = 0.0f;
+  // Storeys, bottom-up: world y0..y1 of each floor.
+  struct Floor { float y0 = 0.0f, y1 = 0.0f; };
+  std::vector<Floor> floors;
+  // Hollow building (issue #157): thin wall Obstacles around the footprint
+  // with a doorway on the frontage edge, instead of a solid prism. `obstacle`
+  // is then the roof slab (full footprint, bounds.min.y above head height).
+  // Non-enterable buildings keep the solid-massing rendering.
+  bool enterable = false;
+  float doorWidth = 0.0f;   // Enterable only: frontage doorway size, per BuildingKind.
+  float doorHeight = 0.0f;  // Lintel underside above the ground (>= kUnitHeight).
+  // Enterable only: optional rear doorway (-1 = none, wall stays solid),
+  // spanning u0..u1 along footprint edge `rearEdge`, same height as the
+  // other rear doors.
+  int rearEdge = -1;
+  float rearU0 = 0.0f, rearU1 = 0.0f;
 
   float Height() const {
     return groundFloorHeight + static_cast<float>(floorCount - 1) * floorHeight;
   }
 };
 
-// Visual-only massing detail (roadmap 3.3): a prism over a convex XZ
-// footprint between y0 and y1. Blocks sight lines and FOV (see
-// SightObstacles). Parapets and roof fixtures also block walking: they are
-// copied into WalkSurface::blockers of their roof slab. Awnings are overhead.
+// Visual-only massing detail (roadmap 3.3): a vertical extrusion over a
+// convex XZ footprint, flat between y0/y1 unless `top` supplies its surface.
+// Blocks sight lines and FOV (see
+// SightObstacles). Parapets, roof fixtures and deck rails also block
+// walking: they are copied into WalkSurface::blockers of their roof slab or
+// deck span. Awnings and pier caps are overhead. PierCap (the bent's
+// hammerhead/crossbeam under the deck) and DeckRail (the overpass's raised
+// sides, issue #223) belong to the highway, not a building: building == -1.
 struct MassingDetail {
-  enum class Kind : uint8_t { Parapet, RoofFixture, Awning };
+  enum class Kind : uint8_t { Parapet, RoofFixture, Awning, PierCap, DeckRail };
   Kind kind = Kind::Parapet;
   std::vector<glm::vec2> footprint;  // Counter-clockwise.
   float y0 = 0.0f, y1 = 0.0f;
   int building = -1;
+  // Optional sloped top for details that follow a planar surface. When
+  // populated, the renderer extrudes this polygon vertically by `depth`
+  // instead of drawing the conservative y0..y1 sight prism. Deck rails use
+  // this so their top and bottom stay parallel to the ramp beneath them.
+  std::vector<glm::vec3> top;
+  float depth = 0.0f;
 };
 
 // A window or door on a generated building's facade (issue #152, roadmap
@@ -125,6 +203,9 @@ struct WalkSurface {
   std::vector<glm::vec3> vertices;  // Counter-clockwise when viewed from above.
   std::vector<int> neighbors;
   bool connectsToGround = false;    // The lowest edge is a legal ground transition.
+  // Elevated highway deck/ramp patch. The renderer uses this to fade the
+  // entire overpass (slabs, rails, caps and piers) as one occluder.
+  bool overpass = false;
   // Convex XZ footprints standing on the patch (roof parapets, furniture)
   // that a figure can't walk into. Honoured on single-patch routes only.
   std::vector<std::vector<glm::vec2>> blockers;
@@ -249,6 +330,10 @@ inline std::vector<AABB> ObstacleBounds(const std::vector<Obstacle>& obstacles) 
 namespace constants {
 constexpr float kMapHalfExtent = 15.0f;  // Default scene's half-size (~30x30); generated scenes set Scene::mapHalfExtent.
 constexpr float kAgentRadius = 0.4f;     // Padding used to inflate obstacles for the navmesh.
+// Navmesh padding for unseen nav-only walls (terrain cliff edges). They guard
+// a drop, not solid geometry a body could clip into, so a figure may stand at
+// the brink; the thin wall still blocks any path crossing it.
+constexpr float kNavWallPad = 0.1f;
 constexpr float kUnitHalfWidth = 0.35f;
 constexpr float kUnitHeight = 1.8f;
 constexpr float kEyeHeight = 1.5f;
@@ -316,6 +401,10 @@ constexpr float kMoveSpeed = 4.0f;  // Default run speed, world units per second
 // fixed-length window. A figure's plannable move distance is bounded by
 // runSpeed * kRoundDuration, so every move animation fits in the window.
 constexpr float kRoundDuration = 5.0f;  // Seconds of execution per round.
+// Fixed step the headless simulators advance a round in (the server and the
+// in-process scenario runner), so reactions that trigger on the first tick
+// something is seen resolve identically in every test topology.
+constexpr float kSimStepSeconds = 1.0f / 30.0f;
 // Visual length of the rendered FOV cone overlay. Sized off kSightRange
 // (bigger than any map's diagonal) so the cone reaches the map edge no matter
 // where a unit stands or faces; the renderer clips each ray at the map

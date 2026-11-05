@@ -1,11 +1,13 @@
 // Headless tests for the render-side ragdoll (issue #217). glm + game Unit
 // only; no GL.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
 #include "game/Types.h"
 #include "gfx/FigureRig.h"
+#include "game/Geometry.h"
 #include "gfx/Ragdoll.h"
 
 namespace {
@@ -29,6 +31,12 @@ tactics::Unit Downed(int id, float elapsed) {
   u.knockdownAxis = glm::vec3(0.0f, 0.0f, -1.0f);  // dir = +X
   u.knockdownElapsed = elapsed;
   return u;
+}
+
+glm::vec3 PoseCentre(const gfx::RagdollPose& pose) {
+  glm::vec3 centre(0.0f);
+  for (const glm::vec3& p : pose) centre += p;
+  return centre / static_cast<float>(gfx::kRagJointCount);
 }
 
 void TestOnlyDownedUnitsRagdoll() {
@@ -79,6 +87,50 @@ void TestDeterministicAndCacheBounded() {
   // Different units fall differently.
   const gfx::RagdollPose c = gfx::SampleRagdoll(Downed(8, 0.2f));
   CHECK(c[gfx::kRagHead] != a[gfx::kRagHead]);
+}
+
+void TestDisplacementStaysOnShotAxisAndReplaysExactly() {
+  gfx::SetRagdollObstacles({});
+  const glm::vec3 shotDir = glm::normalize(glm::vec3(0.6f, 0.0f, -0.8f));
+  const glm::vec3 side(-shotDir.z, 0.0f, shotDir.x);
+
+  // Exercise every normal figure id. The varied launch may change how far a
+  // body travels, but without a replicated lateral force its centre must stay
+  // on the shot axis. Varying the hit position represents moving figures
+  // being shot at different points along their paths.
+  for (int id = 0; id < 40; ++id) {
+    tactics::Unit u = Downed(id, tactics::constants::kKnockdownMaxSeconds);
+    u.position += glm::vec3(0.17f * id, 0.0f, -0.11f * id);
+    u.facingYaw = 0.37f;
+    u.knockdownAxis = glm::vec3(shotDir.z, 0.0f, -shotDir.x);
+    const glm::vec3 start = PoseCentre(gfx::SampleRagdollStep(u, 0));
+    float maxSideways = 0.0f;
+    for (int step = 1; step <= gfx::kRagdollSteps; ++step) {
+      const glm::vec3 displacement = PoseCentre(gfx::SampleRagdollStep(u, step)) - start;
+      maxSideways = std::max(maxSideways, std::fabs(glm::dot(displacement, side)));
+    }
+    CHECK(maxSideways < 0.15f);
+    const glm::vec3 displacement = PoseCentre(gfx::SampleRagdoll(u)) - start;
+    CHECK(glm::dot(displacement, shotDir) > 0.2f);
+  }
+
+  // Replay may sample the fall out of order after the live trajectory has
+  // been evicted. It must reconstruct the identical physical frames.
+  tactics::Unit u = Downed(7, 0.0f);
+  u.position = glm::vec3(-1.3f, 0.0f, 4.7f);
+  u.knockdownAxis = glm::vec3(shotDir.z, 0.0f, -shotDir.x);
+  const int sampleSteps[] = {0, 7, 31, 79, 143, gfx::kRagdollSteps};
+  gfx::RagdollPose live[6];
+  for (int i = 0; i < 6; ++i) live[i] = gfx::SampleRagdollStep(u, sampleSteps[i]);
+  for (int id = 100; id < 100 + 2 * gfx::kRagdollMaxCached; ++id) {
+    gfx::SampleRagdoll(Downed(id, 0.3f));
+  }
+  for (int i = 5; i >= 0; --i) {
+    const gfx::RagdollPose replay = gfx::SampleRagdollStep(u, sampleSteps[i]);
+    for (int joint = 0; joint < gfx::kRagJointCount; ++joint) {
+      CHECK(replay[joint] == live[i][joint]);
+    }
+  }
 }
 
 void TestFigurePartsFollowRagdoll() {
@@ -141,15 +193,235 @@ void TestFallsOffWallAndStaysOutside() {
   gfx::SetRagdollObstacles({});
 }
 
+// Issue #259: a body shot toward a bridge's side rail on the deck stays on the
+// deck side instead of clipping through. The rail is a thin diagonal prism.
+void TestDeckRailBlocksBody() {
+  tactics::WalkSurface deck;
+  deck.vertices = {glm::vec3(-10, 3, -10), glm::vec3(10, 3, -10), glm::vec3(10, 3, 10),
+                   glm::vec3(-10, 3, 10)};
+  tactics::HeightField none;
+  gfx::SetRagdollObstacles({});
+  gfx::SetRagdollGround({deck}, none);
+  tactics::MassingDetail rail;
+  rail.kind = tactics::MassingDetail::Kind::DeckRail;
+  rail.footprint = {glm::vec2(1.0f, -10.0f), glm::vec2(1.3f, -10.0f), glm::vec2(1.3f, 10.0f),
+                    glm::vec2(1.0f, 10.0f)};
+  rail.y0 = 2.75f;
+  rail.y1 = 3.9f;
+  gfx::SetRagdollRails({rail});
+  for (int id = 1; id <= 20; ++id) {
+    tactics::Unit u = Downed(id, tactics::constants::kKnockdownMaxSeconds);
+    u.position = glm::vec3(0.4f, 3.0f, 0.0f);  // Shot travels +X, into the rail.
+    for (int s = 0; s <= gfx::kRagdollSteps; ++s) {
+      for (const glm::vec3& p : gfx::SampleRagdollStep(u, s)) {
+        CHECK(!(p.x > 1.0f && p.y < 3.8f));  // Never past the rail.
+      }
+    }
+    CHECK(gfx::SampleRagdoll(u)[gfx::kRagHead].y > 2.9f);  // Stayed on the deck.
+  }
+  gfx::SetRagdollRails({});
+  gfx::SetRagdollGround({}, none);
+}
+
+// Dying flush against a wall must not turn the wall push-out into velocity
+// (the body used to be flung away and through the map).
+void TestWallPushOutDoesNotLaunchBody() {
+  tactics::Obstacle wall;
+  wall.bounds.min = glm::vec3(0.4f, 0.0f, -3.0f);
+  wall.bounds.max = glm::vec3(3.0f, 3.0f, 3.0f);
+  gfx::SetRagdollObstacles({wall});
+  for (int id = 1; id <= 20; ++id) {
+    tactics::Unit u = Downed(id, tactics::constants::kKnockdownMaxSeconds);
+    u.position = glm::vec3(0.1f, 0.0f, 0.0f);  // Body overlaps the wall face.
+    gfx::RagdollPose last = gfx::SampleRagdollStep(u, 0);
+    for (int s = 1; s <= gfx::kRagdollSteps; ++s) {
+      const gfx::RagdollPose cur = gfx::SampleRagdollStep(u, s);
+      for (int i = 0; i < gfx::kRagJointCount; ++i) {
+        CHECK(glm::length(cur[i] - last[i]) < 0.3f);  // No per-step teleport/launch.
+        CHECK(glm::length(cur[i] - u.position) < 6.0f);
+      }
+      last = cur;
+    }
+  }
+  gfx::SetRagdollObstacles({});
+}
+
+// Overlapping low slabs (sidewalk + curb) around a standing figure, with a
+// neighbour: neither body may be launched (issue #262).
+void TestOverlappingSidewalkDoesNotLaunch() {
+  tactics::Obstacle a, b, c;
+  a.bounds.min = glm::vec3(2.0f, 0.0f, -4.0f);
+  a.bounds.max = glm::vec3(3.6f, 0.15f, 4.0f);
+  b.bounds.min = glm::vec3(2.9f, 0.0f, -4.0f);  // Overlaps a.
+  b.bounds.max = glm::vec3(3.2f, 0.4f, 4.0f);
+  c.bounds.min = glm::vec3(2.5f, 0.0f, -2.5f);
+  c.bounds.max = glm::vec3(3.3f, 0.3f, -1.5f);
+  gfx::SetRagdollObstacles({a, b, c});
+  for (int id = 1; id <= 20; ++id) {
+    for (float x : {2.2f, 3.0f, 3.5f}) {
+      tactics::Unit u = Downed(id, tactics::constants::kKnockdownMaxSeconds);
+      u.position = glm::vec3(x, 0.0f, -2.0f);
+      u.knockdownImpacts.push_back({0.4f, glm::vec3(0.0f, 0.0f, 1.0f)});
+      gfx::RagdollPose last = gfx::SampleRagdollStep(u, 0);
+      for (int s = 1; s <= gfx::kRagdollSteps; ++s) {
+        const gfx::RagdollPose cur = gfx::SampleRagdollStep(u, s);
+        for (int i = 0; i < gfx::kRagJointCount; ++i) {
+          CHECK(glm::length(cur[i] - last[i]) < 0.3f);
+          CHECK(glm::length(cur[i] - u.position) < 6.0f);
+        }
+        last = cur;
+      }
+    }
+  }
+  gfx::SetRagdollObstacles({});
+}
+
+// A second hit on the falling body shoves it: same fall until the hit, then
+// a different one (here a hit from the opposite side).
+void TestSecondHitShovesFallingBody() {
+  const float kHitAt = 0.3f;
+  const tactics::Unit plain = Downed(7, tactics::constants::kKnockdownMaxSeconds);
+  tactics::Unit hit = plain;
+  hit.knockdownImpacts.push_back({kHitAt, glm::vec3(0.0f, 0.0f, 1.0f)});  // dir = -X
+  const int hitStep = static_cast<int>(std::lround(kHitAt / gfx::kRagdollStep));
+  const gfx::RagdollPose a = gfx::SampleRagdollStep(plain, hitStep);
+  const gfx::RagdollPose b = gfx::SampleRagdollStep(hit, hitStep);
+  for (int i = 0; i < gfx::kRagJointCount; ++i) CHECK(glm::length(a[i] - b[i]) < 1e-5f);
+  const gfx::RagdollPose endPlain = gfx::SampleRagdoll(plain);
+  const gfx::RagdollPose endHit = gfx::SampleRagdoll(hit);
+  CHECK(glm::length(endPlain[gfx::kRagHead] - endHit[gfx::kRagHead]) > 0.1f);
+  CHECK(endHit[gfx::kRagHead].x < endPlain[gfx::kRagHead].x);  // Pushed back.
+  // A hit after the body came to rest wakes it up again.
+  tactics::Unit late = plain;
+  late.knockdownImpacts.push_back({2.0f, glm::vec3(0.0f, 0.0f, -1.0f)});
+  const gfx::RagdollPose before = gfx::SampleRagdollStep(late, 119);
+  const gfx::RagdollPose after = gfx::SampleRagdollStep(late, 140);
+  CHECK(glm::length(after[gfx::kRagHead] - before[gfx::kRagHead]) > 0.05f);
+}
+
 }  // namespace
 
+// The fall begins from the pose held at the hit: a unit caught mid-stride
+// starts from different joint positions than one standing still.
+void TestStartsFromAnimatedPose() {
+  tactics::Unit still = Downed(1, 0.0f);
+  tactics::Unit running = still;
+  running.walkBlend = 1.0f;
+  running.walkPhase = 1.2f;
+  const gfx::RagdollPose a = gfx::SampleRagdollStep(still, 0);
+  const gfx::RagdollPose b = gfx::SampleRagdollStep(running, 0);
+  CHECK(glm::length(a[gfx::kRagFootL] - b[gfx::kRagFootL]) > 0.02f ||
+        glm::length(a[gfx::kRagHandL] - b[gfx::kRagHandL]) > 0.02f);
+  // Matches the live animated pose exactly (no snap to a neutral stand).
+  const gfx::RagdollPose live = gfx::AnimatedPose(running);
+  for (int i = 0; i < gfx::kRagJointCount; ++i) CHECK(glm::length(b[i] - live[i]) < 1e-4f);
+}
+
+// Shot on a zipline cable: the body drops to the ground below, not rest in mid-air.
+void TestRiderFallsToGroundBelowCable() {
+  gfx::SetRagdollObstacles({});
+  tactics::Unit u = Downed(3, tactics::constants::kKnockdownMaxSeconds);
+  u.position.y = 3.0f;
+  u.knockdownDrop = 3.0f;
+  const gfx::RagdollPose end = gfx::SampleRagdoll(u);
+  float lowest = 1e9f;
+  for (const glm::vec3& p : end) lowest = std::min(lowest, p.y);
+  CHECK(lowest < 0.3f);
+}
+
+// A figure killed on a ramp comes to rest lying on it, not hovering at its
+// starting height above the lower ground.
+void TestRestsOnRamp() {
+  tactics::WalkSurface ramp;  // Falls from y=1.6 at x=-2 to y=0 at x=14.
+  ramp.vertices = {{-2.0f, 1.6f, 4.0f}, {14.0f, 0.0f, 4.0f}, {14.0f, 0.0f, -4.0f},
+                   {-2.0f, 1.6f, -4.0f}};
+  gfx::SetRagdollObstacles({});
+  gfx::SetRagdollGround({ramp}, tactics::HeightField{});
+  for (int id = 1; id <= 10; ++id) {
+    tactics::Unit u = Downed(id, tactics::constants::kKnockdownMaxSeconds);
+    u.position = glm::vec3(0.0f, 1.6f * 14.0f / 16.0f, 0.0f);
+    const gfx::RagdollPose end = gfx::SampleRagdoll(u);
+    for (int s = 0; s <= gfx::kRagdollSteps; ++s) {
+      for (const glm::vec3& p : gfx::SampleRagdollStep(u, s)) {
+        if (p.x > -2.0f && p.x < 14.0f) {
+          CHECK(p.y > tactics::SurfaceHeightAt(ramp, p.x, p.z) - 0.35f);  // Never under it.
+        }
+      }
+    }
+    for (const glm::vec3& p : end) {
+      const float floorY = p.x < 14.0f ? tactics::SurfaceHeightAt(ramp, p.x, p.z) : 0.0f;
+      CHECK(p.y - floorY < 0.5f);  // Lying on the ramp, not levitating.
+    }
+  }
+  gfx::SetRagdollGround({}, tactics::HeightField{});
+}
+
+// Issue #257: a figure killed at the top of a ramp (platform box + ramp seam)
+// and its dropped rifle settle within ~2s instead of bouncing/jittering.
+void TestSettlesAtRampTop() {
+  tactics::WalkSurface ramp;  // Falls from y=1.6 at x=-2 to y=0 at x=14.
+  ramp.vertices = {{-2.0f, 1.6f, 4.0f}, {14.0f, 0.0f, 4.0f}, {14.0f, 0.0f, -4.0f},
+                   {-2.0f, 1.6f, -4.0f}};
+  tactics::Obstacle deck;
+  deck.bounds = tactics::AABB{glm::vec3(-10.0f, 0.0f, -4.0f), glm::vec3(-2.0f, 1.6f, 4.0f)};
+  gfx::SetRagdollObstacles({deck});
+  gfx::SetRagdollGround({ramp}, tactics::HeightField{});
+  const int from = 2 * 60;  // After 2s everything must be still.
+  for (int id = 1; id <= 12; ++id) {
+    for (float x : {-2.5f, -1.5f, -0.5f}) {
+      tactics::Unit u = Downed(id, tactics::constants::kKnockdownMaxSeconds);
+      u.position = glm::vec3(x, x < -2.0f ? 1.6f : tactics::SurfaceHeightAt(ramp, x, 0.0f), 0.0f);
+      const gfx::RagdollPose a = gfx::SampleRagdollStep(u, from);
+      const gfx::RagdollPose b = gfx::SampleRagdollStep(u, gfx::kRagdollSteps);
+      for (int j = 0; j < gfx::kRagJointCount; ++j) CHECK(glm::length(a[j] - b[j]) < 0.02f);
+      const gfx::RagdollGun ga = gfx::SampleRagdollGunStep(u, from);
+      const gfx::RagdollGun gb = gfx::SampleRagdollGunStep(u, gfx::kRagdollSteps);
+      CHECK(glm::length(ga.pos - gb.pos) < 0.02f);
+    }
+  }
+  gfx::SetRagdollObstacles({});
+  gfx::SetRagdollGround({}, tactics::HeightField{});
+}
+
+void TestRagdollRestsOnStandingFigure() {
+  gfx::SetRagdollObstacles({});
+  gfx::SetRagdollFigures({{glm::vec3(3.6f, 0.5f, -2.0f), 0.30f, 1.75f}});
+  const tactics::Unit u = Downed(21, tactics::constants::kKnockdownMaxSeconds);
+  float maxSpeed = 0.0f;
+  gfx::RagdollPose prev = gfx::SampleRagdollStep(u, 0);
+  for (int step = 1; step <= gfx::kRagdollSteps; ++step) {
+    const gfx::RagdollPose cur = gfx::SampleRagdollStep(u, step);
+    for (int i = 0; i < gfx::kRagJointCount; ++i) {
+      maxSpeed = std::max(maxSpeed, glm::length(cur[i] - prev[i]) / gfx::kRagdollStep);
+    }
+    prev = cur;
+  }
+  CHECK(maxSpeed < 20.0f);  // No launch from depenetration.
+  const gfx::RagdollPose end = gfx::SampleRagdoll(u);
+  for (int i = 0; i < gfx::kRagJointCount; ++i) {
+    const glm::vec3 axisPt(3.6f, glm::clamp(end[i].y, 0.5f + 0.30f, 0.5f + 1.45f), -2.0f);
+    CHECK(glm::length(end[i] - axisPt) >= 0.30f - 0.03f);  // Not inside the capsule.
+  }
+  gfx::SetRagdollFigures({});
+}
+
 int main() {
+  TestRagdollRestsOnStandingFigure();
+  TestRiderFallsToGroundBelowCable();
+  TestStartsFromAnimatedPose();
+  TestWallPushOutDoesNotLaunchBody();
+  TestOverlappingSidewalkDoesNotLaunch();
+  TestSecondHitShovesFallingBody();
   TestFallsOffWallAndStaysOutside();
+  TestRestsOnRamp();
+  TestDeckRailBlocksBody();
+  TestSettlesAtRampTop();
   TestGunReleaseAndDrop();
   TestOnlyDownedUnitsRagdoll();
   TestFallsAlongShotAndRests();
   TestLimbLengthsPreserved();
   TestDeterministicAndCacheBounded();
+  TestDisplacementStaysOnShotAxisAndReplaysExactly();
   TestFigurePartsFollowRagdoll();
   if (g_failures == 0) std::puts("ragdoll_tests: OK");
   return g_failures == 0 ? 0 : 1;

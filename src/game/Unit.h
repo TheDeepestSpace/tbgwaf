@@ -119,6 +119,17 @@ struct Unit {
   // around it topples the figure in the shot's direction of travel.
   glm::vec3 knockdownAxis{1.0f, 0.0f, 0.0f};
   float knockdownElapsed = -1.0f;  // Seconds since hit; <0 = not falling.
+  // Further hits that land on the figure while it is still falling (visual
+  // only): when (knockdownElapsed at the hit) and the horizontal fall axis,
+  // same convention as knockdownAxis. The ragdoll applies each as a shove.
+  struct KnockdownImpact {
+    float at = 0.0f;
+    glm::vec3 axis{1.0f, 0.0f, 0.0f};
+  };
+  std::vector<KnockdownImpact> knockdownImpacts;
+  // How far above the ground the figure was when hit (a zipline rider hangs
+  // on the cable); the ragdoll falls this far before it lands. 0 = on the ground.
+  float knockdownDrop = 0.0f;
   // Visual-only walk cycle: phase in radians (advances with distance moved,
   // 2*pi per kWalkStrideLength) and a 0..1 blend of how much the walk pose
   // overrides the rest pose (eases toward 1 while a planned move is in
@@ -189,7 +200,18 @@ struct Unit {
   AABB Bounds() const {
     glm::vec3 halfExtents(constants::kUnitHalfWidth, 0.0f, constants::kUnitHalfWidth);
     glm::vec3 base = position - halfExtents;
-    glm::vec3 top = position + halfExtents + glm::vec3(0.0f, constants::kUnitHeight, 0.0f);
+    float height = constants::kUnitHeight;
+    if (!alive && knockdownElapsed >= 0.0f) {
+      // A downed figure collapses: the box sinks to a lying thickness over the
+      // tip-over (and to the ground, for a rider shot off the cable) so shots
+      // pass through the air it no longer fills.
+      constexpr float kLyingHeight = 0.3f;
+      const float s = glm::clamp(knockdownElapsed / constants::kKnockdownDuration, 0.0f, 1.0f);
+      height = glm::mix(constants::kUnitHeight, kLyingHeight, s);
+      base.y -= knockdownDrop;
+    }
+    glm::vec3 top = glm::vec3(position.x, base.y, position.z) + halfExtents +
+                    glm::vec3(0.0f, height, 0.0f);
     return AABB{base, top};
   }
 };

@@ -176,7 +176,7 @@ void DrawShotLevelBar(const GameLogic& game, const Unit& shooter,
 
 HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRect& rect,
                    int windowHeight, const gfx::OrbitCamera& camera, HudLayout* layout,
-                   float* roundPanelBottom) {
+                   float* roundPanelBottom, const NetHudInfo* net) {
   HudActions actions;
   // Window ids are suffixed with the team so two panes can share one ImGui
   // context (the visual runner) without their windows colliding.
@@ -252,13 +252,28 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
       default:
         break;
     }
-    ImGui::BeginDisabled(!game.CanCommitRound());
+    if (game.HasPlanOverlap()) {
+      ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1.0f),
+                         "Planned paths make figures overlap; re-plan a move.");
+    } else if (game.MovePreviewBlockedByFigure()) {
+      ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1.0f),
+                         "Blocked: no route avoids the other figures' moves.");
+    }
+    const bool committed = net && net->committed;
+    ImGui::BeginDisabled(!game.CanCommitRound() || committed);
     if (Button("Commit Round")) actions.commit = true;
     ImGui::EndDisabled();
     // Squad-wide config, not tied to any figure: opens its own view.
     ImGui::SameLine();
     bool& playbookOpen = PlaybookOpen(team);
     if (Button(playbookOpen ? "Close Playbook" : "Playbook")) playbookOpen = !playbookOpen;
+    if (committed) {
+      ImGui::TextColored(ImVec4(0.55f, 0.9f, 0.55f, 1.0f),
+                         net->peerReady ? "Both committed -- round starting..."
+                                        : "Committed. Waiting for opponent...");
+    } else if (net && net->peerReady) {
+      ImGui::TextUnformatted("Opponent has committed.");
+    }
     // Window height tracks collapse, so anything anchored below follows.
     if (roundPanelBottom) *roundPanelBottom = ImGui::GetWindowPos().y + ImGui::GetWindowHeight();
     ImGui::End();
@@ -459,7 +474,8 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
                     float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
-                    bool& disableOcclusionFade, bool& showFps, float fps, float frameMs,
+                    bool& disableOcclusionFade, bool& npr, gfx::NprSettings& nprSettings,
+                    bool& showFps, float fps, float frameMs,
                     float fovMs, const gfx::RenderFrameStats& stats, float top,
                     std::optional<size_t> wasmHeapBytes) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
@@ -488,6 +504,28 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
     ImGui::SliderInt("AO quality", &aoQuality, 1, 20);
     ImGui::SetNextItemWidth(130.0f);
     ImGui::SliderInt("AO softness", &aoSoftness, 0, 10);
+  }
+  // Grayscale NPR look; with the AO view on, only its outlines are layered on top.
+  ImGui::Checkbox("NPR", &npr);
+  if (npr) {
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("Outline px", &nprSettings.outlineThickness, 0.0f, 4.0f, "%.1f");
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("Outline strength", &nprSettings.outlineStrength, 0.0f, 1.0f, "%.2f");
+    // Distance LOD: edges on features smaller than this (world units) fade
+    // out from afar instead of aliasing into dotted lines. 0 disables.
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("Outline LOD", &nprSettings.detailSize, 0.0f, 0.5f, "%.2f");
+  }
+  if (npr && !thermal) {
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderInt("Cel bands", &nprSettings.celBands, 2, 8);
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("Cel softness", &nprSettings.celSoftness, 0.0f, 1.0f, "%.2f");
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("NPR AO radius", &nprSettings.ao.radius, 0.5f, 6.0f, "%.1f");
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderFloat("NPR AO strength", &nprSettings.ao.strength, 0.0f, 3.0f, "%.2f");
   }
   ImGui::Checkbox("Disable occlusion fade", &disableOcclusionFade);
   ImGui::Checkbox("Show FPS", &showFps);

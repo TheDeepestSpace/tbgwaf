@@ -6,15 +6,18 @@
 # the deck figure (and could not target it) while the deck figure saw and
 # could shoot it. Seed 7's deck, as in fov_cone_bridge_deck. A second Red
 # figure idles far away at grade, out of everyone's view, so the round
-# completes whether or not the shot lands.
+# completes whether or not the shot lands. Since issue #223 the deck has a
+# raised side (a 0.9 guard parapet that is cover): the deck figure stands
+# right against it so its upper body still shows, and the street figure
+# stands far enough back that the sightline over the parapet reaches it.
 name: overpass_deck_edge_sighting
 
 map:
   generate: {type: urban, seed: 7, arteries: 2, elevated: true, elevated_layout: ramp-up-ramp-down, features: {furniture: off, terrain: off}}
 
 units:
-  - {id: 0, team: blue, position: [20.08, 0, 9.77], facing_degrees: -105.4}
-  - {id: 1, team: red, position: [17.56, 5.0, 0.61], facing_degrees: 74.6}
+  - {id: 0, team: blue, position: [22.58, 0, 13.23], facing_degrees: -105.4}
+  - {id: 1, team: red, position: [19.21, 5.0, 0.99], facing_degrees: 74.6}
   - {id: 2, team: red, position: [-66, 0, 17], facing_degrees: 0}
 
 camera:

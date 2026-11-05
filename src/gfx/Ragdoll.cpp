@@ -6,7 +6,9 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "game/Geometry.h"
 #include "game/Types.h"
+#include "gfx/FigureRig.h"
 
 using tactics::Unit;
 
@@ -61,6 +63,10 @@ constexpr float kGunRestitution = 0.35f;
 constexpr float kGunFriction = 0.7f;      // Horizontal velocity kept per contact step.
 constexpr float kGunSpinDamping = 0.6f;   // Angular velocity kept per contact step.
 constexpr float kGunInertia = 0.03f;      // Unit mass, roughly a thin box.
+constexpr float kGunRestSpeed = 0.6f;     // Slower contact approaches do not bounce.
+constexpr float kGunSettleSpeed = 0.5f;   // Contact speed/spin below which the gun is settling;
+constexpr float kGunSettleSpin = 2.5f;    // a few such steps in a row put it to sleep.
+constexpr int kGunSettleSteps = 8;
 constexpr float kGunSpin = 9.0f;          // Max tumble rate on release, rad/s.
 
 // Weapon-local extent of the (largest) weapon, used for ground contact. The
@@ -82,11 +88,49 @@ std::vector<tactics::AABB>& Colliders() {
   return boxes;
 }
 
-// Top of the highest obstacle a point of radius `r` at (x, z) can rest on: one
-// whose top it was already at or above (`refY`, the point's previous height),
-// so a body beside a wall is never lifted onto it. Falls back to `base`.
+// Bridge deck rails (MassingDetail::Kind::DeckRail): thin convex prisms that
+// are not in Scene::obstacles, so they need their own collider. Changing them
+// drops every cached trajectory.
+struct RailCollider {
+  std::vector<glm::vec2> footprint;  // Convex, counter-clockwise.
+  float yLo = 0.0f, yHi = 0.0f;
+};
+std::vector<RailCollider>& Rails() {
+  static std::vector<RailCollider> rails;
+  return rails;
+}
+
+// Ramps, decks and the terrain heightfield, set by the renderer alongside the
+// obstacles. Changing them drops every cached trajectory.
+struct Walkable {
+  tactics::WalkSurface surface;
+  glm::vec2 lo{0.0f}, hi{0.0f};  // XZ bounds, a cheap reject.
+};
+std::vector<Walkable>& Surfaces() {
+  static std::vector<Walkable> surfaces;
+  return surfaces;
+}
+tactics::HeightField& Terrain() {
+  static tactics::HeightField terrain;
+  return terrain;
+}
+
+// How far below a surface a point may be and still be lifted onto it, so a
+// body slides along a ramp instead of tunnelling under it.
+constexpr float kSurfaceStep = 0.3f;
+
+// Height of the walkable ground the body can rest on at (x, z): the terrain
+// (or `base` on a flat map), then any ramp/deck/obstacle top the point was
+// already at or above (`refY`, the point's previous height), so a body beside
+// a wall is never lifted onto it, nor one under a bridge onto the deck.
 float FloorAt(float x, float z, float refY, float r, float base) {
-  float floorY = base;
+  float floorY = Terrain().Empty() ? base : Terrain().HeightAt(x, z);
+  for (const Walkable& w : Surfaces()) {
+    if (x < w.lo.x || x > w.hi.x || z < w.lo.y || z > w.hi.y) continue;
+    if (!tactics::SurfaceContainsXZ(w.surface, x, z)) continue;
+    const float h = tactics::SurfaceHeightAt(w.surface, x, z);
+    if (refY >= h - kSurfaceStep) floorY = std::max(floorY, h);
+  }
   for (const tactics::AABB& b : Colliders()) {
     if (x < b.min.x - r || x > b.max.x + r || z < b.min.z - r || z > b.max.z + r) continue;
     if (refY >= b.max.y - 0.1f) floorY = std::max(floorY, b.max.y);
@@ -97,6 +141,12 @@ float FloorAt(float x, float z, float refY, float r, float base) {
 // Pushes a point of radius `r` out of any obstacle it is beside (below the
 // top, not resting on it) through the nearest side face. Returns the normal
 // of the last face used (zero if none).
+// Largest correction one push-out may apply. Overlapping colliders (a curb on
+// a sidewalk, a body spawned inside a box) would otherwise teleport a joint
+// metres in one step, which Verlet reads as a huge velocity.
+constexpr float kMaxJointStep = 0.25f;  // m per step (15 m/s).
+constexpr float kMaxPushPerIter = 0.015f;
+
 glm::vec3 PushOutOfWalls(glm::vec3& p, float refY, float r) {
   glm::vec3 normal(0.0f);
   for (const tactics::AABB& b : Colliders()) {
@@ -105,10 +155,71 @@ glm::vec3 PushOutOfWalls(glm::vec3& p, float refY, float r) {
     const float dzMin = p.z - (b.min.z - r), dzMax = (b.max.z + r) - p.z;
     if (dxMin <= 0.0f || dxMax <= 0.0f || dzMin <= 0.0f || dzMax <= 0.0f) continue;
     const float m = std::min(std::min(dxMin, dxMax), std::min(dzMin, dzMax));
-    if (m == dxMin) { p.x -= dxMin; normal = glm::vec3(-1, 0, 0); }
-    else if (m == dxMax) { p.x += dxMax; normal = glm::vec3(1, 0, 0); }
-    else if (m == dzMin) { p.z -= dzMin; normal = glm::vec3(0, 0, -1); }
-    else { p.z += dzMax; normal = glm::vec3(0, 0, 1); }
+    const float push = std::min(m, kMaxPushPerIter);
+    if (m == dxMin) { p.x -= push; normal = glm::vec3(-1, 0, 0); }
+    else if (m == dxMax) { p.x += push; normal = glm::vec3(1, 0, 0); }
+    else if (m == dzMin) { p.z -= push; normal = glm::vec3(0, 0, -1); }
+    else { p.z += push; normal = glm::vec3(0, 0, 1); }
+  }
+  return normal;
+}
+
+std::vector<RagdollFigureCollider>& Figures() {
+  static std::vector<RagdollFigureCollider> figures;
+  return figures;
+}
+
+// Pushes a joint of radius `r` out of every living-figure capsule (vertical
+// segment with hemispherical caps), through the nearest surface point and by
+// at most kMaxPushPerIter. Returns the summed contact normals (zero if none).
+glm::vec3 PushOutOfFigures(glm::vec3& p, float r) {
+  glm::vec3 total(0.0f);
+  for (const RagdollFigureCollider& f : Figures()) {
+    const float lo = f.base.y + f.radius, hi = f.base.y + f.height - f.radius;
+    const glm::vec3 axisPt(f.base.x, glm::clamp(p.y, lo, std::max(lo, hi)), f.base.z);
+    glm::vec3 d = p - axisPt;
+    const float len = glm::length(d);
+    const float minDist = f.radius + r;
+    if (len >= minDist) continue;
+    const glm::vec3 n = len > 1e-5f ? d / len : glm::vec3(1.0f, 0.0f, 0.0f);
+    p += n * std::min(minDist - len, kMaxPushPerIter);
+    total += n;
+  }
+  return total;
+}
+
+// Pushes a point of radius `r` out of any deck rail it overlaps, back through
+// the face on the side `prev` (its previous position) came from, so a thin
+// rail can't be tunnelled through or the body popped out the far side.
+// Returns the normal used (zero if none).
+glm::vec3 PushOutOfRails(glm::vec3& p, const glm::vec3& prev, float r) {
+  glm::vec3 normal(0.0f);
+  for (const RailCollider& rail : Rails()) {
+    if (p.y > rail.yHi + r || p.y < rail.yLo - r) continue;
+    const size_t n = rail.footprint.size();
+    // Signed distance (outside positive) of p and prev to each edge line.
+    float maxP = -1e30f;
+    float bestPrev = -1e30f;
+    glm::vec2 bestN(0.0f);
+    float bestD = 0.0f;  // Offset of the chosen edge line, from the origin.
+    for (size_t i = 0; i < n; ++i) {
+      const glm::vec2 a = rail.footprint[i], b = rail.footprint[(i + 1) % n];
+      const glm::vec2 e = b - a;
+      const float len = glm::length(e);
+      if (len < 1e-6f) continue;
+      const glm::vec2 en(e.y / len, -e.x / len);  // Outward for CCW.
+      const float d = glm::dot(en, a);
+      maxP = std::max(maxP, glm::dot(en, glm::vec2(p.x, p.z)) - d);
+      const float dp = glm::dot(en, glm::vec2(prev.x, prev.z)) - d;
+      if (dp > bestPrev) { bestPrev = dp; bestN = en; bestD = d; }
+    }
+    if (maxP >= r) continue;  // Clear of the rail (or beyond its end).
+    const float dist = glm::dot(bestN, glm::vec2(p.x, p.z)) - bestD;
+    const float push = r - dist;
+    if (push <= 0.0f) continue;
+    p.x += bestN.x * push;
+    p.z += bestN.y * push;
+    normal = glm::vec3(bestN.x, 0.0f, bestN.y);
   }
   return normal;
 }
@@ -163,14 +274,33 @@ struct Trajectory {
   glm::vec3 position{0.0f};
   float yaw = 0.0f;
   glm::vec3 axis{0.0f};
+  Unit anim;  // Only the animation fields that set the starting pose are compared.
+  std::vector<Unit::KnockdownImpact> impacts;
   unsigned long stamp = 0;
   std::vector<RagdollPose> frames;  // Up to kRagdollSteps + 1 entries.
   std::vector<RagdollGun> guns;     // Same length as frames.
 };
 
+bool SameAnimation(const Unit& a, const Unit& b) {
+  return a.walkPhase == b.walkPhase && a.walkBlend == b.walkBlend &&
+         a.idleElapsed == b.idleElapsed && a.shootElapsed == b.shootElapsed &&
+         a.shootAimYaw == b.shootAimYaw && a.grabElapsed == b.grabElapsed &&
+         a.rideTravel == b.rideTravel && a.rideLength == b.rideLength &&
+         a.rideSlope == b.rideSlope && a.weapon == b.weapon;
+}
+
+bool SameImpacts(const std::vector<Unit::KnockdownImpact>& a,
+                 const std::vector<Unit::KnockdownImpact>& b) {
+  return a.size() == b.size() &&
+         std::equal(a.begin(), a.end(), b.begin(), [](const auto& x, const auto& y) {
+           return x.at == y.at && x.axis == y.axis;
+         });
+}
+
 bool SameKey(const Trajectory& t, const Unit& u) {
   return t.id == u.id && t.position == u.position && t.yaw == u.facingYaw &&
-         t.axis == u.knockdownAxis;
+         t.axis == u.knockdownAxis && t.anim.knockdownDrop == u.knockdownDrop && SameAnimation(t.anim, u) &&
+         SameImpacts(t.impacts, u.knockdownImpacts);
 }
 
 Trajectory Simulate(const Unit& unit) {
@@ -179,21 +309,28 @@ Trajectory Simulate(const Unit& unit) {
   traj.position = unit.position;
   traj.yaw = unit.facingYaw;
   traj.axis = unit.knockdownAxis;
+  traj.anim = unit;
+  traj.impacts = unit.knockdownImpacts;
 
   // KnockDown() stores axis = up x dir, so the shot direction is (-axis.z, axis.x).
-  glm::vec3 dir(-unit.knockdownAxis.z, 0.0f, unit.knockdownAxis.x);
-  dir = glm::length(dir) < 1e-4f ? unit.FacingDirection() : glm::normalize(dir);
+  const auto shotDir = [&unit](const glm::vec3& axis) {
+    const glm::vec3 d(-axis.z, 0.0f, axis.x);
+    return glm::length(d) < 1e-4f ? unit.FacingDirection() : glm::normalize(d);
+  };
+  const glm::vec3 dir = shotDir(unit.knockdownAxis);
   const glm::vec3 side(-dir.z, 0.0f, dir.x);
-  // Deterministic per-unit sideways twist so neighbours don't fall identically.
-  const float twist = 0.35f * std::sin(static_cast<float>(unit.id) * 12.9898f);
+  // Vary the strength along the hit line so neighbours do not fall
+  // identically.  Do not add a sideways component here: there is no lateral
+  // force in the replicated hit state, and doing so made a body drift (and
+  // appear to snap) across the shot line as the fall played out.
+  const float impactScale =
+      1.0f + 0.12f * std::sin(static_cast<float>(unit.id) * 12.9898f);
 
-  const glm::mat4 frame =
-      glm::translate(glm::mat4(1.0f), unit.position) *
-      glm::rotate(glm::mat4(1.0f), unit.facingYaw, glm::vec3(0.0f, -1.0f, 0.0f));
-  RagdollPose pos, prev;
+  // Start from the pose the figure was actually in when it was hit (the
+  // animation state is frozen from then on), not a neutral stand.
+  RagdollPose pos = AnimatedPose(unit), prev;
   for (int i = 0; i < kRagJointCount; ++i) {
-    pos[i] = glm::vec3(frame * glm::vec4(kStanding[i], 1.0f));
-    const glm::vec3 v = (dir * kLaunchSpeed + side * (kLaunchSpeed * twist) +
+    const glm::vec3 v = (dir * (kLaunchSpeed * impactScale) +
                          glm::vec3(0.0f, kLaunchLift, 0.0f)) *
                         kLaunchWeight[i];
     prev[i] = pos[i] - v * kRagdollStep;
@@ -217,35 +354,68 @@ Trajectory Simulate(const Unit& unit) {
     // Tumble about the sideways axis (barrel flips over), plus a little yaw.
     const float s = std::sin(static_cast<float>(unit.id) * 7.531f);
     gunSpin = side * (kGunSpin * (0.5f + 0.5f * std::fabs(s)) * (s < 0 ? -1.0f : 1.0f)) +
-              glm::vec3(0.0f, 2.0f * twist, 0.0f);
+              glm::vec3(0.0f, 0.7f * std::sin(static_cast<float>(unit.id) * 12.9898f), 0.0f);
     gunVel += dir * 0.8f + glm::vec3(0.0f, 0.6f, 0.0f);
   }
   bool gunAsleep = false;
+  int gunSettling = 0;
   auto gunFrame = [&]() { return RagdollGun{drops, gunPos, gunRot}; };
   traj.guns.reserve(kRagdollSteps + 1);
   traj.guns.push_back(gunFrame());
 
   // A figure shot while standing on top of an obstacle falls to the real
   // ground (y = 0); otherwise the ground is wherever it was standing.
-  float groundY = unit.position.y;
+  float groundY = unit.position.y - unit.knockdownDrop;
   for (const tactics::AABB& b : Colliders()) {
     if (unit.position.x >= b.min.x && unit.position.x <= b.max.x && unit.position.z >= b.min.z &&
         unit.position.z <= b.max.z && std::fabs(unit.position.y - b.max.y) < 0.15f) {
       groundY = 0.0f;
     }
   }
+  // Likewise a figure on a ramp or deck: the surface is a floor (FloorAt),
+  // not the flat ground the body lands on past its edge.
+  for (const Walkable& w : Surfaces()) {
+    if (tactics::SurfaceContainsXZ(w.surface, unit.position.x, unit.position.z) &&
+        std::fabs(unit.position.y -
+                  tactics::SurfaceHeightAt(w.surface, unit.position.x, unit.position.z)) < 0.15f) {
+      groundY = 0.0f;
+    }
+  }
   int still = 0;
   std::array<bool, kRagJointCount> onFloor{};
+  // Later hits on the falling body, in time order, applied as extra shoves.
+  std::vector<Unit::KnockdownImpact> impacts = unit.knockdownImpacts;
+  std::stable_sort(impacts.begin(), impacts.end(),
+                   [](const auto& a, const auto& b) { return a.at < b.at; });
+  size_t nextImpact = 0;
   // Run until body and (dropped) gun are at rest, up to the cap: a fall from
   // an obstacle top takes a while.
   for (int step = 0; step < kMaxSimSteps; ++step) {
-    if (still >= kSleepSteps && (!drops || gunAsleep)) break;
+    while (nextImpact < impacts.size() &&
+           std::lround(impacts[nextImpact].at / kRagdollStep) <= step) {
+      const glm::vec3 hitDir = shotDir(impacts[nextImpact].axis);
+      const glm::vec3 hitV =
+          hitDir * (kLaunchSpeed * impactScale) + glm::vec3(0.0f, kLaunchLift, 0.0f);
+      for (int i = 0; i < kRagJointCount; ++i) {
+        prev[i] -= hitV * kLaunchWeight[i] * kRagdollStep;
+      }
+      if (drops) {
+        gunVel += hitDir * 0.8f + glm::vec3(0.0f, 0.6f, 0.0f);
+        gunAsleep = false;
+        gunSettling = 0;
+      }
+      still = 0;
+      ++nextImpact;
+    }
+    if (still >= kSleepSteps && (!drops || gunAsleep) && nextImpact >= impacts.size()) break;
     if (drops && !gunAsleep) {
       gunVel.y -= kGravity * kRagdollStep;
       const float gunRefY = gunPos.y;
       gunPos += gunVel * kRagdollStep;
       {
-        const glm::vec3 n = PushOutOfWalls(gunPos, gunRefY, 0.15f);
+        glm::vec3 n = PushOutOfWalls(gunPos, gunRefY, 0.15f);
+        const glm::vec3 rn = PushOutOfRails(gunPos, gunPos - gunVel * kRagdollStep, 0.15f);
+        if (rn != glm::vec3(0.0f)) n = rn;
         const float into = glm::dot(gunVel, n);
         if (into < 0.0f) gunVel -= (1.0f + kGunRestitution) * into * n;
       }
@@ -267,8 +437,11 @@ Trajectory Simulate(const Unit& unit) {
         const glm::vec3 cv = gunVel + glm::cross(gunSpin, r);
         if (cv.y < 0.0f) {
           const glm::vec3 rn = glm::cross(r, glm::vec3(0.0f, 1.0f, 0.0f));
+          // No restitution for gentle contacts, or a resting gun micro-bounces
+          // (gravity alone adds ~0.23 per step) and never settles on a slope.
+          const float e = cv.y > -kGunRestSpeed ? 0.0f : kGunRestitution;
           const float j =
-              -(1.0f + kGunRestitution) * cv.y / (1.0f + glm::dot(rn, rn) / kGunInertia);
+              -(1.0f + e) * cv.y / (1.0f + glm::dot(rn, rn) / kGunInertia);
           gunVel.y += j;
           gunSpin += glm::cross(r, glm::vec3(0.0f, j, 0.0f)) / kGunInertia;
         }
@@ -278,7 +451,10 @@ Trajectory Simulate(const Unit& unit) {
         gunVel.x *= kGunFriction;
         gunVel.z *= kGunFriction;
         gunSpin *= kGunSpinDamping;
-        if (glm::length(gunVel) < 0.15f && glm::length(gunSpin) < 0.4f) {
+        const bool slow =
+            glm::length(gunVel) < kGunSettleSpeed && glm::length(gunSpin) < kGunSettleSpin;
+        gunSettling = slow ? gunSettling + 1 : 0;
+        if (gunSettling >= kGunSettleSteps) {
           gunAsleep = true;
           gunVel = glm::vec3(0.0f);
           gunSpin = glm::vec3(0.0f);
@@ -307,11 +483,19 @@ Trajectory Simulate(const Unit& unit) {
       for (int i = 0; i < kRagJointCount; ++i) {
         const float r = kGroundOffset[i];
         const float refY = prev[i].y;
-        const glm::vec3 n = PushOutOfWalls(pos[i], refY, r);
+        glm::vec3 n = PushOutOfWalls(pos[i], refY, r);
+        const glm::vec3 rn = PushOutOfRails(pos[i], prev[i], r);
+        if (rn != glm::vec3(0.0f)) n = rn;
         if (n != glm::vec3(0.0f)) {
           // Kill the velocity into the wall (Verlet: move prev onto pos along n).
           const float into = glm::dot(pos[i] - prev[i], n);
-          if (into < 0.0f) prev[i] -= into * n;
+          if (into < 0.0f) prev[i] += into * n;
+        }
+        const glm::vec3 fn = PushOutOfFigures(pos[i], r);
+        if (fn != glm::vec3(0.0f)) {
+          const glm::vec3 fnn = glm::normalize(fn);
+          const float into = glm::dot(pos[i] - prev[i], fnn);
+          if (into < 0.0f) prev[i] += into * fnn;
         }
         const float floorY = FloorAt(pos[i].x, pos[i].z, refY, r, groundY) + r;
         if (pos[i].y < floorY) pos[i].y = floorY;
@@ -320,6 +504,10 @@ Trajectory Simulate(const Unit& unit) {
     }
     float maxSpeed = 0.0f;
     for (int i = 0; i < kRagJointCount; ++i) {
+      // Safety cap: no joint may move further than this in one step.
+      const glm::vec3 step = pos[i] - prev[i];
+      const float stepLen = glm::length(step);
+      if (stepLen > kMaxJointStep) prev[i] = pos[i] - step * (kMaxJointStep / stepLen);
       if (onFloor[i]) {
         // Resting on the ground: bleed off horizontal motion (friction).
         prev[i].x = pos[i].x - (pos[i].x - prev[i].x) * kGroundFriction;
@@ -355,6 +543,58 @@ void SetRagdollObstacles(const std::vector<tactics::Obstacle>& obstacles) {
                                });
   if (same) return;
   cur = std::move(boxes);
+  Cache().clear();
+}
+
+void SetRagdollFigures(const std::vector<RagdollFigureCollider>& figures) {
+  Figures() = figures;
+}
+
+void SetRagdollRails(const std::vector<tactics::MassingDetail>& massing) {
+  std::vector<RailCollider> rails;
+  for (const tactics::MassingDetail& d : massing) {
+    if (d.kind != tactics::MassingDetail::Kind::DeckRail || d.footprint.size() < 3) continue;
+    rails.push_back({d.footprint, d.y0, d.y1});
+  }
+  std::vector<RailCollider>& cur = Rails();
+  const bool same = rails.size() == cur.size() &&
+                    std::equal(rails.begin(), rails.end(), cur.begin(),
+                               [](const RailCollider& a, const RailCollider& b) {
+                                 return a.footprint == b.footprint && a.yLo == b.yLo &&
+                                        a.yHi == b.yHi;
+                               });
+  if (same) return;
+  cur = std::move(rails);
+  Cache().clear();
+}
+
+void SetRagdollGround(const std::vector<tactics::WalkSurface>& surfaces,
+                      const tactics::HeightField& terrain) {
+  std::vector<Walkable>& cur = Surfaces();
+  const bool same =
+      surfaces.size() == cur.size() && terrain.heights == Terrain().heights &&
+      terrain.nx == Terrain().nx && terrain.nz == Terrain().nz &&
+      terrain.minX == Terrain().minX && terrain.minZ == Terrain().minZ &&
+      terrain.step == Terrain().step &&
+      std::equal(surfaces.begin(), surfaces.end(), cur.begin(),
+                 [](const tactics::WalkSurface& a, const Walkable& b) {
+                   return a.vertices == b.surface.vertices;
+                 });
+  if (same) return;
+  cur.clear();
+  for (const tactics::WalkSurface& surface : surfaces) {
+    if (surface.vertices.empty()) continue;
+    Walkable w{surface, glm::vec2(surface.vertices[0].x, surface.vertices[0].z), {}};
+    w.hi = w.lo;
+    for (const glm::vec3& v : surface.vertices) {
+      w.lo = glm::min(w.lo, glm::vec2(v.x, v.z));
+      w.hi = glm::max(w.hi, glm::vec2(v.x, v.z));
+    }
+    w.surface.neighbors.clear();
+    w.surface.blockers.clear();
+    cur.push_back(std::move(w));
+  }
+  Terrain() = terrain;
   Cache().clear();
 }
 

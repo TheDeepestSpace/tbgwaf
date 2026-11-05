@@ -20,6 +20,9 @@
 // N rounds with no winner.
 //
 // `map.half_extent` sizes the ground square; units must start inside it.
+// `map.demo_scene: <id>` uses a registered demo scene (issue #240) instead
+// of an authored/generated map; its figures are the scene's unless `units`
+// is given.
 //
 // See tests/scenarios/*.yaml for the file format by example, and
 // tests/scenario_tests.cpp for how these are run in CI.
@@ -33,6 +36,7 @@
 
 #include "game/Scene.h"
 #include "game/Types.h"
+#include "net/Json.h"
 
 namespace tactics {
 class GameLogic;
@@ -146,10 +150,15 @@ struct Scenario {
   std::string name;
   std::string sourcePath;
   Scene scene;
+  net::Json sceneSpec;  // Declarative form of `scene` (see net/SceneSpec.h).
   SquadPlaybook playbooks[2] = {SquadPlaybook::Passive(), SquadPlaybook::Passive()};  // Indexed by Team; passive unless the YAML sets `playbook`.
   // `friendly_fire: false` flips the single config flag that makes
   // same-team figures transparent to free-aim ballistic traces.
   bool friendlyFire = true;
+  // `figure_overlap: false` turns off plan-time rejection of paths that make
+  // figures overlap (issue #267) for scenarios that deliberately race figures
+  // onto one spot or share a zipline.
+  bool rejectFigureOverlap = true;
   // `shot_rolls: [0.1, 0.9, ...]`: pins the shot RNG for deterministic
   // outcomes -- rolls are consumed in resolution order and the list repeats
   // when exhausted. Empty keeps the default seeded RNG.
@@ -244,5 +253,14 @@ struct PlaybackHooks {
 // executing each step's action or checking its assertion in order.
 ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks);
 ScenarioResult RunScenario(const Scenario& scenario);
+
+// Building blocks for other runners (the networked one): apply one scripted
+// plan action (Move/Shoot/Pass/Cancel/Focus; also Commit/NewGame locally) to
+// a single GameLogic through its click/choose API, and check one assertion
+// against a GameLogic's state. Failures are appended to `result`.
+bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& action,
+                   int stepIndex, ScenarioResult* result);
+void CheckAssertion(const GameLogic& game, const ScenarioAssertion& assertion, int stepIndex,
+                    ScenarioResult* result);
 
 }  // namespace tactics::scenario

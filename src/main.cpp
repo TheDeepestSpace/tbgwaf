@@ -13,11 +13,16 @@
 #include <functional>
 #endif
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
+#include <fstream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -25,16 +30,21 @@
 #include <vector>
 
 #include "ai/JevPlanner.h"
+#include "game/BuilderScene.h"
 #include "game/GameLogic.h"
 #include "game/Geometry.h"
 #include "game/MapGenerator.h"
 #include "game/Raycast.h"
+#include "game/ReproLog.h"
 #include "game/TurnTimeline.h"
 #include "game/Types.h"
 #include "game/Visibility.h"
 #include "gfx/Camera.h"
 #include "gfx/SceneRenderer.h"
+#include "net/RemoteClient.h"
 #include "AppFlow.h"
+#include "net/BuilderSceneSync.h"
+#include "ui/BuilderPanel.h"
 #include "ui/Hud.h"
 #include "ui/Menu.h"
 
@@ -74,6 +84,61 @@ constexpr Uint32 kPeerSyncTimeoutMs = 500;
 // specialHTMLTargets table instead; must run before SDL_Init.
 EM_JS(void, tbgwaf_bind_canvas, (), {
   specialHTMLTargets["#canvas"] = Module.canvas;
+  // Gesture input SDL doesn't expose: touch pinch/drag and trackpad wheel
+  // gestures. Accumulated here, drained once per frame by tbgwaf_take_gesture.
+  const c = Module.canvas;
+  const g = Module.tbgwafGesture = {rotX: 0, rotY: 0, zoom: 0, panX: 0, panY: 0, x: 0, active: false};
+  c.style.touchAction = "none";
+  // Capture phase + stopImmediatePropagation keeps SDL's own wheel handler
+  // from also acting on events we consume.
+  c.addEventListener("wheel", (e) => {
+    const trackpadScroll = e.deltaMode === 0 && !e.ctrlKey &&
+        (e.deltaX !== 0 || !Number.isInteger(e.deltaY) || Math.abs(e.deltaY) < 50);
+    if (!e.ctrlKey && !trackpadScroll) return;  // Mouse wheel: SDL zooms as before.
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    g.x = e.clientX - c.getBoundingClientRect().left;
+    if (e.ctrlKey) g.zoom += e.deltaY;  // Trackpad pinch (or ctrl+wheel).
+    else { g.rotX += e.deltaX; g.rotY -= e.deltaY; }
+  }, {capture: true, passive: false});
+  const touches = new Map();
+  const dist = () => { const p = [...touches.values()]; return Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y); };
+  const mid = () => { const p = [...touches.values()]; return {x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2}; };
+  c.addEventListener("pointerdown", (e) => {
+    if (e.pointerType !== "touch") return;
+    touches.set(e.pointerId, {x: e.clientX, y: e.clientY});
+    if (touches.size >= 2) { e.stopImmediatePropagation(); e.preventDefault(); }
+  }, {capture: true, passive: false});
+  c.addEventListener("pointermove", (e) => {
+    if (e.pointerType !== "touch" || !touches.has(e.pointerId)) return;
+    if (touches.size < 2) { touches.set(e.pointerId, {x: e.clientX, y: e.clientY}); return; }
+    const d0 = dist(), m0 = mid();
+    touches.set(e.pointerId, {x: e.clientX, y: e.clientY});
+    const d1 = dist(), m1 = mid();
+    g.zoom += (d0 - d1) * 0.5;  // Fingers apart -> zoom in (negative delta).
+    g.rotX += (m0.x - m1.x) * -1; g.rotY += (m0.y - m1.y) * -1;
+    g.x = m1.x - c.getBoundingClientRect().left;
+    e.stopImmediatePropagation(); e.preventDefault();
+  }, {capture: true, passive: false});
+  const end = (e) => {
+    if (e.pointerType !== "touch") return;
+    if (touches.size >= 2) { e.stopImmediatePropagation(); }
+    touches.delete(e.pointerId);
+  };
+  c.addEventListener("pointerup", end, {capture: true});
+  c.addEventListener("pointercancel", end, {capture: true});
+  for (const t of ["touchstart", "touchmove"])
+    c.addEventListener(t, (e) => e.preventDefault(), {passive: false});
+});
+
+// Drains accumulated gesture deltas (CSS px / wheel units). Returns 1 if any.
+EM_JS(int, tbgwaf_take_gesture, (float* out), {
+  const g = Module.tbgwafGesture;
+  if (!g || (!g.rotX && !g.rotY && !g.zoom)) return 0;
+  HEAPF32[out >> 2] = g.rotX; HEAPF32[(out >> 2) + 1] = g.rotY;
+  HEAPF32[(out >> 2) + 2] = g.zoom; HEAPF32[(out >> 2) + 3] = g.x;
+  g.rotX = g.rotY = g.zoom = 0;
+  return 1;
 });
 
 // 0 = blue, 1 = red, -1 = not specified. The page assigns each client
@@ -112,6 +177,98 @@ EM_JS(char*, tbgwaf_channel_next, (), {
   return ptr;
 });
 
+// Server mode (real networking, as opposed to the in-page bus above): the
+// page passes the WebSocket URL as Module.tbgwafServer (and optionally a
+// room name as Module.tbgwafRoom). Returns a malloc'd string (caller frees),
+// empty when unset.
+EM_JS(int, tbgwaf_has_server, (), { return Module.tbgwafServer ? 1 : 0; });
+EM_JS(char*, tbgwaf_server_url, (), {
+  const text = Module.tbgwafServer || "";
+  const size = lengthBytesUTF8(text) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(text, ptr, size);
+  return ptr;
+});
+EM_JS(char*, tbgwaf_server_room, (), {
+  const text = Module.tbgwafRoom || "";
+  const size = lengthBytesUTF8(text) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(text, ptr, size);
+  return ptr;
+});
+
+// "create" / "join" (Module.tbgwafRoomIntent) for the room page; empty otherwise.
+EM_JS(char*, tbgwaf_server_room_intent, (), {
+  const text = Module.tbgwafRoomIntent || "";
+  const size = lengthBytesUTF8(text) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(text, ptr, size);
+  return ptr;
+});
+
+// Back to the page's start screen (drops the connection, fresh game).
+EM_JS(void, tbgwaf_reload_page, (), { window.location.reload(); });
+
+// Module.tbgwafBotMode: "player-v-ai" / "ai-v-ai" asks the server to seat Jev
+// (it plans on the server; this client never talks to Jev).
+EM_JS(char*, tbgwaf_server_bot_mode, (), {
+  const text = Module.tbgwafBotMode || "";
+  const size = lengthBytesUTF8(text) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(text, ptr, size);
+  return ptr;
+});
+
+// Module.tbgwafServerSpectate: watch the room read-only (Jev vs Jev pane).
+EM_JS(int, tbgwaf_server_spectate, (), { return Module.tbgwafServerSpectate ? 1 : 0; });
+
+// WebSocket plumbing: events are queued as "O" (open), "C" (closed) and
+// "M<text frame>" and drained by the frame loop.
+EM_JS(void, tbgwaf_ws_open, (const char* url), {
+  const queue = [];
+  Module.tbgwafWsQueue = queue;
+  const ws = new WebSocket(UTF8ToString(url));
+  Module.tbgwafWs = ws;
+  ws.onopen = () => queue.push("O");
+  ws.onclose = () => queue.push("C");
+  ws.onerror = () => {};
+  ws.onmessage = (e) => { if (typeof e.data === "string") queue.push("M" + e.data); };
+});
+
+EM_JS(void, tbgwaf_ws_send, (const char* msg), {
+  const ws = Module.tbgwafWs;
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(UTF8ToString(msg));
+  // Lets a page that runs two clients order their joins (first = Blue).
+  if (!Module.tbgwafSentOnce) {
+    Module.tbgwafSentOnce = true;
+    if (Module.tbgwafOnFirstSend) Module.tbgwafOnFirstSend();
+  }
+});
+
+// Drops the current connection without raising a "C" event (a refused join
+// goes back to the Room screen rather than showing "Disconnected").
+EM_JS(void, tbgwaf_ws_close, (), {
+  const ws = Module.tbgwafWs;
+  if (ws) {
+    ws.onopen = ws.onclose = ws.onmessage = null;
+    ws.close();
+  }
+  Module.tbgwafWs = null;
+  Module.tbgwafWsQueue = [];
+});
+
+// Returns a malloc'd event (caller frees) or null if none are queued.
+EM_JS(char*, tbgwaf_ws_next, (), {
+  const queue = Module.tbgwafWsQueue;
+  if (!queue || queue.length === 0) return 0;
+  const msg = queue.shift();
+  const size = lengthBytesUTF8(msg) + 1;
+  const ptr = _malloc(size);
+  stringToUTF8(msg, ptr, size);
+  return ptr;
+});
+
 // CSS size of this instance's own canvas (each client renders into its own
 // <canvas>, so a global "#canvas" selector would not do).
 EM_JS(double, tbgwaf_canvas_css_width, (), {
@@ -125,6 +282,17 @@ EM_JS(int, tbgwaf_ai_enabled, (), { return Module.tbgwafAI ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_paused, (), { return Module.tbgwafAIPaused ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_fallback, (), { return Module.tbgwafAIFallback ? 1 : 0; });
 EM_JS(int, tbgwaf_auto_commit, (), { return Module.tbgwafAutoCommit ? 1 : 0; });
+EM_JS(int, tbgwaf_auto_enter, (), { return Module.tbgwafAutoEnter ? 1 : 0; });
+// Splash-page match setup: map id (0 none, 1 urban, 2 urban x4, 3 hills) and
+// seed (-1 none).
+EM_JS(int, tbgwaf_map_choice, (), {
+  const ids = {"urban": 1, "urban-x4": 2, "hills": 3};
+  return ids[Module.tbgwafMap] || 0;
+});
+EM_JS(double, tbgwaf_map_seed, (), {
+  const s = Module.tbgwafMapSeed;
+  return Number.isInteger(s) && s >= 0 && s <= 4294967295 ? s : -1;
+});
 EM_JS(int, tbgwaf_spectator, (), { return Module.tbgwafSpectator ? 1 : 0; });
 EM_JS(int, tbgwaf_default_ctf, (), { return Module.tbgwafDefaultCtf ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_generation, (), { return Module.tbgwafAIGeneration || 0; });
@@ -154,6 +322,19 @@ EM_JS(void, tbgwaf_report_match, (const char* phase, int round, int winner), {
 });
 EM_JS(void, tbgwaf_ai_local_error, (const char* message), {
   if (Module.tbgwafReportAiError) Module.tbgwafReportAiError(UTF8ToString(message));
+});
+// Builder repro log download: hands the text to the browser as a file
+// download.
+EM_JS(void, tbgwaf_download_text, (const char* filename, const char* text), {
+  const blob = new Blob([UTF8ToString(text)], {type: "application/x-ndjson"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = UTF8ToString(filename);
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 #endif
 
@@ -281,6 +462,198 @@ int PaneForX(int x, int paneCount, int windowWidth) {
   return paneCount == 1 || x < windowWidth / 2 ? 0 : 1;
 }
 
+// Frames `camera` on what `bs` actually contains (cubes and figures, plus a
+// margin), centered on the map: a near-empty scene still shows some ground,
+// a crowded one its whole map.
+void FitCameraToBuilderScene(gfx::OrbitCamera* camera, const tactics::BuilderScene& bs) {
+  float extent = 6.0f;
+  for (const tactics::BuilderBox& box : bs.boxes) {
+    extent = std::max({extent, std::fabs(box.cx) + box.hx + 2.0f, std::fabs(box.cz) + box.hz + 2.0f});
+  }
+  for (const tactics::BuilderFigure& figure : bs.figures) {
+    extent = std::max({extent, std::fabs(figure.x) + 2.0f, std::fabs(figure.z) + 2.0f});
+  }
+  camera->target = glm::vec3(0.0f);
+  camera->FitToExtent(std::min(extent, bs.mapHalfExtent));
+  camera->Update(1.0e3f);
+}
+
+// Builder card thumbnails: each scene is rendered offscreen through the same
+// SceneRenderer pass as gameplay (no fog, both teams' FOV) into a texture
+// the Builder screen shows. `*texture` is created on first use and reused
+// (re-rendered in place) after the scene is edited; the caller deletes it
+// with the card.
+constexpr int kThumbnailWidth = 320;
+constexpr int kThumbnailHeight = 180;
+
+void RenderBuilderThumbnail(gfx::SceneRenderer& renderer, const tactics::BuilderScene& bs,
+                            GLuint* texture, int index,
+                            gfx::RenderDebugOptions options) {
+  if (*texture == 0) {
+    glGenTextures(1, texture);
+    glBindTexture(GL_TEXTURE_2D, *texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kThumbnailWidth, kThumbnailHeight, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+  }
+  GLuint fbo = 0, depthStencil = 0;
+  // The scene pass uses depth and stencil.
+  glGenRenderbuffers(1, &depthStencil);
+  glBindRenderbuffer(GL_RENDERBUFFER, depthStencil);
+  glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, kThumbnailWidth, kThumbnailHeight);
+  glBindRenderbuffer(GL_RENDERBUFFER, 0);
+  glGenFramebuffers(1, &fbo);
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, *texture, 0);
+  glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
+                            depthStencil);
+  const bool complete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  if (complete) {
+    GameLogic preview(tactics::BuildScene(bs));
+    preview.UpdateSightingMemory(0.0f);
+    gfx::OrbitCamera camera;
+    FitCameraToBuilderScene(&camera, bs);
+    gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(preview, Team::Blue, std::nullopt);
+    overlays.spectatorFov = true;
+    renderer.RenderPane(preview, Team::Blue, /*fogActive=*/false, TeamVisibility{}, camera, 0, 0,
+                        kThumbnailWidth, kThumbnailHeight, overlays, fbo, options);
+#ifndef __EMSCRIPTEN__
+    // TBGWAF_THUMBNAIL_DUMP=<dir>: write each card's render as
+    // <dir>/builder-<index>.ppm (debug aid for the offscreen path, which no
+    // golden covers).
+    if (const char* dumpDir = std::getenv("TBGWAF_THUMBNAIL_DUMP")) {
+      std::vector<unsigned char> pixels(static_cast<size_t>(kThumbnailWidth) * kThumbnailHeight * 4);
+      glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+      glReadPixels(0, 0, kThumbnailWidth, kThumbnailHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      std::ofstream out(std::string(dumpDir) + "/builder-" + std::to_string(index) + ".ppm",
+                        std::ios::binary);
+      out << "P6\n" << kThumbnailWidth << ' ' << kThumbnailHeight << "\n255\n";
+      for (int y = kThumbnailHeight - 1; y >= 0; --y) {  // GL rows are bottom-up.
+        for (int x = 0; x < kThumbnailWidth; ++x) {
+          const unsigned char* p = &pixels[(static_cast<size_t>(y) * kThumbnailWidth + x) * 4];
+          out.write(reinterpret_cast<const char*>(p), 3);
+        }
+      }
+    }
+#else
+    (void)index;
+#endif
+  } else {
+    std::fprintf(stderr, "builder thumbnail framebuffer incomplete\n");
+  }
+  glDeleteFramebuffers(1, &fbo);
+  glDeleteRenderbuffers(1, &depthStencil);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+// The Builder's first card, and the scene TBGWAF_SMOKE_BUILDER plays: two
+// cubes (a Blue sniper perched on one), 2v2.
+tactics::BuilderScene MakeSampleBuilderScene() {
+  tactics::BuilderScene bs;
+  bs.name = "Rooftop standoff";
+  bs.boxes.push_back({-6.0f, 0.0f, 1.5f, 1.5f, 1.2f});
+  bs.boxes.push_back({2.0f, -4.0f, 1.0f, 2.0f, 2.0f});
+  bs.figures.push_back({Team::Blue, tactics::WeaponType::SniperRifle, -6.0f, 0.0f});
+  bs.figures.push_back({Team::Blue, tactics::WeaponType::AssaultRifle, -8.0f, 5.0f});
+  bs.figures.push_back({Team::Red, tactics::WeaponType::DesertEagle, 8.0f, 2.0f});
+  bs.figures.push_back({Team::Red, tactics::WeaponType::AssaultRifle, 8.0f, -5.0f});
+  return bs;
+}
+
+// XZ where `ray` crosses the horizontal plane at height `y`; false if parallel
+// or behind the origin.
+bool RayHitsPlaneY(const gfx::Ray& ray, float y, float* x, float* z) {
+  if (std::fabs(ray.direction.y) < 1e-4f) return false;
+  const float t = (y - ray.origin.y) / ray.direction.y;
+  if (t <= 0.0f) return false;
+  *x = ray.origin.x + ray.direction.x * t;
+  *z = ray.origin.z + ray.direction.z * t;
+  return true;
+}
+
+// Editor picking: the figure whose standing box (feet at its surface, ~1.8
+// tall) the ray hits nearest, or -1; likewise for cubes.
+int PickBuilderFigure(const gfx::Ray& ray, const tactics::BuilderScene& bs) {
+  int best = -1;
+  float bestT = std::numeric_limits<float>::infinity();
+  for (int i = 0; i < static_cast<int>(bs.figures.size()); ++i) {
+    const tactics::BuilderFigure& figure = bs.figures[i];
+    const float y = tactics::SurfaceHeightAt(bs, figure.x, figure.z);
+    const tactics::AABB bounds{glm::vec3(figure.x - 0.5f, y, figure.z - 0.5f),
+                               glm::vec3(figure.x + 0.5f, y + 1.8f, figure.z + 0.5f)};
+    float t = 0.0f;
+    if (tactics::RayIntersectsAABB(ray.origin, ray.direction, bounds, &t) && t < bestT) {
+      bestT = t;
+      best = i;
+    }
+  }
+  return best;
+}
+
+int PickBuilderBox(const gfx::Ray& ray, const tactics::BuilderScene& bs) {
+  int best = -1;
+  float bestT = std::numeric_limits<float>::infinity();
+  for (int i = 0; i < static_cast<int>(bs.boxes.size()); ++i) {
+    const tactics::BuilderBox& box = bs.boxes[i];
+    const tactics::AABB bounds{glm::vec3(box.cx - box.hx, box.y, box.cz - box.hz),
+                               glm::vec3(box.cx + box.hx, tactics::BoxTop(box), box.cz + box.hz)};
+    float t = 0.0f;
+    if (tactics::RayIntersectsAABB(ray.origin, ray.direction, bounds, &t) && t < bestT) {
+      bestT = t;
+      best = i;
+    }
+  }
+  return best;
+}
+
+std::string UtcTimestamp(bool forFilename) {
+  const std::time_t now = std::time(nullptr);
+  char buf[32];
+  std::tm tm{};
+#ifdef _WIN32
+  gmtime_s(&tm, &now);
+#else
+  gmtime_r(&now, &tm);
+#endif
+  std::strftime(buf, sizeof buf, forFilename ? "%Y%m%d-%H%M%S" : "%Y-%m-%dT%H:%M:%SZ", &tm);
+  return buf;
+}
+
+// Hands the session's repro log to the user: a browser download on the web,
+// a file (TBGWAF_REPRO_DIR, else the working directory) natively. Returns
+// where it went, for the panel.
+std::string DownloadReproLog(tactics::ReproRecorder& recorder, const std::string& sceneId) {
+  const std::string text = recorder.Text();
+  // Scene ids may carry a Builder scene's free-form name ("builder:My yard"):
+  // keep the filename portable.
+  std::string safeId = sceneId;
+  for (char& c : safeId) {
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') c = '-';
+  }
+  const std::string filename = "repro-" + safeId + "-" + UtcTimestamp(true) + ".jsonl";
+#ifdef __EMSCRIPTEN__
+  tbgwaf_download_text(filename.c_str(), text.c_str());
+  return filename;
+#else
+  std::string path = filename;
+  if (const char* dir = std::getenv("TBGWAF_REPRO_DIR")) path = std::string(dir) + "/" + filename;
+  std::ofstream out(path, std::ios::binary);
+  out << text;
+  if (!out) {
+    std::fprintf(stderr, "could not write repro log %s\n", path.c_str());
+    return "";
+  }
+  std::fprintf(stderr, "repro log written to %s\n", path.c_str());
+  return path;
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -360,6 +733,9 @@ int main() {
 #ifndef __EMSCRIPTEN__
   mapSeed = std::random_device{}();
 #endif
+#ifdef __EMSCRIPTEN__
+  if (const double s = tbgwaf_map_seed(); s >= 0) mapSeed = static_cast<uint32_t>(s);
+#endif
   if (const char* seedEnv = std::getenv("TBGWAF_MAP_SEED")) {
     mapSeed = static_cast<uint32_t>(std::strtoul(seedEnv, nullptr, 10));
   }
@@ -369,10 +745,21 @@ int main() {
   // issue #130); TBGWAF_MAP=urban forces it off, urban-elevated forces it on;
   // urban-full forces every optional feature layer on.
   std::string mapType = "urban-auto";
+#ifdef __EMSCRIPTEN__
+  // Splash pick (the same ids the Map Select screen maps to below).
+  if (const int choice = tbgwaf_map_choice(); choice == 1) mapType = "urban-auto-x1";
+  else if (choice == 3) mapType = "hilly";
+#endif
   if (const char* mapEnv = std::getenv("TBGWAF_MAP")) mapType = mapEnv;
   auto makeBaseMap = [](uint32_t mapSeed, const std::string& mapType) {
     if (mapType == "hilly") return tactics::GenerateHillyMap(mapSeed);
     tactics::MapGeneratorConfig config;
+    // The regular menu entry keeps the original 4x4 city. Urban x4 uses
+    // the 8x8 generator default: twice each dimension, four times the area.
+    if (mapType == "urban-auto-x1") {
+      config.blocksX = 4;
+      config.blocksZ = 4;
+    }
     if (mapType == "urban-merge" || mapType == "urban-elevated") config.arteryCount = 2;
     if (mapType == "urban" || mapType == "urban-merge") {
       config.elevatedHighway = tactics::OverpassMode::Off;
@@ -381,7 +768,7 @@ int main() {
     if (mapType == "urban-full") {
       // Every optional detail layer forced on (issue #146).
       for (const char* name :
-           {"lanes", "curbs", "furniture", "terrain", "interiors", "rail", "facades"}) {
+           {"lanes", "curbs", "furniture", "terrain", "interiors", "rail", "facades", "trees"}) {
         tactics::UrbanFeatureByName(&config.features, name)->mode = tactics::FeatureMode::On;
       }
     }
@@ -421,6 +808,67 @@ int main() {
   timeline.Reset(game);
   tactics::TimelinePlayback timelinePlayback;
 
+  // Builder: the player-built scenes (in memory for the session; the first
+  // card is a sample), each card's thumbnail texture and whether it needs a
+  // re-render, the scene open in the editor / in play, and the session
+  // recorder. A builder game is played hotseat on one screen; the recorder
+  // keeps its log downloadable until the next builder game starts.
+  std::vector<tactics::BuilderScene> builderScenes = {MakeSampleBuilderScene()};
+  std::vector<GLuint> builderThumbnails(builderScenes.size(), 0);
+  std::vector<bool> builderThumbnailDirty(builderScenes.size(), true);
+  // With a game server configured the scenes are stored there (see
+  // net::BuilderSceneSync): the id each scene has on the server ("" = not
+  // stored yet), kept parallel to builderScenes.
+  tactics::net::BuilderSceneSync sceneSync;
+  std::vector<std::string> builderSceneIds(builderScenes.size());
+  int builderIndex = -1;          // Scene open in the editor / played.
+  bool builderGameActive = false;  // Gameplay was entered via start_builder_game.
+  std::string builderLogSceneId;   // Scene id of the recorder's current log.
+  std::string builderStatus;
+  tactics::ReproRecorder reproRecorder([] { return static_cast<uint64_t>(SDL_GetTicks()); });
+  // The editor's own view of the scene being built: a preview game rebuilt
+  // whenever the scene changes (keyed on its serialization), its camera and
+  // selection, and the figure being dragged in the viewport (-1 = none).
+  GameLogic builderPreview;
+  std::string builderPreviewKey;
+  gfx::OrbitCamera builderCamera;
+  tactics::ui::BuilderEditorState builderEditor;
+  int builderDragFigure = -1;
+  int builderDragBox = -1;           // Cube being dragged in the viewport (-1 = none).
+  bool builderDragRotate = false;    // Shift held on grab: the drag turns the figure instead.
+  glm::vec2 builderDragBoxGrab(0.0f);  // Cube center minus grab point (XZ).
+  float builderDragPlaneY = 0.0f;    // Height of the plane the cube is dragged along.
+  auto addBuilderScene = [&](tactics::BuilderScene bs, std::string id = "") {
+    builderScenes.push_back(std::move(bs));
+    builderSceneIds.push_back(std::move(id));
+    builderThumbnails.push_back(0);
+    builderThumbnailDirty.push_back(true);
+    return static_cast<int>(builderScenes.size()) - 1;
+  };
+  auto deleteBuilderScene = [&](int index) {
+    if (builderThumbnails[index] != 0) glDeleteTextures(1, &builderThumbnails[index]);
+    if (!builderSceneIds[index].empty() && !sceneSync.Remove(builderSceneIds[index])) {
+      builderStatus = "Server not connected: scene not deleted there";
+    }
+    builderScenes.erase(builderScenes.begin() + index);
+    builderSceneIds.erase(builderSceneIds.begin() + index);
+    builderThumbnails.erase(builderThumbnails.begin() + index);
+    builderThumbnailDirty.erase(builderThumbnailDirty.begin() + index);
+    if (builderIndex == index) builderIndex = -1;
+    else if (builderIndex > index) --builderIndex;
+  };
+  // Opens scene `index` in the editor: fresh selection, camera fit to the map.
+  auto openBuilderEditor = [&](int index) {
+    builderIndex = index;
+    builderEditor = {};
+    builderDragFigure = -1;
+    builderDragBox = -1;
+    builderPreviewKey.clear();  // Rebuilt on the first editor frame.
+    builderCamera = gfx::OrbitCamera();
+    builderCamera.FitToExtent(builderScenes[index].mapHalfExtent);
+    builderCamera.Update(1.0e3f);
+  };
+
   // Navmesh boundary debug overlay ('N' toggles it): a full-map navmesh
   // built on first use (GameLogic's own is windowed per move, so the debug
   // view meshes the whole scene itself).
@@ -437,7 +885,8 @@ int main() {
   bool awaitingPeerSync = false;
   Uint32 peerSyncDeadline = 0;
 #ifdef __EMSCRIPTEN__
-  if (const int requested = tbgwaf_requested_player(); requested >= 0) {
+  if (const int requested = tbgwaf_requested_player();
+      requested >= 0 && !tbgwaf_has_server()) {
     fixedTeam = requested == 0 ? Team::Blue : Team::Red;
     tbgwaf_channel_open();
     tbgwaf_channel_post("H");
@@ -445,12 +894,128 @@ int main() {
     peerSyncDeadline = SDL_GetTicks() + kPeerSyncTimeoutMs;
   }
 #endif
+  // Server mode: this client plays against a remote opponent through the
+  // authoritative server (src/server). The local GameLogic is only a
+  // presentation mirror driven by net::RemoteClient; our team is assigned by
+  // the server once an opponent has joined.
+  std::unique_ptr<tactics::net::RemoteClient> remote;
+  // A server is configured but no room was named by the page: the in-game
+  // Room screen (Game Mode -> Online) picks one and connects (see
+  // connectOnline). Empty on native builds and when the page names a room.
+  std::string onlineServerUrl;
+  bool connectedFromMenu = false;
+  tactics::ui::RoomForm roomForm;
+#ifdef __EMSCRIPTEN__
+  {
+    char* urlRaw = tbgwaf_server_url();
+    const std::string serverUrl(urlRaw);
+    std::free(urlRaw);
+    if (!serverUrl.empty()) {
+      char* roomRaw = tbgwaf_server_room();
+      char* intentRaw = tbgwaf_server_room_intent();
+      const bool spectate = tbgwaf_server_spectate() != 0;
+      if (roomRaw[0] == '\0' && intentRaw[0] == '\0' && !spectate && !tbgwaf_auto_enter()) {
+        onlineServerUrl = serverUrl;
+        fixedTeam = Team::Blue;  // One pane; a local mirror until a room is chosen.
+      } else {
+        remote = std::make_unique<tactics::net::RemoteClient>(&game, roomRaw, intentRaw, spectate);
+        char* botModeRaw = tbgwaf_server_bot_mode();
+        remote->SetBotMode(botModeRaw);
+        {
+          const int choice = tbgwaf_map_choice();
+          const double s = tbgwaf_map_seed();
+          remote->SetMatchSetup(choice == 1 ? "urban" : choice == 2 ? "urban-x4"
+                                                    : choice == 3 ? "hills" : "",
+                                s >= 0 ? std::optional<uint32_t>(static_cast<uint32_t>(s))
+                                       : std::nullopt,
+                                tbgwaf_default_ctf() != 0);
+        }
+        std::free(botModeRaw);
+        fixedTeam = Team::Blue;  // Placeholder until the server's "start".
+        tbgwaf_ws_open(serverUrl.c_str());
+      }
+      std::free(roomRaw);
+      std::free(intentRaw);
+    }
+  }
+#endif
+  bool remoteMode = remote != nullptr;
   const bool networked = fixedTeam.has_value();
   // The Blue instance (or the lone native window) simulates rounds; the Red
-  // instance mirrors it during execution.
-  const bool isSimulator = !networked || *fixedTeam == Team::Blue;
-  const int paneCount = networked ? 1 : kMaxPanes;
+  // instance mirrors it during execution. A server-mode client never
+  // simulates: the server is the only authority.
+  bool isSimulator = !remoteMode && (!networked || *fixedTeam == Team::Blue);
+  // Panes outside a builder game; a builder game is one hotseat pane.
+  const int defaultPaneCount = networked ? 1 : kMaxPanes;
+  // Builder hotseat: one screen plans for both teams, so the "pane team"
+  // (whose HUD, overlays and input tags are used) follows the selected
+  // figure, Blue when nothing is selected.
+  auto hotseatTeam = [&]() {
+    if (const auto selectedId = game.SelectedUnitId()) {
+      if (const Unit* selected = game.FindUnit(*selectedId)) return selected->team;
+    }
+    return Team::Blue;
+  };
+  // Server-stored Builder scenes (web build, game server configured): the
+  // Builder keeps a short-lived socket to the server while its screens are
+  // up. The local scenes start empty and fill from the server's list (an
+  // empty store is seeded with the sample scene).
+  std::mt19937_64 sceneIdRng{std::random_device{}()};
+  [[maybe_unused]] bool sceneSocketOpen = false;  // Web build only.
+  bool sceneListSeeded = false;
+  [[maybe_unused]] std::optional<std::vector<tactics::net::BuilderSceneSync::Stored>>
+      pendingServerScenes;
+  if (!onlineServerUrl.empty()) {
+    for (GLuint texture : builderThumbnails) {
+      if (texture != 0) glDeleteTextures(1, &texture);
+    }
+    builderScenes.clear();
+    builderSceneIds.clear();
+    builderThumbnails.clear();
+    builderThumbnailDirty.clear();
+  }
+  // Stores scene `index` on the server (no-op without one). An editing
+  // session's changes are saved when the editor is left.
+  auto saveBuilderScene = [&](int index) {
+    if (onlineServerUrl.empty() || index < 0 || index >= static_cast<int>(builderScenes.size())) {
+      return;
+    }
+    if (builderSceneIds[index].empty()) {
+      builderSceneIds[index] = tactics::net::BuilderSceneSync::NewId(sceneIdRng());
+    }
+    if (!sceneSync.Save(builderSceneIds[index], builderScenes[index])) {
+      builderStatus = "Server not connected: scene not saved";
+    }
+  };
+  // Merges the server's list into the local scenes: the server's copy wins
+  // per id, local scenes the server doesn't have yet are kept and uploaded.
+  [[maybe_unused]] auto applyServerScenes = [&](std::vector<tactics::net::BuilderSceneSync::Stored> stored) {
+    std::vector<tactics::BuilderScene> localScenes = std::move(builderScenes);
+    std::vector<std::string> localIds = std::move(builderSceneIds);
+    for (GLuint texture : builderThumbnails) {
+      if (texture != 0) glDeleteTextures(1, &texture);
+    }
+    builderScenes.clear();
+    builderSceneIds.clear();
+    builderThumbnails.clear();
+    builderThumbnailDirty.clear();
+    builderIndex = -1;
+    for (auto& entry : stored) addBuilderScene(std::move(entry.scene), entry.id);
+    std::vector<int> toUpload;
+    for (size_t i = 0; i < localScenes.size(); ++i) {
+      bool onServer = false;
+      for (const auto& entry : stored) onServer = onServer || entry.id == localIds[i];
+      if (onServer && !localIds[i].empty()) continue;
+      toUpload.push_back(addBuilderScene(std::move(localScenes[i]), localIds[i]));
+    }
+    if (builderScenes.empty() && !sceneListSeeded) {
+      toUpload.push_back(addBuilderScene(MakeSampleBuilderScene()));
+    }
+    sceneListSeeded = true;
+    for (int index : toUpload) saveBuilderScene(index);
+  };
   auto paneTeam = [&](int pane) {
+    if (builderGameActive) return hotseatTeam();
     if (networked) return *fixedTeam;
     return pane == 0 ? Team::Blue : Team::Red;
   };
@@ -474,6 +1039,82 @@ int main() {
   InputMode lastReportedMode = InputMode::Executing;
 #endif
 
+  // Local-only debug panel state (defaults: FOV and shadows on, FPS shown).
+  gfx::RenderDebugOptions debugOptions;
+  // AO view is on by default, including in the smoke test (software GL needs
+  // the longer smoke_test timeout).
+  // Default look: AO view (black hot) with NPR outlines layered on top.
+  debugOptions.thermal = true;
+  debugOptions.npr = true;
+  debugOptions.nprSettings.outlineThickness = 0.8f;
+  debugOptions.nprSettings.outlineStrength = 0.46f;
+  debugOptions.nprSettings.detailSize = 0.02f;
+  bool showFps = true;
+  float smoothedFps = 0.0f;
+  float frameMs = 0.0f;
+  float fovMs = 0.0f;
+  gfx::RenderFrameStats frameStats;
+
+  // Starts a hotseat game on builder scene `index`: per-session reset and a
+  // fresh recording (the log embeds the scene), cameras framed on it.
+  auto startBuilderGame = [&](int index) {
+    builderIndex = index;
+    builderGameActive = true;
+    const tactics::BuilderScene& bs = builderScenes[index];
+    uint32_t seed = SDL_GetTicks() * 2654435761u ^ static_cast<uint32_t>(std::time(nullptr));
+    if (const char* seedEnv = std::getenv("TBGWAF_MAP_SEED")) {
+      seed = static_cast<uint32_t>(std::strtoul(seedEnv, nullptr, 10));
+    }
+    tactics::InitBuilderGame(&game, bs, seed);
+    builderLogSceneId = tactics::BuilderSceneLogId(bs);
+    reproRecorder.Start(game, builderLogSceneId, seed, UtcTimestamp(false),
+                        tactics::SerializeBuilderScene(bs));
+    game.SetInputRecorder(&reproRecorder);
+    timeline.Reset(game);
+    timelinePlayback.Reset();
+    navMeshDebugBuilt = false;
+    showNavMeshDebug = false;
+    for (auto& camera : cameras) FitCameraToBuilderScene(&camera, bs);
+    builderStatus.clear();
+    // Builder play is local to this instance: no peer sync to wait for.
+    awaitingPeerSync = false;
+  };
+  // Ends a builder game (Stop): the recorder stops listening but keeps the
+  // log for Download.
+  auto stopBuilderGame = [&]() {
+    game.SetInputRecorder(nullptr);
+    builderGameActive = false;
+    timelinePlayback.Reset();
+  };
+  // Leaving the Builder for the Game Mode menu: drop the builder game so it
+  // is never published, and (web) rejoin the peer's match -- ask it for its
+  // state; the simulator re-broadcasts ours.
+  auto leaveBuilderFlow = [&]() {
+    stopBuilderGame();
+    game.Reset(makeMap());
+    timeline.Reset(game);
+    timelinePlayback.Reset();
+    navMeshDebugBuilt = false;
+    showNavMeshDebug = false;
+    lastSentState.clear();
+    forceBroadcast = isSimulator;
+#ifdef __EMSCRIPTEN__
+    if (networked) {
+      tbgwaf_channel_post("H");
+      awaitingPeerSync = !isSimulator;
+      peerSyncDeadline = SDL_GetTicks() + kPeerSyncTimeoutMs;
+    }
+#endif
+  };
+#ifdef __EMSCRIPTEN__
+  // Builder screens and builder games are single-instance: a networked
+  // instance in them neither sends nor applies bus messages.
+  auto inBuilderFlow = [&](tbgwaf_flow::State state) {
+    return state == tbgwaf_flow::State::Builder || state == tbgwaf_flow::State::BuilderEdit ||
+           (state == tbgwaf_flow::State::Gameplay && builderGameActive);
+  };
+#endif
+
   bool quit = false;
   constexpr float kClickDragThresholdPx = 5.0f;
   constexpr Uint32 kDoubleClickMs = 400;
@@ -491,26 +1132,86 @@ int main() {
   // Headless CI (xvfb) has no real user input; bound the run so the smoke
   // test still exits on its own after exercising a few frames.
   const bool isSmokeTest = std::getenv("TBGWAF_SMOKE_TEST") != nullptr;
+  // TBGWAF_SMOKE_BUILDER=1 walks into the Builder instead (thumbnails, the
+  // editor) and plays the sample scene hotseat, with a scripted round, and
+  // TBGWAF_REPRO_OUT=<path> writes the recorded log on exit (ctest
+  // builder_smoke_test replays it).
+  const bool isSmokeBuilder = isSmokeTest && std::getenv("TBGWAF_SMOKE_BUILDER") != nullptr;
   int frameCount = 0;
-  constexpr int kSmokeTestMaxFrames = 60;
+  const int kSmokeTestMaxFrames = isSmokeBuilder ? 240 : 60;
   Uint32 lastFrameTicks = SDL_GetTicks();
   // App-level screen (Splash -> Map Select -> gameplay), generated from
   // flow/app_flow.yaml.
   tbgwaf_flow::State screen = tbgwaf_flow::kInitialState;
-  // Local-only debug panel state (defaults: FOV and shadows on, FPS shown).
-  gfx::RenderDebugOptions debugOptions;
-  // AO view is on by default, including in the smoke test (software GL needs
-  // the longer smoke_test timeout).
-  debugOptions.thermal = true;
-  bool showFps = true;
-  float smoothedFps = 0.0f;
-  float frameMs = 0.0f;
-  float fovMs = 0.0f;
-  gfx::RenderFrameStats frameStats;
-
+#ifndef __EMSCRIPTEN__
+  // TBGWAF_REPRO_LOG=<file>: replay a recorded session (a Builder log, or a
+  // registry demo-scene log) into the live game (the turn timeline records
+  // it, so it can be scrubbed) and open straight on the result. View-only:
+  // the loaded session is not re-recorded. A Builder log's scene is added to
+  // the Builder's cards and shown hotseat, as it was played.
+  if (const char* logPath = std::getenv("TBGWAF_REPRO_LOG")) {
+    std::ifstream in(logPath, std::ios::binary);
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    if (!in) {
+      std::fprintf(stderr, "TBGWAF_REPRO_LOG: cannot read %s\n", logPath);
+      return 1;
+    }
+    tactics::ReproLog parsed;
+    std::string parseError;
+    if (!tactics::ParseReproLog(buffer.str(), &parsed, &parseError)) {
+      std::fprintf(stderr, "TBGWAF_REPRO_LOG: %s\n", parseError.c_str());
+      return 1;
+    }
+    // Restart the timeline on the session's initial state (so its Start tick
+    // is the session's): replaying the header alone sets the game up exactly
+    // as the full replay below will, without applying any entry.
+    tactics::ReproLog headerOnly;
+    headerOnly.header = parsed.header;
+    const tactics::ReplayReport setup =
+        tactics::ReplayAnyLog(tactics::SerializeReproLog(headerOnly), &game);
+    if (!setup.error.empty()) {
+      std::fprintf(stderr, "TBGWAF_REPRO_LOG: %s\n", setup.error.c_str());
+      return 1;
+    }
+    timeline.Reset(game);
+    const tactics::ReplayReport report = tactics::ReplayAnyLog(
+        buffer.str(), &game, nullptr, [&](const tactics::ReproEntry&, float dt) {
+          game.UpdateSightingMemory(dt);
+          timeline.Observe(game, dt);
+        });
+    if (!report.error.empty()) {
+      std::fprintf(stderr, "TBGWAF_REPRO_LOG: %s\n", report.error.c_str());
+      return 1;
+    }
+    timeline.Observe(game, 0.0f);
+    const std::string loaded = std::string("Loaded ") + logPath + ": " +
+                               std::to_string(report.mismatches.size()) + " hash mismatch(es)";
+    std::fprintf(stderr, "%s\n", loaded.c_str());
+    tactics::BuilderScene loadedScene;
+    if (!parsed.header.builderScene.empty() &&
+        tactics::ParseBuilderScene(parsed.header.builderScene, &loadedScene)) {
+      builderIndex = addBuilderScene(loadedScene);
+      builderGameActive = true;
+      builderStatus = loaded;
+      for (auto& camera : cameras) FitCameraToBuilderScene(&camera, loadedScene);
+    } else {
+      for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
+    }
+    screen = tbgwaf_flow::State::Gameplay;
+  }
+#endif
   auto runFrame = [&]() {
 #ifdef __EMSCRIPTEN__
-    const bool aiEnabled = networked && tbgwaf_ai_enabled();
+    // A restart from the page (e.g. switching to Jev vs Jev) pulls this
+    // instance out of the Builder back into the shared match.
+    const bool pageRestart = tbgwaf_take_restart() && networked && !remoteMode;
+    if (pageRestart && inBuilderFlow(screen)) {
+      leaveBuilderFlow();
+      screen = tbgwaf_flow::State::GameMode;
+    }
+    // Jev never plays a builder game.
+    const bool aiEnabled = networked && tbgwaf_ai_enabled() && !inBuilderFlow(screen);
     const bool aiPaused = tbgwaf_ai_paused();
     const int aiGeneration = tbgwaf_ai_generation();
     if (aiGeneration != observedAiGeneration) {
@@ -520,7 +1221,9 @@ int main() {
       jevErrorHold = false;
     }
     if (tbgwaf_take_ai_retry()) jevErrorHold = false;
-    if (networked && tbgwaf_take_restart()) {
+    // A server-mode page restarts by reloading into a fresh room; the local
+    // game is only a mirror and must not be reset here.
+    if (pageRestart) {
       // Jev vs Jev defaults to CTF; leaving it restores the menu's choice.
       const bool previewCtf = tbgwaf_default_ctf();
       if (previewCtf) ctfMode = true;
@@ -558,10 +1261,83 @@ int main() {
       return mode != InputMode::Executing && mode != InputMode::GameOver;
     };
 #ifdef __EMSCRIPTEN__
-    if (networked) {
+    if (!onlineServerUrl.empty() && !remoteMode) {
+      const bool wantSceneSocket = inBuilderFlow(screen);
+      if (wantSceneSocket && !sceneSocketOpen) {
+        tbgwaf_ws_open(onlineServerUrl.c_str());
+        sceneSocketOpen = true;
+      }
+      while (sceneSocketOpen) {
+        char* raw = tbgwaf_ws_next();
+        if (!raw) break;
+        const std::string event(raw);
+        std::free(raw);
+        if (event == "O") {
+          sceneSync.OnOpen();
+        } else if (event == "C") {
+          sceneSync.OnClose();
+          sceneSocketOpen = false;
+        } else if (event.size() > 1 && event[0] == 'M') {
+          if (sceneSync.OnMessage(event.substr(1))) {
+            std::vector<tactics::net::BuilderSceneSync::Stored> stored;
+            if (sceneSync.TakeLoaded(&stored)) pendingServerScenes = std::move(stored);
+          } else if (!sceneSync.lastError().empty()) {
+            builderStatus = "Server: " + sceneSync.lastError();
+          }
+        }
+      }
+      // Apply a fresh list on the Builder screen only (never under the editor).
+      if (pendingServerScenes && screen == tbgwaf_flow::State::Builder) {
+        applyServerScenes(std::move(*pendingServerScenes));
+        pendingServerScenes.reset();
+      }
+      if (sceneSocketOpen) {
+        for (const std::string& frame : sceneSync.TakeOutgoing()) tbgwaf_ws_send(frame.c_str());
+      }
+      if (!wantSceneSocket && sceneSocketOpen) {
+        tbgwaf_ws_close();
+        sceneSync.OnClose();
+        sceneSocketOpen = false;
+        pendingServerScenes.reset();
+      }
+    }
+    if (remoteMode) {
+      while (char* raw = tbgwaf_ws_next()) {
+        const std::string event(raw);
+        std::free(raw);
+        if (event == "O") remote->OnOpen();
+        else if (event == "C") remote->OnClose();
+        else if (event.size() > 1 && event[0] == 'M') remote->OnMessage(event.substr(1));
+      }
+      if (remote->team()) fixedTeam = remote->team();
+      if (remote->ConsumeMatchStarted()) {
+        pendingJevRequest.reset();
+        jevBuilder.reset();
+        jevErrorHold = false;
+        lastAutoCommittedRound = -1;
+        timeline.Reset(game);
+        timelinePlayback.Reset();
+        for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
+      }
+      // A room picked in the menu that the server refused (unknown / full):
+      // back to the Room screen with the reason.
+      if (connectedFromMenu && remote->status() == tactics::net::RemoteClient::Status::Rejected) {
+        roomForm.error = remote->lastError();
+        tbgwaf_ws_close();
+        remote.reset();
+        remoteMode = false;
+        isSimulator = true;
+        connectedFromMenu = false;
+        screen = tbgwaf_flow::State::Room;
+      }
+    } else if (networked) {
+      // Builder screens/games are local: the peer's messages are drained
+      // and dropped (leaving the Builder resyncs, see leaveBuilderFlow).
+      const bool dropMessages = inBuilderFlow(screen);
       while (char* raw = tbgwaf_channel_next()) {
         const std::string msg(raw);
         std::free(raw);
+        if (dropMessages) continue;
         if (msg == "H") {
           forceBroadcast = true;  // A peer just opened: hand it our state.
         } else if (msg == "C") {
@@ -601,6 +1377,16 @@ int main() {
     }
 #endif
 
+    const bool builderHotseat = screen == tbgwaf_flow::State::Gameplay && builderGameActive;
+    const bool builderEditing = screen == tbgwaf_flow::State::BuilderEdit && builderIndex >= 0 &&
+                                builderIndex < static_cast<int>(builderScenes.size());
+    const int paneCount = builderHotseat ? 1 : defaultPaneCount;
+    // The editor's 3D viewport: the window left of its side panel.
+    const PaneRect editorRect{
+        0, std::max(1, windowWidth - static_cast<int>(tactics::ui::BuilderPanelWidth(windowWidth)))};
+    auto cameraForPane = [&](int pane) -> gfx::OrbitCamera& {
+      return builderEditing ? builderCamera : cameras[pane];
+    };
     std::array<PaneRect, kMaxPanes> paneRects;
     for (int pane = 0; pane < paneCount; ++pane) {
       paneRects[pane] = ComputePaneRect(pane, paneCount, windowWidth);
@@ -620,6 +1406,23 @@ int main() {
     int mouseX = 0, mouseY = 0;
     SDL_GetMouseState(&mouseX, &mouseY);
 
+#ifdef __EMSCRIPTEN__
+    {
+      // Touch pinch/drag and trackpad scroll/pinch gestures (see
+      // tbgwaf_bind_canvas). Scroll/two-finger drag rotates; pinch zooms.
+      float g[4];
+      if (tbgwaf_take_gesture(g) && !ImGui::GetIO().WantCaptureMouse) {
+        constexpr float kRotateSpeed = 0.005f;
+        constexpr float kPinchZoom = 0.01f;  // Fraction of distance per unit.
+        const float scale = tbgwaf_canvas_css_width() > 0
+                                ? static_cast<float>(windowWidth / tbgwaf_canvas_css_width())
+                                : 1.0f;
+        gfx::OrbitCamera& camera = cameras[PaneForX(static_cast<int>(g[3] * scale), paneCount, windowWidth)];
+        camera.Rotate(-g[0] * kRotateSpeed, g[1] * kRotateSpeed);
+        camera.Zoom(g[2] * kPinchZoom * camera.TargetDistance());
+      }
+    }
+#endif
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
       ImGui_ImplSDL2_ProcessEvent(&event);
@@ -637,7 +1440,42 @@ int main() {
         // (instead of panning) until the button is released.
         aimedUnitId = -1;
         aimedPane = -1;
-        if (isPlanningMode(game.Mode()) && !awaitingPeerSync && !timelinePlayback.Active() &&
+        builderDragFigure = -1;
+        builderDragBox = -1;
+        if (builderEditing && !ImGui::GetIO().WantCaptureMouse &&
+            event.button.x < editorRect.x + editorRect.width) {
+          // Editor: pressing on a figure drags it (instead of panning) until
+          // the button is released.
+          const gfx::Ray grabRay = builderCamera.ScreenPointToRay(
+              static_cast<float>(event.button.x - editorRect.x), static_cast<float>(event.button.y),
+              static_cast<float>(editorRect.width), static_cast<float>(windowHeight));
+          builderDragFigure = PickBuilderFigure(grabRay, builderScenes[builderIndex]);
+          builderDragRotate = (SDL_GetModState() & KMOD_SHIFT) != 0;
+          if (builderDragFigure >= 0) {
+            builderEditor.selectedFigure = builderDragFigure;
+            builderEditor.selectedBox = -1;
+          } else {
+            // No figure under the cursor: a cube is dragged on a plane at its
+            // top, keeping the grab offset.
+            builderDragBox = PickBuilderBox(grabRay, builderScenes[builderIndex]);
+            if (builderDragBox >= 0) {
+              const tactics::BuilderBox& box = builderScenes[builderIndex].boxes[builderDragBox];
+              builderDragPlaneY = tactics::BoxTop(box);
+              builderDragBoxGrab = glm::vec2(box.cx, box.cz);
+              if (RayHitsPlaneY(grabRay, builderDragPlaneY, &builderDragBoxGrab.x,
+                                &builderDragBoxGrab.y)) {
+                const glm::vec2 center(box.cx, box.cz);
+                builderDragBoxGrab = center - builderDragBoxGrab;
+              } else {
+                builderDragBoxGrab = glm::vec2(0.0f);
+              }
+              builderEditor.selectedBox = builderDragBox;
+              builderEditor.selectedFigure = -1;
+            }
+          }
+        }
+        if (screen == tbgwaf_flow::State::Gameplay && isPlanningMode(game.Mode()) &&
+            !awaitingPeerSync && !timelinePlayback.Active() &&
             !ImGui::GetIO().WantCaptureMouse) {
           const PaneRect& grabRect = paneRects[leftDragPane];
           const Team grabTeam = paneTeam(leftDragPane);
@@ -647,7 +1485,8 @@ int main() {
           if (std::fabs(grabRay.direction.y) > 1e-4f) {
             constexpr float kGrabRadius = 0.7f;
             for (const Unit& unit : game.GetScene().units) {
-              if (!unit.alive || unit.team != grabTeam ||
+              // Hotseat: either team's ghosts can be grabbed.
+              if (!unit.alive || (!builderHotseat && unit.team != grabTeam) ||
                   unit.plan.type != tactics::PlannedActionType::Move || unit.plan.movePath.empty()) {
                 continue;
               }
@@ -669,18 +1508,19 @@ int main() {
         // While a ghost is grabbed, left-drag aims it (handled after the UI
         // pass) instead of panning the camera.
         if (leftDragPane >= 0 && !ImGui::GetIO().WantCaptureMouse) {
-          if (aimedUnitId < 0) {
+          if (aimedUnitId < 0 && builderDragFigure < 0 && builderDragBox < 0) {
             constexpr float kPanSpeed = 0.0015f;
             // Drag the world under the cursor: target moves opposite to the drag.
-            cameras[leftDragPane].Pan(-event.motion.xrel * kPanSpeed, event.motion.yrel * kPanSpeed);
+            cameraForPane(leftDragPane)
+                .Pan(-event.motion.xrel * kPanSpeed, event.motion.yrel * kPanSpeed);
           }
           leftDragDistance += std::hypot(static_cast<float>(event.motion.xrel),
                                           static_cast<float>(event.motion.yrel));
         }
         if (rightDragPane >= 0 && !ImGui::GetIO().WantCaptureMouse) {
           constexpr float kRotateSpeed = 0.005f;
-          cameras[rightDragPane].Rotate(-event.motion.xrel * kRotateSpeed,
-                                         event.motion.yrel * kRotateSpeed);
+          cameraForPane(rightDragPane)
+              .Rotate(-event.motion.xrel * kRotateSpeed, event.motion.yrel * kRotateSpeed);
         }
       } else if (event.type == SDL_MOUSEWHEEL) {
         if (!ImGui::GetIO().WantCaptureMouse) {
@@ -692,7 +1532,7 @@ int main() {
 #else
           const float wheelY = static_cast<float>(event.wheel.y);
 #endif
-          gfx::OrbitCamera& camera = cameras[PaneForX(mouseX, paneCount, windowWidth)];
+          gfx::OrbitCamera& camera = cameraForPane(PaneForX(mouseX, paneCount, windowWidth));
           camera.Zoom(-wheelY * kZoomSpeed * camera.TargetDistance());
         }
       } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
@@ -702,6 +1542,8 @@ int main() {
         leftDragDistance = 0.0f;
         aimedUnitId = -1;
         aimedPane = -1;
+        builderDragFigure = -1;
+        builderDragBox = -1;
         leftClickX = event.button.x;
         leftClickY = event.button.y;
       } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
@@ -725,41 +1567,226 @@ int main() {
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
 
+    // --- Builder editor (builder_edit): the scene being built, rendered
+    // full-height left of the side panel, with its own camera. ---
+    if (screen == tbgwaf_flow::State::BuilderEdit && !builderEditing) {
+      screen = tbgwaf_flow::Next(screen, tbgwaf_flow::Event::BackToBuilder);  // Scene gone.
+    }
+    if (builderEditing) {
+      tactics::BuilderScene& bs = builderScenes[builderIndex];
+      const Uint32 nowTicks = SDL_GetTicks();
+      builderCamera.Update(static_cast<float>(nowTicks - lastFrameTicks) / 1000.0f);
+      lastFrameTicks = nowTicks;
+
+      const tactics::ui::BuilderEditorActions editor =
+          tactics::ui::DrawBuilderEditor(&bs, &builderEditor, windowWidth, windowHeight);
+
+      // Deferred viewport input, now that WantCaptureMouse reflects this
+      // frame's UI. Dragging a figure follows the walkable surface under the
+      // cursor (ground or a cube top) and stays snapped onto it.
+      auto editorRay = [&](int x, int y) {
+        return builderCamera.ScreenPointToRay(
+            static_cast<float>(x - editorRect.x), static_cast<float>(y),
+            static_cast<float>(editorRect.width), static_cast<float>(windowHeight));
+      };
+      const bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse;
+      if (builderDragFigure >= 0 && builderDragFigure < static_cast<int>(bs.figures.size()) &&
+          leftDragDistance >= kClickDragThresholdPx) {
+        glm::vec3 point;
+        if (IntersectGroundOrClimbTop(editorRay(mouseX, mouseY), builderPreview.GetScene(),
+                                      &point)) {
+          if (builderDragRotate) {
+            const tactics::BuilderFigure& figure = bs.figures[builderDragFigure];
+            if (std::hypot(point.x - figure.x, point.z - figure.z) > 0.1f) {
+              tactics::ui::RotateBuilderFigure(&bs, builderDragFigure,
+                                               std::atan2(point.z - figure.z, point.x - figure.x));
+            }
+          } else {
+            tactics::ui::PlaceBuilderFigure(&bs, builderDragFigure, point.x, point.z);
+          }
+        }
+      }
+      if (builderDragBox >= 0 && builderDragBox < static_cast<int>(bs.boxes.size()) &&
+          leftDragDistance >= kClickDragThresholdPx) {
+        float hitX = 0.0f, hitZ = 0.0f;
+        if (RayHitsPlaneY(editorRay(mouseX, mouseY), builderDragPlaneY, &hitX, &hitZ)) {
+          tactics::BuilderBox moved = bs.boxes[builderDragBox];
+          const float limit = bs.mapHalfExtent;
+          moved.cx = std::clamp(hitX + builderDragBoxGrab.x, -limit, limit);
+          moved.cz = std::clamp(hitZ + builderDragBoxGrab.y, -limit, limit);
+          tactics::ui::UpdateBuilderBox(&bs, builderDragBox, moved);
+        }
+      }
+      if (leftClickPending && !uiWantsMouse && leftClickX < editorRect.x + editorRect.width) {
+        // Click: select the figure or cube under the cursor (nothing = clear).
+        const gfx::Ray ray = editorRay(leftClickX, leftClickY);
+        builderEditor.selectedFigure = PickBuilderFigure(ray, bs);
+        builderEditor.selectedBox =
+            builderEditor.selectedFigure >= 0 ? -1 : PickBuilderBox(ray, bs);
+      }
+      if (escapePending && !ImGui::GetIO().WantCaptureKeyboard) builderEditor = {};
+
+      // Headless smoke run: start the scene as soon as the editor has shown.
+      const bool start = editor.start || isSmokeBuilder;
+      if (start || editor.back) {
+        builderThumbnailDirty[builderIndex] = true;  // Its card shows the edits.
+        builderDragFigure = -1;
+        builderDragBox = -1;
+      }
+      if (start) {
+        if (const std::vector<std::string> problems = tactics::ui::BuilderSceneProblems(bs);
+            !problems.empty()) {
+          std::fprintf(stderr, "builder scene not startable: %s\n", problems.front().c_str());
+        }
+        saveBuilderScene(builderIndex);
+        startBuilderGame(builderIndex);
+        screen = tbgwaf_flow::Next(screen, tbgwaf_flow::Event::StartBuilderGame);
+        lastFrameTicks = SDL_GetTicks();
+      } else if (editor.back) {
+        saveBuilderScene(builderIndex);
+        screen = tbgwaf_flow::Next(screen, tbgwaf_flow::Event::BackToBuilder);
+      }
+
+      // Rebuild the preview whenever the scene changed (cheap: a flat map).
+      const std::string key = tactics::SerializeBuilderScene(bs);
+      if (key != builderPreviewKey) {
+        builderPreview.Reset(tactics::BuildScene(bs));
+        builderPreview.UpdateSightingMemory(0.0f);
+        builderPreviewKey = key;
+      }
+      tactics::ui::DrawBuilderViewportOverlay(bs, builderEditor, builderCamera, editorRect,
+                                              windowHeight);
+      gfx::PaneOverlays overlays;
+      overlays.spectatorFov = true;  // Both teams' FOV, as the hotseat game shows them.
+      if (const Unit* selected = builderPreview.FindUnit(builderEditor.selectedFigure)) {
+        overlays.selectionHighlight = selected->position;
+      }
+      gfx::RenderDebugOptions editorOptions = debugOptions;
+      editorOptions.stats = nullptr;
+      glViewport(0, 0, windowWidth, windowHeight);
+      glClearColor(0.08f, 0.09f, 0.11f, 1.0f);
+      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+      renderer.RenderPane(builderPreview, Team::Blue, /*fogActive=*/false, TeamVisibility{},
+                          builderCamera, editorRect.x, 0, editorRect.width, windowHeight, overlays,
+                          0, editorOptions);
+      ImGui::Render();
+      ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+      SDL_GL_SwapWindow(window);
+      return;
+    }
+
     if (screen != tbgwaf_flow::State::Gameplay) {
+      // Builder cards: (re-)render the thumbnails of new or edited scenes.
+      tactics::ui::BuilderMenu builderMenu;
+      if (screen == tbgwaf_flow::State::Builder) {
+        gfx::RenderDebugOptions thumbnailOptions = debugOptions;
+        thumbnailOptions.stats = nullptr;
+        for (int i = 0; i < static_cast<int>(builderScenes.size()); ++i) {
+          if (!builderThumbnailDirty[i]) continue;
+          RenderBuilderThumbnail(renderer, builderScenes[i], &builderThumbnails[i], i,
+                                 thumbnailOptions);
+          builderThumbnailDirty[i] = false;
+        }
+        for (int i = 0; i < static_cast<int>(builderScenes.size()); ++i) {
+          builderMenu.cards.push_back({builderScenes[i].name, builderThumbnails[i]});
+        }
+        builderMenu.lastLogAvailable = reproRecorder.Started();
+        builderMenu.status = builderStatus;
+      }
       std::optional<tbgwaf_flow::Event> flowEvent =
-          tactics::ui::DrawMenu(screen, windowWidth, windowHeight, &mapSeed);
-      // Headless smoke run: walk the menu automatically so gameplay is exercised.
+          tactics::ui::DrawMenu(screen, windowWidth, windowHeight, &mapSeed,
+                                !onlineServerUrl.empty(), &roomForm, &builderMenu);
+      if (builderMenu.downloadLastLog) {
+        const std::string where = DownloadReproLog(reproRecorder, builderLogSceneId);
+        builderStatus = where.empty() ? "Download failed" : "Saved " + where;
+      }
+      if (builderMenu.deleteIndex >= 0) deleteBuilderScene(builderMenu.deleteIndex);
+      // Headless smoke run: walk the menu automatically so gameplay is
+      // exercised (the builder smoke walks into the sample scene's editor).
       bool autoEnterGameplay = isSmokeTest;
       bool autoCtf = false;
 #ifdef __EMSCRIPTEN__
-      autoEnterGameplay = autoEnterGameplay || aiEnabled;
+      autoEnterGameplay = autoEnterGameplay || aiEnabled || (remoteMode && tbgwaf_auto_enter());
       autoCtf = tbgwaf_default_ctf();
       ctfFromPreview = autoCtf;
 #endif
       if (autoEnterGameplay && !flowEvent) {
         switch (screen) {
           case tbgwaf_flow::State::Splash: flowEvent = tbgwaf_flow::Event::NewGame; break;
+          case tbgwaf_flow::State::Room: break;  // Needs a typed code or a click.
           case tbgwaf_flow::State::GameMode:
-            flowEvent = autoCtf ? tbgwaf_flow::Event::SelectCtf : tbgwaf_flow::Event::SelectRegular;
+            flowEvent = isSmokeBuilder ? tbgwaf_flow::Event::SelectBuilder
+                        : autoCtf      ? tbgwaf_flow::Event::SelectCtf
+                                       : tbgwaf_flow::Event::SelectRegular;
             break;
-          default: flowEvent = tbgwaf_flow::Event::SelectUrban; break;
+          case tbgwaf_flow::State::MapSelect:
+            flowEvent = tbgwaf_flow::Event::SelectUrban;
+#ifdef __EMSCRIPTEN__
+            if (const int choice = tbgwaf_map_choice(); choice == 2) {
+              flowEvent = tbgwaf_flow::Event::SelectUrbanX4;
+            } else if (choice == 3) {
+              flowEvent = tbgwaf_flow::Event::SelectHills;
+            }
+#endif
+            break;
+          case tbgwaf_flow::State::Builder:
+            if (isSmokeBuilder && !builderScenes.empty()) {
+              builderMenu.openIndex = 0;
+              flowEvent = tbgwaf_flow::Event::OpenBuilderScene;
+            }
+            break;
+          default: break;
         }
+      }
+      if (flowEvent && (*flowEvent == tbgwaf_flow::Event::CreateRoom ||
+                        *flowEvent == tbgwaf_flow::Event::JoinRoom)) {
+#ifdef __EMSCRIPTEN__
+        // Connect now: "create" has the server pick the code (shown in-game
+        // while waiting); "join" enters an existing room by code. The server
+        // picks the map, so the room goes straight to gameplay.
+        const bool create = *flowEvent == tbgwaf_flow::Event::CreateRoom;
+        remote = std::make_unique<tactics::net::RemoteClient>(
+            &game, create ? "" : roomForm.code, create ? "create" : "join", false);
+        remoteMode = true;
+        isSimulator = false;
+        connectedFromMenu = true;
+        roomForm.error.clear();
+        tbgwaf_ws_open(onlineServerUrl.c_str());
+#endif
       }
       if (flowEvent) {
         if (*flowEvent == tbgwaf_flow::Event::SelectRegular ||
             *flowEvent == tbgwaf_flow::Event::SelectCtf) {
           ctfMode = *flowEvent == tbgwaf_flow::Event::SelectCtf;
         }
-        if (*flowEvent == tbgwaf_flow::Event::SelectUrban ||
-            *flowEvent == tbgwaf_flow::Event::SelectHills) {
-          // The menu's Urban entry uses the seed-driven random overpass mode.
-          mapType = *flowEvent == tbgwaf_flow::Event::SelectHills ? "hilly" : "urban-auto";
+        if (*flowEvent == tbgwaf_flow::Event::ExitBuilder) leaveBuilderFlow();
+        if (*flowEvent == tbgwaf_flow::Event::OpenBuilderScene) {
+          if (builderMenu.newScene) {
+            tactics::BuilderScene fresh;  // Empty medium flat ground.
+            fresh.name = "Scene " + std::to_string(builderScenes.size() + 1);
+            builderMenu.openIndex = addBuilderScene(std::move(fresh));
+          }
+          if (builderMenu.openIndex >= 0 &&
+              builderMenu.openIndex < static_cast<int>(builderScenes.size())) {
+            openBuilderEditor(builderMenu.openIndex);
+          } else {
+            flowEvent.reset();
+          }
+        }
+        if (flowEvent && !remoteMode &&
+            (*flowEvent == tbgwaf_flow::Event::SelectUrban ||
+             *flowEvent == tbgwaf_flow::Event::SelectUrbanX4 ||
+             *flowEvent == tbgwaf_flow::Event::SelectHills)) {
+          // Both urban entries use the seed-driven random overpass mode.
+          if (*flowEvent == tbgwaf_flow::Event::SelectHills) mapType = "hilly";
+          else if (*flowEvent == tbgwaf_flow::Event::SelectUrbanX4) mapType = "urban-auto";
+          else mapType = "urban-auto-x1";
           game.Reset(makeMap());
           timeline.Reset(game);
           timelinePlayback.Reset();
           for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
         }
-        screen = tbgwaf_flow::Next(screen, *flowEvent);
+        if (flowEvent) screen = tbgwaf_flow::Next(screen, *flowEvent);
         lastFrameTicks = SDL_GetTicks();
       }
       glViewport(0, 0, windowWidth, windowHeight);
@@ -783,11 +1810,17 @@ int main() {
     // its own (empty) round would end it immediately.
     bool simulationPaused = false;
 #ifdef __EMSCRIPTEN__
-    simulationPaused = networked && aiPaused && tbgwaf_auto_commit();
+    simulationPaused = networked && aiPaused && tbgwaf_auto_commit() && !builderHotseat;
 #endif
-    if (!simulationPaused && (isSimulator || game.Mode() != InputMode::Executing)) game.Update(dt);
+    // A builder game is local to this instance, so even a web follower
+    // simulates it itself.
+    const bool simulatesLocally = isSimulator || builderHotseat;
+    if (!simulationPaused && (simulatesLocally || game.Mode() != InputMode::Executing)) {
+      game.Update(dt);
+    }
     // Sighting memory is per-page derived state: tick it unconditionally so
     // a follower (which skips Update() while Executing) still builds it.
+    if (remoteMode) remote->Update(dt);
     game.UpdateSightingMemory(dt);
     for (auto& camera : cameras) camera.Update(dt);
 
@@ -819,7 +1852,10 @@ int main() {
       jevBuilder.reset();
     }
 
-    if (aiEnabled && !aiPaused && !jevErrorHold && !awaitingPeerSync &&
+    const bool remoteReady =
+        !remoteMode || remote->status() == tactics::net::RemoteClient::Status::Playing;
+    if (aiEnabled && !aiPaused && !jevErrorHold && !awaitingPeerSync && remoteReady &&
+        !(remoteMode && remote->CommitLocked()) &&
         game.Mode() == InputMode::AwaitingSelection) {
       if (!pendingJevRequest) {
         if (!jevBuilder) {
@@ -850,7 +1886,14 @@ int main() {
 
     // Blue is the only simulator. With no human player (Jev vs Jev) it commits once as
     // soon as every living figure has a plan; human modes commit manually.
-    if (networked && isSimulator && tbgwaf_auto_commit() && !aiPaused &&
+    // A server-mode client commits its own team's plans the same way; the
+    // server runs the round once both clients have.
+    if (remoteMode && remoteReady && tbgwaf_auto_commit() && !aiPaused &&
+        game.CanCommitRound() && lastAutoCommittedRound != game.RoundNumber()) {
+      lastAutoCommittedRound = game.RoundNumber();
+      remote->RequestCommit();
+    }
+    if (networked && isSimulator && !builderHotseat && tbgwaf_auto_commit() && !aiPaused &&
         game.CanCommitRound() && lastAutoCommittedRound != game.RoundNumber()) {
       if (autoCommitHold >= kAutoCommitDelay) {
         autoCommitHold = 0.0f;
@@ -863,6 +1906,28 @@ int main() {
       autoCommitHold = 0.0f;
     }
 #endif
+    // Builder smoke: plan the sample scene's scripted round through the same
+    // input API a player's clicks reach (all recorded), then commit. Blue 0
+    // is the sniper on the cube top.
+    if (isSmokeBuilder && builderHotseat && frameCount == 10 &&
+        game.Mode() == InputMode::AwaitingSelection) {
+      game.ClickUnit(2, Team::Red);
+      game.ChooseMove();
+      game.ClickGround(glm::vec3(5.0f, 0.0f, 4.0f), Team::Red);
+      game.FinishMovePlan();
+      game.ClickUnit(1, Team::Blue);
+      game.ChooseShoot();
+      game.SetPlannedShotCount(3, Team::Blue);
+      game.PlaceAimPoint(glm::vec3(8.0f, 1.0f, -5.0f), Team::Blue);
+      game.ConfirmAim(Team::Blue);
+      game.ClickUnit(0, Team::Blue);
+      game.ChoosePass();
+      game.ClickUnit(3, Team::Red);
+      game.ChoosePass();
+      if (!game.CanCommitRound()) std::fprintf(stderr, "builder smoke: round not fully planned\n");
+      game.CommitRound();
+    }
+
     // Turn timeline (issue #143): record the local game's history and
     // advance any replay in progress. While a replay is viewed, the panes
     // render `displayGame` (the replay instance) and game-action input is
@@ -880,11 +1945,21 @@ int main() {
     // after game over) neither pane takes action input. Camera
     // orbit/zoom/pan is never gated -- either player can look around their
     // own pane at any time.
-    const bool planning = !replayActive && isPlanningMode(game.Mode()) && !awaitingPeerSync;
+    // A spectator never plans, so it is not "playing" for input purposes.
+    const bool remotePlaying =
+        !remoteMode || (remote->status() == tactics::net::RemoteClient::Status::Playing &&
+                        !remote->spectating());
+    // Once this side committed, its plans are locked in on the server until
+    // the opponent commits too: planning input must go inert, or edits would
+    // silently diverge the mirror (the server refuses them).
+    const bool remoteCommitLocked = remoteMode && remote->CommitLocked();
+    const bool planning = !replayActive && isPlanningMode(game.Mode()) && !awaitingPeerSync &&
+                          remotePlaying && !remoteCommitLocked;
     // The HUD reflects whatever state is on screen (replay or live); its
     // button presses are only applied to the live game when no replay is
     // active (replay is strictly view-only).
-    const bool hudPlanning = isPlanningMode(displayGame.Mode()) && !awaitingPeerSync;
+    const bool hudPlanning = isPlanningMode(displayGame.Mode()) && !awaitingPeerSync &&
+                             remotePlaying && !remoteCommitLocked;
 #ifdef __EMSCRIPTEN__
     const bool humanPlanning = planning && !aiEnabled;
     const bool hudHumanPlanning = hudPlanning && !aiEnabled;
@@ -899,7 +1974,10 @@ int main() {
 #else
     const bool spectator = false;
 #endif
-    const bool fogActive = !spectator && displayGame.Mode() != InputMode::GameOver;
+    // Builder hotseat: one screen plays both teams, so nothing is fogged and
+    // both teams' FOV cones are drawn (the spectator view's rendering).
+    const bool fogActive =
+        !spectator && !builderHotseat && displayGame.Mode() != InputMode::GameOver;
     // The team whose plan the shared selection/preview overlays currently
     // belong to (only one figure is ever mid-selection at a time).
     std::optional<Team> selectedTeam;
@@ -921,14 +1999,31 @@ int main() {
     if (debugOptions.thermal) ui::PushThermalHudStyle();
     float roundPanelBottom = 2.0f;
     for (int pane = 0; pane < paneCount; ++pane) {
+      // Server mode: the HUD shows the commit handshake (greyed button +
+      // waiting line) that the local mirror alone cannot know about.
+      ui::NetHudInfo netInfo;
+      const ui::NetHudInfo* netInfoPtr = nullptr;
+      if (remoteMode && !remote->spectating()) {
+        netInfo.committed = remote->CommitLocked();
+        netInfo.peerReady = remote->peerReady();
+        netInfoPtr = &netInfo;
+      }
       const ui::HudActions hud = ui::DrawHud(displayGame, paneTeam(pane), hudHumanPlanning,
                                              paneRects[pane], windowHeight, cameras[pane],
-                                             nullptr, pane == 0 ? &roundPanelBottom : nullptr);
+                                             nullptr, pane == 0 ? &roundPanelBottom : nullptr,
+                                             netInfoPtr);
       // Replay is view-only: while it is showing, HUD presses must not leak
       // into the live match (return to Live first).
       if (!replayActive) {
-        if (hud.newMatch) {
-          if (isSimulator) {
+        if (hud.newMatch && builderHotseat) {
+          // Same scene, fresh recording.
+          if (builderIndex >= 0 && builderIndex < static_cast<int>(builderScenes.size())) {
+            startBuilderGame(builderIndex);
+          }
+        } else if (hud.newMatch) {
+          if (remoteMode) {
+            remote->RequestNewMatch();
+          } else if (isSimulator) {
             game.Reset(makeMap());
             timeline.Reset(game);
             timelinePlayback.Reset();
@@ -941,7 +2036,16 @@ int main() {
           }
         }
         if (hud.commit) {
-          if (isSimulator) {
+          if (remoteMode) {
+            remote->RequestCommit();
+            // Planning is locked now: close any action menu still open so it
+            // doesn't linger inert on screen.
+            for (int i = 0; i < 3 && isPlanningMode(game.Mode()) &&
+                            game.Mode() != InputMode::AwaitingSelection;
+                 ++i) {
+              game.CancelAction();
+            }
+          } else if (simulatesLocally) {
             game.CommitRound();
           } else {
 #ifdef __EMSCRIPTEN__
@@ -952,14 +2056,18 @@ int main() {
 #endif
           }
         }
-        if (hud.move) game.ChooseMove();
-        if (hud.shoot) game.ChooseShoot();
-        if (hud.pass) game.ChoosePass();
-        if (hud.cancel) game.CancelAction();
-        if (hud.playbook) game.SetPlaybook(paneTeam(pane), *hud.playbook);
-        if (hud.done) game.FinishMovePlan();
-        if (hud.fire) game.ConfirmAim(paneTeam(pane));
-        if (hud.shots) game.SetPlannedShotCount(*hud.shots, paneTeam(pane));
+        // Plan edits only while planning is actually open (not while a round
+        // executes, a commit is locked in, or the peer sync is pending).
+        if (hudPlanning) {
+          if (hud.move) game.ChooseMove();
+          if (hud.shoot) game.ChooseShoot();
+          if (hud.pass) game.ChoosePass();
+          if (hud.cancel) game.CancelAction();
+          if (hud.playbook) game.SetPlaybook(paneTeam(pane), *hud.playbook);
+          if (hud.done) game.FinishMovePlan();
+          if (hud.fire) game.ConfirmAim(paneTeam(pane));
+          if (hud.shots) game.SetPlannedShotCount(*hud.shots, paneTeam(pane));
+        }
       }
 
       // Turn timeline strip (issue #143). Both panes drive the same shared
@@ -982,10 +2090,37 @@ int main() {
           IM_COL32(255, 255, 255, 60), 2.0f);
     }
 
+    if (connectedFromMenu) {
+#ifdef __EMSCRIPTEN__
+      ImGui::SetNextWindowPos(ImVec2(10.0f, 8.0f), ImGuiCond_Always);
+      ImGui::SetNextWindowBgAlpha(0.5f);
+      ImGui::Begin("##leaveroom", nullptr,
+                   ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+      if (ImGui::Button("Leave room")) tbgwaf_reload_page();
+      ImGui::End();
+#endif
+    }
+    if (remoteMode) {
+      const std::string statusText = remote->StatusText();
+      if (!statusText.empty()) {
+        ImGui::SetNextWindowPos(
+            ImVec2(static_cast<float>(paneRects[0].x + paneRects[0].width / 2),
+                   static_cast<float>(windowHeight) - 12.0f),
+            ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+        ImGui::SetNextWindowBgAlpha(0.7f);
+        ImGui::Begin("##netstatus", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::TextUnformatted(statusText.c_str());
+        ImGui::End();
+      }
+    }
+
     // --- Dispatch deferred input, now that WantCaptureMouse reflects the UI
     // actually built this frame. ---
-    if (escapePending && !replayActive) game.CancelAction();
-    if (enterPending && !replayActive) game.FinishMovePlan();
+    if (escapePending && humanPlanning) game.CancelAction();
+    if (enterPending && humanPlanning) game.FinishMovePlan();
 
     const bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse;
     if (!uiWantsMouse && humanPlanning) {
@@ -1029,7 +2164,7 @@ int main() {
             const glm::vec3 hit = aimRay.origin + aimRay.direction * t;
             if (glm::length(glm::vec2(hit.x - dest.x, hit.z - dest.z)) > 0.1f) {
               game.SetPlannedMoveFacing(aimedUnitId, std::atan2(hit.z - dest.z, hit.x - dest.x),
-                                       paneTeam(aimedPane));
+                                        builderHotseat ? aimed->team : paneTeam(aimedPane));
             }
           }
         }
@@ -1068,7 +2203,10 @@ int main() {
           // selector on a surface in the shooter's 360-degree LOS.
           game.ClickAimRay(clickRay.origin, clickRay.direction, clickTeam);
         } else if (hitUnit >= 0) {
-          game.ClickUnit(hitUnit, clickTeam);
+          // Hotseat: any figure is selectable -- the click acts for the
+          // clicked figure's own team.
+          const Unit* hit = game.FindUnit(hitUnit);
+          game.ClickUnit(hitUnit, builderHotseat && hit ? hit->team : clickTeam);
           if (doubleClick) {
             // Drone-style focus: frame the unit's whole movement frontier
             // (same reach as the reach-field query window).
@@ -1100,12 +2238,43 @@ int main() {
                        debugOptions.thermalAo.radius,
                        debugOptions.thermalAo.strength, debugOptions.thermalAo.quality,
                        debugOptions.thermalAo.softness,
-                       debugOptions.disableOcclusionFade, showFps,
+                       debugOptions.disableOcclusionFade, debugOptions.npr,
+                       debugOptions.nprSettings, showFps,
                        smoothedFps, frameMs, fovMs, frameStats,
                        roundPanelBottom + 6.0f, wasmHeapBytes);
     // Pop against the pre-panel state: the checkbox may have just toggled
     // `thermal`, but the push at the top of this frame is what must unwind.
     if (hudWasThermal) ui::PopThermalHudStyle();
+    // Builder panel (builder games): which scene is in play, Download log
+    // (the recording so far; works mid-game and after game over) and Stop,
+    // back to the Builder's cards.
+    if (builderHotseat) {
+      // Top-right: the Round panel holds the top-left corner.
+      ImGui::SetNextWindowPos(ImVec2(windowWidth - 10.0f, 10.0f), ImGuiCond_Always,
+                              ImVec2(1.0f, 0.0f));
+      ImGui::Begin("Builder game", nullptr,
+                   ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                       ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                       ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar);
+      const bool sceneKnown = builderIndex >= 0 && builderIndex < static_cast<int>(builderScenes.size());
+      ImGui::Text("Builder: %s", sceneKnown ? builderScenes[builderIndex].name.c_str() : "?");
+      ImGui::SameLine();
+      if (reproRecorder.Started()) {
+        if (ImGui::Button("Download log")) {
+          const std::string where = DownloadReproLog(reproRecorder, builderLogSceneId);
+          builderStatus = where.empty() ? "Download failed" : "Saved " + where;
+        }
+        ImGui::SameLine();
+      }
+      if (ImGui::Button("Stop")) {
+        stopBuilderGame();
+        screen = tbgwaf_flow::Next(screen, tbgwaf_flow::Event::BackToBuilder);
+      }
+      ImGui::TextUnformatted(
+          "Hotseat: click any figure to plan it. Plan both teams, then Commit Round.");
+      if (!builderStatus.empty()) ImGui::TextUnformatted(builderStatus.c_str());
+      ImGui::End();
+    }
 
     // --- Render: one shadow pass + one color pass per pane, both inside
     // SceneRenderer::RenderPane. Selection/move-preview overlays belong to
@@ -1122,7 +2291,7 @@ int main() {
       if (hasHoveredGroundPoint && !replayActive) hover = hoveredGroundPoint;
       gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(displayGame, paneTeam(pane), hover);
       if (showNavMeshDebug) overlays.navMeshDebug = &navMeshDebug;
-      overlays.spectatorFov = spectator;
+      overlays.spectatorFov = spectator || builderHotseat;
       renderer.RenderPane(displayGame, paneTeam(pane), fogActive, paneVisibility[pane],
                           cameras[pane], rect.x, 0, rect.width, windowHeight, overlays, 0,
                           debugOptions);
@@ -1134,9 +2303,12 @@ int main() {
     SDL_GL_SwapWindow(window);
 
 #ifdef __EMSCRIPTEN__
+    // A builder game is local: the page hears nothing of it, and nothing of
+    // it goes on the bus.
     const int reportWinner = game.Winner() ? static_cast<int>(*game.Winner()) : -1;
-    if (game.RoundNumber() != lastReportedRound || game.Mode() != lastReportedMode ||
-        reportWinner != lastReportedWinner) {
+    if (!builderHotseat &&
+        (game.RoundNumber() != lastReportedRound || game.Mode() != lastReportedMode ||
+         reportWinner != lastReportedWinner)) {
       const char* phase = game.Mode() == InputMode::GameOver
                               ? "game-over"
                               : game.Mode() == InputMode::Executing ? "executing" : "planning";
@@ -1147,7 +2319,9 @@ int main() {
     }
     // Publish state changes: the simulator ships the whole match, the
     // follower just its plans (only while planning).
-    if (networked && !awaitingPeerSync && (isSimulator || isPlanningMode(game.Mode()))) {
+    if (remoteMode) {
+      for (const std::string& frame : remote->TakeOutgoing()) tbgwaf_ws_send(frame.c_str());
+    } else if (networked && !builderHotseat && !awaitingPeerSync && (isSimulator || isPlanningMode(game.Mode()))) {
       std::string state = SerializeSnapshot(game.ExportState());
       if (forceBroadcast || state != lastSentState) {
         tbgwaf_channel_post(((isSimulator ? "S " : "P ") + state).c_str());
@@ -1160,6 +2334,15 @@ int main() {
     if (isSmokeTest && ++frameCount >= kSmokeTestMaxFrames) {
       quit = true;
     }
+#ifndef __EMSCRIPTEN__
+    if (quit && reproRecorder.Started()) {
+      if (const char* outPath = std::getenv("TBGWAF_REPRO_OUT")) {
+        std::ofstream out(outPath, std::ios::binary);
+        out << reproRecorder.Text();
+        std::fprintf(stderr, "repro log written to %s\n", outPath);
+      }
+    }
+#endif
 
 #ifdef __EMSCRIPTEN__
     if (quit) emscripten_cancel_main_loop();

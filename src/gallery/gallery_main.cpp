@@ -1,5 +1,6 @@
 // Asset & animation gallery viewer (issue #126): one canvas/window showing
-// a single catalog item (weapon turntable or figure animation) at a time,
+// a single catalog item (weapon turntable, figure animation or street
+// fixture turntable) at a time,
 // with mouse orbit/zoom and loop playback. The item list, playback
 // controls, and labels live in the host page (web/gallery.html), which
 // drives this module through the small exported C API below; a native build
@@ -21,7 +22,11 @@
 #include <cstdio>
 #include <functional>
 
+#include <cstdint>
+#include <string>
+
 #include "gallery/GalleryScene.h"
+#include "gallery/MapView.h"
 
 namespace {
 
@@ -50,6 +55,7 @@ struct ViewerState {
   gallery::ViewState view;
 };
 ViewerState g_state;
+gallery::MapView g_mapView;
 
 void SelectItem(int index) {
   const int count = static_cast<int>(gallery::Catalog().size());
@@ -68,6 +74,14 @@ extern "C" {
 #define GALLERY_EXPORT
 #endif
 
+// Map-seed viewer: while open, the canvas shows the generated map drawn by
+// the game's renderer instead of the catalog item, and mouse input drives
+// the game-style camera.
+GALLERY_EXPORT void gallery_map_open(unsigned seed, int x4) {
+  g_mapView.Open(static_cast<uint32_t>(seed), x4 != 0);
+}
+GALLERY_EXPORT void gallery_map_close() { g_mapView.Close(); }
+
 GALLERY_EXPORT int gallery_item_count() {
   return static_cast<int>(gallery::Catalog().size());
 }
@@ -77,9 +91,14 @@ GALLERY_EXPORT const char* gallery_item_id(int index) {
 GALLERY_EXPORT const char* gallery_item_label(int index) {
   return gallery::Catalog()[index].label;
 }
-// 0 = weapon model (turntable), 1 = animation.
+// 0 = weapon model (turntable), 1 = animation, 2 = street fixture (turntable).
 GALLERY_EXPORT int gallery_item_kind(int index) {
-  return gallery::Catalog()[index].kind == gallery::ItemKind::WeaponModel ? 0 : 1;
+  switch (gallery::Catalog()[index].kind) {
+    case gallery::ItemKind::WeaponModel: return 0;
+    case gallery::ItemKind::Animation: return 1;
+    case gallery::ItemKind::StreetFixture: return 2;
+  }
+  return 1;
 }
 GALLERY_EXPORT double gallery_item_duration(int index) {
   return gallery::Catalog()[index].duration;
@@ -128,11 +147,12 @@ int main() {
   SDL_GL_SetSwapInterval(1);
 
   static gallery::GalleryRenderer renderer;
-  if (!renderer.Init()) return 1;
+  if (!renderer.Init() || !g_mapView.Init()) return 1;
   SelectItem(0);
 
   static bool quit = false;
   static bool dragging = false;
+  static bool rightDragging = false;
   static Uint32 lastTicks = SDL_GetTicks();
   static SDL_Window* win = window;
 
@@ -162,12 +182,17 @@ int main() {
           break;
         case SDL_MOUSEBUTTONDOWN:
           if (event.button.button == SDL_BUTTON_LEFT) dragging = true;
+          if (event.button.button == SDL_BUTTON_RIGHT) rightDragging = true;
           break;
         case SDL_MOUSEBUTTONUP:
           if (event.button.button == SDL_BUTTON_LEFT) dragging = false;
+          if (event.button.button == SDL_BUTTON_RIGHT) rightDragging = false;
           break;
         case SDL_MOUSEMOTION:
-          if (dragging) {
+          if (g_mapView.IsOpen()) {
+            if (dragging) g_mapView.Pan(event.motion.xrel, event.motion.yrel);
+            if (rightDragging) g_mapView.Rotate(event.motion.xrel, event.motion.yrel);
+          } else if (dragging) {
             g_state.view.yawRadians += event.motion.xrel * 0.01f;
             g_state.view.pitchRadians = std::clamp(
                 g_state.view.pitchRadians + event.motion.yrel * 0.01f,
@@ -175,14 +200,24 @@ int main() {
           }
           break;
         case SDL_MOUSEWHEEL:
-          g_state.view.distance = std::clamp(
-              g_state.view.distance * (event.wheel.y > 0 ? 0.9f : 1.1f), 0.3f, 20.0f);
+          if (g_mapView.IsOpen()) {
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+            g_mapView.Zoom(event.wheel.preciseY);
+#else
+            g_mapView.Zoom(static_cast<float>(event.wheel.y));
+#endif
+          } else {
+            g_state.view.distance = std::clamp(
+                g_state.view.distance * (event.wheel.y > 0 ? 0.9f : 1.1f), 0.3f, 20.0f);
+          }
           break;
         case SDL_KEYDOWN:
           if (event.key.keysym.sym == SDLK_RIGHT) SelectItem(g_state.item + 1);
           if (event.key.keysym.sym == SDLK_LEFT) SelectItem(g_state.item - 1);
           if (event.key.keysym.sym == SDLK_SPACE) g_state.playing = !g_state.playing;
+#ifndef __EMSCRIPTEN__
           if (event.key.keysym.sym == SDLK_ESCAPE) quit = true;
+#endif
           break;
         default:
           break;
@@ -196,7 +231,11 @@ int main() {
 
     int width = 0, height = 0;
     SDL_GL_GetDrawableSize(win, &width, &height);
-    renderer.Render(g_state.item, g_state.time, g_state.view, width, height);
+    if (g_mapView.IsOpen()) {
+      g_mapView.Render(static_cast<float>(dt), width, height);
+    } else {
+      renderer.Render(g_state.item, g_state.time, g_state.view, width, height);
+    }
     SDL_GL_SwapWindow(win);
 
 #ifdef __EMSCRIPTEN__
@@ -211,6 +250,7 @@ int main() {
 #else
   while (!quit) runFrame();
 
+  g_mapView.Destroy();
   renderer.Destroy();
   SDL_GL_DeleteContext(glContext);
   SDL_DestroyWindow(window);

@@ -20,7 +20,8 @@ namespace gfx {
 // of which are already replicated/replayed state, so every client and every
 // replay reproduces the same result. Nothing here reads or writes game logic.
 // Collision is against the ground plane at unit.position.y plus the map's
-// obstacle boxes (see SetRagdollObstacles): a figure shot on top of an
+// obstacle boxes, ramps/decks and terrain (see SetRagdollObstacles,
+// SetRagdollGround): a figure shot on top of an
 // obstacle falls off its edge to the ground, and obstacle sides block it.
 
 enum RagdollJoint {
@@ -65,6 +66,32 @@ struct RagdollGun {
 // Obstacles the ragdolls collide with. Call before sampling (cheap when
 // unchanged; a change drops all cached trajectories).
 void SetRagdollObstacles(const std::vector<tactics::Obstacle>& obstacles);
+
+// Bridge deck rails (the DeckRail entries of Scene::massing; others are
+// ignored), so a body on a deck is stopped by its side rail instead of
+// falling through it. Same calling convention as SetRagdollObstacles.
+void SetRagdollRails(const std::vector<tactics::MassingDetail>& massing);
+
+// Ramps/decks and the terrain heightfield the ragdolls rest on, so a body on
+// a ramp slides down it and one on hilly ground lies on the slope. Same
+// calling convention as SetRagdollObstacles.
+void SetRagdollGround(const std::vector<tactics::WalkSurface>& surfaces,
+                      const tactics::HeightField& terrain);
+
+// A living figure as an abstracted collider (issue #266): a vertical capsule
+// standing on `base` (feet). Falling bodies are pushed out of it (bounded per
+// step) so they rest on / slide off a standing figure instead of passing
+// through it. Visual only: the figure itself is never moved.
+struct RagdollFigureCollider {
+  glm::vec3 base{0.0f};
+  float radius = 0.30f;
+  float height = 1.75f;
+};
+
+// Living figures at the moment a fall is first simulated. Unlike obstacles,
+// changing these does NOT drop cached trajectories (figures move every
+// frame); a fall uses the figures as they were when it was first evaluated.
+void SetRagdollFigures(const std::vector<RagdollFigureCollider>& figures);
 
 // True for a downed unit whose knockdown animation has started: such units
 // are drawn as a ragdoll instead of a rigid tip-over.

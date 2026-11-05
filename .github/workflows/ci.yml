@@ -87,6 +87,14 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+      # Server-only build: proves the SDL2/EGL/GLESv2 dev packages aren't
+      # needed for the headless targets (runs from a scratch build dir).
+      - name: Headless/server-only build and test
+        run: |
+          cmake -B build-headless -G Ninja -DCMAKE_BUILD_TYPE=Release -DTBGWAF_BUILD_CLIENT=OFF
+          cmake --build build-headless
+          ctest --test-dir build-headless --output-on-failure
+
       - name: Upload visual test output
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

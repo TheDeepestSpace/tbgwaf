@@ -16,6 +16,12 @@ std::vector<glm::vec2> Ccw(std::vector<glm::vec2> polygon) {
   return polygon;
 }
 
+// Vertex `i` of `polygon` read in CCW order without copying it: these are hot
+// inner loops (navmesh visibility tests), so no per-call allocation.
+glm::vec2 CcwAt(const std::vector<glm::vec2>& polygon, bool reversed, size_t i) {
+  return reversed ? polygon[polygon.size() - 1 - i] : polygon[i];
+}
+
 bool LineIntersection(glm::vec2 p, glm::vec2 r, glm::vec2 q, glm::vec2 s,
                       glm::vec2* out) {
   const float denominator = Cross(r, s);
@@ -28,10 +34,11 @@ bool LineIntersection(glm::vec2 p, glm::vec2 r, glm::vec2 q, glm::vec2 s,
 // finite (segments / 3D Y clip) or infinite (rays).
 bool ClipParametric(glm::vec2 origin, glm::vec2 direction,
                     const std::vector<glm::vec2>& polygon, float* enter, float* exit) {
-  const std::vector<glm::vec2> ccw = Ccw(polygon);
-  for (size_t i = 0; i < ccw.size(); ++i) {
-    const glm::vec2 a = ccw[i];
-    const glm::vec2 edge = ccw[(i + 1) % ccw.size()] - a;
+  const bool reversed = PolygonSignedArea(polygon) < 0.0f;
+  const size_t n = polygon.size();
+  for (size_t i = 0; i < n; ++i) {
+    const glm::vec2 a = CcwAt(polygon, reversed, i);
+    const glm::vec2 edge = CcwAt(polygon, reversed, (i + 1) % n) - a;
     const float value = Cross(edge, origin - a);
     const float rate = Cross(edge, direction);
     if (std::fabs(rate) < kEps) {
@@ -63,9 +70,11 @@ float PolygonArea(const std::vector<glm::vec2>& polygon) {
 bool PointInConvexPolygon(const glm::vec2& point, const std::vector<glm::vec2>& polygon,
                           float epsilon) {
   if (polygon.size() < 3) return false;
-  const std::vector<glm::vec2> ccw = Ccw(polygon);
-  for (size_t i = 0; i < ccw.size(); ++i) {
-    if (Cross(ccw[(i + 1) % ccw.size()] - ccw[i], point - ccw[i]) < -epsilon) return false;
+  const bool reversed = PolygonSignedArea(polygon) < 0.0f;
+  const size_t n = polygon.size();
+  for (size_t i = 0; i < n; ++i) {
+    const glm::vec2 a = CcwAt(polygon, reversed, i);
+    if (Cross(CcwAt(polygon, reversed, (i + 1) % n) - a, point - a) < -epsilon) return false;
   }
   return true;
 }
@@ -73,9 +82,11 @@ bool PointInConvexPolygon(const glm::vec2& point, const std::vector<glm::vec2>& 
 bool PointStrictlyInConvexPolygon(const glm::vec2& point,
                                   const std::vector<glm::vec2>& polygon, float epsilon) {
   if (polygon.size() < 3) return false;
-  const std::vector<glm::vec2> ccw = Ccw(polygon);
-  for (size_t i = 0; i < ccw.size(); ++i) {
-    if (Cross(ccw[(i + 1) % ccw.size()] - ccw[i], point - ccw[i]) <= epsilon) return false;
+  const bool reversed = PolygonSignedArea(polygon) < 0.0f;
+  const size_t n = polygon.size();
+  for (size_t i = 0; i < n; ++i) {
+    const glm::vec2 a = CcwAt(polygon, reversed, i);
+    if (Cross(CcwAt(polygon, reversed, (i + 1) % n) - a, point - a) <= epsilon) return false;
   }
   return true;
 }

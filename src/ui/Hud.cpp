@@ -533,7 +533,9 @@ void DrawRotationDome(gfx::OrbitCamera& camera, const PaneRect& rect, float wind
                    ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoScrollbar);
   const ImVec2 origin = ImGui::GetCursorScreenPos();
   ImGui::InvisibleButton("drag", ImVec2(side, side));
-  if (ImGui::IsItemActive()) {
+  // A touch has no hover phase, so on the press frame the pointer teleports from
+  // its last position to the finger and MouseDelta is a huge bogus jump; skip it.
+  if (ImGui::IsItemActive() && !ImGui::IsItemActivated()) {
     const ImVec2 d = ImGui::GetIO().MouseDelta;
     if (d.x != 0.0f || d.y != 0.0f) {
       const glm::vec2 da = gfx::DomeDragDelta(glm::vec2(d.x, d.y), kRadiansPerPixel);

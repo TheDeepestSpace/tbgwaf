@@ -243,6 +243,10 @@ struct PlaybackHooks {
   // the GameLogic passed to onFrame/onActionComplete is the *replayed*
   // state, exactly what the app would render.
   std::function<void(const TurnTimeline&, const TimelinePlayback&)> onTimeline;
+  // Hands over the live game (outlives RunScenario) so a renderer can key
+  // full-information reveal on the *live* match being over, not on the
+  // replayed frame it is drawing (issue #284).
+  std::function<void(const GameLogic&)> onLiveGame;
 };
 
 // Runs `scenario` against a fresh GameLogic instance built from its scene,

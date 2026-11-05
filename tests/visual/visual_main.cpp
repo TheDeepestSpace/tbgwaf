@@ -217,6 +217,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   // controller via hooks.onTimeline below).
   const tactics::TurnTimeline* timelineView = nullptr;
   const tactics::TimelinePlayback* timelinePlayback = nullptr;
+  const GameLogic* liveGame = nullptr;  // in-process runner only
 
   // Issue #110: the scenario (or --fov-shadow-map) picks the FOV overlay
   // path; restored to the CPU default after the scenario.
@@ -258,7 +259,9 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   auto renderPanes = [&](const PaneGames& games, const ClickMarker* marker = nullptr) {
     for (int pane = 0; pane < 2; ++pane) {
       const GameLogic& game = *games[pane];
-      const bool fogActive = game.Mode() != InputMode::GameOver;
+      // Once the live match is over, a replay reveals both teams (as in the app).
+      const bool matchOver = liveGame && liveGame->Mode() == InputMode::GameOver;
+      const bool fogActive = game.Mode() != InputMode::GameOver && !matchOver;
       const Team team = PaneTeam(pane);
       TeamVisibility visibility;
       if (fogActive) visibility = game.ComputeVisibility(team);
@@ -453,6 +456,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     timelineView = &timeline;
     timelinePlayback = &playback;
   };
+  hooks.onLiveGame = [&](const GameLogic& live) { liveGame = &live; };
   hooks.onActionComplete = [&](const GameLogic& game, int turn) {
     // The holds for this action have already been emitted, so framesWritten
     // is the exclusive end of the action's video segment (turn 0 = the

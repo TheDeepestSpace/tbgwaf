@@ -1042,8 +1042,12 @@ int main() {
   gfx::RenderDebugOptions debugOptions;
   // AO view is on by default, including in the smoke test (software GL needs
   // the longer smoke_test timeout).
-  debugOptions.thermal = false;
-  debugOptions.npr = true;  // Grayscale NPR look by default (thermal stays a toggle).
+  // Default look: AO view (black hot) with NPR outlines layered on top.
+  debugOptions.thermal = true;
+  debugOptions.npr = true;
+  debugOptions.nprSettings.outlineThickness = 0.8f;
+  debugOptions.nprSettings.outlineStrength = 0.46f;
+  debugOptions.nprSettings.detailSize = 0.02f;
   bool showFps = true;
   float smoothedFps = 0.0f;
   float frameMs = 0.0f;

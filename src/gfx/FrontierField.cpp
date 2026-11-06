@@ -310,11 +310,13 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
         const float len = std::sqrt(nxv * nxv + nzv * nzv);
         if (len > 1e-10f) {
           // Anisotropy in [0, 1]: 1 on a straight edge or band, 0 at a
-          // corner. Corners keep the isotropic blur (rounded), straight
-          // stretches take the tangential average (straightened).
+          // corner. Straight stretches take the tangential average
+          // (straightened); corners fall back to the unblurred grid field,
+          // whose contour follows the obstacle's footprint into a sharp
+          // corner instead of the blur's round-off.
           const float aniso = 2.0f * disc / trace;
           const float avg = rawAlong(ix, iz, -nzv / len, nxv / len);
-          value = aniso * avg + (1.0f - aniso) * value;
+          value = aniso * avg + (1.0f - aniso) * raw[i];
         }
       }
       depth[i] = value;

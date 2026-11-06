@@ -4359,6 +4359,25 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           kEdgeAlpha * factor * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
       return ColorTriangleMesh::Vertex{q.p, glm::vec4(color, a)};
     };
+    // Fans around the vertex average rather than vertex 0: a fan from a
+    // corner interpolates alpha along one diagonal, which shows as faint
+    // diagonal stripes in the gradient. The centre carries the mean field
+    // value, so the ramp is symmetric. Same triangle count order as before.
+    auto emitFan = [&](const std::vector<Pt>& poly) {
+      if (poly.size() < 3) return;
+      Pt c{glm::vec3(0.0f), 0.0f};
+      for (const Pt& q : poly) {
+        c.p += q.p;
+        c.g += q.g;
+      }
+      c.p /= static_cast<float>(poly.size());
+      c.g /= static_cast<float>(poly.size());
+      for (size_t k = 0; k < poly.size(); ++k) {
+        fill.push_back(toVertex(c));
+        fill.push_back(toVertex(poly[k]));
+        fill.push_back(toVertex(poly[(k + 1) % poly.size()]));
+      }
+    };
     for (int iz = 0; iz + 1 < nz; ++iz) {
       for (int ix = 0; ix + 1 < nx; ++ix) {
         const int cx[4] = {ix, ix + 1, ix + 1, ix};
@@ -4410,11 +4429,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             cut.push_back(c);
           }
         }
-        for (size_t k = 1; k + 1 < poly.size(); ++k) {
-          fill.push_back(toVertex(poly[0]));
-          fill.push_back(toVertex(poly[k]));
-          fill.push_back(toVertex(poly[k + 1]));
-        }
+        emitFan(poly);
         if (cut.size() == 2) {
           border.push_back(cut[0].p);
           border.push_back(cut[1].p);
@@ -4423,11 +4438,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         // lay a clipped copy on top of each slab the cell overlaps.
         for (const AABB& slab : slabs) {
           const std::vector<Pt> piece = clipToSlab(poly, slab);
-          for (size_t k = 1; k + 1 < piece.size(); ++k) {
-            fill.push_back(toVertex(piece[0]));
-            fill.push_back(toVertex(piece[k]));
-            fill.push_back(toVertex(piece[k + 1]));
-          }
+          emitFan(piece);
           if (cut.size() == 2) {
             // Liang-Barsky clip of the border segment to the slab footprint.
             const glm::vec3 a = cut[0].p, d = cut[1].p - cut[0].p;

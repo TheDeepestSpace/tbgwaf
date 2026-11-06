@@ -267,6 +267,62 @@ void TestWallBoundaryIsExact() {
   CHECK(depth[5 * field.nx + 5] < 0.0f);
 }
 
+void TestWallCornerStaysSquare() {
+  // A rectangular obstacle corner poking into a wide reached region
+  // (issue #292): the contour must hug both faces squarely all the way
+  // into the corner instead of rounding across it, and the wall itself
+  // must stay negative (no positive depth leaking over the obstacle).
+  tactics::ReachField field = EmptyField(41);
+  field.walkable.assign(field.dist.size(), 1);
+  for (int iz = 0; iz < field.nz; ++iz) {
+    for (int ix = 0; ix < field.nx; ++ix) {
+      const int i = iz * field.nx + ix;
+      if (ix >= 20 && iz <= 20) field.walkable[i] = 0;  // Obstacle quadrant.
+      else field.dist[i] = 0.0f;
+    }
+  }
+  const std::vector<float> depth = gfx::SmoothFrontierSignedDepth(field);
+  const float half = 0.5f * field.step;
+  const auto at = [&](int ix, int iz) { return depth[iz * field.nx + ix]; };
+  // Vertical face, right up to the corner at (20, 20).
+  for (int iz = 2; iz <= 20; ++iz) {
+    CHECK(std::abs(at(19, iz) - half) < 0.02f);
+    CHECK(std::abs(at(20, iz) + half) < 0.02f);
+  }
+  // Horizontal face, right up to the corner.
+  for (int ix = 22; ix <= 38; ++ix) {
+    CHECK(std::abs(at(ix, 21) - half) < 0.02f);
+    CHECK(std::abs(at(ix, 20) + half) < 0.02f);
+  }
+}
+
+void TestWallContourUsesExactOutline() {
+  // With wallDist filled, the wall part of the contour must sit on the
+  // obstacle's true outline, not on the grid's half-step line. The padded
+  // outline runs at x = 19.6 * step, between the last walkable column (19)
+  // and the first blocked one (20); the interpolated zero crossing between
+  // those columns must land exactly on it.
+  tactics::ReachField field = EmptyField(41);
+  field.walkable.assign(field.dist.size(), 1);
+  field.wallDist.assign(field.dist.size(), 0.0f);
+  const float wallX = 19.6f * field.step;
+  for (int iz = 0; iz < field.nz; ++iz) {
+    for (int ix = 0; ix < field.nx; ++ix) {
+      const int i = iz * field.nx + ix;
+      if (ix >= 20) field.walkable[i] = 0;
+      else field.dist[i] = 0.0f;
+      field.wallDist[i] = std::abs(ix * field.step - wallX);
+    }
+  }
+  const std::vector<float> depth = gfx::SmoothFrontierSignedDepth(field);
+  for (int iz = 10; iz <= 30; ++iz) {
+    const float a = depth[iz * field.nx + 19];  // +0.6 * step exactly.
+    const float b = depth[iz * field.nx + 20];  // -0.4 * step exactly.
+    CHECK(std::abs(a - 0.6f * field.step) < 0.005f);
+    CHECK(std::abs(b + 0.4f * field.step) < 0.005f);
+  }
+}
+
 void TestCoverStyleWeights() {
   // A wall column of cover tiles: flat along the middle, tactical at the
   // ends. Nearby nodes take the nearest tile's kind; open ground stays
@@ -318,6 +374,8 @@ int main() {
   TestObliqueThinBandOutlineIsStraight();
   TestLedgeAlongObliqueCliffOutlineIsStraight();
   TestWallBoundaryIsExact();
+  TestWallCornerStaysSquare();
+  TestWallContourUsesExactOutline();
   TestCoverStyleWeights();
   if (gFailures == 0) {
     std::printf("All frontier field tests passed.\n");

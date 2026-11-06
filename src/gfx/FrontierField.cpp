@@ -285,21 +285,18 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
     return sum / weight;
   };
   const float sampleDepth = 0.1f * field.step;
+  const bool haveWallDist = field.wallDist.size() == dIn.size();
   for (int iz = 0; iz < nz; ++iz) {
     for (int ix = 0; ix < nx; ++ix) {
       const int i = iz * nx + ix;
       const float a = txx[i], b = txz[i], c = tzz[i];
       const float trace = a + c;
-      // Wall-caused boundary: the exact chamfer depth, whose zero contour
-      // runs parallel to the obstacle half a step outside the last reached
-      // node and keeps its corners square. The tangential pass below still
-      // applies, straightening the staircase of an oblique wall onto the
-      // wall's true line; the isotropic blur (rounding) is what walls skip.
       const float wall = wallWeight(i);
-      float value = wall > 0.0f ? wall * raw[i] + (1.0f - wall) * depth[i] : depth[i];
+      float value = depth[i];
       // Only near-contour values are visible (the fill fades out well
-      // inside kMaxDepth); skip the sampling work elsewhere.
-      if (std::fabs(value) < 1.5f && trace > 1e-12f) {
+      // inside kMaxDepth); skip the sampling work there and where the wall
+      // takes the whole blend below.
+      if (wall < 1.0f && std::fabs(value) < 1.5f && trace > 1e-12f) {
         const float disc = std::sqrt(0.25f * (a - c) * (a - c) + b * b);
         // Dominant eigenvector of the tensor is the boundary normal.
         float nxv = b, nzv = 0.5f * trace + disc - a;
@@ -311,13 +308,31 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
         if (len > 1e-10f) {
           // Anisotropy in [0, 1]: 1 on a straight edge or band, 0 at a
           // corner. Straight stretches take the tangential average
-          // (straightened); corners fall back to the unblurred grid field,
-          // whose contour follows the obstacle's footprint into a sharp
-          // corner instead of the blur's round-off.
+          // (straightened); corners fall back to the unblurred grid field
+          // instead of the blur's round-off.
           const float aniso = 2.0f * disc / trace;
           const float avg = rawAlong(ix, iz, -nzv / len, nxv / len);
           value = aniso * avg + (1.0f - aniso) * raw[i];
         }
+      }
+      // Wall-caused boundary, applied after every smoothing pass so none of
+      // them can round it off: the exact node-to-outline distance where the
+      // reach field recorded one, signed by reachability. Its zero contour
+      // lies on the padded obstacle outline itself -- straight faces,
+      // square corners, oblique walls exact. The grid chamfer depth (zero
+      // contour half a step outside the last reached node, corners square
+      // at grid resolution) stands in when the exact distance is missing or
+      // disagrees with the grid, i.e. the local blocker is not a measured
+      // outline (the window edge, or an obstacle on the far side of this
+      // one).
+      if (wall > 0.0f) {
+        float exact = raw[i];
+        if (haveWallDist && std::isfinite(field.wallDist[i])) {
+          const float signedDist =
+              (reached(ix, iz) ? 1.0f : -1.0f) * std::min(field.wallDist[i], kMaxDepth);
+          if (std::fabs(signedDist - raw[i]) <= 1.5f * field.step) exact = signedDist;
+        }
+        value = wall * exact + (1.0f - wall) * value;
       }
       depth[i] = value;
     }

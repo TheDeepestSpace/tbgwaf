@@ -3120,6 +3120,66 @@ void TestPinnedFurnitureFingerprints() {
   }
 }
 
+// Issue #280: nearly coplanar road patches overlapping in XZ z-fight. Seeds
+// 10, 35 and 36 used to overlap by several square metres at 1-10 mm apart.
+void TestRoadPatchesDoNotZFight() {
+  const auto signedArea = [](const std::vector<glm::vec2>& p) {
+    float a = 0.0f;
+    for (size_t i = 0; i < p.size(); ++i) {
+      const glm::vec2 u = p[i], v = p[(i + 1) % p.size()];
+      a += u.x * v.y - v.x * u.y;
+    }
+    return 0.5f * a;
+  };
+  const auto flat = [&](const RoadSurface& r) {
+    std::vector<glm::vec2> p;
+    for (const glm::vec3& v : r.vertices) p.emplace_back(v.x, v.z);
+    if (signedArea(p) < 0.0f) std::reverse(p.begin(), p.end());
+    return p;
+  };
+  const auto clip = [](const std::vector<glm::vec2>& s, glm::vec2 a, glm::vec2 b) {
+    const auto side = [&](glm::vec2 p) { return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x); };
+    std::vector<glm::vec2> out;
+    for (size_t i = 0; i < s.size(); ++i) {
+      const glm::vec2 p = s[i], q = s[(i + 1) % s.size()];
+      const float dp = side(p), dq = side(q);
+      if (dp >= 0.0f) out.push_back(p);
+      if ((dp >= 0.0f) != (dq >= 0.0f)) out.push_back(p + (q - p) * (dp / (dp - dq)));
+    }
+    return out;
+  };
+  for (uint32_t seed : {10u, 35u, 36u, 3u, 17u}) {
+    const Scene scene = GenerateUrbanMap(seed, OldSizeConfig());
+    float worst = 0.0f;
+    for (size_t i = 0; i < scene.roads.size(); ++i) {
+      for (size_t j = i + 1; j < scene.roads.size(); ++j) {
+        const auto a = flat(scene.roads[i]), b = flat(scene.roads[j]);
+        std::vector<glm::vec2> o = a;
+        for (size_t k = 0; k < b.size() && o.size() >= 3; ++k) o = clip(o, b[k], b[(k + 1) % b.size()]);
+        if (o.size() < 3 || signedArea(o) < 0.02f) continue;
+        // Coplanar overlap only; a deck far above ground is a different layer.
+        glm::vec2 c(0.0f);
+        for (const glm::vec2& p : o) c += p;
+        c /= static_cast<float>(o.size());
+        const auto yAt = [&](const RoadSurface& r) {
+          const auto& v = r.vertices;
+          glm::vec3 n(0.0f);
+          for (size_t m = 0; m < v.size(); ++m) {
+            const glm::vec3 p = v[m], q = v[(m + 1) % v.size()];
+            n.x += (p.y - q.y) * (p.z + q.z);
+            n.y += (p.z - q.z) * (p.x + q.x);
+            n.z += (p.x - q.x) * (p.y + q.y);
+          }
+          return v[0].y - (n.x * (c.x - v[0].x) + n.z * (c.y - v[0].z)) / n.y;
+        };
+        const float dy = std::fabs(yAt(scene.roads[i]) - yAt(scene.roads[j]));
+        if (dy > 1e-4f && dy < 0.15f) worst = std::max(worst, signedArea(o));
+      }
+    }
+    CHECK(worst < 0.02f);
+  }
+}
+
 // Issue #157: obstacles that start at head height don't block the navmesh.
 void TestNavMeshIgnoresOverheadObstacles() {
   std::vector<Obstacle> obstacles;
@@ -3196,6 +3256,59 @@ void TestEnterableBuildingsHaveDoorways() {
   off.enterableChance = 0.0f;
   const Scene solid = GenerateUrbanMap(1u, off);
   for (const Building& b : solid.buildings) CHECK(!b.enterable);
+}
+
+// Roadmap 5.3: windows on enterable buildings are real holes in the walls.
+void TestWindowsAreWallCutouts() {
+  MapGeneratorConfig c = OldSizeConfig();
+  c.enterableChance = 1.0f;
+  int tested = 0;
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed, c);
+    NavMesh mesh;
+    mesh.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
+               &scene.walkSurfaces);
+    for (const FacadeOpening& o : scene.facadeOpenings) {
+      if (o.kind != FacadeOpening::Kind::Window || o.floor != 0) continue;
+      const Building& b = scene.buildings[o.building];
+      if (!b.enterable) continue;
+      const float sill = o.y0 - b.baseY, head = o.y1 - b.baseY;
+      if (sill < 0.8f || head < 1.7f) continue;  // Needs a sill that hides the foot probe.
+      const auto& fp = scene.obstacles[b.obstacle].footprint;
+      const size_t e = static_cast<size_t>(o.wallEdge), n = fp.size();
+      const glm::vec2 a = fp[e], d = glm::normalize(fp[(e + 1) % n] - a);
+      const glm::vec2 in(-d.y, d.x);
+      const float um = 0.5f * (o.u0 + o.u1);
+      const auto at = [&](float u, float depth, float height) {
+        const glm::vec2 p = a + d * u + in * depth;
+        return glm::vec3(p.x, b.baseY + height, p.y);
+      };
+      // Just the wall pieces on this edge: the cutout itself is under test.
+      std::vector<Obstacle> own;
+      for (const Obstacle& w : scene.obstacles) {
+        if (w.building == o.building && w.footprint.size() == 4 &&
+            MinimumPolygonWidth(w.footprint) < 0.5f &&
+            std::fabs(glm::dot(w.footprint[0] - a, in)) < 1e-3f &&
+            glm::dot(glm::normalize(w.footprint[1] - w.footprint[0]), d) > 0.999f) {
+          own.push_back(w);
+        }
+      }
+      const glm::vec3 outEye = at(um, -4.0f, constants::kEyeHeight);
+      // Inside figure right behind the window: eye seen, foot hidden by the sill.
+      CHECK(LineOfSightClear(outEye, at(um, 0.4f, constants::kEyeHeight), own));
+      CHECK(!LineOfSightClear(outEye, at(um, 0.4f, 0.05f), own));
+      // The jamb beside the window hides everything behind it.
+      CHECK(!LineOfSightClear(at(o.u0 - 0.15f, -4.0f, constants::kEyeHeight),
+                              at(o.u0 - 0.15f, 0.6f, constants::kEyeHeight), own));
+      // A shot ray from outside to the inside eye passes the opening too.
+      CHECK(LineOfSightClear(at(um, -12.0f, constants::kEyeHeight),
+                             at(um, 0.4f, constants::kEyeHeight), own));
+      // Nobody walks through a window.
+      CHECK(!mesh.IsWalkable(at(um, 0.15f, 0.0f).x, at(um, 0.15f, 0.0f).z));
+      ++tested;
+    }
+  }
+  CHECK(tested > 0);
 }
 
 void TestTreesStayOnEmptyBlocksAndAreSolid() {
@@ -3280,7 +3393,9 @@ void TestTreesStayOnEmptyBlocksAndAreSolid() {
 int main() {
   TestNavMeshIgnoresOverheadObstacles();
   TestEnterableBuildingsHaveDoorways();
+  TestWindowsAreWallCutouts();
   TestTreesStayOnEmptyBlocksAndAreSolid();
+  TestRoadPatchesDoNotZFight();
   TestFeatureFlagsAndStreetGraph();
   TestLongBlockApartmentRowsAndPedestrianSplits();
   TestFurnitureHugsSidewalksAndRespectsClearances();

@@ -236,3 +236,15 @@ test("an explicit CTF choice overrides the per-mode default", () => {
   controller.setMode("human");
   assert.equal(blue.tbgwafDefaultCtf, true);
 });
+
+test("Blue vs Jev (Hev vs Jev) passes the splash's CTF choice to the human pane", () => {
+  const controller = new JevPreviewController({ documentRef: null, endpoint: "http://adapter" });
+  const blue = moduleStub();
+  controller.registerModule("blue", blue);
+  controller.ctf = true;
+  controller.setMode("player-v-ai");
+  assert.equal(blue.tbgwafDefaultCtf, true);
+  controller.ctf = null;
+  controller.setMode("player-v-ai");
+  assert.equal(blue.tbgwafDefaultCtf, false);
+});

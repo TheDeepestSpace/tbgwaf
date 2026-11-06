@@ -294,6 +294,8 @@ EM_JS(double, tbgwaf_map_seed, (), {
 });
 EM_JS(int, tbgwaf_spectator, (), { return Module.tbgwafSpectator ? 1 : 0; });
 EM_JS(int, tbgwaf_default_ctf, (), { return Module.tbgwafDefaultCtf ? 1 : 0; });
+// The Jev preview page always sets the splash's game choice; standalone pages leave it undefined.
+EM_JS(int, tbgwaf_ctf_from_splash, (), { return Module.tbgwafDefaultCtf !== undefined ? 1 : 0; });
 EM_JS(int, tbgwaf_ai_generation, (), { return Module.tbgwafAIGeneration || 0; });
 EM_JS(int, tbgwaf_take_restart, (), {
   const value = Module.tbgwafRestart ? 1 : 0;
@@ -1042,7 +1044,12 @@ int main() {
   gfx::RenderDebugOptions debugOptions;
   // AO view is on by default, including in the smoke test (software GL needs
   // the longer smoke_test timeout).
+  // Default look: AO view (black hot) with NPR outlines layered on top.
   debugOptions.thermal = true;
+  debugOptions.npr = true;
+  debugOptions.nprSettings.outlineThickness = 0.8f;
+  debugOptions.nprSettings.outlineStrength = 0.46f;
+  debugOptions.nprSettings.detailSize = 0.02f;
   bool showFps = true;
   float smoothedFps = 0.0f;
   float frameMs = 0.0f;
@@ -1752,6 +1759,11 @@ int main() {
         if (*flowEvent == tbgwaf_flow::Event::SelectRegular ||
             *flowEvent == tbgwaf_flow::Event::SelectCtf) {
           ctfMode = *flowEvent == tbgwaf_flow::Event::SelectCtf;
+#ifdef __EMSCRIPTEN__
+          // The splash's Game choice wins over the in-game menu (Hev vs Jev's
+          // human pane otherwise fell back to Regular and spawned no flag).
+          if (tbgwaf_ctf_from_splash()) ctfMode = tbgwaf_default_ctf() != 0;
+#endif
         }
         if (*flowEvent == tbgwaf_flow::Event::ExitBuilder) leaveBuilderFlow();
         if (*flowEvent == tbgwaf_flow::Event::OpenBuilderScene) {
@@ -2226,7 +2238,8 @@ int main() {
                        debugOptions.thermalAo.radius,
                        debugOptions.thermalAo.strength, debugOptions.thermalAo.quality,
                        debugOptions.thermalAo.softness,
-                       debugOptions.disableOcclusionFade, showFps,
+                       debugOptions.disableOcclusionFade, debugOptions.npr,
+                       debugOptions.nprSettings, showFps,
                        smoothedFps, frameMs, fovMs, frameStats,
                        roundPanelBottom + 6.0f);
     // Pop against the pre-panel state: the checkbox may have just toggled

@@ -14,6 +14,24 @@ struct AmbientOcclusionSettings {
   int softness = 3;       // Bilateral blur half-width in pixels.
 };
 
+// Grayscale NPR look (tactical-comic cel shading + AO + screen-space
+// outlines). Distances are screen pixels so the line weight does not change
+// with zoom or pane size. Defaults are the shipped look.
+struct NprSettings {
+  float outlineThickness = 1.5f;  // Outline reach in screen pixels (0 = off).
+  float outlineStrength = 0.85f;  // Outline opacity, 0..1.
+  // World size of the finest detail worth outlining (window frames, sills).
+  // From afar, edges on features near/below this size would alias into
+  // dotted lines, so they fade out and only large steps (silhouettes) keep
+  // their outline -- a distance LOD that declutters small screens. 0 = off.
+  float detailSize = 0.1f;
+  int celBands = 4;               // Lit tone steps (>= 2).
+  float celSoftness = 0.5f;       // Band edge width, 0 (hard) .. 1 (fully smooth).
+  // Cheaper than the thermal defaults: the AO is evaluated at half
+  // resolution and blurred over a small kernel (mobile GPUs).
+  AmbientOcclusionSettings ao{4.0f, 0.9f, 3, 1};
+};
+
 // Pane-local, screen-space ambient occlusion for the thermal world. Capture
 // opaque color, world normals and depth; composite before translucent geometry
 // and sensor processing. Uses only core GLES3/WebGL2 attachment formats.
@@ -26,10 +44,24 @@ class AmbientOcclusion {
   bool Begin(int width, int height, float background);
   void Composite(GLuint target, int x, int y, const glm::mat4& view,
                  const glm::mat4& projection, bool blackHot,
-                 const AmbientOcclusionSettings& settings);
+                 const AmbientOcclusionSettings& settings,
+                 const NprSettings* outlines = nullptr);  // Non-null: NPR outlines on top.
+  // NPR variant: half-res AO, then one full-res pass that applies the AO
+  // and draws depth/normal outlines. Figures (normal alpha 0) keep their
+  // team color; only a lightly darkened rim is drawn on them.
+  void CompositeNpr(GLuint target, int x, int y, const glm::mat4& view,
+                    const glm::mat4& projection, const NprSettings& settings);
+  // See-through geometry: BeginFaded() rebinds the G-buffer (keeping the
+  // opaque depth) so the faded blocks can be drawn into it tagged
+  // (normal alpha 0.75); CompositeFadedOutlines() then blends outlines of
+  // just those pixels onto `target`, scaled by the blocks' `opacity`.
+  void BeginFaded();
+  void CompositeFadedOutlines(GLuint target, int x, int y, const glm::mat4& view,
+                              const glm::mat4& projection, const NprSettings& settings,
+                              float opacity);
 
  private:
-  Shader occlusionShader_, compositeShader_;
+  Shader occlusionShader_, compositeShader_, nprShader_, fadedOutlineShader_;
   GLuint sceneFbo_ = 0, occlusionFbo_ = 0, vao_ = 0;
   GLuint color_ = 0, normal_ = 0, depth_ = 0, occlusion_ = 0;
   int width_ = 0, height_ = 0;                    // Current pane.

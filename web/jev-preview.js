@@ -420,6 +420,9 @@ function bootstrap() {
       tbgwafServerSpectate: true,
       tbgwafSpectator: true,
       tbgwafAutoEnter: true,
+      // The spectator opens the room, so it carries the CTF choice (it is
+      // never registered, so #configureModule does not set this for it).
+      tbgwafDefaultCtf: config.ctf ?? true,
       onRuntimeInitialized() {
         controller.watchServer(spectatorConfig);
         if (--pending === 0) status.textContent = "";

@@ -1,5 +1,6 @@
 #include "game/Cover.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "game/Geometry.h"
@@ -9,7 +10,8 @@ namespace {
 
 constexpr int kDirs = 8;
 
-bool Blocked(const std::vector<Obstacle>& obstacles, const glm::vec2& p, float feetY) {
+// Height of the blocker above the feet at `p`, or a negative value if none.
+float BlockHeight(const std::vector<Obstacle>& obstacles, const glm::vec2& p, float feetY) {
   for (const Obstacle& o : obstacles) {
     if (o.navOnly) continue;
     const AABB& b = o.bounds;
@@ -17,9 +19,13 @@ bool Blocked(const std::vector<Obstacle>& obstacles, const glm::vec2& p, float f
     if (b.max.y < feetY + kCoverMinHeight || b.min.y > feetY + 0.3f) continue;
     if (p.x < b.min.x || p.x > b.max.x || p.y < b.min.z || p.y > b.max.z) continue;
     if (!o.footprint.empty() && !PointInConvexPolygon(p, o.footprint)) continue;
-    return true;
+    return b.max.y - feetY;
   }
-  return false;
+  return -1.0f;
+}
+
+bool Blocked(const std::vector<Obstacle>& obstacles, const glm::vec2& p, float feetY) {
+  return BlockHeight(obstacles, p, feetY) >= 0.0f;
 }
 
 }  // namespace
@@ -31,12 +37,15 @@ CoverTile ClassifyCover(const std::vector<Obstacle>& obstacles, const glm::vec3&
   if (Blocked(obstacles, c, feet.y)) return tile;  // Inside a blocker: not a standing spot.
   glm::vec2 sum(0.0f);
   bool tactical = false, cardinal = false;
+  float tallest = 0.0f;
   for (int k = 0; k < kDirs; ++k) {
     const float a = static_cast<float>(k) * (3.14159265358979f / 4.0f);
     const glm::vec2 d(std::cos(a), std::sin(a));
     // Diagonal probes reach the same face distance as cardinal ones.
     const float reach = (k % 2 == 0) ? kCoverProbeDistance : kCoverProbeDistance * 1.2f;
-    if (!Blocked(obstacles, c + d * reach, feet.y)) continue;
+    const float h = BlockHeight(obstacles, c + d * reach, feet.y);
+    if (h < 0.0f) continue;
+    tallest = std::max(tallest, h);
     tile.dirMask |= static_cast<uint8_t>(1u << k);
     sum += d;
     if (k % 2 != 0) continue;  // Diagonals only add direction; edges are judged on faces.
@@ -54,6 +63,7 @@ CoverTile ClassifyCover(const std::vector<Obstacle>& obstacles, const glm::vec3&
   if (tile.dirMask == 0) return tile;
   // Only a diagonal probe hit: the tile touches a blocker's corner.
   if (!cardinal) tactical = true;
+  tile.crouch = tallest < kCoverStandHeight;
   tile.kind = tactical ? CoverKind::Tactical : CoverKind::Flat;
   if (yaw) {
     *yaw = glm::length(sum) > 1e-4f ? std::atan2(sum.y, sum.x) : 0.0f;

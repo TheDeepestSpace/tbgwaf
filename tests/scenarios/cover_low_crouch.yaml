@@ -1,0 +1,29 @@
+name: cover_low_crouch
+description: >
+  Low cover (1.0 high, enough to hide a crouched figure) makes the figure crouch with
+  its back to it instead of standing against it.
+
+map:
+  obstacles:
+    - {center: [0, 5], half_extent: [6.0, 0.4], height: 1.0, climbable: false}
+
+units:
+  - {id: 0, team: blue, position: [0, 0, -1], facing_degrees: 0}
+  - {id: 1, team: red, position: [0, 0, -14], facing_degrees: 180}
+
+camera:
+  target: [0, 3]
+  zoom: 4
+
+script:
+  - action: move
+    actor: 0
+    destination: [0, 0, 4.2]
+    final_facing_degrees: 0
+    comment: "Chest-low barrier: crouches, back to it"
+  - action: move
+    actor: 1
+    destination: [0, 0, -12]
+  - action: commit
+  - assert: {unit: 0, position: [0, 0, 4.2], tolerance: 0.05}
+  - assert: {unit: 0, facing_degrees: -90, tolerance: 0.5}

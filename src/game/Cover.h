@@ -23,13 +23,20 @@ enum class CoverKind : uint8_t { None = 0, Flat = 1, Tactical = 2 };
 
 constexpr float kCoverProbeDistance = 0.7f;  // Tile centre to blocker face probe.
 constexpr float kCoverEdgeReach = 0.75f;     // How far along the wall an open edge counts.
-constexpr float kCoverMinHeight = 1.0f;      // Blocker must rise this far above the feet.
+// A crouched figure is ~1.15 tall; a blocker must hide at least 70% of that
+// (more than 30% visible = no protection, so it is not cover at all).
+constexpr float kCrouchedHeight = 1.15f;
+constexpr float kCoverMinHeight = 0.7f * kCrouchedHeight;  // Blocker must rise this far above the feet.
+constexpr float kCoverStandHeight = 1.4f;  // At/above this the figure stands with its back to it.
 
 struct CoverTile {
   CoverKind kind = CoverKind::None;
   // Bit k set = a blocker lies in compass direction k, the direction at
   // angle k * 45 degrees from +X toward +Z (matches Unit::facingYaw).
   uint8_t dirMask = 0;
+  // Tallest adjacent blocker rises less than kCoverStandHeight above the feet:
+  // the figure crouches behind it instead of standing against it.
+  bool crouch = false;
 };
 
 // Classifies a feet position. `yaw` (if given) receives the world yaw

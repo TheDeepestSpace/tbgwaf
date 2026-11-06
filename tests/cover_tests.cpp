@@ -45,6 +45,18 @@ int main() {
   crown.bounds.min.y = 2.0f;
   CHECK(ClassifyCover({crown}, {0, 0, -0.4f}).kind == CoverKind::None);
 
+  // Height decides the pose: tall = stand with back to it, low = crouch,
+  // and below the 70%-of-crouched-height line it is not cover at all.
+  CHECK(!ClassifyCover({Box(-20, 0, 20, 1, 3.0f)}, {0, 0, -0.4f}).crouch);
+  CHECK(!ClassifyCover({Box(-20, 0, 20, 1, kCoverStandHeight)}, {0, 0, -0.4f}).crouch);
+  CHECK(ClassifyCover({Box(-20, 0, 20, 1, 1.0f)}, {0, 0, -0.4f}).crouch);
+  CHECK(ClassifyCover({Box(-20, 0, 20, 1, kCoverMinHeight + 0.01f)}, {0, 0, -0.4f}).kind ==
+        CoverKind::Flat);
+  CHECK(ClassifyCover({Box(-20, 0, 20, 1, kCoverMinHeight - 0.01f)}, {0, 0, -0.4f}).kind ==
+        CoverKind::None);
+  // Crouched, no more than 30% of the figure shows above the cover.
+  CHECK((kCrouchedHeight - kCoverMinHeight) / kCrouchedHeight <= 0.3f + 1e-4f);
+
   // Deterministic and map consistent with point classification.
   ReachField f;
   f.minX = -1; f.minZ = -2; f.step = 0.25f; f.nx = 9; f.nz = 9; f.budget = 5;

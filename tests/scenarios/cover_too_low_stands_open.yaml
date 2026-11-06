@@ -1,0 +1,29 @@
+name: cover_too_low_stands_open
+description: >
+  A barrier so low (0.6) that over 30% of a crouched figure would show is no cover:
+  the figure neither crouches nor turns its back; the requested facing (+X) is kept.
+
+map:
+  obstacles:
+    - {center: [0, 5], half_extent: [6.0, 0.4], height: 0.6, climbable: false}
+
+units:
+  - {id: 0, team: blue, position: [0, 0, -1], facing_degrees: 0}
+  - {id: 1, team: red, position: [0, 0, -14], facing_degrees: 180}
+
+camera:
+  target: [0, 3]
+  zoom: 4
+
+script:
+  - action: move
+    actor: 0
+    destination: [0, 0, 4.2]
+    final_facing_degrees: 0
+    comment: "Too low to protect: stands open and keeps the chosen facing"
+  - action: move
+    actor: 1
+    destination: [0, 0, -12]
+  - action: commit
+  - assert: {unit: 0, position: [0, 0, 4.2], tolerance: 0.05}
+  - assert: {unit: 0, facing_degrees: 0, tolerance: 0.5}

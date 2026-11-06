@@ -140,7 +140,8 @@ struct Unit {
   // clients render the same sampled rig pose during execution.
   float idleElapsed = 0.0f;
   // Cover pose (issue #290; visual only, derived from geometry by GameLogic):
-  // CoverKind of the tile the figure stands on (0 none, 1 flat, 2 tactical),
+  // pose for the cover tile the figure stands on (0 none, 1 back against
+  // the wall for tall cover, 2 crouch for low cover),
   // the yaw pointing at the blocker, a 0..1 blend into the pose, and the
   // position the kind was last classified at.
   uint8_t coverKind = 0;

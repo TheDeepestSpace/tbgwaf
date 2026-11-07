@@ -140,6 +140,22 @@ windows and doors themselves stay visual for now. Switch the openings off
 with `MapGeneratorConfig::features.facades` or scenario YAML
 `map.generate.features: {facades: off}`.
 
+About half the parcels (`MapGeneratorConfig::enterableChance`, own seed
+stream) are built **enterable** (issues #157, #158, #159): thin wall
+`Obstacle`s around the footprint instead of a solid prism, a real doorway on
+the frontage (plus a rear doorway for some), windows cut out of the walls on
+every floor (jambs, sill and head pieces, so an eye sees through the hole while
+the sill hides a foot probe), and the upper storeys as walkable floors: each
+floor is one or more convex `WalkSurface`s inside the walls (non-convex plans
+are split by `DecomposeToConvex` and linked as neighbours) over a ceiling slab,
+reached by a straight stair -- one steep flight `WalkSurface` per storey, drawn
+as steps, stacked in a stairwell notched out of the floors above. Figures path
+in through the door, up the stairs and to a window on any floor like anywhere
+else; a figure at an upper window covers the street below. Nothing is
+"climbable" by flag any more (issue #40): crates and parked cars carry a top
+`WalkSurface` plus a little ramp (`AddClimbRamp`), and every raised place is
+reached over a ramp or stair.
+
 Urban maps carry pre-built **ziplines** (0-2 per block, seed-deterministic,
 `MapGeneratorConfig::maxZiplinesPerBlock`): two-way cables between anchor
 posts along the block sidewalks. A move plan may walk to one anchor, ride,
@@ -216,7 +232,7 @@ medium flat field (40 x 40) in 3D with a side panel to rename the scene, add
 cubes and edit their position, size and height, and add Blue/Red figures and
 pick each one's gun (Desert Eagle, Assault Rifle, Sniper Rifle). Drag a
 figure in the 3D view to move it; it snaps onto the ground or a cube top
-(every cube is climbable). **Start** (enabled once both teams have a figure
+(every cube has a ramp up onto its top). **Start** (enabled once both teams have a figure
 and every figure stands clear) plays the scene **hotseat** on one screen:
 both teams' figures and FOV cones are shown, any figure can be clicked and
 planned, and the HUD follows the selected figure's team; **Commit Round** once

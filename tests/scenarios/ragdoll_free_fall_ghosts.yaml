@@ -12,7 +12,9 @@ shot_rolls: [0.9, 0.0, 0.0]
 
 map:
   obstacles:
-    - {center: [0, 0], half_extent: [0.6, 5.0], height: 6.0, climbable: true}
+    # The wall top is a walk surface reached over a ramp on the west side
+    # (issue #40), so red2 can walk along it; the east side stays open ground.
+    - {center: [0, 0], half_extent: [0.6, 5.0], height: 6.0, ramp: "-x"}
 
 units:
   - {id: 0, team: blue, position: [-8, 0, 1], facing_degrees: 0}    # Shooter, west of the wall.

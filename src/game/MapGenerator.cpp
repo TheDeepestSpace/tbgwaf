@@ -80,8 +80,7 @@ void AddBuilding(Scene* scene, float x0, float z0, float x1, float z1, float hei
                  const GroundY& groundY) {
   const float baseY = groundY(0.5f * (x0 + x1), 0.5f * (z0 + z1));
   scene->obstacles.push_back(Obstacle{
-      AABB{glm::vec3(x0, baseY, z0), glm::vec3(x1, baseY + height, z1)},
-      /*climbable=*/false});
+      AABB{glm::vec3(x0, baseY, z0), glm::vec3(x1, baseY + height, z1)}});
 }
 
 // Splits [a, b] into `count` buildings. Junction i (between building i and
@@ -2124,7 +2123,7 @@ int AddPolygonBuilding(Scene* scene, std::vector<glm::vec2> footprint, float bas
   const float baseY = groundY(center.x, center.y) + baseLift;
   bounds.min.y = baseY;
   bounds.max.y = baseY + height;
-  scene->obstacles.push_back(Obstacle{bounds, false, std::move(footprint), ObstacleKind::Generic, building});
+  scene->obstacles.push_back(Obstacle{bounds, std::move(footprint), ObstacleKind::Generic, building});
   return static_cast<int>(scene->obstacles.size()) - 1;
 }
 
@@ -4073,7 +4072,7 @@ void EmitPiers(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c, 
         bounds.max.z = std::max(bounds.max.z, p.y);
       }
       scene->obstacles.push_back(
-          Obstacle{bounds, false, std::move(footprint), ObstacleKind::Pier});
+          Obstacle{bounds, std::move(footprint), ObstacleKind::Pier});
     };
     // One bent at `center`: `deckHalf` is the road's half width, `along` its
     // direction, `deckY` the relative deck lift there.
@@ -4236,14 +4235,31 @@ DoorSpec DoorSpecFor(BuildingKind kind) {
 // Hollow building (issue #157): one thin wall Obstacle per footprint edge,
 // the frontage wall split around a doorway (like SplitRun's alleys) with the
 // lintel as a wall piece starting at kDoorHeight, plus a roof slab over the
-// whole footprint (Building::obstacle). False (nothing emitted) when the
-// frontage is too short for a doorway or the footprint is not usable.
+// whole footprint (Building::obstacle). Multi-storey buildings (roadmap
+// 5.4/5.5) get every upper floor as convex WalkSurfaces at the storey's
+// height over the interior (the footprint inset by the wall and a figure's
+// clearance), a ceiling slab Obstacle under each (sight occluder and visual
+// soffit over the ring the walkable floor leaves at the walls), and one
+// straight stair: a steep flight WalkSurface per storey gap, all stacked in
+// one stairwell against an interior wall, each floor above the ground one
+// notched around the stairwell and decomposed back into convex pieces
+// (DecomposeToConvex) linked as neighbours. False (nothing emitted) when the
+// frontage is too short for a doorway, the footprint is not usable, or no
+// wall is long enough for the stair.
 bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, const std::vector<Parcel>& parcels,
                         float height, int index, const GroundY& groundY, bool halfClosed,
                         bool rearOpen, Building* b) {
   constexpr float kWallThickness = 0.3f;
   constexpr float kRoofThickness = 0.3f;
+  constexpr float kCeilingThickness = 0.5f;  // Slab under an upper floor (the walk surface's 0.45 sits inside it).
+  constexpr float kCeilingGap = 0.01f;       // Ceiling top just under the walkable floor: no coplanar faces.
+  constexpr float kFloorInset = 0.25f;       // Walkable floor edge back from the wall's inner face.
   constexpr float kEndMargin = 0.8f;  // Wall left either side of the door.
+  constexpr float kStairWidth = 1.0f;
+  constexpr float kStairEndMargin = 0.4f;    // Flight ends clear of the interior's corners.
+  constexpr float kStairMinSlope = 0.75f;    // Gentlest flight (rise over run) when the wall allows.
+  constexpr float kStairMaxSlope = 1.1f;     // Steepest; still under kMaxWalkSlope.
+  constexpr float kStairPassage = 2.0f * constants::kAgentRadius + 0.6f;  // Floor left beside the flight.
   std::vector<glm::vec2> fp = parcel.footprint;
   if (fp.size() < 3 || PolygonArea(fp) < kMinBuildingArea) return false;
   if (PolygonSignedArea(fp) < 0.0f) return false;  // Parcels are CCW; don't guess.
@@ -4264,8 +4280,62 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, const std::vector<Pa
   const float fullDoorHeight = doorHeight;
   const bool shuttered = halfClosed && b->kind == BuildingKind::Commercial;
   if (shuttered) doorHeight = std::max(constants::kUnitHeight, 0.5f * doorHeight);
+  for (size_t e = 0; e < n; ++e) {
+    if (glm::distance(fp[e], fp[(e + 1) % n]) < 1e-3f) return false;
+  }
+
+  // Frame along footprint edge e: P(u, v) = fp[e] + d * u + in * v, `in` the
+  // inward normal (left of a CCW edge).
+  const auto frame = [&](size_t e, glm::vec2* d, glm::vec2* in) {
+    *d = glm::normalize(fp[(e + 1) % n] - fp[e]);
+    *in = glm::vec2(-d->y, d->x);
+  };
+
+  // Stair plan for multi-storey buildings: the interior wall (never the
+  // frontage) whose length allows the gentlest flight for the tallest storey,
+  // with the flight centered along it and room beside it to walk past.
+  const int storeys = static_cast<int>(b->floors.size());
+  const std::vector<glm::vec2> interior = InsetConvexPolygon(fp, kWallThickness + kFloorInset);
+  int stairEdge = -1;
+  float stairU0 = 0.0f, stairU1 = 0.0f, stairV = 0.0f;
+  if (storeys >= 2) {
+    if (interior.size() != n) return false;
+    float maxRise = 0.0f;
+    for (int f = 0; f + 1 < storeys; ++f) {
+      maxRise = std::max(maxRise, b->floors[f + 1].y0 - b->floors[f].y0);
+    }
+    float bestRun = 0.0f;
+    for (size_t e = 0; e < n; ++e) {
+      if (e == door) continue;
+      glm::vec2 d, in;
+      frame(e, &d, &in);
+      const float uA = glm::dot(interior[e] - fp[e], d);
+      const float uB = glm::dot(interior[(e + 1) % n] - fp[e], d);
+      const float v = glm::dot(interior[e] - fp[e], in);
+      const float avail = uB - uA - 2.0f * kStairEndMargin;
+      float run = std::min(maxRise / kStairMinSlope, avail);
+      if (run < maxRise / kStairMaxSlope) continue;
+      const float u0 = 0.5f * (uA + uB) - 0.5f * run, u1 = u0 + run;
+      const auto at = [&](float u, float depth) { return fp[e] + d * u + in * depth; };
+      bool fits = true;
+      for (const glm::vec2& q : {at(u0, v), at(u1, v), at(u1, v + kStairWidth),
+                                 at(u0, v + kStairWidth), at(u0, v + kStairWidth + kStairPassage),
+                                 at(u1, v + kStairWidth + kStairPassage)}) {
+        fits &= PointInConvexPolygon(q, interior, 1e-3f);
+      }
+      if (!fits || run <= bestRun) continue;
+      bestRun = run;
+      stairEdge = static_cast<int>(e);
+      stairU0 = u0;
+      stairU1 = u1;
+      stairV = v;
+    }
+    if (stairEdge < 0) return false;
+  }
+
   // Rear doorway (50/50 via `rearOpen`): the longest edge facing away from the
-  // frontage with open ground behind it (back-to-back parcels share walls).
+  // frontage with open ground behind it (back-to-back parcels share walls),
+  // never the stair wall.
   constexpr float kRearDoorWidth = 1.2f, kRearDoorHeight = 2.2f;
   int rearEdge = -1;
   float rearScore = 0.0f;
@@ -4273,7 +4343,7 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, const std::vector<Pa
     const glm::vec2 fd = glm::normalize(fp[(door + 1) % n] - fp[door]);
     const glm::vec2 frontOut(fd.y, -fd.x);
     for (size_t e = 0; e < n; ++e) {
-      if (e == door) continue;
+      if (e == door || static_cast<int>(e) == stairEdge) continue;
       const glm::vec2 a = fp[e], q = fp[(e + 1) % n];
       const float len = glm::distance(a, q);
       if (len < kRearDoorWidth + 2.0f * kEndMargin) continue;
@@ -4297,9 +4367,6 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, const std::vector<Pa
         rearEdge = static_cast<int>(e);
       }
     }
-  }
-  for (size_t e = 0; e < n; ++e) {
-    if (glm::distance(fp[e], fp[(e + 1) % n]) < 1e-3f) return false;
   }
   constexpr float kMinPiece = 0.01f;
   const auto addWall = [&](glm::vec2 a, glm::vec2 q, float u0, float u1, float lift, float h) {
@@ -4345,11 +4412,102 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, const std::vector<Pa
       addWall(a, q, u0, u1, doorHeight, height - doorHeight);  // Lintel.
     }
   }
-  // Interior floor slabs under each upper storey (a slab per floor above the
-  // ground one). Overhead, so they never block the ground navmesh.
-  for (size_t f = 1; f < b->floors.size(); ++f) {
-    AddPolygonBuilding(scene, fp, b->floors[f].y0 - kRoofThickness - b->baseY, kRoofThickness,
-                       index, groundY);
+
+  // Upper floors and the stair (roadmap 5.4/5.5).
+  b->floorSurfaces.clear();
+  b->stairSurfaces.clear();
+  b->stairEdge = stairEdge;
+  b->stairU0 = stairU0;
+  b->stairU1 = stairU1;
+  if (storeys >= 2) {
+    glm::vec2 d, in;
+    frame(static_cast<size_t>(stairEdge), &d, &in);
+    const size_t se = static_cast<size_t>(stairEdge);
+    const auto at = [&](float u, float depth) { return fp[se] + d * u + in * depth; };
+    // The stairwell's four corners (shared, bit for bit, by the notched
+    // floors and the flights, so the navmesh sees full seams).
+    const glm::vec2 wellLo0 = at(stairU0, stairV), wellLo1 = at(stairU0, stairV + kStairWidth);
+    const glm::vec2 wellHi0 = at(stairU1, stairV), wellHi1 = at(stairU1, stairV + kStairWidth);
+    // `polygon` with the stairwell notched out of edge `se` (the notch runs
+    // from the polygon's edge in to the stairwell's inner side).
+    const auto notched = [&](const std::vector<glm::vec2>& polygon, float edgeDepth) {
+      std::vector<glm::vec2> out;
+      for (size_t i = 0; i < n; ++i) {
+        out.push_back(polygon[i]);
+        if (i != se) continue;
+        out.push_back(at(stairU0, edgeDepth));
+        out.push_back(wellLo1);
+        out.push_back(wellHi1);
+        out.push_back(at(stairU1, edgeDepth));
+      }
+      return out;
+    };
+    // Counter-clockwise from above, as every WalkSurface consumer expects.
+    const auto pushSurface = [&](std::vector<glm::vec3> vertices, bool connectsToGround,
+                                 bool stair) {
+      float area = 0.0f;
+      for (size_t i = 0; i < vertices.size(); ++i) {
+        const glm::vec3& p = vertices[i];
+        const glm::vec3& q = vertices[(i + 1) % vertices.size()];
+        area += p.x * q.z - q.x * p.z;
+      }
+      if (area < 0.0f) std::reverse(vertices.begin(), vertices.end());
+      WalkSurface surface;
+      surface.vertices = std::move(vertices);
+      surface.connectsToGround = connectsToGround;
+      surface.stair = stair;
+      surface.building = index;
+      scene->walkSurfaces.push_back(std::move(surface));
+      return static_cast<int>(scene->walkSurfaces.size()) - 1;
+    };
+    const auto link = [&](int a, int q) {
+      scene->walkSurfaces[a].neighbors.push_back(q);
+      scene->walkSurfaces[q].neighbors.push_back(a);
+    };
+    // Surface among `pieces` holding both corners (the one owning that notch edge).
+    const auto pieceWithEdge = [&](const std::vector<int>& pieces, glm::vec2 p, glm::vec2 q) {
+      for (int piece : pieces) {
+        int hits = 0;
+        for (const glm::vec3& v : scene->walkSurfaces[piece].vertices) {
+          hits += glm::distance(glm::vec2(v.x, v.z), p) < 1e-4f;
+          hits += glm::distance(glm::vec2(v.x, v.z), q) < 1e-4f;
+        }
+        if (hits == 2) return piece;
+      }
+      return -1;
+    };
+    std::vector<std::vector<int>> floorPieces(storeys);  // Per storey (ground: none).
+    const ConvexDecomposition floorPlan = DecomposeToConvex(notched(interior, stairV));
+    const ConvexDecomposition ceilingPlan = DecomposeToConvex(notched(fp, 0.0f));
+    for (int f = 1; f < storeys; ++f) {
+      const float y = b->floors[f].y0;
+      const int first = static_cast<int>(scene->walkSurfaces.size());
+      for (const std::vector<glm::vec2>& piece : floorPlan.pieces) {
+        std::vector<glm::vec3> vertices;
+        for (const glm::vec2& p : piece) vertices.emplace_back(p.x, y, p.y);
+        floorPieces[f].push_back(pushSurface(std::move(vertices), false, false));
+      }
+      for (const auto& [p, q] : floorPlan.links) link(first + p, first + q);
+      b->floorSurfaces.insert(b->floorSurfaces.end(), floorPieces[f].begin(),
+                              floorPieces[f].end());
+      for (const std::vector<glm::vec2>& piece : ceilingPlan.pieces) {
+        AddPolygonBuilding(scene, piece, y - kCeilingThickness - b->baseY,
+                           kCeilingThickness - kCeilingGap, index, groundY, kMinPiece);
+      }
+    }
+    for (int f = 0; f + 1 < storeys; ++f) {
+      const float y0 = b->floors[f].y0, y1 = b->floors[f + 1].y0;
+      const int flight = pushSurface({{wellLo0.x, y0, wellLo0.y}, {wellHi0.x, y1, wellHi0.y},
+                                      {wellHi1.x, y1, wellHi1.y}, {wellLo1.x, y0, wellLo1.y}},
+                                     /*connectsToGround=*/f == 0, /*stair=*/true);
+      b->stairSurfaces.push_back(flight);
+      const int above = pieceWithEdge(floorPieces[f + 1], wellHi0, wellHi1);
+      if (above >= 0) link(flight, above);
+      if (f > 0) {
+        const int below = pieceWithEdge(floorPieces[f], wellLo0, wellLo1);
+        if (below >= 0) link(flight, below);
+      }
+    }
   }
   b->enterable = true;
   b->doorWidth = doorWidth;
@@ -5065,10 +5223,10 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
           scene->facadeOpenings.push_back(FacadeOpening{
               FacadeOpening::Kind::Window, static_cast<int>(bi), b.obstacle,
               static_cast<int>(e), u0, u1, y0, y1, floor});
-          // Ground-floor windows only for now: nothing can stand above the
-          // ground floor until stairs/floors land (roadmap 5.4-5.5), and each
-          // cut triples the wall piece count.
-          if (b.enterable && floor == 0) {
+          // Every floor of an enterable building: its upper floors are
+          // walkable (roadmap 5.4), so a figure up there peeps out (and is
+          // seen) through the same holes as on the ground floor.
+          if (b.enterable) {
             windowCuts.push_back(WindowCut{static_cast<int>(bi), a, q, u0, u1, y0, y1});
           }
         }
@@ -5196,7 +5354,6 @@ void EmitStreetFurniture(Scene* scene, const CityPlan& city, const MapGeneratorC
             AABB{glm::vec3(center.x - spec.sx * 0.5f, baseY, center.y - spec.sz * 0.5f),
                  glm::vec3(center.x + spec.sx * 0.5f, baseY + kSidewalkHeight + spec.height,
                            center.y + spec.sz * 0.5f)},
-            /*climbable=*/false,
             /*footprint=*/{},
             ObstacleKind::StreetFurniture});
         if (kind == 0) {
@@ -5227,6 +5384,8 @@ void EmitStreetFurniture(Scene* scene, const CityPlan& city, const MapGeneratorC
 // sees over them, taller than a foot probe so they still hide a low target.
 // The bus is the exception: a full wall of a vehicle that blocks sight
 // entirely. Tagged ObstacleKind::Cover, with no footprint (like the furniture).
+// `climbable` vehicles get a walkable top and a ramp off one bumper (issue
+// #40, AddClimbRamp) when the road beyond the bumper is clear.
 struct CoverSpec {
   StreetFixtureModel model;
   bool climbable;
@@ -5405,7 +5564,6 @@ void EmitCoachBuses(Scene* scene, const CityPlan& city, const MapGeneratorConfig
       scene->obstacles.push_back(Obstacle{
           AABB{glm::vec3(pick.lo.x, pick.baseY, pick.lo.y),
                glm::vec3(pick.hi.x, pick.baseY + kGradeY + spec.Height(), pick.hi.y)},
-          spec.climbable,
           /*footprint=*/{},
           ObstacleKind::Cover});
       Obstacle& item = scene->obstacles.back();
@@ -5555,7 +5713,7 @@ void EmitArteryWrecks(Scene* scene, const CityPlan& city, const MapGeneratorConf
 
     scene->obstacles.push_back(Obstacle{
         AABB{glm::vec3(lo.x, baseY, lo.y), glm::vec3(hi.x, baseY + kGradeY + height, hi.y)},
-        /*climbable=*/false, poly, ObstacleKind::Cover});
+        poly, ObstacleKind::Cover});
     Obstacle& item = scene->obstacles.back();
     item.fixtureModel = model;
     item.fixtureYaw = yaw;
@@ -5785,6 +5943,21 @@ void EmitCoverItems(Scene* scene, const CityPlan& city, const MapGeneratorConfig
             }
             if (!lane) continue;
           }
+          // Never on a stoop, platform or a parked car's ramp: clear of every
+          // walk surface that is not far overhead.
+          {
+            const std::vector<glm::vec2> rect = {lo, {hi.x, lo.y}, hi, {lo.x, hi.y}};
+            for (const WalkSurface& surface : scene->walkSurfaces) {
+              if (surface.vertices.size() < 3) continue;
+              float lowest = surface.vertices.front().y;
+              for (const glm::vec3& v : surface.vertices) lowest = std::min(lowest, v.y);
+              if (lowest > baseY + constants::kMinDeckHeadroom) continue;
+              std::vector<glm::vec2> xz;
+              for (const glm::vec3& v : surface.vertices) xz.emplace_back(v.x, v.z);
+              ok &= RectPolygonGap(lo, hi, xz) >= 0.05f;
+            }
+            if (!ok) continue;
+          }
           // Against everything else already placed (terrain walls, stairs,
           // furniture, signal poles, a stopped bus): no overlap, a body width
           // from the small fixtures so they never pinch the sidewalk, and a
@@ -5821,7 +5994,6 @@ void EmitCoverItems(Scene* scene, const CityPlan& city, const MapGeneratorConfig
           scene->obstacles.push_back(Obstacle{
               AABB{glm::vec3(lo.x, baseY, lo.y),
                    glm::vec3(hi.x, baseY + surface + spec.Height(), hi.y)},
-              spec.climbable,
               /*footprint=*/{},
               ObstacleKind::Cover});
           Obstacle& item = scene->obstacles.back();
@@ -5829,6 +6001,52 @@ void EmitCoverItems(Scene* scene, const CityPlan& city, const MapGeneratorConfig
           item.fixtureYaw = std::atan2(-axisIn.x, axisIn.y);
           item.fixtureBaseY = baseY + surface;
           placed.push_back(center);
+          if (spec.climbable) {
+            // Ramp off whichever bumper has level, open road beyond it (the
+            // first that fits, in the curb's direction first); none if neither.
+            const float run = (surface + spec.Height()) / kClimbRampSlope;
+            for (const glm::vec2 end : {axisDir, -axisDir}) {
+              glm::vec2 rlo = lo, rhi = hi;
+              if (end.x > 0.0f) { rlo.x = hi.x; rhi.x = hi.x + run; }
+              if (end.x < 0.0f) { rhi.x = lo.x; rlo.x = lo.x - run; }
+              if (end.y > 0.0f) { rlo.y = hi.y; rhi.y = hi.y + run; }
+              if (end.y < 0.0f) { rhi.y = lo.y; rlo.y = lo.y - run; }
+              if (std::max(std::max(std::fabs(rlo.x), std::fabs(rhi.x)),
+                           std::max(std::fabs(rlo.y), std::fabs(rhi.y))) > half - 0.6f) {
+                continue;
+              }
+              const std::vector<glm::vec2> rect = {rlo, {rhi.x, rlo.y}, rhi, {rlo.x, rhi.y}};
+              bool fits = true;
+              for (const glm::vec2& q : rect) {
+                fits &= std::fabs(groundY(q.x, q.y) - baseY) < 0.05f;
+                for (const UrbanBlock& other : city.blocks) {
+                  fits &= !PointInConvexPolygon(q, other.vertices, 0.05f);
+                }
+              }
+              fits = fits && PolygonClearOfRoads(rect, city.streets.roads, 0.0f);
+              for (size_t oi = 0; oi + 1 < scene->obstacles.size() && fits; ++oi) {
+                fits &= RectPolygonGap(rlo, rhi, ObstacleFootprint(scene->obstacles[oi])) >= 0.05f;
+              }
+              for (const WalkSurface& other : scene->walkSurfaces) {
+                if (!fits) break;
+                if (other.vertices.size() < 3) continue;
+                float lowest = other.vertices.front().y;
+                for (const glm::vec3& v : other.vertices) lowest = std::min(lowest, v.y);
+                if (lowest > baseY + constants::kMinDeckHeadroom) continue;
+                std::vector<glm::vec2> xz;
+                for (const glm::vec3& v : other.vertices) xz.emplace_back(v.x, v.z);
+                fits &= RectPolygonGap(rlo, rhi, xz) >= 0.05f;
+              }
+              for (const Unit& unit : scene->units) {
+                const glm::vec2 u(unit.position.x, unit.position.z);
+                fits &= glm::length(glm::max(glm::max(rlo - u, u - rhi), glm::vec2(0.0f))) >=
+                        kSpawnClearance;
+              }
+              if (!fits) continue;
+              AddClimbRamp(scene, static_cast<int>(scene->obstacles.size()) - 1, end);
+              break;
+            }
+          }
           break;
         }
       }
@@ -5928,7 +6146,6 @@ void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorCo
     scene->obstacles.push_back(Obstacle{
         AABB{glm::vec3(p.x - post * 0.5f, y, p.y - post * 0.5f),
              glm::vec3(p.x + post * 0.5f, y + height, p.y + post * 0.5f)},
-        /*climbable=*/false,
         /*footprint=*/{},
         ObstacleKind::StreetFurniture});
     placed.push_back(p);
@@ -6704,8 +6921,7 @@ Scene GenerateHillyMapImpl(uint32_t seed, const HillyMapConfig& c) {
       }
     }
     scene.obstacles.push_back(Obstacle{
-        AABB{glm::vec3(cx - hx, lo - 1.0f, cz - hz), glm::vec3(cx + hx, hi + c.rockHeight, cz + hz)},
-        /*climbable=*/false});
+        AABB{glm::vec3(cx - hx, lo - 1.0f, cz - hz), glm::vec3(cx + hx, hi + c.rockHeight, cz + hz)}});
   }
 
   // Same 3v3 spawn rows as the urban generator, standing on the terrain.

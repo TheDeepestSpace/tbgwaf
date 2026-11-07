@@ -24,13 +24,71 @@ namespace {
 constexpr float kPi = 3.14159265358979323846f;
 
 Obstacle MakeObstacle(float centerX, float centerZ, float halfWidthX, float halfWidthZ,
-                       float height, bool climbable) {
+                       float height) {
   return Obstacle{AABB{glm::vec3(centerX - halfWidthX, 0.0f, centerZ - halfWidthZ),
-                        glm::vec3(centerX + halfWidthX, height, centerZ + halfWidthZ)},
-                   climbable};
+                        glm::vec3(centerX + halfWidthX, height, centerZ + halfWidthZ)}};
 }
 
 }  // namespace
+
+int AddClimbRamp(Scene* scene, int obstacle, glm::vec2 rampSide, float maxRun) {
+  Obstacle& box = scene->obstacles[obstacle];
+  const float top = box.bounds.max.y;
+  const float base = box.bounds.min.y;
+  const float rise = top - base;
+  if (rise <= kClimbTopLift) return -1;
+  box.bounds.max.y = top - kClimbTopLift;
+  const glm::vec3 lo = box.bounds.min, hi = box.bounds.max;
+  // Counter-clockwise from above (positive x*z' - x'*z area), like every
+  // other walk surface.
+  const auto push = [&](std::vector<glm::vec3> vertices, bool connectsToGround) {
+    float area = 0.0f;
+    for (size_t i = 0; i < vertices.size(); ++i) {
+      const glm::vec3& p = vertices[i];
+      const glm::vec3& q = vertices[(i + 1) % vertices.size()];
+      area += p.x * q.z - q.x * p.z;
+    }
+    if (area < 0.0f) std::reverse(vertices.begin(), vertices.end());
+    WalkSurface surface;
+    surface.vertices = std::move(vertices);
+    surface.connectsToGround = connectsToGround;
+    scene->walkSurfaces.push_back(std::move(surface));
+    return static_cast<int>(scene->walkSurfaces.size()) - 1;
+  };
+  const int topIndex = push({{lo.x, top, lo.z}, {hi.x, top, lo.z}, {hi.x, top, hi.z},
+                             {lo.x, top, hi.z}},
+                            /*connectsToGround=*/false);
+  // The ramp hangs off the face `rampSide` points through, as wide as that
+  // face, and lands `run` further out at the box's underside height.
+  const glm::vec2 side = std::fabs(rampSide.x) >= std::fabs(rampSide.y)
+                             ? glm::vec2(rampSide.x < 0.0f ? -1.0f : 1.0f, 0.0f)
+                             : glm::vec2(0.0f, rampSide.y < 0.0f ? -1.0f : 1.0f);
+  const float run = std::min(rise / kClimbRampSlope, std::max(maxRun, 0.2f));
+  glm::vec3 a, b;  // The top edge along the face.
+  if (side.x != 0.0f) {
+    const float x = side.x > 0.0f ? hi.x : lo.x;
+    a = glm::vec3(x, top, lo.z);
+    b = glm::vec3(x, top, hi.z);
+  } else {
+    const float z = side.y > 0.0f ? hi.z : lo.z;
+    a = glm::vec3(lo.x, top, z);
+    b = glm::vec3(hi.x, top, z);
+  }
+  const glm::vec3 out(side.x * run, base - top, side.y * run);
+  const int ramp = push({a, b, b + out, a + out}, /*connectsToGround=*/base < 1e-4f);
+  scene->walkSurfaces[topIndex].neighbors.push_back(ramp);
+  scene->walkSurfaces[ramp].neighbors.push_back(topIndex);
+  return topIndex;
+}
+
+int AddClimbableBox(Scene* scene, const AABB& box, glm::vec2 rampSide) {
+  Obstacle o;
+  o.bounds = box;
+  scene->obstacles.push_back(o);
+  const int index = static_cast<int>(scene->obstacles.size()) - 1;
+  AddClimbRamp(scene, index, rampSide);
+  return index;
+}
 
 Obstacle TreeOccluder(const TreeDecoration& tree) {
   Obstacle solid;
@@ -49,16 +107,16 @@ Obstacle TreeOccluder(const TreeDecoration& tree) {
 Scene BuildDefaultScene() {
   Scene scene;
 
-  // 30x30 field. Non-climbable structures (taller than a figure can climb)
-  // are fully impassable to the navmesh and block shots; the squads start at
-  // opposite ends with no clear sightline between them.
+  // 30x30 field. Walls and fences are fully impassable to the navmesh and
+  // block shots; the squads start at opposite ends with no clear sightline
+  // between them.
   constexpr float kWallHeight = 2.5f;
   constexpr float kFenceHeight = 1.7f;
   auto wall = [&](float cx, float cz, float hx, float hz) {
-    scene.obstacles.push_back(MakeObstacle(cx, cz, hx, hz, kWallHeight, /*climbable=*/false));
+    scene.obstacles.push_back(MakeObstacle(cx, cz, hx, hz, kWallHeight));
   };
   auto fence = [&](float cx, float cz, float hx, float hz) {
-    scene.obstacles.push_back(MakeObstacle(cx, cz, hx, hz, kFenceHeight, /*climbable=*/false));
+    scene.obstacles.push_back(MakeObstacle(cx, cz, hx, hz, kFenceHeight));
   };
 
   // Central building: a walled room with a door gap (x in [-1, 1]) in its
@@ -80,13 +138,18 @@ Scene BuildDefaultScene() {
   fence(-7.0f, 6.0f, 2.4f, 0.15f);
   fence(7.0f, -6.0f, 2.4f, 0.15f);
 
-  // A handful of standalone crates for extra path variety. Low enough to be
-  // climbable: the navmesh connects ground level to their tops (Stage C).
-  scene.obstacles.push_back(MakeObstacle(-4.0f, 6.5f, 0.6f, 0.6f, 1.2f, /*climbable=*/true));
-  scene.obstacles.push_back(MakeObstacle(4.0f, -6.5f, 0.6f, 0.6f, 1.2f, /*climbable=*/true));
-  scene.obstacles.push_back(MakeObstacle(-3.5f, -7.5f, 0.6f, 0.6f, 1.2f, /*climbable=*/true));
-  scene.obstacles.push_back(MakeObstacle(3.5f, 7.5f, 0.6f, 0.6f, 1.2f, /*climbable=*/true));
-  scene.obstacles.push_back(MakeObstacle(0.0f, 0.0f, 0.6f, 0.6f, 1.2f, /*climbable=*/true));
+  // A handful of standalone crates for extra path variety. Each carries a
+  // walkable top and a little ramp (issue #40), so the navmesh connects
+  // ground level to their tops over the ramp; the ramp side keeps clear of
+  // the fences and the central building.
+  auto crate = [&](float cx, float cz, glm::vec2 rampSide) {
+    AddClimbableBox(&scene, MakeObstacle(cx, cz, 0.6f, 0.6f, 1.2f).bounds, rampSide);
+  };
+  crate(-4.0f, 6.5f, {1.0f, 0.0f});
+  crate(4.0f, -6.5f, {-1.0f, 0.0f});
+  crate(-3.5f, -7.5f, {1.0f, 0.0f});
+  crate(3.5f, 7.5f, {0.0f, 1.0f});
+  crate(0.0f, 0.0f, {0.0f, 1.0f});  // Toward the room's door.
 
   const float spawnX = 12.0f;
   const float rows[3] = {-6.0f, 0.0f, 6.0f};

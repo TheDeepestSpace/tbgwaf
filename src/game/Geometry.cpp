@@ -1,6 +1,7 @@
 #include "game/Geometry.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 
@@ -192,6 +193,147 @@ bool RayIntersectsWalkSurface(const glm::vec3& origin, const glm::vec3& directio
   if (!clipPositive(bottomValue, bottomRate) || exit < 0.0f) return false;
   if (outT) *outT = std::max(0.0f, enter);
   return true;
+}
+
+ConvexDecomposition DecomposeToConvex(const std::vector<glm::vec2>& input) {
+  ConvexDecomposition result;
+  // Clean input: counter-clockwise, no repeated or collinear vertices (a
+  // vertex in the middle of a straight edge would be a degenerate ear).
+  std::vector<glm::vec2> polygon = Ccw(input);
+  for (bool changed = true; changed && polygon.size() >= 3;) {
+    changed = false;
+    for (size_t i = 0; i < polygon.size() && polygon.size() >= 3; ++i) {
+      const glm::vec2 prev = polygon[(i + polygon.size() - 1) % polygon.size()];
+      const glm::vec2 next = polygon[(i + 1) % polygon.size()];
+      const glm::vec2 e0 = polygon[i] - prev, e1 = next - polygon[i];
+      if (glm::length(e1) < 1e-5f ||
+          (std::fabs(Cross(e0, e1)) < 1e-6f && glm::dot(e0, e1) > 0.0f)) {
+        polygon.erase(polygon.begin() + static_cast<long>(i));
+        changed = true;
+        break;
+      }
+    }
+  }
+  const size_t n = polygon.size();
+  if (n < 3 || PolygonArea(polygon) < kEps) return result;
+
+  // Ear clipping triangulation over vertex indices. O(n^3) worst case; floor
+  // plans have a handful of vertices.
+  std::vector<int> ring(n);
+  for (size_t i = 0; i < n; ++i) ring[i] = static_cast<int>(i);
+  std::vector<std::array<int, 3>> triangles;
+  const auto inTriangle = [&](glm::vec2 p, glm::vec2 a, glm::vec2 b, glm::vec2 c) {
+    return Cross(b - a, p - a) >= -1e-7f && Cross(c - b, p - b) >= -1e-7f &&
+           Cross(a - c, p - c) >= -1e-7f;
+  };
+  while (ring.size() > 3) {
+    bool clipped = false;
+    for (size_t i = 0; i < ring.size(); ++i) {
+      const int ia = ring[(i + ring.size() - 1) % ring.size()], ib = ring[i],
+                ic = ring[(i + 1) % ring.size()];
+      const glm::vec2 a = polygon[ia], b = polygon[ib], c = polygon[ic];
+      if (Cross(b - a, c - b) <= 1e-7f) continue;  // Reflex (or flat) corner: not an ear.
+      bool empty = true;
+      for (int other : ring) {
+        if (other == ia || other == ib || other == ic) continue;
+        if (inTriangle(polygon[other], a, b, c)) {
+          empty = false;
+          break;
+        }
+      }
+      if (!empty) continue;
+      triangles.push_back({ia, ib, ic});
+      ring.erase(ring.begin() + static_cast<long>(i));
+      clipped = true;
+      break;
+    }
+    if (!clipped) {
+      // Numerically stuck (near-degenerate input): take the least reflex
+      // corner so the loop always terminates with a full cover.
+      size_t best = 0;
+      float bestTurn = -std::numeric_limits<float>::infinity();
+      for (size_t i = 0; i < ring.size(); ++i) {
+        const glm::vec2 a = polygon[ring[(i + ring.size() - 1) % ring.size()]];
+        const glm::vec2 b = polygon[ring[i]], c = polygon[ring[(i + 1) % ring.size()]];
+        const float turn = Cross(b - a, c - b);
+        if (turn > bestTurn) {
+          bestTurn = turn;
+          best = i;
+        }
+      }
+      triangles.push_back({ring[(best + ring.size() - 1) % ring.size()], ring[best],
+                           ring[(best + 1) % ring.size()]});
+      ring.erase(ring.begin() + static_cast<long>(best));
+    }
+  }
+  triangles.push_back({ring[0], ring[1], ring[2]});
+
+  // Hertel-Mehlhorn: merge pieces across a shared diagonal while the union
+  // stays convex. Pieces are index rings in counter-clockwise order.
+  std::vector<std::vector<int>> pieces;
+  for (const auto& t : triangles) pieces.push_back({t[0], t[1], t[2]});
+  const auto convex = [&](const std::vector<int>& ring) {
+    for (size_t i = 0; i < ring.size(); ++i) {
+      const glm::vec2 a = polygon[ring[(i + ring.size() - 1) % ring.size()]];
+      const glm::vec2 b = polygon[ring[i]], c = polygon[ring[(i + 1) % ring.size()]];
+      if (Cross(b - a, c - b) < -1e-6f) return false;
+    }
+    return true;
+  };
+  // Merge ring `q` into `p` across the directed edge p[i] -> p[i+1], which q
+  // holds reversed as q[j] -> q[j+1]: p's vertices up to p[i], then q's from
+  // q[j+1] around to q[j] (exclusive of the shared pair), then the rest of p.
+  const auto merged = [&](const std::vector<int>& p, size_t i, const std::vector<int>& q,
+                          size_t j) {
+    std::vector<int> out;
+    for (size_t k = 0; k <= i; ++k) out.push_back(p[k]);
+    for (size_t k = 2; k < q.size(); ++k) out.push_back(q[(j + k) % q.size()]);
+    for (size_t k = i + 1; k < p.size(); ++k) out.push_back(p[k]);
+    return out;
+  };
+  for (bool mergedAny = true; mergedAny;) {
+    mergedAny = false;
+    for (size_t a = 0; a < pieces.size() && !mergedAny; ++a) {
+      for (size_t b = a + 1; b < pieces.size() && !mergedAny; ++b) {
+        const std::vector<int>& p = pieces[a];
+        const std::vector<int>& q = pieces[b];
+        for (size_t i = 0; i < p.size() && !mergedAny; ++i) {
+          const int u = p[i], v = p[(i + 1) % p.size()];
+          for (size_t j = 0; j < q.size(); ++j) {
+            if (q[j] != v || q[(j + 1) % q.size()] != u) continue;
+            std::vector<int> candidate = merged(p, i, q, j);
+            if (!convex(candidate)) break;
+            pieces[a] = std::move(candidate);
+            pieces.erase(pieces.begin() + static_cast<long>(b));
+            mergedAny = true;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  for (const std::vector<int>& ring : pieces) {
+    std::vector<glm::vec2> piece;
+    for (int index : ring) piece.push_back(polygon[index]);
+    result.pieces.push_back(std::move(piece));
+  }
+  for (size_t a = 0; a < pieces.size(); ++a) {
+    for (size_t b = a + 1; b < pieces.size(); ++b) {
+      bool shared = false;
+      for (size_t i = 0; i < pieces[a].size() && !shared; ++i) {
+        const int u = pieces[a][i], v = pieces[a][(i + 1) % pieces[a].size()];
+        for (size_t j = 0; j < pieces[b].size(); ++j) {
+          if (pieces[b][j] == v && pieces[b][(j + 1) % pieces[b].size()] == u) {
+            shared = true;
+            break;
+          }
+        }
+      }
+      if (shared) result.links.emplace_back(static_cast<int>(a), static_cast<int>(b));
+    }
+  }
+  return result;
 }
 
 bool SurfaceContainsXZ(const WalkSurface& surface, float x, float z) {

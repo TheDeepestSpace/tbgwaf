@@ -61,11 +61,19 @@ void TestBuildScene() {
   CHECK(scene.roundLimit == 7);
   CHECK(!scene.flag.enabled);
   CHECK(scene.obstacles.size() == 3);
-  for (const Obstacle& o : scene.obstacles) {
-    CHECK(o.climbable);
-    CHECK(o.bounds.min.y == 0.0f);
+  for (const Obstacle& o : scene.obstacles) CHECK(o.bounds.min.y == 0.0f);
+  // Every box carries a walkable top at its nominal height plus a ramp from
+  // the ground (issue #40); the box itself stops just under the top surface.
+  CHECK(scene.walkSurfaces.size() == 6);
+  for (size_t i = 0; i < scene.obstacles.size(); ++i) {
+    const WalkSurface& top = scene.walkSurfaces[2 * i];
+    const WalkSurface& ramp = scene.walkSurfaces[2 * i + 1];
+    CHECK(std::fabs(top.vertices[0].y - BoxTop(bs.boxes[i])) < 1e-5f);
+    CHECK(std::fabs(scene.obstacles[i].bounds.max.y - (BoxTop(bs.boxes[i]) - kClimbTopLift)) < 1e-5f);
+    CHECK(!top.connectsToGround && ramp.connectsToGround);
+    CHECK(top.neighbors == std::vector<int>{static_cast<int>(2 * i + 1)});
   }
-  CHECK(scene.obstacles[0].bounds.max.y == 2.0f);
+  CHECK(std::fabs(scene.obstacles[0].bounds.max.y - (2.0f - kClimbTopLift)) < 1e-5f);
   CHECK(scene.obstacles[0].bounds.min.x == -9.5f && scene.obstacles[0].bounds.max.z == 1.5f);
 
   CHECK(scene.units.size() == bs.figures.size());
@@ -356,7 +364,7 @@ void TestStackingAndYaw() {
   CHECK(SurfaceHeightAt(bs, 1.5f, 0.0f) == 1.2f);
   const Scene scene = BuildScene(bs);
   CHECK(scene.obstacles[1].bounds.min.y == 1.2f);
-  CHECK(scene.obstacles[1].bounds.max.y == 10.2f);
+  CHECK(std::fabs(scene.obstacles[1].bounds.max.y - (10.2f - kClimbTopLift)) < 1e-5f);
   CHECK(scene.units[0].facingYaw == 1.25f);
   CHECK(scene.units[0].position.y == 10.2f);
   CHECK(std::fabs(scene.units[1].facingYaw - 3.14159265f) < 1e-5f);  // Default: face enemy.
@@ -371,11 +379,16 @@ void TestStackingAndYaw() {
   // Ground cubes keep the original 5-number form (old logs stay byte-identical).
   CHECK(text.find("[0,0,2,2,1.20000005]") != std::string::npos);
 
-  // A figure can path up the stack: ground -> lower top -> upper top.
+  // A figure can path up the stack: ground -> ramp -> lower top -> the upper
+  // box's ramp (standing on the lower top) -> upper top.
   NavMesh nav;
-  nav.Build(scene.obstacles, 12.0f, constants::kAgentRadius);
+  nav.Build(scene.obstacles, 12.0f, constants::kAgentRadius, nullptr, &scene.walkSurfaces);
   std::vector<glm::vec3> path;
   CHECK(nav.FindPath(glm::vec3(8.0f, 0.0f, 0.0f), glm::vec3(0.0f, 10.2f, 0.0f), &path));
+  CHECK(!path.empty() && std::fabs(path.back().y - 10.2f) < 1e-3f);
+  bool sawLowerTop = false;
+  for (const glm::vec3& p : path) sawLowerTop |= std::fabs(p.y - 1.2f) < 1e-3f;
+  CHECK(sawLowerTop);
 }
 
 }  // namespace

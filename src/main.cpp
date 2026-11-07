@@ -391,14 +391,14 @@ bool IntersectTerrain(const gfx::Ray& ray, const tactics::HeightField& ground, g
   return false;
 }
 
-// Stage-C climbing: a ground/move click can land either on the ground
-// surface (the y=0 plane, or the sampled terrain when the scene has one) or
-// on top of a climbable obstacle (a crate's top face). Pick whichever the
-// ray actually hits nearer the camera -- matches how the scene is rendered
-// (the ground is drawn everywhere but obstacles occlude it visually).
+// A ground/move click can land either on the ground surface (the y=0 plane,
+// or the sampled terrain when the scene has one) or on a walk surface (a
+// crate top, deck, ramp, stair or building floor). Pick whichever the ray
+// actually hits nearer the camera -- matches how the scene is rendered (the
+// ground is drawn everywhere but obstacles occlude it visually).
 //
-// Any walkable surface counts, not just crates: climbable obstacles and the
-// scene's flat walkable slabs (sidewalks) are all picked by their top face.
+// Any walkable surface counts: the scene's flat walkable slabs (sidewalks)
+// are picked by their top face, walk surfaces by their plane.
 bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const tactics::Scene& scene, glm::vec3* outPoint) {
   bool found = false;
   float bestT = std::numeric_limits<float>::infinity();
@@ -431,9 +431,6 @@ bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const tactics::Scene& scene,
       bestPoint = hit;
     }
   };
-  for (const auto& obstacle : scene.obstacles) {
-    if (obstacle.climbable) considerSurface(obstacle.bounds);
-  }
   for (const tactics::AABB& slab : scene.sidewalks) considerSurface(slab);
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
     if (surface.vertices.size() < 3) continue;

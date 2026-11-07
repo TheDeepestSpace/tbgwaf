@@ -265,7 +265,9 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
       const Team team = PaneTeam(pane);
       TeamVisibility visibility;
       if (fogActive) visibility = game.ComputeVisibility(team);
-      const gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(game, team);
+      gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(game, team);
+      // After the match both teams' FOV is shown to everyone (as in the app).
+      overlays.spectatorFov = overlays.spectatorFov || matchOver;
       if (options.profile) {
         glFinish();
         const auto start = std::chrono::steady_clock::now();

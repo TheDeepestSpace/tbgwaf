@@ -3258,6 +3258,59 @@ void TestEnterableBuildingsHaveDoorways() {
   for (const Building& b : solid.buildings) CHECK(!b.enterable);
 }
 
+// Roadmap 5.3: windows on enterable buildings are real holes in the walls.
+void TestWindowsAreWallCutouts() {
+  MapGeneratorConfig c = OldSizeConfig();
+  c.enterableChance = 1.0f;
+  int tested = 0;
+  for (uint32_t seed : kSeeds) {
+    const Scene scene = GenerateUrbanMap(seed, c);
+    NavMesh mesh;
+    mesh.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
+               &scene.walkSurfaces);
+    for (const FacadeOpening& o : scene.facadeOpenings) {
+      if (o.kind != FacadeOpening::Kind::Window || o.floor != 0) continue;
+      const Building& b = scene.buildings[o.building];
+      if (!b.enterable) continue;
+      const float sill = o.y0 - b.baseY, head = o.y1 - b.baseY;
+      if (sill < 0.8f || head < 1.7f) continue;  // Needs a sill that hides the foot probe.
+      const auto& fp = scene.obstacles[b.obstacle].footprint;
+      const size_t e = static_cast<size_t>(o.wallEdge), n = fp.size();
+      const glm::vec2 a = fp[e], d = glm::normalize(fp[(e + 1) % n] - a);
+      const glm::vec2 in(-d.y, d.x);
+      const float um = 0.5f * (o.u0 + o.u1);
+      const auto at = [&](float u, float depth, float height) {
+        const glm::vec2 p = a + d * u + in * depth;
+        return glm::vec3(p.x, b.baseY + height, p.y);
+      };
+      // Just the wall pieces on this edge: the cutout itself is under test.
+      std::vector<Obstacle> own;
+      for (const Obstacle& w : scene.obstacles) {
+        if (w.building == o.building && w.footprint.size() == 4 &&
+            MinimumPolygonWidth(w.footprint) < 0.5f &&
+            std::fabs(glm::dot(w.footprint[0] - a, in)) < 1e-3f &&
+            glm::dot(glm::normalize(w.footprint[1] - w.footprint[0]), d) > 0.999f) {
+          own.push_back(w);
+        }
+      }
+      const glm::vec3 outEye = at(um, -4.0f, constants::kEyeHeight);
+      // Inside figure right behind the window: eye seen, foot hidden by the sill.
+      CHECK(LineOfSightClear(outEye, at(um, 0.4f, constants::kEyeHeight), own));
+      CHECK(!LineOfSightClear(outEye, at(um, 0.4f, 0.05f), own));
+      // The jamb beside the window hides everything behind it.
+      CHECK(!LineOfSightClear(at(o.u0 - 0.15f, -4.0f, constants::kEyeHeight),
+                              at(o.u0 - 0.15f, 0.6f, constants::kEyeHeight), own));
+      // A shot ray from outside to the inside eye passes the opening too.
+      CHECK(LineOfSightClear(at(um, -12.0f, constants::kEyeHeight),
+                             at(um, 0.4f, constants::kEyeHeight), own));
+      // Nobody walks through a window.
+      CHECK(!mesh.IsWalkable(at(um, 0.15f, 0.0f).x, at(um, 0.15f, 0.0f).z));
+      ++tested;
+    }
+  }
+  CHECK(tested > 0);
+}
+
 void TestTreesStayOnEmptyBlocksAndAreSolid() {
   std::set<int> variants;
   MapGeneratorConfig legacyTrees = LegacyConfig();
@@ -3340,6 +3393,7 @@ void TestTreesStayOnEmptyBlocksAndAreSolid() {
 int main() {
   TestNavMeshIgnoresOverheadObstacles();
   TestEnterableBuildingsHaveDoorways();
+  TestWindowsAreWallCutouts();
   TestTreesStayOnEmptyBlocksAndAreSolid();
   TestRoadPatchesDoNotZFight();
   TestFeatureFlagsAndStreetGraph();

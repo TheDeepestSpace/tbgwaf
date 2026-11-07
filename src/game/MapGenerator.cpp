@@ -6,6 +6,7 @@
 #include <functional>
 #include <limits>
 #include <random>
+#include <unordered_map>
 #include <vector>
 
 #include "game/Geometry.h"
@@ -4666,6 +4667,84 @@ std::vector<std::pair<float, float>> FacadeColumns(float len, float w, float gap
   return columns;
 }
 
+// A window rectangle to cut out of an enterable building's wall pieces
+// (roadmap 5.3): along footprint edge a->q, (u0,u1) x (y0,y1) world height.
+struct WindowCut {
+  int building;
+  glm::vec2 a, q;
+  float u0, u1, y0, y1;
+};
+
+// Cuts each window out of the wall pieces it overlaps, replacing a piece by
+// up to four plain Obstacles: the left/right jambs, the sill below and the
+// head above. Nothing downstream needs to know: rays pass through the gap,
+// the sill blocks movement, the prism renderer draws from min.y to max.y.
+void CutWindows(Scene* scene, const std::vector<WindowCut>& cuts) {
+  constexpr float kMinSide = 0.02f;
+  std::unordered_map<int, std::vector<int>> pieces;
+  for (size_t i = 0; i < scene->obstacles.size(); ++i) {
+    const Obstacle& o = scene->obstacles[i];
+    if (o.building >= 0 && o.footprint.size() == 4) pieces[o.building].push_back(static_cast<int>(i));
+  }
+  for (const WindowCut& w : cuts) {
+    const float len = glm::distance(w.a, w.q);
+    if (len < 1e-3f) continue;
+    const glm::vec2 d = (w.q - w.a) / len;
+    const glm::vec2 in(-d.y, d.x);
+    const auto it = pieces.find(w.building);
+    if (it == pieces.end()) continue;
+    const std::vector<int> candidates = it->second;  // Copy: we append below.
+    for (int idx : candidates) {
+      const Obstacle piece = scene->obstacles[idx];
+      const auto& f = piece.footprint;
+      const glm::vec2 along = f[1] - f[0];
+      const float pieceLen = glm::length(along);
+      if (pieceLen < 1e-3f) continue;
+      // Only wall pieces lying on this edge, with the same orientation.
+      if (glm::dot(along / pieceLen, d) < 0.999f) continue;
+      if (std::fabs(glm::dot(f[0] - w.a, in)) > 1e-3f) continue;
+      const float thickness = glm::dot(f[3] - f[0], in);
+      if (thickness < 1e-3f || thickness > 0.5f) continue;  // Walls only, not slabs.
+      const float p0 = glm::dot(f[0] - w.a, d), p1 = glm::dot(f[1] - w.a, d);
+      const float ylo = piece.bounds.min.y, yhi = piece.bounds.max.y;
+      const float ou0 = std::max(p0, w.u0), ou1 = std::min(p1, w.u1);
+      const float oy0 = std::max(ylo, w.y0), oy1 = std::min(yhi, w.y1);
+      if (ou1 - ou0 < kMinSide || oy1 - oy0 < kMinSide) continue;
+      bool reused = false;
+      const auto emit = [&](float u0, float u1, float y0, float y1) {
+        if (u1 - u0 < kMinSide || y1 - y0 < kMinSide) return;
+        const glm::vec2 s0 = w.a + d * u0, s1 = w.a + d * u1;
+        Obstacle o = piece;
+        o.footprint = {s0, s1, s1 + in * thickness, s0 + in * thickness};
+        o.bounds.min = glm::vec3(1e30f, y0, 1e30f);
+        o.bounds.max = glm::vec3(-1e30f, y1, -1e30f);
+        for (const glm::vec2& v : o.footprint) {
+          o.bounds.min.x = std::min(o.bounds.min.x, v.x);
+          o.bounds.max.x = std::max(o.bounds.max.x, v.x);
+          o.bounds.min.z = std::min(o.bounds.min.z, v.y);
+          o.bounds.max.z = std::max(o.bounds.max.z, v.y);
+        }
+        if (!reused) {
+          scene->obstacles[idx] = std::move(o);
+          reused = true;
+        } else {
+          scene->obstacles.push_back(std::move(o));
+          it->second.push_back(static_cast<int>(scene->obstacles.size()) - 1);
+        }
+      };
+      emit(p0, ou0, ylo, yhi);   // Left jamb.
+      emit(ou1, p1, ylo, yhi);   // Right jamb.
+      emit(ou0, ou1, ylo, oy0);  // Sill.
+      emit(ou0, ou1, oy1, yhi);  // Head.
+      if (!reused) {
+        // Whole piece is the opening (cannot happen for real windows): keep
+        // a degenerate-free scene by dropping it to a zero-height sliver.
+        scene->obstacles[idx].bounds.max.y = scene->obstacles[idx].bounds.min.y;
+      }
+    }
+  }
+}
+
 // Windows and doors per building, recorded as FacadeOpening data and drawn
 // as pane extrusions (roadmap 3.4): a window grid per floor on every street
 // facade, one entrance door on the frontage, and a rear/courtyard door for
@@ -4689,6 +4768,7 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
   constexpr float kRearDoorWidth = 1.2f, kRearDoorHeight = 2.2f;
   constexpr float kWallGap = 0.03f;       // Walk surfaces stand just off the wall face.
   constexpr float kSpawnClearance = 1.5f;
+  std::vector<WindowCut> windowCuts;  // Enterable walls' windows, cut out at the end.
 
   std::vector<std::vector<glm::vec2>> footprints;
   footprints.reserve(scene->obstacles.size());
@@ -4985,10 +5065,17 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
           scene->facadeOpenings.push_back(FacadeOpening{
               FacadeOpening::Kind::Window, static_cast<int>(bi), b.obstacle,
               static_cast<int>(e), u0, u1, y0, y1, floor});
+          // Ground-floor windows only for now: nothing can stand above the
+          // ground floor until stairs/floors land (roadmap 5.4-5.5), and each
+          // cut triples the wall piece count.
+          if (b.enterable && floor == 0) {
+            windowCuts.push_back(WindowCut{static_cast<int>(bi), a, q, u0, u1, y0, y1});
+          }
         }
       }
     }
   }
+  CutWindows(scene, windowCuts);
 }
 
 // Squads at the artery's ends.

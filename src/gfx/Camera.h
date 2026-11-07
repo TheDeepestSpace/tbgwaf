@@ -25,6 +25,8 @@ class OrbitCamera {
   // allowed pitch, and zooms so a square ground area of the given half-extent
   // fits the view. Any manual Pan()/Rotate() cancels the target/pitch glide.
   void FocusOn(const glm::vec3& focusPoint, float halfExtent);
+  float Yaw() const { return yaw_; }
+  float Pitch() const { return pitch_; }
   float TargetDistance() const { return targetDistance_; }
 
   // Moves `target` along the ground-projected right/forward axes (derived

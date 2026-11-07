@@ -2682,12 +2682,12 @@ const glm::vec3 kAimColor(0.55f, 1.0f, 0.1f);
 // The "+" aim selector: a 3D plus sign (three thin axis-aligned bars) so a
 // point placed on a surface or in the sky reads from any camera angle.
 void DrawAimMarker(const Shader& colorShader, ColorTriangleMesh& mesh,
-                   const glm::mat4& viewProj, const glm::vec3& point) {
+                   const glm::mat4& viewProj, const glm::vec3& point, const glm::vec3& aimColor) {
   constexpr float kArm = 0.55f;
   constexpr float kThick = 0.06f;
   constexpr float kAlpha = 0.95f;
   std::vector<ColorTriangleMesh::Vertex> vertices;
-  const glm::vec4 color(kAimColor, kAlpha);
+  const glm::vec4 color(aimColor, kAlpha);
   const auto appendBox = [&](const glm::vec3& halfExtents) {
     const glm::vec3 mn = point - halfExtents;
     const glm::vec3 mx = point + halfExtents;
@@ -3502,6 +3502,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   std::vector<FovMask> teamFovMasks, otherFovMasks, aimFovMasks;
   const bool shadowMapFov = fovOverlayMode_ == FovOverlayMode::ShadowMap && !debug.disableFov;
   const bool aimSweep = overlays.aimShooter && overlays.aimShooter->alive && !debug.disableFov;
+  // Aim overlays: acid green normally, the thermal HUD green (dark in black-hot) otherwise.
+  const glm::vec3 aimColor =
+      !debug.thermal ? kAimColor : (debug.thermalBlackHot ? kThermalGreenDark : kThermalGreen);
   if (shadowMapFov || aimSweep) {
     // Static receivers/casters for the shadow-map mask, cached per scene.
     const unsigned long long sceneKey = FovSceneFingerprint(game.GetScene());
@@ -4250,7 +4253,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glEnable(GL_STENCIL_TEST);
     glStencilMask(0xFF);
     glClear(GL_STENCIL_BUFFER_BIT);
-    DrawFovMasks(aimFovMasks, glm::vec4(kAimColor, 0.22f), viewProj, drawTerrain, mapHalfExtent,
+    DrawFovMasks(aimFovMasks, glm::vec4(aimColor, 0.22f), viewProj, drawTerrain, mapHalfExtent,
                  !debug.disableTrees);
     colorShader_.Use();
   }
@@ -4320,7 +4323,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       // A planned shot keeps its "+" selector until the commit, like a
       // planned move keeps its destination ghost.
       if (coneAim) {
-        DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, *coneAim);
+        DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, *coneAim, aimColor);
       }
     }
   }
@@ -4329,7 +4332,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (overlays.aimMarker) {
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
-    DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, *overlays.aimMarker);
+    DrawAimMarker(colorShader_, aimOverlayMesh_, viewProj, *overlays.aimMarker, aimColor);
     glDepthFunc(GL_LESS);
   }
   glDisable(GL_POLYGON_OFFSET_FILL);
@@ -4673,7 +4676,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       if (!unit.alive || (!overlays.spectatorFov && unit.team != team)) continue;
       if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
       const bool planned = unit.plan.type != tactics::PlannedActionType::None;
-      const glm::vec4 color = planned ? glm::vec4(0.25f, 0.9f, 0.35f, 1.0f)
+      const glm::vec4 color = planned ? glm::vec4(debug.thermal ? thermalGreen : glm::vec3(0.25f, 0.9f, 0.35f), 1.0f)
                                         : glm::vec4(1.0f, 1.0f, 1.0f, 0.6f);
       DrawHighlightOnSurface(unit.position, color);
     }

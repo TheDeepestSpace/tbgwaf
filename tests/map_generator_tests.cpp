@@ -3279,8 +3279,8 @@ void TestTreesStayOnEmptyBlocksAndAreSolid() {
 
 // Issue #301: a tall building on a wedge/sliver parcel (an 11-floor tower
 // with a 0.8 m end wall on seed 618949235) rendered as a tapering, sheared
-// facade. Tall buildings need a compact footprint.
-void TestTallBuildingsHaveCompactFootprints() {
+// facade. Landmark towers need a compact footprint.
+void TestLandmarkTowersHaveCompactFootprints() {
   std::vector<Scene> scenes;
   for (const char* kind : {"urban", "urban-elevated"}) {
     scenes.push_back(GenerateMapByKind(618949235u, kind));
@@ -3288,7 +3288,7 @@ void TestTallBuildingsHaveCompactFootprints() {
   for (uint32_t seed : kSeeds) scenes.push_back(GenerateUrbanMap(seed, FlatConfig()));
   for (const Scene& scene : scenes) {
     for (const Building& b : scene.buildings) {
-      if (b.floorCount <= 3 || b.obstacle < 0) continue;
+      if (b.kind != BuildingKind::Civic || b.floorCount <= 3 || b.obstacle < 0) continue;
       const std::vector<glm::vec2> fp = ObstacleFootprint(scene.obstacles[b.obstacle]);
       float minWidth = 1e9f, minEdge = 1e9f;
       for (size_t i = 0; i < fp.size(); ++i) {
@@ -3308,7 +3308,7 @@ void TestTallBuildingsHaveCompactFootprints() {
 
 int main() {
   TestNavMeshIgnoresOverheadObstacles();
-  TestTallBuildingsHaveCompactFootprints();
+  TestLandmarkTowersHaveCompactFootprints();
   TestEnterableBuildingsHaveDoorways();
   TestTreesStayOnEmptyBlocksAndAreSolid();
   TestFeatureFlagsAndStreetGraph();

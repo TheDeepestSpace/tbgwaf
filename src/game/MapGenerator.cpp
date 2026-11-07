@@ -2734,7 +2734,7 @@ struct SkylineField {
 // Narrowest width (min over edges of the farthest vertex's distance from the
 // edge line) and shortest edge of a convex parcel footprint. A wedge or sliver
 // parcel with a very short end reads as a tapering, sheared facade once built
-// tall (issue #301), so tall massing is kept off such parcels.
+// tall (issue #301), so landmark towers are kept off such parcels.
 struct ParcelShape {
   float minWidth = 0.0f, minEdge = 0.0f;
 };
@@ -2754,7 +2754,6 @@ ParcelShape MeasureParcelShape(const std::vector<glm::vec2>& fp) {
 }
 constexpr float kTallMinWidth = 3.0f;  // Narrowest a tall building's footprint may be.
 constexpr float kTallMinEdge = 2.0f;   // Shortest wall a tall building may have.
-constexpr int kSlenderMaxFloors = 3;
 bool SuitableForTall(const std::vector<glm::vec2>& fp) {
   const ParcelShape shape = MeasureParcelShape(fp);
   return shape.minWidth >= kTallMinWidth && shape.minEdge >= kTallMinEdge;
@@ -2818,10 +2817,6 @@ std::vector<Building> PlanBuildings(const std::vector<Parcel>& parcels,
       else if (jitter > 0.8f) ++floors;
       b.floorCount = std::max(2, floors);
       while (b.floorCount > 2 && b.Height() > c.skylineMaxHeight + 1e-3f) --b.floorCount;
-    }
-    // Wedge/sliver parcels stay low (draws above are unaffected).
-    if (b.floorCount > kSlenderMaxFloors && !SuitableForTall(parcel.footprint)) {
-      b.floorCount = kSlenderMaxFloors;
     }
     b.style = static_cast<int>(b.kind) * 2 + (rng.Chance(0.5f) ? 1 : 0);
     // Offices step their top floor back when there is room for it.

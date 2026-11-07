@@ -1059,6 +1059,59 @@ void AppendSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
   }
 }
 
+// Steps drawn over a stair flight (WalkSurface::stair, roadmap 5.5): the
+// flight is a sloped quad whose two lowest vertices form the bottom edge and
+// two highest the top edge. Each step is a flat tread at the slope's height
+// at its upper end, a vertical riser at its lower end and two side
+// triangles, so a sawtooth sits on the slab that movement actually follows.
+// Non-quads (or flat patches) fall back to nothing extra.
+void AppendStairSteps(const std::vector<glm::vec3>& quad, LitVertices* vertices,
+                      std::vector<GLuint>* indices) {
+  if (quad.size() != 4) return;
+  // Pair the vertices: bottom edge = the two lowest, top edge = the rest,
+  // matched so the two side rails do not cross.
+  std::vector<int> order = {0, 1, 2, 3};
+  std::sort(order.begin(), order.end(), [&](int a, int b) { return quad[a].y < quad[b].y; });
+  glm::vec3 b0 = quad[order[0]], b1 = quad[order[1]];
+  glm::vec3 t0 = quad[order[2]], t1 = quad[order[3]];
+  const float rise = 0.5f * (t0.y + t1.y) - 0.5f * (b0.y + b1.y);
+  if (rise < 0.1f) return;
+  if (glm::distance(b0, t0) + glm::distance(b1, t1) > glm::distance(b0, t1) + glm::distance(b1, t0)) {
+    std::swap(t0, t1);
+  }
+  constexpr float kRiser = 0.19f;
+  const int steps = std::max(1, static_cast<int>(std::lround(rise / kRiser)));
+  const glm::vec3 along0 = t0 - b0, along1 = t1 - b1;  // Lower to upper rail.
+  glm::vec3 across = b1 - b0;
+  const glm::vec3 up(0.0f, 1.0f, 0.0f);
+  glm::vec3 forward = glm::normalize(glm::vec3(along0.x + along1.x, 0.0f, along0.z + along1.z));
+  if (glm::dot(glm::cross(across, forward), up) < 0.0f) {
+    // Make (across, forward, up) right-handed so faces wind outward.
+    std::swap(b0, b1);
+    std::swap(t0, t1);
+    across = -across;
+  }
+  auto tri = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 n) {
+    AppendTriangle(a, b, c, n, vertices, indices);
+  };
+  for (int i = 0; i < steps; ++i) {
+    const float s0 = static_cast<float>(i) / steps, s1 = static_cast<float>(i + 1) / steps;
+    // Slope points at the step's lower and upper ends on both rails.
+    const glm::vec3 lo0 = b0 + (t0 - b0) * s0, lo1 = b1 + (t1 - b1) * s0;
+    const glm::vec3 hi0 = b0 + (t0 - b0) * s1, hi1 = b1 + (t1 - b1) * s1;
+    const float treadY = 0.5f * (hi0.y + hi1.y);
+    const glm::vec3 r0(lo0.x, treadY, lo0.z), r1(lo1.x, treadY, lo1.z);  // Riser top corners.
+    // Tread (up), riser (facing down the flight), two side triangles.
+    tri(r0, r1, glm::vec3(hi1.x, treadY, hi1.z), up);
+    tri(r0, glm::vec3(hi1.x, treadY, hi1.z), glm::vec3(hi0.x, treadY, hi0.z), up);
+    tri(lo0, r1, r0, -forward);
+    tri(lo0, lo1, r1, -forward);
+    const glm::vec3 side = glm::normalize(across);
+    tri(lo1, glm::vec3(hi1.x, treadY, hi1.z), r1, side);   // Right side (b1 rail).
+    tri(lo0, r0, glm::vec3(hi0.x, treadY, hi0.z), -side);  // Left side (b0 rail).
+  }
+}
+
 void BuildSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
                        LitTriangleMesh* mesh, const std::vector<char>* hiddenEdges = nullptr) {
   LitVertices vertices;
@@ -1243,7 +1296,9 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
     AppendMassingDetail(d, &vertices, &indices);
   }
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
+    if (surface.climbProxy) continue;
     AppendSurfacePatch(surface.vertices, 0.45f, &vertices, &indices);
+    if (surface.stair) AppendStairSteps(surface.vertices, &vertices, &indices);
   }
   for (const tactics::TerrainStair& stair : scene.terrainStairs) {
     AppendTerrainStair(stair, &vertices, &indices);
@@ -1431,6 +1486,8 @@ unsigned long long DeckFingerprint(const tactics::Scene& scene) {
   for (const tactics::WalkSurface& s : scene.walkSurfaces) {
     mix(s.vertices.data(), s.vertices.size() * sizeof(glm::vec3));
     mix(s.neighbors.data(), s.neighbors.size() * sizeof(int));
+    mix(&s.stair, sizeof(s.stair));
+    mix(&s.climbProxy, sizeof(s.climbProxy));
   }
   return h;
 }
@@ -1444,8 +1501,15 @@ void BuildDeckMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   std::vector<GLuint> indices;
   std::vector<int> groups;
   for (size_t i = 0; i < scene.walkSurfaces.size(); ++i) {
+    if (scene.walkSurfaces[i].climbProxy) {
+      groups.resize(indices.size() / 3, static_cast<int>(i));
+      continue;
+    }
     const std::vector<char> hidden = SharedEdges(scene.walkSurfaces, scene.walkSurfaces[i]);
     AppendSurfacePatch(scene.walkSurfaces[i].vertices, 0.45f, &vertices, &indices, &hidden);
+    if (scene.walkSurfaces[i].stair) {
+      AppendStairSteps(scene.walkSurfaces[i].vertices, &vertices, &indices);
+    }
     groups.resize(indices.size() / 3, static_cast<int>(i));
   }
   mesh->SetChunkedMesh(vertices, indices, kCullGridCells, &groups);
@@ -1464,12 +1528,17 @@ void BuildMassingMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   mesh->SetChunkedMesh(vertices, indices, kCullGridCells, &groups);
 }
 
-// For each walk surface, the building whose roof slab it is (all its
-// vertices on one building obstacle's top), or -1.
+// For each walk surface, the building it belongs to: its explicit tag
+// (interior floors and stairs), else the building whose roof slab it is (all
+// its vertices on one building obstacle's top), or -1.
 std::vector<int> RoofBuildings(const tactics::Scene& scene) {
   std::vector<int> buildings(scene.walkSurfaces.size(), -1);
   for (size_t i = 0; i < scene.walkSurfaces.size(); ++i) {
     const tactics::WalkSurface& surface = scene.walkSurfaces[i];
+    if (surface.building >= 0) {
+      buildings[i] = surface.building;
+      continue;
+    }
     for (const tactics::Obstacle& o : scene.obstacles) {
       if (o.building < 0) continue;
       bool inside = !surface.vertices.empty();
@@ -1999,27 +2068,24 @@ void DrawNavMeshDebug(const Shader& shader, LineMesh& lines, const glm::mat4& vi
   // distance), not just a z-fighting epsilon.
   constexpr float kLift = 0.2f;
   constexpr float kEdgeStep = 0.75f;  // Terrain-sampling interval along an edge.
-  std::vector<glm::vec3> groundSegs, climbSegs;
+  std::vector<glm::vec3> groundSegs;
   for (const tactics::NavCell& cell : navmesh.Cells()) {
     const glm::vec2 corners[4] = {{cell.xMin, cell.zMin},
                                   {cell.xMax, cell.zMin},
                                   {cell.xMax, cell.zMax},
                                   {cell.xMin, cell.zMax}};
-    std::vector<glm::vec3>& out = cell.climbTop ? climbSegs : groundSegs;
     for (int e = 0; e < 4; ++e) {
       const glm::vec2 a = corners[e];
       const glm::vec2 b = corners[(e + 1) % 4];
       const int pieces =
-          cell.climbTop || terrain.Empty()
+          terrain.Empty()
               ? 1
               : std::max(1, static_cast<int>(std::ceil(glm::distance(a, b) / kEdgeStep)));
       for (int k = 0; k < pieces; ++k) {
         const glm::vec2 p = a + (b - a) * (static_cast<float>(k) / pieces);
         const glm::vec2 q = a + (b - a) * (static_cast<float>(k + 1) / pieces);
-        const float py = cell.climbTop ? cell.elevation : terrain.HeightAt(p.x, p.y);
-        const float qy = cell.climbTop ? cell.elevation : terrain.HeightAt(q.x, q.y);
-        out.emplace_back(p.x, py + kLift, p.y);
-        out.emplace_back(q.x, qy + kLift, q.y);
+        groundSegs.emplace_back(p.x, terrain.HeightAt(p.x, p.y) + kLift, p.y);
+        groundSegs.emplace_back(q.x, terrain.HeightAt(q.x, q.y) + kLift, q.y);
       }
     }
   }
@@ -2027,11 +2093,6 @@ void DrawNavMeshDebug(const Shader& shader, LineMesh& lines, const glm::mat4& vi
   shader.SetVec4("uColor", glm::vec4(0.25f, 0.9f, 0.95f, 1.0f));
   lines.SetPoints(groundSegs);
   lines.DrawSegments();
-  if (!climbSegs.empty()) {
-    shader.SetVec4("uColor", glm::vec4(1.0f, 0.6f, 0.1f, 1.0f));
-    lines.SetPoints(climbSegs);
-    lines.DrawSegments();
-  }
   std::vector<glm::vec3> surfaceSegs;
   for (const tactics::WalkSurface& surface : navmesh.WalkSurfaces()) {
     for (size_t i = 0; i < surface.vertices.size(); ++i) {
@@ -4034,7 +4095,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
     }
     for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-      if (fadeSurface[i]) {
+      if (fadeSurface[i] && !walkSurfaces[i].climbProxy) {
         faded.push_back({glm::distance(cameraPos, tactics::SurfaceCenter(walkSurfaces[i])), -1,
                          static_cast<int>(i)});
       }

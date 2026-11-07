@@ -1,7 +1,7 @@
 #pragma once
 
-// Builder scenes: a player-authored skirmish -- climbable boxes and placed
-// figures on a flat square map -- described by a small data struct that is
+// Builder scenes: a player-authored skirmish -- climbable boxes (each with a
+// ramp up onto its top) and placed figures on a flat square map -- described by a small data struct that is
 // turned into a game Scene, serialized to one line of JSON, and embedded in
 // repro logs (header field "builder_scene", see docs/repro-log.md) so a
 // session on a hand-built map replays headlessly without any registry entry.
@@ -19,7 +19,9 @@ namespace tactics {
 
 // A climbable box: centered at (cx, cz) with half extents (hx, hz) in XZ,
 // `height` tall, its underside at `y` (0 = on the ground; above 0 = stacked on
-// other boxes). Its top is BoxTop().
+// other boxes). Its top is BoxTop(). BuildScene gives every box a walkable
+// top and a ramp (issue #40) on whichever side has room, from the ground or
+// from the top of the box it stands on.
 struct BuilderBox {
   float cx = 0.0f, cz = 0.0f;
   float hx = 1.5f, hz = 1.5f;
@@ -43,13 +45,15 @@ struct BuilderScene {
   std::string name = "Untitled";
   float mapHalfExtent = 20.0f;  // "Medium" flat surface.
   int roundLimit = 0;           // Same default as Scene: unlimited.
-  std::vector<BuilderBox> boxes;  // All climbable.
+  std::vector<BuilderBox> boxes;  // All climbable (top surface + ramp).
   std::vector<BuilderFigure> figures;
 };
 
 // Game Scene for `bs`: flat ground, `mapHalfExtent` as the playable area
 // (the map edge is enforced by the simulation, as in the default scene), one
-// climbable Obstacle per box, one Unit per figure with id == index, the
+// Obstacle per box with its top and ramp WalkSurfaces (see AddClimbRamp; a
+// stacked box's ramp foot is linked to the top it stands on), one Unit per
+// figure with id == index, the
 // figure's explicit weapon, facing its explicit yaw (default: its enemy side,
 // Blue +X, Red -X) and standing at SurfaceHeightAt(x, z). No flag.
 Scene BuildScene(const BuilderScene& bs);

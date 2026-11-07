@@ -19,7 +19,6 @@ constexpr float kEps = 1e-4f;
 // standing on top doesn't have its center placed right at (or past) the
 // edge. Smaller than `kAgentRadius` so even a 1.2x1.2 crate keeps a usable
 // top surface.
-constexpr float kClimbTopInset = 0.15f;
 
 struct ZInterval {
   float lo, hi;
@@ -133,7 +132,7 @@ float ObstaclePad(const Obstacle& obstacle, float agentRadius) {
 void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, float agentRadius) {
   std::vector<Obstacle> typed;
   typed.reserve(obstacles.size());
-  for (const AABB& bounds : obstacles) typed.push_back(Obstacle{bounds, false});
+  for (const AABB& bounds : obstacles) typed.push_back(Obstacle{bounds});
   Build(typed, SquareRegion(mapHalfExtent), agentRadius, nullptr, nullptr);
 }
 
@@ -167,7 +166,42 @@ void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& 
     obstacles.push_back(obstacle);
   }
   ground_ = ground ? *ground : HeightField{};
-  walkSurfaces_ = walkSurfaces ? *walkSurfaces : std::vector<WalkSurface>{};
+  // Only the walk surfaces touching the window: a windowed build covers what
+  // one move can reach, and a surface wholly outside it (an upper floor
+  // across town) can neither be stood on nor shortcut a route that fits the
+  // budget. Links to dropped surfaces go with them. This keeps the all-pairs
+  // surface routing (see BuildSurfaceCaches) proportional to the window, not
+  // to every building interior on the map.
+  walkSurfaces_.clear();
+  if (walkSurfaces) {
+    std::vector<int> remap(walkSurfaces->size(), -1);
+    for (size_t i = 0; i < walkSurfaces->size(); ++i) {
+      const WalkSurface& surface = (*walkSurfaces)[i];
+      if (surface.vertices.empty()) continue;
+      float xMin = surface.vertices[0].x, xMax = xMin, zMin = surface.vertices[0].z, zMax = zMin;
+      for (const glm::vec3& v : surface.vertices) {
+        xMin = std::min(xMin, v.x);
+        xMax = std::max(xMax, v.x);
+        zMin = std::min(zMin, v.z);
+        zMax = std::max(zMax, v.z);
+      }
+      if (xMax < region.xMin - agentRadius || xMin > region.xMax + agentRadius ||
+          zMax < region.zMin - agentRadius || zMin > region.zMax + agentRadius) {
+        continue;
+      }
+      remap[i] = static_cast<int>(walkSurfaces_.size());
+      walkSurfaces_.push_back(surface);
+    }
+    for (WalkSurface& surface : walkSurfaces_) {
+      std::vector<int> kept;
+      for (int n : surface.neighbors) {
+        if (n >= 0 && static_cast<size_t>(n) < remap.size() && remap[n] >= 0) {
+          kept.push_back(remap[n]);
+        }
+      }
+      surface.neighbors = std::move(kept);
+    }
+  }
   BuildSurfaceCaches(agentRadius);
   polygonMode_ = false;
   paddedPolygons_.clear();
@@ -179,7 +213,6 @@ void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& 
   }
   AddLowDeckBlockers(agentRadius);
   BuildGroundMesh(obstacles, region, agentRadius);
-  AddClimbConnections(obstacles, agentRadius);
 }
 
 void NavMesh::BuildGroundMesh(const std::vector<Obstacle>& obstacles, const NavRegion& region,
@@ -314,69 +347,6 @@ void NavMesh::BuildGroundMesh(const std::vector<Obstacle>& obstacles, const NavR
         neighbors_[aIdx].push_back(bIdx);
         neighbors_[bIdx].push_back(aIdx);
       }
-    }
-  }
-}
-
-void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float agentRadius) {
-  const int groundCellCount = static_cast<int>(cells_.size());
-  // Climb-top cell per obstacle (-1 = none), to link stacked obstacles.
-  std::vector<int> topCellOf(obstacles.size(), -1);
-
-  for (size_t obstacleIdx = 0; obstacleIdx < obstacles.size(); ++obstacleIdx) {
-    const auto& obstacle = obstacles[obstacleIdx];
-    if (!obstacle.climbable) continue;
-    const AABB& bounds = obstacle.bounds;
-    // Windowed builds: skip obstacles entirely outside the region.
-    if (bounds.max.x < region_.xMin || bounds.min.x > region_.xMax ||
-        bounds.max.z < region_.zMin || bounds.min.z > region_.zMax) {
-      continue;
-    }
-
-    const float xMin = bounds.min.x + kClimbTopInset;
-    const float xMax = bounds.max.x - kClimbTopInset;
-    const float zMin = bounds.min.z + kClimbTopInset;
-    const float zMax = bounds.max.z - kClimbTopInset;
-    if (xMax <= xMin + kEps || zMax <= zMin + kEps) continue;  // Too small to stand on.
-
-    const int topIdx = static_cast<int>(cells_.size());
-    cells_.push_back(NavCell{xMin, xMax, zMin, zMax, bounds.max.y, /*climbTop=*/true});
-    neighbors_.emplace_back();
-    topCellOf[obstacleIdx] = topIdx;
-
-    // A raised obstacle (underside above the ground) is only reached from the
-    // top of what it rests on, linked below.
-    if (bounds.min.y > kEps) continue;
-
-    const AABB padded{
-        glm::vec3(std::max(region_.xMin, bounds.min.x - agentRadius), bounds.min.y,
-                   std::max(region_.zMin, bounds.min.z - agentRadius)),
-        glm::vec3(std::min(region_.xMax, bounds.max.x + agentRadius), bounds.min.y,
-                   std::min(region_.zMax, bounds.max.z + agentRadius))};
-
-    for (int groundIdx = 0; groundIdx < groundCellCount; ++groundIdx) {
-      if (!RectsAdjacent(cells_[groundIdx], padded)) continue;
-      neighbors_[groundIdx].push_back(topIdx);
-      neighbors_[topIdx].push_back(groundIdx);
-    }
-  }
-
-  // Stacked obstacles: the top of one connects to the top of every obstacle
-  // resting on it (underside at its top, footprints overlapping).
-  for (size_t upper = 0; upper < obstacles.size(); ++upper) {
-    if (topCellOf[upper] < 0) continue;
-    const AABB& u = obstacles[upper].bounds;
-    if (u.min.y <= kEps) continue;
-    for (size_t lower = 0; lower < obstacles.size(); ++lower) {
-      if (lower == upper || topCellOf[lower] < 0) continue;
-      const AABB& l = obstacles[lower].bounds;
-      if (std::fabs(l.max.y - u.min.y) > kEps) continue;
-      if (l.min.x >= u.max.x - kEps || l.max.x <= u.min.x + kEps ||
-          l.min.z >= u.max.z - kEps || l.max.z <= u.min.z + kEps) {
-        continue;
-      }
-      neighbors_[topCellOf[lower]].push_back(topCellOf[upper]);
-      neighbors_[topCellOf[upper]].push_back(topCellOf[lower]);
     }
   }
 }
@@ -844,27 +814,11 @@ bool NavMesh::IsWalkable(float x, float z) const {
   return true;
 }
 
-// Ground cells only, so IsWalkable matches its documented "ground level"
-// semantics regardless of the terrain height under (x, z).
 int NavMesh::FindCellContaining(float x, float z) const {
   for (size_t i = 0; i < cells_.size(); ++i) {
-    if (!cells_[i].climbTop && cells_[i].Contains(x, z)) return static_cast<int>(i);
+    if (cells_[i].Contains(x, z)) return static_cast<int>(i);
   }
   return -1;
-}
-
-int NavMesh::FindCellContaining(float x, float z, float yHint) const {
-  int best = -1;
-  float bestDy = std::numeric_limits<float>::infinity();
-  for (size_t i = 0; i < cells_.size(); ++i) {
-    if (!cells_[i].Contains(x, z)) continue;
-    const float dy = std::fabs(SurfaceY(cells_[i], x, z) - yHint);
-    if (dy < bestDy) {
-      bestDy = dy;
-      best = static_cast<int>(i);
-    }
-  }
-  return best;
 }
 
 int NavMesh::FindWalkSurfaceContaining(float x, float z, float yHint) const {
@@ -1174,11 +1128,16 @@ bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* 
   }
 
   // The only ground/surface transition is a patch that explicitly declares
-  // a ramp foot. Try every such patch and retain the shortest complete route.
+  // a ramp foot. Try every such patch that is actually joined to the surface
+  // end of the route (the cached surface graph says which; a stair foot in
+  // another building never reaches this floor) and retain the shortest
+  // complete route.
   std::vector<glm::vec3> best;
   float bestLength = std::numeric_limits<float>::infinity();
+  const int surfaceEnd = startSurface >= 0 ? startSurface : goalSurface;
   for (size_t entry = 0; entry < walkSurfaces_.size(); ++entry) {
     if (!walkSurfaces_[entry].connectsToGround) continue;
+    if (static_cast<int>(entry) != surfaceEnd && surfaceParent_[entry][surfaceEnd] < 0) continue;
     const glm::vec3 connection = GroundConnectionPoint(static_cast<int>(entry));
     glm::vec3 groundConnection = connection;
     groundConnection.y = ground_.HeightAt(connection.x, connection.z);
@@ -1242,14 +1201,29 @@ void NavMesh::AddLowDeckBlockers(float agentRadius) {
       return out;
     };
     constexpr float kFootSlack = 0.3f;
+    float footSlack = kFootSlack;
     // A declared ground transition whose lowest edge is already raised is a
     // step up onto the slab, not a ramp foot: its connection stays reachable.
     if (surface.connectsToGround) {
       float lowest = pts.front().z;
       for (const glm::vec3& p : pts) lowest = std::min(lowest, p.z);
       if (lowest > kFootSlack) continue;
+      // The agent padding below would otherwise creep back down a steep
+      // ramp (a crate ramp, a stair flight) and swallow its foot, leaving the
+      // ground connection unwalkable. Start the band higher by the clearance
+      // the padding spans along the slope, so the padded blocker still
+      // begins at kFootSlack above the foot.
+      const glm::vec3 p0 = surface.vertices[0];
+      glm::vec3 normal(0.0f);
+      for (size_t i = 1; i + 1 < surface.vertices.size() && std::fabs(normal.y) < 1e-6f; ++i) {
+        normal = glm::cross(surface.vertices[i] - p0, surface.vertices[i + 1] - p0);
+      }
+      if (std::fabs(normal.y) > 1e-6f) {
+        const float slope = std::hypot(normal.x / normal.y, normal.z / normal.y);
+        footSlack += agentRadius * slope;
+      }
     }
-    std::vector<glm::vec3> band = clip(pts, kFootSlack, true);
+    std::vector<glm::vec3> band = clip(pts, footSlack, true);
     band = clip(band, constants::kMinDeckHeadroom, false);
     if (band.size() < 3) continue;
     std::vector<glm::vec2> polygon;
@@ -1281,8 +1255,8 @@ bool NavMesh::FindPlanarGroundPath(glm::vec3 start, glm::vec3 goal,
 
   if (polygonMode_) return FindPolygonGroundPath(start, goal, outPath);
 
-  const int startCell = FindCellContaining(start.x, start.z, start.y);
-  const int goalCell = FindCellContaining(goal.x, goal.z, goal.y);
+  const int startCell = FindCellContaining(start.x, start.z);
+  const int goalCell = FindCellContaining(goal.x, goal.z);
   if (startCell < 0 || goalCell < 0) return false;
   start.y = cells_[startCell].elevation;
   goal.y = cells_[goalCell].elevation;

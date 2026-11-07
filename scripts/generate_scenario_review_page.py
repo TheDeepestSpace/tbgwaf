@@ -544,6 +544,8 @@ def _assert_text(check: dict, units: dict) -> str:
             parts.append(f"{subject} is {'alive' if check.pop('alive') else 'down'}")
         if "position" in check:
             parts.append(f"{subject} is at {_fmt_point(check.pop('position'))}")
+        if "cover_pose" in check:
+            parts.append(f"{subject} cover pose is {check.pop('cover_pose')}")
         if "facing_degrees" in check:
             parts.append(f"{subject} faces {_fmt_num(check.pop('facing_degrees'))}°")
         if "visible" in check:

@@ -27,3 +27,4 @@ script:
   - action: commit
   - assert: {unit: 0, position: [0, 0, 4.2], tolerance: 0.05}
   - assert: {unit: 0, facing_degrees: -90, tolerance: 0.5}
+  - assert: {unit: 0, cover_pose: crouch}

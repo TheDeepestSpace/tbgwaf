@@ -27,3 +27,14 @@ script:
     comment: Alley tinted on both sides, cars tactical, low barrier untinted.
   - assert: {unit: 0, position: [-2, 0, 0], tolerance: 0.05}
   - assert: {round: 1}
+  - action: cancel
+    actor: 0
+  - action: move
+    actor: 0
+    destination: [-5, 0, -2]
+    comment: Click Move, pick a spot hugging the alley wall, Done.
+  - action: move
+    actor: 1
+    destination: [0, 0, -12]
+  - action: commit
+  - assert: {unit: 0, position: [-5, 0, -2], tolerance: 0.05}

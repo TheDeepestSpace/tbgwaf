@@ -467,6 +467,7 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
         game.CancelAction();  // ...and deselect.
         return true;
       }
+      NotifyMenuClick(actorTeam, "Done");
       game.FinishMovePlan();
       if (game.Mode() != InputMode::AwaitingSelection) {
         return Fail("has no path to destination " + ToString(action.destination) +

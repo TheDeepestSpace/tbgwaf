@@ -23,3 +23,15 @@ script:
     comment: Tint hugs the wall face and building sides; corners turn tactical.
   - assert: {unit: 0, position: [0, 0, 4], tolerance: 0.05}
   - assert: {round: 1}
+  - action: cancel
+    actor: 0
+  - action: move
+    actor: 0
+    destination: [4.5, 0, 2.45]
+    comment: Click Move, pick a spot in the orange wedge by the building corner, Done.
+  - action: move
+    actor: 1
+    destination: [0, 0, -12]
+  - action: commit
+  - assert: {unit: 0, position: [4.5, 0, 2.45], tolerance: 0.05}
+  - assert: {unit: 0, cover_pose: stand}

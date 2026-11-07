@@ -71,13 +71,20 @@ heights, with sharp edges (no rolling noise). The sampled heightfield only
 drives movement (an unseen nav wall along each cliff keeps figures off the
 edge). The terrain is planned first;
 the highway profile is then chosen against it per seed: the artery stays at
-grade and ramps through every wall (a main road cutting through the levels),
+grade and ramps through walls, or holds its grade through a sufficiently tall
+raised band as a two-portal tunnel,
 or climbs onto a deck before a run of walls, flies over them clear of the
 highest tier and settles onto the level beyond, with either ramp optionally
 replaced by an elevated map edge, up to one tall deck above every level. The
 branch merges onto whatever the artery is doing and ramps through the walls
-it meets at grade. A local street never runs into a level or across a road
-that is ramping through one: an avenue may ramp through a level; any other
+it meets at grade. Local streets use the same tunnel planner when two
+successive walls enclose enough headroom (the taller the band, the likelier
+the bore); the road matches the level at each portal, ramping down inside
+the bore where the far side is lower. The raised level stays walkable over
+the tunnel roof, independently of the road below: streets crossing the roof
+step onto it where they meet its edge, never from the road beneath. A local
+street that gets neither a tunnel nor the selected level ramp never runs into
+a level or across a road that is ramping through one: an avenue may ramp through a level; any other
 street whose pavement would reach the level band or a ramp corridor stops at
 the last street it crossed before it (a T, not an X) and resumes at the first
 one beyond it, and the blocks either side of the missing stretch stay one

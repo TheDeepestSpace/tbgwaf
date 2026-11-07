@@ -646,26 +646,28 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
       // ground connection and stepping off there (as FindPath allows). Price
       // the route to each foot and seed the ground search from it.
       for (size_t entry = 0; entry < walkSurfaces_.size(); ++entry) {
-        if (!walkSurfaces_[entry].connectsToGround) continue;
-        const glm::vec3 connection = GroundConnectionPoint(static_cast<int>(entry));
-        std::vector<glm::vec3> path;
-        if (!FindSurfacePath(startSurface, start, static_cast<int>(entry), connection, &path)) {
-          continue;
+        for (const glm::vec3& connection : GroundConnectionPoints(static_cast<int>(entry))) {
+          std::vector<glm::vec3> path;
+          if (!FindSurfacePath(startSurface, start, static_cast<int>(entry), connection, &path)) {
+            continue;
+          }
+          float cost = 0.0f;
+          for (size_t i = 0; i + 1 < path.size(); ++i) {
+            cost += glm::distance(path[i], path[i + 1]);
+          }
+          if (cost > budget) continue;
+          const int ix = static_cast<int>(std::lround((connection.x - field.minX) / step));
+          const int iz = static_cast<int>(std::lround((connection.z - field.minZ) / step));
+          if (ix < 0 || iz < 0 || ix >= field.nx || iz >= field.nz) continue;
+          if (!nodeWalkable(ix, iz)) continue;
+          const glm::vec3 node = nodeWorld(ix, iz);
+          const float d = cost + glm::distance(glm::vec2(node.x, node.z),
+                                               glm::vec2(connection.x, connection.z));
+          const int idx = iz * field.nx + ix;
+          if (d > budget || d >= field.dist[idx]) continue;
+          field.dist[idx] = d;
+          open.push({d, idx});
         }
-        float cost = 0.0f;
-        for (size_t i = 0; i + 1 < path.size(); ++i) cost += glm::distance(path[i], path[i + 1]);
-        if (cost > budget) continue;
-        const int ix = static_cast<int>(std::lround((connection.x - field.minX) / step));
-        const int iz = static_cast<int>(std::lround((connection.z - field.minZ) / step));
-        if (ix < 0 || iz < 0 || ix >= field.nx || iz >= field.nz) continue;
-        if (!nodeWalkable(ix, iz)) continue;
-        const glm::vec3 node = nodeWorld(ix, iz);
-        const float d = cost + glm::distance(glm::vec2(node.x, node.z),
-                                             glm::vec2(connection.x, connection.z));
-        const int idx = iz * field.nx + ix;
-        if (d > budget || d >= field.dist[idx]) continue;
-        field.dist[idx] = d;
-        open.push({d, idx});
       }
     }
     while (!open.empty()) {
@@ -712,23 +714,23 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
   }
 
   std::vector<float> entryCost(walkSurfaces_.size(), inf);
+  std::vector<glm::vec3> entryPoint(walkSurfaces_.size());
   if (startSurface < 0) {
     for (size_t entry = 0; entry < walkSurfaces_.size(); ++entry) {
-      if (!walkSurfaces_[entry].connectsToGround) continue;
-      const glm::vec3 connection = GroundConnectionPoint(static_cast<int>(entry));
-      glm::vec3 groundConnection = connection;
-      groundConnection.y = ground_.HeightAt(connection.x, connection.z);
-      std::vector<glm::vec3> path;
-      if (!FindGroundPath(start, groundConnection, &path)) continue;
-      float length = glm::distance(groundConnection, connection);
-      for (size_t i = 0; i + 1 < path.size(); ++i) length += glm::distance(path[i], path[i + 1]);
-      entryCost[entry] = length;
-    }
-  }
-  std::vector<glm::vec3> entryPoint(walkSurfaces_.size());
-  for (size_t entry = 0; entry < walkSurfaces_.size(); ++entry) {
-    if (std::isfinite(entryCost[entry])) {
-      entryPoint[entry] = GroundConnectionPoint(static_cast<int>(entry));
+      for (const glm::vec3& connection : GroundConnectionPoints(static_cast<int>(entry))) {
+        glm::vec3 groundConnection = connection;
+        groundConnection.y = ground_.HeightAt(connection.x, connection.z);
+        std::vector<glm::vec3> path;
+        if (!FindGroundPath(start, groundConnection, &path)) continue;
+        float length = glm::distance(groundConnection, connection);
+        for (size_t i = 0; i + 1 < path.size(); ++i) {
+          length += glm::distance(path[i], path[i + 1]);
+        }
+        if (length < entryCost[entry]) {
+          entryCost[entry] = length;
+          entryPoint[entry] = connection;
+        }
+      }
     }
   }
 
@@ -886,10 +888,11 @@ float NavMesh::ResolveSurfaceY(float x, float z, float yHint) const {
   return surface >= 0 ? SurfaceHeightAt(walkSurfaces_[surface], x, z) : ground_.HeightAt(x, z);
 }
 
-glm::vec3 NavMesh::GroundConnectionPoint(int surface) const {
-  if (surface < 0 || static_cast<size_t>(surface) >= walkSurfaces_.size()) return glm::vec3(0.0f);
+std::vector<glm::vec3> NavMesh::GroundConnectionPoints(int surface) const {
+  if (surface < 0 || static_cast<size_t>(surface) >= walkSurfaces_.size()) return {};
   const WalkSurface& patch = walkSurfaces_[surface];
-  if (patch.vertices.empty()) return glm::vec3(0.0f);
+  if (!patch.groundConnections.empty()) return patch.groundConnections;
+  if (!patch.connectsToGround || patch.vertices.empty()) return {};
   float lowest = patch.vertices.front().y;
   for (const glm::vec3& v : patch.vertices) lowest = std::min(lowest, v.y);
   glm::vec3 sum(0.0f);
@@ -900,7 +903,7 @@ glm::vec3 NavMesh::GroundConnectionPoint(int surface) const {
       ++count;
     }
   }
-  return count ? sum / static_cast<float>(count) : SurfaceCenter(patch);
+  return {count ? sum / static_cast<float>(count) : SurfaceCenter(patch)};
 }
 
 bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface,
@@ -1178,33 +1181,33 @@ bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* 
   std::vector<glm::vec3> best;
   float bestLength = std::numeric_limits<float>::infinity();
   for (size_t entry = 0; entry < walkSurfaces_.size(); ++entry) {
-    if (!walkSurfaces_[entry].connectsToGround) continue;
-    const glm::vec3 connection = GroundConnectionPoint(static_cast<int>(entry));
-    glm::vec3 groundConnection = connection;
-    groundConnection.y = ground_.HeightAt(connection.x, connection.z);
-    std::vector<glm::vec3> groundPath, surfacePath, candidate;
-    bool found = false;
-    if (startSurface < 0) {
-      found = FindGroundPath(start, groundConnection, &groundPath) &&
-              FindSurfacePath(static_cast<int>(entry), connection, goalSurface, goal,
-                              &surfacePath);
-      candidate = std::move(groundPath);
-      candidate.insert(candidate.end(), surfacePath.begin(), surfacePath.end());
-    } else {
-      found = FindSurfacePath(startSurface, start, static_cast<int>(entry), connection,
-                              &surfacePath) &&
-              FindGroundPath(groundConnection, goal, &groundPath);
-      candidate = std::move(surfacePath);
-      candidate.insert(candidate.end(), groundPath.begin(), groundPath.end());
-    }
-    if (!found) continue;
-    float length = 0.0f;
-    for (size_t i = 0; i + 1 < candidate.size(); ++i) {
-      length += glm::distance(candidate[i], candidate[i + 1]);
-    }
-    if (length < bestLength) {
-      bestLength = length;
-      best = std::move(candidate);
+    for (const glm::vec3& connection : GroundConnectionPoints(static_cast<int>(entry))) {
+      glm::vec3 groundConnection = connection;
+      groundConnection.y = ground_.HeightAt(connection.x, connection.z);
+      std::vector<glm::vec3> groundPath, surfacePath, candidate;
+      bool found = false;
+      if (startSurface < 0) {
+        found = FindGroundPath(start, groundConnection, &groundPath) &&
+                FindSurfacePath(static_cast<int>(entry), connection, goalSurface, goal,
+                                &surfacePath);
+        candidate = std::move(groundPath);
+        candidate.insert(candidate.end(), surfacePath.begin(), surfacePath.end());
+      } else {
+        found = FindSurfacePath(startSurface, start, static_cast<int>(entry), connection,
+                                &surfacePath) &&
+                FindGroundPath(groundConnection, goal, &groundPath);
+        candidate = std::move(surfacePath);
+        candidate.insert(candidate.end(), groundPath.begin(), groundPath.end());
+      }
+      if (!found) continue;
+      float length = 0.0f;
+      for (size_t i = 0; i + 1 < candidate.size(); ++i) {
+        length += glm::distance(candidate[i], candidate[i + 1]);
+      }
+      if (length < bestLength) {
+        bestLength = length;
+        best = std::move(candidate);
+      }
     }
   }
   if (best.empty()) return false;
@@ -1221,6 +1224,11 @@ bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* 
 void NavMesh::AddLowDeckBlockers(float agentRadius) {
   for (const WalkSurface& surface : walkSurfaces_) {
     if (surface.vertices.size() < 3) continue;
+    // A restored terrain roof over a tunnel bore rests on the surrounding
+    // tier along its long sides: its corners read near-zero clearance while
+    // the bore beneath was planned with full headroom. The clip below only
+    // sees the corners and would block the whole road through the tunnel.
+    if (surface.terrain) continue;
     std::vector<glm::vec3> pts;
     for (const glm::vec3& v : surface.vertices) {
       pts.emplace_back(v.x, v.z, v.y - ground_.HeightAt(v.x, v.z));  // (x, z, clearance)

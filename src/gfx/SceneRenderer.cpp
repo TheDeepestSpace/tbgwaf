@@ -1429,8 +1429,11 @@ unsigned long long DeckFingerprint(const tactics::Scene& scene) {
     }
   };
   for (const tactics::WalkSurface& s : scene.walkSurfaces) {
+    mix(&s.overpass, sizeof(s.overpass));
+    mix(&s.terrain, sizeof(s.terrain));
     mix(s.vertices.data(), s.vertices.size() * sizeof(glm::vec3));
     mix(s.neighbors.data(), s.neighbors.size() * sizeof(int));
+    mix(s.groundConnections.data(), s.groundConnections.size() * sizeof(glm::vec3));
   }
   return h;
 }
@@ -1444,6 +1447,7 @@ void BuildDeckMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   std::vector<GLuint> indices;
   std::vector<int> groups;
   for (size_t i = 0; i < scene.walkSurfaces.size(); ++i) {
+    if (scene.walkSurfaces[i].terrain) continue;
     const std::vector<char> hidden = SharedEdges(scene.walkSurfaces, scene.walkSurfaces[i]);
     AppendSurfacePatch(scene.walkSurfaces[i].vertices, 0.45f, &vertices, &indices, &hidden);
     groups.resize(indices.size() / 3, static_cast<int>(i));
@@ -1897,6 +1901,7 @@ void AppendPrism(const std::vector<glm::vec2>& polygon, float bottom, float top,
 void BuildUrbanTierMeshes(const tactics::HeightField& hf,
                           const std::vector<tactics::TerrainWall>& walls,
                           const std::vector<std::vector<glm::vec2>>& cutouts,
+                          const std::vector<tactics::TerrainTunnel>& tunnels,
                           LitTriangleMesh* base, LitTriangleMesh* raised) {
   LitVertices baseVertices, raisedVertices;
   std::vector<GLuint> baseIndices, raisedIndices;
@@ -1916,6 +1921,9 @@ void BuildUrbanTierMeshes(const tactics::HeightField& hf,
     AppendPrism(tier.polygon, 0.0f, tier.height, /*topFace=*/true, &raisedVertices,
                 &raisedIndices);
   }
+  for (const tactics::TerrainTunnel& tunnel : tunnels) {
+    AppendSurfacePatch(tunnel.roof, 0.45f, &raisedVertices, &raisedIndices);
+  }
   base->SetChunkedMesh(baseVertices, baseIndices, kCullGridCells);
   raised->SetChunkedMesh(raisedVertices, raisedIndices, kCullGridCells);
 }
@@ -1927,10 +1935,11 @@ void BuildUrbanTierMeshes(const tactics::HeightField& hf,
 // concrete tiers and `base` the ground plane. Hills use the heightfield.
 void BuildTerrainMesh(const tactics::HeightField& hf,
                       const std::vector<tactics::TerrainWall>& walls,
-                      const std::vector<std::vector<glm::vec2>>& cutouts, LitTriangleMesh* base,
+                      const std::vector<std::vector<glm::vec2>>& cutouts,
+                      const std::vector<tactics::TerrainTunnel>& tunnels, LitTriangleMesh* base,
                       LitTriangleMesh* raised) {
   if (!walls.empty()) {
-    BuildUrbanTierMeshes(hf, walls, cutouts, base, raised);
+    BuildUrbanTierMeshes(hf, walls, cutouts, tunnels, base, raised);
     return;
   }
   const int nx = hf.nx, nz = hf.nz;
@@ -3299,7 +3308,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (terrainChanged) {
     if (!terrain.Empty()) {
       BuildTerrainMesh(terrain, game.GetScene().terrainWalls, game.GetScene().terrainCutouts,
-                       &terrainMesh_, &terrainRaisedMesh_);
+                       game.GetScene().terrainTunnels, &terrainMesh_, &terrainRaisedMesh_);
     }
     terrainKey_ = terrain;
     fovSceneKey_ = 0;
@@ -3705,6 +3714,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
       for (size_t i = 0; i < walkSurfaces.size(); ++i) {
         const tactics::WalkSurface& surface = walkSurfaces[i];
+        if (surface.terrain) continue;
         if (surface.vertices.size() < 3) continue;  // Never intersected.
         glm::vec2 lo(surface.vertices[0].x, surface.vertices[0].z);
         glm::vec2 hi = lo;

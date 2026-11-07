@@ -81,6 +81,13 @@ void TestControlsAndDeterminism() {
       CHECK(on.terrainWalls[i].accesses[a].bottom == repeat.terrainWalls[i].accesses[a].bottom);
     }
   }
+  CHECK(on.terrainTunnels.size() == repeat.terrainTunnels.size());
+  for (size_t i = 0; i < on.terrainTunnels.size(); ++i) {
+    CHECK(on.terrainTunnels[i].bore == repeat.terrainTunnels[i].bore);
+    CHECK(on.terrainTunnels[i].roof == repeat.terrainTunnels[i].roof);
+    CHECK(on.terrainTunnels[i].entrance == repeat.terrainTunnels[i].entrance);
+    CHECK(on.terrainTunnels[i].exit == repeat.terrainTunnels[i].exit);
+  }
   CHECK(on.ground.heights != GenerateUrbanMap(42, c).ground.heights);
   c.features.terrain.mode = FeatureMode::Off;
   const Scene off = GenerateUrbanMap(7, c);
@@ -364,8 +371,11 @@ void TestHighwayProfilesOverLevels() {
   CHECK(layouts[static_cast<int>(OverpassLayout::RampUpRampDown)] > 0);
   CHECK(layouts[static_cast<int>(OverpassLayout::EnterRampUp)] > 0);
   CHECK(layouts[static_cast<int>(OverpassLayout::EnterRampDown)] > 0);
-  // At grade, the artery climbs through every wall it meets.
+  // At grade, the artery climbs through every wall it meets, unless it
+  // holds its grade through a raised band as a tunnel (issue #156): then
+  // its centerline spans only the difference between the exterior levels.
   c.elevatedHighway = OverpassMode::Off;
+  int tunnelled = 0;
   for (currentSeed = 1; currentSeed <= 200; ++currentSeed) {
     const auto roads = UrbanRoads(currentSeed, c);
     float minY = 1e9f, maxY = -1e9f;
@@ -373,8 +383,14 @@ void TestHighwayProfilesOverLevels() {
       minY = std::min(minY, p.y);
       maxY = std::max(maxY, p.y);
     }
-    CHECK(maxY - minY > constants::kUnitHeight * 0.9f);
+    if (maxY - minY > constants::kUnitHeight * 0.9f) continue;
+    const Scene s = GenerateUrbanMap(currentSeed, c);
+    bool highwayTunnel = false;
+    for (const TerrainTunnel& tunnel : s.terrainTunnels) highwayTunnel |= tunnel.highway;
+    CHECK(highwayTunnel);
+    tunnelled += highwayTunnel ? 1 : 0;
   }
+  CHECK(tunnelled > 0);
 }
 
 void TestStreetsKeepClearOfLevels() {
@@ -513,6 +529,87 @@ void TestTerrainZiplines() {
       CHECK(LineOfSightClear(line.a + lift, line.b + lift, s.ground));
     }
   }
+}
+
+void TestTerrainTunnels() {
+  int highway = 0, local = 0, downhillExit = 0;
+  for (const uint32_t seed : {31u, 72u}) {
+    currentSeed = seed;
+    const Scene s = GenerateUrbanMap(seed, TerrainConfig());
+    CHECK(!s.terrainTunnels.empty());
+    NavMesh nav;
+    nav.Build(s.obstacles, s.mapHalfExtent, constants::kAgentRadius, &s.ground,
+              &s.walkSurfaces);
+    for (const TerrainTunnel& tunnel : s.terrainTunnels) {
+      highway += tunnel.highway ? 1 : 0;
+      local += tunnel.highway ? 0 : 1;
+      downhillExit += tunnel.entrance.y > tunnel.exit.y + 0.1f ? 1 : 0;
+      CHECK(tunnel.bore.size() == 4 && tunnel.roof.size() == 4);
+      CHECK(tunnel.roofSurface >= 0 &&
+            tunnel.roofSurface < static_cast<int>(s.walkSurfaces.size()));
+      if (tunnel.roofSurface < 0 ||
+          tunnel.roofSurface >= static_cast<int>(s.walkSurfaces.size())) {
+        continue;
+      }
+      const WalkSurface& roof = s.walkSurfaces[tunnel.roofSurface];
+      CHECK(roof.terrain && !roof.connectsToGround);
+      CHECK(roof.groundConnections.size() >= 2);
+      const float roofY = tunnel.roof.front().y;
+      CHECK(roofY - std::max(tunnel.entrance.y, tunnel.exit.y) >=
+            constants::kMinDeckHeadroom + 0.35f);
+
+      const glm::vec2 a(tunnel.entrance.x, tunnel.entrance.z);
+      const glm::vec2 b(tunnel.exit.x, tunnel.exit.z);
+      const glm::vec2 dir = glm::normalize(b - a);
+      CHECK(std::fabs(s.ground.HeightAt((a - dir * 0.5f).x, (a - dir * 0.5f).y) +
+                          0.025f - tunnel.entrance.y) < 0.12f);
+      CHECK(std::fabs(s.ground.HeightAt((b + dir * 0.5f).x, (b + dir * 0.5f).y) +
+                          0.025f - tunnel.exit.y) < 0.12f);
+
+      // The road stays walkable portal-to-portal, never exceeds its normal
+      // grade, and the shortest route actually uses the bore below the roof.
+      float last = s.ground.HeightAt(a.x, a.y);
+      const float length = glm::distance(a, b);
+      for (int i = 1; i <= 100; ++i) {
+        const glm::vec2 p = glm::mix(a, b, static_cast<float>(i) / 100.0f);
+        const float y = s.ground.HeightAt(p.x, p.y);
+        CHECK(std::fabs(y - last) / (length / 100.0f) <= 0.32f);
+        last = y;
+      }
+      std::vector<glm::vec3> path;
+      glm::vec3 start = tunnel.entrance, goal = tunnel.exit;
+      start.y -= 0.025f;
+      goal.y -= 0.025f;
+      CHECK(nav.FindPath(start, goal, &path));
+      bool inBore = false;
+      for (const glm::vec3& p : path) {
+        inBore |= PointInConvexPolygon({p.x, p.z}, tunnel.bore) &&
+                  p.y < roofY - constants::kMinDeckHeadroom;
+      }
+      CHECK(inBore);
+
+      // The restored level above is independently reachable from the
+      // adjacent high terrain (the sidewalk strip beside the bore, with the
+      // block's buildings right behind it, or a street crossing the roof);
+      // it never connects vertically to the road.
+      if (roof.groundConnections.size() >= 2) {
+        const glm::vec3 center = SurfaceCenter(roof);
+        bool reachable = false;
+        for (const glm::vec3& connection : roof.groundConnections) {
+          glm::vec2 outward(connection.x - center.x, connection.z - center.z);
+          outward = glm::normalize(outward) * 0.3f;
+          glm::vec3 outside(connection.x + outward.x, 0.0f, connection.z + outward.y);
+          outside.y = s.ground.HeightAt(outside.x, outside.z);
+          CHECK(std::fabs(outside.y - roofY) < 0.3f);
+          reachable |= nav.FindPath(center, outside, &path) && nav.FindPath(outside, center, &path);
+        }
+        CHECK(reachable);
+      }
+    }
+  }
+  CHECK(highway > 0);
+  CHECK(local > 0);
+  CHECK(downhillExit > 0);
 }
 
 void TestMovementUpStair() {
@@ -689,6 +786,7 @@ int main() {
   TestHighwayProfilesOverLevels();
   TestStreetsKeepClearOfLevels();
   TestSurfacesSitOnTiers();
+  TestTerrainTunnels();
   TestTerrainZiplines();
   TestMovementUpStair();
   TestSheerFacesAreImpassable();

@@ -41,6 +41,20 @@ struct TerrainStair {
   float base = 0.0f;                       // Ground height at the foot.
 };
 
+// A road bored through a raised terrain band (issue #156). `bore` is the
+// convex opening cut from the solid tier, portal to portal. The road follows
+// the sampled ground below it; `roof` restores the walkable level above as a
+// slab, with enough clearance for figures underneath. Highway and local
+// streets share this representation.
+struct TerrainTunnel {
+  std::vector<glm::vec2> bore;
+  std::vector<glm::vec3> roof;
+  glm::vec3 entrance{0.0f}, exit{0.0f};
+  float width = 0.0f;
+  int roofSurface = -1;
+  bool highway = false;
+};
+
 // Hardcoded Stage-A scene: a ~30x30 unit field with box-shaped obstacles and
 // two 3-figure squads facing each other across the map.
 // Neutral flag objective (CTF part 1). Off by default so existing scenes are
@@ -124,12 +138,13 @@ struct Scene {
   // rendering all sample it (see HeightField).
   HeightField ground;
   // Urban levels as drawn: each tier is an extruded polygon (the map split
-  // by the walls' step lines, minus the ramp corridors in `terrainCutouts`,
+  // by the walls' step lines, minus the ramp/tunnel corridors in `terrainCutouts`,
   // convex rectangles exactly the width of their pavement), and each stair
   // one extruded wedge. The heightfield above stays the movement model.
   std::vector<TerrainWall> terrainWalls;
   std::vector<std::vector<glm::vec2>> terrainCutouts;
   std::vector<TerrainStair> terrainStairs;
+  std::vector<TerrainTunnel> terrainTunnels;
   FlagConfig flag;
   SpawnHints spawnHints;
   // Round limit: when > 0 the match ends in a draw once this many rounds

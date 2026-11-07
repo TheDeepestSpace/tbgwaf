@@ -205,7 +205,7 @@ class NavMesh {
                              std::vector<glm::vec3>* outPath) const;
   bool FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface,
                        glm::vec3 goal, std::vector<glm::vec3>* outPath) const;
-  glm::vec3 GroundConnectionPoint(int surface) const;
+  std::vector<glm::vec3> GroundConnectionPoints(int surface) const;
   // Per-Build caches over walkSurfaces_: footprints/bounds, a uniform XZ grid
   // for point queries, and all-pairs surface routes (see BuildSurfaceCaches).
   void BuildSurfaceCaches(float agentRadius);

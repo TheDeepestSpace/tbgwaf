@@ -345,6 +345,12 @@ void Lobby::MaybeRunRound(Room& room) {
     SendSeat(room, t, session.PlansMessage(t));
     SendSeat(room, t, Json(Json::Object{{"t", Json("peer")}, {"ready", Json(false)}}));
   }
+  // Match over: players saw a fogged timeline, so hand them the full one for
+  // the post-game replay (spectators already received it unfiltered).
+  if (session.game().Mode() == InputMode::GameOver) {
+    const Json reveal = session.RevealMessage();
+    for (int ti = 0; ti < 2; ++ti) SendSeat(room, static_cast<Team>(ti), reveal);
+  }
   for (int spectator : room.spectators) {
     Send(spectator, reports[2]);
     Send(spectator, session.SpectatorPlansMessage());

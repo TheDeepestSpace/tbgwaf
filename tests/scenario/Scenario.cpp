@@ -801,6 +801,7 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
   timeline.Reset(game);
   TimelinePlayback playback;
   if (hooks.onTimeline) hooks.onTimeline(timeline, playback);
+  if (hooks.onLiveGame) hooks.onLiveGame(game);
   auto Display = [&]() -> const GameLogic& {
     return playback.Active() ? playback.Game() : game;
   };

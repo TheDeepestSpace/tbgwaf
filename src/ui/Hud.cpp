@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <string>
 
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "game/Unit.h"
+#include "gfx/RotationDome.h"
 
 using tactics::GameLogic;
 using tactics::InputMode;
@@ -475,7 +477,7 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
                     float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
                     bool& disableOcclusionFade, bool& npr, gfx::NprSettings& nprSettings,
-                    bool& showFps, float fps, float frameMs,
+                    bool& showFps, bool& showRotationDome, float fps, float frameMs,
                     float fovMs, const gfx::RenderFrameStats& stats, float top,
                     std::optional<size_t> wasmHeapBytes) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
@@ -528,6 +530,7 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
     ImGui::SliderFloat("NPR AO strength", &nprSettings.ao.strength, 0.0f, 3.0f, "%.2f");
   }
   ImGui::Checkbox("Disable occlusion fade", &disableOcclusionFade);
+  ImGui::Checkbox("Rotation dome", &showRotationDome);
   ImGui::Checkbox("Show FPS", &showFps);
   if (showFps) ImGui::Text("%.1f FPS (%.2f ms)", fps, frameMs);
   ImGui::Text("Draw calls: %d", stats.drawCalls);
@@ -540,6 +543,93 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
     ImGui::TextUnformatted("WASM heap: N/A (native)");
   }
   ImGui::End();
+}
+
+void DrawRotationDome(gfx::OrbitCamera& camera, const PaneRect& rect, float windowHeight, int id,
+                      bool blackHot) {
+  constexpr float kRadius = 52.0f;
+  constexpr float kPad = 10.0f;
+  constexpr float kRadiansPerPixel = 0.01f;
+  // Compass labels sit at 1.18 * kRadius from the center, so the window must
+  // extend past that by half a label or the draw list clips the letters.
+  const float side = kRadius * 2.0f + 40.0f;
+  ImGui::SetNextWindowPos(ImVec2(rect.x + rect.width - kPad, windowHeight - kPad),
+                          ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+  ImGui::SetNextWindowSize(ImVec2(side, side), ImGuiCond_Always);
+  // Movement-boundary green: dark variant on the black-hot view's white scene
+  // (kThermalGreenDark), bright one (kThermalGreen) otherwise.
+  const ImVec4 menu = blackHot ? ImVec4(0.02f, 0.45f, 0.14f, 1.0f)
+                               : ImVec4(0.30f, 0.90f, 0.40f, 1.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
+  ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
+  ImGui::PushID(id);
+  // Window names are global (the ID stack does not apply to Begin), so bake
+  // the pane id in or the second pane appends to the first pane's window.
+  char name[32];
+  std::snprintf(name, sizeof(name), "##rotation_dome_%d", id);
+  ImGui::Begin(name, nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                   ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoScrollbar);
+  const ImVec2 origin = ImGui::GetCursorScreenPos();
+  ImGui::InvisibleButton("drag", ImVec2(side, side));
+  // A touch has no hover phase, so on the press frame the pointer teleports from
+  // its last position to the finger and MouseDelta is a huge bogus jump; skip it.
+  if (ImGui::IsItemActive() && !ImGui::IsItemActivated()) {
+    const ImVec2 d = ImGui::GetIO().MouseDelta;
+    if (d.x != 0.0f || d.y != 0.0f) {
+      const glm::vec2 da = gfx::DomeDragDelta(glm::vec2(d.x, d.y), kRadiansPerPixel);
+      camera.Rotate(da.x, da.y);
+    }
+  }
+  const float yaw = camera.Yaw(), pitch = camera.Pitch();
+  const ImVec2 c(origin.x + side * 0.5f, origin.y + side * 0.5f);
+  auto toScreen = [&](const glm::vec3& p) {
+    const glm::vec2 v = gfx::DomeProject(p, yaw, pitch);
+    return ImVec2(c.x + v.x * kRadius, c.y + v.y * kRadius);
+  };
+  auto color = [&](bool front) {
+    return ImGui::ColorConvertFloat4ToU32(ImVec4(menu.x, menu.y, menu.z, front ? 1.0f : 0.35f));
+  };
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  auto line = [&](const glm::vec3& a, const glm::vec3& b, float thickness) {
+    const bool front = gfx::DomeDepth(a + b, yaw, pitch) > 0.0f;
+    dl->AddLine(toScreen(a), toScreen(b), color(front), thickness);
+  };
+  // Dome wireframe: latitude rings and longitude arcs.
+  constexpr int kSegs = 40;
+  const float twoPi = 6.2831853f;
+  for (float lat : {0.5236f, 1.0472f}) {
+    for (int i = 0; i < kSegs; ++i)
+      line(gfx::DomeDirection(twoPi * i / kSegs, lat),
+           gfx::DomeDirection(twoPi * (i + 1) / kSegs, lat), 1.0f);
+  }
+  for (int m = 0; m < 8; ++m) {
+    const float a = twoPi * m / 8.0f;
+    for (int i = 0; i < 12; ++i)
+      line(gfx::DomeDirection(a, 1.5708f * i / 12),
+           gfx::DomeDirection(a, 1.5708f * (i + 1) / 12), 1.0f);
+  }
+  // Compass circle at the dome's base: ring, tick marks, and N/E/S/W labels.
+  // North is world -Z (top of the default ground view), east +X.
+  for (int i = 0; i < kSegs; ++i)
+    line(gfx::DomeDirection(twoPi * i / kSegs, 0.0f),
+         gfx::DomeDirection(twoPi * (i + 1) / kSegs, 0.0f), 2.0f);
+  struct Cardinal { const char* label; float yaw; };
+  for (const Cardinal& k : {Cardinal{"N", -1.5708f}, Cardinal{"E", 0.0f},
+                            Cardinal{"S", 1.5708f}, Cardinal{"W", 3.1416f}}) {
+    const glm::vec3 edge = gfx::DomeDirection(k.yaw, 0.0f);
+    const bool front = gfx::DomeDepth(edge, yaw, pitch) > -0.05f;
+    dl->AddLine(toScreen(edge * 0.88f), toScreen(edge), color(front), 2.0f);
+    const ImVec2 t = toScreen(edge * 1.18f);
+    const ImVec2 sz = ImGui::CalcTextSize(k.label);
+    dl->AddText(ImVec2(t.x - sz.x * 0.5f, t.y - sz.y * 0.5f), color(front), k.label);
+  }
+  ImGui::End();
+  ImGui::PopID();
+  ImGui::PopStyleColor(2);
+  ImGui::PopStyleVar();
 }
 
 void PushThermalHudStyle() {

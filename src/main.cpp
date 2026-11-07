@@ -87,7 +87,7 @@ EM_JS(void, tbgwaf_bind_canvas, (), {
   // Gesture input SDL doesn't expose: touch pinch/drag and trackpad wheel
   // gestures. Accumulated here, drained once per frame by tbgwaf_take_gesture.
   const c = Module.canvas;
-  const g = Module.tbgwafGesture = {rotX: 0, rotY: 0, zoom: 0, panX: 0, panY: 0, x: 0, active: false};
+  const g = Module.tbgwafGesture = {legacyRotate: false, rotX: 0, rotY: 0, zoom: 0, panX: 0, panY: 0, x: 0, active: false};
   c.style.touchAction = "none";
   // Capture phase + stopImmediatePropagation keeps SDL's own wheel handler
   // from also acting on events we consume.
@@ -116,7 +116,7 @@ EM_JS(void, tbgwaf_bind_canvas, (), {
     touches.set(e.pointerId, {x: e.clientX, y: e.clientY});
     const d1 = dist(), m1 = mid();
     g.zoom += (d0 - d1) * 0.5;  // Fingers apart -> zoom in (negative delta).
-    g.rotX += (m0.x - m1.x) * -1; g.rotY += (m0.y - m1.y) * -1;
+    if (g.legacyRotate) { g.rotX += (m0.x - m1.x) * -1; g.rotY += (m0.y - m1.y) * -1; }
     g.x = m1.x - c.getBoundingClientRect().left;
     e.stopImmediatePropagation(); e.preventDefault();
   }, {capture: true, passive: false});
@@ -129,6 +129,11 @@ EM_JS(void, tbgwaf_bind_canvas, (), {
   c.addEventListener("pointercancel", end, {capture: true});
   for (const t of ["touchstart", "touchmove"])
     c.addEventListener(t, (e) => e.preventDefault(), {passive: false});
+});
+
+// Two-finger touch rotation is only active while the rotation dome is off.
+EM_JS(void, tbgwaf_set_legacy_rotate, (int on), {
+  if (Module.tbgwafGesture) Module.tbgwafGesture.legacyRotate = !!on;
 });
 
 // Drains accumulated gesture deltas (CSS px / wheel units). Returns 1 if any.
@@ -1042,6 +1047,7 @@ int main() {
 #endif
 
   // Local-only debug panel state (defaults: FOV and shadows on, FPS shown).
+  bool showRotationDome = true;  // Debug-panel flag (issue #298); on by default.
   gfx::RenderDebugOptions debugOptions;
   // AO view is on by default, including in the smoke test (software GL needs
   // the longer smoke_test timeout).
@@ -1409,6 +1415,7 @@ int main() {
     SDL_GetMouseState(&mouseX, &mouseY);
 
 #ifdef __EMSCRIPTEN__
+    tbgwaf_set_legacy_rotate(showRotationDome ? 0 : 1);
     {
       // Touch pinch/drag and trackpad scroll/pinch gestures (see
       // tbgwaf_bind_canvas). Scroll/two-finger drag rotates; pinch zooms.
@@ -2232,6 +2239,11 @@ int main() {
         }
       }
     }
+    if (showRotationDome) {
+      for (int pane = 0; pane < paneCount; ++pane)
+        ui::DrawRotationDome(cameraForPane(pane), paneRects[pane], static_cast<float>(windowHeight),
+                             pane, debugOptions.thermal && debugOptions.thermalBlackHot);
+    }
     // Anchored under the Round panel so it follows collapse/expand.
     // emscripten_get_heap_size() just reads the current memory size, so it is
     // cheap enough to call every frame.
@@ -2246,7 +2258,7 @@ int main() {
                        debugOptions.thermalAo.strength, debugOptions.thermalAo.quality,
                        debugOptions.thermalAo.softness,
                        debugOptions.disableOcclusionFade, debugOptions.npr,
-                       debugOptions.nprSettings, showFps,
+                       debugOptions.nprSettings, showFps, showRotationDome,
                        smoothedFps, frameMs, fovMs, frameStats,
                        roundPanelBottom + 6.0f, wasmHeapBytes);
     // Pop against the pre-panel state: the checkbox may have just toggled

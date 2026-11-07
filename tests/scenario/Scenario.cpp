@@ -473,8 +473,12 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
                     " (unreachable, or beyond the mover's round move budget)");
       }
       if (action.finalFacingDegrees) {
-        game.SetPlannedMoveFacing(action.actor, *action.finalFacingDegrees * 3.14159265f / 180.0f,
-                                  actorTeam);
+        const float yaw = *action.finalFacingDegrees * 3.14159265f / 180.0f;
+        // The player aims the ghost by dragging from the destination toward
+        // the facing direction (main.cpp); show that drag end as a click.
+        NotifyClick(actorTeam, action.destination +
+                                   3.0f * glm::vec3(std::cos(yaw), 0.0f, std::sin(yaw)));
+        game.SetPlannedMoveFacing(action.actor, yaw, actorTeam);
       }
       return true;
     }

@@ -11,6 +11,7 @@
 
 #include <glm/glm.hpp>
 
+#include "game/Cover.h"
 #include "game/NavMesh.h"
 #include "game/Scene.h"
 #include "game/Types.h"
@@ -291,6 +292,11 @@ class GameLogic {
 
   // Reachable-area field for the selected figure's move budget, computed once
   // when entering move-destination mode (null otherwise).
+  // Cover tiles for MoveFrontier()'s grid, or null when there is no frontier.
+  const CoverMap* MoveCover() const {
+    return mode_ == InputMode::AwaitingMoveDestination && moveCover_.nx > 0 ? &moveCover_
+                                                                           : nullptr;
+  }
   const ReachField* MoveFrontier() const {
     return mode_ == InputMode::AwaitingMoveDestination && moveFrontier_.nx > 0 ? &moveFrontier_
                                                                               : nullptr;
@@ -691,6 +697,7 @@ class GameLogic {
   // the cached one already covers this figure at this origin.
   void EnsureNavMeshFor(const Unit& mover, const glm::vec3& origin);
   void RefreshMoveFrontier();
+  void UpdateCoverPoses(float dtSeconds);
   // Rebuilds ziplineFrontiers_ (and their navmeshes) for a leg from `origin`.
   void BuildZiplineFrontiers(const Unit& mover, const glm::vec3& origin);
   // Plans one leg from `from` to `goal`: a plain walk when affordable within
@@ -772,6 +779,7 @@ class GameLogic {
   bool movePreviewValid_ = false;
   bool movePreviewBlocked_ = false;
   ReachField moveFrontier_;
+  CoverMap moveCover_;  // Cover per moveFrontier_ node (issue #290); UI reads only.
   bool moveFrontierEnabled_ = true;
   bool overlapCheckEnabled_ = true;
   int frontierRevision_ = 0;  // Stamped into recomputed fields (ReachField::revision).

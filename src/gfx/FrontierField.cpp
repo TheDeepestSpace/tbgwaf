@@ -52,19 +52,8 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
     return false;
   };
 
-  // Chamfer distance (in world units) from each node to the nearest node
-  // of the opposite reached/unreached class, within its own layer.
-  const auto chamfer = [&](bool target) {
-    const float inf = std::numeric_limits<float>::infinity();
-    std::vector<float> d(static_cast<size_t>(nx) * nz, inf);
-    for (int iz = 0; iz < nz; ++iz) {
-      for (int ix = 0; ix < nx; ++ix) {
-        if (reached(ix, iz) == target ||
-            (!target && reached(ix, iz) && onLayerEdge(ix, iz))) {
-          d[iz * nx + ix] = reached(ix, iz) && !target ? field.step : 0.0f;
-        }
-      }
-    }
+  // Two-sweep chamfer relaxation of seeded distances, within each layer.
+  const auto chamferSweep = [&](std::vector<float>& d) {
     const float s = field.step, sd = field.step * 1.41421356f;
     const auto relax = [&](int ix, int iz, int dx, int dz, float weight) {
       const int jx = ix + dx, jz = iz + dz;
@@ -89,12 +78,47 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
         relax(ix, iz, -1, 1, sd);
       }
     }
+  };
+  // Chamfer distance (in world units) from each node to the nearest node
+  // of the opposite reached/unreached class, within its own layer.
+  const float inf = std::numeric_limits<float>::infinity();
+  const auto chamfer = [&](bool target) {
+    std::vector<float> d(static_cast<size_t>(nx) * nz, inf);
+    for (int iz = 0; iz < nz; ++iz) {
+      for (int ix = 0; ix < nx; ++ix) {
+        if (reached(ix, iz) == target ||
+            (!target && reached(ix, iz) && onLayerEdge(ix, iz))) {
+          d[iz * nx + ix] = reached(ix, iz) && !target ? field.step : 0.0f;
+        }
+      }
+    }
+    chamferSweep(d);
     return d;
   };
 
   constexpr float kMaxDepth = 4.0f;
   const std::vector<float> dIn = chamfer(false);
   const std::vector<float> dOut = chamfer(true);
+
+  // Distance to the nearest obstacle-blocked node (the reach computation
+  // caches walkability around the frontier). Where it ties with dIn the
+  // boundary is a wall rather than the budget running out, and the drawn
+  // contour must follow the obstacle exactly instead of being rounded.
+  const bool haveWalkable = field.walkable.size() == dIn.size();
+  std::vector<float> dWall;
+  if (haveWalkable) {
+    dWall.assign(dIn.size(), inf);
+    for (size_t i = 0; i < dWall.size(); ++i) {
+      if (field.walkable[i] == 0) dWall[i] = 0.0f;
+    }
+    chamferSweep(dWall);
+  }
+  // 1 where the local boundary is an obstacle, 0 where it is the move
+  // budget, blending over two steps where a wall meets the open arc.
+  const auto wallWeight = [&](int i) {
+    if (!haveWalkable || !std::isfinite(dWall[i])) return 0.0f;
+    return std::clamp(1.0f - (dWall[i] - dIn[i]) / (2.0f * field.step), 0.0f, 1.0f);
+  };
   std::vector<float> raw(dIn.size());
   for (int iz = 0; iz < nz; ++iz) {
     for (int ix = 0; ix < nx; ++ix) {
@@ -261,15 +285,18 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
     return sum / weight;
   };
   const float sampleDepth = 0.1f * field.step;
+  const bool haveWallDist = field.wallDist.size() == dIn.size();
   for (int iz = 0; iz < nz; ++iz) {
     for (int ix = 0; ix < nx; ++ix) {
       const int i = iz * nx + ix;
       const float a = txx[i], b = txz[i], c = tzz[i];
       const float trace = a + c;
+      const float wall = wallWeight(i);
       float value = depth[i];
       // Only near-contour values are visible (the fill fades out well
-      // inside kMaxDepth); skip the sampling work elsewhere.
-      if (std::fabs(value) < 1.5f && trace > 1e-12f) {
+      // inside kMaxDepth); skip the sampling work there and where the wall
+      // takes the whole blend below.
+      if (wall < 1.0f && std::fabs(value) < 1.5f && trace > 1e-12f) {
         const float disc = std::sqrt(0.25f * (a - c) * (a - c) + b * b);
         // Dominant eigenvector of the tensor is the boundary normal.
         float nxv = b, nzv = 0.5f * trace + disc - a;
@@ -280,12 +307,32 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
         const float len = std::sqrt(nxv * nxv + nzv * nzv);
         if (len > 1e-10f) {
           // Anisotropy in [0, 1]: 1 on a straight edge or band, 0 at a
-          // corner. Corners keep the isotropic blur (rounded), straight
-          // stretches take the tangential average (straightened).
+          // corner. Straight stretches take the tangential average
+          // (straightened); corners fall back to the unblurred grid field
+          // instead of the blur's round-off.
           const float aniso = 2.0f * disc / trace;
           const float avg = rawAlong(ix, iz, -nzv / len, nxv / len);
-          value = aniso * avg + (1.0f - aniso) * value;
+          value = aniso * avg + (1.0f - aniso) * raw[i];
         }
+      }
+      // Wall-caused boundary, applied after every smoothing pass so none of
+      // them can round it off: the exact node-to-outline distance where the
+      // reach field recorded one, signed by reachability. Its zero contour
+      // lies on the padded obstacle outline itself -- straight faces,
+      // square corners, oblique walls exact. The grid chamfer depth (zero
+      // contour half a step outside the last reached node, corners square
+      // at grid resolution) stands in when the exact distance is missing or
+      // disagrees with the grid, i.e. the local blocker is not a measured
+      // outline (the window edge, or an obstacle on the far side of this
+      // one).
+      if (wall > 0.0f) {
+        float exact = raw[i];
+        if (haveWallDist && std::isfinite(field.wallDist[i])) {
+          const float signedDist =
+              (reached(ix, iz) ? 1.0f : -1.0f) * std::min(field.wallDist[i], kMaxDepth);
+          if (std::fabs(signedDist - raw[i]) <= 1.5f * field.step) exact = signedDist;
+        }
+        value = wall * exact + (1.0f - wall) * value;
       }
       depth[i] = value;
     }
@@ -430,6 +477,47 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
     }
   }
   return depth;
+}
+
+std::vector<glm::vec2> FrontierCoverStyle(const tactics::ReachField& field,
+                                          const std::vector<tactics::Obstacle>& obstacles,
+                                          float reach) {
+  const int nx = field.nx, nz = field.nz;
+  if (nx <= 0 || nz <= 0 || field.step <= 0.0f) return {};
+  // Only blockers near the field can matter; the full list can be huge.
+  const float margin = reach + tactics::kCoverEdgeReach + 1.0f;
+  const float x0 = field.minX - margin, x1 = field.minX + nx * field.step + margin;
+  const float z0 = field.minZ - margin, z1 = field.minZ + nz * field.step + margin;
+  std::vector<tactics::Obstacle> nearby;
+  for (const tactics::Obstacle& o : obstacles) {
+    const tactics::AABB& b = o.bounds;
+    if (b.max.x >= x0 && b.min.x <= x1 && b.max.z >= z0 && b.min.z <= z1) nearby.push_back(o);
+  }
+  std::vector<glm::vec2> style(static_cast<size_t>(nx) * nz, glm::vec2(0.0f));
+  for (int iz = 0; iz < nz; ++iz) {
+    for (int ix = 0; ix < nx; ++ix) {
+      glm::vec3 p = field.Node(ix, iz);
+      if (!field.Reached(ix, iz)) {
+        // An unreached node (a wall and its navmesh padding) still corners
+        // the boundary cells around it, so it needs a style too; sample it
+        // at a reached neighbour's height so a node beside a deck never
+        // reads the floor below. No reached neighbour at all means no
+        // drawn cell touches the node: leave it unstyled.
+        bool found = false;
+        for (int dz = -1; dz <= 1 && !found; ++dz) {
+          for (int dx = -1; dx <= 1 && !found; ++dx) {
+            if (field.Reached(ix + dx, iz + dz)) {
+              p.y = field.Node(ix + dx, iz + dz).y;
+              found = true;
+            }
+          }
+        }
+        if (!found) continue;
+      }
+      style[iz * nx + ix] = tactics::CoverZoneWeights(nearby, p, reach);
+    }
+  }
+  return style;
 }
 
 }  // namespace gfx

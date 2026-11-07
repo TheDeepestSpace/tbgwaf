@@ -1,0 +1,32 @@
+name: cover_facing_corner
+description: >
+  Tactical cover is the stretch of wall leading up to a corner (45-degree
+  wedge), not the corner's diagonal. Reaching it turns the figure's back to
+  that wall: the face is toward +Z here, so the figure ends facing -90
+  degrees, ignoring the requested +X.
+
+map:
+  obstacles:
+    - {center: [0, 5], half_extent: [2.0, 2.0], height: 4.0, climbable: false}
+
+units:
+  - {id: 0, team: blue, position: [0, 0, -1], facing_degrees: 0}
+  - {id: 1, team: red, position: [0, 0, -14], facing_degrees: 180}
+
+camera:
+  target: [0, 3]
+  zoom: 4
+
+script:
+  - action: move
+    actor: 0
+    destination: [1.4, 0, 2.6]
+    final_facing_degrees: 0
+    comment: In the corner wedge; back to the building face, not the requested +X
+  - action: move
+    actor: 1
+    destination: [0, 0, -12]
+  - action: commit
+  - assert: {unit: 0, position: [1.4, 0, 2.6], tolerance: 0.05}
+  - assert: {unit: 0, facing_degrees: -90, tolerance: 0.5}
+  - assert: {unit: 0, cover_pose: stand}

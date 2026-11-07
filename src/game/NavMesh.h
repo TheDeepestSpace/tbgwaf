@@ -57,6 +57,20 @@ struct ReachField {
   // comes too close after the mover would have arrived (it stands at its
   // destination for the rest of the round). Empty otherwise.
   std::vector<char> endpointBlocked;
+  // Ground walkability per node (-1 unknown, 0 obstacle-blocked, 1 free),
+  // cached by the reach computation for the nodes it inspected. Blocked
+  // nodes mark where the frontier is a wall rather than the budget running
+  // out, so the drawn boundary can hug obstacles exactly. Empty for fields
+  // built by hand (tests).
+  std::vector<char> walkable;
+  // Exact XZ world distance from each node to the nearest padded obstacle
+  // outline, filled by ComputeReachField for nodes within a couple of
+  // metres of one (infinity elsewhere; may be empty, e.g. hand-built
+  // fields). Where the reach boundary is a wall, the frontier overlay
+  // contours this instead of grid-derived depths, so the drawn edge follows
+  // the obstacle outline itself -- straight faces, square corners, oblique
+  // walls exact (issue #292).
+  std::vector<float> wallDist;
   // Bumped by the owner each recompute, so renderers caching geometry by
   // (origin, budget) notice content-only changes (blockers moved).
   int revision = 0;

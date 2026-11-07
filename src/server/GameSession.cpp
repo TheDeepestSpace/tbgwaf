@@ -70,6 +70,7 @@ GameSession::Result GameSession::Apply(Team team, const net::Action& action, uin
     seed_ = newSeed;
     game_.Reset(fixedScene_ ? *fixedScene_ : GenerateMatchScene(seed_, mapKind_, ctf_));
     ready_ = {false, false};
+    history_.clear();
     return result;
   }
   // A commit locks the team's plans until the round runs: accepting later
@@ -195,6 +196,7 @@ std::array<Json, 3> GameSession::RunRound() {
                                           : StateBody(static_cast<Team>(ti)));
     out[ti] = std::move(msg);
   }
+  history_.push_back(out[kSpectatorSlot]);
   return out;
 }
 
@@ -257,6 +259,15 @@ Json GameSession::DumpState() const {
     dump.Set(std::string("visible_") + net::TeamName(team), std::move(seen));
   }
   return dump;
+}
+
+Json GameSession::RevealMessage() const {
+  Json rounds{Json::Array{}};
+  for (const Json& round : history_) rounds.Push(round);
+  Json msg;
+  msg.Set("t", "reveal");
+  msg.Set("rounds", std::move(rounds));
+  return msg;
 }
 
 Json GameSession::StateMessage(Team team) const {

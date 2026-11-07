@@ -143,8 +143,17 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
                     float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
                     bool& disableOcclusionFade, bool& npr, gfx::NprSettings& nprSettings,
-                    bool& showFps, float fps, float frameMs,
+                    bool& showFps, bool& showRotationDome, float fps, float frameMs,
                     float fovMs, const gfx::RenderFrameStats& stats, float top);
+
+// Camera-rotation dome (issue #298): small corner widget in the bottom-right
+// of `rect`. A wireframe half-sphere with a compass circle at its base, drawn
+// as the camera sees the world; dragging it rotates `camera` (pitch clamped by
+// OrbitCamera). The widget is an ImGui window, so drags never reach the map
+// pan/tap handlers. `blackHot` selects the dark overlay green used by the
+// black-hot thermal view, where the bright green is unreadable on white.
+void DrawRotationDome(gfx::OrbitCamera& camera, const PaneRect& rect, float windowHeight, int id,
+                      bool blackHot);
 
 // Thermal view (issue #177): restyles every HUD window drawn in between to
 // the monochrome green symbology of real thermal footage, pane team label

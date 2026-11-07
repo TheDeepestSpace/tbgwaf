@@ -1,8 +1,9 @@
 name: cover_facing_corner
 description: >
-  Reaching tactical cover (a building corner) also turns the figure's back to the
-  blocker, here diagonally: the building is toward -X/+Z (135 degrees), so the figure ends facing
-  -45 degrees (away from it).
+  Tactical cover is the stretch of wall leading up to a corner (45-degree
+  wedge), not the corner's diagonal. Reaching it turns the figure's back to
+  that wall: the face is toward +Z here, so the figure ends facing -90
+  degrees, ignoring the requested +X.
 
 map:
   obstacles:
@@ -19,12 +20,13 @@ camera:
 script:
   - action: move
     actor: 0
-    destination: [2.4, 0, 2.6]
+    destination: [1.4, 0, 2.6]
     final_facing_degrees: 0
-    comment: Corner tile; back to the building, not the requested +X
+    comment: In the corner wedge; back to the building face, not the requested +X
   - action: move
     actor: 1
     destination: [0, 0, -12]
   - action: commit
-  - assert: {unit: 0, position: [2.4, 0, 2.6], tolerance: 0.05}
-  - assert: {unit: 0, facing_degrees: -45, tolerance: 0.5}
+  - assert: {unit: 0, position: [1.4, 0, 2.6], tolerance: 0.05}
+  - assert: {unit: 0, facing_degrees: -90, tolerance: 0.5}
+  - assert: {unit: 0, cover_pose: stand}

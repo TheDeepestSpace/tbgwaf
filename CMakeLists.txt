@@ -275,7 +275,7 @@ else()
   add_test(NAME camera_tests COMMAND tactics_camera_tests)
 
   add_executable(tactics_frontier_field_tests tests/frontier_field_tests.cpp
-                 src/gfx/FrontierField.cpp)
+                 src/gfx/FrontierField.cpp src/game/Cover.cpp src/game/Geometry.cpp)
   target_include_directories(tactics_frontier_field_tests PRIVATE src)
   target_link_libraries(tactics_frontier_field_tests PRIVATE glm::glm)
   add_test(NAME frontier_field_tests COMMAND tactics_frontier_field_tests)

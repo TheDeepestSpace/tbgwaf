@@ -37,7 +37,12 @@ int main() {
   CHECK(ClassifyCover(block, {0.6f, 0, -0.4f}).kind == CoverKind::Tactical);  // Short car-sized block.
   const std::vector<Obstacle> longer = {Box(0, 0, 12, 1)};
   CHECK(ClassifyCover(longer, {6, 0, -0.4f}).kind == CoverKind::Flat);
-  CHECK(ClassifyCover(longer, {0.3f, 0, -0.4f}).kind == CoverKind::Tactical);
+  CHECK(ClassifyCover(longer, {0.5f, 0, -0.4f}).kind == CoverKind::Tactical);
+  // The tactical wedge is cut at 45 degrees from the corner: a spot nearer
+  // the corner along the wall than its distance from the wall face is past
+  // the cut and only flat.
+  CHECK(ClassifyCover(longer, {0.3f, 0, -0.4f}).kind == CoverKind::Flat);
+  CHECK(ClassifyCover(longer, {0.3f, 0, -0.2f}).kind == CoverKind::Tactical);
 
   // Low blockers (below cover height) and overhead ones don't count.
   CHECK(ClassifyCover({Box(-20, 0, 20, 1, 0.5f)}, {0, 0, -0.4f}).kind == CoverKind::None);
@@ -101,12 +106,15 @@ int main() {
     CHECK(y > kPi - 0.1f || y < -kPi + 0.1f);
   }
 
-  // Building corner: standing at the outside corner is tactical.
+  // Building corner: tactical is only the stretch of wall leading up to the
+  // corner, inside the 45-degree wedge; the corner's diagonal is no cover.
   {
     const std::vector<Obstacle> building = {Box(0, 0, 10, 10)};
     CHECK(ClassifyCover(building, {-0.4f, 0, 5}).kind == CoverKind::Flat);   // Mid-face.
-    CHECK(ClassifyCover(building, {-0.4f, 0, 0.3f}).kind == CoverKind::Tactical);  // Near corner.
-    CHECK(ClassifyCover(building, {-0.4f, 0, -0.4f}).kind == CoverKind::Tactical);  // Diagonal touch.
+    CHECK(ClassifyCover(building, {-0.4f, 0, 0.5f}).kind == CoverKind::Tactical);  // In the wedge.
+    CHECK(ClassifyCover(building, {-0.4f, 0, 0.3f}).kind == CoverKind::Flat);  // Past the 45-degree cut.
+    CHECK(ClassifyCover(building, {-0.2f, 0, 0.3f}).kind == CoverKind::Tactical);  // Hugging the wall.
+    CHECK(ClassifyCover(building, {-0.4f, 0, -0.4f}).kind == CoverKind::None);  // Diagonally off the corner.
     CHECK(ClassifyCover(building, {-3, 0, -3}).kind == CoverKind::None);
   }
 
@@ -121,7 +129,8 @@ int main() {
   // Row of cars with a gap.
   {
     const std::vector<Obstacle> cars = {Box(0, 0, 4, 1.5f, 1.4f), Box(6, 0, 10, 1.5f, 1.4f)};
-    CHECK(ClassifyCover(cars, {4.3f, 0, -0.4f}).kind == CoverKind::Tactical);  // Beside the gap.
+    CHECK(ClassifyCover(cars, {3.5f, 0, -0.4f}).kind == CoverKind::Tactical);  // Leading up to the gap.
+    CHECK(ClassifyCover(cars, {4.3f, 0, -0.4f}).kind == CoverKind::None);     // Diagonally off the car corner.
     CHECK(ClassifyCover(cars, {4.4f, 0, 0.7f}).kind != CoverKind::None);      // Inside the gap, beside a car end.
     CHECK(ClassifyCover(cars, {2.0f, 0, -0.4f}).kind != CoverKind::None);
   }
@@ -131,6 +140,19 @@ int main() {
     const std::vector<Obstacle> mixed = {Box(-5, 0, 5, 1, 0.6f), Box(-5, 4, 5, 5, 3.0f)};
     CHECK(ClassifyCover(mixed, {0, 0, -0.4f}).kind == CoverKind::None);
     CHECK(ClassifyCover(mixed, {0, 0, 3.6f}).kind == CoverKind::Flat);
+  }
+
+  // CoverZoneWeights: the continuous zone the frontier overlay paints.
+  // Flat along the face, tactical only inside the 45-degree corner wedge,
+  // nothing diagonally past the corner or on open ground.
+  {
+    const std::vector<Obstacle> building = {Box(0, 0, 10, 10)};
+    CHECK(CoverZoneWeights(building, {-0.4f, 0, 5}, 0.8f) == glm::vec2(0, 1));       // Mid-face.
+    CHECK(CoverZoneWeights(building, {-0.75f, 0, 5}, 0.8f) == glm::vec2(0, 1));      // Deeper band than gameplay.
+    CHECK(CoverZoneWeights(building, {-0.4f, 0, 0.5f}, 0.8f) == glm::vec2(1, 0));    // In the wedge.
+    CHECK(CoverZoneWeights(building, {-0.4f, 0, 0.3f}, 0.8f) == glm::vec2(0, 1));    // Past the 45-degree cut.
+    CHECK(CoverZoneWeights(building, {-0.5f, 0, -0.5f}, 0.8f) == glm::vec2(0, 0));   // Corner diagonal.
+    CHECK(CoverZoneWeights(building, {-2, 0, 5}, 0.8f) == glm::vec2(0, 0));          // Open ground.
   }
 
   // Unreached nodes in a ReachField stay None even beside a wall.

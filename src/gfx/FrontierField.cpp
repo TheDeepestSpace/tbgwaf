@@ -480,56 +480,42 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
 }
 
 std::vector<glm::vec2> FrontierCoverStyle(const tactics::ReachField& field,
-                                          const tactics::CoverMap& cover, float reach) {
+                                          const std::vector<tactics::Obstacle>& obstacles,
+                                          float reach) {
   const int nx = field.nx, nz = field.nz;
-  if (nx <= 0 || nz <= 0 || field.step <= 0.0f || cover.nx != nx || cover.nz != nz ||
-      cover.tiles.size() != static_cast<size_t>(nx) * nz) {
-    return {};
+  if (nx <= 0 || nz <= 0 || field.step <= 0.0f) return {};
+  // Only blockers near the field can matter; the full list can be huge.
+  const float margin = reach + tactics::kCoverEdgeReach + 1.0f;
+  const float x0 = field.minX - margin, x1 = field.minX + nx * field.step + margin;
+  const float z0 = field.minZ - margin, z1 = field.minZ + nz * field.step + margin;
+  std::vector<tactics::Obstacle> nearby;
+  for (const tactics::Obstacle& o : obstacles) {
+    const tactics::AABB& b = o.bounds;
+    if (b.max.x >= x0 && b.min.x <= x1 && b.max.z >= z0 && b.min.z <= z1) nearby.push_back(o);
   }
-  constexpr float kLayerStep = 0.6f;
-  const auto sameLayer = [&](int ax, int az, int bx, int bz) {
-    if (field.surfaceY.size() != static_cast<size_t>(nx) * nz) return true;
-    return std::abs(field.surfaceY[az * nx + ax] - field.surfaceY[bz * nx + bx]) <=
-           kLayerStep;
-  };
-  const float inf = std::numeric_limits<float>::infinity();
-  const auto chamferFrom = [&](tactics::CoverKind kind) {
-    std::vector<float> d(static_cast<size_t>(nx) * nz, inf);
-    for (size_t i = 0; i < d.size(); ++i) {
-      if (cover.tiles[i].kind == kind) d[i] = 0.0f;
-    }
-    const float s = field.step, sd = field.step * 1.41421356f;
-    const auto relax = [&](int ix, int iz, int dx, int dz, float weight) {
-      const int jx = ix + dx, jz = iz + dz;
-      if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) return;
-      if (!sameLayer(ix, iz, jx, jz)) return;
-      float& value = d[iz * nx + ix];
-      value = std::min(value, d[jz * nx + jx] + weight);
-    };
-    for (int iz = 0; iz < nz; ++iz) {
-      for (int ix = 0; ix < nx; ++ix) {
-        relax(ix, iz, -1, 0, s);
-        relax(ix, iz, 0, -1, s);
-        relax(ix, iz, -1, -1, sd);
-        relax(ix, iz, 1, -1, sd);
+  std::vector<glm::vec2> style(static_cast<size_t>(nx) * nz, glm::vec2(0.0f));
+  for (int iz = 0; iz < nz; ++iz) {
+    for (int ix = 0; ix < nx; ++ix) {
+      glm::vec3 p = field.Node(ix, iz);
+      if (!field.Reached(ix, iz)) {
+        // An unreached node (a wall and its navmesh padding) still corners
+        // the boundary cells around it, so it needs a style too; sample it
+        // at a reached neighbour's height so a node beside a deck never
+        // reads the floor below. No reached neighbour at all means no
+        // drawn cell touches the node: leave it unstyled.
+        bool found = false;
+        for (int dz = -1; dz <= 1 && !found; ++dz) {
+          for (int dx = -1; dx <= 1 && !found; ++dx) {
+            if (field.Reached(ix + dx, iz + dz)) {
+              p.y = field.Node(ix + dx, iz + dz).y;
+              found = true;
+            }
+          }
+        }
+        if (!found) continue;
       }
+      style[iz * nx + ix] = tactics::CoverZoneWeights(nearby, p, reach);
     }
-    for (int iz = nz - 1; iz >= 0; --iz) {
-      for (int ix = nx - 1; ix >= 0; --ix) {
-        relax(ix, iz, 1, 0, s);
-        relax(ix, iz, 0, 1, s);
-        relax(ix, iz, 1, 1, sd);
-        relax(ix, iz, -1, 1, sd);
-      }
-    }
-    return d;
-  };
-  const std::vector<float> dTac = chamferFrom(tactics::CoverKind::Tactical);
-  const std::vector<float> dFlat = chamferFrom(tactics::CoverKind::Flat);
-  std::vector<glm::vec2> style(dTac.size(), glm::vec2(0.0f));
-  for (size_t i = 0; i < style.size(); ++i) {
-    if (dTac[i] <= dFlat[i] && dTac[i] <= reach) style[i].x = 1.0f;
-    else if (dFlat[i] <= reach) style[i].y = 1.0f;
   }
   return style;
 }

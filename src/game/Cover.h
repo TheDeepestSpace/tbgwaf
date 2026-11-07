@@ -14,11 +14,15 @@ namespace tactics {
 // on the obstacles around a tile, never on where enemies stand, and uses no
 // randomness or floating accumulation, so it is replay-safe (cf. #284).
 //
-// A tile is a cover tile when a wall/blocker sits right beside it.
-//  - Flat: every adjacent blocker keeps running along both sides of the tile
-//    (standing along a wall) -- nothing to peek around.
-//  - Tactical: some adjacent blocker ends within kCoverEdgeReach of the tile
-//    (building corner, end/side of a car) -- a spot to peek from.
+// A tile is a cover tile when it stands beside a wall face -- in front of
+// the face, not past its span (diagonally off a corner is no cover).
+//  - Flat: the wall keeps running (standing along a wall) -- nothing to
+//    peek around.
+//  - Tactical: the stretch of wall leading up to an open end (building
+//    corner, end of a car), cut at 45 degrees: the tile is within
+//    kCoverEdgeReach of the corner along the wall and no farther from the
+//    wall than from the corner, so the wedge tapers to a point at the
+//    corner itself.
 enum class CoverKind : uint8_t { None = 0, Flat = 1, Tactical = 2 };
 
 constexpr float kCoverProbeDistance = 0.7f;  // Tile centre to blocker face probe.
@@ -40,9 +44,16 @@ struct CoverTile {
 };
 
 // Classifies a feet position. `yaw` (if given) receives the world yaw
-// pointing at the blockers (mean of the blocked directions), for poses.
+// pointing at the blockers (mean of the wall directions), for poses.
 CoverTile ClassifyCover(const std::vector<Obstacle>& obstacles, const glm::vec3& feet,
                         float* yaw = nullptr);
+
+// Continuous variant for overlays: weights (tactical, flat), at most one of
+// them 1, for a point within `band` of a wall face. Uses the same wedge rule
+// as ClassifyCover but samples any point, so the drawn cover zones follow
+// the walls and 45-degree corner wedges exactly instead of the nav grid.
+glm::vec2 CoverZoneWeights(const std::vector<Obstacle>& obstacles, const glm::vec3& feet,
+                           float band);
 
 // Per-node cover for every node of `field` (same grid and indexing). Nodes
 // the field does not reach stay None.

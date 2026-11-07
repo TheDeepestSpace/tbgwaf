@@ -4384,7 +4384,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     };
     const std::vector<float> g = SmoothFrontierSignedDepth(f);
     std::vector<glm::vec2> style;
-    if (cover) style = FrontierCoverStyle(f, *cover, kFadeWidth);
+    if (cover) style = FrontierCoverStyle(f, game.SightObstacles(), kFadeWidth);
     const bool styled = style.size() == g.size();
 
     struct Pt {

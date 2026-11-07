@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <string>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -538,21 +539,30 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
   ImGui::End();
 }
 
-void DrawRotationDome(gfx::OrbitCamera& camera, const PaneRect& rect, float windowHeight, int id) {
+void DrawRotationDome(gfx::OrbitCamera& camera, const PaneRect& rect, float windowHeight, int id,
+                      bool blackHot) {
   constexpr float kRadius = 52.0f;
   constexpr float kPad = 10.0f;
   constexpr float kRadiansPerPixel = 0.01f;
-  const float side = kRadius * 2.0f + 20.0f;
+  // Compass labels sit at 1.18 * kRadius from the center, so the window must
+  // extend past that by half a label or the draw list clips the letters.
+  const float side = kRadius * 2.0f + 40.0f;
   ImGui::SetNextWindowPos(ImVec2(rect.x + rect.width - kPad, windowHeight - kPad),
                           ImGuiCond_Always, ImVec2(1.0f, 1.0f));
   ImGui::SetNextWindowSize(ImVec2(side, side), ImGuiCond_Always);
-  // Darker menu green, same as the movement boundary (kThermalGreen).
-  const ImVec4 menu(0.30f, 0.90f, 0.40f, 1.0f);
+  // Movement-boundary green: dark variant on the black-hot view's white scene
+  // (kThermalGreenDark), bright one (kThermalGreen) otherwise.
+  const ImVec4 menu = blackHot ? ImVec4(0.02f, 0.45f, 0.14f, 1.0f)
+                               : ImVec4(0.30f, 0.90f, 0.40f, 1.0f);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
   ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
   ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
   ImGui::PushID(id);
-  ImGui::Begin("##rotation_dome", nullptr,
+  // Window names are global (the ID stack does not apply to Begin), so bake
+  // the pane id in or the second pane appends to the first pane's window.
+  char name[32];
+  std::snprintf(name, sizeof(name), "##rotation_dome_%d", id);
+  ImGui::Begin(name, nullptr,
                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
                    ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoScrollbar);

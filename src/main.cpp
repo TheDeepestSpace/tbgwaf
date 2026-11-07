@@ -2233,7 +2233,8 @@ int main() {
     }
     if (showRotationDome) {
       for (int pane = 0; pane < paneCount; ++pane)
-        ui::DrawRotationDome(cameraForPane(pane), paneRects[pane], static_cast<float>(windowHeight), pane);
+        ui::DrawRotationDome(cameraForPane(pane), paneRects[pane], static_cast<float>(windowHeight),
+                             pane, debugOptions.thermal && debugOptions.thermalBlackHot);
     }
     // Anchored under the Round panel so it follows collapse/expand.
     const bool hudWasThermal = debugOptions.thermal;

@@ -1296,6 +1296,7 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
     AppendMassingDetail(d, &vertices, &indices);
   }
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
+    if (surface.climbProxy) continue;
     AppendSurfacePatch(surface.vertices, 0.45f, &vertices, &indices);
     if (surface.stair) AppendStairSteps(surface.vertices, &vertices, &indices);
   }
@@ -1486,6 +1487,7 @@ unsigned long long DeckFingerprint(const tactics::Scene& scene) {
     mix(s.vertices.data(), s.vertices.size() * sizeof(glm::vec3));
     mix(s.neighbors.data(), s.neighbors.size() * sizeof(int));
     mix(&s.stair, sizeof(s.stair));
+    mix(&s.climbProxy, sizeof(s.climbProxy));
   }
   return h;
 }
@@ -1499,6 +1501,10 @@ void BuildDeckMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   std::vector<GLuint> indices;
   std::vector<int> groups;
   for (size_t i = 0; i < scene.walkSurfaces.size(); ++i) {
+    if (scene.walkSurfaces[i].climbProxy) {
+      groups.resize(indices.size() / 3, static_cast<int>(i));
+      continue;
+    }
     const std::vector<char> hidden = SharedEdges(scene.walkSurfaces, scene.walkSurfaces[i]);
     AppendSurfacePatch(scene.walkSurfaces[i].vertices, 0.45f, &vertices, &indices, &hidden);
     if (scene.walkSurfaces[i].stair) {
@@ -4089,7 +4095,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
     }
     for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-      if (fadeSurface[i]) {
+      if (fadeSurface[i] && !walkSurfaces[i].climbProxy) {
         faded.push_back({glm::distance(cameraPos, tactics::SurfaceCenter(walkSurfaces[i])), -1,
                          static_cast<int>(i)});
       }

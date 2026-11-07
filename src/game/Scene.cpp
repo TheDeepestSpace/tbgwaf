@@ -52,6 +52,7 @@ int AddClimbRamp(Scene* scene, int obstacle, glm::vec2 rampSide, float maxRun) {
     WalkSurface surface;
     surface.vertices = std::move(vertices);
     surface.connectsToGround = connectsToGround;
+    surface.climbProxy = true;
     scene->walkSurfaces.push_back(std::move(surface));
     return static_cast<int>(scene->walkSurfaces.size()) - 1;
   };

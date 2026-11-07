@@ -221,6 +221,9 @@ struct WalkSurface {
   // A stair flight (roadmap 5.5): a steep sloped quad the renderer draws as
   // steps over the slope. Movement/LOS treat it like any other ramp.
   bool stair = false;
+  // Invisible navigation proxy for a crate/car top or its ramp (AddClimbRamp):
+  // the obstacle itself is what gets drawn, so the renderer skips the patch.
+  bool climbProxy = false;
   // Index into Scene::buildings when the patch is a floor or stair inside a
   // generated building (roadmap 5.4), else -1. The renderer fades it with
   // the rest of that building.

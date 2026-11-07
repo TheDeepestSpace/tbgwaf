@@ -52,13 +52,15 @@ class AmbientOcclusion {
   void CompositeNpr(GLuint target, int x, int y, const glm::mat4& view,
                     const glm::mat4& projection, const NprSettings& settings);
   // See-through geometry: BeginFaded() rebinds the G-buffer (keeping the
-  // opaque depth) so the faded blocks can be drawn into it tagged
-  // (normal alpha 0.75); CompositeFadedOutlines() then blends outlines of
-  // just those pixels onto `target`, scaled by the blocks' `opacity`.
+  // opaque depth, stencil cleared) so the faded blocks can be drawn into it
+  // tagged (normal alpha 0.75 for the shell, 0.5 for a faded building's
+  // floors and stairs); CompositeFadedOutlines() then blends outlines of
+  // just those pixels onto `target`, scaled by `opacity` or
+  // `interiorOpacity` per tag.
   void BeginFaded();
   void CompositeFadedOutlines(GLuint target, int x, int y, const glm::mat4& view,
                               const glm::mat4& projection, const NprSettings& settings,
-                              float opacity);
+                              float opacity, float interiorOpacity);
 
  private:
   Shader occlusionShader_, compositeShader_, nprShader_, fadedOutlineShader_;

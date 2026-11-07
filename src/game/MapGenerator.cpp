@@ -6,6 +6,7 @@
 #include <functional>
 #include <limits>
 #include <random>
+#include <unordered_map>
 #include <vector>
 
 #include "game/Geometry.h"
@@ -4704,6 +4705,84 @@ std::vector<std::pair<float, float>> FacadeColumns(float len, float w, float gap
   return columns;
 }
 
+// A window rectangle to cut out of an enterable building's wall pieces
+// (roadmap 5.3): along footprint edge a->q, (u0,u1) x (y0,y1) world height.
+struct WindowCut {
+  int building;
+  glm::vec2 a, q;
+  float u0, u1, y0, y1;
+};
+
+// Cuts each window out of the wall pieces it overlaps, replacing a piece by
+// up to four plain Obstacles: the left/right jambs, the sill below and the
+// head above. Nothing downstream needs to know: rays pass through the gap,
+// the sill blocks movement, the prism renderer draws from min.y to max.y.
+void CutWindows(Scene* scene, const std::vector<WindowCut>& cuts) {
+  constexpr float kMinSide = 0.02f;
+  std::unordered_map<int, std::vector<int>> pieces;
+  for (size_t i = 0; i < scene->obstacles.size(); ++i) {
+    const Obstacle& o = scene->obstacles[i];
+    if (o.building >= 0 && o.footprint.size() == 4) pieces[o.building].push_back(static_cast<int>(i));
+  }
+  for (const WindowCut& w : cuts) {
+    const float len = glm::distance(w.a, w.q);
+    if (len < 1e-3f) continue;
+    const glm::vec2 d = (w.q - w.a) / len;
+    const glm::vec2 in(-d.y, d.x);
+    const auto it = pieces.find(w.building);
+    if (it == pieces.end()) continue;
+    const std::vector<int> candidates = it->second;  // Copy: we append below.
+    for (int idx : candidates) {
+      const Obstacle piece = scene->obstacles[idx];
+      const auto& f = piece.footprint;
+      const glm::vec2 along = f[1] - f[0];
+      const float pieceLen = glm::length(along);
+      if (pieceLen < 1e-3f) continue;
+      // Only wall pieces lying on this edge, with the same orientation.
+      if (glm::dot(along / pieceLen, d) < 0.999f) continue;
+      if (std::fabs(glm::dot(f[0] - w.a, in)) > 1e-3f) continue;
+      const float thickness = glm::dot(f[3] - f[0], in);
+      if (thickness < 1e-3f || thickness > 0.5f) continue;  // Walls only, not slabs.
+      const float p0 = glm::dot(f[0] - w.a, d), p1 = glm::dot(f[1] - w.a, d);
+      const float ylo = piece.bounds.min.y, yhi = piece.bounds.max.y;
+      const float ou0 = std::max(p0, w.u0), ou1 = std::min(p1, w.u1);
+      const float oy0 = std::max(ylo, w.y0), oy1 = std::min(yhi, w.y1);
+      if (ou1 - ou0 < kMinSide || oy1 - oy0 < kMinSide) continue;
+      bool reused = false;
+      const auto emit = [&](float u0, float u1, float y0, float y1) {
+        if (u1 - u0 < kMinSide || y1 - y0 < kMinSide) return;
+        const glm::vec2 s0 = w.a + d * u0, s1 = w.a + d * u1;
+        Obstacle o = piece;
+        o.footprint = {s0, s1, s1 + in * thickness, s0 + in * thickness};
+        o.bounds.min = glm::vec3(1e30f, y0, 1e30f);
+        o.bounds.max = glm::vec3(-1e30f, y1, -1e30f);
+        for (const glm::vec2& v : o.footprint) {
+          o.bounds.min.x = std::min(o.bounds.min.x, v.x);
+          o.bounds.max.x = std::max(o.bounds.max.x, v.x);
+          o.bounds.min.z = std::min(o.bounds.min.z, v.y);
+          o.bounds.max.z = std::max(o.bounds.max.z, v.y);
+        }
+        if (!reused) {
+          scene->obstacles[idx] = std::move(o);
+          reused = true;
+        } else {
+          scene->obstacles.push_back(std::move(o));
+          it->second.push_back(static_cast<int>(scene->obstacles.size()) - 1);
+        }
+      };
+      emit(p0, ou0, ylo, yhi);   // Left jamb.
+      emit(ou1, p1, ylo, yhi);   // Right jamb.
+      emit(ou0, ou1, ylo, oy0);  // Sill.
+      emit(ou0, ou1, oy1, yhi);  // Head.
+      if (!reused) {
+        // Whole piece is the opening (cannot happen for real windows): keep
+        // a degenerate-free scene by dropping it to a zero-height sliver.
+        scene->obstacles[idx].bounds.max.y = scene->obstacles[idx].bounds.min.y;
+      }
+    }
+  }
+}
+
 // Windows and doors per building, recorded as FacadeOpening data and drawn
 // as pane extrusions (roadmap 3.4): a window grid per floor on every street
 // facade, one entrance door on the frontage, and a rear/courtyard door for
@@ -4727,6 +4806,7 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
   constexpr float kRearDoorWidth = 1.2f, kRearDoorHeight = 2.2f;
   constexpr float kWallGap = 0.03f;       // Walk surfaces stand just off the wall face.
   constexpr float kSpawnClearance = 1.5f;
+  std::vector<WindowCut> windowCuts;  // Enterable walls' windows, cut out at the end.
 
   std::vector<std::vector<glm::vec2>> footprints;
   footprints.reserve(scene->obstacles.size());
@@ -5023,10 +5103,17 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
           scene->facadeOpenings.push_back(FacadeOpening{
               FacadeOpening::Kind::Window, static_cast<int>(bi), b.obstacle,
               static_cast<int>(e), u0, u1, y0, y1, floor});
+          // Ground-floor windows only for now: nothing can stand above the
+          // ground floor until stairs/floors land (roadmap 5.4-5.5), and each
+          // cut triples the wall piece count.
+          if (b.enterable && floor == 0) {
+            windowCuts.push_back(WindowCut{static_cast<int>(bi), a, q, u0, u1, y0, y1});
+          }
         }
       }
     }
   }
+  CutWindows(scene, windowCuts);
 }
 
 // Squads at the artery's ends.
@@ -5996,6 +6083,107 @@ void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorCo
   }
 }
 
+// Road patches from different emitters (crossing street bands, the artery's
+// shoulder overlap) cover the same ground, and each is fitted to its own
+// plane. Where two nearly coplanar patches overlap their depths differ by
+// millimetres and z-fight (issue #280). Later patches lose the part an
+// earlier, near-coplanar patch already covers; genuinely stacked layers
+// (apart by more than kRoadStackGap) and identical planes are left alone.
+void DedupeRoadOverlaps(Scene* scene) {
+  constexpr float kRoadStackGap = 0.15f;
+  // Identical planes (flat ground) render the same depth and cannot flicker.
+  const auto ZFights = [](float a, float b) {
+    const float dy = std::fabs(a - b);
+    return dy > 1e-4f && dy < kRoadStackGap;
+  };
+  struct Kept {
+    std::vector<glm::vec3> v;
+    glm::vec2 lo, hi;
+    float sign;
+  };
+  const auto planeY = [](const std::vector<glm::vec3>& v, glm::vec2 q) {
+    glm::vec3 n(0.0f);
+    for (size_t i = 0; i < v.size(); ++i) {
+      const glm::vec3 a = v[i], b = v[(i + 1) % v.size()];
+      n.x += (a.y - b.y) * (a.z + b.z);
+      n.y += (a.z - b.z) * (a.x + b.x);
+      n.z += (a.x - b.x) * (a.y + b.y);
+    }
+    if (std::fabs(n.y) < 1e-6f) return v[0].y;
+    return v[0].y - (n.x * (q.x - v[0].x) + n.z * (q.y - v[0].z)) / n.y;
+  };
+  const auto xz = [](const std::vector<glm::vec3>& v) {
+    std::vector<glm::vec2> out;
+    for (const glm::vec3& p : v) out.emplace_back(p.x, p.z);
+    return out;
+  };
+  std::vector<Kept> kept;
+  std::vector<RoadSurface> result;
+  for (const RoadSurface& road : scene->roads) {
+    std::vector<std::vector<glm::vec3>> pieces = {road.vertices};
+    for (const Kept& k : kept) {
+      std::vector<std::vector<glm::vec3>> next;
+      for (auto& piece : pieces) {
+        const std::vector<glm::vec2> flat = xz(piece);
+        glm::vec2 lo = flat[0], hi = flat[0], center(0.0f);
+        for (const glm::vec2& q : flat) {
+          lo = glm::min(lo, q);
+          hi = glm::max(hi, q);
+          center += q;
+        }
+        center /= static_cast<float>(flat.size());
+        if (hi.x <= k.lo.x || lo.x >= k.hi.x || hi.y <= k.lo.y || lo.y >= k.hi.y) {
+          next.push_back(std::move(piece));
+          continue;
+        }
+        // Subtract the convex `k` from the convex piece: peel off the part
+        // outside each of k's edges, shrinking the remainder to the inside.
+        const std::vector<glm::vec2> kf = xz(k.v);
+        std::vector<glm::vec2> rest = flat;
+        std::vector<std::vector<glm::vec2>> outside;
+        for (size_t e = 0; e < kf.size() && rest.size() >= 3; ++e) {
+          const glm::vec2 d = kf[(e + 1) % kf.size()] - kf[e];
+          const glm::vec2 n = glm::vec2(-d.y, d.x) * k.sign;
+          const float dMin = glm::dot(n, kf[e]);
+          auto out = KeepSide(rest, -n, -dMin);
+          rest = KeepSide(rest, n, dMin);
+          if (out.size() >= 3) outside.push_back(std::move(out));
+        }
+        glm::vec2 overlapCenter(0.0f);
+        for (const glm::vec2& q : rest) overlapCenter += q;
+        if (rest.size() >= 3) overlapCenter /= static_cast<float>(rest.size());
+        if (rest.size() < 3 || PolygonArea(rest) < 1e-4f ||
+            !ZFights(planeY(piece, overlapCenter), planeY(k.v, overlapCenter))) {
+          next.push_back(std::move(piece));  // Disjoint, identical or stacked: keep whole.
+          continue;
+        }
+        for (auto& o : outside) {
+          SimplifyPolygon(&o);
+          if (o.size() < 3 || PolygonArea(o) < 1e-3f) continue;
+          std::vector<glm::vec3> lifted;
+          for (const glm::vec2& q : o) lifted.emplace_back(q.x, planeY(piece, q), q.y);
+          next.push_back(std::move(lifted));
+        }
+      }
+      pieces = std::move(next);
+    }
+    for (auto& piece : pieces) {
+      Kept k;
+      k.v = piece;
+      const std::vector<glm::vec2> flat = xz(piece);
+      k.lo = k.hi = flat[0];
+      for (const glm::vec2& q : flat) {
+        k.lo = glm::min(k.lo, q);
+        k.hi = glm::max(k.hi, q);
+      }
+      k.sign = PolygonSignedArea(flat) >= 0.0f ? 1.0f : -1.0f;
+      kept.push_back(std::move(k));
+      result.push_back({std::move(piece)});
+    }
+  }
+  scene->roads = std::move(result);
+}
+
 void EmitTrees(Scene* scene, const std::vector<UrbanBlock>& blocks,
                uint32_t seed, const MapGeneratorConfig& c) {
   if (c.features.trees.mode == FeatureMode::Off) return;
@@ -6107,6 +6295,7 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   const size_t streetBegin = scene.roads.size();
   EmitStreetSurfaces(&scene, city, c);
   EmitPiers(&scene, city, c, pierForm, groundY, streetBegin, scene.roads.size());
+  DedupeRoadOverlaps(&scene);
   std::vector<float> characterRolls;
   const std::vector<Parcel> parcels = PlanParcels(city, c, &rng, &characterRolls);
   EmitBuildings(&scene, city, parcels, PlanBuildings(parcels, characterRolls, seed, c, &rng), c,

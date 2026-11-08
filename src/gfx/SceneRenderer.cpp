@@ -4203,6 +4203,56 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         }
       }
     };
+    // Window edges through the floors (PR #304 review): the outline pass
+    // only sees the shell where no interior claimed the pixel, so a window
+    // (a real gap between an enterable building's wall pieces) lost its
+    // edges wherever a floor slab overlaps it on screen, and the player
+    // could not tell where to stand to look out. On exactly those pixels
+    // (stencil == 1 right after the interior colour draw) the window
+    // rectangles of every faded enterable building are drawn as faint ink
+    // segments at the shell outline's own intensity; elsewhere the edge
+    // pass still outlines them. Depth-tested against the opaque scene like
+    // the rest of the see-through pass.
+    const auto drawWindowEdgesOverInterior = [&]() {
+      const tactics::Scene& scene = game.GetScene();
+      std::vector<glm::vec3> segments;
+      for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
+        if (o.kind != tactics::FacadeOpening::Kind::Window || !fadedBuilding(o.building) ||
+            !scene.buildings[o.building].enterable) {
+          continue;
+        }
+        if (o.obstacle < 0 || o.obstacle >= static_cast<int>(obstacles.size())) continue;
+        const std::vector<glm::vec2>& fp = obstacles[o.obstacle].footprint;
+        if (fp.size() < 3 || o.wallEdge < 0 || o.wallEdge >= static_cast<int>(fp.size())) {
+          continue;
+        }
+        const glm::vec2 a = fp[o.wallEdge], b = fp[(o.wallEdge + 1) % fp.size()];
+        const float len = glm::distance(a, b);
+        if (len < 1e-4f) continue;
+        const glm::vec2 dir = (b - a) / len;
+        const glm::vec2 p0 = a + dir * o.u0, p1 = a + dir * o.u1;
+        const glm::vec3 corners[4] = {{p0.x, o.y0, p0.y}, {p1.x, o.y0, p1.y},
+                                      {p1.x, o.y1, p1.y}, {p0.x, o.y1, p0.y}};
+        for (int k = 0; k < 4; ++k) {
+          segments.push_back(corners[k]);
+          segments.push_back(corners[(k + 1) % 4]);
+        }
+      }
+      if (segments.empty()) return;
+      // Same ink as CompositeFadedOutlines gives a full-strength shell edge.
+      const float ink = std::clamp(debug.nprSettings.outlineStrength, 0.0f, 1.0f) *
+                        kOccluderFadeOpacity * 0.88f;
+      unlitShader_.Use();
+      unlitShader_.SetMat4("uMVP", viewProj);
+      unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink));
+      glStencilFunc(GL_EQUAL, 1, 0xFF);
+      glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+      pathLine_.SetPoints(segments);
+      pathLine_.DrawSegments();
+      glStencilFunc(GL_EQUAL, 0, 0xFF);
+      glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+      litShader_.Use();
+    };
     // NPR: the opaque composite never saw the faded blocks, so they would
     // lose their edges. First re-draw them (depth-tested against the opaque
     // scene) into the G-buffer, tagged; the outlines of just those pixels
@@ -4234,6 +4284,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glStencilFunc(GL_EQUAL, 0, 0xFF);
     glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
     drawInteriorGeometry(false);
+    if (fadedOutlines) drawWindowEdgesOverInterior();
     drawShellGeometry(false);
     litShader_.SetInt("uDisableShadows", (debug.disableShadows || debug.thermal) ? 1 : 0);
     glDisable(GL_CULL_FACE);

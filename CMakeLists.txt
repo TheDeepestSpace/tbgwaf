@@ -538,8 +538,11 @@ else()
                 $<TARGET_FILE:tactics_visual_tests> --out-dir ${CMAKE_BINARY_DIR}/visual_out
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
       )
+      # 83 scenarios take ~230 s on the CI runner and the suite grows with
+      # each PR that pins a new rendering behaviour; 300 s left no headroom
+      # (PR #304's two see-through scenarios tipped it over).
       set_tests_properties(visual_tests PROPERTIES
-        TIMEOUT 300
+        TIMEOUT 600
         ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
       )
       if(TBGWAF_BUILD_SERVER)

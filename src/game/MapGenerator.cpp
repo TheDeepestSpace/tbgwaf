@@ -5067,6 +5067,22 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
       const float len = glm::distance(fp[frontage], fp[(frontage + 1) % n]);
       doorSpans[frontage] = glm::vec2(0.5f * (len - b.doorWidth), 0.5f * (len + b.doorWidth));
       if (b.rearEdge >= 0) doorSpans[b.rearEdge] = glm::vec2(b.rearU0, b.rearU1);
+      // Record the real doorways as FacadeOpening data too, so the
+      // see-through pass can outline them like the windows. They get no
+      // pane geometry or recessed niche (the gap already exists in the
+      // walls): the renderer treats an enterable building's Door record
+      // as outline-only.
+      scene->facadeOpenings.push_back(FacadeOpening{
+          FacadeOpening::Kind::Door, static_cast<int>(bi), b.obstacle, frontage,
+          doorSpans[frontage].x, doorSpans[frontage].y, baseY, baseY + b.doorHeight, 0});
+      if (b.rearEdge >= 0) {
+        // Same height EmitHollowBuilding gave the rear gap.
+        const float rearHead =
+            baseY + std::min(kRearDoorHeight, b.groundFloorHeight - 0.15f);
+        scene->facadeOpenings.push_back(FacadeOpening{
+            FacadeOpening::Kind::Door, static_cast<int>(bi), b.obstacle, b.rearEdge,
+            b.rearU0, b.rearU1, baseY, rearHead, 0});
+      }
     } else {
     // Street entrance on the frontage, with a stoop walk-up for some
     // buildings and straight off the ground for the rest.

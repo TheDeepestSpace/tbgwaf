@@ -7,7 +7,7 @@ description: >
   shell opacity while the rest of the cutaway stays pronounced. The goldens
   pin the outlined cutaway with an occupant upstairs: the slab under the
   figure and the one over it, the stair flights beside it, and a single
-  frame per first-floor window around it.
+  frame per first-floor window and ground-floor doorway around it.
 
 map:
   generate: {seed: 7, type: urban, elevated: false, features: {terrain: off}}

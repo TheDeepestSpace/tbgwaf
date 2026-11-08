@@ -973,6 +973,16 @@ bool OpeningRecessed(const tactics::Scene& scene, const tactics::FacadeOpening& 
   return PaneStyleFor(scene, opening).recessed;
 }
 
+// An enterable building's doorway is a real gap in its walls (cut by
+// EmitHollowBuilding); its Door record exists so the see-through pass can
+// outline it like the windows, and must get no pane geometry or recessed
+// niche — a leaf at the back of a niche would plug the open doorway.
+bool OpeningIsRealGap(const tactics::Scene& scene, const tactics::FacadeOpening& opening) {
+  return opening.kind == tactics::FacadeOpening::Kind::Door && opening.building >= 0 &&
+         opening.building < static_cast<int>(scene.buildings.size()) &&
+         scene.buildings[opening.building].enterable;
+}
+
 // A box in the opening's wall frame: u along the edge, y up, d along the
 // outward normal (negative reaches into the wall). `skipBack` leaves out the
 // -normal face when it rests flush against the wall.
@@ -998,6 +1008,7 @@ void AppendOpeningBox(const OpeningBasis& f, float u0, float u1, float y0, float
 // for the shapes per kind.
 void AppendFacadeOpening(const tactics::Scene& scene, const tactics::FacadeOpening& opening,
                          LitVertices* vertices, std::vector<GLuint>* indices) {
+  if (OpeningIsRealGap(scene, opening)) return;
   const OpeningBasis f = OpeningBasisFor(scene, opening);
   if (!f.valid) return;
   const PaneStyle style = PaneStyleFor(scene, opening);
@@ -1497,7 +1508,7 @@ std::unordered_map<int, std::vector<std::vector<glm::vec4>>> RecessHolesByObstac
     const tactics::Scene& scene) {
   std::unordered_map<int, std::vector<std::vector<glm::vec4>>> holes;
   for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
-    if (!OpeningRecessed(scene, o)) continue;
+    if (OpeningIsRealGap(scene, o) || !OpeningRecessed(scene, o)) continue;
     if (o.obstacle < 0 || o.obstacle >= static_cast<int>(scene.obstacles.size())) continue;
     const tactics::Obstacle& wall = scene.obstacles[o.obstacle];
     if (wall.footprint.empty() || o.wallEdge < 0 ||
@@ -4238,20 +4249,21 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         }
       }
     };
-    // Window edges through the floors (PR #304 review): the outline pass
-    // only sees the shell where no interior claimed the pixel, so a window
-    // (a real gap between an enterable building's wall pieces) lost its
-    // edges wherever a floor slab overlaps it on screen, and the player
-    // could not tell where to stand to look out. The window rectangles of
-    // every faded enterable building are therefore drawn unconditionally
-    // (not only over the interior) as faint ink segments at the shell
-    // outline's own intensity, so every window reads the same whether or not
-    // a floor or stair overlaps it. Depth-tested against the opaque scene like
-    // the rest of the see-through pass. The rectangle sits on the wall face
-    // the camera sees (the outer face of a near wall, the inner face of the
-    // far wall seen through the building), which is where the edge pass
-    // puts its single frame per window, so the two line up.
-    const auto drawWindowEdgesOverInterior = [&]() {
+    // Window and doorway edges through the floors (PR #304 review): the
+    // outline pass only sees the shell where no interior claimed the pixel,
+    // so a window or doorway (a real gap between an enterable building's
+    // wall pieces) lost its edges wherever a floor slab overlaps it on
+    // screen, and the player could not tell where to stand to look (or
+    // walk) out. The opening rectangles of every faded enterable building
+    // are therefore drawn unconditionally (not only over the interior) as
+    // faint ink segments at the shell outline's own intensity, so every
+    // opening reads the same whether or not a floor or stair overlaps it.
+    // Depth-tested against the opaque scene like the rest of the
+    // see-through pass. The rectangle sits on the wall face the camera sees
+    // (the outer face of a near wall, the inner face of the far wall seen
+    // through the building), which is where the edge pass puts its single
+    // frame per opening, so the two line up.
+    const auto drawOpeningEdgesOverInterior = [&]() {
       const tactics::Scene& scene = game.GetScene();
       // Wall thickness per faded enterable building, read off its wall
       // pieces (ObstacleKind::Wall: sides 0 and 2 are the outer and inner
@@ -4271,8 +4283,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
       std::vector<glm::vec3> segments;
       for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
-        if (o.kind != tactics::FacadeOpening::Kind::Window || !fadedBuilding(o.building) ||
-            !scene.buildings[o.building].enterable) {
+        // Enterable buildings only: their windows and doorways are real
+        // gaps (a solid building's painted openings have no hole to mark).
+        if (o.building < 0 || o.building >= static_cast<int>(scene.buildings.size()) ||
+            !fadedBuilding(o.building) || !scene.buildings[o.building].enterable) {
           continue;
         }
         if (o.obstacle < 0 || o.obstacle >= static_cast<int>(obstacles.size())) continue;
@@ -4307,7 +4321,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       unlitShader_.SetMat4("uMVP", viewProj);
       unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink));
       // Unconditional: the same frame whether or not a floor or stair slab
-      // overlaps the window on screen (stencil is neither tested nor written).
+      // overlaps the opening on screen (stencil is neither tested nor written).
       glStencilFunc(GL_ALWAYS, 0, 0xFF);
       glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
       pathLine_.SetPoints(segments);
@@ -4347,7 +4361,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glStencilFunc(GL_EQUAL, 0, 0xFF);
     glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
     drawInteriorGeometry(false);
-    if (fadedOutlines) drawWindowEdgesOverInterior();
+    if (fadedOutlines) drawOpeningEdgesOverInterior();
     drawShellGeometry(false);
     litShader_.SetInt("uDisableShadows", (debug.disableShadows || debug.thermal) ? 1 : 0);
     glDisable(GL_CULL_FACE);

@@ -5,12 +5,12 @@ description: >
   ground floor of the three-storey building and one just behind it) with
   render.npr on and the camera pulled in, so Blue's pane draws the building
   see-through with outlines. What the goldens pin: the shell, floors and
-  stair flights keep their edges; every window is outlined exactly once, on
-  the wall face the camera sees (the near walls' outer face, the far wall's
-  inner face), not as a pair of inner and outer frames; and a window's frame
-  stays visible where a floor slab overlaps it on screen, so a player can
-  see where to stand to look out. Red's pane keeps the building opaque and
-  outlined.
+  stair flights keep their edges; every window and doorway is outlined
+  exactly once, on the wall face the camera sees (the near walls' outer
+  face, the far wall's inner face), not as a pair of inner and outer
+  frames; and an opening's frame stays visible where a floor slab overlaps
+  it on screen, so a player can see where to stand to look (or walk) out.
+  Red's pane keeps the building opaque and outlined.
 
 map:
   generate: {seed: 7, type: urban, elevated: false, features: {terrain: off}}

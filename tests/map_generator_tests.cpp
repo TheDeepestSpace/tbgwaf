@@ -3312,6 +3312,22 @@ void TestEnterableBuildingsHaveDoorways() {
           }
           CHECK(ceilings >= 1);
         }
+        // Storeys are joined only through the flights: a floor piece's
+        // neighbours are pieces of its own storey or a flight meeting it at
+        // its own height (two shared 3D vertices), never another storey.
+        for (int si : b.floorSurfaces) {
+          const WalkSurface& s = scene.walkSurfaces[si];
+          for (int ni : s.neighbors) {
+            const WalkSurface& other = scene.walkSurfaces[ni];
+            CHECK(other.building == static_cast<int>(bi));
+            int shared = 0;
+            for (const glm::vec3& v : s.vertices) {
+              for (const glm::vec3& w : other.vertices) shared += glm::distance(v, w) < 1e-3f;
+            }
+            CHECK(shared == 2);
+            if (!other.stair) CHECK(std::fabs(other.vertices.front().y - s.vertices.front().y) < kEps);
+          }
+        }
         for (size_t f = 0; f + 1 < b.floors.size(); ++f) {
           const WalkSurface& flight = scene.walkSurfaces[b.stairSurfaces[f]];
           CHECK(flight.stair && flight.building == static_cast<int>(bi));
@@ -3448,6 +3464,33 @@ void TestEnterableFloorsReachableByStairs() {
         for (const glm::vec3& p : up) CHECK(PointInConvexPolygon({p.x, p.z}, fp, 1e-3f));
         CHECK(mesh.FindPath(goal, start, &down));
         CHECK(!down.empty() && std::fabs(down.back().y - start.y) < 1e-3f);
+        // Only ever via the stair: no leg climbs steeper than a flight (the
+        // stacked flights share one XZ footprint, which once left the path
+        // on the ground flight until a final storey-high vertical step), and
+        // every waypoint stands on this building's ground floor, a floor
+        // slab or a flight.
+        for (const std::vector<glm::vec3>* path : {&up, &down}) {
+          for (size_t i = 0; i + 1 < path->size(); ++i) {
+            const glm::vec3& p = (*path)[i];
+            const glm::vec3& q = (*path)[i + 1];
+            const float run = std::hypot(q.x - p.x, q.z - p.z);
+            CHECK(std::fabs(q.y - p.y) <= constants::kMaxWalkSlope * run + 1e-3f);
+          }
+          for (const glm::vec3& p : *path) {
+            bool onBuilding = std::fabs(p.y - b.baseY) < 1e-3f;
+            for (const int si2 : b.floorSurfaces) {
+              const WalkSurface& s = scene.walkSurfaces[si2];
+              onBuilding |= SurfaceContainsXZ(s, p.x, p.z) &&
+                            std::fabs(SurfaceHeightAt(s, p.x, p.z) - p.y) < 1e-2f;
+            }
+            for (const int si2 : b.stairSurfaces) {
+              const WalkSurface& s = scene.walkSurfaces[si2];
+              onBuilding |= SurfaceContainsXZ(s, p.x, p.z) &&
+                            std::fabs(SurfaceHeightAt(s, p.x, p.z) - p.y) < 1e-2f;
+            }
+            CHECK(onBuilding);
+          }
+        }
         ++floorsTested;
       }
       // The move frontier from the doorway reaches the first floor's stair top.

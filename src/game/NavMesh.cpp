@@ -52,8 +52,11 @@ float TriArea2(glm::vec2 a, glm::vec2 b, glm::vec2 c) {
 // Simple stupid funnel algorithm: pulls a path from `start` to `goal` taut
 // through a sequence of portals, bending only at portal endpoints (i.e.
 // obstacle corners). Appends the corners and `goal` (not `start`) to `out`.
+// `outPortal` (optional) receives, per appended point, the portal it lies
+// on: 1-based index into `inner` for a corner, inner.size() + 1 for `goal`.
+// Indices never decrease along the path.
 void Funnel(glm::vec2 start, glm::vec2 goal, const std::vector<Portal>& inner,
-            std::vector<glm::vec2>* out) {
+            std::vector<glm::vec2>* out, std::vector<size_t>* outPortal = nullptr) {
   std::vector<Portal> portals;
   portals.push_back({start, start});
   portals.insert(portals.end(), inner.begin(), inner.end());
@@ -71,6 +74,7 @@ void Funnel(glm::vec2 start, glm::vec2 goal, const std::vector<Portal>& inner,
         rightIdx = i;
       } else {
         out->push_back(left);
+        if (outPortal) outPortal->push_back(leftIdx);
         apex = left;
         right = left;
         rightIdx = leftIdx;
@@ -84,6 +88,7 @@ void Funnel(glm::vec2 start, glm::vec2 goal, const std::vector<Portal>& inner,
         leftIdx = i;
       } else {
         out->push_back(right);
+        if (outPortal) outPortal->push_back(rightIdx);
         apex = right;
         left = right;
         leftIdx = rightIdx;
@@ -93,6 +98,18 @@ void Funnel(glm::vec2 start, glm::vec2 goal, const std::vector<Portal>& inner,
     }
   }
   out->push_back(goal);
+  if (outPortal) outPortal->push_back(portals.size() - 1);
+}
+
+// Parameter t in [0, 1] along a -> b where it crosses the line through the
+// portal p -> q. A segment running along the portal (parallel) reports
+// `fallback`: every point of it is on the seam, so any choice is on it.
+float PortalCrossingParam(glm::vec2 a, glm::vec2 b, glm::vec2 p, glm::vec2 q, float fallback) {
+  const glm::vec2 d = b - a, e = q - p;
+  const float denom = d.x * e.y - d.y * e.x;
+  if (std::fabs(denom) < 1e-9f) return fallback;
+  const glm::vec2 w = p - a;
+  return std::clamp((w.x * e.y - w.y * e.x) / denom, 0.0f, 1.0f);
 }
 
 // True if axis-aligned rectangle `cell` and `rect` share a border segment of
@@ -878,48 +895,85 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
   start.y = SurfaceHeightAt(walkSurfaces_[startSurface], start.x, start.z);
   goal.y = SurfaceHeightAt(walkSurfaces_[goalSurface], goal.x, goal.z);
 
-  // Height on the corridor at (x, z): the first route surface containing the
-  // point. Bends sit on seam vertices shared by both neighbors, where the
-  // two planes agree, so "first containing" is unambiguous there.
-  auto corridorY = [&](float x, float z, float fallback) {
-    for (int node : route) {
-      if (SurfaceContains(node, x, z)) {
-        return SurfaceHeightAt(walkSurfaces_[node], x, z);
-      }
-    }
-    return fallback;
-  };
-
   // Walk the surface corridor. Runs of seam-adjacent surfaces are pulled
   // taut with the funnel through the shared seam edges (instead of forcing
   // every seam midpoint, which dog-legged paths via the deck centerline);
-  // transitions without a shared edge stay hard waypoints. Funneled segments
-  // are densified so the path tracks the deck's changing grade between
-  // seams rather than cutting straight through a crest or sag.
+  // transitions without a shared edge stay hard waypoints.
+  //
+  // Heights come from the corridor order, never from an XZ lookup: the
+  // funnel is planar, so every corner is pinned to the seam it bends on and
+  // every seam a straight run crosses gets its own waypoint, each on the
+  // plane of the surface it leaves (both planes agree along a seam). Between
+  // two pins the path lies on one planar patch, so straight 3D interpolation
+  // is exact. Looking heights up by "the first route surface containing the
+  // XZ" is not: a building's stair flights are stacked over one footprint,
+  // which kept every stairwell corner on the ground flight and then made the
+  // final step rise a whole storey or three straight up.
   outPath->push_back(start);
   glm::vec3 from = start;
   std::vector<Portal> portals;
+  std::vector<int> portalSurface;  // Route surface each queued portal leaves.
   auto flush = [&](glm::vec3 to) {
     std::vector<glm::vec2> pts;
-    Funnel({from.x, from.z}, {to.x, to.z}, portals, &pts);
+    std::vector<size_t> at;  // Portal (1-based) each funnel point lies on.
+    Funnel({from.x, from.z}, {to.x, to.z}, portals, &pts, &at);
+    const auto seamY = [&](size_t portal, glm::vec2 p) {
+      return SurfaceHeightAt(walkSurfaces_[portalSurface[portal - 1]], p.x, p.y);
+    };
+    const auto emit = [&](const glm::vec3& p) {
+      if (glm::distance(p, outPath->back()) > kEps) outPath->push_back(p);
+    };
     constexpr float kSurfacePathStep = 1.5f;
-    glm::vec3 prev = from;
-    for (const glm::vec2& pt : pts) {
-      glm::vec3 p(pt.x, 0.0f, pt.y);
-      p.y = corridorY(p.x, p.z, prev.y);
-      const float len = glm::length(glm::vec2(p.x - prev.x, p.z - prev.z));
+    glm::vec3 last = from;
+    size_t prevPortal = 0;
+    for (size_t c = 0; c < pts.size(); ++c) {
+      const glm::vec2 prev(last.x, last.z);
+      const glm::vec2 pt = pts[c];
+      const size_t portal = at[c];
+      // Pins along this straight run, as (parameter, point): the seams
+      // crossed strictly between the previous corner and this one, in
+      // corridor order, then the corner itself.
+      std::vector<std::pair<float, glm::vec3>> pins;
+      float tPrev = 0.0f;
+      for (size_t k = prevPortal + 1; k < portal && k <= portals.size(); ++k) {
+        const float t = std::max(
+            tPrev, PortalCrossingParam(prev, pt, portals[k - 1].left, portals[k - 1].right, tPrev));
+        tPrev = t;
+        const glm::vec2 x = prev + (pt - prev) * t;
+        pins.emplace_back(t, glm::vec3(x.x, seamY(k, x), x.y));
+      }
+      // A corner on the goal pseudo-portal is `to`; one on the start
+      // pseudo-portal (degenerate funnel) stays at the start's height.
+      const float y = portal == 0 ? last.y : portal <= portals.size() ? seamY(portal, pt) : to.y;
+      pins.emplace_back(1.0f, glm::vec3(pt.x, y, pt.y));
+      // Densified at the same spacing as before (consumers sample the
+      // polyline for figure overlap and frontier pricing), each sample
+      // interpolated between the pins it falls between.
+      const float len = glm::length(pt - prev);
       const int pieces = static_cast<int>(std::ceil(len / kSurfacePathStep));
+      size_t pin = 0;
+      glm::vec3 segStart = last;
+      float segT = 0.0f;
       for (int k = 1; k < pieces; ++k) {
         const float t = static_cast<float>(k) / static_cast<float>(pieces);
-        glm::vec3 q = prev + (p - prev) * t;
-        q.y = corridorY(q.x, q.z, q.y);
-        if (glm::distance(q, outPath->back()) > kEps) outPath->push_back(q);
+        while (pin < pins.size() && pins[pin].first <= t) {
+          emit(pins[pin].second);
+          segStart = pins[pin].second;
+          segT = pins[pin].first;
+          ++pin;
+        }
+        const auto& next = pins[pin];  // The corner pin (t = 1) is always ahead.
+        const float span = next.first - segT;
+        const float u = span > 1e-6f ? (t - segT) / span : 0.0f;
+        emit(segStart + (next.second - segStart) * u);
       }
-      if (glm::distance(p, outPath->back()) > kEps) outPath->push_back(p);
-      prev = p;
+      for (; pin < pins.size(); ++pin) emit(pins[pin].second);
+      last = pins.back().second;
+      prevPortal = portal;
     }
     outPath->back().y = to.y;
     portals.clear();
+    portalSurface.clear();
     from = to;
   };
   for (size_t i = 0; i + 1 < route.size(); ++i) {
@@ -945,6 +999,7 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
       const float crossU = d.x * (u.y - mid.y) - d.y * (u.x - mid.x);
       const float crossV = d.x * (v.y - mid.y) - d.y * (v.x - mid.x);
       portals.push_back(crossU >= crossV ? Portal{u, v} : Portal{v, u});
+      portalSurface.push_back(route[i]);
       continue;
     }
     glm::vec3 transition(0.0f);

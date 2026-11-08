@@ -1410,7 +1410,7 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   int groundConnections = 0;
   bool mergeNode = false;
   for (const WalkSurface& surface : scene.walkSurfaces) {
-    groundConnections += surface.connectsToGround ? 1 : 0;
+    groundConnections += (surface.connectsToGround && surface.overpass) ? 1 : 0;
     mergeNode |= surface.neighbors.size() >= 3;
   }
   CHECK(groundConnections == 3);
@@ -1424,7 +1424,7 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   // from the piers, by the merge) stays clear for ground shots.
   glm::vec3 top(0.0f);
   for (const WalkSurface& surface : scene.walkSurfaces) {
-    if (surface.neighbors.empty()) continue;  // A zipline's roof slab, not the deck.
+    if (!surface.overpass || surface.neighbors.empty()) continue;  // Deck only: not a roof slab or floor.
     const glm::vec3 center = SurfaceCenter(surface);
     if (center.y > top.y) top = center;
   }
@@ -1697,7 +1697,7 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
       // Ground transitions: one per on-map ramp foot plus the branch's foot.
       int groundConnections = 0;
       for (const WalkSurface& surface : scene.walkSurfaces) {
-        groundConnections += surface.connectsToGround ? 1 : 0;
+        groundConnections += (surface.connectsToGround && surface.overpass) ? 1 : 0;
       }
       CHECK(groundConnections == 1 + (tc.gradeStart ? 1 : 0) + (tc.gradeEnd ? 1 : 0));
 
@@ -1731,7 +1731,7 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
                 &scene.walkSurfaces);
       glm::vec3 top(0.0f);  // Highest deck surface center still on the map.
       for (const WalkSurface& surface : scene.walkSurfaces) {
-        if (surface.neighbors.empty()) continue;  // A zipline's roof slab, not the deck.
+        if (!surface.overpass || surface.neighbors.empty()) continue;  // Deck only: not a roof slab or floor.
         const glm::vec3 center = SurfaceCenter(surface);
         if (std::max(std::fabs(center.x), std::fabs(center.z)) > half - 2.0f) continue;
         if (center.y > top.y) top = center;
@@ -1795,7 +1795,7 @@ void TestBranchMayRunOffMapWithoutRamp() {
     CHECK(std::fabs(std::max(std::fabs(branch.front().x), std::fabs(branch.front().z)) - half) < kEps);
     int groundConnections = 0;
     for (const WalkSurface& surface : scene.walkSurfaces) {
-      groundConnections += surface.connectsToGround ? 1 : 0;
+      groundConnections += (surface.connectsToGround && surface.overpass) ? 1 : 0;
     }
     CHECK(groundConnections == 2);  // The artery's two ramp feet only.
     for (const Obstacle& o : scene.obstacles) {
@@ -2268,7 +2268,15 @@ void TestFacadeOpeningsDoorsStoopsAndPlatforms() {
       const Scene bareScene = GenerateUrbanMap(seed, bare);
       CHECK(bareScene.facadeOpenings.empty());
       CHECK(bareScene.walkSurfaces.size() <= scene.walkSurfaces.size());
-      CHECK(bareScene.obstacles.size() == scene.obstacles.size());
+      // Facades never move a wall, but cover items keep clear of the stoops
+      // and platforms they add, so only those may differ (never grow).
+      const auto countNonCover = [](const Scene& s) {
+        size_t n = 0;
+        for (const Obstacle& o : s.obstacles) n += o.kind == ObstacleKind::Cover ? 0 : 1;
+        return n;
+      };
+      CHECK(countNonCover(bareScene) == countNonCover(scene));
+      CHECK(bareScene.obstacles.size() >= scene.obstacles.size());
     }
     std::vector<int> frontDoors(scene.buildings.size(), 0);
     int windows = 0;

@@ -5790,10 +5790,39 @@ void EmitArteryWrecks(Scene* scene, const CityPlan& city, const MapGeneratorConf
 // in the street outside every block and off the highway, and nothing lands
 // on sloped ground, another obstacle or the spawn rows. Every random draw
 // happens per station whether or not it is accepted.
-void EmitCoverItems(Scene* scene, const CityPlan& city, const MapGeneratorConfig& c,
-                    uint32_t seed, const GroundY& groundY) {
+void EmitCoverItems(Scene* scene, const CityPlan& city, const std::vector<Parcel>& parcels,
+                    const MapGeneratorConfig& c, uint32_t seed, const GroundY& groundY) {
   Rng rng(seed ^ kCoverStream);
   if (!FurnitureEnabled(c)) return;
+
+  // The approach to every enterable building's front and rear doorway: a
+  // bench or newsstand squeezed against the wall in front of a door would
+  // leave less than a body width to get in, sealing the building.
+  std::vector<std::vector<glm::vec2>> doorBays;
+  for (const Building& b : scene->buildings) {
+    if (!b.enterable) continue;
+    const std::vector<glm::vec2>& fp = scene->obstacles[b.obstacle].footprint;
+    const auto addBay = [&](int edge, float u0, float u1) {
+      if (edge < 0 || fp.size() < 3) return;
+      const size_t e = static_cast<size_t>(edge) % fp.size();
+      const glm::vec2 a = fp[e], q = fp[(e + 1) % fp.size()];
+      const float len = glm::distance(a, q);
+      if (len < 1e-3f) return;
+      const glm::vec2 dir = (q - a) / len;
+      const glm::vec2 out(dir.y, -dir.x);
+      const float margin = 2.0f * constants::kAgentRadius;
+      const float depth = 4.0f * constants::kAgentRadius;
+      const glm::vec2 p0 = a + dir * (u0 - margin), p1 = a + dir * (u1 + margin);
+      doorBays.push_back({p0, p0 + out * depth, p1 + out * depth, p1});  // Counter-clockwise.
+    };
+    if (fp.size() >= 3) {
+      const int front = parcels[b.parcel].frontageEdge;
+      const float len = glm::distance(fp[static_cast<size_t>(front) % fp.size()],
+                                      fp[(static_cast<size_t>(front) + 1) % fp.size()]);
+      addBay(front, 0.5f * (len - b.doorWidth), 0.5f * (len + b.doorWidth));
+    }
+    addBay(b.rearEdge, b.rearU0, b.rearU1);
+  }
 
   std::vector<std::vector<glm::vec2>> buildings;
   for (const Obstacle& o : scene->obstacles) {
@@ -5944,9 +5973,10 @@ void EmitCoverItems(Scene* scene, const CityPlan& city, const MapGeneratorConfig
             if (!lane) continue;
           }
           // Never on a stoop, platform or a parked car's ramp: clear of every
-          // walk surface that is not far overhead.
+          // walk surface that is not far overhead, nor in a doorway's approach.
           {
             const std::vector<glm::vec2> rect = {lo, {hi.x, lo.y}, hi, {lo.x, hi.y}};
+            for (const std::vector<glm::vec2>& bay : doorBays) ok &= !PolygonsOverlap(rect, bay);
             for (const WalkSurface& surface : scene->walkSurfaces) {
               if (surface.vertices.size() < 3) continue;
               float lowest = surface.vertices.front().y;
@@ -6488,7 +6518,7 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   // Furniture before ziplines: anchors and cables then keep clear of it.
   EmitStreetFurniture(&scene, city, c, seed, groundY);
   EmitTrafficControl(&scene, city, c, seed, groundY);
-  EmitCoverItems(&scene, city, c, seed, groundY);
+  EmitCoverItems(&scene, city, parcels, c, seed, groundY);
   PlaceZiplines(&scene, city.blocks, seed, c, roofCount);
   EmitMassing(&scene, parcels, seed);
   EmitTrees(&scene, city.blocks, seed, c);

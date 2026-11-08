@@ -85,7 +85,11 @@ the tunnel roof, independently of the road below: streets crossing the roof
 step onto it where they meet its edge, never from the road beneath. The
 road's strip on top is not reserved: a local street's tunnel does not split
 the blocks above it, which are laid out (sidewalks, buildings) as if the road
-were not there. A local
+were not there. The roof is a camera see-through occluder like a building or
+the overpass: when it hides one of your figures, its movement frontier or a
+path inside the tunnel, the roof slab and the paving on it turn translucent
+in your pane (the solid tier beside the bore stays opaque), so what is in
+the tunnel stays readable. A local
 street that gets neither a tunnel nor the selected level ramp never runs into
 a level or across a road that is ramping through one: an avenue may ramp through a level; any other
 street whose pavement would reach the level band or a ramp corridor stops at

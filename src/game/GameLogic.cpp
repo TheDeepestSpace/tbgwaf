@@ -2478,6 +2478,7 @@ void GameLogic::FinishRound() {
 
   // Auto-arm the next leg of any multi-round route; the player can still
   // replan (which clears the queue) before committing.
+  std::vector<int> armedLegs;
   for (auto& unit : scene_.units) {
     if (unit.plan.queuedLegs.empty()) continue;
     if (!unit.alive) {
@@ -2491,6 +2492,25 @@ void GameLogic::FinishRound() {
     unit.plan.queuedLegs.erase(unit.plan.queuedLegs.begin());
     unit.plan.queuedLegRides.erase(unit.plan.queuedLegRides.begin());
     unit.plan.endFacingYaw = EndFacing(sightObstacles_, unit.plan.movePath, unit.facingYaw);
+    armedLegs.push_back(unit.id);
+  }
+  // Queued legs were planned rounds ago against other positions, so an armed
+  // leg can now run into another figure and stall the round (Commit Round
+  // unavailable). Drop such legs, with the rest of that figure's queue, so
+  // the owner (player or Jev) re-plans it.
+  while (HasPlanOverlap()) {
+    bool dropped = false;
+    for (const int id : armedLegs) {
+      Unit* unit = FindUnit(id);
+      if (!unit || unit->plan.type != PlannedActionType::Move ||
+          !PathOverlapsFigure(*unit, unit->plan.movePath, unit->plan.moveRides)) {
+        continue;
+      }
+      unit->plan = PlannedAction{};
+      dropped = true;
+      break;
+    }
+    if (!dropped) break;
   }
 
   SyncFlag();

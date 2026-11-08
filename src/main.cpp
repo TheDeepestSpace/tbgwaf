@@ -473,6 +473,10 @@ void FitCameraToBuilderScene(gfx::OrbitCamera* camera, const tactics::BuilderSce
   for (const tactics::BuilderBox& box : bs.boxes) {
     extent = std::max({extent, std::fabs(box.cx) + box.hx + 2.0f, std::fabs(box.cz) + box.hz + 2.0f});
   }
+  for (const tactics::BuilderBuilding& building : bs.buildings) {
+    extent = std::max({extent, std::fabs(building.cx) + building.hx + 4.0f,
+                       std::fabs(building.cz) + building.hz + 4.0f});
+  }
   for (const tactics::BuilderFigure& figure : bs.figures) {
     extent = std::max({extent, std::fabs(figure.x) + 2.0f, std::fabs(figure.z) + 2.0f});
   }
@@ -1456,7 +1460,7 @@ int main() {
           builderDragRotate = (SDL_GetModState() & KMOD_SHIFT) != 0;
           if (builderDragFigure >= 0) {
             builderEditor.selectedFigure = builderDragFigure;
-            builderEditor.selectedBox = -1;
+            builderEditor.selectedBox = builderEditor.selectedBuilding = -1;
           } else {
             // No figure under the cursor: a cube is dragged on a plane at its
             // top, keeping the grab offset.
@@ -1473,7 +1477,7 @@ int main() {
                 builderDragBoxGrab = glm::vec2(0.0f);
               }
               builderEditor.selectedBox = builderDragBox;
-              builderEditor.selectedFigure = -1;
+              builderEditor.selectedFigure = builderEditor.selectedBuilding = -1;
             }
           }
         }
@@ -1623,6 +1627,7 @@ int main() {
       if (leftClickPending && !uiWantsMouse && leftClickX < editorRect.x + editorRect.width) {
         // Click: select the figure or cube under the cursor (nothing = clear).
         const gfx::Ray ray = editorRay(leftClickX, leftClickY);
+        builderEditor.selectedBuilding = -1;
         builderEditor.selectedFigure = PickBuilderFigure(ray, bs);
         builderEditor.selectedBox =
             builderEditor.selectedFigure >= 0 ? -1 : PickBuilderBox(ray, bs);

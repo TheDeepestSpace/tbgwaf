@@ -4634,7 +4634,8 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>
 // (the furniture stays), and furniture keeps clear of zipline landings.
 // Awnings hang over the sidewalk well above head height. Own rng stream, so
 // the buildings never move when the dressing changes.
-void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed) {
+void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed,
+                 size_t firstBuilding = 0) {
   Rng rng(seed ^ kMassingStream);
   constexpr float kParapetThickness = 0.25f;
   constexpr float kAwningDepth = 1.1f;  // Over the 1.5 sidewalk, short of the curb.
@@ -4642,7 +4643,7 @@ void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed
   struct Fixture { float along, across, height; };
   const Fixture kTank{1.2f, 1.2f, 1.5f}, kAc{0.9f, 0.6f, 0.6f}, kBulkhead{2.2f, 1.6f, 1.3f};
 
-  for (size_t bi = 0; bi < scene->buildings.size(); ++bi) {
+  for (size_t bi = firstBuilding; bi < scene->buildings.size(); ++bi) {
     const Building& b = scene->buildings[bi];
     const Parcel& parcel = parcels[b.parcel];
     const Obstacle& roofPrism =
@@ -4913,7 +4914,8 @@ void CutWindows(Scene* scene, const std::vector<WindowCut>& cuts) {
 // its three free sides (both as WalkSurfaces, so figures use them). Own rng
 // stream: openings never move a wall or a zipline draw.
 void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& parcels,
-                 uint32_t seed, const MapGeneratorConfig& c, const GroundY& groundY) {
+                 uint32_t seed, const MapGeneratorConfig& c, const GroundY& groundY,
+                 size_t firstBuilding = 0) {
   if (scene->buildings.empty()) return;
   if (c.features.facades.mode == FeatureMode::Off) return;
   Rng rng(seed ^ kFacadeStream);
@@ -4994,7 +4996,7 @@ void EmitFacades(Scene* scene, const CityPlan& city, const std::vector<Parcel>& 
     return static_cast<int>(scene->walkSurfaces.size()) - 1;
   };
 
-  for (size_t bi = 0; bi < scene->buildings.size(); ++bi) {
+  for (size_t bi = firstBuilding; bi < scene->buildings.size(); ++bi) {
     const Building& b = scene->buildings[bi];
     // Enterable buildings have a real doorway (no painted door, stoop or rear
     // platform) but still get window panes on their walls.
@@ -6528,6 +6530,43 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
 }
 
 }  // namespace
+
+bool AppendGeneratedBuilding(Scene* scene, const GeneratedBuildingSpec& spec) {
+  if (!(spec.hx >= kGeneratedBuildingMinHalfExtent) || !(spec.hz >= kGeneratedBuildingMinHalfExtent) ||
+      !std::isfinite(spec.cx) || !std::isfinite(spec.cz)) {
+    return false;
+  }
+  MapGeneratorConfig c;
+  c.towerCount = 0;            // No landmark: it would dwarf a builder map.
+  c.skylineMaxHeight = 14.0f;
+  c.enterableChance = 1.0f;    // Hollow whenever the footprint allows it.
+  c.features.facades.mode = FeatureMode::On;
+  Rng rng(spec.seed);
+  const float x0 = spec.cx - spec.hx, x1 = spec.cx + spec.hx;
+  const float z0 = spec.cz - spec.hz, z1 = spec.cz + spec.hz;
+  Parcel parcel;
+  parcel.footprint = {{x0, z0}, {x1, z0}, {x1, z1}, {x0, z1}};  // Counter-clockwise.
+  parcel.frontageEdge = rng.Int(0, 3);
+  parcel.depth = 2.0f * (parcel.frontageEdge % 2 == 0 ? spec.hz : spec.hx);
+  parcel.block = 0;
+  parcel.kindRoll = rng.Unit01();
+  const std::vector<Parcel> parcels = {parcel};
+  // The parcel's own block: the footprint plus the sidewalk ring, so every
+  // footprint edge lies on the building line (like a city parcel's street edge).
+  const float sw = c.sidewalkWidth;
+  CityPlan city;
+  UrbanBlock block{x0 - sw, x1 + sw, z0 - sw, z1 + sw,
+                   {{x0 - sw, z0 - sw}, {x1 + sw, z0 - sw}, {x1 + sw, z1 + sw}, {x0 - sw, z1 + sw}}};
+  city.blocks.push_back(block);
+  const std::vector<float> characterRolls = {rng.Unit01()};
+  const GroundY groundY = [](float, float) { return 0.0f; };
+  const size_t first = scene->buildings.size();
+  EmitBuildings(scene, city, parcels, PlanBuildings(parcels, characterRolls, spec.seed, c, &rng), c,
+                groundY, spec.seed);
+  EmitFacades(scene, city, parcels, spec.seed, c, groundY, first);
+  EmitMassing(scene, parcels, spec.seed, first);
+  return scene->buildings.size() > first;
+}
 
 FeatureToggle* UrbanFeatureByName(UrbanFeatures* f, const std::string& name) {
   if (name == "trees") return &f->trees;

@@ -441,6 +441,49 @@ void TestSniperNeverFiresTwiceWithinInterval() {
   for (int i = 0; i < 16; ++i) RunSniperCase(i * 0.3926991f, true);
 }
 
+// Generated buildings: the city generator's building passes on one parcel.
+void TestGeneratedBuildings() {
+  int enterable = 0, multiStorey = 0;
+  for (int seed = 0; seed < 60; ++seed) {
+    BuilderScene bs;
+    bs.mapHalfExtent = 30.0f;
+    bs.buildings.push_back({seed, 3.0f, -2.0f, 5.0f + (seed % 4), 5.0f + (seed % 3)});
+    bs.figures.push_back({Team::Blue, WeaponType::AssaultRifle, -25.0f, 0.0f});
+    bs.figures.push_back({Team::Red, WeaponType::AssaultRifle, 25.0f, 0.0f});
+    const Scene scene = BuildScene(bs);
+    CHECK(scene.buildings.size() == 1);
+    CHECK(!scene.obstacles.empty());
+    CHECK(scene.units.size() == 2);
+    if (scene.buildings.empty()) continue;
+    if (scene.buildings[0].enterable) ++enterable;
+    if (scene.buildings[0].floors.size() >= 2) ++multiStorey;
+    // Deterministic, and the JSON form round-trips it.
+    const Scene again = BuildScene(bs);
+    CHECK(again.obstacles.size() == scene.obstacles.size());
+    CHECK(again.walkSurfaces.size() == scene.walkSurfaces.size());
+    BuilderScene parsed;
+    std::string error;
+    CHECK(ParseBuilderScene(SerializeBuilderScene(bs), &parsed, &error));
+    CHECK(parsed.buildings.size() == 1 && parsed.buildings[0].seed == seed);
+    CHECK(SerializeBuilderScene(parsed) == SerializeBuilderScene(bs));
+    // The game accepts it (navmesh, sightlines) and a step runs.
+    GameLogic game;
+    InitBuilderGame(&game, bs, 1);
+    game.Update(0.05f);
+  }
+  CHECK(enterable > 0);
+  CHECK(multiStorey > 0);
+
+  // Several buildings coexist; a too-small one is skipped; none on old scenes.
+  BuilderScene bs;
+  bs.mapHalfExtent = 40.0f;
+  bs.buildings.push_back({1, -15.0f, -15.0f, 6.0f, 6.0f});
+  bs.buildings.push_back({2, 15.0f, 15.0f, 7.0f, 5.0f});
+  bs.buildings.push_back({3, 0.0f, 0.0f, 1.0f, 1.0f});
+  CHECK(BuildScene(bs).buildings.size() == 2);
+  CHECK(SerializeBuilderScene(MakeTestScene()).find("buildings") == std::string::npos);
+}
+
 int main() {
   TestStackingAndYaw();
   TestBuildScene();
@@ -450,6 +493,7 @@ int main() {
   TestRecordReplayRoundTrip();
   TestOldFormatLogStillReplays();
   TestSniperNeverFiresTwiceWithinInterval();
+  TestGeneratedBuildings();
   if (g_failures == 0) {
     std::printf("All builder scene tests passed.\n");
     return 0;

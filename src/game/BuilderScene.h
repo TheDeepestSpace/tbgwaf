@@ -30,6 +30,16 @@ struct BuilderBox {
 };
 inline float BoxTop(const BuilderBox& box) { return box.y + box.height; }
 
+// A generated building (MapGenerator's AppendGeneratedBuilding): the city
+// generator's building passes run on a rectangular parcel centered at
+// (cx, cz) with half extents (hx, hz); `seed` (non-negative, 31 bits)
+// decides the rest. BuildScene appends it after the cubes and figures.
+struct BuilderBuilding {
+  int seed = 0;
+  float cx = 0.0f, cz = 0.0f;
+  float hx = 6.0f, hz = 6.0f;
+};
+
 // A figure standing at (x, z) on whatever surface is highest there.
 struct BuilderFigure {
   Team team = Team::Blue;
@@ -46,6 +56,7 @@ struct BuilderScene {
   float mapHalfExtent = 20.0f;  // "Medium" flat surface.
   int roundLimit = 0;           // Same default as Scene: unlimited.
   std::vector<BuilderBox> boxes;  // All climbable (top surface + ramp).
+  std::vector<BuilderBuilding> buildings;  // Generated; JSON "buildings" (omitted when empty).
   std::vector<BuilderFigure> figures;
 };
 
@@ -55,7 +66,9 @@ struct BuilderScene {
 // stacked box's ramp foot is linked to the top it stands on), one Unit per
 // figure with id == index, the
 // figure's explicit weapon, facing its explicit yaw (default: its enemy side,
-// Blue +X, Red -X) and standing at SurfaceHeightAt(x, z). No flag.
+// Blue +X, Red -X) and standing at SurfaceHeightAt(x, z), then each
+// generated building (after the units, so its stoops keep clear of them;
+// one that no longer fits is skipped). No flag.
 Scene BuildScene(const BuilderScene& bs);
 
 // Top of the highest box whose XZ extent contains (x, z) (edges inclusive),

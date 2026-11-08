@@ -6,6 +6,7 @@
 #include "game/DemoScenes.h"
 #include "game/Geometry.h"
 #include "game/Json.h"
+#include "game/MapGenerator.h"
 
 namespace tactics {
 namespace {
@@ -166,6 +167,11 @@ Scene BuildScene(const BuilderScene& bs) {
     u.weapon = figure.weapon;
     scene.units.push_back(u);
   }
+  for (const BuilderBuilding& building : bs.buildings) {
+    AppendGeneratedBuilding(&scene, GeneratedBuildingSpec{static_cast<uint32_t>(building.seed),
+                                                          building.cx, building.cz, building.hx,
+                                                          building.hz});
+  }
   return scene;
 }
 
@@ -183,7 +189,18 @@ std::string SerializeBuilderScene(const BuilderScene& bs) {
     if (b.y != 0.0f) out += ',' + FloatText(b.y);  // Omitted for ground cubes.
     out += ']';
   }
-  out += "],\"figures\":[";
+  out += ']';
+  if (!bs.buildings.empty()) {
+    out += ",\"buildings\":[";
+    for (size_t i = 0; i < bs.buildings.size(); ++i) {
+      const BuilderBuilding& b = bs.buildings[i];
+      if (i) out += ',';
+      out += '[' + std::to_string(b.seed) + ',' + FloatText(b.cx) + ',' + FloatText(b.cz) + ',' +
+             FloatText(b.hx) + ',' + FloatText(b.hz) + ']';
+    }
+    out += ']';
+  }
+  out += ",\"figures\":[";
   for (size_t i = 0; i < bs.figures.size(); ++i) {
     const BuilderFigure& f = bs.figures[i];
     if (i) out += ',';
@@ -230,6 +247,25 @@ bool ParseBuilderScene(const std::string& text, BuilderScene* out, std::string* 
       return FailWith(error, "box extents and height must be positive and y non-negative");
     }
     bs.boxes.push_back(b);
+  }
+
+  if (const JsonValue* buildings = root.Find("buildings")) {
+    if (buildings->type != JsonValue::Type::Array) {
+      return FailWith(error, "builder scene 'buildings' must be an array");
+    }
+    for (const JsonValue& v : buildings->array) {
+      BuilderBuilding b;
+      float seed = 0.0f;
+      if (v.type != JsonValue::Type::Array || v.array.size() != 5 || !ReadNumberAt(v, 0, &seed) ||
+          !ReadNumberAt(v, 1, &b.cx) || !ReadNumberAt(v, 2, &b.cz) || !ReadNumberAt(v, 3, &b.hx) ||
+          !ReadNumberAt(v, 4, &b.hz)) {
+        return FailWith(error, "building must be [seed, cx, cz, hx, hz]");
+      }
+      if (!ReadInt(&v.array[0], &b.seed) || b.seed < 0 || b.hx <= 0.0f || b.hz <= 0.0f) {
+        return FailWith(error, "building seed must be a non-negative integer and extents positive");
+      }
+      bs.buildings.push_back(b);
+    }
   }
 
   const JsonValue* figures = root.Find("figures");

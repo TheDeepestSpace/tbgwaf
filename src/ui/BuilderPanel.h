@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "game/BuilderScene.h"
+#include "game/MapGenerator.h"
 #include "gfx/Camera.h"
 #include "ui/Hud.h"
 
@@ -31,11 +32,17 @@ constexpr float kBuilderMapMargin = 1.0f;
 // visible. There is no maximum width, depth or height.
 constexpr float kBuilderMinHalfExtent = 0.05f;
 constexpr float kBuilderMinHeight = 0.2f;
+// Map half-size range the editor offers (default 20): generated buildings
+// need room for their sidewalk and stoops, so the map can grow.
+constexpr float kBuilderMinMapHalfExtent = 10.0f;
+constexpr float kBuilderMaxMapHalfExtent = 120.0f;
 
-// Selection in the editor (-1 = none). At most one of the two is set.
+// Selection in the editor (-1 = none). At most one of the three is set.
 struct BuilderEditorState {
   int selectedBox = -1;
   int selectedFigure = -1;
+  int selectedBuilding = -1;
+  std::string buildingStatus;  // Last "Add Random Building" failure, else empty.
 };
 
 struct BuilderEditorActions {
@@ -67,9 +74,11 @@ void UpdateBuilderBox(BuilderScene* bs, int index, const BuilderBox& next);
 // Appends a default cube at a free spot near the map center / a figure of
 // `team` at a free spot on its side; returns the new index.
 int AddBuilderBox(BuilderScene* bs);
-// Appends a random building -- a ground cube with 0-2 narrower cubes
-// stacked on top -- at a free spot (deterministic in `seed`); returns the
-// index of its ground cube, or -1 when no free spot fits.
+// Appends a random generated building (BuilderScene::buildings; the city
+// generator's building passes, with doorway, floors, stairs and windows
+// where they fit) at a free spot, clear of cubes, other buildings and
+// figures (deterministic in `seed`); returns its index, or -1 when no free
+// spot fits the map.
 int AddRandomBuilderBuilding(BuilderScene* bs, uint32_t seed);
 int AddBuilderFigure(BuilderScene* bs, Team team);
 

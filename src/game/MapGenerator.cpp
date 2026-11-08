@@ -1396,6 +1396,10 @@ struct StreetCut {
   // A short segment dividing a long block (its gaps are everything outside
   // the segment): junction tests use only that segment.
   bool blockSplit = false;
+  // Param intervals where the street runs in a tunnel under a raised level.
+  // The road stays paved, but nothing of it exists on the surface, so the
+  // blocks above are laid out as if it were not there (BuildBlocks only).
+  std::vector<std::pair<float, float>> tunnelSpans;
 
   bool InGap(float t, float tol = 0.0f) const {
     for (const auto& g : gaps) {
@@ -1408,6 +1412,23 @@ struct StreetCut {
     std::vector<std::pair<float, float>> out;
     float cursor = lo;
     for (const auto& g : gaps) {
+      if (g.second <= cursor) continue;
+      if (g.first > cursor) out.emplace_back(cursor, std::min(g.first, hi));
+      cursor = std::max(cursor, g.second);
+      if (cursor >= hi) break;
+    }
+    if (cursor < hi) out.emplace_back(cursor, hi);
+    return out;
+  }
+  // As Kept, but the tunnelled stretches count as missing too: what a block
+  // sees of the street on the surface.
+  std::vector<std::pair<float, float>> SurfaceKept(float lo, float hi) const {
+    std::vector<std::pair<float, float>> out;
+    float cursor = lo;
+    std::vector<std::pair<float, float>> all = gaps;
+    all.insert(all.end(), tunnelSpans.begin(), tunnelSpans.end());
+    std::sort(all.begin(), all.end());
+    for (const auto& g : all) {
       if (g.second <= cursor) continue;
       if (g.first > cursor) out.emplace_back(cursor, std::min(g.first, hi));
       cursor = std::max(cursor, g.second);
@@ -1942,6 +1963,15 @@ std::vector<UrbanBlock> BuildBlocks(uint32_t seed, const MapGeneratorConfig& c,
   const float arteryD = glm::dot(artery.normal, artery.origin);
 
   std::vector<UrbanBlock> blocks;
+  // A street bored under a raised level leaves no trace on top of it.
+  for (const TerrainTunnelSpec& tunnel : terrain.tunnels) {
+    if (tunnel.road != TunnelRoad::Local || tunnel.streetCut < 0 ||
+        static_cast<size_t>(tunnel.streetCut) >= graph->cuts.size()) {
+      continue;
+    }
+    graph->cuts[static_cast<size_t>(tunnel.streetCut)].tunnelSpans.emplace_back(tunnel.t0,
+                                                                                 tunnel.t1);
+  }
   // Chords a trimmed street was carved along beyond its existing stretch
   // (see the last pass below), paved back afterwards up to its obstacles.
   struct Ghost {
@@ -1960,7 +1990,7 @@ std::vector<UrbanBlock> BuildBlocks(uint32_t seed, const MapGeneratorConfig& c,
     std::vector<const StreetCut*> trimmed;
     for (const StreetCut& cut : graph->cuts) {
       if (cut.side != side) continue;
-      if (cut.gaps.empty()) {
+      if (cut.gaps.empty() && cut.tunnelSpans.empty()) {
         CutStreet(&regions, cut.origin, cut.dir, cut.width);
       } else {
         trimmed.push_back(&cut);
@@ -1994,11 +2024,14 @@ std::vector<UrbanBlock> BuildBlocks(uint32_t seed, const MapGeneratorConfig& c,
             r0 = std::min(r0, t);
             r1 = std::max(r1, t);
           }
-          float keptLength = 0.0f;
-          for (const auto& k : cut->Kept(r0, r1)) keptLength += k.second - k.first;
+          float keptLength = 0.0f, realLength = 0.0f;
+          for (const auto& k : cut->SurfaceKept(r0, r1)) keptLength += k.second - k.first;
+          for (const auto& k : cut->Kept(r0, r1)) realLength += k.second - k.first;
           const float tol = 0.05f;
           const bool whole = keptLength >= (r1 - r0) - tol;
-          const bool settle = pass == 3 && keptLength >= 1.0f;
+          // Only a dead end settles; a tunnel under the region is no reason
+          // to carve its road through the blocks above.
+          const bool settle = pass == 3 && keptLength >= 1.0f && realLength < (r1 - r0) - tol;
           if (whole || settle) {
             if (!whole) ghosts.push_back({static_cast<size_t>(cut - graph->cuts.data()), r0, r1});
             std::vector<std::vector<glm::vec2>> one;
@@ -4706,7 +4739,9 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>
         // exactly on a ramp corridor's edge then takes the tier's height,
         // not the ramp's below, and the strip stays flat beside the
         // corridor's cliff instead of twisting down into it.
-        const auto ground = [&](glm::vec2 q) { return UrbanGroundAt(city, c, q) + kSidewalkHeight; };
+        const auto ground = [&](glm::vec2 q) {
+          return StreetGroundAt(city, c, -1, q) + kSidewalkHeight;  // On the roof over a bore.
+        };
         if (!PlanarPatch(strip, ground, &sidewalk)) continue;
       } else {
         for (const glm::vec2& p : strip) {
@@ -6585,12 +6620,19 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   DedupeRoadOverlaps(&scene);
   std::vector<float> characterRolls;
   const std::vector<Parcel> parcels = PlanParcels(city, c, &rng, &characterRolls);
+  // Buildings over a tunnel bore stand on its roof, not on the road below.
+  const GroundY blockGroundY = [&](float x, float z) {
+    if (const TerrainTunnelSpec* tunnel = TunnelBoreAt(city.terrain, glm::vec2(x, z))) {
+      return tunnel->ceiling;
+    }
+    return scene.ground.HeightAt(x, z);
+  };
   EmitBuildings(&scene, city, parcels, PlanBuildings(parcels, characterRolls, seed, c, &rng), c,
-                groundY, seed);
+                blockGroundY, seed);
   EmitSpawns(&scene, city, c, groundY);
   // Facades go before the ziplines so an anchor or cable never lands on a
   // stoop or rear platform (their clearance pass checks the walk surfaces).
-  EmitFacades(&scene, city, parcels, seed, c, groundY);
+  EmitFacades(&scene, city, parcels, seed, c, blockGroundY);
   const size_t roofCount = scene.obstacles.size();
   EmitTerrainCliffs(&scene, city, c);
   // Furniture before ziplines: anchors and cables then keep clear of it.

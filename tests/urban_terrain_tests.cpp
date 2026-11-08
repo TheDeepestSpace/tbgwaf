@@ -35,6 +35,18 @@ glm::vec3 OnGround(const Scene& scene, glm::vec3 p) {
 float FlatDistance(glm::vec3 a, glm::vec3 b) {
   return glm::length(glm::vec2(a.x - b.x, a.z - b.z));
 }
+bool InsideConvex(const std::vector<glm::vec2>& polygon, glm::vec2 p) {
+  float sign = 0.0f;
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    const glm::vec2 a = polygon[i], e = polygon[(i + 1) % polygon.size()] - a;
+    const float side = e.x * (p.y - a.y) - e.y * (p.x - a.x);
+    if (std::fabs(side) < 1e-4f) continue;
+    if (sign == 0.0f) sign = side;
+    else if (side * sign < 0.0f) return false;
+  }
+  return true;
+}
+
 bool Planar(const std::vector<glm::vec3>& polygon, float tolerance = 0.01f) {
   if (polygon.size() < 4) return true;
   glm::vec3 normal(0.0f);
@@ -181,7 +193,12 @@ void TestSeedInvariants() {
       // A set-back top floor stands on its building's base prism, not the ground.
       if (o.building >= 0 && s.buildings[o.building].upperObstacle == static_cast<int>(oi)) continue;
       for (glm::vec2 p : ObstacleFootprint(o)) {
-        CHECK(std::fabs(s.ground.HeightAt(p.x, p.y) - o.bounds.min.y) < 0.03f);
+        // Over a tunnel bore the building stands on the roof, not the road.
+        float ground = s.ground.HeightAt(p.x, p.y);
+        for (const TerrainTunnel& tunnel : s.terrainTunnels) {
+          if (InsideConvex(tunnel.bore, p)) ground = tunnel.roof[0].y;
+        }
+        CHECK(std::fabs(ground - o.bounds.min.y) < 0.03f);
       }
     }
   }

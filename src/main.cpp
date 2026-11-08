@@ -1050,9 +1050,7 @@ int main() {
   // Default look: AO view (black hot) with NPR outlines layered on top.
   debugOptions.thermal = true;
   debugOptions.npr = true;
-  debugOptions.nprSettings.outlineThickness = 0.8f;
-  debugOptions.nprSettings.outlineStrength = 0.46f;
-  debugOptions.nprSettings.detailSize = 0.02f;
+  debugOptions.nprSettings = gfx::DefaultAppNprSettings();
   bool showFps = true;
   float smoothedFps = 0.0f;
   float frameMs = 0.0f;

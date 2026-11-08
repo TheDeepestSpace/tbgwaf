@@ -32,6 +32,16 @@ struct NprSettings {
   AmbientOcclusionSettings ao{4.0f, 0.9f, 3, 1};
 };
 
+// The app's default NPR look (tuned thinner/subtler than the struct defaults).
+// Shared by the live app and the visual runner so goldens match what ships.
+inline NprSettings DefaultAppNprSettings() {
+  NprSettings s;
+  s.outlineThickness = 0.8f;
+  s.outlineStrength = 0.46f;
+  s.detailSize = 0.02f;
+  return s;
+}
+
 // Pane-local, screen-space ambient occlusion for the thermal world. Capture
 // opaque color, world normals and depth; composite before translucent geometry
 // and sensor processing. Uses only core GLES3/WebGL2 attachment formats.

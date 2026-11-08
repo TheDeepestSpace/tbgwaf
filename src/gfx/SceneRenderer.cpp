@@ -4242,11 +4242,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // only sees the shell where no interior claimed the pixel, so a window
     // (a real gap between an enterable building's wall pieces) lost its
     // edges wherever a floor slab overlaps it on screen, and the player
-    // could not tell where to stand to look out. On exactly those pixels
-    // (stencil == 1 right after the interior colour draw) the window
-    // rectangles of every faded enterable building are drawn as faint ink
-    // segments at the shell outline's own intensity; elsewhere the edge
-    // pass still outlines them. Depth-tested against the opaque scene like
+    // could not tell where to stand to look out. The window rectangles of
+    // every faded enterable building are therefore drawn unconditionally
+    // (not only over the interior) as faint ink segments at the shell
+    // outline's own intensity, so every window reads the same whether or not
+    // a floor or stair overlaps it. Depth-tested against the opaque scene like
     // the rest of the see-through pass. The rectangle sits on the wall face
     // the camera sees (the outer face of a near wall, the inner face of the
     // far wall seen through the building), which is where the edge pass
@@ -4306,7 +4306,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       unlitShader_.Use();
       unlitShader_.SetMat4("uMVP", viewProj);
       unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink));
-      glStencilFunc(GL_EQUAL, 1, 0xFF);
+      // Unconditional: the same frame whether or not a floor or stair slab
+      // overlaps the window on screen (stencil is neither tested nor written).
+      glStencilFunc(GL_ALWAYS, 0, 0xFF);
       glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
       pathLine_.SetPoints(segments);
       pathLine_.DrawSegments();

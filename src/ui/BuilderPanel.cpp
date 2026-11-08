@@ -7,6 +7,7 @@
 #include <cfloat>
 #include <cstdio>
 #include <cstring>
+#include <random>
 
 #include "game/Types.h"
 
@@ -247,6 +248,56 @@ int AddBuilderBox(BuilderScene* bs) {
   return static_cast<int>(bs->boxes.size()) - 1;
 }
 
+int AddRandomBuilderBuilding(BuilderScene* bs, uint32_t seed) {
+  std::mt19937 rng(seed);
+  auto uni = [&](float lo, float hi) { return std::uniform_real_distribution<float>(lo, hi)(rng); };
+  const float limit = PlayableHalfExtent(*bs);
+  BuilderBox base;
+  base.hx = uni(2.0f, 4.0f);
+  base.hz = uni(2.0f, 4.0f);
+  base.height = uni(2.5f, 4.0f);
+  const float maxX = limit - base.hx, maxZ = limit - base.hz;
+  if (maxX < 0.0f || maxZ < 0.0f) return -1;
+  auto free = [&](float cx, float cz) {
+    for (const BuilderBox& o : bs->boxes) {
+      if (o.y > 0.0f) continue;
+      if (std::fabs(cx - o.cx) < base.hx + o.hx + 0.5f && std::fabs(cz - o.cz) < base.hz + o.hz + 0.5f)
+        return false;
+    }
+    for (const BuilderFigure& f : bs->figures) {
+      if (std::fabs(f.x - cx) < base.hx + 1.0f && std::fabs(f.z - cz) < base.hz + 1.0f) return false;
+    }
+    return true;
+  };
+  bool placed = false;
+  for (int attempt = 0; attempt < 200 && !placed; ++attempt) {
+    const float cx = uni(-maxX, maxX), cz = uni(-maxZ, maxZ);
+    if (free(cx, cz)) {
+      base.cx = cx;
+      base.cz = cz;
+      placed = true;
+    }
+  }
+  if (!placed) return -1;
+  bs->boxes.push_back(base);
+  const int first = static_cast<int>(bs->boxes.size()) - 1;
+  // 0-2 narrower tiers stacked on top, each inside the one below.
+  const int tiers = std::uniform_int_distribution<int>(0, 2)(rng);
+  BuilderBox below = base;
+  for (int t = 0; t < tiers; ++t) {
+    BuilderBox tier;
+    tier.hx = std::max(below.hx * uni(0.55f, 0.8f), 1.0f);
+    tier.hz = std::max(below.hz * uni(0.55f, 0.8f), 1.0f);
+    tier.cx = below.cx + uni(-1.0f, 1.0f) * (below.hx - tier.hx);
+    tier.cz = below.cz + uni(-1.0f, 1.0f) * (below.hz - tier.hz);
+    tier.y = BoxTop(below);
+    tier.height = uni(2.0f, 3.5f);
+    bs->boxes.push_back(tier);
+    below = tier;
+  }
+  return first;
+}
+
 int AddBuilderFigure(BuilderScene* bs, Team team) {
   const float limit = PlayableHalfExtent(*bs);
   const float side = team == Team::Blue ? -1.0f : 1.0f;
@@ -305,6 +356,15 @@ BuilderEditorActions DrawBuilderEditor(BuilderScene* bs, BuilderEditorState* sta
   if (ImGui::Button("Add Cube")) {
     state->selectedBox = AddBuilderBox(bs);
     state->selectedFigure = -1;
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Add Random Building")) {
+    static uint32_t counter = std::random_device{}();
+    const int index = AddRandomBuilderBuilding(bs, counter++);
+    if (index >= 0) {
+      state->selectedBox = index;
+      state->selectedFigure = -1;
+    }
   }
   if (ImGui::BeginListBox("##cubes", ImVec2(-1.0f, 5.0f * ImGui::GetTextLineHeightWithSpacing()))) {
     for (int i = 0; i < static_cast<int>(bs->boxes.size()); ++i) {

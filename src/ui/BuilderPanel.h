@@ -8,6 +8,7 @@
 // between ImGui::NewFrame() and Render(). The 3D view itself, its camera
 // and the figure drag are the app's (src/main.cpp).
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -66,6 +67,10 @@ void UpdateBuilderBox(BuilderScene* bs, int index, const BuilderBox& next);
 // Appends a default cube at a free spot near the map center / a figure of
 // `team` at a free spot on its side; returns the new index.
 int AddBuilderBox(BuilderScene* bs);
+// Appends a random building -- a ground cube with 0-2 narrower cubes
+// stacked on top -- at a free spot (deterministic in `seed`); returns the
+// index of its ground cube, or -1 when no free spot fits.
+int AddRandomBuilderBuilding(BuilderScene* bs, uint32_t seed);
 int AddBuilderFigure(BuilderScene* bs, Team team);
 
 // Draws the side panel (right edge of the window) editing `*bs` and

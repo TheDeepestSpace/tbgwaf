@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <limits>
 #include <string>
+#include <unordered_map>
 
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -856,6 +857,32 @@ void BuildPolygonPrism(const tactics::Obstacle& obstacle, LitTriangleMesh* mesh,
   LitVertices vertices;
   std::vector<GLuint> indices;
   AppendPolygonPrism(obstacle, &vertices, &indices, holesPerEdge);
+  mesh->SetMesh(vertices, indices);
+}
+
+// Only the outer and inner faces (footprint sides 0 and 2) of a hollow
+// building's wall piece (ObstacleKind::Wall): no ends, top or bottom. Those
+// are the window and door reveals (CutWindows splits a wall into jambs, sill
+// and head around each opening), and in the see-through outline pass they
+// made every window read as two frames, one at the outer wall plane and
+// one at the inner (PR #304 review). Without them the edge detector finds
+// a single depth step per window: the hole in whichever wall face the
+// camera sees. Ends at building corners sit inside the adjacent wall and
+// the roof slab covers the tops, so nothing else is lost.
+void BuildWallLongFaces(const tactics::Obstacle& obstacle, LitTriangleMesh* mesh) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  const std::vector<glm::vec2>& fp = obstacle.footprint;
+  const float lo = obstacle.bounds.min.y, hi = obstacle.bounds.max.y;
+  for (size_t i = 0; fp.size() == 4 && i < 4; i += 2) {
+    const glm::vec2 a = fp[i], b = fp[(i + 1) % 4];
+    const glm::vec2 edge = glm::normalize(b - a);
+    const glm::vec3 normal(edge.y, 0.0f, -edge.x);
+    const glm::vec3 a0(a.x, lo, a.y), a1(a.x, hi, a.y);
+    const glm::vec3 b0(b.x, lo, b.y), b1(b.x, hi, b.y);
+    AppendTriangle(a0, b0, b1, normal, &vertices, &indices);
+    AppendTriangle(a0, b1, a1, normal, &vertices, &indices);
+  }
   mesh->SetMesh(vertices, indices);
 }
 
@@ -4194,7 +4221,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, obstacle.bounds.min,
                        obstacle.bounds.max - obstacle.bounds.min, color);
           } else {
-            BuildPolygonPrism(obstacle, &geometryMesh_);
+            // Outline pass: a wall piece contributes just its outer and
+            // inner faces, so each window is outlined once (see
+            // BuildWallLongFaces). The colour pass keeps the full prism.
+            if (mark && obstacle.kind == tactics::ObstacleKind::Wall &&
+                obstacle.footprint.size() == 4) {
+              BuildWallLongFaces(obstacle, &geometryMesh_);
+            } else {
+              BuildPolygonPrism(obstacle, &geometryMesh_);
+            }
             DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                          color);
           }
@@ -4212,9 +4247,28 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // rectangles of every faded enterable building are drawn as faint ink
     // segments at the shell outline's own intensity; elsewhere the edge
     // pass still outlines them. Depth-tested against the opaque scene like
-    // the rest of the see-through pass.
+    // the rest of the see-through pass. The rectangle sits on the wall face
+    // the camera sees (the outer face of a near wall, the inner face of the
+    // far wall seen through the building), which is where the edge pass
+    // puts its single frame per window, so the two line up.
     const auto drawWindowEdgesOverInterior = [&]() {
       const tactics::Scene& scene = game.GetScene();
+      // Wall thickness per faded enterable building, read off its wall
+      // pieces (ObstacleKind::Wall: sides 0 and 2 are the outer and inner
+      // faces); 0 when a building has none.
+      std::unordered_map<int, float> wallThickness;
+      for (const tactics::Obstacle& w : obstacles) {
+        if (w.kind != tactics::ObstacleKind::Wall || w.footprint.size() != 4 ||
+            w.building < 0 || !fadedBuilding(w.building) ||
+            wallThickness.count(w.building)) {
+          continue;
+        }
+        const glm::vec2 d = w.footprint[1] - w.footprint[0];
+        const float len = glm::length(d);
+        if (len < 1e-4f) continue;
+        const glm::vec2 in(-d.y / len, d.x / len);
+        wallThickness[w.building] = std::max(0.0f, glm::dot(w.footprint[3] - w.footprint[0], in));
+      }
       std::vector<glm::vec3> segments;
       for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
         if (o.kind != tactics::FacadeOpening::Kind::Window || !fadedBuilding(o.building) ||
@@ -4230,7 +4284,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         const float len = glm::distance(a, b);
         if (len < 1e-4f) continue;
         const glm::vec2 dir = (b - a) / len;
-        const glm::vec2 p0 = a + dir * o.u0, p1 = a + dir * o.u1;
+        const glm::vec2 out(dir.y, -dir.x);  // Outward, as OpeningBasisFor.
+        glm::vec2 p0 = a + dir * o.u0, p1 = a + dir * o.u1;
+        if (glm::dot(glm::vec2(cameraPos.x, cameraPos.z) - a, out) < 0.0f) {
+          const auto t = wallThickness.find(o.building);
+          const glm::vec2 inset = out * (t == wallThickness.end() ? 0.0f : t->second);
+          p0 -= inset;
+          p1 -= inset;
+        }
         const glm::vec3 corners[4] = {{p0.x, o.y0, p0.y}, {p1.x, o.y0, p1.y},
                                       {p1.x, o.y1, p1.y}, {p0.x, o.y1, p0.y}};
         for (int k = 0; k < 4; ++k) {

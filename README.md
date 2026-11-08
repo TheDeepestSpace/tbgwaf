@@ -205,7 +205,10 @@ to green. The **FOV opacity** slider (while AO is on) sets the team FOV tint str
 the thermal world (default 0.25; the normal view uses 0.15). The `thermal_urban_black_hot` and
 `thermal_urban_white_hot` scenarios show both polarities on the same city;
 scenario YAML selects them with `render: {thermal: true, thermal_black_hot: false}`
-for white-hot (omit `thermal_black_hot` for black-hot).
+for white-hot (omit `thermal_black_hot` for black-hot). `render: {npr: true}`
+adds the ink outlines (the debug panel's NPR toggle) on top of the AO view;
+the `see_through_building_outlines*` scenarios use it to pin how a
+camera-faded building's walls, floors and window frames are outlined.
 
 The AO sliders in the debug panel tune the contact shading: radius (default
 6.0), strength (1.0), quality (4 samples per ray) and softness (3 px blur).

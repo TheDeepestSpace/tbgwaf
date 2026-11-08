@@ -1,0 +1,29 @@
+name: see_through_building_outlines_upper_floor
+description: >
+  PR #304 review: outlines on a camera-faded enterable building whose
+  occupant is upstairs. Same building and camera as
+  see_through_building_outlines, but Blue's indoor figure stands on the
+  first floor beside the stair top, so the slab directly over it keeps the
+  shell opacity while the rest of the cutaway stays pronounced. The goldens
+  pin the outlined cutaway with an occupant upstairs: the slab under the
+  figure and the one over it, the stair flights beside it, and a single
+  frame per first-floor window around it.
+
+map:
+  generate: {seed: 7, type: urban, elevated: false, features: {terrain: off}}
+
+units:
+  - {id: 0, team: blue, position: [-29.11, 4, -8.25], facing_degrees: 0}
+  - {id: 1, team: red, position: [40, 0, -30], facing_degrees: 180}
+  - {id: 2, team: blue, position: [-35.6, 0, -2.1], facing_degrees: 0}
+
+camera:
+  target: [-31.9, -6.7]
+  zoom: -145
+
+render:
+  npr: true
+
+script:
+  - assert: {round: 1}
+  - assert: {unit: 0, position: [-29.11, 4, -8.25], tolerance: 0.1}

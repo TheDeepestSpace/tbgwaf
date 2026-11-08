@@ -27,7 +27,13 @@ struct AABB {
 // Semantic tag used only to group static render geometry; collision, LOS,
 // and navigation treat every kind identically. Pier marks the overpass
 // bents' columns and footings (issue #223).
-enum class ObstacleKind { Generic, StreetFurniture, Pier, Cover };
+// Wall: one thin wall piece of an enterable (hollow) building, laid out as
+// {outer start, outer end, inner end, inner start} so footprint sides 0 and
+// 2 are its outer and inner faces and sides 1/3 (plus top and bottom) are
+// the ends and the window/door reveals (see MapGenerator's CutWindows).
+// Gameplay treats it like Generic; the renderer's see-through outline pass
+// draws only its two long faces so each window gets a single frame.
+enum class ObstacleKind { Generic, StreetFurniture, Pier, Cover, Wall };
 
 // Street fixtures the renderer batches as static geometry: post-sized furniture
 // and cover-sized street items (parked cars, planters, dumpsters, ...).

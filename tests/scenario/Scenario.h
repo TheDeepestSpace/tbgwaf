@@ -175,11 +175,15 @@ struct Scenario {
   //   fov_probe_height: shadow_map only; see SceneRenderer::SetFovProbeHeight.
   //   thermal: false (default) | true -- thermal render prototype.
   //   thermal_black_hot: true (default) | false -- white-hot when false.
+  //   npr: false (default) | true -- screen-space ink outlines on top of the
+  //     AO view (RenderDebugOptions::npr), including the see-through pass's
+  //     outlines of faded buildings and their window edges.
   enum class FovOverlay { Cpu, ShadowMap };
   FovOverlay fovOverlay = FovOverlay::Cpu;
   float fovProbeHeight = 0.0f;
   bool thermal = false;
   bool thermalBlackHot = true;
+  bool npr = false;
 };
 
 // Throws std::runtime_error with a descriptive message on malformed YAML.

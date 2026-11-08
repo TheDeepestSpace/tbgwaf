@@ -1,0 +1,31 @@
+name: see_through_building_outlines
+description: >
+  PR #304 review: ink outlines on a camera-faded enterable building. The
+  setup of occlusion_fade_building_interior (seed 7, one Blue figure on the
+  ground floor of the three-storey building and one just behind it) with
+  render.npr on and the camera pulled in, so Blue's pane draws the building
+  see-through with outlines. What the goldens pin: the shell, floors and
+  stair flights keep their edges; every window is outlined exactly once, on
+  the wall face the camera sees (the near walls' outer face, the far wall's
+  inner face), not as a pair of inner and outer frames; and a window's frame
+  stays visible where a floor slab overlaps it on screen, so a player can
+  see where to stand to look out. Red's pane keeps the building opaque and
+  outlined.
+
+map:
+  generate: {seed: 7, type: urban, elevated: false, features: {terrain: off}}
+
+units:
+  - {id: 0, team: blue, position: [-31.9, 0, -6.7], facing_degrees: 0}
+  - {id: 1, team: red, position: [40, 0, -30], facing_degrees: 180}
+  - {id: 2, team: blue, position: [-35.6, 0, -2.1], facing_degrees: 0}
+
+camera:
+  target: [-31.9, -6.7]
+  zoom: -145
+
+render:
+  npr: true
+
+script:
+  - assert: {round: 1}

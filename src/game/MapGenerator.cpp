@@ -4373,8 +4373,10 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, const std::vector<Pa
     const glm::vec2 d = glm::normalize(q - a);
     const glm::vec2 in(-d.y, d.x);
     const glm::vec2 p0 = a + d * u0, p1 = a + d * u1;
-    AddPolygonBuilding(scene, {p0, p1, p1 + in * kWallThickness, p0 + in * kWallThickness}, lift,
-                       h, index, groundY, kMinPiece);
+    const int piece = AddPolygonBuilding(
+        scene, {p0, p1, p1 + in * kWallThickness, p0 + in * kWallThickness}, lift, h, index,
+        groundY, kMinPiece);
+    if (piece >= 0) scene->obstacles[piece].kind = ObstacleKind::Wall;
   };
   for (size_t e = 0; e < n; ++e) {
     const glm::vec2 a = fp[e], q = fp[(e + 1) % n];

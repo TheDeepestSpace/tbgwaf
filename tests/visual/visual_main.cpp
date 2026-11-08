@@ -231,6 +231,9 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   // Every scenario renders in the AO view, like the live app default.
   renderDebug.thermal = true;
   renderDebug.thermalBlackHot = scenario.thermalBlackHot;
+  // Ink outlines (NPR over the AO view) only where a scenario asks for them;
+  // the default goldens pin the plain AO view.
+  renderDebug.npr = scenario.npr;
   // --profile: per-pane RenderPane wall time (glFinish before and after)
   // and the number of own living units whose cones were drawn, so the cost
   // per pane and per unit can be read off.

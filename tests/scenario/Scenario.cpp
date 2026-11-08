@@ -753,6 +753,7 @@ Scenario LoadScenarioFromFile(const std::string& path) {
     if (render["thermal_black_hot"]) {
       scenario.thermalBlackHot = render["thermal_black_hot"].as<bool>();
     }
+    if (render["npr"]) scenario.npr = render["npr"].as<bool>();
   }
 
   if (const YAML::Node scriptNode = root["script"]) {

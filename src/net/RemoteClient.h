@@ -8,6 +8,7 @@
 #include <glm/glm.hpp>
 
 #include "game/GameLogic.h"
+#include "game/TurnTimeline.h"
 #include "net/Json.h"
 #include "net/Protocol.h"
 
@@ -67,6 +68,16 @@ class RemoteClient {
   bool spectating() const { return spectate_; }
   std::optional<tactics::Team> team() const { return team_; }
   bool playingBack() const { return playback_.has_value(); }
+  // After game over the server sends every round's unfogged timeline (#284).
+  bool hasReveal() const { return reveal_.has_value(); }
+  struct RevealedHistory {
+    std::vector<tactics::TurnTimeline::HistoryFrame> frames;
+    std::vector<tactics::TurnTimeline::Tick> ticks;
+  };
+  // Consumes the reveal and rebuilds the match as full-information timeline
+  // frames, starting from `start` (the all-alive initial snapshot). Empty if
+  // there is no usable reveal.
+  std::optional<RevealedHistory> TakeRevealedHistory(const GameSnapshot& start);
   bool selfReady() const { return selfReady_; }
   bool peerReady() const { return peerReady_; }
   // True from the moment RequestCommit() queues the commit until the server
@@ -120,6 +131,10 @@ class RemoteClient {
   void HandleStart(const Json& m);
   void HandlePlans(const Json& m);
   void HandleRound(const Json& m);
+  void HandleReveal(const Json& m);
+  static Playback ParseRound(const Json& m);
+  // Writes the pose of `pb` at pb.clock into `snap` (units, shots, tracers).
+  void PosePlayback(GameSnapshot* snap, const Playback& pb, float dt);
   void ApplyPlans(const Json& m);
   void ApplyState(const Json& state);
   void AdvancePlayback(float dt);
@@ -138,6 +153,7 @@ class RemoteClient {
   std::optional<tactics::Team> team_;
   std::vector<std::string> outgoing_;
   std::optional<Playback> playback_;
+  std::optional<Json> reveal_;
   std::optional<Json> pendingPlans_;  // Arrived mid-playback; applied once it ends.
   std::map<int, std::string> syncedPlan_;   // Unit id -> last plan signature the server has.
   std::optional<tactics::SquadPlaybook> syncedPlaybook_;

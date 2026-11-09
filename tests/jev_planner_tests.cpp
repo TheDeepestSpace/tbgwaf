@@ -599,6 +599,60 @@ void TestJevSquadPlanNeverOverlaps() {
   }
 }
 
+// Issue #306: Jev vs Jev rounds must never stall on "Planned paths make
+// figures overlap" -- every round both squads plan and the round is
+// committable, including after queued multi-round legs re-arm.
+void TestJevVsJevRoundsNeverStallOnOverlap() {
+  for (const int seed : {1, 2, 3, 4}) {
+    GameLogic game(tactics::GenerateUrbanMap(seed, tactics::OldSizeConfig()));
+    game.SetShotRollSource([] { return 0.5f; });
+    for (int round = 0; round < 4 && game.Mode() == InputMode::AwaitingSelection; ++round) {
+      for (const Team team : {Team::Blue, Team::Red}) {
+        const auto request = BuildJevRequest(game, team, 100 * seed + round);
+        if (!request) continue;
+        CHECK(ApplyJevChoice(&game, *request, DeterministicFallbackChoice(*request)));
+      }
+      CHECK(!game.HasPlanOverlap());
+      CHECK(game.CanCommitRound());
+      if (!game.CanCommitRound()) break;
+      game.CommitRound();
+      game.Update(20.0f);
+    }
+  }
+}
+
+// Issue #306: a queued multi-round leg that re-arms onto a figure standing in
+// its way is dropped (so the owner re-plans it) instead of stalling the round.
+void TestQueuedLegIntoFigureIsDroppedNotStalled() {
+  Scene scene;
+  scene.mapHalfExtent = 30.0f;
+  Unit blue;
+  blue.id = 0;
+  blue.team = Team::Blue;
+  blue.position = {-10.0f, 0.0f, 0.0f};
+  scene.units.push_back(blue);
+  Unit red;
+  red.id = 1;
+  red.team = Team::Red;
+  red.position = {0.0f, 0.0f, 6.0f};
+  scene.units.push_back(red);
+  GameLogic game(scene);
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround({-6.0f, 0.0f, 6.0f}, Team::Blue);
+  game.ClickGround({6.0f, 0.0f, 6.0f}, Team::Blue);  // Queued leg straight through red.
+  game.FinishMovePlan();
+  CHECK(!game.FindUnit(0)->plan.queuedLegs.empty());
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+  game.Update(20.0f);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  CHECK(!game.HasPlanOverlap());
+  CHECK(game.FindUnit(0)->plan.type == PlannedActionType::None);
+}
+
 int main() {
   TestIncrementalBuilderMatchesBlockingBuild();
   TestBoundedCandidatesUseNormalLegalPath();
@@ -618,6 +672,8 @@ int main() {
   TestJevOffersWaitOnlyWithContact();
   TestSpawnHintsAvoidGroundUnderLowDecks();
   TestJevSquadPlanNeverOverlaps();
+  TestJevVsJevRoundsNeverStallOnOverlap();
+  TestQueuedLegIntoFigureIsDroppedNotStalled();
   if (failures == 0) {
     std::puts("All Jev planner scenarios passed.");
     return 0;

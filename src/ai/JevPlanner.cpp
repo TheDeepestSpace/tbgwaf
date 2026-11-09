@@ -319,6 +319,9 @@ bool CandidateApplied(const GameLogic& before, Team team, const JevCandidate& ca
 
   const Unit* planned = out->FindUnit(candidate.actorId);
   if (!planned || out->Mode() != InputMode::AwaitingSelection) return false;
+  // Never add a figure overlap (a standing figure can sit in a planned
+  // walker's path); the caller then falls back to another action.
+  if (out->HasPlanOverlap() && !before.HasPlanOverlap()) return false;
   if (candidate.kind == JevActionKind::Wait) {
     return planned->plan.type == PlannedActionType::Pass;
   }
@@ -997,6 +1000,13 @@ bool ApplyJevChoice(GameLogic* game, const JevRequest& request,
       wait.kind = JevActionKind::Wait;
       wait.actorId = candidate->actorId;
       attempts.push_back(std::move(wait));
+    } else {
+      // A standing figure sitting in a planned walker's path steps aside.
+      for (const JevCandidate& other : request.candidates) {
+        if (other.actorId == candidate->actorId && other.kind == JevActionKind::Move) {
+          attempts.push_back(other);
+        }
+      }
     }
     bool applied = false;
     for (const JevCandidate& attempt : attempts) {

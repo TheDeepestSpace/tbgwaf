@@ -14,6 +14,22 @@ void TurnTimeline::Reset(const GameLogic& game) {
   ticks_.push_back(Tick{"Start", 0});
 }
 
+void TurnTimeline::ReplaceHistory(const GameLogic& game, std::vector<HistoryFrame> frames,
+                                  std::vector<Tick> ticks) {
+  if (frames.empty() || ticks.empty()) return;
+  frames_.clear();
+  for (HistoryFrame& f : frames) {
+    Frame frame;
+    frame.time = f.time;
+    frame.snapshot = std::move(f.snapshot);
+    frames_.push_back(std::move(frame));
+  }
+  ticks_ = std::move(ticks);
+  time_ = frames_.back().time;
+  lastRound_ = game.RoundNumber();
+  lastMode_ = game.Mode();
+}
+
 void TurnTimeline::Capture(const GameLogic& game) {
   Frame frame;
   frame.time = time_;

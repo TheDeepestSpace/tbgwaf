@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -64,6 +65,17 @@ struct ReachField {
     return endpointBlocked.empty() || !endpointBlocked[iz * nx + ix];
   }
   float Dist(int ix, int iz) const { return dist[iz * nx + ix]; }
+  // True when the frontier this field describes covers the world point `p`:
+  // its cell is reached *and* the surface layer the field priced for that
+  // cell is at p's height (within layerTolerance). A point on a different
+  // stacked layer -- an upper floor directly over a priced ground cell --
+  // is not covered, even though the XZ cell is reached.
+  bool CoversPoint(const glm::vec3& p, float layerTolerance) const {
+    const int ix = static_cast<int>(std::lround((p.x - minX) / step));
+    const int iz = static_cast<int>(std::lround((p.z - minZ) / step));
+    if (!Reached(ix, iz)) return false;
+    return std::fabs(p.y - surfaceY[iz * nx + ix]) <= layerTolerance;
+  }
   glm::vec3 Node(int ix, int iz) const {
     const int index = iz * nx + ix;
     const float y = index >= 0 && static_cast<size_t>(index) < surfaceY.size()

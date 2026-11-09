@@ -2154,13 +2154,16 @@ int main() {
         const gfx::Ray hoverRay = cameras[hoverPane].ScreenPointToRay(
             static_cast<float>(mouseX - rect.x), static_cast<float>(mouseY),
             static_cast<float>(rect.width), static_cast<float>(windowHeight));
-        glm::vec3 hoverPoint;
-        if (IntersectGroundOrClimbTop(hoverRay, game.GetScene(), &hoverPoint)) {
-          hoveredGroundPoint = hoverPoint;
+        // Frontier-aware pick: surfaces the mover cannot stop on this leg
+        // (an unreachable upper floor between the camera and the frontier)
+        // are transparent, so the selector lands on the floor the frontier
+        // is actually drawn on instead of a storey out of reach.
+        if (const auto hoverPoint = game.ResolveMoveRay(hoverRay.origin, hoverRay.direction)) {
+          hoveredGroundPoint = *hoverPoint;
           hasHoveredGroundPoint = true;
           // Team-tagged: hovering over the *other* player's pane just clears
           // the preview instead of steering this pane's selected mover.
-          game.HoverGround(hoverPoint, paneTeam(hoverPane));
+          game.HoverGround(*hoverPoint, paneTeam(hoverPane));
         }
       }
       if (aimedUnitId >= 0 && leftDragPane >= 0 && leftDragDistance >= kClickDragThresholdPx) {
@@ -2231,9 +2234,10 @@ int main() {
             }
           }
         } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
-          glm::vec3 point;
-          if (IntersectGroundOrClimbTop(clickRay, game.GetScene(), &point)) {
-            game.ClickGround(point, clickTeam);
+          // Same frontier-aware pick as the hover, so the click lands
+          // exactly where the selector ring showed it would.
+          if (const auto point = game.ResolveMoveRay(clickRay.origin, clickRay.direction)) {
+            game.ClickGround(*point, clickTeam);
           }
         }
       }

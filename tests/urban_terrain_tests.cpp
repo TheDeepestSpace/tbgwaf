@@ -627,6 +627,25 @@ void TestTerrainTunnels() {
   CHECK(highway > 0);
   CHECK(local > 0);
   CHECK(downhillExit > 0);
+
+  // Cover items and furniture over a bore belong to the level above: they
+  // stand on the roof, not on the road in the tunnel below.
+  MapGeneratorConfig city;
+  city.features.terrain.mode = FeatureMode::On;
+  currentSeed = 31;
+  const Scene s = GenerateUrbanMap(31, city);
+  int overBore = 0;
+  for (const Obstacle& o : s.obstacles) {
+    if (!IsStreetFixture(o.kind)) continue;
+    const glm::vec2 p(0.5f * (o.bounds.min.x + o.bounds.max.x),
+                      0.5f * (o.bounds.min.z + o.bounds.max.z));
+    for (const TerrainTunnel& tunnel : s.terrainTunnels) {
+      if (!InsideConvex(tunnel.bore, p)) continue;
+      ++overBore;
+      CHECK(std::fabs(o.bounds.min.y - tunnel.roof.front().y) < 0.3f);
+    }
+  }
+  CHECK(overBore > 0);
 }
 
 void TestMovementUpStair() {

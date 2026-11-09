@@ -6638,7 +6638,7 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   // Furniture before ziplines: anchors and cables then keep clear of it.
   EmitStreetFurniture(&scene, city, c, seed, groundY);
   EmitTrafficControl(&scene, city, c, seed, groundY);
-  EmitCoverItems(&scene, city, c, seed, groundY);
+  EmitCoverItems(&scene, city, c, seed, blockGroundY);
   PlaceZiplines(&scene, city.blocks, seed, c, roofCount);
   EmitMassing(&scene, parcels, seed);
   EmitTrees(&scene, city.blocks, seed, c);

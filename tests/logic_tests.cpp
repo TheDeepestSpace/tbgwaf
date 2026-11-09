@@ -3780,7 +3780,44 @@ void TestReachFieldManySurfacesPerformance() {
 #endif
 }
 
+// Camera see-through: a faded enterable building keeps its interior view only
+// while something (figure, path, frontier node) is inside it.
+void TestBuildingsContainingPoints() {
+  Scene scene;
+  Building enterable;
+  enterable.enterable = true;
+  enterable.baseY = 0.0f;
+  enterable.obstacle = 0;
+  Building solid;  // Solid prism: never "entered".
+  solid.obstacle = 1;
+  scene.buildings = {enterable, solid};
+  Obstacle roof;  // Roof slab above head height, full footprint.
+  roof.building = 0;
+  roof.bounds.min = glm::vec3(0.0f, 3.0f, 0.0f);
+  roof.bounds.max = glm::vec3(6.0f, 3.3f, 4.0f);
+  roof.footprint = {{0, 0}, {6, 0}, {6, 4}, {0, 4}};
+  Obstacle block;
+  block.building = 1;
+  block.bounds.min = glm::vec3(10.0f, 0.0f, 0.0f);
+  block.bounds.max = glm::vec3(14.0f, 6.0f, 4.0f);
+  block.footprint = {{10, 0}, {14, 0}, {14, 4}, {10, 4}};
+  scene.obstacles = {roof, block};
+
+  const auto inside = [&](const glm::vec3& p) {
+    return BuildingsContainingPoints(scene, {p});
+  };
+  CHECK(inside({3.0f, 0.3f, 2.0f})[0] == 1);   // Figure indoors.
+  CHECK(inside({3.0f, 1.7f, 2.0f})[0] == 1);   // Eye height indoors.
+  CHECK(inside({-1.0f, 0.3f, 2.0f})[0] == 0);  // Outside the footprint.
+  CHECK(inside({3.0f, 3.4f, 2.0f})[0] == 0);   // On the roof.
+  CHECK(inside({12.0f, 0.3f, 2.0f})[1] == 0);  // Solid building: not enterable.
+  CHECK(BuildingsContainingPoints(scene, {}) == std::vector<char>({0, 0}));
+  // Any one point is enough (a path that merely clips the building).
+  CHECK(BuildingsContainingPoints(scene, {{-5.0f, 0.3f, 2.0f}, {5.5f, 0.3f, 3.5f}})[0] == 1);
+}
+
 int main() {
+  TestBuildingsContainingPoints();
   TestNavMeshRoutesAroundObstacle();
   TestReachFieldFromRampIncludesGroundBeyondFoot();
   TestNavMeshDirectPathWhenUnobstructed();

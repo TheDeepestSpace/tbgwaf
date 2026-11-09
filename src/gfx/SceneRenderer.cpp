@@ -3730,9 +3730,26 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // overpass grouping below): a faded building's floors keep the shell
   // opacity where they hide a probe, see kInteriorFadeOpacity.
   std::vector<char> directSurface(walkSurfaces.size(), 0);
+  // Enterable buildings that fade only because they block the view: drawn as
+  // a plain translucent solid, no interior. A faded enterable building keeps
+  // its interior view only while a figure (own, or a visible opponent) is
+  // inside, or the movement frontier, a path or a plan runs through it.
+  std::vector<char> plainBuilding;
   bool anyFaded = false;
   if (!debug.disableOcclusionFade) {
     std::vector<glm::vec3> probes = CollectSeeThroughProbes(game, team, fogActive, overlays);
+    std::vector<char> engagedBuilding = BuildingsContainingPoints(game.GetScene(), probes);
+    {
+      std::vector<glm::vec3> opponents;
+      for (const Unit& unit : game.GetScene().units) {
+        if (!unit.alive || unit.team == team) continue;
+        if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
+        opponents.push_back(unit.position + glm::vec3(0.0f, 0.3f, 0.0f));
+        opponents.push_back(unit.EyePosition());
+      }
+      const std::vector<char> byOpponent = BuildingsContainingPoints(game.GetScene(), opponents);
+      for (size_t b = 0; b < engagedBuilding.size(); ++b) engagedBuilding[b] |= byOpponent[b];
+    }
     const glm::vec3 cameraPos = camera.Position();
     const uint64_t geometryKey = FadeGeometryKey(game.GetScene());
     FadeCache& fadeCache = fadeCache_[team == tactics::Team::Blue ? 0 : 1];
@@ -3956,6 +3973,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       fadeCache.directSurface = directSurface;
       fadeCache.anyFaded = anyFaded;
     }
+    plainBuilding.assign(fadeBuilding.size(), 0);
+    for (size_t b = 0; b < fadeBuilding.size(); ++b) {
+      plainBuilding[b] = fadeBuilding[b] && game.GetScene().buildings[b].enterable &&
+                         !engagedBuilding[b];
+    }
   }
 
   // Thermal view only restyles the world: gameplay overlays (selection,
@@ -4162,17 +4184,47 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       float viewDistance;
       int obstacle;  // Index into obstacles, or -1 when `surface` is set.
       int surface;   // Index into walkSurfaces, or -1.
+      int plain = -1;  // Index into buildings: one solid translucent prism, or -1.
     };
     const glm::vec3 cameraPos = camera.Position();
     std::vector<FadedOccluder> shell, interior;
+    const auto isPlain = [&](int b) {
+      return b >= 0 && b < static_cast<int>(plainBuilding.size()) && plainBuilding[b];
+    };
+    // Plain buildings: the walls, window cuts and floor slabs are replaced by
+    // the building's full footprint extruded floor to roof.
+    std::vector<tactics::Obstacle> plainPrisms(plainBuilding.size());
     for (size_t i = 0; i < obstacles.size(); ++i) {
-      if (fadeObstacle[i]) {
-        shell.push_back({glm::distance(cameraPos, obstacles[i].bounds.Center()),
-                         static_cast<int>(i), -1});
+      if (!fadeObstacle[i]) continue;
+      const int b = obstacles[i].building;
+      if (isPlain(b)) {
+        tactics::Obstacle& prism = plainPrisms[b];
+        if (prism.footprint.empty()) {
+          prism.bounds.min = obstacles[i].bounds.min;
+          prism.bounds.max = obstacles[i].bounds.max;
+        }
+        prism.bounds.min.y = std::min(prism.bounds.min.y, obstacles[i].bounds.min.y);
+        prism.bounds.max.y = std::max(prism.bounds.max.y, obstacles[i].bounds.max.y);
+        const int roof = game.GetScene().buildings[b].obstacle;
+        if (roof >= 0 && roof < static_cast<int>(obstacles.size())) {
+          prism.footprint = obstacles[roof].footprint;
+          prism.bounds.min.x = obstacles[roof].bounds.min.x;
+          prism.bounds.min.z = obstacles[roof].bounds.min.z;
+          prism.bounds.max.x = obstacles[roof].bounds.max.x;
+          prism.bounds.max.z = obstacles[roof].bounds.max.z;
+        }
+        continue;
       }
+      shell.push_back({glm::distance(cameraPos, obstacles[i].bounds.Center()),
+                       static_cast<int>(i), -1});
+    }
+    for (size_t b = 0; b < plainPrisms.size(); ++b) {
+      if (plainPrisms[b].footprint.empty()) continue;
+      shell.push_back({glm::distance(cameraPos, plainPrisms[b].bounds.Center()), -1, -1,
+                       static_cast<int>(b)});
     }
     for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-      if (fadeSurface[i] && !walkSurfaces[i].climbProxy) {
+      if (fadeSurface[i] && !walkSurfaces[i].climbProxy && !isPlain(walkSurfaces[i].building)) {
         (walkSurfaces[i].building >= 0 ? interior : shell)
             .push_back({glm::distance(cameraPos, tactics::SurfaceCenter(walkSurfaces[i])), -1,
                         static_cast<int>(i)});
@@ -4224,7 +4276,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         }
       }
       for (const FadedOccluder& f : shell) {
-        if (f.obstacle >= 0) {
+        if (f.plain >= 0) {
+          thermalMaterial(ThermalMaterial::Building);
+          BuildPolygonPrism(plainPrisms[f.plain], &geometryMesh_);
+          DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                       glm::vec4(kObstacleColor, kOccluderFadeOpacity));
+        } else if (f.obstacle >= 0) {
           thermalMaterial(ThermalMaterial::Building);
           const tactics::Obstacle& obstacle = obstacles[f.obstacle];
           const glm::vec4 color(kObstacleColor, kOccluderFadeOpacity);
@@ -4286,7 +4343,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         // Enterable buildings only: their windows and doorways are real
         // gaps (a solid building's painted openings have no hole to mark).
         if (o.building < 0 || o.building >= static_cast<int>(scene.buildings.size()) ||
-            !fadedBuilding(o.building) || !scene.buildings[o.building].enterable) {
+            !fadedBuilding(o.building) || isPlain(o.building) ||
+            !scene.buildings[o.building].enterable) {
           continue;
         }
         if (o.obstacle < 0 || o.obstacle >= static_cast<int>(obstacles.size())) continue;

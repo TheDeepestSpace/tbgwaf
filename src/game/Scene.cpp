@@ -390,4 +390,32 @@ std::vector<Obstacle> SightObstacles(const Scene& scene) {
   return out;
 }
 
+std::vector<char> BuildingsContainingPoints(const Scene& scene,
+                                            const std::vector<glm::vec3>& points) {
+  std::vector<char> inside(scene.buildings.size(), 0);
+  for (size_t b = 0; b < scene.buildings.size(); ++b) {
+    const Building& building = scene.buildings[b];
+    if (!building.enterable || building.obstacle < 0 ||
+        building.obstacle >= static_cast<int>(scene.obstacles.size())) {
+      continue;
+    }
+    const Obstacle& roof = scene.obstacles[building.obstacle];
+    if (roof.footprint.size() < 3) continue;
+    const float floorY = building.baseY - 0.5f;
+    const float ceilingY = roof.bounds.min.y;
+    for (const glm::vec3& p : points) {
+      if (p.y < floorY || p.y >= ceilingY) continue;
+      if (p.x < roof.bounds.min.x || p.x > roof.bounds.max.x || p.z < roof.bounds.min.z ||
+          p.z > roof.bounds.max.z) {
+        continue;
+      }
+      if (PointInConvexPolygon(glm::vec2(p.x, p.z), roof.footprint)) {
+        inside[b] = 1;
+        break;
+      }
+    }
+  }
+  return inside;
+}
+
 }  // namespace tactics

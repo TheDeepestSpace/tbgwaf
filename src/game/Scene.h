@@ -189,4 +189,13 @@ void ApplySpawnHints(Scene* scene);
 // indices are unchanged. For sight lines and FOV only: they never collide.
 std::vector<Obstacle> SightObstacles(const Scene& scene);
 
+// For each entry of Scene::buildings: 1 when the building is enterable and at
+// least one of `points` lies inside it (within the footprint, from the floor
+// up to the underside of the roof slab; the roof top is outside). The camera
+// see-through view uses this to decide when a faded building shows its
+// interior (a figure or planned movement is in there) or just a plain
+// translucent shell.
+std::vector<char> BuildingsContainingPoints(const Scene& scene,
+                                            const std::vector<glm::vec3>& points);
+
 }  // namespace tactics

@@ -2723,12 +2723,10 @@ std::vector<glm::vec3> CollectSeeThroughProbes(const GameLogic& game, Team team,
   // ground/deck they sit on never reads as occlusion.
   constexpr float kSurfaceLift = 0.3f;
   constexpr float kGhostLift = 0.9f;  // Mid-torso of a ghost/figure wireframe.
-  std::vector<glm::vec3> probes;
-  for (const Unit& unit : game.GetScene().units) {
-    if (!unit.alive || (!allTeams && unit.team != team)) continue;
-    probes.push_back(unit.EyePosition());
-    probes.push_back(unit.position + glm::vec3(0.0f, kSurfaceLift, 0.0f));
-  }
+  // Own figures (dead included) and dead opponents in the squad FOV.
+  const tactics::Scene& scene = game.GetScene();
+  std::vector<glm::vec3> probes = tactics::FigureSeeThroughProbes(
+      team, allTeams, fogActive, scene.units, scene.obstacles, scene.walkSurfaces, scene.ground);
   const auto addPolyline = [&](const std::vector<glm::vec3>& path) {
     for (size_t i = 0; i < path.size(); ++i) {
       probes.push_back(path[i] + glm::vec3(0.0f, kSurfaceLift, 0.0f));

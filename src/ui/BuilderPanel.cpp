@@ -7,6 +7,7 @@
 #include <cfloat>
 #include <cstdio>
 #include <cstring>
+#include <random>
 
 #include "game/Types.h"
 
@@ -63,6 +64,27 @@ bool FigureSpotFree(const BuilderScene& bs, float x, float z, int ignoreIndex) {
 bool FootprintsOverlap(const BuilderBox& a, const BuilderBox& b) {
   return std::fabs(a.cx - b.cx) < a.hx + b.hx - 1e-3f &&
          std::fabs(a.cz - b.cz) < a.hz + b.hz - 1e-3f;
+}
+
+// Is the rectangle (cx, cz, hx, hz), with a building's sidewalk/stoop margin,
+// clear of every cube, other generated building and figure?
+bool BuildingSpotFree(const BuilderScene& bs, float cx, float cz, float hx, float hz,
+                      int ignoreIndex) {
+  const float m = kGeneratedBuildingMargin;
+  for (const BuilderBox& o : bs.boxes) {
+    if (std::fabs(cx - o.cx) < hx + o.hx + m && std::fabs(cz - o.cz) < hz + o.hz + m) return false;
+  }
+  for (int i = 0; i < static_cast<int>(bs.buildings.size()); ++i) {
+    if (i == ignoreIndex) continue;
+    const BuilderBuilding& o = bs.buildings[i];
+    if (std::fabs(cx - o.cx) < hx + o.hx + 2.0f * m && std::fabs(cz - o.cz) < hz + o.hz + 2.0f * m) {
+      return false;
+    }
+  }
+  for (const BuilderFigure& f : bs.figures) {
+    if (std::fabs(f.x - cx) < hx + m && std::fabs(f.z - cz) < hz + m) return false;
+  }
+  return true;
 }
 
 std::string FigureLabel(const BuilderScene& bs, int index) {
@@ -247,6 +269,30 @@ int AddBuilderBox(BuilderScene* bs) {
   return static_cast<int>(bs->boxes.size()) - 1;
 }
 
+int AddRandomBuilderBuilding(BuilderScene* bs, uint32_t seed) {
+  std::mt19937 rng(seed);
+  auto uni = [&](float lo, float hi) { return std::uniform_real_distribution<float>(lo, hi)(rng); };
+  const float limit = PlayableHalfExtent(*bs);
+  BuilderBuilding building;
+  building.seed = static_cast<int>(rng() & 0x7fffffffu);
+  building.hx = uni(5.0f, 8.0f);
+  building.hz = uni(5.0f, 8.0f);
+  // The footprint plus the sidewalk ring and stoops must fit inside the map.
+  const float reach = kGeneratedBuildingMargin;
+  const float maxX = limit - building.hx - reach, maxZ = limit - building.hz - reach;
+  if (maxX < 0.0f || maxZ < 0.0f) return -1;
+  for (int attempt = 0; attempt < 200; ++attempt) {
+    const float cx = uni(-maxX, maxX), cz = uni(-maxZ, maxZ);
+    if (BuildingSpotFree(*bs, cx, cz, building.hx, building.hz, -1)) {
+      building.cx = cx;
+      building.cz = cz;
+      bs->buildings.push_back(building);
+      return static_cast<int>(bs->buildings.size()) - 1;
+    }
+  }
+  return -1;
+}
+
 int AddBuilderFigure(BuilderScene* bs, Team team) {
   const float limit = PlayableHalfExtent(*bs);
   const float side = team == Team::Blue ? -1.0f : 1.0f;
@@ -280,6 +326,7 @@ BuilderEditorActions DrawBuilderEditor(BuilderScene* bs, BuilderEditorState* sta
                                        int windowWidth, int windowHeight) {
   BuilderEditorActions actions;
   if (state->selectedBox >= static_cast<int>(bs->boxes.size())) state->selectedBox = -1;
+  if (state->selectedBuilding >= static_cast<int>(bs->buildings.size())) state->selectedBuilding = -1;
   if (state->selectedFigure >= static_cast<int>(bs->figures.size())) state->selectedFigure = -1;
 
   const float panelWidth = BuilderPanelWidth(windowWidth);
@@ -300,6 +347,10 @@ BuilderEditorActions DrawBuilderEditor(BuilderScene* bs, BuilderEditorState* sta
     bs->roundLimit = std::clamp(bs->roundLimit, 0, 99);
   }
 
+  ImGui::SetNextItemWidth(120.0f);
+  ImGui::DragFloat("Map half-size", &bs->mapHalfExtent, 0.5f, kBuilderMinMapHalfExtent,
+                   kBuilderMaxMapHalfExtent, "%.0f", ImGuiSliderFlags_AlwaysClamp);
+
   // --- Cubes ---
   ImGui::SeparatorText("Cubes");
   if (ImGui::Button("Add Cube")) {
@@ -315,7 +366,7 @@ BuilderEditorActions DrawBuilderEditor(BuilderScene* bs, BuilderEditorState* sta
                     box.cx, box.cz, 2.0f * box.hx, 2.0f * box.hz, box.height, box.y, i);
       if (ImGui::Selectable(label, state->selectedBox == i)) {
         state->selectedBox = i;
-        state->selectedFigure = -1;
+        state->selectedFigure = state->selectedBuilding = -1;
       }
     }
     ImGui::EndListBox();
@@ -344,6 +395,51 @@ BuilderEditorActions DrawBuilderEditor(BuilderScene* bs, BuilderEditorState* sta
     }
   }
 
+  // --- Buildings ---
+  ImGui::SeparatorText("Buildings");
+  if (ImGui::Button("Add Random Building")) {
+    static uint32_t counter = std::random_device{}();
+    const int index = AddRandomBuilderBuilding(bs, counter++);
+    if (index >= 0) {
+      state->selectedBuilding = index;
+      state->selectedBox = state->selectedFigure = -1;
+    } else {
+      state->buildingStatus = "No free spot: enlarge the map or clear space.";
+    }
+  }
+  if (!state->buildingStatus.empty()) ImGui::TextWrapped("%s", state->buildingStatus.c_str());
+  if (ImGui::BeginListBox("##buildings", ImVec2(-1.0f, 3.0f * ImGui::GetTextLineHeightWithSpacing()))) {
+    for (int i = 0; i < static_cast<int>(bs->buildings.size()); ++i) {
+      const BuilderBuilding& b = bs->buildings[i];
+      char label[96];
+      std::snprintf(label, sizeof label, "Building %d  (%.1f, %.1f)  %.1f x %.1f  seed %d##building%d",
+                    i + 1, b.cx, b.cz, 2.0f * b.hx, 2.0f * b.hz, b.seed, i);
+      if (ImGui::Selectable(label, state->selectedBuilding == i)) {
+        state->selectedBuilding = i;
+        state->selectedBox = state->selectedFigure = -1;
+      }
+    }
+    ImGui::EndListBox();
+  }
+  if (state->selectedBuilding >= 0) {
+    BuilderBuilding& b = bs->buildings[state->selectedBuilding];
+    const float limit = bs->mapHalfExtent;
+    ImGui::PushItemWidth(-110.0f);
+    ImGui::InputInt("Seed", &b.seed);
+    b.seed = std::max(b.seed, 0);
+    ImGui::DragFloat("Center X", &b.cx, 0.05f, -limit, limit, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::DragFloat("Center Z", &b.cz, 0.05f, -limit, limit, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::DragFloat("Half size X", &b.hx, 0.05f, kGeneratedBuildingMinHalfExtent, FLT_MAX, "%.2f",
+                     ImGuiSliderFlags_AlwaysClamp);
+    ImGui::DragFloat("Half size Z", &b.hz, 0.05f, kGeneratedBuildingMinHalfExtent, FLT_MAX, "%.2f",
+                     ImGuiSliderFlags_AlwaysClamp);
+    ImGui::PopItemWidth();
+    if (ImGui::Button("Delete Building")) {
+      bs->buildings.erase(bs->buildings.begin() + state->selectedBuilding);
+      state->selectedBuilding = -1;
+    }
+  }
+
   // --- Figures ---
   ImGui::SeparatorText("Figures");
   if (ImGui::Button("Add Blue Figure")) {
@@ -364,7 +460,7 @@ BuilderEditorActions DrawBuilderEditor(BuilderScene* bs, BuilderEditorState* sta
       ImGui::PushStyleColor(ImGuiCol_Text, TeamColor(figure.team));
       if (ImGui::Selectable(label.c_str(), state->selectedFigure == i)) {
         state->selectedFigure = i;
-        state->selectedBox = -1;
+        state->selectedBox = state->selectedBuilding = -1;
       }
       ImGui::PopStyleColor();
     }

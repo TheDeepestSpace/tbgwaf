@@ -163,7 +163,15 @@ ScenarioAction ParseAction(const YAML::Node& node) {
   action.actor = node["actor"].as<int>();
   if (kind == "move") {
     action.kind = ScenarioAction::Kind::Move;
-    action.destination = ParseVec3(node["destination"], "script[].destination");
+    if (node["ray_from"] || node["ray_dir"]) {
+      if (node["destination"]) {
+        throw std::runtime_error("script 'move' cannot mix 'destination' with 'ray_from'/'ray_dir'");
+      }
+      action.moveRayFrom = ParseVec3(node["ray_from"], "script[].ray_from");
+      action.moveRayDir = ParseVec3(node["ray_dir"], "script[].ray_dir");
+    } else {
+      action.destination = ParseVec3(node["destination"], "script[].destination");
+    }
     if (const YAML::Node waypoints = node["waypoints"]) {
       if (!waypoints.IsSequence()) {
         throw std::runtime_error("script[].waypoints must be a list of [x, y, z]");
@@ -453,13 +461,31 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
           return Fail("waypoint " + ToString(waypoint) + " was rejected (no path, or beyond one round's reach of the previous leg)");
         }
       }
-      NotifyClick(actorTeam, action.destination);
-      game.ClickGround(action.destination, actorTeam);
+      glm::vec3 destination = action.destination;
+      if (action.moveRayFrom) {
+        // The camera-ray form of the destination click: resolve through the
+        // same frontier-aware pick the interactive hover/click uses.
+        const std::optional<glm::vec3> resolved =
+            game.ResolveMoveRay(*action.moveRayFrom, *action.moveRayDir);
+        if (!resolved) {
+          if (action.expectUnreachable) {
+            NotifyMenuClick(actorTeam, "Cancel");
+            game.CancelAction();
+            game.CancelAction();
+            return true;
+          }
+          return Fail("move ray from " + ToString(*action.moveRayFrom) +
+                      " hit no walkable surface");
+        }
+        destination = *resolved;
+      }
+      NotifyClick(actorTeam, destination);
+      game.ClickGround(destination, actorTeam);
       if (action.expectUnreachable) {
         // Walk and zipline plans alike must have been rejected: nothing planned.
         if (game.Mode() != InputMode::AwaitingMoveDestination ||
             game.FindUnit(action.actor)->plan.type != PlannedActionType::None) {
-          return Fail("destination " + ToString(action.destination) +
+          return Fail("destination " + ToString(destination) +
                       " was expected to be unreachable, but a move was planned");
         }
         NotifyMenuClick(actorTeam, "Cancel");
@@ -470,7 +496,7 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
       NotifyMenuClick(actorTeam, "Done");
       game.FinishMovePlan();
       if (game.Mode() != InputMode::AwaitingSelection) {
-        return Fail("has no path to destination " + ToString(action.destination) +
+        return Fail("has no path to destination " + ToString(destination) +
                     " (unreachable, or beyond the mover's round move budget)");
       }
       if (action.finalFacingDegrees) {
@@ -774,6 +800,7 @@ Scenario LoadScenarioFromFile(const std::string& path) {
     if (render["thermal_black_hot"]) {
       scenario.thermalBlackHot = render["thermal_black_hot"].as<bool>();
     }
+    if (render["npr"]) scenario.npr = render["npr"].as<bool>();
   }
 
   if (const YAML::Node scriptNode = root["script"]) {

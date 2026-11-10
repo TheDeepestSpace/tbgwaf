@@ -492,6 +492,19 @@ class GameLogic {
   // origin of the next leg.
   glm::vec3 MoveChainEnd() const;
   void HoverGround(const glm::vec3& point, Team byTeam);
+  // Camera-ray form of the move hover/click: resolves the ray to the
+  // walkable surface the move selector should land on. While a move
+  // frontier is up, surfaces the mover cannot stop on this leg are
+  // transparent to the ray -- an unreachable upper floor between the camera
+  // and the frontier, and any surface whose layer is not the one the
+  // frontier priced for that cell -- so the selector falls through to the
+  // reachable floor the frontier is actually drawn on instead of parking on
+  // a storey the figure cannot reach. When the ray crosses the frontier
+  // nowhere (hovering genuinely out of range), the nearest walkable hit is
+  // returned unchanged, so the invalid-destination feedback stays where the
+  // player points. nullopt when the ray hits no walkable surface at all.
+  std::optional<glm::vec3> ResolveMoveRay(const glm::vec3& origin,
+                                          const glm::vec3& direction) const;
 
   // Advances the executing round (Mode() == InputMode::Executing) by
   // `dtSeconds`: every in-flight planned move on both teams advances along

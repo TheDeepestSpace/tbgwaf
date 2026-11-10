@@ -166,6 +166,79 @@ void CheckRenderer() {
     options.npr = false;
   }
 
+  // Enterable buildings fade to a plain translucent solid while they merely
+  // block the view; a figure inside brings the interior back.
+  {
+    const glm::vec3 camPos = camera.Position();
+    const glm::vec3 away = glm::normalize(glm::vec3(-camPos.x, 0.0f, -camPos.z));
+    const auto hollowScene = [&](bool enterable, bool figureInside) {
+      tactics::Scene s;
+      s.mapHalfExtent = 10.0f;
+      tactics::Building record;
+      record.enterable = enterable;
+      record.floorCount = 1;
+      record.groundFloorHeight = 4.0f;
+      record.floors = {{0.0f, 4.0f}};
+      record.obstacle = 0;
+      s.buildings.push_back(record);
+      const auto add = [&](glm::vec3 lo, glm::vec3 hi) {
+        tactics::Obstacle o;
+        o.bounds = {lo, hi};
+        o.footprint = {{lo.x, lo.z}, {hi.x, lo.z}, {hi.x, hi.z}, {lo.x, hi.z}};
+        o.building = 0;
+        s.obstacles.push_back(o);
+      };
+      if (enterable) {
+        add(glm::vec3(-2, 3.7f, -2), glm::vec3(2, 4, 2));  // Roof slab (index 0).
+        // Four walls, each with a doorway-sized gap (and lintel) mid-way.
+        add(glm::vec3(-2, 0, -2), glm::vec3(-0.5f, 3.7f, -1.8f));
+        add(glm::vec3(0.5f, 0, -2), glm::vec3(2, 3.7f, -1.8f));
+        add(glm::vec3(-0.5f, 2.2f, -2), glm::vec3(0.5f, 3.7f, -1.8f));
+        add(glm::vec3(-2, 0, 1.8f), glm::vec3(-0.5f, 3.7f, 2));
+        add(glm::vec3(0.5f, 0, 1.8f), glm::vec3(2, 3.7f, 2));
+        add(glm::vec3(-0.5f, 2.2f, 1.8f), glm::vec3(0.5f, 3.7f, 2));
+        add(glm::vec3(-2, 0, -1.8f), glm::vec3(-1.8f, 3.7f, -0.5f));
+        add(glm::vec3(-2, 0, 0.5f), glm::vec3(-1.8f, 3.7f, 1.8f));
+        add(glm::vec3(-1.8f, 2.2f, -0.5f), glm::vec3(-2, 3.7f, 0.5f));
+        add(glm::vec3(1.8f, 0, -1.8f), glm::vec3(2, 3.7f, -0.5f));
+        add(glm::vec3(1.8f, 0, 0.5f), glm::vec3(2, 3.7f, 1.8f));
+        add(glm::vec3(1.8f, 2.2f, -0.5f), glm::vec3(2, 3.7f, 0.5f));
+      } else {
+        add(glm::vec3(-2, 0, -2), glm::vec3(2, 4, 2));
+      }
+      tactics::Unit friendly;
+      friendly.id = 3;
+      friendly.team = tactics::Team::Blue;
+      friendly.position = figureInside ? glm::vec3(0.0f) : away * 3.0f;
+      s.units.push_back(friendly);
+      return s;
+    };
+    options.disableShadows = true;
+    options.npr = false;
+    const auto renderScene = [&](const tactics::Scene& s) {
+      tactics::GameLogic g(s);
+      renderer.RenderPane(g, tactics::Team::Blue, false, {}, camera, x, y, width, height, {}, fbo,
+                          options);
+      return Capture(x, y, width, height);
+    };
+    // A solid block and a hollow building seen from outside fade identically:
+    // no interior, no window/door cuts, just the translucent footprint prism.
+    const auto shell = renderScene(hollowScene(true, false));
+    const auto solid = renderScene(hollowScene(false, false));
+    Dump("shell", shell, width, height);
+    Require(shell == solid, "Unengaged enterable building did not fade to a plain shell");
+    options.disableOcclusionFade = true;
+    Require(renderScene(hollowScene(true, false)) != shell, "Shell building did not fade");
+    options.disableOcclusionFade = false;
+    // The figure inside is under a hollow building's roof: not hidden from the
+    // camera by the walls alone? It is, from above -- the roof blocks it, so
+    // the building fades and, being occupied, keeps its interior.
+    const auto interior = renderScene(hollowScene(true, true));
+    Dump("interior", interior, width, height);
+    Require(interior != renderScene(hollowScene(false, true)),
+            "Occupied enterable building lost its interior view");
+  }
+
   // NPR on top of the AO (thermal) view: outlines only, base view unchanged
   // when they are off.
   options.thermal = true;

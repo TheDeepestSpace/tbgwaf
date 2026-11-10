@@ -266,7 +266,9 @@ void main() {
 )";
 
 // Outline-only pass for see-through geometry: only pixels the faded redraw
-// tagged (normal alpha 0.75) get an edge, blended as dark ink.
+// tagged get an edge, blended as dark ink at that layer's opacity (normal
+// alpha 0.75 = the shell at uOpacity, 0.5 = a faded building's floors and
+// stairs at uInteriorOpacity).
 const char* kFadedOutline = R"(#version 300 es
 precision highp float;
 precision highp sampler2D;
@@ -278,7 +280,8 @@ uniform vec2 uPaneSize;
 uniform vec2 uUvScale;
 uniform float uThickness;
 uniform float uOutline;
-uniform float uOpacity;  // Opacity of the see-through geometry.
+uniform float uOpacity;          // Opacity of the see-through shell.
+uniform float uInteriorOpacity;  // Opacity of a faded building's floors and stairs.
 out vec4 FragColor;
 
 vec3 WorldPosition(vec2 uv, float depth) {
@@ -290,10 +293,14 @@ vec3 WorldPosition(vec2 uv, float depth) {
 void main() {
   float depth = texture(uDepth, vUV * uUvScale).r;
   vec4 normalSample = texture(uNormal, vUV * uUvScale);
-  if (depth >= 1.0 || abs(normalSample.a - 0.75) > 0.1) discard;
+  if (depth >= 1.0) discard;
+  float opacity;
+  if (abs(normalSample.a - 0.75) < 0.1) opacity = uOpacity;
+  else if (abs(normalSample.a - 0.5) < 0.1) opacity = uInteriorOpacity;
+  else discard;
   vec3 p = WorldPosition(vUV, depth);
   vec3 n = normalize(normalSample.xyz * 2.0 - 1.0);
-  float amount = OutlineEdge(p, n) * uOutline * uOpacity;
+  float amount = OutlineEdge(p, n) * uOutline * opacity;
   FragColor = vec4(vec3(0.0), clamp(amount, 0.0, 1.0) * 0.88);
 }
 )";
@@ -346,7 +353,9 @@ bool AmbientOcclusion::Begin(int width, int height, float background) {
     glActiveTexture(GL_TEXTURE0);
     Allocate(color_, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, allocWidth, allocHeight);
     Allocate(normal_, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, allocWidth, allocHeight);
-    Allocate(depth_, GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, allocWidth,
+    // Depth with stencil: the see-through re-draw (BeginFaded) stencil-caps
+    // a faded building's interior over its shell, as the colour pass does.
+    Allocate(depth_, GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, allocWidth,
              allocHeight);
     Allocate(occlusion_, GL_R8, GL_RED, GL_UNSIGNED_BYTE, allocWidth, allocHeight);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -356,7 +365,8 @@ bool AmbientOcclusion::Begin(int width, int height, float background) {
     glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo_);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_, 0);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, normal_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, depth_,
+                           0);
     const GLenum buffers[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     glDrawBuffers(2, buffers);
     complete = complete && glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
@@ -380,7 +390,7 @@ bool AmbientOcclusion::Begin(int width, int height, float background) {
   const GLfloat normal[] = {0.5f, 1.0f, 0.5f, 1.0f};
   glClearBufferfv(GL_COLOR, 0, color);
   glClearBufferfv(GL_COLOR, 1, normal);
-  glClear(GL_DEPTH_BUFFER_BIT);
+  glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
   return true;
 }
 
@@ -513,6 +523,7 @@ void AmbientOcclusion::BeginFaded() {
   glScissor(0, 0, width_, height_);
   glDisable(GL_BLEND);
   glDisable(GL_STENCIL_TEST);
+  glClear(GL_STENCIL_BUFFER_BIT);  // The caller's own stencil cap starts clean.
   glEnable(GL_DEPTH_TEST);
   glDepthMask(GL_TRUE);
   glDepthFunc(GL_LESS);
@@ -521,7 +532,8 @@ void AmbientOcclusion::BeginFaded() {
 void AmbientOcclusion::CompositeFadedOutlines(GLuint target, int x, int y,
                                               const glm::mat4& view,
                                               const glm::mat4& projection,
-                                              const NprSettings& settings, float opacity) {
+                                              const NprSettings& settings, float opacity,
+                                              float interiorOpacity) {
   const glm::mat4 inverse = glm::inverse(projection * view);
   const glm::vec2 paneSize(static_cast<float>(width_), static_cast<float>(height_));
   const glm::vec2 uvScale(paneSize.x / static_cast<float>(allocatedWidth_),
@@ -544,6 +556,7 @@ void AmbientOcclusion::CompositeFadedOutlines(GLuint target, int x, int y,
   fadedOutlineShader_.SetFloat("uThickness", std::max(settings.outlineThickness, 0.0f));
   fadedOutlineShader_.SetFloat("uOutline", std::clamp(settings.outlineStrength, 0.0f, 1.0f));
   fadedOutlineShader_.SetFloat("uOpacity", opacity);
+  fadedOutlineShader_.SetFloat("uInteriorOpacity", interiorOpacity);
   fadedOutlineShader_.SetFloat("uPixelScale", 2.0f / std::max(projection[1][1] * paneSize.y, 1e-4f));
   fadedOutlineShader_.SetFloat("uDetailSize", std::max(settings.detailSize, 0.0f));
   glBindVertexArray(vao_);

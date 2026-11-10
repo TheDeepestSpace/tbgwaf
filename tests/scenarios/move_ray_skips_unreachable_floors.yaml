@@ -1,0 +1,34 @@
+name: move_ray_skips_unreachable_floors
+description: >
+  Frontier-aware move selection: Blue's figure stands on the ground floor of
+  the three-storey building from stairs_only_way_up_building (seed 7), and
+  the camera looks straight down into it, so the destination ray crosses the
+  second- and first-floor slabs before the ground floor the move frontier is
+  drawn on. The storeys the figure cannot reach this leg must be transparent
+  to the selector: the ray resolves through both slabs to the ground-floor
+  point under the cursor, and the committed move lands there at y = 0. (The
+  old nearest-surface pick parked the selector on the top slab, whose storey
+  is out of one leg's reach, and the click was rejected until the player
+  rotated the camera for a direct line of sight.)
+
+map:
+  generate: {seed: 7, type: urban, elevated: false, features: {terrain: off}}
+
+units:
+  - {id: 0, team: blue, position: [-31.9, 0, -6.7], facing_degrees: 0}
+  - {id: 1, team: red, position: [40, 0, -30], facing_degrees: 180}
+
+camera:
+  target: [-32.3, -8.1]
+  zoom: -145
+
+script:
+  - action: move
+    actor: 0
+    ray_from: [-30, 60, -6]
+    ray_dir: [0, -1, 0]
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [-30, 0, -6], tolerance: 0.1}
+  - assert: {round: 2}

@@ -207,6 +207,7 @@ class SceneRenderer {
     uint64_t geometryKey = 0;
     std::vector<glm::vec3> probes;
     std::vector<char> fadeObstacle, fadeSurface, fadeMassing, fadeBuilding;
+    std::vector<char> directSurface;  // Surfaces crossing a probe ray themselves.
     bool anyFaded = false;
   };
   FadeCache fadeCache_[2];

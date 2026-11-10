@@ -1,0 +1,38 @@
+name: timeline_replay_start_after_game_over
+description: >
+  Turn timeline (issue #284): after the game is over, scrubbing the replay back to the Start
+  tick shows every figure at its opening position -- including the opponent, whom the viewing
+  team never saw (blue faces away from red, so red starts outside blue's cone). Playing the
+  replay then walks through the same kill, and the opponent must not pop in only once playback
+  starts. (Networked clients rebuild this history from the server's full-match reveal; that
+  path is covered by TestRevealHistoryShowsBothTeams in tests/server_tests.cpp.)
+
+shot_rolls: [0.0]
+
+units:
+  - {id: 0, team: blue, position: [-5, 0, 0], facing_degrees: 180}
+  - {id: 1, team: red, position: [5, 0, 0], facing_degrees: 0}
+
+script:
+  - assert: {unit: 1, visible_to: blue, visible: false}
+
+  # ---- Blue turns around and kills red: game over. ----
+  - action: shoot
+    actor: 0
+    at: [5, 0.9, 0]
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 1, alive: false}
+  - assert: {winner: blue}
+
+  # ---- Back to the start in replay: both figures are in place, red alive. ----
+  - action: timeline_seek
+    tick: 0
+  - assert: {round: 1}
+  - assert: {unit: 0, position: [-5, 0, 0]}
+  - assert: {unit: 1, position: [5, 0, 0], alive: true}
+  - action: timeline_play
+    seconds: 10
+    comment: Playing through to the end lands on the kill.
+  - assert: {unit: 1, alive: false}

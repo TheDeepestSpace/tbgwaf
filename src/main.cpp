@@ -391,14 +391,14 @@ bool IntersectTerrain(const gfx::Ray& ray, const tactics::HeightField& ground, g
   return false;
 }
 
-// Stage-C climbing: a ground/move click can land either on the ground
-// surface (the y=0 plane, or the sampled terrain when the scene has one) or
-// on top of a climbable obstacle (a crate's top face). Pick whichever the
-// ray actually hits nearer the camera -- matches how the scene is rendered
-// (the ground is drawn everywhere but obstacles occlude it visually).
+// A ground/move click can land either on the ground surface (the y=0 plane,
+// or the sampled terrain when the scene has one) or on a walk surface (a
+// crate top, deck, ramp, stair or building floor). Pick whichever the ray
+// actually hits nearer the camera -- matches how the scene is rendered (the
+// ground is drawn everywhere but obstacles occlude it visually).
 //
-// Any walkable surface counts, not just crates: climbable obstacles and the
-// scene's flat walkable slabs (sidewalks) are all picked by their top face.
+// Any walkable surface counts: the scene's flat walkable slabs (sidewalks)
+// are picked by their top face, walk surfaces by their plane.
 bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const tactics::Scene& scene, glm::vec3* outPoint) {
   bool found = false;
   float bestT = std::numeric_limits<float>::infinity();
@@ -431,9 +431,6 @@ bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const tactics::Scene& scene,
       bestPoint = hit;
     }
   };
-  for (const auto& obstacle : scene.obstacles) {
-    if (obstacle.climbable) considerSurface(obstacle.bounds);
-  }
   for (const tactics::AABB& slab : scene.sidewalks) considerSurface(slab);
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
     if (surface.vertices.size() < 3) continue;
@@ -475,6 +472,10 @@ void FitCameraToBuilderScene(gfx::OrbitCamera* camera, const tactics::BuilderSce
   float extent = 6.0f;
   for (const tactics::BuilderBox& box : bs.boxes) {
     extent = std::max({extent, std::fabs(box.cx) + box.hx + 2.0f, std::fabs(box.cz) + box.hz + 2.0f});
+  }
+  for (const tactics::BuilderBuilding& building : bs.buildings) {
+    extent = std::max({extent, std::fabs(building.cx) + building.hx + 4.0f,
+                       std::fabs(building.cz) + building.hz + 4.0f});
   }
   for (const tactics::BuilderFigure& figure : bs.figures) {
     extent = std::max({extent, std::fabs(figure.x) + 2.0f, std::fabs(figure.z) + 2.0f});
@@ -812,7 +813,10 @@ int main() {
   // bus, so the Blue-authority/Red-mirror protocol is untouched.
   tactics::TurnTimeline timeline;
   timeline.Reset(game);
-  tactics::TimelinePlayback timelinePlayback;
+  // Replay is per player: each pane has its own controller, so one player
+  // can review the match while the other keeps planning (view-only; never
+  // posts to the bus).
+  std::array<tactics::TimelinePlayback, kMaxPanes> timelinePlayback;
 
   // Builder: the player-built scenes (in memory for the session; the first
   // card is a sample), each card's thumbnail texture and whether it needs a
@@ -1053,9 +1057,7 @@ int main() {
   // Default look: AO view (black hot) with NPR outlines layered on top.
   debugOptions.thermal = true;
   debugOptions.npr = true;
-  debugOptions.nprSettings.outlineThickness = 0.8f;
-  debugOptions.nprSettings.outlineStrength = 0.46f;
-  debugOptions.nprSettings.detailSize = 0.02f;
+  debugOptions.nprSettings = gfx::DefaultAppNprSettings();
   bool showFps = true;
   float smoothedFps = 0.0f;
   float frameMs = 0.0f;
@@ -1078,7 +1080,7 @@ int main() {
                         tactics::SerializeBuilderScene(bs));
     game.SetInputRecorder(&reproRecorder);
     timeline.Reset(game);
-    timelinePlayback.Reset();
+    for (auto& playback : timelinePlayback) playback.Reset();
     navMeshDebugBuilt = false;
     showNavMeshDebug = false;
     for (auto& camera : cameras) FitCameraToBuilderScene(&camera, bs);
@@ -1091,7 +1093,7 @@ int main() {
   auto stopBuilderGame = [&]() {
     game.SetInputRecorder(nullptr);
     builderGameActive = false;
-    timelinePlayback.Reset();
+    for (auto& playback : timelinePlayback) playback.Reset();
   };
   // Leaving the Builder for the Game Mode menu: drop the builder game so it
   // is never published, and (web) rejoin the peer's match -- ask it for its
@@ -1100,7 +1102,7 @@ int main() {
     stopBuilderGame();
     game.Reset(makeMap());
     timeline.Reset(game);
-    timelinePlayback.Reset();
+    for (auto& playback : timelinePlayback) playback.Reset();
     navMeshDebugBuilt = false;
     showNavMeshDebug = false;
     lastSentState.clear();
@@ -1323,7 +1325,7 @@ int main() {
         jevErrorHold = false;
         lastAutoCommittedRound = -1;
         timeline.Reset(game);
-        timelinePlayback.Reset();
+        for (auto& playback : timelinePlayback) playback.Reset();
         for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
       }
       // A room picked in the menu that the server refused (unknown / full):
@@ -1353,7 +1355,7 @@ int main() {
           if (isSimulator && game.Mode() == InputMode::GameOver) {
             game.Reset(makeMap());
             timeline.Reset(game);
-            timelinePlayback.Reset();
+            for (auto& playback : timelinePlayback) playback.Reset();
             navMeshDebugBuilt = false;
             showNavMeshDebug = false;
           }
@@ -1461,7 +1463,7 @@ int main() {
           builderDragRotate = (SDL_GetModState() & KMOD_SHIFT) != 0;
           if (builderDragFigure >= 0) {
             builderEditor.selectedFigure = builderDragFigure;
-            builderEditor.selectedBox = -1;
+            builderEditor.selectedBox = builderEditor.selectedBuilding = -1;
           } else {
             // No figure under the cursor: a cube is dragged on a plane at its
             // top, keeping the grab offset.
@@ -1478,12 +1480,12 @@ int main() {
                 builderDragBoxGrab = glm::vec2(0.0f);
               }
               builderEditor.selectedBox = builderDragBox;
-              builderEditor.selectedFigure = -1;
+              builderEditor.selectedFigure = builderEditor.selectedBuilding = -1;
             }
           }
         }
         if (screen == tbgwaf_flow::State::Gameplay && isPlanningMode(game.Mode()) &&
-            !awaitingPeerSync && !timelinePlayback.Active() &&
+            !awaitingPeerSync && !timelinePlayback[leftDragPane].Active() &&
             !ImGui::GetIO().WantCaptureMouse) {
           const PaneRect& grabRect = paneRects[leftDragPane];
           const Team grabTeam = paneTeam(leftDragPane);
@@ -1628,6 +1630,7 @@ int main() {
       if (leftClickPending && !uiWantsMouse && leftClickX < editorRect.x + editorRect.width) {
         // Click: select the figure or cube under the cursor (nothing = clear).
         const gfx::Ray ray = editorRay(leftClickX, leftClickY);
+        builderEditor.selectedBuilding = -1;
         builderEditor.selectedFigure = PickBuilderFigure(ray, bs);
         builderEditor.selectedBox =
             builderEditor.selectedFigure >= 0 ? -1 : PickBuilderBox(ray, bs);
@@ -1796,7 +1799,7 @@ int main() {
           else mapType = "urban-auto-x1";
           game.Reset(makeMap());
           timeline.Reset(game);
-          timelinePlayback.Reset();
+          for (auto& playback : timelinePlayback) playback.Reset();
           for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
         }
         if (flowEvent) screen = tbgwaf_flow::Next(screen, *flowEvent);
@@ -1943,12 +1946,28 @@ int main() {
 
     // Turn timeline (issue #143): record the local game's history and
     // advance any replay in progress. While a replay is viewed, the panes
-    // render `displayGame` (the replay instance) and game-action input is
+    // render their own replay instance (per pane) and game-action input is
     // inert; the live game keeps simulating/syncing untouched underneath.
-    if (timeline.Observe(game, dt)) timelinePlayback.Reset();
-    timelinePlayback.Update(timeline, dt);
-    const bool replayActive = timelinePlayback.Active();
-    const GameLogic& displayGame = replayActive ? timelinePlayback.Game() : game;
+    if (timeline.Observe(game, dt)) {
+      for (auto& playback : timelinePlayback) playback.Reset();
+    }
+    // Online, the recorded history is this player's fogged view. Once the
+    // match is over the server sends the full one; swap it in so the replay
+    // shows both teams (issue #284).
+    if (remoteMode && remote->hasReveal() && !remote->playingBack() &&
+        game.Mode() == InputMode::GameOver && timeline.FrameCount() > 0) {
+      if (auto revealed = remote->TakeRevealedHistory(timeline.FrameSnapshot(0))) {
+        timeline.ReplaceHistory(game, std::move(revealed->frames), std::move(revealed->ticks));
+        for (auto& playback : timelinePlayback) playback.Reset();
+      }
+    }
+    std::array<bool, kMaxPanes> replayActive{};
+    std::array<const GameLogic*, kMaxPanes> paneGame{};
+    for (int pane = 0; pane < paneCount; ++pane) {
+      timelinePlayback[pane].Update(timeline, dt);
+      replayActive[pane] = timelinePlayback[pane].Active();
+      paneGame[pane] = replayActive[pane] ? &timelinePlayback[pane].Game() : &game;
+    }
 
     // WEGO rounds: both teams plan simultaneously, so during the planning
     // phase *both* panes accept game-action input (unit selection,
@@ -1966,12 +1985,12 @@ int main() {
     // the opponent commits too: planning input must go inert, or edits would
     // silently diverge the mirror (the server refuses them).
     const bool remoteCommitLocked = remoteMode && remote->CommitLocked();
-    const bool planning = !replayActive && isPlanningMode(game.Mode()) && !awaitingPeerSync &&
+    const bool planning = isPlanningMode(game.Mode()) && !awaitingPeerSync &&
                           remotePlaying && !remoteCommitLocked;
     // The HUD reflects whatever state is on screen (replay or live); its
     // button presses are only applied to the live game when no replay is
     // active (replay is strictly view-only).
-    const bool hudPlanning = isPlanningMode(displayGame.Mode()) && !awaitingPeerSync &&
+    const bool hudPlanning = isPlanningMode(game.Mode()) && !awaitingPeerSync &&
                              remotePlaying && !remoteCommitLocked;
 #ifdef __EMSCRIPTEN__
     const bool humanPlanning = planning && !aiEnabled;
@@ -1989,8 +2008,12 @@ int main() {
 #endif
     // Builder hotseat: one screen plays both teams, so nothing is fogged and
     // both teams' FOV cones are drawn (the spectator view's rendering).
-    const bool fogActive =
-        !spectator && !builderHotseat && displayGame.Mode() != InputMode::GameOver;
+    // Once the live match is over (any mode), full information is revealed,
+    // replay included: both teams' movements and FOV (issue #284). Keyed on
+    // the live game so a replay scrubbed to an earlier moment stays revealed,
+    // while nothing leaks during play. Render-only.
+    const bool matchOver = game.Mode() == InputMode::GameOver;
+    const bool fogActive = !spectator && !builderHotseat && !matchOver;
     // The team whose plan the shared selection/preview overlays currently
     // belong to (only one figure is ever mid-selection at a time).
     std::optional<Team> selectedTeam;
@@ -2001,7 +2024,7 @@ int main() {
     std::array<TeamVisibility, kMaxPanes> paneVisibility;
     const Uint64 fovStart = SDL_GetPerformanceCounter();
     for (int pane = 0; pane < paneCount; ++pane) {
-      if (fogActive) paneVisibility[pane] = displayGame.ComputeVisibility(paneTeam(pane));
+      if (fogActive) paneVisibility[pane] = paneGame[pane]->ComputeVisibility(paneTeam(pane));
     }
     fovMs = static_cast<float>(SDL_GetPerformanceCounter() - fovStart) * 1000.0f /
             static_cast<float>(SDL_GetPerformanceFrequency());
@@ -2021,13 +2044,13 @@ int main() {
         netInfo.peerReady = remote->peerReady();
         netInfoPtr = &netInfo;
       }
-      const ui::HudActions hud = ui::DrawHud(displayGame, paneTeam(pane), hudHumanPlanning,
+      const ui::HudActions hud = ui::DrawHud(*paneGame[pane], paneTeam(pane), hudHumanPlanning && !replayActive[pane],
                                              paneRects[pane], windowHeight, cameras[pane],
                                              nullptr, pane == 0 ? &roundPanelBottom : nullptr,
                                              netInfoPtr);
       // Replay is view-only: while it is showing, HUD presses must not leak
       // into the live match (return to Live first).
-      if (!replayActive) {
+      if (!replayActive[pane]) {
         if (hud.newMatch && builderHotseat) {
           // Same scene, fresh recording.
           if (builderIndex >= 0 && builderIndex < static_cast<int>(builderScenes.size())) {
@@ -2039,7 +2062,7 @@ int main() {
           } else if (isSimulator) {
             game.Reset(makeMap());
             timeline.Reset(game);
-            timelinePlayback.Reset();
+            for (auto& playback : timelinePlayback) playback.Reset();
             navMeshDebugBuilt = false;
             showNavMeshDebug = false;
           } else {
@@ -2083,15 +2106,15 @@ int main() {
         }
       }
 
-      // Turn timeline strip (issue #143). Both panes drive the same shared
-      // playback, so scrubbing in either shows the replay in both (each
-      // through its own team's fog).
-      const ui::TimelineActions timelineUi = ui::DrawTimeline(
-          timeline, timelinePlayback, paneTeam(pane), paneRects[pane], windowHeight);
-      if (timelineUi.seekTick) timelinePlayback.SeekTick(timeline, game, *timelineUi.seekTick);
-      if (timelineUi.seekFrame) timelinePlayback.SeekFrame(timeline, game, *timelineUi.seekFrame);
-      if (timelineUi.togglePlay) timelinePlayback.TogglePlay(timeline, game);
-      if (timelineUi.live) timelinePlayback.Deactivate();
+      // Turn timeline strip (issue #143). Each pane drives its own playback:
+      // one player can replay while the other plans.
+      auto& playback = timelinePlayback[pane];
+      const ui::TimelineActions timelineUi =
+          ui::DrawTimeline(timeline, playback, paneTeam(pane), paneRects[pane], windowHeight);
+      if (timelineUi.seekTick) playback.SeekTick(timeline, game, *timelineUi.seekTick);
+      if (timelineUi.seekFrame) playback.SeekFrame(timeline, game, *timelineUi.seekFrame);
+      if (timelineUi.togglePlay) playback.TogglePlay(timeline, game);
+      if (timelineUi.live) playback.Deactivate();
     }
 
     // Pane divider. Both teams plan at once, so there's no "inactive side"
@@ -2132,12 +2155,13 @@ int main() {
 
     // --- Dispatch deferred input, now that WantCaptureMouse reflects the UI
     // actually built this frame. ---
-    if (escapePending && humanPlanning) game.CancelAction();
-    if (enterPending && humanPlanning) game.FinishMovePlan();
+    const int keyPane = PaneForX(mouseX, paneCount, windowWidth);
+    if (escapePending && humanPlanning && !replayActive[keyPane]) game.CancelAction();
+    if (enterPending && humanPlanning && !replayActive[keyPane]) game.FinishMovePlan();
 
     const bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse;
-    if (!uiWantsMouse && humanPlanning) {
-      const int hoverPane = PaneForX(mouseX, paneCount, windowWidth);
+    if (!uiWantsMouse && humanPlanning && !replayActive[keyPane]) {
+      const int hoverPane = keyPane;
       if (game.Mode() == InputMode::AwaitingShootTarget) {
         // The preview cone follows the cursor until an aim point is placed.
         const PaneRect& rect = paneRects[hoverPane];
@@ -2154,13 +2178,16 @@ int main() {
         const gfx::Ray hoverRay = cameras[hoverPane].ScreenPointToRay(
             static_cast<float>(mouseX - rect.x), static_cast<float>(mouseY),
             static_cast<float>(rect.width), static_cast<float>(windowHeight));
-        glm::vec3 hoverPoint;
-        if (IntersectGroundOrClimbTop(hoverRay, game.GetScene(), &hoverPoint)) {
-          hoveredGroundPoint = hoverPoint;
+        // Frontier-aware pick: surfaces the mover cannot stop on this leg
+        // (an unreachable upper floor between the camera and the frontier)
+        // are transparent, so the selector lands on the floor the frontier
+        // is actually drawn on instead of a storey out of reach.
+        if (const auto hoverPoint = game.ResolveMoveRay(hoverRay.origin, hoverRay.direction)) {
+          hoveredGroundPoint = *hoverPoint;
           hasHoveredGroundPoint = true;
           // Team-tagged: hovering over the *other* player's pane just clears
           // the preview instead of steering this pane's selected mover.
-          game.HoverGround(hoverPoint, paneTeam(hoverPane));
+          game.HoverGround(*hoverPoint, paneTeam(hoverPane));
         }
       }
       if (aimedUnitId >= 0 && leftDragPane >= 0 && leftDragDistance >= kClickDragThresholdPx) {
@@ -2182,7 +2209,7 @@ int main() {
           }
         }
       }
-      if (leftClickPending) {
+      if (leftClickPending && !replayActive[PaneForX(leftClickX, paneCount, windowWidth)]) {
         const int clickPane = PaneForX(leftClickX, paneCount, windowWidth);
         const PaneRect& rect = paneRects[clickPane];
         const gfx::Ray clickRay = cameras[clickPane].ScreenPointToRay(
@@ -2231,9 +2258,10 @@ int main() {
             }
           }
         } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
-          glm::vec3 point;
-          if (IntersectGroundOrClimbTop(clickRay, game.GetScene(), &point)) {
-            game.ClickGround(point, clickTeam);
+          // Same frontier-aware pick as the hover, so the click lands
+          // exactly where the selector ring showed it would.
+          if (const auto point = game.ResolveMoveRay(clickRay.origin, clickRay.direction)) {
+            game.ClickGround(*point, clickTeam);
           }
         }
       }
@@ -2300,11 +2328,11 @@ int main() {
       const PaneRect& rect = paneRects[pane];
       std::optional<glm::vec3> hover;
       // No hover marker over a replay: it belongs to live move planning.
-      if (hasHoveredGroundPoint && !replayActive) hover = hoveredGroundPoint;
-      gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(displayGame, paneTeam(pane), hover);
+      if (hasHoveredGroundPoint && !replayActive[pane]) hover = hoveredGroundPoint;
+      gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(*paneGame[pane], paneTeam(pane), hover);
       if (showNavMeshDebug) overlays.navMeshDebug = &navMeshDebug;
-      overlays.spectatorFov = spectator || builderHotseat;
-      renderer.RenderPane(displayGame, paneTeam(pane), fogActive, paneVisibility[pane],
+      overlays.spectatorFov = spectator || builderHotseat || matchOver;
+      renderer.RenderPane(*paneGame[pane], paneTeam(pane), fogActive, paneVisibility[pane],
                           cameras[pane], rect.x, 0, rect.width, windowHeight, overlays, 0,
                           debugOptions);
     }

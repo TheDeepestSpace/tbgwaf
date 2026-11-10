@@ -19,7 +19,6 @@ constexpr float kEps = 1e-4f;
 // standing on top doesn't have its center placed right at (or past) the
 // edge. Smaller than `kAgentRadius` so even a 1.2x1.2 crate keeps a usable
 // top surface.
-constexpr float kClimbTopInset = 0.15f;
 
 struct ZInterval {
   float lo, hi;
@@ -53,8 +52,11 @@ float TriArea2(glm::vec2 a, glm::vec2 b, glm::vec2 c) {
 // Simple stupid funnel algorithm: pulls a path from `start` to `goal` taut
 // through a sequence of portals, bending only at portal endpoints (i.e.
 // obstacle corners). Appends the corners and `goal` (not `start`) to `out`.
+// `outPortal` (optional) receives, per appended point, the portal it lies
+// on: 1-based index into `inner` for a corner, inner.size() + 1 for `goal`.
+// Indices never decrease along the path.
 void Funnel(glm::vec2 start, glm::vec2 goal, const std::vector<Portal>& inner,
-            std::vector<glm::vec2>* out) {
+            std::vector<glm::vec2>* out, std::vector<size_t>* outPortal = nullptr) {
   std::vector<Portal> portals;
   portals.push_back({start, start});
   portals.insert(portals.end(), inner.begin(), inner.end());
@@ -72,6 +74,7 @@ void Funnel(glm::vec2 start, glm::vec2 goal, const std::vector<Portal>& inner,
         rightIdx = i;
       } else {
         out->push_back(left);
+        if (outPortal) outPortal->push_back(leftIdx);
         apex = left;
         right = left;
         rightIdx = leftIdx;
@@ -85,6 +88,7 @@ void Funnel(glm::vec2 start, glm::vec2 goal, const std::vector<Portal>& inner,
         leftIdx = i;
       } else {
         out->push_back(right);
+        if (outPortal) outPortal->push_back(rightIdx);
         apex = right;
         left = right;
         leftIdx = rightIdx;
@@ -94,6 +98,18 @@ void Funnel(glm::vec2 start, glm::vec2 goal, const std::vector<Portal>& inner,
     }
   }
   out->push_back(goal);
+  if (outPortal) outPortal->push_back(portals.size() - 1);
+}
+
+// Parameter t in [0, 1] along a -> b where it crosses the line through the
+// portal p -> q. A segment running along the portal (parallel) reports
+// `fallback`: every point of it is on the seam, so any choice is on it.
+float PortalCrossingParam(glm::vec2 a, glm::vec2 b, glm::vec2 p, glm::vec2 q, float fallback) {
+  const glm::vec2 d = b - a, e = q - p;
+  const float denom = d.x * e.y - d.y * e.x;
+  if (std::fabs(denom) < 1e-9f) return fallback;
+  const glm::vec2 w = p - a;
+  return std::clamp((w.x * e.y - w.y * e.x) / denom, 0.0f, 1.0f);
 }
 
 // True if axis-aligned rectangle `cell` and `rect` share a border segment of
@@ -133,7 +149,7 @@ float ObstaclePad(const Obstacle& obstacle, float agentRadius) {
 void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, float agentRadius) {
   std::vector<Obstacle> typed;
   typed.reserve(obstacles.size());
-  for (const AABB& bounds : obstacles) typed.push_back(Obstacle{bounds, false});
+  for (const AABB& bounds : obstacles) typed.push_back(Obstacle{bounds});
   Build(typed, SquareRegion(mapHalfExtent), agentRadius, nullptr, nullptr);
 }
 
@@ -167,7 +183,42 @@ void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& 
     obstacles.push_back(obstacle);
   }
   ground_ = ground ? *ground : HeightField{};
-  walkSurfaces_ = walkSurfaces ? *walkSurfaces : std::vector<WalkSurface>{};
+  // Only the walk surfaces touching the window: a windowed build covers what
+  // one move can reach, and a surface wholly outside it (an upper floor
+  // across town) can neither be stood on nor shortcut a route that fits the
+  // budget. Links to dropped surfaces go with them. This keeps the all-pairs
+  // surface routing (see BuildSurfaceCaches) proportional to the window, not
+  // to every building interior on the map.
+  walkSurfaces_.clear();
+  if (walkSurfaces) {
+    std::vector<int> remap(walkSurfaces->size(), -1);
+    for (size_t i = 0; i < walkSurfaces->size(); ++i) {
+      const WalkSurface& surface = (*walkSurfaces)[i];
+      if (surface.vertices.empty()) continue;
+      float xMin = surface.vertices[0].x, xMax = xMin, zMin = surface.vertices[0].z, zMax = zMin;
+      for (const glm::vec3& v : surface.vertices) {
+        xMin = std::min(xMin, v.x);
+        xMax = std::max(xMax, v.x);
+        zMin = std::min(zMin, v.z);
+        zMax = std::max(zMax, v.z);
+      }
+      if (xMax < region.xMin - agentRadius || xMin > region.xMax + agentRadius ||
+          zMax < region.zMin - agentRadius || zMin > region.zMax + agentRadius) {
+        continue;
+      }
+      remap[i] = static_cast<int>(walkSurfaces_.size());
+      walkSurfaces_.push_back(surface);
+    }
+    for (WalkSurface& surface : walkSurfaces_) {
+      std::vector<int> kept;
+      for (int n : surface.neighbors) {
+        if (n >= 0 && static_cast<size_t>(n) < remap.size() && remap[n] >= 0) {
+          kept.push_back(remap[n]);
+        }
+      }
+      surface.neighbors = std::move(kept);
+    }
+  }
   BuildSurfaceCaches(agentRadius);
   polygonMode_ = false;
   paddedPolygons_.clear();
@@ -179,7 +230,6 @@ void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& 
   }
   AddLowDeckBlockers(agentRadius);
   BuildGroundMesh(obstacles, region, agentRadius);
-  AddClimbConnections(obstacles, agentRadius);
 }
 
 void NavMesh::BuildGroundMesh(const std::vector<Obstacle>& obstacles, const NavRegion& region,
@@ -314,69 +364,6 @@ void NavMesh::BuildGroundMesh(const std::vector<Obstacle>& obstacles, const NavR
         neighbors_[aIdx].push_back(bIdx);
         neighbors_[bIdx].push_back(aIdx);
       }
-    }
-  }
-}
-
-void NavMesh::AddClimbConnections(const std::vector<Obstacle>& obstacles, float agentRadius) {
-  const int groundCellCount = static_cast<int>(cells_.size());
-  // Climb-top cell per obstacle (-1 = none), to link stacked obstacles.
-  std::vector<int> topCellOf(obstacles.size(), -1);
-
-  for (size_t obstacleIdx = 0; obstacleIdx < obstacles.size(); ++obstacleIdx) {
-    const auto& obstacle = obstacles[obstacleIdx];
-    if (!obstacle.climbable) continue;
-    const AABB& bounds = obstacle.bounds;
-    // Windowed builds: skip obstacles entirely outside the region.
-    if (bounds.max.x < region_.xMin || bounds.min.x > region_.xMax ||
-        bounds.max.z < region_.zMin || bounds.min.z > region_.zMax) {
-      continue;
-    }
-
-    const float xMin = bounds.min.x + kClimbTopInset;
-    const float xMax = bounds.max.x - kClimbTopInset;
-    const float zMin = bounds.min.z + kClimbTopInset;
-    const float zMax = bounds.max.z - kClimbTopInset;
-    if (xMax <= xMin + kEps || zMax <= zMin + kEps) continue;  // Too small to stand on.
-
-    const int topIdx = static_cast<int>(cells_.size());
-    cells_.push_back(NavCell{xMin, xMax, zMin, zMax, bounds.max.y, /*climbTop=*/true});
-    neighbors_.emplace_back();
-    topCellOf[obstacleIdx] = topIdx;
-
-    // A raised obstacle (underside above the ground) is only reached from the
-    // top of what it rests on, linked below.
-    if (bounds.min.y > kEps) continue;
-
-    const AABB padded{
-        glm::vec3(std::max(region_.xMin, bounds.min.x - agentRadius), bounds.min.y,
-                   std::max(region_.zMin, bounds.min.z - agentRadius)),
-        glm::vec3(std::min(region_.xMax, bounds.max.x + agentRadius), bounds.min.y,
-                   std::min(region_.zMax, bounds.max.z + agentRadius))};
-
-    for (int groundIdx = 0; groundIdx < groundCellCount; ++groundIdx) {
-      if (!RectsAdjacent(cells_[groundIdx], padded)) continue;
-      neighbors_[groundIdx].push_back(topIdx);
-      neighbors_[topIdx].push_back(groundIdx);
-    }
-  }
-
-  // Stacked obstacles: the top of one connects to the top of every obstacle
-  // resting on it (underside at its top, footprints overlapping).
-  for (size_t upper = 0; upper < obstacles.size(); ++upper) {
-    if (topCellOf[upper] < 0) continue;
-    const AABB& u = obstacles[upper].bounds;
-    if (u.min.y <= kEps) continue;
-    for (size_t lower = 0; lower < obstacles.size(); ++lower) {
-      if (lower == upper || topCellOf[lower] < 0) continue;
-      const AABB& l = obstacles[lower].bounds;
-      if (std::fabs(l.max.y - u.min.y) > kEps) continue;
-      if (l.min.x >= u.max.x - kEps || l.max.x <= u.min.x + kEps ||
-          l.min.z >= u.max.z - kEps || l.max.z <= u.min.z + kEps) {
-        continue;
-      }
-      neighbors_[topCellOf[lower]].push_back(topCellOf[upper]);
-      neighbors_[topCellOf[upper]].push_back(topCellOf[lower]);
     }
   }
 }
@@ -844,27 +831,11 @@ bool NavMesh::IsWalkable(float x, float z) const {
   return true;
 }
 
-// Ground cells only, so IsWalkable matches its documented "ground level"
-// semantics regardless of the terrain height under (x, z).
 int NavMesh::FindCellContaining(float x, float z) const {
   for (size_t i = 0; i < cells_.size(); ++i) {
-    if (!cells_[i].climbTop && cells_[i].Contains(x, z)) return static_cast<int>(i);
+    if (cells_[i].Contains(x, z)) return static_cast<int>(i);
   }
   return -1;
-}
-
-int NavMesh::FindCellContaining(float x, float z, float yHint) const {
-  int best = -1;
-  float bestDy = std::numeric_limits<float>::infinity();
-  for (size_t i = 0; i < cells_.size(); ++i) {
-    if (!cells_[i].Contains(x, z)) continue;
-    const float dy = std::fabs(SurfaceY(cells_[i], x, z) - yHint);
-    if (dy < bestDy) {
-      bestDy = dy;
-      best = static_cast<int>(i);
-    }
-  }
-  return best;
 }
 
 int NavMesh::FindWalkSurfaceContaining(float x, float z, float yHint) const {
@@ -924,48 +895,85 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
   start.y = SurfaceHeightAt(walkSurfaces_[startSurface], start.x, start.z);
   goal.y = SurfaceHeightAt(walkSurfaces_[goalSurface], goal.x, goal.z);
 
-  // Height on the corridor at (x, z): the first route surface containing the
-  // point. Bends sit on seam vertices shared by both neighbors, where the
-  // two planes agree, so "first containing" is unambiguous there.
-  auto corridorY = [&](float x, float z, float fallback) {
-    for (int node : route) {
-      if (SurfaceContains(node, x, z)) {
-        return SurfaceHeightAt(walkSurfaces_[node], x, z);
-      }
-    }
-    return fallback;
-  };
-
   // Walk the surface corridor. Runs of seam-adjacent surfaces are pulled
   // taut with the funnel through the shared seam edges (instead of forcing
   // every seam midpoint, which dog-legged paths via the deck centerline);
-  // transitions without a shared edge stay hard waypoints. Funneled segments
-  // are densified so the path tracks the deck's changing grade between
-  // seams rather than cutting straight through a crest or sag.
+  // transitions without a shared edge stay hard waypoints.
+  //
+  // Heights come from the corridor order, never from an XZ lookup: the
+  // funnel is planar, so every corner is pinned to the seam it bends on and
+  // every seam a straight run crosses gets its own waypoint, each on the
+  // plane of the surface it leaves (both planes agree along a seam). Between
+  // two pins the path lies on one planar patch, so straight 3D interpolation
+  // is exact. Looking heights up by "the first route surface containing the
+  // XZ" is not: a building's stair flights are stacked over one footprint,
+  // which kept every stairwell corner on the ground flight and then made the
+  // final step rise a whole storey or three straight up.
   outPath->push_back(start);
   glm::vec3 from = start;
   std::vector<Portal> portals;
+  std::vector<int> portalSurface;  // Route surface each queued portal leaves.
   auto flush = [&](glm::vec3 to) {
     std::vector<glm::vec2> pts;
-    Funnel({from.x, from.z}, {to.x, to.z}, portals, &pts);
+    std::vector<size_t> at;  // Portal (1-based) each funnel point lies on.
+    Funnel({from.x, from.z}, {to.x, to.z}, portals, &pts, &at);
+    const auto seamY = [&](size_t portal, glm::vec2 p) {
+      return SurfaceHeightAt(walkSurfaces_[portalSurface[portal - 1]], p.x, p.y);
+    };
+    const auto emit = [&](const glm::vec3& p) {
+      if (glm::distance(p, outPath->back()) > kEps) outPath->push_back(p);
+    };
     constexpr float kSurfacePathStep = 1.5f;
-    glm::vec3 prev = from;
-    for (const glm::vec2& pt : pts) {
-      glm::vec3 p(pt.x, 0.0f, pt.y);
-      p.y = corridorY(p.x, p.z, prev.y);
-      const float len = glm::length(glm::vec2(p.x - prev.x, p.z - prev.z));
+    glm::vec3 last = from;
+    size_t prevPortal = 0;
+    for (size_t c = 0; c < pts.size(); ++c) {
+      const glm::vec2 prev(last.x, last.z);
+      const glm::vec2 pt = pts[c];
+      const size_t portal = at[c];
+      // Pins along this straight run, as (parameter, point): the seams
+      // crossed strictly between the previous corner and this one, in
+      // corridor order, then the corner itself.
+      std::vector<std::pair<float, glm::vec3>> pins;
+      float tPrev = 0.0f;
+      for (size_t k = prevPortal + 1; k < portal && k <= portals.size(); ++k) {
+        const float t = std::max(
+            tPrev, PortalCrossingParam(prev, pt, portals[k - 1].left, portals[k - 1].right, tPrev));
+        tPrev = t;
+        const glm::vec2 x = prev + (pt - prev) * t;
+        pins.emplace_back(t, glm::vec3(x.x, seamY(k, x), x.y));
+      }
+      // A corner on the goal pseudo-portal is `to`; one on the start
+      // pseudo-portal (degenerate funnel) stays at the start's height.
+      const float y = portal == 0 ? last.y : portal <= portals.size() ? seamY(portal, pt) : to.y;
+      pins.emplace_back(1.0f, glm::vec3(pt.x, y, pt.y));
+      // Densified at the same spacing as before (consumers sample the
+      // polyline for figure overlap and frontier pricing), each sample
+      // interpolated between the pins it falls between.
+      const float len = glm::length(pt - prev);
       const int pieces = static_cast<int>(std::ceil(len / kSurfacePathStep));
+      size_t pin = 0;
+      glm::vec3 segStart = last;
+      float segT = 0.0f;
       for (int k = 1; k < pieces; ++k) {
         const float t = static_cast<float>(k) / static_cast<float>(pieces);
-        glm::vec3 q = prev + (p - prev) * t;
-        q.y = corridorY(q.x, q.z, q.y);
-        if (glm::distance(q, outPath->back()) > kEps) outPath->push_back(q);
+        while (pin < pins.size() && pins[pin].first <= t) {
+          emit(pins[pin].second);
+          segStart = pins[pin].second;
+          segT = pins[pin].first;
+          ++pin;
+        }
+        const auto& next = pins[pin];  // The corner pin (t = 1) is always ahead.
+        const float span = next.first - segT;
+        const float u = span > 1e-6f ? (t - segT) / span : 0.0f;
+        emit(segStart + (next.second - segStart) * u);
       }
-      if (glm::distance(p, outPath->back()) > kEps) outPath->push_back(p);
-      prev = p;
+      for (; pin < pins.size(); ++pin) emit(pins[pin].second);
+      last = pins.back().second;
+      prevPortal = portal;
     }
     outPath->back().y = to.y;
     portals.clear();
+    portalSurface.clear();
     from = to;
   };
   for (size_t i = 0; i + 1 < route.size(); ++i) {
@@ -991,6 +999,7 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
       const float crossU = d.x * (u.y - mid.y) - d.y * (u.x - mid.x);
       const float crossV = d.x * (v.y - mid.y) - d.y * (v.x - mid.x);
       portals.push_back(crossU >= crossV ? Portal{u, v} : Portal{v, u});
+      portalSurface.push_back(route[i]);
       continue;
     }
     glm::vec3 transition(0.0f);
@@ -1174,11 +1183,16 @@ bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* 
   }
 
   // The only ground/surface transition is a patch that explicitly declares
-  // a ramp foot. Try every such patch and retain the shortest complete route.
+  // a ramp foot. Try every such patch that is actually joined to the surface
+  // end of the route (the cached surface graph says which; a stair foot in
+  // another building never reaches this floor) and retain the shortest
+  // complete route.
   std::vector<glm::vec3> best;
   float bestLength = std::numeric_limits<float>::infinity();
+  const int surfaceEnd = startSurface >= 0 ? startSurface : goalSurface;
   for (size_t entry = 0; entry < walkSurfaces_.size(); ++entry) {
     if (!walkSurfaces_[entry].connectsToGround) continue;
+    if (static_cast<int>(entry) != surfaceEnd && surfaceParent_[entry][surfaceEnd] < 0) continue;
     const glm::vec3 connection = GroundConnectionPoint(static_cast<int>(entry));
     glm::vec3 groundConnection = connection;
     groundConnection.y = ground_.HeightAt(connection.x, connection.z);
@@ -1242,14 +1256,29 @@ void NavMesh::AddLowDeckBlockers(float agentRadius) {
       return out;
     };
     constexpr float kFootSlack = 0.3f;
+    float footSlack = kFootSlack;
     // A declared ground transition whose lowest edge is already raised is a
     // step up onto the slab, not a ramp foot: its connection stays reachable.
     if (surface.connectsToGround) {
       float lowest = pts.front().z;
       for (const glm::vec3& p : pts) lowest = std::min(lowest, p.z);
       if (lowest > kFootSlack) continue;
+      // The agent padding below would otherwise creep back down a steep
+      // ramp (a crate ramp, a stair flight) and swallow its foot, leaving the
+      // ground connection unwalkable. Start the band higher by the clearance
+      // the padding spans along the slope, so the padded blocker still
+      // begins at kFootSlack above the foot.
+      const glm::vec3 p0 = surface.vertices[0];
+      glm::vec3 normal(0.0f);
+      for (size_t i = 1; i + 1 < surface.vertices.size() && std::fabs(normal.y) < 1e-6f; ++i) {
+        normal = glm::cross(surface.vertices[i] - p0, surface.vertices[i + 1] - p0);
+      }
+      if (std::fabs(normal.y) > 1e-6f) {
+        const float slope = std::hypot(normal.x / normal.y, normal.z / normal.y);
+        footSlack += agentRadius * slope;
+      }
     }
-    std::vector<glm::vec3> band = clip(pts, kFootSlack, true);
+    std::vector<glm::vec3> band = clip(pts, footSlack, true);
     band = clip(band, constants::kMinDeckHeadroom, false);
     if (band.size() < 3) continue;
     std::vector<glm::vec2> polygon;
@@ -1281,8 +1310,8 @@ bool NavMesh::FindPlanarGroundPath(glm::vec3 start, glm::vec3 goal,
 
   if (polygonMode_) return FindPolygonGroundPath(start, goal, outPath);
 
-  const int startCell = FindCellContaining(start.x, start.z, start.y);
-  const int goalCell = FindCellContaining(goal.x, goal.z, goal.y);
+  const int startCell = FindCellContaining(start.x, start.z);
+  const int goalCell = FindCellContaining(goal.x, goal.z);
   if (startCell < 0 || goalCell < 0) return false;
   start.y = cells_[startCell].elevation;
   goal.y = cells_[goalCell].elevation;

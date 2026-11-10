@@ -1199,6 +1199,107 @@ void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
   }
 }
 
+namespace {
+
+struct WalkableHit {
+  float t = 0.0f;
+  glm::vec3 point{0.0f};
+};
+
+// Every walkable-surface crossing along a camera ray, unsorted: the ground
+// (flat plane or sampled terrain, inside the map square), sidewalk slab tops
+// and walk-surface planes (decks, ramps, stairs, floors). The same surface
+// set the app's plain ground picking chooses from, so the frontier-aware
+// resolver below sees every candidate that pick would have offered.
+void CollectWalkableHits(const glm::vec3& origin, const glm::vec3& dir, const Scene& scene,
+                         std::vector<WalkableHit>* hits) {
+  if (scene.ground.Empty()) {
+    if (std::fabs(dir.y) > 1e-6f) {
+      const float t = -origin.y / dir.y;
+      if (t >= 0.0f) {
+        const glm::vec3 p = origin + dir * t;
+        if (std::fabs(p.x) <= scene.mapHalfExtent && std::fabs(p.z) <= scene.mapHalfExtent) {
+          hits->push_back({t, p});
+        }
+      }
+    }
+  } else if (origin.y > scene.ground.HeightAt(origin.x, origin.z)) {
+    // Coarse ray-march refined by bisection, same approach as the app's
+    // terrain click picking.
+    constexpr float kCoarseStep = 0.5f;
+    constexpr float kMaxDistance = 2000.0f;
+    float prevT = 0.0f;
+    for (float t = kCoarseStep; t <= kMaxDistance; t += kCoarseStep) {
+      const glm::vec3 p = origin + dir * t;
+      if (p.y - scene.ground.HeightAt(p.x, p.z) <= 0.0f) {
+        float lo = prevT, hi = t;
+        for (int i = 0; i < 24; ++i) {
+          const float mid = 0.5f * (lo + hi);
+          const glm::vec3 q = origin + dir * mid;
+          (q.y - scene.ground.HeightAt(q.x, q.z) <= 0.0f ? hi : lo) = mid;
+        }
+        const float hitT = 0.5f * (lo + hi);
+        const glm::vec3 hit = origin + dir * hitT;
+        if (std::fabs(hit.x) <= scene.mapHalfExtent && std::fabs(hit.z) <= scene.mapHalfExtent) {
+          hits->push_back({hitT, hit});
+        }
+        break;
+      }
+      prevT = t;
+    }
+  }
+
+  constexpr float kTopFaceEpsilon = 1e-2f;
+  float t = 0.0f;
+  for (const AABB& slab : scene.sidewalks) {
+    if (!RayIntersectsAABB(origin, dir, slab, &t)) continue;
+    const glm::vec3 hit = origin + dir * t;
+    if (hit.y < slab.max.y - kTopFaceEpsilon) continue;  // Hit a side, not the top.
+    hits->push_back({t, hit});
+  }
+  for (const WalkSurface& surface : scene.walkSurfaces) {
+    if (surface.vertices.size() < 3) continue;
+    const glm::vec3 normal = glm::cross(surface.vertices[1] - surface.vertices[0],
+                                        surface.vertices[2] - surface.vertices[0]);
+    const float denominator = glm::dot(normal, dir);
+    if (std::fabs(denominator) < 1e-7f) continue;
+    const float planeT = glm::dot(normal, surface.vertices[0] - origin) / denominator;
+    if (planeT < 0.0f) continue;
+    const glm::vec3 hit = origin + dir * planeT;
+    if (!SurfaceContainsXZ(surface, hit.x, hit.z)) continue;
+    hits->push_back({planeT, hit});
+  }
+}
+
+}  // namespace
+
+std::optional<glm::vec3> GameLogic::ResolveMoveRay(const glm::vec3& origin,
+                                                   const glm::vec3& direction) const {
+  if (glm::length(direction) < 1e-6f) return std::nullopt;
+  const glm::vec3 dir = glm::normalize(direction);
+  std::vector<WalkableHit> hits;
+  CollectWalkableHits(origin, dir, scene_, &hits);
+  if (hits.empty()) return std::nullopt;
+  std::sort(hits.begin(), hits.end(),
+            [](const WalkableHit& a, const WalkableHit& b) { return a.t < b.t; });
+
+  // Half a storey separates stacked floors (the lowest generated spacing is
+  // 2.8), while comfortably absorbing the height error of sampling a sloped
+  // ramp/stair cell at its node center instead of the exact hit point.
+  constexpr float kLayerTolerance = 1.0f;
+  if (const ReachField* frontier = MoveFrontier()) {
+    for (const WalkableHit& hit : hits) {
+      if (frontier->CoversPoint(hit.point, kLayerTolerance)) return hit.point;
+      for (const ZiplineFrontier& zipline : ziplineFrontiers_) {
+        if (zipline.field.CoversPoint(hit.point, kLayerTolerance)) return hit.point;
+      }
+    }
+  }
+  // No frontier up (not planning a move, or it is disabled), or the ray
+  // crosses it nowhere: the plain nearest-surface pick, as before.
+  return hits.front().point;
+}
+
 // Any manual touch of a figure's plan drops its queued multi-round route.
 void GameLogic::ClearQueuedLegs(std::optional<int> unitId) {
   if (Unit* unit = FindUnit(unitId.value_or(-1))) {
@@ -2431,6 +2532,7 @@ void GameLogic::FinishRound() {
 
   // Auto-arm the next leg of any multi-round route; the player can still
   // replan (which clears the queue) before committing.
+  std::vector<int> armedLegs;
   for (auto& unit : scene_.units) {
     if (unit.plan.queuedLegs.empty()) continue;
     if (!unit.alive) {
@@ -2444,6 +2546,25 @@ void GameLogic::FinishRound() {
     unit.plan.queuedLegs.erase(unit.plan.queuedLegs.begin());
     unit.plan.queuedLegRides.erase(unit.plan.queuedLegRides.begin());
     unit.plan.endFacingYaw = FinalYaw(unit.plan.movePath, unit.facingYaw);
+    armedLegs.push_back(unit.id);
+  }
+  // Queued legs were planned rounds ago against other positions, so an armed
+  // leg can now run into another figure and stall the round (Commit Round
+  // unavailable). Drop such legs, with the rest of that figure's queue, so
+  // the owner (player or Jev) re-plans it.
+  while (HasPlanOverlap()) {
+    bool dropped = false;
+    for (const int id : armedLegs) {
+      Unit* unit = FindUnit(id);
+      if (!unit || unit->plan.type != PlannedActionType::Move ||
+          !PathOverlapsFigure(*unit, unit->plan.movePath, unit->plan.moveRides)) {
+        continue;
+      }
+      unit->plan = PlannedAction{};
+      dropped = true;
+      break;
+    }
+    if (!dropped) break;
   }
 
   SyncFlag();

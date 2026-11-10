@@ -43,7 +43,7 @@ move option toward it (`state.flag` is `null` otherwise).
 
 Environment Jev is told: an ASCII top-down map (`state.map.grid`, 0.75-unit cells,
 up to 96x96, sampled at cell centres against the exact obstacle footprints; `#`
-obstacle, `+` climbable, own figures, visible enemies and ghosts marked, with
+obstacle, own figures, visible enemies and ghosts marked, with
 `cell_size` and the coordinate mapping in the legend), the nearest 48 obstacles with
 exact footprints, FOV half-angle, shoot range, each figure's move budget, the team's
 reaction playbook, and `ghosts` (last-known enemy positions, rounds ago,

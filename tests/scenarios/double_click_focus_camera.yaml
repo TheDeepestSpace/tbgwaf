@@ -7,7 +7,7 @@ description: >
 
 map:
   obstacles:
-    - {center: [3, -3], half_extent: [1.0, 1.0], height: 2.0, climbable: false}
+    - {center: [3, -3], half_extent: [1.0, 1.0], height: 2.0}
 
 units:
   - {id: 0, team: blue, position: [-6, 0, 3], facing_degrees: 0}

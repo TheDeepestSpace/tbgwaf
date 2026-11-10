@@ -391,14 +391,14 @@ bool IntersectTerrain(const gfx::Ray& ray, const tactics::HeightField& ground, g
   return false;
 }
 
-// Stage-C climbing: a ground/move click can land either on the ground
-// surface (the y=0 plane, or the sampled terrain when the scene has one) or
-// on top of a climbable obstacle (a crate's top face). Pick whichever the
-// ray actually hits nearer the camera -- matches how the scene is rendered
-// (the ground is drawn everywhere but obstacles occlude it visually).
+// A ground/move click can land either on the ground surface (the y=0 plane,
+// or the sampled terrain when the scene has one) or on a walk surface (a
+// crate top, deck, ramp, stair or building floor). Pick whichever the ray
+// actually hits nearer the camera -- matches how the scene is rendered (the
+// ground is drawn everywhere but obstacles occlude it visually).
 //
-// Any walkable surface counts, not just crates: climbable obstacles and the
-// scene's flat walkable slabs (sidewalks) are all picked by their top face.
+// Any walkable surface counts: the scene's flat walkable slabs (sidewalks)
+// are picked by their top face, walk surfaces by their plane.
 bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const tactics::Scene& scene, glm::vec3* outPoint) {
   bool found = false;
   float bestT = std::numeric_limits<float>::infinity();
@@ -431,9 +431,6 @@ bool IntersectGroundOrClimbTop(const gfx::Ray& ray, const tactics::Scene& scene,
       bestPoint = hit;
     }
   };
-  for (const auto& obstacle : scene.obstacles) {
-    if (obstacle.climbable) considerSurface(obstacle.bounds);
-  }
   for (const tactics::AABB& slab : scene.sidewalks) considerSurface(slab);
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
     if (surface.vertices.size() < 3) continue;
@@ -475,6 +472,10 @@ void FitCameraToBuilderScene(gfx::OrbitCamera* camera, const tactics::BuilderSce
   float extent = 6.0f;
   for (const tactics::BuilderBox& box : bs.boxes) {
     extent = std::max({extent, std::fabs(box.cx) + box.hx + 2.0f, std::fabs(box.cz) + box.hz + 2.0f});
+  }
+  for (const tactics::BuilderBuilding& building : bs.buildings) {
+    extent = std::max({extent, std::fabs(building.cx) + building.hx + 4.0f,
+                       std::fabs(building.cz) + building.hz + 4.0f});
   }
   for (const tactics::BuilderFigure& figure : bs.figures) {
     extent = std::max({extent, std::fabs(figure.x) + 2.0f, std::fabs(figure.z) + 2.0f});
@@ -1056,9 +1057,7 @@ int main() {
   // Default look: AO view (black hot) with NPR outlines layered on top.
   debugOptions.thermal = true;
   debugOptions.npr = true;
-  debugOptions.nprSettings.outlineThickness = 0.8f;
-  debugOptions.nprSettings.outlineStrength = 0.46f;
-  debugOptions.nprSettings.detailSize = 0.02f;
+  debugOptions.nprSettings = gfx::DefaultAppNprSettings();
   bool showFps = true;
   float smoothedFps = 0.0f;
   float frameMs = 0.0f;
@@ -1464,7 +1463,7 @@ int main() {
           builderDragRotate = (SDL_GetModState() & KMOD_SHIFT) != 0;
           if (builderDragFigure >= 0) {
             builderEditor.selectedFigure = builderDragFigure;
-            builderEditor.selectedBox = -1;
+            builderEditor.selectedBox = builderEditor.selectedBuilding = -1;
           } else {
             // No figure under the cursor: a cube is dragged on a plane at its
             // top, keeping the grab offset.
@@ -1481,7 +1480,7 @@ int main() {
                 builderDragBoxGrab = glm::vec2(0.0f);
               }
               builderEditor.selectedBox = builderDragBox;
-              builderEditor.selectedFigure = -1;
+              builderEditor.selectedFigure = builderEditor.selectedBuilding = -1;
             }
           }
         }
@@ -1631,6 +1630,7 @@ int main() {
       if (leftClickPending && !uiWantsMouse && leftClickX < editorRect.x + editorRect.width) {
         // Click: select the figure or cube under the cursor (nothing = clear).
         const gfx::Ray ray = editorRay(leftClickX, leftClickY);
+        builderEditor.selectedBuilding = -1;
         builderEditor.selectedFigure = PickBuilderFigure(ray, bs);
         builderEditor.selectedBox =
             builderEditor.selectedFigure >= 0 ? -1 : PickBuilderBox(ray, bs);
@@ -2178,13 +2178,16 @@ int main() {
         const gfx::Ray hoverRay = cameras[hoverPane].ScreenPointToRay(
             static_cast<float>(mouseX - rect.x), static_cast<float>(mouseY),
             static_cast<float>(rect.width), static_cast<float>(windowHeight));
-        glm::vec3 hoverPoint;
-        if (IntersectGroundOrClimbTop(hoverRay, game.GetScene(), &hoverPoint)) {
-          hoveredGroundPoint = hoverPoint;
+        // Frontier-aware pick: surfaces the mover cannot stop on this leg
+        // (an unreachable upper floor between the camera and the frontier)
+        // are transparent, so the selector lands on the floor the frontier
+        // is actually drawn on instead of a storey out of reach.
+        if (const auto hoverPoint = game.ResolveMoveRay(hoverRay.origin, hoverRay.direction)) {
+          hoveredGroundPoint = *hoverPoint;
           hasHoveredGroundPoint = true;
           // Team-tagged: hovering over the *other* player's pane just clears
           // the preview instead of steering this pane's selected mover.
-          game.HoverGround(hoverPoint, paneTeam(hoverPane));
+          game.HoverGround(*hoverPoint, paneTeam(hoverPane));
         }
       }
       if (aimedUnitId >= 0 && leftDragPane >= 0 && leftDragDistance >= kClickDragThresholdPx) {
@@ -2255,9 +2258,10 @@ int main() {
             }
           }
         } else if (game.Mode() == InputMode::AwaitingMoveDestination) {
-          glm::vec3 point;
-          if (IntersectGroundOrClimbTop(clickRay, game.GetScene(), &point)) {
-            game.ClickGround(point, clickTeam);
+          // Same frontier-aware pick as the hover, so the click lands
+          // exactly where the selector ring showed it would.
+          if (const auto point = game.ResolveMoveRay(clickRay.origin, clickRay.direction)) {
+            game.ClickGround(*point, clickTeam);
           }
         }
       }

@@ -8,6 +8,8 @@
 
 namespace tactics {
 
+struct TerrainTunnel;  // Scene.h: a road bored through a raised terrain band.
+
 // Axis-aligned XZ rectangle the navmesh covers.
 struct NavRegion {
   float xMin = 0.0f, xMax = 0.0f;
@@ -117,17 +119,21 @@ class NavMesh {
   // ground level up to their top surface. `ground` (optional) is the scene's
   // terrain heightfield: paths and elevation queries then follow the sampled
   // terrain instead of a flat y = 0 plane. The field is copied; the caller's
-  // instance need not outlive the mesh.
+  // instance need not outlive the mesh. `tunnels` (optional) are the scene's
+  // terrain tunnels: an obstacle standing on a tunnel roof then only blocks
+  // the ground outside the bore (the road below it stays open).
   void Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent, float agentRadius,
              const HeightField* ground = nullptr,
-             const std::vector<WalkSurface>* walkSurfaces = nullptr);
+             const std::vector<WalkSurface>* walkSurfaces = nullptr,
+             const std::vector<TerrainTunnel>* tunnels = nullptr);
 
   // Windowed form: meshes only the XZ rectangle `region` (obstacles are
   // clipped to it). Used by GameLogic to mesh just the area a figure can
   // reach in one round instead of the whole map.
   void Build(const std::vector<Obstacle>& obstacles, const NavRegion& region, float agentRadius,
              const HeightField* ground = nullptr,
-             const std::vector<WalkSurface>* walkSurfaces = nullptr);
+             const std::vector<WalkSurface>* walkSurfaces = nullptr,
+             const std::vector<TerrainTunnel>* tunnels = nullptr);
 
   // Returns true and fills `outPath` with a smoothed path from `start` to
   // `goal` (XZ plus an elevation hint used to disambiguate overlapping

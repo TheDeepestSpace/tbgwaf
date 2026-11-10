@@ -1568,7 +1568,7 @@ int main() {
         if (showNavMeshDebug && !navMeshDebugBuilt) {
           navMeshDebug.Build(game.GetScene().obstacles, game.GetScene().mapHalfExtent,
                              tactics::constants::kAgentRadius, &game.GetScene().ground,
-                             &game.GetScene().walkSurfaces);
+                             &game.GetScene().walkSurfaces, &game.GetScene().terrainTunnels);
           navMeshDebugBuilt = true;
         }
       }

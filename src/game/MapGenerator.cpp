@@ -788,9 +788,14 @@ const TerrainTunnelSpec* TunnelAt(const TerrainPlan& terrain, glm::vec2 p, Tunne
 // Finds consecutive wall crossings that enclose a genuinely raised band.
 // A low terrace is left to the existing ramp/stop planner; a bore needs a
 // full figure's headroom plus its roof slab. The height-weighted seeded draw
-// makes taller levels increasingly likely to get a tunnel.
+// makes taller levels increasingly likely to get a tunnel. `forbidden` are
+// param intervals of the road no bore may touch: stretches whose ground the
+// model hands to someone else (a highway corridor, an earlier bore - see
+// UrbanGroundAt's priorities), where the tier would stand at full height
+// mid-tunnel and split the road in two.
 bool PlanTunnelForRoad(TerrainPlan* terrain, glm::vec2 origin, glm::vec2 dir, float width,
-                       float tMin, float tMax, TunnelRoad road, int streetCut, Rng* rng) {
+                       float tMin, float tMax, TunnelRoad road, int streetCut, Rng* rng,
+                       const std::vector<std::pair<float, float>>& forbidden = {}) {
   struct Crossing { size_t wall; float t; };
   std::vector<Crossing> crossings;
   for (size_t i = 0; i < terrain->walls.size(); ++i) {
@@ -806,6 +811,9 @@ bool PlanTunnelForRoad(TerrainPlan* terrain, glm::vec2 origin, glm::vec2 dir, fl
   for (size_t i = 0; i + 1 < crossings.size(); ++i) {
     const Crossing a = crossings[i], b = crossings[i + 1];
     if (b.t - a.t < 8.0f) continue;
+    bool blockedSpan = false;
+    for (const auto& f : forbidden) blockedSpan |= b.t > f.first && a.t < f.second;
+    if (blockedSpan) continue;
     constexpr float sample = 0.35f;
     const float lowA = TierHeight(*terrain, origin + dir * (a.t - sample));
     const float roof = TierHeight(*terrain, origin + dir * (0.5f * (a.t + b.t)));
@@ -1216,8 +1224,20 @@ HighwayPlan BuildHighwayPlan(uint32_t seed, const MapGeneratorConfig& c, Terrain
     PlanTunnelForRoad(terrainOut, plan.artery.origin, plan.artery.dir, c.arteryWidth,
                       plan.artery.sMin, plan.artery.sMax, TunnelRoad::Artery, -1, &rng);
     if (plan.hasBranch) {
+      // The artery corridor's ground outranks the branch's (UrbanGroundAt),
+      // so a branch bore must not touch it.
+      std::vector<std::pair<float, float>> forbidden;
+      const float denom = glm::dot(plan.artery.normal, plan.branch.dir);
+      if (std::fabs(denom) > 1e-3f) {
+        const float t = (glm::dot(plan.artery.normal, plan.artery.origin) -
+                         glm::dot(plan.artery.normal, plan.branch.start)) /
+                        denom;
+        const float spread =
+            (c.arteryWidth * 0.5f + plan.branch.width * 0.5f + 1.0f) / std::fabs(denom);
+        forbidden.emplace_back(t - spread, t + spread);
+      }
       PlanTunnelForRoad(terrainOut, plan.branch.start, plan.branch.dir, plan.branch.width,
-                        0.0f, plan.branch.length, TunnelRoad::Branch, -1, &rng);
+                        0.0f, plan.branch.length, TunnelRoad::Branch, -1, &rng, forbidden);
     }
     for (const TerrainTunnelSpec& tunnel : terrainOut->tunnels) {
       if (tunnel.road == TunnelRoad::Artery) {
@@ -1567,9 +1587,34 @@ void ChooseTunnelRoutes(uint32_t seed, const MapGeneratorConfig& c, const Highwa
     if (cut.cls == UrbanStreetClass::Highway || cut.terrainBoundary || cut.blockSplit) continue;
     float t0 = 0.0f, t1 = 0.0f;
     if (!CutPavedExtent(cut, plan, c, &t0, &t1)) continue;
-    PlanTunnelForRoad(terrain, cut.origin, cut.dir,
-                      cut.pave > 0.0f ? cut.pave : cut.width, t0, t1,
-                      TunnelRoad::Local, static_cast<int>(i), &rng);
+    const float width = cut.pave > 0.0f ? cut.pave : cut.width;
+    // Stretches of this street no bore may touch (see PlanTunnelForRoad):
+    // where it crosses a highway corridor or an already placed bore, whose
+    // ground outranks a local tunnel floor in UrbanGroundAt.
+    std::vector<std::pair<float, float>> forbidden;
+    const auto forbidStrip = [&](glm::vec2 n, glm::vec2 stripOrigin, float halfWidth,
+                                 glm::vec2 stripDir, float s0, float s1) {
+      const float denom = glm::dot(n, cut.dir);
+      if (std::fabs(denom) < 1e-3f) return;  // Runs along the strip.
+      const float t =
+          (glm::dot(n, stripOrigin) - glm::dot(n, cut.origin)) / denom;
+      const float s = glm::dot(cut.origin + cut.dir * t - stripOrigin, stripDir);
+      if (s < s0 || s > s1) return;  // Crosses the strip's line beyond its extent.
+      const float spread = (halfWidth + width * 0.5f + 1.0f) / std::fabs(denom);
+      forbidden.emplace_back(t - spread, t + spread);
+    };
+    forbidStrip(plan.artery.normal, plan.artery.origin, c.arteryWidth * 0.5f,
+                plan.artery.dir, plan.artery.sMin - 2.0f, plan.artery.sMax + 2.0f);
+    if (plan.hasBranch) {
+      forbidStrip(glm::vec2(-plan.branch.dir.y, plan.branch.dir.x), plan.branch.start,
+                  plan.branch.width * 0.5f, plan.branch.dir, -1.0f, plan.branch.length + 1.0f);
+    }
+    for (const TerrainTunnelSpec& other : terrain->tunnels) {
+      forbidStrip(glm::vec2(-other.dir.y, other.dir.x), other.origin, other.width * 0.5f,
+                  other.dir, other.t0, other.t1);
+    }
+    PlanTunnelForRoad(terrain, cut.origin, cut.dir, width, t0, t1,
+                      TunnelRoad::Local, static_cast<int>(i), &rng, forbidden);
   }
 }
 

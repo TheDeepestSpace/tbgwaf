@@ -556,7 +556,7 @@ void TestTerrainTunnels() {
     CHECK(!s.terrainTunnels.empty());
     NavMesh nav;
     nav.Build(s.obstacles, s.mapHalfExtent, constants::kAgentRadius, &s.ground,
-              &s.walkSurfaces);
+              &s.walkSurfaces, &s.terrainTunnels);
     for (const TerrainTunnel& tunnel : s.terrainTunnels) {
       highway += tunnel.highway ? 1 : 0;
       local += tunnel.highway ? 0 : 1;
@@ -604,6 +604,15 @@ void TestTerrainTunnels() {
                   p.y < roofY - constants::kMinDeckHeadroom;
       }
       CHECK(inBore);
+
+      // The bore's own centerline stays walkable the whole way: a building
+      // or cover item standing on the roof above must not block the road
+      // below (its padded footprint used to seal the tunnel mid-way).
+      for (int i = 0; i <= 100; ++i) {
+        const glm::vec2 p = glm::mix(a, b, static_cast<float>(i) / 100.0f);
+        if (!PointInConvexPolygon(p, tunnel.bore, -0.3f)) continue;
+        CHECK(nav.IsWalkable(p.x, p.y));
+      }
 
       // The restored level above is independently reachable from the
       // adjacent high terrain (the sidewalk strip beside the bore, with the

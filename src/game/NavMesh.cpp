@@ -9,6 +9,7 @@
 
 #include "game/Raycast.h"
 #include "game/Geometry.h"
+#include "game/Scene.h"
 
 namespace tactics {
 namespace {
@@ -128,6 +129,74 @@ float ObstaclePad(const Obstacle& obstacle, float agentRadius) {
   if (obstacle.kind == ObstacleKind::StreetFurniture) return 0.5f * agentRadius;
   return agentRadius;
 }
+
+// Sutherland-Hodgman against one half-plane: keeps {p : dot(n, p) >= d}.
+std::vector<glm::vec2> ClipToHalfPlane(const std::vector<glm::vec2>& polygon, glm::vec2 n,
+                                       float d) {
+  std::vector<glm::vec2> out;
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    const glm::vec2 a = polygon[i];
+    const glm::vec2 b = polygon[(i + 1) % polygon.size()];
+    const float da = glm::dot(n, a) - d;
+    const float db = glm::dot(n, b) - d;
+    if (da >= 0.0f) out.push_back(a);
+    if ((da >= 0.0f) != (db >= 0.0f) && std::fabs(da - db) > 1e-7f) {
+      out.push_back(a + (b - a) * (da / (da - db)));
+    }
+  }
+  return out;
+}
+
+// Issue #156 tunnels: an obstacle standing on a tunnel roof (a building or
+// cover item of the restored level above) may straddle the bore's edge in
+// XZ. The stretch over the bore has a full road's headroom beneath it, so
+// only the parts outside the bore may block the ground mesh; keeping the
+// whole footprint would seal the tunnel below. True (with `outPieces` set
+// to the blocking pieces: convex, possibly overlapping - harmless for
+// blockers) only when some bore actually clipped the footprint; an
+// uninvolved obstacle keeps its original form.
+bool GroundBlockingPieces(const Obstacle& obstacle, const std::vector<TerrainTunnel>* tunnels,
+                          std::vector<std::vector<glm::vec2>>* outPieces) {
+  if (!tunnels || tunnels->empty()) return false;
+  std::vector<std::vector<glm::vec2>> pieces = {ObstacleFootprint(obstacle)};
+  bool clipped = false;
+  for (const TerrainTunnel& tunnel : *tunnels) {
+    if (tunnel.bore.size() < 3 || tunnel.roof.empty()) continue;
+    // Only something resting on (or above) this roof: anything lower - the
+    // road's own clutter near a portal, the unseen tunnel-wall blockers -
+    // stands in the bore itself and blocks normally.
+    if (obstacle.bounds.min.y < tunnel.roof.front().y - 0.25f) continue;
+    std::vector<glm::vec2> bore = tunnel.bore;
+    if (PolygonSignedArea(bore) < 0.0f) std::reverse(bore.begin(), bore.end());
+    std::vector<std::vector<glm::vec2>> next;
+    for (const std::vector<glm::vec2>& piece : pieces) {
+      // Overlap test: the piece clipped into the bore. No overlap keeps it.
+      std::vector<glm::vec2> inside = piece;
+      for (size_t e = 0; e < bore.size() && inside.size() >= 3; ++e) {
+        const glm::vec2 a = bore[e], b = bore[(e + 1) % bore.size()];
+        const glm::vec2 inward = glm::normalize(glm::vec2(-(b - a).y, (b - a).x));
+        inside = ClipToHalfPlane(inside, inward, glm::dot(inward, a));
+      }
+      if (inside.size() < 3 || PolygonArea(inside) < 1e-3f) {
+        next.push_back(piece);
+        continue;
+      }
+      clipped = true;
+      // piece \ bore as one convex clip per bore edge (their union is exact).
+      for (size_t e = 0; e < bore.size(); ++e) {
+        const glm::vec2 a = bore[e], b = bore[(e + 1) % bore.size()];
+        const glm::vec2 outward = glm::normalize(glm::vec2((b - a).y, -(b - a).x));
+        std::vector<glm::vec2> outside = ClipToHalfPlane(piece, outward, glm::dot(outward, a));
+        if (outside.size() >= 3 && PolygonArea(outside) > 1e-3f) {
+          next.push_back(std::move(outside));
+        }
+      }
+    }
+    pieces = std::move(next);
+  }
+  if (clipped) *outPieces = std::move(pieces);
+  return clipped;
+}
 }  // namespace
 
 void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, float agentRadius) {
@@ -139,13 +208,15 @@ void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, flo
 
 void NavMesh::Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent,
                      float agentRadius, const HeightField* ground,
-                     const std::vector<WalkSurface>* walkSurfaces) {
-  Build(obstacles, SquareRegion(mapHalfExtent), agentRadius, ground, walkSurfaces);
+                     const std::vector<WalkSurface>* walkSurfaces,
+                     const std::vector<TerrainTunnel>* tunnels) {
+  Build(obstacles, SquareRegion(mapHalfExtent), agentRadius, ground, walkSurfaces, tunnels);
 }
 
 void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& region,
                      float agentRadius, const HeightField* ground,
-                     const std::vector<WalkSurface>* walkSurfaces) {
+                     const std::vector<WalkSurface>* walkSurfaces,
+                     const std::vector<TerrainTunnel>* tunnels) {
   // Anything starting at or above head height over the ground beneath it
   // (door lintels, roof slabs, upper storeys) can be walked under, so it
   // never blocks the ground mesh. Measured above the highest ground under
@@ -164,7 +235,26 @@ void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& 
       }
     }
     if (b.min.y - groundTop >= constants::kUnitHeight) continue;
-    obstacles.push_back(obstacle);
+    std::vector<std::vector<glm::vec2>> pieces;
+    if (!GroundBlockingPieces(obstacle, tunnels, &pieces)) {
+      obstacles.push_back(obstacle);
+      continue;
+    }
+    // Straddles a tunnel bore: block with the clipped pieces only, each a
+    // polygon obstacle of its own with bounds shrunk to fit.
+    for (std::vector<glm::vec2>& piece : pieces) {
+      Obstacle part = obstacle;
+      part.bounds.min.x = part.bounds.max.x = piece.front().x;
+      part.bounds.min.z = part.bounds.max.z = piece.front().y;
+      for (const glm::vec2& p : piece) {
+        part.bounds.min.x = std::min(part.bounds.min.x, p.x);
+        part.bounds.max.x = std::max(part.bounds.max.x, p.x);
+        part.bounds.min.z = std::min(part.bounds.min.z, p.y);
+        part.bounds.max.z = std::max(part.bounds.max.z, p.y);
+      }
+      part.footprint = std::move(piece);
+      obstacles.push_back(std::move(part));
+    }
   }
   ground_ = ground ? *ground : HeightField{};
   walkSurfaces_ = walkSurfaces ? *walkSurfaces : std::vector<WalkSurface>{};

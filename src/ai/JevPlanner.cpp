@@ -116,7 +116,7 @@ bool RouteToward(const GameLogic& game, const Unit& actor, const glm::vec3& goal
   region.zMax = std::min(half, actor.position.z + reach);
   NavMesh mesh;
   mesh.Build(scene.obstacles, region, constants::kAgentRadius, &scene.ground,
-             &scene.walkSurfaces);
+             &scene.walkSurfaces, &scene.terrainTunnels);
 
   const float margin = 2.0f * constants::kAgentRadius;
   const auto inWindow = [&](const glm::vec3& p) {

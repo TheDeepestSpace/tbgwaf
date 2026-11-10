@@ -27,7 +27,13 @@ struct AABB {
 // Semantic tag used only to group static render geometry; collision, LOS,
 // and navigation treat every kind identically. Pier marks the overpass
 // bents' columns and footings (issue #223).
-enum class ObstacleKind { Generic, StreetFurniture, Pier, Cover };
+// Wall: one thin wall piece of an enterable (hollow) building, laid out as
+// {outer start, outer end, inner end, inner start} so footprint sides 0 and
+// 2 are its outer and inner faces and sides 1/3 (plus top and bottom) are
+// the ends and the window/door reveals (see MapGenerator's CutWindows).
+// Gameplay treats it like Generic; the renderer's see-through outline pass
+// draws only its two long faces so each window gets a single frame.
+enum class ObstacleKind { Generic, StreetFurniture, Pier, Cover, Wall };
 
 // Street fixtures the renderer batches as static geometry: post-sized furniture
 // and cover-sized street items (parked cars, planters, dumpsters, ...).
@@ -71,12 +77,12 @@ inline bool IsCurbVehicle(StreetFixtureModel model) {
          model == StreetFixtureModel::Pickup;
 }
 
-// A map obstacle. `climbable` obstacles get a navmesh connection from
-// ground level up to their top surface (see NavMesh); non-climbable
-// obstacles are simply impassable walls.
+// A map obstacle: an impassable prism. Nothing is climbed by flag (issue
+// #40): a figure gets onto raised geometry only over a WalkSurface ramp or
+// stair, so a crate or parked car that can be stood on carries a top
+// WalkSurface plus a ramp (see AddClimbRamp in Scene.h).
 struct Obstacle {
   AABB bounds;
-  bool climbable = false;
   // Optional convex XZ footprint in counter-clockwise order. Empty keeps the
   // historical rectangular `bounds` footprint. `bounds` remains the broad
   // phase and vertical extent; collision, LOS, navigation and rendering use
@@ -137,6 +143,7 @@ struct Building {
   // Hollow building (issue #157): thin wall Obstacles around the footprint
   // with a doorway on the frontage edge, instead of a solid prism. `obstacle`
   // is then the roof slab (full footprint, bounds.min.y above head height).
+  // Windows on every floor are real cutouts in the walls (issue #158).
   // Non-enterable buildings keep the solid-massing rendering.
   bool enterable = false;
   float doorWidth = 0.0f;   // Enterable only: frontage doorway size, per BuildingKind.
@@ -146,6 +153,17 @@ struct Building {
   // other rear doors.
   int rearEdge = -1;
   float rearU0 = 0.0f, rearU1 = 0.0f;
+  // Enterable, multi-storey only (roadmap 5.4/5.5): every upper floor is one
+  // or more convex WalkSurfaces (indices into Scene::walkSurfaces, bottom
+  // floor first) linked as neighbours, with a ceiling slab Obstacle under
+  // each; the flights of the single straight stair joining them (one per
+  // storey gap, bottom-up) run along footprint edge `stairEdge`, spanning
+  // stairU0..stairU1 from footprint[stairEdge], and cut a stairwell notch out
+  // of every floor above the ground one. The ground flight connectsToGround.
+  std::vector<int> floorSurfaces;
+  std::vector<int> stairSurfaces;
+  int stairEdge = -1;
+  float stairU0 = 0.0f, stairU1 = 0.0f;
 
   float Height() const {
     return groundFloorHeight + static_cast<float>(floorCount - 1) * floorHeight;
@@ -216,6 +234,16 @@ struct WalkSurface {
   // navigation, LOS and shadow casting like any slab, but is rendered with
   // the terrain rather than the concrete deck batch.
   bool terrain = false;
+  // A stair flight (roadmap 5.5): a steep sloped quad the renderer draws as
+  // steps over the slope. Movement/LOS treat it like any other ramp.
+  bool stair = false;
+  // Invisible navigation proxy for a crate/car top or its ramp (AddClimbRamp):
+  // the obstacle itself is what gets drawn, so the renderer skips the patch.
+  bool climbProxy = false;
+  // Index into Scene::buildings when the patch is a floor or stair inside a
+  // generated building (roadmap 5.4), else -1. The renderer fades it with
+  // the rest of that building.
+  int building = -1;
   // Convex XZ footprints standing on the patch (roof parapets, furniture)
   // that a figure can't walk into. Honoured on single-patch routes only.
   std::vector<std::vector<glm::vec2>> blockers;

@@ -129,7 +129,6 @@ bool RouteToward(const GameLogic& game, const Unit& actor, const glm::vec3& goal
     glm::vec3 best = target;
     float bestDistance = std::numeric_limits<float>::infinity();
     for (const NavCell& cell : mesh.Cells()) {
-      if (cell.climbTop) continue;
       const glm::vec3 point(std::clamp(target.x, cell.xMin, cell.xMax), 0.0f,
                             std::clamp(target.z, cell.zMin, cell.zMax));
       const float cellDistance = XZDistance(point, target);
@@ -654,7 +653,7 @@ bool InsideFootprint(const std::vector<glm::vec2>& poly, float x, float z) {
 // Top-down overview: row 0 is the most negative Z, column 0 the most negative
 // X. Each cell is sampled at its centre against the exact obstacle footprint
 // (obstacles smaller than a cell still mark the cell holding their centre).
-// '#' obstacle, '+' climbable obstacle, '.' open; allies are their id digit,
+// '#' obstacle, '.' open; allies are their id digit,
 // visible enemies lowercase 'e', remembered (ghost) enemies '?', the flag 'F'
 // (drawn under figures, so a carried flag shows as its carrier).
 std::vector<std::string> BuildGrid(const GameLogic& game, Team team,
@@ -669,7 +668,7 @@ std::vector<std::string> BuildGrid(const GameLogic& game, Team team,
   };
   for (const Obstacle& obstacle : scene.obstacles) {
     if (obstacle.bounds.max.y - obstacle.bounds.min.y < 1.0f) continue;
-    const char mark = obstacle.climbable ? '+' : '#';
+    const char mark = '#';
     const std::vector<glm::vec2> poly = ObstacleFootprint(obstacle);
     for (int z = toCell(obstacle.bounds.min.z); z <= toCell(obstacle.bounds.max.z); ++z) {
       for (int x = toCell(obstacle.bounds.min.x); x <= toCell(obstacle.bounds.max.x); ++x) {
@@ -773,7 +772,7 @@ std::string BuildVisibleState(const GameLogic& game, Team team,
       << ",\"grid_legend\":"
       << JsonString("cell (row r, column c) covers x from -half_extent + c*cell_size and z from "
                     "-half_extent + r*cell_size; rows run -Z to +Z, columns -X to +X; # obstacle, "
-                    "+ climbable obstacle, . open, digit = your figure id, e = visible enemy, "
+                    ". open, digit = your figure id, e = visible enemy, "
                     "? = ghost (last known enemy position), F = the neutral flag (CTF only)")
       << ",\"grid\":[";
   const std::vector<std::string> grid = BuildGrid(game, team, visibility, ghosts, cells);
@@ -795,8 +794,7 @@ std::string BuildVisibleState(const GameLogic& game, Team team,
       const Obstacle& o = scene.obstacles[order[i]];
       out << (i ? "," : "") << "{\"id\":" << order[i] << ",\"min_xz\":["
           << o.bounds.min.x << "," << o.bounds.min.z << "],\"max_xz\":[" << o.bounds.max.x
-          << "," << o.bounds.max.z << "],\"height\":" << o.bounds.max.y - o.bounds.min.y
-          << ",\"climbable\":" << (o.climbable ? "true" : "false") << "}";
+          << "," << o.bounds.max.z << "],\"height\":" << o.bounds.max.y - o.bounds.min.y << "}";
     }
   }
   out << "]},\"allies\":[";

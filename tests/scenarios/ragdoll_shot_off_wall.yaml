@@ -12,7 +12,7 @@ shot_rolls: [0.9, 0.9, 0.9, 0.9, 0.0]
 
 map:
   obstacles:
-    - {center: [0, 0], half_extent: [0.6, 3.0], height: 8.0, climbable: true}
+    - {center: [0, 0], half_extent: [0.6, 3.0], height: 8.0}
 
 units:
   - {id: 0, team: blue, position: [-10, 0, -8], facing_degrees: 0}   # Walker; keeps the round running.

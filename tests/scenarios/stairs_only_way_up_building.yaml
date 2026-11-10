@@ -1,0 +1,40 @@
+name: stairs_only_way_up_building
+description: >
+  PR #304 review: the only way between the storeys of an enterable building
+  is its stair. Blue's figure starts on the ground floor of the three-storey
+  building from occlusion_fade_building_interior (seed 7) and chains two
+  legs, one per storey, to the same spot on the first and then the second
+  floor, directly above the stair top. The planned path in the turn-01
+  goldens walks up the ground flight, back along the first floor past the
+  stairwell and up the second flight, with no vertical hop between the
+  storeys (the stacked flights share one footprint, which once left the
+  route on the ground flight and finished with a storey-high step straight
+  up). One leg executes per commit; the position asserts pin each landing.
+
+map:
+  generate: {seed: 7, type: urban, elevated: false, features: {terrain: off}}
+
+units:
+  - {id: 0, team: blue, position: [-31.9, 0, -6.7], facing_degrees: 0}
+  - {id: 1, team: red, position: [40, 0, -30], facing_degrees: 180}
+
+camera:
+  target: [-32.3, -8.1]
+  zoom: -145
+
+script:
+  - action: move
+    actor: 0
+    waypoints:
+      - [-29.11, 4, -8.25]
+    destination: [-29.11, 7, -8.25]
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [-29.11, 4, -8.25], tolerance: 0.1}
+  - assert: {round: 2}
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [-29.11, 7, -8.25], tolerance: 0.1}
+  - assert: {round: 3}

@@ -68,6 +68,15 @@ struct ScenarioAction {
   int actor = -1;  // Unused (and not required in YAML) for Commit/NewGame/Timeline*.
   Kind kind = Kind::Pass;
   glm::vec3 destination{0.0f};  // Move only: the last leg's end.
+  // Move only, mutually exclusive with `destination`: a camera-style ray
+  // (`ray_from`/`ray_dir`) resolved through GameLogic::ResolveMoveRay
+  // exactly like a real move hover/click, so the clicked destination is the
+  // surface the frontier-aware selector lands on (a floor the mover cannot
+  // reach this leg, sitting between the camera and the frontier, is
+  // skipped). A ray that hits no walkable surface fails the step unless
+  // `expect_unreachable` is set.
+  std::optional<glm::vec3> moveRayFrom;
+  std::optional<glm::vec3> moveRayDir;
   std::vector<glm::vec3> waypoints;  // Move only: earlier leg ends, clicked in
                                       // order before `destination` (multi-leg
                                       // plan, one leg executes per round).
@@ -175,11 +184,15 @@ struct Scenario {
   //   fov_probe_height: shadow_map only; see SceneRenderer::SetFovProbeHeight.
   //   thermal: false (default) | true -- thermal render prototype.
   //   thermal_black_hot: true (default) | false -- white-hot when false.
+  //   npr: false (default) | true -- screen-space ink outlines on top of the
+  //     AO view (RenderDebugOptions::npr), including the see-through pass's
+  //     outlines of faded buildings and their window edges.
   enum class FovOverlay { Cpu, ShadowMap };
   FovOverlay fovOverlay = FovOverlay::Cpu;
   float fovProbeHeight = 0.0f;
   bool thermal = false;
   bool thermalBlackHot = true;
+  bool npr = false;
 };
 
 // Throws std::runtime_error with a descriptive message on malformed YAML.

@@ -167,6 +167,23 @@ std::vector<TerrainTier> TerrainTiers(const std::vector<TerrainWall>& walls,
 
 Scene BuildDefaultScene();
 
+// Climbable boxes without a flag (issue #40): gives scene->obstacles[obstacle]
+// (an axis-aligned box) a walkable top WalkSurface and a ramp WalkSurface
+// leaning on the face in direction `rampSide` (an axis-aligned unit XZ
+// vector), running from the box's underside height out to `run` =
+// height / kClimbRampSlope. The box top is lowered by kClimbTopLift so the
+// top surface (at the box's original max.y) does not z-fight it. A box on
+// the ground gets a ramp that connectsToGround; a box resting on another
+// surface (bounds.min.y > 0) leaves linking the ramp foot to the caller.
+// `maxRun` caps the ramp's length (a stacked box's ramp must land on the box
+// beneath), steepening it as needed. Returns the index of the top surface
+// (the ramp is the next one).
+constexpr float kClimbRampSlope = 1.0f;   // Rise over run; under kMaxWalkSlope.
+constexpr float kClimbTopLift = 0.02f;
+int AddClimbRamp(Scene* scene, int obstacle, glm::vec2 rampSide, float maxRun = 1e9f);
+// Pushes `box` as an obstacle and adds its top and ramp; returns the obstacle index.
+int AddClimbableBox(Scene* scene, const AABB& box, glm::vec2 rampSide);
+
 // True when a figure can stand at (x, z): on the map and clear of obstacles.
 bool IsFreeSpot(const Scene& scene, float x, float z);
 
@@ -186,5 +203,14 @@ void ApplySpawnHints(Scene* scene);
 // prisms, appended after the real obstacles so obstacle
 // indices are unchanged. For sight lines and FOV only: they never collide.
 std::vector<Obstacle> SightObstacles(const Scene& scene);
+
+// For each entry of Scene::buildings: 1 when the building is enterable and at
+// least one of `points` lies inside it (within the footprint, from the floor
+// up to the underside of the roof slab; the roof top is outside). The camera
+// see-through view uses this to decide when a faded building shows its
+// interior (a figure or planned movement is in there) or just a plain
+// translucent shell.
+std::vector<char> BuildingsContainingPoints(const Scene& scene,
+                                            const std::vector<glm::vec3>& points);
 
 }  // namespace tactics

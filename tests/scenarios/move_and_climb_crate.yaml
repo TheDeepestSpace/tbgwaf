@@ -1,14 +1,15 @@
 name: move_and_climb_crate
 description: >
-  Regression coverage for climbable-obstacle pathfinding, matching
+  Regression coverage for climbing a crate over its ramp (issue #40), matching
   TestGameLogicMoveCanClimbOntoObstacle in tests/logic_tests.cpp: a move destination on top
-  of a climbable crate should route up onto it rather than being rejected as unreachable.
+  of a crate should route up its ramp onto the top surface rather than being rejected as
+  unreachable.
   Both figures act in the same WEGO round: blue0 climbs while red1 crosses the open ground
   concurrently.
 
 map:
   obstacles:
-    - {center: [0, 0], half_extent: [0.6, 0.6], height: 1.2, climbable: true}
+    - {center: [0, 0], half_extent: [0.6, 0.6], height: 1.2, ramp: "-x"}
 
 units:
   - {id: 0, team: blue, position: [-5, 0, 0], facing_degrees: 0}

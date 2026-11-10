@@ -90,7 +90,7 @@ scene's name and is informational only; the replayer keys on `builder_scene`.
 * `half_extent`: playable area is `[-half_extent, half_extent]^2`, flat ground.
 * `round_limit`: draw after this many rounds; `0` is unlimited.
 * `boxes`: `[cx, cz, hx, hz, height]` or `[cx, cz, hx, hz, height, y]` each,
-  all climbable (centre and half extents in XZ; the box spans `y` to
+  all climbable over a ramp (centre and half extents in XZ; the box spans `y` to
   `y + height`, with `y` omitted = 0 = on the ground; `y > 0` stacks it on
   the cubes beneath). There is no maximum height.
 * `figures`: in order, so the array index is the unit id. `team` is `blue` or

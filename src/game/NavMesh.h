@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -15,15 +16,13 @@ struct NavRegion {
 };
 
 // A convex, axis-aligned rectangular navmesh cell in the XZ plane. Ground
-// cells (`climbTop == false`) have elevation 0 in the mesh's internal flat
-// space and follow the scene's HeightField (if any) in world space;
-// "climb-top" cells (see NavMesh::Build) sit atop a climbable obstacle at
-// that obstacle's height.
+// cells have elevation 0 in the mesh's internal flat space and follow the
+// scene's HeightField (if any) in world space. Everything above ground is a
+// WalkSurface (decks, ramps, stairs, floors, crate tops), not a cell.
 struct NavCell {
   float xMin = 0.0f, xMax = 0.0f;
   float zMin = 0.0f, zMax = 0.0f;
   float elevation = 0.0f;
-  bool climbTop = false;
 
   bool Contains(float x, float z) const {
     return x >= xMin && x <= xMax && z >= zMin && z <= zMax;
@@ -66,6 +65,17 @@ struct ReachField {
     return endpointBlocked.empty() || !endpointBlocked[iz * nx + ix];
   }
   float Dist(int ix, int iz) const { return dist[iz * nx + ix]; }
+  // True when the frontier this field describes covers the world point `p`:
+  // its cell is reached *and* the surface layer the field priced for that
+  // cell is at p's height (within layerTolerance). A point on a different
+  // stacked layer -- an upper floor directly over a priced ground cell --
+  // is not covered, even though the XZ cell is reached.
+  bool CoversPoint(const glm::vec3& p, float layerTolerance) const {
+    const int ix = static_cast<int>(std::lround((p.x - minX) / step));
+    const int iz = static_cast<int>(std::lround((p.z - minZ) / step));
+    if (!Reached(ix, iz)) return false;
+    return std::fabs(p.y - surfaceY[iz * nx + ix]) <= layerTolerance;
+  }
   glm::vec3 Node(int ix, int iz) const {
     const int index = iz * nx + ix;
     const float y = index >= 0 && static_cast<size_t>(index) < surfaceY.size()
@@ -101,23 +111,22 @@ struct MovingBlockers {
 // funnel algorithm (bending only at obstacle corners) to produce a
 // shortest continuous-space path within the corridor.
 //
-// Climbable obstacles additionally get a "climb-top" cell placed at their
-// summit, wired into the graph with edges to every ground cell bordering
-// their footprint. A* naturally routes across these edges when climbing
-// onto/over an obstacle is part of the shortest path.
+// Raised geometry is reached only over explicit WalkSurfaces (issue #40):
+// a ramp or stair that connectsToGround leads onto decks, floors and crate
+// tops, which are routed as a graph of their own and joined to the ground
+// at those feet.
 class NavMesh {
  public:
   // `agentRadius` inflates obstacle footprints so the resulting mesh
   // represents the free space for the *center* of a circular agent.
   //
-  // Stage-A form: every obstacle is a plain impassable box (no climbing).
+  // Stage-A form: every obstacle is a plain impassable box.
   void Build(const std::vector<AABB>& obstacles, float mapHalfExtent, float agentRadius);
 
-  // Stage-C form: obstacles marked `climbable` get a navmesh connection from
-  // ground level up to their top surface. `ground` (optional) is the scene's
-  // terrain heightfield: paths and elevation queries then follow the sampled
-  // terrain instead of a flat y = 0 plane. The field is copied; the caller's
-  // instance need not outlive the mesh.
+  // Full form. `ground` (optional) is the scene's terrain heightfield: paths
+  // and elevation queries then follow the sampled terrain instead of a flat
+  // y = 0 plane. The field is copied; the caller's instance need not outlive
+  // the mesh. `walkSurfaces` (optional) are the raised layers.
   void Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent, float agentRadius,
              const HeightField* ground = nullptr,
              const std::vector<WalkSurface>* walkSurfaces = nullptr);
@@ -139,18 +148,15 @@ class NavMesh {
   // waypoints tracks the ground.
   bool FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* outPath) const;
 
-  // World-space Y of the walkable surface of `cell` at (x, z): the obstacle
-  // top for climb-top cells, else the terrain height (0 when flat).
-  float SurfaceY(const NavCell& cell, float x, float z) const {
-    return cell.climbTop ? cell.elevation : ground_.HeightAt(x, z);
-  }
+  // World-space Y of the ground at (x, z): the terrain height (0 when flat).
+  float SurfaceY(const NavCell&, float x, float z) const { return ground_.HeightAt(x, z); }
 
   // Highest/nearest explicit surface at XZ for a supplied elevation hint;
   // returns terrain height when no walk-surface is selected.
   float ResolveSurfaceY(float x, float z, float yHint) const;
 
   // True if the given XZ point lies inside the walkable navmesh area at
-  // ground level (elevation 0); climb-top surfaces are not considered.
+  // ground level (elevation 0); walk surfaces are not considered.
   bool IsWalkable(float x, float z) const;
 
   // True if (x, z) at ground level sits under a walk surface that is above
@@ -158,8 +164,9 @@ class NavMesh {
   bool GroundUnderLowDeck(float x, float z) const;
 
   // Dijkstra flood fill over ground-level free space from `start`, covering
-  // everything within `budget` path distance. Climb-top surfaces are not
-  // included. Returns an empty field if `start` isn't on walkable ground.
+  // everything within `budget` path distance, plus every walk surface node
+  // reachable over a ground connection. Returns an empty field if `start` is
+  // neither on walkable ground nor on a walk surface.
   // With `blockers`, ground routing additionally dodges the given moving
   // figures in time (see MovingBlockers); the elevated walk-surface pass only
   // applies the endpoint check, not route-through blocking.
@@ -183,10 +190,8 @@ class NavMesh {
  private:
   void BuildGroundMesh(const std::vector<Obstacle>& obstacles, const NavRegion& region,
                         float agentRadius);
-  void AddClimbConnections(const std::vector<Obstacle>& obstacles, float agentRadius);
 
   int FindCellContaining(float x, float z) const;
-  int FindCellContaining(float x, float z, float yHint) const;
   int FindWalkSurfaceContaining(float x, float z, float yHint) const;
   // Ground route that never crosses terrain steeper than constants::kMaxWalkSlope:
   // the planar route when it is walkable, else a slope-aware grid search.

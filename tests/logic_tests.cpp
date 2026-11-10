@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "game/GameLogic.h"
+#include "game/Geometry.h"
 #include "game/NavMesh.h"
 #include "game/Raycast.h"
 #include "game/Scene.h"
@@ -38,17 +39,17 @@ using namespace tactics;
 // tests rely on its clear middle lane; the richer default scene has no
 // initial sightlines between squads (see TestDefaultSceneSquadsStartHidden).
 tactics::Scene LegacyScene() {
-  auto box = [](float cx, float cz, float hx, float hz, float h, bool climbable) {
-    return tactics::Obstacle{tactics::AABB{glm::vec3(cx - hx, 0.0f, cz - hz), glm::vec3(cx + hx, h, cz + hz)},
-                    climbable};
+  auto box = [](float cx, float cz, float hx, float hz, float h) {
+    return tactics::AABB{glm::vec3(cx - hx, 0.0f, cz - hz), glm::vec3(cx + hx, h, cz + hz)};
   };
   tactics::Scene scene;
-  scene.obstacles.push_back(box(0.0f, -4.0f, 1.0f, 2.0f, 2.0f, false));
-  scene.obstacles.push_back(box(0.0f, 4.0f, 1.0f, 2.0f, 2.0f, false));
-  scene.obstacles.push_back(box(-4.0f, 6.5f, 0.6f, 0.6f, 1.2f, true));
-  scene.obstacles.push_back(box(4.0f, -6.5f, 0.6f, 0.6f, 1.2f, true));
-  scene.obstacles.push_back(box(-3.5f, -7.5f, 0.6f, 0.6f, 1.2f, true));
-  scene.obstacles.push_back(box(3.5f, 7.5f, 0.6f, 0.6f, 1.2f, true));
+  scene.obstacles.push_back(tactics::Obstacle{box(0.0f, -4.0f, 1.0f, 2.0f, 2.0f)});
+  scene.obstacles.push_back(tactics::Obstacle{box(0.0f, 4.0f, 1.0f, 2.0f, 2.0f)});
+  // Crates with a ramp up onto their top (issue #40), ramps away from the walls.
+  tactics::AddClimbableBox(&scene, box(-4.0f, 6.5f, 0.6f, 0.6f, 1.2f), {1.0f, 0.0f});
+  tactics::AddClimbableBox(&scene, box(4.0f, -6.5f, 0.6f, 0.6f, 1.2f), {-1.0f, 0.0f});
+  tactics::AddClimbableBox(&scene, box(-3.5f, -7.5f, 0.6f, 0.6f, 1.2f), {1.0f, 0.0f});
+  tactics::AddClimbableBox(&scene, box(3.5f, 7.5f, 0.6f, 0.6f, 1.2f), {0.0f, 1.0f});
   const float rows[3] = {-4.0f, 0.0f, 4.0f};
   for (int i = 0; i < 3; ++i) {
     tactics::Unit blue;
@@ -145,7 +146,7 @@ void TestNavMeshCellsCoverThinLedgeBetweenRotatedFootprints() {
     for (int k = 0; k <= 20; ++k) {
       const glm::vec3 p = glm::mix(path[i], path[i + 1], k / 20.0f);
       bool covered = false;
-      for (const NavCell& cell : nav.Cells()) covered |= !cell.climbTop && cell.Contains(p.x, p.z);
+      for (const NavCell& cell : nav.Cells()) covered |= cell.Contains(p.x, p.z);
       CHECK(covered);
     }
   }
@@ -220,40 +221,63 @@ void TestNavMeshPathIsTight() {
   }
 }
 
-void TestNavMeshClimbsOntoClimbableObstacle() {
-  std::vector<Obstacle> obstacles = {
-      Obstacle{AABB{glm::vec3(-1.0f, 0.0f, -1.0f), glm::vec3(1.0f, 1.2f, 1.0f)},
-               /*climbable=*/true},
-  };
+// Issue #40: a crate is climbed over its ramp surface, not by flag. The top
+// surface sits at the crate's nominal height, the box stops just under it.
+void TestNavMeshClimbsOntoCrateOverRamp() {
+  Scene scene;
+  const int crate = AddClimbableBox(
+      &scene, AABB{glm::vec3(-1.0f, 0.0f, -1.0f), glm::vec3(1.0f, 1.2f, 1.0f)}, {-1.0f, 0.0f});
+  CHECK(scene.obstacles.size() == 1 && scene.walkSurfaces.size() == 2);
+  CHECK(std::fabs(scene.obstacles[crate].bounds.max.y - (1.2f - kClimbTopLift)) < 1e-5f);
+  const WalkSurface& top = scene.walkSurfaces[0];
+  const WalkSurface& ramp = scene.walkSurfaces[1];
+  CHECK(!top.connectsToGround && ramp.connectsToGround);
+  for (const glm::vec3& v : top.vertices) CHECK(std::fabs(v.y - 1.2f) < 1e-5f);
+  // The ramp leans on the -X face and reaches the ground 1.2 further out.
+  float lowest = 10.0f, highest = -10.0f, minX = 10.0f;
+  for (const glm::vec3& v : ramp.vertices) {
+    lowest = std::min(lowest, v.y);
+    highest = std::max(highest, v.y);
+    minX = std::min(minX, v.x);
+  }
+  CHECK(std::fabs(lowest) < 1e-5f && std::fabs(highest - 1.2f) < 1e-5f);
+  CHECK(std::fabs(minX + 2.2f) < 1e-4f);
+
   NavMesh nav;
-  nav.Build(obstacles, /*mapHalfExtent=*/10.0f, /*agentRadius=*/0.4f);
-
+  nav.Build(scene.obstacles, /*mapHalfExtent=*/10.0f, /*agentRadius=*/0.4f, nullptr,
+            &scene.walkSurfaces);
   const glm::vec3 start(-8.0f, 0.0f, 0.0f);
-  const glm::vec3 top(0.0f, 1.2f, 0.0f);  // Center of the crate's top surface.
-
+  const glm::vec3 goal(0.0f, 1.2f, 0.0f);  // Center of the crate's top surface.
   std::vector<glm::vec3> path;
-  CHECK(nav.FindPath(start, top, &path));
-  CHECK(path.size() >= 2);
+  CHECK(nav.FindPath(start, goal, &path));
+  CHECK(path.size() >= 3);
   CHECK(std::fabs(path.front().x - start.x) < 1e-3f);
   CHECK(std::fabs(path.front().z - start.z) < 1e-3f);
-  // The path must actually climb: it should end at the obstacle's top
-  // elevation, and pass through ground level along the way (not spawn
-  // directly on top or treat the obstacle as flat-ground-passable).
+  // The path really climbs: ground level first, the top at the end, and the
+  // ramp in between (a waypoint strictly between the two levels).
   CHECK(std::fabs(path.back().y - 1.2f) < 1e-3f);
-  bool sawGroundLevel = false;
-  bool sawTopLevel = false;
+  bool sawGroundLevel = false, sawRamp = false;
   for (const auto& p : path) {
     if (std::fabs(p.y) < 1e-3f) sawGroundLevel = true;
-    if (std::fabs(p.y - 1.2f) < 1e-3f) sawTopLevel = true;
+    if (p.y > 0.05f && p.y < 1.15f) sawRamp = true;
   }
   CHECK(sawGroundLevel);
-  CHECK(sawTopLevel);
+  CHECK(sawRamp);
+  // Approaching from the far side still works (around to the ramp foot), and
+  // the ground under the steep part of the ramp is not walkable.
+  CHECK(nav.FindPath(glm::vec3(8.0f, 0.0f, 0.0f), goal, &path));
+  CHECK(!nav.IsWalkable(-1.3f, 0.0f));
+  // A box with no ramp is just a wall: its top is unreachable.
+  Scene plain;
+  plain.obstacles.push_back(Obstacle{AABB{glm::vec3(-1.0f, 0.0f, -1.0f), glm::vec3(1.0f, 1.2f, 1.0f)}});
+  NavMesh wall;
+  wall.Build(plain.obstacles, 10.0f, 0.4f, nullptr, &plain.walkSurfaces);
+  CHECK(!wall.FindPath(start, goal, &path));
 }
 
-void TestNavMeshObstacleOverloadStillRoutesAroundNonClimbable() {
+void TestNavMeshObstacleOverloadStillRoutesAroundBox() {
   std::vector<Obstacle> obstacles = {
-      Obstacle{AABB{glm::vec3(-2.0f, 0.0f, -2.0f), glm::vec3(2.0f, 2.0f, 2.0f)},
-               /*climbable=*/false},
+      Obstacle{AABB{glm::vec3(-2.0f, 0.0f, -2.0f), glm::vec3(2.0f, 2.0f, 2.0f)}},
   };
   NavMesh nav;
   nav.Build(obstacles, 10.0f, 0.4f);
@@ -262,8 +286,123 @@ void TestNavMeshObstacleOverloadStillRoutesAroundNonClimbable() {
   const glm::vec3 goal(8.0f, 0.0f, 0.0f);
   std::vector<glm::vec3> path;
   CHECK(nav.FindPath(start, goal, &path));
-  CHECK(path.size() > 2);  // Must detour; a non-climbable obstacle has no top connection.
+  CHECK(path.size() > 2);  // Must detour; a box has no top connection.
   for (const auto& p : path) CHECK(std::fabs(p.y) < 1e-3f);  // Never leaves ground level.
+}
+
+// Roadmap 5.4: non-convex floor plans are split into convex pieces joined by
+// seam links, each piece made only of the input's own vertices.
+void TestDecomposeToConvex() {
+  const auto convexCcw = [](const std::vector<glm::vec2>& p) {
+    if (p.size() < 3 || PolygonSignedArea(p) <= 0.0f) return false;
+    for (size_t i = 0; i < p.size(); ++i) {
+      const glm::vec2 a = p[(i + p.size() - 1) % p.size()], b = p[i], c = p[(i + 1) % p.size()];
+      const glm::vec2 e0 = b - a, e1 = c - b;
+      if (e0.x * e1.y - e0.y * e1.x < -1e-5f) return false;
+    }
+    return true;
+  };
+  const auto totalArea = [](const ConvexDecomposition& d) {
+    float area = 0.0f;
+    for (const auto& piece : d.pieces) area += PolygonArea(piece);
+    return area;
+  };
+  const auto usesInputVertices = [](const ConvexDecomposition& d, const std::vector<glm::vec2>& in) {
+    for (const auto& piece : d.pieces) {
+      for (const glm::vec2& v : piece) {
+        bool found = false;
+        for (const glm::vec2& q : in) found |= glm::distance(v, q) < 1e-6f;
+        if (!found) return false;
+      }
+    }
+    return true;
+  };
+  const auto connected = [](const ConvexDecomposition& d) {
+    std::vector<char> seen(d.pieces.size(), 0);
+    std::vector<int> stack = {0};
+    if (!d.pieces.empty()) seen[0] = 1;
+    while (!stack.empty()) {
+      const int cur = stack.back();
+      stack.pop_back();
+      for (const auto& [a, b] : d.links) {
+        const int other = a == cur ? b : b == cur ? a : -1;
+        if (other >= 0 && !seen[other]) {
+          seen[other] = 1;
+          stack.push_back(other);
+        }
+      }
+    }
+    for (char s : seen) if (!s) return false;
+    return true;
+  };
+
+  // Convex input: one piece, no links, vertices kept.
+  const std::vector<glm::vec2> rect = {{0, 0}, {4, 0}, {4, 3}, {0, 3}};
+  const ConvexDecomposition one = DecomposeToConvex(rect);
+  CHECK(one.pieces.size() == 1 && one.links.empty());
+  CHECK(one.pieces[0].size() == 4 && convexCcw(one.pieces[0]));
+  // Clockwise input comes back counter-clockwise.
+  const std::vector<glm::vec2> cw(rect.rbegin(), rect.rend());
+  CHECK(DecomposeToConvex(cw).pieces.size() == 1 && convexCcw(DecomposeToConvex(cw).pieces[0]));
+  // Degenerate input yields nothing.
+  CHECK(DecomposeToConvex({{0, 0}, {1, 0}}).pieces.empty());
+  CHECK(DecomposeToConvex({{0, 0}, {1, 0}, {2, 0}}).pieces.empty());
+
+  // An L: two convex pieces sharing one seam.
+  const std::vector<glm::vec2> ell = {{0, 0}, {6, 0}, {6, 2}, {2, 2}, {2, 5}, {0, 5}};
+  const ConvexDecomposition l = DecomposeToConvex(ell);
+  CHECK(l.pieces.size() == 2 && l.links.size() == 1);
+  for (const auto& piece : l.pieces) CHECK(convexCcw(piece));
+  CHECK(std::fabs(totalArea(l) - PolygonArea(ell)) < 1e-4f);
+  CHECK(usesInputVertices(l, ell));
+
+  // A floor with a stairwell notch in its bottom edge: convex pieces that
+  // tile the floor exactly (no overlap, no gap), all linked into one graph,
+  // and the notch's three edges each owned by exactly one piece.
+  const std::vector<glm::vec2> notched = {{0, 0}, {3, 0}, {3, 1.5f}, {6, 1.5f}, {6, 0},
+                                          {10, 0}, {10, 6}, {0, 6}};
+  const ConvexDecomposition d = DecomposeToConvex(notched);
+  CHECK(d.pieces.size() >= 2 && d.pieces.size() <= 4);
+  for (const auto& piece : d.pieces) CHECK(convexCcw(piece));
+  CHECK(std::fabs(totalArea(d) - PolygonArea(notched)) < 1e-4f);
+  CHECK(usesInputVertices(d, notched));
+  CHECK(connected(d));
+  for (float x = 0.25f; x < 10.0f; x += 0.5f) {
+    for (float y = 0.25f; y < 6.0f; y += 0.5f) {
+      const bool inFloor = !(x > 3.0f && x < 6.0f && y < 1.5f);
+      int covering = 0;
+      for (const auto& piece : d.pieces) covering += PointStrictlyInConvexPolygon({x, y}, piece);
+      CHECK(covering == (inFloor ? 1 : 0));
+    }
+  }
+  const std::pair<glm::vec2, glm::vec2> notchEdges[] = {
+      {{3, 0}, {3, 1.5f}}, {{3, 1.5f}, {6, 1.5f}}, {{6, 1.5f}, {6, 0}}};
+  for (const auto& [a, b] : notchEdges) {
+    int owners = 0;
+    for (const auto& piece : d.pieces) {
+      for (size_t i = 0; i < piece.size(); ++i) {
+        const glm::vec2 p = piece[i], q = piece[(i + 1) % piece.size()];
+        owners += glm::distance(p, a) < 1e-6f && glm::distance(q, b) < 1e-6f;
+      }
+    }
+    CHECK(owners == 1);
+  }
+  // Every link really is a shared edge (two common vertices, reversed).
+  for (const auto& [a, b] : d.links) {
+    int common = 0;
+    for (const glm::vec2& p : d.pieces[a]) {
+      for (const glm::vec2& q : d.pieces[b]) common += glm::distance(p, q) < 1e-6f;
+    }
+    CHECK(common == 2);
+  }
+
+  // A U (two reflex corners) still tiles exactly.
+  const std::vector<glm::vec2> u = {{0, 0}, {9, 0}, {9, 5}, {6, 5}, {6, 2}, {3, 2}, {3, 5}, {0, 5}};
+  const ConvexDecomposition cup = DecomposeToConvex(u);
+  CHECK(cup.pieces.size() >= 3);
+  for (const auto& piece : cup.pieces) CHECK(convexCcw(piece));
+  CHECK(std::fabs(totalArea(cup) - PolygonArea(u)) < 1e-4f);
+  CHECK(connected(cup));
 }
 
 void TestRaycastLineOfSight() {
@@ -1300,8 +1439,8 @@ void TestGameLogicIgnoresInputWhileExecuting() {
 }
 
 void TestGameLogicMoveCanClimbOntoObstacle() {
-  // LegacyScene marks the standalone crates climbable; the one at
-  // (-4, 6.5) is a 1.2x1.2 footprint, 1.2 tall.
+  // LegacyScene's standalone crates each have a ramp (issue #40); the one at
+  // (-4, 6.5) is a 1.2x1.2 footprint, 1.2 tall, ramp on its +X side.
   GameLogic game(LegacyScene());
   game.ClickUnit(0, Team::Blue);
   game.ChooseMove();
@@ -2551,7 +2690,7 @@ tactics::Scene RoofZiplineScene() {
   tactics::Scene scene;
   scene.mapHalfExtent = 40.0f;
   scene.obstacles.push_back(tactics::Obstacle{
-      tactics::AABB{glm::vec3(2.0f, 0.0f, -4.0f), glm::vec3(10.0f, 6.0f, 4.0f)}, false});
+      tactics::AABB{glm::vec3(2.0f, 0.0f, -4.0f), glm::vec3(10.0f, 6.0f, 4.0f)}});
   tactics::WalkSurface roof;
   roof.vertices = {{2.25f, 6.05f, -3.75f}, {2.25f, 6.05f, 3.75f}, {9.75f, 6.05f, 3.75f},
                    {9.75f, 6.05f, -3.75f}};
@@ -2987,7 +3126,7 @@ void TestFreeAimBlindHitRevealsMissDoesNot() {
 
 void TestFreeAimTraceStopsAtWalls() {
   const tactics::Obstacle wall{
-      tactics::AABB{glm::vec3(5.0f, 0.0f, -2.0f), glm::vec3(6.0f, 2.5f, 2.0f)}, false};
+      tactics::AABB{glm::vec3(5.0f, 0.0f, -2.0f), glm::vec3(6.0f, 2.5f, 2.0f)}};
   GameLogic game(AimScene(
       {{Team::Blue, glm::vec3(0.0f)}, {Team::Red, glm::vec3(10.0f, 0.0f, 0.0f)}}, {wall}));
   game.SetShotRollSource([] { return 0.0f; });
@@ -3685,16 +3824,54 @@ void TestDeadFiguresSeeThroughProbes() {
   CHECK(has(probes, units[2].EyePosition()));
 }
 
+// Camera see-through: a faded enterable building keeps its interior view only
+// while something (figure, path, frontier node) is inside it.
+void TestBuildingsContainingPoints() {
+  Scene scene;
+  Building enterable;
+  enterable.enterable = true;
+  enterable.baseY = 0.0f;
+  enterable.obstacle = 0;
+  Building solid;  // Solid prism: never "entered".
+  solid.obstacle = 1;
+  scene.buildings = {enterable, solid};
+  Obstacle roof;  // Roof slab above head height, full footprint.
+  roof.building = 0;
+  roof.bounds.min = glm::vec3(0.0f, 3.0f, 0.0f);
+  roof.bounds.max = glm::vec3(6.0f, 3.3f, 4.0f);
+  roof.footprint = {{0, 0}, {6, 0}, {6, 4}, {0, 4}};
+  Obstacle block;
+  block.building = 1;
+  block.bounds.min = glm::vec3(10.0f, 0.0f, 0.0f);
+  block.bounds.max = glm::vec3(14.0f, 6.0f, 4.0f);
+  block.footprint = {{10, 0}, {14, 0}, {14, 4}, {10, 4}};
+  scene.obstacles = {roof, block};
+
+  const auto inside = [&](const glm::vec3& p) {
+    return BuildingsContainingPoints(scene, {p});
+  };
+  CHECK(inside({3.0f, 0.3f, 2.0f})[0] == 1);   // Figure indoors.
+  CHECK(inside({3.0f, 1.7f, 2.0f})[0] == 1);   // Eye height indoors.
+  CHECK(inside({-1.0f, 0.3f, 2.0f})[0] == 0);  // Outside the footprint.
+  CHECK(inside({3.0f, 3.4f, 2.0f})[0] == 0);   // On the roof.
+  CHECK(inside({12.0f, 0.3f, 2.0f})[1] == 0);  // Solid building: not enterable.
+  CHECK(BuildingsContainingPoints(scene, {}) == std::vector<char>({0, 0}));
+  // Any one point is enough (a path that merely clips the building).
+  CHECK(BuildingsContainingPoints(scene, {{-5.0f, 0.3f, 2.0f}, {5.5f, 0.3f, 3.5f}})[0] == 1);
+}
+
 int main() {
   TestDeadFiguresSeeThroughProbes();
+  TestBuildingsContainingPoints();
   TestNavMeshRoutesAroundObstacle();
   TestReachFieldFromRampIncludesGroundBeyondFoot();
   TestNavMeshDirectPathWhenUnobstructed();
   TestNavMeshCellsCoverThinLedgeBetweenRotatedFootprints();
   TestNavMeshRejectsPointsInsideObstacle();
   TestNavMeshPathIsTight();
-  TestNavMeshClimbsOntoClimbableObstacle();
-  TestNavMeshObstacleOverloadStillRoutesAroundNonClimbable();
+  TestNavMeshClimbsOntoCrateOverRamp();
+  TestNavMeshObstacleOverloadStillRoutesAroundBox();
+  TestDecomposeToConvex();
   TestRaycastLineOfSight();
   TestElevatedEyePositionSeesOverObstacle();
   TestFovCone();

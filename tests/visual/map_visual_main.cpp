@@ -321,7 +321,7 @@ int main(int argc, char** argv) {
   }
   // Building archetypes and massing (issue #151): one close-framed golden
   // per forced block character, so each archetype mix (and its parapets,
-  // roof furniture, awnings and office setbacks) is pinned on its own. Seed
+  // roof furniture and awnings) is pinned on its own. Seed
   // 7's downtown-side blocks fill the frame; the layout is identical in all
   // three, only kinds/heights/dressing differ.
   const std::pair<const char*, tactics::BlockCharacter> kCharacters[] = {

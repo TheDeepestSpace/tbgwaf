@@ -31,7 +31,7 @@ namespace {
 //   0x6a09e667u   ramp channels   which avenue ramps through each level
 //   0x1eae1007u   terrain accesses stair flights
 //   0x21b1e5a7u   ziplines         roof/anchor selection
-//   0xa5c47e75u   archetypes       floors, facade variants, setbacks
+//   0xa5c47e75u   archetypes       floors, facade variants
 //   0x7d1f0b2du   enterable      which parcels are hollow
 //   0x3a55196eu   massing          parapets, roof furniture, awnings
 //   0x51f0a3c9u   facades          door spots, stoops, rear platforms, window grids
@@ -2615,7 +2615,7 @@ std::vector<Parcel> PlanParcels(const CityPlan& city, const MapGeneratorConfig& 
 
 // --- Building archetypes (issue #151, roadmap 3.2) -------------------------
 
-constexpr uint32_t kArchetypeStream = 0xa5c47e75u;  // Floors, variants, setbacks.
+constexpr uint32_t kArchetypeStream = 0xa5c47e75u;  // Floors, variants.
 constexpr uint32_t kEnterableStream = 0x7d1f0b2du;   // Which parcels are hollow.
 constexpr uint32_t kMassingStream = 0x3a55196eu;    // Parapets, roof furniture, awnings.
 
@@ -2759,7 +2759,7 @@ bool SuitableForTall(const std::vector<glm::vec2>& fp) {
   return shape.minWidth >= kTallMinWidth && shape.minEdge >= kTallMinEdge;
 }
 
-// Kind, floors, facade variant and setback per parcel, then the landmark
+// Kind, floors, facade variant per parcel, then the landmark
 // towers (Civic, from the layout rng exactly where the old tower pick drew).
 std::vector<Building> PlanBuildings(const std::vector<Parcel>& parcels,
                                     const std::vector<float>& characterRolls, uint32_t seed,
@@ -2819,10 +2819,8 @@ std::vector<Building> PlanBuildings(const std::vector<Parcel>& parcels,
       while (b.floorCount > 2 && b.Height() > c.skylineMaxHeight + 1e-3f) --b.floorCount;
     }
     b.style = static_cast<int>(b.kind) * 2 + (rng.Chance(0.5f) ? 1 : 0);
-    // Offices step their top floor back when there is room for it.
-    if (b.kind == BuildingKind::Office && b.floorCount >= 3 && rng.Chance(0.6f)) {
-      b.upperObstacle = -2;  // Request; EmitBuildings resolves it (or drops it).
-    }
+    // Draw kept so the stream stays as it was while top-floor setbacks are off.
+    (void)rng.Chance(0.6f);
     buildings.push_back(b);
   }
 
@@ -2857,7 +2855,6 @@ std::vector<Building> PlanBuildings(const std::vector<Parcel>& parcels,
       --b.floorCount;
       b.groundFloorHeight = height - static_cast<float>(b.floorCount - 1) * b.floorHeight;
     }
-    b.upperObstacle = -1;
     candidates.erase(candidates.begin() + chosen);
   }
   return buildings;
@@ -3051,12 +3048,7 @@ void PlaceZiplines(Scene* scene, const std::vector<UrbanBlock>& blocks, uint32_t
       glm::vec2 centre(0.0f);
       for (const glm::vec2& v : footprints[i]) centre += v;
       centre /= static_cast<float>(footprints[i].size());
-      // A base prism carrying a set-back top floor has no free roof.
-      const int building = scene->obstacles[i].building;
-      const bool covered = building >= 0 &&
-                           scene->buildings[building].upperObstacle >= 0 &&
-                           scene->buildings[building].obstacle == static_cast<int>(i);
-      if (!covered && scene->obstacles[i].bounds.max.y >= kMinRoofHeight &&
+      if (scene->obstacles[i].bounds.max.y >= kMinRoofHeight &&
           PointInConvexPolygon(centre, poly)) {
         roofs.push_back(i);
       }
@@ -4597,7 +4589,6 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>
       scene->sidewalkSurfaces.push_back(std::move(sidewalk));
     }
   }
-  constexpr float kSetbackInset = 1.2f;
   // Parcels make way for the stairs climbing a terrain level: any parcel
   // overlapping an access (plus clearance) is dropped.
   std::vector<std::vector<glm::vec2>> accessClearances;
@@ -4627,18 +4618,7 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>
     if (dropped(parcels[i])) continue;
     Building& b = buildings[i];
     const int index = static_cast<int>(scene->buildings.size());
-    const bool setback = b.upperObstacle == -2;
-    std::vector<glm::vec2> upper;
-    if (setback) {
-      upper = InsetConvexPolygon(parcels[i].footprint, kSetbackInset);
-      if (upper.size() < 3 || PolygonArea(upper) < 6.0f ||
-          PolygonArea(upper) < 0.4f * PolygonArea(parcels[i].footprint)) {
-        upper.clear();
-      }
-    }
-    b.upperObstacle = -1;
     const float height = b.Height();
-    const float baseHeight = upper.empty() ? height : height - b.floorHeight;
     // Drawn for every parcel so the stream never depends on eligibility.
     const bool wantEnterable = enterRng.Chance(c.enterableChance);
     const bool halfClosed = enterRng.Chance(c.bayHalfClosedChance);
@@ -4650,17 +4630,13 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>
       b.floors.push_back({y0, b.baseY + b.groundFloorHeight + f * b.floorHeight});
     }
     b.floors.back().y1 = b.baseY + height;
-    if (wantEnterable && upper.empty() &&
+    if (wantEnterable &&
         EmitHollowBuilding(scene, parcels[i], parcels, height, index, groundY, halfClosed, rearOpen,
                            &b)) {
       scene->buildings.push_back(b);
       continue;
     }
-    b.obstacle = AddPolygonBuilding(scene, parcels[i].footprint, 0.0f, baseHeight, index, groundY);
-    if (!upper.empty()) {
-      b.upperObstacle =
-          AddPolygonBuilding(scene, std::move(upper), baseHeight, b.floorHeight, index, groundY);
-    }
+    b.obstacle = AddPolygonBuilding(scene, parcels[i].footprint, 0.0f, height, index, groundY);
     scene->buildings.push_back(b);
   }
 }
@@ -4685,7 +4661,7 @@ void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed
     const Building& b = scene->buildings[bi];
     const Parcel& parcel = parcels[b.parcel];
     const Obstacle& roofPrism =
-        scene->obstacles[b.upperObstacle >= 0 ? b.upperObstacle : b.obstacle];
+        scene->obstacles[b.obstacle];
     const std::vector<glm::vec2>& roof = roofPrism.footprint;
     const float roofTop = roofPrism.bounds.max.y;
     const glm::vec2 fa = parcel.footprint[parcel.frontageEdge];

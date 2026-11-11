@@ -113,7 +113,7 @@ struct Obstacle {
 enum class BuildingKind : uint8_t {
   Residential,  // Apartments: 3.0 floors, brick/plaster.
   MixedUse,     // Shops under apartments: 4.0 ground floor, awning.
-  Office,       // 3.5 floors, glassy; upper storeys may step back.
+  Office,       // 3.5 floors, glassy.
   Commercial,   // Single-storey shop/warehouse hall, no awning (loading door).
   Civic,        // Landmark: the towers.
   Garage,       // Parking decks: low 2.8 floors, raw concrete.
@@ -131,7 +131,6 @@ struct Building {
   // Facade palette index the renderer reads (kind * variants + variant).
   int style = 0;
   int obstacle = -1;       // Base prism (full parcel footprint).
-  int upperObstacle = -1;  // Top floor stepped back as its own prism (offices), else -1.
   int parcel = -1;         // Index into UrbanParcels(seed, config).
   int block = -1;
   // Ground level of the footprint (the base prism's min.y for solid

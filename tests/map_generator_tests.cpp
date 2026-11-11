@@ -259,7 +259,6 @@ void TestBuildingKindsFloorsAndHeights() {
     const Scene scene = GenerateUrbanMap(seed, FlatConfig());
     const std::vector<UrbanParcel> parcels = UrbanParcels(seed, FlatConfig());
     int perKind[kBuildingKindCount] = {};
-    int setbacks = 0;
     for (size_t i = 0; i < scene.buildings.size(); ++i) {
       const Building& b = scene.buildings[i];
       ++perKind[static_cast<int>(b.kind)];
@@ -276,22 +275,10 @@ void TestBuildingKindsFloorsAndHeights() {
         }
       }
       if (b.kind == BuildingKind::Commercial) CHECK(b.floorCount == 1);
-      if (b.upperObstacle >= 0) {
-        ++setbacks;
-        CHECK(b.kind == BuildingKind::Office);
-        const Obstacle& upper = scene.obstacles[b.upperObstacle];
-        CHECK(upper.building == static_cast<int>(i));
-        CHECK(std::fabs(upper.bounds.min.y - base.bounds.max.y) < kEps);
-        CHECK(std::fabs(upper.bounds.max.y - (base.bounds.min.y + height)) < kEps);
-        CHECK(PolygonArea(upper.footprint) < PolygonArea(base.footprint));
-        for (const glm::vec2& v : upper.footprint) CHECK(PointInConvexPolygon(v, base.footprint));
-      } else {
-        CHECK(std::fabs(base.bounds.max.y - base.bounds.min.y - height) < kEps);
-      }
+      CHECK(std::fabs(base.bounds.max.y - base.bounds.min.y - height) < kEps);
     }
     CHECK(perKind[static_cast<int>(BuildingKind::Civic)] == c.towerCount);
     for (int k = 0; k < kBuildingKindCount; ++k) CHECK(perKind[k] > 0);
-    (void)setbacks;  // Seed-dependent; asserted on the forced-downtown city below.
     // Every obstacle with a footprint is a building or a pier column/footing.
     for (const Obstacle& o : scene.obstacles) {
       CHECK(o.footprint.empty() || o.building >= 0 || o.kind == ObstacleKind::Pier ||
@@ -342,9 +329,6 @@ void TestBuildingKindsFloorsAndHeights() {
   }
   CHECK(townOffice > homesOffice);
   CHECK(homesRes > townRes);
-  int townSetbacks = 0;
-  for (const Building& b : town.buildings) townSetbacks += b.upperObstacle >= 0;
-  CHECK(townSetbacks > 0);
   CHECK(homesRes * 2 > static_cast<int>(base.buildings.size()));
   BlockCharacter parsed = BlockCharacter::Auto;
   CHECK(ParseBlockCharacter("industrial", &parsed) && parsed == BlockCharacter::Industrial);
@@ -447,7 +431,7 @@ void TestMassingStaysOnItsBuilding() {
       }
       CHECK(d.building >= 0 && d.building < static_cast<int>(scene.buildings.size()));
       const Building& b = scene.buildings[d.building];
-      const Obstacle& roof = scene.obstacles[b.upperObstacle >= 0 ? b.upperObstacle : b.obstacle];
+      const Obstacle& roof = scene.obstacles[b.obstacle];
       switch (d.kind) {
         case MassingDetail::Kind::Parapet:
         case MassingDetail::Kind::RoofFixture: {
@@ -498,7 +482,7 @@ void TestMassingStaysOnItsBuilding() {
     int ringed = 0;
     for (size_t i = 0; i < scene.buildings.size(); ++i) {
       const Building& b = scene.buildings[i];
-      const Obstacle& roof = scene.obstacles[b.upperObstacle >= 0 ? b.upperObstacle : b.obstacle];
+      const Obstacle& roof = scene.obstacles[b.obstacle];
       if (parapetsPerBuilding[i] == 0) continue;
       ++ringed;
       CHECK(parapetsPerBuilding[i] <= static_cast<int>(roof.footprint.size()));

@@ -45,10 +45,13 @@ struct Wall {
 // of issue #292: a face with an open end (a corner to peek around) is
 // tactical only on the stretch of wall leading up to that corner, cut at 45
 // degrees -- the point's distance to the corner along the wall must be at
-// most kCoverEdgeReach and at least its distance from the wall. The corner
-// itself and anything diagonally beyond the face's span get no cover.
+// most kCoverEdgeReach and (with `taper`) at least its distance from the
+// wall. The corner itself and anything diagonally beyond the face's span get
+// no cover. The overlay passes taper=false so the drawn tactical patch is
+// the full band-deep stretch beside the corner (a chunky solid mark), not
+// just the thin 45-degree sliver.
 std::vector<Wall> CollectWalls(const std::vector<Obstacle>& obstacles, const glm::vec2& c,
-                               float feetY, float band) {
+                               float feetY, float band, bool taper = true) {
   std::vector<Wall> walls;
   std::vector<glm::vec2> poly;
   for (const Obstacle& ob : obstacles) {
@@ -86,7 +89,7 @@ std::vector<Wall> CollectWalls(const std::vector<Obstacle>& obstacles, const glm
         float a;  // Distance from the point to this end along the wall.
       } ends[2] = {{v0, -along, t}, {v1, along, len - t}};
       for (const auto& end : ends) {
-        if (end.a > kCoverEdgeReach || o > end.a) continue;  // Outside the wedge.
+        if (end.a > kCoverEdgeReach || (taper && o > end.a)) continue;  // Outside the wedge.
         // Open end: nothing continues the wall just past the corner behind
         // the face plane, and the ground around the corner is free to peek
         // from. A joint between collinear boxes stays one flat wall.
@@ -136,7 +139,7 @@ glm::vec2 CoverZoneWeights(const std::vector<Obstacle>& obstacles, const glm::ve
   const glm::vec2 c(feet.x, feet.z);
   if (Blocked(obstacles, c, feet.y)) return glm::vec2(0.0f);
   bool tactical = false, flat = false;
-  for (const Wall& w : CollectWalls(obstacles, c, feet.y, band)) {
+  for (const Wall& w : CollectWalls(obstacles, c, feet.y, band, /*taper=*/false)) {
     flat = true;
     tactical |= w.tactical;
   }

@@ -143,14 +143,16 @@ int main() {
   }
 
   // CoverZoneWeights: the continuous zone the frontier overlay paints.
-  // Flat along the face, tactical only inside the 45-degree corner wedge,
-  // nothing diagonally past the corner or on open ground.
+  // Flat along the face, tactical on the full band-deep stretch within
+  // kCoverEdgeReach of an open corner (no 45-degree taper: the drawn mark is
+  // a chunky solid patch), nothing diagonally past the corner or on open
+  // ground.
   {
     const std::vector<Obstacle> building = {Box(0, 0, 10, 10)};
     CHECK(CoverZoneWeights(building, {-0.4f, 0, 5}, 0.8f) == glm::vec2(0, 1));       // Mid-face.
     CHECK(CoverZoneWeights(building, {-0.75f, 0, 5}, 0.8f) == glm::vec2(0, 1));      // Deeper band than gameplay.
     CHECK(CoverZoneWeights(building, {-0.4f, 0, 0.5f}, 0.8f) == glm::vec2(1, 0));    // In the wedge.
-    CHECK(CoverZoneWeights(building, {-0.4f, 0, 0.3f}, 0.8f) == glm::vec2(0, 1));    // Past the 45-degree cut.
+    CHECK(CoverZoneWeights(building, {-0.4f, 0, 0.3f}, 0.8f) == glm::vec2(1, 0));    // Near the corner, full depth.
     CHECK(CoverZoneWeights(building, {-0.5f, 0, -0.5f}, 0.8f) == glm::vec2(0, 0));   // Corner diagonal.
     CHECK(CoverZoneWeights(building, {-2, 0, 5}, 0.8f) == glm::vec2(0, 0));          // Open ground.
   }

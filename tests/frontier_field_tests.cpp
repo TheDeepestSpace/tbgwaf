@@ -324,10 +324,10 @@ void TestWallContourUsesExactOutline() {
 }
 
 void TestCoverStyleWeights() {
-  // A wall obstacle: striped (flat) along its face, the full gradient
-  // (tactical) only inside the 45-degree wedge leading up to each end, and
-  // nothing diagonally past a corner or on open ground (no gradient on the
-  // budget boundary). Nodes sit at (ix * 0.25, iz * 0.25).
+  // A wall obstacle: hatched (flat) along its face, solid (tactical) on the
+  // full band-deep stretch within kCoverEdgeReach of each open end, and
+  // nothing diagonally past a corner or on open ground (no cover mark on
+  // the budget boundary). Nodes sit at (ix * 0.25, iz * 0.25).
   tactics::ReachField field = EmptyField(21);
   for (float& d : field.dist) d = 0.0f;
   tactics::Obstacle wall;
@@ -340,7 +340,7 @@ void TestCoverStyleWeights() {
   const auto at = [&](int ix, int iz) { return style[iz * field.nx + ix]; };
   CHECK(at(14, 10).y == 1.0f && at(14, 10).x == 0.0f);  // Mid-wall: striped (flat).
   CHECK(at(14, 6).x == 1.0f && at(14, 6).y == 0.0f);    // Wedge at the wall's end.
-  CHECK(at(12, 6).x == 0.0f && at(12, 6).y == 1.0f);    // Same height, farther out: past the 45-degree cut.
+  CHECK(at(12, 6).x == 1.0f && at(12, 6).y == 0.0f);    // Same height, farther out: still the solid patch.
   CHECK(at(14, 4).x == 0.0f && at(14, 4).y == 0.0f);    // Diagonally past the corner: nothing.
   CHECK(at(10, 10).x == 0.0f && at(10, 10).y == 0.0f);  // Open ground: none.
 }

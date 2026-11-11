@@ -4707,6 +4707,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       glm::vec3 p;
       float g;
       glm::vec2 s;  // (tactical, flat) cover style weights.
+      // Budget-glow weight: 1 where the nearby boundary is the move budget
+      // running out, 0 where it is an obstacle outline (per field.wallDist),
+      // so the gradient glow marks only the budget arc and obstacles carry
+      // nothing but their cover marks (issue #292).
+      float w = 1.0f;
     };
     const std::vector<AABB>& slabs = game.GetScene().sidewalks;
     // Clips a convex polygon to a slab's XZ footprint (Sutherland-Hodgman),
@@ -4727,7 +4732,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           if (inside(cur) != inside(prev)) {
             const float t = (bound - coord(prev)) / (coord(cur) - coord(prev));
             out.push_back({prev.p + (cur.p - prev.p) * t, prev.g + (cur.g - prev.g) * t,
-                           prev.s + (cur.s - prev.s) * t});
+                           prev.s + (cur.s - prev.s) * t, prev.w + (cur.w - prev.w) * t});
           }
           if (inside(cur)) out.push_back(cur);
         }
@@ -4737,17 +4742,21 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       return poly;
     };
     auto toVertex = [&](const Pt& q) {
-      float factor = 1.0f;
+      const float open = q.w * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
+      float a = kEdgeAlpha * open;
       if (styled) {
-        // 45-degree world-space stripes tag flat cover; tactical cover gets
-        // the full gradient and open ground none.
+        // Schematic cover marks (issue #292): tactical cover is a solid
+        // flat fill, flat cover a crisp 45-degree world-space hatch -- flat
+        // alphas, not gradients, so the two read apart at a glance. The
+        // marks replace the boundary glow inside the cover band; open
+        // ground keeps the plain budget-edge gradient.
         const float wave =
             0.5f + 0.5f * std::sin((q.p.x + q.p.z) * (6.2831853f / 0.6f));
-        const float stripe = std::clamp(1.8f * wave - 0.4f, 0.0f, 1.0f);
-        factor = std::min(1.0f, q.s.x + q.s.y * stripe);
+        const float hatch = std::clamp(6.0f * (wave - 0.5f) + 0.5f, 0.0f, 1.0f);
+        const float coverWeight = std::min(1.0f, q.s.x + q.s.y);
+        const float pattern = std::min(1.0f, q.s.x + q.s.y * hatch);
+        a = kEdgeAlpha * glm::mix(open, pattern, coverWeight);
       }
-      const float a =
-          kEdgeAlpha * factor * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
       return ColorTriangleMesh::Vertex{q.p, glm::vec4(color, a)};
     };
     // Emits a triangle, midpoint-subdividing it (two levels) where it touches
@@ -4759,7 +4768,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         [&](const Pt& a, const Pt& b, const Pt& c, int depth) {
           if (depth < 2 && styled && std::max({a.s.y, b.s.y, c.s.y}) > 0.0f) {
             const auto mid = [](const Pt& u, const Pt& v) {
-              return Pt{(u.p + v.p) * 0.5f, (u.g + v.g) * 0.5f, (u.s + v.s) * 0.5f};
+              return Pt{(u.p + v.p) * 0.5f, (u.g + v.g) * 0.5f, (u.s + v.s) * 0.5f,
+                        (u.w + v.w) * 0.5f};
             };
             const Pt ab = mid(a, b), bc = mid(b, c), ca = mid(c, a);
             emitTri(a, ab, ca, depth + 1);
@@ -4779,14 +4789,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     auto emitFan = [&](const std::vector<Pt>& poly) {
       if (poly.size() < 3) return;
       Pt c{glm::vec3(0.0f), 0.0f, glm::vec2(0.0f)};
+      c.w = 0.0f;
       for (const Pt& q : poly) {
         c.p += q.p;
         c.g += q.g;
         c.s += q.s;
+        c.w += q.w;
       }
       c.p /= static_cast<float>(poly.size());
       c.g /= static_cast<float>(poly.size());
       c.s /= static_cast<float>(poly.size());
+      c.w /= static_cast<float>(poly.size());
       for (size_t k = 0; k < poly.size(); ++k)
         emitTri(c, poly[k], poly[(k + 1) % poly.size()], 0);
     };
@@ -4797,8 +4810,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         Pt quad[4];
         bool anyIn = false;
         for (int k = 0; k < 4; ++k) {
-          quad[k] = {f.Node(cx[k], cz[k]), g[cz[k] * nx + cx[k]],
-                     styled ? style[cz[k] * nx + cx[k]] : glm::vec2(0.0f)};
+          const int idx = cz[k] * nx + cx[k];
+          // Glow only where the boundary is the budget: beside an obstacle
+          // outline (wallDist and the boundary depth agree) the gradient is
+          // muted, so the obstacle carries only its cover marks.
+          float openGlow = 1.0f;
+          if (f.wallDist.size() == g.size() && std::isfinite(f.wallDist[idx])) {
+            openGlow = std::clamp((f.wallDist[idx] - std::max(g[idx], 0.0f)) / (2.0f * f.step),
+                                  0.0f, 1.0f);
+          }
+          quad[k] = {f.Node(cx[k], cz[k]), g[idx],
+                     styled ? style[idx] : glm::vec2(0.0f), openGlow};
           // Each node rides the terrain under it (HeightAt is 0 on flat
           // maps); the 0.25-unit grid is fine enough that the linear
           // contour/edge interpolation below stays on the slope.
@@ -4825,6 +4847,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           quad[k].p.y = quad[dom].p.y;
           quad[k].g = -0.5f * f.step;
           quad[k].s = quad[dom].s;
+          quad[k].w = quad[dom].w;
         }
         // Clip the cell to g >= 0 (Sutherland-Hodgman against the field).
         std::vector<Pt> poly;
@@ -4836,13 +4859,22 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           if (ain) poly.push_back(a);
           if (ain != bin) {
             const float t = a.g / (a.g - b.g);
-            const Pt c{a.p + (b.p - a.p) * t, 0.0f, a.s + (b.s - a.s) * t};
+            const Pt c{a.p + (b.p - a.p) * t, 0.0f, a.s + (b.s - a.s) * t,
+                       a.w + (b.w - a.w) * t};
             poly.push_back(c);
             cut.push_back(c);
           }
         }
         emitFan(poly);
-        if (cut.size() == 2) {
+        // Contour line only where the boundary is the budget running out.
+        // Where it is an obstacle, the box itself (plus its cover marks) is
+        // the boundary; a line there shows through the see-through-faded box
+        // and reads as a walkable rim around its top (issue #292).
+        bool wallCut = false;
+        if (f.walkable.size() == g.size()) {
+          for (int k = 0; k < 4; ++k) wallCut |= f.walkable[cz[k] * nx + cx[k]] == 0;
+        }
+        if (cut.size() == 2 && !wallCut) {
           border.push_back(cut[0].p);
           border.push_back(cut[1].p);
         }
@@ -4851,7 +4883,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         for (const AABB& slab : slabs) {
           const std::vector<Pt> piece = clipToSlab(poly, slab);
           emitFan(piece);
-          if (cut.size() == 2) {
+          if (cut.size() == 2 && !wallCut) {
             // Liang-Barsky clip of the border segment to the slab footprint.
             const glm::vec3 a = cut[0].p, d = cut[1].p - cut[0].p;
             float t0 = 0.0f, t1 = 1.0f;

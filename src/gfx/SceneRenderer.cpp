@@ -4376,9 +4376,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       unlitShader_.Use();
       unlitShader_.SetMat4("uMVP", viewProj);
       unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink));
-      // Unconditional: the same frame whether or not a floor or stair slab
-      // overlaps the opening on screen (stencil is neither tested nor written).
-      glStencilFunc(GL_ALWAYS, 0, 0xFF);
+      // Only where a floor or stair claimed the pixel (stencil 1; the shell
+      // marks 2): elsewhere CompositeFadedOutlines already draws the frame,
+      // and drawing it here too would double it. Called after the shell
+      // blend so the shell never dims these lines (a slab pixel gets no
+      // shell, so lines there would otherwise stay stronger than elsewhere).
+      glStencilFunc(GL_EQUAL, 1, 0xFF);
       glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
       pathLine_.SetPoints(segments);
       pathLine_.DrawSegments();
@@ -4417,8 +4420,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glStencilFunc(GL_EQUAL, 0, 0xFF);
     glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
     drawInteriorGeometry(false);
-    if (fadedOutlines) drawOpeningEdgesOverInterior();
+    // Shell claims its pixels as stencil 2 (bit-invert under a 0x02 write
+    // mask) so the opening edges can tell them from interior pixels (1).
+    glStencilMask(0x02);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
     drawShellGeometry(false);
+    glStencilMask(0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+    if (fadedOutlines) drawOpeningEdgesOverInterior();
     litShader_.SetInt("uDisableShadows", (debug.disableShadows || debug.thermal) ? 1 : 0);
     glDisable(GL_CULL_FACE);
     glFrontFace(GL_CCW);

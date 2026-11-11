@@ -4866,15 +4866,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           }
         }
         emitFan(poly);
-        // Contour line only where the boundary is the budget running out.
-        // Where it is an obstacle, the box itself (plus its cover marks) is
-        // the boundary; a line there shows through the see-through-faded box
-        // and reads as a walkable rim around its top (issue #292).
-        bool wallCut = false;
-        if (f.walkable.size() == g.size()) {
-          for (int k = 0; k < 4; ++k) wallCut |= f.walkable[cz[k] * nx + cx[k]] == 0;
-        }
-        if (cut.size() == 2 && !wallCut) {
+        // Thin contour line follows the whole movement boundary, obstacle
+        // outlines included (the glow is muted there, the line is not).
+        if (cut.size() == 2) {
           border.push_back(cut[0].p);
           border.push_back(cut[1].p);
         }
@@ -4883,7 +4877,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         for (const AABB& slab : slabs) {
           const std::vector<Pt> piece = clipToSlab(poly, slab);
           emitFan(piece);
-          if (cut.size() == 2 && !wallCut) {
+          if (cut.size() == 2) {
             // Liang-Barsky clip of the border segment to the slab footprint.
             const glm::vec3 a = cut[0].p, d = cut[1].p - cut[0].p;
             float t0 = 0.0f, t1 = 1.0f;

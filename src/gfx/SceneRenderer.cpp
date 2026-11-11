@@ -4742,7 +4742,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         // 45-degree world-space stripes tag flat cover; tactical cover gets
         // the full gradient and open ground none.
         const float wave =
-            0.5f + 0.5f * std::sin((q.p.x + q.p.z) * (6.2831853f / 1.2f));
+            0.5f + 0.5f * std::sin((q.p.x + q.p.z) * (6.2831853f / 0.6f));
         const float stripe = std::clamp(1.8f * wave - 0.4f, 0.0f, 1.0f);
         factor = std::min(1.0f, q.s.x + q.s.y * stripe);
       }
@@ -4750,24 +4750,45 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           kEdgeAlpha * factor * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
       return ColorTriangleMesh::Vertex{q.p, glm::vec4(color, a)};
     };
+    // Emits a triangle, midpoint-subdividing it (two levels) where it touches
+    // flat cover so the thin stripes are resolved by the geometry instead of
+    // aliasing against the 0.25-unit grid into blocky squares. Tactical and
+    // open triangles stay whole: their alpha is linear, so the gradient is
+    // the plain smooth ramp.
+    std::function<void(const Pt&, const Pt&, const Pt&, int)> emitTri =
+        [&](const Pt& a, const Pt& b, const Pt& c, int depth) {
+          if (depth < 2 && styled && std::max({a.s.y, b.s.y, c.s.y}) > 0.0f) {
+            const auto mid = [](const Pt& u, const Pt& v) {
+              return Pt{(u.p + v.p) * 0.5f, (u.g + v.g) * 0.5f, (u.s + v.s) * 0.5f};
+            };
+            const Pt ab = mid(a, b), bc = mid(b, c), ca = mid(c, a);
+            emitTri(a, ab, ca, depth + 1);
+            emitTri(ab, b, bc, depth + 1);
+            emitTri(ca, bc, c, depth + 1);
+            emitTri(ab, bc, ca, depth + 1);
+            return;
+          }
+          fill.push_back(toVertex(a));
+          fill.push_back(toVertex(b));
+          fill.push_back(toVertex(c));
+        };
     // Fans around the vertex average rather than vertex 0: a fan from a
     // corner interpolates alpha along one diagonal, which shows as faint
     // diagonal stripes in the gradient. The centre carries the mean field
     // value, so the ramp is symmetric. Same triangle count order as before.
     auto emitFan = [&](const std::vector<Pt>& poly) {
       if (poly.size() < 3) return;
-      Pt c{glm::vec3(0.0f), 0.0f};
+      Pt c{glm::vec3(0.0f), 0.0f, glm::vec2(0.0f)};
       for (const Pt& q : poly) {
         c.p += q.p;
         c.g += q.g;
+        c.s += q.s;
       }
       c.p /= static_cast<float>(poly.size());
       c.g /= static_cast<float>(poly.size());
-      for (size_t k = 0; k < poly.size(); ++k) {
-        fill.push_back(toVertex(c));
-        fill.push_back(toVertex(poly[k]));
-        fill.push_back(toVertex(poly[(k + 1) % poly.size()]));
-      }
+      c.s /= static_cast<float>(poly.size());
+      for (size_t k = 0; k < poly.size(); ++k)
+        emitTri(c, poly[k], poly[(k + 1) % poly.size()], 0);
     };
     for (int iz = 0; iz + 1 < nz; ++iz) {
       for (int ix = 0; ix + 1 < nx; ++ix) {

@@ -883,6 +883,56 @@ void TestBuildingOverTunnelRoof() {
   CHECK(checkedFlights > 0);
 }
 
+// A figure on the tier beside a tunnel roof steps onto the slab anywhere along
+// its long edges, not only at the declared connection points: the movement
+// frontier must carry across the slab edge (seed 87, start near an edge end).
+void TestRoofReachableFromAnyEdgePoint() {
+  currentSeed = 87;
+  const Scene s = GenerateUrbanMap(87, TerrainConfig());
+  NavMesh nav;
+  nav.Build(s.obstacles, s.mapHalfExtent, constants::kAgentRadius, &s.ground,
+            &s.walkSurfaces, &s.terrainTunnels);
+  int probes = 0;
+  for (const TerrainTunnel& tunnel : s.terrainTunnels) {
+    if (tunnel.roofSurface < 0) continue;
+    const WalkSurface& roof = s.walkSurfaces[tunnel.roofSurface];
+    const float roofY = roof.vertices.front().y;
+    std::vector<glm::vec2> outline;
+    glm::vec2 center(0.0f);
+    for (const glm::vec3& v : roof.vertices) {
+      outline.emplace_back(v.x, v.z);
+      center += outline.back() * 0.25f;
+    }
+    for (const size_t e : {size_t{0}, size_t{2}}) {
+      const glm::vec3 a = roof.vertices[e], b = roof.vertices[e + 1];
+      const glm::vec2 dir = glm::normalize(glm::vec2(b.x - a.x, b.z - a.z));
+      glm::vec2 out(-dir.y, dir.x);
+      const glm::vec3 m = a + (b - a) * 0.1f;
+      if (glm::dot(out, glm::vec2(m.x, m.z) - center) < 0.0f) out = -out;
+      glm::vec3 start(m.x + out.x * 0.8f, 0.0f, m.z + out.y * 0.8f);
+      start.y = s.ground.HeightAt(start.x, start.z);
+      if (!nav.IsWalkable(start.x, start.z) || std::fabs(start.y - roofY) > 0.3f) continue;
+      ++probes;
+      const ReachField field = nav.ComputeReachField(start, 5.0f);
+      for (int iz = 0; iz < field.nz; ++iz) {
+        for (int ix = 0; ix < field.nx; ++ix) {
+          const glm::vec3 p = field.Node(ix, iz);
+          if (!PointInConvexPolygon({p.x, p.z}, outline)) continue;
+          if (glm::length(glm::vec2(p.x - start.x, p.z - start.z)) > 2.5f) continue;
+          bool blocked = false;  // Walls standing on the roof level.
+          for (const Obstacle& o : s.obstacles) {
+            blocked |= std::fabs(o.bounds.min.y - roofY) < 0.3f &&
+                       p.x > o.bounds.min.x - 0.5f && p.x < o.bounds.max.x + 0.5f &&
+                       p.z > o.bounds.min.z - 0.5f && p.z < o.bounds.max.z + 0.5f;
+          }
+          if (!blocked) CHECK(field.Reached(ix, iz));
+        }
+      }
+    }
+  }
+  CHECK(probes > 0);
+}
+
 int main() {
   TestStairSidesSealed();
   TestNoWalkableCliffLinks();
@@ -897,6 +947,7 @@ int main() {
   TestSurfacesSitOnTiers();
   TestTerrainTunnels();
   TestBuildingOverTunnelRoof();
+  TestRoofReachableFromAnyEdgePoint();
   TestTerrainZiplines();
   TestMovementUpStair();
   TestSheerFacesAreImpassable();

@@ -723,8 +723,10 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
       // Standing on a surface: ground is reachable by walking to any declared
       // ground connection and stepping off there (as FindPath allows). Price
       // the route to each foot and seed the ground search from it.
+      const std::vector<glm::vec3> hints = {start};
       for (size_t entry = 0; entry < walkSurfaces_.size(); ++entry) {
-        for (const glm::vec3& connection : GroundConnectionPoints(static_cast<int>(entry))) {
+        for (const glm::vec3& connection :
+             GroundConnectionPoints(static_cast<int>(entry), &hints)) {
           std::vector<glm::vec3> path;
           if (!FindSurfacePath(startSurface, start, static_cast<int>(entry), connection, &path)) {
             continue;
@@ -870,6 +872,63 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
     }
   }
 
+  // A terrain roof meets the tier along its whole long edges: flood it from
+  // every reached tier node under its outline (the overhang strip), so the
+  // frontier carries onto the slab instead of stopping at its edge.
+  if (startSurface < 0) {
+    for (size_t r = 0; r < walkSurfaces_.size(); ++r) {
+      const WalkSurface& roof = walkSurfaces_[r];
+      if (!roof.terrain || roof.connectsToGround || roof.vertices.empty()) continue;
+      const float roofY = roof.vertices.front().y;
+      const auto onRoof = [&](float x, float z) {
+        return SurfaceContains(static_cast<int>(r), x, z) &&
+               !SurfaceBlocked(static_cast<int>(r), x, z);
+      };
+      std::vector<float> rd(field.dist.size(), inf);
+      using Entry = std::pair<float, int>;
+      std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+      for (int iz = 0; iz < field.nz; ++iz) {
+        for (int ix = 0; ix < field.nx; ++ix) {
+          const int idx = iz * field.nx + ix;
+          if (field.dist[idx] > budget || field.surfaceY[idx] < roofY - 0.3f ||
+              field.surfaceY[idx] > roofY + 0.3f) {
+            continue;
+          }
+          const glm::vec3 p = field.Node(ix, iz);
+          if (!onRoof(p.x, p.z)) continue;
+          rd[idx] = field.dist[idx];
+          open.push({rd[idx], idx});
+        }
+      }
+      while (!open.empty()) {
+        const auto [d, idx] = open.top();
+        open.pop();
+        if (d > rd[idx]) continue;
+        const int ix = idx % field.nx, iz = idx / field.nx;
+        const glm::vec3 from = field.Node(ix, iz);
+        for (const auto& m : kMoves) {
+          const int jx = ix + m[0], jz = iz + m[1];
+          if (jx < 0 || jz < 0 || jx >= field.nx || jz >= field.nz) continue;
+          const glm::vec3 to = field.Node(jx, jz);
+          if (!onRoof(to.x, to.z) || !onRoof(0.5f * (from.x + to.x), 0.5f * (from.z + to.z))) {
+            continue;
+          }
+          const float nd = d + std::hypot(to.x - from.x, to.z - from.z);
+          const int jdx = jz * field.nx + jx;
+          if (nd > budget || nd >= rd[jdx]) continue;
+          rd[jdx] = nd;
+          open.push({nd, jdx});
+        }
+      }
+      for (size_t idx = 0; idx < rd.size(); ++idx) {
+        if (rd[idx] > budget || rd[idx] >= field.dist[idx] + 0.5f) continue;
+        field.dist[idx] = rd[idx];
+        field.surfaceY[idx] = roofY;
+        field.parent[idx] = -1;
+      }
+    }
+  }
+
   if (blockers) {
     // Endpoint pass: a mover stopping on a node stands there for the rest of
     // the round, so the node is no valid destination if any blocker comes
@@ -955,7 +1014,8 @@ namespace {
 constexpr float kFootOffGround = 1.0f;
 }  // namespace
 
-std::vector<glm::vec3> NavMesh::GroundConnectionPoints(int surface) const {
+std::vector<glm::vec3> NavMesh::GroundConnectionPoints(int surface,
+                                                       const std::vector<glm::vec3>* hints) const {
   if (surface < 0 || static_cast<size_t>(surface) >= walkSurfaces_.size()) return {};
   const WalkSurface& patch = walkSurfaces_[surface];
   std::vector<glm::vec3> feet;
@@ -973,6 +1033,21 @@ std::vector<glm::vec3> NavMesh::GroundConnectionPoints(int surface) const {
       }
     }
     feet.push_back(count ? sum / static_cast<float>(count) : SurfaceCenter(patch));
+  }
+  // A terrain roof rests on the tier along its two long edges, so a figure
+  // steps on anywhere along them: offer the edge point nearest each hint.
+  if (hints && patch.terrain && !patch.connectsToGround && patch.vertices.size() == 4) {
+    for (const glm::vec3& hint : *hints) {
+      for (size_t e : {size_t{0}, size_t{2}}) {
+        const glm::vec3 a = patch.vertices[e], b = patch.vertices[e + 1];
+        const glm::vec2 ab(b.x - a.x, b.z - a.z);
+        const float len2 = glm::dot(ab, ab);
+        if (len2 < 1e-6f) continue;
+        const float u = std::clamp(glm::dot(glm::vec2(hint.x - a.x, hint.z - a.z), ab) / len2,
+                                   0.02f, 0.98f);
+        feet.push_back(a + (b - a) * u);
+      }
+    }
   }
   // A foot standing on a terrain roof is not on the ground below it (the
   // road in the bore): stepping off there would be a vertical hop. Such feet
@@ -1465,9 +1540,11 @@ bool NavMesh::FindPath(glm::vec3 start, glm::vec3 goal, std::vector<glm::vec3>* 
   std::vector<glm::vec3> best;
   float bestLength = std::numeric_limits<float>::infinity();
   const int surfaceEnd = startSurface >= 0 ? startSurface : goalSurface;
+  const std::vector<glm::vec3> endpoints = {start, goal};
   for (size_t entry = 0; entry < walkSurfaces_.size(); ++entry) {
     if (static_cast<int>(entry) != surfaceEnd && surfaceParent_[entry][surfaceEnd] < 0) continue;
-    for (const glm::vec3& connection : GroundConnectionPoints(static_cast<int>(entry))) {
+    for (const glm::vec3& connection :
+         GroundConnectionPoints(static_cast<int>(entry), &endpoints)) {
       glm::vec3 groundConnection = connection;
       groundConnection.y = ground_.HeightAt(connection.x, connection.z);
       std::vector<glm::vec3> groundPath, surfacePath, candidate;

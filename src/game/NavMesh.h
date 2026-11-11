@@ -218,7 +218,11 @@ class NavMesh {
                        glm::vec3 goal, std::vector<glm::vec3>* outPath) const;
   bool FindRoutePath(const std::vector<int>& route, glm::vec3 start, glm::vec3 goal,
                      std::vector<glm::vec3>* outPath) const;
-  std::vector<glm::vec3> GroundConnectionPoints(int surface) const;
+  // `hints` (optional): XZ positions the route runs to or from. A terrain
+  // roof meets the tier along both long edges, so it also offers the point of
+  // each edge nearest every hint, not just its declared connections.
+  std::vector<glm::vec3> GroundConnectionPoints(int surface,
+                                                const std::vector<glm::vec3>* hints = nullptr) const;
   // Joins stair/ramp feet standing on a terrain roof to it and makes the
   // walls standing on the roof solid for it (see the definition).
   void LinkTunnelRoofs(const std::vector<Obstacle>& obstacles);

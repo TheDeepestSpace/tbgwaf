@@ -6404,8 +6404,15 @@ void EmitCoverItems(Scene* scene, const CityPlan& city, const std::vector<Parcel
             for (const WalkSurface& surface : scene->walkSurfaces) {
               if (surface.vertices.size() < 3) continue;
               float lowest = surface.vertices.front().y;
-              for (const glm::vec3& v : surface.vertices) lowest = std::min(lowest, v.y);
+              float highest = lowest;
+              for (const glm::vec3& v : surface.vertices) {
+                lowest = std::min(lowest, v.y);
+                highest = std::max(highest, v.y);
+              }
               if (lowest > baseY + constants::kMinDeckHeadroom) continue;
+              // A flat surface level with the item's base (a tunnel roof) is
+              // what it stands on, not something to keep clear of.
+              if (highest - lowest < 0.05f && std::fabs(lowest - baseY) < 0.05f) continue;
               std::vector<glm::vec2> xz;
               for (const glm::vec3& v : surface.vertices) xz.emplace_back(v.x, v.z);
               ok &= RectPolygonGap(lo, hi, xz) >= 0.05f;
@@ -6485,8 +6492,13 @@ void EmitCoverItems(Scene* scene, const CityPlan& city, const std::vector<Parcel
                 if (!fits) break;
                 if (other.vertices.size() < 3) continue;
                 float lowest = other.vertices.front().y;
-                for (const glm::vec3& v : other.vertices) lowest = std::min(lowest, v.y);
+                float highest = lowest;
+                for (const glm::vec3& v : other.vertices) {
+                  lowest = std::min(lowest, v.y);
+                  highest = std::max(highest, v.y);
+                }
                 if (lowest > baseY + constants::kMinDeckHeadroom) continue;
+                if (highest - lowest < 0.05f && std::fabs(lowest - baseY) < 0.05f) continue;
                 std::vector<glm::vec2> xz;
                 for (const glm::vec3& v : other.vertices) xz.emplace_back(v.x, v.z);
                 fits &= RectPolygonGap(rlo, rhi, xz) >= 0.05f;

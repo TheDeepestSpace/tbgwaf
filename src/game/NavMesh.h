@@ -216,7 +216,12 @@ class NavMesh {
                              std::vector<glm::vec3>* outPath) const;
   bool FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface,
                        glm::vec3 goal, std::vector<glm::vec3>* outPath) const;
+  bool FindRoutePath(const std::vector<int>& route, glm::vec3 start, glm::vec3 goal,
+                     std::vector<glm::vec3>* outPath) const;
   std::vector<glm::vec3> GroundConnectionPoints(int surface) const;
+  // Joins stair/ramp feet standing on a terrain roof to it and makes the
+  // walls standing on the roof solid for it (see the definition).
+  void LinkTunnelRoofs(const std::vector<Obstacle>& obstacles);
   // Per-Build caches over walkSurfaces_: footprints/bounds, a uniform XZ grid
   // for point queries, and all-pairs surface routes (see BuildSurfaceCaches).
   void BuildSurfaceCaches(float agentRadius);

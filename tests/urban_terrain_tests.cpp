@@ -819,6 +819,70 @@ void TestSheerFacesAreImpassable() {
   CHECK(!sealed.FindPath(start, glm::vec3(7.0f, 3.0f, 0.0f), &path));
 }
 
+// Seed 87 raises a stair-and-shell building over a tunnel bore: its ground
+// floor is the roof level and its stair foot stands on the roof, not on the
+// road in the bore. A route to the upper floor must climb the stair from the
+// roof (never hop up from the road below), and a figure on the roof must not
+// walk through the building's walls.
+void TestBuildingOverTunnelRoof() {
+  currentSeed = 87;
+  const Scene s = GenerateUrbanMap(87, TerrainConfig());
+  NavMesh nav;
+  nav.Build(s.obstacles, s.mapHalfExtent, constants::kAgentRadius, &s.ground,
+            &s.walkSurfaces, &s.terrainTunnels);
+  int checkedFlights = 0;
+  for (const TerrainTunnel& tunnel : s.terrainTunnels) {
+    if (tunnel.roofSurface < 0) continue;
+    const WalkSurface& roof = s.walkSurfaces[tunnel.roofSurface];
+    const float roofY = roof.vertices.front().y;
+    std::vector<glm::vec2> outline;
+    for (const glm::vec3& v : roof.vertices) outline.emplace_back(v.x, v.z);
+    for (size_t i = 0; i < s.walkSurfaces.size(); ++i) {
+      const WalkSurface& flight = s.walkSurfaces[i];
+      if (!flight.stair || !flight.connectsToGround || flight.building < 0) continue;
+      float lowest = 1e9f, highest = -1e9f;
+      glm::vec3 foot(0.0f), top(0.0f);
+      for (const glm::vec3& v : flight.vertices) {
+        lowest = std::min(lowest, v.y);
+        highest = std::max(highest, v.y);
+      }
+      int feet = 0, tops = 0;
+      for (const glm::vec3& v : flight.vertices) {
+        if (v.y < lowest + 1e-3f) { foot += v; ++feet; }
+        if (v.y > highest - 1e-3f) { top += v; ++tops; }
+      }
+      foot /= static_cast<float>(feet);
+      top /= static_cast<float>(tops);
+      if (std::fabs(lowest - roofY) > 0.3f ||
+          std::fabs(s.ground.HeightAt(foot.x, foot.z) - foot.y) < 1.0f ||
+          !PointInConvexPolygon({foot.x, foot.z}, outline)) {
+        continue;
+      }
+      ++checkedFlights;
+      // From a roof point beside the building to the top of the flight.
+      const glm::vec3 center = SurfaceCenter(roof);
+      std::vector<glm::vec3> path;
+      CHECK(nav.FindPath(center, top + glm::vec3(0.0f, 0.1f, 0.0f), &path));
+      for (size_t k = 0; k + 1 < path.size(); ++k) {
+        const float run = glm::length(glm::vec2(path[k + 1].x - path[k].x,
+                                                 path[k + 1].z - path[k].z));
+        CHECK(std::fabs(path[k + 1].y - path[k].y) <= 1.5f * run + 0.05f);
+        // Never through a wall standing on the roof level.
+        if (path[k].y > roofY + 0.3f || path[k + 1].y > roofY + 0.3f) continue;
+        for (const Obstacle& o : s.obstacles) {
+          if (o.footprint.size() < 3 || std::fabs(o.bounds.min.y - roofY) > 0.3f ||
+              o.bounds.max.y - roofY < 0.9f) {
+            continue;
+          }
+          CHECK(!SegmentEntersConvexPolygon({path[k].x, path[k].z},
+                                            {path[k + 1].x, path[k + 1].z}, o.footprint));
+        }
+      }
+    }
+  }
+  CHECK(checkedFlights > 0);
+}
+
 int main() {
   TestStairSidesSealed();
   TestNoWalkableCliffLinks();
@@ -832,6 +896,7 @@ int main() {
   TestStreetsKeepClearOfLevels();
   TestSurfacesSitOnTiers();
   TestTerrainTunnels();
+  TestBuildingOverTunnelRoof();
   TestTerrainZiplines();
   TestMovementUpStair();
   TestSheerFacesAreImpassable();

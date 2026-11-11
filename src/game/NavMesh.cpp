@@ -309,6 +309,7 @@ void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& 
       surface.neighbors = std::move(kept);
     }
   }
+  LinkTunnelRoofs(allObstacles);
   BuildSurfaceCaches(agentRadius);
   polygonMode_ = false;
   paddedPolygons_.clear();
@@ -949,23 +950,146 @@ float NavMesh::ResolveSurfaceY(float x, float z, float yHint) const {
   return surface >= 0 ? SurfaceHeightAt(walkSurfaces_[surface], x, z) : ground_.HeightAt(x, z);
 }
 
+namespace {
+// Ground connections farther than this from their foot are not on the ground.
+constexpr float kFootOffGround = 1.0f;
+}  // namespace
+
 std::vector<glm::vec3> NavMesh::GroundConnectionPoints(int surface) const {
   if (surface < 0 || static_cast<size_t>(surface) >= walkSurfaces_.size()) return {};
   const WalkSurface& patch = walkSurfaces_[surface];
-  if (!patch.groundConnections.empty()) return patch.groundConnections;
-  if (!patch.connectsToGround || patch.vertices.empty()) return {};
-  float lowest = patch.vertices.front().y;
-  for (const glm::vec3& v : patch.vertices) lowest = std::min(lowest, v.y);
-  glm::vec3 sum(0.0f);
-  int count = 0;
-  for (const glm::vec3& v : patch.vertices) {
-    if (std::fabs(v.y - lowest) < 1e-3f) {
-      sum += v;
-      ++count;
+  std::vector<glm::vec3> feet;
+  if (!patch.groundConnections.empty()) {
+    feet = patch.groundConnections;
+  } else if (patch.connectsToGround && !patch.vertices.empty()) {
+    float lowest = patch.vertices.front().y;
+    for (const glm::vec3& v : patch.vertices) lowest = std::min(lowest, v.y);
+    glm::vec3 sum(0.0f);
+    int count = 0;
+    for (const glm::vec3& v : patch.vertices) {
+      if (std::fabs(v.y - lowest) < 1e-3f) {
+        sum += v;
+        ++count;
+      }
+    }
+    feet.push_back(count ? sum / static_cast<float>(count) : SurfaceCenter(patch));
+  }
+  // A foot standing on a terrain roof is not on the ground below it (the
+  // road in the bore): stepping off there would be a vertical hop. Such feet
+  // join the roof surface instead (LinkTunnelRoofs).
+  feet.erase(std::remove_if(feet.begin(), feet.end(),
+                            [&](const glm::vec3& foot) {
+                              return !ground_.Empty() &&
+                                     std::fabs(ground_.HeightAt(foot.x, foot.z) - foot.y) >
+                                         kFootOffGround;
+                            }),
+             feet.end());
+  return feet;
+}
+
+void NavMesh::LinkTunnelRoofs(const std::vector<Obstacle>& obstacles) {
+  if (ground_.Empty()) return;
+  const int n = static_cast<int>(walkSurfaces_.size());
+  const auto link = [&](int a, int b) {
+    auto& na = walkSurfaces_[a].neighbors;
+    if (std::find(na.begin(), na.end(), b) == na.end()) na.push_back(b);
+    auto& nb = walkSurfaces_[b].neighbors;
+    if (std::find(nb.begin(), nb.end(), a) == nb.end()) nb.push_back(a);
+  };
+  constexpr float kLevelSlack = 0.3f;
+  for (int roofIdx = 0; roofIdx < n; ++roofIdx) {
+    WalkSurface& roof = walkSurfaces_[roofIdx];
+    if (!roof.terrain || roof.connectsToGround || roof.vertices.size() < 3) continue;
+    const float roofY = roof.vertices.front().y;
+    std::vector<glm::vec2> outline;
+    for (const glm::vec3& v : roof.vertices) outline.emplace_back(v.x, v.z);
+    // Walls, parapets and furniture standing on the roof level are solid for
+    // it. Without them a figure on the roof walks straight through the shell
+    // of a building raised over the bore (its ground floor is this roof).
+    for (const Obstacle& o : obstacles) {
+      if (std::fabs(o.bounds.min.y - roofY) > kLevelSlack || o.bounds.max.y - roofY < 0.9f) {
+        continue;
+      }
+      std::vector<glm::vec2> poly = o.footprint;
+      if (poly.size() < 3) {
+        poly = {{o.bounds.min.x, o.bounds.min.z}, {o.bounds.max.x, o.bounds.min.z},
+                {o.bounds.max.x, o.bounds.max.z}, {o.bounds.min.x, o.bounds.max.z}};
+      }
+      bool on = false;
+      for (const glm::vec2& p : poly) on |= PointInConvexPolygon(p, outline);
+      if (on) roof.blockers.push_back(std::move(poly));
+    }
+    // Stair and ramp flights whose foot stands on the roof start there.
+    for (int i = 0; i < n; ++i) {
+      if (i == roofIdx) continue;
+      const WalkSurface& s = walkSurfaces_[i];
+      if (s.terrain || !s.connectsToGround || s.vertices.empty()) continue;
+      float lowest = s.vertices.front().y;
+      for (const glm::vec3& v : s.vertices) lowest = std::min(lowest, v.y);
+      if (std::fabs(lowest - roofY) > kLevelSlack) continue;
+      glm::vec3 foot(0.0f);
+      int count = 0;
+      for (const glm::vec3& v : s.vertices) {
+        if (std::fabs(v.y - lowest) < 1e-3f) {
+          foot += v;
+          ++count;
+        }
+      }
+      foot /= static_cast<float>(std::max(count, 1));
+      if (std::fabs(ground_.HeightAt(foot.x, foot.z) - foot.y) <= kFootOffGround) continue;
+      if (SurfaceContainsXZ(roof, foot.x, foot.z)) link(roofIdx, i);
     }
   }
-  return {count ? sum / static_cast<float>(count) : SurfaceCenter(patch)};
 }
+
+namespace {
+// Where a route passes from patch `a` to the adjacent patch `b` when it does
+// not cross a full shared seam: the shared corner(s); else, for a flight
+// landing on a terrain roof, the middle of its foot on the roof plane; else
+// a vertex contained by both (a ramp ending inside a wider deck), else the
+// midpoint of the centers. Height is the mean of both planes there.
+glm::vec3 SurfaceTransition(const WalkSurface& a, const WalkSurface& b) {
+  glm::vec3 transition(0.0f);
+  int count = 0;
+  for (const glm::vec3& av : a.vertices) {
+    for (const glm::vec3& bv : b.vertices) {
+      if (glm::distance(av, bv) < 1e-3f) {
+        transition += (av + bv) * 0.5f;
+        ++count;
+      }
+    }
+  }
+  if (count) {
+    transition /= static_cast<float>(count);
+  } else {
+    const WalkSurface* roof = a.terrain ? &a : b.terrain ? &b : nullptr;
+    const WalkSurface* flight = roof == &a ? &b : &a;
+    if (roof && !roof->vertices.empty()) {
+      for (const glm::vec3& v : flight->vertices) {
+        if (std::fabs(v.y - roof->vertices.front().y) < 0.05f) {
+          transition += v;
+          ++count;
+        }
+      }
+    }
+    if (count) {
+      transition /= static_cast<float>(count);
+    } else {
+      for (const glm::vec3& v : a.vertices) {
+        if (SurfaceContainsXZ(b, v.x, v.z)) {
+          transition += v;
+          ++count;
+        }
+      }
+      if (count) transition /= static_cast<float>(count);
+      else transition = (SurfaceCenter(a) + SurfaceCenter(b)) * 0.5f;
+    }
+  }
+  transition.y = 0.5f * (SurfaceHeightAt(a, transition.x, transition.z) +
+                         SurfaceHeightAt(b, transition.x, transition.z));
+  return transition;
+}
+}  // namespace
 
 bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface,
                               glm::vec3 goal, std::vector<glm::vec3>* outPath) const {
@@ -985,6 +1109,51 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
   }
   std::reverse(route.begin(), route.end());
 
+  // A patch with blockers (a roof with walls standing on it) is crossed by
+  // visibility-graph search, so cut the route there: the patch is walked
+  // from where the route enters it to where it leaves, the rest as usual.
+  bool blocked = false;
+  for (int surface : route) blocked |= !surfaceBlockers_[surface].empty();
+  if (!blocked || route.size() < 2) return FindRoutePath(route, start, goal, outPath);
+  const auto append = [&](const std::vector<glm::vec3>& piece) {
+    for (const glm::vec3& p : piece) {
+      if (outPath->empty() || glm::distance(p, outPath->back()) > kEps) outPath->push_back(p);
+    }
+  };
+  glm::vec3 at = start;
+  size_t next = 0;  // First route surface not yet walked.
+  std::vector<glm::vec3> piece;
+  for (size_t k = 0; k < route.size(); ++k) {
+    if (surfaceBlockers_[route[k]].empty()) continue;
+    const WalkSurface& patch = walkSurfaces_[route[k]];
+    glm::vec3 enter = at, leave = goal;
+    if (k > 0) enter = SurfaceTransition(walkSurfaces_[route[k - 1]], patch);
+    if (k + 1 < route.size()) leave = SurfaceTransition(patch, walkSurfaces_[route[k + 1]]);
+    if (k > next) {
+      const std::vector<int> lead(route.begin() + next, route.begin() + k);
+      if (!FindRoutePath(lead, at, enter, &piece)) return false;
+      append(piece);
+    }
+    enter.y = SurfaceHeightAt(patch, enter.x, enter.z);
+    leave.y = SurfaceHeightAt(patch, leave.x, leave.z);
+    if (!FindBlockedSurfacePath(route[k], enter, leave, &piece)) return false;
+    append(piece);
+    at = leave;
+    next = k + 1;
+  }
+  if (next < route.size()) {
+    const std::vector<int> tail(route.begin() + next, route.end());
+    if (!FindRoutePath(tail, at, goal, &piece)) return false;
+    append(piece);
+  }
+  return true;
+}
+
+bool NavMesh::FindRoutePath(const std::vector<int>& route, glm::vec3 start, glm::vec3 goal,
+                            std::vector<glm::vec3>* outPath) const {
+  outPath->clear();
+  const int startSurface = route.front();
+  const int goalSurface = route.back();
   start.y = SurfaceHeightAt(walkSurfaces_[startSurface], start.x, start.z);
   goal.y = SurfaceHeightAt(walkSurfaces_[goalSurface], goal.x, goal.z);
 
@@ -1095,25 +1264,7 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
       portalSurface.push_back(route[i]);
       continue;
     }
-    glm::vec3 transition(0.0f);
-    if (!shared.empty()) {
-      for (const glm::vec3& s : shared) transition += s;
-      transition /= static_cast<float>(shared.size());
-    } else {
-      // A ramp may terminate in the interior of a wider deck. Prefer a
-      // vertex contained by both, then fall back to the midpoint of centers.
-      int contained = 0;
-      for (const glm::vec3& v : a.vertices) {
-        if (SurfaceContainsXZ(b, v.x, v.z)) {
-          transition += v;
-          ++contained;
-        }
-      }
-      if (contained) transition /= static_cast<float>(contained);
-      else transition = (SurfaceCenter(a) + SurfaceCenter(b)) * 0.5f;
-    }
-    transition.y = 0.5f * (SurfaceHeightAt(a, transition.x, transition.z) +
-                            SurfaceHeightAt(b, transition.x, transition.z));
+    glm::vec3 transition = SurfaceTransition(a, b);
     flush(transition);
   }
   flush(goal);
@@ -1129,6 +1280,27 @@ bool NavMesh::FindBlockedSurfacePath(int surface, glm::vec3 start, glm::vec3 goa
   const auto& blockers = surfaceBlockers_[surface];
   const glm::vec2 s(start.x, start.z), g(goal.x, goal.z);
   if (SurfaceBlocked(surface, g.x, g.y)) return false;
+  // Most legs are open: try the straight line before building the graph.
+  const auto crossesBlocker = [&](glm::vec2 from, glm::vec2 to, bool skipStartInside) {
+    const glm::vec2 lo = glm::min(from, to), hi = glm::max(from, to);
+    for (const auto& blocker : blockers) {
+      glm::vec2 bl = blocker.front(), bh = blocker.front();
+      for (const glm::vec2& p : blocker) {
+        bl = glm::min(bl, p);
+        bh = glm::max(bh, p);
+      }
+      if (bh.x < lo.x || bl.x > hi.x || bh.y < lo.y || bl.y > hi.y) continue;
+      if (skipStartInside && PointInConvexPolygon(s, blocker)) continue;
+      if (SegmentEntersConvexPolygon(from, to, blocker)) return true;
+    }
+    return false;
+  };
+  if (!crossesBlocker(s, g, true)) {
+    outPath->clear();
+    outPath->emplace_back(s.x, SurfaceHeightAt(patch, s.x, s.y), s.y);
+    outPath->emplace_back(g.x, SurfaceHeightAt(patch, g.x, g.y), g.y);
+    return true;
+  }
   std::vector<glm::vec2> nodes = {s, g};
   for (const auto& polygon : blockers) {
     // Way-nodes sit a nudge outside their blocker: a corner on the boundary
@@ -1140,13 +1312,23 @@ bool NavMesh::FindBlockedSurfacePath(int surface, glm::vec3 start, glm::vec3 goa
       }
     }
   }
+  std::vector<glm::vec2> blo(blockers.size()), bhi(blockers.size());
+  for (size_t i = 0; i < blockers.size(); ++i) {
+    blo[i] = bhi[i] = blockers[i].front();
+    for (const glm::vec2& p : blockers[i]) {
+      blo[i] = glm::min(blo[i], p);
+      bhi[i] = glm::max(bhi[i], p);
+    }
+  }
   std::vector<char> startInside(blockers.size(), 0);
   for (size_t i = 0; i < blockers.size(); ++i) {
     startInside[i] = PointInConvexPolygon(s, blockers[i]);
   }
   const auto clear = [&](size_t from, size_t to) {
+    const glm::vec2 lo = glm::min(nodes[from], nodes[to]), hi = glm::max(nodes[from], nodes[to]);
     for (size_t i = 0; i < blockers.size(); ++i) {
       if (from == 0 && startInside[i]) continue;
+      if (bhi[i].x < lo.x || blo[i].x > hi.x || bhi[i].y < lo.y || blo[i].y > hi.y) continue;
       if (SegmentEntersConvexPolygon(nodes[from], nodes[to], blockers[i])) return false;
     }
     return true;

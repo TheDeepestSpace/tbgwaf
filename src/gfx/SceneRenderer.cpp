@@ -4852,6 +4852,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         // Clip the cell to g >= 0 (Sutherland-Hodgman against the field).
         std::vector<Pt> poly;
         std::vector<Pt> cut;  // Contour crossings, in polygon order.
+        std::vector<bool> cutEnters;  // Per crossing: outside -> inside.
         for (int k = 0; k < 4; ++k) {
           const Pt& a = quad[k];
           const Pt& b = quad[(k + 1) % 4];
@@ -4863,23 +4864,30 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                        a.w + (b.w - a.w) * t};
             poly.push_back(c);
             cut.push_back(c);
+            cutEnters.push_back(bin);
           }
         }
         emitFan(poly);
+        // Contour segments: each inside run runs from an entering crossing to
+        // the next exiting one. Saddle cells have two runs (4 crossings); a
+        // single segment there left gaps in the line.
+        std::vector<std::pair<glm::vec3, glm::vec3>> segs;
+        for (size_t k = 0; k < cut.size(); ++k)
+          if (cutEnters[k]) segs.emplace_back(cut[k].p, cut[(k + 1) % cut.size()].p);
         // Thin contour line follows the whole movement boundary, obstacle
         // outlines included (the glow is muted there, the line is not).
-        if (cut.size() == 2) {
-          border.push_back(cut[0].p);
-          border.push_back(cut[1].p);
+        for (const auto& sg : segs) {
+          border.push_back(sg.first);
+          border.push_back(sg.second);
         }
         // The ground-level copy is buried under raised sidewalk slabs, so
         // lay a clipped copy on top of each slab the cell overlaps.
         for (const AABB& slab : slabs) {
           const std::vector<Pt> piece = clipToSlab(poly, slab);
           emitFan(piece);
-          if (cut.size() == 2) {
+          for (const auto& sg : segs) {
             // Liang-Barsky clip of the border segment to the slab footprint.
-            const glm::vec3 a = cut[0].p, d = cut[1].p - cut[0].p;
+            const glm::vec3 a = sg.first, d = sg.second - sg.first;
             float t0 = 0.0f, t1 = 1.0f;
             const float lo[2] = {slab.min.x, slab.min.z}, hi[2] = {slab.max.x, slab.max.z};
             const float a2[2] = {a.x, a.z}, d2[2] = {d.x, d.z};

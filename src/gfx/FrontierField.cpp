@@ -5,6 +5,8 @@
 #include <deque>
 #include <limits>
 
+#include "game/Types.h"
+
 namespace gfx {
 
 std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
@@ -97,6 +99,7 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
   };
 
   constexpr float kMaxDepth = 4.0f;
+  constexpr float kObstacleInset = tactics::constants::kAgentRadius - 0.05f;
   const std::vector<float> dIn = chamfer(false);
   const std::vector<float> dOut = chamfer(true);
 
@@ -330,7 +333,12 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
         if (haveWallDist && std::isfinite(field.wallDist[i])) {
           const float signedDist =
               (reached(ix, iz) ? 1.0f : -1.0f) * std::min(field.wallDist[i], kMaxDepth);
-          if (std::fabs(signedDist - raw[i]) <= 1.5f * field.step) exact = signedDist;
+          if (std::fabs(signedDist - raw[i]) <= 1.5f * field.step) {
+            // The measured outline is the navmesh's agent-padded one; draw the
+            // line just off the obstacle's real face instead of a body radius
+            // away from it.
+            exact = signedDist + kObstacleInset;
+          }
         }
         value = wall * exact + (1.0f - wall) * value;
       }

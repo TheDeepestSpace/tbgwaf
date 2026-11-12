@@ -25,6 +25,7 @@ outside that subset just loses its breakdown column, never the page.
 Must run with a working X display (CI wraps it in xvfb-run) and ffmpeg on
 PATH. Always writes an index.html, even when the PR touches no scenarios.
 
+`--plan` prints the shard matrix for CI (count scales with scenario count).
 Recording can be sharded across CI jobs: `--shard i/N` records only the i-th
 (0-based) round-robin slice of the sorted scenario list into --out/media and
 writes --out/shard-<i>.json instead of the page; `--collect` then builds the
@@ -769,6 +770,13 @@ def shard_slice(paths: list[str], index: int, count: int) -> list[str]:
     return sorted(paths)[index::count]
 
 
+def plan_shards(count: int, target_per_shard: int, max_shards: int) -> int:
+    """Shard count = clamp(ceil(count / target), 1, max); 0 when nothing to record."""
+    if count <= 0:
+        return 0
+    return max(1, min(max_shards, -(-count // max(1, target_per_shard))))
+
+
 def scenario_entry(path: str, info: dict | None,
                    breakdown: tuple[str, str] | None = None) -> str:
     description, breakdown = breakdown or ("", "")
@@ -840,10 +848,17 @@ def main() -> int:
     mode.add_argument("--shard", type=parse_shard, metavar="i/N",
                       help="Record only slice i of N (0-based); writes "
                            "shard-<i>.json instead of the page")
+    mode.add_argument("--plan", action="store_true",
+                      help="Print the CI shard matrix as JSON "
+                           '({"count": N, "shard": [0..N-1]}) and exit')
     mode.add_argument("--collect", action="store_true",
                       help="Build the page from shard-*.json + media/ already "
                            "present in --out; fails if a shard is missing")
-    parser.add_argument("--out", required=True, type=Path,
+    parser.add_argument("--target-per-shard", type=int, default=3,
+                        help="--plan: scenarios per shard to aim for")
+    parser.add_argument("--max-shards", type=int, default=18,
+                        help="--plan: upper bound on the shard count")
+    parser.add_argument("--out", type=Path,
                         help="Output directory for index.html + media/")
     parser.add_argument("--server", type=Path, default=None,
                         help="tbgwaf_server_testctl binary: film through a real server")
@@ -855,13 +870,21 @@ def main() -> int:
     parser.add_argument("--performance-url", default="../../../performance/",
                         help="URL of the published Performance suite report")
     args = parser.parse_args()
-    if not args.collect and args.runner is None:
+    if not args.plan and args.out is None:
+        parser.error("--out is required unless --plan")
+    if not args.plan and not args.collect and args.runner is None:
         parser.error("--runner is required unless --collect")
 
     changes = classify_changes(args.base, args.head, args.repo_root)
     all_paths = list_scenario_paths(args.head, args.repo_root)
     changed_paths = set(changes["A"]) | set(changes["M"])
     changes["U"] = [p for p in all_paths if p not in changed_paths]
+
+    if args.plan:
+        n = plan_shards(len(changes["A"] + changes["M"] + changes["U"]),
+                        args.target_per_shard, args.max_shards)
+        print(json.dumps({"count": n, "shard": list(range(n))}))
+        return 0
 
     args.out.mkdir(parents=True, exist_ok=True)
     media_dir = args.out / "media"

@@ -9,6 +9,12 @@ permissions:
   packages: read
   pull-requests: write
 
+env:
+  # Scenario recording shards: aim for this many scenarios per shard, never
+  # exceeding the cap. The only place these are configured.
+  SCENARIO_TARGET_PER_SHARD: "3"
+  SCENARIO_MAX_SHARDS: "18"
+
 concurrency:
   group: pr-preview-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -82,8 +88,35 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # Sizes the shard matrix from the scenario count (0 shards = skip recording).
+  plan_shards:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    outputs:
+      count: ${{ steps.plan.outputs.count }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Plan shards
+        id: plan
+        run: |
+          matrix="$(python3 scripts/generate_scenario_review_page.py \
+            --base ${{ github.event.pull_request.base.sha }} \
+            --head ${{ github.event.pull_request.head.sha }} \
+            --plan \
+            --target-per-shard "$SCENARIO_TARGET_PER_SHARD" \
+            --max-shards "$SCENARIO_MAX_SHARDS")"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$(jq -r .count <<<"$matrix")" >> "$GITHUB_OUTPUT"
+          echo "$matrix"
+
   scenario_shard:
-    needs: build_runner
+    needs: [build_runner, plan_shards]
+    if: needs.plan_shards.outputs.count != '0'
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/thedeepestspace/tbgwaf-dev:pr-${{ github.event.pull_request.number }}
@@ -97,8 +130,8 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        # Shard count is derived from this list via strategy.job-total below.
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+        # From plan_shards; strategy.job-total below is the shard count.
+        shard: ${{ fromJSON(needs.plan_shards.outputs.matrix).shard }}
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -320,8 +353,8 @@ jobs:
   # are serialized; publish_to_preview.sh's fetch-and-retry covers other
   # writers (e.g. pages.yml).
   publish_scenarios:
-    needs: [preview, scenario_shard]
-    if: ${{ github.event.action != 'closed' && needs.preview.result == 'success' && needs.scenario_shard.result == 'success' }}
+    needs: [preview, plan_shards, scenario_shard]
+    if: ${{ github.event.action != 'closed' && needs.preview.result == 'success' && (needs.scenario_shard.result == 'success' || (needs.scenario_shard.result == 'skipped' && needs.plan_shards.result == 'success')) }}
     concurrency:
       group: gh-pages-publish
       cancel-in-progress: false

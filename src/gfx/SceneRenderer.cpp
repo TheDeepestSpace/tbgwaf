@@ -4748,14 +4748,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         // Schematic cover marks (issue #292): tactical cover is a solid
         // flat fill, flat cover a crisp 45-degree world-space hatch -- flat
         // alphas, not gradients, so the two read apart at a glance. The
-        // marks replace the boundary glow inside the cover band; open
-        // ground keeps the plain budget-edge gradient.
+        // marks are the only fill: open ground and obstacle outlines get
+        // just the thin boundary line, no gradient.
         const float wave =
             0.5f + 0.5f * std::sin((q.p.x + q.p.z) * (6.2831853f / 0.6f));
         const float hatch = std::clamp(6.0f * (wave - 0.5f) + 0.5f, 0.0f, 1.0f);
         const float coverWeight = std::min(1.0f, q.s.x + q.s.y);
         const float pattern = std::min(1.0f, q.s.x + q.s.y * hatch);
-        a = kEdgeAlpha * glm::mix(open, pattern, coverWeight);
+        a = kEdgeAlpha * coverWeight * pattern;
       }
       return ColorTriangleMesh::Vertex{q.p, glm::vec4(color, a)};
     };

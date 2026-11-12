@@ -1331,7 +1331,16 @@ void BuildTunnelRoofMesh(const std::vector<tactics::TerrainTunnel>& tunnels,
   std::vector<GLuint> indices;
   std::vector<int> groups;
   for (const tactics::TerrainTunnel& tunnel : tunnels) {
-    AppendSurfacePatch(tunnel.roof, 0.45f, &vertices, &indices);
+    // The slab's long sides run along the bore inside the solid tier; drawn,
+    // their faces poke through the terrain at some camera angles. Only the
+    // portal ends (the short edges) keep a face.
+    std::vector<char> hidden(tunnel.roof.size(), 0);
+    if (tunnel.roof.size() == 4) {
+      const float e0 = glm::distance(tunnel.roof[0], tunnel.roof[1]);
+      const float e1 = glm::distance(tunnel.roof[1], tunnel.roof[2]);
+      for (size_t i = 0; i < 4; ++i) hidden[i] = ((i % 2 == 0) == (e0 > e1)) ? 1 : 0;
+    }
+    AppendSurfacePatch(tunnel.roof, 0.45f, &vertices, &indices, &hidden);
     groups.resize(indices.size() / 3, tunnel.roofSurface);
   }
   mesh->SetChunkedMesh(vertices, indices, kCullGridCells, &groups);

@@ -297,11 +297,14 @@ void TestWallCornerStaysSquare() {
 }
 
 void TestWallContourUsesExactOutline() {
-  // With wallDist filled, the wall part of the contour must sit on the
-  // obstacle's true outline, not on the grid's half-step line. The padded
-  // outline runs at x = 19.6 * step, between the last walkable column (19)
-  // and the first blocked one (20); the interpolated zero crossing between
-  // those columns must land exactly on it.
+  // With wallDist filled, the wall part of the contour must come from the
+  // exact signed outline distance, not from the grid's half-step line.
+  // wallDist is signed against the padded outline at x = 19.6 * step
+  // (positive on the walkable side, negative past it), and the drawn
+  // contour sits kObstacleInset = kAgentRadius - 0.05 (1.4 steps here)
+  // beyond the padded outline, i.e. 0.05 off the obstacle's real face: the
+  // depth must be the signed outline distance plus that inset, putting the
+  // zero crossing at x = 21.0 * step exactly.
   tactics::ReachField field = EmptyField(41);
   field.walkable.assign(field.dist.size(), 1);
   field.wallDist.assign(field.dist.size(), 0.0f);
@@ -311,15 +314,16 @@ void TestWallContourUsesExactOutline() {
       const int i = iz * field.nx + ix;
       if (ix >= 20) field.walkable[i] = 0;
       else field.dist[i] = 0.0f;
-      field.wallDist[i] = std::abs(ix * field.step - wallX);
+      field.wallDist[i] = wallX - ix * field.step;
     }
   }
   const std::vector<float> depth = gfx::SmoothFrontierSignedDepth(field);
   for (int iz = 10; iz <= 30; ++iz) {
-    const float a = depth[iz * field.nx + 19];  // +0.6 * step exactly.
-    const float b = depth[iz * field.nx + 20];  // -0.4 * step exactly.
-    CHECK(std::abs(a - 0.6f * field.step) < 0.005f);
-    CHECK(std::abs(b + 0.4f * field.step) < 0.005f);
+    const float a = depth[iz * field.nx + 20];  // +1.0 * step exactly.
+    const float b = depth[iz * field.nx + 22];  // -1.0 * step exactly.
+    CHECK(std::abs(a - 1.0f * field.step) < 0.005f);
+    CHECK(std::abs(b + 1.0f * field.step) < 0.005f);
+    CHECK(std::abs(depth[iz * field.nx + 21]) < 0.005f);
   }
 }
 

@@ -289,6 +289,11 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
   };
   const float sampleDepth = 0.1f * field.step;
   const bool haveWallDist = field.wallDist.size() == dIn.size();
+  // Nodes whose trusted wall-exact depth is non-negative: the drawn line is
+  // inset past the padded outline (just off the obstacle's real face), so
+  // these unreached nodes legitimately sit on the inside of the contour.
+  // The sign guarantee below must not push them back out.
+  std::vector<char> insetPositive(dIn.size(), 0);
   for (int iz = 0; iz < nz; ++iz) {
     for (int ix = 0; ix < nx; ++ix) {
       const int i = iz * nx + ix;
@@ -331,13 +336,18 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
       if (wall > 0.0f) {
         float exact = raw[i];
         if (haveWallDist && std::isfinite(field.wallDist[i])) {
+          // wallDist is signed against the union of padded outlines, so a
+          // nested inner outline (a pier shaft inside its footing) cannot
+          // flip or shrink it; the agreement check below still drops nodes
+          // whose nearest outline is not the local blocker.
           const float signedDist =
-              (reached(ix, iz) ? 1.0f : -1.0f) * std::min(field.wallDist[i], kMaxDepth);
+              std::clamp(field.wallDist[i], -kMaxDepth, kMaxDepth);
           if (std::fabs(signedDist - raw[i]) <= 1.5f * field.step) {
             // The measured outline is the navmesh's agent-padded one; draw the
             // line just off the obstacle's real face instead of a body radius
             // away from it.
             exact = signedDist + kObstacleInset;
+            if (exact >= -1e-4f) insetPositive[i] = 1;
           }
         }
         value = wall * exact + (1.0f - wall) * value;
@@ -353,14 +363,24 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
   // outside the reach stays negative. The first ring of outside nodes
   // floats free: a straight contour through an oblique staircase has to be
   // able to pass just outside the stair-corner nodes, and that ring is
-  // within the half-step bias the contour carries by construction.
+  // within the half-step bias the contour carries by construction. Nodes in
+  // the wall-inset band (trusted exact depth >= 0, and close enough to the
+  // reach that they cannot be the middle of an unwalkable sliver between
+  // two paddings) also float: the line is drawn kObstacleInset past the
+  // padded outline there on purpose, and clamping them negative at some
+  // grid phases but not others saw-toothed an otherwise straight wall line.
   const float kThin = 4.0f * field.step;
   for (int iz = 0; iz < nz; ++iz) {
     for (int ix = 0; ix < nx; ++ix) {
       const int i = iz * nx + ix;
       if (thickness[i] >= kThin) continue;
-      if (reached(ix, iz)) depth[i] = std::max(depth[i], sampleDepth);
-      else if (dOut[i] > 1.5f * field.step) depth[i] = std::min(depth[i], -sampleDepth);
+      if (reached(ix, iz)) {
+        depth[i] = std::max(depth[i], sampleDepth);
+      } else if (dOut[i] > 1.5f * field.step &&
+                 !(insetPositive[i] &&
+                   dOut[i] <= kObstacleInset + 1.5f * field.step)) {
+        depth[i] = std::min(depth[i], -sampleDepth);
+      }
     }
   }
 

@@ -1340,7 +1340,25 @@ void BuildTunnelRoofMesh(const std::vector<tactics::TerrainTunnel>& tunnels,
       const float e1 = glm::distance(tunnel.roof[1], tunnel.roof[2]);
       for (size_t i = 0; i < 4; ++i) hidden[i] = ((i % 2 == 0) == (e0 > e1)) ? 1 : 0;
     }
-    AppendSurfacePatch(tunnel.roof, 0.45f, &vertices, &indices, &hidden);
+    // The top face also butts against the tier tops beside the bore at the
+    // same height; float rounding along that shared edge leaves a hairline
+    // gap showing the dark bore as a dashed line. Overlap the neighbours by
+    // a sliver (same height and colour, so the overlap is invisible).
+    std::vector<glm::vec3> roof = tunnel.roof;
+    glm::vec3 centre(0.0f);
+    for (const glm::vec3& v : roof) centre += v / static_cast<float>(roof.size());
+    for (size_t i = 0; i < roof.size(); ++i) {
+      if (!hidden[i]) continue;
+      const glm::vec3 a = tunnel.roof[i], b = tunnel.roof[(i + 1) % roof.size()];
+      glm::vec3 out = glm::cross(b - a, glm::vec3(0, 1, 0));
+      out.y = 0.0f;
+      if (glm::length(out) < 1e-6f) continue;
+      out = glm::normalize(out);
+      if (glm::dot(out, 0.5f * (a + b) - centre) < 0.0f) out = -out;
+      roof[i] += out * 0.06f;
+      roof[(i + 1) % roof.size()] += out * 0.06f;
+    }
+    AppendSurfacePatch(roof, 0.45f, &vertices, &indices, &hidden);
     groups.resize(indices.size() / 3, tunnel.roofSurface);
   }
   mesh->SetChunkedMesh(vertices, indices, kCullGridCells, &groups);

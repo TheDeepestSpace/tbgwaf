@@ -86,6 +86,8 @@ class LineMesh {
   void Draw() const;
   // Draws the points as independent segments (pairs) instead of a strip.
   void DrawSegments() const;
+  // Draws the points as a plain triangle list (e.g. ribbon geometry).
+  void DrawTriangles() const;
 
  private:
   GLuint vao_ = 0;

@@ -4679,6 +4679,32 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // full gradient at tactical cover (a corner or car side to peek from),
   // slanted stripes along flat wall cover, and no gradient at all where the
   // boundary is only the movement budget running out.
+  // Turns segment endpoint pairs into a flat ribbon of constant world width
+  // (a GL line is always one pixel), up-facing, ends extended by half the
+  // width so consecutive segments overlap instead of leaving joint gaps.
+  const auto ribbonize = [](const std::vector<glm::vec3>& segs, float width) {
+    std::vector<glm::vec3> tris;
+    tris.reserve(segs.size() * 3);
+    const float h = 0.5f * width;
+    for (size_t i = 0; i + 1 < segs.size(); i += 2) {
+      glm::vec3 d = segs[i + 1] - segs[i];
+      glm::vec2 dir(d.x, d.z);
+      const float len = glm::length(dir);
+      if (len < 1e-6f) continue;
+      dir /= len;
+      const glm::vec3 t(dir.x * h, 0.0f, dir.y * h);
+      const glm::vec3 n(-dir.y * h, 0.0f, dir.x * h);
+      const glm::vec3 a = segs[i] - t, b = segs[i + 1] + t;
+      glm::vec3 q[4] = {a - n, b - n, b + n, a + n};
+      // Wind counter-clockwise seen from above.
+      const float facing = (q[1].z - q[0].z) * (q[2].x - q[0].x) -
+                           (q[1].x - q[0].x) * (q[2].z - q[0].z);
+      if (facing < 0.0f) std::swap(q[1], q[3]);
+      for (int k : {0, 1, 2, 0, 2, 3}) tris.push_back(q[k]);
+    }
+    return tris;
+  };
+  constexpr float kBoundaryWidth = 0.07f;  // World units.
   const auto appendFrontier = [&](const tactics::ReachField& f,
                                   const tactics::CoverMap* cover, const glm::vec3& color,
                                   std::vector<ColorTriangleMesh::Vertex>& fill,
@@ -4946,7 +4972,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       std::vector<glm::vec3> border;
       appendFrontier(f, cover, debug.thermal ? thermalGreen : kSetupColor, fill, border);
       frontierFill_.SetVertices(fill);
-      frontierBorder_.SetPoints(border);
+      frontierBorder_.SetPoints(ribbonize(border, kBoundaryWidth));
     }
     // Same depth bias as the FOV cone, against z-fighting at distance.
     glEnable(GL_POLYGON_OFFSET_FILL);
@@ -4962,7 +4988,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     const glm::vec3 frontierColor = debug.thermal ? thermalGreen : kSetupColor;
     unlitShader_.SetVec4("uColor", glm::vec4(frontierColor,
                                              overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f));
-    frontierBorder_.DrawSegments();
+    frontierBorder_.DrawTriangles();
     glDisable(GL_POLYGON_OFFSET_FILL);
   }
   // Zipline regions: where a walk -> ride -> walk plan can reach, in a second
@@ -4987,7 +5013,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         if (fr.field.nx > 0) appendFrontier(fr.field, nullptr, regionColor, fill, border);
       }
       ziplineFill_.SetVertices(fill);
-      ziplineBorder_.SetPoints(border);
+      ziplineBorder_.SetPoints(ribbonize(border, kBoundaryWidth));
     }
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(-2.0f, -4.0f);
@@ -4998,7 +5024,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     unlitShader_.SetMat4("uMVP", viewProj);
     const float legAlpha = overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f;
     unlitShader_.SetVec4("uColor", glm::vec4(regionColor, legAlpha));
-    ziplineBorder_.DrawSegments();
+    ziplineBorder_.DrawTriangles();
     glDisable(GL_POLYGON_OFFSET_FILL);
     for (const auto& fr : frontiers) {
       // The ring below overwrites uMVP/uColor, so restore them per line.

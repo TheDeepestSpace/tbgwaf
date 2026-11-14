@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "game/GameLogic.h"
+#include "test_shard.h"
 #include "game/Geometry.h"
 #include "game/MapGenerator.h"
 #include "OldSizeConfig.h"
@@ -204,8 +205,9 @@ void TestSeedInvariants() {
   }
 }
 
-void TestReachability() {
+void TestReachabilitySeed(uint32_t only) {
   for (uint32_t seed : {7u, 42u, 2024u, 16u}) {
+    if (seed != only) continue;
     currentSeed = seed;
     auto c = TerrainConfig();
     if (seed == 16) { c.elevatedHighway = OverpassMode::On; c.arteryCount = 2; }
@@ -248,6 +250,12 @@ void TestReachability() {
     }
   }
 }
+
+// One case per seed so CI can spread the sweep over shards.
+void TestReachability_7() { TestReachabilitySeed(7); }
+void TestReachability_42() { TestReachabilitySeed(42); }
+void TestReachability_2024() { TestReachabilitySeed(2024); }
+void TestReachability_16() { TestReachabilitySeed(16); }
 
 void TestWallCoverAndCollision() {
   currentSeed = 7;
@@ -721,12 +729,12 @@ void TestStairSidesSealed() {
   CHECK(checked > 0);
 }
 
-void TestNoWalkableCliffLinks() {
+void TestNoWalkableCliffLinksSeeds(uint32_t lo, uint32_t hi) {
   // No two neighbouring walkable points straddle a cliff: every drop is
   // walled, including the wall stretch beside a road ramping through a step
   // (seed 7 left it open). The map rim is skipped.
   int checked = 0;
-  for (currentSeed = 1; currentSeed <= 12; ++currentSeed) {
+  for (currentSeed = lo; currentSeed <= hi; ++currentSeed) {
     MapGeneratorConfig c;
     c.elevatedHighway = OverpassMode::Off;
     const Scene s = GenerateUrbanMap(currentSeed, c);
@@ -747,6 +755,12 @@ void TestNoWalkableCliffLinks() {
   }
   CHECK(checked > 0);
 }
+
+// Split into seed ranges so CI can spread the (slowest) sweep over shards.
+void TestNoWalkableCliffLinks_1_3() { TestNoWalkableCliffLinksSeeds(1, 3); }
+void TestNoWalkableCliffLinks_4_6() { TestNoWalkableCliffLinksSeeds(4, 6); }
+void TestNoWalkableCliffLinks_7_9() { TestNoWalkableCliffLinksSeeds(7, 9); }
+void TestNoWalkableCliffLinks_10_12() { TestNoWalkableCliffLinksSeeds(10, 12); }
 
 // Sheer faces are not walkable (issue #221). A plateau (x >= 6, 3 high)
 // stands over flat ground behind a cliff; with `ramp` a 2-wide strip at
@@ -933,24 +947,33 @@ void TestRoofReachableFromAnyEdgePoint() {
   CHECK(probes > 0);
 }
 
-int main() {
-  TestStairSidesSealed();
-  TestNoWalkableCliffLinks();
-  TestControlsAndDeterminism();
-  TestPinnedTerrainFingerprints();
-  TestSeedInvariants();
-  TestReachability();
-  TestWallCoverAndCollision();
-  TestHighwayTerrainInterplay();
-  TestHighwayProfilesOverLevels();
-  TestStreetsKeepClearOfLevels();
-  TestSurfacesSitOnTiers();
-  TestTerrainTunnels();
-  TestBuildingOverTunnelRoof();
-  TestRoofReachableFromAnyEdgePoint();
-  TestTerrainZiplines();
-  TestMovementUpStair();
-  TestSheerFacesAreImpassable();
+int main(int argc, char** argv) {
+  const std::vector<TestCase> cases = {
+      TBG_TEST(TestStairSidesSealed),
+      TBG_TEST(TestNoWalkableCliffLinks_1_3),
+      TBG_TEST(TestNoWalkableCliffLinks_4_6),
+      TBG_TEST(TestNoWalkableCliffLinks_7_9),
+      TBG_TEST(TestNoWalkableCliffLinks_10_12),
+      TBG_TEST(TestControlsAndDeterminism),
+      TBG_TEST(TestPinnedTerrainFingerprints),
+      TBG_TEST(TestSeedInvariants),
+      TBG_TEST(TestReachability_7),
+      TBG_TEST(TestReachability_42),
+      TBG_TEST(TestReachability_2024),
+      TBG_TEST(TestReachability_16),
+      TBG_TEST(TestWallCoverAndCollision),
+      TBG_TEST(TestHighwayTerrainInterplay),
+      TBG_TEST(TestHighwayProfilesOverLevels),
+      TBG_TEST(TestStreetsKeepClearOfLevels),
+      TBG_TEST(TestSurfacesSitOnTiers),
+      TBG_TEST(TestTerrainTunnels),
+      TBG_TEST(TestBuildingOverTunnelRoof),
+      TBG_TEST(TestRoofReachableFromAnyEdgePoint),
+      TBG_TEST(TestTerrainZiplines),
+      TBG_TEST(TestMovementUpStair),
+      TBG_TEST(TestSheerFacesAreImpassable),
+  };
+  if (!RunSelectedTests(argc, argv, cases)) return 2;
   if (failures) { std::fprintf(stderr, "%d terrain check(s) failed\n", failures); return 1; }
   std::puts("urban terrain tests passed (200 seeds)");
 }

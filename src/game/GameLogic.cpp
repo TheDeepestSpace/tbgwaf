@@ -389,7 +389,7 @@ void GameLogic::EnsureNavMeshFor(const Unit& mover, const glm::vec3& origin) {
   region.zMin = std::max(-half, origin.z - reach);
   region.zMax = std::min(half, origin.z + reach);
   navMesh_.Build(scene_.obstacles, region, constants::kAgentRadius, &scene_.ground,
-                 &scene_.walkSurfaces);
+                 &scene_.walkSurfaces, &scene_.terrainTunnels);
   navMeshUnitId_ = mover.id;
   navMeshOrigin_ = origin;
 }
@@ -1391,7 +1391,7 @@ void GameLogic::BuildZiplineFrontiers(const Unit& mover, const glm::vec3& origin
       region.zMax = std::min(half, exit.z + reach);
       NavMesh mesh;
       mesh.Build(scene_.obstacles, region, constants::kAgentRadius, &scene_.ground,
-                 &scene_.walkSurfaces);
+                 &scene_.walkSurfaces, &scene_.terrainTunnels);
       ZiplineFrontier frontier;
       frontier.zipline = static_cast<int>(i);
       frontier.entry = entry;

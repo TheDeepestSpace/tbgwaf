@@ -9,6 +9,8 @@
 
 namespace tactics {
 
+struct TerrainTunnel;  // Scene.h: a road bored through a raised terrain band.
+
 // Axis-aligned XZ rectangle the navmesh covers.
 struct NavRegion {
   float xMin = 0.0f, xMax = 0.0f;
@@ -126,17 +128,21 @@ class NavMesh {
   // Full form. `ground` (optional) is the scene's terrain heightfield: paths
   // and elevation queries then follow the sampled terrain instead of a flat
   // y = 0 plane. The field is copied; the caller's instance need not outlive
-  // the mesh. `walkSurfaces` (optional) are the raised layers.
+  // the mesh. `walkSurfaces` (optional) are the raised layers. `tunnels`
+  // (optional) are the scene's terrain tunnels: an obstacle standing on a
+  // tunnel roof then only blocks the ground outside the bore.
   void Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent, float agentRadius,
              const HeightField* ground = nullptr,
-             const std::vector<WalkSurface>* walkSurfaces = nullptr);
+             const std::vector<WalkSurface>* walkSurfaces = nullptr,
+             const std::vector<TerrainTunnel>* tunnels = nullptr);
 
   // Windowed form: meshes only the XZ rectangle `region` (obstacles are
   // clipped to it). Used by GameLogic to mesh just the area a figure can
   // reach in one round instead of the whole map.
   void Build(const std::vector<Obstacle>& obstacles, const NavRegion& region, float agentRadius,
              const HeightField* ground = nullptr,
-             const std::vector<WalkSurface>* walkSurfaces = nullptr);
+             const std::vector<WalkSurface>* walkSurfaces = nullptr,
+             const std::vector<TerrainTunnel>* tunnels = nullptr);
 
   // Returns true and fills `outPath` with a smoothed path from `start` to
   // `goal` (XZ plus an elevation hint used to disambiguate overlapping
@@ -210,7 +216,16 @@ class NavMesh {
                              std::vector<glm::vec3>* outPath) const;
   bool FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface,
                        glm::vec3 goal, std::vector<glm::vec3>* outPath) const;
-  glm::vec3 GroundConnectionPoint(int surface) const;
+  bool FindRoutePath(const std::vector<int>& route, glm::vec3 start, glm::vec3 goal,
+                     std::vector<glm::vec3>* outPath) const;
+  // `hints` (optional): XZ positions the route runs to or from. A terrain
+  // roof meets the tier along both long edges, so it also offers the point of
+  // each edge nearest every hint, not just its declared connections.
+  std::vector<glm::vec3> GroundConnectionPoints(int surface,
+                                                const std::vector<glm::vec3>* hints = nullptr) const;
+  // Joins stair/ramp feet standing on a terrain roof to it and makes the
+  // walls standing on the roof solid for it (see the definition).
+  void LinkTunnelRoofs(const std::vector<Obstacle>& obstacles);
   // Per-Build caches over walkSurfaces_: footprints/bounds, a uniform XZ grid
   // for point queries, and all-pairs surface routes (see BuildSurfaceCaches).
   void BuildSurfaceCaches(float agentRadius);

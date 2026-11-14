@@ -85,7 +85,20 @@ bool SameScene(const Scene& a, const Scene& b) {
   for (size_t i = 0; i < a.walkSurfaces.size(); ++i) {
     if (a.walkSurfaces[i].vertices != b.walkSurfaces[i].vertices ||
         a.walkSurfaces[i].neighbors != b.walkSurfaces[i].neighbors ||
-        a.walkSurfaces[i].connectsToGround != b.walkSurfaces[i].connectsToGround) {
+        a.walkSurfaces[i].connectsToGround != b.walkSurfaces[i].connectsToGround ||
+        a.walkSurfaces[i].groundConnections != b.walkSurfaces[i].groundConnections ||
+        a.walkSurfaces[i].overpass != b.walkSurfaces[i].overpass ||
+        a.walkSurfaces[i].terrain != b.walkSurfaces[i].terrain) {
+      return false;
+    }
+  }
+  if (a.terrainTunnels.size() != b.terrainTunnels.size()) return false;
+  for (size_t i = 0; i < a.terrainTunnels.size(); ++i) {
+    const TerrainTunnel& x = a.terrainTunnels[i];
+    const TerrainTunnel& y = b.terrainTunnels[i];
+    if (x.bore != y.bore || x.roof != y.roof || x.entrance != y.entrance ||
+        x.exit != y.exit || x.width != y.width || x.roofSurface != y.roofSurface ||
+        x.highway != y.highway) {
       return false;
     }
   }

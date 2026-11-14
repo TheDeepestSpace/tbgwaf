@@ -897,10 +897,15 @@ void TestRevealHistoryShowsBothTeams() {
     CHECK(frame.snapshot.units.size() == 6);
     for (const auto& u : frame.snapshot.units) CHECK(u.position.x < 5000.0f);  // Nobody hidden, Start tick included.
   }
-  // Both teams actually move across the replay.
-  for (int id : {0, 3}) {
-    CHECK(glm::distance(history->frames.front().snapshot.units[id].position,
-                        history->frames.back().snapshot.units[id].position) > 0.5f);
+  // Both teams actually move across the replay. Any unit will do: a spawn on
+  // a ledge can have no short walk available.
+  for (int first : {0, 3}) {
+    bool moved = false;
+    for (int id = first; id < first + 3; ++id) {
+      moved |= glm::distance(history->frames.front().snapshot.units[id].position,
+                             history->frames.back().snapshot.units[id].position) > 0.5f;
+    }
+    CHECK(moved);
   }
   CHECK(history->frames.back().time > 0.0f);
 }

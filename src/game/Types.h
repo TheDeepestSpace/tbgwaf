@@ -221,9 +221,19 @@ struct WalkSurface {
   std::vector<glm::vec3> vertices;  // Counter-clockwise when viewed from above.
   std::vector<int> neighbors;
   bool connectsToGround = false;    // The lowest edge is a legal ground transition.
+  // Explicit transitions for a surface whose legal exits are not its
+  // lowest edge. Terrain-tunnel roofs use their long sides, where the roof
+  // meets the surrounding raised level; the road below must not become an
+  // accidental vertical shortcut. Empty keeps the historical lowest-edge
+  // behaviour selected by connectsToGround.
+  std::vector<glm::vec3> groundConnections;
   // Elevated highway deck/ramp patch. The renderer uses this to fade the
   // entire overpass (slabs, rails, caps and piers) as one occluder.
   bool overpass = false;
+  // A restored piece of terrain over a tunnel bore. It participates in
+  // navigation, LOS and shadow casting like any slab, but is rendered with
+  // the terrain rather than the concrete deck batch.
+  bool terrain = false;
   // A stair flight (roadmap 5.5): a steep sloped quad the renderer draws as
   // steps over the slope. Movement/LOS treat it like any other ramp.
   bool stair = false;

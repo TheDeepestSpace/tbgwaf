@@ -1187,8 +1187,13 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
   // A patch with blockers (a roof with walls standing on it) is crossed by
   // visibility-graph search, so cut the route there: the patch is walked
   // from where the route enters it to where it leaves, the rest as usual.
+  // Only terrain roofs: deck rails and building parapets never cut a route
+  // across several patches (their seam crossings sit on the rail line).
+  const auto cutsRoute = [&](int surface) {
+    return walkSurfaces_[surface].terrain && !surfaceBlockers_[surface].empty();
+  };
   bool blocked = false;
-  for (int surface : route) blocked |= !surfaceBlockers_[surface].empty();
+  for (int surface : route) blocked |= cutsRoute(surface);
   if (!blocked || route.size() < 2) return FindRoutePath(route, start, goal, outPath);
   const auto append = [&](const std::vector<glm::vec3>& piece) {
     for (const glm::vec3& p : piece) {
@@ -1199,7 +1204,7 @@ bool NavMesh::FindSurfacePath(int startSurface, glm::vec3 start, int goalSurface
   size_t next = 0;  // First route surface not yet walked.
   std::vector<glm::vec3> piece;
   for (size_t k = 0; k < route.size(); ++k) {
-    if (surfaceBlockers_[route[k]].empty()) continue;
+    if (!cutsRoute(route[k])) continue;
     const WalkSurface& patch = walkSurfaces_[route[k]];
     glm::vec3 enter = at, leave = goal;
     if (k > 0) enter = SurfaceTransition(walkSurfaces_[route[k - 1]], patch);

@@ -5067,6 +5067,27 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     }
   };
 
+  // Stacked walk layers (issue #292 follow-up): where the reach covers
+  // several floors of one XZ spot (a multi-storey interior, a deck over the
+  // street), the single-valued field cannot show them all at once, so it is
+  // split into per-layer sheets and each sheet rendered like a field of its
+  // own, with the level-edge lines re-measured against the sheet's own
+  // storey. Fields without stacked reach render directly, unchanged.
+  const auto appendFrontierLayers = [&](const tactics::ReachField& f,
+                                        const tactics::CoverMap* cover, const glm::vec3& color,
+                                        std::vector<ColorTriangleMesh::Vertex>& fill,
+                                        std::vector<glm::vec3>& border) {
+    std::vector<tactics::ReachField> sheets = tactics::SplitReachSheets(f);
+    if (sheets.empty()) {
+      appendFrontier(f, cover, color, fill, border);
+      return;
+    }
+    for (tactics::ReachField& sheet : sheets) {
+      tactics::FillLevelEdgeDistances(game.GetScene(), &sheet);
+      appendFrontier(sheet, cover, color, fill, border);
+    }
+  };
+
   // Overlay green in the thermal view; thermalKey tags it for the mesh caches.
   const int thermalKey = debug.thermal ? (debug.thermalBlackHot ? 2 : 1) : 0;
   const glm::vec3 thermalGreen = debug.thermalBlackHot ? kThermalGreenDark : kThermalGreen;
@@ -5097,7 +5118,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       frontierKeyCover_ = cover != nullptr;
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
-      appendFrontier(f, cover, debug.thermal ? thermalGreen : kSetupColor, fill, border);
+      appendFrontierLayers(f, cover, debug.thermal ? thermalGreen : kSetupColor, fill, border);
       frontierFill_.SetVertices(fill);
       frontierBorder_.SetPoints(ribbonize(border, kBoundaryWidth));
     }
@@ -5137,7 +5158,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
       for (const auto& fr : frontiers) {
-        if (fr.field.nx > 0) appendFrontier(fr.field, nullptr, regionColor, fill, border);
+        if (fr.field.nx > 0) appendFrontierLayers(fr.field, nullptr, regionColor, fill, border);
       }
       ziplineFill_.SetVertices(fill);
       ziplineBorder_.SetPoints(ribbonize(border, kBoundaryWidth));

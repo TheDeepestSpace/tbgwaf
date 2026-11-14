@@ -25,6 +25,14 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
     return std::abs(field.surfaceY[az * nx + ax] - field.surfaceY[bz * nx + bx]) <=
            kLayerStep;
   };
+  // Stacked-layer sheets (SplitReachSheets): a spot where the reach
+  // continues on a sibling sheet is an artificial cut, not a boundary. The
+  // layer-edge seeding skips it, and the smoothing taps treat it as neutral
+  // (the local value carries on) instead of "just outside the contour".
+  const bool haveCont = field.layerStart.size() == static_cast<size_t>(nx) * nz + 1;
+  const auto continues = [&](int node, float y) {
+    return haveCont && field.LayerContinues(node, y);
+  };
   // The grid-exact reach can contain lines one node wide: a route that grazes
   // an obstacle's padded edge reaches the nodes exactly along it and nothing
   // beside them. Drawn, that is a hairline strip across the ground, so only
@@ -50,7 +58,10 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
     for (int k = 0; k < 4; ++k) {
       const int jx = ix + kDx[k], jz = iz + kDz[k];
       if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) continue;
-      if (!sameLayer(ix, iz, jx, jz)) return true;
+      if (!sameLayer(ix, iz, jx, jz) &&
+          !continues(jz * nx + jx, field.surfaceY[iz * nx + ix])) {
+        return true;
+      }
     }
     return false;
   };
@@ -145,7 +156,13 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
           float sum = 0.0f;
           for (int k = -radius; k <= radius; ++k) {
             const int jx = std::clamp(ix + k, 0, nx - 1);
-            sum += sameLayer(ix, iz, jx, iz) ? out[iz * nx + jx] : -0.5f * field.step;
+            if (sameLayer(ix, iz, jx, iz)) {
+              sum += out[iz * nx + jx];
+            } else if (continues(iz * nx + jx, field.surfaceY[iz * nx + ix])) {
+              sum += out[iz * nx + ix];
+            } else {
+              sum += -0.5f * field.step;
+            }
           }
           tmp[iz * nx + ix] = sum / (2 * radius + 1);
         }
@@ -155,7 +172,13 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
           float sum = 0.0f;
           for (int k = -radius; k <= radius; ++k) {
             const int jz = std::clamp(iz + k, 0, nz - 1);
-            sum += sameLayer(ix, iz, ix, jz) ? tmp[jz * nx + ix] : -0.5f * field.step;
+            if (sameLayer(ix, iz, ix, jz)) {
+              sum += tmp[jz * nx + ix];
+            } else if (continues(jz * nx + ix, field.surfaceY[iz * nx + ix])) {
+              sum += tmp[iz * nx + ix];
+            } else {
+              sum += -0.5f * field.step;
+            }
           }
           out[iz * nx + ix] = sum / (2 * radius + 1);
         }
@@ -273,7 +296,8 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
       const float ux = std::clamp(fx - ix, 0.0f, 1.0f);
       const float uz = std::clamp(fz - iz, 0.0f, 1.0f);
       const auto corner = [&](int jx, int jz) {
-        return sameLayer(cx, cz, jx, jz) ? raw[jz * nx + jx] : -0.5f * field.step;
+        if (sameLayer(cx, cz, jx, jz)) return raw[jz * nx + jx];
+        return continues(jz * nx + jx, field.surfaceY[c]) ? raw[c] : -0.5f * field.step;
       };
       return (corner(ix, iz) * (1 - ux) + corner(ix + 1, iz) * ux) * (1 - uz) +
              (corner(ix, iz + 1) * (1 - ux) + corner(ix + 1, iz + 1) * ux) * uz;
@@ -874,18 +898,9 @@ std::vector<FrontierOutline> TraceFrontierOutline(const tactics::ReachField& fie
   const auto sameLine = [&](const Vertex& a, const Vertex& b) {
     return a.kind == b.kind && a.seg == b.seg;
   };
-  for (int pass = 0; pass < 2; ++pass) {
-    for (int s = 0; s < static_cast<int>(verts.size()); ++s) {
-      if (visited[s]) continue;
-      // Open chains first (start from their ends), then closed loops.
-      const bool isEnd = verts[s].link[0] < 0 || verts[s].link[1] < 0;
-      if (pass == 0 && !isEnd) continue;
-      std::vector<int> chain;
-      const bool closed = walk(s, &chain);
-      const int n = static_cast<int>(chain.size());
-      if (n < 2) continue;
-      std::vector<Vertex> loop(n);
-      for (int k = 0; k < n; ++k) loop[k] = verts[chain[k]];
+  const auto processLoop = [&](std::vector<Vertex> loop, bool closed) {
+      const int n = static_cast<int>(loop.size());
+      if (n < 2) return;
       const auto at = [&](int k) -> Vertex& { return loop[((k % n) + n) % n]; };
       const auto valid = [&](int k) { return closed || (k >= 0 && k < n); };
 
@@ -1000,6 +1015,64 @@ std::vector<FrontierOutline> TraceFrontierOutline(const tactics::ReachField& fie
       outline.points.reserve(out.size());
       for (const Out& o : out) outline.points.emplace_back(o.p.x, o.y, o.p.y);
       outlines.push_back(std::move(outline));
+  };
+
+  // Stacked-layer sheets (SplitReachSheets): a vertex whose outside node is
+  // reached by a sibling sheet at this vertex's own height sits on an
+  // artificial cut between sheets, not on a boundary of the figure's reach
+  // -- movement simply continues there on the sibling's layer. Such
+  // stretches are dropped; each surviving run keeps one suppressed vertex
+  // at either end so its line meets the sibling sheet's without a gap.
+  const bool haveCont = haveY && field.layerStart.size() == total + 1;
+  const auto keptVertex = [&](const Vertex& v) {
+    return !haveCont || !field.LayerContinues(v.out, field.surfaceY[v.in]);
+  };
+  for (int pass = 0; pass < 2; ++pass) {
+    for (int s = 0; s < static_cast<int>(verts.size()); ++s) {
+      if (visited[s]) continue;
+      // Open chains first (start from their ends), then closed loops.
+      const bool isEnd = verts[s].link[0] < 0 || verts[s].link[1] < 0;
+      if (pass == 0 && !isEnd) continue;
+      std::vector<int> chain;
+      const bool closed = walk(s, &chain);
+      const int n = static_cast<int>(chain.size());
+      if (n < 2) continue;
+      std::vector<Vertex> loop(n);
+      for (int k = 0; k < n; ++k) loop[k] = verts[chain[k]];
+      if (!haveCont) {
+        processLoop(std::move(loop), closed);
+        continue;
+      }
+      std::vector<char> keep(n);
+      int keptCount = 0;
+      for (int k = 0; k < n; ++k) keptCount += (keep[k] = keptVertex(loop[k]) ? 1 : 0);
+      if (keptCount == n) {
+        processLoop(std::move(loop), closed);
+        continue;
+      }
+      if (keptCount == 0) continue;
+      const auto vertexAt = [&](int k) -> const Vertex& { return loop[((k % n) + n) % n]; };
+      // A closed loop scans from a suppressed vertex so no run wraps.
+      int begin = 0;
+      if (closed) {
+        while (keep[begin]) ++begin;
+      }
+      int j = begin;
+      const int stop = begin + n;
+      while (j < stop) {
+        if (!keep[j % n]) {
+          ++j;
+          continue;
+        }
+        const int runBegin = j;
+        while (j < stop && keep[j % n]) ++j;
+        std::vector<Vertex> run;
+        run.reserve(j - runBegin + 2);
+        if (closed || runBegin > 0) run.push_back(vertexAt(runBegin - 1));
+        for (int t = runBegin; t < j; ++t) run.push_back(vertexAt(t));
+        if (closed || j < n) run.push_back(vertexAt(j));
+        processLoop(std::move(run), false);
+      }
     }
   }
   return outlines;

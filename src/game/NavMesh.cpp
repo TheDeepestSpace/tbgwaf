@@ -827,11 +827,24 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
                    /*ground=*/false, yMin, yMax);
     }
   }
+  // Terrain height per node, snapshotted before the elevated pass overwrites
+  // stacked nodes (dropped again below when nothing stacks).
+  field.groundY = field.surfaceY;
+  // Every reachable layer at the node under scrutiny: the grid keeps one of
+  // them, the rest go to field.stacked (issue #292 follow-up).
+  struct LayerCand {
+    float dist = 0.0f;
+    float y = 0.0f;
+    char elevated = 1;
+  };
+  std::vector<LayerCand> layerCands;
   for (int iz = 0; iz < field.nz; ++iz) {
     for (int ix = 0; ix < field.nx; ++ix) {
       const int idx = iz * field.nx + ix;
       const float x = field.minX + ix * field.step;
       const float z = field.minZ + iz * field.step;
+      const float groundDist = field.dist[idx];
+      layerCands.clear();
       for (int surface : SurfaceCandidates(x, z)) {
         if (!SurfaceContains(surface, x, z) || SurfaceBlocked(surface, x, z)) continue;
         glm::vec3 goal(x, SurfaceHeightAt(walkSurfaces_[surface], x, z), z);
@@ -868,6 +881,7 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
           }
         }
         if (!found) continue;
+        if (distance <= budget) layerCands.push_back({distance, goal.y, 1});
         if (distance <= budget && (startSurface >= 0 || distance < field.dist[idx] + 0.5f)) {
           field.dist[idx] = distance;
           field.surfaceY[idx] = goal.y;
@@ -875,8 +889,30 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
           field.parent[idx] = -1;  // Priced over the surface graph, not this grid.
         }
       }
+      if (layerCands.empty()) continue;
+      // Stacked layers (issue #292 follow-up): everything reachable that the
+      // grid's one sample per node cannot hold -- the ground sample when an
+      // elevated one overwrote it, and elevated layers beyond the stored one.
+      // Same-height duplicates (two floor pieces sharing an edge node)
+      // collapse onto the cheapest.
+      if (field.elevated[idx] && groundDist <= budget) {
+        layerCands.push_back({groundDist, field.groundY[idx], 0});
+      }
+      std::sort(layerCands.begin(), layerCands.end(),
+                [](const LayerCand& a, const LayerCand& b) { return a.dist < b.dist; });
+      const size_t nodeBegin = field.stacked.size();
+      for (const LayerCand& cand : layerCands) {
+        if (std::fabs(cand.y - field.surfaceY[idx]) <= kReachLayerStep) continue;
+        bool duplicate = false;
+        for (size_t s = nodeBegin; s < field.stacked.size() && !duplicate; ++s) {
+          duplicate = std::fabs(cand.y - field.stacked[s].surfaceY) <= kReachLayerStep;
+        }
+        if (duplicate) continue;
+        field.stacked.push_back({idx, cand.dist, cand.y, cand.elevated});
+      }
     }
   }
+  if (field.stacked.empty()) field.groundY.clear();
 
   if (blockers) {
     // Endpoint pass: a mover stopping on a node stands there for the rest of
@@ -1705,6 +1741,182 @@ void NavMesh::LiftGroundPathOntoTerrain(std::vector<glm::vec3>* outPath) const {
     }
   }
   *outPath = std::move(lifted);
+}
+
+std::vector<ReachField> SplitReachSheets(const ReachField& field) {
+  std::vector<ReachField> sheets;
+  const int nx = field.nx, nz = field.nz;
+  const size_t total = static_cast<size_t>(nx) * nz;
+  if (field.stacked.empty() || nx <= 0 || nz <= 0 || field.dist.size() != total ||
+      field.surfaceY.size() != total) {
+    return sheets;
+  }
+
+  // Every reached sample -- the grid's one per node plus the stacked ones --
+  // flattened into a per-node CSR list.
+  struct Sample {
+    int node = 0;
+    float dist = 0.0f;
+    float y = 0.0f;
+    char elevated = 0;
+    int sheet = -1;
+  };
+  std::vector<int> start(total + 1, 0);
+  std::vector<Sample> samples;
+  {
+    std::vector<int> count(total, 0);
+    for (int iz = 0; iz < nz; ++iz) {
+      for (int ix = 0; ix < nx; ++ix) {
+        if (field.Reached(ix, iz)) ++count[iz * nx + ix];
+      }
+    }
+    for (const ReachField::StackedSample& s : field.stacked) ++count[s.node];
+    for (size_t i = 0; i < total; ++i) start[i + 1] = start[i] + count[i];
+    samples.resize(start[total]);
+    std::vector<int> cursor(start.begin(), start.end() - 1);
+    const bool haveElevated = field.elevated.size() == total;
+    for (int iz = 0; iz < nz; ++iz) {
+      for (int ix = 0; ix < nx; ++ix) {
+        const int node = iz * nx + ix;
+        if (!field.Reached(ix, iz)) continue;
+        samples[cursor[node]++] = {node, field.dist[node], field.surfaceY[node],
+                                   static_cast<char>(haveElevated ? field.elevated[node] : 0),
+                                   -1};
+      }
+    }
+    for (const ReachField::StackedSample& s : field.stacked) {
+      samples[cursor[s.node]++] = {s.node, s.dist, s.surfaceY, s.elevated, -1};
+    }
+  }
+
+  // Greedy sheet assignment, lowest seed first (the ground and whatever
+  // climbs away from it, then each floor above): BFS over 8-neighbour sample
+  // adjacency within kReachLayerStep, refusing nodes the sheet already holds
+  // a sample at. A fragment the growth cuts off (a flight's top rows whose
+  // nodes the ground sheet claimed) simply becomes its own small sheet; the
+  // renderer's seam suppression (LayerContinues) hides every cut.
+  std::vector<int> order(samples.size());
+  for (size_t i = 0; i < order.size(); ++i) order[i] = static_cast<int>(i);
+  std::sort(order.begin(), order.end(),
+            [&](int a, int b) { return samples[a].y < samples[b].y; });
+  constexpr size_t kMaxSheets = 32;
+  std::vector<std::vector<int>> sheetSamples;
+  std::vector<int> occupied;
+  std::vector<int> queue;
+  for (int seed : order) {
+    if (samples[seed].sheet >= 0) continue;
+    if (sheetSamples.size() >= kMaxSheets) break;
+    const int sheet = static_cast<int>(sheetSamples.size());
+    sheetSamples.emplace_back();
+    occupied.assign(total, -1);
+    samples[seed].sheet = sheet;
+    occupied[samples[seed].node] = seed;
+    sheetSamples[sheet].push_back(seed);
+    queue.assign(1, seed);
+    while (!queue.empty()) {
+      const Sample s = samples[queue.back()];
+      queue.pop_back();
+      const int ix = s.node % nx, iz = s.node / nx;
+      for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+          if (dx == 0 && dz == 0) continue;
+          const int jx = ix + dx, jz = iz + dz;
+          if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) continue;
+          const int m = jz * nx + jx;
+          if (occupied[m] >= 0) continue;
+          int best = -1;
+          float bestDy = kReachLayerStep;
+          for (int t = start[m]; t < start[m + 1]; ++t) {
+            if (samples[t].sheet >= 0) continue;
+            const float dy = std::fabs(samples[t].y - s.y);
+            if (dy <= bestDy) {
+              bestDy = dy;
+              best = t;
+            }
+          }
+          if (best < 0) continue;
+          samples[best].sheet = sheet;
+          occupied[m] = best;
+          sheetSamples[sheet].push_back(best);
+          queue.push_back(best);
+        }
+      }
+    }
+  }
+
+  // Emit each sheet windowed to its samples plus the margin the frontier
+  // smoothing and outline passes look past the reach.
+  constexpr int kSheetMargin = 18;
+  const float inf = std::numeric_limits<float>::infinity();
+  const bool haveGround = field.groundY.size() == total;
+  const bool haveWalkable = field.walkable.size() == total;
+  const bool haveWall = field.wallDist.size() == total;
+  const bool haveEdge = field.edgeDist.size() == total;
+  const bool haveElevated = field.elevated.size() == total;
+  for (const std::vector<int>& ids : sheetSamples) {
+    if (ids.empty()) continue;
+    int x0 = nx, x1 = -1, z0 = nz, z1 = -1;
+    for (int sid : ids) {
+      const int ix = samples[sid].node % nx, iz = samples[sid].node / nx;
+      x0 = std::min(x0, ix);
+      x1 = std::max(x1, ix);
+      z0 = std::min(z0, iz);
+      z1 = std::max(z1, iz);
+    }
+    x0 = std::max(0, x0 - kSheetMargin);
+    z0 = std::max(0, z0 - kSheetMargin);
+    x1 = std::min(nx - 1, x1 + kSheetMargin);
+    z1 = std::min(nz - 1, z1 + kSheetMargin);
+    ReachField sheet;
+    sheet.step = field.step;
+    sheet.budget = field.budget;
+    sheet.revision = field.revision;
+    sheet.minX = field.minX + x0 * field.step;
+    sheet.minZ = field.minZ + z0 * field.step;
+    sheet.nx = x1 - x0 + 1;
+    sheet.nz = z1 - z0 + 1;
+    const size_t sheetTotal = static_cast<size_t>(sheet.nx) * sheet.nz;
+    sheet.dist.assign(sheetTotal, inf);
+    sheet.surfaceY.resize(sheetTotal);
+    if (haveElevated) sheet.elevated.assign(sheetTotal, 0);
+    if (haveWalkable) sheet.walkable.resize(sheetTotal);
+    if (haveWall) sheet.wallDist.resize(sheetTotal);
+    if (haveEdge) sheet.edgeDist.resize(sheetTotal);
+    sheet.layerStart.assign(sheetTotal + 1, 0);
+    for (int iz = 0; iz < sheet.nz; ++iz) {
+      for (int ix = 0; ix < sheet.nx; ++ix) {
+        const size_t local = static_cast<size_t>(iz) * sheet.nx + ix;
+        const size_t parent = static_cast<size_t>(iz + z0) * nx + (ix + x0);
+        sheet.surfaceY[local] = haveGround ? field.groundY[parent] : field.surfaceY[parent];
+        if (haveWalkable) sheet.walkable[local] = field.walkable[parent];
+        if (haveWall) sheet.wallDist[local] = field.wallDist[parent];
+        if (haveEdge) sheet.edgeDist[local] = field.edgeDist[parent];
+        sheet.layerStart[local + 1] =
+            sheet.layerStart[local] + (start[parent + 1] - start[parent]);
+      }
+    }
+    sheet.layerY.resize(sheet.layerStart[sheetTotal]);
+    for (int iz = 0; iz < sheet.nz; ++iz) {
+      for (int ix = 0; ix < sheet.nx; ++ix) {
+        const size_t local = static_cast<size_t>(iz) * sheet.nx + ix;
+        const size_t parent = static_cast<size_t>(iz + z0) * nx + (ix + x0);
+        int k = sheet.layerStart[local];
+        for (int t = start[parent]; t < start[parent + 1]; ++t) sheet.layerY[k++] = samples[t].y;
+      }
+    }
+    for (int sid : ids) {
+      const Sample& s = samples[sid];
+      const int ix = s.node % nx, iz = s.node / nx;
+      const size_t local = static_cast<size_t>(iz - z0) * sheet.nx + (ix - x0);
+      sheet.dist[local] = s.dist;
+      sheet.surfaceY[local] = s.y;
+      if (haveElevated) sheet.elevated[local] = s.elevated;
+    }
+    sheet.wallSegs = field.wallSegs;
+    sheet.edgeSegs = field.edgeSegs;
+    sheets.push_back(std::move(sheet));
+  }
+  return sheets;
 }
 
 }  // namespace tactics

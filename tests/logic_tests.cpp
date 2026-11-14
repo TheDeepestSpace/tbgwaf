@@ -3730,6 +3730,68 @@ void TestReachFieldFromRampIncludesGroundBeyondFoot() {
   CHECK(!reached(-9.0f, 0.0f));  // Past the budget.
 }
 
+// Issue #292 follow-up: where the reach covers stacked walk layers (a deck
+// over usable ground), the field keeps every layer -- the grid holds one
+// sample per node and the rest land in `stacked` -- so clicking either layer
+// works (CoversPoint) and SplitReachSheets can hand the renderer one
+// single-valued sheet per layer.
+void TestReachFieldStackedLayersAndSheets() {
+  // Deck at y = 3 over open ground, reached over a ramp at its -x edge.
+  tactics::WalkSurface deck;
+  deck.vertices = {{0.0f, 3.0f, -3.0f}, {6.0f, 3.0f, -3.0f}, {6.0f, 3.0f, 3.0f},
+                   {0.0f, 3.0f, 3.0f}};
+  deck.neighbors = {1};
+  tactics::WalkSurface ramp;
+  ramp.vertices = {{-6.0f, 0.0f, -1.0f}, {-6.0f, 0.0f, 1.0f}, {0.0f, 3.0f, 1.0f},
+                   {0.0f, 3.0f, -1.0f}};
+  ramp.neighbors = {0};
+  ramp.connectsToGround = true;
+  std::vector<tactics::WalkSurface> surfaces{deck, ramp};
+  tactics::NavMesh nav;
+  nav.Build(std::vector<tactics::Obstacle>{}, 30.0f, 0.4f, nullptr, &surfaces);
+  const tactics::ReachField f = nav.ComputeReachField(glm::vec3(-8.0f, 0.0f, 0.0f), 22.0f);
+
+  // Under the deck, both the ground and the deck itself are reachable.
+  CHECK(!f.stacked.empty());
+  CHECK(f.CoversPoint(glm::vec3(3.0f, 0.0f, 0.0f), 0.5f));
+  CHECK(f.CoversPoint(glm::vec3(3.0f, 3.0f, 0.0f), 0.5f));
+  CHECK(!f.CoversPoint(glm::vec3(3.0f, 1.5f, 0.0f), 0.5f));
+
+  // The sheets are single-valued, keep every sample exactly once, and both
+  // layers of the stacked spot appear on different sheets.
+  const std::vector<tactics::ReachField> sheets = tactics::SplitReachSheets(f);
+  CHECK(sheets.size() >= 2);
+  size_t mainSamples = 0;
+  for (int iz = 0; iz < f.nz; ++iz) {
+    for (int ix = 0; ix < f.nx; ++ix) mainSamples += f.Reached(ix, iz);
+  }
+  size_t sheetSamples = 0;
+  bool groundSheet = false, deckSheet = false;
+  for (const tactics::ReachField& sheet : sheets) {
+    CHECK(sheet.layerStart.size() == sheet.dist.size() + 1);
+    for (int iz = 0; iz < sheet.nz; ++iz) {
+      for (int ix = 0; ix < sheet.nx; ++ix) sheetSamples += sheet.Reached(ix, iz);
+    }
+    if (sheet.CoversPoint(glm::vec3(3.0f, 0.0f, 0.0f), 0.5f)) {
+      groundSheet = true;
+      // The seam-suppression data sees the deck stacked over this spot.
+      const int ix = static_cast<int>(std::lround((3.0f - sheet.minX) / sheet.step));
+      const int iz = static_cast<int>(std::lround((0.0f - sheet.minZ) / sheet.step));
+      CHECK(sheet.LayerContinues(iz * sheet.nx + ix, 3.0f));
+    }
+    if (sheet.CoversPoint(glm::vec3(3.0f, 3.0f, 0.0f), 0.5f)) deckSheet = true;
+  }
+  CHECK(groundSheet);
+  CHECK(deckSheet);
+  CHECK(sheetSamples == mainSamples + f.stacked.size());
+
+  // A flat field without stacked reach does not split at all.
+  const tactics::ReachField flatField =
+      nav.ComputeReachField(glm::vec3(-20.0f, 0.0f, -20.0f), 4.0f);
+  CHECK(flatField.stacked.empty());
+  CHECK(tactics::SplitReachSheets(flatField).empty());
+}
+
 // Benchmark: ~300 small deck/ramp surfaces (interiors-scale). Guards the
 // per-Build route table and surface spatial index; the ceiling is generous
 // so only an algorithmic regression trips it (the pre-cache code took ~3.3 s here).
@@ -3865,6 +3927,7 @@ int main() {
   TestBuildingsContainingPoints();
   TestNavMeshRoutesAroundObstacle();
   TestReachFieldFromRampIncludesGroundBeyondFoot();
+  TestReachFieldStackedLayersAndSheets();
   TestNavMeshDirectPathWhenUnobstructed();
   TestNavMeshCellsCoverThinLedgeBetweenRotatedFootprints();
   TestNavMeshRejectsPointsInsideObstacle();

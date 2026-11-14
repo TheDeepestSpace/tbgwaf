@@ -191,6 +191,12 @@ void RemoteClient::ApplyPlans(const Json& m) {
       continue;
     }
     if (Signature(PlanToAction(*unit)) != wanted) {
+      // Re-applying another unit's plan replays it through the click flow,
+      // which resets the shared selection/mode and would close the action
+      // menu of the unit being edited (it re-fired on every plans message
+      // for a plan that never round-trips identically, e.g. multi-turn
+      // moves). Leave it unrecorded; it's applied once the edit is done.
+      if (editing && selected) continue;
       ApplyPlanAction(*game_, unit->team, action, &error);
     }
     syncedPlan_[unit->id] = wanted;

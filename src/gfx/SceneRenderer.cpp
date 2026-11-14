@@ -39,6 +39,7 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
   overlays.selectionHighlight = selected->position;
   if (game.Mode() == tactics::InputMode::AwaitingMoveDestination) {
     overlays.moveFrontier = game.MoveFrontier();
+    overlays.moveCover = game.MoveCover();
     overlays.ziplineFrontiers = &game.ZiplineFrontiers();
     overlays.movePreviewRides = &game.MovePreviewRides();
     // A later leg is drawn at 50% alpha; the first leg is solid green.
@@ -4671,8 +4672,39 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
 
   // Builds one reach field's glow + boundary geometry (see below) in `color`,
   // appending to `fill`/`border`. Shared by the walk region and the zipline
-  // regions, which only differ in tint.
-  const auto appendFrontier = [&](const tactics::ReachField& f, const glm::vec3& color,
+  // regions, which only differ in tint. With `cover` given, the glow itself
+  // identifies what the positions along the boundary offer (issue #292):
+  // full gradient at tactical cover (a corner or car side to peek from),
+  // slanted stripes along flat wall cover, and no gradient at all where the
+  // boundary is only the movement budget running out.
+  // Turns segment endpoint pairs into a flat ribbon of constant world width
+  // (a GL line is always one pixel), up-facing, ends extended by half the
+  // width so consecutive segments overlap instead of leaving joint gaps.
+  const auto ribbonize = [](const std::vector<glm::vec3>& segs, float width) {
+    std::vector<glm::vec3> tris;
+    tris.reserve(segs.size() * 3);
+    const float h = 0.5f * width;
+    for (size_t i = 0; i + 1 < segs.size(); i += 2) {
+      glm::vec3 d = segs[i + 1] - segs[i];
+      glm::vec2 dir(d.x, d.z);
+      const float len = glm::length(dir);
+      if (len < 1e-6f) continue;
+      dir /= len;
+      const glm::vec3 t(dir.x * h, 0.0f, dir.y * h);
+      const glm::vec3 n(-dir.y * h, 0.0f, dir.x * h);
+      const glm::vec3 a = segs[i] - t, b = segs[i + 1] + t;
+      glm::vec3 q[4] = {a - n, b - n, b + n, a + n};
+      // Wind counter-clockwise seen from above.
+      const float facing = (q[1].z - q[0].z) * (q[2].x - q[0].x) -
+                           (q[1].x - q[0].x) * (q[2].z - q[0].z);
+      if (facing < 0.0f) std::swap(q[1], q[3]);
+      for (int k : {0, 1, 2, 0, 2, 3}) tris.push_back(q[k]);
+    }
+    return tris;
+  };
+  constexpr float kBoundaryWidth = 0.07f;  // World units.
+  const auto appendFrontier = [&](const tactics::ReachField& f,
+                                  const tactics::CoverMap* cover, const glm::vec3& color,
                                   std::vector<ColorTriangleMesh::Vertex>& fill,
                                   std::vector<glm::vec3>& border) {
     constexpr float kY = 0.03f;
@@ -4691,10 +4723,19 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       return std::abs(f.surfaceY[az * nx + ax] - f.surfaceY[bz * nx + bx]) <= kLayerStep;
     };
     const std::vector<float> g = SmoothFrontierSignedDepth(f);
+    std::vector<glm::vec2> style;
+    if (cover) style = FrontierCoverStyle(f, game.SightObstacles(), kFadeWidth);
+    const bool styled = style.size() == g.size();
 
     struct Pt {
       glm::vec3 p;
       float g;
+      glm::vec2 s;  // (tactical, flat) cover style weights.
+      // Budget-glow weight: 1 where the nearby boundary is the move budget
+      // running out, 0 where it is an obstacle outline (per field.wallDist),
+      // so the gradient glow marks only the budget arc and obstacles carry
+      // nothing but their cover marks (issue #292).
+      float w = 1.0f;
     };
     const std::vector<AABB>& slabs = game.GetScene().sidewalks;
     // Clips a convex polygon to a slab's XZ footprint (Sutherland-Hodgman),
@@ -4714,7 +4755,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           const Pt& prev = poly[(v + poly.size() - 1) % poly.size()];
           if (inside(cur) != inside(prev)) {
             const float t = (bound - coord(prev)) / (coord(cur) - coord(prev));
-            out.push_back({prev.p + (cur.p - prev.p) * t, prev.g + (cur.g - prev.g) * t});
+            out.push_back({prev.p + (cur.p - prev.p) * t, prev.g + (cur.g - prev.g) * t,
+                           prev.s + (cur.s - prev.s) * t, prev.w + (cur.w - prev.w) * t});
           }
           if (inside(cur)) out.push_back(cur);
         }
@@ -4724,8 +4766,66 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       return poly;
     };
     auto toVertex = [&](const Pt& q) {
-      const float a = kEdgeAlpha * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
+      const float open = q.w * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
+      float a = kEdgeAlpha * open;
+      if (styled) {
+        // Schematic cover marks (issue #292): tactical cover is a solid
+        // flat fill, flat cover a crisp 45-degree world-space hatch -- flat
+        // alphas, not gradients, so the two read apart at a glance. The
+        // marks are the only fill: open ground and obstacle outlines get
+        // just the thin boundary line, no gradient.
+        const float wave =
+            0.5f + 0.5f * std::sin((q.p.x + q.p.z) * (6.2831853f / 0.6f));
+        const float hatch = std::clamp(6.0f * (wave - 0.5f) + 0.5f, 0.0f, 1.0f);
+        const float coverWeight = std::min(1.0f, q.s.x + q.s.y);
+        const float pattern = std::min(1.0f, q.s.x + q.s.y * hatch);
+        a = kEdgeAlpha * coverWeight * pattern;
+      }
       return ColorTriangleMesh::Vertex{q.p, glm::vec4(color, a)};
+    };
+    // Emits a triangle, midpoint-subdividing it (two levels) where it touches
+    // flat cover so the thin stripes are resolved by the geometry instead of
+    // aliasing against the 0.25-unit grid into blocky squares. Tactical and
+    // open triangles stay whole: their alpha is linear, so the gradient is
+    // the plain smooth ramp.
+    std::function<void(const Pt&, const Pt&, const Pt&, int)> emitTri =
+        [&](const Pt& a, const Pt& b, const Pt& c, int depth) {
+          if (depth < 2 && styled && std::max({a.s.y, b.s.y, c.s.y}) > 0.0f) {
+            const auto mid = [](const Pt& u, const Pt& v) {
+              return Pt{(u.p + v.p) * 0.5f, (u.g + v.g) * 0.5f, (u.s + v.s) * 0.5f,
+                        (u.w + v.w) * 0.5f};
+            };
+            const Pt ab = mid(a, b), bc = mid(b, c), ca = mid(c, a);
+            emitTri(a, ab, ca, depth + 1);
+            emitTri(ab, b, bc, depth + 1);
+            emitTri(ca, bc, c, depth + 1);
+            emitTri(ab, bc, ca, depth + 1);
+            return;
+          }
+          fill.push_back(toVertex(a));
+          fill.push_back(toVertex(b));
+          fill.push_back(toVertex(c));
+        };
+    // Fans around the vertex average rather than vertex 0: a fan from a
+    // corner interpolates alpha along one diagonal, which shows as faint
+    // diagonal stripes in the gradient. The centre carries the mean field
+    // value, so the ramp is symmetric. Same triangle count order as before.
+    auto emitFan = [&](const std::vector<Pt>& poly) {
+      if (poly.size() < 3) return;
+      Pt c{glm::vec3(0.0f), 0.0f, glm::vec2(0.0f)};
+      c.w = 0.0f;
+      for (const Pt& q : poly) {
+        c.p += q.p;
+        c.g += q.g;
+        c.s += q.s;
+        c.w += q.w;
+      }
+      c.p /= static_cast<float>(poly.size());
+      c.g /= static_cast<float>(poly.size());
+      c.s /= static_cast<float>(poly.size());
+      c.w /= static_cast<float>(poly.size());
+      for (size_t k = 0; k < poly.size(); ++k)
+        emitTri(c, poly[k], poly[(k + 1) % poly.size()], 0);
     };
     for (int iz = 0; iz + 1 < nz; ++iz) {
       for (int ix = 0; ix + 1 < nx; ++ix) {
@@ -4734,7 +4834,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         Pt quad[4];
         bool anyIn = false;
         for (int k = 0; k < 4; ++k) {
-          quad[k] = {f.Node(cx[k], cz[k]), g[cz[k] * nx + cx[k]]};
+          const int idx = cz[k] * nx + cx[k];
+          // Glow only where the boundary is the budget: beside an obstacle
+          // outline (wallDist and the boundary depth agree) the gradient is
+          // muted, so the obstacle carries only its cover marks.
+          float openGlow = 1.0f;
+          if (f.wallDist.size() == g.size() && std::isfinite(f.wallDist[idx])) {
+            openGlow = std::clamp((f.wallDist[idx] - std::max(g[idx], 0.0f)) / (2.0f * f.step),
+                                  0.0f, 1.0f);
+          }
+          quad[k] = {f.Node(cx[k], cz[k]), g[idx],
+                     styled ? style[idx] : glm::vec2(0.0f), openGlow};
           // Each node rides the terrain under it (HeightAt is 0 on flat
           // maps); the 0.25-unit grid is fine enough that the linear
           // contour/edge interpolation below stays on the slope.
@@ -4748,74 +4858,102 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           anyIn |= quad[k].g > 0.0f;
         }
         if (!anyIn) continue;
-        // Never triangulate across a layer step (deck/roof edge). Corners
-        // on another layer than the strongest one become virtual unreached
-        // nodes at the same height, so the contour rounds off at the edge
-        // like it does beside a ground obstacle instead of leaving a
-        // grid-stepped gap.
-        int dom = 0;
-        for (int k = 1; k < 4; ++k)
-          if (quad[k].g > quad[dom].g) dom = k;
-        for (int k = 0; k < 4; ++k) {
-          if (sameLayer(cx[dom], cz[dom], cx[k], cz[k])) continue;
-          quad[k].p.y = quad[dom].p.y;
-          quad[k].g = -0.5f * f.step;
-        }
-        // Clip the cell to g >= 0 (Sutherland-Hodgman against the field).
-        std::vector<Pt> poly;
-        std::vector<Pt> cut;  // Contour crossings, in polygon order.
-        for (int k = 0; k < 4; ++k) {
-          const Pt& a = quad[k];
-          const Pt& b = quad[(k + 1) % 4];
-          const bool ain = a.g >= 0.0f, bin = b.g >= 0.0f;
-          if (ain) poly.push_back(a);
-          if (ain != bin) {
-            const float t = a.g / (a.g - b.g);
-            const Pt c{a.p + (b.p - a.p) * t, 0.0f};
-            poly.push_back(c);
-            cut.push_back(c);
-          }
-        }
-        for (size_t k = 1; k + 1 < poly.size(); ++k) {
-          fill.push_back(toVertex(poly[0]));
-          fill.push_back(toVertex(poly[k]));
-          fill.push_back(toVertex(poly[k + 1]));
-        }
-        if (cut.size() == 2) {
-          border.push_back(cut[0].p);
-          border.push_back(cut[1].p);
-        }
-        // The ground-level copy is buried under raised sidewalk slabs, so
-        // lay a clipped copy on top of each slab the cell overlaps.
-        for (const AABB& slab : slabs) {
-          const std::vector<Pt> piece = clipToSlab(poly, slab);
-          for (size_t k = 1; k + 1 < piece.size(); ++k) {
-            fill.push_back(toVertex(piece[0]));
-            fill.push_back(toVertex(piece[k]));
-            fill.push_back(toVertex(piece[k + 1]));
-          }
-          if (cut.size() == 2) {
-            // Liang-Barsky clip of the border segment to the slab footprint.
-            const glm::vec3 a = cut[0].p, d = cut[1].p - cut[0].p;
-            float t0 = 0.0f, t1 = 1.0f;
-            const float lo[2] = {slab.min.x, slab.min.z}, hi[2] = {slab.max.x, slab.max.z};
-            const float a2[2] = {a.x, a.z}, d2[2] = {d.x, d.z};
-            bool vis = true;
-            for (int ax = 0; ax < 2 && vis; ++ax) {
-              if (std::abs(d2[ax]) < 1e-9f) {
-                vis = a2[ax] >= lo[ax] && a2[ax] <= hi[ax];
-                continue;
-              }
-              float ta = (lo[ax] - a2[ax]) / d2[ax], tb = (hi[ax] - a2[ax]) / d2[ax];
-              if (ta > tb) std::swap(ta, tb);
-              t0 = std::max(t0, ta);
-              t1 = std::min(t1, tb);
-              vis = t0 < t1;
+        // Never triangulate across a layer step (deck/roof edge): each layer
+        // present in the cell renders its own piece, with the corners on the
+        // other layer(s) turned into virtual unreached nodes at its height.
+        // Rendering every layer (not just the deepest) keeps both sides' fill
+        // and line continuous along the step instead of alternating by which
+        // layer happens to dominate each cell. The virtual corner carries the
+        // exact distance to the level-edge line where one was measured
+        // (issue #292), so the crossing interpolates onto the real cliff /
+        // deck-edge geometry instead of the grid rasterisation of the step.
+        bool used[4] = {false, false, false, false};
+        for (int g0 = 0; g0 < 4; ++g0) {
+          if (used[g0]) continue;
+          bool member[4];
+          int dom = g0;
+          for (int k = 0; k < 4; ++k) {
+            member[k] = !used[k] && sameLayer(cx[g0], cz[g0], cx[k], cz[k]);
+            if (member[k]) {
+              used[k] = true;
+              if (quad[k].g > quad[dom].g) dom = k;
             }
-            if (vis) {
-              const float y = slab.max.y + kSlabOffset;
-              border.emplace_back(a.x + d.x * t0, y, a.z + d.z * t0);
-              border.emplace_back(a.x + d.x * t1, y, a.z + d.z * t1);
+          }
+          if (quad[dom].g <= 0.0f) continue;
+          Pt cell[4];
+          for (int k = 0; k < 4; ++k) {
+            cell[k] = quad[k];
+            if (member[k]) continue;
+            const int idx = cz[k] * nx + cx[k];
+            float virtualG = -0.5f * f.step;
+            if (f.edgeDist.size() == g.size() && std::isfinite(f.edgeDist[idx]) &&
+                f.edgeDist[idx] <= 3.0f * f.step) {
+              virtualG = -(f.edgeDist[idx] + kLevelEdgeInset);
+            }
+            cell[k].p.y = quad[dom].p.y;
+            cell[k].g = virtualG;
+            cell[k].s = quad[dom].s;
+            cell[k].w = quad[dom].w;
+          }
+          // Clip the cell to g >= 0 (Sutherland-Hodgman against the field).
+          std::vector<Pt> poly;
+          std::vector<Pt> cut;  // Contour crossings, in polygon order.
+          std::vector<bool> cutEnters;  // Per crossing: outside -> inside.
+          for (int k = 0; k < 4; ++k) {
+            const Pt& a = cell[k];
+            const Pt& b = cell[(k + 1) % 4];
+            const bool ain = a.g >= 0.0f, bin = b.g >= 0.0f;
+            if (ain) poly.push_back(a);
+            if (ain != bin) {
+              const float t = a.g / (a.g - b.g);
+              const Pt c{a.p + (b.p - a.p) * t, 0.0f, a.s + (b.s - a.s) * t,
+                         a.w + (b.w - a.w) * t};
+              poly.push_back(c);
+              cut.push_back(c);
+              cutEnters.push_back(bin);
+            }
+          }
+          emitFan(poly);
+          // Contour segments: each inside run runs from an entering crossing
+          // to the next exiting one. Saddle cells have two runs (4
+          // crossings); a single segment there left gaps in the line.
+          std::vector<std::pair<glm::vec3, glm::vec3>> segs;
+          for (size_t k = 0; k < cut.size(); ++k)
+            if (cutEnters[k]) segs.emplace_back(cut[k].p, cut[(k + 1) % cut.size()].p);
+          // Thin contour line follows the whole movement boundary, obstacle
+          // outlines included (the glow is muted there, the line is not).
+          for (const auto& sg : segs) {
+            border.push_back(sg.first);
+            border.push_back(sg.second);
+          }
+          // The ground-level copy is buried under raised sidewalk slabs, so
+          // lay a clipped copy on top of each slab the cell overlaps.
+          for (const AABB& slab : slabs) {
+            const std::vector<Pt> piece = clipToSlab(poly, slab);
+            emitFan(piece);
+            for (const auto& sg : segs) {
+              // Liang-Barsky clip of the border segment to the slab footprint.
+              const glm::vec3 a = sg.first, d = sg.second - sg.first;
+              float t0 = 0.0f, t1 = 1.0f;
+              const float lo[2] = {slab.min.x, slab.min.z}, hi[2] = {slab.max.x, slab.max.z};
+              const float a2[2] = {a.x, a.z}, d2[2] = {d.x, d.z};
+              bool vis = true;
+              for (int ax = 0; ax < 2 && vis; ++ax) {
+                if (std::abs(d2[ax]) < 1e-9f) {
+                  vis = a2[ax] >= lo[ax] && a2[ax] <= hi[ax];
+                  continue;
+                }
+                float ta = (lo[ax] - a2[ax]) / d2[ax], tb = (hi[ax] - a2[ax]) / d2[ax];
+                if (ta > tb) std::swap(ta, tb);
+                t0 = std::max(t0, ta);
+                t1 = std::min(t1, tb);
+                vis = t0 < t1;
+              }
+              if (vis) {
+                const float y = slab.max.y + kSlabOffset;
+                border.emplace_back(a.x + d.x * t0, y, a.z + d.z * t0);
+                border.emplace_back(a.x + d.x * t1, y, a.z + d.z * t1);
+              }
             }
           }
         }
@@ -4834,20 +4972,28 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // is smooth rather than following the sampling grid.
   if (overlays.moveFrontier && overlays.moveFrontier->nx > 0) {
     const tactics::ReachField& f = *overlays.moveFrontier;
+    const tactics::CoverMap* cover =
+        overlays.moveCover && overlays.moveCover->nx == f.nx && overlays.moveCover->nz == f.nz
+            ? overlays.moveCover
+            : nullptr;
     const glm::vec2 origin(f.minX, f.minZ);
-    if (frontierKeyField_ != &f || frontierKeyOrigin_ != origin ||
-        frontierKeyBudget_ != f.budget || frontierKeyRevision_ != f.revision ||
-        frontierKeyThermal_ != thermalKey) {
+    const bool frontierRebuilt = frontierKeyField_ != &f || frontierKeyOrigin_ != origin ||
+                                 frontierKeyBudget_ != f.budget ||
+                                 frontierKeyRevision_ != f.revision ||
+                                 frontierKeyThermal_ != thermalKey ||
+                                 frontierKeyCover_ != (cover != nullptr);
+    if (frontierRebuilt) {
       frontierKeyField_ = &f;
       frontierKeyOrigin_ = origin;
       frontierKeyBudget_ = f.budget;
       frontierKeyRevision_ = f.revision;
       frontierKeyThermal_ = thermalKey;
+      frontierKeyCover_ = cover != nullptr;
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
-      appendFrontier(f, debug.thermal ? thermalGreen : kSetupColor, fill, border);
+      appendFrontier(f, cover, debug.thermal ? thermalGreen : kSetupColor, fill, border);
       frontierFill_.SetVertices(fill);
-      frontierBorder_.SetPoints(border);
+      frontierBorder_.SetPoints(ribbonize(border, kBoundaryWidth));
     }
     // Same depth bias as the FOV cone, against z-fighting at distance.
     glEnable(GL_POLYGON_OFFSET_FILL);
@@ -4863,7 +5009,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     const glm::vec3 frontierColor = debug.thermal ? thermalGreen : kSetupColor;
     unlitShader_.SetVec4("uColor", glm::vec4(frontierColor,
                                              overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f));
-    frontierBorder_.DrawSegments();
+    frontierBorder_.DrawTriangles();
     glDisable(GL_POLYGON_OFFSET_FILL);
   }
   // Zipline regions: where a walk -> ride -> walk plan can reach, in a second
@@ -4885,10 +5031,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border;
       for (const auto& fr : frontiers) {
-        if (fr.field.nx > 0) appendFrontier(fr.field, regionColor, fill, border);
+        if (fr.field.nx > 0) appendFrontier(fr.field, nullptr, regionColor, fill, border);
       }
       ziplineFill_.SetVertices(fill);
-      ziplineBorder_.SetPoints(border);
+      ziplineBorder_.SetPoints(ribbonize(border, kBoundaryWidth));
     }
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(-2.0f, -4.0f);
@@ -4899,7 +5045,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     unlitShader_.SetMat4("uMVP", viewProj);
     const float legAlpha = overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f;
     unlitShader_.SetVec4("uColor", glm::vec4(regionColor, legAlpha));
-    ziplineBorder_.DrawSegments();
+    ziplineBorder_.DrawTriangles();
     glDisable(GL_POLYGON_OFFSET_FILL);
     for (const auto& fr : frontiers) {
       // The ring below overwrites uMVP/uColor, so restore them per line.

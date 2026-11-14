@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include <GLES3/gl3.h>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "game/Types.h"
@@ -211,6 +212,10 @@ const std::vector<GalleryItem>& Catalog() {
         {AnimKind::ZipDown, "zip_down", "zipline (downhill)", kZipRideSeconds},
         {AnimKind::ZipUp, "zip_up", "zipline (uphill)", kZipRideSeconds},
         {AnimKind::EmptyMag, "empty_mag", "empty mag", 0.0f},  // Per weapon, below.
+        {AnimKind::CoverLean, "cover_lean", "cover (wall lean)",
+         gfx::kCoverLeanLoopSeconds},
+        {AnimKind::CoverCrouch, "cover_crouch", "cover (crouch)",
+         gfx::kCoverCrouchLoopSeconds},
     };
     for (const W& w : weapons) {
       for (A a : anims) {
@@ -329,6 +334,15 @@ Unit AnimationUnit(const GalleryItem& item, double t) {
       unit.shootElapsed = SampleEmptyMag(item.weapon, t).shootElapsed;
       unit.shootAimYaw = unit.facingYaw;
       break;
+    case AnimKind::CoverLean:
+    case AnimKind::CoverCrouch:
+      // Holding cover that sits behind the figure (toward -X), so the pose
+      // leans back onto the prop while the figure faces the camera side.
+      unit.idleElapsed = static_cast<float>(t);
+      unit.coverKind = item.anim == AnimKind::CoverLean ? 1 : 2;
+      unit.coverBlend = 1.0f;
+      unit.coverYaw = glm::pi<float>();
+      break;
   }
   return unit;
 }
@@ -418,6 +432,22 @@ void GalleryRenderer::Render(int itemIndex, double t, const ViewState& view, int
     ground.primitive = gfx::FigurePrimitive::Box;
     parts.push_back(ground);
     const Unit unit = AnimationUnit(item, t);
+    if (item.anim == AnimKind::CoverLean || item.anim == AnimKind::CoverCrouch) {
+      // The prop the cover pose is using (it sits behind the figure, toward
+      // -X, where AnimationUnit put the cover): a wall segment to lean back
+      // against, or a chest-high block to crouch behind.
+      gfx::FigurePart prop;
+      if (item.anim == AnimKind::CoverLean) {
+        prop.model = glm::translate(glm::mat4(1.0f), glm::vec3(-0.70f, 0.0f, -1.1f)) *
+                     glm::scale(glm::mat4(1.0f), glm::vec3(0.24f, 1.9f, 2.2f));
+      } else {
+        prop.model = glm::translate(glm::mat4(1.0f), glm::vec3(-0.95f, 0.0f, -0.55f)) *
+                     glm::scale(glm::mat4(1.0f), glm::vec3(0.6f, 1.05f, 1.1f));
+      }
+      prop.color = glm::vec4(0.45f, 0.45f, 0.48f, 1.0f);
+      prop.primitive = gfx::FigurePrimitive::Box;
+      parts.push_back(prop);
+    }
     if (item.anim == AnimKind::EmptyMag) {
       // Longer stage with a backstop plate, plus one tracer per bullet fired
       // so far; the newest flashes white-hot like in the game.

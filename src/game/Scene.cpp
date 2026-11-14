@@ -1,5 +1,6 @@
 #include "game/Scene.h"
 #include "game/Geometry.h"
+#include "game/NavMesh.h"
 
 #include <algorithm>
 #include <cmath>
@@ -416,6 +417,204 @@ std::vector<char> BuildingsContainingPoints(const Scene& scene,
     }
   }
   return inside;
+}
+
+void FillLevelEdgeDistances(const Scene& scene, ReachField* field) {
+  if (!field || field->nx <= 0 || field->nz <= 0 || field->step <= 0.0f ||
+      field->dist.size() != static_cast<size_t>(field->nx) * field->nz) {
+    return;
+  }
+  // Only nodes this close to an edge line get a distance; farther nodes stay
+  // at infinity (matches ReachField::wallDist's range).
+  constexpr float kRange = 2.0f;
+  // A candidate edge span is a real level edge only when the walkable
+  // heights on its two sides differ by at least this much. Keeps sidewalk
+  // curbs, tier-split seams and at-grade transitions out.
+  constexpr float kMinDrop = 0.45f;
+  // Candidate edges are tested (and kept or dropped) per span of about this
+  // length, so a stair flank or ramp mouth keeps only its cliff-like part.
+  constexpr float kSpanLength = 1.0f;
+  const float wx0 = field->minX - kRange;
+  const float wz0 = field->minZ - kRange;
+  const float wx1 = field->minX + (field->nx - 1) * field->step + kRange;
+  const float wz1 = field->minZ + (field->nz - 1) * field->step + kRange;
+  const auto inWindow = [&](glm::vec2 a, glm::vec2 b) {
+    return std::max(a.x, b.x) >= wx0 && std::min(a.x, b.x) <= wx1 &&
+           std::max(a.y, b.y) >= wz0 && std::min(a.y, b.y) <= wz1;
+  };
+
+  // Walk surfaces near the window, each with its supporting plane, for the
+  // "is the far side still walkable at this height" test below.
+  struct SurfacePlane {
+    const WalkSurface* surface;
+    std::vector<glm::vec2> footprint;
+    glm::vec3 point{0.0f};
+    glm::vec3 normal{0.0f, 1.0f, 0.0f};
+  };
+  std::vector<SurfacePlane> nearby;
+  for (const WalkSurface& s : scene.walkSurfaces) {
+    if (s.vertices.size() < 3) continue;
+    glm::vec2 lo(s.vertices[0].x, s.vertices[0].z), hi = lo;
+    std::vector<glm::vec2> footprint;
+    footprint.reserve(s.vertices.size());
+    for (const glm::vec3& v : s.vertices) {
+      footprint.emplace_back(v.x, v.z);
+      lo = glm::min(lo, footprint.back());
+      hi = glm::max(hi, footprint.back());
+    }
+    if (!inWindow(lo, hi)) continue;
+    SurfacePlane plane;
+    plane.surface = &s;
+    plane.point = s.vertices[0];
+    for (size_t i = 2; i < s.vertices.size(); ++i) {
+      const glm::vec3 n = glm::cross(s.vertices[1] - s.vertices[0],
+                                     s.vertices[i] - s.vertices[0]);
+      if (std::fabs(n.y) > 1e-6f) {
+        plane.normal = n;
+        break;
+      }
+    }
+    plane.footprint = std::move(footprint);
+    nearby.push_back(std::move(plane));
+  }
+  // Walkable height at `p` on or beside a level edge: the highest candidate
+  // among the terrain and every walk surface whose footprint covers `p`,
+  // preferring the one nearest `yHint` (a deck below a reference roof must
+  // not read as the roof's own level continuing).
+  const auto walkableYNear = [&](glm::vec2 p, float yHint) {
+    float best = scene.ground.HeightAt(p.x, p.y);
+    for (const SurfacePlane& plane : nearby) {
+      if (!PointInConvexPolygon(p, plane.footprint)) continue;
+      const glm::vec3& n = plane.normal;
+      const float y = plane.point.y -
+                      ((p.x - plane.point.x) * n.x + (p.y - plane.point.z) * n.z) / n.y;
+      if (std::fabs(y - yHint) < std::fabs(best - yHint)) best = y;
+    }
+    return best;
+  };
+
+  struct Seg {
+    glm::vec2 a, b;
+    // Height band the span's two sides cover, so a node only measures spans
+    // of its own storey: a roof outline six units up must not bend the
+    // ground boundary below it, but a cliff span serves both its top and
+    // its base.
+    float yMin = 0.0f, yMax = 0.0f;
+  };
+  std::vector<Seg> segments;
+  // Keeps the sub-spans of a -> b that behave like a cliff: the walkable
+  // height a probe away on one side differs from the edge's own height by
+  // more than kMinDrop.
+  const auto pushCliffSpans = [&](glm::vec2 a, glm::vec2 b, float ya, float yb) {
+    if (!inWindow(a, b)) return;
+    const glm::vec2 d = b - a;
+    const float length = glm::length(d);
+    if (length < 1e-4f) return;
+    const glm::vec2 n = glm::vec2(-d.y, d.x) / length;
+    constexpr float kProbe = 0.4f;
+    const int pieces = std::max(1, static_cast<int>(std::ceil(length / kSpanLength)));
+    int runStart = -1;
+    float runYMin = 0.0f, runYMax = 0.0f;
+    for (int k = 0; k <= pieces; ++k) {
+      bool cliff = false;
+      float yLo = 0.0f, yHi = 0.0f;
+      if (k < pieces) {
+        const float t = (k + 0.5f) / pieces;
+        const glm::vec2 m = a + d * t;
+        const float yEdge = ya + (yb - ya) * t;
+        const float yLeft = walkableYNear(m + n * kProbe, yEdge);
+        const float yRight = walkableYNear(m - n * kProbe, yEdge);
+        cliff = std::fabs(yLeft - yEdge) > kMinDrop || std::fabs(yRight - yEdge) > kMinDrop;
+        yLo = std::min({yEdge, yLeft, yRight});
+        yHi = std::max({yEdge, yLeft, yRight});
+      }
+      if (cliff) {
+        if (runStart < 0) {
+          runStart = k;
+          runYMin = yLo;
+          runYMax = yHi;
+        } else {
+          runYMin = std::min(runYMin, yLo);
+          runYMax = std::max(runYMax, yHi);
+        }
+      } else if (runStart >= 0) {
+        segments.push_back({a + d * (static_cast<float>(runStart) / pieces),
+                            a + d * (static_cast<float>(k) / pieces), runYMin, runYMax});
+        runStart = -1;
+      }
+    }
+  };
+
+  // Terrain tier cliff lines: the same polygons the renderer extrudes, so
+  // the drawn boundary and the drawn cliff faces agree. Edges whose two
+  // sides are level (tier-split seams, the map border, at-grade ramp
+  // corridors) are dropped by the height test.
+  if (!scene.terrainWalls.empty() && !scene.ground.Empty()) {
+    const float half = scene.mapHalfExtent;
+    const std::vector<glm::vec2> square = {
+        {-half, -half}, {half, -half}, {half, half}, {-half, half}};
+    for (const TerrainTier& tier : TerrainTiers(scene.terrainWalls, scene.terrainCutouts, square)) {
+      for (size_t i = 0; i < tier.polygon.size(); ++i) {
+        const glm::vec2 a = tier.polygon[i];
+        const glm::vec2 b = tier.polygon[(i + 1) % tier.polygon.size()];
+        pushCliffSpans(a, b, tier.height, tier.height);
+      }
+    }
+    // Stair flanks and landing rims (their grades live in the heightfield;
+    // the foot and the mouth onto the level are at grade and drop out).
+    for (const TerrainStair& stair : scene.terrainStairs) {
+      for (const std::vector<glm::vec3>* quad : {&stair.flight, &stair.landing}) {
+        for (size_t i = 0; i < quad->size(); ++i) {
+          const glm::vec3& a = (*quad)[i];
+          const glm::vec3& b = (*quad)[(i + 1) % quad->size()];
+          pushCliffSpans({a.x, a.z}, {b.x, b.z}, a.y, b.y);
+        }
+      }
+    }
+  }
+  // Walk-surface outlines (decks, roofs, ramps, crate tops). Shared joints
+  // between chained patches and ground-level ramp feet are level on both
+  // sides, so only true dropoffs survive.
+  for (const SurfacePlane& plane : nearby) {
+    const std::vector<glm::vec3>& vertices = plane.surface->vertices;
+    for (size_t i = 0; i < vertices.size(); ++i) {
+      const glm::vec3& a = vertices[i];
+      const glm::vec3& b = vertices[(i + 1) % vertices.size()];
+      pushCliffSpans({a.x, a.z}, {b.x, b.z}, a.y, b.y);
+    }
+  }
+  if (segments.empty()) return;
+
+  const float inf = std::numeric_limits<float>::infinity();
+  field->edgeDist.assign(field->dist.size(), inf);
+  for (const Seg& s : segments) {
+    const glm::vec2 lo = glm::min(s.a, s.b), hi = glm::max(s.a, s.b);
+    const auto clampNode = [&](float v, float minV, int n) {
+      return std::clamp(static_cast<int>(std::floor((v - minV) / field->step)), 0, n - 1);
+    };
+    const int ix0 = clampNode(lo.x - kRange, field->minX, field->nx);
+    const int ix1 = clampNode(hi.x + kRange + field->step, field->minX, field->nx);
+    const int iz0 = clampNode(lo.y - kRange, field->minZ, field->nz);
+    const int iz1 = clampNode(hi.y + kRange + field->step, field->minZ, field->nz);
+    const glm::vec2 ab = s.b - s.a;
+    const float abLen2 = std::max(glm::dot(ab, ab), 1e-12f);
+    const bool haveY = field->surfaceY.size() == field->dist.size();
+    constexpr float kStoreyTolerance = 1.0f;
+    for (int iz = iz0; iz <= iz1; ++iz) {
+      for (int ix = ix0; ix <= ix1; ++ix) {
+        const size_t i = static_cast<size_t>(iz) * field->nx + ix;
+        if (haveY && (field->surfaceY[i] < s.yMin - kStoreyTolerance ||
+                      field->surfaceY[i] > s.yMax + kStoreyTolerance)) {
+          continue;
+        }
+        const glm::vec2 p(field->minX + ix * field->step, field->minZ + iz * field->step);
+        const float t = std::clamp(glm::dot(p - s.a, ab) / abLen2, 0.0f, 1.0f);
+        const float d = glm::length(p - s.a - ab * t);
+        float& best = field->edgeDist[i];
+        best = std::min(best, d);
+      }
+    }
+  }
 }
 
 }  // namespace tactics

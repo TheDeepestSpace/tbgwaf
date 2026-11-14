@@ -105,6 +105,9 @@ void CheckNetAssertion(const Scenario& scenario, Rig& rig, const Json& dump,
                        const ScenarioAssertion& a, int step, AssertionStats* stats) {
   ScenarioResult result;
   GameLogic oracle = OracleFromDump(scenario, dump);
+  // Cover poses are presentation state set by the per-frame update; the
+  // oracle rebuilt from a dump needs one tick to classify its idle units.
+  if (a.coverPose) oracle.Update(0.0f);
 
   // 1. Ground truth, via the shared assertion code (sighting memory is a
   //    client-side presentation concern, handled below).

@@ -97,6 +97,22 @@ float FinalYaw(const std::vector<glm::vec3>& path, float fallback) {
   return fallback;
 }
 
+// Facing a figure ends a move with. On a cover tile (flat or tactical) it is
+// forced to put its back to the blocker; elsewhere it keeps the walk
+// direction. *forced reports whether cover decided it.
+float EndFacing(const std::vector<Obstacle>& obstacles, const std::vector<glm::vec3>& path,
+                float fallback, bool* forced = nullptr) {
+  if (!path.empty()) {
+    float yaw = 0.0f;
+    if (ClassifyCover(obstacles, path.back(), &yaw).kind != CoverKind::None) {
+      if (forced) *forced = true;
+      return std::remainder(yaw + 3.14159265358979f, 2.0f * 3.14159265358979f);
+    }
+  }
+  if (forced) *forced = false;
+  return FinalYaw(path, fallback);
+}
+
 }  // namespace
 
 std::optional<Team> CheckWinner(const std::vector<Unit>& units) {
@@ -907,7 +923,7 @@ void GameLogic::ClickGround(const glm::vec3& point, Team byTeam) {
     // Default the final facing to the leg's last non-degenerate segment
     // direction (what the walk animation would leave the figure facing), so
     // an untouched ghost costs nothing extra.
-    mover->plan.endFacingYaw = FinalYaw(path, mover->facingYaw);
+    mover->plan.endFacingYaw = EndFacing(sightObstacles_, path, mover->facingYaw);
     // Plan only: nothing moves until this plan is executed by CommitRound();
     // the facing stays adjustable via SetPlannedMoveFacing() until then.
     mover->plan.type = PlannedActionType::Move;
@@ -946,6 +962,10 @@ void GameLogic::SetPlannedMoveFacing(int unitId, float yaw, Team byTeam) {
   Unit* unit = FindUnit(unitId);
   if (!unit || !unit->alive || unit->team != byTeam) return;
   if (unit->plan.type != PlannedActionType::Move || unit->plan.movePath.empty()) return;
+  // Cover destinations fix the facing (back to the wall); not adjustable.
+  bool forced = false;
+  EndFacing(sightObstacles_, unit->plan.movePath, 0.0f, &forced);
+  if (forced) return;
   unit->plan.endFacingYaw = std::remainder(yaw, 2.0f * 3.14159265358979f);
 }
 
@@ -970,6 +990,30 @@ void GameLogic::Update(float dtSeconds) {
     e.value = dtSeconds;
     RecordScope record(this, std::move(e));
     UpdateUnrecorded(dtSeconds);
+  }
+}
+
+// Cover pose state (issue #290): a figure standing still on a cover tile eases
+// into the pose; moving or downed figures ease out. Classification is redone
+// only when the figure's position changes.
+void GameLogic::UpdateCoverPoses(float dtSeconds) {
+  for (Unit& unit : scene_.units) {
+    if (!unit.alive || unit.walkBlend > 0.01f || unit.rideTravel >= 0.0f) {
+      unit.coverBlend = std::max(0.0f, unit.coverBlend - dtSeconds * 4.0f);
+      continue;
+    }
+    if (unit.coverFrom != unit.position) {
+      unit.coverFrom = unit.position;
+      float yaw = 0.0f;
+      const CoverTile tile = ClassifyCover(sightObstacles_, unit.position, &yaw);
+      // Pose: 0 none, 1 back against the wall (tall cover), 2 crouch (low cover).
+      unit.coverKind = tile.kind == CoverKind::None ? 0 : (tile.crouch ? 2 : 1);
+      unit.coverYaw = yaw;
+    }
+    const float target = unit.coverKind != 0 ? 1.0f : 0.0f;
+    const float step = dtSeconds * 4.0f;
+    unit.coverBlend = unit.coverBlend < target ? std::min(target, unit.coverBlend + step)
+                                               : std::max(target, unit.coverBlend - step);
   }
 }
 
@@ -1001,6 +1045,7 @@ void GameLogic::UpdateUnrecorded(float dtSeconds) {
       if (unit.grabElapsed >= constants::kGrabAnimDuration) unit.grabElapsed = -1.0f;
     }
   }
+  UpdateCoverPoses(dtSeconds);
   if (flag_.dropElapsed >= 0.0f) {
     flag_.dropElapsed = std::min(flag_.dropElapsed + dtSeconds, constants::kFlagDropDuration);
   }
@@ -1315,6 +1360,7 @@ void GameLogic::ClearQueuedLegs(std::optional<int> unitId) {
 // legs run in later rounds and get the plain field.
 void GameLogic::RefreshMoveFrontier() {
   moveFrontier_ = ReachField();
+  moveCover_ = CoverMap();
   ziplineFrontiers_.clear();
   ziplineMeshes_.clear();
   ziplineUnitId_ = -1;
@@ -1328,7 +1374,9 @@ void GameLogic::RefreshMoveFrontier() {
     moveFrontier_ = navMesh_.ComputeReachField(
         origin, mover->MoveBudget(), 0.25f,
         firstLeg && !blockers.trajectories.empty() ? &blockers : nullptr);
+    FillLevelEdgeDistances(scene_, &moveFrontier_);
     moveFrontier_.revision = ++frontierRevision_;
+    moveCover_ = ComputeCoverMap(sightObstacles_, moveFrontier_);
     BuildZiplineFrontiers(*mover, origin);
   }
 }
@@ -1407,6 +1455,7 @@ void GameLogic::BuildZiplineFrontiers(const Unit& mover, const glm::vec3& origin
       frontier.field = mesh.ComputeReachField(
           exit, remaining, 0.25f,
           firstLeg && !blockers.trajectories.empty() ? &blockers : nullptr);
+      FillLevelEdgeDistances(scene_, &frontier.field);
       frontier.field.revision = ++frontierRevision_;
       ziplineFrontiers_.push_back(std::move(frontier));
       ziplineMeshes_.push_back(std::move(mesh));
@@ -2545,7 +2594,7 @@ void GameLogic::FinishRound() {
     unit.plan.moveRides = std::move(unit.plan.queuedLegRides.front());
     unit.plan.queuedLegs.erase(unit.plan.queuedLegs.begin());
     unit.plan.queuedLegRides.erase(unit.plan.queuedLegRides.begin());
-    unit.plan.endFacingYaw = FinalYaw(unit.plan.movePath, unit.facingYaw);
+    unit.plan.endFacingYaw = EndFacing(sightObstacles_, unit.plan.movePath, unit.facingYaw);
     armedLegs.push_back(unit.id);
   }
   // Queued legs were planned rounds ago against other positions, so an armed

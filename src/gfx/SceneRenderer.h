@@ -82,6 +82,9 @@ struct PaneOverlays {
   std::optional<glm::vec3> invalidHoverHighlight;  // Red ring on an unreachable hover point.
   const std::vector<glm::vec3>* movePreviewPath = nullptr;  // Yellow preview polyline.
   const tactics::ReachField* moveFrontier = nullptr;  // Reachable-area gradient + border.
+  // Styles the frontier glow by cover kind (#290/#292): full gradient at
+  // tactical cover, slanted stripes along flat cover, none on open ground.
+  const tactics::CoverMap* moveCover = nullptr;
   bool moveFrontierSubsequentLeg = false;             // Border/path drawn at 50% alpha.
   // Zipline reach (walk -> ride -> walk), drawn as a second, cyan region with
   // the line itself highlighted; the preview/planned path marks its ride.
@@ -220,6 +223,7 @@ class SceneRenderer {
   float frontierKeyBudget_ = -1.0f;
   int frontierKeyRevision_ = -1;  // Field contents change with blockers' plans.
   int frontierKeyThermal_ = 0;  // 0 off, 1 white-hot, 2 black-hot.
+  bool frontierKeyCover_ = false;  // Whether the glow was styled by a cover map.
   ColorTriangleMesh ziplineFill_;
   LineMesh ziplineBorder_;
   std::vector<glm::vec4> ziplineKey_;  // (minX, minZ, budget, zipline) per region.

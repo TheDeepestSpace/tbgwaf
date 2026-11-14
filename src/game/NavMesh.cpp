@@ -536,6 +536,52 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
     }
   }
 
+  // Exact signed distance from each node to the union of padded obstacle
+  // outlines, for nodes near one (see ReachField::wallDist): negative inside
+  // any padded polygon. The sign matters where outlines nest or overlap -- a
+  // pier shaft inside its wider footing, abutting buildings -- because an
+  // unsigned "distance to the nearest outline" there measures the inner,
+  // non-blocking outline and warps the drawn boundary. The min over signed
+  // per-polygon distances is exact outside the union and along its boundary.
+  // Only near-contour values are ever drawn, so nodes farther than
+  // kWallDistRange from every outline stay at infinity and skip the work.
+  constexpr float kWallDistRange = 2.0f;
+  field.wallDist.assign(field.dist.size(), inf);
+  for (const std::vector<glm::vec2>& polygon : paddedPolygons_) {
+    if (polygon.size() < 3) continue;
+    glm::vec2 lo = polygon[0], hi = polygon[0];
+    for (const glm::vec2& v : polygon) {
+      lo = glm::min(lo, v);
+      hi = glm::max(hi, v);
+    }
+    const auto nodeMin = [&](float v, float minV) {
+      return std::max(0, static_cast<int>(std::floor((v - kWallDistRange - minV) / step)));
+    };
+    const int ix0 = nodeMin(lo.x, field.minX), iz0 = nodeMin(lo.y, field.minZ);
+    const int ix1 = std::min(
+        field.nx - 1, static_cast<int>(std::ceil((hi.x + kWallDistRange - field.minX) / step)));
+    const int iz1 = std::min(
+        field.nz - 1, static_cast<int>(std::ceil((hi.y + kWallDistRange - field.minZ) / step)));
+    for (int iz = iz0; iz <= iz1; ++iz) {
+      for (int ix = ix0; ix <= ix1; ++ix) {
+        const glm::vec2 p(field.minX + ix * step, field.minZ + iz * step);
+        float& best = field.wallDist[iz * field.nx + ix];
+        float edge = inf;
+        bool inside = true;  // ExpandConvexPolygon output is counter-clockwise.
+        for (size_t e = 0; e < polygon.size(); ++e) {
+          const glm::vec2 a = polygon[e];
+          const glm::vec2 ab = polygon[(e + 1) % polygon.size()] - a;
+          const glm::vec2 ap = p - a;
+          inside &= ab.x * ap.y - ab.y * ap.x >= 0.0f;
+          const float t =
+              std::clamp(glm::dot(ap, ab) / std::max(glm::dot(ab, ab), 1e-12f), 0.0f, 1.0f);
+          edge = std::min(edge, glm::length(ap - t * ab));
+        }
+        best = std::min(best, inside ? -edge : edge);
+      }
+    }
+  }
+
   // Broadphase for the Dijkstra below (issue #256): testing every node and
   // every short edge against every padded blocker polygon is
   // O(nodes x polygons) and cost ~0.5 s per move click on urban maps. Bucket
@@ -591,9 +637,9 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
   static const int kMoves[16][2] = {{1, 0},  {-1, 0}, {0, 1},  {0, -1}, {1, 1},  {1, -1},
                                     {-1, 1}, {-1, -1}, {2, 1},  {2, -1}, {-2, 1}, {-2, -1},
                                     {1, 2},  {1, -2}, {-1, 2}, {-1, -2}};
-  std::vector<char> walkable(field.dist.size(), -1);  // -1 unknown, 0/1 cached.
+  field.walkable.assign(field.dist.size(), -1);  // -1 unknown, 0/1 cached.
   auto nodeWalkable = [&](int ix, int iz) {
-    char& w = walkable[iz * field.nx + ix];
+    char& w = field.walkable[iz * field.nx + ix];
     if (w < 0) {
       const glm::vec3 p = field.Node(ix, iz);
       if (!polygonMode_) {

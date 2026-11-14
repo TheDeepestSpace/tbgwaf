@@ -199,6 +199,14 @@ void LineMesh::DrawSegments() const {
   glBindVertexArray(0);
 }
 
+void LineMesh::DrawTriangles() const {
+  if (pointCount_ < 3) return;
+  glBindVertexArray(vao_);
+  glDrawArrays(GL_TRIANGLES, 0, pointCount_);
+  RecordDraw(pointCount_, pointCount_ / 3);
+  glBindVertexArray(0);
+}
+
 void TriangleMesh::Init() {
   glGenVertexArrays(1, &vao_);
   glGenBuffers(1, &vbo_);

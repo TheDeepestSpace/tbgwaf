@@ -118,6 +118,7 @@ struct ScenarioAssertion {
   std::optional<int> unit;
   std::optional<bool> alive;
   std::optional<glm::vec3> position;
+  std::optional<std::string> coverPose;  // Paired with `unit`: none | stand (back to tall cover) | crouch.
   std::optional<float> facingDegrees;  // Paired with `unit`; degrees, atan2(dz, dx).
   float tolerance = 0.05f;
 

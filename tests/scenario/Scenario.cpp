@@ -229,6 +229,13 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   if (node["alive"]) assertion.alive = node["alive"].as<bool>();
   if (node["position"]) assertion.position = ParseVec3(node["position"], "assert.position");
   if (node["facing_degrees"]) assertion.facingDegrees = node["facing_degrees"].as<float>();
+  if (node["cover_pose"]) {
+    assertion.coverPose = node["cover_pose"].as<std::string>();
+    if (*assertion.coverPose != "none" && *assertion.coverPose != "stand" &&
+        *assertion.coverPose != "crouch") {
+      throw std::runtime_error("assert.cover_pose must be none, stand or crouch");
+    }
+  }
   if (node["tolerance"]) assertion.tolerance = node["tolerance"].as<float>();
   if (node["visible_to"]) {
     assertion.visibleToTeam = ParseTeam(node["visible_to"].as<std::string>(), "assert.visible_to");
@@ -269,9 +276,10 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   }
 
   if ((assertion.alive || assertion.position || assertion.facingDegrees ||
-       assertion.visible || assertion.remembered || assertion.ghostAlpha) && !assertion.unit) {
+       assertion.coverPose || assertion.visible || assertion.remembered ||
+       assertion.ghostAlpha) && !assertion.unit) {
     throw std::runtime_error(
-        "assert checking alive/position/facing_degrees/visible/remembered/ghost_alpha requires 'unit'");
+        "assert checking alive/position/facing_degrees/cover_pose/visible/remembered/ghost_alpha requires 'unit'");
   }
   if ((assertion.remembered || assertion.ghostAlpha) && !assertion.rememberedByTeam) {
     throw std::runtime_error("assert 'remembered'/'ghost_alpha' require 'remembered_by'");
@@ -485,14 +493,19 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
         game.CancelAction();  // ...and deselect.
         return true;
       }
+      NotifyMenuClick(actorTeam, "Done");
       game.FinishMovePlan();
       if (game.Mode() != InputMode::AwaitingSelection) {
         return Fail("has no path to destination " + ToString(destination) +
                     " (unreachable, or beyond the mover's round move budget)");
       }
       if (action.finalFacingDegrees) {
-        game.SetPlannedMoveFacing(action.actor, *action.finalFacingDegrees * 3.14159265f / 180.0f,
-                                  actorTeam);
+        const float yaw = *action.finalFacingDegrees * 3.14159265f / 180.0f;
+        // The player aims the ghost by dragging from the destination toward
+        // the facing direction (main.cpp); show that drag end as a click.
+        NotifyClick(actorTeam, action.destination +
+                                   3.0f * glm::vec3(std::cos(yaw), 0.0f, std::sin(yaw)));
+        game.SetPlannedMoveFacing(action.actor, yaw, actorTeam);
       }
       return true;
     }
@@ -642,6 +655,14 @@ void CheckAssertionImpl(const GameLogic& game, const ScenarioAssertion& a, int s
           Fail("unit " + std::to_string(*a.unit) + " expected facing near " +
                std::to_string(*a.facingDegrees) + " deg but is at " +
                std::to_string(unit->facingYaw * 180.0f / 3.14159265f));
+        }
+      }
+      if (a.coverPose) {
+        static const char* const kPoses[] = {"none", "stand", "crouch"};
+        const char* actual = unit->coverKind < 3 ? kPoses[unit->coverKind] : "?";
+        if (*a.coverPose != actual) {
+          Fail("unit " + std::to_string(*a.unit) + " expected cover_pose " + *a.coverPose +
+               " but was " + actual);
         }
       }
       if (a.visible) {

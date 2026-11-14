@@ -691,8 +691,74 @@ void TestSheerFacesAreImpassable() {
   CHECK(!sealed.FindPath(start, glm::vec3(7.0f, 3.0f, 0.0f), &path));
 }
 
+void TestLevelEdgeDistances() {
+  // FillLevelEdgeDistances (issue #292): nodes near a terrain step line
+  // measure the exact XZ distance to it, nodes far from every level edge
+  // stay at infinity, and a seam between two abutting walk-surface patches
+  // at one height is not an edge.
+  Scene scene;
+  scene.mapHalfExtent = 10.0f;
+  TerrainWall wall;
+  wall.origin = wall.lineOrigin = glm::vec2(0.0f);
+  wall.dir = glm::vec2(0.0f, 1.0f);
+  wall.raisedNormal = glm::vec2(1.0f, 0.0f);
+  wall.rise = 3.0f;
+  scene.terrainWalls.push_back(wall);
+  HeightField& ground = scene.ground;
+  ground.minX = ground.minZ = -10.0f;
+  ground.step = 0.25f;
+  ground.nx = ground.nz = 81;
+  ground.heights.resize(static_cast<size_t>(ground.nx) * ground.nz);
+  for (int iz = 0; iz < ground.nz; ++iz) {
+    for (int ix = 0; ix < ground.nx; ++ix) {
+      ground.heights[static_cast<size_t>(iz) * ground.nx + ix] =
+          ground.minX + ix * ground.step >= 0.0f ? 3.0f : 0.0f;
+    }
+  }
+  // Two abutting 2x2 patches at one height: outer edges are dropoffs, the
+  // shared seam at x = 6 is not.
+  for (const float x0 : {4.0f, 6.0f}) {
+    WalkSurface patch;
+    patch.vertices = {{x0, 2.0f, -1.0f}, {x0 + 2.0f, 2.0f, -1.0f},
+                      {x0 + 2.0f, 2.0f, 1.0f}, {x0, 2.0f, 1.0f}};
+    scene.walkSurfaces.push_back(patch);
+  }
+  ReachField field;
+  field.minX = field.minZ = -9.0f;
+  field.step = 0.25f;
+  field.nx = field.nz = 73;
+  field.dist.assign(static_cast<size_t>(field.nx) * field.nz, 0.0f);
+  field.surfaceY.resize(field.dist.size());
+  for (int iz = 0; iz < field.nz; ++iz) {
+    for (int ix = 0; ix < field.nx; ++ix) {
+      const float x = field.minX + ix * field.step;
+      const float z = field.minZ + iz * field.step;
+      const bool onPatch = x >= 4.0f && x <= 8.0f && z >= -1.0f && z <= 1.0f;
+      field.surfaceY[iz * field.nx + ix] = onPatch ? 2.0f : ground.HeightAt(x, z);
+    }
+  }
+  FillLevelEdgeDistances(scene, &field);
+  CHECK(field.edgeDist.size() == field.dist.size());
+  if (field.edgeDist.size() != field.dist.size()) return;
+  const auto at = [&](float x, float z) {
+    const int ix = static_cast<int>(std::lround((x - field.minX) / field.step));
+    const int iz = static_cast<int>(std::lround((z - field.minZ) / field.step));
+    return field.edgeDist[iz * field.nx + ix];
+  };
+  // Both sides of the step line measure the line itself.
+  CHECK(std::fabs(at(-1.0f, -5.0f) - 1.0f) < 0.02f);
+  CHECK(std::fabs(at(0.5f, -5.0f) - 0.5f) < 0.02f);
+  CHECK(std::fabs(at(-0.25f, 3.0f) - 0.25f) < 0.02f);
+  // Far from every edge: no distance recorded.
+  CHECK(!std::isfinite(at(-5.0f, -5.0f)));
+  // On the patches, the seam at x = 6 does not count: the nearest edges
+  // from their center are the z = +-1 rims, one unit away.
+  CHECK(std::fabs(at(6.0f, 0.0f) - 1.0f) < 0.02f);
+}
+
 int main(int argc, char** argv) {
   const std::vector<TestCase> cases = {
+      TBG_TEST(TestLevelEdgeDistances),
       TBG_TEST(TestStairSidesSealed),
       TBG_TEST(TestNoWalkableCliffLinks_1_3),
       TBG_TEST(TestNoWalkableCliffLinks_4_6),

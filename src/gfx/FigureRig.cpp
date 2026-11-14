@@ -84,6 +84,38 @@ constexpr BipedCurve kIdleBob = {1.0f, 0.4f, 0.0f, 0.5f, 1.0f, 0.6f, 0.0f, 0.4f}
 constexpr float kWalkBobHeight = 0.04f;
 constexpr float kIdleBobHeight = 0.008f;
 
+// Cover poses (issue #290): compact retargets of the Crouch_Idle_Loop (UAL1)
+// and Idle_FoldArms_Loop (UAL2) clips from the Quaternius Universal Animation
+// Library (CC0 1.0; pinned source and extraction details in THIRD_PARTY.md,
+// sampled with scripts/extract_biped_clip.py). Tactical cover plays the
+// crouch; flat cover plays the relaxed weight-shifted stand (its folded arms
+// are unused -- the arms keep carrying the weapon). Unlike the walk gait
+// these are pose retargets, so hip/knee angles are kept at full scale; only
+// the spine pitch is damped for the doll's oversized torso.
+constexpr BipedCurve kCrouchLeftHip = {102.1f, 101.8f, 101.1f, 100.5f,
+                                       100.2f, 100.5f, 101.2f, 101.8f};
+constexpr BipedCurve kCrouchLeftKnee = {-94.9f, -94.7f, -94.1f, -93.5f,
+                                        -93.3f, -93.5f, -94.1f, -94.7f};
+constexpr BipedCurve kCrouchRightHip = {56.9f, 57.2f, 58.6f, 60.2f,
+                                        61.2f, 60.9f, 59.5f, 57.9f};
+constexpr BipedCurve kCrouchRightKnee = {-135.1f, -135.0f, -134.9f, -134.8f,
+                                         -134.9f, -135.0f, -135.2f, -135.2f};
+constexpr BipedCurve kCrouchSpinePitch = {36.5f, 36.3f, 35.8f, 34.9f,
+                                          34.3f, 34.6f, 35.4f, 36.1f};
+constexpr BipedCurve kLeanLeftHip = {16.5f, 17.9f, 19.4f, 18.0f,
+                                     16.1f, 17.6f, 19.4f, 18.4f};
+constexpr BipedCurve kLeanLeftKnee = {-19.9f, -22.5f, -25.3f, -24.4f,
+                                      -21.3f, -23.0f, -25.3f, -23.3f};
+constexpr BipedCurve kLeanRightHip = {-5.2f, -3.3f, -1.4f, -3.1f,
+                                      -5.3f, -3.6f, -1.4f, -2.7f};
+constexpr BipedCurve kLeanRightKnee = {-12.0f, -15.6f, -19.4f, -16.6f,
+                                       -12.5f, -15.5f, -19.3f, -16.7f};
+constexpr BipedCurve kLeanSpinePitch = {4.8f, 4.5f, 6.1f, 6.2f,
+                                        4.8f, 4.5f, 6.1f, 6.2f};
+constexpr float kCoverSpinePitchScale = 0.6f;
+constexpr float kCrouchLean = 16.0f;     // Spine toward the edge, degrees.
+constexpr float kFlatCoverLean = 11.0f;  // Spine resting back on the wall, degrees.
+
 constexpr float kTwoPi = 6.28318530717958647692f;
 constexpr float kGrabLean = glm::radians(32.0f);  // Peak forward dip of the flag-grab reach.
 
@@ -619,7 +651,7 @@ FigureParts BuildRagdollFigure(const Unit& unit, bool compactWeapon) {
   return parts;
 }
 
-FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon, RagdollPose* joints = nullptr) {
+FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* joints = nullptr) {
   if (!joints && RagdollActive(unit)) return BuildRagdollFigure(unit, compactWeapon);
   // Every body part shares the one flat team color; only the weapon differs.
   const glm::vec4 teamColor = unit.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
@@ -696,9 +728,60 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon, RagdollPose* j
     leftHip += stepAmount;
   }
   const float bank = -glm::clamp(lag, -kTurnBankMaxLag, kTurnBankMaxLag) * kTurnBank * walk;
-  const glm::mat4 figure =
-      fall * YawFrame(unit.position + glm::vec3(0.0f, bob + ride.lift, 0.0f), unit.VisualYaw()) *
+
+  // Cover pose (issue #290): the legs and spine play a retargeted authored
+  // clip -- a crouch for tactical cover, a relaxed weight-shifted stand for
+  // flat cover -- while the arms keep carrying the weapon. On top of the
+  // clip the spine tips toward the wall (in the figure's own frame, so the
+  // pose reads whichever way it is facing) and the body shifts into contact.
+  float coverDrop = 0.0f;
+  float spineLean = 0.0f;
+  float coverPitch = 0.0f;
+  glm::vec3 spineAxis(0.0f, 0.0f, 1.0f);
+  glm::vec3 coverShift(0.0f);
+  if (!joints && unit.coverBlend > 0.0f && unit.coverKind != 0 && unit.alive &&
+      unit.walkBlend <= 0.05f && !ride.riding) {
+    const float b = unit.coverBlend;
+    const bool flat = unit.coverKind == 1;
+    const float coverPhase =
+        unit.idleElapsed *
+            (kTwoPi / (flat ? kCoverLeanLoopSeconds : kCoverCrouchLoopSeconds)) +
+        unit.id * 0.73f;
+    const auto reach = [](float h, float k) {
+      return kUpperLegLength * std::cos(h) + kLowerLegLength * std::cos(h + k);
+    };
+    const auto curve = [&](const BipedCurve& flatCurve, const BipedCurve& crouchCurve) {
+      return glm::radians(SampleLoop(flat ? flatCurve : crouchCurve, coverPhase));
+    };
+    leftHip = glm::mix(leftHip, curve(kLeanLeftHip, kCrouchLeftHip), b);
+    rightHip = glm::mix(rightHip, curve(kLeanRightHip, kCrouchRightHip), b);
+    leftKnee = glm::mix(leftKnee, curve(kLeanLeftKnee, kCrouchLeftKnee), b);
+    rightKnee = glm::mix(rightKnee, curve(kLeanRightKnee, kCrouchRightKnee), b);
+    // Keep the lower foot on the ground: drop by the leg length lost.
+    const float standing = kUpperLegLength + kLowerLegLength * std::cos(glm::radians(12.0f));
+    coverDrop = std::max(0.0f, standing - std::min(reach(leftHip, leftKnee),
+                                                   reach(rightHip, rightKnee)));
+    const float cy = std::cos(unit.coverYaw - unit.VisualYaw());
+    const float sy = std::sin(unit.coverYaw - unit.VisualYaw());
+    spineAxis = glm::vec3(sy, 0.0f, -cy);  // Tips +Y toward the wall.
+    spineLean = glm::radians(flat ? kFlatCoverLean : kCrouchLean) * b;
+    coverPitch = curve(kLeanSpinePitch, kCrouchSpinePitch) * kCoverSpinePitchScale * b;
+    coverShift = glm::vec3(cy, 0.0f, sy) * ((flat ? 0.10f : 0.04f) * b);
+  }
+
+  const glm::mat4 hipFrame =
+      fall * YawFrame(unit.position + glm::vec3(0.0f, bob + ride.lift - coverDrop, 0.0f),
+                      unit.VisualYaw()) *
       glm::rotate(glm::mat4(1.0f), bank, glm::vec3(1.0f, 0.0f, 0.0f)) *
+      glm::translate(glm::mat4(1.0f), glm::vec3(coverShift));
+  // Everything above the hips (torso, head, arms, weapon) rides the spine.
+  // The cover clip's sagittal pitch (hunching forward over the knees in the
+  // crouch, a slight slouch in the lean) pivots at the hips like the wall tip.
+  const glm::mat4 figure =
+      hipFrame * glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, kHipHeight, 0.0f)) *
+      glm::rotate(glm::mat4(1.0f), spineLean, spineAxis) *
+      glm::rotate(glm::mat4(1.0f), -coverPitch, glm::vec3(0.0f, 0.0f, 1.0f)) *
+      glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -kHipHeight, 0.0f)) *
       glm::rotate(glm::mat4(1.0f), -grabLean, glm::vec3(0.0f, 0.0f, 1.0f));
 
   // Rifle aim blades the torso/shoulders onto the target bearing plus
@@ -734,10 +817,10 @@ FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon, RagdollPose* j
   parts.push_back({EllipsoidModel(figure, headCenter, glm::vec3(kHeadRadius)), teamColor});
 
   const glm::mat4 leftThigh =
-      LimbFrame(figure, glm::vec3(0.0f, kHipHeight, -kLegSideOffset), leftHip, legTwist);
+      LimbFrame(hipFrame, glm::vec3(0.0f, kHipHeight, -kLegSideOffset), leftHip, legTwist);
   const glm::mat4 leftShin = ChildBoneFrame(leftThigh, kUpperLegLength, leftKnee);
   const glm::mat4 rightThigh =
-      LimbFrame(figure, glm::vec3(0.0f, kHipHeight, kLegSideOffset), rightHip, legTwist);
+      LimbFrame(hipFrame, glm::vec3(0.0f, kHipHeight, kLegSideOffset), rightHip, legTwist);
   const glm::mat4 rightShin = ChildBoneFrame(rightThigh, kUpperLegLength, rightKnee);
   // Where an IK-solved arm ends up, for the ragdoll's starting pose.
   auto armOut = [&](int elbow, int hand, glm::vec3** e, glm::vec3** h) {
@@ -953,8 +1036,12 @@ RagdollPose AnimatedPose(const Unit& unit) {
   standing.alive = true;
   standing.knockdownElapsed = -1.0f;
   RagdollPose pose{};
-  BuildFigureImpl(standing, true, &pose);
+  BuildFigureBase(standing, true, &pose);
   return pose;
+}
+
+FigureParts BuildFigureImpl(const Unit& unit, bool compactWeapon) {
+  return BuildFigureBase(unit, compactWeapon);
 }
 
 FigureParts BuildFigure(const Unit& unit) { return BuildFigureImpl(unit, false); }

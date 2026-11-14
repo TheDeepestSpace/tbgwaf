@@ -740,8 +740,12 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
   glm::vec3 spineAxis(0.0f, 0.0f, 1.0f);
   glm::vec3 coverShift(0.0f);
   if (!joints && unit.coverBlend > 0.0f && unit.coverKind != 0 && unit.alive &&
-      unit.walkBlend <= 0.05f && !ride.riding) {
-    const float b = unit.coverBlend;
+      !ride.riding) {
+    // Ease in as the walk cycle eases out (the sim starts the blend the
+    // moment the figure stops), smoothstepped so the pose neither pops in
+    // nor lingers at the ends.
+    const float raw = glm::clamp(unit.coverBlend * (1.0f - walk), 0.0f, 1.0f);
+    const float b = raw * raw * (3.0f - 2.0f * raw);
     const bool flat = unit.coverKind == 1;
     const float coverPhase =
         unit.idleElapsed *

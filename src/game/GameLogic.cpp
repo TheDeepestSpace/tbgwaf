@@ -998,7 +998,7 @@ void GameLogic::Update(float dtSeconds) {
 // only when the figure's position changes.
 void GameLogic::UpdateCoverPoses(float dtSeconds) {
   for (Unit& unit : scene_.units) {
-    if (!unit.alive || unit.walkBlend > 0.01f || unit.rideTravel >= 0.0f) {
+    if (!unit.alive || IsUnitMoving(unit.id) || unit.rideTravel >= 0.0f) {
       unit.coverBlend = std::max(0.0f, unit.coverBlend - dtSeconds * 4.0f);
       continue;
     }
@@ -1011,7 +1011,7 @@ void GameLogic::UpdateCoverPoses(float dtSeconds) {
       unit.coverYaw = yaw;
     }
     const float target = unit.coverKind != 0 ? 1.0f : 0.0f;
-    const float step = dtSeconds * 4.0f;
+    const float step = dtSeconds * 3.0f;
     unit.coverBlend = unit.coverBlend < target ? std::min(target, unit.coverBlend + step)
                                                : std::max(target, unit.coverBlend - step);
   }

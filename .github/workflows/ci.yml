@@ -54,6 +54,71 @@ jobs:
           fi
           echo "tag=${BUILT_TAG:-ghcr.io/thedeepestspace/tbgwaf-ci:latest}" >> "$GITHUB_OUTPUT"
 
+  # Builds the two long-running suites headless, derives the shard matrix from
+  # their --list output (no hardcoded counts), and checks shard coverage.
+  plan-shards:
+    needs: select_ci_image
+    if: ${{ !cancelled() && needs.select_ci_image.result == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    container:
+      image: ${{ needs.select_ci_image.outputs.image-tag }}
+      options: --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build sharded test binaries
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DTBGWAF_BUILD_CLIENT=OFF
+          cmake --build build --target tactics_map_generator_tests tactics_urban_terrain_tests
+
+      - name: Check every test is covered by exactly one shard
+        run: python3 scripts/ci_matrix.py check build
+
+      - id: matrix
+        run: echo "matrix=$(python3 scripts/ci_matrix.py matrix build)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: shard-binaries
+          path: |
+            build/tactics_map_generator_tests
+            build/tactics_urban_terrain_tests
+          retention-days: 1
+
+  test-shard:
+    needs: [select_ci_image, plan-shards]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan-shards.outputs.matrix) }}
+    name: ${{ matrix.suite }} ${{ matrix.shard }}
+    container:
+      image: ${{ needs.select_ci_image.outputs.image-tag }}
+      options: --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: shard-binaries
+          path: bin
+
+      - name: Run shard
+        run: |
+          chmod +x bin/*
+          ./bin/${{ matrix.binary }} --shard ${{ matrix.shard }} --timings
+
+  # Everything else, in parallel with the shards.
   build-and-test:
     needs: select_ci_image
     if: ${{ !cancelled() && needs.select_ci_image.result == 'success' }}
@@ -84,16 +149,9 @@ jobs:
       - name: Build
         run: cmake --build build
 
+      # map_generator/urban_terrain run in the test-shard jobs.
       - name: Test
-        run: ctest --test-dir build --output-on-failure
-
-      # Server-only build: proves the SDL2/EGL/GLESv2 dev packages aren't
-      # needed for the headless targets (runs from a scratch build dir).
-      - name: Headless/server-only build and test
-        run: |
-          cmake -B build-headless -G Ninja -DCMAKE_BUILD_TYPE=Release -DTBGWAF_BUILD_CLIENT=OFF
-          cmake --build build-headless
-          ctest --test-dir build-headless --output-on-failure
+        run: ctest --test-dir build --output-on-failure -j"$(nproc)" -E '^(map_generator|urban_terrain)_tests$'
 
       - name: Upload visual test output
         if: failure()
@@ -103,3 +161,42 @@ jobs:
           path: |
             build/visual_out
             build/map_visual_out
+
+  # Server-only build: proves the SDL2/EGL/GLESv2 dev packages aren't
+  # needed for the headless targets (runs from a scratch build dir).
+  headless-build-and-test:
+    needs: select_ci_image
+    if: ${{ !cancelled() && needs.select_ci_image.result == 'success' }}
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.select_ci_image.outputs.image-tag }}
+      options: --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Headless/server-only build and test
+        run: |
+          cmake -B build-headless -G Ninja -DCMAKE_BUILD_TYPE=Release -DTBGWAF_BUILD_CLIENT=OFF
+          cmake --build build-headless
+          ctest --test-dir build-headless --output-on-failure -j"$(nproc)" -E '^(map_generator|urban_terrain)_tests$'
+
+  # The only required check: the shard matrix size is dynamic, so branch
+  # protection must not name individual shard jobs.
+  ci-gate:
+    if: always()
+    needs: [browser-and-adapter-tests, select_ci_image, plan-shards, test-shard, build-and-test, headless-build-and-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all jobs to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | python3 -c '
+          import json, sys
+          bad = {k: v["result"] for k, v in json.load(sys.stdin).items() if v["result"] != "success"}
+          print(bad or "all green")
+          sys.exit(1 if bad else 0)'

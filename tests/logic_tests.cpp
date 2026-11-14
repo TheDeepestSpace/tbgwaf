@@ -3780,6 +3780,50 @@ void TestReachFieldManySurfacesPerformance() {
 #endif
 }
 
+void TestDeadFiguresSeeThroughProbes() {
+  std::vector<Unit> units(3);
+  units[0].id = 0;
+  units[0].team = Team::Blue;
+  units[0].position = glm::vec3(-4.0f, 0.0f, 0.0f);
+  units[0].facingYaw = 0.0f;
+  units[1].id = 1;  // Own dead figure, in front of the viewer.
+  units[1].team = Team::Blue;
+  units[1].position = glm::vec3(4.0f, 0.0f, 6.0f);
+  units[1].alive = false;
+  units[2].id = 2;  // Enemy dead figure, in FOV.
+  units[2].team = Team::Red;
+  units[2].position = glm::vec3(4.0f, 0.0f, 0.0f);
+  units[2].alive = false;
+  const std::vector<WalkSurface> noSurfaces;
+  const HeightField flat;
+  const std::vector<Obstacle> wall = {
+      Obstacle{AABB{glm::vec3(-0.5f, 0.0f, -1.0f), glm::vec3(0.5f, 3.0f, 1.0f)}},
+  };
+  const auto has = [](const std::vector<glm::vec3>& probes, const glm::vec3& eye) {
+    return std::find_if(probes.begin(), probes.end(), [&](const glm::vec3& p) {
+             return glm::distance(p, eye) < 1e-4f;
+           }) != probes.end();
+  };
+  // Own dead figure is probed even though no one sees it.
+  auto probes = FigureSeeThroughProbes(Team::Blue, false, true, units, wall, noSurfaces, flat);
+  CHECK(has(probes, units[1].EyePosition()));
+  // Enemy dead figure walled off from the squad is not in FOV: not probed under fog.
+  CHECK(!has(probes, units[2].EyePosition()));
+  // In FOV (a wall off the squad's sightline, e.g. on the camera side): probed.
+  const std::vector<Obstacle> offLine = {
+      Obstacle{AABB{glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(1.0f, 3.0f, 4.0f)}},
+  };
+  probes = FigureSeeThroughProbes(Team::Blue, false, true, units, offLine, noSurfaces, flat);
+  CHECK(has(probes, units[2].EyePosition()));
+  // Enemy dead figure outside the FOV cone: not probed.
+  units[0].facingYaw = 3.14159265f;
+  probes = FigureSeeThroughProbes(Team::Blue, false, true, units, {}, noSurfaces, flat);
+  CHECK(!has(probes, units[2].EyePosition()));
+  CHECK(has(probes, units[1].EyePosition()));
+  probes = FigureSeeThroughProbes(Team::Blue, false, false, units, {}, noSurfaces, flat);
+  CHECK(has(probes, units[2].EyePosition()));
+}
+
 // Camera see-through: a faded enterable building keeps its interior view only
 // while something (figure, path, frontier node) is inside it.
 void TestBuildingsContainingPoints() {
@@ -3817,6 +3861,7 @@ void TestBuildingsContainingPoints() {
 }
 
 int main() {
+  TestDeadFiguresSeeThroughProbes();
   TestBuildingsContainingPoints();
   TestNavMeshRoutesAroundObstacle();
   TestReachFieldFromRampIncludesGroundBeyondFoot();

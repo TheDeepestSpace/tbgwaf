@@ -4310,9 +4310,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // wall pieces) lost its edges wherever a floor slab overlaps it on
     // screen, and the player could not tell where to stand to look (or
     // walk) out. The opening rectangles of every faded enterable building
-    // are therefore drawn unconditionally (not only over the interior) as
-    // faint ink segments at the shell outline's own intensity, so every
-    // opening reads the same whether or not a floor or stair overlaps it.
+    // are therefore drawn as faint ink segments. A near wall's (camera on
+    // its outer side) only where a floor or stair claimed the pixel, at the
+    // shell outline's own intensity: everywhere else the outline pass sees
+    // that wall and CompositeFadedOutlines draws the frame. A far wall
+    // (seen through the building) never reaches the outline pass where the
+    // nearer shell covers it on screen, so its openings are drawn
+    // everywhere, dimmer than a regular edge (PR #313 review).
     // Depth-tested against the opaque scene like the rest of the
     // see-through pass. The rectangle sits on the wall face the camera sees
     // (the outer face of a near wall, the inner face of the far wall seen
@@ -4336,7 +4340,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         const glm::vec2 in(-d.y / len, d.x / len);
         wallThickness[w.building] = std::max(0.0f, glm::dot(w.footprint[3] - w.footprint[0], in));
       }
-      std::vector<glm::vec3> segments;
+      std::vector<glm::vec3> nearSegments, farSegments;
       for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
         // Enterable buildings only: their windows and doorways are real
         // gaps (a solid building's painted openings have no hole to mark).
@@ -4356,7 +4360,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         const glm::vec2 dir = (b - a) / len;
         const glm::vec2 out(dir.y, -dir.x);  // Outward, as OpeningBasisFor.
         glm::vec2 p0 = a + dir * o.u0, p1 = a + dir * o.u1;
-        if (glm::dot(glm::vec2(cameraPos.x, cameraPos.z) - a, out) < 0.0f) {
+        const bool farWall = glm::dot(glm::vec2(cameraPos.x, cameraPos.z) - a, out) < 0.0f;
+        if (farWall) {
           const auto t = wallThickness.find(o.building);
           const glm::vec2 inset = out * (t == wallThickness.end() ? 0.0f : t->second);
           p0 -= inset;
@@ -4364,24 +4369,42 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         }
         const glm::vec3 corners[4] = {{p0.x, o.y0, p0.y}, {p1.x, o.y0, p1.y},
                                       {p1.x, o.y1, p1.y}, {p0.x, o.y1, p0.y}};
+        std::vector<glm::vec3>& segments = farWall ? farSegments : nearSegments;
         for (int k = 0; k < 4; ++k) {
           segments.push_back(corners[k]);
           segments.push_back(corners[(k + 1) % 4]);
         }
       }
-      if (segments.empty()) return;
+      if (nearSegments.empty() && farSegments.empty()) return;
       // Same ink as CompositeFadedOutlines gives a full-strength shell edge.
       const float ink = std::clamp(debug.nprSettings.outlineStrength, 0.0f, 1.0f) *
                         kOccluderFadeOpacity * 0.88f;
       unlitShader_.Use();
       unlitShader_.SetMat4("uMVP", viewProj);
-      unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink));
-      // Unconditional: the same frame whether or not a floor or stair slab
-      // overlaps the opening on screen (stencil is neither tested nor written).
-      glStencilFunc(GL_ALWAYS, 0, 0xFF);
       glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-      pathLine_.SetPoints(segments);
-      pathLine_.DrawSegments();
+      if (!nearSegments.empty()) {
+        // Only where a floor or stair claimed the pixel (stencil 1; the
+        // shell marks 2): elsewhere CompositeFadedOutlines already draws
+        // the frame, and drawing it here too would double it. Called after
+        // the shell blend so the shell never dims these lines (a slab pixel
+        // gets no shell, so lines there would otherwise stay stronger than
+        // elsewhere).
+        unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink));
+        glStencilFunc(GL_EQUAL, 1, 0xFF);
+        pathLine_.SetPoints(nearSegments);
+        pathLine_.DrawSegments();
+      }
+      if (!farSegments.empty()) {
+        // Far-wall openings get no frame from CompositeFadedOutlines where
+        // the nearer shell or a slab hides the wall, which is almost the
+        // whole wall, so these draw on every pixel; through a near opening
+        // the dim line lands on the outline pass's frame, a slight
+        // darkening that still reads as one line.
+        unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink * 0.5f));
+        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+        pathLine_.SetPoints(farSegments);
+        pathLine_.DrawSegments();
+      }
       glStencilFunc(GL_EQUAL, 0, 0xFF);
       glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
       litShader_.Use();
@@ -4417,8 +4440,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glStencilFunc(GL_EQUAL, 0, 0xFF);
     glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
     drawInteriorGeometry(false);
-    if (fadedOutlines) drawOpeningEdgesOverInterior();
+    // Shell claims its pixels as stencil 2 (bit-invert under a 0x02 write
+    // mask) so the opening edges can tell them from interior pixels (1).
+    glStencilMask(0x02);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
     drawShellGeometry(false);
+    glStencilMask(0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+    if (fadedOutlines) drawOpeningEdgesOverInterior();
     litShader_.SetInt("uDisableShadows", (debug.disableShadows || debug.thermal) ? 1 : 0);
     glDisable(GL_CULL_FACE);
     glFrontFace(GL_CCW);

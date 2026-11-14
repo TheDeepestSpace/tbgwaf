@@ -4380,8 +4380,22 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       const float ink = std::clamp(debug.nprSettings.outlineStrength, 0.0f, 1.0f) *
                         kOccluderFadeOpacity * 0.88f;
       unlitShader_.Use();
-      unlitShader_.SetMat4("uMVP", viewProj);
       glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+      // GL lines are 1px; the slab outlines are the NPR edge pass at
+      // outlineThickness px of reach. Match them by drawing each frame as
+      // four taps nudged by half that reach in screen space (NDC offsets).
+      const float reach = std::max(debug.nprSettings.outlineThickness, 1.0f) * 0.5f;
+      const auto drawThick = [&](const std::vector<glm::vec3>& segments) {
+        pathLine_.SetPoints(segments);
+        for (int sx = -1; sx <= 1; sx += 2) {
+          for (int sy = -1; sy <= 1; sy += 2) {
+            const glm::vec3 shift(2.0f * reach * sx / std::max(width, 1),
+                                  2.0f * reach * sy / std::max(height, 1), 0.0f);
+            unlitShader_.SetMat4("uMVP", glm::translate(glm::mat4(1.0f), shift) * viewProj);
+            pathLine_.DrawSegments();
+          }
+        }
+      };
       if (!nearSegments.empty()) {
         // Only where a floor or stair claimed the pixel (stencil 1; the
         // shell marks 2): elsewhere CompositeFadedOutlines already draws
@@ -4391,8 +4405,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         // elsewhere).
         unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink));
         glStencilFunc(GL_EQUAL, 1, 0xFF);
-        pathLine_.SetPoints(nearSegments);
-        pathLine_.DrawSegments();
+        drawThick(nearSegments);
       }
       if (!farSegments.empty()) {
         // Far-wall openings get no frame from CompositeFadedOutlines where
@@ -4402,8 +4415,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         // darkening that still reads as one line.
         unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink * 0.5f));
         glStencilFunc(GL_ALWAYS, 0, 0xFF);
-        pathLine_.SetPoints(farSegments);
-        pathLine_.DrawSegments();
+        drawThick(farSegments);
       }
       glStencilFunc(GL_EQUAL, 0, 0xFF);
       glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);

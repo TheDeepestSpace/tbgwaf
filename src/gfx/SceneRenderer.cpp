@@ -2112,6 +2112,7 @@ void AppendPrism(const std::vector<glm::vec2>& polygon, float bottom, float top,
 void BuildUrbanTierMeshes(const tactics::HeightField& hf,
                           const std::vector<tactics::TerrainWall>& walls,
                           const std::vector<std::vector<glm::vec2>>& cutouts,
+                          const std::vector<tactics::TerrainTunnel>& tunnels,
                           LitTriangleMesh* base, LitTriangleMesh* raised) {
   LitVertices baseVertices, raisedVertices;
   std::vector<GLuint> baseIndices, raisedIndices;
@@ -2126,10 +2127,102 @@ void BuildUrbanTierMeshes(const tactics::HeightField& hf,
 
   // Tier polygons: the map square split by each step line, minus the ramp
   // corridors (shared with the tests, so what they check is what is drawn).
-  for (const tactics::TerrainTier& tier : tactics::TerrainTiers(walls, cutouts, square)) {
+  //
+  // Cutting a corridor or bore out of a tier splits it along the cut's
+  // (infinite) edge lines, so pieces of one level butt against each other.
+  // A side wall buried against a neighbour at least as tall is left out:
+  // drawn, it shares its top edge with the neighbour's top face, and the
+  // slope-scaled depth bias (see the terrain pass) pushes that grazing top
+  // back further than the wall, which then shows through as a dashed line.
+  // A tunnel's side walls (the tier faces along its bore) sit under the
+  // roof's long edges the same way, so they stop just short of the top; the
+  // roof slab, wider and thicker than that gap, closes the bore above them.
+  constexpr float kBoreWallDrop = 0.2f;
+  // Bore edges running along each tunnel (its long sides).
+  std::vector<std::pair<glm::vec2, glm::vec2>> boreSides;
+  for (const tactics::TerrainTunnel& tunnel : tunnels) {
+    const glm::vec2 along(tunnel.exit.x - tunnel.entrance.x, tunnel.exit.z - tunnel.entrance.z);
+    if (glm::length(along) < 1e-4f) continue;
+    for (size_t i = 0; i < tunnel.bore.size(); ++i) {
+      const glm::vec2 a = tunnel.bore[i], b = tunnel.bore[(i + 1) % tunnel.bore.size()];
+      if (glm::distance(a, b) < 1e-4f) continue;
+      const glm::vec2 e = glm::normalize(b - a), d = glm::normalize(along);
+      if (std::fabs(e.x * d.y - e.y * d.x) < 0.1f) boreSides.emplace_back(a, b);
+    }
+  }
+  const std::vector<tactics::TerrainTier> tiers = tactics::TerrainTiers(walls, cutouts, square);
+  for (size_t t = 0; t < tiers.size(); ++t) {
+    const tactics::TerrainTier& tier = tiers[t];
     if (tier.height < 0.01f) continue;  // The base plane already shows here.
-    AppendPrism(tier.polygon, 0.0f, tier.height, /*topFace=*/true, &raisedVertices,
+    const std::vector<glm::vec2>& polygon = tier.polygon;
+    AppendPrism(polygon, tier.height, tier.height, /*topFace=*/true, &raisedVertices,
                 &raisedIndices);
+    glm::vec2 center(0.0f);
+    for (glm::vec2 p : polygon) center += p;
+    center /= static_cast<float>(polygon.size());
+    for (size_t i = 0; i < polygon.size(); ++i) {
+      const glm::vec2 a = polygon[i], b = polygon[(i + 1) % polygon.size()];
+      const float length = glm::distance(a, b);
+      if (length < 1e-4f) continue;
+      const glm::vec2 dir = (b - a) / length;
+      // Stretches of this edge (as params along it) covered by a neighbour,
+      // and those running along a tunnel bore.
+      constexpr float kOnLine = 2e-3f;
+      std::vector<std::pair<float, float>> covered, bored;
+      const auto overlap = [&](glm::vec2 c, glm::vec2 e, std::vector<std::pair<float, float>>* out) {
+        c -= a;
+        e -= a;
+        if (std::fabs(dir.x * c.y - dir.y * c.x) > kOnLine ||
+            std::fabs(dir.x * e.y - dir.y * e.x) > kOnLine) {
+          return;
+        }
+        const float t0 = std::max(0.0f, std::min(glm::dot(c, dir), glm::dot(e, dir)));
+        const float t1 = std::min(length, std::max(glm::dot(c, dir), glm::dot(e, dir)));
+        if (t1 - t0 > kOnLine) out->emplace_back(t0, t1);
+      };
+      for (const auto& [c, e] : boreSides) overlap(c, e, &bored);
+      for (size_t o = 0; o < tiers.size(); ++o) {
+        if (o == t || tiers[o].height < tier.height - 1e-3f) continue;
+        const std::vector<glm::vec2>& other = tiers[o].polygon;
+        for (size_t k = 0; k < other.size(); ++k) {
+          overlap(other[k], other[(k + 1) % other.size()], &covered);
+        }
+      }
+      // Cut the edge at every interval end; each stretch between two cuts is
+      // then wholly covered, wholly along a bore, or a plain cliff face.
+      std::vector<float> cuts = {0.0f, length};
+      for (const auto* list : {&covered, &bored}) {
+        for (const auto& [t0, t1] : *list) {
+          cuts.push_back(t0);
+          cuts.push_back(t1);
+        }
+      }
+      std::sort(cuts.begin(), cuts.end());
+      const auto within = [](const std::vector<std::pair<float, float>>& list, float t) {
+        for (const auto& [t0, t1] : list) {
+          if (t > t0 && t < t1) return true;
+        }
+        return false;
+      };
+      glm::vec2 n(-dir.y, dir.x);
+      if (glm::dot(n, center - a) > 0.0f) n = -n;  // Outward.
+      const glm::vec3 normal(n.x, 0.0f, n.y);
+      for (size_t k = 0; k + 1 < cuts.size(); ++k) {
+        const float t0 = cuts[k], t1 = cuts[k + 1];
+        if (t1 - t0 < kOnLine) continue;
+        const float mid = 0.5f * (t0 + t1);
+        if (within(covered, mid)) continue;
+        const float top = tier.height - (within(bored, mid) ? kBoreWallDrop : 0.0f);
+        // The edge's own corners where a stretch ends on one, so the wall
+        // stays watertight against its neighbours there.
+        const glm::vec2 p = t0 <= 0.0f ? a : a + dir * t0;
+        const glm::vec2 q = t1 >= length ? b : a + dir * t1;
+        const glm::vec3 a0(p.x, 0.0f, p.y), a1(p.x, top, p.y);
+        const glm::vec3 b0(q.x, 0.0f, q.y), b1(q.x, top, q.y);
+        AppendTriangle(a0, b0, b1, normal, &raisedVertices, &raisedIndices);
+        AppendTriangle(a0, b1, a1, normal, &raisedVertices, &raisedIndices);
+      }
+    }
   }
   // Tunnel roofs are a separate mesh (BuildTunnelRoofMesh): the camera
   // see-through pass needs to leave a crossed roof out of the opaque pass.
@@ -2144,10 +2237,11 @@ void BuildUrbanTierMeshes(const tactics::HeightField& hf,
 // concrete tiers and `base` the ground plane. Hills use the heightfield.
 void BuildTerrainMesh(const tactics::HeightField& hf,
                       const std::vector<tactics::TerrainWall>& walls,
-                      const std::vector<std::vector<glm::vec2>>& cutouts, LitTriangleMesh* base,
+                      const std::vector<std::vector<glm::vec2>>& cutouts,
+                      const std::vector<tactics::TerrainTunnel>& tunnels, LitTriangleMesh* base,
                       LitTriangleMesh* raised) {
   if (!walls.empty()) {
-    BuildUrbanTierMeshes(hf, walls, cutouts, base, raised);
+    BuildUrbanTierMeshes(hf, walls, cutouts, tunnels, base, raised);
     return;
   }
   const int nx = hf.nx, nz = hf.nz;
@@ -3511,7 +3605,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (terrainChanged) {
     if (!terrain.Empty()) {
       BuildTerrainMesh(terrain, game.GetScene().terrainWalls, game.GetScene().terrainCutouts,
-                       &terrainMesh_, &terrainRaisedMesh_);
+                       game.GetScene().terrainTunnels, &terrainMesh_, &terrainRaisedMesh_);
       BuildTunnelRoofMesh(game.GetScene().terrainTunnels, &tunnelRoofMesh_);
     }
     terrainKey_ = terrain;

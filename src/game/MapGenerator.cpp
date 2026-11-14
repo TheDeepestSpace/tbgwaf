@@ -4304,10 +4304,9 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, const std::vector<Pa
   float doorHeight = std::min(spec.height, b->groundFloorHeight - 0.15f);
   if (doorHeight < constants::kUnitHeight) return false;
   // A half-shuttered warehouse bay: the roll-up door sits half down, still
-  // passable (never below head height). The facade keeps the full-height
-  // opening; the shutter panel is set back inside it (see below) so the bay
-  // still reads as a door rather than a wall with a gap under it.
-  const float fullDoorHeight = doorHeight;
+  // passable (never below head height). The lintel comes down with it, flush
+  // with the facade — no recessed shutter panel (wall setbacks are out, like
+  // the office top-floor ones).
   const bool shuttered = halfClosed && b->kind == BuildingKind::Commercial;
   if (shuttered) doorHeight = std::max(constants::kUnitHeight, 0.5f * doorHeight);
   for (size_t e = 0; e < n; ++e) {
@@ -4429,20 +4428,7 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, const std::vector<Pa
     const float u0 = 0.5f * (len - doorWidth), u1 = u0 + doorWidth;
     addWall(a, q, 0.0f, u0, 0.0f, height);
     addWall(a, q, u1, len, 0.0f, height);
-    if (shuttered && fullDoorHeight - doorHeight > 0.2f) {
-      // Lintel at the full door height; the shutter panel sits recessed
-      // inside the wall's own thickness (no returns, so the wall never looks
-      // thicker around the bay), between the jambs.
-      constexpr float kShutterDepth = 0.12f, kShutterThickness = 0.12f;
-      addWall(a, q, u0, u1, fullDoorHeight, height - fullDoorHeight);
-      const glm::vec2 d = glm::normalize(q - a);
-      const glm::vec2 in(-d.y, d.x);
-      const glm::vec2 p0 = a + d * u0 + in * kShutterDepth, p1 = a + d * u1 + in * kShutterDepth;
-      AddPolygonBuilding(scene, {p0, p1, p1 + in * kShutterThickness, p0 + in * kShutterThickness},
-                         doorHeight, fullDoorHeight - doorHeight, index, groundY, kMinPiece);
-    } else {
-      addWall(a, q, u0, u1, doorHeight, height - doorHeight);  // Lintel.
-    }
+    addWall(a, q, u0, u1, doorHeight, height - doorHeight);  // Lintel.
   }
 
   // Upper floors and the stair (roadmap 5.4/5.5).
@@ -4549,9 +4535,9 @@ bool EmitHollowBuilding(Scene* scene, const Parcel& parcel, const std::vector<Pa
   return b->obstacle >= 0;
 }
 
-// Sidewalk rings, then one Building per parcel: its base prism over the
-// whole footprint and, for a set-back office, the top floor as a second,
-// inset prism standing on it (both tagged with the Building index).
+// Sidewalk rings, then one Building per parcel: a single prism over the
+// whole footprint (tagged with the Building index), or thin walls and a
+// roof slab for an enterable one.
 void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>& parcels,
                    std::vector<Building> buildings, const MapGeneratorConfig& c,
                    const GroundY& groundY, uint32_t seed) {

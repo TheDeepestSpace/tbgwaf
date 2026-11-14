@@ -5255,6 +5255,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         ghost.position = unit.plan.movePath.back();
         ghost.facingYaw = unit.plan.endFacingYaw;
         ghost.turnLag = 0.0f;
+        // Frozen stand-in: the copy would otherwise inherit the live figure's
+        // idle/walk clocks and cover pose (which belongs to its current tile).
+        ghost.idleElapsed = 0.0f;
+        ghost.walkPhase = 0.0f;
+        ghost.walkBlend = 0.0f;
+        ghost.coverBlend = 0.0f;
+        ghost.coverKind = 0;
+        ghost.shootElapsed = -1.0f;
+        ghost.rideTravel = -1.0f;
+        ghost.grabElapsed = -1.0f;
         // Common highlight green for both teams (darker in the black-hot view).
         DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost,
                           debug.thermal ? glm::vec4(thermalGreen, 1.0f)

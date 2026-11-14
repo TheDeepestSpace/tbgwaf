@@ -142,19 +142,41 @@ int main() {
     CHECK(ClassifyCover(mixed, {0, 0, 3.6f}).kind == CoverKind::Flat);
   }
 
-  // CoverZoneWeights: the continuous zone the frontier overlay paints.
-  // Flat along the face, tactical on the full band-deep stretch within
-  // kCoverEdgeReach of an open corner (no 45-degree taper: the drawn mark is
-  // a chunky solid patch), nothing diagonally past the corner or on open
-  // ground.
+  // CoverZoneRects: the schematic rectangles the frontier overlay draws.
+  // Solid (tactical) on the band-deep stretch within kCoverEdgeReach of an
+  // open corner, striped (flat) along the rest of the face, nothing
+  // diagonally past a corner or on open ground.
   {
+    // 0 = no rect, 1 = flat, 2 = tactical (tactical wins where rects touch).
+    const auto kindAt = [](const std::vector<CoverZoneRect>& rects, float x, float z) {
+      int kind = 0;
+      for (const CoverZoneRect& r : rects) {
+        const glm::vec2 d = glm::vec2(x, z) - r.origin;
+        const float s = glm::dot(d, r.along), o = glm::dot(d, r.out);
+        if (s < 0.0f || s > r.length || o < 0.0f || o > r.depth) continue;
+        if (kind < (r.tactical ? 2 : 1)) kind = r.tactical ? 2 : 1;
+      }
+      return kind;
+    };
     const std::vector<Obstacle> building = {Box(0, 0, 10, 10)};
-    CHECK(CoverZoneWeights(building, {-0.4f, 0, 5}, 0.8f) == glm::vec2(0, 1));       // Mid-face.
-    CHECK(CoverZoneWeights(building, {-0.75f, 0, 5}, 0.8f) == glm::vec2(0, 1));      // Deeper band than gameplay.
-    CHECK(CoverZoneWeights(building, {-0.4f, 0, 0.5f}, 0.8f) == glm::vec2(1, 0));    // In the wedge.
-    CHECK(CoverZoneWeights(building, {-0.4f, 0, 0.3f}, 0.8f) == glm::vec2(1, 0));    // Near the corner, full depth.
-    CHECK(CoverZoneWeights(building, {-0.5f, 0, -0.5f}, 0.8f) == glm::vec2(0, 0));   // Corner diagonal.
-    CHECK(CoverZoneWeights(building, {-2, 0, 5}, 0.8f) == glm::vec2(0, 0));          // Open ground.
+    const std::vector<CoverZoneRect> rects = CoverZoneRects(building, 0.0f, 0.8f);
+    CHECK(rects.size() == 12);  // Per face: corner stretch, middle, corner stretch.
+    for (const CoverZoneRect& r : rects) CHECK(r.depth == 0.8f);
+    CHECK(kindAt(rects, -0.4f, 5) == 1);      // Mid-face: striped flat mark.
+    CHECK(kindAt(rects, -0.75f, 5) == 1);     // Deeper band than gameplay cover.
+    CHECK(kindAt(rects, -0.4f, 0.5f) == 2);   // Beside the corner: solid tactical mark.
+    CHECK(kindAt(rects, -0.4f, 0.3f) == 2);   // Near the corner, full depth.
+    CHECK(kindAt(rects, -0.5f, -0.5f) == 0);  // Corner diagonal: nothing.
+    CHECK(kindAt(rects, -2, 5) == 0);         // Open ground.
+    // A joint between collinear boxes is not an open end: no tactical
+    // stretch beside it, and a short face with open ends both sides is one
+    // whole tactical rect.
+    const std::vector<Obstacle> joined = {Box(0, 0, 4, 1), Box(4, 0, 8, 1)};
+    const std::vector<CoverZoneRect> jr = CoverZoneRects(joined, 0.0f, 0.8f);
+    CHECK(kindAt(jr, 3.8f, -0.4f) == 1);  // Beside the joint: still flat.
+    CHECK(kindAt(jr, 0.4f, -0.4f) == 2);  // Open left end: tactical.
+    const std::vector<CoverZoneRect> car = CoverZoneRects({Box(0, 0, 1.2f, 1)}, 0.0f, 0.8f);
+    for (const CoverZoneRect& r : car) CHECK(r.tactical);
   }
 
   // Unreached nodes in a ReachField stay None even beside a wall.

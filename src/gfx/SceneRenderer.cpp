@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <map>
 #include <string>
 #include <unordered_map>
 
@@ -4672,11 +4673,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
 
   // Builds one reach field's glow + boundary geometry (see below) in `color`,
   // appending to `fill`/`border`. Shared by the walk region and the zipline
-  // regions, which only differ in tint. With `cover` given, the glow itself
-  // identifies what the positions along the boundary offer (issue #292):
-  // full gradient at tactical cover (a corner or car side to peek from),
-  // slanted stripes along flat wall cover, and no gradient at all where the
-  // boundary is only the movement budget running out.
+  // regions, which only differ in tint. With `cover` given, the fill is the
+  // schematic cover marks instead of the budget glow (issue #292): a solid
+  // rectangle at tactical cover (a corner or car side to peek from), 45-degree
+  // stripes along flat wall cover, and nothing at all -- no gradient -- where
+  // the boundary is only the movement budget running out.
   // Turns segment endpoint pairs into a flat ribbon of constant world width
   // (a GL line is always one pixel), up-facing, ends extended by half the
   // width so consecutive segments overlap instead of leaving joint gaps.
@@ -4723,19 +4724,58 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       return std::abs(f.surfaceY[az * nx + ax] - f.surfaceY[bz * nx + bx]) <= kLayerStep;
     };
     const std::vector<float> g = SmoothFrontierSignedDepth(f);
-    std::vector<glm::vec2> style;
-    if (cover) style = FrontierCoverStyle(f, game.SightObstacles(), kFadeWidth);
-    const bool styled = style.size() == g.size();
 
     struct Pt {
       glm::vec3 p;
       float g;
-      glm::vec2 s;  // (tactical, flat) cover style weights.
       // Budget-glow weight: 1 where the nearby boundary is the move budget
       // running out, 0 where it is an obstacle outline (per field.wallDist),
       // so the gradient glow marks only the budget arc and obstacles carry
       // nothing but their cover marks (issue #292).
       float w = 1.0f;
+    };
+
+    // Cover-zone rectangles (issue #292), per feet height so decks and the
+    // ground see their own walls. Obstacles are pre-filtered to the field's
+    // bounds; the full list can be huge.
+    std::vector<tactics::Obstacle> nearbyObstacles;
+    if (cover) {
+      const float margin = kFadeWidth + tactics::kCoverEdgeReach + 1.0f;
+      const float x0 = f.minX - margin, x1 = f.minX + nx * f.step + margin;
+      const float z0 = f.minZ - margin, z1 = f.minZ + nz * f.step + margin;
+      for (const tactics::Obstacle& o : game.SightObstacles()) {
+        const tactics::AABB& b = o.bounds;
+        if (b.max.x >= x0 && b.min.x <= x1 && b.max.z >= z0 && b.min.z <= z1) {
+          nearbyObstacles.push_back(o);
+        }
+      }
+    }
+    // Each rect carries its XZ bounds so the per-cell loop below can reject
+    // far-away rects without clipping.
+    struct BoundedRect {
+      tactics::CoverZoneRect r;
+      glm::vec2 bmin{0.0f}, bmax{0.0f};
+    };
+    std::map<int, std::vector<BoundedRect>> rectsByLevel;
+    const auto rectsFor = [&](float feetY) -> const std::vector<BoundedRect>& {
+      const int key = static_cast<int>(std::lround(feetY / kLayerStep));
+      auto it = rectsByLevel.find(key);
+      if (it == rectsByLevel.end()) {
+        std::vector<BoundedRect> bounded;
+        for (const tactics::CoverZoneRect& r :
+             tactics::CoverZoneRects(nearbyObstacles, feetY, kFadeWidth)) {
+          BoundedRect br{r, r.origin, r.origin};
+          for (const glm::vec2& c : {r.origin + r.along * r.length,
+                                     r.origin + r.out * r.depth,
+                                     r.origin + r.along * r.length + r.out * r.depth}) {
+            br.bmin = glm::min(br.bmin, c);
+            br.bmax = glm::max(br.bmax, c);
+          }
+          bounded.push_back(br);
+        }
+        it = rectsByLevel.emplace(key, std::move(bounded)).first;
+      }
+      return it->second;
     };
     const std::vector<AABB>& slabs = game.GetScene().sidewalks;
     // Clips a convex polygon to a slab's XZ footprint (Sutherland-Hodgman),
@@ -4756,7 +4796,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           if (inside(cur) != inside(prev)) {
             const float t = (bound - coord(prev)) / (coord(cur) - coord(prev));
             out.push_back({prev.p + (cur.p - prev.p) * t, prev.g + (cur.g - prev.g) * t,
-                           prev.s + (cur.s - prev.s) * t, prev.w + (cur.w - prev.w) * t});
+                           prev.w + (cur.w - prev.w) * t});
           }
           if (inside(cur)) out.push_back(cur);
         }
@@ -4767,65 +4807,119 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     };
     auto toVertex = [&](const Pt& q) {
       const float open = q.w * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
-      float a = kEdgeAlpha * open;
-      if (styled) {
-        // Schematic cover marks (issue #292): tactical cover is a solid
-        // flat fill, flat cover a crisp 45-degree world-space hatch -- flat
-        // alphas, not gradients, so the two read apart at a glance. The
-        // marks are the only fill: open ground and obstacle outlines get
-        // just the thin boundary line, no gradient.
-        const float wave =
-            0.5f + 0.5f * std::sin((q.p.x + q.p.z) * (6.2831853f / 0.6f));
-        const float hatch = std::clamp(6.0f * (wave - 0.5f) + 0.5f, 0.0f, 1.0f);
-        const float coverWeight = std::min(1.0f, q.s.x + q.s.y);
-        const float pattern = std::min(1.0f, q.s.x + q.s.y * hatch);
-        a = kEdgeAlpha * coverWeight * pattern;
-      }
-      return ColorTriangleMesh::Vertex{q.p, glm::vec4(color, a)};
+      return ColorTriangleMesh::Vertex{q.p, glm::vec4(color, kEdgeAlpha * open)};
     };
-    // Emits a triangle, midpoint-subdividing it (two levels) where it touches
-    // flat cover so the thin stripes are resolved by the geometry instead of
-    // aliasing against the 0.25-unit grid into blocky squares. Tactical and
-    // open triangles stay whole: their alpha is linear, so the gradient is
-    // the plain smooth ramp.
-    std::function<void(const Pt&, const Pt&, const Pt&, int)> emitTri =
-        [&](const Pt& a, const Pt& b, const Pt& c, int depth) {
-          if (depth < 2 && styled && std::max({a.s.y, b.s.y, c.s.y}) > 0.0f) {
-            const auto mid = [](const Pt& u, const Pt& v) {
-              return Pt{(u.p + v.p) * 0.5f, (u.g + v.g) * 0.5f, (u.s + v.s) * 0.5f,
-                        (u.w + v.w) * 0.5f};
-            };
-            const Pt ab = mid(a, b), bc = mid(b, c), ca = mid(c, a);
-            emitTri(a, ab, ca, depth + 1);
-            emitTri(ab, b, bc, depth + 1);
-            emitTri(ca, bc, c, depth + 1);
-            emitTri(ab, bc, ca, depth + 1);
-            return;
-          }
-          fill.push_back(toVertex(a));
-          fill.push_back(toVertex(b));
-          fill.push_back(toVertex(c));
-        };
     // Fans around the vertex average rather than vertex 0: a fan from a
     // corner interpolates alpha along one diagonal, which shows as faint
     // diagonal stripes in the gradient. The centre carries the mean field
-    // value, so the ramp is symmetric. Same triangle count order as before.
+    // value, so the ramp is symmetric.
     auto emitFan = [&](const std::vector<Pt>& poly) {
       if (poly.size() < 3) return;
-      Pt c{glm::vec3(0.0f), 0.0f, glm::vec2(0.0f)};
+      Pt c{glm::vec3(0.0f), 0.0f};
       c.w = 0.0f;
       for (const Pt& q : poly) {
         c.p += q.p;
         c.g += q.g;
-        c.s += q.s;
         c.w += q.w;
       }
       c.p /= static_cast<float>(poly.size());
       c.g /= static_cast<float>(poly.size());
-      c.s /= static_cast<float>(poly.size());
       c.w /= static_cast<float>(poly.size());
-      for (size_t k = 0; k < poly.size(); ++k)
-        emitTri(c, poly[k], poly[(k + 1) % poly.size()], 0);
+      for (size_t k = 0; k < poly.size(); ++k) {
+        fill.push_back(toVertex(c));
+        fill.push_back(toVertex(poly[k]));
+        fill.push_back(toVertex(poly[(k + 1) % poly.size()]));
+      }
+    };
+    // Schematic cover marks (issue #292): tactical cover is a solid
+    // rectangle along the wall stretch beside an open corner, flat cover the
+    // same rectangle filled with crisp 45-degree world-space stripes --
+    // constant alpha, no gradients, so the two read apart at a glance. The
+    // marks are the only fill in cover mode: open ground and obstacle
+    // outlines get just the thin boundary line. Each cell's reach polygon is
+    // clipped to the cover rectangles exactly, so mark edges are the walls'
+    // own lines, not the sampling grid.
+    // Clips a convex polygon in place to dot(p.xz, dir) <= bound.
+    const auto clipHalfPlane = [](std::vector<glm::vec3>& poly, const glm::vec2& dir,
+                                  float bound) {
+      std::vector<glm::vec3> out;
+      out.reserve(poly.size() + 2);
+      for (size_t v = 0; v < poly.size(); ++v) {
+        const glm::vec3& cur = poly[v];
+        const glm::vec3& prev = poly[(v + poly.size() - 1) % poly.size()];
+        const float dc = cur.x * dir.x + cur.z * dir.y - bound;
+        const float dp = prev.x * dir.x + prev.z * dir.y - bound;
+        if ((dc <= 0.0f) != (dp <= 0.0f)) out.push_back(prev + (cur - prev) * (dp / (dp - dc)));
+        if (dc <= 0.0f) out.push_back(cur);
+      }
+      poly = std::move(out);
+    };
+    // Emits one convex mark polygon (and its copies on raised sidewalk
+    // slabs) at the flat mark alpha.
+    const auto emitMarkPoly = [&](const std::vector<glm::vec3>& poly) {
+      const auto fan = [&](const std::vector<glm::vec3>& q) {
+        for (size_t k = 1; k + 1 < q.size(); ++k) {
+          fill.push_back({q[0], glm::vec4(color, kEdgeAlpha)});
+          fill.push_back({q[k], glm::vec4(color, kEdgeAlpha)});
+          fill.push_back({q[k + 1], glm::vec4(color, kEdgeAlpha)});
+        }
+      };
+      if (poly.size() < 3) return;
+      fan(poly);
+      for (const AABB& slab : slabs) {
+        std::vector<glm::vec3> onSlab = poly;
+        clipHalfPlane(onSlab, {-1.0f, 0.0f}, -slab.min.x);
+        clipHalfPlane(onSlab, {1.0f, 0.0f}, slab.max.x);
+        clipHalfPlane(onSlab, {0.0f, -1.0f}, -slab.min.z);
+        clipHalfPlane(onSlab, {0.0f, 1.0f}, slab.max.z);
+        if (onSlab.size() < 3) continue;
+        for (glm::vec3& p : onSlab) p.y = slab.max.y + kSlabOffset;
+        fan(onSlab);
+      }
+    };
+    // Stripe pattern for flat cover, in u = x + z (unnormalized 45-degree
+    // coordinate): a stripe covers the first half of each period.
+    constexpr float kStripePeriod = 0.6f;
+    const auto emitMarks = [&](const std::vector<Pt>& region, float feetY) {
+      if (region.size() < 3) return;
+      std::vector<glm::vec3> base(region.size());
+      glm::vec2 cellMin(region[0].p.x, region[0].p.z), cellMax = cellMin;
+      for (size_t k = 0; k < region.size(); ++k) {
+        base[k] = region[k].p;
+        cellMin = glm::min(cellMin, glm::vec2(base[k].x, base[k].z));
+        cellMax = glm::max(cellMax, glm::vec2(base[k].x, base[k].z));
+      }
+      for (const BoundedRect& br : rectsFor(feetY)) {
+        if (br.bmin.x > cellMax.x || br.bmax.x < cellMin.x || br.bmin.y > cellMax.y ||
+            br.bmax.y < cellMin.y) {
+          continue;
+        }
+        const tactics::CoverZoneRect& r = br.r;
+        const float o = glm::dot(r.origin, r.out);
+        const float a = glm::dot(r.origin, r.along);
+        std::vector<glm::vec3> piece = base;
+        clipHalfPlane(piece, -r.out, -o);
+        clipHalfPlane(piece, r.out, o + r.depth);
+        clipHalfPlane(piece, -r.along, -a);
+        clipHalfPlane(piece, r.along, a + r.length);
+        if (piece.size() < 3) continue;
+        if (r.tactical) {
+          emitMarkPoly(piece);
+          continue;
+        }
+        float umin = piece[0].x + piece[0].z, umax = umin;
+        for (const glm::vec3& p : piece) {
+          umin = std::min(umin, p.x + p.z);
+          umax = std::max(umax, p.x + p.z);
+        }
+        for (int k = static_cast<int>(std::floor(umin / kStripePeriod));
+             k <= static_cast<int>(std::floor(umax / kStripePeriod)); ++k) {
+          std::vector<glm::vec3> stripe = piece;
+          clipHalfPlane(stripe, {-1.0f, -1.0f}, -k * kStripePeriod);
+          clipHalfPlane(stripe, {1.0f, 1.0f}, (k + 0.5f) * kStripePeriod);
+          emitMarkPoly(stripe);
+        }
+      }
     };
     for (int iz = 0; iz + 1 < nz; ++iz) {
       for (int ix = 0; ix + 1 < nx; ++ix) {
@@ -4843,8 +4937,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             openGlow = std::clamp((f.wallDist[idx] - std::max(g[idx], 0.0f)) / (2.0f * f.step),
                                   0.0f, 1.0f);
           }
-          quad[k] = {f.Node(cx[k], cz[k]), g[idx],
-                     styled ? style[idx] : glm::vec2(0.0f), openGlow};
+          quad[k] = {f.Node(cx[k], cz[k]), g[idx], openGlow};
           // Each node rides the terrain under it (HeightAt is 0 on flat
           // maps); the 0.25-unit grid is fine enough that the linear
           // contour/edge interpolation below stays on the slope.
@@ -4892,7 +4985,6 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             }
             cell[k].p.y = quad[dom].p.y;
             cell[k].g = virtualG;
-            cell[k].s = quad[dom].s;
             cell[k].w = quad[dom].w;
           }
           // Clip the cell to g >= 0 (Sutherland-Hodgman against the field).
@@ -4904,10 +4996,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             if (ain) poly.push_back(a);
             if (ain != bin) {
               const float t = a.g / (a.g - b.g);
-              const Pt c{a.p + (b.p - a.p) * t, 0.0f, a.s + (b.s - a.s) * t,
-                         a.w + (b.w - a.w) * t};
+              const Pt c{a.p + (b.p - a.p) * t, 0.0f, a.w + (b.w - a.w) * t};
               poly.push_back(c);
             }
+          }
+          if (cover) {
+            // Cover marks only: the clip to the cover rectangles happens
+            // against this reach polygon, so marks never cross the movement
+            // boundary, and emitMarkPoly lays the slab copies itself.
+            emitMarks(poly, f.Node(cx[dom], cz[dom]).y);
+            continue;
           }
           emitFan(poly);
           // The ground-level copy is buried under raised sidewalk slabs, so

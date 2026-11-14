@@ -1005,45 +1005,4 @@ std::vector<FrontierOutline> TraceFrontierOutline(const tactics::ReachField& fie
   return outlines;
 }
 
-std::vector<glm::vec2> FrontierCoverStyle(const tactics::ReachField& field,
-                                          const std::vector<tactics::Obstacle>& obstacles,
-                                          float reach) {
-  const int nx = field.nx, nz = field.nz;
-  if (nx <= 0 || nz <= 0 || field.step <= 0.0f) return {};
-  // Only blockers near the field can matter; the full list can be huge.
-  const float margin = reach + tactics::kCoverEdgeReach + 1.0f;
-  const float x0 = field.minX - margin, x1 = field.minX + nx * field.step + margin;
-  const float z0 = field.minZ - margin, z1 = field.minZ + nz * field.step + margin;
-  std::vector<tactics::Obstacle> nearby;
-  for (const tactics::Obstacle& o : obstacles) {
-    const tactics::AABB& b = o.bounds;
-    if (b.max.x >= x0 && b.min.x <= x1 && b.max.z >= z0 && b.min.z <= z1) nearby.push_back(o);
-  }
-  std::vector<glm::vec2> style(static_cast<size_t>(nx) * nz, glm::vec2(0.0f));
-  for (int iz = 0; iz < nz; ++iz) {
-    for (int ix = 0; ix < nx; ++ix) {
-      glm::vec3 p = field.Node(ix, iz);
-      if (!field.Reached(ix, iz)) {
-        // An unreached node (a wall and its navmesh padding) still corners
-        // the boundary cells around it, so it needs a style too; sample it
-        // at a reached neighbour's height so a node beside a deck never
-        // reads the floor below. No reached neighbour at all means no
-        // drawn cell touches the node: leave it unstyled.
-        bool found = false;
-        for (int dz = -1; dz <= 1 && !found; ++dz) {
-          for (int dx = -1; dx <= 1 && !found; ++dx) {
-            if (field.Reached(ix + dx, iz + dz)) {
-              p.y = field.Node(ix + dx, iz + dz).y;
-              found = true;
-            }
-          }
-        }
-        if (!found) continue;
-      }
-      style[iz * nx + ix] = tactics::CoverZoneWeights(nearby, p, reach);
-    }
-  }
-  return style;
-}
-
 }  // namespace gfx

@@ -45,13 +45,10 @@ struct Wall {
 // of issue #292: a face with an open end (a corner to peek around) is
 // tactical only on the stretch of wall leading up to that corner, cut at 45
 // degrees -- the point's distance to the corner along the wall must be at
-// most kCoverEdgeReach and (with `taper`) at least its distance from the
-// wall. The corner itself and anything diagonally beyond the face's span get
-// no cover. The overlay passes taper=false so the drawn tactical patch is
-// the full band-deep stretch beside the corner (a chunky solid mark), not
-// just the thin 45-degree sliver.
+// most kCoverEdgeReach and at least its distance from the wall. The corner
+// itself and anything diagonally beyond the face's span get no cover.
 std::vector<Wall> CollectWalls(const std::vector<Obstacle>& obstacles, const glm::vec2& c,
-                               float feetY, float band, bool taper = true) {
+                               float feetY, float band) {
   std::vector<Wall> walls;
   std::vector<glm::vec2> poly;
   for (const Obstacle& ob : obstacles) {
@@ -89,7 +86,7 @@ std::vector<Wall> CollectWalls(const std::vector<Obstacle>& obstacles, const glm
         float a;  // Distance from the point to this end along the wall.
       } ends[2] = {{v0, -along, t}, {v1, along, len - t}};
       for (const auto& end : ends) {
-        if (end.a > kCoverEdgeReach || (taper && o > end.a)) continue;  // Outside the wedge.
+        if (end.a > kCoverEdgeReach || o > end.a) continue;  // Outside the wedge.
         // Open end: nothing continues the wall just past the corner behind
         // the face plane, and the ground around the corner is free to peek
         // from. A joint between collinear boxes stays one flat wall.
@@ -134,16 +131,56 @@ CoverTile ClassifyCover(const std::vector<Obstacle>& obstacles, const glm::vec3&
   return tile;
 }
 
-glm::vec2 CoverZoneWeights(const std::vector<Obstacle>& obstacles, const glm::vec3& feet,
-                           float band) {
-  const glm::vec2 c(feet.x, feet.z);
-  if (Blocked(obstacles, c, feet.y)) return glm::vec2(0.0f);
-  bool tactical = false, flat = false;
-  for (const Wall& w : CollectWalls(obstacles, c, feet.y, band, /*taper=*/false)) {
-    flat = true;
-    tactical |= w.tactical;
+std::vector<CoverZoneRect> CoverZoneRects(const std::vector<Obstacle>& obstacles, float feetY,
+                                          float band) {
+  std::vector<CoverZoneRect> rects;
+  std::vector<glm::vec2> poly;
+  for (const Obstacle& ob : obstacles) {
+    if (ob.navOnly) continue;
+    const AABB& b = ob.bounds;
+    if (b.max.y < feetY + kCoverMinHeight || b.min.y > feetY + 0.3f) continue;
+    if (!ob.footprint.empty()) {
+      poly = ob.footprint;
+    } else {
+      poly = {{b.min.x, b.min.z}, {b.max.x, b.min.z}, {b.max.x, b.max.z}, {b.min.x, b.max.z}};
+    }
+    glm::vec2 centroid(0.0f);
+    for (const glm::vec2& v : poly) centroid += v;
+    centroid /= static_cast<float>(poly.size());
+    for (size_t i = 0; i < poly.size(); ++i) {
+      const glm::vec2 v0 = poly[i], v1 = poly[(i + 1) % poly.size()];
+      const float len = glm::length(v1 - v0);
+      if (len < 1e-4f) continue;
+      const glm::vec2 along = (v1 - v0) / len;
+      glm::vec2 n(along.y, -along.x);
+      if (glm::dot(centroid - v0, n) > 0.0f) n = -n;  // Outward.
+      // How far each open end's tactical stretch reaches along the face,
+      // with the same openness probes as CollectWalls above.
+      const struct {
+        glm::vec2 corner, dirOut;
+      } ends[2] = {{v0, -along}, {v1, along}};
+      float reach[2] = {0.0f, 0.0f};
+      for (int e = 0; e < 2; ++e) {
+        const glm::vec2 base = ends[e].corner + ends[e].dirOut * kCoverEdgeProbeOut;
+        if (Blocked(obstacles, base - n * kCoverEdgeProbeIn, feetY)) continue;
+        if (Blocked(obstacles, base + n * kCoverEdgeProbeOut, feetY)) continue;
+        reach[e] = std::min(kCoverEdgeReach, len);
+      }
+      const auto add = [&](float t0, float t1, bool tactical) {
+        if (t1 - t0 < 1e-4f) return;
+        rects.push_back({v0 + along * t0, along, n, t1 - t0, band, tactical});
+      };
+      if (reach[0] + reach[1] >= len) {
+        // The open ends' tactical stretches cover the whole face.
+        add(0.0f, len, true);
+      } else {
+        add(0.0f, reach[0], true);
+        add(reach[0], len - reach[1], false);
+        add(len - reach[1], len, true);
+      }
+    }
   }
-  return glm::vec2(tactical ? 1.0f : 0.0f, !tactical && flat ? 1.0f : 0.0f);
+  return rects;
 }
 
 CoverMap ComputeCoverMap(const std::vector<Obstacle>& obstacles, const ReachField& field) {

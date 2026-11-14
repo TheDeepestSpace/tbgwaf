@@ -48,12 +48,27 @@ struct CoverTile {
 CoverTile ClassifyCover(const std::vector<Obstacle>& obstacles, const glm::vec3& feet,
                         float* yaw = nullptr);
 
-// Continuous variant for overlays: weights (tactical, flat), at most one of
-// them 1, for a point within `band` of a wall face. Uses the same wedge rule
-// as ClassifyCover but samples any point, so the drawn cover zones follow
-// the walls and 45-degree corner wedges exactly instead of the nav grid.
-glm::vec2 CoverZoneWeights(const std::vector<Obstacle>& obstacles, const glm::vec3& feet,
-                           float band);
+// One cover-zone rectangle for overlays (issue #292): a band-deep stretch
+// along a wall face. A face with an open end contributes a tactical stretch
+// (the kCoverEdgeReach of wall leading up to the corner) and the remainder
+// is flat; rects of one face never overlap. The overlay draws tactical
+// rects as solid fills and flat rects as angled stripes -- schematic marks,
+// not gradients.
+struct CoverZoneRect {
+  glm::vec2 origin{0.0f};  // On the face line, at the stretch's start.
+  glm::vec2 along{0.0f};   // Unit direction from origin toward the stretch's end.
+  glm::vec2 out{0.0f};     // Unit outward normal of the face.
+  float length = 0.0f;     // Stretch length along the face.
+  float depth = 0.0f;      // Band depth, outward from the face.
+  bool tactical = false;
+};
+
+// All cover-zone rectangles for feet standing at height `feetY`, `band` deep
+// off each qualifying wall face. Same face/height/open-end rules as
+// ClassifyCover, so the drawn zones follow the walls exactly instead of the
+// nav grid.
+std::vector<CoverZoneRect> CoverZoneRects(const std::vector<Obstacle>& obstacles, float feetY,
+                                          float band);
 
 // Per-node cover for every node of `field` (same grid and indexing). Nodes
 // the field does not reach stay None.

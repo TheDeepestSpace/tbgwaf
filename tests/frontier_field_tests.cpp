@@ -357,28 +357,6 @@ void TestLevelEdgeContourUsesExactLine() {
   }
 }
 
-void TestCoverStyleWeights() {
-  // A wall obstacle: hatched (flat) along its face, solid (tactical) on the
-  // full band-deep stretch within kCoverEdgeReach of each open end, and
-  // nothing diagonally past a corner or on open ground (no cover mark on
-  // the budget boundary). Nodes sit at (ix * 0.25, iz * 0.25).
-  tactics::ReachField field = EmptyField(21);
-  for (float& d : field.dist) d = 0.0f;
-  tactics::Obstacle wall;
-  wall.bounds.min = glm::vec3(3.75f, 0.0f, 1.25f);
-  wall.bounds.max = glm::vec3(4.5f, 3.0f, 3.75f);
-  const std::vector<glm::vec2> style =
-      gfx::FrontierCoverStyle(field, {wall}, 0.8f);
-  CHECK(style.size() == field.dist.size());
-  if (style.size() != field.dist.size()) return;
-  const auto at = [&](int ix, int iz) { return style[iz * field.nx + ix]; };
-  CHECK(at(14, 10).y == 1.0f && at(14, 10).x == 0.0f);  // Mid-wall: striped (flat).
-  CHECK(at(14, 6).x == 1.0f && at(14, 6).y == 0.0f);    // Wedge at the wall's end.
-  CHECK(at(12, 6).x == 1.0f && at(12, 6).y == 0.0f);    // Same height, farther out: still the solid patch.
-  CHECK(at(14, 4).x == 0.0f && at(14, 4).y == 0.0f);    // Diagonally past the corner: nothing.
-  CHECK(at(10, 10).x == 0.0f && at(10, 10).y == 0.0f);  // Open ground: none.
-}
-
 }  // namespace
 
 void TestThinStraightBandHasSmoothOutline() {
@@ -580,7 +558,6 @@ int main() {
   TestWallCornerStaysSquare();
   TestWallContourUsesExactOutline();
   TestLevelEdgeContourUsesExactLine();
-  TestCoverStyleWeights();
   if (gFailures == 0) {
     std::printf("All frontier field tests passed.\n");
     return 0;

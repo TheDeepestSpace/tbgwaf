@@ -72,6 +72,15 @@ struct ReachField {
   // nested outlines (a pier shaft inside its footing) cannot pull the line
   // inward (issue #292).
   std::vector<float> wallDist;
+  // Exact XZ world distance from each node to the nearest level-edge line --
+  // a terrain tier's cliff, a stair flight's flank, a walk-surface (deck,
+  // roof, ramp) outline -- for nodes within a couple of metres of one
+  // (infinity elsewhere; empty unless FillLevelEdgeDistances ran). Where the
+  // reach boundary is such an edge, the frontier overlay contours this
+  // instead of grid-derived depths, so the drawn line follows the level's
+  // real geometry -- straight cliff lines and stair flanks -- rather than
+  // the grid rasterisation of the layer step (issue #292).
+  std::vector<float> edgeDist;
   // Bumped by the owner each recompute, so renderers caching geometry by
   // (origin, budget) notice content-only changes (blockers moved).
   int revision = 0;

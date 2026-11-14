@@ -327,6 +327,34 @@ void TestWallContourUsesExactOutline() {
   }
 }
 
+void TestLevelEdgeContourUsesExactLine() {
+  // With edgeDist filled (FillLevelEdgeDistances), the part of the contour
+  // that runs along a level edge -- a terrain cliff here: the right half is
+  // another walk layer -- must come from the exact distance to the edge
+  // line, zero crossing kLevelEdgeInset before it, not from the grid's
+  // half-step line.
+  tactics::ReachField field = EmptyField(41);
+  field.edgeDist.assign(field.dist.size(), std::numeric_limits<float>::infinity());
+  const float edgeX = 19.6f * field.step;
+  for (int iz = 0; iz < field.nz; ++iz) {
+    for (int ix = 0; ix < field.nx; ++ix) {
+      const int i = iz * field.nx + ix;
+      if (ix >= 20) field.surfaceY[i] = 3.0f;  // The level: unreached layer.
+      else field.dist[i] = 0.0f;
+      field.edgeDist[i] = std::fabs(edgeX - ix * field.step);
+    }
+  }
+  const std::vector<float> depth = gfx::SmoothFrontierSignedDepth(field);
+  for (int iz = 10; iz <= 30; ++iz) {
+    for (int ix = 15; ix <= 19; ++ix) {
+      const float expected = (edgeX - ix * field.step) - gfx::kLevelEdgeInset;
+      CHECK(std::abs(depth[iz * field.nx + ix] - expected) < 0.005f);
+    }
+    // The far side stays negative: its own layer has no reach at all.
+    CHECK(depth[iz * field.nx + 21] < 0.0f);
+  }
+}
+
 void TestCoverStyleWeights() {
   // A wall obstacle: hatched (flat) along its face, solid (tactical) on the
   // full band-deep stretch within kCoverEdgeReach of each open end, and
@@ -380,6 +408,7 @@ int main() {
   TestWallBoundaryIsExact();
   TestWallCornerStaysSquare();
   TestWallContourUsesExactOutline();
+  TestLevelEdgeContourUsesExactLine();
   TestCoverStyleWeights();
   if (gFailures == 0) {
     std::printf("All frontier field tests passed.\n");

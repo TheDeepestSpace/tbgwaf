@@ -306,6 +306,18 @@ int main(int argc, char** argv) {
     deckFrontier.frontierBudget = 12.0f;
     cases.push_back(std::move(deckFrontier));
   }
+  // Frontier of a unit standing on a stair flight at a terrain level edge
+  // (issue #292): the boundary must follow the straight cliff line and the
+  // stair's flanks instead of the grid rasterisation of the layer step.
+  {
+    MapCase cliffFrontier{"city_terrain_cliff_frontier_seed_58920953",
+                          tactics::GenerateUrbanMap(58920953), 32.0f,
+                          /*showNavMesh=*/false, /*pitchOffset=*/-0.55f, /*yawOffset=*/-0.4f};
+    cliffFrontier.cameraTarget = glm::vec3(-66.0f, 2.4f, -105.0f);
+    cliffFrontier.frontierFrom = glm::vec3(-66.0f, 2.4f, -105.0f);
+    cliffFrontier.frontierBudget = 20.0f;
+    cases.push_back(std::move(cliffFrontier));
+  }
   // Every other random seed uses the default 8x8 ("Urban x4") city, the rest
   // the 4x4 one, so the gallery samples both Map Select entries. The x4 maps
   // are twice as wide, so the camera pulls back twice as far.
@@ -362,10 +374,21 @@ int main(int argc, char** argv) {
     debug.thermal = mapCase.thermal;
     tactics::ReachField reach;
     if (mapCase.frontierFrom) {
-      navMesh.Build(game.GetScene().obstacles, game.GetScene().mapHalfExtent,
-                    tactics::constants::kAgentRadius, &game.GetScene().ground,
-                    &game.GetScene().walkSurfaces);
+      // Windowed like GameLogic::EnsureNavMeshFor: a full-map build prices
+      // all-pairs surface routes, which takes minutes on a default-size
+      // city, and the window provably prices every in-budget route the same.
+      const float reachExtent =
+          mapCase.frontierBudget + 2.0f * tactics::constants::kAgentRadius;
+      const float half = game.GetScene().mapHalfExtent;
+      tactics::NavRegion region;
+      region.xMin = std::max(-half, mapCase.frontierFrom->x - reachExtent);
+      region.xMax = std::min(half, mapCase.frontierFrom->x + reachExtent);
+      region.zMin = std::max(-half, mapCase.frontierFrom->z - reachExtent);
+      region.zMax = std::min(half, mapCase.frontierFrom->z + reachExtent);
+      navMesh.Build(game.GetScene().obstacles, region, tactics::constants::kAgentRadius,
+                    &game.GetScene().ground, &game.GetScene().walkSurfaces);
       reach = navMesh.ComputeReachField(*mapCase.frontierFrom, mapCase.frontierBudget);
+      tactics::FillLevelEdgeDistances(game.GetScene(), &reach);
       overlays.moveFrontier = &reach;
     }
     if (mapCase.showNavMesh) {

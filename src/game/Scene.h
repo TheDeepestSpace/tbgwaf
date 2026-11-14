@@ -189,6 +189,18 @@ void ApplySpawnHints(Scene* scene);
 // indices are unchanged. For sight lines and FOV only: they never collide.
 std::vector<Obstacle> SightObstacles(const Scene& scene);
 
+struct ReachField;
+
+// Fills `field->edgeDist` with the exact XZ distance from each node near one
+// to the nearest level-edge line of the scene: terrain tier cliff lines (the
+// same TerrainTiers polygons the renderer extrudes), terrain stair flanks,
+// and walk-surface (deck/roof/ramp) outlines. Only edge spans whose two
+// sides really differ in walkable height count -- tier-split seams, patch-
+// to-patch deck joints and at-grade ramp mouths are skipped -- so the drawn
+// movement boundary can follow the real geometry where the reach ends at
+// such an edge (issue #292).
+void FillLevelEdgeDistances(const Scene& scene, ReachField* field);
+
 // For each entry of Scene::buildings: 1 when the building is enterable and at
 // least one of `points` lies inside it (within the footprint, from the floor
 // up to the underside of the roof slab; the roof top is outside). The camera

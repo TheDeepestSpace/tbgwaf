@@ -9,6 +9,13 @@
 
 namespace gfx {
 
+// How far inside a level-edge line (cliff top/base, stair flank, deck
+// outline; see ReachField::edgeDist) the drawn boundary sits, so the line
+// reads as hugging the edge without z-fighting the face below/above it.
+// Shared by the depth smoothing and the renderer's layer-step cells so the
+// contour is continuous across cell kinds.
+constexpr float kLevelEdgeInset = 0.06f;
+
 // Smooth signed distance used to contour a movement ReachField. Positive
 // samples are reachable and negative samples are not; smoothing never
 // changes that classification, so a narrow reachable band cannot disappear.

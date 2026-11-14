@@ -289,6 +289,7 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
   };
   const float sampleDepth = 0.1f * field.step;
   const bool haveWallDist = field.wallDist.size() == dIn.size();
+  const bool haveEdgeDist = field.edgeDist.size() == dIn.size();
   // Nodes whose trusted wall-exact depth is non-negative: the drawn line is
   // inset past the padded outline (just off the obstacle's real face), so
   // these unreached nodes legitimately sit on the inside of the contour.
@@ -323,6 +324,39 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
           value = aniso * avg + (1.0f - aniso) * raw[i];
         }
       }
+      // Level-edge-caused boundary (issue #292): where a node sits near a
+      // measured level-edge line (cliff top/base, stair flank, deck
+      // outline; see FillLevelEdgeDistances) and that exact distance agrees
+      // with the grid depth, the contour follows the real edge geometry --
+      // straight cliff lines -- instead of the grid rasterisation of the
+      // layer step. Disagreement means the local boundary is something else
+      // (the budget arc, or reach flowing through a stair/ramp opening in
+      // the edge), and the grid depth stands. Unreached nodes take part
+      // too: the rim nodes on a cliff's slope band that still count as the
+      // reached strip's layer carry the sub-step tail of the exact depth,
+      // and leaving them at grid values saw-toothed the line.
+      float edgeExact = 0.0f;
+      float edgeW = 0.0f;
+      if (haveEdgeDist && std::isfinite(field.edgeDist[i])) {
+        const float e = field.edgeDist[i] - kLevelEdgeInset;
+        // The grid boundary at a level edge sits systematically inside the
+        // geometric line (the heightfield rasterises the cliff as a one-cell
+        // slope band the walk gate rejects), so the agreement window is
+        // wider than the wall one and one-sided-friendly: full weight while
+        // the grid depth is within two steps of the exact line, fading out
+        // by 2.75 steps so reach that genuinely flows past the line (a
+        // stair mouth, a ramp at grade) never snaps to it.
+        // Where the boundary is wall-caused (terrain cliffs carry thin
+        // nav-only wall obstacles whose padding keeps the grid reach up to
+        // ~0.85 units from the step line) the window widens further: blocked
+        // nodes right there mean it cannot be the budget arc snapping.
+        const float tolerance = (2.75f + 1.5f * wall) * field.step;
+        const float diff = std::fabs(e - raw[i]);
+        if (diff <= tolerance) {
+          edgeExact = e;
+          edgeW = std::min(1.0f, (tolerance - diff) / (0.75f * field.step));
+        }
+      }
       // Wall-caused boundary, applied after every smoothing pass so none of
       // them can round it off: the exact node-to-outline distance where the
       // reach field recorded one, signed by reachability. Its zero contour
@@ -332,9 +366,23 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
       // at grid resolution) stands in when the exact distance is missing or
       // disagrees with the grid, i.e. the local blocker is not a measured
       // outline (the window edge, or an obstacle on the far side of this
-      // one).
-      if (wall > 0.0f) {
-        float exact = raw[i];
+      // one) -- unless a level edge measured it above (a deck edge over
+      // blocked ground reads as wall-bounded, but the deck outline is the
+      // boundary that is actually drawn).
+      if (edgeW >= 1.0f) {
+        // A fully agreeing level edge outranks the wall outline: terrain
+        // cliffs carry thin nav-only wall obstacles ON the step line, and
+        // the padded-outline metric would put the line a fifth of a unit
+        // past the visible cliff face instead of hugging it. The renderer's
+        // layer-step cells interpolate against edgeDist, so this keeps the
+        // two sides of every crossing on one metric.
+        value = edgeExact;
+        // The snapped band's unreached nodes (between the grid reach and
+        // the drawn line) must survive the sign guarantee below, exactly
+        // like the wall-inset band.
+        if (edgeExact >= -1e-4f) insetPositive[i] = 1;
+      } else if (wall > 0.0f) {
+        float exact = edgeW > 0.0f ? edgeW * edgeExact + (1.0f - edgeW) * raw[i] : raw[i];
         if (haveWallDist && std::isfinite(field.wallDist[i])) {
           // wallDist is signed against the union of padded outlines, so a
           // nested inner outline (a pier shaft inside its footing) cannot
@@ -351,6 +399,8 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
           }
         }
         value = wall * exact + (1.0f - wall) * value;
+      } else if (edgeW > 0.0f) {
+        value = edgeW * edgeExact + (1.0f - edgeW) * value;
       }
       depth[i] = value;
     }

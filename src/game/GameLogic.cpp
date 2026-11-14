@@ -1374,6 +1374,7 @@ void GameLogic::RefreshMoveFrontier() {
     moveFrontier_ = navMesh_.ComputeReachField(
         origin, mover->MoveBudget(), 0.25f,
         firstLeg && !blockers.trajectories.empty() ? &blockers : nullptr);
+    FillLevelEdgeDistances(scene_, &moveFrontier_);
     moveFrontier_.revision = ++frontierRevision_;
     moveCover_ = ComputeCoverMap(sightObstacles_, moveFrontier_);
     BuildZiplineFrontiers(*mover, origin);
@@ -1454,6 +1455,7 @@ void GameLogic::BuildZiplineFrontiers(const Unit& mover, const glm::vec3& origin
       frontier.field = mesh.ComputeReachField(
           exit, remaining, 0.25f,
           firstLeg && !blockers.trajectories.empty() ? &blockers : nullptr);
+      FillLevelEdgeDistances(scene_, &frontier.field);
       frontier.field.revision = ++frontierRevision_;
       ziplineFrontiers_.push_back(std::move(frontier));
       ziplineMeshes_.push_back(std::move(mesh));

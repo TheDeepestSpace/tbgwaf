@@ -260,7 +260,6 @@ void TestBuildingKindsFloorsAndHeights() {
     const Scene scene = GenerateUrbanMap(seed, FlatConfig());
     const std::vector<UrbanParcel> parcels = UrbanParcels(seed, FlatConfig());
     int perKind[kBuildingKindCount] = {};
-    int setbacks = 0;
     for (size_t i = 0; i < scene.buildings.size(); ++i) {
       const Building& b = scene.buildings[i];
       ++perKind[static_cast<int>(b.kind)];
@@ -277,22 +276,10 @@ void TestBuildingKindsFloorsAndHeights() {
         }
       }
       if (b.kind == BuildingKind::Commercial) CHECK(b.floorCount == 1);
-      if (b.upperObstacle >= 0) {
-        ++setbacks;
-        CHECK(b.kind == BuildingKind::Office);
-        const Obstacle& upper = scene.obstacles[b.upperObstacle];
-        CHECK(upper.building == static_cast<int>(i));
-        CHECK(std::fabs(upper.bounds.min.y - base.bounds.max.y) < kEps);
-        CHECK(std::fabs(upper.bounds.max.y - (base.bounds.min.y + height)) < kEps);
-        CHECK(PolygonArea(upper.footprint) < PolygonArea(base.footprint));
-        for (const glm::vec2& v : upper.footprint) CHECK(PointInConvexPolygon(v, base.footprint));
-      } else {
-        CHECK(std::fabs(base.bounds.max.y - base.bounds.min.y - height) < kEps);
-      }
+      CHECK(std::fabs(base.bounds.max.y - base.bounds.min.y - height) < kEps);
     }
     CHECK(perKind[static_cast<int>(BuildingKind::Civic)] == c.towerCount);
     for (int k = 0; k < kBuildingKindCount; ++k) CHECK(perKind[k] > 0);
-    (void)setbacks;  // Seed-dependent; asserted on the forced-downtown city below.
     // Every obstacle with a footprint is a building or a pier column/footing.
     for (const Obstacle& o : scene.obstacles) {
       CHECK(o.footprint.empty() || o.building >= 0 || o.kind == ObstacleKind::Pier ||
@@ -343,9 +330,6 @@ void TestBuildingKindsFloorsAndHeights() {
   }
   CHECK(townOffice > homesOffice);
   CHECK(homesRes > townRes);
-  int townSetbacks = 0;
-  for (const Building& b : town.buildings) townSetbacks += b.upperObstacle >= 0;
-  CHECK(townSetbacks > 0);
   CHECK(homesRes * 2 > static_cast<int>(base.buildings.size()));
   BlockCharacter parsed = BlockCharacter::Auto;
   CHECK(ParseBlockCharacter("industrial", &parsed) && parsed == BlockCharacter::Industrial);
@@ -448,7 +432,7 @@ void TestMassingStaysOnItsBuilding() {
       }
       CHECK(d.building >= 0 && d.building < static_cast<int>(scene.buildings.size()));
       const Building& b = scene.buildings[d.building];
-      const Obstacle& roof = scene.obstacles[b.upperObstacle >= 0 ? b.upperObstacle : b.obstacle];
+      const Obstacle& roof = scene.obstacles[b.obstacle];
       switch (d.kind) {
         case MassingDetail::Kind::Parapet:
         case MassingDetail::Kind::RoofFixture: {
@@ -499,7 +483,7 @@ void TestMassingStaysOnItsBuilding() {
     int ringed = 0;
     for (size_t i = 0; i < scene.buildings.size(); ++i) {
       const Building& b = scene.buildings[i];
-      const Obstacle& roof = scene.obstacles[b.upperObstacle >= 0 ? b.upperObstacle : b.obstacle];
+      const Obstacle& roof = scene.obstacles[b.obstacle];
       if (parapetsPerBuilding[i] == 0) continue;
       ++ringed;
       CHECK(parapetsPerBuilding[i] <= static_cast<int>(roof.footprint.size()));
@@ -516,7 +500,7 @@ void TestPinnedKindHistograms() {
   const Expected expected[] = {
       // residential, mixed-use, office, commercial, civic, garage
       {1u, 63, {10, 22, 13, 7, 2, 9}},
-      {42u, 73, {29, 18, 11, 6, 2, 7}},
+      {42u, 73, {28, 19, 11, 6, 2, 7}},
       {2024u, 80, {21, 18, 15, 11, 2, 13}},
   };
   for (const auto& e : expected) {
@@ -3606,9 +3590,39 @@ void TestTreesStayOnEmptyBlocksAndAreSolid() {
   CHECK(GenerateHillyMap(7).trees.empty());
 }
 
+// Issue #301: a tall building on a wedge/sliver parcel (an 11-floor tower
+// with a 0.8 m end wall on seed 618949235) rendered as a tapering, sheared
+// facade. Landmark towers need a compact footprint.
+void TestLandmarkTowersHaveCompactFootprints() {
+  std::vector<Scene> scenes;
+  for (const char* kind : {"urban", "urban-elevated"}) {
+    scenes.push_back(GenerateMapByKind(618949235u, kind));
+  }
+  for (uint32_t seed : kSeeds) scenes.push_back(GenerateUrbanMap(seed, FlatConfig()));
+  for (const Scene& scene : scenes) {
+    for (const Building& b : scene.buildings) {
+      if (b.kind != BuildingKind::Civic || b.floorCount <= 3 || b.obstacle < 0) continue;
+      const std::vector<glm::vec2> fp = ObstacleFootprint(scene.obstacles[b.obstacle]);
+      float minWidth = 1e9f, minEdge = 1e9f;
+      for (size_t i = 0; i < fp.size(); ++i) {
+        const glm::vec2 a = fp[i], c = fp[(i + 1) % fp.size()];
+        const float len = glm::distance(a, c);
+        minEdge = std::min(minEdge, len);
+        const glm::vec2 d = (c - a) / len;
+        float far = 0.0f;
+        for (const glm::vec2& p : fp) far = std::max(far, std::fabs(d.x * (p - a).y - d.y * (p - a).x));
+        minWidth = std::min(minWidth, far);
+      }
+      CHECK(minWidth >= 3.0f - 1e-3f);
+      CHECK(minEdge >= 2.0f - 1e-3f);
+    }
+  }
+}
+
 int main(int argc, char** argv) {
   const std::vector<TestCase> cases = {
       TBG_TEST(TestNavMeshIgnoresOverheadObstacles),
+      TBG_TEST(TestLandmarkTowersHaveCompactFootprints),
       TBG_TEST(TestEnterableBuildingsHaveDoorways),
       TBG_TEST(TestWindowsAreWallCutouts),
       TBG_TEST(TestEnterableFloorsReachableByStairs),

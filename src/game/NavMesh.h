@@ -39,6 +39,28 @@ struct NavCell {
 // unreachable / out-of-budget / non-walkable nodes. Node() always reports
 // y = 0; consumers that need terrain-following geometry sample the scene's
 // HeightField themselves.
+// A straight piece of exact boundary geometry near a ReachField's window:
+// the vector outline of the movement boundary is snapped onto these (see
+// gfx::TraceFrontierOutline, issue #292).
+struct BoundarySeg {
+  glm::vec2 a{0.0f}, b{0.0f};
+  // How far past the line the drawn boundary sits. Wall segments are edges
+  // of counter-clockwise padded outlines, so "past" is to the left of
+  // a -> b (toward the obstacle's real face); level-edge segments have no
+  // orientation and are inset toward the reached side.
+  float inset = 0.0f;
+  // Height band the segment applies to (a node only snaps to segments of
+  // its own storey).
+  float yMin = 0.0f, yMax = 0.0f;
+  // Wall segments only: true for ground obstacles (applies to nodes walking
+  // the ground, whatever its height), false for blockers standing on a walk
+  // surface (applies to that surface's nodes, by height band).
+  bool ground = true;
+  // Wall segments only: the padded outline (a convex polygon) the segment
+  // belongs to; one outline's segments are stored consecutively, in order.
+  int outline = -1;
+};
+
 struct ReachField {
   float minX = 0.0f, minZ = 0.0f, step = 1.0f;
   int nx = 0, nz = 0;
@@ -81,6 +103,14 @@ struct ReachField {
   // real geometry -- straight cliff lines and stair flanks -- rather than
   // the grid rasterisation of the layer step (issue #292).
   std::vector<float> edgeDist;
+  // The geometry behind wallDist / edgeDist as line segments, for the vector
+  // outline: padded obstacle outline edges (ground obstacles and walk-surface
+  // blockers) and level-edge spans. Empty for hand-built fields.
+  std::vector<BoundarySeg> wallSegs;
+  std::vector<BoundarySeg> edgeSegs;
+  // 1 for nodes priced by the elevated walk-surface pass (deck, roof, ramp,
+  // floor) rather than over the ground. Empty for hand-built fields.
+  std::vector<char> elevated;
   // Bumped by the owner each recompute, so renderers caching geometry by
   // (origin, budget) notice content-only changes (blockers moved).
   int revision = 0;
@@ -253,6 +283,9 @@ class NavMesh {
   std::vector<WalkSurface> walkSurfaces_;
   std::vector<std::vector<std::vector<glm::vec2>>> surfaceBlockers_;  // Agent-padded.
   std::vector<std::vector<glm::vec2>> paddedPolygons_;
+  // Per padded polygon: how far inside the outline the visible face sits
+  // (the pad it was expanded by; 0 for low-deck headroom blockers).
+  std::vector<float> paddedPolygonPad_;
   bool polygonMode_ = false;
 
   std::vector<std::vector<glm::vec2>> surfaceFootprints_;

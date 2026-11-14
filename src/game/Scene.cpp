@@ -584,6 +584,17 @@ void FillLevelEdgeDistances(const Scene& scene, ReachField* field) {
     }
   }
   if (segments.empty()) return;
+  field->edgeSegs.clear();
+  for (const Seg& s : segments) {
+    BoundarySeg seg;
+    seg.a = s.a;
+    seg.b = s.b;
+    seg.inset = 0.06f;  // gfx::kLevelEdgeInset.
+    seg.yMin = s.yMin;
+    seg.yMax = s.yMax;
+    seg.ground = false;
+    field->edgeSegs.push_back(seg);
+  }
 
   const float inf = std::numeric_limits<float>::infinity();
   field->edgeDist.assign(field->dist.size(), inf);

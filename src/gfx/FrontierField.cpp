@@ -4,6 +4,7 @@
 #include <cmath>
 #include <deque>
 #include <limits>
+#include <unordered_map>
 
 #include "game/Types.h"
 
@@ -555,6 +556,453 @@ std::vector<float> SmoothFrontierSignedDepth(const tactics::ReachField& field) {
     }
   }
   return depth;
+}
+
+std::vector<FrontierOutline> TraceFrontierOutline(const tactics::ReachField& field) {
+  const int nx = field.nx, nz = field.nz;
+  const size_t total = static_cast<size_t>(nx) * nz;
+  if (nx <= 1 || nz <= 1 || field.step <= 0.0f || field.dist.size() != total) return {};
+  const float step = field.step;
+  constexpr float kLayerStep = 0.6f;
+  const bool haveY = field.surfaceY.size() == total;
+  const auto sameLayer = [&](int a, int b) {
+    return !haveY || std::abs(field.surfaceY[a] - field.surfaceY[b]) <= kLayerStep;
+  };
+  // Same hairline rule as SmoothFrontierSignedDepth: only nodes inside a
+  // fully reached 2x2 block of one layer count.
+  std::vector<char> solid(total, 0);
+  for (int iz = 0; iz + 1 < nz; ++iz) {
+    for (int ix = 0; ix + 1 < nx; ++ix) {
+      const int a = iz * nx + ix, b = a + 1, c = a + nx, d = c + 1;
+      if (!field.Reached(ix, iz) || !field.Reached(ix + 1, iz) || !field.Reached(ix, iz + 1) ||
+          !field.Reached(ix + 1, iz + 1) || !sameLayer(a, b) || !sameLayer(a, c) ||
+          !sameLayer(a, d)) {
+        continue;
+      }
+      solid[a] = solid[b] = solid[c] = solid[d] = 1;
+    }
+  }
+  const auto nodeXZ = [&](int i) {
+    return glm::vec2(field.minX + (i % nx) * step, field.minZ + (i / nx) * step);
+  };
+
+  // --- 1. Trace the mask outline: one vertex per (inside, outside) node
+  // pair on a grid edge, linked cell by cell.
+  struct Vertex {
+    int in = -1, out = -1;
+    int link[2] = {-1, -1};
+    glm::vec2 p{0.0f};
+    float y = 0.0f;
+    int kind = 0;  // 0 free, 1 wall segment, 2 level-edge segment.
+    int seg = -1;
+    bool budget = false;
+  };
+  std::vector<Vertex> verts;
+  std::unordered_map<long long, int> vertexOf;
+  const auto vertexFor = [&](int in, int out) {
+    const long long key = static_cast<long long>(in) * static_cast<long long>(total) + out;
+    const auto it = vertexOf.find(key);
+    if (it != vertexOf.end()) return it->second;
+    Vertex v;
+    v.in = in;
+    v.out = out;
+    verts.push_back(v);
+    vertexOf.emplace(key, static_cast<int>(verts.size()) - 1);
+    return static_cast<int>(verts.size()) - 1;
+  };
+  const auto link = [&](int a, int b) {
+    if (a == b) return;
+    for (int k = 0; k < 2; ++k) {
+      if (verts[a].link[k] == b) return;
+    }
+    for (int k = 0; k < 2; ++k) {
+      if (verts[a].link[k] < 0) {
+        verts[a].link[k] = b;
+        break;
+      }
+    }
+    for (int k = 0; k < 2; ++k) {
+      if (verts[b].link[k] < 0) {
+        verts[b].link[k] = a;
+        break;
+      }
+    }
+  };
+  for (int iz = 0; iz + 1 < nz; ++iz) {
+    for (int ix = 0; ix + 1 < nx; ++ix) {
+      const int corner[4] = {iz * nx + ix, iz * nx + ix + 1, (iz + 1) * nx + ix + 1,
+                             (iz + 1) * nx + ix};
+      bool used[4] = {false, false, false, false};
+      for (int g0 = 0; g0 < 4; ++g0) {
+        if (used[g0] || !solid[corner[g0]]) continue;
+        bool in[4];
+        int count = 0;
+        for (int k = 0; k < 4; ++k) {
+          in[k] = !used[k] && solid[corner[k]] && sameLayer(corner[g0], corner[k]);
+          if (in[k]) {
+            used[k] = true;
+            ++count;
+          }
+        }
+        if (count == 4) continue;
+        // Crossings in polygon order; an inside run goes from an entering
+        // crossing to the next exiting one (saddles have two runs).
+        int cross[4];
+        bool enters[4];
+        int n = 0;
+        for (int k = 0; k < 4; ++k) {
+          const int k1 = (k + 1) % 4;
+          if (in[k] == in[k1]) continue;
+          cross[n] = in[k] ? vertexFor(corner[k], corner[k1]) : vertexFor(corner[k1], corner[k]);
+          enters[n] = in[k1];
+          ++n;
+        }
+        for (int k = 0; k < n; ++k) {
+          if (enters[k]) link(cross[k], cross[(k + 1) % n]);
+        }
+      }
+    }
+  }
+  if (verts.empty()) return {};
+
+  // --- 2. Place each vertex.
+  // Segment broadphase: buckets over the field window.
+  const float cell = 1.0f;
+  const float gx0 = field.minX - 1.0f, gz0 = field.minZ - 1.0f;
+  const int gn = std::max(1, static_cast<int>(std::ceil(((nx - 1) * step + 2.0f) / cell)));
+  const int gm = std::max(1, static_cast<int>(std::ceil(((nz - 1) * step + 2.0f) / cell)));
+  struct Buckets {
+    std::vector<std::vector<int>> cells;
+  };
+  const auto bucketize = [&](const std::vector<tactics::BoundarySeg>& segs, float reach) {
+    Buckets b;
+    b.cells.resize(static_cast<size_t>(gn) * gm);
+    for (size_t s = 0; s < segs.size(); ++s) {
+      const glm::vec2 lo = glm::min(segs[s].a, segs[s].b) - reach;
+      const glm::vec2 hi = glm::max(segs[s].a, segs[s].b) + reach;
+      const int x0 = static_cast<int>(std::floor((lo.x - gx0) / cell));
+      const int x1 = static_cast<int>(std::floor((hi.x - gx0) / cell));
+      const int z0 = static_cast<int>(std::floor((lo.y - gz0) / cell));
+      const int z1 = static_cast<int>(std::floor((hi.y - gz0) / cell));
+      for (int z = std::max(0, z0); z <= std::min(gm - 1, z1); ++z) {
+        for (int x = std::max(0, x0); x <= std::min(gn - 1, x1); ++x) {
+          b.cells[static_cast<size_t>(z) * gn + x].push_back(static_cast<int>(s));
+        }
+      }
+    }
+    return b;
+  };
+  // A vertex snaps to a wall when the padded outline passes within kWallTol
+  // of it (the grid boundary straddles the outline, give or take the
+  // hairline erosion), and to a level edge within kEdgeTol (the heightfield
+  // rasterises a cliff as a slope band the walk gate rejects, so the grid
+  // boundary sits up to a few samples off the geometric line).
+  constexpr float kWallTol = 0.45f;
+  constexpr float kEdgeTol = 0.9f;
+  constexpr float kStoreyTolerance = 1.0f;
+  const Buckets wallBuckets = bucketize(field.wallSegs, kWallTol);
+  const Buckets edgeBuckets = bucketize(field.edgeSegs, kEdgeTol);
+  const auto segDistance = [](const tactics::BoundarySeg& s, glm::vec2 p) {
+    const glm::vec2 ab = s.b - s.a;
+    const float t = std::clamp(glm::dot(p - s.a, ab) / std::max(glm::dot(ab, ab), 1e-12f),
+                               0.0f, 1.0f);
+    return glm::length(p - s.a - ab * t);
+  };
+  const bool haveElevated = field.elevated.size() == total;
+  const bool haveWalkable = field.walkable.size() == total;
+  // First segment index of each wall outline (segments of one outline are
+  // consecutive), for the "is this edge buried inside another outline" test.
+  std::vector<int> outlineBegin, outlineEnd;
+  for (size_t k = 0; k < field.wallSegs.size(); ++k) {
+    const int o = field.wallSegs[k].outline;
+    if (o < 0) continue;
+    if (static_cast<size_t>(o) >= outlineBegin.size()) {
+      outlineBegin.resize(o + 1, -1);
+      outlineEnd.resize(o + 1, -1);
+    }
+    if (outlineBegin[o] < 0) outlineBegin[o] = static_cast<int>(k);
+    outlineEnd[o] = static_cast<int>(k) + 1;
+  }
+  const auto insideOutline = [&](int o, glm::vec2 p) {
+    for (int k = outlineBegin[o]; k < outlineEnd[o]; ++k) {
+      const tactics::BoundarySeg& e = field.wallSegs[k];
+      const glm::vec2 ab = e.b - e.a, ap = p - e.a;
+      if (ab.x * ap.y - ab.y * ap.x < 0.01f * glm::length(ab)) return false;
+    }
+    return true;
+  };
+  const auto nearest = [&](const std::vector<tactics::BoundarySeg>& segs, const Buckets& buckets,
+                           glm::vec2 p, float y, bool elevated, bool wall, float tol) {
+    const int x = static_cast<int>(std::floor((p.x - gx0) / cell));
+    const int z = static_cast<int>(std::floor((p.y - gz0) / cell));
+    int best = -1;
+    if (x < 0 || z < 0 || x >= gn || z >= gm) return best;
+    const std::vector<int>& bucket = buckets.cells[static_cast<size_t>(z) * gn + x];
+    const auto applies = [&](const tactics::BoundarySeg& seg) {
+      if (wall && seg.ground == elevated) return false;
+      if (wall && seg.ground) return true;
+      return y >= seg.yMin - kStoreyTolerance && y <= seg.yMax + kStoreyTolerance;
+    };
+    float bestD = tol;
+    for (int s : bucket) {
+      const tactics::BoundarySeg& seg = segs[s];
+      if (!applies(seg)) continue;
+      const float d = segDistance(seg, p);
+      if (d >= bestD) continue;
+      if (wall && seg.outline >= 0) {
+        // Abutting / nested outlines (a cliff wall built from pieces, a pier
+        // shaft in its footing): an edge buried inside another outline is
+        // not part of the boundary of their union.
+        const glm::vec2 ab = seg.b - seg.a;
+        const float t = std::clamp(glm::dot(p - seg.a, ab) / std::max(glm::dot(ab, ab), 1e-12f),
+                                   0.0f, 1.0f);
+        const glm::vec2 out = glm::normalize(glm::vec2(ab.y, -ab.x));
+        const glm::vec2 probe = seg.a + ab * t + out * 0.03f;
+        bool buried = false;
+        int last = -1;
+        for (int other : bucket) {
+          const tactics::BoundarySeg& o = segs[other];
+          if (o.outline < 0 || o.outline == seg.outline || o.outline == last || !applies(o)) {
+            continue;
+          }
+          last = o.outline;
+          if (insideOutline(o.outline, probe)) {
+            buried = true;
+            break;
+          }
+        }
+        if (buried) continue;
+      }
+      bestD = d;
+      best = s;
+    }
+    return best;
+  };
+  // The line a snapped vertex is drawn on: point + unit direction.
+  const auto drawLine = [&](const Vertex& v, glm::vec2* origin, glm::vec2* dir) {
+    const tactics::BoundarySeg& seg = v.kind == 1 ? field.wallSegs[v.seg] : field.edgeSegs[v.seg];
+    const glm::vec2 d = glm::normalize(seg.b - seg.a);
+    glm::vec2 n(-d.y, d.x);  // Left of a -> b: into a padded outline.
+    if (v.kind == 2 && glm::dot(nodeXZ(v.in) - seg.a, n) < 0.0f) n = -n;
+    // Level edges are inset toward the reached side, walls past the outline.
+    *origin = seg.a + n * seg.inset;
+    *dir = d;
+  };
+  static const int kMoves[16][2] = {{1, 0},  {-1, 0}, {0, 1},  {0, -1}, {1, 1},  {1, -1},
+                                    {-1, 1}, {-1, -1}, {2, 1},  {2, -1}, {-2, 1}, {-2, -1},
+                                    {1, 2},  {1, -2}, {-1, 2}, {-1, -2}};
+  for (Vertex& v : verts) {
+    const glm::vec2 pin = nodeXZ(v.in), pout = nodeXZ(v.out);
+    const glm::vec2 mid = 0.5f * (pin + pout);
+    v.y = haveY ? field.surfaceY[v.in] : 0.0f;
+    v.p = mid;
+    const bool elevated = haveElevated && field.elevated[v.in];
+    const bool layerStep = !sameLayer(v.in, v.out);
+    const bool blocked = haveWalkable && field.walkable[v.out] == 0 && !elevated;
+    // The budget ran out here if the outside node could have been walked to
+    // from a reached neighbour but for the cost.
+    float crossing = -1.0f;
+    if (!layerStep && !blocked && !solid[v.out] && field.dist[v.in] <= field.budget) {
+      float outDist = std::numeric_limits<float>::infinity();
+      const int ox = v.out % nx, oz = v.out / nx;
+      for (const auto& m : kMoves) {
+        const int jx = ox + m[0], jz = oz + m[1];
+        if (!field.Reached(jx, jz)) continue;
+        const int j = jz * nx + jx;
+        if (!sameLayer(j, v.out) && !sameLayer(j, v.in)) continue;
+        outDist = std::min(outDist, field.dist[j] + step * std::hypot(static_cast<float>(m[0]),
+                                                                    static_cast<float>(m[1])));
+      }
+      const int outX = v.out % nx, outZ = v.out / nx;
+      if (field.Reached(outX, outZ)) {
+        // Reached but dropped by the hairline rule: the arc passes just
+        // beyond it.
+        outDist = std::max(field.dist[v.out], field.dist[v.in]);
+        crossing = 1.0f;
+      } else if (outDist > field.budget && outDist - field.dist[v.in] <= 1.5f * step) {
+        crossing = std::clamp((field.budget - field.dist[v.in]) /
+                                  std::max(outDist - field.dist[v.in], 1e-4f),
+                              0.0f, 1.0f);
+      }
+    }
+    if (crossing >= 0.0f) {
+      v.budget = true;
+      v.p = pin + (pout - pin) * crossing;
+      continue;
+    }
+    int wall = -1, edge = -1;
+    if (!field.wallSegs.empty()) {
+      wall = nearest(field.wallSegs, wallBuckets, mid, v.y, elevated, true, kWallTol);
+    }
+    if (!field.edgeSegs.empty()) {
+      edge = nearest(field.edgeSegs, edgeBuckets, mid, v.y, elevated, false, kEdgeTol);
+    }
+    if (wall >= 0 && edge >= 0) {
+      // A layer step is a level edge first; an obstacle-blocked node a wall
+      // first; otherwise whichever line is (relatively) nearer.
+      if (layerStep) wall = -1;
+      else if (blocked) edge = -1;
+      else if (segDistance(field.wallSegs[wall], mid) / kWallTol <=
+               segDistance(field.edgeSegs[edge], mid) / kEdgeTol) edge = -1;
+      else wall = -1;
+    }
+    if (wall >= 0) {
+      v.kind = 1;
+      v.seg = wall;
+    } else if (edge >= 0) {
+      v.kind = 2;
+      v.seg = edge;
+    }
+  }
+
+  // --- 3. Chain into loops and straighten.
+  std::vector<FrontierOutline> outlines;
+  std::vector<char> visited(verts.size(), 0);
+  const auto walk = [&](int start, std::vector<int>* chain) {
+    // Returns true when the chain closes on itself.
+    int prev = -1, cur = start;
+    while (cur >= 0 && !visited[cur]) {
+      visited[cur] = 1;
+      chain->push_back(cur);
+      int next = verts[cur].link[0] != prev ? verts[cur].link[0] : verts[cur].link[1];
+      if (next == prev && verts[cur].link[0] == verts[cur].link[1]) next = -1;
+      prev = cur;
+      cur = next;
+    }
+    return cur == start && chain->size() > 2;
+  };
+  const auto sameLine = [&](const Vertex& a, const Vertex& b) {
+    return a.kind == b.kind && a.seg == b.seg;
+  };
+  for (int pass = 0; pass < 2; ++pass) {
+    for (int s = 0; s < static_cast<int>(verts.size()); ++s) {
+      if (visited[s]) continue;
+      // Open chains first (start from their ends), then closed loops.
+      const bool isEnd = verts[s].link[0] < 0 || verts[s].link[1] < 0;
+      if (pass == 0 && !isEnd) continue;
+      std::vector<int> chain;
+      const bool closed = walk(s, &chain);
+      const int n = static_cast<int>(chain.size());
+      if (n < 2) continue;
+      std::vector<Vertex> loop(n);
+      for (int k = 0; k < n; ++k) loop[k] = verts[chain[k]];
+      const auto at = [&](int k) -> Vertex& { return loop[((k % n) + n) % n]; };
+      const auto valid = [&](int k) { return closed || (k >= 0 && k < n); };
+
+      // 3a. Flicker repair: a short stretch (up to three vertices) of
+      // anything else between two stretches on one line joins that line if
+      // it is close to it -- one wall must not alternate snapped/unsnapped.
+      for (int k = 0; k < n; ++k) {
+        if (loop[k].kind == 0) continue;
+        for (int gap = 1; gap <= 3; ++gap) {
+          const int far = k + gap + 1;
+          if (!valid(far) || !sameLine(loop[k], at(far))) continue;
+          bool any = false, ok = true;
+          glm::vec2 origin, dir;
+          drawLine(loop[k], &origin, &dir);
+          const tactics::BoundarySeg& seg =
+              loop[k].kind == 1 ? field.wallSegs[loop[k].seg] : field.edgeSegs[loop[k].seg];
+          for (int j = k + 1; j < far; ++j) {
+            if (sameLine(at(j), loop[k])) continue;
+            any = true;
+            const glm::vec2 mid = 0.5f * (nodeXZ(at(j).in) + nodeXZ(at(j).out));
+            const glm::vec2 rel = mid - seg.a;
+            ok &= std::fabs(rel.x * dir.y - rel.y * dir.x) <=
+                  1.5f * (loop[k].kind == 1 ? kWallTol : kEdgeTol);
+          }
+          if (!any || !ok) continue;
+          for (int j = k + 1; j < far; ++j) {
+            at(j).kind = loop[k].kind;
+            at(j).seg = loop[k].seg;
+            at(j).budget = false;
+          }
+          break;
+        }
+      }
+      // 3b. Project snapped vertices onto their line.
+      for (Vertex& v : loop) {
+        if (v.kind == 0) continue;
+        glm::vec2 origin, dir;
+        drawLine(v, &origin, &dir);
+        const glm::vec2 mid = 0.5f * (nodeXZ(v.in) + nodeXZ(v.out));
+        v.p = origin + dir * glm::dot(mid - origin, dir);
+      }
+      // 3c. Smooth the free stretches (budget arc, anything unmeasured),
+      // with snapped vertices and open ends pinned.
+      {
+        std::vector<glm::vec2> next(n);
+        for (int iter = 0; iter < 10; ++iter) {
+          for (int k = 0; k < n; ++k) {
+            next[k] = loop[k].p;
+            if (loop[k].kind != 0 || !valid(k - 1) || !valid(k + 1)) continue;
+            next[k] = 0.25f * at(k - 1).p + 0.5f * loop[k].p + 0.25f * at(k + 1).p;
+          }
+          for (int k = 0; k < n; ++k) loop[k].p = next[k];
+        }
+      }
+      // 3d. Emit, replacing the joint between two different lines with
+      // their intersection (a sharp corner) and trimming any overshoot.
+      std::vector<char> drop(n, 0), hasCorner(n, 0);
+      std::vector<glm::vec2> corner(n);
+      const auto lineDir = [&](const Vertex& v) {
+        const tactics::BoundarySeg& seg =
+            v.kind == 1 ? field.wallSegs[v.seg] : field.edgeSegs[v.seg];
+        return glm::normalize(seg.b - seg.a);
+      };
+      for (int k = 0; k < n; ++k) {
+        if (!valid(k + 1)) break;
+        const Vertex& a = loop[k];
+        const Vertex& b = at(k + 1);
+        if (a.kind == 0 || b.kind == 0 || sameLine(a, b)) continue;
+        // Snapped points already sit on their (inset) lines.
+        const glm::vec2 da = lineDir(a), db = lineDir(b);
+        const float det = da.x * db.y - da.y * db.x;
+        if (std::fabs(det) < 0.1f) continue;  // Near-parallel: plain join.
+        const glm::vec2 r = b.p - a.p;
+        const glm::vec2 x = a.p + da * ((r.x * db.y - r.y * db.x) / det);
+        if (glm::length(x - a.p) > 1.0f || glm::length(x - b.p) > 1.0f) continue;
+        hasCorner[k] = 1;
+        corner[k] = x;
+        // Walking away from the joint on each side, drop the vertices of
+        // that side's line lying beyond the corner (overshoot). A stretch's
+        // only vertex is always replaced by the corner.
+        for (int side = 0; side < 2; ++side) {
+          const int origin = side == 0 ? k : k + 1;
+          const int dir = side == 0 ? -1 : 1;
+          const Vertex& first = at(origin);
+          for (int j = 0; j < 3; ++j) {
+            const int idx = origin + dir * j;
+            if (!valid(idx) || !sameLine(at(idx), first)) break;
+            const int beyond = idx + dir;
+            if (!valid(beyond) || !sameLine(at(beyond), first)) {
+              if (j == 0) drop[((idx % n) + n) % n] = 1;
+              break;
+            }
+            // Travelling away from the joint, at(idx) -> at(beyond): the
+            // vertex overshoots if the corner lies further that way.
+            if (glm::dot(x - at(idx).p, at(beyond).p - at(idx).p) <= 1e-5f) break;
+            drop[((idx % n) + n) % n] = 1;
+          }
+        }
+      }
+      struct Out {
+        glm::vec2 p;
+        float y;
+      };
+      std::vector<Out> out;
+      out.reserve(n + 8);
+      for (int k = 0; k < n; ++k) {
+        if (!drop[k]) out.push_back({loop[k].p, loop[k].y});
+        if (hasCorner[k]) out.push_back({corner[k], loop[k].y});
+      }
+      FrontierOutline outline;
+      outline.closed = closed;
+      outline.points.reserve(out.size());
+      for (const Out& o : out) outline.points.emplace_back(o.p.x, o.y, o.p.y);
+      outlines.push_back(std::move(outline));
+    }
+  }
+  return outlines;
 }
 
 std::vector<glm::vec2> FrontierCoverStyle(const tactics::ReachField& field,

@@ -3,6 +3,8 @@
 #include <limits>
 #include <vector>
 
+#include <glm/glm.hpp>
+
 #include "gfx/FrontierField.h"
 
 namespace {
@@ -396,7 +398,176 @@ void TestThinStraightBandHasSmoothOutline() {
   }
 }
 
+// Appends a convex counter-clockwise padded outline as wall segments.
+void AddWallOutline(tactics::ReachField* field, const std::vector<glm::vec2>& polygon,
+                    float inset, int outline) {
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    tactics::BoundarySeg seg;
+    seg.a = polygon[i];
+    seg.b = polygon[(i + 1) % polygon.size()];
+    seg.inset = inset;
+    seg.outline = outline;
+    field->wallSegs.push_back(seg);
+  }
+}
+
+bool InsideCcw(const std::vector<glm::vec2>& polygon, glm::vec2 p) {
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    const glm::vec2 ab = polygon[(i + 1) % polygon.size()] - polygon[i], ap = p - polygon[i];
+    if (ab.x * ap.y - ab.y * ap.x < 0.0f) return false;
+  }
+  return true;
+}
+
+void TestOutlineAlongObliqueWallIsOneStraightLine() {
+  // Issue #292: everything is reached except an obstacle rotated 27 degrees
+  // against the grid. The traced outline around it must be exactly the four
+  // inset lines meeting at four sharp corners -- no grid staircase, whatever
+  // side of the obstacle -- i.e. four points.
+  tactics::ReachField field = EmptyField(81);
+  field.walkable.assign(field.dist.size(), 1);
+  const glm::vec2 centre(10.0f, 10.0f);
+  const float angle = 0.47f, c = std::cos(angle), s = std::sin(angle);
+  const auto corner = [&](float x, float z) {
+    return centre + glm::vec2(c * x - s * z, s * x + c * z);
+  };
+  const std::vector<glm::vec2> padded = {corner(-4, -2.5f), corner(4, -2.5f), corner(4, 2.5f),
+                                         corner(-4, 2.5f)};
+  const float inset = 0.35f;
+  AddWallOutline(&field, padded, inset, 0);
+  for (int iz = 0; iz < field.nz; ++iz) {
+    for (int ix = 0; ix < field.nx; ++ix) {
+      const int i = iz * field.nx + ix;
+      const glm::vec2 p(ix * field.step, iz * field.step);
+      if (InsideCcw(padded, p)) field.walkable[i] = 0;
+      else if (ix > 0 && iz > 0 && ix < field.nx - 1 && iz < field.nz - 1) field.dist[i] = 0.0f;
+    }
+  }
+  const std::vector<gfx::FrontierOutline> outlines = gfx::TraceFrontierOutline(field);
+  const std::vector<glm::vec2> face = {corner(-4 + inset, -2.5f + inset),
+                                       corner(4 - inset, -2.5f + inset),
+                                       corner(4 - inset, 2.5f - inset),
+                                       corner(-4 + inset, 2.5f - inset)};
+  int found = 0;
+  for (const gfx::FrontierOutline& outline : outlines) {
+    if (outline.points.empty()) continue;
+    const glm::vec2 first(outline.points[0].x, outline.points[0].z);
+    if (glm::length(first - centre) > 6.0f) continue;  // The window's own rim.
+    ++found;
+    CHECK(outline.closed);
+    // Every point lies on one of the four inset lines, and the four corners
+    // are all present exactly.
+    for (const glm::vec3& q : outline.points) {
+      const glm::vec2 p(q.x, q.z);
+      float best = 1e9f;
+      for (size_t i = 0; i < 4; ++i) {
+        const glm::vec2 a = face[i], d = glm::normalize(face[(i + 1) % 4] - a);
+        best = std::min(best, std::fabs((p.x - a.x) * d.y - (p.y - a.y) * d.x));
+      }
+      CHECK(best < 1e-3f);
+    }
+    for (const glm::vec2& f : face) {
+      float best = 1e9f;
+      for (const glm::vec3& q : outline.points) {
+        best = std::min(best, glm::length(glm::vec2(q.x, q.z) - f));
+      }
+      CHECK(best < 1e-3f);
+    }
+  }
+  CHECK(found == 1);
+}
+
+void TestOutlineIgnoresEdgesBuriedInAbuttingOutline() {
+  // A long wall built from two abutting pieces: their shared end caps are
+  // inside the union and must not pull the outline into a notch.
+  tactics::ReachField field = EmptyField(81);
+  field.walkable.assign(field.dist.size(), 1);
+  const std::vector<glm::vec2> left = {{4.0f, 9.0f}, {10.2f, 9.0f}, {10.2f, 11.0f}, {4.0f, 11.0f}};
+  const std::vector<glm::vec2> right = {{9.8f, 9.0f}, {16.0f, 9.0f}, {16.0f, 11.0f},
+                                        {9.8f, 11.0f}};
+  AddWallOutline(&field, left, 0.05f, 0);
+  AddWallOutline(&field, right, 0.05f, 1);
+  for (int iz = 0; iz < field.nz; ++iz) {
+    for (int ix = 0; ix < field.nx; ++ix) {
+      const int i = iz * field.nx + ix;
+      const glm::vec2 p(ix * field.step, iz * field.step);
+      if (InsideCcw(left, p) || InsideCcw(right, p)) field.walkable[i] = 0;
+      else if (ix > 0 && iz > 0 && ix < field.nx - 1 && iz < field.nz - 1) field.dist[i] = 0.0f;
+    }
+  }
+  for (const gfx::FrontierOutline& outline : gfx::TraceFrontierOutline(field)) {
+    for (const glm::vec3& q : outline.points) {
+      if (q.x < 5.0f || q.x > 15.0f || q.z < 8.0f || q.z > 12.0f) continue;
+      // Along the long sides: exactly on z = 9.05 or z = 10.95.
+      CHECK(std::fabs(q.z - 9.05f) < 1e-3f || std::fabs(q.z - 10.95f) < 1e-3f);
+    }
+  }
+}
+
+void TestOutlineAlongLevelEdgeIsOneStraightLine() {
+  // The reach ends at an oblique cliff line (the far side is another walk
+  // layer): the outline along it is the edge line, kLevelEdgeInset inside.
+  tactics::ReachField field = EmptyField(81);
+  const glm::vec2 a(2.0f, 9.3f), b(18.0f, 12.1f);
+  const glm::vec2 d = glm::normalize(b - a);
+  tactics::BoundarySeg seg;
+  seg.a = a;
+  seg.b = b;
+  seg.inset = gfx::kLevelEdgeInset;
+  seg.yMin = 0.0f;
+  seg.yMax = 3.0f;
+  field.edgeSegs.push_back(seg);
+  for (int iz = 0; iz < field.nz; ++iz) {
+    for (int ix = 0; ix < field.nx; ++ix) {
+      const int i = iz * field.nx + ix;
+      const glm::vec2 p(ix * field.step, iz * field.step);
+      const float side = (p.x - a.x) * d.y - (p.y - a.y) * d.x;  // > 0: low side.
+      if (side < 0.0f) field.surfaceY[i] = 3.0f;
+      else if (side > 0.3f && ix > 0 && iz > 0 && ix < field.nx - 1 && iz < field.nz - 1) {
+        field.dist[i] = 0.0f;
+      }
+    }
+  }
+  int onLine = 0;
+  for (const gfx::FrontierOutline& outline : gfx::TraceFrontierOutline(field)) {
+    for (const glm::vec3& q : outline.points) {
+      const float side = (q.x - a.x) * d.y - (q.z - a.y) * d.x;
+      if (q.x < 4.0f || q.x > 16.0f || std::fabs(side) > 1.0f) continue;
+      CHECK(std::fabs(side - gfx::kLevelEdgeInset) < 1e-3f);
+      ++onLine;
+    }
+  }
+  CHECK(onLine > 20);
+}
+
+void TestBudgetArcOutlineIsSmooth() {
+  // Open ground, the reach a disc: the outline is the budget circle, every
+  // point within a small fraction of a sample of it (no grid staircase).
+  tactics::ReachField field = EmptyField(81);
+  field.walkable.assign(field.dist.size(), 1);
+  field.budget = 6.0f;
+  const glm::vec2 centre(10.0f, 10.0f);
+  for (int iz = 0; iz < field.nz; ++iz) {
+    for (int ix = 0; ix < field.nx; ++ix) {
+      const float r = glm::length(glm::vec2(ix * field.step, iz * field.step) - centre);
+      if (r <= field.budget) field.dist[iz * field.nx + ix] = r;
+    }
+  }
+  const std::vector<gfx::FrontierOutline> outlines = gfx::TraceFrontierOutline(field);
+  CHECK(outlines.size() == 1);
+  for (const gfx::FrontierOutline& outline : outlines) {
+    CHECK(outline.closed);
+    for (const glm::vec3& q : outline.points) {
+      CHECK(std::fabs(glm::length(glm::vec2(q.x, q.z) - centre) - field.budget) < 0.04f);
+    }
+  }
+}
+
 int main() {
+  TestOutlineAlongObliqueWallIsOneStraightLine();
+  TestOutlineIgnoresEdgesBuriedInAbuttingOutline();
+  TestOutlineAlongLevelEdgeIsOneStraightLine();
+  TestBudgetArcOutlineIsSmooth();
   TestThinStraightBandHasSmoothOutline();
   TestThinNeckStaysConnectedToWideRegion();
   TestNarrowReachableBandSurvivesSmoothing();

@@ -223,10 +223,12 @@ void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& 
   polygonMode_ = false;
   paddedPolygons_.clear();
   paddedPolygons_.reserve(obstacles.size());
+  paddedPolygonPad_.clear();
   for (const Obstacle& obstacle : obstacles) {
     polygonMode_ |= !obstacle.footprint.empty();
     paddedPolygons_.push_back(
         ExpandConvexPolygon(ObstacleFootprint(obstacle), ObstaclePad(obstacle, agentRadius)));
+    paddedPolygonPad_.push_back(ObstaclePad(obstacle, agentRadius));
   }
   AddLowDeckBlockers(agentRadius);
   BuildGroundMesh(obstacles, region, agentRadius);
@@ -546,13 +548,40 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
   // Only near-contour values are ever drawn, so nodes farther than
   // kWallDistRange from every outline stay at infinity and skip the work.
   constexpr float kWallDistRange = 2.0f;
+  // The drawn boundary sits this far off an obstacle's real face.
+  constexpr float kFaceGap = 0.05f;
+  const float windowMaxX = field.minX + (field.nx - 1) * step;
+  const float windowMaxZ = field.minZ + (field.nz - 1) * step;
+  int wallOutlines = 0;
+  const auto pushWallSegs = [&](const std::vector<glm::vec2>& polygon, float inset, bool ground,
+                                float yMin, float yMax) {
+    const int outline = wallOutlines++;
+    for (size_t e = 0; e < polygon.size(); ++e) {
+      BoundarySeg seg;
+      seg.outline = outline;
+      seg.a = polygon[e];
+      seg.b = polygon[(e + 1) % polygon.size()];
+      seg.inset = inset;
+      seg.ground = ground;
+      seg.yMin = yMin;
+      seg.yMax = yMax;
+      field.wallSegs.push_back(seg);
+    }
+  };
   field.wallDist.assign(field.dist.size(), inf);
-  for (const std::vector<glm::vec2>& polygon : paddedPolygons_) {
+  for (size_t polygonIndex = 0; polygonIndex < paddedPolygons_.size(); ++polygonIndex) {
+    const std::vector<glm::vec2>& polygon = paddedPolygons_[polygonIndex];
     if (polygon.size() < 3) continue;
     glm::vec2 lo = polygon[0], hi = polygon[0];
     for (const glm::vec2& v : polygon) {
       lo = glm::min(lo, v);
       hi = glm::max(hi, v);
+    }
+    if (hi.x >= field.minX - 1.0f && hi.y >= field.minZ - 1.0f && lo.x <= windowMaxX + 1.0f &&
+        lo.y <= windowMaxZ + 1.0f) {
+      const float pad =
+          polygonIndex < paddedPolygonPad_.size() ? paddedPolygonPad_[polygonIndex] : 0.0f;
+      pushWallSegs(polygon, std::max(0.0f, pad - kFaceGap), /*ground=*/true, 0.0f, 0.0f);
     }
     const auto nodeMin = [&](float v, float minV) {
       return std::max(0, static_cast<int>(std::floor((v - kWallDistRange - minV) / step)));
@@ -773,6 +802,31 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
     for (size_t i = 0; i + 1 < path.size(); ++i) length += glm::distance(path[i], path[i + 1]);
     return length;
   };
+  field.elevated.assign(field.dist.size(), 0);
+  // Blockers standing on walk surfaces (parapets, roof furniture) bound the
+  // reach up there the way padded obstacles do on the ground.
+  for (size_t s = 0; s < surfaceBlockers_.size() && s < walkSurfaces_.size(); ++s) {
+    for (const std::vector<glm::vec2>& polygon : surfaceBlockers_[s]) {
+      if (polygon.size() < 3) continue;
+      glm::vec2 lo = polygon[0], hi = polygon[0];
+      float yMin = inf, yMax = -inf;
+      for (const glm::vec2& v : polygon) {
+        lo = glm::min(lo, v);
+        hi = glm::max(hi, v);
+        const float y = SurfaceHeightAt(walkSurfaces_[s], v.x, v.y);
+        yMin = std::min(yMin, y);
+        yMax = std::max(yMax, y);
+      }
+      if (hi.x < field.minX - 1.0f || hi.y < field.minZ - 1.0f || lo.x > windowMaxX + 1.0f ||
+          lo.y > windowMaxZ + 1.0f) {
+        continue;
+      }
+      pushWallSegs(polygon,
+                   std::max(0.0f, std::min(constants::kAgentRadius, constants::kNavWallPad) -
+                                      kFaceGap),
+                   /*ground=*/false, yMin, yMax);
+    }
+  }
   for (int iz = 0; iz < field.nz; ++iz) {
     for (int ix = 0; ix < field.nx; ++ix) {
       const int idx = iz * field.nx + ix;
@@ -817,6 +871,7 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
         if (distance <= budget && (startSurface >= 0 || distance < field.dist[idx] + 0.5f)) {
           field.dist[idx] = distance;
           field.surfaceY[idx] = goal.y;
+          field.elevated[idx] = 1;
           field.parent[idx] = -1;  // Priced over the surface graph, not this grid.
         }
       }
@@ -1333,6 +1388,7 @@ void NavMesh::AddLowDeckBlockers(float agentRadius) {
     if (padded.size() < 3) continue;
     polygonMode_ = true;
     paddedPolygons_.push_back(std::move(padded));
+    paddedPolygonPad_.push_back(0.0f);
   }
 }
 

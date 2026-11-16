@@ -19,6 +19,7 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "game/Cover.h"
 #include "game/Geometry.h"
 
 using tactics::AABB;
@@ -5379,8 +5380,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         ghost.idleElapsed = 0.0f;
         ghost.walkPhase = 0.0f;
         ghost.walkBlend = 0.0f;
-        ghost.coverBlend = 0.0f;
-        ghost.coverKind = 0;
+        // The cover pose belongs to the destination, not the current tile:
+        // classify it so a ghost ending behind cover crouches (or leans) as
+        // the figure will on arrival.
+        {
+          float coverYaw = 0.0f;
+          const tactics::CoverTile tile =
+              tactics::ClassifyCover(game.SightObstacles(), ghost.position, &coverYaw);
+          ghost.coverKind = tile.kind == tactics::CoverKind::None ? 0 : (tile.crouch ? 2 : 1);
+          ghost.coverYaw = coverYaw;
+          ghost.coverBlend = ghost.coverKind != 0 ? 1.0f : 0.0f;
+        }
         ghost.shootElapsed = -1.0f;
         ghost.rideTravel = -1.0f;
         ghost.grabElapsed = -1.0f;

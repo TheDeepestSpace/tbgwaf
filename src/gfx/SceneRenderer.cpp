@@ -4261,7 +4261,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       // A floor slab that itself hides a probe (a figure on the storey under
       // it) keeps the shell opacity, so what is below it still shows through.
       for (const FadedOccluder& f : interior) {
-        drawSurface(f.surface, !directSurface[f.surface], mark);
+        // G-buffer pass: floor slabs claim depth/stencil but stay untagged.
+        // Their outlines are the explicit ink rectangles of
+        // drawOpeningEdgesOverInterior (PR #313 review), drawn whether or
+        // not the slab wins its pixels, so the edge pass must not add a
+        // second, occlusion-dependent set. Stairs keep the tag: their
+        // sawtooth step edges have no line-segment equivalent.
+        const bool floorSlab = !walkSurfaces[f.surface].stair;
+        if (mark && floorSlab) litShader_.SetInt("uFadedMark", 0);
+        drawSurface(f.surface, !directSurface[f.surface], mark && !floorSlab);
       }
     };
     const auto drawShellGeometry = [&](bool mark) {
@@ -4311,12 +4319,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // screen, and the player could not tell where to stand to look (or
     // walk) out. The opening rectangles of every faded enterable building
     // are therefore drawn as faint ink segments. A near wall's (camera on
-    // its outer side) only where a floor or stair claimed the pixel, at the
-    // shell outline's own intensity: everywhere else the outline pass sees
-    // that wall and CompositeFadedOutlines draws the frame. A far wall
+    // its outer side) everywhere the wall itself did not claim the pixel,
+    // at the shell outline's own intensity: where it did,
+    // CompositeFadedOutlines sees the wall and draws the frame. A far wall
     // (seen through the building) never reaches the outline pass where the
     // nearer shell covers it on screen, so its openings are drawn
-    // everywhere, dimmer than a regular edge (PR #313 review).
+    // everywhere, dimmer than a regular edge. Interior floor slabs get the
+    // same treatment: their boundary rectangles are inked explicitly so an
+    // edge reads whether a wall, a window hole or a nearer slab is in front
+    // of it on screen (PR #313 review).
     // Depth-tested against the opaque scene like the rest of the
     // see-through pass. The rectangle sits on the wall face the camera sees
     // (the outer face of a near wall, the inner face of the far wall seen
@@ -4375,7 +4386,30 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           segments.push_back(corners[(k + 1) % 4]);
         }
       }
-      if (nearSegments.empty() && farSegments.empty()) return;
+      // Floor-slab outlines (PR #313 review): each faded interior floor's
+      // boundary drawn as explicit ink, so a slab reads as a complete
+      // rectangle whether a wall, a nearer slab or nothing covers it on
+      // screen. The G-buffer redraw leaves floors untagged (see
+      // drawInteriorGeometry), so these lines are a floor's only outline
+      // and never double with the edge pass. Joints between two patches of
+      // one floor stay hidden, as in the slab mesh itself.
+      std::vector<glm::vec3> floorSegments, directFloorSegments;
+      for (const FadedOccluder& f : interior) {
+        const tactics::WalkSurface& s = walkSurfaces[f.surface];
+        if (s.stair) continue;
+        const std::vector<char> hidden = SharedEdges(walkSurfaces, s);
+        std::vector<glm::vec3>& segments =
+            directSurface[f.surface] ? directFloorSegments : floorSegments;
+        for (size_t e = 0; e < s.vertices.size(); ++e) {
+          if (hidden[e]) continue;
+          segments.push_back(s.vertices[e]);
+          segments.push_back(s.vertices[(e + 1) % s.vertices.size()]);
+        }
+      }
+      if (nearSegments.empty() && farSegments.empty() && floorSegments.empty() &&
+          directFloorSegments.empty()) {
+        return;
+      }
       // Same ink as CompositeFadedOutlines gives a full-strength shell edge.
       const float ink = std::clamp(debug.nprSettings.outlineStrength, 0.0f, 1.0f) *
                         kOccluderFadeOpacity * 0.88f;
@@ -4397,14 +4431,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         }
       };
       if (!nearSegments.empty()) {
-        // Only where a floor or stair claimed the pixel (stencil 1; the
-        // shell marks 2): elsewhere CompositeFadedOutlines already draws
-        // the frame, and drawing it here too would double it. Called after
-        // the shell blend so the shell never dims these lines (a slab pixel
-        // gets no shell, so lines there would otherwise stay stronger than
-        // elsewhere).
+        // Everywhere the shell did not claim the pixel (bit 2 clear): a
+        // floor or stair claimed it (1) or the opening's real hole shows
+        // what is behind (0) -- in both cases the outline pass never sees
+        // the wall there, so the frame must be inked by hand. Where the
+        // wall did claim the pixel (2), CompositeFadedOutlines draws the
+        // frame at this same strength, and inking it again would double
+        // it. Ground-floor openings rely on the hole case: no slab
+        // overlaps them on screen (PR #313 review).
         unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink));
-        glStencilFunc(GL_EQUAL, 1, 0xFF);
+        glStencilFunc(GL_EQUAL, 0, 0x02);
         drawThick(nearSegments);
       }
       if (!farSegments.empty()) {
@@ -4416,6 +4452,21 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink * 0.5f));
         glStencilFunc(GL_ALWAYS, 0, 0xFF);
         drawThick(farSegments);
+      }
+      if (!floorSegments.empty()) {
+        // Same ink as the edge pass gives a pronounced interior's edge.
+        const float interiorInk = std::clamp(debug.nprSettings.outlineStrength, 0.0f, 1.0f) *
+                                  kInteriorFadeOpacity * 0.88f;
+        unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, interiorInk));
+        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+        drawThick(floorSegments);
+      }
+      if (!directFloorSegments.empty()) {
+        // A floor that itself hides the probe keeps shell opacity; so does
+        // its outline.
+        unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink));
+        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+        drawThick(directFloorSegments);
       }
       glStencilFunc(GL_EQUAL, 0, 0xFF);
       glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);

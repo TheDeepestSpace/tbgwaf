@@ -1,0 +1,48 @@
+name: cover_firefight_exposed_stays_standing
+description: >
+  Issue #292 cover vs an ongoing firefight, exposed case: a figure walks
+  along a tall wall to a cover tile while seeing (and shooting at, rolls
+  pinned to misses) an enemy to the south-east. The wall is on the figure's
+  north side, so it would not stop that enemy's shots at all -- hugging it
+  would be useless. On arrival the figure keeps standing (no cover pose) and
+  keeps reacting per the playbook for as long as the enemy stays in sight.
+
+map:
+  obstacles:
+    - {center: [0, 5], half_extent: [6.0, 0.5], height: 3.0, climbable: false}
+
+playbook:
+  blue: {moving_seen: shoot_continue, moving_unseen: shoot_continue, stationary_seen: shoot}
+
+# Every roll misses: both figures survive, so the stand-off is still live
+# when the pose is judged.
+shot_rolls: [0.99]
+
+units:
+  # Walks east along the wall; the enemy stays in its forward cone the whole
+  # way, and again after the arrival turn (back to the wall = facing south).
+  - {id: 0, team: blue, position: [-8, 0, 3.2], facing_degrees: 0}
+  # South-east, in the open, looking at the walker: the wall north of the
+  # cover tile cannot block its line.
+  - {id: 1, team: red, position: [6, 0, -6], facing_degrees: 150}
+
+camera:
+  target: [0, 0]
+  zoom: 5
+
+script:
+  - action: move
+    actor: 0
+    destination: [0, 0, 4]
+    comment: Fires on the move; on arrival the wall is useless, so no cover pose
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [0, 0, 4], tolerance: 0.05}
+  # Not pinned to the back-to-wall facing: the figure keeps reacting after
+  # arrival, and the shot beat swings it onto the enemy's bearing.
+  - assert: {unit: 0, facing_degrees: -59, tolerance: 1.0}
+  # No pose: the sighted enemy's shots would not be stopped by the wall.
+  - assert: {unit: 0, cover_pose: none}
+  - assert: {unit: 1, alive: true}
+  - assert: {unit: 0, alive: true}

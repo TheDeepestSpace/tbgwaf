@@ -32,6 +32,10 @@ constexpr float kCoverEdgeReach = 0.75f;     // How far along the wall an open e
 constexpr float kCrouchedHeight = 1.15f;
 constexpr float kCoverMinHeight = 0.7f * kCrouchedHeight;  // Blocker must rise this far above the feet.
 constexpr float kCoverStandHeight = 1.4f;  // At/above this the figure stands with its back to it.
+// Chest height of a figure holding the crouch pose, for judging whether a
+// blocker actually lies on an enemy's shot line at it (it sits below
+// kCoverMinHeight, so any qualifying blocker crossing that line stops it).
+constexpr float kCrouchChestHeight = 0.7f;
 
 struct CoverTile {
   CoverKind kind = CoverKind::None;

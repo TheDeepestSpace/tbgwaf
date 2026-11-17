@@ -711,6 +711,11 @@ class GameLogic {
   void EnsureNavMeshFor(const Unit& mover, const glm::vec3& origin);
   void RefreshMoveFrontier();
   void UpdateCoverPoses(float dtSeconds);
+  // True when a living enemy `unit` can see could still land a shot on the
+  // chest `unit` would hold in cover pose `poseKind` (1 stand, 2 crouch):
+  // the blockers do not cross that shot line, so taking the pose is useless
+  // against it. See UpdateCoverPoses.
+  bool CoverExposedToSightedEnemy(const Unit& unit, uint8_t poseKind) const;
   // Rebuilds ziplineFrontiers_ (and their navmeshes) for a leg from `origin`.
   void BuildZiplineFrontiers(const Unit& mover, const glm::vec3& origin);
   // Plans one leg from `from` to `goal`: a plain walk when affordable within

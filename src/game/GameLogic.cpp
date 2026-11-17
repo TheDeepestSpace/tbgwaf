@@ -996,6 +996,13 @@ void GameLogic::Update(float dtSeconds) {
 // Cover pose state (issue #290): a figure standing still on a cover tile eases
 // into the pose; moving or downed figures ease out. Classification is redone
 // only when the figure's position changes.
+//
+// Taking the pose defers to the fight (issue #292): cover that would not
+// stop a sighted enemy's shots is useless, so while the figure sees a living
+// enemy whose line to its in-cover chest the blockers do not cross, it stays
+// standing (free to keep shooting per the playbook). The instant every such
+// enemy is dead or out of sight -- including an enemy the blockers *do*
+// protect from -- it takes the pose as normal.
 void GameLogic::UpdateCoverPoses(float dtSeconds) {
   for (Unit& unit : scene_.units) {
     if (!unit.alive || IsUnitMoving(unit.id) || unit.rideTravel >= 0.0f) {
@@ -1007,14 +1014,32 @@ void GameLogic::UpdateCoverPoses(float dtSeconds) {
       float yaw = 0.0f;
       const CoverTile tile = ClassifyCover(sightObstacles_, unit.position, &yaw);
       // Pose: 0 none, 1 back against the wall (tall cover), 2 crouch (low cover).
-      unit.coverKind = tile.kind == CoverKind::None ? 0 : (tile.crouch ? 2 : 1);
+      unit.coverTileKind = tile.kind == CoverKind::None ? 0 : (tile.crouch ? 2 : 1);
       unit.coverYaw = yaw;
     }
+    unit.coverKind = unit.coverTileKind != 0 &&
+                             CoverExposedToSightedEnemy(unit, unit.coverTileKind)
+                         ? 0
+                         : unit.coverTileKind;
     const float target = unit.coverKind != 0 ? 1.0f : 0.0f;
     const float step = dtSeconds * 3.0f;
     unit.coverBlend = unit.coverBlend < target ? std::min(target, unit.coverBlend + step)
                                                : std::max(target, unit.coverBlend - step);
   }
+}
+
+bool GameLogic::CoverExposedToSightedEnemy(const Unit& unit, uint8_t poseKind) const {
+  const float chestY = poseKind == 2 ? kCrouchChestHeight : constants::kTorsoAimHeight;
+  const glm::vec3 chest = unit.position + glm::vec3(0.0f, chestY, 0.0f);
+  for (const Unit& enemy : scene_.units) {
+    if (!enemy.alive || enemy.team == unit.team) continue;
+    if (!CanUnitSee(unit, enemy, sightObstacles_, scene_.walkSurfaces, scene_.ground)) continue;
+    if (LineOfSightClear(enemy.EyePosition(), chest, sightObstacles_, scene_.walkSurfaces,
+                         scene_.ground)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void GameLogic::UpdateUnrecorded(float dtSeconds) {

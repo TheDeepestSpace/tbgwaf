@@ -10,7 +10,9 @@ map:
 
 units:
   - {id: 0, team: blue, position: [0, 0, -1], facing_degrees: 0}
-  - {id: 1, team: red, position: [0, 0, -14], facing_degrees: 180}
+  # Behind the wall, out of the figure's sight: a sighted enemy the cover
+  # cannot stop would keep the figure standing (issue #292).
+  - {id: 1, team: red, position: [0, 0, 14], facing_degrees: -90}
 
 camera:
   target: [0, 3]
@@ -24,7 +26,7 @@ script:
     comment: Wall is toward +Z; asked to face +X but ends with its back to the wall
   - action: move
     actor: 1
-    destination: [0, 0, -12]
+    destination: [0, 0, 12]
   - action: commit
   - assert: {unit: 0, position: [0, 0, 4], tolerance: 0.05}
   - assert: {unit: 0, facing_degrees: -90, tolerance: 0.5}

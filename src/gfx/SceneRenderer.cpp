@@ -246,7 +246,9 @@ uniform int uThermal;
 uniform int uThermalBlackHot;  // 1 = hot reads dark (the review reference), 0 = white-hot.
 uniform int uThermalMaterial;  // ThermalMaterial; only figures use uColor.
 uniform int uNpr;
-uniform int uFadedMark;  // G-buffer pass for outlining see-through geometry: 1 shell, 2 interior.
+// G-buffer pass for outlining see-through geometry: 1 shell, 2 interior,
+// 3 interior drawn at the shell's opacity.
+uniform int uFadedMark;
 uniform int uCelBands;
 uniform float uCelSoftness;
 layout(location = 0) out vec4 FragColor;
@@ -296,8 +298,10 @@ void main() {
   vec3 viewDir = normalize(uViewPos - vWorldPos);
   if (dot(normal, viewDir) < 0.0) normal = -normal;
   // Alpha tags see-through geometry for its outline-only pass: 0.75 the
-  // faded shell, 0.5 the pronounced interior (AmbientOcclusion kFadedOutline).
-  float fadedTag = uFadedMark == 1 ? 0.75 : (uFadedMark == 2 ? 0.5 : 1.0);
+  // faded shell, 0.5 the pronounced interior, 0.625 an interior surface at
+  // the shell's opacity (AmbientOcclusion kFadedOutline).
+  float fadedTag = uFadedMark == 1 ? 0.75
+                 : (uFadedMark == 2 ? 0.5 : (uFadedMark == 3 ? 0.625 : 1.0));
   WorldNormal = vec4(normal * 0.5 + 0.5, fadedTag);
 
   float diffuse = max(dot(normal, -uLightDir), 0.0);
@@ -4247,11 +4251,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // Outlines apply to the see-through blocks in both the NPR view and the
     // NPR-over-AO view.
     const bool fadedOutlines = thermalAo && debug.npr;
-    // `mark`: the G-buffer pass, which tags each draw with its opacity class
-    // (uFadedMark) for CompositeFadedOutlines.
-    const auto drawSurface = [&](int surface, bool pronounced, bool mark) {
+    // `mark`: the G-buffer pass, which tags each draw with its class
+    // (uFadedMark) for CompositeFadedOutlines. A building's floor or stair
+    // stays an interior there even at the shell's opacity (`interior`), so
+    // its edge against the shell is still outlined.
+    const auto drawSurface = [&](int surface, bool pronounced, bool mark, bool interior) {
       thermalMaterial(ThermalMaterial::Concrete);
-      if (mark) litShader_.SetInt("uFadedMark", pronounced ? 2 : 1);
+      if (mark) litShader_.SetInt("uFadedMark", pronounced ? 2 : (interior ? 3 : 1));
       BuildWalkSurface(walkSurfaces, surface, &geometryMesh_);
       const float opacity = pronounced ? kInteriorFadeOpacity : kOccluderFadeOpacity;
       DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
@@ -4261,7 +4267,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       // A floor slab that itself hides a probe (a figure on the storey under
       // it) keeps the shell opacity, so what is below it still shows through.
       for (const FadedOccluder& f : interior) {
-        drawSurface(f.surface, !directSurface[f.surface], mark);
+        drawSurface(f.surface, !directSurface[f.surface], mark, true);
       }
     };
     const auto drawShellGeometry = [&](bool mark) {
@@ -4300,7 +4306,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                          color);
           }
         } else {
-          drawSurface(f.surface, false, mark);
+          drawSurface(f.surface, false, mark, false);
         }
       }
     };

@@ -268,7 +268,7 @@ void main() {
 // Outline-only pass for see-through geometry: only pixels the faded redraw
 // tagged get an edge, blended as dark ink at that layer's opacity (normal
 // alpha 0.75 = the shell at uOpacity, 0.5 = a faded building's floors and
-// stairs at uInteriorOpacity).
+// stairs at uInteriorOpacity, 0.625 = such a floor at uOpacity).
 const char* kFadedOutline = R"(#version 300 es
 precision highp float;
 precision highp sampler2D;
@@ -290,17 +290,43 @@ vec3 WorldPosition(vec2 uv, float depth) {
 }
 //EDGE_FUNCTION
 
+// 0 = not see-through, 1 = shell, 2 = pronounced interior, 3 = interior at
+// the shell's opacity.
+int FadedLayer(float tag) {
+  if (abs(tag - 0.75) < 0.05) return 1;
+  if (abs(tag - 0.5) < 0.05) return 2;
+  if (abs(tag - 0.625) < 0.05) return 3;
+  return 0;
+}
+
 void main() {
   float depth = texture(uDepth, vUV * uUvScale).r;
   vec4 normalSample = texture(uNormal, vUV * uUvScale);
   if (depth >= 1.0) discard;
-  float opacity;
-  if (abs(normalSample.a - 0.75) < 0.1) opacity = uOpacity;
-  else if (abs(normalSample.a - 0.5) < 0.1) opacity = uInteriorOpacity;
-  else discard;
+  int layer = FadedLayer(normalSample.a);
+  if (layer == 0) discard;
+  float opacity = layer == 2 ? uInteriorOpacity : uOpacity;
   vec3 p = WorldPosition(vUV, depth);
   vec3 n = normalize(normalSample.xyz * 2.0 - 1.0);
-  float amount = OutlineEdge(p, n) * uOutline * opacity;
+  float edge = OutlineEdge(p, n);
+  // A floor or stair against its building's shell is always an edge. Through
+  // a wall the shell pixel next to the slab is that near wall, a depth step
+  // OutlineEdge picks up; seen directly through a window opening it is the
+  // wall the slab butts against, a contact crease with no depth step, which
+  // the outline LOD fades out -- the slab then lost its outline exactly
+  // where it was in plain view (PR #313 review).
+  if (uThickness > 0.0) {
+    vec2 texel = 1.0 / uPaneSize;
+    vec2 offsets[4] = vec2[4](vec2(1, 0), vec2(-1, 0), vec2(0, 1), vec2(0, -1));
+    for (int i = 0; i < 4; ++i) {
+      vec2 uv = vUV + offsets[i] * uThickness * texel;
+      if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) continue;
+      if (texture(uDepth, uv * uUvScale).r >= 1.0) continue;
+      int other = FadedLayer(texture(uNormal, uv * uUvScale).a);
+      if (other != 0 && (other == 1) != (layer == 1)) edge = 1.0;
+    }
+  }
+  float amount = edge * uOutline * opacity;
   FragColor = vec4(vec3(0.0), clamp(amount, 0.0, 1.0) * 0.88);
 }
 )";

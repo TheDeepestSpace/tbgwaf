@@ -934,6 +934,37 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
       game.UpdateSightingMemory(hooks.tickSeconds);
     }
   }
+  // Cover tail: the figure only eases into its crouch/lean after it stops
+  // (walk ease-out + pose blend, ~1 s), so a video that ends at arrival never
+  // shows it. Keep ticking until the pose has settled, then hold a beat.
+  if (hooks.onFrame && hooks.tickSeconds > 0.0f && !playback.Active()) {
+    auto Settling = [&] {
+      for (const Unit& unit : game.GetScene().units) {
+        if (unit.alive && unit.coverKind != 0 && unit.coverBlend < 1.0f) return true;
+      }
+      return false;
+    };
+    auto AnyCover = [&] {
+      for (const Unit& unit : game.GetScene().units) {
+        if (unit.alive && unit.coverKind != 0) return true;
+      }
+      return false;
+    };
+    constexpr float kMaxSettleSeconds = 3.0f;
+    constexpr float kHoldSeconds = 1.0f;
+    float elapsed = 0.0f;
+    float held = 0.0f;
+    while (AnyCover() && elapsed < kMaxSettleSeconds + kHoldSeconds) {
+      hooks.onFrame(game);
+      game.Update(hooks.tickSeconds);
+      game.UpdateSightingMemory(hooks.tickSeconds);
+      elapsed += hooks.tickSeconds;
+      if (!Settling()) {
+        held += hooks.tickSeconds;
+        if (held >= kHoldSeconds) break;
+      }
+    }
+  }
   return result;
 }
 

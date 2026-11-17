@@ -268,7 +268,11 @@ void main() {
 // Outline-only pass for see-through geometry: only pixels the faded redraw
 // tagged get an edge, blended as dark ink at that layer's opacity (normal
 // alpha 0.75 = the shell at uOpacity, 0.5 = a faded building's floors and
-// stairs at uInteriorOpacity, 0.625 = such a floor at uOpacity).
+// stairs at uInteriorOpacity, 0.625 = such a floor at uOpacity, 0.375 = a
+// stair seen through a floor slab, at half the interior's ink).
+// This pass does not use the shared OutlineEdge: its edge taps are
+// layer-aware (see the loop below), so it carries its own copy of the
+// depth/normal test and LOD from kEdgeFunction.
 const char* kFadedOutline = R"(#version 300 es
 precision highp float;
 precision highp sampler2D;
@@ -282,20 +286,23 @@ uniform float uThickness;
 uniform float uOutline;
 uniform float uOpacity;          // Opacity of the see-through shell.
 uniform float uInteriorOpacity;  // Opacity of a faded building's floors and stairs.
+uniform float uPixelScale;  // World size of one pixel at unit view distance.
+uniform float uDetailSize;  // World size of the finest outlined detail (0 = no LOD).
 out vec4 FragColor;
 
 vec3 WorldPosition(vec2 uv, float depth) {
   vec4 p = uInverseViewProjection * vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
   return p.xyz / p.w;
 }
-//EDGE_FUNCTION
 
 // 0 = not see-through, 1 = shell, 2 = pronounced interior, 3 = interior at
-// the shell's opacity.
+// the shell's opacity, 4 = a stair seen through a floor slab (the faded
+// redraw kept the stair's depth/normal under the slab that covers it).
 int FadedLayer(float tag) {
   if (abs(tag - 0.75) < 0.05) return 1;
   if (abs(tag - 0.5) < 0.05) return 2;
   if (abs(tag - 0.625) < 0.05) return 3;
+  if (abs(tag - 0.375) < 0.05) return 4;
   return 0;
 }
 
@@ -305,25 +312,51 @@ void main() {
   if (depth >= 1.0) discard;
   int layer = FadedLayer(normalSample.a);
   if (layer == 0) discard;
-  float opacity = layer == 2 ? uInteriorOpacity : uOpacity;
+  // A stair behind a slab inks at half the interior's opacity, like the
+  // far-wall opening frames: visible, but clearly the blocked part.
+  float opacity = layer == 2 ? uInteriorOpacity
+                : (layer == 4 ? uInteriorOpacity * 0.5 : uOpacity);
   vec3 p = WorldPosition(vUV, depth);
   vec3 n = normalize(normalSample.xyz * 2.0 - 1.0);
-  float edge = OutlineEdge(p, n);
-  // A floor or stair against its building's shell is always an edge. Through
-  // a wall the shell pixel next to the slab is that near wall, a depth step
-  // OutlineEdge picks up; seen directly through a window opening it is the
-  // wall the slab butts against, a contact crease with no depth step, which
-  // the outline LOD fades out -- the slab then lost its outline exactly
-  // where it was in plain view (PR #313 review).
-  if (uThickness > 0.0) {
+  float edge = 0.0;
+  if (uThickness > 0.0 && uOutline > 0.0) {
     vec2 texel = 1.0 / uPaneSize;
+    float viewDist = max(length(p - WorldPosition(vUV, 0.0)), 0.001);
+    float detail = uDetailSize > 0.0
+        ? smoothstep(1.5, 3.0, uDetailSize / max(viewDist * uPixelScale, 1e-6))
+        : 1.0;
     vec2 offsets[4] = vec2[4](vec2(1, 0), vec2(-1, 0), vec2(0, 1), vec2(0, -1));
     for (int i = 0; i < 4; ++i) {
       vec2 uv = vUV + offsets[i] * uThickness * texel;
       if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) continue;
-      if (texture(uDepth, uv * uUvScale).r >= 1.0) continue;
-      int other = FadedLayer(texture(uNormal, uv * uUvScale).a);
-      if (other != 0 && (other == 1) != (layer == 1)) edge = 1.0;
+      float d = texture(uDepth, uv * uUvScale).r;
+      if (d >= 1.0) { edge = 1.0; continue; }  // Silhouette against the void.
+      vec4 sampleNormal = texture(uNormal, uv * uUvScale);
+      int other = FadedLayer(sampleNormal.a);
+      vec3 q = WorldPosition(uv, d);
+      float plane = abs(dot(q - p, n));
+      // A floor or stair against its building's shell is always an edge.
+      // Through a wall the shell pixel next to the slab is that near wall, a
+      // depth step the plain test picks up; seen directly through a window
+      // opening it is the wall the slab butts against, a contact crease with
+      // no depth step, which the outline LOD fades out -- the slab then lost
+      // its outline exactly where it was in plain view (PR #313 review).
+      if (other != 0 && (other == 1) != (layer == 1)) { edge = 1.0; continue; }
+      if (layer > 1 && other > 1 && (other == 4) != (layer == 4)) {
+        // Direct-to-covered stair boundary. When the surface runs on
+        // continuously, the tag flip is the covering slab's silhouette
+        // crossing the stair: ink it. A depth step instead is the stair's
+        // own silhouette against the slab that covers it; only the stair
+        // side inks that line, at its dim opacity -- the slab, which really
+        // continues over the stair, must not ink a full-strength edge there.
+        if (plane / viewDist < 0.012) { edge = 1.0; continue; }
+        if (layer != 4) continue;
+      }
+      float major = smoothstep(0.3, 0.9, plane);  // Step size in world units.
+      float depthEdge = smoothstep(0.006, 0.03, plane / viewDist) * max(detail, major);
+      vec3 sn = normalize(sampleNormal.xyz * 2.0 - 1.0);
+      float normalEdge = smoothstep(0.3, 0.7, 1.0 - dot(n, sn)) * detail;
+      edge = max(edge, max(depthEdge, normalEdge));
     }
   }
   float amount = edge * uOutline * opacity;
@@ -351,7 +384,7 @@ bool AmbientOcclusion::Init() {
   return occlusionShader_.Compile(kVertex, kOcclusion) &&
          compositeShader_.Compile(kVertex, WithEdgeFunction(kComposite).c_str()) &&
          nprShader_.Compile(kVertex, WithEdgeFunction(kNpr).c_str()) &&
-         fadedOutlineShader_.Compile(kVertex, WithEdgeFunction(kFadedOutline).c_str());
+         fadedOutlineShader_.Compile(kVertex, kFadedOutline);
 }
 
 void AmbientOcclusion::Destroy() {

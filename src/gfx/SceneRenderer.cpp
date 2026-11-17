@@ -247,7 +247,7 @@ uniform int uThermalBlackHot;  // 1 = hot reads dark (the review reference), 0 =
 uniform int uThermalMaterial;  // ThermalMaterial; only figures use uColor.
 uniform int uNpr;
 // G-buffer pass for outlining see-through geometry: 1 shell, 2 interior,
-// 3 interior drawn at the shell's opacity.
+// 3 interior drawn at the shell's opacity, 4 a stair seen through a slab.
 uniform int uFadedMark;
 uniform int uCelBands;
 uniform float uCelSoftness;
@@ -299,9 +299,11 @@ void main() {
   if (dot(normal, viewDir) < 0.0) normal = -normal;
   // Alpha tags see-through geometry for its outline-only pass: 0.75 the
   // faded shell, 0.5 the pronounced interior, 0.625 an interior surface at
-  // the shell's opacity (AmbientOcclusion kFadedOutline).
+  // the shell's opacity, 0.375 a stair seen through a floor slab
+  // (AmbientOcclusion kFadedOutline).
   float fadedTag = uFadedMark == 1 ? 0.75
-                 : (uFadedMark == 2 ? 0.5 : (uFadedMark == 3 ? 0.625 : 1.0));
+                 : (uFadedMark == 2 ? 0.5
+                 : (uFadedMark == 3 ? 0.625 : (uFadedMark == 4 ? 0.375 : 1.0)));
   WorldNormal = vec4(normal * 0.5 + 0.5, fadedTag);
 
   float diffuse = max(dot(normal, -uLightDir), 0.0);
@@ -4251,23 +4253,29 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // Outlines apply to the see-through blocks in both the NPR view and the
     // NPR-over-AO view.
     const bool fadedOutlines = thermalAo && debug.npr;
-    // `mark`: the G-buffer pass, which tags each draw with its class
-    // (uFadedMark) for CompositeFadedOutlines. A building's floor or stair
-    // stays an interior there even at the shell's opacity (`interior`), so
-    // its edge against the shell is still outlined.
-    const auto drawSurface = [&](int surface, bool pronounced, bool mark, bool interior) {
+    // `markTag`: the uFadedMark class tag for the G-buffer pass feeding
+    // CompositeFadedOutlines (0 in the colour pass). A building's floor or
+    // stair stays an interior there even at the shell's opacity (3), so its
+    // edge against the shell is still outlined.
+    const auto drawSurface = [&](int surface, bool pronounced, int markTag) {
       thermalMaterial(ThermalMaterial::Concrete);
-      if (mark) litShader_.SetInt("uFadedMark", pronounced ? 2 : (interior ? 3 : 1));
+      if (markTag) litShader_.SetInt("uFadedMark", markTag);
       BuildWalkSurface(walkSurfaces, surface, &geometryMesh_);
       const float opacity = pronounced ? kInteriorFadeOpacity : kOccluderFadeOpacity;
       DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                    glm::vec4(kDeckColor, opacity));
     };
-    const auto drawInteriorGeometry = [&](bool mark) {
+    // `stairs`: -1 draws every interior surface (the colour pass), 1 only
+    // the stair flights, 0 only the floor slabs. `coveredTag` re-tags the
+    // draw as a stair seen through a slab (uFadedMark 4).
+    const auto drawInteriorGeometry = [&](bool mark, int stairs, bool coveredTag) {
       // A floor slab that itself hides a probe (a figure on the storey under
       // it) keeps the shell opacity, so what is below it still shows through.
       for (const FadedOccluder& f : interior) {
-        drawSurface(f.surface, !directSurface[f.surface], mark, true);
+        if (stairs >= 0 && (walkSurfaces[f.surface].stair ? 1 : 0) != stairs) continue;
+        const bool pronounced = !directSurface[f.surface];
+        drawSurface(f.surface, pronounced,
+                    mark ? (coveredTag ? 4 : (pronounced ? 2 : 3)) : 0);
       }
     };
     const auto drawShellGeometry = [&](bool mark) {
@@ -4306,7 +4314,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                          color);
           }
         } else {
-          drawSurface(f.surface, false, mark, false);
+          drawSurface(f.surface, false, mark ? 1 : 0);
         }
       }
     };
@@ -4324,10 +4332,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // nearer shell covers it on screen, so its openings are drawn
     // everywhere, dimmer than a regular edge (PR #313 review).
     // Depth-tested against the opaque scene like the rest of the
-    // see-through pass. The rectangle sits on the wall face the camera sees
-    // (the outer face of a near wall, the inner face of the far wall seen
-    // through the building), which is where the edge pass puts its single
-    // frame per opening, so the two line up.
+    // see-through pass. A window's rectangle sits on the wall face the
+    // camera sees (the outer face of a near wall, the inner face of the far
+    // wall seen through the building), which is where the edge pass puts
+    // its single frame per opening, so the two line up. A doorway's always
+    // sits on the outer face (see below).
     const auto drawOpeningEdgesOverInterior = [&]() {
       const tactics::Scene& scene = game.GetScene();
       // Wall thickness per faded enterable building, read off its wall
@@ -4367,7 +4376,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         const glm::vec2 out(dir.y, -dir.x);  // Outward, as OpeningBasisFor.
         glm::vec2 p0 = a + dir * o.u0, p1 = a + dir * o.u1;
         const bool farWall = glm::dot(glm::vec2(cameraPos.x, cameraPos.z) - a, out) < 0.0f;
-        if (farWall) {
+        // A doorway keeps its frame on the outer wall face from every side:
+        // flipping to the inner face whenever the camera looks at the wall
+        // from within read as two different doorway outlines (PR #313
+        // review). Window frames on a far wall stay on the inner face the
+        // camera actually sees, where the edge pass puts its frame.
+        if (farWall && o.kind != tactics::FacadeOpening::Kind::Door) {
           const auto t = wallThickness.find(o.building);
           const glm::vec2 inset = out * (t == wallThickness.end() ? 0.0f : t->second);
           p0 -= inset;
@@ -4440,21 +4454,53 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       litShader_.Use();
       glEnable(GL_STENCIL_TEST);
       // Interiors resolve among themselves by depth (BeginFaded leaves
-      // depth writes on); the stencil only records that an interior claimed
-      // the pixel so the shell is skipped there. A first-claim cap
-      // (GL_EQUAL 0, as the colour pass uses) would let the slab drawn
-      // first -- nearest surface *center*, not nearest at this pixel --
-      // own pixels where another slab is actually in front, and the slab
-      // seen through a window then lost its outline to whatever glancing
-      // slab happened to claim its pixels (PR #313 review).
-      glStencilFunc(GL_ALWAYS, 0, 0xFF);
-      glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
-      drawInteriorGeometry(true);
+      // depth writes on); the stencil records which class claimed the pixel
+      // so later draws can be gated per class. A first-claim cap (GL_EQUAL
+      // 0, as the colour pass uses) would let the slab drawn first --
+      // nearest surface *center*, not nearest at this pixel -- own pixels
+      // where another slab is actually in front, and the slab seen through
+      // a window then lost its outline to whatever glancing slab happened
+      // to claim its pixels (PR #313 review).
+      // Stairs draw first and keep their pixels even under a slab, so the
+      // stair outline shows through the floor slabs -- exactly the part
+      // that would be visible were the slabs absent (the depth buffer still
+      // holds the opaque scene, so anything else occluding the stair wins),
+      // dimmer than ink in plain view (PR #313 review). Stencil bits:
+      // 0x01 an interior claimed the pixel (the shell is skipped there),
+      // 0x02 a stair owns it, 0x04 a slab is nearer (the stair shows
+      // through that slab).
+      glStencilFunc(GL_ALWAYS, 0x03, 0xFF);
+      glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+      glStencilMask(0x03);
+      drawInteriorGeometry(true, 1, false);
+      // Which stair pixels does a slab cover? Depth-test the slabs against
+      // the stair depths, writing nothing but the stencil bit.
+      glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+      glDepthMask(GL_FALSE);
+      glStencilFunc(GL_EQUAL, 0x06, 0x02);
+      glStencilMask(0x04);
+      drawInteriorGeometry(true, 0, false);
+      glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+      // Re-tag the covered stair pixels as seen-through-a-slab (dim ink);
+      // GL_LEQUAL re-accepts exactly the fragments the first pass kept.
+      glDepthFunc(GL_LEQUAL);
+      glStencilFunc(GL_EQUAL, 0x04, 0x04);
+      glStencilMask(0x00);
+      drawInteriorGeometry(true, 1, true);
+      glDepthFunc(GL_LESS);
+      glDepthMask(GL_TRUE);
+      // Slabs, by depth among themselves, everywhere no stair owns the pixel.
+      glStencilFunc(GL_EQUAL, 0x01, 0x02);
+      glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+      glStencilMask(0x01);
+      drawInteriorGeometry(true, 0, false);
       // Shell pieces only where no interior claimed the pixel; among
       // themselves the depth test keeps the nearest.
-      glStencilFunc(GL_EQUAL, 0, 0xFF);
+      glStencilFunc(GL_EQUAL, 0, 0x01);
       glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+      glStencilMask(0x00);
       drawShellGeometry(true);
+      glStencilMask(0xFF);
       litShader_.SetInt("uFadedMark", 0);
       glDisable(GL_STENCIL_TEST);
       glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
@@ -4468,7 +4514,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glEnable(GL_STENCIL_TEST);
     glStencilFunc(GL_EQUAL, 0, 0xFF);
     glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
-    drawInteriorGeometry(false);
+    drawInteriorGeometry(false, -1, false);
     // Shell claims its pixels as stencil 2 (bit-invert under a 0x02 write
     // mask) so the opening edges can tell them from interior pixels (1).
     glStencilMask(0x02);

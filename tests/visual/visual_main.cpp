@@ -559,6 +559,54 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     }
     rig.playDt = 1.0f / kVideoFps;
     if (options.video && videoOk) rig.onFrame = drawFrame;
+    // Cover tail (issue #292): the crouch/lean eases in via the mirror's own
+    // GameLogic::Update, which the live app ticks every frame while planning
+    // but this runner never does -- round playback goes through
+    // RemoteClient::Update (snapshot posing only), and the hold frames are
+    // static. Without these ticks the recorded video never shows the pose at
+    // all. Tick both mirrors after each round until every in-cover figure
+    // has settled, then hold a beat on the pose.
+    auto settleCoverPoses = [&] {
+      if (!options.video || !videoOk) return;
+      constexpr float kMaxSettleSeconds = 3.0f;
+      constexpr float kHoldSeconds = 1.0f;
+      const float dt = 1.0f / kVideoFps;
+      auto tick = [&] {
+        for (tactics::testing::Player* p : {&rig.Blue(), &rig.Red()}) {
+          p->game.Update(dt);
+          p->game.UpdateSightingMemory(dt);
+        }
+        drawFrame();
+      };
+      auto anyCover = [&] {
+        for (tactics::testing::Player* p : {&rig.Blue(), &rig.Red()}) {
+          for (const tactics::Unit& unit : p->game.GetScene().units) {
+            if (unit.alive && unit.coverKind != 0) return true;
+          }
+        }
+        return false;
+      };
+      auto settling = [&] {
+        for (tactics::testing::Player* p : {&rig.Blue(), &rig.Red()}) {
+          for (const tactics::Unit& unit : p->game.GetScene().units) {
+            if (unit.alive && unit.coverKind != 0 && unit.coverBlend < 1.0f) return true;
+          }
+        }
+        return false;
+      };
+      tick();  // Classification runs on the first Update after arrival.
+      if (!anyCover()) return;
+      float elapsed = dt;
+      float held = 0.0f;
+      while (elapsed < kMaxSettleSeconds + kHoldSeconds) {
+        tick();
+        elapsed += dt;
+        if (!settling()) {
+          held += dt;
+          if (held >= kHoldSeconds) break;
+        }
+      }
+    };
     int completed = 0;
     auto finishAction = [&] {
       if (!options.video || !videoOk) return;
@@ -573,7 +621,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
       if (!step.action) continue;
       const ScenarioAction& action = *step.action;
       if (action.kind == ScenarioAction::Kind::Commit) {
-        rig.Commit();
+        if (rig.Commit()) settleCoverPoses();
       } else if (action.kind == ScenarioAction::Kind::NewGame) {
         rig.NewMatch();
       } else if (action.kind == ScenarioAction::Kind::Wait) {

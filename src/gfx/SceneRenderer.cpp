@@ -4449,8 +4449,33 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           for (const FadedOccluder& f : interior) {
             if (f.surface == self) continue;
             const tactics::WalkSurface& s = walkSurfaces[f.surface];
-            if (s.vertices.size() < 3 || !tactics::SurfaceContainsXZ(s, q.x, q.y)) continue;
-            if (std::fabs(tactics::SurfaceHeightAt(s, q.x, q.y) - p.y) < 0.2f) return true;
+            if (s.vertices.size() < 3) continue;
+            if (tactics::SurfaceContainsXZ(s, q.x, q.y)) {
+              if (std::fabs(tactics::SurfaceHeightAt(s, q.x, q.y) - p.y) < 0.2f) return true;
+              continue;
+            }
+            // Where patches meet at a shallow corner, the neighbouring patch
+            // is narrower there than the probe distance and the probe lands
+            // beyond it, which inked a short stray whisker at the corner
+            // (PR #313 review). Lying on the neighbour's outline is the same
+            // seam whether or not the probe hit its interior.
+            float d2 = std::numeric_limits<float>::max();
+            for (size_t e = 0; e < s.vertices.size(); ++e) {
+              const glm::vec2 e0(s.vertices[e].x, s.vertices[e].z);
+              const glm::vec2 e1(s.vertices[(e + 1) % s.vertices.size()].x,
+                                 s.vertices[(e + 1) % s.vertices.size()].z);
+              const glm::vec2 d = e1 - e0;
+              const float len2 = glm::dot(d, d);
+              const glm::vec2 pp(p.x, p.z);
+              const float t =
+                  len2 < 1e-8f ? 0.0f : std::clamp(glm::dot(pp - e0, d) / len2, 0.0f, 1.0f);
+              const glm::vec2 c = e0 + d * t;
+              d2 = std::min(d2, glm::dot(pp - c, pp - c));
+            }
+            if (d2 <= 0.15f * 0.15f &&
+                std::fabs(tactics::SurfaceHeightAt(s, p.x, p.z) - p.y) < 0.2f) {
+              return true;
+            }
           }
           return false;
         };
@@ -4533,12 +4558,21 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
       if (!coveredSegments.empty()) {
         // Same dim ink as a stair seen through a slab: half the interior
-        // layer's outline strength.
+        // layer's outline strength. The four taps of drawThick overlap on
+        // most pixels, and blending each one in compounded the dim ink
+        // toward a full-strength line (PR #313 review); a free stencil bit
+        // (0x04 -- the colour pass leaves 0, 1 and 2) caps every pixel to
+        // one blended tap. Nothing reads the stencil after this draw before
+        // the pass clears it.
         const float coveredInk = std::clamp(debug.nprSettings.outlineStrength, 0.0f, 1.0f) *
                                  kInteriorFadeOpacity * 0.5f * 0.88f;
         unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, coveredInk));
-        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+        glStencilFunc(GL_EQUAL, 0, 0x04);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
+        glStencilMask(0x04);
         drawThick(coveredSegments);
+        glStencilMask(0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
       }
       glStencilFunc(GL_EQUAL, 0, 0xFF);
       glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);

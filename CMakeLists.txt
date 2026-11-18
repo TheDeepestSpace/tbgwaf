@@ -553,8 +553,10 @@ else()
       # 83 scenarios take ~230 s on the CI runner and the suite grows with
       # each PR that pins a new rendering behaviour; 300 s left no headroom
       # (PR #304's two see-through scenarios tipped it over).
+      # Runs alongside other heavy ctest jobs; wall time varies 230-510+ s, so
+      # 600 s flaked (cover scenarios now also settle their pose blend).
       set_tests_properties(visual_tests PROPERTIES
-        TIMEOUT 600
+        TIMEOUT 1200
         ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
       )
       if(TBGWAF_BUILD_SERVER)
@@ -568,7 +570,7 @@ else()
           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         )
         set_tests_properties(visual_server_tests PROPERTIES
-          TIMEOUT 600
+          TIMEOUT 1200
           ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
         )
       endif()

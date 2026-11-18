@@ -10,6 +10,7 @@
 #include <GLES3/gl3.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -163,6 +164,29 @@ int main(int argc, char** argv) {
   cases.push_back({"city_terrain_elevated_seed_16",
                    tactics::GenerateUrbanMap(16, terrainElevatedConfig), 180.0f,
                    /*showNavMesh=*/false, /*pitchOffset=*/-0.4f, /*yawOffset=*/-1.0f});
+  // Roads tunnelled through a raised level (issue #156): the artery (seed
+  // 72) and a local street (seed 31) hold their grade through the band as a
+  // two-portal bore under the restored terrain roof, which the streets above
+  // cross. Framed low at the entrance portal, looking along the road.
+  {
+    tactics::MapGeneratorConfig tunnelConfig = terrainConfig;
+    tunnelConfig.maxZiplinesPerBlock = 0;
+    const std::pair<const char*, uint32_t> kTunnels[] = {
+        {"city_terrain_tunnel_artery_seed_72", 72},
+        {"city_terrain_tunnel_street_seed_31", 31},
+    };
+    for (const auto& [name, seed] : kTunnels) {
+      MapCase tunnel{name, tactics::GenerateUrbanMap(seed, tunnelConfig), 25.0f,
+                     /*showNavMesh=*/false, /*pitchOffset=*/-0.6f, /*yawOffset=*/0.0f};
+      if (!tunnel.scene.terrainTunnels.empty()) {
+        const tactics::TerrainTunnel& t = tunnel.scene.terrainTunnels.front();
+        const glm::vec3 along = glm::normalize(t.exit - t.entrance);
+        tunnel.cameraTarget = t.entrance + along * 4.0f;
+        tunnel.yawOffset = std::atan2(-along.z, -along.x) + 0.9f;  // Camera behind the portal.
+      }
+      cases.push_back(std::move(tunnel));
+    }
+  }
   // Street furniture and traffic props (issue #150), forced on (and framed
   // closer) so the golden pins the layer regardless of the seed's Auto draw.
   tactics::MapGeneratorConfig furnitureConfig = gradeConfig;

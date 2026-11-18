@@ -1275,16 +1275,93 @@ void AppendTerrainOverlay(const tactics::HeightField& terrain,
                           const std::array<glm::vec3, 3>& footprint,
                           std::vector<glm::vec3>* points, float lift = 0.08f);
 
+// The tunnel roof (walk-surface index) a pavement patch lies on, or -1. A
+// patch counts as on the roof when it sits at the roof's height and any of
+// its corners (or its centroid) is over the bore: the roof is drawn on
+// demand (camera see-through, issue #156), and the paving over it must go
+// with it or it would hang in the air over the revealed tunnel.
+int TunnelRoofUnder(const tactics::RoadSurface& patch,
+                    const std::vector<tactics::TerrainTunnel>& tunnels) {
+  if (patch.vertices.size() < 3) return -1;
+  glm::vec3 centroid(0.0f);
+  for (const glm::vec3& v : patch.vertices) centroid += v;
+  centroid /= static_cast<float>(patch.vertices.size());
+  for (const tactics::TerrainTunnel& tunnel : tunnels) {
+    if (tunnel.roofSurface < 0 || tunnel.roof.empty()) continue;
+    const float roofY = tunnel.roof.front().y;
+    if (std::fabs(centroid.y - roofY) > 0.5f) continue;
+    const auto over = [&](const glm::vec3& p) {
+      return tactics::PointStrictlyInConvexPolygon(glm::vec2(p.x, p.z), tunnel.bore, 1e-3f);
+    };
+    if (over(centroid)) return tunnel.roofSurface;
+    for (const glm::vec3& v : patch.vertices) {
+      if (over(v)) return tunnel.roofSurface;
+    }
+  }
+  return -1;
+}
+
 // Streets and sidewalks are planar patches at their own heights (a city's
-// levels are planar too), batched into one mesh per material.
+// levels are planar too), batched into one mesh per material. Patches over
+// a tunnel roof form a triangle group keyed by that roof's walk-surface
+// index (everything else is group -1), so the opaque pass can leave them
+// out together with a camera-faded roof.
 void BuildPavementMesh(const std::vector<tactics::RoadSurface>& patches, float thickness,
+                       const std::vector<tactics::TerrainTunnel>& tunnels,
                        LitTriangleMesh* mesh) {
   LitVertices vertices;
   std::vector<GLuint> indices;
+  std::vector<int> groups;
   for (const auto& patch : patches) {
     AppendSurfacePatch(patch.vertices, thickness, &vertices, &indices);
+    groups.resize(indices.size() / 3, TunnelRoofUnder(patch, tunnels));
   }
-  mesh->SetChunkedMesh(vertices, indices, kCullGridCells);
+  mesh->SetChunkedMesh(vertices, indices, kCullGridCells, &groups);
+}
+
+// Tunnel roofs (issue #156): the slab restoring the raised level over each
+// bore, as its own mesh grouped by the roof's walk-surface index. It is
+// drawn with the terrain (same concrete, same depth bias) but, unlike the
+// tier prisms, it can hide a figure or movement frontier standing in the
+// tunnel, so the camera see-through pass skips a crossed roof here and
+// re-draws it translucent after the figures.
+void BuildTunnelRoofMesh(const std::vector<tactics::TerrainTunnel>& tunnels,
+                         LitTriangleMesh* mesh) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  std::vector<int> groups;
+  for (const tactics::TerrainTunnel& tunnel : tunnels) {
+    // The slab's long sides run along the bore inside the solid tier; drawn,
+    // their faces poke through the terrain at some camera angles. Only the
+    // portal ends (the short edges) keep a face.
+    std::vector<char> hidden(tunnel.roof.size(), 0);
+    if (tunnel.roof.size() == 4) {
+      const float e0 = glm::distance(tunnel.roof[0], tunnel.roof[1]);
+      const float e1 = glm::distance(tunnel.roof[1], tunnel.roof[2]);
+      for (size_t i = 0; i < 4; ++i) hidden[i] = ((i % 2 == 0) == (e0 > e1)) ? 1 : 0;
+    }
+    // The top face also butts against the tier tops beside the bore at the
+    // same height; float rounding along that shared edge leaves a hairline
+    // gap showing the dark bore as a dashed line. Overlap the neighbours by
+    // a sliver (same height and colour, so the overlap is invisible).
+    std::vector<glm::vec3> roof = tunnel.roof;
+    glm::vec3 centre(0.0f);
+    for (const glm::vec3& v : roof) centre += v / static_cast<float>(roof.size());
+    for (size_t i = 0; i < roof.size(); ++i) {
+      if (!hidden[i]) continue;
+      const glm::vec3 a = tunnel.roof[i], b = tunnel.roof[(i + 1) % roof.size()];
+      glm::vec3 out = glm::cross(b - a, glm::vec3(0, 1, 0));
+      out.y = 0.0f;
+      if (glm::length(out) < 1e-6f) continue;
+      out = glm::normalize(out);
+      if (glm::dot(out, 0.5f * (a + b) - centre) < 0.0f) out = -out;
+      roof[i] += out * 0.06f;
+      roof[(i + 1) % roof.size()] += out * 0.06f;
+    }
+    AppendSurfacePatch(roof, 0.45f, &vertices, &indices, &hidden);
+    groups.resize(indices.size() / 3, tunnel.roofSurface);
+  }
+  mesh->SetChunkedMesh(vertices, indices, kCullGridCells, &groups);
 }
 
 void BuildStreetFixtureMeshes(
@@ -1534,8 +1611,11 @@ unsigned long long DeckFingerprint(const tactics::Scene& scene) {
     }
   };
   for (const tactics::WalkSurface& s : scene.walkSurfaces) {
+    mix(&s.overpass, sizeof(s.overpass));
+    mix(&s.terrain, sizeof(s.terrain));
     mix(s.vertices.data(), s.vertices.size() * sizeof(glm::vec3));
     mix(s.neighbors.data(), s.neighbors.size() * sizeof(int));
+    mix(s.groundConnections.data(), s.groundConnections.size() * sizeof(glm::vec3));
     mix(&s.stair, sizeof(s.stair));
     mix(&s.climbProxy, sizeof(s.climbProxy));
   }
@@ -1551,6 +1631,7 @@ void BuildDeckMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   std::vector<GLuint> indices;
   std::vector<int> groups;
   for (size_t i = 0; i < scene.walkSurfaces.size(); ++i) {
+    if (scene.walkSurfaces[i].terrain) continue;
     if (scene.walkSurfaces[i].climbProxy) {
       groups.resize(indices.size() / 3, static_cast<int>(i));
       continue;
@@ -2031,6 +2112,7 @@ void AppendPrism(const std::vector<glm::vec2>& polygon, float bottom, float top,
 void BuildUrbanTierMeshes(const tactics::HeightField& hf,
                           const std::vector<tactics::TerrainWall>& walls,
                           const std::vector<std::vector<glm::vec2>>& cutouts,
+                          const std::vector<tactics::TerrainTunnel>& tunnels,
                           LitTriangleMesh* base, LitTriangleMesh* raised) {
   LitVertices baseVertices, raisedVertices;
   std::vector<GLuint> baseIndices, raisedIndices;
@@ -2045,11 +2127,105 @@ void BuildUrbanTierMeshes(const tactics::HeightField& hf,
 
   // Tier polygons: the map square split by each step line, minus the ramp
   // corridors (shared with the tests, so what they check is what is drawn).
-  for (const tactics::TerrainTier& tier : tactics::TerrainTiers(walls, cutouts, square)) {
-    if (tier.height < 0.01f) continue;  // The base plane already shows here.
-    AppendPrism(tier.polygon, 0.0f, tier.height, /*topFace=*/true, &raisedVertices,
-                &raisedIndices);
+  //
+  // Cutting a corridor or bore out of a tier splits it along the cut's
+  // (infinite) edge lines, so pieces of one level butt against each other.
+  // A side wall buried against a neighbour at least as tall is left out:
+  // drawn, it shares its top edge with the neighbour's top face, and the
+  // slope-scaled depth bias (see the terrain pass) pushes that grazing top
+  // back further than the wall, which then shows through as a dashed line.
+  // A tunnel's side walls (the tier faces along its bore) sit under the
+  // roof's long edges the same way, so they stop just short of the top; the
+  // roof slab, wider and thicker than that gap, closes the bore above them.
+  constexpr float kBoreWallDrop = 0.2f;
+  // Bore edges running along each tunnel (its long sides).
+  std::vector<std::pair<glm::vec2, glm::vec2>> boreSides;
+  for (const tactics::TerrainTunnel& tunnel : tunnels) {
+    const glm::vec2 along(tunnel.exit.x - tunnel.entrance.x, tunnel.exit.z - tunnel.entrance.z);
+    if (glm::length(along) < 1e-4f) continue;
+    for (size_t i = 0; i < tunnel.bore.size(); ++i) {
+      const glm::vec2 a = tunnel.bore[i], b = tunnel.bore[(i + 1) % tunnel.bore.size()];
+      if (glm::distance(a, b) < 1e-4f) continue;
+      const glm::vec2 e = glm::normalize(b - a), d = glm::normalize(along);
+      if (std::fabs(e.x * d.y - e.y * d.x) < 0.1f) boreSides.emplace_back(a, b);
+    }
   }
+  const std::vector<tactics::TerrainTier> tiers = tactics::TerrainTiers(walls, cutouts, square);
+  for (size_t t = 0; t < tiers.size(); ++t) {
+    const tactics::TerrainTier& tier = tiers[t];
+    if (tier.height < 0.01f) continue;  // The base plane already shows here.
+    const std::vector<glm::vec2>& polygon = tier.polygon;
+    AppendPrism(polygon, tier.height, tier.height, /*topFace=*/true, &raisedVertices,
+                &raisedIndices);
+    glm::vec2 center(0.0f);
+    for (glm::vec2 p : polygon) center += p;
+    center /= static_cast<float>(polygon.size());
+    for (size_t i = 0; i < polygon.size(); ++i) {
+      const glm::vec2 a = polygon[i], b = polygon[(i + 1) % polygon.size()];
+      const float length = glm::distance(a, b);
+      if (length < 1e-4f) continue;
+      const glm::vec2 dir = (b - a) / length;
+      // Stretches of this edge (as params along it) covered by a neighbour,
+      // and those running along a tunnel bore.
+      constexpr float kOnLine = 2e-3f;
+      std::vector<std::pair<float, float>> covered, bored;
+      const auto overlap = [&](glm::vec2 c, glm::vec2 e, std::vector<std::pair<float, float>>* out) {
+        c -= a;
+        e -= a;
+        if (std::fabs(dir.x * c.y - dir.y * c.x) > kOnLine ||
+            std::fabs(dir.x * e.y - dir.y * e.x) > kOnLine) {
+          return;
+        }
+        const float t0 = std::max(0.0f, std::min(glm::dot(c, dir), glm::dot(e, dir)));
+        const float t1 = std::min(length, std::max(glm::dot(c, dir), glm::dot(e, dir)));
+        if (t1 - t0 > kOnLine) out->emplace_back(t0, t1);
+      };
+      for (const auto& [c, e] : boreSides) overlap(c, e, &bored);
+      for (size_t o = 0; o < tiers.size(); ++o) {
+        if (o == t || tiers[o].height < tier.height - 1e-3f) continue;
+        const std::vector<glm::vec2>& other = tiers[o].polygon;
+        for (size_t k = 0; k < other.size(); ++k) {
+          overlap(other[k], other[(k + 1) % other.size()], &covered);
+        }
+      }
+      // Cut the edge at every interval end; each stretch between two cuts is
+      // then wholly covered, wholly along a bore, or a plain cliff face.
+      std::vector<float> cuts = {0.0f, length};
+      for (const auto* list : {&covered, &bored}) {
+        for (const auto& [t0, t1] : *list) {
+          cuts.push_back(t0);
+          cuts.push_back(t1);
+        }
+      }
+      std::sort(cuts.begin(), cuts.end());
+      const auto within = [](const std::vector<std::pair<float, float>>& list, float t) {
+        for (const auto& [t0, t1] : list) {
+          if (t > t0 && t < t1) return true;
+        }
+        return false;
+      };
+      glm::vec2 n(-dir.y, dir.x);
+      if (glm::dot(n, center - a) > 0.0f) n = -n;  // Outward.
+      const glm::vec3 normal(n.x, 0.0f, n.y);
+      for (size_t k = 0; k + 1 < cuts.size(); ++k) {
+        const float t0 = cuts[k], t1 = cuts[k + 1];
+        if (t1 - t0 < kOnLine) continue;
+        const float mid = 0.5f * (t0 + t1);
+        if (within(covered, mid)) continue;
+        const float top = tier.height - (within(bored, mid) ? kBoreWallDrop : 0.0f);
+        // The edge's own corners where a stretch ends on one, so the wall
+        // stays watertight against its neighbours there.
+        const glm::vec2 p = t0 <= 0.0f ? a : a + dir * t0;
+        const glm::vec2 q = t1 >= length ? b : a + dir * t1;
+        const glm::vec3 a0(p.x, 0.0f, p.y), a1(p.x, top, p.y);
+        const glm::vec3 b0(q.x, 0.0f, q.y), b1(q.x, top, q.y);
+        AppendTriangle(a0, b0, b1, normal, &raisedVertices, &raisedIndices);
+        AppendTriangle(a0, b1, a1, normal, &raisedVertices, &raisedIndices);
+      }
+    }
+  }
+  // Tunnel roofs are a separate mesh (BuildTunnelRoofMesh): the camera
+  // see-through pass needs to leave a crossed roof out of the opaque pass.
   base->SetChunkedMesh(baseVertices, baseIndices, kCullGridCells);
   raised->SetChunkedMesh(raisedVertices, raisedIndices, kCullGridCells);
 }
@@ -2061,10 +2237,11 @@ void BuildUrbanTierMeshes(const tactics::HeightField& hf,
 // concrete tiers and `base` the ground plane. Hills use the heightfield.
 void BuildTerrainMesh(const tactics::HeightField& hf,
                       const std::vector<tactics::TerrainWall>& walls,
-                      const std::vector<std::vector<glm::vec2>>& cutouts, LitTriangleMesh* base,
+                      const std::vector<std::vector<glm::vec2>>& cutouts,
+                      const std::vector<tactics::TerrainTunnel>& tunnels, LitTriangleMesh* base,
                       LitTriangleMesh* raised) {
   if (!walls.empty()) {
-    BuildUrbanTierMeshes(hf, walls, cutouts, base, raised);
+    BuildUrbanTierMeshes(hf, walls, cutouts, tunnels, base, raised);
     return;
   }
   const int nx = hf.nx, nz = hf.nz;
@@ -3012,6 +3189,7 @@ bool SceneRenderer::Init() {
   aimOverlayMesh_.Init();
   terrainMesh_.Init();
   terrainRaisedMesh_.Init();
+  tunnelRoofMesh_.Init();
   terrainRoadMesh_.Init();
   terrainSidewalkMesh_.Init();
   terrainStairMesh_.Init();
@@ -3082,6 +3260,7 @@ void SceneRenderer::Destroy() {
   fovKeyMapHalfExtent_ = 0.0f;
   terrainMesh_.Destroy();
   terrainRaisedMesh_.Destroy();
+  tunnelRoofMesh_.Destroy();
   terrainRoadMesh_.Destroy();
   terrainSidewalkMesh_.Destroy();
   terrainStairMesh_.Destroy();
@@ -3261,6 +3440,7 @@ int SceneRenderer::AcquireFovMaps(const Unit& unit, int sector, float facingYaw,
       depthShader_.SetMat4("uLightMVP", slot.matrix[half]);
       terrainMesh_.DrawVisible(inMap);
       terrainRaisedMesh_.DrawVisible(inMap);
+      tunnelRoofMesh_.DrawVisible(inMap);
       terrainStairMesh_.Draw();
     } else {
       DrawBoxDepth(depthShader_, cubeMesh_, slot.matrix[half],
@@ -3368,6 +3548,7 @@ void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::v
     if (drawTerrain) {
       drawReceiver(terrainMesh_);
       drawReceiver(terrainRaisedMesh_);
+      drawReceiver(tunnelRoofMesh_);
     } else {
       const glm::mat4 model =
           BoxModel(glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
@@ -3422,7 +3603,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (terrainChanged) {
     if (!terrain.Empty()) {
       BuildTerrainMesh(terrain, game.GetScene().terrainWalls, game.GetScene().terrainCutouts,
-                       &terrainMesh_, &terrainRaisedMesh_);
+                       game.GetScene().terrainTunnels, &terrainMesh_, &terrainRaisedMesh_);
+      BuildTunnelRoofMesh(game.GetScene().terrainTunnels, &tunnelRoofMesh_);
     }
     terrainKey_ = terrain;
     fovSceneKey_ = 0;
@@ -3431,8 +3613,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (!terrain.Empty()) {
     const auto key = FovSceneFingerprint(game.GetScene());
     if (terrainChanged || pavementKey_ != key) {
-      BuildPavementMesh(game.GetScene().roads, 0.0f, &terrainRoadMesh_);
-      BuildPavementMesh(game.GetScene().sidewalkSurfaces, 0.10f, &terrainSidewalkMesh_);
+      BuildPavementMesh(game.GetScene().roads, 0.0f, game.GetScene().terrainTunnels,
+                        &terrainRoadMesh_);
+      BuildPavementMesh(game.GetScene().sidewalkSurfaces, 0.10f,
+                        game.GetScene().terrainTunnels, &terrainSidewalkMesh_);
       BuildTerrainStairMesh(game.GetScene().terrainStairs, &terrainStairMesh_);
       pavementKey_ = key;
     }
@@ -3582,6 +3766,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
       terrainMesh_.DrawVisible(inShadowMap);
       terrainRaisedMesh_.DrawVisible(inShadowMap);
+      tunnelRoofMesh_.DrawVisible(inShadowMap);
       terrainStairMesh_.Draw();
     }
     if (obstacleCasterMesh_.HasGeometry()) {
@@ -4003,6 +4188,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
 
+  // Tunnel roofs and the paving on them are grouped by the roof's walk-surface
+  // index (-1 for paving elsewhere); a roof crossed by a sightline to a figure
+  // or frontier in the tunnel is left out of the opaque pass and blended back
+  // in after the figures (issue #156).
+  const std::function<bool(int)> skipFadedRoofGroup =
+      anyFaded ? std::function<bool(int)>([&](int i) { return i >= 0 && fadeSurface[i] != 0; })
+               : std::function<bool(int)>();
   if (drawTerrain) {
     // Retaining-wall tops coincide with the high pad. Bias the terrain
     // behind the solid geometry to keep their shared edge free of z-fighting.
@@ -4019,6 +4211,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     thermalMaterial(ThermalMaterial::Concrete);
     DrawLitVisible(litShader_, terrainRaisedMesh_, viewProj, lightSpaceMatrix_,
                    glm::vec4(kDeckColor, 1.0f), onScreen);
+    if (tunnelRoofMesh_.HasGeometry()) {
+      DrawLitVisible(litShader_, tunnelRoofMesh_, viewProj, lightSpaceMatrix_,
+                     glm::vec4(kDeckColor, 1.0f), onScreen, skipFadedRoofGroup);
+    }
     DrawLitModel(litShader_, terrainStairMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(kDeckColor, 1.0f));
     glDisable(GL_POLYGON_OFFSET_FILL);
@@ -4038,10 +4234,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
 
   if (drawTerrain) {
     DrawLitVisible(litShader_, terrainSidewalkMesh_, viewProj, lightSpaceMatrix_,
-                   glm::vec4(0.36f, 0.37f, 0.39f, 1.0f), onScreen);
+                   glm::vec4(0.36f, 0.37f, 0.39f, 1.0f), onScreen, skipFadedRoofGroup);
     thermalMaterial(ThermalMaterial::Asphalt);
     DrawLitVisible(litShader_, terrainRoadMesh_, viewProj, lightSpaceMatrix_,
-                   glm::vec4(0.13f, 0.14f, 0.16f, 1.0f), onScreen);
+                   glm::vec4(0.13f, 0.14f, 0.16f, 1.0f), onScreen, skipFadedRoofGroup);
   }
   thermalMaterial(ThermalMaterial::Concrete);
   for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
@@ -4299,6 +4495,22 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                          color);
           }
+        } else if (walkSurfaces[f.surface].terrain) {
+          // A tunnel roof: its drawn slab is the bore (the walk footprint
+          // overhangs onto the solid tier), and the paving on it stands
+          // proud of the slab, so it goes first to claim its pixels.
+          const std::function<bool(int)> otherRoofs = [&](int i) { return i != f.surface; };
+          thermalMaterial(ThermalMaterial::Concrete);
+          DrawLitVisible(litShader_, terrainSidewalkMesh_, viewProj, lightSpaceMatrix_,
+                         glm::vec4(0.36f, 0.37f, 0.39f, kOccluderFadeOpacity), onScreen,
+                         otherRoofs);
+          thermalMaterial(ThermalMaterial::Asphalt);
+          DrawLitVisible(litShader_, terrainRoadMesh_, viewProj, lightSpaceMatrix_,
+                         glm::vec4(0.13f, 0.14f, 0.16f, kOccluderFadeOpacity), onScreen,
+                         otherRoofs);
+          thermalMaterial(ThermalMaterial::Concrete);
+          DrawLitVisible(litShader_, tunnelRoofMesh_, viewProj, lightSpaceMatrix_,
+                         glm::vec4(kDeckColor, kOccluderFadeOpacity), onScreen, otherRoofs);
         } else {
           drawSurface(f.surface, false, mark);
         }

@@ -4337,6 +4337,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // wall seen through the building), which is where the edge pass puts
     // its single frame per opening, so the two line up. A doorway's always
     // sits on the outer face (see below).
+    // The same hand-ink draw also carries the outlines of floor slabs
+    // covered by other slabs (see coveredSegments below).
     const auto drawOpeningEdgesOverInterior = [&]() {
       const tactics::Scene& scene = game.GetScene();
       // Wall thickness per faded enterable building, read off its wall
@@ -4395,7 +4397,97 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           segments.push_back(corners[(k + 1) % 4]);
         }
       }
-      if (nearSegments.empty() && farSegments.empty()) return;
+      // Floor slabs underneath other slabs (PR #313 review): the covered
+      // part of a slab's outline shows through the slab(s) in front of it,
+      // dimmer, like the covered stairs. The outline G-buffer keeps one
+      // surface per pixel -- the nearest slab -- so the covered slab's
+      // edge can never come out of the edge pass (unlike the stair, whose
+      // pixels survive under a slab because the two are distinct classes);
+      // it is inked by hand instead: each boundary edge is sampled down to
+      // the pieces a nearer faded slab blocks from the camera, and those
+      // draw as dim depth-tested lines -- only what would be visible were
+      // the covering slabs absent (the opaque scene, figures included,
+      // still wins the depth test).
+      std::vector<glm::vec3> coveredSegments;
+      {
+        // Non-stair interior surfaces: stairs already show through slabs
+        // via the G-buffer re-tag, and nothing meaningfully hides under
+        // a stair flight.
+        std::vector<int> slabs;
+        for (const FadedOccluder& f : interior) {
+          if (!walkSurfaces[f.surface].stair && walkSurfaces[f.surface].vertices.size() >= 3) {
+            slabs.push_back(f.surface);
+          }
+        }
+        const auto coveredByOtherSlab = [&](const glm::vec3& p, int self) {
+          const glm::vec3 ray = p - cameraPos;
+          const float rayLength = glm::length(ray);
+          if (rayLength < 1e-3f) return false;
+          // The blocker's plane crossing must sit a real step in front of
+          // the point, not graze it (an adjacent coplanar patch crosses at
+          // the point itself).
+          const float tMax = 1.0f - 0.5f / rayLength;
+          for (int j : slabs) {
+            if (j == self) continue;
+            const std::vector<glm::vec3>& v = walkSurfaces[j].vertices;
+            const glm::vec3 n = glm::cross(v[1] - v[0], v[2] - v[0]);
+            const float denom = glm::dot(ray, n);
+            if (std::fabs(denom) < 1e-6f) continue;
+            const float t = glm::dot(v[0] - cameraPos, n) / denom;
+            if (t < 0.01f || t > tMax) continue;
+            const glm::vec3 hit = cameraPos + ray * t;
+            if (tactics::SurfaceContainsXZ(walkSurfaces[j], hit.x, hit.z)) return true;
+          }
+          return false;
+        };
+        // A boundary piece with walkable floor just outside at the same
+        // height is an internal seam (floors split into convex patches
+        // around stairwells; a stair's top edge): the edge pass never inks
+        // it in plain view, so it gets no ink through a slab either.
+        const auto seamAt = [&](const glm::vec3& p, const glm::vec2& outward, int self) {
+          const glm::vec2 q(p.x + outward.x * 0.12f, p.z + outward.y * 0.12f);
+          for (const FadedOccluder& f : interior) {
+            if (f.surface == self) continue;
+            const tactics::WalkSurface& s = walkSurfaces[f.surface];
+            if (s.vertices.size() < 3 || !tactics::SurfaceContainsXZ(s, q.x, q.y)) continue;
+            if (std::fabs(tactics::SurfaceHeightAt(s, q.x, q.y) - p.y) < 0.2f) return true;
+          }
+          return false;
+        };
+        for (int i : slabs) {
+          const std::vector<glm::vec3>& v = walkSurfaces[i].vertices;
+          glm::vec3 centroid(0.0f);
+          for (const glm::vec3& c : v) centroid += c;
+          centroid /= static_cast<float>(v.size());
+          for (size_t k = 0; k < v.size(); ++k) {
+            const glm::vec3 a = v[k], b = v[(k + 1) % v.size()];
+            const float len = glm::distance(a, b);
+            if (len < 1e-4f) continue;
+            const glm::vec2 dir((b.x - a.x) / len, (b.z - a.z) / len);
+            glm::vec2 outward(dir.y, -dir.x);
+            const glm::vec3 mid = 0.5f * (a + b);
+            if (outward.x * (mid.x - centroid.x) + outward.y * (mid.z - centroid.z) < 0.0f) {
+              outward = -outward;
+            }
+            const int steps = std::max(1, static_cast<int>(std::ceil(len / 0.4f)));
+            int runStart = -1;
+            const auto flush = [&](int endStep) {
+              if (runStart < 0) return;
+              coveredSegments.push_back(glm::mix(a, b, static_cast<float>(runStart) / steps));
+              coveredSegments.push_back(glm::mix(a, b, static_cast<float>(endStep) / steps));
+              runStart = -1;
+            };
+            for (int s = 0; s < steps; ++s) {
+              const glm::vec3 p = glm::mix(a, b, (s + 0.5f) / steps);
+              const bool ink = !seamAt(p, outward, i) && coveredByOtherSlab(p, i);
+              if (ink && runStart < 0) runStart = s;
+              if (!ink) flush(s);
+            }
+            flush(steps);
+          }
+        }
+      }
+      if (nearSegments.empty() && farSegments.empty() && coveredSegments.empty()) return;
       // Same ink as CompositeFadedOutlines gives a full-strength shell edge.
       const float ink = std::clamp(debug.nprSettings.outlineStrength, 0.0f, 1.0f) *
                         kOccluderFadeOpacity * 0.88f;
@@ -4438,6 +4530,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink * 0.5f));
         glStencilFunc(GL_ALWAYS, 0, 0xFF);
         drawThick(farSegments);
+      }
+      if (!coveredSegments.empty()) {
+        // Same dim ink as a stair seen through a slab: half the interior
+        // layer's outline strength.
+        const float coveredInk = std::clamp(debug.nprSettings.outlineStrength, 0.0f, 1.0f) *
+                                 kInteriorFadeOpacity * 0.5f * 0.88f;
+        unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, coveredInk));
+        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+        drawThick(coveredSegments);
       }
       glStencilFunc(GL_EQUAL, 0, 0xFF);
       glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);

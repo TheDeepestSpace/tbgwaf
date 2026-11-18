@@ -386,6 +386,17 @@ constexpr float kMaxWalkSlope = 1.2f;
 // Shared by the ballistics (burst aim point), the staged-lock "+" marker and
 // the planned-shot cone, so what the cone shader shows is what gets shot at.
 constexpr float kTorsoAimHeight = 0.9f;
+// Crouch pose sim geometry (issues #290/#292). Holding the crouch shrinks
+// the figure the sim shoots at and sees, not just the drawn rig: Bounds()
+// drops to kCrouchedHeight, the sighting/lock probe to kCrouchEyeHeight and
+// the torso aim point to kCrouchChestHeight, each blended by the pose's
+// 0..1 coverBlend so the box tracks the animation (cf. the knockdown
+// collapse). The figure's *own* eye stays at kEyeHeight -- it peeks over
+// the blocker -- so the stand-back-up-when-flanked rule
+// (GameLogic::CoverExposedToSightedEnemy) still sights approaching enemies.
+constexpr float kCrouchedHeight = 1.15f;   // Top of the crouched body.
+constexpr float kCrouchEyeHeight = 1.0f;   // Head/sight probe of the crouched pose.
+constexpr float kCrouchChestHeight = 0.7f; // Chest a shot at the crouched pose aims for.
 // Sighting range: effectively unlimited (exceeds any generated map's diagonal).
 // Visibility stays on this so capping the shot range doesn't shrink what a team sees.
 constexpr float kSightRange = 250.0f;

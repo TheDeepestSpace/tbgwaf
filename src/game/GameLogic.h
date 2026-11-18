@@ -156,6 +156,14 @@ struct GameSnapshot {
     float rideSlope = 0.0f;
     float grabElapsed = -1.0f;  // Flag pickup reach beat (see Unit).
     bool moving = false;  // Has an in-flight move in the executing round.
+    // Cover pose (issues #290/#292), mirrored so a follower replaying a
+    // round from snapshots shows the crouch/lean the moment the simulator's
+    // figure takes it (a follower skips Update() -- where the pose blends --
+    // while Executing), instead of only once planning reopens.
+    uint8_t coverKind = 0;
+    uint8_t coverTileKind = 0;
+    float coverYaw = 0.0f;
+    float coverBlend = 0.0f;
   };
   std::vector<UnitState> units;
   std::vector<Tracer> tracers;

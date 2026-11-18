@@ -443,6 +443,10 @@ GameSnapshot GameLogic::ExportState() const {
     u.rideSlope = unit.rideSlope;
     u.grabElapsed = unit.grabElapsed;
     u.moving = IsUnitMoving(unit.id);
+    u.coverKind = unit.coverKind;
+    u.coverTileKind = unit.coverTileKind;
+    u.coverYaw = unit.coverYaw;
+    u.coverBlend = unit.coverBlend;
     snap.units.push_back(std::move(u));
   }
   snap.tracers = tracers_;
@@ -533,6 +537,14 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     unit->rideLength = u.rideLength;
     unit->rideSlope = u.rideSlope;
     unit->grabElapsed = u.grabElapsed;
+    unit->coverKind = u.coverKind;
+    unit->coverTileKind = u.coverTileKind;
+    unit->coverYaw = u.coverYaw;
+    unit->coverBlend = u.coverBlend;
+    // Mark the imported pose as classified here so a planning-time
+    // UpdateCoverPoses continues the blend instead of re-deriving from a
+    // stale position (it still re-judges the exposure rule every tick).
+    unit->coverFrom = u.position;
     ApplyPlan(u, unit);
     if (u.moving) mirroredMoving_.push_back(u.id);
   }
@@ -631,6 +643,8 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
       out << ' ' << im.at << ' ' << im.axis.x << ' ' << im.axis.y << ' ' << im.axis.z;
     }
     out << ' ' << u.knockdownDrop;
+    out << ' ' << static_cast<int>(u.coverKind) << ' ' << static_cast<int>(u.coverTileKind)
+        << ' ' << u.coverYaw << ' ' << u.coverBlend;
   }
   out << ' ' << snap.tracers.size();
   for (const Tracer& t : snap.tracers) {
@@ -715,6 +729,11 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
       if (!(in >> im.at >> im.axis.x >> im.axis.y >> im.axis.z)) return false;
     }
     if (!(in >> u.knockdownDrop)) return false;
+    int coverKind = 0, coverTileKind = 0;
+    if (!(in >> coverKind >> coverTileKind >> u.coverYaw >> u.coverBlend)) return false;
+    if (coverKind < 0 || coverKind > 2 || coverTileKind < 0 || coverTileKind > 2) return false;
+    u.coverKind = static_cast<uint8_t>(coverKind);
+    u.coverTileKind = static_cast<uint8_t>(coverTileKind);
   }
   size_t tracerCount = 0;
   if (!(in >> tracerCount) || tracerCount > kMaxEntries) return false;
@@ -1702,7 +1721,9 @@ float GameLogic::ShotHitChance(const Unit& shooter, const Unit& target) const {
   const ShotProfile& profile = kDefaultShotProfile;  // Future: derive from shooter's role.
   if (IsUnitRiding(shooter.id)) return 0.0f;  // Hands on the cable: no shooting while riding.
   const glm::vec3 eye = shooter.EyePosition();
-  const glm::vec3 targetEye = target.EyePosition();
+  // Pose-aware: a crouched target is sighted (and range-judged) at its
+  // crouched head, so cover tall enough to hide it blocks the lock too.
+  const glm::vec3 targetEye = target.SightPosition();
   if (!InFovCone(eye, shooter.FacingDirection(), targetEye, profile.halfAngleDegrees,
                  std::numeric_limits<float>::infinity()) ||
       !LineOfSightClear(eye, targetEye, sightObstacles_, scene_.walkSurfaces, scene_.ground)) {
@@ -1794,7 +1815,7 @@ void GameLogic::ApplyShot(Unit& shooter, Unit& target, bool hit) {
   PlayShootBeat(shooter, std::atan2(dir.z, dir.x));
   Unit aimed = shooter;
   aimed.facingYaw = shooter.shootAimYaw;
-  RecordTracer(shooter, aimed.MuzzlePosition(), target.EyePosition());
+  RecordTracer(shooter, aimed.MuzzlePosition(), target.SightPosition());
   if (recorder_.ptr) {
     char buf[160];
     std::snprintf(buf, sizeof buf, "shot shooter=%d target=%d hit=%d exec=%.4f round=%d",
@@ -2035,7 +2056,7 @@ std::vector<GameLogic::AimTraceCandidate> GameLogic::RayTraceCandidates(
     }
     // Same profile falloff as a locked shot, at the struck figure's actual
     // bearing/distance (the bearing is near-zero for anything on the ray).
-    const glm::vec3 toEye = unit.EyePosition() - muzzle;
+    const glm::vec3 toEye = unit.SightPosition() - muzzle;
     float angle = 0.0f;
     if (glm::length(glm::vec2(toEye.x, toEye.z)) > 1e-6f) {
       const glm::vec3 to = glm::normalize(glm::vec3(toEye.x, 0.0f, toEye.z));
@@ -2147,9 +2168,9 @@ void GameLogic::ResolvePendingShots() {
       if (!ShotConnects(*shooter, *target)) continue;
       // The bullets fly muzzle -> torso, so the hold-fire gate waits for
       // that very line too: a burst must not open up while chest-high cover
-      // still blocks the trajectory the eyes already see over.
-      const glm::vec3 aimPoint =
-          target->position + glm::vec3(0.0f, constants::kTorsoAimHeight, 0.0f);
+      // still blocks the trajectory the eyes already see over. Pose-aware:
+      // a crouched target's torso is its in-cover chest.
+      const glm::vec3 aimPoint = target->TorsoAimPosition();
       const Unit aimed = AimedAt(*shooter, aimPoint);
       if (!LineOfSightClear(aimed.MuzzlePosition(), aimPoint, sightObstacles_,
                             scene_.walkSurfaces, scene_.ground)) {
@@ -2227,9 +2248,7 @@ void GameLogic::ResolvePendingShots() {
     const float scatter = glm::radians(StatsOf(b.shooter->weapon).scatterHalfAngleDegrees);
     if (!b.judged) {
       b.judged = true;
-      b.aimPoint = b.target ? b.target->position +
-                                  glm::vec3(0.0f, constants::kTorsoAimHeight, 0.0f)
-                            : b.shot->aimPoint;
+      b.aimPoint = b.target ? b.target->TorsoAimPosition() : b.shot->aimPoint;
     }
     const Unit aimed = AimedAt(*b.shooter, b.aimPoint);
     bullet.from = aimed.MuzzlePosition();

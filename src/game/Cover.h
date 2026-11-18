@@ -29,13 +29,15 @@ constexpr float kCoverProbeDistance = 0.7f;  // Tile centre to blocker face prob
 constexpr float kCoverEdgeReach = 0.75f;     // How far along the wall an open edge counts.
 // A crouched figure is ~1.15 tall; a blocker must hide at least 70% of that
 // (more than 30% visible = no protection, so it is not cover at all).
-constexpr float kCrouchedHeight = 1.15f;
+// The heights themselves live in constants:: (Types.h) because the crouched
+// pose also shrinks the sim's hit box and sight/aim probes (issue #292).
+constexpr float kCrouchedHeight = constants::kCrouchedHeight;
 constexpr float kCoverMinHeight = 0.7f * kCrouchedHeight;  // Blocker must rise this far above the feet.
 constexpr float kCoverStandHeight = 1.4f;  // At/above this the figure stands with its back to it.
 // Chest height of a figure holding the crouch pose, for judging whether a
 // blocker actually lies on an enemy's shot line at it (it sits below
 // kCoverMinHeight, so any qualifying blocker crossing that line stops it).
-constexpr float kCrouchChestHeight = 0.7f;
+constexpr float kCrouchChestHeight = constants::kCrouchChestHeight;
 
 struct CoverTile {
   CoverKind kind = CoverKind::None;

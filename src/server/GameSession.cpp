@@ -122,9 +122,15 @@ std::array<Json, 3> GameSession::RunRound() {
       Json list{Json::Array{}};
       for (const Unit& u : units) {
         if (!spectator && !Visible(game_, viewer, u, vis)) continue;
+        // [id,x,y,z,yaw,alive,moving,coverKind,coverBlend,coverYaw]: the
+        // cover pose ships with each frame (issue #292) because a client
+        // never simulates a round -- without it the crouch/lean would only
+        // appear once planning reopens, not when the figure takes it.
         list.Push(Json(Json::Array{Num(u.id), Num(u.position.x), Num(u.position.y), Num(u.position.z),
                                    Num(u.facingYaw), Num(u.alive ? 1 : 0),
-                                   Num(game_.IsUnitMoving(u.id) ? 1 : 0)}));
+                                   Num(game_.IsUnitMoving(u.id) ? 1 : 0), Num(u.coverKind),
+                                   Num(std::round(u.coverBlend * 1000.0) / 1000.0),
+                                   Num(std::round(u.coverYaw * 1000.0) / 1000.0)}));
       }
       Json frame;
       frame.Set("t", Num(std::round(t * 100.0) / 100.0));

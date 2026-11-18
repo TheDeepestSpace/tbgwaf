@@ -537,8 +537,22 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     }
     tactics::testing::Rig rig(net->server.gamePort, &net->control);
     auto drawFrame = [&] { writePaneFrames({&rig.Blue().game, &rig.Red().game}, nullptr); };
+    // Advance both mirrors one frame the way main.cpp's loop does: a client
+    // skips GameLogic::Update while a round plays back (snapshots pose it;
+    // Rig::PlayOut), and runs it every other frame -- so planning-time
+    // animation (idle, the cover-pose blend easing in the moment a figure
+    // stops on a cover tile) behaves exactly as in the live game.
+    auto tickMirrors = [&](float dt) {
+      for (tactics::testing::Player* p : {&rig.Blue(), &rig.Red()}) {
+        if (p->game.Mode() != InputMode::Executing) p->game.Update(dt);
+        p->game.UpdateSightingMemory(dt);
+      }
+    };
     auto hold = [&] {
-      for (int i = 0; i < kHoldFrames; ++i) drawFrame();
+      for (int i = 0; i < kHoldFrames; ++i) {
+        tickMirrors(1.0f / kVideoFps);
+        drawFrame();
+      }
     };
     auto done = [&] {
       for (auto& f : rig.failures) result.failures.push_back(f);
@@ -559,54 +573,42 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     }
     rig.playDt = 1.0f / kVideoFps;
     if (options.video && videoOk) rig.onFrame = drawFrame;
-    // Cover tail (issue #292): the crouch/lean eases in via the mirror's own
-    // GameLogic::Update, which the live app ticks every frame while planning
-    // but this runner never does -- round playback goes through
-    // RemoteClient::Update (snapshot posing only), and the hold frames are
-    // static. Without these ticks the recorded video never shows the pose at
-    // all. Tick both mirrors after each round until every in-cover figure
-    // has settled, then hold a beat on the pose.
-    auto settleCoverPoses = [&] {
-      if (!options.video || !videoOk) return;
-      constexpr float kMaxSettleSeconds = 3.0f;
-      constexpr float kHoldSeconds = 1.0f;
-      const float dt = 1.0f / kVideoFps;
-      auto tick = [&] {
-        for (tactics::testing::Player* p : {&rig.Blue(), &rig.Red()}) {
-          p->game.Update(dt);
-          p->game.UpdateSightingMemory(dt);
-        }
+    // The same presentation hooks the in-process runner films with, so a
+    // --server video shows the identical planning flow a real player drives:
+    // click the figure, press "Move", hold on the movement range, click the
+    // destination, press "Done" (and likewise for shots and passes). Each
+    // lambda draws both mirrors' panes; the acting mirror carries the
+    // selection/menu state the marker points at.
+    tactics::scenario::PlaybackHooks serverHooks;
+    if (options.video && videoOk) {
+      serverHooks.tickSeconds = 1.0f / kVideoFps;
+      serverHooks.holdFramesAfterAction = kHoldFrames;
+      serverHooks.onMoveFrontier = [&](const GameLogic&, Team team) {
+        // ExecuteAction's hold loop ticks the acting mirror; keep the other
+        // pane's planning animation running too, as its player's app would.
+        tactics::testing::Player& other = rig.For(team == Team::Blue ? Team::Red : Team::Blue);
+        if (other.game.Mode() != InputMode::Executing) other.game.Update(1.0f / kVideoFps);
+        other.game.UpdateSightingMemory(1.0f / kVideoFps);
         drawFrame();
       };
-      auto anyCover = [&] {
-        for (tactics::testing::Player* p : {&rig.Blue(), &rig.Red()}) {
-          for (const tactics::Unit& unit : p->game.GetScene().units) {
-            if (unit.alive && unit.coverKind != 0) return true;
-          }
+      serverHooks.onClick = [&](const GameLogic&, Team team, const glm::vec3& worldPoint) {
+        for (int i = 0; i < kClickFrames; ++i) {
+          const float progress =
+              std::min(1.0f, static_cast<float>(i + 1) / (kClickFrames * 0.7f));
+          const ClickMarker marker{team, worldPoint, progress};
+          writePaneFrames({&rig.Blue().game, &rig.Red().game}, &marker);
         }
-        return false;
       };
-      auto settling = [&] {
-        for (tactics::testing::Player* p : {&rig.Blue(), &rig.Red()}) {
-          for (const tactics::Unit& unit : p->game.GetScene().units) {
-            if (unit.alive && unit.coverKind != 0 && unit.coverBlend < 1.0f) return true;
-          }
+      serverHooks.onMenuClick = [&](const GameLogic&, Team team, const char* button) {
+        for (int i = 0; i < kClickFrames; ++i) {
+          ClickMarker marker;
+          marker.team = team;
+          marker.progress = std::min(1.0f, static_cast<float>(i + 1) / (kClickFrames * 0.7f));
+          marker.button = button;
+          writePaneFrames({&rig.Blue().game, &rig.Red().game}, &marker);
         }
-        return false;
       };
-      tick();  // Classification runs on the first Update after arrival.
-      if (!anyCover()) return;
-      float elapsed = dt;
-      float held = 0.0f;
-      while (elapsed < kMaxSettleSeconds + kHoldSeconds) {
-        tick();
-        elapsed += dt;
-        if (!settling()) {
-          held += dt;
-          if (held >= kHoldSeconds) break;
-        }
-      }
-    };
+    }
     int completed = 0;
     auto finishAction = [&] {
       if (!options.video || !videoOk) return;
@@ -621,15 +623,20 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
       if (!step.action) continue;
       const ScenarioAction& action = *step.action;
       if (action.kind == ScenarioAction::Kind::Commit) {
-        if (rig.Commit()) settleCoverPoses();
+        // Either pane has the button; show the press in Blue's, as the
+        // in-process runner does.
+        if (serverHooks.onMenuClick) {
+          serverHooks.onMenuClick(rig.Blue().game, Team::Blue, "Commit Round");
+        }
+        rig.Commit();
       } else if (action.kind == ScenarioAction::Kind::NewGame) {
         rig.NewMatch();
       } else if (action.kind == ScenarioAction::Kind::Wait) {
-        // Pure client-side time: ghosts fade on each mirror's own clock.
-        for (Team team : {Team::Blue, Team::Red}) {
-          for (float t = 0.0f; t < action.playSeconds - 1e-4f; t += 0.05f) {
-            rig.For(team).game.UpdateSightingMemory(0.05f);
-          }
+        // Client-side time passing, ticked as the app's frame loop would.
+        const float step = options.video && videoOk ? 1.0f / kVideoFps : 0.05f;
+        for (float t = 0.0f; t < action.playSeconds - 1e-4f; t += step) {
+          tickMirrors(step);
+          if (options.video && videoOk) drawFrame();
         }
       } else {
         const tactics::Unit* actor = nullptr;
@@ -641,7 +648,8 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
           break;
         }
         tactics::testing::Player& p = rig.For(actor->team);
-        const bool ok = tactics::scenario::ExecuteAction(p.game, scenario.scene, action, i, &result);
+        const bool ok = tactics::scenario::ExecuteAction(p.game, scenario.scene, action, i,
+                                                         &result, serverHooks);
         if (ok) rig.Sync(p);
         if (ok && action.kind == ScenarioAction::Kind::Focus) {
           if (const tactics::Unit* unit = p.game.FindUnit(action.actor)) {

@@ -451,7 +451,13 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
       if (hooks.onMoveFrontier) {
         for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
           hooks.onMoveFrontier(game, actorTeam);
-          if (hooks.tickSeconds > 0.0f) game.UpdateSightingMemory(hooks.tickSeconds);
+          if (hooks.tickSeconds > 0.0f) {
+            // Planning time passes while the frontier is up, as in the app's
+            // frame loop (main.cpp ticks Update/sighting/timeline every frame).
+            game.Update(hooks.tickSeconds);
+            game.UpdateSightingMemory(hooks.tickSeconds);
+            timeline.Observe(game, hooks.tickSeconds);
+          }
         }
       }
       for (const glm::vec3& waypoint : action.waypoints) {
@@ -520,7 +526,11 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
       if (hooks.onMoveFrontier) {
         for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
           hooks.onMoveFrontier(game, actorTeam);
-          if (hooks.tickSeconds > 0.0f) game.UpdateSightingMemory(hooks.tickSeconds);
+          if (hooks.tickSeconds > 0.0f) {
+            game.Update(hooks.tickSeconds);
+            game.UpdateSightingMemory(hooks.tickSeconds);
+            timeline.Observe(game, hooks.tickSeconds);
+          }
         }
       }
       return true;
@@ -741,10 +751,10 @@ void CheckAssertionImpl(const GameLogic& game, const ScenarioAssertion& a, int s
 }  // namespace
 
 bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& action,
-                   int stepIndex, ScenarioResult* result) {
+                   int stepIndex, ScenarioResult* result, const PlaybackHooks& hooks) {
   TurnTimeline timeline;
   TimelinePlayback playback;
-  return ExecuteActionImpl(game, scene, action, stepIndex, {}, timeline, playback, result);
+  return ExecuteActionImpl(game, scene, action, stepIndex, hooks, timeline, playback, result);
 }
 
 void CheckAssertion(const GameLogic& game, const ScenarioAssertion& assertion, int stepIndex,
@@ -858,10 +868,16 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
     if (!hooks.onFrame) return;
     for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
       hooks.onFrame(Display());
-      // Video mode: time passes while planning, so ghosts/bullets keep
-      // fading across the held frames instead of freezing mid-hold.
+      // Video mode: planning time passes across the held frames exactly as
+      // in the app's frame loop (main.cpp ticks Update, sighting memory and
+      // the timeline every frame), so idle animation, ghost/bullet fades and
+      // the cover-pose blend behave as they would live -- a figure that just
+      // stopped on a cover tile eases into its crouch/lean right here, not
+      // in some test-only tail.
       if (hooks.tickSeconds > 0.0f && !playback.Active()) {
+        game.Update(hooks.tickSeconds);
         game.UpdateSightingMemory(hooks.tickSeconds);
+        timeline.Observe(game, hooks.tickSeconds);
       }
     }
   };
@@ -932,37 +948,6 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
       hooks.onFrame(game);
       game.Update(hooks.tickSeconds);  // Ages the bullet lines (UpdateSightingMemory doesn't).
       game.UpdateSightingMemory(hooks.tickSeconds);
-    }
-  }
-  // Cover tail: the figure only eases into its crouch/lean after it stops
-  // (walk ease-out + pose blend, ~1 s), so a video that ends at arrival never
-  // shows it. Keep ticking until the pose has settled, then hold a beat.
-  if (hooks.onFrame && hooks.tickSeconds > 0.0f && !playback.Active()) {
-    auto Settling = [&] {
-      for (const Unit& unit : game.GetScene().units) {
-        if (unit.alive && unit.coverKind != 0 && unit.coverBlend < 1.0f) return true;
-      }
-      return false;
-    };
-    auto AnyCover = [&] {
-      for (const Unit& unit : game.GetScene().units) {
-        if (unit.alive && unit.coverKind != 0) return true;
-      }
-      return false;
-    };
-    constexpr float kMaxSettleSeconds = 3.0f;
-    constexpr float kHoldSeconds = 1.0f;
-    float elapsed = 0.0f;
-    float held = 0.0f;
-    while (AnyCover() && elapsed < kMaxSettleSeconds + kHoldSeconds) {
-      hooks.onFrame(game);
-      game.Update(hooks.tickSeconds);
-      game.UpdateSightingMemory(hooks.tickSeconds);
-      elapsed += hooks.tickSeconds;
-      if (!Settling()) {
-        held += hooks.tickSeconds;
-        if (held >= kHoldSeconds) break;
-      }
     }
   }
   return result;

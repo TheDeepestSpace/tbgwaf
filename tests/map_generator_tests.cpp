@@ -338,7 +338,10 @@ void TestBuildingKindsFloorsAndHeights() {
   MapGeneratorConfig downtown = OldSizeConfig(), residential = OldSizeConfig();
   downtown.character = BlockCharacter::Downtown;
   residential.character = BlockCharacter::Residential;
-  const Scene base = GenerateUrbanMap(42, OldSizeConfig());
+  // Solid prisms: this checks set-back offices, which hollow shells drop (#321).
+  MapGeneratorConfig solid = OldSizeConfig();
+  solid.enterableChance = downtown.enterableChance = residential.enterableChance = 0.0f;
+  const Scene base = GenerateUrbanMap(42, solid);
   const Scene town = GenerateUrbanMap(42, downtown);
   const Scene homes = GenerateUrbanMap(42, residential);
   CHECK(town.buildings.size() == base.buildings.size());
@@ -3384,6 +3387,55 @@ void TestEnterableBuildingsHaveDoorways() {
   for (const Building& b : solid.buildings) CHECK(!b.enterable);
 }
 
+// Issue #321: with the default config every building is enterable: hollow,
+// with a doorway whose outside and inside are joined on the nav mesh.
+void TestAllBuildingsEnterableAcrossSeeds() {
+  const MapGeneratorConfig c = OldSizeConfig();
+  CHECK(MapGeneratorConfig{}.enterableChance >= 1.0f);
+  int checked = 0;
+  for (uint32_t seed : {1u, 42u, 2024u, 7u, 99u, 2533922924u}) {
+    const Scene scene = GenerateUrbanMap(seed, c);
+    const std::vector<UrbanParcel> parcels = UrbanParcels(seed, c);
+    NavMesh mesh;
+    mesh.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
+               &scene.walkSurfaces);
+    for (const Building& b : scene.buildings) {
+      CHECK(b.enterable);
+      CHECK(b.doorWidth >= 0.9f && b.doorHeight >= constants::kUnitHeight);
+      CHECK(b.parcel >= 0 && b.parcel < static_cast<int>(parcels.size()));
+      if (!b.enterable || b.parcel < 0 || b.parcel >= static_cast<int>(parcels.size())) continue;
+      const UrbanParcel& p = parcels[b.parcel];
+      const size_t n = p.footprint.size();
+      const glm::vec2 a = p.footprint[p.frontageEdge % n], e = p.footprint[(p.frontageEdge + 1) % n];
+      const glm::vec2 d = glm::normalize(e - a), in(-d.y, d.x), mid = 0.5f * (a + e);
+      // Some walkable point just outside the doorway joins some walkable
+      // point inside the walls through the nav mesh (stair flights near the
+      // door can make a single probe point unreachable, so try a grid).
+      bool ok = false;
+      for (float so = 0.3f; so <= 3.0f && !ok; so += 0.5f) {
+        const glm::vec2 outside = mid - in * so;
+        if (!mesh.IsWalkable(outside.x, outside.y)) continue;
+        for (float si = 0.5f; si <= 4.0f && !ok; si += 0.5f) {
+          for (float lat : {0.0f, -0.4f, 0.4f}) {
+            const glm::vec2 inside = mid + in * si + d * lat;
+            if (!mesh.IsWalkable(inside.x, inside.y)) continue;
+            std::vector<glm::vec3> path;
+            if (mesh.FindPath(glm::vec3(outside.x, b.baseY, outside.y),
+                              glm::vec3(inside.x, b.baseY, inside.y), &path)) {
+              ok = true;
+              break;
+            }
+          }
+        }
+      }
+      if (!ok) std::fprintf(stderr, "not enterable: seed %u parcel %d\n", seed, b.parcel);
+      CHECK(ok);
+      ++checked;
+    }
+  }
+  CHECK(checked > 0);
+}
+
 // Roadmap 5.3: windows on enterable buildings are real holes in the walls.
 void TestWindowsAreWallCutouts() {
   MapGeneratorConfig c = OldSizeConfig();
@@ -3623,6 +3675,7 @@ int main(int argc, char** argv) {
   const std::vector<TestCase> cases = {
       TBG_TEST(TestNavMeshIgnoresOverheadObstacles),
       TBG_TEST(TestEnterableBuildingsHaveDoorways),
+      TBG_TEST(TestAllBuildingsEnterableAcrossSeeds),
       TBG_TEST(TestWindowsAreWallCutouts),
       TBG_TEST(TestEnterableFloorsReachableByStairs),
       TBG_TEST(TestTreesStayOnEmptyBlocksAndAreSolid),

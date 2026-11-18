@@ -116,7 +116,7 @@ bool RouteToward(const GameLogic& game, const Unit& actor, const glm::vec3& goal
   region.zMax = std::min(half, actor.position.z + reach);
   NavMesh mesh;
   mesh.Build(scene.obstacles, region, constants::kAgentRadius, &scene.ground,
-             &scene.walkSurfaces);
+             &scene.walkSurfaces, &scene.terrainTunnels);
 
   const float margin = 2.0f * constants::kAgentRadius;
   const auto inWindow = [&](const glm::vec3& p) {
@@ -537,11 +537,19 @@ std::vector<JevCandidate> GenerateCandidateSpecs(const GameLogic& game, Team tea
     }
     for (size_t surfaceIndex = 0; surfaceIndex < scene.walkSurfaces.size(); ++surfaceIndex) {
       const WalkSurface& surface = scene.walkSurfaces[surfaceIndex];
-      if (!surface.connectsToGround || surface.vertices.empty()) continue;
-      const glm::vec3 foot = ExtremeEdgeCenter(surface.vertices, false);
-      if (std::fabs(foot.y - actor->position.y) < kMinConnectorRise) continue;
-      addConnector("deck_" + std::to_string(surfaceIndex), foot,
-                   "Head to the ramp foot that connects this deck to the ground.");
+      if (surface.vertices.empty()) continue;
+      std::vector<glm::vec3> feet = surface.groundConnections;
+      if (feet.empty() && surface.connectsToGround) {
+        feet.push_back(ExtremeEdgeCenter(surface.vertices, false));
+      }
+      for (size_t footIndex = 0; footIndex < feet.size(); ++footIndex) {
+        const glm::vec3 foot = feet[footIndex];
+        if (std::fabs(foot.y - actor->position.y) < kMinConnectorRise) continue;
+        addConnector("deck_" + std::to_string(surfaceIndex) + "_" + std::to_string(footIndex),
+                     foot, surface.terrain
+                               ? "Head to the edge that connects the terrain above a tunnel."
+                               : "Head to the ramp foot that connects this deck to the ground.");
+      }
     }
     std::sort(connectors.begin(), connectors.end(), [](const Connector& a, const Connector& b) {
       if (a.distance != b.distance) return a.distance < b.distance;

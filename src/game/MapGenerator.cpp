@@ -29,6 +29,7 @@ namespace {
 //   0x7e22ac31u   terrain levels   level-step lines, raised sides, rises
 //   0x3c9d51e7u   highway profile  deck layout against the levels, ramp spots
 //   0x6a09e667u   ramp channels   which avenue ramps through each level
+//   0x1567e11u    terrain tunnels highway and local road tunnel choices
 //   0x1eae1007u   terrain accesses stair flights
 //   0x21b1e5a7u   ziplines         roof/anchor selection
 //   0xa5c47e75u   archetypes       floors, facade variants, setbacks
@@ -47,6 +48,7 @@ namespace {
 constexpr uint32_t kStreetStream = 0xb10c5eedu;
 constexpr uint32_t kPierFormStream = 0x7d3a94c5u;
 constexpr uint32_t kRampChannelStream = 0x6a09e667u;
+constexpr uint32_t kTunnelStream = 0x01567e11u;
 constexpr uint32_t kFurnitureStream = 0x6c57f00du;
 constexpr uint32_t kTrafficStream = 0x51674ea1u;
 constexpr uint32_t kCoverStream = 0x4c0b3a7du;
@@ -693,10 +695,69 @@ struct TerrainWallSpec {
   }
 };
 
+enum class TunnelRoad { Artery, Branch, Local };
+
+// One paired-portal bore through the raised band between two terrain walls.
+// The roof is the (flat) tier between the consecutive crossings. The floor
+// matches both exterior levels: when they differ, the road holds the higher
+// tunnel grade and uses a kRampGrade ramp beside the lower portal.
+struct TerrainTunnelSpec {
+  glm::vec2 origin{0.0f}, dir{1.0f, 0.0f};
+  float width = 0.0f;
+  float t0 = 0.0f, t1 = 0.0f;
+  float floor0 = 0.0f, floor1 = 0.0f;
+  float ceiling = 0.0f;
+  size_t wall0 = 0, wall1 = 0;
+  TunnelRoad road = TunnelRoad::Local;
+  int streetCut = -1;
+
+  float FloorAt(float t) const {
+    const float delta = floor1 - floor0;
+    if (std::fabs(delta) < 1e-4f) return floor0;
+    const float run = std::fabs(delta) / kRampGrade;
+    if (delta > 0.0f) return glm::mix(floor0, floor1, std::clamp((t - t0) / run, 0.0f, 1.0f));
+    return glm::mix(floor0, floor1,
+                    std::clamp((t - (t1 - run)) / run, 0.0f, 1.0f));
+  }
+
+  float RampBreak() const {
+    if (floor1 > floor0 + 1e-4f) return t0 + (floor1 - floor0) / kRampGrade;
+    if (floor1 < floor0 - 1e-4f) return t1 - (floor0 - floor1) / kRampGrade;
+    return 0.5f * (t0 + t1);
+  }
+
+  std::vector<glm::vec2> Bore(const std::vector<TerrainWallSpec>& walls) const {
+    const glm::vec2 across(-dir.y, dir.x);
+    const float half = width * 0.5f;
+    const auto corner = [&](size_t wall, float side) {
+      const glm::vec2 edgeOrigin = origin + across * (side * half);
+      return edgeOrigin + dir * walls[wall].CrossingParam(edgeOrigin, dir);
+    };
+    std::vector<glm::vec2> out = {corner(wall0, -1.0f), corner(wall1, -1.0f),
+                                  corner(wall1, 1.0f), corner(wall0, 1.0f)};
+    if (PolygonSignedArea(out) < 0.0f) std::reverse(out.begin(), out.end());
+    return out;
+  }
+
+  std::vector<glm::vec2> FloorZone(const std::vector<TerrainWallSpec>& walls) const {
+    std::vector<glm::vec2> zone = Bore(walls);
+    // The sampled heightfield bilinearly blends one cell around a sharp
+    // portal. Hold the road grade through that cell so a walkable sample
+    // never lands halfway up the otherwise vertical portal edge.
+    constexpr float apron = kGroundStep + 0.1f;
+    zone[0] -= dir * apron;
+    zone[3] -= dir * apron;
+    zone[1] += dir * apron;
+    zone[2] += dir * apron;
+    return zone;
+  }
+};
+
 struct TerrainPlan {
   bool enabled = false;
   float deckCruise = 0.0f;  // Absolute deck height at full overpass profile.
   std::vector<TerrainWallSpec> walls;
+  std::vector<TerrainTunnelSpec> tunnels;
 };
 
 // Level height from the steps alone (sharp cliff edges), before road ramps,
@@ -710,11 +771,77 @@ float TierHeight(const TerrainPlan& terrain, glm::vec2 p) {
   return y;
 }
 
+bool TunnelMatchesRoad(const TerrainTunnelSpec& tunnel, TunnelRoad road, int streetCut = -1) {
+  return tunnel.road == road && (road != TunnelRoad::Local || tunnel.streetCut == streetCut);
+}
+
+const TerrainTunnelSpec* TunnelAt(const TerrainPlan& terrain, glm::vec2 p, TunnelRoad road,
+                                  int streetCut = -1) {
+  for (const TerrainTunnelSpec& tunnel : terrain.tunnels) {
+    if (!TunnelMatchesRoad(tunnel, road, streetCut)) continue;
+    if (PointInConvexPolygon(p, tunnel.FloorZone(terrain.walls), 1e-3f)) return &tunnel;
+  }
+  return nullptr;
+}
+
+// Finds consecutive wall crossings that enclose a genuinely raised band.
+// A low terrace is left to the existing ramp/stop planner; a bore needs a
+// full figure's headroom plus its roof slab. The height-weighted seeded draw
+// makes taller levels increasingly likely to get a tunnel. `forbidden` are
+// param intervals of the road no bore may touch: stretches whose ground the
+// model hands to someone else (a highway corridor, an earlier bore - see
+// UrbanGroundAt's priorities), where the tier would stand at full height
+// mid-tunnel and split the road in two.
+bool PlanTunnelForRoad(TerrainPlan* terrain, glm::vec2 origin, glm::vec2 dir, float width,
+                       float tMin, float tMax, TunnelRoad road, int streetCut, Rng* rng,
+                       const std::vector<std::pair<float, float>>& forbidden = {}) {
+  struct Crossing { size_t wall; float t; };
+  std::vector<Crossing> crossings;
+  for (size_t i = 0; i < terrain->walls.size(); ++i) {
+    const TerrainWallSpec& wall = terrain->walls[i];
+    const float denom = glm::dot(wall.raisedN, dir);
+    if (std::fabs(denom) < 0.2f) continue;
+    const float t = wall.CrossingParam(origin, dir);
+    if (t > tMin + 2.0f && t < tMax - 2.0f) crossings.push_back({i, t});
+  }
+  std::sort(crossings.begin(), crossings.end(),
+            [](const Crossing& a, const Crossing& b) { return a.t < b.t; });
+  bool placed = false;
+  for (size_t i = 0; i + 1 < crossings.size(); ++i) {
+    const Crossing a = crossings[i], b = crossings[i + 1];
+    if (b.t - a.t < 8.0f) continue;
+    bool blockedSpan = false;
+    for (const auto& f : forbidden) blockedSpan |= b.t > f.first && a.t < f.second;
+    if (blockedSpan) continue;
+    constexpr float sample = 0.35f;
+    const float lowA = TierHeight(*terrain, origin + dir * (a.t - sample));
+    const float roof = TierHeight(*terrain, origin + dir * (0.5f * (a.t + b.t)));
+    const float lowB = TierHeight(*terrain, origin + dir * (b.t + sample));
+    const float rampRun = std::fabs(lowB - lowA) / kRampGrade;
+    if (rampRun + 2.0f > b.t - a.t) continue;
+    constexpr float slab = 0.45f;
+    const float clearance = roof - std::max(lowA, lowB) - slab;
+    if (clearance < constants::kMinDeckHeadroom + 0.15f) continue;
+    const float chance = std::clamp(0.35f + 0.12f * (clearance - constants::kMinDeckHeadroom),
+                                    0.35f, 0.90f);
+    if (!rng->Chance(chance)) continue;
+    terrain->tunnels.push_back({origin, dir, width, a.t, b.t, lowA, lowB, roof,
+                                a.wall, b.wall, road, streetCut});
+    placed = true;
+    ++i;  // Paired portals cannot also belong to an overlapping bore.
+  }
+  return placed;
+}
+
 // Ground grade under a highway road at point `p`: a wall crossed at grade
 // becomes a kRampGrade ramp climbing into its raised side along the road,
 // while a wall the deck flies over keeps its sharp step (the wall itself
 // continues beneath the deck).
 float HighwayGradeAt(const TerrainPlan& terrain, glm::vec2 p, glm::vec2 roadDir, bool branchRoad) {
+  const TunnelRoad road = branchRoad ? TunnelRoad::Branch : TunnelRoad::Artery;
+  if (const TerrainTunnelSpec* tunnel = TunnelAt(terrain, p, road)) {
+    return tunnel->FloorAt(glm::dot(p - tunnel->origin, tunnel->dir));
+  }
   float y = 0.0f;
   for (const TerrainWallSpec& w : terrain.walls) {
     const float d = glm::dot(w.raisedN, p) - w.stepD;
@@ -1088,6 +1215,39 @@ HighwayPlan BuildHighwayPlan(uint32_t seed, const MapGeneratorConfig& c, Terrain
   HighwayPlan plan = BeginHighwayPlan(seed, c);
   *terrainOut = BuildTerrainPlan(seed, c, plan.artery);
   FinishHighwayPlan(&plan, seed, c, terrainOut);
+  // An at-grade highway may hold its grade through a sufficiently tall
+  // raised band instead of climbing both faces. Elevated spans retain the
+  // established flyover planner and never become tunnels.
+  if (!plan.elevated && terrainOut->enabled) {
+    Rng rng(seed ^ kTunnelStream);
+    PlanTunnelForRoad(terrainOut, plan.artery.origin, plan.artery.dir, c.arteryWidth,
+                      plan.artery.sMin, plan.artery.sMax, TunnelRoad::Artery, -1, &rng);
+    if (plan.hasBranch) {
+      // The artery corridor's ground outranks the branch's (UrbanGroundAt),
+      // so a branch bore must not touch it.
+      std::vector<std::pair<float, float>> forbidden;
+      const float denom = glm::dot(plan.artery.normal, plan.branch.dir);
+      if (std::fabs(denom) > 1e-3f) {
+        const float t = (glm::dot(plan.artery.normal, plan.artery.origin) -
+                         glm::dot(plan.artery.normal, plan.branch.start)) /
+                        denom;
+        const float spread =
+            (c.arteryWidth * 0.5f + plan.branch.width * 0.5f + 1.0f) / std::fabs(denom);
+        forbidden.emplace_back(t - spread, t + spread);
+      }
+      PlanTunnelForRoad(terrainOut, plan.branch.start, plan.branch.dir, plan.branch.width,
+                        0.0f, plan.branch.length, TunnelRoad::Branch, -1, &rng, forbidden);
+    }
+    for (const TerrainTunnelSpec& tunnel : terrainOut->tunnels) {
+      if (tunnel.road == TunnelRoad::Artery) {
+        terrainOut->walls[tunnel.wall0].arteryRamp = false;
+        terrainOut->walls[tunnel.wall1].arteryRamp = false;
+      } else if (tunnel.road == TunnelRoad::Branch) {
+        terrainOut->walls[tunnel.wall0].branchRamp = false;
+        terrainOut->walls[tunnel.wall1].branchRamp = false;
+      }
+    }
+  }
   return plan;
 }
 
@@ -1255,6 +1415,10 @@ struct StreetCut {
   // A short segment dividing a long block (its gaps are everything outside
   // the segment): junction tests use only that segment.
   bool blockSplit = false;
+  // Param intervals where the street runs in a tunnel under a raised level.
+  // The road stays paved, but nothing of it exists on the surface, so the
+  // blocks above are laid out as if it were not there (BuildBlocks only).
+  std::vector<std::pair<float, float>> tunnelSpans;
 
   bool InGap(float t, float tol = 0.0f) const {
     for (const auto& g : gaps) {
@@ -1267,6 +1431,23 @@ struct StreetCut {
     std::vector<std::pair<float, float>> out;
     float cursor = lo;
     for (const auto& g : gaps) {
+      if (g.second <= cursor) continue;
+      if (g.first > cursor) out.emplace_back(cursor, std::min(g.first, hi));
+      cursor = std::max(cursor, g.second);
+      if (cursor >= hi) break;
+    }
+    if (cursor < hi) out.emplace_back(cursor, hi);
+    return out;
+  }
+  // As Kept, but the tunnelled stretches count as missing too: what a block
+  // sees of the street on the surface.
+  std::vector<std::pair<float, float>> SurfaceKept(float lo, float hi) const {
+    std::vector<std::pair<float, float>> out;
+    float cursor = lo;
+    std::vector<std::pair<float, float>> all = gaps;
+    all.insert(all.end(), tunnelSpans.begin(), tunnelSpans.end());
+    std::sort(all.begin(), all.end());
+    for (const auto& g : all) {
       if (g.second <= cursor) continue;
       if (g.first > cursor) out.emplace_back(cursor, std::min(g.first, hi));
       cursor = std::max(cursor, g.second);
@@ -1316,6 +1497,13 @@ float UrbanGroundAt(const HighwayPlan& plan, const TerrainPlan& terrain,
       return HighwayGradeAt(terrain, p, plan.branch.dir, true);
     }
   }
+  for (const TerrainTunnelSpec& tunnel : terrain.tunnels) {
+    if (tunnel.road != TunnelRoad::Local ||
+        !PointInConvexPolygon(p, tunnel.FloorZone(terrain.walls), 1e-3f)) {
+      continue;
+    }
+    return tunnel.FloorAt(glm::dot(p - tunnel.origin, tunnel.dir));
+  }
   float y = 0.0f;
   for (const TerrainWallSpec& wall : terrain.walls) y += wall.rise * wall.Factor(p);
   return y;
@@ -1323,6 +1511,30 @@ float UrbanGroundAt(const HighwayPlan& plan, const TerrainPlan& terrain,
 
 float UrbanGroundAt(const CityPlan& city, const MapGeneratorConfig& c, glm::vec2 p) {
   return UrbanGroundAt(city.highway, city.terrain, c, p);
+}
+
+// The tunnel whose bore (portal to portal, the road's width) contains `p`,
+// whichever road owns it.
+const TerrainTunnelSpec* TunnelBoreAt(const TerrainPlan& terrain, glm::vec2 p) {
+  for (const TerrainTunnelSpec& tunnel : terrain.tunnels) {
+    if (PointInConvexPolygon(p, tunnel.Bore(terrain.walls), 1e-3f)) return &tunnel;
+  }
+  return nullptr;
+}
+
+// Ground under local street `cutIndex` at `p`: inside a tunnel bore the
+// street that owns the tunnel follows its floor, while any other street
+// stays on the restored terrain roof and never acquires an accidental
+// junction with the road in the bore below.
+float StreetGroundAt(const CityPlan& city, const MapGeneratorConfig& c, int cutIndex,
+                     glm::vec2 p) {
+  if (const TerrainTunnelSpec* tunnel = TunnelBoreAt(city.terrain, p)) {
+    if (tunnel->road == TunnelRoad::Local && tunnel->streetCut == cutIndex) {
+      return tunnel->FloorAt(glm::dot(p - tunnel->origin, tunnel->dir));
+    }
+    return tunnel->ceiling;
+  }
+  return UrbanGroundAt(city, c, p);
 }
 
 float RimWidth(const MapGeneratorConfig& c) { return std::max(c.streetWidth, c.localStreetWidth); }
@@ -1366,6 +1578,55 @@ bool CutPavedExtent(const StreetCut& cut, const HighwayPlan& plan, const MapGene
   return *t1 > *t0;
 }
 
+void ChooseTunnelRoutes(uint32_t seed, const MapGeneratorConfig& c, const HighwayPlan& plan,
+                        TerrainPlan* terrain, const std::vector<StreetCut>& cuts) {
+  Rng rng(seed ^ (kTunnelStream + 1u));
+  for (size_t i = 0; i < cuts.size(); ++i) {
+    const StreetCut& cut = cuts[i];
+    if (cut.cls == UrbanStreetClass::Highway || cut.terrainBoundary || cut.blockSplit) continue;
+    float t0 = 0.0f, t1 = 0.0f;
+    if (!CutPavedExtent(cut, plan, c, &t0, &t1)) continue;
+    const float width = cut.pave > 0.0f ? cut.pave : cut.width;
+    // Stretches of this street no bore may touch (see PlanTunnelForRoad):
+    // where it crosses a highway corridor or an already placed bore, whose
+    // ground outranks a local tunnel floor in UrbanGroundAt.
+    std::vector<std::pair<float, float>> forbidden;
+    const auto forbidStrip = [&](glm::vec2 n, glm::vec2 stripOrigin, float halfWidth,
+                                 glm::vec2 stripDir, float s0, float s1) {
+      const float denom = glm::dot(n, cut.dir);
+      if (std::fabs(denom) < 1e-3f) return;  // Runs along the strip.
+      const float t =
+          (glm::dot(n, stripOrigin) - glm::dot(n, cut.origin)) / denom;
+      const float s = glm::dot(cut.origin + cut.dir * t - stripOrigin, stripDir);
+      if (s < s0 || s > s1) return;  // Crosses the strip's line beyond its extent.
+      const float spread = (halfWidth + width * 0.5f + 1.0f) / std::fabs(denom);
+      forbidden.emplace_back(t - spread, t + spread);
+    };
+    forbidStrip(plan.artery.normal, plan.artery.origin, c.arteryWidth * 0.5f,
+                plan.artery.dir, plan.artery.sMin - 2.0f, plan.artery.sMax + 2.0f);
+    if (plan.hasBranch) {
+      forbidStrip(glm::vec2(-plan.branch.dir.y, plan.branch.dir.x), plan.branch.start,
+                  plan.branch.width * 0.5f, plan.branch.dir, -1.0f, plan.branch.length + 1.0f);
+    }
+    for (const TerrainTunnelSpec& other : terrain->tunnels) {
+      forbidStrip(glm::vec2(-other.dir.y, other.dir.x), other.origin, other.width * 0.5f,
+                  other.dir, other.t0, other.t1);
+    }
+    PlanTunnelForRoad(terrain, cut.origin, cut.dir, width, t0, t1,
+                      TunnelRoad::Local, static_cast<int>(i), &rng, forbidden);
+  }
+}
+
+bool TunnelUsesWall(const TerrainPlan& terrain, TunnelRoad road, int streetCut, size_t wall) {
+  for (const TerrainTunnelSpec& tunnel : terrain.tunnels) {
+    if (TunnelMatchesRoad(tunnel, road, streetCut) &&
+        (tunnel.wall0 == wall || tunnel.wall1 == wall)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Picks, per wall and artery side, the avenue allowed to ramp through that
 // level at road grade (see BuildUrbanTerrain, which carves the opening).
 void ChooseRampChannels(uint32_t seed, const MapGeneratorConfig& c, const HighwayPlan& plan,
@@ -1374,7 +1635,8 @@ void ChooseRampChannels(uint32_t seed, const MapGeneratorConfig& c, const Highwa
   const float half = UrbanMapHalfExtent(c);
   Rng rng(seed ^ kRampChannelStream);
   const glm::vec2 branchN(-plan.branch.dir.y, plan.branch.dir.x);
-  for (TerrainWallSpec& w : terrain->walls) {
+  for (size_t wallIndex = 0; wallIndex < terrain->walls.size(); ++wallIndex) {
+    TerrainWallSpec& w = terrain->walls[wallIndex];
     for (const int side : {1, -1}) {
       const bool drawn = rng.Chance(0.6f);
       bool hasSecondary = false;
@@ -1386,8 +1648,12 @@ void ChooseRampChannels(uint32_t seed, const MapGeneratorConfig& c, const Highwa
       for (int pass = 0; pass < 2; ++pass) {
       if (pass == 1 && !drawn) break;
       bool placed = false;
-      for (const StreetCut& cut : cuts) {
+      for (size_t cutIndex = 0; cutIndex < cuts.size(); ++cutIndex) {
+        const StreetCut& cut = cuts[cutIndex];
         if (cut.side != side || cut.cls == UrbanStreetClass::Highway || cut.terrainBoundary) {
+          continue;
+        }
+        if (TunnelUsesWall(*terrain, TunnelRoad::Local, static_cast<int>(cutIndex), wallIndex)) {
           continue;
         }
         if (pass == 0 && !cut.secondaryArtery) continue;
@@ -1490,7 +1756,8 @@ void TrimStreetsAtWalls(const MapGeneratorConfig& c, const HighwayPlan& plan,
       if (hi <= paved0 || lo >= paved1) return;
       crossings.push_back({i, lo, hi});
     };
-    for (const TerrainWallSpec& w : terrain.walls) {
+    for (size_t wallIndex = 0; wallIndex < terrain.walls.size(); ++wallIndex) {
+      const TerrainWallSpec& w = terrain.walls[wallIndex];
       const TerrainChannel* own = nullptr;  // This street's own ramp through the wall.
       for (const TerrainChannel& ch : w.channels) {
         const glm::vec2 rel = ch.foot - cut.origin;
@@ -1502,7 +1769,9 @@ void TrimStreetsAtWalls(const MapGeneratorConfig& c, const HighwayPlan& plan,
       // The level band, grown by the street's own width: a street brushing
       // the band at a shallow angle is cut off as well.
       const float denom = glm::dot(w.raisedN, cut.dir);
-      if (!own && std::fabs(denom) > 1e-3f) {
+      const bool tunnel = TunnelUsesWall(terrain, TunnelRoad::Local,
+                                         static_cast<int>(i), wallIndex);
+      if (!own && !tunnel && std::fabs(denom) > 1e-3f) {
         const float t = (w.stepD - glm::dot(w.raisedN, cut.origin)) / denom;
         const float halfStrip = (w.cutWidth + cut.width) * 0.5f / std::fabs(denom);
         add(t - halfStrip, t + halfStrip);
@@ -1708,6 +1977,7 @@ StreetGraph BuildStreetGraph(uint32_t seed, const MapGeneratorConfig& c, const H
       avenues.erase(avenues.begin() + pick);
     }
   }
+  ChooseTunnelRoutes(seed, c, plan, terrainPlan, graph.cuts);
   ChooseRampChannels(seed, c, plan, terrainPlan, graph.cuts);
   // Trimmed against the channels; a channel left without its avenue over
   // the ramp is dropped and the streets trimmed again without it, so the
@@ -1737,6 +2007,15 @@ std::vector<UrbanBlock> BuildBlocks(uint32_t seed, const MapGeneratorConfig& c,
   const float arteryD = glm::dot(artery.normal, artery.origin);
 
   std::vector<UrbanBlock> blocks;
+  // A street bored under a raised level leaves no trace on top of it.
+  for (const TerrainTunnelSpec& tunnel : terrain.tunnels) {
+    if (tunnel.road != TunnelRoad::Local || tunnel.streetCut < 0 ||
+        static_cast<size_t>(tunnel.streetCut) >= graph->cuts.size()) {
+      continue;
+    }
+    graph->cuts[static_cast<size_t>(tunnel.streetCut)].tunnelSpans.emplace_back(tunnel.t0,
+                                                                                 tunnel.t1);
+  }
   // Chords a trimmed street was carved along beyond its existing stretch
   // (see the last pass below), paved back afterwards up to its obstacles.
   struct Ghost {
@@ -1755,7 +2034,7 @@ std::vector<UrbanBlock> BuildBlocks(uint32_t seed, const MapGeneratorConfig& c,
     std::vector<const StreetCut*> trimmed;
     for (const StreetCut& cut : graph->cuts) {
       if (cut.side != side) continue;
-      if (cut.gaps.empty()) {
+      if (cut.gaps.empty() && cut.tunnelSpans.empty()) {
         CutStreet(&regions, cut.origin, cut.dir, cut.width);
       } else {
         trimmed.push_back(&cut);
@@ -1789,11 +2068,14 @@ std::vector<UrbanBlock> BuildBlocks(uint32_t seed, const MapGeneratorConfig& c,
             r0 = std::min(r0, t);
             r1 = std::max(r1, t);
           }
-          float keptLength = 0.0f;
-          for (const auto& k : cut->Kept(r0, r1)) keptLength += k.second - k.first;
+          float keptLength = 0.0f, realLength = 0.0f;
+          for (const auto& k : cut->SurfaceKept(r0, r1)) keptLength += k.second - k.first;
+          for (const auto& k : cut->Kept(r0, r1)) realLength += k.second - k.first;
           const float tol = 0.05f;
           const bool whole = keptLength >= (r1 - r0) - tol;
-          const bool settle = pass == 3 && keptLength >= 1.0f;
+          // Only a dead end settles; a tunnel under the region is no reason
+          // to carve its road through the blocks above.
+          const bool settle = pass == 3 && keptLength >= 1.0f && realLength < (r1 - r0) - tol;
           if (whole || settle) {
             if (!whole) ghosts.push_back({static_cast<size_t>(cut - graph->cuts.data()), r0, r1});
             std::vector<std::vector<glm::vec2>> one;
@@ -3175,7 +3457,8 @@ void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
   Rng rng(seed ^ 0x1eae1007u);
   const glm::vec2 branchN(-plan.branch.dir.y, plan.branch.dir.x);
 
-  for (TerrainWallSpec& w : terrain.walls) {
+  for (size_t wallIndex = 0; wallIndex < terrain.walls.size(); ++wallIndex) {
+    TerrainWallSpec& w = terrain.walls[wallIndex];
     TerrainWall wall;
     wall.origin = w.origin;
     wall.dir = w.dir;
@@ -3205,6 +3488,16 @@ void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
       }
       return std::make_pair(1.0f, -1.0f);
     };
+    std::vector<std::pair<float, float>> tunnelPortals;
+    for (const TerrainTunnelSpec& tunnel : terrain.tunnels) {
+      if (tunnel.wall0 != wallIndex && tunnel.wall1 != wallIndex) continue;
+      const std::vector<glm::vec2> bore = tunnel.Bore(terrain.walls);
+      const glm::vec2 a = tunnel.wall0 == wallIndex ? bore[0] : bore[1];
+      const glm::vec2 b = tunnel.wall0 == wallIndex ? bore[3] : bore[2];
+      const float ta = glm::dot(a - w.lineOrigin, w.dir);
+      const float tb = glm::dot(b - w.lineOrigin, w.dir);
+      tunnelPortals.emplace_back(std::min(ta, tb) - 0.6f, std::max(ta, tb) + 0.6f);
+    }
 
     // Stretches of the wall line where nothing may be placed: the rim
     // streets, the highway corridors and every street crossing. `hard`
@@ -3220,6 +3513,9 @@ void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
     {
       const auto band = branchBand(5.0f);
       if (band.first < band.second) hard.push_back(band);
+    }
+    for (const auto& portal : tunnelPortals) {
+      hard.emplace_back(portal.first - 4.0f, portal.second + 4.0f);
     }
     blocked = hard;
     for (const StreetCut& cut : city.streets.cuts) {
@@ -3242,6 +3538,7 @@ void BuildUrbanTerrain(Scene* scene, CityPlan* cityPlan, uint32_t seed,
       w.gaps.push_back(bandInterval(branchN, glm::dot(branchN, plan.branch.start),
                                     plan.branch.width * 0.5f + c.localStreetWidth * 0.4f + 0.6f));
     }
+    for (const auto& portal : tunnelPortals) w.gaps.push_back(portal);
 
     // Avenue ramp-throughs were chosen with the street graph: their gaps.
     for (const TerrainChannel& channel : w.channels) {
@@ -3462,7 +3759,8 @@ void EmitTerrainCliffs(Scene* scene, const CityPlan& city, const MapGeneratorCon
     }
   };
 
-  for (const TerrainWallSpec& w : terrain.walls) {
+  for (size_t wallIndex = 0; wallIndex < terrain.walls.size(); ++wallIndex) {
+    const TerrainWallSpec& w = terrain.walls[wallIndex];
     const auto lineAt = [&](float t) { return w.lineOrigin + w.dir * t; };
     float tMin = 0.0f, tMax = 0.0f;
     ClipLineToSquare(w.lineOrigin, w.dir, half - 0.25f, &tMin, &tMax);
@@ -3500,6 +3798,17 @@ void EmitTerrainCliffs(Scene* scene, const CityPlan& city, const MapGeneratorCon
     if (plan.hasBranch && w.branchRamp) {
       highwayCut(plan.branch.start, plan.branch.dir, plan.branch.width * 0.5f);
     }
+    // A tunnel opens the cliff at each portal but, unlike a ramp, does not
+    // cut away the raised band beyond that face.
+    for (const TerrainTunnelSpec& tunnel : terrain.tunnels) {
+      if (tunnel.wall0 != wallIndex && tunnel.wall1 != wallIndex) continue;
+      const std::vector<glm::vec2> bore = tunnel.Bore(terrain.walls);
+      const glm::vec2 a = tunnel.wall0 == wallIndex ? bore[0] : bore[1];
+      const glm::vec2 b = tunnel.wall0 == wallIndex ? bore[3] : bore[2];
+      const float ta = glm::dot(a - w.lineOrigin, w.dir);
+      const float tb = glm::dot(b - w.lineOrigin, w.dir);
+      open.emplace_back(std::min(ta, tb) - 0.15f, std::max(ta, tb) + 0.15f);
+    }
     for (const TerrainFlight& flight : w.flights) {
       const float tLand0 = flight.tFoot + flight.dir * flight.run;
       const float tLand1 = flight.tFoot + flight.dir * (flight.run + kLanding);
@@ -3522,6 +3831,79 @@ void EmitTerrainCliffs(Scene* scene, const CityPlan& city, const MapGeneratorCon
       navWall(lineAt(tEnd) - w.raisedN * kFlightWidth, lineAt(tEnd), w.dir * (flight.dir * 0.6f),
               -w.dir * (flight.dir * 0.6f));
     }
+  }
+
+  // Bores are visual holes in the tier prisms. Their long tier faces become
+  // the tunnel walls; a terrain-coloured slab restores the walkable roof.
+  // Thin unseen walls along both sides give collision/LOS the same shell.
+  for (const TerrainTunnelSpec& tunnel : terrain.tunnels) {
+    const std::vector<glm::vec2> bore = tunnel.Bore(terrain.walls);
+    const std::vector<glm::vec2> floorZone = tunnel.FloorZone(terrain.walls);
+    if (bore.size() != 4) continue;
+    scene->terrainCutouts.push_back(bore);
+    const glm::vec2 across(-tunnel.dir.y, tunnel.dir.x);
+    navWall(floorZone[0], floorZone[1], across * 0.6f, -across * 0.6f);
+    navWall(floorZone[3], floorZone[2], -across * 0.6f, across * 0.6f);
+
+    TerrainTunnel out;
+    out.bore = bore;
+    out.width = tunnel.width;
+    out.highway = tunnel.road != TunnelRoad::Local;
+    for (const glm::vec2& p : bore) out.roof.emplace_back(p.x, tunnel.ceiling, p.y);
+    const glm::vec2 entrance = tunnel.origin + tunnel.dir * tunnel.t0;
+    const glm::vec2 exit = tunnel.origin + tunnel.dir * tunnel.t1;
+    out.entrance = {entrance.x, tunnel.floor0 + kGradeY, entrance.y};
+    out.exit = {exit.x, tunnel.floor1 + kGradeY, exit.y};
+
+    // The gameplay roof overhangs the intact tier on both sides, past the
+    // unseen cliff wall above (0.15 half-width) grown by the agent radius,
+    // so a figure on the tier can reach its edge. Those two outer edges are
+    // explicit ground transitions; using the roof centre would incorrectly
+    // connect it to the road below.
+    TerrainTunnelSpec walkRoof = tunnel;
+    walkRoof.width += 2.0f * (0.15f + constants::kAgentRadius + 0.35f);
+    const std::vector<glm::vec2> footprint = walkRoof.Bore(terrain.walls);
+    WalkSurface roof;
+    for (const glm::vec2& p : footprint) roof.vertices.emplace_back(p.x, tunnel.ceiling, p.y);
+    roof.terrain = true;
+    roof.groundConnections = {
+        glm::vec3(0.5f * (footprint[0].x + footprint[1].x), tunnel.ceiling,
+                  0.5f * (footprint[0].y + footprint[1].y)),
+        glm::vec3(0.5f * (footprint[2].x + footprint[3].x), tunnel.ceiling,
+                  0.5f * (footprint[2].y + footprint[3].y))};
+    // A street crossing the roof above enters it where its centerline meets
+    // each long edge, so a figure following that street steps on and off
+    // the roof in line instead of detouring to the edge midpoints.
+    for (size_t cutIndex = 0; cutIndex < city.streets.cuts.size(); ++cutIndex) {
+      const StreetCut& cut = city.streets.cuts[cutIndex];
+      if (cut.cls == UrbanStreetClass::Highway || cut.terrainBoundary) continue;
+      if (tunnel.road == TunnelRoad::Local && tunnel.streetCut == static_cast<int>(cutIndex)) {
+        continue;
+      }
+      if (std::fabs(glm::dot(cut.dir, tunnel.dir)) > 0.9f) continue;  // Runs along the bore.
+      float paved0 = 0.0f, paved1 = 0.0f;
+      if (!CutPavedExtent(cut, plan, c, &paved0, &paved1)) continue;
+      // A street ending on the tunnelled road (a T onto the artery) stops
+      // just inside its pavement; the roof edge lies the overhang beyond.
+      const float overhang = 0.5f * (walkRoof.width - tunnel.width) + 0.25f;
+      for (const auto& edge : {std::pair<size_t, size_t>{0, 1}, std::pair<size_t, size_t>{2, 3}}) {
+        const glm::vec2 p = footprint[edge.first], q = footprint[edge.second];
+        const glm::vec2 e = q - p;
+        const float denom = e.x * cut.dir.y - e.y * cut.dir.x;
+        if (std::fabs(denom) < 1e-5f) continue;
+        const glm::vec2 rel = cut.origin - p;
+        const float s = (rel.x * cut.dir.y - rel.y * cut.dir.x) / denom;
+        const float u = (rel.x * e.y - rel.y * e.x) / denom;
+        if (s <= 0.02f || s >= 0.98f) continue;
+        if (u < paved0 - overhang || u > paved1 + overhang) continue;
+        if (cut.InGap(std::clamp(u, paved0, paved1))) continue;
+        const glm::vec2 hit = p + e * s;
+        roof.groundConnections.emplace_back(hit.x, tunnel.ceiling, hit.y);
+      }
+    }
+    out.roofSurface = static_cast<int>(scene->walkSurfaces.size());
+    scene->walkSurfaces.push_back(std::move(roof));
+    scene->terrainTunnels.push_back(std::move(out));
   }
 }
 
@@ -3760,6 +4142,12 @@ void EmitHighwaySurfaces(Scene* scene, const CityPlan& city, const MapGeneratorC
           if (ramp) splitAt(&pieces, wall.raisedN, wall.stepD + wall.rise / kRampGrade);
         }
         const glm::vec2 origin = roadIndex == 0 ? plan.artery.origin : plan.branch.start;
+        const TunnelRoad tunnelRoad = roadIndex == 0 ? TunnelRoad::Artery : TunnelRoad::Branch;
+        for (const TerrainTunnelSpec& tunnel : city.terrain.tunnels) {
+          if (tunnel.road != tunnelRoad) continue;
+          splitAt(&pieces, tunnel.dir,
+                  glm::dot(tunnel.dir, tunnel.origin) + tunnel.RampBreak());
+        }
         if (plan.elevated) {
           const std::vector<float> profileBreaks =
               roadIndex == 0
@@ -3892,6 +4280,10 @@ void EmitStreetSurfaces(Scene* scene, const CityPlan& city, const MapGeneratorCo
       lines.push_back({across, sideD + channel.width * 0.5f});
     }
   }
+  for (const TerrainTunnelSpec& tunnel : city.terrain.tunnels) {
+    lines.push_back({tunnel.dir,
+                     glm::dot(tunnel.dir, tunnel.origin) + tunnel.RampBreak()});
+  }
   if (city.terrain.enabled) {
     lines.push_back({artery.normal, arteryD - c.arteryWidth * 0.5f});
     lines.push_back({artery.normal, arteryD + c.arteryWidth * 0.5f});
@@ -3909,8 +4301,8 @@ void EmitStreetSurfaces(Scene* scene, const CityPlan& city, const MapGeneratorCo
       lines.push_back({branch.dir, u0 + branch.length + 1.0f});
     }
   }
-  const auto ground = [&](glm::vec2 p) { return UrbanGroundAt(city, c, p) + kGradeY; };
-  for (const StreetCut& cut : city.streets.cuts) {
+  for (size_t cutIndex = 0; cutIndex < city.streets.cuts.size(); ++cutIndex) {
+    const StreetCut& cut = city.streets.cuts[cutIndex];
     if (cut.cls == UrbanStreetClass::Highway) continue;  // A highway road already.
     if (cut.terrainBoundary) continue;                   // A level band: unpaved.
     float t0, t1;
@@ -3929,6 +4321,9 @@ void EmitStreetSurfaces(Scene* scene, const CityPlan& city, const MapGeneratorCo
     band = KeepSide(band, artery.normal * static_cast<float>(cut.side),
                     static_cast<float>(cut.side) * arteryD + c.arteryWidth * 0.5f - 0.2f);
     const float base = glm::dot(cut.dir, cut.origin);
+    const auto ground = [&](glm::vec2 p) {
+      return StreetGroundAt(city, c, static_cast<int>(cutIndex), p) + kGradeY;
+    };
     for (const auto& kept : cut.Kept(-1e9f, 1e9f)) {
       std::vector<glm::vec2> piece = band;
       if (kept.first > -1e8f) piece = KeepSide(piece, cut.dir, base + kept.first);
@@ -4549,7 +4944,9 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>
         // exactly on a ramp corridor's edge then takes the tier's height,
         // not the ramp's below, and the strip stays flat beside the
         // corridor's cliff instead of twisting down into it.
-        const auto ground = [&](glm::vec2 q) { return UrbanGroundAt(city, c, q) + kSidewalkHeight; };
+        const auto ground = [&](glm::vec2 q) {
+          return StreetGroundAt(city, c, -1, q) + kSidewalkHeight;  // On the roof over a bore.
+        };
         if (!PlanarPatch(strip, ground, &sidewalk)) continue;
       } else {
         for (const glm::vec2& p : strip) {
@@ -5369,6 +5766,8 @@ void EmitStreetFurniture(Scene* scene, const CityPlan& city, const MapGeneratorC
         }
         for (const glm::vec2& q : placed) clear &= glm::distance(q, center) >= kItemSpacing;
         if (!fronted || !clear) continue;
+        // The sampled ground inside a tunnel bore is the road below.
+        if (TunnelBoreAt(city.terrain, center)) continue;
         const float baseY = groundY(center.x, center.y);
         scene->obstacles.push_back(Obstacle{
             AABB{glm::vec3(center.x - spec.sx * 0.5f, baseY, center.y - spec.sz * 0.5f),
@@ -5534,6 +5933,11 @@ void EmitCoachBuses(Scene* scene, const CityPlan& city, const MapGeneratorConfig
           ok &= !PolygonsOverlap(padded, other.vertices);
         }
         ok = ok && PolygonClearOfRoads(padded, city.streets.roads, 0.0f);
+        // The sampled ground inside a tunnel bore is the road below; a car
+        // on a street crossing the roof would drop into the tunnel.
+        for (const TerrainTunnelSpec& tunnel : city.terrain.tunnels) {
+          ok &= !PolygonsOverlap(padded, tunnel.Bore(city.terrain.walls));
+        }
         if (!ok) continue;
         // Level ground under the whole footprint.
         const float baseY = groundY(center.x, center.y);
@@ -6000,8 +6404,15 @@ void EmitCoverItems(Scene* scene, const CityPlan& city, const std::vector<Parcel
             for (const WalkSurface& surface : scene->walkSurfaces) {
               if (surface.vertices.size() < 3) continue;
               float lowest = surface.vertices.front().y;
-              for (const glm::vec3& v : surface.vertices) lowest = std::min(lowest, v.y);
+              float highest = lowest;
+              for (const glm::vec3& v : surface.vertices) {
+                lowest = std::min(lowest, v.y);
+                highest = std::max(highest, v.y);
+              }
               if (lowest > baseY + constants::kMinDeckHeadroom) continue;
+              // A flat surface level with the item's base (a tunnel roof) is
+              // what it stands on, not something to keep clear of.
+              if (highest - lowest < 0.05f && std::fabs(lowest - baseY) < 0.05f) continue;
               std::vector<glm::vec2> xz;
               for (const glm::vec3& v : surface.vertices) xz.emplace_back(v.x, v.z);
               ok &= RectPolygonGap(lo, hi, xz) >= 0.05f;
@@ -6081,8 +6492,13 @@ void EmitCoverItems(Scene* scene, const CityPlan& city, const std::vector<Parcel
                 if (!fits) break;
                 if (other.vertices.size() < 3) continue;
                 float lowest = other.vertices.front().y;
-                for (const glm::vec3& v : other.vertices) lowest = std::min(lowest, v.y);
+                float highest = lowest;
+                for (const glm::vec3& v : other.vertices) {
+                  lowest = std::min(lowest, v.y);
+                  highest = std::max(highest, v.y);
+                }
                 if (lowest > baseY + constants::kMinDeckHeadroom) continue;
+                if (highest - lowest < 0.05f && std::fabs(lowest - baseY) < 0.05f) continue;
                 std::vector<glm::vec2> xz;
                 for (const glm::vec3& v : other.vertices) xz.emplace_back(v.x, v.z);
                 fits &= RectPolygonGap(rlo, rhi, xz) >= 0.05f;
@@ -6175,6 +6591,7 @@ void EmitTrafficControl(Scene* scene, const CityPlan& city, const MapGeneratorCo
   auto add = [&](StreetPropKind kind, glm::vec2 p, float yaw, float secondaryYaw) {
     if (kind != StreetPropKind::StreetNameSign && !snapToCorner(p, &p)) return;
     if (std::max(std::fabs(p.x), std::fabs(p.y)) > half - 0.5f) return;
+    if (TunnelBoreAt(city.terrain, p)) return;  // The sampled ground there is the road below.
     for (const Obstacle& o : scene->obstacles) {
       if (p.x < o.bounds.min.x - 0.4f || p.x > o.bounds.max.x + 0.4f ||
           p.y < o.bounds.min.z - 0.4f || p.y > o.bounds.max.z + 0.4f) {
@@ -6527,18 +6944,25 @@ Scene GenerateArterialUrbanMap(uint32_t seed, const MapGeneratorConfig& c) {
   DedupeRoadOverlaps(&scene);
   std::vector<float> characterRolls;
   const std::vector<Parcel> parcels = PlanParcels(city, c, &rng, &characterRolls);
+  // Buildings over a tunnel bore stand on its roof, not on the road below.
+  const GroundY blockGroundY = [&](float x, float z) {
+    if (const TerrainTunnelSpec* tunnel = TunnelBoreAt(city.terrain, glm::vec2(x, z))) {
+      return tunnel->ceiling;
+    }
+    return scene.ground.HeightAt(x, z);
+  };
   EmitBuildings(&scene, city, parcels, PlanBuildings(parcels, characterRolls, seed, c, &rng), c,
-                groundY, seed);
+                blockGroundY, seed);
   EmitSpawns(&scene, city, c, groundY);
   // Facades go before the ziplines so an anchor or cable never lands on a
   // stoop or rear platform (their clearance pass checks the walk surfaces).
-  EmitFacades(&scene, city, parcels, seed, c, groundY);
+  EmitFacades(&scene, city, parcels, seed, c, blockGroundY);
   const size_t roofCount = scene.obstacles.size();
   EmitTerrainCliffs(&scene, city, c);
   // Furniture before ziplines: anchors and cables then keep clear of it.
   EmitStreetFurniture(&scene, city, c, seed, groundY);
   EmitTrafficControl(&scene, city, c, seed, groundY);
-  EmitCoverItems(&scene, city, parcels, c, seed, groundY);
+  EmitCoverItems(&scene, city, parcels, c, seed, blockGroundY);
   PlaceZiplines(&scene, city.blocks, seed, c, roofCount);
   EmitMassing(&scene, parcels, seed);
   EmitTrees(&scene, city.blocks, seed, c);
@@ -6675,16 +7099,24 @@ std::vector<UrbanStreet> UrbanStreets(uint32_t seed, const MapGeneratorConfig& c
   Scene terrain;
   terrain.mapHalfExtent = half;
   if (c.features.terrain.mode != FeatureMode::Off) BuildUrbanTerrain(&terrain, &city, seed, c);
-  for (const StreetCut& cut : graph.cuts) {
+  for (size_t cutIndex = 0; cutIndex < graph.cuts.size(); ++cutIndex) {
+    const StreetCut& cut = graph.cuts[cutIndex];
     if (cut.cls == UrbanStreetClass::Highway) continue;  // Already a road above.
     if (cut.terrainBoundary) continue;                   // A level band, not a street.
     float t0, t1;
     if (!CutPavedExtent(cut, plan, c, &t0, &t1)) continue;  // Its own side only.
+    // The sampled ground, except inside a tunnel bore, where the pavement
+    // of a street other than the one bored through sits on the roof.
+    const auto height = [&](glm::vec2 p) {
+      if (TunnelBoreAt(city.terrain, p)) {
+        return StreetGroundAt(city, c, static_cast<int>(cutIndex), p);
+      }
+      return terrain.ground.HeightAt(p.x, p.y);
+    };
     for (const auto& kept : cut.Kept(t0, t1)) {
       if (!(kept.second > kept.first)) continue;
       const glm::vec2 a = cut.origin + cut.dir * kept.first, b = cut.origin + cut.dir * kept.second;
-      out.push_back({glm::vec3(a.x, terrain.ground.HeightAt(a.x, a.y), a.y),
-                     glm::vec3(b.x, terrain.ground.HeightAt(b.x, b.y), b.y),
+      out.push_back({glm::vec3(a.x, height(a), a.y), glm::vec3(b.x, height(b), b.y),
                      cut.pave > 0.0f ? cut.pave : cut.width, cut.cls, false});
     }
   }

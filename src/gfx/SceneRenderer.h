@@ -229,6 +229,10 @@ class SceneRenderer {
   // instances), which an address key would mistake for "unchanged".
   LitTriangleMesh terrainMesh_;
   LitTriangleMesh terrainRaisedMesh_;  // Concrete level tops and cliff faces of a city.
+  // Slabs restoring the level over each tunnel bore (issue #156), grouped
+  // by roof walk-surface index so the camera see-through pass can skip a
+  // roof hiding a figure or frontier in the tunnel and blend it back in.
+  LitTriangleMesh tunnelRoofMesh_;
   LitTriangleMesh terrainRoadMesh_, terrainSidewalkMesh_, terrainStairMesh_;
   unsigned long long pavementKey_ = 0;
   // Reused scratch mesh for polygon prisms and road/deck patches. Geometry

@@ -6,8 +6,9 @@ description: >
   first floor beside the stair top, so the slab directly over it keeps the
   shell opacity while the rest of the cutaway stays pronounced. The goldens
   pin the outlined cutaway with an occupant upstairs: the slab under the
-  figure and the one over it, the stair flights beside it, and a single
-  frame per first-floor window and ground-floor doorway around it.
+  figure and the one over it, the stair flights beside it -- including the
+  dim outline of the stair parts a slab covers (PR #313 review) -- and a
+  single frame per first-floor window and ground-floor doorway around it.
 
 map:
   generate: {seed: 7, type: urban, elevated: false, features: {terrain: off}}

@@ -759,6 +759,8 @@ Scenario LoadScenarioFromFile(const std::string& path) {
   if (const YAML::Node cam = root["camera"]) {
     if (cam["target"]) scenario.cameraTarget = ParseVec2(cam["target"], "camera.target");
     if (cam["zoom"]) scenario.cameraZoom = cam["zoom"].as<float>();
+    if (cam["yaw_degrees"]) scenario.cameraYawDegrees = cam["yaw_degrees"].as<float>();
+    if (cam["pitch_degrees"]) scenario.cameraPitchDegrees = cam["pitch_degrees"].as<float>();
   }
   if (const YAML::Node render = root["render"]) {
     if (render["fov_overlay"]) {

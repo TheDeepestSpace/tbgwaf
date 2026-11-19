@@ -544,7 +544,12 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     // Mark the imported pose as classified here so a planning-time
     // UpdateCoverPoses continues the blend instead of re-deriving from a
     // stale position (it still re-judges the exposure rule every tick).
-    unit->coverFrom = u.position;
+    // A snapshot carrying no pose (a figure mid-walk, a net client's round
+    // end) leaves coverFrom stale so the next tick classifies the tile it
+    // actually stands on.
+    if (u.coverTileKind != 0 || u.coverKind != 0 || u.coverBlend > 0.0f) {
+      unit->coverFrom = u.position;
+    }
     ApplyPlan(u, unit);
     if (u.moving) mirroredMoving_.push_back(u.id);
   }

@@ -102,7 +102,7 @@ struct MapGeneratorConfig {
   // Enterable buildings (issue #157): P(a parcel of any kind (set-back
   // offices excepted) is hollow: thin walls, a frontage doorway, interior floor slabs
   // and a roof slab overhead). 0 keeps every building a solid prism.
-  float enterableChance = 0.5f;  // Share of parcels built hollow (#157).
+  float enterableChance = 1.0f;  // Share of parcels built hollow (#157); 1 = all enterable (#321).
   float rearDoorOpenChance = 0.5f;     // Enterable: chance the rear wall has an open doorway.
   float bayHalfClosedChance = 0.5f;    // Enterable warehouses: chance the bay is half shuttered.
   int towerCount = 2;           // Tall landmark buildings scattered across the city.
@@ -160,9 +160,10 @@ struct MapGeneratorConfig {
   // retaining wall parallel to that street. Steps overlap into nested
   // tiers (sharp, no rolling noise). The highway profile is planned
   // against the levels: the artery/branch ramp through a wall at grade (a
-  // main road cutting through the level) or fly over a run of walls on a
-  // deck; an avenue may ramp through; stair flights attached along each
-  // wall face climb it elsewhere. terrainLevelCount: -1 draws 1-3 per
+  // main road cutting through the level), tunnel through a sufficiently
+  // tall raised band, or fly over a run of walls on a deck; an avenue may
+  // ramp or tunnel through; stair flights attached along each wall face
+  // climb it elsewhere. terrainLevelCount: -1 draws 1-3 per
   // seed; 0 keeps the city flat. Legacy arteryCount=0 stays flat.
   int terrainLevelCount = -1;
   UrbanFeatures features;

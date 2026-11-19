@@ -246,7 +246,9 @@ uniform int uThermal;
 uniform int uThermalBlackHot;  // 1 = hot reads dark (the review reference), 0 = white-hot.
 uniform int uThermalMaterial;  // ThermalMaterial; only figures use uColor.
 uniform int uNpr;
-uniform int uFadedMark;  // G-buffer pass for outlining see-through geometry: 1 shell, 2 interior.
+// G-buffer pass for outlining see-through geometry: 1 shell, 2 interior,
+// 3 interior drawn at the shell's opacity, 4 a stair seen through a slab.
+uniform int uFadedMark;
 uniform int uCelBands;
 uniform float uCelSoftness;
 layout(location = 0) out vec4 FragColor;
@@ -296,8 +298,12 @@ void main() {
   vec3 viewDir = normalize(uViewPos - vWorldPos);
   if (dot(normal, viewDir) < 0.0) normal = -normal;
   // Alpha tags see-through geometry for its outline-only pass: 0.75 the
-  // faded shell, 0.5 the pronounced interior (AmbientOcclusion kFadedOutline).
-  float fadedTag = uFadedMark == 1 ? 0.75 : (uFadedMark == 2 ? 0.5 : 1.0);
+  // faded shell, 0.5 the pronounced interior, 0.625 an interior surface at
+  // the shell's opacity, 0.375 a stair seen through a floor slab
+  // (AmbientOcclusion kFadedOutline).
+  float fadedTag = uFadedMark == 1 ? 0.75
+                 : (uFadedMark == 2 ? 0.5
+                 : (uFadedMark == 3 ? 0.625 : (uFadedMark == 4 ? 0.375 : 1.0)));
   WorldNormal = vec4(normal * 0.5 + 0.5, fadedTag);
 
   float diffuse = max(dot(normal, -uLightDir), 0.0);
@@ -1275,16 +1281,93 @@ void AppendTerrainOverlay(const tactics::HeightField& terrain,
                           const std::array<glm::vec3, 3>& footprint,
                           std::vector<glm::vec3>* points, float lift = 0.08f);
 
+// The tunnel roof (walk-surface index) a pavement patch lies on, or -1. A
+// patch counts as on the roof when it sits at the roof's height and any of
+// its corners (or its centroid) is over the bore: the roof is drawn on
+// demand (camera see-through, issue #156), and the paving over it must go
+// with it or it would hang in the air over the revealed tunnel.
+int TunnelRoofUnder(const tactics::RoadSurface& patch,
+                    const std::vector<tactics::TerrainTunnel>& tunnels) {
+  if (patch.vertices.size() < 3) return -1;
+  glm::vec3 centroid(0.0f);
+  for (const glm::vec3& v : patch.vertices) centroid += v;
+  centroid /= static_cast<float>(patch.vertices.size());
+  for (const tactics::TerrainTunnel& tunnel : tunnels) {
+    if (tunnel.roofSurface < 0 || tunnel.roof.empty()) continue;
+    const float roofY = tunnel.roof.front().y;
+    if (std::fabs(centroid.y - roofY) > 0.5f) continue;
+    const auto over = [&](const glm::vec3& p) {
+      return tactics::PointStrictlyInConvexPolygon(glm::vec2(p.x, p.z), tunnel.bore, 1e-3f);
+    };
+    if (over(centroid)) return tunnel.roofSurface;
+    for (const glm::vec3& v : patch.vertices) {
+      if (over(v)) return tunnel.roofSurface;
+    }
+  }
+  return -1;
+}
+
 // Streets and sidewalks are planar patches at their own heights (a city's
-// levels are planar too), batched into one mesh per material.
+// levels are planar too), batched into one mesh per material. Patches over
+// a tunnel roof form a triangle group keyed by that roof's walk-surface
+// index (everything else is group -1), so the opaque pass can leave them
+// out together with a camera-faded roof.
 void BuildPavementMesh(const std::vector<tactics::RoadSurface>& patches, float thickness,
+                       const std::vector<tactics::TerrainTunnel>& tunnels,
                        LitTriangleMesh* mesh) {
   LitVertices vertices;
   std::vector<GLuint> indices;
+  std::vector<int> groups;
   for (const auto& patch : patches) {
     AppendSurfacePatch(patch.vertices, thickness, &vertices, &indices);
+    groups.resize(indices.size() / 3, TunnelRoofUnder(patch, tunnels));
   }
-  mesh->SetChunkedMesh(vertices, indices, kCullGridCells);
+  mesh->SetChunkedMesh(vertices, indices, kCullGridCells, &groups);
+}
+
+// Tunnel roofs (issue #156): the slab restoring the raised level over each
+// bore, as its own mesh grouped by the roof's walk-surface index. It is
+// drawn with the terrain (same concrete, same depth bias) but, unlike the
+// tier prisms, it can hide a figure or movement frontier standing in the
+// tunnel, so the camera see-through pass skips a crossed roof here and
+// re-draws it translucent after the figures.
+void BuildTunnelRoofMesh(const std::vector<tactics::TerrainTunnel>& tunnels,
+                         LitTriangleMesh* mesh) {
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  std::vector<int> groups;
+  for (const tactics::TerrainTunnel& tunnel : tunnels) {
+    // The slab's long sides run along the bore inside the solid tier; drawn,
+    // their faces poke through the terrain at some camera angles. Only the
+    // portal ends (the short edges) keep a face.
+    std::vector<char> hidden(tunnel.roof.size(), 0);
+    if (tunnel.roof.size() == 4) {
+      const float e0 = glm::distance(tunnel.roof[0], tunnel.roof[1]);
+      const float e1 = glm::distance(tunnel.roof[1], tunnel.roof[2]);
+      for (size_t i = 0; i < 4; ++i) hidden[i] = ((i % 2 == 0) == (e0 > e1)) ? 1 : 0;
+    }
+    // The top face also butts against the tier tops beside the bore at the
+    // same height; float rounding along that shared edge leaves a hairline
+    // gap showing the dark bore as a dashed line. Overlap the neighbours by
+    // a sliver (same height and colour, so the overlap is invisible).
+    std::vector<glm::vec3> roof = tunnel.roof;
+    glm::vec3 centre(0.0f);
+    for (const glm::vec3& v : roof) centre += v / static_cast<float>(roof.size());
+    for (size_t i = 0; i < roof.size(); ++i) {
+      if (!hidden[i]) continue;
+      const glm::vec3 a = tunnel.roof[i], b = tunnel.roof[(i + 1) % roof.size()];
+      glm::vec3 out = glm::cross(b - a, glm::vec3(0, 1, 0));
+      out.y = 0.0f;
+      if (glm::length(out) < 1e-6f) continue;
+      out = glm::normalize(out);
+      if (glm::dot(out, 0.5f * (a + b) - centre) < 0.0f) out = -out;
+      roof[i] += out * 0.06f;
+      roof[(i + 1) % roof.size()] += out * 0.06f;
+    }
+    AppendSurfacePatch(roof, 0.45f, &vertices, &indices, &hidden);
+    groups.resize(indices.size() / 3, tunnel.roofSurface);
+  }
+  mesh->SetChunkedMesh(vertices, indices, kCullGridCells, &groups);
 }
 
 void BuildStreetFixtureMeshes(
@@ -1534,8 +1617,11 @@ unsigned long long DeckFingerprint(const tactics::Scene& scene) {
     }
   };
   for (const tactics::WalkSurface& s : scene.walkSurfaces) {
+    mix(&s.overpass, sizeof(s.overpass));
+    mix(&s.terrain, sizeof(s.terrain));
     mix(s.vertices.data(), s.vertices.size() * sizeof(glm::vec3));
     mix(s.neighbors.data(), s.neighbors.size() * sizeof(int));
+    mix(s.groundConnections.data(), s.groundConnections.size() * sizeof(glm::vec3));
     mix(&s.stair, sizeof(s.stair));
     mix(&s.climbProxy, sizeof(s.climbProxy));
   }
@@ -1551,6 +1637,7 @@ void BuildDeckMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   std::vector<GLuint> indices;
   std::vector<int> groups;
   for (size_t i = 0; i < scene.walkSurfaces.size(); ++i) {
+    if (scene.walkSurfaces[i].terrain) continue;
     if (scene.walkSurfaces[i].climbProxy) {
       groups.resize(indices.size() / 3, static_cast<int>(i));
       continue;
@@ -2031,6 +2118,7 @@ void AppendPrism(const std::vector<glm::vec2>& polygon, float bottom, float top,
 void BuildUrbanTierMeshes(const tactics::HeightField& hf,
                           const std::vector<tactics::TerrainWall>& walls,
                           const std::vector<std::vector<glm::vec2>>& cutouts,
+                          const std::vector<tactics::TerrainTunnel>& tunnels,
                           LitTriangleMesh* base, LitTriangleMesh* raised) {
   LitVertices baseVertices, raisedVertices;
   std::vector<GLuint> baseIndices, raisedIndices;
@@ -2045,11 +2133,105 @@ void BuildUrbanTierMeshes(const tactics::HeightField& hf,
 
   // Tier polygons: the map square split by each step line, minus the ramp
   // corridors (shared with the tests, so what they check is what is drawn).
-  for (const tactics::TerrainTier& tier : tactics::TerrainTiers(walls, cutouts, square)) {
-    if (tier.height < 0.01f) continue;  // The base plane already shows here.
-    AppendPrism(tier.polygon, 0.0f, tier.height, /*topFace=*/true, &raisedVertices,
-                &raisedIndices);
+  //
+  // Cutting a corridor or bore out of a tier splits it along the cut's
+  // (infinite) edge lines, so pieces of one level butt against each other.
+  // A side wall buried against a neighbour at least as tall is left out:
+  // drawn, it shares its top edge with the neighbour's top face, and the
+  // slope-scaled depth bias (see the terrain pass) pushes that grazing top
+  // back further than the wall, which then shows through as a dashed line.
+  // A tunnel's side walls (the tier faces along its bore) sit under the
+  // roof's long edges the same way, so they stop just short of the top; the
+  // roof slab, wider and thicker than that gap, closes the bore above them.
+  constexpr float kBoreWallDrop = 0.2f;
+  // Bore edges running along each tunnel (its long sides).
+  std::vector<std::pair<glm::vec2, glm::vec2>> boreSides;
+  for (const tactics::TerrainTunnel& tunnel : tunnels) {
+    const glm::vec2 along(tunnel.exit.x - tunnel.entrance.x, tunnel.exit.z - tunnel.entrance.z);
+    if (glm::length(along) < 1e-4f) continue;
+    for (size_t i = 0; i < tunnel.bore.size(); ++i) {
+      const glm::vec2 a = tunnel.bore[i], b = tunnel.bore[(i + 1) % tunnel.bore.size()];
+      if (glm::distance(a, b) < 1e-4f) continue;
+      const glm::vec2 e = glm::normalize(b - a), d = glm::normalize(along);
+      if (std::fabs(e.x * d.y - e.y * d.x) < 0.1f) boreSides.emplace_back(a, b);
+    }
   }
+  const std::vector<tactics::TerrainTier> tiers = tactics::TerrainTiers(walls, cutouts, square);
+  for (size_t t = 0; t < tiers.size(); ++t) {
+    const tactics::TerrainTier& tier = tiers[t];
+    if (tier.height < 0.01f) continue;  // The base plane already shows here.
+    const std::vector<glm::vec2>& polygon = tier.polygon;
+    AppendPrism(polygon, tier.height, tier.height, /*topFace=*/true, &raisedVertices,
+                &raisedIndices);
+    glm::vec2 center(0.0f);
+    for (glm::vec2 p : polygon) center += p;
+    center /= static_cast<float>(polygon.size());
+    for (size_t i = 0; i < polygon.size(); ++i) {
+      const glm::vec2 a = polygon[i], b = polygon[(i + 1) % polygon.size()];
+      const float length = glm::distance(a, b);
+      if (length < 1e-4f) continue;
+      const glm::vec2 dir = (b - a) / length;
+      // Stretches of this edge (as params along it) covered by a neighbour,
+      // and those running along a tunnel bore.
+      constexpr float kOnLine = 2e-3f;
+      std::vector<std::pair<float, float>> covered, bored;
+      const auto overlap = [&](glm::vec2 c, glm::vec2 e, std::vector<std::pair<float, float>>* out) {
+        c -= a;
+        e -= a;
+        if (std::fabs(dir.x * c.y - dir.y * c.x) > kOnLine ||
+            std::fabs(dir.x * e.y - dir.y * e.x) > kOnLine) {
+          return;
+        }
+        const float t0 = std::max(0.0f, std::min(glm::dot(c, dir), glm::dot(e, dir)));
+        const float t1 = std::min(length, std::max(glm::dot(c, dir), glm::dot(e, dir)));
+        if (t1 - t0 > kOnLine) out->emplace_back(t0, t1);
+      };
+      for (const auto& [c, e] : boreSides) overlap(c, e, &bored);
+      for (size_t o = 0; o < tiers.size(); ++o) {
+        if (o == t || tiers[o].height < tier.height - 1e-3f) continue;
+        const std::vector<glm::vec2>& other = tiers[o].polygon;
+        for (size_t k = 0; k < other.size(); ++k) {
+          overlap(other[k], other[(k + 1) % other.size()], &covered);
+        }
+      }
+      // Cut the edge at every interval end; each stretch between two cuts is
+      // then wholly covered, wholly along a bore, or a plain cliff face.
+      std::vector<float> cuts = {0.0f, length};
+      for (const auto* list : {&covered, &bored}) {
+        for (const auto& [t0, t1] : *list) {
+          cuts.push_back(t0);
+          cuts.push_back(t1);
+        }
+      }
+      std::sort(cuts.begin(), cuts.end());
+      const auto within = [](const std::vector<std::pair<float, float>>& list, float t) {
+        for (const auto& [t0, t1] : list) {
+          if (t > t0 && t < t1) return true;
+        }
+        return false;
+      };
+      glm::vec2 n(-dir.y, dir.x);
+      if (glm::dot(n, center - a) > 0.0f) n = -n;  // Outward.
+      const glm::vec3 normal(n.x, 0.0f, n.y);
+      for (size_t k = 0; k + 1 < cuts.size(); ++k) {
+        const float t0 = cuts[k], t1 = cuts[k + 1];
+        if (t1 - t0 < kOnLine) continue;
+        const float mid = 0.5f * (t0 + t1);
+        if (within(covered, mid)) continue;
+        const float top = tier.height - (within(bored, mid) ? kBoreWallDrop : 0.0f);
+        // The edge's own corners where a stretch ends on one, so the wall
+        // stays watertight against its neighbours there.
+        const glm::vec2 p = t0 <= 0.0f ? a : a + dir * t0;
+        const glm::vec2 q = t1 >= length ? b : a + dir * t1;
+        const glm::vec3 a0(p.x, 0.0f, p.y), a1(p.x, top, p.y);
+        const glm::vec3 b0(q.x, 0.0f, q.y), b1(q.x, top, q.y);
+        AppendTriangle(a0, b0, b1, normal, &raisedVertices, &raisedIndices);
+        AppendTriangle(a0, b1, a1, normal, &raisedVertices, &raisedIndices);
+      }
+    }
+  }
+  // Tunnel roofs are a separate mesh (BuildTunnelRoofMesh): the camera
+  // see-through pass needs to leave a crossed roof out of the opaque pass.
   base->SetChunkedMesh(baseVertices, baseIndices, kCullGridCells);
   raised->SetChunkedMesh(raisedVertices, raisedIndices, kCullGridCells);
 }
@@ -2061,10 +2243,11 @@ void BuildUrbanTierMeshes(const tactics::HeightField& hf,
 // concrete tiers and `base` the ground plane. Hills use the heightfield.
 void BuildTerrainMesh(const tactics::HeightField& hf,
                       const std::vector<tactics::TerrainWall>& walls,
-                      const std::vector<std::vector<glm::vec2>>& cutouts, LitTriangleMesh* base,
+                      const std::vector<std::vector<glm::vec2>>& cutouts,
+                      const std::vector<tactics::TerrainTunnel>& tunnels, LitTriangleMesh* base,
                       LitTriangleMesh* raised) {
   if (!walls.empty()) {
-    BuildUrbanTierMeshes(hf, walls, cutouts, base, raised);
+    BuildUrbanTierMeshes(hf, walls, cutouts, tunnels, base, raised);
     return;
   }
   const int nx = hf.nx, nz = hf.nz;
@@ -3062,6 +3245,7 @@ bool SceneRenderer::Init() {
   aimOverlayMesh_.Init();
   terrainMesh_.Init();
   terrainRaisedMesh_.Init();
+  tunnelRoofMesh_.Init();
   terrainRoadMesh_.Init();
   terrainSidewalkMesh_.Init();
   terrainStairMesh_.Init();
@@ -3132,6 +3316,7 @@ void SceneRenderer::Destroy() {
   fovKeyMapHalfExtent_ = 0.0f;
   terrainMesh_.Destroy();
   terrainRaisedMesh_.Destroy();
+  tunnelRoofMesh_.Destroy();
   terrainRoadMesh_.Destroy();
   terrainSidewalkMesh_.Destroy();
   terrainStairMesh_.Destroy();
@@ -3311,6 +3496,7 @@ int SceneRenderer::AcquireFovMaps(const Unit& unit, int sector, float facingYaw,
       depthShader_.SetMat4("uLightMVP", slot.matrix[half]);
       terrainMesh_.DrawVisible(inMap);
       terrainRaisedMesh_.DrawVisible(inMap);
+      tunnelRoofMesh_.DrawVisible(inMap);
       terrainStairMesh_.Draw();
     } else {
       DrawBoxDepth(depthShader_, cubeMesh_, slot.matrix[half],
@@ -3418,6 +3604,7 @@ void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::v
     if (drawTerrain) {
       drawReceiver(terrainMesh_);
       drawReceiver(terrainRaisedMesh_);
+      drawReceiver(tunnelRoofMesh_);
     } else {
       const glm::mat4 model =
           BoxModel(glm::vec3(-mapHalfExtent, -0.05f, -mapHalfExtent),
@@ -3472,7 +3659,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (terrainChanged) {
     if (!terrain.Empty()) {
       BuildTerrainMesh(terrain, game.GetScene().terrainWalls, game.GetScene().terrainCutouts,
-                       &terrainMesh_, &terrainRaisedMesh_);
+                       game.GetScene().terrainTunnels, &terrainMesh_, &terrainRaisedMesh_);
+      BuildTunnelRoofMesh(game.GetScene().terrainTunnels, &tunnelRoofMesh_);
     }
     terrainKey_ = terrain;
     fovSceneKey_ = 0;
@@ -3481,8 +3669,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (!terrain.Empty()) {
     const auto key = FovSceneFingerprint(game.GetScene());
     if (terrainChanged || pavementKey_ != key) {
-      BuildPavementMesh(game.GetScene().roads, 0.0f, &terrainRoadMesh_);
-      BuildPavementMesh(game.GetScene().sidewalkSurfaces, 0.10f, &terrainSidewalkMesh_);
+      BuildPavementMesh(game.GetScene().roads, 0.0f, game.GetScene().terrainTunnels,
+                        &terrainRoadMesh_);
+      BuildPavementMesh(game.GetScene().sidewalkSurfaces, 0.10f,
+                        game.GetScene().terrainTunnels, &terrainSidewalkMesh_);
       BuildTerrainStairMesh(game.GetScene().terrainStairs, &terrainStairMesh_);
       pavementKey_ = key;
     }
@@ -3632,6 +3822,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
       terrainMesh_.DrawVisible(inShadowMap);
       terrainRaisedMesh_.DrawVisible(inShadowMap);
+      tunnelRoofMesh_.DrawVisible(inShadowMap);
       terrainStairMesh_.Draw();
     }
     if (obstacleCasterMesh_.HasGeometry()) {
@@ -4053,6 +4244,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, shadowDepthTex_);
 
+  // Tunnel roofs and the paving on them are grouped by the roof's walk-surface
+  // index (-1 for paving elsewhere); a roof crossed by a sightline to a figure
+  // or frontier in the tunnel is left out of the opaque pass and blended back
+  // in after the figures (issue #156).
+  const std::function<bool(int)> skipFadedRoofGroup =
+      anyFaded ? std::function<bool(int)>([&](int i) { return i >= 0 && fadeSurface[i] != 0; })
+               : std::function<bool(int)>();
   if (drawTerrain) {
     // Retaining-wall tops coincide with the high pad. Bias the terrain
     // behind the solid geometry to keep their shared edge free of z-fighting.
@@ -4069,6 +4267,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     thermalMaterial(ThermalMaterial::Concrete);
     DrawLitVisible(litShader_, terrainRaisedMesh_, viewProj, lightSpaceMatrix_,
                    glm::vec4(kDeckColor, 1.0f), onScreen);
+    if (tunnelRoofMesh_.HasGeometry()) {
+      DrawLitVisible(litShader_, tunnelRoofMesh_, viewProj, lightSpaceMatrix_,
+                     glm::vec4(kDeckColor, 1.0f), onScreen, skipFadedRoofGroup);
+    }
     DrawLitModel(litShader_, terrainStairMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                  glm::vec4(kDeckColor, 1.0f));
     glDisable(GL_POLYGON_OFFSET_FILL);
@@ -4088,10 +4290,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
 
   if (drawTerrain) {
     DrawLitVisible(litShader_, terrainSidewalkMesh_, viewProj, lightSpaceMatrix_,
-                   glm::vec4(0.36f, 0.37f, 0.39f, 1.0f), onScreen);
+                   glm::vec4(0.36f, 0.37f, 0.39f, 1.0f), onScreen, skipFadedRoofGroup);
     thermalMaterial(ThermalMaterial::Asphalt);
     DrawLitVisible(litShader_, terrainRoadMesh_, viewProj, lightSpaceMatrix_,
-                   glm::vec4(0.13f, 0.14f, 0.16f, 1.0f), onScreen);
+                   glm::vec4(0.13f, 0.14f, 0.16f, 1.0f), onScreen, skipFadedRoofGroup);
   }
   thermalMaterial(ThermalMaterial::Concrete);
   for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
@@ -4297,21 +4499,29 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // Outlines apply to the see-through blocks in both the NPR view and the
     // NPR-over-AO view.
     const bool fadedOutlines = thermalAo && debug.npr;
-    // `mark`: the G-buffer pass, which tags each draw with its opacity class
-    // (uFadedMark) for CompositeFadedOutlines.
-    const auto drawSurface = [&](int surface, bool pronounced, bool mark) {
+    // `markTag`: the uFadedMark class tag for the G-buffer pass feeding
+    // CompositeFadedOutlines (0 in the colour pass). A building's floor or
+    // stair stays an interior there even at the shell's opacity (3), so its
+    // edge against the shell is still outlined.
+    const auto drawSurface = [&](int surface, bool pronounced, int markTag) {
       thermalMaterial(ThermalMaterial::Concrete);
-      if (mark) litShader_.SetInt("uFadedMark", pronounced ? 2 : 1);
+      if (markTag) litShader_.SetInt("uFadedMark", markTag);
       BuildWalkSurface(walkSurfaces, surface, &geometryMesh_);
       const float opacity = pronounced ? kInteriorFadeOpacity : kOccluderFadeOpacity;
       DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                    glm::vec4(kDeckColor, opacity));
     };
-    const auto drawInteriorGeometry = [&](bool mark) {
+    // `stairs`: -1 draws every interior surface (the colour pass), 1 only
+    // the stair flights, 0 only the floor slabs. `coveredTag` re-tags the
+    // draw as a stair seen through a slab (uFadedMark 4).
+    const auto drawInteriorGeometry = [&](bool mark, int stairs, bool coveredTag) {
       // A floor slab that itself hides a probe (a figure on the storey under
       // it) keeps the shell opacity, so what is below it still shows through.
       for (const FadedOccluder& f : interior) {
-        drawSurface(f.surface, !directSurface[f.surface], mark);
+        if (stairs >= 0 && (walkSurfaces[f.surface].stair ? 1 : 0) != stairs) continue;
+        const bool pronounced = !directSurface[f.surface];
+        drawSurface(f.surface, pronounced,
+                    mark ? (coveredTag ? 4 : (pronounced ? 2 : 3)) : 0);
       }
     };
     const auto drawShellGeometry = [&](bool mark) {
@@ -4349,8 +4559,24 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
                          color);
           }
+        } else if (walkSurfaces[f.surface].terrain) {
+          // A tunnel roof: its drawn slab is the bore (the walk footprint
+          // overhangs onto the solid tier), and the paving on it stands
+          // proud of the slab, so it goes first to claim its pixels.
+          const std::function<bool(int)> otherRoofs = [&](int i) { return i != f.surface; };
+          thermalMaterial(ThermalMaterial::Concrete);
+          DrawLitVisible(litShader_, terrainSidewalkMesh_, viewProj, lightSpaceMatrix_,
+                         glm::vec4(0.36f, 0.37f, 0.39f, kOccluderFadeOpacity), onScreen,
+                         otherRoofs);
+          thermalMaterial(ThermalMaterial::Asphalt);
+          DrawLitVisible(litShader_, terrainRoadMesh_, viewProj, lightSpaceMatrix_,
+                         glm::vec4(0.13f, 0.14f, 0.16f, kOccluderFadeOpacity), onScreen,
+                         otherRoofs);
+          thermalMaterial(ThermalMaterial::Concrete);
+          DrawLitVisible(litShader_, tunnelRoofMesh_, viewProj, lightSpaceMatrix_,
+                         glm::vec4(kDeckColor, kOccluderFadeOpacity), onScreen, otherRoofs);
         } else {
-          drawSurface(f.surface, false, mark);
+          drawSurface(f.surface, false, mark ? 1 : 0);
         }
       }
     };
@@ -4360,14 +4586,21 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // wall pieces) lost its edges wherever a floor slab overlaps it on
     // screen, and the player could not tell where to stand to look (or
     // walk) out. The opening rectangles of every faded enterable building
-    // are therefore drawn unconditionally (not only over the interior) as
-    // faint ink segments at the shell outline's own intensity, so every
-    // opening reads the same whether or not a floor or stair overlaps it.
+    // are therefore drawn as faint ink segments. A near wall's (camera on
+    // its outer side) everywhere the wall itself did not claim the pixel,
+    // at the shell outline's own intensity: where it did,
+    // CompositeFadedOutlines sees the wall and draws the frame. A far wall
+    // (seen through the building) never reaches the outline pass where the
+    // nearer shell covers it on screen, so its openings are drawn
+    // everywhere, dimmer than a regular edge (PR #313 review).
     // Depth-tested against the opaque scene like the rest of the
-    // see-through pass. The rectangle sits on the wall face the camera sees
-    // (the outer face of a near wall, the inner face of the far wall seen
-    // through the building), which is where the edge pass puts its single
-    // frame per opening, so the two line up.
+    // see-through pass. A window's rectangle sits on the wall face the
+    // camera sees (the outer face of a near wall, the inner face of the far
+    // wall seen through the building), which is where the edge pass puts
+    // its single frame per opening, so the two line up. A doorway's always
+    // sits on the outer face (see below).
+    // The same hand-ink draw also carries the outlines of floor slabs
+    // covered by other slabs (see coveredSegments below).
     const auto drawOpeningEdgesOverInterior = [&]() {
       const tactics::Scene& scene = game.GetScene();
       // Wall thickness per faded enterable building, read off its wall
@@ -4386,7 +4619,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         const glm::vec2 in(-d.y / len, d.x / len);
         wallThickness[w.building] = std::max(0.0f, glm::dot(w.footprint[3] - w.footprint[0], in));
       }
-      std::vector<glm::vec3> segments;
+      std::vector<glm::vec3> nearSegments, farSegments;
       for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
         // Enterable buildings only: their windows and doorways are real
         // gaps (a solid building's painted openings have no hole to mark).
@@ -4406,7 +4639,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         const glm::vec2 dir = (b - a) / len;
         const glm::vec2 out(dir.y, -dir.x);  // Outward, as OpeningBasisFor.
         glm::vec2 p0 = a + dir * o.u0, p1 = a + dir * o.u1;
-        if (glm::dot(glm::vec2(cameraPos.x, cameraPos.z) - a, out) < 0.0f) {
+        const bool farWall = glm::dot(glm::vec2(cameraPos.x, cameraPos.z) - a, out) < 0.0f;
+        // A doorway keeps its frame on the outer wall face from every side:
+        // flipping to the inner face whenever the camera looks at the wall
+        // from within read as two different doorway outlines (PR #313
+        // review). Window frames on a far wall stay on the inner face the
+        // camera actually sees, where the edge pass puts its frame.
+        if (farWall && o.kind != tactics::FacadeOpening::Kind::Door) {
           const auto t = wallThickness.find(o.building);
           const glm::vec2 inset = out * (t == wallThickness.end() ? 0.0f : t->second);
           p0 -= inset;
@@ -4414,24 +4653,189 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         }
         const glm::vec3 corners[4] = {{p0.x, o.y0, p0.y}, {p1.x, o.y0, p1.y},
                                       {p1.x, o.y1, p1.y}, {p0.x, o.y1, p0.y}};
+        std::vector<glm::vec3>& segments = farWall ? farSegments : nearSegments;
         for (int k = 0; k < 4; ++k) {
           segments.push_back(corners[k]);
           segments.push_back(corners[(k + 1) % 4]);
         }
       }
-      if (segments.empty()) return;
+      // Floor slabs underneath other slabs (PR #313 review): the covered
+      // part of a slab's outline shows through the slab(s) in front of it,
+      // dimmer, like the covered stairs. The outline G-buffer keeps one
+      // surface per pixel -- the nearest slab -- so the covered slab's
+      // edge can never come out of the edge pass (unlike the stair, whose
+      // pixels survive under a slab because the two are distinct classes);
+      // it is inked by hand instead: each boundary edge is sampled down to
+      // the pieces a nearer faded slab blocks from the camera, and those
+      // draw as dim depth-tested lines -- only what would be visible were
+      // the covering slabs absent (the opaque scene, figures included,
+      // still wins the depth test).
+      std::vector<glm::vec3> coveredSegments;
+      {
+        // Non-stair interior surfaces: stairs already show through slabs
+        // via the G-buffer re-tag, and nothing meaningfully hides under
+        // a stair flight.
+        std::vector<int> slabs;
+        for (const FadedOccluder& f : interior) {
+          if (!walkSurfaces[f.surface].stair && walkSurfaces[f.surface].vertices.size() >= 3) {
+            slabs.push_back(f.surface);
+          }
+        }
+        const auto coveredByOtherSlab = [&](const glm::vec3& p, int self) {
+          const glm::vec3 ray = p - cameraPos;
+          const float rayLength = glm::length(ray);
+          if (rayLength < 1e-3f) return false;
+          // The blocker's plane crossing must sit a real step in front of
+          // the point, not graze it (an adjacent coplanar patch crosses at
+          // the point itself).
+          const float tMax = 1.0f - 0.5f / rayLength;
+          for (int j : slabs) {
+            if (j == self) continue;
+            const std::vector<glm::vec3>& v = walkSurfaces[j].vertices;
+            const glm::vec3 n = glm::cross(v[1] - v[0], v[2] - v[0]);
+            const float denom = glm::dot(ray, n);
+            if (std::fabs(denom) < 1e-6f) continue;
+            const float t = glm::dot(v[0] - cameraPos, n) / denom;
+            if (t < 0.01f || t > tMax) continue;
+            const glm::vec3 hit = cameraPos + ray * t;
+            if (tactics::SurfaceContainsXZ(walkSurfaces[j], hit.x, hit.z)) return true;
+          }
+          return false;
+        };
+        // A boundary piece with walkable floor just outside at the same
+        // height is an internal seam (floors split into convex patches
+        // around stairwells; a stair's top edge): the edge pass never inks
+        // it in plain view, so it gets no ink through a slab either.
+        const auto seamAt = [&](const glm::vec3& p, const glm::vec2& outward, int self) {
+          const glm::vec2 q(p.x + outward.x * 0.12f, p.z + outward.y * 0.12f);
+          for (const FadedOccluder& f : interior) {
+            if (f.surface == self) continue;
+            const tactics::WalkSurface& s = walkSurfaces[f.surface];
+            if (s.vertices.size() < 3) continue;
+            if (tactics::SurfaceContainsXZ(s, q.x, q.y)) {
+              if (std::fabs(tactics::SurfaceHeightAt(s, q.x, q.y) - p.y) < 0.2f) return true;
+              continue;
+            }
+            // Where patches meet at a shallow corner, the neighbouring patch
+            // is narrower there than the probe distance and the probe lands
+            // beyond it, which inked a short stray whisker at the corner
+            // (PR #313 review). Lying on the neighbour's outline is the same
+            // seam whether or not the probe hit its interior.
+            float d2 = std::numeric_limits<float>::max();
+            for (size_t e = 0; e < s.vertices.size(); ++e) {
+              const glm::vec2 e0(s.vertices[e].x, s.vertices[e].z);
+              const glm::vec2 e1(s.vertices[(e + 1) % s.vertices.size()].x,
+                                 s.vertices[(e + 1) % s.vertices.size()].z);
+              const glm::vec2 d = e1 - e0;
+              const float len2 = glm::dot(d, d);
+              const glm::vec2 pp(p.x, p.z);
+              const float t =
+                  len2 < 1e-8f ? 0.0f : std::clamp(glm::dot(pp - e0, d) / len2, 0.0f, 1.0f);
+              const glm::vec2 c = e0 + d * t;
+              d2 = std::min(d2, glm::dot(pp - c, pp - c));
+            }
+            if (d2 <= 0.15f * 0.15f &&
+                std::fabs(tactics::SurfaceHeightAt(s, p.x, p.z) - p.y) < 0.2f) {
+              return true;
+            }
+          }
+          return false;
+        };
+        for (int i : slabs) {
+          const std::vector<glm::vec3>& v = walkSurfaces[i].vertices;
+          glm::vec3 centroid(0.0f);
+          for (const glm::vec3& c : v) centroid += c;
+          centroid /= static_cast<float>(v.size());
+          for (size_t k = 0; k < v.size(); ++k) {
+            const glm::vec3 a = v[k], b = v[(k + 1) % v.size()];
+            const float len = glm::distance(a, b);
+            if (len < 1e-4f) continue;
+            const glm::vec2 dir((b.x - a.x) / len, (b.z - a.z) / len);
+            glm::vec2 outward(dir.y, -dir.x);
+            const glm::vec3 mid = 0.5f * (a + b);
+            if (outward.x * (mid.x - centroid.x) + outward.y * (mid.z - centroid.z) < 0.0f) {
+              outward = -outward;
+            }
+            const int steps = std::max(1, static_cast<int>(std::ceil(len / 0.4f)));
+            int runStart = -1;
+            const auto flush = [&](int endStep) {
+              if (runStart < 0) return;
+              coveredSegments.push_back(glm::mix(a, b, static_cast<float>(runStart) / steps));
+              coveredSegments.push_back(glm::mix(a, b, static_cast<float>(endStep) / steps));
+              runStart = -1;
+            };
+            for (int s = 0; s < steps; ++s) {
+              const glm::vec3 p = glm::mix(a, b, (s + 0.5f) / steps);
+              const bool ink = !seamAt(p, outward, i) && coveredByOtherSlab(p, i);
+              if (ink && runStart < 0) runStart = s;
+              if (!ink) flush(s);
+            }
+            flush(steps);
+          }
+        }
+      }
+      if (nearSegments.empty() && farSegments.empty() && coveredSegments.empty()) return;
       // Same ink as CompositeFadedOutlines gives a full-strength shell edge.
       const float ink = std::clamp(debug.nprSettings.outlineStrength, 0.0f, 1.0f) *
                         kOccluderFadeOpacity * 0.88f;
       unlitShader_.Use();
-      unlitShader_.SetMat4("uMVP", viewProj);
-      unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink));
-      // Unconditional: the same frame whether or not a floor or stair slab
-      // overlaps the opening on screen (stencil is neither tested nor written).
-      glStencilFunc(GL_ALWAYS, 0, 0xFF);
       glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-      pathLine_.SetPoints(segments);
-      pathLine_.DrawSegments();
+      // GL lines are 1px; the slab outlines are the NPR edge pass at
+      // outlineThickness px of reach. Match them by drawing each frame as
+      // four taps nudged by half that reach in screen space (NDC offsets).
+      const float reach = std::max(debug.nprSettings.outlineThickness, 1.0f) * 0.5f;
+      const auto drawThick = [&](const std::vector<glm::vec3>& segments) {
+        pathLine_.SetPoints(segments);
+        for (int sx = -1; sx <= 1; sx += 2) {
+          for (int sy = -1; sy <= 1; sy += 2) {
+            const glm::vec3 shift(2.0f * reach * sx / std::max(width, 1),
+                                  2.0f * reach * sy / std::max(height, 1), 0.0f);
+            unlitShader_.SetMat4("uMVP", glm::translate(glm::mat4(1.0f), shift) * viewProj);
+            pathLine_.DrawSegments();
+          }
+        }
+      };
+      if (!nearSegments.empty()) {
+        // Everywhere the shell did not claim the pixel (bit 2 clear): a
+        // floor or stair claimed it (1) or the opening's real hole shows
+        // what is behind (0) -- in both cases the outline pass never sees
+        // the wall there, so the frame must be inked by hand. Where the
+        // wall did claim the pixel (2), CompositeFadedOutlines draws the
+        // frame at this same strength, and inking it again would double
+        // it. Ground-floor openings rely on the hole case: no slab
+        // overlaps them on screen (PR #313 review).
+        unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink));
+        glStencilFunc(GL_EQUAL, 0, 0x02);
+        drawThick(nearSegments);
+      }
+      if (!farSegments.empty()) {
+        // Far-wall openings get no frame from CompositeFadedOutlines where
+        // the nearer shell or a slab hides the wall, which is almost the
+        // whole wall, so these draw on every pixel; through a near opening
+        // the dim line lands on the outline pass's frame, a slight
+        // darkening that still reads as one line.
+        unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, ink * 0.5f));
+        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+        drawThick(farSegments);
+      }
+      if (!coveredSegments.empty()) {
+        // Same dim ink as a stair seen through a slab: half the interior
+        // layer's outline strength. The four taps of drawThick overlap on
+        // most pixels, and blending each one in compounded the dim ink
+        // toward a full-strength line (PR #313 review); a free stencil bit
+        // (0x04 -- the colour pass leaves 0, 1 and 2) caps every pixel to
+        // one blended tap. Nothing reads the stencil after this draw before
+        // the pass clears it.
+        const float coveredInk = std::clamp(debug.nprSettings.outlineStrength, 0.0f, 1.0f) *
+                                 kInteriorFadeOpacity * 0.5f * 0.88f;
+        unlitShader_.SetVec4("uColor", glm::vec4(0.0f, 0.0f, 0.0f, coveredInk));
+        glStencilFunc(GL_EQUAL, 0, 0x04);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
+        glStencilMask(0x04);
+        drawThick(coveredSegments);
+        glStencilMask(0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+      }
       glStencilFunc(GL_EQUAL, 0, 0xFF);
       glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
       litShader_.Use();
@@ -4446,13 +4850,54 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       thermalOcclusion_.BeginFaded();
       litShader_.Use();
       glEnable(GL_STENCIL_TEST);
-      glStencilFunc(GL_EQUAL, 0, 0xFF);
-      glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
-      drawInteriorGeometry(true);
+      // Interiors resolve among themselves by depth (BeginFaded leaves
+      // depth writes on); the stencil records which class claimed the pixel
+      // so later draws can be gated per class. A first-claim cap (GL_EQUAL
+      // 0, as the colour pass uses) would let the slab drawn first --
+      // nearest surface *center*, not nearest at this pixel -- own pixels
+      // where another slab is actually in front, and the slab seen through
+      // a window then lost its outline to whatever glancing slab happened
+      // to claim its pixels (PR #313 review).
+      // Stairs draw first and keep their pixels even under a slab, so the
+      // stair outline shows through the floor slabs -- exactly the part
+      // that would be visible were the slabs absent (the depth buffer still
+      // holds the opaque scene, so anything else occluding the stair wins),
+      // dimmer than ink in plain view (PR #313 review). Stencil bits:
+      // 0x01 an interior claimed the pixel (the shell is skipped there),
+      // 0x02 a stair owns it, 0x04 a slab is nearer (the stair shows
+      // through that slab).
+      glStencilFunc(GL_ALWAYS, 0x03, 0xFF);
+      glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+      glStencilMask(0x03);
+      drawInteriorGeometry(true, 1, false);
+      // Which stair pixels does a slab cover? Depth-test the slabs against
+      // the stair depths, writing nothing but the stencil bit.
+      glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+      glDepthMask(GL_FALSE);
+      glStencilFunc(GL_EQUAL, 0x06, 0x02);
+      glStencilMask(0x04);
+      drawInteriorGeometry(true, 0, false);
+      glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+      // Re-tag the covered stair pixels as seen-through-a-slab (dim ink);
+      // GL_LEQUAL re-accepts exactly the fragments the first pass kept.
+      glDepthFunc(GL_LEQUAL);
+      glStencilFunc(GL_EQUAL, 0x04, 0x04);
+      glStencilMask(0x00);
+      drawInteriorGeometry(true, 1, true);
+      glDepthFunc(GL_LESS);
+      glDepthMask(GL_TRUE);
+      // Slabs, by depth among themselves, everywhere no stair owns the pixel.
+      glStencilFunc(GL_EQUAL, 0x01, 0x02);
+      glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+      glStencilMask(0x01);
+      drawInteriorGeometry(true, 0, false);
       // Shell pieces only where no interior claimed the pixel; among
       // themselves the depth test keeps the nearest.
+      glStencilFunc(GL_EQUAL, 0, 0x01);
       glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+      glStencilMask(0x00);
       drawShellGeometry(true);
+      glStencilMask(0xFF);
       litShader_.SetInt("uFadedMark", 0);
       glDisable(GL_STENCIL_TEST);
       glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
@@ -4466,9 +4911,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     glEnable(GL_STENCIL_TEST);
     glStencilFunc(GL_EQUAL, 0, 0xFF);
     glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
-    drawInteriorGeometry(false);
-    if (fadedOutlines) drawOpeningEdgesOverInterior();
+    drawInteriorGeometry(false, -1, false);
+    // Shell claims its pixels as stencil 2 (bit-invert under a 0x02 write
+    // mask) so the opening edges can tell them from interior pixels (1).
+    glStencilMask(0x02);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
     drawShellGeometry(false);
+    glStencilMask(0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+    if (fadedOutlines) drawOpeningEdgesOverInterior();
     litShader_.SetInt("uDisableShadows", (debug.disableShadows || debug.thermal) ? 1 : 0);
     glDisable(GL_CULL_FACE);
     glFrontFace(GL_CCW);

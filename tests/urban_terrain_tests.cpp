@@ -36,6 +36,18 @@ glm::vec3 OnGround(const Scene& scene, glm::vec3 p) {
 float FlatDistance(glm::vec3 a, glm::vec3 b) {
   return glm::length(glm::vec2(a.x - b.x, a.z - b.z));
 }
+bool InsideConvex(const std::vector<glm::vec2>& polygon, glm::vec2 p) {
+  float sign = 0.0f;
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    const glm::vec2 a = polygon[i], e = polygon[(i + 1) % polygon.size()] - a;
+    const float side = e.x * (p.y - a.y) - e.y * (p.x - a.x);
+    if (std::fabs(side) < 1e-4f) continue;
+    if (sign == 0.0f) sign = side;
+    else if (side * sign < 0.0f) return false;
+  }
+  return true;
+}
+
 bool Planar(const std::vector<glm::vec3>& polygon, float tolerance = 0.01f) {
   if (polygon.size() < 4) return true;
   glm::vec3 normal(0.0f);
@@ -81,6 +93,13 @@ void TestControlsAndDeterminism() {
     for (size_t a = 0; a < on.terrainWalls[i].accesses.size(); ++a) {
       CHECK(on.terrainWalls[i].accesses[a].bottom == repeat.terrainWalls[i].accesses[a].bottom);
     }
+  }
+  CHECK(on.terrainTunnels.size() == repeat.terrainTunnels.size());
+  for (size_t i = 0; i < on.terrainTunnels.size(); ++i) {
+    CHECK(on.terrainTunnels[i].bore == repeat.terrainTunnels[i].bore);
+    CHECK(on.terrainTunnels[i].roof == repeat.terrainTunnels[i].roof);
+    CHECK(on.terrainTunnels[i].entrance == repeat.terrainTunnels[i].entrance);
+    CHECK(on.terrainTunnels[i].exit == repeat.terrainTunnels[i].exit);
   }
   CHECK(on.ground.heights != GenerateUrbanMap(42, c).ground.heights);
   c.features.terrain.mode = FeatureMode::Off;
@@ -175,7 +194,12 @@ void TestSeedInvariants() {
       // A set-back top floor stands on its building's base prism, not the ground.
       if (o.building >= 0 && s.buildings[o.building].upperObstacle == static_cast<int>(oi)) continue;
       for (glm::vec2 p : ObstacleFootprint(o)) {
-        CHECK(std::fabs(s.ground.HeightAt(p.x, p.y) - o.bounds.min.y) < 0.03f);
+        // Over a tunnel bore the building stands on the roof, not the road.
+        float ground = s.ground.HeightAt(p.x, p.y);
+        for (const TerrainTunnel& tunnel : s.terrainTunnels) {
+          if (InsideConvex(tunnel.bore, p)) ground = tunnel.roof[0].y;
+        }
+        CHECK(std::fabs(ground - o.bounds.min.y) < 0.03f);
       }
     }
   }
@@ -372,8 +396,11 @@ void TestHighwayProfilesOverLevels() {
   CHECK(layouts[static_cast<int>(OverpassLayout::RampUpRampDown)] > 0);
   CHECK(layouts[static_cast<int>(OverpassLayout::EnterRampUp)] > 0);
   CHECK(layouts[static_cast<int>(OverpassLayout::EnterRampDown)] > 0);
-  // At grade, the artery climbs through every wall it meets.
+  // At grade, the artery climbs through every wall it meets, unless it
+  // holds its grade through a raised band as a tunnel (issue #156): then
+  // its centerline spans only the difference between the exterior levels.
   c.elevatedHighway = OverpassMode::Off;
+  int tunnelled = 0;
   for (currentSeed = 1; currentSeed <= 200; ++currentSeed) {
     const auto roads = UrbanRoads(currentSeed, c);
     float minY = 1e9f, maxY = -1e9f;
@@ -381,8 +408,14 @@ void TestHighwayProfilesOverLevels() {
       minY = std::min(minY, p.y);
       maxY = std::max(maxY, p.y);
     }
-    CHECK(maxY - minY > constants::kUnitHeight * 0.9f);
+    if (maxY - minY > constants::kUnitHeight * 0.9f) continue;
+    const Scene s = GenerateUrbanMap(currentSeed, c);
+    bool highwayTunnel = false;
+    for (const TerrainTunnel& tunnel : s.terrainTunnels) highwayTunnel |= tunnel.highway;
+    CHECK(highwayTunnel);
+    tunnelled += highwayTunnel ? 1 : 0;
   }
+  CHECK(tunnelled > 0);
 }
 
 void TestStreetsKeepClearOfLevels() {
@@ -521,6 +554,115 @@ void TestTerrainZiplines() {
       CHECK(LineOfSightClear(line.a + lift, line.b + lift, s.ground));
     }
   }
+}
+
+void TestTerrainTunnels() {
+  int highway = 0, local = 0, downhillExit = 0;
+  for (const uint32_t seed : {31u, 72u}) {
+    currentSeed = seed;
+    const Scene s = GenerateUrbanMap(seed, TerrainConfig());
+    CHECK(!s.terrainTunnels.empty());
+    NavMesh nav;
+    nav.Build(s.obstacles, s.mapHalfExtent, constants::kAgentRadius, &s.ground,
+              &s.walkSurfaces, &s.terrainTunnels);
+    for (const TerrainTunnel& tunnel : s.terrainTunnels) {
+      highway += tunnel.highway ? 1 : 0;
+      local += tunnel.highway ? 0 : 1;
+      downhillExit += tunnel.entrance.y > tunnel.exit.y + 0.1f ? 1 : 0;
+      CHECK(tunnel.bore.size() == 4 && tunnel.roof.size() == 4);
+      CHECK(tunnel.roofSurface >= 0 &&
+            tunnel.roofSurface < static_cast<int>(s.walkSurfaces.size()));
+      if (tunnel.roofSurface < 0 ||
+          tunnel.roofSurface >= static_cast<int>(s.walkSurfaces.size())) {
+        continue;
+      }
+      const WalkSurface& roof = s.walkSurfaces[tunnel.roofSurface];
+      CHECK(roof.terrain && !roof.connectsToGround);
+      CHECK(roof.groundConnections.size() >= 2);
+      const float roofY = tunnel.roof.front().y;
+      CHECK(roofY - std::max(tunnel.entrance.y, tunnel.exit.y) >=
+            constants::kMinDeckHeadroom + 0.35f);
+
+      const glm::vec2 a(tunnel.entrance.x, tunnel.entrance.z);
+      const glm::vec2 b(tunnel.exit.x, tunnel.exit.z);
+      const glm::vec2 dir = glm::normalize(b - a);
+      CHECK(std::fabs(s.ground.HeightAt((a - dir * 0.5f).x, (a - dir * 0.5f).y) +
+                          0.025f - tunnel.entrance.y) < 0.12f);
+      CHECK(std::fabs(s.ground.HeightAt((b + dir * 0.5f).x, (b + dir * 0.5f).y) +
+                          0.025f - tunnel.exit.y) < 0.12f);
+
+      // The road stays walkable portal-to-portal, never exceeds its normal
+      // grade, and the shortest route actually uses the bore below the roof.
+      float last = s.ground.HeightAt(a.x, a.y);
+      const float length = glm::distance(a, b);
+      for (int i = 1; i <= 100; ++i) {
+        const glm::vec2 p = glm::mix(a, b, static_cast<float>(i) / 100.0f);
+        const float y = s.ground.HeightAt(p.x, p.y);
+        CHECK(std::fabs(y - last) / (length / 100.0f) <= 0.32f);
+        last = y;
+      }
+      std::vector<glm::vec3> path;
+      glm::vec3 start = tunnel.entrance, goal = tunnel.exit;
+      start.y -= 0.025f;
+      goal.y -= 0.025f;
+      CHECK(nav.FindPath(start, goal, &path));
+      bool inBore = false;
+      for (const glm::vec3& p : path) {
+        inBore |= PointInConvexPolygon({p.x, p.z}, tunnel.bore) &&
+                  p.y < roofY - constants::kMinDeckHeadroom;
+      }
+      CHECK(inBore);
+
+      // The bore's own centerline stays walkable the whole way: a building
+      // or cover item standing on the roof above must not block the road
+      // below (its padded footprint used to seal the tunnel mid-way).
+      for (int i = 0; i <= 100; ++i) {
+        const glm::vec2 p = glm::mix(a, b, static_cast<float>(i) / 100.0f);
+        if (!PointInConvexPolygon(p, tunnel.bore, -0.3f)) continue;
+        CHECK(nav.IsWalkable(p.x, p.y));
+      }
+
+      // The restored level above is independently reachable from the
+      // adjacent high terrain (the sidewalk strip beside the bore, with the
+      // block's buildings right behind it, or a street crossing the roof);
+      // it never connects vertically to the road.
+      if (roof.groundConnections.size() >= 2) {
+        const glm::vec3 center = SurfaceCenter(roof);
+        bool reachable = false;
+        for (const glm::vec3& connection : roof.groundConnections) {
+          glm::vec2 outward(connection.x - center.x, connection.z - center.z);
+          outward = glm::normalize(outward) * 0.3f;
+          glm::vec3 outside(connection.x + outward.x, 0.0f, connection.z + outward.y);
+          outside.y = s.ground.HeightAt(outside.x, outside.z);
+          CHECK(std::fabs(outside.y - roofY) < 0.3f);
+          reachable |= nav.FindPath(center, outside, &path) && nav.FindPath(outside, center, &path);
+        }
+        CHECK(reachable);
+      }
+    }
+  }
+  CHECK(highway > 0);
+  CHECK(local > 0);
+  CHECK(downhillExit > 0);
+
+  // Cover items and furniture over a bore belong to the level above: they
+  // stand on the roof, not on the road in the tunnel below.
+  MapGeneratorConfig city;
+  city.features.terrain.mode = FeatureMode::On;
+  currentSeed = 31;
+  const Scene s = GenerateUrbanMap(31, city);
+  int overBore = 0;
+  for (const Obstacle& o : s.obstacles) {
+    if (!IsStreetFixture(o.kind)) continue;
+    const glm::vec2 p(0.5f * (o.bounds.min.x + o.bounds.max.x),
+                      0.5f * (o.bounds.min.z + o.bounds.max.z));
+    for (const TerrainTunnel& tunnel : s.terrainTunnels) {
+      if (!InsideConvex(tunnel.bore, p)) continue;
+      ++overBore;
+      CHECK(std::fabs(o.bounds.min.y - tunnel.roof.front().y) < 0.3f);
+    }
+  }
+  CHECK(overBore > 0);
 }
 
 void TestMovementUpStair() {
@@ -691,6 +833,120 @@ void TestSheerFacesAreImpassable() {
   CHECK(!sealed.FindPath(start, glm::vec3(7.0f, 3.0f, 0.0f), &path));
 }
 
+// Seed 87 raises a stair-and-shell building over a tunnel bore: its ground
+// floor is the roof level and its stair foot stands on the roof, not on the
+// road in the bore. A route to the upper floor must climb the stair from the
+// roof (never hop up from the road below), and a figure on the roof must not
+// walk through the building's walls.
+void TestBuildingOverTunnelRoof() {
+  currentSeed = 87;
+  const Scene s = GenerateUrbanMap(87, TerrainConfig());
+  NavMesh nav;
+  nav.Build(s.obstacles, s.mapHalfExtent, constants::kAgentRadius, &s.ground,
+            &s.walkSurfaces, &s.terrainTunnels);
+  int checkedFlights = 0;
+  for (const TerrainTunnel& tunnel : s.terrainTunnels) {
+    if (tunnel.roofSurface < 0) continue;
+    const WalkSurface& roof = s.walkSurfaces[tunnel.roofSurface];
+    const float roofY = roof.vertices.front().y;
+    std::vector<glm::vec2> outline;
+    for (const glm::vec3& v : roof.vertices) outline.emplace_back(v.x, v.z);
+    for (size_t i = 0; i < s.walkSurfaces.size(); ++i) {
+      const WalkSurface& flight = s.walkSurfaces[i];
+      if (!flight.stair || !flight.connectsToGround || flight.building < 0) continue;
+      float lowest = 1e9f, highest = -1e9f;
+      glm::vec3 foot(0.0f), top(0.0f);
+      for (const glm::vec3& v : flight.vertices) {
+        lowest = std::min(lowest, v.y);
+        highest = std::max(highest, v.y);
+      }
+      int feet = 0, tops = 0;
+      for (const glm::vec3& v : flight.vertices) {
+        if (v.y < lowest + 1e-3f) { foot += v; ++feet; }
+        if (v.y > highest - 1e-3f) { top += v; ++tops; }
+      }
+      foot /= static_cast<float>(feet);
+      top /= static_cast<float>(tops);
+      if (std::fabs(lowest - roofY) > 0.3f ||
+          std::fabs(s.ground.HeightAt(foot.x, foot.z) - foot.y) < 1.0f ||
+          !PointInConvexPolygon({foot.x, foot.z}, outline)) {
+        continue;
+      }
+      ++checkedFlights;
+      // From a roof point beside the building to the top of the flight.
+      const glm::vec3 center = SurfaceCenter(roof);
+      std::vector<glm::vec3> path;
+      CHECK(nav.FindPath(center, top + glm::vec3(0.0f, 0.1f, 0.0f), &path));
+      for (size_t k = 0; k + 1 < path.size(); ++k) {
+        const float run = glm::length(glm::vec2(path[k + 1].x - path[k].x,
+                                                 path[k + 1].z - path[k].z));
+        CHECK(std::fabs(path[k + 1].y - path[k].y) <= 1.5f * run + 0.05f);
+        // Never through a wall standing on the roof level.
+        if (path[k].y > roofY + 0.3f || path[k + 1].y > roofY + 0.3f) continue;
+        for (const Obstacle& o : s.obstacles) {
+          if (o.footprint.size() < 3 || std::fabs(o.bounds.min.y - roofY) > 0.3f ||
+              o.bounds.max.y - roofY < 0.9f) {
+            continue;
+          }
+          CHECK(!SegmentEntersConvexPolygon({path[k].x, path[k].z},
+                                            {path[k + 1].x, path[k + 1].z}, o.footprint));
+        }
+      }
+    }
+  }
+  CHECK(checkedFlights > 0);
+}
+
+// A figure on the tier beside a tunnel roof steps onto the slab anywhere along
+// its long edges, not only at the declared connection points: the movement
+// frontier must carry across the slab edge (seed 87, start near an edge end).
+void TestRoofReachableFromAnyEdgePoint() {
+  currentSeed = 87;
+  const Scene s = GenerateUrbanMap(87, TerrainConfig());
+  NavMesh nav;
+  nav.Build(s.obstacles, s.mapHalfExtent, constants::kAgentRadius, &s.ground,
+            &s.walkSurfaces, &s.terrainTunnels);
+  int probes = 0;
+  for (const TerrainTunnel& tunnel : s.terrainTunnels) {
+    if (tunnel.roofSurface < 0) continue;
+    const WalkSurface& roof = s.walkSurfaces[tunnel.roofSurface];
+    const float roofY = roof.vertices.front().y;
+    std::vector<glm::vec2> outline;
+    glm::vec2 center(0.0f);
+    for (const glm::vec3& v : roof.vertices) {
+      outline.emplace_back(v.x, v.z);
+      center += outline.back() * 0.25f;
+    }
+    for (const size_t e : {size_t{0}, size_t{2}}) {
+      const glm::vec3 a = roof.vertices[e], b = roof.vertices[e + 1];
+      const glm::vec2 dir = glm::normalize(glm::vec2(b.x - a.x, b.z - a.z));
+      glm::vec2 out(-dir.y, dir.x);
+      const glm::vec3 m = a + (b - a) * 0.1f;
+      if (glm::dot(out, glm::vec2(m.x, m.z) - center) < 0.0f) out = -out;
+      glm::vec3 start(m.x + out.x * 0.8f, 0.0f, m.z + out.y * 0.8f);
+      start.y = s.ground.HeightAt(start.x, start.z);
+      if (!nav.IsWalkable(start.x, start.z) || std::fabs(start.y - roofY) > 0.3f) continue;
+      ++probes;
+      const ReachField field = nav.ComputeReachField(start, 5.0f);
+      for (int iz = 0; iz < field.nz; ++iz) {
+        for (int ix = 0; ix < field.nx; ++ix) {
+          const glm::vec3 p = field.Node(ix, iz);
+          if (!PointInConvexPolygon({p.x, p.z}, outline)) continue;
+          if (glm::length(glm::vec2(p.x - start.x, p.z - start.z)) > 2.5f) continue;
+          bool blocked = false;  // Walls standing on the roof level.
+          for (const Obstacle& o : s.obstacles) {
+            blocked |= std::fabs(o.bounds.min.y - roofY) < 0.3f &&
+                       p.x > o.bounds.min.x - 0.5f && p.x < o.bounds.max.x + 0.5f &&
+                       p.z > o.bounds.min.z - 0.5f && p.z < o.bounds.max.z + 0.5f;
+          }
+          if (!blocked) CHECK(field.Reached(ix, iz));
+        }
+      }
+    }
+  }
+  CHECK(probes > 0);
+}
+
 int main(int argc, char** argv) {
   const std::vector<TestCase> cases = {
       TBG_TEST(TestStairSidesSealed),
@@ -710,6 +966,9 @@ int main(int argc, char** argv) {
       TBG_TEST(TestHighwayProfilesOverLevels),
       TBG_TEST(TestStreetsKeepClearOfLevels),
       TBG_TEST(TestSurfacesSitOnTiers),
+      TBG_TEST(TestTerrainTunnels),
+      TBG_TEST(TestBuildingOverTunnelRoof),
+      TBG_TEST(TestRoofReachableFromAnyEdgePoint),
       TBG_TEST(TestTerrainZiplines),
       TBG_TEST(TestMovementUpStair),
       TBG_TEST(TestSheerFacesAreImpassable),

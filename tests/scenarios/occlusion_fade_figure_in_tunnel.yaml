@@ -1,0 +1,26 @@
+name: occlusion_fade_figure_in_tunnel
+description: >
+  Issue #156 tunnel see-through: Blue stands inside the local-street tunnel
+  bored through seed 31's raised level, and begin_move leaves its movement
+  frontier up. The roof slab over the bore (and the paving on it) must go
+  see-through in Blue's pane like a faded building, so the figure and the
+  reachable area inside the tunnel stay visible; the solid tier beside the
+  bore stays opaque.
+
+map:
+  generate: {type: urban, seed: 31, elevated: false, features: {terrain: on}}
+
+units:
+  - {id: 0, team: blue, position: [-27.3, 0, 28.8], facing_degrees: -20}
+  - {id: 1, team: red, position: [60, 0, -60], facing_degrees: 180}
+
+camera:
+  target: [-27.3, 28.8]
+  zoom: -80
+
+script:
+  - action: begin_move
+    actor: 0
+    comment: Frontier spreads along the bore under the roof; the roof must fade, not hide it.
+  - assert: {unit: 0, position: [-27.3, 4.5, 28.8], tolerance: 0.05}
+  - assert: {round: 1}

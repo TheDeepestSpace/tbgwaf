@@ -94,7 +94,7 @@ void TimelinePlayback::ShowFrame(const TurnTimeline& timeline, const GameLogic& 
   // finish their hold + fade rather than cutting them at the step boundary.
   const bool keepGhosts = active_ && replay_ && index > frame_;
   if (!replay_ || !replay_->ImportState(snapshot)) {
-    replay_ = std::make_unique<GameLogic>(live.GetScene());
+    replay_ = std::make_unique<GameLogic>(live.BaseScene());
     replay_->SetReplayGhostMode(true);
     if (!replay_->ImportState(snapshot)) {
       // History doesn't match the live scene (shouldn't happen: both reset

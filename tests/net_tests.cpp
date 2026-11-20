@@ -9,6 +9,7 @@
 #include "net/ActionApply.h"
 #include "net/Json.h"
 #include "net/Protocol.h"
+#include "net/RemoteClient.h"
 #include "test_util.h"
 
 using namespace tactics;
@@ -181,6 +182,43 @@ void TestApplyPlanActionRules() {
   }
 }
 
+// #295: a plans echo carrying another unit's (non-round-tripping, e.g.
+// multi-turn) plan used to be replayed through the click flow, resetting the
+// shared selection and closing the action menu of the unit being edited.
+void TestPlansEchoKeepsActionMenuOpen() {
+  GameLogic game(BuildDefaultScene());
+  net::RemoteClient client(&game, "");
+  Json start;
+  start.Set("t", "start").Set("team", "blue").Set("seed", 1);
+  client.OnMessage(start.Dump());
+  CHECK(client.status() == net::RemoteClient::Status::Playing);
+
+  int a = -1, b = -1;
+  for (const Unit& u : game.GetScene().units) {
+    if (u.team != Team::Blue) continue;
+    (a < 0 ? a : b) = u.id;
+    if (b >= 0) break;
+  }
+  CHECK(a >= 0 && b >= 0);
+
+  // Server says A has a plan the local replay can't reproduce.
+  Action far = Make(ActionKind::Move, a);
+  far.waypoints = {glm::vec3(0.0f, 0.0f, 500.0f)};
+  Json plans;
+  plans.Set("t", "plans").Set("ready", false);
+  Json arr{Json::Array{}};
+  arr.Push(net::EncodeAction(far));
+  plans.Set("plans", arr);
+
+  game.ClickUnit(b, Team::Blue);
+  CHECK(game.Mode() == InputMode::ActionMenu);
+  for (int i = 0; i < 3; ++i) {  // Echoes keep coming while B's menu is open.
+    client.OnMessage(plans.Dump());
+    CHECK(game.Mode() == InputMode::ActionMenu);
+    CHECK(game.SelectedUnitId() == b);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -189,6 +227,7 @@ int main() {
   TestParseAction();
   TestActionEncodeParseRoundTrip();
   TestApplyPlanActionRules();
+  TestPlansEchoKeepsActionMenuOpen();
   if (g_failures == 0) {
     std::printf("All net tests passed.\n");
     return 0;

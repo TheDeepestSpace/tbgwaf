@@ -870,9 +870,18 @@ void TestBuildingOverTunnelRoof() {
           !PointInConvexPolygon({foot.x, foot.z}, outline)) {
         continue;
       }
-      ++checkedFlights;
-      // From a roof point beside the building to the top of the flight.
+      // From a roof point beside the building to the top of the flight. When
+      // the slab's centre sits inside a building (a tall one can now stand
+      // over it), there is no such point to start from: skip that flight.
       const glm::vec3 center = SurfaceCenter(roof);
+      bool centerUnderBuilding = false;
+      for (const Obstacle& o : s.obstacles) {
+        centerUnderBuilding |= o.building >= 0 && o.footprint.size() >= 3 &&
+                               o.bounds.min.y > roofY &&
+                               PointInConvexPolygon({center.x, center.z}, o.footprint);
+      }
+      if (centerUnderBuilding) continue;
+      ++checkedFlights;
       std::vector<glm::vec3> path;
       CHECK(nav.FindPath(center, top + glm::vec3(0.0f, 0.1f, 0.0f), &path));
       for (size_t k = 0; k + 1 < path.size(); ++k) {

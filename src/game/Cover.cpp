@@ -84,11 +84,12 @@ std::vector<Wall> CollectWalls(const std::vector<Obstacle>& obstacles, const glm
     if (ob.navOnly) continue;
     const AABB& b = ob.bounds;
     if (b.max.y < feetY + kCoverMinHeight || b.min.y > feetY + 0.3f) continue;
-    if (!WideEnoughForCover(ob)) continue;
     if (c.x < b.min.x - band || c.x > b.max.x + band || c.y < b.min.z - band ||
         c.y > b.max.z + band) {
       continue;
     }
+    // Last: the width test walks the footprint, the checks above are compares.
+    if (!WideEnoughForCover(ob)) continue;
     if (!ob.footprint.empty()) {
       poly = ob.footprint;
     } else {

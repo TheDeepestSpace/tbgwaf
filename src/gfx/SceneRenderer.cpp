@@ -13,8 +13,10 @@
 #include <cstdio>
 #include <limits>
 #include <map>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -1752,6 +1754,96 @@ void BuildObstacleMeshes(const tactics::Scene& scene,
   drawn->SetChunkedMesh(drawnVertices, drawnIndices, kCullGridCells, &groups);
   caster->SetChunkedMesh(casterVertices, casterIndices, kCullGridCells);
 }
+
+// Grid-bucketed index over the sidewalk surface patches: answers "which
+// patches contain this XZ point" without scanning every patch. The frontier
+// overlay rebuild asks this once per grid-cell corner; on a dense city map a
+// linear PatchContainsXZ scan there was almost the whole rebuild cost
+// (hundreds of milliseconds of planning-stage lag).
+class SidewalkPatchIndex {
+ public:
+  explicit SidewalkPatchIndex(const std::vector<tactics::RoadSurface>& patches)
+      : patches_(patches) {
+    glm::vec2 lo(1e9f), hi(-1e9f);
+    bounds_.resize(patches.size());
+    signs_.resize(patches.size(), 1.0f);
+    for (size_t i = 0; i < patches.size(); ++i) {
+      const std::vector<glm::vec3>& verts = patches[i].vertices;
+      if (verts.size() < 3) {
+        bounds_[i] = {glm::vec2(1.0f), glm::vec2(-1.0f)};  // Empty.
+        continue;
+      }
+      glm::vec2 bmin(1e9f), bmax(-1e9f);
+      float area = 0.0f;
+      for (size_t k = 0; k < verts.size(); ++k) {
+        const glm::vec3& a = verts[k];
+        const glm::vec3& b = verts[(k + 1) % verts.size()];
+        area += a.x * b.z - a.z * b.x;
+        bmin = glm::min(bmin, glm::vec2(a.x, a.z));
+        bmax = glm::max(bmax, glm::vec2(a.x, a.z));
+      }
+      // Pad past the containment test's own tolerance so the box never
+      // rejects a point the edge test would accept.
+      bounds_[i] = {bmin - kPad, bmax + kPad};
+      signs_[i] = area >= 0.0f ? 1.0f : -1.0f;
+      lo = glm::min(lo, bounds_[i].first);
+      hi = glm::max(hi, bounds_[i].second);
+    }
+    if (lo.x > hi.x) return;  // No usable patch; buckets stay empty.
+    origin_ = lo;
+    nx_ = static_cast<int>((hi.x - lo.x) / kCell) + 1;
+    nz_ = static_cast<int>((hi.y - lo.y) / kCell) + 1;
+    buckets_.resize(static_cast<size_t>(nx_) * nz_);
+    for (size_t i = 0; i < patches.size(); ++i) {
+      if (bounds_[i].first.x > bounds_[i].second.x) continue;
+      const int x0 = CellX(bounds_[i].first.x), x1 = CellX(bounds_[i].second.x);
+      const int z0 = CellZ(bounds_[i].first.y), z1 = CellZ(bounds_[i].second.y);
+      for (int cz = z0; cz <= z1; ++cz)
+        for (int cx = x0; cx <= x1; ++cx)
+          buckets_[cz * nx_ + cx].push_back(static_cast<int>(i));
+    }
+  }
+
+  // Highest patch surface among the patches containing (x, z), or nothing.
+  // Matches PatchContainsXZ, patch by patch.
+  std::optional<float> TopAt(float x, float z) const {
+    if (buckets_.empty()) return std::nullopt;
+    std::optional<float> top;
+    for (int i : buckets_[CellZ(z) * nx_ + CellX(x)]) {
+      const std::pair<glm::vec2, glm::vec2>& b = bounds_[i];
+      if (x < b.first.x || x > b.second.x || z < b.first.y || z > b.second.y) continue;
+      const std::vector<glm::vec3>& verts = patches_[i].vertices;
+      const float sign = signs_[i];
+      bool inside = true;
+      for (size_t k = 0; k < verts.size() && inside; ++k) {
+        const glm::vec3& a = verts[k];
+        const glm::vec3& c = verts[(k + 1) % verts.size()];
+        inside = sign * ((c.x - a.x) * (z - a.z) - (c.z - a.z) * (x - a.x)) >= -1e-4f;
+      }
+      if (inside) top = std::max(top.value_or(-1e9f), verts.front().y);
+    }
+    return top;
+  }
+
+ private:
+  static constexpr float kCell = 4.0f;  // World units per bucket.
+  static constexpr float kPad = 1e-3f;
+  // Queries outside the grid clamp onto the border buckets; the per-patch
+  // box test still rejects, so the answer stays exact.
+  int CellX(float x) const {
+    return std::clamp(static_cast<int>((x - origin_.x) / kCell), 0, nx_ - 1);
+  }
+  int CellZ(float z) const {
+    return std::clamp(static_cast<int>((z - origin_.y) / kCell), 0, nz_ - 1);
+  }
+
+  const std::vector<tactics::RoadSurface>& patches_;
+  std::vector<std::pair<glm::vec2, glm::vec2>> bounds_;  // Padded XZ boxes.
+  std::vector<float> signs_;                             // Winding of each patch.
+  glm::vec2 origin_{0.0f};
+  int nx_ = 0, nz_ = 0;
+  std::vector<std::vector<int>> buckets_;
+};
 
 bool PatchContainsXZ(const tactics::RoadSurface& patch, float x, float z) {
   if (patch.vertices.size() < 3) return false;
@@ -4935,6 +5027,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     constexpr float kFadeWidth = 0.8f;   // World units from boundary to transparent.
     constexpr float kEdgeAlpha = 0.65f;  // Fill alpha right at the boundary.
     const int nx = f.nx, nz = f.nz;
+    const SidewalkPatchIndex sidewalkIndex(game.GetScene().sidewalkSurfaces);
 
     // Nodes whose surface heights differ by more than a step belong to
     // different walk layers (deck vs. ground, or either side of a deck
@@ -5163,11 +5256,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           // Each node rides the terrain under it (HeightAt is 0 on flat
           // maps); the 0.25-unit grid is fine enough that the linear
           // contour/edge interpolation below stays on the slope.
-          for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
-            if (PatchContainsXZ(sidewalk, quad[k].p.x, quad[k].p.z)) {
-              quad[k].p.y = std::max(quad[k].p.y, terrain.Empty() ? sidewalk.vertices.front().y
-                               : terrain.MeshHeightAt(quad[k].p.x, quad[k].p.z) + 0.12f);
-            }
+          if (const std::optional<float> top =
+                  sidewalkIndex.TopAt(quad[k].p.x, quad[k].p.z)) {
+            quad[k].p.y = std::max(quad[k].p.y, terrain.Empty()
+                              ? *top
+                              : terrain.MeshHeightAt(quad[k].p.x, quad[k].p.z) + 0.12f);
           }
           quad[k].p.y += kY;
           anyIn |= quad[k].g > 0.0f;
@@ -5240,11 +5333,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // vector outline (issue #292), every wall / cliff side one exact
     // straight line, the budget arc smooth.
     const auto liftY = [&](glm::vec3 p) {
-      for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
-        if (PatchContainsXZ(sidewalk, p.x, p.z)) {
-          p.y = std::max(p.y, terrain.Empty() ? sidewalk.vertices.front().y
-                                              : terrain.MeshHeightAt(p.x, p.z) + 0.12f);
-        }
+      if (const std::optional<float> top = sidewalkIndex.TopAt(p.x, p.z)) {
+        p.y = std::max(p.y, terrain.Empty() ? *top : terrain.MeshHeightAt(p.x, p.z) + 0.12f);
       }
       p.y += kY;
       return p;

@@ -34,6 +34,7 @@
 #include "server/Server.h"
 #include "server/WebSocket.h"
 #include "test_util.h"
+#include "test_shard.h"
 
 using namespace tactics;
 using tactics::net::Action;
@@ -1496,39 +1497,42 @@ void TestRealSocketLoopback() {
 
 }  // namespace
 
-int main() {
-  TestBotRoomHonoursMapAndSeed();
-  TestBotRoomHonoursCtf();
-  TestHumanRoomHonoursMapAndSeed();
-  TestWebSocketPrimitives();
-  TestFrameParser();
-  TestSessionSpawnsAtOppositeCorners();
-  TestSessionReadyAndRound();
-  TestSessionFogHidesEnemyPlansAndUnits();
-  TestSceneStore();
-  TestLobbySceneStorage();
-  TestLobbyPairing();
-  TestRoomIntents();
-  TestSpectator();
-  TestJevReplyParsing();
-  TestHttpUrlParsing();
-  TestHttpPostLoopback();
-  TestBotModesNeedAdapter();
-  TestBlueVsJev();
-  TestJevVsJev();
-  TestBotRoomLimit();
-  TestControlTapScenarioRoom();
-  TestRevealHistoryShowsBothTeams();
-  TestWorldChangeDebugRemoveAgrees();
-  TestWorldChangeSentInRoundOnce();
-  TestWorldChangeKinds();
-  TestClientServerRound();
-  TestPlaybackFallFromCable();
-  TestStaleEchoDoesNotRevertFreshPlans();
-  TestEchoDoesNotInterruptEditing();
-  TestCommitLockHandshake();
-  TestRejectedActionResyncs();
-  TestRealSocketLoopback();
+int main(int argc, char** argv) {
+  const std::vector<TestCase> cases = {
+      TBG_TEST(TestBotRoomHonoursMapAndSeed),
+      TBG_TEST(TestBotRoomHonoursCtf),
+      TBG_TEST(TestHumanRoomHonoursMapAndSeed),
+      TBG_TEST(TestWebSocketPrimitives),
+      TBG_TEST(TestFrameParser),
+      TBG_TEST(TestSessionSpawnsAtOppositeCorners),
+      TBG_TEST(TestSessionReadyAndRound),
+      TBG_TEST(TestSessionFogHidesEnemyPlansAndUnits),
+      TBG_TEST(TestSceneStore),
+      TBG_TEST(TestLobbySceneStorage),
+      TBG_TEST(TestLobbyPairing),
+      TBG_TEST(TestRoomIntents),
+      TBG_TEST(TestSpectator),
+      TBG_TEST(TestJevReplyParsing),
+      TBG_TEST(TestHttpUrlParsing),
+      TBG_TEST(TestHttpPostLoopback),
+      TBG_TEST(TestBotModesNeedAdapter),
+      TBG_TEST(TestBlueVsJev),
+      TBG_TEST(TestJevVsJev),
+      TBG_TEST(TestBotRoomLimit),
+      TBG_TEST(TestControlTapScenarioRoom),
+      TBG_TEST(TestRevealHistoryShowsBothTeams),
+      TBG_TEST(TestWorldChangeDebugRemoveAgrees),
+      TBG_TEST(TestWorldChangeSentInRoundOnce),
+      TBG_TEST(TestWorldChangeKinds),
+      TBG_TEST(TestClientServerRound),
+      TBG_TEST(TestPlaybackFallFromCable),
+      TBG_TEST(TestStaleEchoDoesNotRevertFreshPlans),
+      TBG_TEST(TestEchoDoesNotInterruptEditing),
+      TBG_TEST(TestCommitLockHandshake),
+      TBG_TEST(TestRejectedActionResyncs),
+      TBG_TEST(TestRealSocketLoopback),
+  };
+  if (!RunSelectedTests(argc, argv, cases)) return 2;
   if (g_failures == 0) {
     std::printf("All server tests passed.\n");
     return 0;

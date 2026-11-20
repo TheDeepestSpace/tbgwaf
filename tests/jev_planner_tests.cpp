@@ -8,6 +8,8 @@
 #include "game/Geometry.h"
 #include "game/MapGenerator.h"
 #include "OldSizeConfig.h"
+#include <vector>
+#include "test_shard.h"
 
 namespace {
 
@@ -653,27 +655,30 @@ void TestQueuedLegIntoFigureIsDroppedNotStalled() {
   CHECK(game.FindUnit(0)->plan.type == PlannedActionType::None);
 }
 
-int main() {
-  TestIncrementalBuilderMatchesBlockingBuild();
-  TestBoundedCandidatesUseNormalLegalPath();
-  TestShootCandidateIsFullBurstAndStateDescribesWeapons();
-  TestMapGhostsAndTacticalMovesAreCommunicated();
-  TestCaptureTheFlagIsExplained();
-  TestWholeSquadIsPlannedAtOnce();
-  TestHiddenEnemyNeverSerialized();
-  TestInvalidAndStaleResponsesDoNotMutate();
-  TestPlayerVsAiTurnAutomaticallyBecomesCommittable();
-  TestCompleteAiVsAiMatchAndTerminalStop();
-  TestJevMovesNeverCrossRampSlab();
-  TestJevMovesMakeProgressAcrossTerrainLevels();
-  TestJevFindsGradedRoadOffTerrainIsland();
-  TestJevRoutesOffTerrainIslandTowardFlag();
-  TestJevAdvanceRoutesOffTerrainIsland();
-  TestJevOffersWaitOnlyWithContact();
-  TestSpawnHintsAvoidGroundUnderLowDecks();
-  TestJevSquadPlanNeverOverlaps();
-  TestJevVsJevRoundsNeverStallOnOverlap();
-  TestQueuedLegIntoFigureIsDroppedNotStalled();
+int main(int argc, char** argv) {
+  const std::vector<TestCase> cases = {
+      TBG_TEST(TestIncrementalBuilderMatchesBlockingBuild),
+      TBG_TEST(TestBoundedCandidatesUseNormalLegalPath),
+      TBG_TEST(TestShootCandidateIsFullBurstAndStateDescribesWeapons),
+      TBG_TEST(TestMapGhostsAndTacticalMovesAreCommunicated),
+      TBG_TEST(TestCaptureTheFlagIsExplained),
+      TBG_TEST(TestWholeSquadIsPlannedAtOnce),
+      TBG_TEST(TestHiddenEnemyNeverSerialized),
+      TBG_TEST(TestInvalidAndStaleResponsesDoNotMutate),
+      TBG_TEST(TestPlayerVsAiTurnAutomaticallyBecomesCommittable),
+      TBG_TEST(TestCompleteAiVsAiMatchAndTerminalStop),
+      TBG_TEST(TestJevMovesNeverCrossRampSlab),
+      TBG_TEST(TestJevMovesMakeProgressAcrossTerrainLevels),
+      TBG_TEST(TestJevFindsGradedRoadOffTerrainIsland),
+      TBG_TEST(TestJevRoutesOffTerrainIslandTowardFlag),
+      TBG_TEST(TestJevAdvanceRoutesOffTerrainIsland),
+      TBG_TEST(TestJevOffersWaitOnlyWithContact),
+      TBG_TEST(TestSpawnHintsAvoidGroundUnderLowDecks),
+      TBG_TEST(TestJevSquadPlanNeverOverlaps),
+      TBG_TEST(TestJevVsJevRoundsNeverStallOnOverlap),
+      TBG_TEST(TestQueuedLegIntoFigureIsDroppedNotStalled),
+  };
+  if (!RunSelectedTests(argc, argv, cases)) return 2;
   if (failures == 0) {
     std::puts("All Jev planner scenarios passed.");
     return 0;

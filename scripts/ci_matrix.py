@@ -15,6 +15,8 @@ from pathlib import Path
 BINARIES = {  # ctest-name -> (binary, source)
     "map_generator_tests": ("tactics_map_generator_tests", "tests/map_generator_tests.cpp"),
     "urban_terrain_tests": ("tactics_urban_terrain_tests", "tests/urban_terrain_tests.cpp"),
+    "jev_planner_tests": ("tactics_jev_planner_tests", "tests/jev_planner_tests.cpp"),
+    "server_tests": ("tactics_server_tests", "tests/server_tests.cpp"),
 }
 TESTS_PER_SHARD = 4
 MAX_SHARDS = 16

@@ -544,7 +544,7 @@ else()
       # (PR #304's two see-through scenarios tipped it over).
       # Under ctest -j the suite shares CPU with other GL tests and hit 600 s.
       set_tests_properties(visual_tests PROPERTIES
-        TIMEOUT 900
+        TIMEOUT 1800
         ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
       )
       if(TBGWAF_BUILD_SERVER)

@@ -217,6 +217,9 @@ class SceneRenderer {
   TriangleMesh highlightRing_;
   ColorTriangleMesh frontierFill_;
   LineMesh frontierBorder_;
+  // Boundary segments lying under a higher reached storey, drawn dimmer so
+  // the floor closest to the camera keeps the full-strength line.
+  LineMesh frontierBorderDim_;
   // Frontier geometry is rebuilt only when the field changes.
   const tactics::ReachField* frontierKeyField_ = nullptr;
   glm::vec2 frontierKeyOrigin_{0.0f};
@@ -226,6 +229,7 @@ class SceneRenderer {
   bool frontierKeyCover_ = false;  // Whether the glow was styled by a cover map.
   ColorTriangleMesh ziplineFill_;
   LineMesh ziplineBorder_;
+  LineMesh ziplineBorderDim_;
   std::vector<glm::vec4> ziplineKey_;  // (minX, minZ, budget, zipline) per region.
   // Terrain ground mesh, rebuilt only when the scene's heightfield changes.
   // Keyed on the field's contents, not its address: successive scenes can

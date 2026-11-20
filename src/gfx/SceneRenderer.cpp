@@ -3184,8 +3184,10 @@ bool SceneRenderer::Init() {
   sphereMesh_.Init();
   frontierFill_.Init();
   frontierBorder_.Init();
+  frontierBorderDim_.Init();
   ziplineFill_.Init();
   ziplineBorder_.Init();
+  ziplineBorderDim_.Init();
   pathLine_.Init();
   fovConeMesh_.Init();
   shotConeMesh_.Init();
@@ -3251,8 +3253,10 @@ bool SceneRenderer::Init() {
 void SceneRenderer::Destroy() {
   frontierFill_.Destroy();
   frontierBorder_.Destroy();
+  frontierBorderDim_.Destroy();
   ziplineFill_.Destroy();
   ziplineBorder_.Destroy();
+  ziplineBorderDim_.Destroy();
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
   shotConeMesh_.Destroy();
@@ -4917,10 +4921,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     return tris;
   };
   constexpr float kBoundaryWidth = 0.07f;  // World units.
+  // Alpha factor for boundary segments running under a higher reached storey
+  // (issue #292 follow-up): still visible through the faded building, but
+  // clearly behind the floor drawn over them.
+  constexpr float kOccludedBoundaryAlpha = 0.35f;
   const auto appendFrontier = [&](const tactics::ReachField& f,
                                   const tactics::CoverMap* cover, const glm::vec3& color,
                                   std::vector<ColorTriangleMesh::Vertex>& fill,
-                                  std::vector<glm::vec3>& border) {
+                                  std::vector<glm::vec3>& border,
+                                  std::vector<glm::vec3>& borderDim) {
     constexpr float kY = 0.03f;
     constexpr float kSlabOffset = 0.015f;  // Above a sidewalk slab's top face.
     constexpr float kFadeWidth = 0.8f;   // World units from boundary to transparent.
@@ -5240,6 +5249,24 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       p.y += kY;
       return p;
     };
+    // True when another reached walk layer sits above `yRef` at node `idx`
+    // (per the sheet's CSR layer list, which holds every sibling sheet's
+    // reached heights too): the spot lies behind a floor nearer the
+    // overhead camera.
+    const auto layerAbove = [&](int idx, float yRef) {
+      if (f.layerStart.size() != static_cast<size_t>(nx) * nz + 1) return false;
+      for (int t = f.layerStart[idx]; t < f.layerStart[idx + 1]; ++t) {
+        if (f.layerY[t] > yRef + kLayerStep) return true;
+      }
+      return false;
+    };
+    const auto occludedAt = [&](const glm::vec3& p) {
+      const int ix =
+          std::clamp(static_cast<int>(std::lround((p.x - f.minX) / f.step)), 0, nx - 1);
+      const int iz =
+          std::clamp(static_cast<int>(std::lround((p.z - f.minZ) / f.step)), 0, nz - 1);
+      return layerAbove(iz * nx + ix, p.y);
+    };
     for (const FrontierOutline& outline : TraceFrontierOutline(f)) {
       const size_t count = outline.points.size();
       if (count < 2) continue;
@@ -5250,8 +5277,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         const glm::vec3 a = lifted[k], d = lifted[(k + 1) % count] - a;
         // A segment spanning a layer step would hang in the air: skip it.
         if (std::abs(d.y) > kLayerStep) continue;
-        border.push_back(a);
-        border.push_back(a + d);
+        // A boundary running under a higher reached storey stays visible but
+        // dimmer, so where floors overlap the storey closest to the camera
+        // keeps the full-strength line (issue #292 follow-up). Floors that do
+        // not overlap each other both render the regular color.
+        const bool dim = occludedAt(outline.points[k]) &&
+                         occludedAt(outline.points[(k + 1) % count]);
+        std::vector<glm::vec3>& out = dim ? borderDim : border;
+        out.push_back(a);
+        out.push_back(a + d);
         // Copy on top of each raised sidewalk slab it crosses (Liang-Barsky
         // clip of the segment to the slab footprint).
         for (const AABB& slab : slabs) {
@@ -5272,8 +5306,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           }
           if (vis) {
             const float y = slab.max.y + kSlabOffset;
-            border.emplace_back(a.x + d.x * t0, y, a.z + d.z * t0);
-            border.emplace_back(a.x + d.x * t1, y, a.z + d.z * t1);
+            out.emplace_back(a.x + d.x * t0, y, a.z + d.z * t0);
+            out.emplace_back(a.x + d.x * t1, y, a.z + d.z * t1);
           }
         }
       }
@@ -5289,15 +5323,16 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   const auto appendFrontierLayers = [&](const tactics::ReachField& f,
                                         const tactics::CoverMap* cover, const glm::vec3& color,
                                         std::vector<ColorTriangleMesh::Vertex>& fill,
-                                        std::vector<glm::vec3>& border) {
+                                        std::vector<glm::vec3>& border,
+                                        std::vector<glm::vec3>& borderDim) {
     std::vector<tactics::ReachField> sheets = tactics::SplitReachSheets(f);
     if (sheets.empty()) {
-      appendFrontier(f, cover, color, fill, border);
+      appendFrontier(f, cover, color, fill, border, borderDim);
       return;
     }
     for (tactics::ReachField& sheet : sheets) {
       tactics::FillLevelEdgeDistances(game.GetScene(), &sheet);
-      appendFrontier(sheet, cover, color, fill, border);
+      appendFrontier(sheet, cover, color, fill, border, borderDim);
     }
   };
 
@@ -5330,10 +5365,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       frontierKeyThermal_ = thermalKey;
       frontierKeyCover_ = cover != nullptr;
       std::vector<ColorTriangleMesh::Vertex> fill;
-      std::vector<glm::vec3> border;
-      appendFrontierLayers(f, cover, debug.thermal ? thermalGreen : kSetupColor, fill, border);
+      std::vector<glm::vec3> border, borderDim;
+      appendFrontierLayers(f, cover, debug.thermal ? thermalGreen : kSetupColor, fill, border,
+                           borderDim);
       frontierFill_.SetVertices(fill);
       frontierBorder_.SetPoints(ribbonize(border, kBoundaryWidth));
+      frontierBorderDim_.SetPoints(ribbonize(borderDim, kBoundaryWidth));
     }
     // Same depth bias as the FOV cone, against z-fighting at distance.
     glEnable(GL_POLYGON_OFFSET_FILL);
@@ -5347,9 +5384,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     // first (blending is already on for the whole overlay section; turning it
     // off here would flatten the zipline fill's alpha gradient below).
     const glm::vec3 frontierColor = debug.thermal ? thermalGreen : kSetupColor;
-    unlitShader_.SetVec4("uColor", glm::vec4(frontierColor,
-                                             overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f));
+    const float frontierAlpha = overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f;
+    unlitShader_.SetVec4("uColor", glm::vec4(frontierColor, frontierAlpha));
     frontierBorder_.DrawTriangles();
+    unlitShader_.SetVec4("uColor",
+                         glm::vec4(frontierColor, frontierAlpha * kOccludedBoundaryAlpha));
+    frontierBorderDim_.DrawTriangles();
     glDisable(GL_POLYGON_OFFSET_FILL);
   }
   // Zipline regions: where a walk -> ride -> walk plan can reach, in a second
@@ -5369,12 +5409,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     if (key != ziplineKey_) {
       ziplineKey_ = key;
       std::vector<ColorTriangleMesh::Vertex> fill;
-      std::vector<glm::vec3> border;
+      std::vector<glm::vec3> border, borderDim;
       for (const auto& fr : frontiers) {
-        if (fr.field.nx > 0) appendFrontierLayers(fr.field, nullptr, regionColor, fill, border);
+        if (fr.field.nx > 0) {
+          appendFrontierLayers(fr.field, nullptr, regionColor, fill, border, borderDim);
+        }
       }
       ziplineFill_.SetVertices(fill);
       ziplineBorder_.SetPoints(ribbonize(border, kBoundaryWidth));
+      ziplineBorderDim_.SetPoints(ribbonize(borderDim, kBoundaryWidth));
     }
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(-2.0f, -4.0f);
@@ -5386,6 +5429,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     const float legAlpha = overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f;
     unlitShader_.SetVec4("uColor", glm::vec4(regionColor, legAlpha));
     ziplineBorder_.DrawTriangles();
+    unlitShader_.SetVec4("uColor", glm::vec4(regionColor, legAlpha * kOccludedBoundaryAlpha));
+    ziplineBorderDim_.DrawTriangles();
     glDisable(GL_POLYGON_OFFSET_FILL);
     for (const auto& fr : frontiers) {
       // The ring below overwrites uMVP/uColor, so restore them per line.

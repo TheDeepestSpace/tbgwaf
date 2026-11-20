@@ -175,7 +175,8 @@ void RemoteClient::ApplyPlans(const Json& m) {
   const auto selected = game_->SelectedUnitId();
   const bool editing = game_->Mode() == InputMode::ActionMenu ||
                        game_->Mode() == InputMode::AwaitingMoveDestination ||
-                       game_->Mode() == InputMode::AwaitingShootTarget;
+                       game_->Mode() == InputMode::AwaitingShootTarget ||
+                       game_->Mode() == InputMode::AwaitingThrowTarget;
   for (const Json& entry : m["plans"].AsArray()) {
     Action action;
     std::string error;
@@ -507,7 +508,8 @@ void RemoteClient::SyncPlans() {
   if (!team_ || spectate_) return;
   const auto selected = game_->SelectedUnitId();
   const bool midPlan = game_->Mode() == InputMode::AwaitingMoveDestination ||
-                       game_->Mode() == InputMode::AwaitingShootTarget;
+                       game_->Mode() == InputMode::AwaitingShootTarget ||
+                       game_->Mode() == InputMode::AwaitingThrowTarget;
   for (const Unit& u : game_->GetScene().units) {
     if (u.team != *team_ || !u.alive) continue;
     if (midPlan && selected && *selected == u.id) continue;  // Still being planned.

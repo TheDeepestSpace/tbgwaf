@@ -468,6 +468,11 @@ void ApplyPlan(const GameSnapshot::UnitState& u, Unit* unit) {
   unit->plan.moveRides = u.planRides;
   unit->plan.queuedLegRides = u.planQueuedLegRides;
   unit->plan.endFacingYaw = u.planEndFacingYaw;
+  // A peer can never ship a throw the thrower could not have planned itself.
+  if (unit->plan.type == PlannedActionType::Throw &&
+      (!unit->plan.hasAimPoint || !CanThrowAt(*unit, unit->plan.aimPoint))) {
+    unit->plan = PlannedAction{};
+  }
 }
 
 }  // namespace
@@ -654,7 +659,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
           pathCount)) {
       return false;
     }
-    if (plan < 0 || plan > static_cast<int>(PlannedActionType::Pass)) return false;
+    if (plan < 0 || plan > static_cast<int>(PlannedActionType::Throw)) return false;
     if (u.planShots < 1 || u.planShots > static_cast<int>(kMaxEntries)) return false;
     if (pathCount > kMaxEntries) return false;
     u.planType = static_cast<PlannedActionType>(plan);
@@ -1590,6 +1595,52 @@ void GameLogic::ChoosePass() {
   mode_ = InputMode::AwaitingSelection;
 }
 
+void GameLogic::ChooseThrow() {
+  RecordScope record(this, InputEvent{InputEvent::Op::ChooseThrow});
+  if (mode_ != InputMode::ActionMenu) return;
+  const Unit* unit = FindUnit(selectedUnitId_.value_or(-1));
+  if (!unit || unit->grenades <= 0) return;  // No supply: nothing to plan.
+  ClearQueuedLegs(selectedUnitId_);
+  aimPreview_.reset();
+  lockPreviewId_.reset();
+  mode_ = InputMode::AwaitingThrowTarget;
+}
+
+std::optional<ThrowPreview> GameLogic::PreviewThrow(const glm::vec3& point) const {
+  const Unit* thrower = FindUnit(selectedUnitId_.value_or(-1));
+  if (!thrower || !CanThrowAt(*thrower, point)) return std::nullopt;
+  return PredictThrow(*thrower, point);
+}
+
+void GameLogic::PlaceThrowPoint(const glm::vec3& point, Team byTeam) {
+  InputEvent e{InputEvent::Op::PlaceThrowPoint};
+  e.point = point;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
+  if (mode_ != InputMode::AwaitingThrowTarget) return;
+  const Unit* thrower = FindUnit(selectedUnitId_.value_or(-1));
+  if (!thrower || thrower->team != byTeam) return;
+  if (!CanThrowAt(*thrower, point)) return;  // Out of range / no supply: ignored.
+  aimPreview_ = AimPreview{point};
+}
+
+void GameLogic::ConfirmThrow(Team byTeam) {
+  InputEvent e{InputEvent::Op::ConfirmThrow};
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
+  if (mode_ != InputMode::AwaitingThrowTarget || !aimPreview_) return;
+  Unit* thrower = FindUnit(selectedUnitId_.value_or(-1));
+  if (!thrower || thrower->team != byTeam) return;
+  if (!CanThrowAt(*thrower, aimPreview_->point)) return;
+  thrower->plan = PlannedAction{};
+  thrower->plan.type = PlannedActionType::Throw;
+  thrower->plan.hasAimPoint = true;
+  thrower->plan.aimPoint = aimPreview_->point;
+  aimPreview_.reset();
+  selectedUnitId_.reset();
+  mode_ = InputMode::AwaitingSelection;
+}
+
 void GameLogic::CancelAction() {
   RecordScope record(this, InputEvent{InputEvent::Op::CancelAction});
   if (mode_ == InputMode::AwaitingMoveDestination) {
@@ -1598,7 +1649,8 @@ void GameLogic::CancelAction() {
       if (unit->plan.type == PlannedActionType::Move) unit->plan = PlannedAction{};
     }
   }
-  if (mode_ == InputMode::AwaitingMoveDestination || mode_ == InputMode::AwaitingShootTarget) {
+  if (mode_ == InputMode::AwaitingMoveDestination || mode_ == InputMode::AwaitingShootTarget ||
+      mode_ == InputMode::AwaitingThrowTarget) {
     mode_ = InputMode::ActionMenu;
     ClearMoveOverlays();
     aimPreview_.reset();
@@ -1876,6 +1928,23 @@ void GameLogic::ClickAimRay(const glm::vec3& origin, const glm::vec3& direction,
     return;
   }
   if (aim.kind == AimRayResult::Kind::Surface) PlaceAimPoint(aim.point, byTeam);
+}
+
+void GameLogic::ClickThrowRay(const glm::vec3& origin, const glm::vec3& direction, Team byTeam) {
+  InputEvent e{InputEvent::Op::ClickThrowRay};
+  e.point = origin;
+  e.direction = direction;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
+  if (mode_ != InputMode::AwaitingThrowTarget) return;
+  const Unit* thrower = FindUnit(selectedUnitId_.value_or(-1));
+  if (!thrower || thrower->team != byTeam) return;
+  const float len = glm::length(direction);
+  if (len < 1e-6f) return;
+  glm::vec3 surface;
+  if (IntersectAimSurface(origin, direction / len, scene_, sightObstacles_, &surface)) {
+    PlaceThrowPoint(surface, byTeam);
+  }
 }
 
 void GameLogic::PlaceAimPoint(const glm::vec3& point, Team byTeam) {

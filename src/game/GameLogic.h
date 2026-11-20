@@ -13,6 +13,7 @@
 
 #include "game/NavMesh.h"
 #include "game/Scene.h"
+#include "game/Throw.h"
 #include "game/Types.h"
 #include "game/Unit.h"
 #include "game/Visibility.h"
@@ -36,6 +37,10 @@ struct InputEvent {
     ChooseMove,
     ChooseShoot,
     ChoosePass,
+    ChooseThrow,
+    ClickThrowRay,    // point = origin, direction, team
+    PlaceThrowPoint,  // point, team
+    ConfirmThrow,     // team
     CancelAction,
     SetMoveFacing,    // unit, value = yaw, team
     ClickAimRay,      // point = origin, direction, team
@@ -81,6 +86,7 @@ enum class InputMode {
   ActionMenu,             // A figure is selected; waiting for Move/Shoot/Pass to plan its action.
   AwaitingMoveDestination,  // Waiting for a ground click to plan a move to.
   AwaitingShootTarget,    // Waiting for a click on an enemy figure to plan a shot at.
+  AwaitingThrowTarget,    // Waiting for an aim point (within throw range) to plan a grenade throw at.
   Executing,              // A committed round is playing out; planning input is inert.
   GameOver,
 };
@@ -463,6 +469,21 @@ class GameLogic {
   // (ConfirmAim) commits it with the chosen shot count.
   const std::optional<int>& GetLockPreview() const { return lockPreviewId_; }
 
+  // --- Throw planning (grenades). While AwaitingThrowTarget the player
+  // places a landing point within kThrowRange of the thrower; like free-aim
+  // it is tap-to-place then confirm. Points out of range, or any throw
+  // without grenade supply, are rejected (no-ops), mirroring how move legs
+  // beyond the budget are ignored. The thrower's plan becomes type Throw
+  // with the landing in plan.aimPoint. ---
+  // Camera-ray form: resolves the nearest surface (no LOS gate -- a grenade
+  // may land out of sight) and places the marker if in range.
+  void ClickThrowRay(const glm::vec3& origin, const glm::vec3& direction, Team byTeam);
+  void PlaceThrowPoint(const glm::vec3& point, Team byTeam);
+  void ConfirmThrow(Team byTeam);
+  // Predicted arc/landing/blast for the selected thrower to `point` (nullopt
+  // if no thrower is selected or the point is not throwable).
+  std::optional<ThrowPreview> PreviewThrow(const glm::vec3& point) const;
+
   // Friendly fire config flag: when off, same-team figures are transparent
   // to the free-aim ballistic trace. On by default.
   bool FriendlyFireEnabled() const { return friendlyFire_; }
@@ -518,6 +539,8 @@ class GameLogic {
   void ChooseMove();
   void ChooseShoot();
   void ChoosePass();
+  // Enters throw targeting; stays in the menu if the figure has no grenades.
+  void ChooseThrow();
 
   // Re-aims a planned move's final facing. Allowed at any time before the
   // round is committed, by the unit's own team; no-op for units without a planned move.

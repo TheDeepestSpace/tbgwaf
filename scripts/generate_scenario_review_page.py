@@ -512,6 +512,11 @@ def _action_text(step: dict, units: dict) -> str:
         if step.get("expect_noop"):
             text += " (expected no-op: target not visible)"
         return text
+    if kind == "throw":
+        text = f"{actor} throws a grenade at {_fmt_point(step.get('at'))}"
+        if step.get("expect_noop"):
+            text += " (expected rejection: out of range or no grenades)"
+        return text
     if kind == "pass":
         return f"{actor} passes"
     if kind == "cancel":

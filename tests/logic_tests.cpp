@@ -3860,7 +3860,74 @@ void TestBuildingsContainingPoints() {
   CHECK(BuildingsContainingPoints(scene, {{-5.0f, 0.3f, 2.0f}, {5.5f, 0.3f, 3.5f}})[0] == 1);
 }
 
+// Throw planning (grenades): range + supply gates, arc shape, cancel, and the
+// snapshot round trip (including a peer-shipped out-of-range throw).
+void TestThrowPlanningRangeSupplyAndPreview() {
+  GameLogic game(LegacyScene());
+  const Unit* thrower = game.FindUnit(1);
+  const glm::vec3 near = thrower->position + glm::vec3(10.0f, 0.0f, 0.0f);
+  const glm::vec3 far = thrower->position + glm::vec3(constants::kThrowRange + 1.0f, 0.0f, 0.0f);
+
+  game.ClickUnit(1, Team::Blue);
+  game.ChooseThrow();
+  CHECK(game.Mode() == InputMode::AwaitingThrowTarget);
+
+  // Out of range: ignored. Wrong team: ignored. Confirm with nothing: no-op.
+  game.PlaceThrowPoint(far, Team::Blue);
+  CHECK(!game.GetAimPreview().has_value());
+  game.ConfirmThrow(Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingThrowTarget);
+  game.PlaceThrowPoint(near, Team::Red);
+  CHECK(!game.GetAimPreview().has_value());
+
+  // Preview: arc from the hand to the landing, rising above both ends.
+  CHECK(!game.PreviewThrow(far).has_value());
+  const auto preview = game.PreviewThrow(near);
+  CHECK(preview.has_value());
+  CHECK(static_cast<int>(preview->arc.size()) == constants::kThrowArcSamples + 1);
+  CHECK(glm::distance(preview->arc.back(), near) < 1e-4f);
+  CHECK(preview->arc.front().y == thrower->position.y + constants::kThrowReleaseHeight);
+  float apex = 0.0f;
+  for (const glm::vec3& p : preview->arc) apex = std::max(apex, p.y);
+  CHECK(apex > preview->arc.front().y + 1.0f);
+  CHECK(preview->blastRadius == constants::kGrenadeBlastRadius);
+
+  game.PlaceThrowPoint(near, Team::Blue);
+  CHECK(game.GetAimPreview().has_value());
+  game.CancelAction();  // Drops back to the menu without planning.
+  CHECK(game.Mode() == InputMode::ActionMenu);
+  CHECK(game.FindUnit(1)->plan.type == PlannedActionType::None);
+
+  game.ChooseThrow();
+  game.PlaceThrowPoint(near, Team::Blue);
+  game.ConfirmThrow(Team::Blue);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+  const PlannedAction& plan = game.FindUnit(1)->plan;
+  CHECK(plan.type == PlannedActionType::Throw && plan.hasAimPoint && plan.aimPoint == near);
+
+  // Snapshot round trip keeps it; a peer-shipped out-of-range throw is dropped.
+  GameSnapshot snap = game.ExportState();
+  GameSnapshot decoded;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(snap), &decoded));
+  GameLogic peer(LegacyScene());
+  CHECK(peer.ImportTeamPlans(decoded, Team::Blue));
+  CHECK(peer.FindUnit(1)->plan.type == PlannedActionType::Throw);
+  for (auto& u : decoded.units) {
+    if (u.id == 1) u.planAimPoint = far;
+  }
+  CHECK(peer.ImportTeamPlans(decoded, Team::Blue));
+  CHECK(peer.FindUnit(1)->plan.type == PlannedActionType::None);
+
+  // No supply: cannot even enter throw targeting.
+  GameLogic dry(LegacyScene());
+  dry.FindUnit(1)->grenades = 0;
+  dry.ClickUnit(1, Team::Blue);
+  dry.ChooseThrow();
+  CHECK(dry.Mode() == InputMode::ActionMenu);
+}
+
 int main() {
+  TestThrowPlanningRangeSupplyAndPreview();
   TestDeadFiguresSeeThroughProbes();
   TestBuildingsContainingPoints();
   TestNavMeshRoutesAroundObstacle();

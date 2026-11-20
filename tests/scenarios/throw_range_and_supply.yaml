@@ -1,0 +1,31 @@
+name: throw_range_and_supply
+description: >
+  Throw planning (grenades, B1): a throw at a point within kThrowRange (25) plans fine, a throw
+  past the range is rejected and leaves no plan, and a figure with no grenade left cannot plan
+  one. Planning only -- executing the throw is a later change, so the round commits with the
+  thrower's plan as-is and nobody dies.
+
+map: {half_extent: 60}
+
+units:
+  - {id: 0, team: blue, position: [-10, 0, 0], facing_degrees: 0}
+  - {id: 1, team: blue, position: [-10, 0, 4], facing_degrees: 0}
+  - {id: 2, team: red, position: [20, 0, 0], facing_degrees: 180}
+
+script:
+  - action: throw
+    description: In range (20 away) -- planned.
+    actor: 0
+    at: [10, 0, 0]
+  - action: throw
+    description: 45 away -- beyond throw range, rejected.
+    actor: 1
+    at: [35, 0, 4]
+    expect_noop: true
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {unit: 0, alive: true}
+  - assert: {unit: 2, alive: true}

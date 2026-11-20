@@ -481,6 +481,18 @@ constexpr bool kFriendlyFireDefault = true;
 // A free-aim trace flies until it hits something, capped at the sight range
 // (chance has long since fallen off by then; there is no hard shot range cap).
 constexpr float kAimTraceRange = kSightRange;
+// Throw action (grenades, B1). Planning-time rules only: the aim point must
+// lie within kThrowRange (horizontal distance) of the thrower, and the
+// thrower needs a grenade in its supply. kStartingGrenades is every figure's
+// supply at match start. The preview arc is a parabola from the hand
+// (kThrowReleaseHeight above the feet) over an apex kThrowArcApexLift above
+// the higher endpoint, sampled into kThrowArcSamples segments.
+constexpr float kThrowRange = 25.0f;
+constexpr int kStartingGrenades = 2;
+constexpr float kGrenadeBlastRadius = 4.0f;
+constexpr float kThrowReleaseHeight = 1.5f;
+constexpr float kThrowArcApexLift = 2.5f;
+constexpr int kThrowArcSamples = 24;
 // Neutral flag objective (CTF part 1). A living figure whose path touches
 // the flag -- within kFlagGrabRadius in XZ and kFlagGrabHeight vertically
 // (so a deck above/below the flag does not grab it) -- picks it up for free.

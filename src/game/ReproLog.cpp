@@ -71,6 +71,10 @@ constexpr OpName kOpNames[] = {
     {InputEvent::Op::ChooseMove, "choose_move"},
     {InputEvent::Op::ChooseShoot, "choose_shoot"},
     {InputEvent::Op::ChoosePass, "choose_pass"},
+    {InputEvent::Op::ChooseThrow, "choose_throw"},
+    {InputEvent::Op::ClickThrowRay, "click_throw_ray"},
+    {InputEvent::Op::PlaceThrowPoint, "place_throw"},
+    {InputEvent::Op::ConfirmThrow, "confirm_throw"},
     {InputEvent::Op::CancelAction, "cancel"},
     {InputEvent::Op::SetMoveFacing, "set_move_facing"},
     {InputEvent::Op::ClickAimRay, "click_aim_ray"},
@@ -96,6 +100,7 @@ void AppendInputFields(std::string* out, const InputEvent& e) {
       break;
     case Op::ClickGround:
     case Op::PlaceAimPoint:
+    case Op::PlaceThrowPoint:
       *out += ",\"point\":";
       AppendVec3(out, e.point);
       team();
@@ -105,6 +110,7 @@ void AppendInputFields(std::string* out, const InputEvent& e) {
       team();
       break;
     case Op::ClickAimRay:
+    case Op::ClickThrowRay:
       *out += ",\"origin\":";
       AppendVec3(out, e.point);
       *out += ",\"dir\":";
@@ -112,6 +118,7 @@ void AppendInputFields(std::string* out, const InputEvent& e) {
       team();
       break;
     case Op::ConfirmAim:
+    case Op::ConfirmThrow:
       team();
       break;
     case Op::SetShotCount:
@@ -151,6 +158,7 @@ void AppendInputFields(std::string* out, const InputEvent& e) {
     case Op::ChooseMove:
     case Op::ChooseShoot:
     case Op::ChoosePass:
+    case Op::ChooseThrow:
     case Op::CancelAction:
     case Op::CommitRound:
     case Op::ClearAllPlans:
@@ -170,6 +178,7 @@ bool ReadInputFields(const JsonValue& obj, InputEvent* e, std::string* error) {
              need(ParseTeamName(obj.Find("team"), &e->team), "team");
     case Op::ClickGround:
     case Op::PlaceAimPoint:
+    case Op::PlaceThrowPoint:
       return need(ReadVec3(obj.Find("point"), &e->point), "point") &&
              need(ParseTeamName(obj.Find("team"), &e->team), "team");
     case Op::SetMoveFacing:
@@ -177,10 +186,12 @@ bool ReadInputFields(const JsonValue& obj, InputEvent* e, std::string* error) {
              need(ReadFloat(obj.Find("yaw"), &e->value), "yaw") &&
              need(ParseTeamName(obj.Find("team"), &e->team), "team");
     case Op::ClickAimRay:
+    case Op::ClickThrowRay:
       return need(ReadVec3(obj.Find("origin"), &e->point), "origin") &&
              need(ReadVec3(obj.Find("dir"), &e->direction), "dir") &&
              need(ParseTeamName(obj.Find("team"), &e->team), "team");
     case Op::ConfirmAim:
+    case Op::ConfirmThrow:
       return need(ParseTeamName(obj.Find("team"), &e->team), "team");
     case Op::SetShotCount:
       return need(ReadInt(obj.Find("count"), &e->count), "count") &&
@@ -220,6 +231,7 @@ bool ReadInputFields(const JsonValue& obj, InputEvent* e, std::string* error) {
     case Op::ChooseMove:
     case Op::ChooseShoot:
     case Op::ChoosePass:
+    case Op::ChooseThrow:
     case Op::CancelAction:
     case Op::CommitRound:
     case Op::ClearAllPlans:
@@ -532,6 +544,10 @@ ReplayReport ReplayReproLog(const ReproLog& log, const Scene& scene, GameLogic* 
       case Op::ChooseMove: game->ChooseMove(); break;
       case Op::ChooseShoot: game->ChooseShoot(); break;
       case Op::ChoosePass: game->ChoosePass(); break;
+      case Op::ChooseThrow: game->ChooseThrow(); break;
+      case Op::ClickThrowRay: game->ClickThrowRay(e.point, e.direction, e.team); break;
+      case Op::PlaceThrowPoint: game->PlaceThrowPoint(e.point, e.team); break;
+      case Op::ConfirmThrow: game->ConfirmThrow(e.team); break;
       case Op::CancelAction: game->CancelAction(); break;
       case Op::SetMoveFacing: game->SetPlannedMoveFacing(e.unit, e.value, e.team); break;
       case Op::ClickAimRay: game->ClickAimRay(e.point, e.direction, e.team); break;

@@ -36,6 +36,8 @@
 //   {"t":"move","unit":3,"waypoints":[[x,y,z],...],"facing":yaw}
 //   {"t":"shoot","unit":3,"target":4}
 //   {"t":"pass","unit":3}
+//   {"t":"throw","unit":3,"aim":[x,y,z]}              grenade at that point; nacked if out of
+//                                                     range (kThrowRange) or the unit has no grenades
 //   {"t":"cancel","unit":3}                           drop that unit's plan
 //   {"t":"focus","unit":3}                            validated no-op (camera is client-side)
 //   {"t":"reaction","table":[a,b,c,d]}               squad playbook, a..d = actions for
@@ -72,7 +74,7 @@ constexpr int kProtocolVersion = 1;
 constexpr size_t kMaxMessageBytes = 16 * 1024;
 constexpr size_t kMaxWaypoints = 32;
 
-enum class ActionKind { Move, Shoot, Pass, Cancel, Focus, Reaction, Commit, NewMatch };
+enum class ActionKind { Move, Shoot, Pass, Throw, Cancel, Focus, Reaction, Commit, NewMatch };
 
 struct Action {
   ActionKind kind = ActionKind::Pass;
@@ -80,6 +82,7 @@ struct Action {
   int target = -1;
   // Shoot only: a free-aim shot (issue #129) carries aimPoint instead of a
   // target; shots is the burst size (issue #138).
+  // Throw: aimPoint is the required landing point.
   std::optional<glm::vec3> aimPoint;
   int shots = 1;
   std::vector<glm::vec3> waypoints;

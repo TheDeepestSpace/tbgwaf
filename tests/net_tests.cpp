@@ -121,6 +121,45 @@ Action Make(ActionKind kind, int unit, int target = -1) {
   return a;
 }
 
+void TestThrowAction() {
+  bool ok = false;
+  Action a = Parse(R"({"t":"throw","unit":1,"aim":[3,0,4]})", &ok);
+  CHECK(ok && a.kind == ActionKind::Throw && a.aimPoint && a.aimPoint->x == 3.0f);
+  Parse(R"({"t":"throw","unit":1})", &ok);  // Aim point is required.
+  CHECK(!ok);
+  Parse(R"({"t":"throw","unit":1,"aim":[1,2]})", &ok);
+  CHECK(!ok);
+  Json j;
+  CHECK(Json::Parse(net::EncodeAction(a).Dump(), &j));
+  Action b;
+  std::string err;
+  CHECK(net::ParseAction(j, &b, &err) && b.aimPoint && b.aimPoint->z == 4.0f);
+
+  GameLogic game(BuildDefaultScene());
+  const glm::vec3 base = game.FindUnit(0)->position;
+  Action t = Make(ActionKind::Throw, 0);
+  t.aimPoint = base + glm::vec3(10.0f, 0.0f, 0.0f);
+  CHECK(net::ApplyPlanAction(game, Team::Blue, t, &err));
+  CHECK(game.FindUnit(0)->plan.type == PlannedActionType::Throw);
+  // Round trip through the plan view.
+  const Action back = net::PlanToAction(*game.FindUnit(0));
+  CHECK(back.kind == ActionKind::Throw && back.aimPoint && glm::distance(*back.aimPoint, *t.aimPoint) < 1e-5f);
+
+  // Rejections are atomic: the earlier throw plan survives.
+  Action far = Make(ActionKind::Throw, 0);
+  far.aimPoint = base + glm::vec3(constants::kThrowRange + 5.0f, 0.0f, 0.0f);
+  CHECK(!net::ApplyPlanAction(game, Team::Blue, far, &err));
+  CHECK(game.FindUnit(0)->plan.type == PlannedActionType::Throw);
+  CHECK(game.FindUnit(0)->plan.aimPoint == *t.aimPoint);
+  game.FindUnit(1)->grenades = 0;
+  Action dry = Make(ActionKind::Throw, 1);
+  dry.aimPoint = game.FindUnit(1)->position + glm::vec3(5.0f, 0.0f, 0.0f);
+  CHECK(!net::ApplyPlanAction(game, Team::Blue, dry, &err));
+  CHECK(game.FindUnit(1)->plan.type == PlannedActionType::None);
+  Action noAim = Make(ActionKind::Throw, 2);
+  CHECK(!net::ApplyPlanAction(game, Team::Blue, noAim, &err));
+}
+
 void TestApplyPlanActionRules() {
   GameLogic game(BuildDefaultScene());
   std::string err;
@@ -227,6 +266,7 @@ int main() {
   TestParseAction();
   TestActionEncodeParseRoundTrip();
   TestApplyPlanActionRules();
+  TestThrowAction();
   TestPlansEchoKeepsActionMenuOpen();
   if (g_failures == 0) {
     std::printf("All net tests passed.\n");

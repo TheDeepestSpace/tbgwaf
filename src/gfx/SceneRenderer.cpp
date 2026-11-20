@@ -50,6 +50,13 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
       overlays.invalidHoverHighlight = hoveredGroundPoint;
     }
   }
+  if (game.Mode() == tactics::InputMode::AwaitingThrowTarget) {
+    if (const auto& preview = game.GetAimPreview()) {
+      overlays.aimMarker = preview->point;
+    }
+    const auto point = overlays.aimMarker ? overlays.aimMarker : hoveredGroundPoint;
+    if (point) overlays.throwPreview = game.PreviewThrow(*point);
+  }
   overlays.showShotCone = game.Mode() == tactics::InputMode::AwaitingShootTarget;
   if (overlays.showShotCone) {
     // Free-aim (issue #129): the aiming figure gets its 360-degree LOS
@@ -5536,6 +5543,27 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawHighlightOnSurface(*overlays.invalidHoverHighlight,
                   glm::vec4(0.9f, 0.15f, 0.15f, 1.0f));
   }
+  // Throw arc + blast radius ring; a ring is a flat polyline at the landing
+  // height, drawn with the same line routine as move paths.
+  const auto drawThrow = [&](const tactics::ThrowPreview& throwPreview, float alpha) {
+    static const std::vector<tactics::PathRide> kNoThrowRides;
+    const glm::vec4 color(1.0f, 0.65f, 0.15f, alpha);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    drawMovePath(throwPreview.arc, kNoThrowRides, color);
+    std::vector<glm::vec3> ring;
+    constexpr int kRingSegments = 32;
+    for (int i = 0; i <= kRingSegments; ++i) {
+      const float a = 6.2831853f * static_cast<float>(i) / static_cast<float>(kRingSegments);
+      ring.push_back(throwPreview.landing + glm::vec3(std::cos(a), 0.05f, std::sin(a)) *
+                                                glm::vec3(throwPreview.blastRadius, 1.0f,
+                                                          throwPreview.blastRadius));
+    }
+    drawMovePath(ring, kNoThrowRides, color);
+    for (const glm::vec3& b : throwPreview.bounces) DrawHighlightOnSurface(b, color);
+    glDisable(GL_BLEND);
+  };
+  if (overlays.throwPreview) drawThrow(*overlays.throwPreview, 1.0f);
   // Visual feedback for the whole squad's plan so far: a planned move reuses
   // the same path-line rendering as the live preview above; a planned shot
   // gets a simple shooter->target line. Own team only -- the enemy's plans
@@ -5585,6 +5613,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                 SurfaceNormal(leg.back()));
         }
         glDisable(GL_BLEND);
+      }
+      if (unit.plan.type == tactics::PlannedActionType::Throw && unit.plan.hasAimPoint) {
+        drawThrow(tactics::PredictThrow(unit, unit.plan.aimPoint), 1.0f);
       }
       // Planned locked shots draw no line here: the shot cone aimed at the
       // target's torso (plus the "+" marker) is the whole preview, same as

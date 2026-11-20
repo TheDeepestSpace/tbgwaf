@@ -4946,6 +4946,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       // so the gradient glow marks only the budget arc and obstacles carry
       // nothing but their cover marks (issue #292).
       float w = 1.0f;
+      // Stacked-storey occlusion: > 0 where another reached walk layer lies
+      // above this piece's layer, so cover marks keep only the topmost
+      // storey at any spot instead of every floor's stripes showing through
+      // the faded building at once.
+      float occ = -1.0f;
     };
 
     // Cover-zone rectangles (issue #292), per feet height so decks and the
@@ -5134,6 +5139,19 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         }
       }
     };
+    // True when another reached walk layer sits above `yRef` at node `idx`
+    // (per the sheet's CSR layer list, which holds every sibling sheet's
+    // reached heights too). Marks under it are skipped: at any XZ spot only
+    // the topmost reached storey draws its cover marks, so a faded
+    // multi-storey interior shows one floor's marks, not every floor's
+    // stripes interleaved (issue #292 follow-up).
+    const auto layerAbove = [&](int idx, float yRef) {
+      if (f.layerStart.size() != g.size() + 1) return false;
+      for (int t = f.layerStart[idx]; t < f.layerStart[idx + 1]; ++t) {
+        if (f.layerY[t] > yRef + kLayerStep) return true;
+      }
+      return false;
+    };
     for (int iz = 0; iz + 1 < nz; ++iz) {
       for (int ix = 0; ix + 1 < nx; ++ix) {
         const int cx[4] = {ix, ix + 1, ix + 1, ix};
@@ -5186,9 +5204,12 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             }
           }
           if (quad[dom].g <= 0.0f) continue;
+          const float domY = f.surfaceY.empty() ? quad[dom].p.y
+                                                : f.surfaceY[cz[dom] * nx + cx[dom]];
           Pt cell[4];
           for (int k = 0; k < 4; ++k) {
             cell[k] = quad[k];
+            cell[k].occ = layerAbove(cz[k] * nx + cx[k], domY) ? 1.0f : -1.0f;
             if (member[k]) continue;
             const int idx = cz[k] * nx + cx[k];
             float virtualG = -0.5f * f.step;
@@ -5209,15 +5230,29 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             if (ain) poly.push_back(a);
             if (ain != bin) {
               const float t = a.g / (a.g - b.g);
-              const Pt c{a.p + (b.p - a.p) * t, 0.0f, a.w + (b.w - a.w) * t};
+              const Pt c{a.p + (b.p - a.p) * t, 0.0f, a.w + (b.w - a.w) * t,
+                         a.occ + (b.occ - a.occ) * t};
               poly.push_back(c);
             }
           }
           if (cover) {
+            // Keep only the part no higher reached storey covers (occ <= 0).
+            std::vector<Pt> open;
+            for (size_t v = 0; v < poly.size(); ++v) {
+              const Pt& a = poly[v];
+              const Pt& b = poly[(v + 1) % poly.size()];
+              const bool ain = a.occ <= 0.0f, bin = b.occ <= 0.0f;
+              if (ain) open.push_back(a);
+              if (ain != bin) {
+                const float t = a.occ / (a.occ - b.occ);
+                open.push_back({a.p + (b.p - a.p) * t, a.g + (b.g - a.g) * t,
+                                a.w + (b.w - a.w) * t, 0.0f});
+              }
+            }
             // Cover marks only: the clip to the cover rectangles happens
             // against this reach polygon, so marks never cross the movement
             // boundary, and emitMarkPoly lays the slab copies itself.
-            emitMarks(poly, f.Node(cx[dom], cz[dom]).y);
+            emitMarks(open, f.Node(cx[dom], cz[dom]).y);
             continue;
           }
           emitFan(poly);
@@ -5246,10 +5281,23 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       std::vector<glm::vec3> lifted(count);
       for (size_t k = 0; k < count; ++k) lifted[k] = liftY(outline.points[k]);
       const size_t segCount = outline.closed ? count : count - 1;
+      // Hidden-line removal across storeys, like the marks above: a segment
+      // whose span lies under a higher reached layer is skipped, so lower
+      // floors' boundaries do not crisscross the storey drawn over them.
+      const auto occludedAt = [&](const glm::vec3& p) {
+        const int ix = std::clamp(static_cast<int>(std::lround((p.x - f.minX) / f.step)), 0,
+                                  nx - 1);
+        const int iz = std::clamp(static_cast<int>(std::lround((p.z - f.minZ) / f.step)), 0,
+                                  nz - 1);
+        return layerAbove(iz * nx + ix, p.y);
+      };
       for (size_t k = 0; k < segCount; ++k) {
         const glm::vec3 a = lifted[k], d = lifted[(k + 1) % count] - a;
         // A segment spanning a layer step would hang in the air: skip it.
         if (std::abs(d.y) > kLayerStep) continue;
+        if (occludedAt(outline.points[k]) && occludedAt(outline.points[(k + 1) % count])) {
+          continue;
+        }
         border.push_back(a);
         border.push_back(a + d);
         // Copy on top of each raised sidewalk slab it crosses (Liang-Barsky

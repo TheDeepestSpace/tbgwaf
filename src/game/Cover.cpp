@@ -28,6 +28,35 @@ float BlockHeight(const std::vector<Obstacle>& obstacles, const glm::vec2& p, fl
   return -1.0f;
 }
 
+// Narrowest horizontal width of the obstacle (min over footprint edges of
+// the polygon's extent across that edge). Thin props -- street poles, lamps --
+// are narrower than a figure and cannot hide one (issue #292).
+bool WideEnoughForCover(const Obstacle& ob) {
+  if (ob.kind == ObstacleKind::Wall) return true;  // Thin wall pieces of buildings stay cover.
+  const AABB& b = ob.bounds;
+  std::vector<glm::vec2> poly;
+  if (!ob.footprint.empty()) {
+    poly = ob.footprint;
+  } else {
+    poly = {{b.min.x, b.min.z}, {b.max.x, b.min.z}, {b.max.x, b.max.z}, {b.min.x, b.max.z}};
+  }
+  float narrowest = 1e9f;
+  for (size_t i = 0; i < poly.size(); ++i) {
+    const glm::vec2 d = poly[(i + 1) % poly.size()] - poly[i];
+    const float len = glm::length(d);
+    if (len < 1e-4f) continue;
+    const glm::vec2 n(d.y / len, -d.x / len);
+    float lo = 1e9f, hi = -1e9f;
+    for (const glm::vec2& v : poly) {
+      const float h = glm::dot(v - poly[i], n);
+      lo = std::min(lo, h);
+      hi = std::max(hi, h);
+    }
+    narrowest = std::min(narrowest, hi - lo);
+  }
+  return narrowest >= 2.0f * constants::kUnitHalfWidth - 1e-4f;
+}
+
 bool Blocked(const std::vector<Obstacle>& obstacles, const glm::vec2& p, float feetY) {
   return BlockHeight(obstacles, p, feetY) >= 0.0f;
 }
@@ -55,6 +84,7 @@ std::vector<Wall> CollectWalls(const std::vector<Obstacle>& obstacles, const glm
     if (ob.navOnly) continue;
     const AABB& b = ob.bounds;
     if (b.max.y < feetY + kCoverMinHeight || b.min.y > feetY + 0.3f) continue;
+    if (!WideEnoughForCover(ob)) continue;
     if (c.x < b.min.x - band || c.x > b.max.x + band || c.y < b.min.z - band ||
         c.y > b.max.z + band) {
       continue;
@@ -139,6 +169,7 @@ std::vector<CoverZoneRect> CoverZoneRects(const std::vector<Obstacle>& obstacles
     if (ob.navOnly) continue;
     const AABB& b = ob.bounds;
     if (b.max.y < feetY + kCoverMinHeight || b.min.y > feetY + 0.3f) continue;
+    if (!WideEnoughForCover(ob)) continue;
     if (!ob.footprint.empty()) {
       poly = ob.footprint;
     } else {

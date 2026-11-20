@@ -44,6 +44,14 @@ int main() {
   CHECK(ClassifyCover(longer, {0.3f, 0, -0.4f}).kind == CoverKind::Flat);
   CHECK(ClassifyCover(longer, {0.3f, 0, -0.2f}).kind == CoverKind::Tactical);
 
+  // Obstacles thinner than a figure (poles, lamps) are never cover; at
+  // figure width they are.
+  const std::vector<Obstacle> pole = {Box(0, 0, 0.3f, 0.3f, 5.0f)};
+  CHECK(ClassifyCover(pole, {0.15f, 0, -0.4f}).kind == CoverKind::None);
+  CHECK(CoverZoneRects(pole, 0.0f, 0.7f).empty());
+  const std::vector<Obstacle> post = {Box(0, 0, 0.7f, 0.7f, 5.0f)};
+  CHECK(ClassifyCover(post, {0.35f, 0, -0.4f}).kind != CoverKind::None);
+
   // Low blockers (below cover height) and overhead ones don't count.
   CHECK(ClassifyCover({Box(-20, 0, 20, 1, 0.5f)}, {0, 0, -0.4f}).kind == CoverKind::None);
   Obstacle crown = Box(-20, 0, 20, 1);

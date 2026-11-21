@@ -6,6 +6,7 @@
 // ImGui::Render(). Const w.r.t. the game: button presses are reported back
 // via HudActions for the caller to apply.
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <utility>
@@ -139,12 +140,15 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 // contact shading live: reach in world units, darkening strength, samples
 // per ray, and blur half-width (see gfx::AmbientOcclusionSettings).
 // `thermalFovAlpha` is the FOV tint opacity used while the thermal view is on.
+// `wasmHeapBytes` is the WASM linear-memory size (nullopt on native builds,
+// shown as N/A). WASM memory never shrinks, so this is also the peak.
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
                     float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
                     bool& disableOcclusionFade, bool& npr, gfx::NprSettings& nprSettings,
                     bool& showFps, bool& showRotationDome, float fps, float frameMs,
-                    float fovMs, const gfx::RenderFrameStats& stats, float top);
+                    float fovMs, const gfx::RenderFrameStats& stats, float top,
+                    std::optional<size_t> wasmHeapBytes);
 
 // Camera-rotation dome (issue #298): small corner widget in the bottom-right
 // of `rect`. A wireframe half-sphere with a compass circle at its base, drawn

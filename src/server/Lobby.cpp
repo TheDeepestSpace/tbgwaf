@@ -548,6 +548,20 @@ Json Lobby::OnControl(const Json& message) {
     }
     return reply(true, "");
   }
+  if (type == "remove_obstacle") {  // Debug: remove an obstacle mid-match.
+    auto it = rooms_.find(name);
+    if (it == rooms_.end() || !it->second.session) return reply(false, "no running match in room");
+    Room& room = it->second;
+    if (!message["obstacle"].IsNumber()) return reply(false, "obstacle index required");
+    if (!room.session->DebugRemoveObstacle(static_cast<int>(message["obstacle"].AsNumber()))) {
+      return reply(false, "no such live obstacle");
+    }
+    Json world = Typed("world");
+    world.Set("world", room.session->TakeWorldDelta());
+    for (int ti = 0; ti < 2; ++ti) SendSeat(room, static_cast<Team>(ti), world);
+    for (int spectator : room.spectators) Send(spectator, world);
+    return reply(true, "");
+  }
   if (type == "dump_state") {
     auto it = rooms_.find(name);
     if (it == rooms_.end() || !it->second.session) return reply(false, "no running match in room");

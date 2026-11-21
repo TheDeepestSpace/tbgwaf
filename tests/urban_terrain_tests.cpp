@@ -870,20 +870,35 @@ void TestBuildingOverTunnelRoof() {
           !PointInConvexPolygon({foot.x, foot.z}, outline)) {
         continue;
       }
-      // From a roof point beside the building to the top of the flight. When
-      // the slab's centre sits inside a building (a tall one can now stand
-      // over it), there is no such point to start from: skip that flight.
-      const glm::vec3 center = SurfaceCenter(roof);
-      bool centerUnderBuilding = false;
-      for (const Obstacle& o : s.obstacles) {
-        centerUnderBuilding |= o.building >= 0 && o.footprint.size() >= 3 &&
-                               o.bounds.min.y > roofY &&
-                               PointInConvexPolygon({center.x, center.z}, o.footprint);
-      }
-      if (centerUnderBuilding) continue;
       ++checkedFlights;
+      // From a free roof point to the top of the flight. Buildings on the roof
+      // are closed shells whose walls can cut the slab into separate pockets,
+      // so the slab centre may sit in a pocket that cannot reach this
+      // building's doorway: try free points nearest the foot first.
+      const std::vector<std::vector<glm::vec2>>& walls =
+          nav.WalkSurfaces()[tunnel.roofSurface].blockers;
+      std::vector<std::pair<float, glm::vec3>> starts;
+      glm::vec2 lo(1e9f), hi(-1e9f);
+      for (const glm::vec2& p : outline) {
+        lo = glm::min(lo, p);
+        hi = glm::max(hi, p);
+      }
+      for (float x = lo.x; x <= hi.x; x += 1.0f) {
+        for (float z = lo.y; z <= hi.y; z += 1.0f) {
+          if (!PointInConvexPolygon({x, z}, outline)) continue;
+          bool free = true;
+          for (const std::vector<glm::vec2>& wall : walls) free &= !PointInConvexPolygon({x, z}, wall);
+          if (free) starts.push_back({glm::length(glm::vec2(x - foot.x, z - foot.z)), {x, roofY, z}});
+        }
+      }
+      std::sort(starts.begin(), starts.end(),
+                [](const auto& a, const auto& b) { return a.first < b.first; });
       std::vector<glm::vec3> path;
-      CHECK(nav.FindPath(center, top + glm::vec3(0.0f, 0.1f, 0.0f), &path));
+      bool reached = false;
+      for (const auto& start : starts) {
+        if ((reached = nav.FindPath(start.second, top + glm::vec3(0.0f, 0.1f, 0.0f), &path))) break;
+      }
+      CHECK(reached);
       for (size_t k = 0; k + 1 < path.size(); ++k) {
         const float run = glm::length(glm::vec2(path[k + 1].x - path[k].x,
                                                  path[k + 1].z - path[k].z));

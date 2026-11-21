@@ -175,6 +175,7 @@ struct GameSnapshot {
     float rideLength = 0.0f;
     float rideSlope = 0.0f;
     float grabElapsed = -1.0f;  // Flag pickup reach beat (see Unit).
+    float throwElapsed = -1.0f;  // Grenade throw beat (see Unit).
     bool moving = false;  // Has an in-flight move in the executing round.
     // Grenade supply (issue #349). Serialized only while it differs from the
     // starting supply, so pre-grenade snapshots keep their text and hashes.

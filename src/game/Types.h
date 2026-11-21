@@ -530,6 +530,10 @@ constexpr float kExplosionVisualSeconds = 0.9f;
 // (so a deck above/below the flag does not grab it) -- picks it up for free.
 constexpr float kFlagGrabRadius = 0.6f;
 constexpr float kFlagGrabHeight = 1.2f;
+// Grenade throw beat on the thrower: a short wind-up (arm cocked back), then
+// the overarm release at kThrowReleaseTime and a follow-through. Purely visual.
+constexpr float kThrowAnimDuration = 0.8f;
+constexpr float kThrowReleaseTime = 0.3f;
 constexpr float kGrabAnimDuration = 0.6f;  // Visual reach/pickup beat on the grabber.
 constexpr float kFlagDropDuration = 0.8f;  // Visual drop/plant settle of a dropped flag.
 }  // namespace constants

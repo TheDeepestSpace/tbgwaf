@@ -431,6 +431,7 @@ GameSnapshot GameLogic::ExportState() const {
     u.rideLength = unit.rideLength;
     u.rideSlope = unit.rideSlope;
     u.grabElapsed = unit.grabElapsed;
+    u.throwElapsed = unit.throwElapsed;
     u.moving = IsUnitMoving(unit.id);
     u.grenades = unit.grenades;
     snap.units.push_back(std::move(u));
@@ -620,6 +621,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     unit->rideLength = u.rideLength;
     unit->rideSlope = u.rideSlope;
     unit->grabElapsed = u.grabElapsed;
+    unit->throwElapsed = u.throwElapsed;
     unit->grenades = u.grenades;
     ApplyPlan(u, unit);
     if (u.moving) mirroredMoving_.push_back(u.id);
@@ -704,7 +706,7 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
         << u.knockdownElapsed << ' ' << u.walkPhase << ' ' << u.walkBlend << ' '
         << u.idleElapsed << ' ' << u.shootElapsed << ' ' << u.shootAimYaw << ' '
         << u.rideTravel << ' ' << u.rideLength << ' ' << u.rideSlope << ' '
-        << u.grabElapsed << ' ' << u.turnLag << ' ' << (u.moving ? 1 : 0) << ' '
+        << u.grabElapsed << ' ' << u.throwElapsed << ' ' << u.turnLag << ' ' << (u.moving ? 1 : 0) << ' '
         << u.planPath.size();
     for (const auto& p : u.planPath) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
     out << ' ' << u.planQueuedLegs.size();
@@ -787,7 +789,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
           u.planAimPoint.z >> u.planShots >> u.planEndFacingYaw >> u.knockdownAxis.x >>
           u.knockdownAxis.y >> u.knockdownAxis.z >> u.knockdownElapsed >> u.walkPhase >>
           u.walkBlend >> u.idleElapsed >> u.shootElapsed >> u.shootAimYaw >> u.rideTravel >> u.rideLength >>
-          u.rideSlope >> u.grabElapsed >> u.turnLag >> moving >>
+          u.rideSlope >> u.grabElapsed >> u.throwElapsed >> u.turnLag >> moving >>
           pathCount)) {
       return false;
     }
@@ -1193,6 +1195,10 @@ void GameLogic::UpdateUnrecorded(float dtSeconds) {
     if (unit.shootElapsed >= 0.0f && !falling) {
       unit.shootElapsed += dtSeconds;
       if (unit.shootElapsed >= constants::kShootAnimDuration) unit.shootElapsed = -1.0f;
+    }
+    if (unit.throwElapsed >= 0.0f && !falling) {
+      unit.throwElapsed += dtSeconds;
+      if (unit.throwElapsed >= constants::kThrowAnimDuration) unit.throwElapsed = -1.0f;
     }
     if (unit.grabElapsed >= 0.0f && !falling) {
       unit.grabElapsed += dtSeconds;
@@ -2730,6 +2736,7 @@ void GameLogic::CommitRound() {
       // committed geometry, one grenade spent. The thrower turns toward the
       // aim point (its new standing facing, like a free-aim shot's).
       --unit.grenades;
+      unit.throwElapsed = 0.0f;
       const glm::vec3 toAim = plan.aimPoint - unit.position;
       if (glm::length(glm::vec2(toAim.x, toAim.z)) > 1e-4f) {
         unit.SetFacingYaw(std::atan2(toAim.z, toAim.x));
@@ -2806,6 +2813,7 @@ void GameLogic::InitFlag() {
   for (Unit& unit : scene_.units) {
     unit.carryingFlag = false;
     unit.grabElapsed = -1.0f;
+    unit.throwElapsed = -1.0f;
   }
   const FlagConfig& config = scene_.flag;
   if (!config.enabled) return;

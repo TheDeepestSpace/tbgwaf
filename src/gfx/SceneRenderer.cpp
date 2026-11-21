@@ -1928,6 +1928,7 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
   ghost.shootElapsed = -1.0f;
   ghost.rideTravel = -1.0f;
   ghost.grabElapsed = -1.0f;
+  ghost.throwElapsed = -1.0f;
   if (glm::length(s.moveDirection) > 0.0f) {
     const glm::vec3 d = s.moveDirection;
     const glm::vec3 side(-d.z, 0.0f, d.x);

@@ -284,7 +284,7 @@ struct Trajectory {
 bool SameAnimation(const Unit& a, const Unit& b) {
   return a.walkPhase == b.walkPhase && a.walkBlend == b.walkBlend &&
          a.idleElapsed == b.idleElapsed && a.shootElapsed == b.shootElapsed &&
-         a.shootAimYaw == b.shootAimYaw && a.grabElapsed == b.grabElapsed &&
+         a.shootAimYaw == b.shootAimYaw && a.grabElapsed == b.grabElapsed && a.throwElapsed == b.throwElapsed &&
          a.rideTravel == b.rideTravel && a.rideLength == b.rideLength &&
          a.rideSlope == b.rideSlope && a.weapon == b.weapon;
 }

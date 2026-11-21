@@ -156,6 +156,8 @@ struct Unit {
   // the flag up (<0 = none) for the visual reach beat.
   bool carryingFlag = false;
   float grabElapsed = -1.0f;
+  // Seconds since this figure began throwing a grenade (<0 = none); visual only.
+  float throwElapsed = -1.0f;
   float runSpeed = constants::kMoveSpeed;  // World units per second while moving.
   // Loadout (issue #126): the model in the figure's hands and the carry/aim
   // animation class; since issue #138 also the magazine/fire-interval cap on

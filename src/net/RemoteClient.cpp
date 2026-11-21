@@ -443,6 +443,13 @@ void RemoteClient::PosePlayback(GameSnapshot* snapOut, const Playback& pb, float
     u.walkBlend += (target - u.walkBlend) * (1.0f - std::exp(-constants::kWalkBlendRate * dt));
     u.idleElapsed = std::fmod(u.idleElapsed + dt, constants::kIdleAnimDuration);
     u.shootElapsed = -1.0f;
+    // Throw beat: a visible grenade of ours early in the round means a throw.
+    u.throwElapsed = -1.0f;
+    if (pb.clock < constants::kThrowAnimDuration) {
+      for (const GameSnapshot::Grenade& g : a.grenades) {
+        if (g.thrower == u.id) u.throwElapsed = pb.clock;
+      }
+    }
     for (const Shot& shot : pb.shots) {
       const float age = pb.clock - shot.t;
       if (shot.unit == u.id && age >= 0.0f && age < constants::kShootAnimDuration) {

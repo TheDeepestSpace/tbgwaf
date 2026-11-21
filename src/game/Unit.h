@@ -139,6 +139,22 @@ struct Unit {
   // Looping clock for the subtle standing pose. Stored per unit so mirrored
   // clients render the same sampled rig pose during execution.
   float idleElapsed = 0.0f;
+  // Cover pose (issue #290, derived by GameLogic):
+  // pose the figure holds (0 none, 1 back against the wall for tall cover,
+  // 2 crouch for low cover), the yaw pointing at the blocker, a 0..1 blend
+  // into the pose, and the position the tile was last classified at.
+  // The crouch is not just visual (issue #292): CrouchAmount() shrinks
+  // Bounds(), SightPosition() and TorsoAimPosition(), so a crouched figure
+  // is seen and shot at as the smaller body it actually is.
+  // coverTileKind is the tile's geometric classification; coverKind is the
+  // pose actually held, which stays 0 while a sighted enemy's shots the
+  // blockers cannot stop make the pose useless (issue #292, see
+  // GameLogic::UpdateCoverPoses).
+  uint8_t coverKind = 0;
+  uint8_t coverTileKind = 0;
+  float coverYaw = 0.0f;
+  float coverBlend = 0.0f;
+  glm::vec3 coverFrom{1e9f};
   // Visual-only quick-draw beat: seconds since this figure's shot resolved
   // (<0 = idle) and the world yaw toward the target it fired at, so the gun
   // arm can swing onto the target even when it sits off-center in the FOV.
@@ -168,8 +184,39 @@ struct Unit {
   // PlannedAction::queuedLegs).
   float MoveBudget() const { return runSpeed * constants::kRoundDuration; }
 
+  // The figure's own viewpoint: always standing eye height. A crouched
+  // figure still peeks over its blocker, so its outgoing sight (FOV, LOS,
+  // the stand-up-when-flanked re-check) never shrinks with the pose --
+  // only how others see and hit it does (SightPosition/TorsoAimPosition).
   glm::vec3 EyePosition() const {
     return position + glm::vec3(0.0f, constants::kEyeHeight, 0.0f);
+  }
+
+  // 0..1 how deep into the crouch pose the body is right now. The lean
+  // (coverKind 1) keeps the standing silhouette; only the crouch shrinks it.
+  float CrouchAmount() const {
+    return alive && coverKind == 2 ? coverBlend : 0.0f;
+  }
+
+  // Where this figure is *sighted and locked onto* by others: the head,
+  // sinking from standing eye to crouched head as the pose blends in.
+  glm::vec3 SightPosition() const {
+    return position +
+           glm::vec3(0.0f,
+                     glm::mix(constants::kEyeHeight, constants::kCrouchEyeHeight, CrouchAmount()),
+                     0.0f);
+  }
+
+  // Where a locked-on burst at this figure aims (and gates its open-fire
+  // LOS): the torso, sinking to the in-cover chest as the pose blends in --
+  // the same chest height GameLogic::CoverExposedToSightedEnemy judges, so
+  // a pose held because it protects really does block the shots.
+  glm::vec3 TorsoAimPosition() const {
+    return position +
+           glm::vec3(0.0f,
+                     glm::mix(constants::kTorsoAimHeight, constants::kCrouchChestHeight,
+                              CrouchAmount()),
+                     0.0f);
   }
 
   // World position of the gun tip when aiming (see constants::kMuzzle*).
@@ -200,7 +247,9 @@ struct Unit {
   AABB Bounds() const {
     glm::vec3 halfExtents(constants::kUnitHalfWidth, 0.0f, constants::kUnitHalfWidth);
     glm::vec3 base = position - halfExtents;
-    float height = constants::kUnitHeight;
+    // Crouching sinks the box top with the pose blend, so bullets (which
+    // trace this box) pass over a figure tucked behind low cover.
+    float height = glm::mix(constants::kUnitHeight, constants::kCrouchedHeight, CrouchAmount());
     if (!alive && knockdownElapsed >= 0.0f) {
       // A downed figure collapses: the box sinks to a lying thickness over the
       // tip-over (and to the ground, for a rider shot off the cable) so shots

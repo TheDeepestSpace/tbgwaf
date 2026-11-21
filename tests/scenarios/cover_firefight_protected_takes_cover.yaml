@@ -1,0 +1,46 @@
+name: cover_firefight_protected_takes_cover
+description: >
+  Issue #292 cover vs an ongoing firefight, protected case: a figure walks
+  along a low barrier to a cover tile while trading sight with an enemy on
+  the far side of that barrier, firing as it goes (playbook shoot_continue;
+  rolls pinned to misses). The barrier *does* block the enemy's line to the
+  crouched figure, so on arrival it takes cover immediately -- back to the
+  barrier, crouched -- even though the enemy is alive out there.
+
+map:
+  obstacles:
+    - {center: [0, 5], half_extent: [6.0, 0.4], height: 1.0, climbable: false}
+
+playbook:
+  blue: {moving_seen: shoot_continue, moving_unseen: shoot_continue, stationary_seen: shoot}
+
+# Every roll misses (hit chance never exceeds 0.95): the firefight itself is
+# not the point, the pose on arrival is.
+shot_rolls: [0.99]
+
+units:
+  # Walks east along the barrier; sees the enemy to the north-east the whole way.
+  - {id: 0, team: blue, position: [-8, 0, 3.2], facing_degrees: 0}
+  # North of the barrier, facing the walker: shots at a crouched figure
+  # behind the barrier would be stopped by it.
+  - {id: 1, team: red, position: [5, 0, 12], facing_degrees: -145}
+
+camera:
+  target: [0, 4]
+  zoom: 5
+
+script:
+  - action: move
+    actor: 0
+    destination: [0, 0, 4.2]
+    comment: Shoots over the barrier while walking, then drops behind it
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [0, 0, 4.2], tolerance: 0.05}
+  - assert: {unit: 0, facing_degrees: -90, tolerance: 0.5}
+  # Cover taken on arrival: the enemy survives (all misses) but the barrier
+  # stands between it and the crouched figure.
+  - assert: {unit: 0, cover_pose: crouch}
+  - assert: {unit: 1, alive: true}
+  - assert: {unit: 0, alive: true}

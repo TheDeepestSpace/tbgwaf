@@ -541,8 +541,8 @@ else()
       )
       # 83 scenarios take ~230 s on the CI runner and the suite grows with
       # each PR that pins a new rendering behaviour; 300 s left no headroom
-      # (PR #304's two see-through scenarios tipped it over).
-      # Under ctest -j the suite shares CPU with other GL tests and hit 600 s.
+      # (PR #304's two see-through scenarios tipped it over). Under CPU
+      # contention with the other parallel ctest jobs it hit 600 s (PR #303).
       set_tests_properties(visual_tests PROPERTIES
         TIMEOUT 1800
         ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"

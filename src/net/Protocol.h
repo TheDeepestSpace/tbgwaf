@@ -64,10 +64,17 @@
 //   {"t":"ack","seq":N,"ok":true|false,"error":"..."}
 //   {"t":"plans","round":N,"ready":bool,"plans":[<action>...],"playbook":[a,b,c,d]}   own team only
 //   {"t":"peer","ready":bool}
-//   {"t":"round","round":N,"duration":s,"frames":[...],"shots":[...],"world":[<change>...],"state":{...}}
+//   {"t":"round","round":N,"duration":s,"frames":[...],"shots":[...],"explosions":[...],
+//    "world":[<change>...],"state":{...}}
 //                                                  "world": world changes not yet sent (ordered; each
 //                                                  carries "at", seconds into this round, when it takes
 //                                                  effect during playback)
+//                                                  each frame: {"t":s,"u":[[id,x,y,z,yaw,alive,moving],...]
+//                                                  [,"g":[[thrower,x,y,z],...]]} -- "g" lists in-flight
+//                                                  grenades; an enemy grenade appears only while inside
+//                                                  the receiving team's FOV (spectators get all of them)
+//                                                  "explosions" (unfiltered): each
+//                                                  {"t":s,"pos":[x,y,z],"radius":r,"seed":N,"team":...}
 //   {"t":"state","round":N,"over":bool,"winner":"blue"|"red"|"none"|null,"units":[...],"world":[...]}
 //                                                  "world": the FULL change log since match start (join,
 //                                                  reconnect, spectator); applying it to the seeded map

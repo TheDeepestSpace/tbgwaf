@@ -557,6 +557,8 @@ def _assert_text(check: dict, units: dict) -> str:
         tol = check.pop("tolerance", None)
         if "alive" in check:
             parts.append(f"{subject} is {'alive' if check.pop('alive') else 'down'}")
+        if "grenades" in check:
+            parts.append(f"{subject} has {_fmt_value(check.pop('grenades'))} grenade(s) left")
         if "position" in check:
             parts.append(f"{subject} is at {_fmt_point(check.pop('position'))}")
         if "facing_degrees" in check:

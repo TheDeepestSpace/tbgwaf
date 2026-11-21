@@ -162,9 +162,8 @@ struct Unit {
   // one shooting action's burst (see WeaponStats). Creation sites assign
   // DefaultWeaponForUnit(id) once the id is known.
   WeaponType weapon = WeaponType::AssaultRifle;
-  // Grenade supply (Throw action): a Throw can only be planned while > 0.
-  // Nothing consumes it yet -- spending a grenade belongs to the throw's
-  // execution, which a later change adds.
+  // Grenade supply (Throw action): a Throw can only be planned while > 0;
+  // committing a round with a Throw plan spends one (issue #349).
   int grenades = constants::kStartingGrenades;
   PlannedAction plan;  // This figure's plan for the current/upcoming round commit.
 

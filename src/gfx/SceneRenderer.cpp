@@ -4366,6 +4366,17 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
   thermalMaterial(ThermalMaterial::Metal);
   DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
+  // In-flight grenades (issue #349): a small dark shell. Fogged like a
+  // figure: an enemy's grenade only shows while inside this pane's FOV.
+  for (const auto& grenade : game.Grenades()) {
+    if (fogActive && grenade.team != team &&
+        !game.GrenadePointVisibleTo(team, grenade.position)) {
+      continue;
+    }
+    const glm::vec3 half(tactics::constants::kGrenadeRadius);
+    DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, grenade.position - half,
+               half * 2.0f, glm::vec4(0.16f, 0.18f, 0.14f, 1.0f));
+  }
 
   if (thermalAo) {
     if (nprActive) {
@@ -5440,6 +5451,35 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         pathLine_.Draw();
       }
     }
+    // Grenade blasts (issue #349): a ring expanding to the blast radius that
+    // fades out within kExplosionVisualSeconds, plus a brief white-hot spike
+    // at the centre. Blasts are not fogged -- everyone sees/hears one.
+    for (const tactics::Explosion& explosion : game.Explosions()) {
+      const float life = 1.0f - explosion.age / tactics::constants::kExplosionVisualSeconds;
+      if (life <= 0.0f) continue;
+      const float grow = glm::clamp(explosion.age / 0.25f, 0.15f, 1.0f);
+      const float radius = explosion.radius * grow;
+      std::vector<glm::vec3> ring;
+      constexpr int kBlastSegments = 40;
+      ring.reserve(kBlastSegments + 1);
+      for (int i = 0; i <= kBlastSegments; ++i) {
+        const float a = 6.2831853f * static_cast<float>(i) / kBlastSegments;
+        ring.push_back(explosion.position +
+                       glm::vec3(std::cos(a) * radius, 0.08f, std::sin(a) * radius));
+      }
+      pathLine_.SetPoints(ring);
+      unlitShader_.SetMat4("uMVP", viewProj);
+      unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.55f, 0.2f, life));
+      pathLine_.Draw();
+      const float flash = glm::clamp(1.0f - explosion.age / 0.3f, 0.0f, 1.0f);
+      if (flash > 0.0f) {
+        pathLine_.SetPoints(
+            {explosion.position,
+             explosion.position + glm::vec3(0.0f, 0.5f + 2.5f * flash, 0.0f)});
+        unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.95f, 0.75f, flash));
+        pathLine_.Draw();
+      }
+    }
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
   }
@@ -5623,7 +5663,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         glDisable(GL_BLEND);
       }
       if (unit.plan.type == tactics::PlannedActionType::Throw && unit.plan.hasAimPoint) {
-        drawThrow(tactics::PredictThrow(unit, unit.plan.aimPoint), 1.0f);
+        drawThrow(game.PredictThrowFor(unit, unit.plan.aimPoint), 1.0f);
       }
       // Planned locked shots draw no line here: the shot cone aimed at the
       // target's torso (plus the "+" marker) is the whole preview, same as

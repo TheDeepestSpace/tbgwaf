@@ -121,6 +121,7 @@ struct ScenarioAction {
 struct ScenarioAssertion {
   std::optional<int> unit;
   std::optional<bool> alive;
+  std::optional<int> grenades;  // Paired with `unit`: remaining grenade supply.
   std::optional<glm::vec3> position;
   std::optional<float> facingDegrees;  // Paired with `unit`; degrees, atan2(dz, dx).
   float tolerance = 0.05f;

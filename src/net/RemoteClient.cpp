@@ -251,6 +251,9 @@ void RemoteClient::ApplyState(const Json& state) {
     glm::vec3 pos;
     if (DecodeVec3((*entry)["pos"], &pos)) u.position = pos;
     u.facingYaw = static_cast<float>((*entry)["yaw"].AsNumber(u.facingYaw));
+    // Own units only (the server keeps enemy supply fogged): a committed
+    // throw's spent grenade shows up here after the round.
+    u.grenades = static_cast<int>((*entry)["grenades"].AsNumber(u.grenades));
     const bool alive = (*entry)["alive"].AsBool(true);
     if (alive) {
       u.walkBlend = 0.0f;
@@ -282,7 +285,7 @@ void RemoteClient::ApplyState(const Json& state) {
   NormalizeEnemyPlans();
 }
 
-RemoteClient::Playback RemoteClient::ParseRound(const Json& m) {
+RemoteClient::Playback RemoteClient::ParseRound(const Json& m) const {
   Playback pb;
   pb.duration = static_cast<float>(m["duration"].AsNumber());
   pb.finalState = m["state"];
@@ -299,6 +302,15 @@ RemoteClient::Playback RemoteClient::ParseRound(const Json& m) {
       s.alive = a[5].AsNumber() != 0;
       s.moving = a[6].AsNumber() != 0;
       frame.units.push_back(s);
+    }
+    for (const Json& row : f["g"].AsArray()) {
+      const auto& a = row.AsArray();
+      if (a.size() != 4) continue;
+      GameSnapshot::Grenade g;
+      g.thrower = static_cast<int>(a[0].AsNumber());
+      g.position = glm::vec3(a[1].AsNumber(), a[2].AsNumber(), a[3].AsNumber());
+      if (const Unit* thrower = game_->FindUnit(g.thrower)) g.team = thrower->team;
+      frame.grenades.push_back(g);
     }
     pb.frames.push_back(std::move(frame));
   }
@@ -318,6 +330,15 @@ RemoteClient::Playback RemoteClient::ParseRound(const Json& m) {
     if (!team || !DecodeVec3(tj["from"], &ev.from) || !DecodeVec3(tj["to"], &ev.to)) continue;
     ev.team = *team;
     pb.tracers.push_back(ev);
+  }
+  for (const Json& xj : m["explosions"].AsArray()) {
+    tactics::Explosion x;
+    x.at = static_cast<float>(xj["t"].AsNumber());
+    if (!DecodeVec3(xj["pos"], &x.position)) continue;
+    x.radius = static_cast<float>(xj["radius"].AsNumber(x.radius));
+    x.seed = static_cast<uint32_t>(xj["seed"].AsNumber());
+    if (const auto team = ParseTeamName(xj["team"].AsString())) x.team = *team;
+    pb.explosions.push_back(x);
   }
   return pb;
 }
@@ -436,6 +457,24 @@ void RemoteClient::PosePlayback(GameSnapshot* snapOut, const Playback& pb, float
   for (const TracerEvent& ev : pb.tracers) {
     if (ev.t > pb.clock) continue;
     snap.tracers.push_back(Tracer{ev.team, ev.from, ev.to, ev.t, pb.clock - ev.t});
+  }
+  // Grenades fly along the server's fog-filtered samples (issue #349),
+  // interpolated between frames when both show the same grenade.
+  snap.grenades.clear();
+  for (const GameSnapshot::Grenade& ga : a.grenades) {
+    GameSnapshot::Grenade g = ga;
+    for (const GameSnapshot::Grenade& gb : b.grenades) {
+      if (gb.thrower == ga.thrower) g.position = glm::mix(ga.position, gb.position, s);
+    }
+    snap.grenades.push_back(g);
+  }
+  // Explosions pop as the clock passes them, aged like live blasts.
+  snap.explosions.clear();
+  for (const tactics::Explosion& ev : pb.explosions) {
+    if (ev.at > pb.clock) continue;
+    tactics::Explosion x = ev;
+    x.age = pb.clock - ev.at;
+    snap.explosions.push_back(x);
   }
 }
 

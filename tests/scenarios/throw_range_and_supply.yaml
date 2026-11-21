@@ -1,9 +1,9 @@
 name: throw_range_and_supply
 description: >
-  Throw planning (grenades, B1): a throw at a point within kThrowRange (25) plans fine, a throw
+  Throw planning (grenades): a throw at a point within kThrowRange (25) plans fine, a throw
   past the range is rejected and leaves no plan, and a figure with no grenade left cannot plan
-  one. Planning only -- executing the throw is a later change, so the round commits with the
-  thrower's plan as-is and nobody dies.
+  one. The committed throw executes (issue #349): it spends one of the thrower's two grenades
+  and detonates at its landing, far from every figure here, so nobody dies.
 
 map: {half_extent: 60}
 
@@ -27,5 +27,6 @@ script:
   - action: pass
     actor: 2
   - action: commit
-  - assert: {unit: 0, alive: true}
-  - assert: {unit: 2, alive: true}
+  - assert: {unit: 0, alive: true, grenades: 1}  # The committed throw spent one.
+  - assert: {unit: 1, alive: true, grenades: 2}  # The rejected throw spent nothing.
+  - assert: {unit: 2, alive: true}  # Blast lands ~10 away from the nearest figure.

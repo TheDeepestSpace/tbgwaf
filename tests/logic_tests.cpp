@@ -3860,6 +3860,166 @@ void TestBuildingsContainingPoints() {
   CHECK(BuildingsContainingPoints(scene, {{-5.0f, 0.3f, 2.0f}, {5.5f, 0.3f, 3.5f}})[0] == 1);
 }
 
+// Flat 80x80 field for grenade-execution tests (issue #349): a Blue thrower,
+// an exposed Red victim at the aim spot, a Red figure behind a chest-high+
+// wall beside the blast, and a Blue teammate near it (for the friendly-fire
+// flag). Everyone faces away from everyone; playbooks are set passive by the
+// tests so only the grenade acts.
+tactics::Scene GrenadeScene() {
+  tactics::Scene scene;
+  scene.mapHalfExtent = 40.0f;
+  // Cover wall between the blast spot (~x 19.5, z 0) and the covered figure
+  // at (19.5, 3.5): spans z in [1.5, 2.1], tall enough to block the torso line.
+  tactics::Obstacle wall;
+  wall.bounds = tactics::AABB{glm::vec3(17.5f, 0.0f, 1.5f), glm::vec3(21.5f, 2.5f, 2.1f)};
+  scene.obstacles.push_back(wall);
+  auto add = [&scene](int id, tactics::Team team, glm::vec3 pos) {
+    tactics::Unit u;
+    u.id = id;
+    u.team = team;
+    u.position = pos;
+    u.facingYaw = team == tactics::Team::Blue ? 3.14159265f : 0.0f;  // Both face away.
+    scene.units.push_back(u);
+  };
+  add(0, tactics::Team::Blue, {0.0f, 0.0f, 0.0f});    // Thrower.
+  add(1, tactics::Team::Red, {18.0f, 0.0f, 0.0f});    // Exposed: in the blast.
+  add(2, tactics::Team::Red, {19.5f, 0.0f, 3.5f});    // Covered by the wall.
+  add(3, tactics::Team::Blue, {17.0f, 0.0f, -1.0f});  // Teammate beside the blast.
+  return scene;
+}
+
+void PlanPass(tactics::GameLogic& game, int unitId, tactics::Team team) {
+  game.ClickUnit(unitId, team);
+  game.ChoosePass();
+}
+
+void PlanThrow(tactics::GameLogic& game, int unitId, tactics::Team team, const glm::vec3& at) {
+  game.ClickUnit(unitId, team);
+  game.ChooseThrow();
+  game.PlaceThrowPoint(at, team);
+  game.ConfirmThrow(team);
+}
+
+void RunRoundToEnd(tactics::GameLogic& game) {
+  for (int i = 0; game.Mode() == InputMode::Executing && i < 2000; ++i) {
+    game.Update(constants::kSimStepSeconds);
+  }
+  CHECK(game.Mode() != InputMode::Executing);
+}
+
+// Grenade execution (issue #349): committing a Throw spends a grenade and
+// launches the simulated flight; the blast kills the exposed figure in
+// radius, spares the one behind cover, and spares teammates when friendly
+// fire is off. The snapshot carries in-flight grenades and explosions.
+void TestGrenadeBlastKillsCoverAndSupply() {
+  GameLogic game(GrenadeScene());
+  game.SetPlaybook(Team::Blue, SquadPlaybook::Passive());
+  game.SetPlaybook(Team::Red, SquadPlaybook::Passive());
+  game.SetFriendlyFireEnabled(false);
+
+  const glm::vec3 aim(18.0f, 0.0f, 0.0f);
+  PlanThrow(game, 0, Team::Blue, aim);
+  CHECK(game.FindUnit(0)->plan.type == PlannedActionType::Throw);
+  PlanPass(game, 3, Team::Blue);
+  PlanPass(game, 1, Team::Red);
+  PlanPass(game, 2, Team::Red);
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+  CHECK(game.Mode() == InputMode::Executing);
+  CHECK(game.FindUnit(0)->grenades == constants::kStartingGrenades - 1);
+  CHECK(game.Grenades().size() == 1);
+  CHECK(game.Grenades()[0].thrower == 0);
+
+  // Mid-flight: the snapshot carries the grenade and round-trips it.
+  game.Update(0.5f);
+  CHECK(game.Grenades().size() == 1);
+  CHECK(game.Grenades()[0].position.y > 0.5f);  // Airborne.
+  {
+    GameSnapshot snap = game.ExportState();
+    CHECK(snap.grenades.size() == 1);
+    GameSnapshot decoded;
+    CHECK(DeserializeSnapshot(SerializeSnapshot(snap), &decoded));
+    CHECK(decoded.grenades.size() == 1);
+    CHECK(decoded.grenades[0].thrower == 0);
+    CHECK(glm::distance(decoded.grenades[0].position, snap.grenades[0].position) < 1e-5f);
+    // A follower mirrors it.
+    GameLogic follower(GrenadeScene());
+    CHECK(follower.ImportState(decoded));
+    CHECK(follower.Grenades().size() == 1);
+  }
+
+  RunRoundToEnd(game);
+  CHECK(game.Grenades().empty());  // Detonated within the round.
+  CHECK(game.Explosions().size() == 1);
+  const Explosion& blast = game.Explosions()[0];
+  CHECK(blast.at == constants::kGrenadeFuseSeconds);
+  CHECK(blast.radius == constants::kGrenadeBlastRadius);
+  CHECK(glm::length(glm::vec2(blast.position.x - aim.x, blast.position.z - aim.z)) < 2.5f);
+  CHECK(!game.FindUnit(1)->alive);  // Exposed, in radius: dead.
+  CHECK(game.FindUnit(2)->alive);   // Behind the wall: the blast line is blocked.
+  CHECK(game.FindUnit(3)->alive);   // Friendly fire off: teammate spared.
+  CHECK(game.FindUnit(0)->alive);
+
+  // The snapshot keeps the explosion for followers/replays and round-trips it.
+  GameSnapshot snap = game.ExportState();
+  CHECK(snap.explosions.size() == 1);
+  GameSnapshot decoded;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(snap), &decoded));
+  CHECK(decoded.explosions.size() == 1);
+  CHECK(decoded.explosions[0].seed == blast.seed);
+  CHECK(std::fabs(decoded.explosions[0].at - blast.at) < 1e-5f);
+}
+
+// With friendly fire on (the default), the same blast kills the teammate too.
+void TestGrenadeBlastFriendlyFire() {
+  GameLogic game(GrenadeScene());
+  game.SetPlaybook(Team::Blue, SquadPlaybook::Passive());
+  game.SetPlaybook(Team::Red, SquadPlaybook::Passive());
+  PlanThrow(game, 0, Team::Blue, {18.0f, 0.0f, 0.0f});
+  PlanPass(game, 3, Team::Blue);
+  PlanPass(game, 1, Team::Red);
+  PlanPass(game, 2, Team::Red);
+  game.CommitRound();
+  RunRoundToEnd(game);
+  CHECK(!game.FindUnit(1)->alive);
+  CHECK(!game.FindUnit(3)->alive);  // Friendly fire on: the nearby teammate dies.
+  CHECK(game.FindUnit(2)->alive);
+}
+
+// SimulateThrow is deterministic and bounces off walls: aimed into the far
+// side of a tall wall, the grenade rebounds and detonates on the thrower's
+// side of it.
+void TestGrenadeFlightBouncesOffWalls() {
+  tactics::Scene scene;
+  scene.mapHalfExtent = 40.0f;
+  tactics::Obstacle wall;  // Far taller than any arc apex: the flight must hit its face.
+  wall.bounds = tactics::AABB{glm::vec3(8.0f, 0.0f, -3.0f), glm::vec3(9.0f, 10.0f, 3.0f)};
+  scene.obstacles.push_back(wall);
+  tactics::Unit thrower;
+  thrower.id = 0;
+  thrower.position = glm::vec3(0.0f);
+  scene.units.push_back(thrower);
+
+  const glm::vec3 blocked(12.0f, 0.0f, 0.0f);  // Behind the wall.
+  const ThrowPreview a = SimulateThrow(scene.units[0], blocked, scene.obstacles,
+                                       scene.walkSurfaces, scene.ground);
+  const ThrowPreview b = SimulateThrow(scene.units[0], blocked, scene.obstacles,
+                                       scene.walkSurfaces, scene.ground);
+  CHECK(a.arc == b.arc && a.landing == b.landing);  // Pure function of its inputs.
+  CHECK(!a.bounces.empty());
+  bool hitWallFace = false;
+  for (const glm::vec3& p : a.bounces) {
+    hitWallFace |= std::fabs(p.x - 8.0f) < 0.1f && p.y > 0.5f;
+  }
+  CHECK(hitWallFace);
+  // The wall turned it back: it settles on the thrower's side.
+  CHECK(a.landing.x < 8.0f);
+  for (const glm::vec3& p : a.arc) {
+    CHECK(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z));
+    CHECK(std::fabs(p.x) < 40.0f && std::fabs(p.z) < 40.0f);
+  }
+}
+
 // Throw planning (grenades): range + supply gates, arc shape, cancel, and the
 // snapshot round trip (including a peer-shipped out-of-range throw).
 void TestThrowPlanningRangeSupplyAndPreview() {
@@ -3880,12 +4040,19 @@ void TestThrowPlanningRangeSupplyAndPreview() {
   game.PlaceThrowPoint(near, Team::Red);
   CHECK(!game.GetAimPreview().has_value());
 
-  // Preview: arc from the hand to the landing, rising above both ends.
+  // Preview: the full simulated flight -- one 30 Hz sample per step from the
+  // hand to the fixed fuse, rising above both ends, bouncing/settling near
+  // the aim point (the detonation spot is `landing`).
   CHECK(!game.PreviewThrow(far).has_value());
   const auto preview = game.PreviewThrow(near);
   CHECK(preview.has_value());
-  CHECK(static_cast<int>(preview->arc.size()) == constants::kThrowArcSamples + 1);
-  CHECK(glm::distance(preview->arc.back(), near) < 1e-4f);
+  const int fuseSteps = static_cast<int>(
+      std::lround(constants::kGrenadeFuseSeconds / constants::kSimStepSeconds));
+  CHECK(static_cast<int>(preview->arc.size()) == fuseSteps + 1);
+  CHECK(preview->fuse == constants::kGrenadeFuseSeconds);
+  CHECK(preview->landing == preview->arc.back());
+  CHECK(glm::length(glm::vec2(preview->landing.x - near.x, preview->landing.z - near.z)) < 2.5f);
+  CHECK(!preview->bounces.empty());  // It hits the ground and settles.
   CHECK(preview->arc.front().y == thrower->position.y + constants::kThrowReleaseHeight);
   float apex = 0.0f;
   for (const glm::vec3& p : preview->arc) apex = std::max(apex, p.y);
@@ -3928,6 +4095,9 @@ void TestThrowPlanningRangeSupplyAndPreview() {
 
 int main() {
   TestThrowPlanningRangeSupplyAndPreview();
+  TestGrenadeBlastKillsCoverAndSupply();
+  TestGrenadeBlastFriendlyFire();
+  TestGrenadeFlightBouncesOffWalls();
   TestDeadFiguresSeeThroughProbes();
   TestBuildingsContainingPoints();
   TestNavMeshRoutesAroundObstacle();

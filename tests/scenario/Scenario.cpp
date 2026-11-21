@@ -232,6 +232,7 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   ScenarioAssertion assertion;
   if (node["unit"]) assertion.unit = node["unit"].as<int>();
   if (node["alive"]) assertion.alive = node["alive"].as<bool>();
+  if (node["grenades"]) assertion.grenades = node["grenades"].as<int>();
   if (node["position"]) assertion.position = ParseVec3(node["position"], "assert.position");
   if (node["facing_degrees"]) assertion.facingDegrees = node["facing_degrees"].as<float>();
   if (node["tolerance"]) assertion.tolerance = node["tolerance"].as<float>();
@@ -273,10 +274,10 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
     assertion.expectedWinner = raw == "none" ? std::optional<Team>() : ParseTeam(raw, "assert.winner");
   }
 
-  if ((assertion.alive || assertion.position || assertion.facingDegrees ||
+  if ((assertion.alive || assertion.grenades || assertion.position || assertion.facingDegrees ||
        assertion.visible || assertion.remembered || assertion.ghostAlpha) && !assertion.unit) {
     throw std::runtime_error(
-        "assert checking alive/position/facing_degrees/visible/remembered/ghost_alpha requires 'unit'");
+        "assert checking alive/grenades/position/facing_degrees/visible/remembered/ghost_alpha requires 'unit'");
   }
   if ((assertion.remembered || assertion.ghostAlpha) && !assertion.rememberedByTeam) {
     throw std::runtime_error("assert 'remembered'/'ghost_alpha' require 'remembered_by'");
@@ -650,6 +651,10 @@ void CheckAssertionImpl(const GameLogic& game, const ScenarioAssertion& a, int s
       if (a.alive && unit->alive != *a.alive) {
         Fail("unit " + std::to_string(*a.unit) + " expected alive=" +
              (*a.alive ? "true" : "false") + " but was " + (unit->alive ? "true" : "false"));
+      }
+      if (a.grenades && unit->grenades != *a.grenades) {
+        Fail("unit " + std::to_string(*a.unit) + " expected grenades=" +
+             std::to_string(*a.grenades) + " but has " + std::to_string(unit->grenades));
       }
       if (a.position) {
         const float dist = glm::distance(unit->position, *a.position);

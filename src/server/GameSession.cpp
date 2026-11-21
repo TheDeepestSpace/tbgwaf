@@ -71,6 +71,7 @@ GameSession::Result GameSession::Apply(Team team, const net::Action& action, uin
     game_.Reset(fixedScene_ ? *fixedScene_ : GenerateMatchScene(seed_, mapKind_, ctf_));
     ready_ = {false, false};
     history_.clear();
+    worldSent_ = 0;
     return result;
   }
   // A commit locks the team's plans until the round runs: accepting later
@@ -192,12 +193,27 @@ std::array<Json, 3> GameSession::RunRound() {
     msg.Set("frames", std::move(frames[ti]));
     msg.Set("shots", std::move(shots[ti]));
     msg.Set("tracers", std::move(tracers[ti]));
+    msg.Set("world", WorldLog(worldSent_));
     msg.Set("state", ti == kSpectatorSlot ? StateBody(std::nullopt)
                                           : StateBody(static_cast<Team>(ti)));
     out[ti] = std::move(msg);
   }
+  worldSent_ = game_.WorldLog().size();
   history_.push_back(out[kSpectatorSlot]);
   return out;
+}
+
+Json GameSession::WorldLog(size_t from) const {
+  Json list{Json::Array{}};
+  const auto& log = game_.WorldLog();
+  for (size_t i = from; i < log.size(); ++i) list.Push(net::EncodeWorldChange(log[i]));
+  return list;
+}
+
+Json GameSession::TakeWorldDelta() {
+  Json list = WorldLog(worldSent_);
+  worldSent_ = game_.WorldLog().size();
+  return list;
 }
 
 Json GameSession::StateBody(std::optional<Team> viewer) const {
@@ -229,6 +245,8 @@ Json GameSession::DumpState() const {
   Json dump;
   dump.Set("t", "state_dump");
   dump.Set("round", Num(game_.RoundNumber()));
+  dump.Set("world_changes", Num(static_cast<double>(game_.WorldLog().size())));
+  dump.Set("checksum", Json(std::to_string(game_.StateHash())));
   dump.Set("over", Json(game_.Mode() == InputMode::GameOver));
   dump.Set("winner", game_.Winner() ? Json(net::TeamName(*game_.Winner())) : Json());
   Json units{Json::Array{}};
@@ -273,12 +291,14 @@ Json GameSession::RevealMessage() const {
 Json GameSession::StateMessage(Team team) const {
   Json msg = StateBody(team);
   msg.Set("t", "state");
+  msg.Set("world", WorldLog(0));
   return msg;
 }
 
 Json GameSession::SpectatorStateMessage() const {
   Json msg = StateBody(std::nullopt);
   msg.Set("t", "state");
+  msg.Set("world", WorldLog(0));
   return msg;
 }
 

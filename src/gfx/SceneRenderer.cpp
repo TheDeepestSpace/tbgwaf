@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <functional>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -647,6 +648,56 @@ void DrawBoxDepth(const Shader& shader, const CubeMesh& cube, const glm::mat4& l
   cube.Draw();
 }
 
+// --- Debris replay (WorldChangeKind::Debris) ---------------------------------
+
+// Yaw basis: local +X to (cos yaw, 0, sin yaw), the planner's convention for
+// rest footprints and launch yaws.
+glm::mat4 YawMatrix(float yaw) {
+  const float c = std::cos(yaw), s = std::sin(yaw);
+  glm::mat4 m(1.0f);
+  m[0] = glm::vec4(c, 0.0f, s, 0.0f);
+  m[2] = glm::vec4(-s, 0.0f, c, 0.0f);
+  return m;
+}
+
+// Model matrix of one debris chunk `t` seconds after its launch: the
+// closed-form ballistic between the recorded launch point and the rest pose
+// (the same arc the server integrated), tumbling about its long axis so it
+// lands flush; at or past `duration` it sits exactly on its rest obstacle.
+glm::mat4 DebrisModel(const tactics::Obstacle& piece, const tactics::DebrisFlight& flight,
+                      float t) {
+  const glm::vec3 center = piece.bounds.Center();
+  const std::vector<glm::vec2>& fp = piece.footprint;
+  glm::vec3 size(piece.bounds.max - piece.bounds.min);
+  float restYaw = 0.0f;
+  if (fp.size() == 4) {
+    const glm::vec2 e0 = fp[1] - fp[0], e1 = fp[2] - fp[1];
+    size = glm::vec3(glm::length(e0), piece.bounds.max.y - piece.bounds.min.y,
+                     glm::length(e1));
+    restYaw = std::atan2(e0.y, e0.x);
+  }
+  const glm::mat4 centered =
+      glm::scale(glm::mat4(1.0f), size) * glm::translate(glm::mat4(1.0f), glm::vec3(-0.5f));
+  if (!(flight.duration > 1e-3f) || t >= flight.duration) {
+    return glm::translate(glm::mat4(1.0f), center) * YawMatrix(restYaw) * centered;
+  }
+  const float s = std::max(0.0f, t) / flight.duration;
+  constexpr float kGravity = 9.81f;
+  const float vy0 = (center.y - flight.from.y +
+                     0.5f * kGravity * flight.duration * flight.duration) /
+                    flight.duration;
+  glm::vec3 pos(glm::mix(flight.from.x, center.x, s),
+                flight.from.y + vy0 * t - 0.5f * kGravity * t * t,
+                glm::mix(flight.from.z, center.z, s));
+  float dYaw = restYaw - flight.fromYaw;
+  while (dYaw > 3.1415927f) dYaw -= 6.2831853f;
+  while (dYaw < -3.1415927f) dYaw += 6.2831853f;
+  const glm::mat4 tilt =
+      glm::rotate(glm::mat4(1.0f), flight.spin * (s - 1.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+  return glm::translate(glm::mat4(1.0f), pos) * YawMatrix(flight.fromYaw + dYaw * s) * tilt *
+         centered;
+}
+
 
 struct StreetPropPart {
   glm::mat4 model{1.0f};
@@ -825,12 +876,59 @@ void AppendWallFaceWithHoles(glm::vec2 a, glm::vec2 b, float lo, float hi,
   }
 }
 
+// A fractured wall piece with a wall-plane silhouette (Obstacle::profile):
+// the convex (u, y) polygon extruded through the wall's thickness, so the
+// drawn torn edges match the gameplay raycast exactly.
+void AppendProfilePiece(const tactics::Obstacle& obstacle, LitVertices* vertices,
+                        std::vector<GLuint>* indices) {
+  const std::vector<glm::vec2>& fp = obstacle.footprint;
+  const std::vector<glm::vec2>& profile = obstacle.profile;
+  const glm::vec2 a = fp[0];
+  const glm::vec2 ab = fp[1] - a;
+  const float len = glm::length(ab);
+  if (len < 1e-5f) return;
+  const glm::vec2 d = ab / len;
+  const glm::vec2 tv = fp[3] - fp[0];
+  auto at = [&](const glm::vec2& p, float side) {
+    const glm::vec2 xz = a + d * p.x + tv * side;
+    return glm::vec3(xz.x, p.y, xz.y);
+  };
+  auto triangle = [&](glm::vec3 p, glm::vec3 q, glm::vec3 r, glm::vec3 normal) {
+    AppendTriangle(p, q, r, normal, vertices, indices);
+  };
+  const glm::vec3 outNormal(d.y, 0.0f, -d.x);  // As AppendPolygonPrism's faces.
+  // Both wall faces (the profile polygon is CCW seen from the +normal side).
+  for (size_t i = 1; i + 1 < profile.size(); ++i) {
+    triangle(at(profile[0], 0.0f), at(profile[i], 0.0f), at(profile[i + 1], 0.0f), outNormal);
+    triangle(at(profile[0], 1.0f), at(profile[i + 1], 1.0f), at(profile[i], 1.0f), -outNormal);
+  }
+  // The rim: one quad per profile edge, through the thickness.
+  for (size_t i = 0; i < profile.size(); ++i) {
+    const glm::vec2 p = profile[i], q = profile[(i + 1) % profile.size()];
+    const glm::vec3 p0 = at(p, 0.0f), q0 = at(q, 0.0f);
+    const glm::vec3 p1 = at(p, 1.0f), q1 = at(q, 1.0f);
+    const glm::vec2 edge = q - p;
+    const float edgeLen = glm::length(edge);
+    if (edgeLen < 1e-6f) continue;
+    // Edge normal in the wall plane (outward for a CCW profile), to world.
+    const glm::vec2 n2(edge.y / edgeLen, -edge.x / edgeLen);
+    const glm::vec3 normal = glm::normalize(glm::vec3(d.x, 0.0f, d.y) * n2.x +
+                                            glm::vec3(0.0f, 1.0f, 0.0f) * n2.y);
+    triangle(p0, q1, q0, normal);  // Clockwise outward, as the prism faces.
+    triangle(p0, p1, q1, normal);
+  }
+}
+
 // `holesPerEdge` (optional, indexed like the footprint's edges) cuts the
 // listed opening rectangles out of the wall faces; see
 // AppendWallFaceWithHoles. Box-bounds obstacles never carry openings.
 void AppendPolygonPrism(const tactics::Obstacle& obstacle, LitVertices* vertices,
                         std::vector<GLuint>* indices,
                         const std::vector<std::vector<glm::vec4>>* holesPerEdge = nullptr) {
+  if (obstacle.profile.size() >= 3 && obstacle.footprint.size() == 4) {
+    AppendProfilePiece(obstacle, vertices, indices);
+    return;
+  }
   const std::vector<glm::vec2> polygon = tactics::ObstacleFootprint(obstacle);
   auto triangle = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 normal) {
     AppendTriangle(a, b, c, normal, vertices, indices);
@@ -1486,6 +1584,7 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
     mix(&o.fixtureBaseY, sizeof(o.fixtureBaseY));
     mix(&o.fixtureRoll, sizeof(o.fixtureRoll));
     mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
+    mix(o.profile.data(), o.profile.size() * sizeof(glm::vec2));
   }
   for (const tactics::StreetProp& prop : scene.props) {
     mix(&prop.kind, sizeof(prop.kind));
@@ -1731,6 +1830,7 @@ unsigned long long ObstacleFingerprint(const tactics::Scene& scene) {
     mix(&o.dead, sizeof(o.dead));
     mix(&o.building, sizeof(o.building));
     mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
+    mix(o.profile.data(), o.profile.size() * sizeof(glm::vec2));
   }
   return h;
 }
@@ -1748,6 +1848,9 @@ void BuildObstacleMeshes(const tactics::Scene& scene,
   for (size_t i = 0; i < scene.obstacles.size(); ++i) {
     const tactics::Obstacle& obstacle = scene.obstacles[i];
     if (obstacle.navOnly || tactics::IsStreetFixture(obstacle.kind)) continue;
+    // Rubble is drawn dynamically (DrawDebris): chunks animate their fall
+    // before coming to rest, so they stay out of the static mesh.
+    if (obstacle.kind == tactics::ObstacleKind::Rubble) continue;
     if (obstacle.footprint.empty()) {
       AppendBox(obstacle.bounds, &drawnVertices, &drawnIndices);
       AppendBox(obstacle.bounds, &casterVertices, &casterIndices);
@@ -3582,6 +3685,34 @@ void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::v
   glDepthFunc(GL_LESS);
 }
 
+void SceneRenderer::UpdateDebris(const tactics::GameLogic& game) {
+  const auto& log = game.WorldLog();
+  if (log.size() < debrisLogSeen_) debrisStarted_.clear();  // New match / rewind.
+  debrisLogSeen_ = log.size();
+  debrisModels_.clear();
+  const double now =
+      std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  for (const tactics::WorldChange& c : log) {
+    if (c.kind != tactics::WorldChangeKind::Debris) continue;
+    if (c.pieces.size() != c.flights.size()) continue;
+    float t;
+    if (c.round == game.RoundNumber() && game.ExecutionElapsed() > c.at + 1e-4f) {
+      // Round playback (live or scrubbed): the flight follows the round clock.
+      t = game.ExecutionElapsed() - c.at;
+      debrisStarted_[c.id] = now - t;  // Stays continuous once the round ends.
+    } else {
+      // Outside playback (debug detonation between rounds, fresh join): run
+      // the fall once on a local clock from when this pane first saw it.
+      const auto [it, inserted] = debrisStarted_.try_emplace(c.id, now);
+      t = static_cast<float>(now - it->second);
+    }
+    for (size_t i = 0; i < c.pieces.size(); ++i) {
+      debrisModels_.push_back(DebrisModel(c.pieces[i], c.flights[i], t));
+    }
+  }
+}
+
 void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                const TeamVisibility& visibility, const OrbitCamera& camera, int x,
                                int y, int width, int height, const PaneOverlays& overlays,
@@ -3594,6 +3725,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     treeKey_ = game.GetScene().trees;
   }
   const auto& obstacles = game.GetScene().obstacles;
+  UpdateDebris(game);
   // World changes append to the log: keep in-flight falls on their original
   // colliders. A shorter/empty log (new map, rewind) drops them as before.
   SetRagdollKeepInFlight(!game.WorldLog().empty() && game.WorldLog().size() >= ragdollWorldSeen_);
@@ -3812,6 +3944,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     for (const Unit& unit : game.GetScene().units) {
       if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
       DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
+    }
+    for (const glm::mat4& model : debrisModels_) {
+      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_ * model);
+      cubeMesh_.Draw();
     }
     DrawPlantedFlagDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, game);
     if (!debug.disableTrees && treeMesh_.HasGeometry()) {
@@ -4356,6 +4492,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawLitVisible(litShader_, treeMesh_, viewProj, lightSpaceMatrix_,
                    glm::vec4(kObstacleColor, 1.0f), onScreen);
   }
+  // Debris chunks: falling ones along their recorded flight, settled ones on
+  // their rubble obstacle (excluded from the static mesh above).
+  if (!debrisModels_.empty()) {
+    thermalMaterial(ThermalMaterial::Building);
+    for (const glm::mat4& model : debrisModels_) {
+      DrawLitModel(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, model,
+                   glm::vec4(kObstacleColor * 0.82f, 1.0f));
+    }
+  }
   thermalMaterial(ThermalMaterial::Figure);
   for (const Unit& unit : game.GetScene().units) {
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
@@ -4511,8 +4656,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             // Outline pass: a wall piece contributes just its outer and
             // inner faces, so each window is outlined once (see
             // BuildWallLongFaces). The colour pass keeps the full prism.
+            // Fractured pieces with a wall-plane profile keep their torn
+            // silhouette (no window decals land on them anyway).
             if (mark && obstacle.kind == tactics::ObstacleKind::Wall &&
-                obstacle.footprint.size() == 4) {
+                obstacle.footprint.size() == 4 && obstacle.profile.empty()) {
               BuildWallLongFaces(obstacle, &geometryMesh_);
             } else {
               BuildPolygonPrism(obstacle, &geometryMesh_);

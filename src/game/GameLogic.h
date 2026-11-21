@@ -244,6 +244,9 @@ class GameLogic {
   std::optional<int> SelectedUnitId() const { return selectedUnitId_; }
   std::optional<Team> Winner() const { return winner_; }
   int RoundNumber() const { return roundNumber_; }
+  // Seconds into the executing round (also valid during replay playback);
+  // the renderer replays debris flights against it.
+  float ExecutionElapsed() const { return executionElapsed_; }
 
   // --- Neutral flag objective (CTF part 1). A living figure whose move
   // passes through the flag's spot (anywhere along its path, not just where

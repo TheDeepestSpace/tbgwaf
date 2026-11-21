@@ -34,12 +34,14 @@ enum class WorldChangeKind : int {
   SurfaceCut = 3,        // target's polygon replaced by `polygon` (a smaller convex patch).
   HeightPatch = 4,       // ground samples inside `rect` (x0,z0,x1,z1) raised by `delta`.
   // A hole punched through wall prism `target`, on its footprint edge
-  // `wallEdge`: u0..u1 world units along the edge, y0..y1 world heights.
-  // Applying it really cuts the geometry, CutWindows-style: the target is
-  // killed and up to four plain prisms (left/right jambs, sill, head) are
-  // appended around the opening, so LOS, shots and -- when the hole reaches
-  // the floor with headroom -- walking pass through it. A Breach
-  // FacadeOpening records the outline.
+  // `wallEdge`: u0..u1 world units along the edge, y0..y1 world heights, and
+  // -- when `polygon` is set -- an irregular fracture outline inside that box
+  // (vertices (u, y, 0), one y run per u). Applying it really cuts the
+  // geometry: the target is killed and the convex pieces of its silhouette
+  // around the outline are appended -- jamb prisms beside it plus pieces whose
+  // `profile` carries the slanted torn edges -- so LOS, shots and (when the
+  // hole reaches the floor with headroom) walking pass through exactly the
+  // drawn hole. A Breach FacadeOpening records the outline's bounding box.
   WallHole = 5,
   // A rectangular hole cut out of walk surface `target` (a building floor):
   // `rect` = (x0,z0,x1,z1) in XZ. The target is killed and up to four convex
@@ -48,8 +50,39 @@ enum class WorldChangeKind : int {
   // slab below is cut by a separate ObstacleReplaced change (see
   // PlanExplosion in game/Destruction.h).
   FloorHole = 6,
+  // Scene::massing[target] (a parapet band, roof fixture or awning) cut
+  // around `rect` = (x0,z0,x1,z1) in XZ: the target detail dies and the
+  // convex pieces of its footprint outside the rect are appended, so the
+  // roof-edge wrap-around breaks with the wall below it. A detail entirely
+  // inside the rect is simply removed (no pieces). Details with a sloped
+  // `top` (deck rails) are only removed whole, never partially cut.
+  MassingCut = 7,
+  // Rubble knocked loose by a blast (destruction: chunks detach, fall and
+  // become obstacles). `pieces` are the chunks at rest -- plain prisms
+  // (ObstacleKind::Rubble) appended to the scene where the server's ballistic
+  // simulation landed them, where they block movement and sight like any
+  // obstacle. `flights`, one per piece, replays the fall on clients: launch
+  // point/yaw, flight time and tumble rate; the arc between launch and the
+  // rest pose is the closed-form ballistic the server integrated, so every
+  // client animates the same fall and ends exactly on the solid rest pose.
+  Debris = 8,
 };
-constexpr int kWorldChangeKindCount = 7;
+constexpr int kWorldChangeKindCount = 9;
+
+// How one debris chunk flew: enough for a client to replay the server's
+// ballistic fall of the matching `pieces` entry (which holds the rest pose).
+// The replayed tilt about the chunk's long axis is spin * (t/duration - 1):
+// it starts mid-tumble and lands exactly flush with the rest pose.
+struct DebrisFlight {
+  glm::vec3 from{0.0f};  // Chunk center at launch.
+  float duration = 0.0f; // Seconds from launch (the change's `at`) to rest.
+  float spin = 0.0f;     // Total tumble over the flight, radians (signed).
+  float fromYaw = 0.0f;  // Yaw at launch; the rest yaw comes from the piece footprint.
+
+  bool operator==(const DebrisFlight& o) const {
+    return from == o.from && duration == o.duration && spin == o.spin && fromYaw == o.fromYaw;
+  }
+};
 
 struct WorldChange {
   int id = 0;           // Position in the log (0-based, gapless).
@@ -57,12 +90,17 @@ struct WorldChange {
   float at = 0.0f;      // Seconds into that round's execution (0 between rounds).
   WorldChangeKind kind = WorldChangeKind::ObstacleRemoved;
   int target = -1;
-  std::vector<Obstacle> pieces;   // ObstacleReplaced.
-  std::vector<glm::vec3> polygon; // SurfaceCut.
-  glm::vec4 rect{0.0f};           // HeightPatch / FloorHole: x0, z0, x1, z1.
+  std::vector<Obstacle> pieces;   // ObstacleReplaced / Debris.
+  // SurfaceCut: the replacement patch. WallHole: optional fracture outline in
+  // the wall plane, (u, y, 0) tuples forming a u-monotone polygon (one y run
+  // per u) in the frame of `wallEdge`; empty keeps the plain u0/u1/y0/y1
+  // rect, so pre-fracture logs replay unchanged.
+  std::vector<glm::vec3> polygon;
+  glm::vec4 rect{0.0f};           // HeightPatch / FloorHole / MassingCut: x0, z0, x1, z1.
   float delta = 0.0f;             // HeightPatch.
   int wallEdge = 0;               // WallHole.
-  float u0 = 0.0f, u1 = 0.0f, y0 = 0.0f, y1 = 0.0f;  // WallHole.
+  float u0 = 0.0f, u1 = 0.0f, y0 = 0.0f, y1 = 0.0f;  // WallHole (outline bounding box).
+  std::vector<DebrisFlight> flights;  // Debris: one per piece.
 
   bool operator==(const WorldChange& o) const;
 };

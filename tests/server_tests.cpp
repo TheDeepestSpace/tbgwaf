@@ -1008,7 +1008,8 @@ void TestWorldChangeSentInRoundOnce() {
     const auto second = s.RunRound();
     CHECK(second[0]["world"].AsArray().empty());  // Already delivered.
   }
-  CHECK(net::kProtocolVersion == 3);  // 3: geometry-cutting WallHole + FloorHole (issue #350).
+  // 4: fracture outlines with profiled pieces, MassingCut + Debris kinds.
+  CHECK(net::kProtocolVersion == 4);
 }
 
 // Thin full-height wall between the two figures, for bomb tests.

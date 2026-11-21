@@ -1,6 +1,6 @@
 name: cover_alley_and_cars
 description: >
-  Issue #290 cover tint: an alley with walls on both sides, two parked
+  Issue #290 cover classification: an alley with walls on both sides, two parked
   car-sized blocks (tactical on all sides, short) and a low barrier that is
   too low to give cover next to a tall wall that does.
 
@@ -24,7 +24,7 @@ camera:
 script:
   - action: begin_move
     actor: 0
-    comment: Alley tinted on both sides, cars tactical, low barrier untinted.
+    comment: Alley walls give cover, cars tactical, low barrier gives none.
   - assert: {unit: 0, position: [-2, 0, 0], tolerance: 0.05}
   - assert: {round: 1}
   - action: cancel

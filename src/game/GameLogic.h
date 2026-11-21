@@ -750,7 +750,7 @@ class GameLogic {
   // Shoot beat start/re-trigger; `sinceShot` is how long ago the bullet left.
   static void PlayShootBeat(Unit& shooter, float aimYaw, float sinceShot = 0.0f);
   static bool IsFalling(const Unit& unit);  // Downed and still mid-fall.
-  void KnockDown(Unit& target, const glm::vec3& dir);
+  void KnockDown(Unit& target, const glm::vec3& dir, bool blast = false);
 
   // Gate check only, no side effects (ShotHitChance > 0): "can this shooter
   // take the shot at all". Split out so a tick's simultaneous shots can all

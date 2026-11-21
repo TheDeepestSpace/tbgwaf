@@ -1893,7 +1893,7 @@ void GameLogic::DetonateGrenade(const ActiveGrenade& grenade) {
                     executionElapsed_, roundNumber_);
       LogSim(buf);
     }
-    KnockDown(unit, dir);
+    KnockDown(unit, dir, true);
   }
 }
 
@@ -2017,7 +2017,7 @@ bool GameLogic::IsFalling(const Unit& unit) {
          unit.knockdownElapsed < constants::kKnockdownMaxSeconds;
 }
 
-void GameLogic::KnockDown(Unit& target, const glm::vec3& dir) {
+void GameLogic::KnockDown(Unit& target, const glm::vec3& dir, bool blast) {
   if (recorder_.ptr) {
     char buf[256];
     std::snprintf(buf, sizeof buf,
@@ -2027,7 +2027,9 @@ void GameLogic::KnockDown(Unit& target, const glm::vec3& dir) {
     LogSim(buf);
   }
   // up x dir: tipping around this axis leans the figure toward dir.
-  const glm::vec3 axis(dir.z, 0.0f, -dir.x);
+  // A blast scales the axis by constants::kBlastAxisLength (visual only: the ragdoll reads the
+  // length as a stronger shove; everything else normalises the axis).
+  const glm::vec3 axis = glm::vec3(dir.z, 0.0f, -dir.x) * (blast ? constants::kBlastAxisLength : 1.0f);
   if (IsFalling(target)) {
     // Already going down: the new hit shoves the falling body.
     constexpr size_t kMaxImpacts = 8;

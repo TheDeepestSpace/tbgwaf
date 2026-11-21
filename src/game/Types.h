@@ -412,6 +412,9 @@ constexpr float kMuzzleHeight = 0.93f;
 constexpr float kMuzzleSide = 0.30f;
 constexpr float kConeStartAlpha = 0.5f;  // Shot-cone opacity at the gun tip; fades to 0 at kShootRange.
 constexpr float kShootHalfFovDegrees = 75.0f;  // 150 degree total FOV cone.
+// Length given to a blast victim's knockdownAxis (normally unit length): the ragdoll reads it as
+// a harder shove. Visual only.
+constexpr float kBlastAxisLength = 2.0f;
 constexpr float kKnockdownDuration = 0.4f;  // Seconds for the rigid (non-ragdoll) tip-over.
 // Longest a ragdoll fall can run (gfx/Ragdoll.h simulates at most this much);
 // knockdownElapsed stops here. It only advances while a round executes (or

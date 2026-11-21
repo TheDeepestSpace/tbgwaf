@@ -5719,11 +5719,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     frontierFill_.Draw();
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
-    // Same green for every leg, half-transparent after the
-    // first (blending is already on for the whole overlay section; turning it
-    // off here would flatten the zipline fill's alpha gradient below).
+    // Same green and width for every leg; later legs are slightly more transparent.
     const glm::vec3 frontierColor = debug.thermal ? thermalGreen : kSetupColor;
-    const float frontierAlpha = overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f;
+    const float frontierAlpha = overlays.moveFrontierSubsequentLeg ? 0.75f : 1.0f;
     unlitShader_.SetVec4("uColor", glm::vec4(frontierColor, frontierAlpha));
     frontierBorder_.DrawTriangles();
     unlitShader_.SetVec4("uColor",
@@ -5765,7 +5763,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     ziplineFill_.Draw();
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
-    const float legAlpha = overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f;
+    const float legAlpha = overlays.moveFrontierSubsequentLeg ? 0.75f : 1.0f;
     unlitShader_.SetVec4("uColor", glm::vec4(regionColor, legAlpha));
     ziplineBorder_.DrawTriangles();
     unlitShader_.SetVec4("uColor", glm::vec4(regionColor, legAlpha * kOccludedBoundaryAlpha));

@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <initializer_list>
+#include <sstream>
 #include <vector>
 
 #include "game/GameLogic.h"
@@ -4074,6 +4075,178 @@ void TestBombFloorHoleDropsFigure() {
   CHECK(bystander && bystander->alive);
 }
 
+// A WallHole carrying a fracture outline cuts angled pieces: the leftover
+// obstacles carry wall-plane profiles, and LOS honours the slanted torn
+// edges exactly (clear inside the outline, blocked outside it, including
+// spots a plain bounding-box hole would have opened).
+void TestWallHoleOutlineCutsAngledPieces() {
+  Scene scene = BombWallScene();
+  WorldChange hole;
+  hole.kind = WorldChangeKind::WallHole;
+  hole.target = 0;
+  hole.wallEdge = 1;  // The implicit footprint's long (+z) edge: u = z + 8.
+  // A six-sided outline: lower chain dips to y=0.8 mid-hole, upper chain
+  // rises to y=2.6. All four slanted edges are neither horizontal nor
+  // vertical.
+  hole.polygon = {{6.0f, 1.5f, 0.0f}, {7.0f, 0.8f, 0.0f}, {8.0f, 1.5f, 0.0f},
+                  {8.0f, 2.2f, 0.0f}, {7.0f, 2.6f, 0.0f}, {6.0f, 2.2f, 0.0f}};
+  hole.u0 = 6.0f;
+  hole.u1 = 8.0f;
+  hole.y0 = 0.8f;
+  hole.y1 = 2.6f;
+  const size_t before = scene.obstacles.size();
+  CHECK(ApplyWorldChange(&scene, hole));
+  CHECK(scene.obstacles[0].dead);
+  CHECK(scene.obstacles.size() > before);
+  bool sawProfile = false;
+  for (size_t i = before; i < scene.obstacles.size(); ++i) {
+    sawProfile |= scene.obstacles[i].profile.size() >= 3;
+  }
+  CHECK(sawProfile);
+  // Through the middle of the outline (u=7 -> z=-1): clear.
+  CHECK(LineOfSightClear({-4.0f, 1.7f, -1.0f}, {4.0f, 1.7f, -1.0f}, scene.obstacles));
+  // Near the left corner (u=6.1 -> z=-1.9) the outline has pinched: y=1.8 is
+  // inside it, y=1.0 is under the slanted lower edge -- a rect hole over the
+  // outline's bounding box would have cleared both.
+  CHECK(LineOfSightClear({-4.0f, 1.8f, -1.9f}, {4.0f, 1.8f, -1.9f}, scene.obstacles));
+  CHECK(!LineOfSightClear({-4.0f, 1.0f, -1.9f}, {4.0f, 1.0f, -1.9f}, scene.obstacles));
+  // Above the upper chain mid-hole: blocked by the slanted head piece.
+  CHECK(!LineOfSightClear({-4.0f, 2.75f, -1.0f}, {4.0f, 2.75f, -1.0f}, scene.obstacles));
+  // Outside the hole entirely: still a wall.
+  CHECK(!LineOfSightClear({-4.0f, 1.5f, 3.0f}, {4.0f, 1.5f, 3.0f}, scene.obstacles));
+}
+
+// PlanExplosion fractures at random angles: the wall-hole outlines carry
+// slanted edges, and applying the plan leaves profiled pieces behind.
+void TestExplosionFractureHasAngledEdges() {
+  const Scene scene = BombWallScene();
+  BombSpec spec;
+  spec.position = glm::vec3(0.0f, 1.0f, 0.0f);
+  spec.radius = 3.0f;
+  spec.seed = ExplosionSeed(7u, 1, 0);
+  bool sawOutline = false, sawSlantedEdge = false;
+  for (const WorldChange& c : PlanExplosion(scene, spec)) {
+    if (c.kind != WorldChangeKind::WallHole || c.polygon.size() < 3) continue;
+    sawOutline = true;
+    for (size_t i = 0; i < c.polygon.size(); ++i) {
+      const glm::vec3 a = c.polygon[i];
+      const glm::vec3 b = c.polygon[(i + 1) % c.polygon.size()];
+      sawSlantedEdge |= std::fabs(b.x - a.x) > 0.05f && std::fabs(b.y - a.y) > 0.05f;
+    }
+  }
+  CHECK(sawOutline);
+  CHECK(sawSlantedEdge);
+  GameLogic game(BombWallScene());
+  game.SetMatchSeed(7u);
+  game.DebugPlaceBomb(spec.position, spec.radius);
+  CHECK(game.DebugDetonateBomb());
+  bool sawProfiledPiece = false;
+  for (const Obstacle& o : game.GetScene().obstacles) {
+    sawProfiledPiece |= !o.dead && o.profile.size() >= 3;
+  }
+  CHECK(sawProfiledPiece);
+}
+
+// The blast knocks chunks out of the openings: the plan's Debris change
+// lands them as rubble obstacles clear of the breach, with one replayable
+// flight per piece, and the whole thing round-trips the codec.
+void TestExplosionDebrisLandsAsRubble() {
+  GameLogic game(BombWallScene());
+  game.SetMatchSeed(7u);
+  game.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
+  CHECK(game.DebugDetonateBomb());
+  const WorldChange* debris = nullptr;
+  for (const WorldChange& c : game.WorldLog()) {
+    if (c.kind == WorldChangeKind::Debris) debris = &c;
+  }
+  CHECK(debris != nullptr);
+  if (!debris) return;
+  CHECK(!debris->pieces.empty());
+  CHECK(debris->flights.size() == debris->pieces.size());
+  for (size_t i = 0; i < debris->pieces.size(); ++i) {
+    const Obstacle& piece = debris->pieces[i];
+    CHECK(piece.kind == ObstacleKind::Rubble);
+    CHECK(piece.footprint.size() == 4);
+    CHECK(piece.bounds.max.y > piece.bounds.min.y);
+    CHECK(std::fabs(piece.bounds.min.y) < 0.05f);  // Resting on the ground.
+    // Clear of the wall plane (x = 0): a chunk must not plug the breach.
+    const glm::vec3 center = piece.bounds.Center();
+    CHECK(std::fabs(center.x) > 0.4f);
+    CHECK(std::fabs(center.x) < 8.0f && std::fabs(center.z) < 8.0f);  // On the map.
+    CHECK(debris->flights[i].duration > 0.0f);
+  }
+  // The chunks really are obstacles in the applied scene.
+  int rubble = 0;
+  for (const Obstacle& o : game.GetScene().obstacles) {
+    rubble += !o.dead && o.kind == ObstacleKind::Rubble;
+  }
+  CHECK(rubble == static_cast<int>(debris->pieces.size()));
+  // Codec round-trip, flights included. Float text is 6 significant digits,
+  // so the stable invariant is write(read(write(x))) == write(x), as for the
+  // snapshot text everywhere else.
+  std::ostringstream out;
+  WriteWorldChange(out, *debris);
+  std::istringstream in(out.str());
+  WorldChange back;
+  CHECK(ReadWorldChange(in, &back));
+  CHECK(back.kind == WorldChangeKind::Debris);
+  CHECK(back.pieces.size() == debris->pieces.size());
+  CHECK(back.flights.size() == debris->flights.size());
+  std::ostringstream again;
+  WriteWorldChange(again, back);
+  CHECK(again.str() == out.str());
+}
+
+// The roof-edge wrap-around (parapet massing) breaks with the wall: the
+// blast emits a MassingCut whose apply kills the band and appends the convex
+// leftovers outside the blast box.
+void TestMassingCutBreaksParapet() {
+  Scene scene = BombWallScene();
+  MassingDetail parapet;
+  parapet.kind = MassingDetail::Kind::Parapet;
+  parapet.footprint = {{-0.15f, -8.0f}, {0.15f, -8.0f}, {0.15f, 8.0f}, {-0.15f, 8.0f}};
+  parapet.y0 = 3.0f;
+  parapet.y1 = 3.6f;
+  scene.massing.push_back(parapet);
+  BombSpec spec;
+  spec.position = glm::vec3(0.0f, 1.0f, 0.0f);
+  spec.radius = 3.0f;
+  spec.seed = ExplosionSeed(7u, 1, 0);
+  bool sawMassingCut = false;
+  for (const WorldChange& c : PlanExplosion(scene, spec)) {
+    sawMassingCut |= c.kind == WorldChangeKind::MassingCut && c.target == 0;
+  }
+  CHECK(sawMassingCut);
+  // Direct apply: a cut through the middle of the band leaves the two ends.
+  WorldChange cut;
+  cut.kind = WorldChangeKind::MassingCut;
+  cut.target = 0;
+  cut.rect = glm::vec4(-2.0f, -1.5f, 2.0f, 1.5f);
+  CHECK(ApplyWorldChange(&scene, cut));
+  CHECK(scene.massing[0].dead && scene.massing[0].footprint.empty());
+  CHECK(scene.massing.size() == 3);  // Two surviving end pieces appended.
+  for (size_t i = 1; i < scene.massing.size(); ++i) {
+    const MassingDetail& piece = scene.massing[i];
+    CHECK(!piece.dead && piece.footprint.size() >= 3);
+    CHECK(piece.kind == MassingDetail::Kind::Parapet);
+    CHECK(piece.y0 == 3.0f && piece.y1 == 3.6f);
+    for (const glm::vec2& p : piece.footprint) CHECK(std::fabs(p.y) >= 1.5f - 1e-3f);
+  }
+  CHECK(!ApplyWorldChange(&scene, cut));  // Dead target.
+  // A cut that misses a detail entirely is rejected.
+  WorldChange miss = cut;
+  miss.target = 1;
+  miss.rect = glm::vec4(5.0f, 5.0f, 6.0f, 6.0f);
+  CHECK(!ApplyWorldChange(&scene, miss));
+  // A detail entirely inside the box is removed whole.
+  WorldChange whole = cut;
+  whole.target = 1;
+  whole.rect = glm::vec4(-10.0f, -10.0f, 10.0f, 10.0f);
+  CHECK(ApplyWorldChange(&scene, whole));
+  CHECK(scene.massing[1].dead);
+  CHECK(scene.massing.size() == 3);  // Nothing appended.
+}
+
 void TestArmedBombDetonatesMidRound() {
   GameLogic game(BombWallScene());
   game.SetMatchSeed(7u);
@@ -4214,6 +4387,10 @@ int main() {
   TestExplosionPlanDeterministicCells();
   TestBombBlowsSeeAndWalkThroughHole();
   TestWallHoleChangeCutsGeometry();
+  TestWallHoleOutlineCutsAngledPieces();
+  TestExplosionFractureHasAngledEdges();
+  TestExplosionDebrisLandsAsRubble();
+  TestMassingCutBreaksParapet();
   TestFloorHolePiecesAndLinks();
   TestBombFloorHoleDropsFigure();
   TestArmedBombDetonatesMidRound();

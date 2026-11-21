@@ -9,14 +9,17 @@
 namespace tactics {
 namespace {
 
-// Fracture tuning. The grid cell is the fracture's spatial resolution: hole
-// outlines are unions of cells, so they stay grid-aligned (every wall piece
-// remains an upright prism) while the seeded Voronoi sites give each blast
-// its own silhouette.
+// Fracture tuning. The grid cell is the fracture's sampling resolution: the
+// removed region is rasterized per column, then the column runs are
+// simplified into a jagged outline whose edges follow the seeded Voronoi
+// cell boundaries -- torn edges at random angles, not stair-steps.
 constexpr float kFractureCell = 0.25f;
-constexpr int kMaxStripsPerWall = 6;      // Rect holes per wall piece.
+constexpr int kMaxHolesPerWall = 4;       // Fracture outlines per wall piece.
+constexpr size_t kMaxChainPoints = 7;     // Outline vertices per chain (angle budget).
 constexpr size_t kMaxPlanChanges = 48;    // Overall piece budget per blast.
+constexpr size_t kMaxDebrisChunks = 10;   // Rubble chunks per blast.
 constexpr float kFloorSnap = 0.35f;       // Holes this close to the wall base/top reach it.
+constexpr float kGravity = 9.81f;         // Debris ballistics.
 // Graded rings: sites inside kShardRing of the blast radius are removed
 // (the inner ones as dust, the rest as small shards -- the split will feed
 // cosmetic debris later); sites beyond stay standing as cracked chunks.
@@ -67,15 +70,21 @@ float DistanceToPrism(const glm::vec3& point, const Obstacle& o) {
 // unseen nav walls and street items are not walls.
 bool WallLike(const Obstacle& o) {
   if (o.dead || o.navOnly) return false;
-  if (o.kind == ObstacleKind::Pier || IsStreetFixture(o.kind)) return false;
+  if (o.kind == ObstacleKind::Pier || o.kind == ObstacleKind::Rubble || IsStreetFixture(o.kind)) {
+    return false;
+  }
   const std::vector<glm::vec2> f = ObstacleFootprint(o);
   if (f.size() != 4) return false;
   const float e0 = glm::distance(f[0], f[1]);
   const float e1 = glm::distance(f[1], f[2]);
   const float thickness = std::min(e0, e1);
   const float length = std::max(e0, e1);
-  if (thickness < 1e-3f || thickness > 0.7f || length < 1.0f) return false;
-  return o.bounds.max.y - o.bounds.min.y >= 0.8f;
+  if (thickness < 1e-3f || thickness > 0.7f || length < 0.6f) return false;
+  // Short strips count too: CutWindows pre-splits a facade into jambs,
+  // sills and heads, and the head band under the roofline must fracture
+  // with the rest of the wall or every blast leaves it floating over the
+  // hole (the "wrap-around" of the breach screenshots).
+  return o.bounds.max.y - o.bounds.min.y >= 0.35f;
 }
 
 // Footprint edge index of the wall's long face (0 or 1; 2/3 mirror them).
@@ -86,24 +95,71 @@ int LongEdge(const std::vector<glm::vec2>& f) {
 // A thin horizontal plate (ceiling or roof slab) a blast can hole.
 bool SlabLike(const Obstacle& o) {
   if (o.dead || o.navOnly) return false;
-  if (o.kind == ObstacleKind::Pier || IsStreetFixture(o.kind)) return false;
+  if (o.kind == ObstacleKind::Pier || o.kind == ObstacleKind::Rubble || IsStreetFixture(o.kind)) {
+    return false;
+  }
   if (o.bounds.max.y - o.bounds.min.y > 0.7f) return false;
   const std::vector<glm::vec2> f = ObstacleFootprint(o);
   return f.size() >= 3 && PolygonArea(f) >= 1.0f;
 }
 
-struct Strip {
-  float u0, u1, y0, y1;
-};
+// Ramer-Douglas-Peucker polyline simplification, raising the tolerance until
+// the chain fits `maxPoints`. Keeps a subset of the input points, so a
+// u-monotone chain stays u-monotone.
+void SimplifyChain(std::vector<glm::vec2>* chain, float tolerance, size_t maxPoints) {
+  while (chain->size() > 2) {
+    const size_t n = chain->size();
+    std::vector<char> keep(n, 0);
+    keep[0] = 1;
+    keep[n - 1] = 1;
+    std::vector<std::pair<size_t, size_t>> stack{{0, n - 1}};
+    while (!stack.empty()) {
+      const auto [lo, hi] = stack.back();
+      stack.pop_back();
+      if (hi <= lo + 1) continue;
+      const glm::vec2 a = (*chain)[lo], b = (*chain)[hi];
+      const glm::vec2 ab = b - a;
+      const float len = glm::length(ab);
+      float worst = 0.0f;
+      size_t at = lo;
+      for (size_t i = lo + 1; i < hi; ++i) {
+        const glm::vec2 ap = (*chain)[i] - a;
+        const float dist = len > 1e-6f ? std::fabs(ab.x * ap.y - ab.y * ap.x) / len
+                                       : glm::length(ap);
+        if (dist > worst) {
+          worst = dist;
+          at = i;
+        }
+      }
+      if (worst > tolerance && at > lo) {
+        keep[at] = 1;
+        stack.push_back({lo, at});
+        stack.push_back({at, hi});
+      }
+    }
+    std::vector<glm::vec2> out;
+    for (size_t i = 0; i < chain->size(); ++i) {
+      if (keep[i]) out.push_back((*chain)[i]);
+    }
+    if (out.size() <= maxPoints) {
+      *chain = std::move(out);
+      return;
+    }
+    tolerance *= 1.6f;
+  }
+}
 
 // Graded Voronoi fracture of one wall piece in its own plane: ~30-40 seeded
 // sites at distance r * random^2 (dense near the center), cells classified
 // by ring -- core (dust) and small-shard cells are removed, the outer large
-// chunks stay standing. The removed region is rasterized on the fracture
-// grid and merged into vertical strips (one rect per column run, adjacent
-// columns with the same run joined), so every hole is an axis-aligned rect
-// in the wall plane and every leftover piece an upright prism.
-std::vector<Strip> FractureWall(const Obstacle& wall, const BombSpec& bomb, uint32_t stream) {
+// chunks stay standing. The removed region is rasterized per grid column
+// (one y run per column), then each connected run of columns becomes one
+// hole outline: the runs' lower and upper envelopes simplified into short
+// jagged chains, pinched together at the ends -- a u-monotone polygon in the
+// wall plane whose torn edges sit at the fracture's own angles. Returned
+// outlines are closed CCW (u, y) polygons.
+std::vector<std::vector<glm::vec2>> FractureWall(const Obstacle& wall, const BombSpec& bomb,
+                                                 uint32_t stream) {
   const std::vector<glm::vec2> f = ObstacleFootprint(wall);
   const int e = LongEdge(f);
   const glm::vec2 a = f[e], b = f[(e + 1) % 4];
@@ -161,7 +217,11 @@ std::vector<Strip> FractureWall(const Obstacle& wall, const BombSpec& bomb, uint
   const int ku1 = static_cast<int>(std::ceil(std::min(len, uc + r) / kFractureCell));
   const int ky0 = static_cast<int>(std::floor(std::max(0.0f, yc - r - ylo) / kFractureCell));
   const int ky1 = static_cast<int>(std::ceil(std::min(yhi - ylo, yc + r - ylo) / kFractureCell));
-  std::vector<Strip> strips;
+  struct Run {
+    int column;
+    float lo, hi;
+  };
+  std::vector<std::vector<Run>> segments;  // Connected column runs.
   for (int ku = ku0; ku < ku1; ++ku) {
     const float u = (ku + 0.5f) * kFractureCell;
     if (u <= 0.0f || u >= len) continue;
@@ -174,48 +234,61 @@ std::vector<Strip> FractureWall(const Obstacle& wall, const BombSpec& bomb, uint
       runHi = std::max(runHi, ylo + (ky + 1) * kFractureCell);
     }
     if (runHi <= runLo) continue;
-    const float cu0 = ku * kFractureCell, cu1 = (ku + 1) * kFractureCell;
-    if (!strips.empty() && std::fabs(strips.back().u1 - cu0) < 1e-3f &&
-        std::fabs(strips.back().y0 - runLo) <= kFractureCell + 1e-3f &&
-        std::fabs(strips.back().y1 - runHi) <= kFractureCell + 1e-3f) {
-      strips.back().u1 = cu1;
-      strips.back().y0 = std::min(strips.back().y0, runLo);
-      strips.back().y1 = std::max(strips.back().y1, runHi);
-    } else {
-      strips.push_back({cu0, cu1, runLo, runHi});
-    }
+    if (segments.empty() || segments.back().back().column != ku - 1) segments.emplace_back();
+    segments.back().push_back({ku, runLo, runHi});
   }
-  // Piece budget: join adjacent strips (removing slightly more wall) until
-  // the count fits.
-  while (static_cast<int>(strips.size()) > kMaxStripsPerWall) {
-    size_t best = 0;
-    float bestGap = 1e30f;
-    for (size_t i = 0; i + 1 < strips.size(); ++i) {
-      const float gap = strips[i + 1].u0 - strips[i].u1;
-      if (gap < bestGap) {
-        bestGap = gap;
-        best = i;
+  // Hole budget: keep the widest outlines (removing less wall than the cells
+  // suggested is fine -- the applied outline is the hole).
+  while (static_cast<int>(segments.size()) > kMaxHolesPerWall) {
+    size_t narrowest = 0;
+    for (size_t i = 1; i < segments.size(); ++i) {
+      if (segments[i].size() < segments[narrowest].size()) narrowest = i;
+    }
+    segments.erase(segments.begin() + narrowest);
+  }
+
+  std::vector<std::vector<glm::vec2>> outlines;
+  for (const std::vector<Run>& segment : segments) {
+    // Lower/upper envelopes of the column runs, pinched at the segment ends.
+    const float uStart = std::max(0.0f, segment.front().column * kFractureCell);
+    const float uEnd = std::min(len, (segment.back().column + 1) * kFractureCell);
+    const glm::vec2 pinchL(uStart, 0.5f * (segment.front().lo + segment.front().hi));
+    const glm::vec2 pinchR(uEnd, 0.5f * (segment.back().lo + segment.back().hi));
+    std::vector<glm::vec2> lower{pinchL}, upper{pinchL};
+    for (const Run& run : segment) {
+      const float u = std::clamp((run.column + 0.5f) * kFractureCell, uStart, uEnd);
+      lower.emplace_back(u, run.lo);
+      upper.emplace_back(u, run.hi);
+    }
+    lower.push_back(pinchR);
+    upper.push_back(pinchR);
+    SimplifyChain(&lower, 0.5f * kFractureCell, kMaxChainPoints);
+    SimplifyChain(&upper, 0.5f * kFractureCell, kMaxChainPoints);
+    const auto snap = [&](std::vector<glm::vec2>* chain) {
+      for (glm::vec2& p : *chain) {
+        if (p.y - ylo < kFloorSnap) p.y = ylo;  // Reaches the floor: a doorway.
+        if (yhi - p.y < kFloorSnap) p.y = yhi;
+        p.y = std::clamp(p.y, ylo, yhi);
       }
+    };
+    snap(&lower);
+    snap(&upper);
+    // Closed CCW outline: lower chain left to right, then the upper chain's
+    // interior back (the pinch endpoints are shared by both chains).
+    std::vector<glm::vec2> outline = lower;
+    for (size_t i = upper.size() - 1; i-- > 1;) outline.push_back(upper[i]);
+    glm::vec2 lo = outline.front(), hi = outline.front();
+    for (const glm::vec2& p : outline) {
+      lo = glm::min(lo, p);
+      hi = glm::max(hi, p);
     }
-    strips[best].u1 = strips[best + 1].u1;
-    strips[best].y0 = std::min(strips[best].y0, strips[best + 1].y0);
-    strips[best].y1 = std::max(strips[best].y1, strips[best + 1].y1);
-    strips.erase(strips.begin() + best + 1);
+    if (outline.size() < 3 || hi.x - lo.x < 0.2f || hi.y - lo.y < 0.2f ||
+        PolygonArea(outline) < 0.15f) {
+      continue;
+    }
+    outlines.push_back(std::move(outline));
   }
-  for (Strip& s : strips) {
-    s.u0 = std::max(0.0f, s.u0);
-    s.u1 = std::min(len, s.u1);
-    if (s.y0 - ylo < kFloorSnap) s.y0 = ylo;  // Reaches the floor: a doorway.
-    if (yhi - s.y1 < kFloorSnap) s.y1 = yhi;
-    s.y0 = std::max(ylo, s.y0);
-    s.y1 = std::min(yhi, s.y1);
-  }
-  strips.erase(std::remove_if(strips.begin(), strips.end(),
-                              [](const Strip& s) {
-                                return s.u1 - s.u0 < 0.05f || s.y1 - s.y0 < 0.05f;
-                              }),
-               strips.end());
-  return strips;
+  return outlines;
 }
 
 // The live wall piece of `scratch` containing `point` (XZ inside the
@@ -268,6 +341,39 @@ std::vector<std::vector<glm::vec2>> ClipAroundRect(const std::vector<glm::vec2>&
   return pieces;
 }
 
+// Highest support under (x, z) below `belowY`: the ground, or a live walk
+// surface (a surviving floor or roof a chunk can land on).
+float SupportHeight(const Scene& scene, glm::vec2 xz, float belowY) {
+  float support = scene.ground.HeightAt(xz.x, xz.y);
+  for (const WalkSurface& s : scene.walkSurfaces) {
+    if (s.dead || s.climbProxy || s.vertices.size() < 3) continue;
+    if (!SurfaceContainsXZ(s, xz.x, xz.y)) continue;
+    const float y = SurfaceHeightAt(s, xz.x, xz.y);
+    if (y <= belowY + 0.3f) support = std::max(support, y);
+  }
+  return support;
+}
+
+// True when a chunk resting at `center` with vertical extent [y0, y1] would
+// sit inside a live obstacle.
+bool RestSpotBlocked(const Scene& scene, glm::vec2 center, float y0, float y1) {
+  for (const Obstacle& o : scene.obstacles) {
+    if (o.dead || o.navOnly) continue;
+    if (y1 <= o.bounds.min.y + 0.02f || y0 >= o.bounds.max.y - 0.02f) continue;
+    if (center.x < o.bounds.min.x - 0.01f || center.x > o.bounds.max.x + 0.01f ||
+        center.y < o.bounds.min.z - 0.01f || center.y > o.bounds.max.z + 0.01f) {
+      continue;
+    }
+    if (PointInConvexPolygon(center, ObstacleFootprint(o))) return true;
+  }
+  return false;
+}
+
+glm::vec2 Rotate2(glm::vec2 v, float angle) {
+  const float c = std::cos(angle), s = std::sin(angle);
+  return {v.x * c - v.y * s, v.x * s + v.y * c};
+}
+
 Obstacle PrismFromFootprint(const Obstacle& base, std::vector<glm::vec2> footprint) {
   Obstacle piece = base;
   piece.dead = false;
@@ -304,11 +410,22 @@ std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& bomb)
     return true;
   };
 
-  // 1. Street fixtures in the blast are blown away.
+  // Openings cut by this plan, remembered as debris launch sites.
+  struct DebrisSource {
+    glm::vec3 pos;        // A point inside the opening (world, mid-thickness).
+    glm::vec2 along;      // Horizontal unit along the wall's long axis.
+    glm::vec2 outward;    // Horizontal unit away from the bomb, through the wall.
+    float thickness = 0.2f;
+    float area = 0.5f;    // Opening area: scales the chunk count.
+  };
+  std::vector<DebrisSource> debrisSources;
+
+  // 1. Street fixtures (and rubble from earlier blasts) in the blast are
+  // blown away.
   const size_t baseObstacles = scene.obstacles.size();
   for (size_t i = 0; i < baseObstacles; ++i) {
     const Obstacle& o = scene.obstacles[i];
-    if (o.dead || !IsStreetFixture(o.kind)) continue;
+    if (o.dead || !(IsStreetFixture(o.kind) || o.kind == ObstacleKind::Rubble)) continue;
     if (DistanceToPrism(bomb.position, o) >= bomb.radius) continue;
     WorldChange remove;
     remove.kind = WorldChangeKind::ObstacleRemoved;
@@ -316,26 +433,30 @@ std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& bomb)
     planChange(std::move(remove));
   }
 
-  // 2. Walls: seeded graded Voronoi fracture, one rect hole per strip. The
-  // per-wall stream hashes the pristine obstacle index, so the fracture of
-  // one wall never depends on which other walls the blast also touched.
+  // 2. Walls: seeded graded Voronoi fracture, one jagged outline per
+  // connected opening. The per-wall stream hashes the pristine obstacle
+  // index, so the fracture of one wall never depends on which other walls
+  // the blast also touched.
   for (size_t i = 0; i < baseObstacles; ++i) {
     const Obstacle& wall = scene.obstacles[i];
     if (!WallLike(wall)) continue;
     if (DistanceToPrism(bomb.position, wall) >= bomb.radius) continue;
-    const std::vector<Strip> strips =
+    const std::vector<std::vector<glm::vec2>> outlines =
         FractureWall(wall, bomb, Mix(bomb.seed, static_cast<uint32_t>(i) * 2654435761u));
-    if (strips.empty()) continue;
+    if (outlines.empty()) continue;
     const std::vector<glm::vec2> f = ObstacleFootprint(wall);
     const int e = LongEdge(f);
     const glm::vec2 a = f[e];
     const glm::vec2 d = glm::normalize(f[(e + 1) % 4] - f[e]);
     const glm::vec2 inward = 0.5f * (f[(e + 3) % 4] - f[e]);
-    for (const Strip& strip : strips) {
-      const glm::vec2 lo2 = a + d * strip.u0 + inward;
-      const glm::vec2 hi2 = a + d * strip.u1 + inward;
-      const glm::vec2 mid2 = 0.5f * (lo2 + hi2);
-      const glm::vec3 mid(mid2.x, 0.5f * (strip.y0 + strip.y1), mid2.y);
+    for (const std::vector<glm::vec2>& outline : outlines) {
+      glm::vec2 lo = outline.front(), hi = outline.front();
+      for (const glm::vec2& p : outline) {
+        lo = glm::min(lo, p);
+        hi = glm::max(hi, p);
+      }
+      const glm::vec2 mid2 = a + d * (0.5f * (lo.x + hi.x)) + inward;
+      const glm::vec3 mid(mid2.x, 0.5f * (lo.y + hi.y), mid2.y);
       const int target = FindPieceAt(scratch, mid, d);
       if (target < 0) continue;
       const Obstacle& piece = scratch.obstacles[target];
@@ -344,17 +465,34 @@ std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& bomb)
       const int pe = LongEdge(pf);
       const glm::vec2 pa = pf[pe];
       const glm::vec2 pd = glm::normalize(pf[(pe + 1) % 4] - pf[pe]);
-      const float pu0 = glm::dot(lo2 - inward - pa, pd);
-      const float pu1 = glm::dot(hi2 - inward - pa, pd);
       WorldChange hole;
       hole.kind = WorldChangeKind::WallHole;
       hole.target = target;
       hole.wallEdge = pe;
-      hole.u0 = std::min(pu0, pu1);
-      hole.u1 = std::max(pu0, pu1);
-      hole.y0 = strip.y0;
-      hole.y1 = strip.y1;
-      planChange(std::move(hole));
+      hole.u0 = 1e30f;
+      hole.u1 = -1e30f;
+      hole.y0 = 1e30f;
+      hole.y1 = -1e30f;
+      hole.polygon.reserve(outline.size());
+      for (const glm::vec2& p : outline) {
+        // Map from the pristine wall's edge frame into the target piece's.
+        const glm::vec2 world = a + d * p.x;
+        const float pu = glm::dot(world - pa, pd);
+        hole.polygon.emplace_back(pu, p.y, 0.0f);
+        hole.u0 = std::min(hole.u0, pu);
+        hole.u1 = std::max(hole.u1, pu);
+        hole.y0 = std::min(hole.y0, p.y);
+        hole.y1 = std::max(hole.y1, p.y);
+      }
+      const float area = PolygonArea(outline);
+      if (planChange(std::move(hole))) {
+        glm::vec2 outward(-d.y, d.x);
+        if (glm::dot(mid2 - glm::vec2(bomb.position.x, bomb.position.z), outward) < 0.0f) {
+          outward = -outward;
+        }
+        debrisSources.push_back(
+            {mid, d, outward, std::max(0.1f, 2.0f * glm::length(inward)), area});
+      }
     }
   }
 
@@ -389,6 +527,48 @@ std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& bomb)
     planChange(std::move(cut));
   }
 
+  // 3.5. Building massing in the blast -- the parapet band wrapping the roof
+  // edge, roof furniture, awnings -- breaks with the wall below it: each
+  // detail the blast sphere reaches is cut around the blast box at its own
+  // height (a detail entirely inside it is removed whole).
+  const size_t baseMassing = scene.massing.size();
+  for (size_t i = 0; i < baseMassing; ++i) {
+    const MassingDetail& detail = scene.massing[i];
+    if (detail.dead || detail.footprint.size() < 3 || detail.y1 <= detail.y0) continue;
+    Obstacle prism;
+    prism.footprint = detail.footprint;
+    prism.bounds.min = glm::vec3(0.0f, detail.y0, 0.0f);
+    prism.bounds.max = glm::vec3(0.0f, detail.y1, 0.0f);
+    if (DistanceToPrism(bomb.position, prism) >= bomb.radius) continue;
+    const float dy = bomb.position.y < detail.y0   ? detail.y0 - bomb.position.y
+                     : bomb.position.y > detail.y1 ? bomb.position.y - detail.y1
+                                                   : 0.0f;
+    const float inPlane = std::sqrt(std::max(0.0f, bomb.radius * bomb.radius - dy * dy));
+    const float half = std::min(inPlane * 0.8f, 4.5f);
+    if (half < 0.3f) continue;
+    WorldChange cut;
+    cut.kind = WorldChangeKind::MassingCut;
+    cut.target = static_cast<int>(i);
+    cut.rect = glm::vec4(bomb.position.x - half, bomb.position.z - half,
+                         bomb.position.x + half, bomb.position.z + half);
+    if (planChange(std::move(cut))) {
+      glm::vec2 lo = detail.footprint.front(), hi = lo;
+      for (const glm::vec2& p : detail.footprint) {
+        lo = glm::min(lo, p);
+        hi = glm::max(hi, p);
+      }
+      const glm::vec2 center = glm::clamp(glm::vec2(bomb.position.x, bomb.position.z), lo, hi);
+      glm::vec2 outward = center - glm::vec2(bomb.position.x, bomb.position.z);
+      const float outLen = glm::length(outward);
+      outward = outLen > 1e-4f ? outward / outLen : glm::vec2(1.0f, 0.0f);
+      const glm::vec2 edge = hi - lo;
+      const glm::vec2 along =
+          edge.x >= edge.y ? glm::vec2(1.0f, 0.0f) : glm::vec2(0.0f, 1.0f);
+      debrisSources.push_back({glm::vec3(center.x, 0.5f * (detail.y0 + detail.y1), center.y),
+                               along, outward, 0.2f, 0.6f});
+    }
+  }
+
   // 4. Building floor surfaces: a hole a figure can fall through.
   const size_t baseSurfaces = scene.walkSurfaces.size();
   for (size_t i = 0; i < baseSurfaces; ++i) {
@@ -414,6 +594,87 @@ std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& bomb)
     hole.rect = glm::vec4(bomb.position.x - half, bomb.position.z - half,
                           bomb.position.x + half, bomb.position.z + half);
     planChange(std::move(hole));  // Validation (hole actually overlaps) is the apply's.
+  }
+
+  // 5. Debris: chunks knocked out of the openings detach, fly away from the
+  // blast and land as rubble obstacles. The ballistics run here -- on
+  // whatever authority is planning the blast, i.e. the server for networked
+  // matches -- against the post-cut scratch scene (so chunks land on
+  // surviving floors/ground), and the resulting rest poses plus flight
+  // parameters ship in one Debris change for clients to replay.
+  if (!debrisSources.empty()) {
+    Rng rng(Mix(bomb.seed, 0x6d2b79f5u));
+    WorldChange debris;
+    debris.kind = WorldChangeKind::Debris;
+    debris.target = -1;
+    std::vector<glm::vec2> placed;  // Rest centers, to spread chunks out.
+    for (const DebrisSource& src : debrisSources) {
+      const int chunks = std::clamp(1 + static_cast<int>(src.area / 2.0f), 1, 3);
+      for (int chunk = 0; chunk < chunks; ++chunk) {
+        if (debris.pieces.size() >= kMaxDebrisChunks) break;
+        for (int attempt = 0; attempt < 4; ++attempt) {
+          const float w = rng.Float(0.3f, 0.65f);   // Along the wall at launch.
+          const float h = rng.Float(0.25f, 0.5f);   // Vertical at launch, flat at rest.
+          const float t = std::clamp(src.thickness, 0.08f, 0.35f);
+          const glm::vec3 spawn =
+              src.pos + glm::vec3(src.along.x, 0.0f, src.along.y) * rng.Float(-0.6f, 0.6f) +
+              glm::vec3(0.0f, rng.Float(-0.4f, 0.4f), 0.0f);
+          const glm::vec2 dir = Rotate2(src.outward, rng.Float(-0.7f, 0.7f));
+          const float speed = rng.Float(1.6f, 3.8f);
+          const float vy = rng.Float(0.3f, 1.8f);
+          // Ballistic flight to the support under the landing spot. The
+          // landing moves the support, so settle the pair with one re-solve.
+          glm::vec2 land(spawn.x, spawn.z);
+          float support = SupportHeight(scratch, land, spawn.y);
+          float duration = 0.0f;
+          for (int solve = 0; solve < 2; ++solve) {
+            const float drop = std::max(0.0f, spawn.y - (support + 0.5f * t));
+            duration = (vy + std::sqrt(vy * vy + 2.0f * kGravity * drop)) / kGravity;
+            land = glm::vec2(spawn.x, spawn.z) + dir * (speed * duration);
+            support = SupportHeight(scratch, land, spawn.y);
+          }
+          // The chunk must clear the opening (not plug the fresh breach),
+          // stay on the map, and come to rest in the open.
+          if (glm::dot(land - glm::vec2(src.pos.x, src.pos.z), src.outward) < 0.45f) continue;
+          const float margin = scene.mapHalfExtent - 0.4f;
+          if (std::fabs(land.x) > margin || std::fabs(land.y) > margin) continue;
+          if (RestSpotBlocked(scratch, land, support + 0.02f, support + t)) continue;
+          bool crowded = false;
+          for (const glm::vec2& other : placed) crowded |= glm::distance(land, other) < 0.5f;
+          if (crowded) continue;
+
+          const float restYaw =
+              std::atan2(src.along.y, src.along.x) + rng.Float(-0.7f, 0.7f);
+          const glm::vec2 axisW = Rotate2(glm::vec2(1.0f, 0.0f), restYaw) * (0.5f * w);
+          const glm::vec2 perp = glm::vec2(-axisW.y, axisW.x) * (h / w);  // 0.5h, perpendicular.
+          Obstacle piece;
+          piece.kind = ObstacleKind::Rubble;
+          piece.building = -1;
+          piece.footprint = {land - axisW - perp, land + axisW - perp, land + axisW + perp,
+                             land - axisW + perp};
+          piece.bounds.min = glm::vec3(1e30f, support, 1e30f);
+          piece.bounds.max = glm::vec3(-1e30f, support + t, -1e30f);
+          for (const glm::vec2& v : piece.footprint) {
+            piece.bounds.min.x = std::min(piece.bounds.min.x, v.x);
+            piece.bounds.max.x = std::max(piece.bounds.max.x, v.x);
+            piece.bounds.min.z = std::min(piece.bounds.min.z, v.y);
+            piece.bounds.max.z = std::max(piece.bounds.max.z, v.y);
+          }
+          DebrisFlight flight;
+          flight.from = spawn;
+          flight.duration = duration;
+          flight.spin = (rng.Int(0, 1) ? 1.0f : -1.0f) * 6.2831853f *
+                        (duration > 0.8f ? 2.0f : 1.0f);
+          flight.fromYaw = std::atan2(src.along.y, src.along.x);
+          debris.pieces.push_back(std::move(piece));
+          debris.flights.push_back(flight);
+          placed.push_back(land);
+          break;
+        }
+      }
+      if (debris.pieces.size() >= kMaxDebrisChunks) break;
+    }
+    if (!debris.pieces.empty()) planChange(std::move(debris));
   }
 
   return plan;

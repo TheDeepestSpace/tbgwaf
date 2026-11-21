@@ -6,13 +6,18 @@
 // debug bomb emits it today and grenades will emit the same record later.
 // PlanExplosion turns one such record plus the current scene into an ordered
 // list of WorldChanges (see game/WorldChange.h): wall holes cut from the wall
-// prisms in the blast (seeded graded Voronoi fracture, rect-merged so every
-// piece stays an upright prism), ceiling/roof slab cuts, floor holes in
-// building floor surfaces, and street fixtures removed. The plan is a pure
-// function of (scene, spec): the server applies it through
-// GameLogic::ApplyWorldChange and ships the resulting log entries, so every
-// client rebuilds exactly the same holes; cosmetic-only debris can be
-// regenerated client-side from the same seed.
+// prisms in the blast (seeded graded Voronoi fracture, each opening a jagged
+// outline whose torn edges sit at the fracture's own angles -- the leftover
+// pieces carry wall-plane profiles), ceiling/roof slab cuts, massing cuts
+// (the parapet wrap-around at the roof edge breaks with the wall below it),
+// floor holes in building floor surfaces, street fixtures removed, and a
+// Debris change: chunks knocked out of the openings, ballistically simulated
+// here against the post-cut scene until they land as rubble obstacles
+// (blocking movement and sight), with per-chunk flight parameters so clients
+// replay the same fall. The plan is a pure function of (scene, spec): the
+// server applies it through GameLogic::ApplyWorldChange and ships the
+// resulting log entries, so every client rebuilds exactly the same holes and
+// rubble.
 
 #include <cstdint>
 #include <vector>

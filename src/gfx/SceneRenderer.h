@@ -319,6 +319,15 @@ class SceneRenderer {
   LitTriangleMesh obstacleCasterMesh_;  // The same, solid, for the shadow map.
   unsigned long long obstacleKey_ = 0;
   size_t ragdollWorldSeen_ = 0;  // World-log size at the last pane render.
+  // Debris replay (WorldChangeKind::Debris): the chunks' model matrices for
+  // this frame, animated along their recorded flights -- against the round
+  // clock during playback, against a local clock for a detonation outside a
+  // round -- and at their obstacle rest pose afterwards. Rubble is excluded
+  // from the static obstacle mesh and drawn from these instead.
+  void UpdateDebris(const tactics::GameLogic& game);
+  std::vector<glm::mat4> debrisModels_;
+  std::unordered_map<int, double> debrisStarted_;  // Change id -> local clock start.
+  size_t debrisLogSeen_ = 0;
   std::vector<int> surfaceBuilding_;  // Roof slab -> building, see RoofBuildings.
   unsigned long long surfaceBuildingKey_ = 0;
   // The slot holding `unit`'s depth maps looking along `facingYaw` (for

@@ -498,10 +498,10 @@ constexpr float kAimTraceRange = kSightRange;
 // lie within kThrowRange (horizontal distance) of the thrower, and the
 // thrower needs a grenade in its supply (kStartingGrenades at match start;
 // committing a Throw spends one). The flight is a ballistic arc from the
-// hand (kThrowReleaseHeight above the feet) whose apex sits
-// kThrowArcApexLift above the higher endpoint; gravity follows from that
-// shape and the flight time (horizontal distance / kThrowFlightSpeed,
-// never under kThrowMinFlightSeconds). SimulateThrow steps it at the fixed
+// hand (kThrowReleaseHeight above the feet) under constant gravity
+// kThrowGravity; the flight time is the 3D distance to the aim point /
+// kThrowFlightSpeed (never under kThrowMinFlightSeconds), so the pace does
+// not depend on the target's height. SimulateThrow steps it at the fixed
 // kSimStepSeconds (30 Hz), bouncing off obstacles/walk surfaces/terrain
 // (restitution kGrenadeRestitution vertically, kGrenadeFriction kept
 // tangentially; slower than kGrenadeRestSpeed on a floor contact = at
@@ -514,7 +514,7 @@ constexpr float kThrowRange = 25.0f;
 constexpr int kStartingGrenades = 2;
 constexpr float kGrenadeBlastRadius = 4.0f;
 constexpr float kThrowReleaseHeight = 1.5f;
-constexpr float kThrowArcApexLift = 2.5f;
+constexpr float kThrowGravity = 20.0f;  // Constant, so pace is independent of target height.
 constexpr float kThrowFlightSpeed = 16.0f;
 constexpr float kThrowMinFlightSeconds = 0.5f;
 constexpr float kGrenadeFuseSeconds = 2.0f;

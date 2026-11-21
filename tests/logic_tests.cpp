@@ -4056,7 +4056,7 @@ void TestThrowPlanningRangeSupplyAndPreview() {
   CHECK(preview->arc.front().y == thrower->position.y + constants::kThrowReleaseHeight);
   float apex = 0.0f;
   for (const glm::vec3& p : preview->arc) apex = std::max(apex, p.y);
-  CHECK(apex > preview->arc.front().y + 1.0f);
+  CHECK(apex > preview->arc.front().y + 0.1f);
   CHECK(preview->blastRadius == constants::kGrenadeBlastRadius);
 
   game.PlaceThrowPoint(near, Team::Blue);

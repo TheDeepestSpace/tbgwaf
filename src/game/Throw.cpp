@@ -154,19 +154,18 @@ ThrowPreview SimulateThrow(const Unit& unit, const glm::vec3& point,
   ThrowPreview out;
   const glm::vec3 from = unit.position + glm::vec3(0.0f, constants::kThrowReleaseHeight, 0.0f);
 
-  // Launch velocity from the quadratic through (0, from.y) and (T, point.y)
-  // peaking kThrowArcApexLift above the higher endpoint: with
-  // y(s) = from.y + (point.y - from.y) s + k s (1 - s) over s = t/T, the
-  // world-time gravity is g = 2k/T^2 and vy0 = ((point.y - from.y) + k)/T.
-  // Unobstructed, the grenade passes exactly through `point` at t = T.
+  // Constant gravity and a flight time proportional to the 3D distance to the
+  // target, so the grenade moves at the same pace whatever the target's
+  // height. Solving y(T) = point.y under gravity g gives
+  // vy0 = (point.y - from.y)/T + g T / 2. Unobstructed, the grenade passes
+  // exactly through `point` at t = T.
+  const float horizontal = ThrowDistance(unit, point);
+  const float dy = point.y - from.y;
   const float T = std::max(constants::kThrowMinFlightSeconds,
-                           ThrowDistance(unit, point) / constants::kThrowFlightSpeed);
-  const float apex = std::max(from.y, point.y) + constants::kThrowArcApexLift;
-  const float chordMid = 0.5f * (from.y + point.y);
-  const float k = 4.0f * (apex - chordMid);
-  const float gravity = 2.0f * k / (T * T);
+                           std::hypot(horizontal, dy) / constants::kThrowFlightSpeed);
+  const float gravity = constants::kThrowGravity;
   glm::vec3 velocity = (point - from) / T;
-  velocity.y = ((point.y - from.y) + k) / T;
+  velocity.y = dy / T + 0.5f * gravity * T;
 
   const float dt = constants::kSimStepSeconds;
   const int steps = static_cast<int>(std::lround(constants::kGrenadeFuseSeconds / dt));

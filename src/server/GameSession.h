@@ -67,6 +67,13 @@ class GameSession {
   // once the match is over; mid-match it would leak the fog.
   net::Json RevealMessage() const;
 
+  // Debug command: removes obstacle `index` from the world now (between
+  // rounds or mid-match). The change joins the world log; clients get it in
+  // the next round message, or immediately via WorldDeltaMessage.
+  bool DebugRemoveObstacle(int index) { return game_.DebugRemoveObstacle(index); }
+  // Unsent world changes (empty array when none); marks them sent.
+  net::Json TakeWorldDelta();
+
   // Rule-state views for one team (fog-filtered; own plans included).
   net::Json StateMessage(Team team) const;
   net::Json PlansMessage(Team team) const;
@@ -81,6 +88,7 @@ class GameSession {
 
  private:
   net::Json StateBody(std::optional<Team> viewer) const;  // nullopt: unfiltered.
+  net::Json WorldLog(size_t from) const;
 
   uint32_t seed_;
   std::string mapKind_;  // See GenerateMapByKind; "" = default city.
@@ -88,6 +96,7 @@ class GameSession {
   std::optional<Scene> fixedScene_;
   GameLogic game_;
   std::array<bool, 2> ready_{false, false};
+  size_t worldSent_ = 0;  // World-log entries already shipped in a round message.
   std::vector<net::Json> history_;  // Unfiltered round messages of this match.
 };
 

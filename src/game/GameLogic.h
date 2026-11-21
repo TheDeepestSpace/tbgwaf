@@ -15,6 +15,7 @@
 #include "game/Scene.h"
 #include "game/Throw.h"
 #include "game/Types.h"
+#include "game/WorldChange.h"
 #include "game/Unit.h"
 #include "game/Visibility.h"
 
@@ -170,6 +171,9 @@ struct GameSnapshot {
   float executionElapsed = 0.0f;
   int winner = -1;  // -1 = none, else static_cast<int>(Team).
   FlagState flag;
+  // The full world-change log since match start (see game/WorldChange.h).
+  // Importing it brings the receiver's geometry in line with the sender's.
+  std::vector<WorldChange> world;
 };
 
 // Text encoding of a snapshot (for the page-level message bus). Deserialize
@@ -563,6 +567,24 @@ class GameLogic {
   // learning what the other side has planned) and leaves everything else,
   // including local selection, alone; it too returns false on mismatch.
   GameSnapshot ExportState() const;
+
+  // --- World changes (see game/WorldChange.h) ---
+  // The ordered log of map edits since Reset(); part of ExportState(),
+  // hence of StateHash().
+  const std::vector<WorldChange>& WorldLog() const { return worldLog_; }
+  // The scene as generated, before any logged change (== GetScene() while
+  // the log is empty). Copy it to build a game that replays the log.
+  Scene BaseScene() const;
+  // Authority side: validates `change` against the live scene, stamps it
+  // (id, round, time within the round) and appends it to the log. Returns
+  // false, changing nothing, if it does not apply.
+  bool ApplyWorldChange(WorldChange change);
+  // Debug command: remove obstacle `index` now (the stump of
+  // ApplyWorldChange). Safe mid-match.
+  bool DebugRemoveObstacle(int index);
+  // Follower side: applies a change received from the authority. Changes
+  // already in the log (same id) are ignored; a gap in ids is rejected.
+  bool AcceptWorldChange(const WorldChange& change);
   bool ImportState(const GameSnapshot& snapshot);
   bool ImportTeamPlans(const GameSnapshot& snapshot, Team team);
   // Drops every figure's plan (incl. queued legs). The timeline replay uses
@@ -795,6 +817,13 @@ class GameLogic {
   int navMeshUnitId_ = -1;
   glm::vec3 navMeshOrigin_{0.0f};
   int roundNumber_ = 1;
+  std::vector<WorldChange> worldLog_;
+  // Copy of the scene taken just before the first logged change, so a
+  // shorter/different log (new match, timeline rewind) can be replayed from
+  // the start. Empty while the log is.
+  std::optional<Scene> pristine_;
+  void OnWorldChanged();  // Rebuilds geometry-derived caches.
+  bool SyncWorld(const std::vector<WorldChange>& log);
   std::vector<Obstacle> sightObstacles_;  // See SightObstacles(); rebuilt in Reset.
   std::vector<AABB> obstacleBounds_;  // Retained for compatibility/debug broad-phase inspection.
 

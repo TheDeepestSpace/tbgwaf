@@ -160,6 +160,8 @@ void GameLogic::Reset(Scene scene) {
   }
   navMesh_ = NavMesh();
   navMeshUnitId_ = -1;
+  worldLog_.clear();  // A new match starts from the seeded map.
+  pristine_.reset();
   roundNumber_ = 1;
 
   mode_ = InputMode::AwaitingSelection;
@@ -438,7 +440,96 @@ GameSnapshot GameLogic::ExportState() const {
   snap.winner = winner_ ? static_cast<int>(*winner_) : -1;
   snap.flag = flag_;
   if (flag_.carrierId >= 0) snap.flag.position = FlagPosition();
+  snap.world = worldLog_;
   return snap;
+}
+
+Scene GameLogic::BaseScene() const { return pristine_ ? *pristine_ : scene_; }
+
+void GameLogic::OnWorldChanged() {
+  obstacleBounds_ = ObstacleBounds(scene_.obstacles);
+  sightObstacles_ = tactics::SightObstacles(scene_);
+  navMesh_ = NavMesh();
+  navMeshUnitId_ = -1;
+  ClearMoveOverlays();
+  // Planned paths were routed over the old geometry; an imported/planned
+  // move is re-validated when the round commits.
+  movePreviewValid_ = false;
+}
+
+bool GameLogic::ApplyWorldChange(WorldChange change) {
+  if (!pristine_) pristine_ = scene_;
+  change.id = static_cast<int>(worldLog_.size());
+  change.round = roundNumber_;
+  change.at = mode_ == InputMode::Executing ? executionElapsed_ : 0.0f;
+  if (!tactics::ApplyWorldChange(&scene_, change)) {  // Validates before mutating.
+    if (worldLog_.empty()) pristine_.reset();
+    return false;
+  }
+  worldLog_.push_back(std::move(change));
+  OnWorldChanged();
+  return true;
+}
+
+bool GameLogic::DebugRemoveObstacle(int index) {
+  WorldChange c;
+  c.kind = WorldChangeKind::ObstacleRemoved;
+  c.target = index;
+  return ApplyWorldChange(std::move(c));
+}
+
+bool GameLogic::AcceptWorldChange(const WorldChange& change) {
+  const int size = static_cast<int>(worldLog_.size());
+  if (change.id < size) return true;  // Already applied (e.g. via a state message).
+  if (change.id != size) return false;
+  if (!pristine_) pristine_ = scene_;
+  if (!tactics::ApplyWorldChange(&scene_, change)) {
+    if (worldLog_.empty()) pristine_.reset();
+    return false;
+  }
+  worldLog_.push_back(change);
+  OnWorldChanged();
+  return true;
+}
+
+// Brings the live geometry to exactly `log`: keeps the common prefix,
+// otherwise rewinds to the pristine scene, then applies the rest in order.
+bool GameLogic::SyncWorld(const std::vector<WorldChange>& log) {
+  if (log.size() == worldLog_.size() && (log.empty() || log.back() == worldLog_.back())) {
+    return true;  // Hot path: ImportState runs every frame during playback.
+  }
+  size_t common = 0;
+  while (common < log.size() && common < worldLog_.size() && log[common] == worldLog_[common]) {
+    ++common;
+  }
+  if (common < worldLog_.size()) {  // Diverged or shorter: start over.
+    if (pristine_) {
+      scene_.obstacles = pristine_->obstacles;
+      scene_.buildings = pristine_->buildings;
+      scene_.massing = pristine_->massing;
+      scene_.facadeOpenings = pristine_->facadeOpenings;
+      scene_.walkSurfaces = pristine_->walkSurfaces;
+      scene_.ground = pristine_->ground;
+    }
+    worldLog_.clear();
+    common = 0;
+  }
+  if (log.empty()) {
+    pristine_.reset();
+    OnWorldChanged();
+    return true;
+  }
+  if (!pristine_) pristine_ = scene_;
+  bool ok = true;
+  for (size_t i = common; i < log.size(); ++i) {
+    if (log[i].id != static_cast<int>(i) || !tactics::ApplyWorldChange(&scene_, log[i])) {
+      ok = false;
+      break;
+    }
+    worldLog_.push_back(log[i]);
+  }
+  OnWorldChanged();
+  return ok;
 }
 
 namespace {
@@ -489,6 +580,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   if (recorder_.ptr) e.text = SerializeSnapshot(snap);
   RecordScope record(this, std::move(e));
   if (!SnapshotMatchesUnits(snap, scene_.units)) return false;
+  if (!SyncWorld(snap.world)) return false;
   // Deaths arriving in this snapshot whose victim the opposing team cannot
   // see happened outside its FOV: a free-aim blind hit resolved on the
   // simulating peer. Sighting memory is per-page derived state (never
@@ -632,6 +724,12 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
   out << ' ' << (snap.flag.enabled ? 1 : 0) << ' ' << snap.flag.carrierId << ' '
       << snap.flag.position.x << ' ' << snap.flag.position.y << ' ' << snap.flag.position.z << ' '
       << snap.flag.dropElapsed;
+  // Only a changed world adds tokens, so unchanged matches keep their
+  // historical text (and hashes).
+  if (!snap.world.empty()) {
+    out << ' ' << snap.world.size();
+    for (const WorldChange& c : snap.world) WriteWorldChange(out, c);
+  }
   return out.str();
 }
 
@@ -736,6 +834,14 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
   bool carrierKnown = snap.flag.carrierId < 0;
   for (const auto& u : snap.units) carrierKnown |= u.id == snap.flag.carrierId;
   if (!carrierKnown) return false;
+  size_t worldCount = 0;
+  if (in >> worldCount) {  // Optional trailing world-change log.
+    if (worldCount > kMaxEntries) return false;
+    snap.world.resize(worldCount);
+    for (WorldChange& c : snap.world) {
+      if (!ReadWorldChange(in, &c)) return false;
+    }
+  }
   *outSnap = std::move(snap);
   return true;
 }

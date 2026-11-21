@@ -1433,6 +1433,7 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   }
   // Parapets, roof furniture and awnings occlude like the gameplay LOS.
   for (const tactics::MassingDetail& d : scene.massing) {
+    if (d.dead) continue;
     AppendMassingDetail(d, &vertices, &indices);
   }
   for (const tactics::WalkSurface& surface : scene.walkSurfaces) {
@@ -1507,6 +1508,7 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
     mix(&d.depth, sizeof(d.depth));
   }
   for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
+    mix(&o.dead, sizeof(o.dead));
     mix(&o.obstacle, sizeof(o.obstacle));
     mix(&o.wallEdge, sizeof(o.wallEdge));
     mix(&o.u0, sizeof(o.u0));
@@ -1566,6 +1568,7 @@ unsigned long long FacadeFingerprint(const tactics::Scene& scene) {
     }
   };
   for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
+    mix(&o.dead, sizeof(o.dead));
     mix(&o.kind, sizeof(o.kind));
     mix(&o.building, sizeof(o.building));  // The pane style reads the building's archetype.
     mix(&o.obstacle, sizeof(o.obstacle));
@@ -1585,6 +1588,7 @@ void BuildFacadeMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   std::vector<GLuint> indices;
   std::vector<int> groups;
   for (const tactics::FacadeOpening& opening : scene.facadeOpenings) {
+    if (opening.dead) continue;
     AppendFacadeOpening(scene, opening, &vertices, &indices);
     groups.resize(indices.size() / 3, opening.building);
   }
@@ -1598,6 +1602,7 @@ std::unordered_map<int, std::vector<std::vector<glm::vec4>>> RecessHolesByObstac
     const tactics::Scene& scene) {
   std::unordered_map<int, std::vector<std::vector<glm::vec4>>> holes;
   for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
+    if (o.dead) continue;
     if (OpeningIsRealGap(scene, o) || !OpeningRecessed(scene, o)) continue;
     if (o.obstacle < 0 || o.obstacle >= static_cast<int>(scene.obstacles.size())) continue;
     const tactics::Obstacle& wall = scene.obstacles[o.obstacle];
@@ -1681,6 +1686,7 @@ void BuildMassingMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   std::vector<GLuint> indices;
   std::vector<int> groups;
   for (const tactics::MassingDetail& d : scene.massing) {
+    if (d.dead) continue;
     AppendMassingDetail(d, &vertices, &indices);
     groups.resize(indices.size() / 3, static_cast<int>(&d - scene.massing.data()));
   }
@@ -1729,6 +1735,7 @@ unsigned long long ObstacleFingerprint(const tactics::Scene& scene) {
     mix(&o.bounds, sizeof(o.bounds));
     mix(&o.kind, sizeof(o.kind));
     mix(&o.navOnly, sizeof(o.navOnly));
+    mix(&o.dead, sizeof(o.dead));
     mix(&o.building, sizeof(o.building));
     mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
   }
@@ -4578,6 +4585,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
       std::vector<glm::vec3> nearSegments, farSegments;
       for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
+        if (o.dead) continue;
         // Enterable buildings only: their windows and doorways are real
         // gaps (a solid building's painted openings have no hole to mark).
         if (o.building < 0 || o.building >= static_cast<int>(scene.buildings.size()) ||

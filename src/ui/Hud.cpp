@@ -473,7 +473,7 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
   return actions;
 }
 
-void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
+void DrawDebugPanel(bool& disableFov, bool& coverView, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
                     float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
                     bool& disableOcclusionFade, bool& npr, gfx::NprSettings& nprSettings,
@@ -485,6 +485,7 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
   ImGui::Begin("Debug", nullptr,
                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove);
   ImGui::Checkbox("Disable FOV cones", &disableFov);
+  ImGui::Checkbox("Cover view", &coverView);
   ImGui::Checkbox("Disable shadows", &disableShadows);
   ImGui::Checkbox("AO", &thermal);
   if (thermal) {

@@ -5438,7 +5438,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   if (overlays.moveFrontier && overlays.moveFrontier->nx > 0) {
     const tactics::ReachField& f = *overlays.moveFrontier;
     const tactics::CoverMap* cover =
-        overlays.moveCover && overlays.moveCover->nx == f.nx && overlays.moveCover->nz == f.nz
+        debug.coverView && overlays.moveCover && overlays.moveCover->nx == f.nx && overlays.moveCover->nz == f.nz
             ? overlays.moveCover
             : nullptr;
     const glm::vec2 origin(f.minX, f.minZ);
@@ -5446,18 +5446,20 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                  frontierKeyBudget_ != f.budget ||
                                  frontierKeyRevision_ != f.revision ||
                                  frontierKeyThermal_ != thermalKey ||
-                                 frontierKeyCover_ != (cover != nullptr);
+                                 frontierKeyCover_ != debug.coverView;
     if (frontierRebuilt) {
       frontierKeyField_ = &f;
       frontierKeyOrigin_ = origin;
       frontierKeyBudget_ = f.budget;
       frontierKeyRevision_ = f.revision;
       frontierKeyThermal_ = thermalKey;
-      frontierKeyCover_ = cover != nullptr;
+      frontierKeyCover_ = debug.coverView;
       std::vector<ColorTriangleMesh::Vertex> fill;
       std::vector<glm::vec3> border, borderDim;
       appendFrontierLayers(f, cover, debug.thermal ? thermalGreen : kSetupColor, fill, border,
                            borderDim);
+      // Without the cover view the frontier is just its boundary outline.
+      if (!debug.coverView) fill.clear();
       frontierFill_.SetVertices(fill);
       frontierBorder_.SetPoints(ribbonize(border, kBoundaryWidth));
       frontierBorderDim_.SetPoints(ribbonize(borderDim, kBoundaryWidth));

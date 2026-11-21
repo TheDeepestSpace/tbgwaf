@@ -41,6 +41,9 @@ struct RenderDebugOptions {
   // Existing golden suites pin the undecorated map; live rendering defaults on.
   bool disableTrees = false;
   bool disableFov = false;
+  // Cover view (issue #292): style the movement frontier by cover kind (marks
+  // at tactical/flat cover). Off: only the thin boundary outline is drawn.
+  bool coverView = false;
   bool disableShadows = false;
   // Thermal camera prototype (issue #177): material-based grayscale with
   // pale surfaces and ambient contact shading; figures keep their team
@@ -226,7 +229,7 @@ class SceneRenderer {
   float frontierKeyBudget_ = -1.0f;
   int frontierKeyRevision_ = -1;  // Field contents change with blockers' plans.
   int frontierKeyThermal_ = 0;  // 0 off, 1 white-hot, 2 black-hot.
-  bool frontierKeyCover_ = false;  // Whether the glow was styled by a cover map.
+  bool frontierKeyCover_ = false;  // Whether the frontier was built in cover view.
   ColorTriangleMesh ziplineFill_;
   LineMesh ziplineBorder_;
   LineMesh ziplineBorderDim_;

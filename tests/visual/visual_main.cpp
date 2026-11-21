@@ -229,6 +229,8 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   gfx::RenderDebugOptions renderDebug;
   // Decorative trees are covered separately; keep gameplay goldens unchanged.
   renderDebug.disableTrees = true;
+  // Goldens pin the cover-styled frontier; the live default is outline-only.
+  renderDebug.coverView = true;
   // Every scenario renders in the AO view, like the live app default.
   renderDebug.thermal = true;
   renderDebug.thermalBlackHot = scenario.thermalBlackHot;

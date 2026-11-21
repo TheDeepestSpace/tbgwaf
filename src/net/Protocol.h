@@ -78,7 +78,10 @@
 //   {"t":"opponent_left"}   {"t":"error","error":"..."}
 namespace tactics::net {
 
-constexpr int kProtocolVersion = 2;  // 2: world-change log ("world") in round/state.
+// 2: world-change log ("world") in round/state. 3: WallHole really cuts the
+// wall geometry and the FloorHole kind exists (issue #350), so a peer on 2
+// would compute different geometry from the same log.
+constexpr int kProtocolVersion = 3;
 constexpr size_t kMaxMessageBytes = 16 * 1024;
 constexpr size_t kMaxWaypoints = 32;
 

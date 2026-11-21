@@ -60,9 +60,13 @@ struct ScenarioAction {
   // BeginMove opens move planning (select + Move) and deliberately stops
   // there, leaving the movement frontier up for the visual runner's
   // post-action capture; no destination is clicked and no plan is recorded.
+  // Bomb (issue #350) is the debug-bomb flow: place it at `destination`
+  // (field `bombRadius`), then either detonate immediately or -- with
+  // `bombAt` set -- arm it to go off that many seconds into the next
+  // committed round, exactly like the debug panel / server control taps.
   enum class Kind {
     Move, BeginMove, Shoot, Aim, Pass, Cancel, Commit, Focus, NewGame,
-    TimelineSeek, TimelinePlay, TimelinePause, Wait,
+    TimelineSeek, TimelinePlay, TimelinePause, Wait, Bomb,
   };
 
   int actor = -1;  // Unused (and not required in YAML) for Commit/NewGame/Timeline*.
@@ -109,6 +113,8 @@ struct ScenarioAction {
   // Absent means "bar untouched": the plan keeps whatever level is dialed in
   // (1 unless an earlier step of the same aim set it).
   std::optional<int> shots;
+  float bombRadius = 3.5f;         // Bomb only: blast radius.
+  std::optional<float> bombAt;     // Bomb only: arm for this round time.
 };
 
 // Every field is optional; only the ones present in the YAML step are

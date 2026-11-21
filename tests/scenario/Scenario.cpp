@@ -158,6 +158,14 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     action.kind = ScenarioAction::Kind::TimelinePause;
     return action;
   }
+  if (kind == "bomb") {  // Debug bomb (issue #350): place + detonate/arm.
+    action.kind = ScenarioAction::Kind::Bomb;
+    if (!node["position"]) throw std::runtime_error("bomb requires 'position'");
+    action.destination = ParseVec3(node["position"], "script[].position");
+    if (node["radius"]) action.bombRadius = node["radius"].as<float>();
+    if (node["at"]) action.bombAt = node["at"].as<float>();
+    return action;
+  }
 
   if (!node["actor"]) throw std::runtime_error("script action step requires 'actor'");
   action.actor = node["actor"].as<int>();
@@ -218,7 +226,7 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     throw std::runtime_error(
         "unknown script action '" + kind +
         "' (expected move/begin_move/shoot/aim/pass/cancel/focus/commit/new_game/"
-        "timeline_seek/timeline_play/timeline_pause)");
+        "timeline_seek/timeline_play/timeline_pause/wait/bomb)");
   }
   return action;
 }
@@ -410,6 +418,18 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
 
   if (action.kind == ScenarioAction::Kind::Cancel) {
     game.CancelAction();
+    return true;
+  }
+
+  if (action.kind == ScenarioAction::Kind::Bomb) {
+    game.DebugPlaceBomb(action.destination, action.bombRadius);
+    if (action.bombAt) {
+      if (!game.DebugArmBomb(*action.bombAt)) return Fail("bomb could not be armed");
+      return true;
+    }
+    if (!game.DebugDetonateBomb()) {
+      return Fail("bomb detonation changed nothing (nothing destructible in range)");
+    }
     return true;
   }
 

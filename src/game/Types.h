@@ -105,6 +105,11 @@ struct Obstacle {
   // lying on a side (wrecks on the artery; their `footprint` is then an
   // arbitrarily rotated rectangle and the bounds follow the rolled body).
   float fixtureRoll = 0.0f;
+  // Removed by a world change (see WorldChange.h). Dead obstacles keep their
+  // index (Building::obstacle, FacadeOpening::obstacle, ... stay valid) but
+  // are inert: parked off the map with no footprint, so collision, LOS,
+  // navigation and rendering all ignore them.
+  bool dead = false;
 };
 
 // Building archetype (urban map issue #151, roadmap 3.2). Drawn per parcel
@@ -164,6 +169,8 @@ struct Building {
   std::vector<int> stairSurfaces;
   int stairEdge = -1;
   float stairU0 = 0.0f, stairU1 = 0.0f;
+  // Every prism of the building was removed by a world change.
+  bool dead = false;
 
   float Height() const {
     return groundFloorHeight + static_cast<float>(floorCount - 1) * floorHeight;
@@ -190,6 +197,7 @@ struct MassingDetail {
   // this so their top and bottom stay parallel to the ramp beneath them.
   std::vector<glm::vec3> top;
   float depth = 0.0f;
+  bool dead = false;  // Its building was removed: footprint/top cleared, never drawn.
 };
 
 // A window or door on a generated building's facade (issue #152, roadmap
@@ -203,7 +211,8 @@ struct MassingDetail {
 // base opens onto a raised stoop or rear platform (a facade WalkSurface
 // emitted alongside it).
 struct FacadeOpening {
-  enum class Kind : uint8_t { Window, Door };
+  // Breach: a hole punched through the wall by a world change (WallHole).
+  enum class Kind : uint8_t { Window, Door, Breach };
   Kind kind = Kind::Window;
   int building = -1;  // Index into Scene::buildings.
   int obstacle = -1;  // Wall prism the opening sits on.
@@ -211,6 +220,7 @@ struct FacadeOpening {
   float u0 = 0.0f, u1 = 0.0f;
   float y0 = 0.0f, y1 = 0.0f;
   int floor = 0;
+  bool dead = false;  // Its wall was removed; never drawn.
 };
 
 // A convex, planar walkable patch above (or sloping away from) the ground.
@@ -247,6 +257,9 @@ struct WalkSurface {
   // Convex XZ footprints standing on the patch (roof parapets, furniture)
   // that a figure can't walk into. Honoured on single-patch routes only.
   std::vector<std::vector<glm::vec2>> blockers;
+  // Removed or cut away by a world change: keeps its index but has no
+  // vertices, neighbours or connections (every consumer skips such patches).
+  bool dead = false;
 };
 
 // A pre-built zipline: a two-way cable between a ground anchor post and a

@@ -242,6 +242,7 @@ void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& 
   std::vector<Obstacle> obstacles;
   obstacles.reserve(allObstacles.size());
   for (const Obstacle& obstacle : allObstacles) {
+    if (obstacle.dead) continue;  // Removed by a world change.
     const AABB& b = obstacle.bounds;
     float groundTop = 0.0f;
     if (!heights.Empty()) {

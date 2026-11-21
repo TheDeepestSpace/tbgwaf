@@ -1,5 +1,7 @@
 #include "net/RemoteClient.h"
 
+#include <limits>
+
 #include <algorithm>
 #include <cmath>
 
@@ -99,6 +101,8 @@ void RemoteClient::OnMessage(const std::string& text) {
     if (!playback_) ApplyState(m);
   } else if (type == "round") {
     HandleRound(m);
+  } else if (type == "world") {
+    ApplyWorldList(m["world"]);
   } else if (type == "reveal") {
     HandleReveal(m);
   } else if (type == "peer") {
@@ -208,7 +212,23 @@ void RemoteClient::ApplyPlans(const Json& m) {
   }
 }
 
+void RemoteClient::ApplyWorldList(const Json& list) {
+  for (const Json& entry : list.AsArray()) {
+    tactics::WorldChange change;
+    if (!DecodeWorldChange(entry, &change)) continue;
+    game_->AcceptWorldChange(change);
+  }
+}
+
+void RemoteClient::ApplyWorldUpTo(Playback* pb, float clock) {
+  while (pb->worldApplied < pb->world.size() && pb->world[pb->worldApplied].at <= clock) {
+    game_->AcceptWorldChange(pb->world[pb->worldApplied]);
+    ++pb->worldApplied;
+  }
+}
+
 void RemoteClient::ApplyState(const Json& state) {
+  if (state.Has("world")) ApplyWorldList(state["world"]);  // Full log: join/reconnect/spectate.
   GameSnapshot snap = game_->ExportState();
   for (auto& u : snap.units) {
     const Unit* unit = game_->FindUnit(u.id);
@@ -281,6 +301,10 @@ RemoteClient::Playback RemoteClient::ParseRound(const Json& m) {
     }
     pb.frames.push_back(std::move(frame));
   }
+  for (const Json& w : m["world"].AsArray()) {
+    tactics::WorldChange change;
+    if (DecodeWorldChange(w, &change)) pb.world.push_back(std::move(change));
+  }
   for (const Json& s : m["shots"].AsArray()) {
     pb.shots.push_back(Shot{static_cast<float>(s["t"].AsNumber()),
                             static_cast<int>(s["unit"].AsNumber(-1)),
@@ -302,10 +326,12 @@ void RemoteClient::HandleRound(const Json& m) {
   selfReady_ = peerReady_ = false;
   commitPending_ = false;  // The round ran; planning reopens afterwards.
   if (pb.frames.empty()) {
+    ApplyWorldUpTo(&pb, std::numeric_limits<float>::infinity());
     ApplyState(pb.finalState);
     return;
   }
   playback_ = std::move(pb);
+  ApplyWorldUpTo(&*playback_, 0.0f);  // Changes made between rounds.
   GameSnapshot snap = game_->ExportState();
   snap.mode = InputMode::Executing;
   game_->ImportState(snap);
@@ -314,7 +340,9 @@ void RemoteClient::HandleRound(const Json& m) {
 void RemoteClient::AdvancePlayback(float dt) {
   Playback& pb = *playback_;
   pb.clock += dt;
+  ApplyWorldUpTo(&pb, pb.clock);
   if (pb.clock >= pb.frames.back().t) {
+    ApplyWorldUpTo(&pb, std::numeric_limits<float>::infinity());
     const Json finalState = pb.finalState;
     playback_.reset();
     ApplyState(finalState);

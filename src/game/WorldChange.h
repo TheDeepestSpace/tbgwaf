@@ -33,9 +33,23 @@ enum class WorldChangeKind : int {
   SurfaceRemoved = 2,    // target = walk-surface index.
   SurfaceCut = 3,        // target's polygon replaced by `polygon` (a smaller convex patch).
   HeightPatch = 4,       // ground samples inside `rect` (x0,z0,x1,z1) raised by `delta`.
-  WallHole = 5,          // opening in obstacle `target`'s wall edge `wallEdge`: u0..u1, y0..y1.
+  // A hole punched through wall prism `target`, on its footprint edge
+  // `wallEdge`: u0..u1 world units along the edge, y0..y1 world heights.
+  // Applying it really cuts the geometry, CutWindows-style: the target is
+  // killed and up to four plain prisms (left/right jambs, sill, head) are
+  // appended around the opening, so LOS, shots and -- when the hole reaches
+  // the floor with headroom -- walking pass through it. A Breach
+  // FacadeOpening records the outline.
+  WallHole = 5,
+  // A rectangular hole cut out of walk surface `target` (a building floor):
+  // `rect` = (x0,z0,x1,z1) in XZ. The target is killed and up to four convex
+  // patches around the hole are appended, linked to each other and to the
+  // target's old neighbours where they still share a boundary. The ceiling
+  // slab below is cut by a separate ObstacleReplaced change (see
+  // PlanExplosion in game/Destruction.h).
+  FloorHole = 6,
 };
-constexpr int kWorldChangeKindCount = 6;
+constexpr int kWorldChangeKindCount = 7;
 
 struct WorldChange {
   int id = 0;           // Position in the log (0-based, gapless).
@@ -45,7 +59,7 @@ struct WorldChange {
   int target = -1;
   std::vector<Obstacle> pieces;   // ObstacleReplaced.
   std::vector<glm::vec3> polygon; // SurfaceCut.
-  glm::vec4 rect{0.0f};           // HeightPatch: x0, z0, x1, z1.
+  glm::vec4 rect{0.0f};           // HeightPatch / FloorHole: x0, z0, x1, z1.
   float delta = 0.0f;             // HeightPatch.
   int wallEdge = 0;               // WallHole.
   float u0 = 0.0f, u1 = 0.0f, y0 = 0.0f, y1 = 0.0f;  // WallHole.

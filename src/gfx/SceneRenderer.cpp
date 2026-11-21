@@ -51,10 +51,10 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
     }
   }
   if (game.Mode() == tactics::InputMode::AwaitingThrowTarget) {
-    if (const auto& preview = game.GetAimPreview()) {
-      overlays.aimMarker = preview->point;
-    }
-    const auto point = overlays.aimMarker ? overlays.aimMarker : hoveredGroundPoint;
+    // No "+" selector for throws: the arc, bounce marks and blast ring show the aim.
+    const auto& preview = game.GetAimPreview();
+    const std::optional<glm::vec3> point =
+        preview ? std::optional<glm::vec3>(preview->point) : hoveredGroundPoint;
     if (point) overlays.throwPreview = game.PreviewThrow(*point);
   }
   overlays.showShotCone = game.Mode() == tactics::InputMode::AwaitingShootTarget;
@@ -5595,7 +5595,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // height, drawn with the same line routine as move paths.
   const auto drawThrow = [&](const tactics::ThrowPreview& throwPreview, float alpha) {
     static const std::vector<tactics::PathRide> kNoThrowRides;
-    const glm::vec4 color(1.0f, 0.65f, 0.15f, alpha);
+    const glm::vec4 color(pathGreen, alpha);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     drawMovePath(throwPreview.arc, kNoThrowRides, color);

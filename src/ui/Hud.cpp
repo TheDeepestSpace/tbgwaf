@@ -250,7 +250,7 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
         break;
       case InputMode::AwaitingThrowTarget:
         ImGui::TextWrapped(
-            "Click a surface point within throw range to place the landing mark ('+'); the arc "
+            "Click a surface point within throw range to place the landing mark; the arc "
             "and blast radius preview. Then Throw to confirm. Esc cancels.");
         break;
       case InputMode::Executing:

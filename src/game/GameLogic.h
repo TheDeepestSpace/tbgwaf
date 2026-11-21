@@ -13,6 +13,7 @@
 
 #include "game/NavMesh.h"
 #include "game/Scene.h"
+#include "game/Throw.h"
 #include "game/Types.h"
 #include "game/WorldChange.h"
 #include "game/Unit.h"
@@ -37,6 +38,10 @@ struct InputEvent {
     ChooseMove,
     ChooseShoot,
     ChoosePass,
+    ChooseThrow,
+    ClickThrowRay,    // point = origin, direction, team
+    PlaceThrowPoint,  // point, team
+    ConfirmThrow,     // team
     CancelAction,
     SetMoveFacing,    // unit, value = yaw, team
     ClickAimRay,      // point = origin, direction, team
@@ -82,6 +87,7 @@ enum class InputMode {
   ActionMenu,             // A figure is selected; waiting for Move/Shoot/Pass to plan its action.
   AwaitingMoveDestination,  // Waiting for a ground click to plan a move to.
   AwaitingShootTarget,    // Waiting for a click on an enemy figure to plan a shot at.
+  AwaitingThrowTarget,    // Waiting for an aim point (within throw range) to plan a grenade throw at.
   Executing,              // A committed round is playing out; planning input is inert.
   GameOver,
 };
@@ -108,6 +114,20 @@ struct Tracer {
   float at = 0.0f;
   // Seconds since the bullet was fired (only ticks while the game updates);
   // the renderer flashes fresh tracers so each shot of a burst reads on its own.
+  float age = 0.0f;
+};
+
+// One grenade detonation of the current/last round (issue #349). Kept like
+// tracers: cleared when the next round starts executing, mirrored in
+// snapshots so followers and replays show the same blasts.
+struct Explosion {
+  Team team = Team::Blue;    // The thrower's team.
+  glm::vec3 position{0.0f};  // Blast centre (where the grenade sat).
+  float radius = constants::kGrenadeBlastRadius;
+  float at = 0.0f;           // Seconds into the round's execution (the fixed fuse).
+  uint32_t seed = 0;         // Deterministic visual-effect seed (round, thrower).
+  // Seconds since detonation (only ticks while the game updates); drives the
+  // flash/ring visual, which fades out within kExplosionVisualSeconds.
   float age = 0.0f;
 };
 
@@ -155,10 +175,24 @@ struct GameSnapshot {
     float rideLength = 0.0f;
     float rideSlope = 0.0f;
     float grabElapsed = -1.0f;  // Flag pickup reach beat (see Unit).
+    float throwElapsed = -1.0f;  // Grenade throw beat (see Unit).
     bool moving = false;  // Has an in-flight move in the executing round.
+    // Grenade supply (issue #349). Serialized only while it differs from the
+    // starting supply, so pre-grenade snapshots keep their text and hashes.
+    int grenades = constants::kStartingGrenades;
+  };
+  // One in-flight grenade right now (issue #349): enough for a mirroring
+  // follower (or a timeline replay) to draw it; the flight itself lives only
+  // on the simulating instance.
+  struct Grenade {
+    int thrower = -1;
+    Team team = Team::Blue;
+    glm::vec3 position{0.0f};
   };
   std::vector<UnitState> units;
   std::vector<Tracer> tracers;
+  std::vector<Grenade> grenades;      // In-flight grenades of the executing round.
+  std::vector<Explosion> explosions;  // This round's detonations.
   SquadPlaybook playbooks[2];  // Indexed by Team.
   InputMode mode = InputMode::AwaitingSelection;
   int roundNumber = 1;
@@ -467,6 +501,39 @@ class GameLogic {
   // (ConfirmAim) commits it with the chosen shot count.
   const std::optional<int>& GetLockPreview() const { return lockPreviewId_; }
 
+  // --- Throw planning (grenades). While AwaitingThrowTarget the player
+  // places a landing point within kThrowRange of the thrower; like free-aim
+  // it is tap-to-place then confirm. Points out of range, or any throw
+  // without grenade supply, are rejected (no-ops), mirroring how move legs
+  // beyond the budget are ignored. The thrower's plan becomes type Throw
+  // with the landing in plan.aimPoint. ---
+  // Camera-ray form: resolves the nearest surface (no LOS gate -- a grenade
+  // may land out of sight) and places the marker if in range.
+  void ClickThrowRay(const glm::vec3& origin, const glm::vec3& direction, Team byTeam);
+  void PlaceThrowPoint(const glm::vec3& point, Team byTeam);
+  void ConfirmThrow(Team byTeam);
+  // Predicted arc/landing/blast for the selected thrower to `point` (nullopt
+  // if no thrower is selected or the point is not throwable).
+  std::optional<ThrowPreview> PreviewThrow(const glm::vec3& point) const;
+  // Scene-aware flight prediction for an arbitrary thrower: SimulateThrow
+  // against the live geometry -- the exact flight a committed throw runs, so
+  // planned-throw overlays draw what will happen.
+  ThrowPreview PredictThrowFor(const Unit& thrower, const glm::vec3& point) const;
+
+  // --- Grenade execution (issue #349). Committing a round turns each Throw
+  // plan into a simulated flight (spending one grenade): the grenade follows
+  // its 30 Hz arc, bounces off geometry, and detonates at the fixed fuse
+  // within the round. The blast kills every figure whose torso is inside the
+  // blast radius unless geometry blocks the line from the blast centre;
+  // with friendly fire off the thrower's own team is spared. ---
+  // In-flight grenades right now (mirrored from snapshots on a follower).
+  const std::vector<GameSnapshot::Grenade>& Grenades() const { return grenadeViews_; }
+  // This round's detonations (cleared when the next round starts executing).
+  const std::vector<Explosion>& Explosions() const { return explosions_; }
+  // Fog rule for grenades: an enemy grenade is shown/sent to a team only
+  // while the grenade itself is inside that team's FOV.
+  bool GrenadePointVisibleTo(Team team, const glm::vec3& position) const;
+
   // Friendly fire config flag: when off, same-team figures are transparent
   // to the free-aim ballistic trace. On by default.
   bool FriendlyFireEnabled() const { return friendlyFire_; }
@@ -522,6 +589,8 @@ class GameLogic {
   void ChooseMove();
   void ChooseShoot();
   void ChoosePass();
+  // Enters throw targeting; stays in the menu if the figure has no grenades.
+  void ChooseThrow();
 
   // Re-aims a planned move's final facing. Allowed at any time before the
   // round is committed, by the unit's own team; no-op for units without a planned move.
@@ -823,11 +892,29 @@ class GameLogic {
   glm::vec3 ziplineOrigin_{0.0f};
   std::vector<PathRide> movePreviewRides_;
 
+  // One committed throw's grenade (simulator side): the whole flight is
+  // fixed at commit (SimulateThrow), execution just follows it by time.
+  struct ActiveGrenade {
+    int throwerId = -1;
+    Team team = Team::Blue;
+    ThrowPreview flight;
+    bool exploded = false;
+  };
+  // Detonates `grenade` where its flight ends: records the Explosion and
+  // applies the blast kills at this tick's figure positions.
+  void DetonateGrenade(const ActiveGrenade& grenade);
+  // Rebuilds grenadeViews_ (the renderable in-flight positions) from
+  // activeGrenades_ at the current execution clock.
+  void RefreshGrenadeViews();
+
   // Every figure's in-flight planned move / not-yet-fired planned shot for
   // the executing round, valid only while mode_ == Executing; empty once
   // the round finishes.
   std::vector<ActiveMove> activeMoves_;
   std::vector<PendingShot> pendingShots_;
+  std::vector<ActiveGrenade> activeGrenades_;  // Simulator only; empty on a follower.
+  std::vector<GameSnapshot::Grenade> grenadeViews_;  // What Grenades() returns.
+  std::vector<Explosion> explosions_;
   // Rounds left in each figure's magazine for reaction fire this round.
   std::map<int, int> reactionAmmo_;
   // When each figure's reaction burst may next fire: a dropped burst (target

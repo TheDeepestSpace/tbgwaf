@@ -94,6 +94,10 @@ struct PaneOverlays {
   // placed-but-unconfirmed "+" selector.
   const tactics::Unit* aimShooter = nullptr;
   std::optional<glm::vec3> aimMarker;
+  // Throw planning: predicted arc/landing/blast for the placed point, else
+  // the hovered one (when within range). Planned throws of the pane's own
+  // team are drawn from their plan.
+  std::optional<tactics::ThrowPreview> throwPreview;
   // Where the preview cone points: the placed marker, else the hovered
   // point, so it never sticks to the facing left by an earlier round's shot.
   std::optional<glm::vec3> aimConeTarget;

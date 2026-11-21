@@ -1,0 +1,37 @@
+name: grenade_blast_cover
+description: >
+  Grenade execution (issue #349): a committed throw flies, detonates at its fixed fuse within
+  the round, and the blast kills the figure standing in the radius while sparing the one the
+  cover wall blocks from the blast centre. With friendly fire off, the thrower's teammate
+  beside the blast is spared too. Walls and terrain are untouched by the blast.
+
+map:
+  half_extent: 40
+  obstacles:
+    # Cover wall between the blast spot (~[19.5, 0]) and the covered figure at [19.5, 3.5].
+    - {center: [19.5, 1.8], half_extent: [2.0, 0.3], height: 2.5}
+
+friendly_fire: false
+
+units:
+  - {id: 0, team: blue, position: [0, 0, 0], facing_degrees: 180}
+  - {id: 1, team: red, position: [18, 0, 0], facing_degrees: 0}    # Exposed, in the blast.
+  - {id: 2, team: red, position: [19.5, 0, 3.5], facing_degrees: 0}  # Behind the wall.
+  - {id: 3, team: blue, position: [17, 0, -1], facing_degrees: 180}  # Teammate beside it.
+
+script:
+  - action: throw
+    actor: 0
+    at: [18, 0, 0]
+  - action: pass
+    actor: 3
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {unit: 0, alive: true, grenades: 1}
+  - assert: {unit: 1, alive: false}  # In the open inside the radius.
+  - assert: {unit: 2, alive: true}   # The wall blocks the line from the blast centre.
+  - assert: {unit: 3, alive: true}   # Friendly fire off spares the teammate.
+  - assert: {winner: none}

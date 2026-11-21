@@ -23,7 +23,8 @@ struct KindName {
 };
 constexpr KindName kKinds[] = {
     {"move", ActionKind::Move},         {"shoot", ActionKind::Shoot},
-    {"pass", ActionKind::Pass},         {"cancel", ActionKind::Cancel},
+    {"pass", ActionKind::Pass},         {"throw", ActionKind::Throw},
+    {"cancel", ActionKind::Cancel},
     {"focus", ActionKind::Focus},       {"reaction", ActionKind::Reaction},
     {"commit", ActionKind::Commit},     {"new_match", ActionKind::NewMatch},
 };
@@ -131,6 +132,12 @@ bool ParseAction(const Json& m, Action* out, std::string* error) {
         a.shots = static_cast<int>(std::clamp(m["shots"].AsNumber(), 1.0, 1000.0));
       }
       break;
+    case ActionKind::Throw: {
+      glm::vec3 p;
+      if (!m.Has("aim") || !DecodeVec3(m["aim"], &p)) return Fail("bad aim point");
+      a.aimPoint = p;
+      break;
+    }
     case ActionKind::Move: {
       if (!m["waypoints"].IsArray()) return Fail("missing waypoints");
       const auto& pts = m["waypoints"].AsArray();
@@ -172,6 +179,7 @@ Json EncodeAction(const Action& a) {
     }
     if (a.shots != 1) j.Set("shots", a.shots);
   }
+  if (a.kind == ActionKind::Throw && a.aimPoint) j.Set("aim", EncodeVec3(*a.aimPoint));
   if (a.kind == ActionKind::Move) {
     Json pts{Json::Array{}};
     for (const auto& w : a.waypoints) pts.Push(EncodeVec3(w));
@@ -219,6 +227,7 @@ const char* PlanName(PlannedActionType type) {
     case PlannedActionType::Move: return "move";
     case PlannedActionType::Shoot: return "shoot";
     case PlannedActionType::Pass: return "pass";
+    case PlannedActionType::Throw: return "throw";
     case PlannedActionType::None: break;
   }
   return "none";
@@ -228,6 +237,7 @@ std::optional<PlannedActionType> ParsePlanName(const std::string& name) {
   if (name == "move") return PlannedActionType::Move;
   if (name == "shoot") return PlannedActionType::Shoot;
   if (name == "pass") return PlannedActionType::Pass;
+  if (name == "throw") return PlannedActionType::Throw;
   if (name == "none") return PlannedActionType::None;
   return std::nullopt;
 }

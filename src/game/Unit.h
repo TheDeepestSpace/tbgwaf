@@ -15,7 +15,7 @@ namespace tactics {
 // figure *will* do -- nothing executes until the whole round is committed
 // (see GameLogic::CommitRound), at which point every plan on both teams
 // plays out together.
-enum class PlannedActionType { None, Move, Shoot, Pass };
+enum class PlannedActionType { None, Move, Shoot, Pass, Throw };
 
 // A traverse step inside a move path: the segment path[segment] ->
 // path[segment + 1] is a ride on scene.ziplines[zipline] rather than a walk.
@@ -48,6 +48,7 @@ struct PlannedAction {
   // wherever a plan is recorded or imported. Default 1 keeps every
   // pre-burst scenario/golden unchanged.
   int shots = 1;
+  // type == Throw reuses hasAimPoint/aimPoint as the grenade's landing point.
 };
 
 // What a figure does, on its own, on a tick where at least one living enemy
@@ -155,12 +156,17 @@ struct Unit {
   // the flag up (<0 = none) for the visual reach beat.
   bool carryingFlag = false;
   float grabElapsed = -1.0f;
+  // Seconds since this figure began throwing a grenade (<0 = none); visual only.
+  float throwElapsed = -1.0f;
   float runSpeed = constants::kMoveSpeed;  // World units per second while moving.
   // Loadout (issue #126): the model in the figure's hands and the carry/aim
   // animation class; since issue #138 also the magazine/fire-interval cap on
   // one shooting action's burst (see WeaponStats). Creation sites assign
   // DefaultWeaponForUnit(id) once the id is known.
   WeaponType weapon = WeaponType::AssaultRifle;
+  // Grenade supply (Throw action): a Throw can only be planned while > 0;
+  // committing a round with a Throw plan spends one (issue #349).
+  int grenades = constants::kStartingGrenades;
   PlannedAction plan;  // This figure's plan for the current/upcoming round commit.
 
   // How far this figure can move in one round's fixed execution window --

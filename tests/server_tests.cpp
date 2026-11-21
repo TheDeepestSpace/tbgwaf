@@ -244,6 +244,65 @@ void TestSessionFogHidesEnemyPlansAndUnits() {
   }
 }
 
+// Grenades on the wire (issue #349): round frames list in-flight grenades
+// ("g"), fog-filtered -- the thrower's team and the spectator see them, a
+// team with the grenade outside its FOV does not -- and the round message
+// carries the detonations ("explosions", unfiltered) for everyone.
+void TestRoundCarriesGrenadesAndExplosions() {
+  Scene scene;
+  scene.mapHalfExtent = 40.0f;
+  Unit thrower;
+  thrower.id = 0;
+  thrower.team = Team::Blue;
+  thrower.position = glm::vec3(0.0f);
+  Unit red;
+  red.id = 1;
+  red.team = Team::Red;
+  red.position = glm::vec3(30.0f, 0.0f, 10.0f);
+  red.facingYaw = 0.0f;  // Faces +x, away from the whole flight path.
+  scene.units = {thrower, red};
+  server::GameSession s(scene);
+
+  Action toss = Plan(ActionKind::Throw, 0);
+  toss.aimPoint = glm::vec3(15.0f, 0.0f, 0.0f);
+  CHECK(s.Apply(Team::Blue, toss).ok);
+  CHECK(s.Apply(Team::Red, Plan(ActionKind::Pass, 1)).ok);
+  Action commit;
+  commit.kind = ActionKind::Commit;
+  CHECK(s.Apply(Team::Blue, commit).ok);
+  CHECK(s.Apply(Team::Red, commit).ok);
+  const auto round = s.RunRound();
+
+  CHECK(s.game().FindUnit(0)->grenades == constants::kStartingGrenades - 1);
+  const auto grenadeFrames = [](const Json& msg) {
+    int frames = 0;
+    for (const Json& f : msg["frames"].AsArray()) {
+      if (!f.Has("g")) continue;
+      ++frames;
+      for (const Json& g : f["g"].AsArray()) {
+        CHECK(g.AsArray().size() == 4);
+        CHECK(static_cast<int>(g.AsArray()[0].AsNumber()) == 0);  // Thrower id.
+      }
+    }
+    return frames;
+  };
+  CHECK(grenadeFrames(round[0]) > 0);   // The thrower's team always sees its grenade.
+  CHECK(grenadeFrames(round[1]) == 0);  // Fog: never inside Red's FOV.
+  CHECK(grenadeFrames(round[2]) > 0);   // Spectator: unfiltered.
+  for (int ti = 0; ti < 3; ++ti) {
+    const auto& explosions = round[ti]["explosions"].AsArray();
+    CHECK(explosions.size() == 1);
+    const Json& x = explosions[0];
+    CHECK(std::fabs(x["t"].AsNumber() - constants::kGrenadeFuseSeconds) < 0.011);
+    CHECK(std::fabs(x["radius"].AsNumber() - constants::kGrenadeBlastRadius) < 1e-6);
+    CHECK(x["pos"].AsArray().size() == 3);
+    const double px = x["pos"].AsArray()[0].AsNumber();
+    CHECK(px > 13.0 && px < 19.0);  // Settled near the aim point.
+    CHECK(x["seed"].AsNumber() > 0.0);
+  }
+  CHECK(s.game().FindUnit(1)->alive);  // 15+ units from the blast.
+}
+
 // In-memory transport for the lobby.
 struct Wire {
   std::map<int, std::deque<std::string>> inbox;
@@ -1507,6 +1566,7 @@ int main(int argc, char** argv) {
       TBG_TEST(TestSessionSpawnsAtOppositeCorners),
       TBG_TEST(TestSessionReadyAndRound),
       TBG_TEST(TestSessionFogHidesEnemyPlansAndUnits),
+      TBG_TEST(TestRoundCarriesGrenadesAndExplosions),
       TBG_TEST(TestSceneStore),
       TBG_TEST(TestLobbySceneStorage),
       TBG_TEST(TestLobbyPairing),

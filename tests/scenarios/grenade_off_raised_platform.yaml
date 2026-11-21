@@ -1,0 +1,32 @@
+name: grenade_off_raised_platform
+description: >
+  Grenade from a raised platform: blue stands on a 3-high platform and lobs a grenade down at
+  a red figure on the ground. The flight starts from the platform height, so it reaches the
+  target at the usual pace and detonates on the ground there, killing the figure at the aim
+  point. A red figure behind the platform is out of the blast.
+
+map:
+  half_extent: 40
+  obstacles:
+    - {center: [0, 0], half_extent: [2.0, 2.0], height: 3.0, roof_slab: true}
+
+friendly_fire: false
+
+units:
+  - {id: 0, team: blue, position: [0, 3.05, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [14, 0, 0], facing_degrees: 180}
+  - {id: 2, team: red, position: [-10, 0, 0], facing_degrees: 0}
+
+script:
+  - action: throw
+    actor: 0
+    at: [14, 0, 0]
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {unit: 0, alive: true, grenades: 1}
+  - assert: {unit: 1, alive: false}
+  - assert: {unit: 2, alive: true}
+  - assert: {winner: none}

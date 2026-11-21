@@ -172,6 +172,9 @@ void GameLogic::Reset(Scene scene) {
   InitFlag();
   activeMoves_.clear();
   pendingShots_.clear();
+  activeGrenades_.clear();
+  grenadeViews_.clear();
+  explosions_.clear();
   mirroredMoving_.clear();
   aimPreview_.reset();
   lockPreviewId_.reset();
@@ -428,10 +431,14 @@ GameSnapshot GameLogic::ExportState() const {
     u.rideLength = unit.rideLength;
     u.rideSlope = unit.rideSlope;
     u.grabElapsed = unit.grabElapsed;
+    u.throwElapsed = unit.throwElapsed;
     u.moving = IsUnitMoving(unit.id);
+    u.grenades = unit.grenades;
     snap.units.push_back(std::move(u));
   }
   snap.tracers = tracers_;
+  snap.grenades = grenadeViews_;
+  snap.explosions = explosions_;
   snap.playbooks[0] = playbooks_[0];
   snap.playbooks[1] = playbooks_[1];
   snap.mode = mode_;
@@ -559,6 +566,11 @@ void ApplyPlan(const GameSnapshot::UnitState& u, Unit* unit) {
   unit->plan.moveRides = u.planRides;
   unit->plan.queuedLegRides = u.planQueuedLegRides;
   unit->plan.endFacingYaw = u.planEndFacingYaw;
+  // A peer can never ship a throw the thrower could not have planned itself.
+  if (unit->plan.type == PlannedActionType::Throw &&
+      (!unit->plan.hasAimPoint || !CanThrowAt(*unit, unit->plan.aimPoint))) {
+    unit->plan = PlannedAction{};
+  }
 }
 
 }  // namespace
@@ -609,6 +621,8 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     unit->rideLength = u.rideLength;
     unit->rideSlope = u.rideSlope;
     unit->grabElapsed = u.grabElapsed;
+    unit->throwElapsed = u.throwElapsed;
+    unit->grenades = u.grenades;
     ApplyPlan(u, unit);
     if (u.moving) mirroredMoving_.push_back(u.id);
   }
@@ -639,6 +653,11 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   executionElapsed_ = snap.executionElapsed;
   if (newGame) ResetSightingMemory();
   tracers_ = snap.tracers;
+  // A follower mirrors grenade positions/explosions rather than re-simulating
+  // the flights (it has none of its own).
+  grenadeViews_ = snap.grenades;
+  explosions_ = snap.explosions;
+  activeGrenades_.clear();
   flag_ = snap.flag;
   for (Unit& unit : scene_.units) unit.carryingFlag = flag_.enabled && unit.id == flag_.carrierId;
   if (snap.winner >= 0) {
@@ -687,7 +706,7 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
         << u.knockdownElapsed << ' ' << u.walkPhase << ' ' << u.walkBlend << ' '
         << u.idleElapsed << ' ' << u.shootElapsed << ' ' << u.shootAimYaw << ' '
         << u.rideTravel << ' ' << u.rideLength << ' ' << u.rideSlope << ' '
-        << u.grabElapsed << ' ' << u.turnLag << ' ' << (u.moving ? 1 : 0) << ' '
+        << u.grabElapsed << ' ' << u.throwElapsed << ' ' << u.turnLag << ' ' << (u.moving ? 1 : 0) << ' '
         << u.planPath.size();
     for (const auto& p : u.planPath) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
     out << ' ' << u.planQueuedLegs.size();
@@ -725,6 +744,28 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
     out << ' ' << snap.world.size();
     for (const WorldChange& c : snap.world) WriteWorldChange(out, c);
   }
+  // Grenades/explosions likewise only add tokens while any exist (issue
+  // #349): frames without them serialize exactly as before. The tags keep
+  // the two optional blocks apart from the world count and each other.
+  size_t spentSupply = 0;
+  for (const auto& u : snap.units) spentSupply += u.grenades != constants::kStartingGrenades;
+  if (!snap.grenades.empty() || !snap.explosions.empty() || spentSupply > 0) {
+    out << " g " << snap.grenades.size();
+    for (const GameSnapshot::Grenade& g : snap.grenades) {
+      out << ' ' << g.thrower << ' ' << static_cast<int>(g.team) << ' ' << g.position.x << ' '
+          << g.position.y << ' ' << g.position.z;
+    }
+    out << " x " << snap.explosions.size();
+    for (const Explosion& x : snap.explosions) {
+      out << ' ' << static_cast<int>(x.team) << ' ' << x.position.x << ' ' << x.position.y << ' '
+          << x.position.z << ' ' << x.radius << ' ' << x.at << ' ' << x.seed << ' ' << x.age;
+    }
+    // Grenade supply, only where spent (id, remaining).
+    out << " s " << spentSupply;
+    for (const auto& u : snap.units) {
+      if (u.grenades != constants::kStartingGrenades) out << ' ' << u.id << ' ' << u.grenades;
+    }
+  }
   return out.str();
 }
 
@@ -748,11 +789,11 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
           u.planAimPoint.z >> u.planShots >> u.planEndFacingYaw >> u.knockdownAxis.x >>
           u.knockdownAxis.y >> u.knockdownAxis.z >> u.knockdownElapsed >> u.walkPhase >>
           u.walkBlend >> u.idleElapsed >> u.shootElapsed >> u.shootAimYaw >> u.rideTravel >> u.rideLength >>
-          u.rideSlope >> u.grabElapsed >> u.turnLag >> moving >>
+          u.rideSlope >> u.grabElapsed >> u.throwElapsed >> u.turnLag >> moving >>
           pathCount)) {
       return false;
     }
-    if (plan < 0 || plan > static_cast<int>(PlannedActionType::Pass)) return false;
+    if (plan < 0 || plan > static_cast<int>(PlannedActionType::Throw)) return false;
     if (u.planShots < 1 || u.planShots > static_cast<int>(kMaxEntries)) return false;
     if (pathCount > kMaxEntries) return false;
     u.planType = static_cast<PlannedActionType>(plan);
@@ -829,12 +870,65 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
   bool carrierKnown = snap.flag.carrierId < 0;
   for (const auto& u : snap.units) carrierKnown |= u.id == snap.flag.carrierId;
   if (!carrierKnown) return false;
-  size_t worldCount = 0;
-  if (in >> worldCount) {  // Optional trailing world-change log.
-    if (worldCount > kMaxEntries) return false;
-    snap.world.resize(worldCount);
-    for (WorldChange& c : snap.world) {
-      if (!ReadWorldChange(in, &c)) return false;
+  // Optional trailing blocks: the world-change log (a bare count), then
+  // tagged grenade ("g") and explosion ("x") lists (issue #349).
+  std::string tag;
+  if (in >> tag) {
+    const auto isCount = [](const std::string& s) {
+      if (s.empty()) return false;
+      for (const char c : s) {
+        if (c < '0' || c > '9') return false;
+      }
+      return true;
+    };
+    if (isCount(tag)) {
+      const size_t worldCount = std::stoull(tag);
+      if (worldCount > kMaxEntries) return false;
+      snap.world.resize(worldCount);
+      for (WorldChange& c : snap.world) {
+        if (!ReadWorldChange(in, &c)) return false;
+      }
+      if (!(in >> tag)) tag.clear();
+    }
+    if (tag == "g") {
+      size_t count = 0;
+      if (!(in >> count) || count > kMaxEntries) return false;
+      snap.grenades.resize(count);
+      for (GameSnapshot::Grenade& g : snap.grenades) {
+        int team = 0;
+        if (!(in >> g.thrower >> team >> g.position.x >> g.position.y >> g.position.z) ||
+            team < 0 || team > 1) {
+          return false;
+        }
+        g.team = static_cast<Team>(team);
+      }
+      if (!(in >> tag)) tag.clear();
+    }
+    if (tag == "x") {
+      size_t count = 0;
+      if (!(in >> count) || count > kMaxEntries) return false;
+      snap.explosions.resize(count);
+      for (Explosion& x : snap.explosions) {
+        int team = 0;
+        if (!(in >> team >> x.position.x >> x.position.y >> x.position.z >> x.radius >> x.at >>
+              x.seed >> x.age) ||
+            team < 0 || team > 1) {
+          return false;
+        }
+        x.team = static_cast<Team>(team);
+      }
+      if (!(in >> tag)) tag.clear();
+    }
+    if (tag == "s") {
+      size_t count = 0;
+      if (!(in >> count) || count > kMaxEntries) return false;
+      for (size_t i = 0; i < count; ++i) {
+        int id = 0, grenades = 0;
+        if (!(in >> id >> grenades) || grenades < 0) return false;
+        for (auto& u : snap.units) {
+          if (u.id == id) u.grenades = grenades;
+        }
+      }
     }
   }
   *outSnap = std::move(snap);
@@ -1102,6 +1196,10 @@ void GameLogic::UpdateUnrecorded(float dtSeconds) {
       unit.shootElapsed += dtSeconds;
       if (unit.shootElapsed >= constants::kShootAnimDuration) unit.shootElapsed = -1.0f;
     }
+    if (unit.throwElapsed >= 0.0f && !falling) {
+      unit.throwElapsed += dtSeconds;
+      if (unit.throwElapsed >= constants::kThrowAnimDuration) unit.throwElapsed = -1.0f;
+    }
     if (unit.grabElapsed >= 0.0f && !falling) {
       unit.grabElapsed += dtSeconds;
       if (unit.grabElapsed >= constants::kGrabAnimDuration) unit.grabElapsed = -1.0f;
@@ -1113,6 +1211,9 @@ void GameLogic::UpdateUnrecorded(float dtSeconds) {
   SyncFlag();  // Also catches a carrier felled outside a round (direct ResolveShot).
 
   for (Tracer& tracer : tracers_) tracer.age = std::min(tracer.age + dtSeconds, 60.0f);
+  for (Explosion& explosion : explosions_) {
+    explosion.age = std::min(explosion.age + dtSeconds, 60.0f);
+  }
 
   if (mode_ == InputMode::Executing) AdvanceExecutingRound(dtSeconds);
 
@@ -1256,6 +1357,16 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
   // tick, held shots get their per-tick FOV/LOS re-check -- this is what
   // lets a shooter hit a target that only walks into its cone mid-round.
   ResolvePendingShots();
+
+  // Grenades: each flight was fixed at commit; a grenade detonates on the
+  // first tick the execution clock passes its fuse, killing at this tick's
+  // figure positions (so the 30 Hz server/scenario step is deterministic).
+  for (ActiveGrenade& grenade : activeGrenades_) {
+    if (grenade.exploded || executionElapsed_ < grenade.flight.fuse) continue;
+    grenade.exploded = true;
+    DetonateGrenade(grenade);
+  }
+  RefreshGrenadeViews();
   SyncFlag();
 
   // Every mover advances together above; drop whichever ones just finished
@@ -1696,6 +1807,125 @@ void GameLogic::ChoosePass() {
   mode_ = InputMode::AwaitingSelection;
 }
 
+void GameLogic::ChooseThrow() {
+  RecordScope record(this, InputEvent{InputEvent::Op::ChooseThrow});
+  if (mode_ != InputMode::ActionMenu) return;
+  const Unit* unit = FindUnit(selectedUnitId_.value_or(-1));
+  if (!unit || unit->grenades <= 0) return;  // No supply: nothing to plan.
+  ClearQueuedLegs(selectedUnitId_);
+  aimPreview_.reset();
+  lockPreviewId_.reset();
+  mode_ = InputMode::AwaitingThrowTarget;
+}
+
+std::optional<ThrowPreview> GameLogic::PreviewThrow(const glm::vec3& point) const {
+  const Unit* thrower = FindUnit(selectedUnitId_.value_or(-1));
+  if (!thrower || !CanThrowAt(*thrower, point)) return std::nullopt;
+  return PredictThrowFor(*thrower, point);
+}
+
+ThrowPreview GameLogic::PredictThrowFor(const Unit& thrower, const glm::vec3& point) const {
+  return SimulateThrow(thrower, point, sightObstacles_, scene_.walkSurfaces, scene_.ground);
+}
+
+bool GameLogic::GrenadePointVisibleTo(Team team, const glm::vec3& position) const {
+  return IsPointVisibleToTeam(team, position, scene_.units, sightObstacles_,
+                              scene_.walkSurfaces, scene_.ground);
+}
+
+void GameLogic::RefreshGrenadeViews() {
+  grenadeViews_.clear();
+  for (const ActiveGrenade& grenade : activeGrenades_) {
+    if (grenade.exploded) continue;
+    GameSnapshot::Grenade view;
+    view.thrower = grenade.throwerId;
+    view.team = grenade.team;
+    view.position = ThrowPositionAt(grenade.flight, executionElapsed_);
+    grenadeViews_.push_back(view);
+  }
+}
+
+void GameLogic::DetonateGrenade(const ActiveGrenade& grenade) {
+  Explosion explosion;
+  explosion.team = grenade.team;
+  explosion.position = grenade.flight.landing;
+  explosion.radius = grenade.flight.blastRadius;
+  // Stamped with the fixed fuse, not the tick that crossed it, so the wire
+  // timing is identical however the frame loop slices the round.
+  explosion.at = grenade.flight.fuse;
+  explosion.seed = static_cast<uint32_t>(roundNumber_) * 0x9e3779b9u ^
+                   static_cast<uint32_t>(grenade.throwerId + 1);
+  explosions_.push_back(explosion);
+  if (recorder_.ptr) {
+    char buf[160];
+    std::snprintf(buf, sizeof buf, "explosion pos=(%.4f,%.4f,%.4f) r=%.2f exec=%.4f round=%d",
+                  explosion.position.x, explosion.position.y, explosion.position.z,
+                  explosion.radius, executionElapsed_, roundNumber_);
+    LogSim(buf);
+  }
+
+  // Blast resolution: every figure whose torso is inside the radius dies,
+  // unless cover blocks the line from the (slightly lifted) blast centre to
+  // the torso; with friendly fire off the thrower's team is spared entirely.
+  const glm::vec3 centre =
+      explosion.position + glm::vec3(0.0f, constants::kGrenadeBlastLift, 0.0f);
+  for (Unit& unit : scene_.units) {
+    if (!unit.alive) continue;
+    if (!friendlyFire_ && unit.team == grenade.team) continue;
+    const glm::vec3 torso = unit.position + glm::vec3(0.0f, constants::kTorsoAimHeight, 0.0f);
+    if (glm::distance(torso, explosion.position) > explosion.radius) continue;
+    if (!LineOfSightClear(centre, torso, sightObstacles_, scene_.walkSurfaces, scene_.ground)) {
+      continue;
+    }
+    // Like a connecting blind shot, a blast kill reveals the victim to the
+    // thrower's side (recorded before the kill so the ghost survives it).
+    if (unit.team != grenade.team) RecordFirstSight(grenade.team, unit);
+    glm::vec3 dir = unit.position - explosion.position;
+    dir.y = 0.0f;
+    if (glm::length(dir) < 1e-4f) {
+      dir = unit.FacingDirection();
+    } else {
+      dir = glm::normalize(dir);
+    }
+    if (recorder_.ptr) {
+      char buf[96];
+      std::snprintf(buf, sizeof buf, "blast kill unit=%d exec=%.4f round=%d", unit.id,
+                    executionElapsed_, roundNumber_);
+      LogSim(buf);
+    }
+    KnockDown(unit, dir);
+  }
+}
+
+void GameLogic::PlaceThrowPoint(const glm::vec3& point, Team byTeam) {
+  InputEvent e{InputEvent::Op::PlaceThrowPoint};
+  e.point = point;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
+  if (mode_ != InputMode::AwaitingThrowTarget) return;
+  const Unit* thrower = FindUnit(selectedUnitId_.value_or(-1));
+  if (!thrower || thrower->team != byTeam) return;
+  if (!CanThrowAt(*thrower, point)) return;  // Out of range / no supply: ignored.
+  aimPreview_ = AimPreview{point};
+}
+
+void GameLogic::ConfirmThrow(Team byTeam) {
+  InputEvent e{InputEvent::Op::ConfirmThrow};
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
+  if (mode_ != InputMode::AwaitingThrowTarget || !aimPreview_) return;
+  Unit* thrower = FindUnit(selectedUnitId_.value_or(-1));
+  if (!thrower || thrower->team != byTeam) return;
+  if (!CanThrowAt(*thrower, aimPreview_->point)) return;
+  thrower->plan = PlannedAction{};
+  thrower->plan.type = PlannedActionType::Throw;
+  thrower->plan.hasAimPoint = true;
+  thrower->plan.aimPoint = aimPreview_->point;
+  aimPreview_.reset();
+  selectedUnitId_.reset();
+  mode_ = InputMode::AwaitingSelection;
+}
+
 void GameLogic::CancelAction() {
   RecordScope record(this, InputEvent{InputEvent::Op::CancelAction});
   if (mode_ == InputMode::AwaitingMoveDestination) {
@@ -1704,7 +1934,8 @@ void GameLogic::CancelAction() {
       if (unit->plan.type == PlannedActionType::Move) unit->plan = PlannedAction{};
     }
   }
-  if (mode_ == InputMode::AwaitingMoveDestination || mode_ == InputMode::AwaitingShootTarget) {
+  if (mode_ == InputMode::AwaitingMoveDestination || mode_ == InputMode::AwaitingShootTarget ||
+      mode_ == InputMode::AwaitingThrowTarget) {
     mode_ = InputMode::ActionMenu;
     ClearMoveOverlays();
     aimPreview_.reset();
@@ -1982,6 +2213,23 @@ void GameLogic::ClickAimRay(const glm::vec3& origin, const glm::vec3& direction,
     return;
   }
   if (aim.kind == AimRayResult::Kind::Surface) PlaceAimPoint(aim.point, byTeam);
+}
+
+void GameLogic::ClickThrowRay(const glm::vec3& origin, const glm::vec3& direction, Team byTeam) {
+  InputEvent e{InputEvent::Op::ClickThrowRay};
+  e.point = origin;
+  e.direction = direction;
+  e.team = byTeam;
+  RecordScope record(this, std::move(e));
+  if (mode_ != InputMode::AwaitingThrowTarget) return;
+  const Unit* thrower = FindUnit(selectedUnitId_.value_or(-1));
+  if (!thrower || thrower->team != byTeam) return;
+  const float len = glm::length(direction);
+  if (len < 1e-6f) return;
+  glm::vec3 surface;
+  if (IntersectAimSurface(origin, direction / len, scene_, sightObstacles_, &surface)) {
+    PlaceThrowPoint(surface, byTeam);
+  }
 }
 
 void GameLogic::PlaceAimPoint(const glm::vec3& point, Team byTeam) {
@@ -2463,6 +2711,9 @@ void GameLogic::CommitRound() {
 
   activeMoves_.clear();
   pendingShots_.clear();
+  activeGrenades_.clear();
+  grenadeViews_.clear();
+  explosions_.clear();
   for (auto& unit : scene_.units) {
     if (!unit.alive) continue;
     const PlannedAction plan = unit.plan;
@@ -2480,6 +2731,29 @@ void GameLogic::CommitRound() {
     } else if (plan.type == PlannedActionType::Shoot) {
       pendingShots_.push_back(
           PendingShot{unit.id, plan.shootTargetId, plan.hasAimPoint, plan.aimPoint, plan.shots});
+    } else if (plan.type == PlannedActionType::Throw && plan.hasAimPoint && unit.grenades > 0) {
+      // The whole flight is fixed now (issue #349): SimulateThrow against the
+      // committed geometry, one grenade spent. The thrower turns toward the
+      // aim point (its new standing facing, like a free-aim shot's).
+      --unit.grenades;
+      unit.throwElapsed = 0.0f;
+      const glm::vec3 toAim = plan.aimPoint - unit.position;
+      if (glm::length(glm::vec2(toAim.x, toAim.z)) > 1e-4f) {
+        unit.SetFacingYaw(std::atan2(toAim.z, toAim.x));
+      }
+      ActiveGrenade grenade;
+      grenade.throwerId = unit.id;
+      grenade.team = unit.team;
+      grenade.flight = PredictThrowFor(unit, plan.aimPoint);
+      if (recorder_.ptr) {
+        char buf[160];
+        std::snprintf(buf, sizeof buf,
+                      "throw unit=%d aim=(%.4f,%.4f,%.4f) fuse=%.2f round=%d", unit.id,
+                      plan.aimPoint.x, plan.aimPoint.y, plan.aimPoint.z, grenade.flight.fuse,
+                      roundNumber_);
+        LogSim(buf);
+      }
+      activeGrenades_.push_back(std::move(grenade));
     }
   }
   aimPreview_.reset();
@@ -2487,6 +2761,7 @@ void GameLogic::CommitRound() {
 
   mode_ = InputMode::Executing;
   executionElapsed_ = 0.0f;
+  RefreshGrenadeViews();  // In-flight grenades show from the release point on.
   tracers_.clear();  // Last turn's shot lines and ghosts are gone.
   ClearSightings();
   // Ghosts made by this commit's tick-0 shots must survive the first sighting
@@ -2538,6 +2813,7 @@ void GameLogic::InitFlag() {
   for (Unit& unit : scene_.units) {
     unit.carryingFlag = false;
     unit.grabElapsed = -1.0f;
+    unit.throwElapsed = -1.0f;
   }
   const FlagConfig& config = scene_.flag;
   if (!config.enabled) return;

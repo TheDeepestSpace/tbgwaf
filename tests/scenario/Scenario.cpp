@@ -208,6 +208,11 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     action.expectNoop = node["expect_noop"] && node["expect_noop"].as<bool>();
   } else if (kind == "begin_move") {
     action.kind = ScenarioAction::Kind::BeginMove;
+  } else if (kind == "throw") {
+    action.kind = ScenarioAction::Kind::Throw;
+    if (!node["at"]) throw std::runtime_error("script 'throw' action requires 'at'");
+    action.shootAt = ParseVec3(node["at"], "script[].at");
+    action.expectNoop = node["expect_noop"] && node["expect_noop"].as<bool>();
   } else if (kind == "pass") {
     action.kind = ScenarioAction::Kind::Pass;
   } else if (kind == "cancel") {
@@ -217,7 +222,7 @@ ScenarioAction ParseAction(const YAML::Node& node) {
   } else {
     throw std::runtime_error(
         "unknown script action '" + kind +
-        "' (expected move/begin_move/shoot/aim/pass/cancel/focus/commit/new_game/"
+        "' (expected move/begin_move/shoot/aim/pass/throw/cancel/focus/commit/new_game/"
         "timeline_seek/timeline_play/timeline_pause)");
   }
   return action;
@@ -227,6 +232,7 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   ScenarioAssertion assertion;
   if (node["unit"]) assertion.unit = node["unit"].as<int>();
   if (node["alive"]) assertion.alive = node["alive"].as<bool>();
+  if (node["grenades"]) assertion.grenades = node["grenades"].as<int>();
   if (node["position"]) assertion.position = ParseVec3(node["position"], "assert.position");
   if (node["facing_degrees"]) assertion.facingDegrees = node["facing_degrees"].as<float>();
   if (node["tolerance"]) assertion.tolerance = node["tolerance"].as<float>();
@@ -268,10 +274,10 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
     assertion.expectedWinner = raw == "none" ? std::optional<Team>() : ParseTeam(raw, "assert.winner");
   }
 
-  if ((assertion.alive || assertion.position || assertion.facingDegrees ||
+  if ((assertion.alive || assertion.grenades || assertion.position || assertion.facingDegrees ||
        assertion.visible || assertion.remembered || assertion.ghostAlpha) && !assertion.unit) {
     throw std::runtime_error(
-        "assert checking alive/position/facing_degrees/visible/remembered/ghost_alpha requires 'unit'");
+        "assert checking alive/grenades/position/facing_degrees/visible/remembered/ghost_alpha requires 'unit'");
   }
   if ((assertion.remembered || assertion.ghostAlpha) && !assertion.rememberedByTeam) {
     throw std::runtime_error("assert 'remembered'/'ghost_alpha' require 'remembered_by'");
@@ -589,6 +595,27 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
       }
       return true;
     }
+    case ScenarioAction::Kind::Throw: {
+      NotifyMenuClick(actorTeam, "Throw");
+      game.ChooseThrow();
+      if (game.Mode() == InputMode::AwaitingThrowTarget) {
+        NotifyClick(actorTeam, *action.shootAt);
+        game.PlaceThrowPoint(*action.shootAt, actorTeam);
+        if (game.GetAimPreview()) {
+          NotifyMenuClick(actorTeam, "Throw");
+          game.ConfirmThrow(actorTeam);
+        }
+      }
+      const bool planned = game.Mode() == InputMode::AwaitingSelection;
+      if (action.expectNoop) {
+        if (planned) return Fail("throw was expected to be rejected, but it was planned");
+        NotifyMenuClick(actorTeam, "Cancel");
+        while (game.Mode() != InputMode::AwaitingSelection) game.CancelAction();
+        return true;
+      }
+      if (!planned) return Fail("throw could not be planned (out of range, or no grenades?)");
+      return true;
+    }
     case ScenarioAction::Kind::Pass:
       NotifyMenuClick(actorTeam, "Pass");
       game.ChoosePass();
@@ -624,6 +651,10 @@ void CheckAssertionImpl(const GameLogic& game, const ScenarioAssertion& a, int s
       if (a.alive && unit->alive != *a.alive) {
         Fail("unit " + std::to_string(*a.unit) + " expected alive=" +
              (*a.alive ? "true" : "false") + " but was " + (unit->alive ? "true" : "false"));
+      }
+      if (a.grenades && unit->grenades != *a.grenades) {
+        Fail("unit " + std::to_string(*a.unit) + " expected grenades=" +
+             std::to_string(*a.grenades) + " but has " + std::to_string(unit->grenades));
       }
       if (a.position) {
         const float dist = glm::distance(unit->position, *a.position);

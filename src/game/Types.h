@@ -494,11 +494,46 @@ constexpr bool kFriendlyFireDefault = true;
 // A free-aim trace flies until it hits something, capped at the sight range
 // (chance has long since fallen off by then; there is no hard shot range cap).
 constexpr float kAimTraceRange = kSightRange;
+// Throw action (grenades, issue #349). Planning rules: the aim point must
+// lie within kThrowRange (horizontal distance) of the thrower, and the
+// thrower needs a grenade in its supply (kStartingGrenades at match start;
+// committing a Throw spends one). The flight is a ballistic arc from the
+// hand (kThrowReleaseHeight above the feet) under constant gravity
+// kThrowGravity; the flight time is the 3D distance to the aim point /
+// kThrowFlightSpeed (never under kThrowMinFlightSeconds), so the pace does
+// not depend on the target's height. SimulateThrow steps it at the fixed
+// kSimStepSeconds (30 Hz), bouncing off obstacles/walk surfaces/terrain
+// (restitution kGrenadeRestitution vertically, kGrenadeFriction kept
+// tangentially; slower than kGrenadeRestSpeed on a floor contact = at
+// rest), and the grenade detonates kGrenadeFuseSeconds after release --
+// always within the round window. The blast kills figures whose torso is
+// within kGrenadeBlastRadius of the detonation point unless geometry blocks
+// the line from the blast centre (lifted kGrenadeBlastLift off the surface
+// so the resting grenade doesn't occlude itself on the floor).
+constexpr float kThrowRange = 25.0f;
+constexpr int kStartingGrenades = 2;
+constexpr float kGrenadeBlastRadius = 4.0f;
+constexpr float kThrowReleaseHeight = 1.5f;
+constexpr float kThrowGravity = 20.0f;  // Constant, so pace is independent of target height.
+constexpr float kThrowFlightSpeed = 16.0f;
+constexpr float kThrowMinFlightSeconds = 0.5f;
+constexpr float kGrenadeFuseSeconds = 2.0f;
+constexpr float kGrenadeRadius = 0.12f;
+constexpr float kGrenadeRestitution = 0.4f;
+constexpr float kGrenadeFriction = 0.3f;
+constexpr float kGrenadeRestSpeed = 2.0f;
+constexpr float kGrenadeBlastLift = 0.3f;
+// How long the explosion visual (flash + expanding ring) stays on screen.
+constexpr float kExplosionVisualSeconds = 0.9f;
 // Neutral flag objective (CTF part 1). A living figure whose path touches
 // the flag -- within kFlagGrabRadius in XZ and kFlagGrabHeight vertically
 // (so a deck above/below the flag does not grab it) -- picks it up for free.
 constexpr float kFlagGrabRadius = 0.6f;
 constexpr float kFlagGrabHeight = 1.2f;
+// Grenade throw beat on the thrower: a short wind-up (arm cocked back), then
+// the overarm release at kThrowReleaseTime and a follow-through. Purely visual.
+constexpr float kThrowAnimDuration = 0.8f;
+constexpr float kThrowReleaseTime = 0.3f;
 constexpr float kGrabAnimDuration = 0.6f;  // Visual reach/pickup beat on the grabber.
 constexpr float kFlagDropDuration = 0.8f;  // Visual drop/plant settle of a dropped flag.
 }  // namespace constants

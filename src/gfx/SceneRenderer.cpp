@@ -50,6 +50,13 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
       overlays.invalidHoverHighlight = hoveredGroundPoint;
     }
   }
+  if (game.Mode() == tactics::InputMode::AwaitingThrowTarget) {
+    // No "+" selector for throws: the arc, bounce marks and blast ring show the aim.
+    const auto& preview = game.GetAimPreview();
+    const std::optional<glm::vec3> point =
+        preview ? std::optional<glm::vec3>(preview->point) : hoveredGroundPoint;
+    if (point) overlays.throwPreview = game.PreviewThrow(*point);
+  }
   overlays.showShotCone = game.Mode() == tactics::InputMode::AwaitingShootTarget;
   if (overlays.showShotCone) {
     // Free-aim (issue #129): the aiming figure gets its 360-degree LOS
@@ -1921,6 +1928,7 @@ void DrawSighting(const Shader& shader, LineMesh& lines, const glm::mat4& viewPr
   ghost.shootElapsed = -1.0f;
   ghost.rideTravel = -1.0f;
   ghost.grabElapsed = -1.0f;
+  ghost.throwElapsed = -1.0f;
   if (glm::length(s.moveDirection) > 0.0f) {
     const glm::vec3 d = s.moveDirection;
     const glm::vec3 side(-d.z, 0.0f, d.x);
@@ -4363,6 +4371,20 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
   thermalMaterial(ThermalMaterial::Metal);
   DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
+  // In-flight grenades (issue #349): a solid team-coloured sphere. Fogged like a
+  // figure: an enemy's grenade only shows while inside this pane's FOV.
+  for (const auto& grenade : game.Grenades()) {
+    if (fogActive && grenade.team != team &&
+        !game.GrenadePointVisibleTo(team, grenade.position)) {
+      continue;
+    }
+    const glm::vec4 teamColor = grenade.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
+                                                           : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
+    const glm::mat4 model =
+        glm::translate(glm::mat4(1.0f), grenade.position) *
+        glm::scale(glm::mat4(1.0f), glm::vec3(tactics::constants::kGrenadeRadius));
+    DrawLitModel(litShader_, sphereMesh_, viewProj, lightSpaceMatrix_, model, teamColor);
+  }
 
   if (thermalAo) {
     if (nprActive) {
@@ -5437,6 +5459,32 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         pathLine_.Draw();
       }
     }
+    // Grenade blasts (issue #349): a translucent sphere expanding to the blast radius that
+    // fades out within kExplosionVisualSeconds, plus a brief white-hot spike
+    // at the centre. Blasts are not fogged -- everyone sees/hears one.
+    for (const tactics::Explosion& explosion : game.Explosions()) {
+      const float life = 1.0f - explosion.age / tactics::constants::kExplosionVisualSeconds;
+      if (life <= 0.0f) continue;
+      const float grow = glm::clamp(explosion.age / 0.25f, 0.15f, 1.0f);
+      const float radius = explosion.radius * grow;
+      const glm::vec3 blastColor = explosion.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
+                                                                : glm::vec3(0.9f, 0.25f, 0.22f);
+      // See-through team-coloured sphere (both faces blend, no depth write).
+      unlitShader_.SetMat4(
+          "uMVP", viewProj * glm::translate(glm::mat4(1.0f), explosion.position) *
+                      glm::scale(glm::mat4(1.0f), glm::vec3(radius)));
+      unlitShader_.SetVec4("uColor", glm::vec4(blastColor, 0.45f * life));
+      sphereMesh_.Draw();
+      unlitShader_.SetMat4("uMVP", viewProj);
+      const float flash = glm::clamp(1.0f - explosion.age / 0.3f, 0.0f, 1.0f);
+      if (flash > 0.0f) {
+        pathLine_.SetPoints(
+            {explosion.position,
+             explosion.position + glm::vec3(0.0f, 0.5f + 2.5f * flash, 0.0f)});
+        unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.95f, 0.75f, flash));
+        pathLine_.Draw();
+      }
+    }
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
   }
@@ -5548,6 +5596,27 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawHighlightOnSurface(*overlays.invalidHoverHighlight,
                   glm::vec4(0.9f, 0.15f, 0.15f, 1.0f));
   }
+  // Throw arc + blast radius ring; a ring is a flat polyline at the landing
+  // height, drawn with the same line routine as move paths.
+  const auto drawThrow = [&](const tactics::ThrowPreview& throwPreview, float alpha) {
+    static const std::vector<tactics::PathRide> kNoThrowRides;
+    const glm::vec4 color(pathGreen, alpha);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    drawMovePath(throwPreview.arc, kNoThrowRides, color);
+    std::vector<glm::vec3> ring;
+    constexpr int kRingSegments = 32;
+    for (int i = 0; i <= kRingSegments; ++i) {
+      const float a = 6.2831853f * static_cast<float>(i) / static_cast<float>(kRingSegments);
+      ring.push_back(throwPreview.landing + glm::vec3(std::cos(a), 0.05f, std::sin(a)) *
+                                                glm::vec3(throwPreview.blastRadius, 1.0f,
+                                                          throwPreview.blastRadius));
+    }
+    drawMovePath(ring, kNoThrowRides, color);
+    for (const glm::vec3& b : throwPreview.bounces) DrawHighlightOnSurface(b, color);
+    glDisable(GL_BLEND);
+  };
+  if (overlays.throwPreview) drawThrow(*overlays.throwPreview, 1.0f);
   // Visual feedback for the whole squad's plan so far: a planned move reuses
   // the same path-line rendering as the live preview above; a planned shot
   // gets a simple shooter->target line. Own team only -- the enemy's plans
@@ -5597,6 +5666,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                                 SurfaceNormal(leg.back()));
         }
         glDisable(GL_BLEND);
+      }
+      if (unit.plan.type == tactics::PlannedActionType::Throw && unit.plan.hasAimPoint) {
+        drawThrow(game.PredictThrowFor(unit, unit.plan.aimPoint), 1.0f);
       }
       // Planned locked shots draw no line here: the shot cone aimed at the
       // target's torso (plus the "+" marker) is the whole preview, same as

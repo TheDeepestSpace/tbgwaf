@@ -3594,6 +3594,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     treeKey_ = game.GetScene().trees;
   }
   const auto& obstacles = game.GetScene().obstacles;
+  // World changes append to the log: keep in-flight falls on their original
+  // colliders. A shorter/empty log (new map, rewind) drops them as before.
+  SetRagdollKeepInFlight(!game.WorldLog().empty() && game.WorldLog().size() >= ragdollWorldSeen_);
+  ragdollWorldSeen_ = game.WorldLog().size();
   SetRagdollObstacles(obstacles);
   SetRagdollRails(game.GetScene().massing);
   SetRagdollGround(game.GetScene().walkSurfaces, game.GetScene().ground);

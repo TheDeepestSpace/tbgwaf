@@ -318,6 +318,7 @@ class SceneRenderer {
   LitTriangleMesh obstacleMesh_;        // Drawn prisms, recessed openings cut out.
   LitTriangleMesh obstacleCasterMesh_;  // The same, solid, for the shadow map.
   unsigned long long obstacleKey_ = 0;
+  size_t ragdollWorldSeen_ = 0;  // World-log size at the last pane render.
   std::vector<int> surfaceBuilding_;  // Roof slab -> building, see RoofBuildings.
   unsigned long long surfaceBuildingKey_ = 0;
   // The slot holding `unit`'s depth maps looking along `facingYaw` (for

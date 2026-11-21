@@ -4366,16 +4366,19 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
   thermalMaterial(ThermalMaterial::Metal);
   DrawPlantedFlag(litShader_, cubeMesh_, sphereMesh_, viewProj, lightSpaceMatrix_, game);
-  // In-flight grenades (issue #349): a small dark shell. Fogged like a
+  // In-flight grenades (issue #349): a solid team-coloured sphere. Fogged like a
   // figure: an enemy's grenade only shows while inside this pane's FOV.
   for (const auto& grenade : game.Grenades()) {
     if (fogActive && grenade.team != team &&
         !game.GrenadePointVisibleTo(team, grenade.position)) {
       continue;
     }
-    const glm::vec3 half(tactics::constants::kGrenadeRadius);
-    DrawBoxLit(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, grenade.position - half,
-               half * 2.0f, glm::vec4(0.16f, 0.18f, 0.14f, 1.0f));
+    const glm::vec4 teamColor = grenade.team == Team::Blue ? glm::vec4(0.2f, 0.45f, 0.95f, 1.0f)
+                                                           : glm::vec4(0.9f, 0.25f, 0.22f, 1.0f);
+    const glm::mat4 model =
+        glm::translate(glm::mat4(1.0f), grenade.position) *
+        glm::scale(glm::mat4(1.0f), glm::vec3(tactics::constants::kGrenadeRadius));
+    DrawLitModel(litShader_, sphereMesh_, viewProj, lightSpaceMatrix_, model, teamColor);
   }
 
   if (thermalAo) {
@@ -5451,7 +5454,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         pathLine_.Draw();
       }
     }
-    // Grenade blasts (issue #349): a ring expanding to the blast radius that
+    // Grenade blasts (issue #349): a translucent sphere expanding to the blast radius that
     // fades out within kExplosionVisualSeconds, plus a brief white-hot spike
     // at the centre. Blasts are not fogged -- everyone sees/hears one.
     for (const tactics::Explosion& explosion : game.Explosions()) {
@@ -5459,18 +5462,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       if (life <= 0.0f) continue;
       const float grow = glm::clamp(explosion.age / 0.25f, 0.15f, 1.0f);
       const float radius = explosion.radius * grow;
-      std::vector<glm::vec3> ring;
-      constexpr int kBlastSegments = 40;
-      ring.reserve(kBlastSegments + 1);
-      for (int i = 0; i <= kBlastSegments; ++i) {
-        const float a = 6.2831853f * static_cast<float>(i) / kBlastSegments;
-        ring.push_back(explosion.position +
-                       glm::vec3(std::cos(a) * radius, 0.08f, std::sin(a) * radius));
-      }
-      pathLine_.SetPoints(ring);
+      const glm::vec3 blastColor = explosion.team == Team::Blue ? glm::vec3(0.2f, 0.45f, 0.95f)
+                                                                : glm::vec3(0.9f, 0.25f, 0.22f);
+      // See-through team-coloured sphere (both faces blend, no depth write).
+      unlitShader_.SetMat4(
+          "uMVP", viewProj * glm::translate(glm::mat4(1.0f), explosion.position) *
+                      glm::scale(glm::mat4(1.0f), glm::vec3(radius)));
+      unlitShader_.SetVec4("uColor", glm::vec4(blastColor, 0.45f * life));
+      sphereMesh_.Draw();
       unlitShader_.SetMat4("uMVP", viewProj);
-      unlitShader_.SetVec4("uColor", glm::vec4(1.0f, 0.55f, 0.2f, life));
-      pathLine_.Draw();
       const float flash = glm::clamp(1.0f - explosion.age / 0.3f, 0.0f, 1.0f);
       if (flash > 0.0f) {
         pathLine_.SetPoints(

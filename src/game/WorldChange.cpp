@@ -123,7 +123,9 @@ bool ApplyFloorHole(Scene* scene, const WorldChange& c) {
   if (base.dead || base.vertices.size() < 3) return false;
   const float x0 = std::min(c.rect.x, c.rect.z), x1 = std::max(c.rect.x, c.rect.z);
   const float z0 = std::min(c.rect.y, c.rect.w), z1 = std::max(c.rect.y, c.rect.w);
-  if (x1 - x0 < kMinPieceSide || z1 - z0 < kMinPieceSide) return false;
+  const bool cells = !c.pieces.empty();
+  if (cells && c.pieces.size() > kMaxPieces) return false;
+  if (!cells && (x1 - x0 < kMinPieceSide || z1 - z0 < kMinPieceSide)) return false;
   // Floors only: the piece clipping below keeps each vertex's own height, but
   // a steep ramp/stair cut this way would leave inconsistent seams.
   float yMin = base.vertices.front().y, yMax = yMin;
@@ -136,12 +138,30 @@ bool ApplyFloorHole(Scene* scene, const WorldChange& c) {
   // of the hole, right of it, and the strips before/behind it in between.
   const auto& v = base.vertices;
   std::vector<std::vector<glm::vec3>> pieces;
-  pieces.push_back(ClipPolygon3(v, [&](float x, float) { return x - x0; }));
-  pieces.push_back(ClipPolygon3(v, [&](float x, float) { return x1 - x; }));
-  std::vector<glm::vec3> mid = ClipPolygon3(v, [&](float x, float) { return x0 - x; });
-  mid = ClipPolygon3(mid, [&](float x, float) { return x - x1; });
-  pieces.push_back(ClipPolygon3(mid, [&](float, float z) { return z - z0; }));
-  pieces.push_back(ClipPolygon3(mid, [&](float, float z) { return z1 - z; }));
+  if (cells) {
+    // Fracture cells left standing: the patch clipped to each convex
+    // footprint, so every piece keeps the patch's own heights.
+    for (const Obstacle& cell : c.pieces) {
+      const std::vector<glm::vec2>& f = cell.footprint;
+      if (f.size() < 3) return false;
+      const float winding = PolygonSignedArea(f) < 0.0f ? -1.0f : 1.0f;
+      std::vector<glm::vec3> piece = v;
+      for (size_t i = 0; i < f.size() && piece.size() >= 3; ++i) {
+        const glm::vec2 p = f[i], q = f[(i + 1) % f.size()];
+        piece = ClipPolygon3(piece, [&](float x, float z) {
+          return -winding * ((q.x - p.x) * (z - p.y) - (q.y - p.y) * (x - p.x));
+        });
+      }
+      pieces.push_back(std::move(piece));
+    }
+  } else {
+    pieces.push_back(ClipPolygon3(v, [&](float x, float) { return x - x0; }));
+    pieces.push_back(ClipPolygon3(v, [&](float x, float) { return x1 - x; }));
+    std::vector<glm::vec3> mid = ClipPolygon3(v, [&](float x, float) { return x0 - x; });
+    mid = ClipPolygon3(mid, [&](float x, float) { return x - x1; });
+    pieces.push_back(ClipPolygon3(mid, [&](float, float z) { return z - z0; }));
+    pieces.push_back(ClipPolygon3(mid, [&](float, float z) { return z1 - z; }));
+  }
   float keptArea = 0.0f;
   std::vector<std::vector<glm::vec3>> live;
   for (std::vector<glm::vec3>& piece : pieces) {
@@ -470,14 +490,26 @@ bool ApplyMassingCut(Scene* scene, const WorldChange& c) {
   if (detail.dead || detail.footprint.size() < 3 || detail.y1 <= detail.y0) return false;
   const float x0 = std::min(c.rect.x, c.rect.z), x1 = std::max(c.rect.x, c.rect.z);
   const float z0 = std::min(c.rect.y, c.rect.w), z1 = std::max(c.rect.y, c.rect.w);
-  if (x1 - x0 < kMinPieceSide || z1 - z0 < kMinPieceSide) return false;
   std::vector<std::vector<glm::vec2>> pieces;
   bool wholeInside = true;
   for (const glm::vec2& p : detail.footprint) {
     wholeInside &= p.x >= x0 - 1e-3f && p.x <= x1 + 1e-3f && p.y >= z0 - 1e-3f &&
                    p.y <= z1 + 1e-3f;
   }
-  if (!wholeInside) {
+  if (!c.pieces.empty()) {
+    // Fracture cells left standing (see PlanExplosion): taken as planned,
+    // as long as they really are a smaller part of this detail.
+    if (c.pieces.size() > kMaxPieces || !detail.top.empty()) return false;
+    float keptArea = 0.0f;
+    for (const Obstacle& cell : c.pieces) {
+      if (cell.footprint.size() < 3) return false;
+      keptArea += PolygonArea(cell.footprint);
+      pieces.push_back(cell.footprint);
+    }
+    if (keptArea > PolygonArea(detail.footprint) - 0.01f) return false;
+  } else if (x1 - x0 < kMinPieceSide || z1 - z0 < kMinPieceSide) {
+    return false;
+  } else if (!wholeInside) {
     // Sloped-top details (deck rails) cannot be partially cut.
     if (!detail.top.empty()) return false;
     pieces = ClipConvexAroundRect(detail.footprint, x0, z0, x1, z1);
@@ -510,8 +542,10 @@ bool ApplyDebris(Scene* scene, const WorldChange& c) {
   for (const DebrisFlight& flight : c.flights) {
     if (!(flight.duration >= 0.0f) || !std::isfinite(flight.duration)) return false;
   }
-  for (const Obstacle& piece : c.pieces) {
-    Obstacle p = piece;
+  // Solid chunks are rubble obstacles from here on; litter is only drawn.
+  for (size_t i = 0; i < c.pieces.size(); ++i) {
+    if (!c.flights[i].solid) continue;
+    Obstacle p = c.pieces[i];
     p.dead = false;
     scene->obstacles.push_back(std::move(p));
   }
@@ -688,7 +722,7 @@ void WriteWorldChange(std::ostream& out, const WorldChange& c) {
   out << ' ' << c.flights.size();
   for (const DebrisFlight& f : c.flights) {
     out << ' ' << f.from.x << ' ' << f.from.y << ' ' << f.from.z << ' ' << f.duration << ' '
-        << f.spin << ' ' << f.fromYaw;
+        << f.spin << ' ' << f.fromYaw << ' ' << f.restYaw << ' ' << (f.solid ? 1 : 0);
   }
 }
 
@@ -715,9 +749,12 @@ bool ReadWorldChange(std::istream& in, WorldChange* c) {
   if (!(in >> flightCount) || flightCount > kMaxPieces) return false;
   c->flights.assign(flightCount, DebrisFlight{});
   for (DebrisFlight& f : c->flights) {
-    if (!(in >> f.from.x >> f.from.y >> f.from.z >> f.duration >> f.spin >> f.fromYaw)) {
+    int solid = 1;
+    if (!(in >> f.from.x >> f.from.y >> f.from.z >> f.duration >> f.spin >> f.fromYaw >>
+          f.restYaw >> solid)) {
       return false;
     }
+    f.solid = solid != 0;
   }
   return true;
 }

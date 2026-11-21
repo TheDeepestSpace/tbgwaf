@@ -152,7 +152,9 @@ bool SceneFromSpec(const Json& spec, tactics::Scene* out, std::string* error) {
     if (!DecodeVec2(o["half_extent"], &half)) return Fail(error, "map.obstacles[].half_extent must be a 2-element [x, z] list");
     if (!o["height"].IsNumber()) return Fail(error, "map.obstacles[] requires 'height'");
     Obstacle obstacle;
-    obstacle.bounds = AABB{glm::vec3(center.x - half.x, 0.0f, center.y - half.y),
+    // Optional `base`: lifts the box off the ground (window sills/lintels, floating slabs).
+    const float base = o["base"].IsNumber() ? static_cast<float>(o["base"].AsNumber()) : 0.0f;
+    obstacle.bounds = AABB{glm::vec3(center.x - half.x, base, center.y - half.y),
                            glm::vec3(center.x + half.x, o["height"].AsNumber(), center.y + half.y)};
     scene.obstacles.push_back(obstacle);
     // `ramp: "-x"|"+x"|"-z"|"+z"`: a climbable crate (issue #40): a walkable

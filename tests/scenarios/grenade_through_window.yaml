@@ -1,0 +1,36 @@
+name: grenade_through_window
+description: >
+  Grenade through a window: blue stands inside a building and lobs a grenade out through a
+  window opening (sill below, lintel above, solid wall either side) at a red figure outside.
+  The arc passes cleanly through the opening and the blast kills the figure outside. The
+  second red figure, inside the room's corner behind the wall, is outside the blast radius.
+
+map:
+  half_extent: 40
+  obstacles:
+    # Wall along x = 10 with a window at z in [-1, 1], y in [1.0, 2.2].
+    - {center: [10, -4.5], half_extent: [0.3, 3.5], height: 4.0}   # Left of the window.
+    - {center: [10, 4.5], half_extent: [0.3, 3.5], height: 4.0}    # Right of the window.
+    - {center: [10, 0], half_extent: [0.3, 1.0], height: 1.0}      # Sill.
+    - {center: [10, 0], half_extent: [0.3, 1.0], base: 2.2, height: 4.0}  # Lintel.
+
+friendly_fire: false
+
+units:
+  - {id: 0, team: blue, position: [6, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [16, 0, 0], facing_degrees: 180}   # Outside, at the aim point.
+  - {id: 2, team: red, position: [6, 0, 7], facing_degrees: 180}    # Inside, far from the blast.
+
+script:
+  - action: throw
+    actor: 0
+    at: [16, 0, 0]
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {unit: 0, alive: true, grenades: 1}
+  - assert: {unit: 1, alive: false, comment: The grenade flew out of the window and blew up outside}
+  - assert: {unit: 2, alive: true}
+  - assert: {winner: none}

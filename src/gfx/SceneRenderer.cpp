@@ -12,9 +12,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -647,57 +649,6 @@ void DrawBoxDepth(const Shader& shader, const CubeMesh& cube, const glm::mat4& l
   shader.SetMat4("uLightMVP", lightSpaceMatrix * model);
   cube.Draw();
 }
-
-// --- Debris replay (WorldChangeKind::Debris) ---------------------------------
-
-// Yaw basis: local +X to (cos yaw, 0, sin yaw), the planner's convention for
-// rest footprints and launch yaws.
-glm::mat4 YawMatrix(float yaw) {
-  const float c = std::cos(yaw), s = std::sin(yaw);
-  glm::mat4 m(1.0f);
-  m[0] = glm::vec4(c, 0.0f, s, 0.0f);
-  m[2] = glm::vec4(-s, 0.0f, c, 0.0f);
-  return m;
-}
-
-// Model matrix of one debris chunk `t` seconds after its launch: the
-// closed-form ballistic between the recorded launch point and the rest pose
-// (the same arc the server integrated), tumbling about its long axis so it
-// lands flush; at or past `duration` it sits exactly on its rest obstacle.
-glm::mat4 DebrisModel(const tactics::Obstacle& piece, const tactics::DebrisFlight& flight,
-                      float t) {
-  const glm::vec3 center = piece.bounds.Center();
-  const std::vector<glm::vec2>& fp = piece.footprint;
-  glm::vec3 size(piece.bounds.max - piece.bounds.min);
-  float restYaw = 0.0f;
-  if (fp.size() == 4) {
-    const glm::vec2 e0 = fp[1] - fp[0], e1 = fp[2] - fp[1];
-    size = glm::vec3(glm::length(e0), piece.bounds.max.y - piece.bounds.min.y,
-                     glm::length(e1));
-    restYaw = std::atan2(e0.y, e0.x);
-  }
-  const glm::mat4 centered =
-      glm::scale(glm::mat4(1.0f), size) * glm::translate(glm::mat4(1.0f), glm::vec3(-0.5f));
-  if (!(flight.duration > 1e-3f) || t >= flight.duration) {
-    return glm::translate(glm::mat4(1.0f), center) * YawMatrix(restYaw) * centered;
-  }
-  const float s = std::max(0.0f, t) / flight.duration;
-  constexpr float kGravity = 9.81f;
-  const float vy0 = (center.y - flight.from.y +
-                     0.5f * kGravity * flight.duration * flight.duration) /
-                    flight.duration;
-  glm::vec3 pos(glm::mix(flight.from.x, center.x, s),
-                flight.from.y + vy0 * t - 0.5f * kGravity * t * t,
-                glm::mix(flight.from.z, center.z, s));
-  float dYaw = restYaw - flight.fromYaw;
-  while (dYaw > 3.1415927f) dYaw -= 6.2831853f;
-  while (dYaw < -3.1415927f) dYaw += 6.2831853f;
-  const glm::mat4 tilt =
-      glm::rotate(glm::mat4(1.0f), flight.spin * (s - 1.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-  return glm::translate(glm::mat4(1.0f), pos) * YawMatrix(flight.fromYaw + dYaw * s) * tilt *
-         centered;
-}
-
 
 struct StreetPropPart {
   glm::mat4 model{1.0f};
@@ -3310,6 +3261,7 @@ bool SceneRenderer::Init() {
   terrainSidewalkMesh_.Init();
   terrainStairMesh_.Init();
   geometryMesh_.Init();
+  debrisMesh_.Init();
   streetFurnitureMesh_.Init();
   streetPropDepthMesh_.Init();
   for (LitTriangleMesh& mesh : streetPropMeshes_) mesh.Init();
@@ -3382,6 +3334,9 @@ void SceneRenderer::Destroy() {
   terrainStairMesh_.Destroy();
   pavementKey_ = 0;
   geometryMesh_.Destroy();
+  debrisMesh_.Destroy();
+  debrisHasGeometry_ = false;
+  debrisKey_ = 0;
   streetFurnitureMesh_.Destroy();
   streetPropDepthMesh_.Destroy();
   for (LitTriangleMesh& mesh : streetPropMeshes_) mesh.Destroy();
@@ -3685,14 +3640,37 @@ void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::v
   glDepthFunc(GL_LESS);
 }
 
-void SceneRenderer::UpdateDebris(const tactics::GameLogic& game) {
+void SceneRenderer::UpdateDebris(const tactics::GameLogic& game, bool settled) {
   const auto& log = game.WorldLog();
   if (log.size() < debrisLogSeen_) debrisStarted_.clear();  // New match / rewind.
   debrisLogSeen_ = log.size();
-  debrisModels_.clear();
   const double now =
       std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
           .count();
+  // Solid chunks are live Rubble obstacles; one a later blast blew away is
+  // gone from the picture too.
+  const auto rubbleKey = [](const tactics::Obstacle& o) {
+    unsigned long long key = 1469598103934665603ull;
+    const auto mix = [&key](float v) {
+      unsigned int bits;
+      std::memcpy(&bits, &v, sizeof bits);
+      key = (key ^ bits) * 1099511628211ull;
+    };
+    mix(o.bounds.min.x);
+    mix(o.bounds.min.y);
+    mix(o.bounds.min.z);
+    mix(o.bounds.max.x);
+    mix(o.bounds.max.z);
+    return key;
+  };
+  std::unordered_set<unsigned long long> liveRubble;
+  for (const tactics::Obstacle& o : game.GetScene().obstacles) {
+    if (!o.dead && o.kind == tactics::ObstacleKind::Rubble) liveRubble.insert(rubbleKey(o));
+  }
+  LitVertices vertices;
+  std::vector<GLuint> indices;
+  bool moving = false;
+  unsigned long long key = log.size() * 1099511628211ull + liveRubble.size();
   for (const tactics::WorldChange& c : log) {
     if (c.kind != tactics::WorldChangeKind::Debris) continue;
     if (c.pieces.size() != c.flights.size()) continue;
@@ -3707,10 +3685,30 @@ void SceneRenderer::UpdateDebris(const tactics::GameLogic& game) {
       const auto [it, inserted] = debrisStarted_.try_emplace(c.id, now);
       t = static_cast<float>(now - it->second);
     }
+    if (settled) t = 1e9f;
     for (size_t i = 0; i < c.pieces.size(); ++i) {
-      debrisModels_.push_back(DebrisModel(c.pieces[i], c.flights[i], t));
+      const tactics::Obstacle& piece = c.pieces[i];
+      if (piece.footprint.size() < 3) continue;
+      if (c.flights[i].solid && !liveRubble.count(rubbleKey(piece))) continue;
+      moving |= t < c.flights[i].duration;
+      // The chunk's rest prism, carried back along its flight.
+      const size_t first = vertices.size();
+      AppendPolygonPrism(piece, &vertices, &indices);
+      const glm::mat4 pose = tactics::DebrisPose(piece, c.flights[i], t);
+      const glm::mat3 turn(pose);
+      for (size_t v = first; v < vertices.size(); ++v) {
+        vertices[v].pos = glm::vec3(pose * glm::vec4(vertices[v].pos, 1.0f));
+        vertices[v].normal = turn * vertices[v].normal;
+      }
     }
   }
+  // Settled debris keeps its mesh; only falling chunks re-tessellate.
+  if (moving || debrisMoving_ || key != debrisKey_) {
+    debrisMesh_.SetMesh(vertices, indices);
+    debrisHasGeometry_ = !indices.empty();
+  }
+  debrisMoving_ = moving;
+  debrisKey_ = key;
 }
 
 void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
@@ -3725,7 +3723,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     treeKey_ = game.GetScene().trees;
   }
   const auto& obstacles = game.GetScene().obstacles;
-  UpdateDebris(game);
+  UpdateDebris(game, debug.settleDebris);
   // World changes append to the log: keep in-flight falls on their original
   // colliders. A shorter/empty log (new map, rewind) drops them as before.
   SetRagdollKeepInFlight(!game.WorldLog().empty() && game.WorldLog().size() >= ragdollWorldSeen_);
@@ -3945,9 +3943,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
       DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
     }
-    for (const glm::mat4& model : debrisModels_) {
-      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_ * model);
-      cubeMesh_.Draw();
+    if (debrisHasGeometry_) {
+      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+      debrisMesh_.Draw();
     }
     DrawPlantedFlagDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, game);
     if (!debug.disableTrees && treeMesh_.HasGeometry()) {
@@ -4494,12 +4492,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   }
   // Debris chunks: falling ones along their recorded flight, settled ones on
   // their rubble obstacle (excluded from the static mesh above).
-  if (!debrisModels_.empty()) {
+  if (debrisHasGeometry_) {
     thermalMaterial(ThermalMaterial::Building);
-    for (const glm::mat4& model : debrisModels_) {
-      DrawLitModel(litShader_, cubeMesh_, viewProj, lightSpaceMatrix_, model,
-                   glm::vec4(kObstacleColor * 0.82f, 1.0f));
-    }
+    DrawLitModel(litShader_, debrisMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                 glm::vec4(kObstacleColor * 0.82f, 1.0f));
   }
   thermalMaterial(ThermalMaterial::Figure);
   for (const Unit& unit : game.GetScene().units) {

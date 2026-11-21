@@ -1009,7 +1009,8 @@ void TestWorldChangeSentInRoundOnce() {
     CHECK(second[0]["world"].AsArray().empty());  // Already delivered.
   }
   // 4: fracture outlines with profiled pieces, MassingCut + Debris kinds.
-  CHECK(net::kProtocolVersion == 4);
+  // 5: fracture-cell pieces on FloorHole / MassingCut, debris rest yaw + solid.
+  CHECK(net::kProtocolVersion == 5);
 }
 
 // Thin full-height wall between the two figures, for bomb tests.

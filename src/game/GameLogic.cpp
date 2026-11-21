@@ -535,6 +535,13 @@ void GameLogic::DropFiguresThroughHole(const WorldChange& c, float floorY) {
     const glm::vec3& p = unit.position;
     if (p.x < x0 || p.x > x1 || p.z < z0 || p.z > z1) continue;
     if (std::fabs(p.y - floorY) > 0.5f) continue;  // Not standing on that floor.
+    // Still on a piece of it the fracture left standing?
+    bool standing = false;
+    for (const WalkSurface& s : scene_.walkSurfaces) {
+      if (s.dead || s.vertices.size() < 3 || !SurfaceContainsXZ(s, p.x, p.z)) continue;
+      standing |= std::fabs(SurfaceHeightAt(s, p.x, p.z) - p.y) <= 0.5f;
+    }
+    if (standing) continue;
     // Highest support left underneath: the ground, or a live lower surface.
     float support = scene_.ground.HeightAt(p.x, p.z);
     for (const WalkSurface& s : scene_.walkSurfaces) {

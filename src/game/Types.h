@@ -120,9 +120,10 @@ struct Obstacle {
   // (footprint x bounds Y) intersected with this silhouette extruded through
   // the wall's thickness, so a fractured wall piece can carry slanted torn
   // edges while `bounds`/`footprint` stay its exact broad phase (the profile's
-  // bounding box always matches them). Only WallHole pieces set it; empty
-  // means the plain prism. LOS/raycast and rendering honour it; XZ movement
-  // collision stays footprint-based (conservative across the piece's u-span).
+  // bounding box always matches them). Fracture pieces set it (the Voronoi
+  // cell left standing, see game/Destruction.h); empty means the plain prism.
+  // LOS/raycast and rendering honour it, and the ground navmesh narrows the
+  // footprint to where the silhouette crosses a figure's body band.
   std::vector<glm::vec2> profile;
 };
 

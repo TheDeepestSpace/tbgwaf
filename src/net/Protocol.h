@@ -83,8 +83,10 @@ namespace tactics::net {
 // would compute different geometry from the same log. 4: WallHole carries a
 // fracture outline cutting profiled pieces, the MassingCut and Debris kinds
 // exist, and obstacles serialize a wall-plane profile -- a peer on 3 would
-// reject the new kinds and compute different geometry.
-constexpr int kProtocolVersion = 4;
+// reject the new kinds and compute different geometry. 5: FloorHole and
+// MassingCut may carry fracture-cell pieces and debris flights serialize a
+// rest yaw and a solid flag (only solid chunks become obstacles).
+constexpr int kProtocolVersion = 5;
 constexpr size_t kMaxMessageBytes = 16 * 1024;
 constexpr size_t kMaxWaypoints = 32;
 

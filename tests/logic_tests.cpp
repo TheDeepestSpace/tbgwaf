@@ -3946,9 +3946,13 @@ void TestExplosionPlanDeterministicCells() {
   for (size_t i = 0; i < std::min(planA.size(), planB.size()); ++i) {
     CHECK(planA[i] == planB[i]);
   }
-  bool sawWallHole = false;
-  for (const WorldChange& c : planA) sawWallHole |= c.kind == WorldChangeKind::WallHole;
-  CHECK(sawWallHole);
+  // The wall (obstacle 0) is replaced by the cells left standing.
+  bool sawWallCut = false;
+  for (const WorldChange& c : planA) {
+    sawWallCut |= c.kind == WorldChangeKind::ObstacleReplaced && c.target == 0 &&
+                  !c.pieces.empty();
+  }
+  CHECK(sawWallCut);
   // A plan out of blast range is empty.
   BombSpec far = spec;
   far.position = glm::vec3(6.0f, 1.0f, 6.0f);
@@ -4061,10 +4065,19 @@ void TestBombFloorHoleDropsFigure() {
   game.DebugPlaceBomb(glm::vec3(0.0f, 3.0f, 0.0f), 2.5f);
   CHECK(game.DebugDetonateBomb());
   bool sawFloorHole = false, sawSlabCut = false;
+  bool sawSlantedCut = false;
   for (const WorldChange& c : game.WorldLog()) {
     sawFloorHole |= c.kind == WorldChangeKind::FloorHole;
     sawSlabCut |= c.kind == WorldChangeKind::ObstacleReplaced;
+    if (c.kind != WorldChangeKind::ObstacleReplaced) continue;
+    for (const Obstacle& piece : c.pieces) {
+      for (size_t i = 0; i < piece.footprint.size(); ++i) {
+        const glm::vec2 e = piece.footprint[(i + 1) % piece.footprint.size()] - piece.footprint[i];
+        sawSlantedCut |= std::fabs(e.x) > 0.05f && std::fabs(e.y) > 0.05f;
+      }
+    }
   }
+  CHECK(sawSlantedCut);  // The slab tears along fracture cells, not a rect.
   CHECK(sawFloorHole);
   CHECK(sawSlabCut);  // The ceiling slab under the floor got a matching hole.
   const Unit* fallen = game.FindUnit(0);
@@ -4116,26 +4129,46 @@ void TestWallHoleOutlineCutsAngledPieces() {
   CHECK(!LineOfSightClear({-4.0f, 1.5f, 3.0f}, {4.0f, 1.5f, 3.0f}, scene.obstacles));
 }
 
-// PlanExplosion fractures at random angles: the wall-hole outlines carry
-// slanted edges, and applying the plan leaves profiled pieces behind.
+// PlanExplosion pre-cracks the wall into Voronoi cells: the standing pieces
+// are convex wall-plane profiles with slanted edges, they never overlap what
+// was knocked out, and nothing is created from thin air (standing + debris
+// area never exceeds the wall).
 void TestExplosionFractureHasAngledEdges() {
   const Scene scene = BombWallScene();
   BombSpec spec;
   spec.position = glm::vec3(0.0f, 1.0f, 0.0f);
   spec.radius = 3.0f;
   spec.seed = ExplosionSeed(7u, 1, 0);
-  bool sawOutline = false, sawSlantedEdge = false;
+  bool sawSlantedEdge = false;
+  float standing = 0.0f, knocked = 0.0f;
   for (const WorldChange& c : PlanExplosion(scene, spec)) {
-    if (c.kind != WorldChangeKind::WallHole || c.polygon.size() < 3) continue;
-    sawOutline = true;
-    for (size_t i = 0; i < c.polygon.size(); ++i) {
-      const glm::vec3 a = c.polygon[i];
-      const glm::vec3 b = c.polygon[(i + 1) % c.polygon.size()];
-      sawSlantedEdge |= std::fabs(b.x - a.x) > 0.05f && std::fabs(b.y - a.y) > 0.05f;
+    if (c.kind == WorldChangeKind::ObstacleReplaced && c.target == 0) {
+      for (const Obstacle& piece : c.pieces) {
+        CHECK(piece.footprint.size() == 4);
+        if (piece.profile.size() < 3) {
+          standing += glm::distance(piece.footprint[0], piece.footprint[1]) *
+                      (piece.bounds.max.y - piece.bounds.min.y);
+          continue;
+        }
+        CHECK(PolygonSignedArea(piece.profile) > 0.0f);  // CCW, as the renderer expects.
+        standing += PolygonArea(piece.profile);
+        for (size_t i = 0; i < piece.profile.size(); ++i) {
+          const glm::vec2 a = piece.profile[i];
+          const glm::vec2 b = piece.profile[(i + 1) % piece.profile.size()];
+          sawSlantedEdge |= std::fabs(b.x - a.x) > 0.05f && std::fabs(b.y - a.y) > 0.05f;
+          // Convex: every turn is a left turn.
+          const glm::vec2 c2 = piece.profile[(i + 2) % piece.profile.size()];
+          CHECK((b.x - a.x) * (c2.y - b.y) - (b.y - a.y) * (c2.x - b.x) > -1e-3f);
+        }
+      }
+    } else if (c.kind == WorldChangeKind::Debris) {
+      for (const Obstacle& piece : c.pieces) knocked += PolygonArea(piece.footprint);
     }
   }
-  CHECK(sawOutline);
   CHECK(sawSlantedEdge);
+  CHECK(standing > 20.0f);              // Most of the 16 x 3 wall still stands...
+  CHECK(knocked > 3.0f);                // ... a real hole came out of it ...
+  CHECK(standing + knocked < 48.01f);   // ... and the two never overlap.
   GameLogic game(BombWallScene());
   game.SetMatchSeed(7u);
   game.DebugPlaceBomb(spec.position, spec.radius);
@@ -4147,10 +4180,13 @@ void TestExplosionFractureHasAngledEdges() {
   CHECK(sawProfiledPiece);
 }
 
-// The blast knocks chunks out of the openings: the plan's Debris change
-// lands them as rubble obstacles clear of the breach, with one replayable
-// flight per piece, and the whole thing round-trips the codec.
-void TestExplosionDebrisLandsAsRubble() {
+// The debris is the destroyed part of the wall: every chunk is one
+// knocked-out fracture cell. Played back to its launch (DebrisPose at t = 0)
+// its rest prism stands upright inside the wall slab, exactly where the
+// applied scene now has a hole; the largest chunks land as rubble obstacles
+// clear of the breach, the rest as litter, each with a replayable flight,
+// and the whole thing round-trips the codec.
+void TestExplosionDebrisMatchesKnockedOutCells() {
   GameLogic game(BombWallScene());
   game.SetMatchSeed(7u);
   game.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
@@ -4161,26 +4197,52 @@ void TestExplosionDebrisLandsAsRubble() {
   }
   CHECK(debris != nullptr);
   if (!debris) return;
-  CHECK(!debris->pieces.empty());
+  CHECK(debris->pieces.size() >= 6);
   CHECK(debris->flights.size() == debris->pieces.size());
+  std::vector<Obstacle> standing;  // What is left of the wall (no rubble).
+  for (const Obstacle& o : game.GetScene().obstacles) {
+    if (!o.dead && o.kind != ObstacleKind::Rubble) standing.push_back(o);
+  }
+  int solid = 0;
   for (size_t i = 0; i < debris->pieces.size(); ++i) {
     const Obstacle& piece = debris->pieces[i];
+    const DebrisFlight& flight = debris->flights[i];
+    solid += flight.solid;
     CHECK(piece.kind == ObstacleKind::Rubble);
-    CHECK(piece.footprint.size() == 4);
-    CHECK(piece.bounds.max.y > piece.bounds.min.y);
-    CHECK(std::fabs(piece.bounds.min.y) < 0.05f);  // Resting on the ground.
+    CHECK(piece.footprint.size() >= 3);
+    CHECK(std::fabs(piece.bounds.min.y) < 0.05f);  // Resting on the ground...
+    CHECK(std::fabs(piece.bounds.max.y - piece.bounds.min.y - 0.3f) < 1e-3f);  // ... flat.
+    glm::vec2 mean(0.0f);
+    for (const glm::vec2& p : piece.footprint) mean += p;
+    mean /= static_cast<float>(piece.footprint.size());
     // Clear of the wall plane (x = 0): a chunk must not plug the breach.
-    const glm::vec3 center = piece.bounds.Center();
-    CHECK(std::fabs(center.x) > 0.4f);
-    CHECK(std::fabs(center.x) < 8.0f && std::fabs(center.z) < 8.0f);  // On the map.
-    CHECK(debris->flights[i].duration > 0.0f);
+    CHECK(std::fabs(mean.x) > 0.4f);
+    CHECK(std::fabs(mean.x) < 8.0f && std::fabs(mean.y) < 8.0f);  // On the map.
+    CHECK(flight.duration > 0.0f);
+    // At launch the chunk is a cell of the wall: upright, inside the slab.
+    const glm::mat4 launch = DebrisPose(piece, flight, 0.0f);
+    for (const glm::vec2& p : piece.footprint) {
+      for (const float y : {piece.bounds.min.y, piece.bounds.max.y}) {
+        const glm::vec3 v(launch * glm::vec4(p.x, y, p.y, 1.0f));
+        CHECK(std::fabs(v.x) < 0.15f + 2e-3f);
+        CHECK(v.y > -2e-3f && v.y < 3.0f + 2e-3f);
+        CHECK(std::fabs(v.z) < 8.0f + 2e-3f);
+      }
+    }
+    // ... and that cell is now open: sight passes through its middle.
+    const glm::vec3 c = flight.from;
+    CHECK(std::fabs(c.x) < 1e-3f);
+    CHECK(LineOfSightClear({-0.5f, c.y, c.z}, {0.5f, c.y, c.z}, standing));
+    // At (and past) the end of the flight the chunk is its rest prism.
+    CHECK(DebrisPose(piece, flight, flight.duration) == glm::mat4(1.0f));
   }
-  // The chunks really are obstacles in the applied scene.
+  // The solid chunks really are obstacles in the applied scene.
+  CHECK(solid >= 1);
   int rubble = 0;
   for (const Obstacle& o : game.GetScene().obstacles) {
     rubble += !o.dead && o.kind == ObstacleKind::Rubble;
   }
-  CHECK(rubble == static_cast<int>(debris->pieces.size()));
+  CHECK(rubble == solid);
   // Codec round-trip, flights included. Float text is 6 significant digits,
   // so the stable invariant is write(read(write(x))) == write(x), as for the
   // snapshot text everywhere else.
@@ -4195,6 +4257,68 @@ void TestExplosionDebrisLandsAsRubble() {
   std::ostringstream again;
   WriteWorldChange(again, back);
   CHECK(again.str() == out.str());
+}
+
+// Everything concrete breaks: a corner post too short to count as a wall and
+// the short head strip over a window fracture like the wall between them.
+void TestExplosionBreaksPostsAndStrips() {
+  Scene scene = BombWallScene();
+  scene.obstacles[0].bounds = AABB{glm::vec3(-0.15f, 0.0f, 0.5f), glm::vec3(0.15f, 3.0f, 8.0f)};
+  Obstacle post;  // 0.2 x 0.3 corner post.
+  post.kind = ObstacleKind::Wall;
+  post.bounds = AABB{glm::vec3(-0.15f, 0.0f, -0.1f), glm::vec3(0.15f, 3.0f, 0.1f)};
+  scene.obstacles.push_back(post);
+  Obstacle head;  // Head strip over an opening.
+  head.kind = ObstacleKind::Wall;
+  head.bounds = AABB{glm::vec3(-0.15f, 2.5f, -2.5f), glm::vec3(0.15f, 3.0f, -0.1f)};
+  scene.obstacles.push_back(head);
+  BombSpec spec;
+  spec.position = glm::vec3(1.0f, 1.2f, 0.0f);
+  spec.radius = 3.0f;
+  spec.seed = ExplosionSeed(7u, 1, 0);
+  bool wall = false, postHit = false, headHit = false;
+  for (const WorldChange& c : PlanExplosion(scene, spec)) {
+    if (c.kind != WorldChangeKind::ObstacleReplaced && c.kind != WorldChangeKind::ObstacleRemoved) {
+      continue;
+    }
+    wall |= c.target == 0;
+    postHit |= c.target == 1;
+    headHit |= c.target == 2;
+  }
+  CHECK(wall);
+  CHECK(postHit);
+  CHECK(headHit);
+}
+
+// A floor hole given as fracture cells: the patches left standing are the
+// cells' footprints clipped to the floor, linked across their shared edges.
+void TestFloorHoleFromCells() {
+  Scene scene = BombFloorScene();
+  WorldChange hole;
+  hole.kind = WorldChangeKind::FloorHole;
+  hole.target = 0;
+  hole.rect = glm::vec4(-1.0f, -3.0f, 3.0f, 3.0f);
+  Obstacle left, wedge;
+  left.footprint = {{-4.0f, -4.0f}, {-1.0f, -4.0f}, {0.0f, 4.0f}, {-4.0f, 4.0f}};  // Slanted cut.
+  wedge.footprint = {{0.0f, 4.0f}, {-1.0f, -4.0f}, {1.0f, -4.0f}};
+  hole.pieces = {left, wedge};
+  CHECK(ApplyWorldChange(&scene, hole));
+  CHECK(scene.walkSurfaces[0].dead);
+  CHECK(scene.walkSurfaces.size() == 4);
+  const WalkSurface& a = scene.walkSurfaces[2];
+  const WalkSurface& b = scene.walkSurfaces[3];
+  CHECK(SurfaceContainsXZ(a, -2.0f, 0.0f) && !SurfaceContainsXZ(a, 0.5f, -2.0f));
+  CHECK(SurfaceContainsXZ(b, 0.0f, -2.0f));
+  CHECK(!SurfaceContainsXZ(a, 2.0f, 0.0f) && !SurfaceContainsXZ(b, 2.0f, 0.0f));  // The hole.
+  for (const glm::vec3& v : a.vertices) CHECK(v.y == 3.0f && std::fabs(v.x) <= 3.001f);
+  CHECK(std::find(a.neighbors.begin(), a.neighbors.end(), 3) != a.neighbors.end());
+  // Cells covering the whole patch remove nothing: rejected.
+  Scene intact = BombFloorScene();
+  WorldChange none = hole;
+  Obstacle all;
+  all.footprint = {{-4.0f, -4.0f}, {4.0f, -4.0f}, {4.0f, 4.0f}, {-4.0f, 4.0f}};
+  none.pieces = {all};
+  CHECK(!ApplyWorldChange(&intact, none));
 }
 
 // The roof-edge wrap-around (parapet massing) breaks with the wall: the
@@ -4389,7 +4513,9 @@ int main() {
   TestWallHoleChangeCutsGeometry();
   TestWallHoleOutlineCutsAngledPieces();
   TestExplosionFractureHasAngledEdges();
-  TestExplosionDebrisLandsAsRubble();
+  TestExplosionDebrisMatchesKnockedOutCells();
+  TestExplosionBreaksPostsAndStrips();
+  TestFloorHoleFromCells();
   TestMassingCutBreaksParapet();
   TestFloorHolePiecesAndLinks();
   TestBombFloorHoleDropsFigure();

@@ -2743,12 +2743,10 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
     const float x = eye.x + dir.x * t;
     const float z = eye.z + dir.y * t;
     float y = terrain.HeightAt(x, z);
-    for (const tactics::RoadSurface& sidewalk : polygonSidewalks) {
-      if (PatchContainsXZ(sidewalk, x, z)) {
-        y = std::max(y, terrain.Empty() ? sidewalk.vertices.front().y
-                                        : terrain.MeshHeightAt(x, z) + 0.12f);
-      }
-    }
+    // Polygon sidewalks are NOT lifted per vertex here: a triangle straddling
+    // the curb would slope across the 0.12 step and sink partly under the
+    // sidewalk top (sawtooth gaps along the curb). They get their own clipped
+    // copy at curb height below, like the slabs.
     return glm::vec3(x, y + kGroundOffset, z);
   };
   std::vector<glm::vec3> points;
@@ -2832,6 +2830,58 @@ std::vector<glm::vec3> BuildFovCone(const Unit& unit,
         points.emplace_back(poly[0].x, y, poly[0].y);
         points.emplace_back(poly[v].x, y, poly[v].y);
         points.emplace_back(poly[v + 1].x, y, poly[v + 1].y);
+      }
+    }
+  }
+  // Polygon sidewalks (convex patches): clip each ground triangle to the
+  // patch outline and lay the piece on the sidewalk top. Bounding-box reject
+  // keeps the cost near the number of triangles actually touching a curb.
+  for (const tactics::RoadSurface& sidewalk : polygonSidewalks) {
+    const auto& sv = sidewalk.vertices;
+    if (sv.size() < 3) continue;
+    float minX = sv[0].x, maxX = sv[0].x, minZ = sv[0].z, maxZ = sv[0].z;
+    float area = 0.0f;
+    for (size_t i = 0; i < sv.size(); ++i) {
+      const glm::vec3& a = sv[i];
+      const glm::vec3& b = sv[(i + 1) % sv.size()];
+      minX = std::min(minX, a.x); maxX = std::max(maxX, a.x);
+      minZ = std::min(minZ, a.z); maxZ = std::max(maxZ, a.z);
+      area += a.x * b.z - a.z * b.x;
+    }
+    const float sign = area >= 0.0f ? 1.0f : -1.0f;
+    for (size_t i = 0; i + 2 < groundPointCount; i += 3) {
+      const glm::vec3& p0 = points[i];
+      const glm::vec3& p1 = points[i + 1];
+      const glm::vec3& p2 = points[i + 2];
+      if (std::max({p0.x, p1.x, p2.x}) < minX || std::min({p0.x, p1.x, p2.x}) > maxX ||
+          std::max({p0.z, p1.z, p2.z}) < minZ || std::min({p0.z, p1.z, p2.z}) > maxZ) {
+        continue;
+      }
+      std::vector<glm::vec2> poly = {{p0.x, p0.z}, {p1.x, p1.z}, {p2.x, p2.z}};
+      for (size_t e = 0; e < sv.size() && !poly.empty(); ++e) {
+        const glm::vec3& a = sv[e];
+        const glm::vec3& b = sv[(e + 1) % sv.size()];
+        const auto side = [&](const glm::vec2& v) {
+          return sign * ((b.x - a.x) * (v.y - a.z) - (b.z - a.z) * (v.x - a.x));
+        };
+        std::vector<glm::vec2> out;
+        for (size_t v = 0; v < poly.size(); ++v) {
+          const glm::vec2& cur = poly[v];
+          const glm::vec2& prev = poly[(v + poly.size() - 1) % poly.size()];
+          const float sc = side(cur), sp = side(prev);
+          if ((sc >= 0.0f) != (sp >= 0.0f)) out.push_back(prev + (cur - prev) * (sp / (sp - sc)));
+          if (sc >= 0.0f) out.push_back(cur);
+        }
+        poly = std::move(out);
+      }
+      const auto top = [&](const glm::vec2& v) {
+        const float h = terrain.Empty() ? sv.front().y : terrain.MeshHeightAt(v.x, v.y) + 0.12f;
+        return glm::vec3(v.x, h + kGroundOffset, v.y);
+      };
+      for (size_t v = 1; v + 1 < poly.size(); ++v) {
+        points.push_back(top(poly[0]));
+        points.push_back(top(poly[v]));
+        points.push_back(top(poly[v + 1]));
       }
     }
   }

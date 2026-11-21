@@ -588,6 +588,7 @@ void GameLogic::ClearAllPlans() {
   for (auto& unit : scene_.units) unit.plan = PlannedAction{};
   movePreviewPath_.clear();
   movePreviewValid_ = false;
+  hoverKeyUnit_ = -1;
 }
 
 bool GameLogic::ImportState(const GameSnapshot& snap) {
@@ -694,14 +695,27 @@ bool GameLogic::ImportTeamPlans(const GameSnapshot& snap, Team team) {
   if (recorder_.ptr) e.text = SerializeSnapshot(snap);
   RecordScope record(this, std::move(e));
   if (!SnapshotMatchesUnits(snap, scene_.units)) return false;
+  bool changed = false;
   for (const auto& u : snap.units) {
     Unit* unit = FindUnit(u.id);
     if (unit->team != team) continue;
+    const PlannedAction before = unit->plan;
     ApplyPlan(u, unit);
+    const PlannedAction& after = unit->plan;
+    changed = changed || before.type != after.type ||
+              before.shootTargetId != after.shootTargetId ||
+              before.hasAimPoint != after.hasAimPoint || before.aimPoint != after.aimPoint ||
+              before.shots != after.shots || before.movePath != after.movePath ||
+              before.queuedLegs != after.queuedLegs || before.moveRides != after.moveRides ||
+              before.queuedLegRides != after.queuedLegRides ||
+              before.endFacingYaw != after.endFacingYaw;
   }
   // Imported plans move the blockers the frontier was computed against; a
   // player mid-move-planning sees the allowed range update (issue #267).
-  if (mode_ == InputMode::AwaitingMoveDestination) RefreshMoveFrontier();
+  // Only when something really changed: peers rebroadcast their state every
+  // frame (animation clocks tick), and recomputing the frontier per message
+  // froze planning.
+  if (changed && mode_ == InputMode::AwaitingMoveDestination) RefreshMoveFrontier();
   return true;
 }
 
@@ -1377,12 +1391,24 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
 }
 
 void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
+  // The app re-resolves the hover ray every frame, mostly to the same spot;
+  // re-running the pathfinder for an unchanged query froze planning. The
+  // frontier revision covers everything else the preview depends on (other
+  // figures' plans, the nav mesh, the selected leg).
+  const Unit* mover = mode_ == InputMode::AwaitingMoveDestination
+                          ? FindUnit(selectedUnitId_.value_or(-1))
+                          : nullptr;
+  if (mover && mover->team == byTeam && hoverKeyUnit_ == mover->id &&
+      hoverKeyFrom_ == MoveChainEnd() && hoverKeyPoint_ == point &&
+      hoverKeyRevision_ == frontierRevision_) {
+    return;
+  }
+  hoverKeyUnit_ = -1;
   movePreviewBlocked_ = false;
   movePreviewPath_.clear();
   movePreviewRides_.clear();
   movePreviewValid_ = false;
   if (mode_ != InputMode::AwaitingMoveDestination) return;
-  const Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->team != byTeam) return;
   movePreviewValid_ = PlanLeg(*mover, MoveChainEnd(), point, &movePreviewPath_, &movePreviewRides_);
   const bool chaining = mover->plan.type == PlannedActionType::Move && !mover->plan.movePath.empty();
@@ -1397,6 +1423,10 @@ void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
       movePreviewBlocked_ = true;
     }
   }
+  hoverKeyUnit_ = mover->id;
+  hoverKeyFrom_ = MoveChainEnd();
+  hoverKeyPoint_ = point;
+  hoverKeyRevision_ = frontierRevision_;
 }
 
 namespace {
@@ -1556,6 +1586,7 @@ void GameLogic::ClearMoveOverlays() {
   movePreviewPath_.clear();
   movePreviewRides_.clear();
   movePreviewValid_ = false;
+  hoverKeyUnit_ = -1;
 }
 
 // Zipline edges of the nav graph for a leg starting at `origin`: for each

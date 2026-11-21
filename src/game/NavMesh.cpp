@@ -1625,13 +1625,88 @@ bool NavMesh::FindPolygonGroundPath(glm::vec3 start, glm::vec3 goal,
     }
     polygonBounds.push_back(bounds);
   }
+  // Bucket the polygons into a coarse grid so each visibility test only
+  // walks the cells its segment crosses (the same broadphase trick as
+  // ComputeReachField's Dijkstra): the previous full sweep over every
+  // polygon per node pair cost ~0.3 s per path on enterable-building maps.
+  glm::vec2 gridLo(std::min(start.x, goal.x), std::min(start.z, goal.z));
+  glm::vec2 gridHi(std::max(start.x, goal.x), std::max(start.z, goal.z));
+  for (const glm::vec4& bounds : polygonBounds) {
+    if (bounds.x > bounds.z) continue;  // Empty polygon.
+    gridLo = glm::min(gridLo, glm::vec2(bounds.x, bounds.y));
+    gridHi = glm::max(gridHi, glm::vec2(bounds.z, bounds.w));
+  }
+  constexpr float kBucketCell = 4.0f;
+  const int gridNx =
+      std::max(1, static_cast<int>(std::ceil((gridHi.x - gridLo.x) / kBucketCell)));
+  const int gridNz =
+      std::max(1, static_cast<int>(std::ceil((gridHi.y - gridLo.y) / kBucketCell)));
+  const auto cellX = [&](float x) {
+    return std::clamp(static_cast<int>((x - gridLo.x) / kBucketCell), 0, gridNx - 1);
+  };
+  const auto cellZ = [&](float z) {
+    return std::clamp(static_cast<int>((z - gridLo.y) / kBucketCell), 0, gridNz - 1);
+  };
+  std::vector<std::vector<int>> buckets(static_cast<size_t>(gridNx) * gridNz);
+  for (size_t i = 0; i < paddedPolygons_.size(); ++i) {
+    const glm::vec4& bounds = polygonBounds[i];
+    if (bounds.x > bounds.z) continue;
+    // The epsilon keeps a polygon whose box ends exactly on a cell boundary
+    // bucketed on both sides of it.
+    const int x0 = cellX(bounds.x - 1e-3f), x1 = cellX(bounds.z + 1e-3f);
+    const int z0 = cellZ(bounds.y - 1e-3f), z1 = cellZ(bounds.w + 1e-3f);
+    for (int gz = z0; gz <= z1; ++gz) {
+      for (int gx = x0; gx <= x1; ++gx) {
+        buckets[static_cast<size_t>(gz) * gridNx + gx].push_back(static_cast<int>(i));
+      }
+    }
+  }
+  // Each polygon is in every bucket its box overlaps, so a crossing polygon
+  // always shares a cell with the segment; the stamp dedupes repeat visits.
+  std::vector<int> stamp(paddedPolygons_.size(), -1);
+  int query = 0;
   auto clear = [&](glm::vec2 a, glm::vec2 b) {
+    ++query;
     const float xMin = std::min(a.x, b.x), xMax = std::max(a.x, b.x);
     const float zMin = std::min(a.y, b.y), zMax = std::max(a.y, b.y);
-    for (size_t i = 0; i < paddedPolygons_.size(); ++i) {
-      const glm::vec4& bounds = polygonBounds[i];
-      if (xMax < bounds.x || xMin > bounds.z || zMax < bounds.y || zMin > bounds.w) continue;
-      if (SegmentEntersConvexPolygon(a, b, paddedPolygons_[i])) return false;
+    const auto cellBlocked = [&](int gx, int gz) {
+      for (int i : buckets[static_cast<size_t>(gz) * gridNx + gx]) {
+        if (stamp[i] == query) continue;
+        stamp[i] = query;
+        const glm::vec4& bounds = polygonBounds[i];
+        if (xMax < bounds.x || xMin > bounds.z || zMax < bounds.y || zMin > bounds.w) continue;
+        if (SegmentEntersConvexPolygon(a, b, paddedPolygons_[i])) return true;
+      }
+      return false;
+    };
+    // Amanatides-Woo cell walk from a to b.
+    int cx = cellX(a.x), cz = cellZ(a.y);
+    const int ex = cellX(b.x), ez = cellZ(b.y);
+    const glm::vec2 d = b - a;
+    const int stepX = d.x > 0.0f ? 1 : -1, stepZ = d.y > 0.0f ? 1 : -1;
+    const float inf = std::numeric_limits<float>::infinity();
+    float tMaxX = inf, tDeltaX = inf, tMaxZ = inf, tDeltaZ = inf;
+    if (std::fabs(d.x) > 1e-9f) {
+      const float edge = gridLo.x + (cx + (stepX > 0 ? 1 : 0)) * kBucketCell;
+      tMaxX = (edge - a.x) / d.x;
+      tDeltaX = kBucketCell / std::fabs(d.x);
+    }
+    if (std::fabs(d.y) > 1e-9f) {
+      const float edge = gridLo.y + (cz + (stepZ > 0 ? 1 : 0)) * kBucketCell;
+      tMaxZ = (edge - a.y) / d.y;
+      tDeltaZ = kBucketCell / std::fabs(d.y);
+    }
+    while (true) {
+      if (cellBlocked(cx, cz)) return false;
+      if (cx == ex && cz == ez) break;
+      if (tMaxX < tMaxZ) {
+        cx += stepX;
+        tMaxX += tDeltaX;
+      } else {
+        cz += stepZ;
+        tMaxZ += tDeltaZ;
+      }
+      if (cx < 0 || cz < 0 || cx >= gridNx || cz >= gridNz) break;
     }
     return true;
   };
@@ -1639,26 +1714,31 @@ bool NavMesh::FindPolygonGroundPath(glm::vec3 start, glm::vec3 goal,
   std::vector<float> distance(n, std::numeric_limits<float>::infinity());
   std::vector<int> parent(n, -1);
   std::vector<char> closed(n, false);
-  using Entry = std::pair<float, int>;
+  // A* over the lazily discovered visibility graph: the straight-line
+  // heuristic is admissible and consistent for Euclidean shortest paths, so
+  // the result matches the previous Dijkstra; testing the distance
+  // improvement before the (far costlier) visibility test and expanding
+  // toward the goal first is what makes the sweep affordable.
+  const glm::vec2 goalNode = nodes[1];
+  using Entry = std::pair<float, int>;  // f = g + straight-line-to-goal, node.
   std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
   distance[0] = 0.0f;
-  open.push({0.0f, 0});
+  open.push({glm::distance(nodes[0], goalNode), 0});
   while (!open.empty()) {
-    const auto [d, current] = open.top();
+    const auto [f, current] = open.top();
     open.pop();
     if (closed[current]) continue;
     closed[current] = true;
     if (current == 1) break;
+    const float d = distance[current];
     for (size_t next = 0; next < n; ++next) {
-      if (next == static_cast<size_t>(current) || closed[next] || !clear(nodes[current], nodes[next])) {
-        continue;
-      }
+      if (next == static_cast<size_t>(current) || closed[next]) continue;
       const float candidate = d + glm::distance(nodes[current], nodes[next]);
-      if (candidate < distance[next]) {
-        distance[next] = candidate;
-        parent[next] = current;
-        open.push({candidate, static_cast<int>(next)});
-      }
+      if (candidate >= distance[next]) continue;
+      if (!clear(nodes[current], nodes[next])) continue;
+      distance[next] = candidate;
+      parent[next] = current;
+      open.push({candidate + glm::distance(nodes[next], goalNode), static_cast<int>(next)});
     }
   }
   if (!std::isfinite(distance[1])) return false;

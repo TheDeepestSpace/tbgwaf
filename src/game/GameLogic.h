@@ -833,6 +833,12 @@ class GameLogic {
   std::vector<glm::vec3> movePreviewPath_;
   bool movePreviewValid_ = false;
   bool movePreviewBlocked_ = false;
+  // HoverGround memo key: the preview stands until one of its inputs moves
+  // (unit -1 = no valid preview cached). See HoverGround.
+  int hoverKeyUnit_ = -1;
+  glm::vec3 hoverKeyFrom_{0.0f};
+  glm::vec3 hoverKeyPoint_{0.0f};
+  int hoverKeyRevision_ = -1;
   ReachField moveFrontier_;
   CoverMap moveCover_;  // Cover per moveFrontier_ node (issue #290); UI reads only.
   bool moveFrontierEnabled_ = true;

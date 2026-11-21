@@ -72,6 +72,7 @@ set(GAME_LOGIC_SOURCES
   src/ai/JevPlanner.cpp
   src/game/Scene.cpp
   src/game/WorldChange.cpp
+  src/game/Destruction.cpp
   src/game/Geometry.cpp
   src/game/MapGenerator.cpp
   src/game/NavMesh.cpp

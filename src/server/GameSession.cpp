@@ -37,7 +37,9 @@ GameSession::GameSession(uint32_t seed, std::string mapKind, bool ctf)
     : seed_(seed),
       mapKind_(std::move(mapKind)),
       ctf_(ctf),
-      game_(GenerateMatchScene(seed, mapKind_, ctf_)) {}
+      game_(GenerateMatchScene(seed, mapKind_, ctf_)) {
+  game_.SetMatchSeed(seed_);  // Explosion seeds hash it (issue #350).
+}
 
 GameSession::GameSession(const Scene& scene) : seed_(0), fixedScene_(scene), game_(scene) {}
 
@@ -246,6 +248,7 @@ Json GameSession::DumpState() const {
   dump.Set("t", "state_dump");
   dump.Set("round", Num(game_.RoundNumber()));
   dump.Set("world_changes", Num(static_cast<double>(game_.WorldLog().size())));
+  dump.Set("world", WorldLog(0));  // Full log, so a test oracle can replay it.
   dump.Set("checksum", Json(std::to_string(game_.StateHash())));
   dump.Set("over", Json(game_.Mode() == InputMode::GameOver));
   dump.Set("winner", game_.Winner() ? Json(net::TeamName(*game_.Winner())) : Json());

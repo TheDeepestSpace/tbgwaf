@@ -1063,6 +1063,7 @@ int main() {
   float frameMs = 0.0f;
   float fovMs = 0.0f;
   gfx::RenderFrameStats frameStats;
+  ui::BombPanelState bombPanel;  // Debug bomb (issue #350), debug-panel driven.
 
   // Starts a hotseat game on builder scene `index`: per-session reset and a
   // fresh recording (the log embeds the scene), cameras framed on it.
@@ -2273,6 +2274,8 @@ int main() {
     }
     // Anchored under the Round panel so it follows collapse/expand.
     const bool hudWasThermal = debugOptions.thermal;
+    bombPanel.placed = game.GetDebugBomb().has_value();
+    if (bombPanel.placed) bombPanel.position = game.GetDebugBomb()->position;
     ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, debugOptions.thermal,
                        debugOptions.thermalBlackHot, debugOptions.thermalFovAlpha,
                        debugOptions.thermalAo.radius,
@@ -2280,8 +2283,39 @@ int main() {
                        debugOptions.thermalAo.softness,
                        debugOptions.disableOcclusionFade, debugOptions.npr,
                        debugOptions.nprSettings, showFps, showRotationDome,
-                       smoothedFps, frameMs, fovMs, frameStats,
+                       smoothedFps, frameMs, fovMs, frameStats, &bombPanel,
                        roundPanelBottom + 6.0f);
+    // Debug bomb (issue #350): panel requests act on the local game. Placing
+    // parks it at the left pane's camera focus, one unit above the ground
+    // there (so a blast at a wall's foot still opens a doorway-height hole).
+    // Only where this instance is the authority: in a server-backed match the
+    // mirror must not fork the world (use the control tap's place_bomb /
+    // detonate_bomb there).
+    if (remoteMode) {
+      bombPanel.requestPlace = bombPanel.requestDetonate = bombPanel.requestArm = false;
+    }
+    if (bombPanel.requestPlace) {
+      glm::vec3 spot = cameraForPane(0).target;
+      spot.y = game.GetScene().ground.HeightAt(spot.x, spot.z) + 1.0f;
+      game.DebugPlaceBomb(spot, bombPanel.radius);
+    }
+    if (bombPanel.requestDetonate) game.DebugDetonateBomb();
+    if (bombPanel.requestArm) game.DebugArmBomb(bombPanel.armAt);
+    bombPanel.requestPlace = bombPanel.requestDetonate = bombPanel.requestArm = false;
+    if (const auto& bomb = game.GetDebugBomb()) {
+      // Marker: a small ring + label in every pane, over the 3D view.
+      ImDrawList* fg = ImGui::GetForegroundDrawList();
+      for (int pane = 0; pane < paneCount; ++pane) {
+        const glm::vec2 at = ui::WorldToWindow(bomb->position, cameraForPane(pane),
+                                               paneRects[pane], windowHeight);
+        if (at.x < paneRects[pane].x || at.x > paneRects[pane].x + paneRects[pane].width) continue;
+        const ImU32 color = IM_COL32(255, 90, 40, 230);
+        fg->AddCircle(ImVec2(at.x, at.y), 9.0f, color, 0, 2.0f);
+        fg->AddCircleFilled(ImVec2(at.x, at.y), 3.0f, color);
+        const char* label = bomb->detonateAt >= 0.0f ? "BOMB (armed)" : "BOMB";
+        fg->AddText(ImVec2(at.x + 12.0f, at.y - 7.0f), color, label);
+      }
+    }
     // Pop against the pre-panel state: the checkbox may have just toggled
     // `thermal`, but the push at the top of this frame is what must unwind.
     if (hudWasThermal) ui::PopThermalHudStyle();

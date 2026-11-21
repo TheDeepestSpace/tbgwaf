@@ -129,6 +129,8 @@ class RemoteClient {
     float clock = 0.0f;
     float duration = 0.0f;
     Json finalState;
+    std::vector<tactics::WorldChange> world;  // Ordered; applied as the clock passes `at`.
+    size_t worldApplied = 0;
   };
 
   void Queue(const Json& message) { outgoing_.push_back(message.Dump()); }
@@ -143,6 +145,9 @@ class RemoteClient {
   void PosePlayback(GameSnapshot* snap, const Playback& pb, float dt);
   void ApplyPlans(const Json& m);
   void ApplyState(const Json& state);
+  // Applies every change of `list` (JSON) the local log does not have yet.
+  void ApplyWorldList(const Json& list);
+  void ApplyWorldUpTo(Playback* pb, float clock);
   void AdvancePlayback(float dt);
   void SyncPlans();
   void NormalizeEnemyPlans();

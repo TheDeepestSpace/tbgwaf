@@ -242,12 +242,21 @@ void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& 
   std::vector<Obstacle> obstacles;
   obstacles.reserve(allObstacles.size());
   for (const Obstacle& obstacle : allObstacles) {
+    if (obstacle.dead) continue;  // Removed by a world change.
     const AABB& b = obstacle.bounds;
     float groundTop = 0.0f;
     if (!heights.Empty()) {
       groundTop = heights.HeightAt(0.5f * (b.min.x + b.max.x), 0.5f * (b.min.z + b.max.z));
-      for (const float x : {b.min.x, b.max.x}) {
-        for (const float z : {b.min.z, b.max.z}) groundTop = std::max(groundTop, heights.HeightAt(x, z));
+      if (obstacle.footprint.size() >= 3) {
+        // Polygon prisms: the footprint's own corners. The bounding box's
+        // corners of a skewed footprint can lie outside it, on terrain higher
+        // than the ground under the building, which made overhead ceiling
+        // slabs of enterable buildings block the whole interior (#321).
+        for (const glm::vec2& v : obstacle.footprint) groundTop = std::max(groundTop, heights.HeightAt(v.x, v.y));
+      } else {
+        for (const float x : {b.min.x, b.max.x}) {
+          for (const float z : {b.min.z, b.max.z}) groundTop = std::max(groundTop, heights.HeightAt(x, z));
+        }
       }
     }
     if (b.min.y - groundTop >= constants::kUnitHeight) continue;

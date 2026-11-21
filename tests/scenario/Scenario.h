@@ -176,9 +176,12 @@ struct Scenario {
   std::vector<ScenarioStep> steps;
   // Optional visual-runner camera adjustments (both panes), applied after
   // the initial view is fitted to the map: orbit target on the ground plane,
-  // and zoom delta (positive = further out).
+  // zoom delta (positive = further out), and orbit deltas in degrees from
+  // the default view (pitch is clamped to the app's orbit limits).
   std::optional<glm::vec2> cameraTarget;
   float cameraZoom = 0.0f;
+  float cameraYawDegrees = 0.0f;
+  float cameraPitchDegrees = 0.0f;
   // Optional visual-runner render settings (`render:` section). Ignored by
   // the logic-only runner.
   //   fov_overlay: "cpu" (default) | "shadow_map" -- issue #110 prototype.

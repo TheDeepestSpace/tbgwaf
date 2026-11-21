@@ -182,6 +182,7 @@ bool IsFreeSpot(const Scene& scene, float x, float z) {
   if (std::abs(x) > scene.mapHalfExtent || std::abs(z) > scene.mapHalfExtent) return false;
   const float m = constants::kAgentRadius;
   for (const Obstacle& o : scene.obstacles) {
+    if (o.dead) continue;
     if (x > o.bounds.min.x - m && x < o.bounds.max.x + m && z > o.bounds.min.z - m &&
         z < o.bounds.max.z + m) {
       return false;

@@ -15,6 +15,7 @@
 #include <thread>
 #include <deque>
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,7 @@
 #include "server/Server.h"
 #include "server/WebSocket.h"
 #include "test_util.h"
+#include "test_shard.h"
 
 using namespace tactics;
 using tactics::net::Action;
@@ -911,6 +913,211 @@ void TestRevealHistoryShowsBothTeams() {
   CHECK(history->frames.back().time > 0.0f);
 }
 
+// --- World-change log (destructible world A1) ---
+
+int FindFreeStandingObstacle(const Scene& scene) {
+  Scene probe;  // Just what IsFreeSpot reads, so toggling `dead` stays cheap.
+  probe.obstacles = scene.obstacles;
+  probe.mapHalfExtent = scene.mapHalfExtent;
+  for (size_t i = 0; i < probe.obstacles.size(); ++i) {
+    const Obstacle& o = probe.obstacles[i];
+    if (o.navOnly || o.building >= 0) continue;
+    const glm::vec3 c = o.bounds.Center();
+    if (IsFreeSpot(probe, c.x, c.z)) continue;
+    probe.obstacles[i].dead = true;
+    const bool freed = IsFreeSpot(probe, c.x, c.z);
+    probe.obstacles[i].dead = false;
+    if (freed) return static_cast<int>(i);
+  }
+  return -1;
+}
+
+void TestWorldChangeDebugRemoveAgrees() {
+  server::GameSession s(1);
+  const int idx = FindFreeStandingObstacle(s.game().GetScene());
+  CHECK(idx >= 0);
+  if (idx < 0) return;
+  const uint64_t before = s.game().StateHash();
+  const size_t count = s.game().GetScene().obstacles.size();
+  CHECK(s.DebugRemoveObstacle(idx));
+  CHECK(!s.DebugRemoveObstacle(idx));  // Already dead.
+  CHECK(!s.DebugRemoveObstacle(-1) && !s.DebugRemoveObstacle(1 << 20));
+  CHECK(s.game().WorldLog().size() == 1);
+  CHECK(s.game().StateHash() != before);  // The checksum covers the log.
+  // Dead, not erased: indices stay put.
+  CHECK(s.game().GetScene().obstacles.size() == count);
+  CHECK(s.game().GetScene().obstacles[idx].dead);
+  const glm::vec3 c = s.game().GetScene().obstacles[idx].bounds.Center();
+  CHECK(c.y < -100.0f);
+
+  // A joining client applies the full log from the state message to the same seeded map.
+  GameLogic joiner(s.game().BaseScene());
+  CHECK(!joiner.GetScene().obstacles[idx].dead);
+  const Json state = s.StateMessage(Team::Blue);
+  CHECK(state["world"].AsArray().size() == 1);
+  for (const Json& e : state["world"].AsArray()) {
+    WorldChange change;
+    CHECK(net::DecodeWorldChange(e, &change));
+    CHECK(joiner.AcceptWorldChange(change));
+    CHECK(joiner.AcceptWorldChange(change));  // Replays are no-ops.
+  }
+  CHECK(joiner.GetScene().obstacles[idx].dead);
+  CHECK(joiner.StateHash() == s.game().StateHash());
+  CHECK(s.SpectatorStateMessage()["world"].AsArray().size() == 1);
+
+  // ImportState carries the log too (Red WASM follows Blue authority) ...
+  GameLogic follower(s.game().BaseScene());
+  CHECK(follower.ImportState(s.game().ExportState()));
+  CHECK(follower.GetScene().obstacles[idx].dead);
+  CHECK(follower.StateHash() == s.game().StateHash());
+  // ... through the text codec as well ...
+  GameSnapshot decoded;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(s.game().ExportState()), &decoded));
+  CHECK(decoded.world.size() == 1 && decoded.world[0] == s.game().WorldLog()[0]);
+  // ... and rewinding to an earlier (empty) log revives the obstacle.
+  GameLogic fresh(s.game().BaseScene());
+  CHECK(follower.ImportState(fresh.ExportState()));
+  CHECK(!follower.GetScene().obstacles[idx].dead && follower.WorldLog().empty());
+  // A new match clears the log.
+  follower.ImportState(s.game().ExportState());
+  follower.Reset(s.game().BaseScene());
+  CHECK(follower.WorldLog().empty());
+
+  // Geometry follows state: nothing blocks the removed obstacle's spot any more.
+  CHECK(IsFreeSpot(s.game().GetScene(), c.x, c.z) || c.y < -100.0f);
+  const Obstacle& o = s.game().GetScene().obstacles[idx];
+  CHECK(o.dead && o.footprint.empty());
+}
+
+void TestWorldChangeSentInRoundOnce() {
+  server::GameSession s(1);
+  const int idx = FindFreeStandingObstacle(s.game().GetScene());
+  CHECK(idx >= 0);
+  if (idx < 0) return;
+  CHECK(s.DebugRemoveObstacle(idx));
+  Action commit;
+  commit.kind = ActionKind::Commit;
+  PlanEveryone(s, Team::Blue);
+  PlanEveryone(s, Team::Red);
+  CHECK(s.Apply(Team::Blue, commit).ok && s.Apply(Team::Red, commit).ok);
+  const auto round = s.RunRound();
+  for (int ti = 0; ti < 3; ++ti) CHECK(round[ti]["world"].AsArray().size() == 1);
+  if (s.game().Mode() != InputMode::GameOver) {
+    PlanEveryone(s, Team::Blue);
+    PlanEveryone(s, Team::Red);
+    CHECK(s.Apply(Team::Blue, commit).ok && s.Apply(Team::Red, commit).ok);
+    const auto second = s.RunRound();
+    CHECK(second[0]["world"].AsArray().empty());  // Already delivered.
+  }
+  CHECK(net::kProtocolVersion == 2);
+}
+
+void TestWorldChangeKinds() {
+  Scene scene = GenerateUrbanMap(1);
+  // Replacement: dead target, pieces appended with deterministic indices.
+  const int idx = FindFreeStandingObstacle(scene);
+  CHECK(idx >= 0);
+  const size_t n = scene.obstacles.size();
+  WorldChange replace;
+  replace.kind = WorldChangeKind::ObstacleReplaced;
+  replace.target = idx;
+  Obstacle stump = scene.obstacles[idx];
+  stump.bounds.max.y = stump.bounds.min.y + 0.3f;
+  replace.pieces.push_back(stump);
+  CHECK(ApplyWorldChange(&scene, replace));
+  CHECK(scene.obstacles.size() == n + 1 && scene.obstacles[idx].dead && !scene.obstacles[n].dead);
+  CHECK(!ApplyWorldChange(&scene, replace));  // Target already dead.
+
+  // Removing a building's prisms kills the building, its openings and surfaces.
+  bool sawBuilding = false;
+  for (size_t b = 0; b < scene.buildings.size() && !sawBuilding; ++b) {
+    if (scene.buildings[b].obstacle < 0) continue;
+    sawBuilding = true;
+    for (size_t i = 0; i < scene.obstacles.size(); ++i) {
+      if (scene.obstacles[i].building == static_cast<int>(b)) KillObstacle(&scene, static_cast<int>(i));
+    }
+    CHECK(scene.buildings[b].dead);
+    for (const int surf : scene.buildings[b].floorSurfaces) CHECK(scene.walkSurfaces[surf].dead);
+    for (const FacadeOpening& f : scene.facadeOpenings) {
+      if (f.building == static_cast<int>(b)) CHECK(f.dead);
+    }
+    for (const MassingDetail& d : scene.massing) {
+      if (d.building == static_cast<int>(b)) CHECK(d.dead);
+    }
+  }
+  CHECK(sawBuilding);
+
+  // Surfaces: removed ones lose vertices and vanish from neighbour lists.
+  int surfaceWithNeighbor = -1;
+  for (size_t i = 0; i < scene.walkSurfaces.size(); ++i) {
+    if (!scene.walkSurfaces[i].dead && !scene.walkSurfaces[i].neighbors.empty()) {
+      surfaceWithNeighbor = static_cast<int>(i);
+      break;
+    }
+  }
+  CHECK(surfaceWithNeighbor >= 0);
+  if (surfaceWithNeighbor >= 0) {
+    const size_t surfaces = scene.walkSurfaces.size();
+    WorldChange cut;
+    cut.kind = WorldChangeKind::SurfaceCut;
+    cut.target = surfaceWithNeighbor;
+    cut.polygon = {{0, 0, 0}, {1, 0, 0}, {0, 0, 1}};
+    CHECK(ApplyWorldChange(&scene, cut));
+    CHECK(scene.walkSurfaces[surfaceWithNeighbor].vertices.size() == 3);
+    cut.polygon.resize(2);
+    CHECK(!ApplyWorldChange(&scene, cut));
+    WorldChange remove;
+    remove.kind = WorldChangeKind::SurfaceRemoved;
+    remove.target = surfaceWithNeighbor;
+    CHECK(ApplyWorldChange(&scene, remove));
+    CHECK(scene.walkSurfaces.size() == surfaces && scene.walkSurfaces[surfaceWithNeighbor].dead);
+    for (const WalkSurface& w : scene.walkSurfaces) {
+      for (const int nb : w.neighbors) CHECK(nb != surfaceWithNeighbor);
+    }
+    CHECK(!ApplyWorldChange(&scene, remove));
+  }
+
+  // Wall hole.
+  WorldChange hole;
+  hole.kind = WorldChangeKind::WallHole;
+  hole.target = n;  // The live stump.
+  hole.u0 = 0.2f; hole.u1 = 1.0f; hole.y0 = 0.0f; hole.y1 = 0.2f;
+  const size_t openings = scene.facadeOpenings.size();
+  CHECK(ApplyWorldChange(&scene, hole));
+  CHECK(scene.facadeOpenings.size() == openings + 1 &&
+        scene.facadeOpenings.back().kind == FacadeOpening::Kind::Breach);
+  hole.u1 = hole.u0;
+  CHECK(!ApplyWorldChange(&scene, hole));
+
+  // Height patch needs sampled ground; flat maps refuse it.
+  WorldChange patch;
+  patch.kind = WorldChangeKind::HeightPatch;
+  patch.rect = glm::vec4(-2.0f, -2.0f, 2.0f, 2.0f);
+  patch.delta = -1.0f;
+  Scene hilly = GenerateMapByKind(1, "hills");
+  CHECK(!hilly.ground.Empty());
+  const float h0 = hilly.ground.HeightAt(0.0f, 0.0f);
+  CHECK(ApplyWorldChange(&hilly, patch));
+  CHECK(std::fabs(hilly.ground.HeightAt(0.0f, 0.0f) - (h0 - 1.0f)) < 1e-3f);
+  Scene flat = BuildDefaultScene();
+  CHECK(!ApplyWorldChange(&flat, patch));
+
+  // Codec round-trips every kind bit-for-bit.
+  WorldChange full = replace;
+  full.id = 7; full.round = 3; full.at = 1.2345678f; full.polygon = {{0.1f, 0.2f, 0.3f}, {1, 2, 3}, {4, 5, 6}};
+  full.rect = glm::vec4(0.1f, 0.2f, 0.3f, 0.4f); full.delta = 0.37f; full.u0 = 0.123456f;
+  std::ostringstream text;
+  text.precision(9);
+  WriteWorldChange(text, full);
+  std::istringstream in(text.str());
+  WorldChange back;
+  CHECK(ReadWorldChange(in, &back) && back == full);
+  WorldChange viaJson;
+  CHECK(net::DecodeWorldChange(net::EncodeWorldChange(full), &viaJson) && viaJson == full);
+  std::istringstream bad("1 2 3");
+  CHECK(!ReadWorldChange(bad, &back));
+}
+
 void TestClientServerRound() {
   Wire w;
   ClientRig blue(1, "t"), red(2, "t");
@@ -1291,36 +1498,42 @@ void TestRealSocketLoopback() {
 
 }  // namespace
 
-int main() {
-  TestBotRoomHonoursMapAndSeed();
-  TestBotRoomHonoursCtf();
-  TestHumanRoomHonoursMapAndSeed();
-  TestWebSocketPrimitives();
-  TestFrameParser();
-  TestSessionSpawnsAtOppositeCorners();
-  TestSessionReadyAndRound();
-  TestSessionFogHidesEnemyPlansAndUnits();
-  TestSceneStore();
-  TestLobbySceneStorage();
-  TestLobbyPairing();
-  TestRoomIntents();
-  TestSpectator();
-  TestJevReplyParsing();
-  TestHttpUrlParsing();
-  TestHttpPostLoopback();
-  TestBotModesNeedAdapter();
-  TestBlueVsJev();
-  TestJevVsJev();
-  TestBotRoomLimit();
-  TestControlTapScenarioRoom();
-  TestRevealHistoryShowsBothTeams();
-  TestClientServerRound();
-  TestPlaybackFallFromCable();
-  TestStaleEchoDoesNotRevertFreshPlans();
-  TestEchoDoesNotInterruptEditing();
-  TestCommitLockHandshake();
-  TestRejectedActionResyncs();
-  TestRealSocketLoopback();
+int main(int argc, char** argv) {
+  const std::vector<TestCase> cases = {
+      TBG_TEST(TestBotRoomHonoursMapAndSeed),
+      TBG_TEST(TestBotRoomHonoursCtf),
+      TBG_TEST(TestHumanRoomHonoursMapAndSeed),
+      TBG_TEST(TestWebSocketPrimitives),
+      TBG_TEST(TestFrameParser),
+      TBG_TEST(TestSessionSpawnsAtOppositeCorners),
+      TBG_TEST(TestSessionReadyAndRound),
+      TBG_TEST(TestSessionFogHidesEnemyPlansAndUnits),
+      TBG_TEST(TestSceneStore),
+      TBG_TEST(TestLobbySceneStorage),
+      TBG_TEST(TestLobbyPairing),
+      TBG_TEST(TestRoomIntents),
+      TBG_TEST(TestSpectator),
+      TBG_TEST(TestJevReplyParsing),
+      TBG_TEST(TestHttpUrlParsing),
+      TBG_TEST(TestHttpPostLoopback),
+      TBG_TEST(TestBotModesNeedAdapter),
+      TBG_TEST(TestBlueVsJev),
+      TBG_TEST(TestJevVsJev),
+      TBG_TEST(TestBotRoomLimit),
+      TBG_TEST(TestControlTapScenarioRoom),
+      TBG_TEST(TestRevealHistoryShowsBothTeams),
+      TBG_TEST(TestWorldChangeDebugRemoveAgrees),
+      TBG_TEST(TestWorldChangeSentInRoundOnce),
+      TBG_TEST(TestWorldChangeKinds),
+      TBG_TEST(TestClientServerRound),
+      TBG_TEST(TestPlaybackFallFromCable),
+      TBG_TEST(TestStaleEchoDoesNotRevertFreshPlans),
+      TBG_TEST(TestEchoDoesNotInterruptEditing),
+      TBG_TEST(TestCommitLockHandshake),
+      TBG_TEST(TestRejectedActionResyncs),
+      TBG_TEST(TestRealSocketLoopback),
+  };
+  if (!RunSelectedTests(argc, argv, cases)) return 2;
   if (g_failures == 0) {
     std::printf("All server tests passed.\n");
     return 0;

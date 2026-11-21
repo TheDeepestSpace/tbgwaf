@@ -206,6 +206,8 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     if (scenario.cameraTarget) {
       camera.target = glm::vec3(scenario.cameraTarget->x, 0.0f, scenario.cameraTarget->y);
     }
+    camera.Rotate(glm::radians(scenario.cameraYawDegrees),
+                  glm::radians(scenario.cameraPitchDegrees));
     camera.Zoom(scenario.cameraZoom);
     camera.Update(1.0e3f);  // Snap any scenario zoom adjustment.
   }

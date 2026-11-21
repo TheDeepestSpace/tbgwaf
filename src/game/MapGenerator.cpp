@@ -5009,10 +5009,21 @@ void EmitBuildings(Scene* scene, const CityPlan& city, const std::vector<Parcel>
       b.floors.push_back({y0, b.baseY + b.groundFloorHeight + f * b.floorHeight});
     }
     b.floors.back().y1 = b.baseY + height;
-    if (wantEnterable && upper.empty() &&
-        EmitHollowBuilding(scene, parcels[i], parcels, height, index, groundY, halfClosed, rearOpen,
-                           &b)) {
-      scene->buildings.push_back(b);
+    if (wantEnterable) {
+      // Issue #321: every building must be enterable. A set-back office is built
+      // as a plain hollow shell (no inset top floor); a footprint that cannot hold
+      // the stair retries as a single storey, and one that still cannot hold a
+      // doorway is dropped rather than left as a solid, un-enterable prism.
+      bool built = EmitHollowBuilding(scene, parcels[i], parcels, height, index, groundY,
+                                      halfClosed, rearOpen, &b);
+      if (!built && b.floors.size() > 1) {
+        b.floorCount = 1;
+        b.floors.resize(1);
+        b.floors[0].y1 = b.baseY + b.Height();
+        built = EmitHollowBuilding(scene, parcels[i], parcels, b.Height(), index, groundY,
+                                   halfClosed, rearOpen, &b);
+      }
+      if (built) scene->buildings.push_back(b);
       continue;
     }
     b.obstacle = AddPolygonBuilding(scene, parcels[i].footprint, 0.0f, baseHeight, index, groundY);

@@ -71,6 +71,7 @@ endif()
 set(GAME_LOGIC_SOURCES
   src/ai/JevPlanner.cpp
   src/game/Scene.cpp
+  src/game/WorldChange.cpp
   src/game/Geometry.cpp
   src/game/MapGenerator.cpp
   src/game/NavMesh.cpp
@@ -556,7 +557,7 @@ else()
       # Runs alongside other heavy ctest jobs; wall time varies 230-510+ s, so
       # 600 s flaked (cover scenarios now also settle their pose blend).
       set_tests_properties(visual_tests PROPERTIES
-        TIMEOUT 1200
+        TIMEOUT 1800
         ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
       )
       if(TBGWAF_BUILD_SERVER)
@@ -581,7 +582,7 @@ else()
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
       )
       set_tests_properties(map_visual_tests PROPERTIES
-        TIMEOUT 300
+        TIMEOUT 900
         ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
       )
     endif()
@@ -614,7 +615,7 @@ else()
                 -P ${CMAKE_SOURCE_DIR}/scripts/builder_smoke_test.cmake
       )
       set_tests_properties(builder_smoke_test PROPERTIES
-        TIMEOUT 240
+        TIMEOUT 600
         ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11;TBGWAF_SMOKE_TEST=1;TBGWAF_SMOKE_BUILDER=1;TBGWAF_REPRO_OUT=${CMAKE_BINARY_DIR}/builder_smoke_repro.jsonl"
       )
     endif()

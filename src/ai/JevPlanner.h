@@ -10,7 +10,7 @@
 
 namespace tactics::ai {
 
-enum class JevActionKind { Move, Shoot, Wait };
+enum class JevActionKind { Move, Shoot, Throw, Wait };
 
 // One action already checked through GameLogic's normal click/plan path.
 // The browser only gives Jev these bounded options; Jev never invents game
@@ -23,6 +23,7 @@ struct JevCandidate {
   int targetId = -1;
   int shots = 1;  // Burst size for Shoot (the weapon's per-round cap).
   glm::vec3 destination{0.0f};
+  glm::vec3 aimPoint{0.0f};  // Throw: where the grenade is aimed.
   // Builder-internal (never serialized): when set, the move is routed toward
   // this goal on the navmesh as the candidate is validated, so one option per
   // round follows a multi-round route (down a graded road, up stairs) instead

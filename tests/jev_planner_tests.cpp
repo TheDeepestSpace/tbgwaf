@@ -120,6 +120,40 @@ void TestShootCandidateIsFullBurstAndStateDescribesWeapons() {
   CHECK(request->json.find("friendly fire") != std::string::npos);
 }
 
+void TestGrenadeThrowIsOfferedWithFuseAndSupplyInfo() {
+  GameLogic game(TwoUnitScene(10.0f, true));
+  const auto request = BuildJevRequest(game, Team::Blue, 5);
+  CHECK(request.has_value());
+  const auto throwOption =
+      std::find_if(request->candidates.begin(), request->candidates.end(),
+                   [](const auto& c) { return c.kind == JevActionKind::Throw; });
+  CHECK(throwOption != request->candidates.end());
+  if (throwOption != request->candidates.end()) {
+    CHECK(throwOption->description.find("detonates") != std::string::npos);
+    GameLogic copy = game;
+    CHECK(ApplyJevChoice(&copy, *request, {throwOption->id}));
+    CHECK(copy.FindUnit(0)->plan.type == PlannedActionType::Throw);
+  }
+  CHECK(request->json.find("grenade_fuse_s") != std::string::npos);
+  CHECK(request->json.find("\"grenades\":2") != std::string::npos);
+
+  // Out of grenades: no throw is offered.
+  Scene empty = TwoUnitScene(10.0f, true);
+  empty.units[0].grenades = 0;
+  GameLogic dry(empty);
+  const auto dryRequest = BuildJevRequest(dry, Team::Blue, 6);
+  CHECK(dryRequest.has_value());
+  for (const auto& c : dryRequest->candidates) CHECK(c.kind != JevActionKind::Throw);
+
+  // Enemy on top of our own figure: the blast would catch us, so no throw.
+  Scene close = TwoUnitScene(2.0f, true);
+  GameLogic near(close);
+  near.SetFriendlyFireEnabled(true);
+  const auto nearRequest = BuildJevRequest(near, Team::Blue, 7);
+  CHECK(nearRequest.has_value());
+  for (const auto& c : nearRequest->candidates) CHECK(c.kind != JevActionKind::Throw);
+}
+
 void TestMapGhostsAndTacticalMovesAreCommunicated() {
   Scene scene = TwoUnitScene(20.0f, true);
   tactics::Obstacle wall;
@@ -660,6 +694,7 @@ int main(int argc, char** argv) {
       TBG_TEST(TestIncrementalBuilderMatchesBlockingBuild),
       TBG_TEST(TestBoundedCandidatesUseNormalLegalPath),
       TBG_TEST(TestShootCandidateIsFullBurstAndStateDescribesWeapons),
+      TBG_TEST(TestGrenadeThrowIsOfferedWithFuseAndSupplyInfo),
       TBG_TEST(TestMapGhostsAndTacticalMovesAreCommunicated),
       TBG_TEST(TestCaptureTheFlagIsExplained),
       TBG_TEST(TestWholeSquadIsPlannedAtOnce),

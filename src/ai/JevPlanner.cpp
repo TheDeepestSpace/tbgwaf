@@ -306,6 +306,10 @@ bool CandidateApplied(const GameLogic& before, Team team, const JevCandidate& ca
   if (out->Mode() != InputMode::ActionMenu) return false;
   if (candidate.kind == JevActionKind::Wait) {
     out->ChoosePass();
+  } else if (candidate.kind == JevActionKind::Throw) {
+    out->ChooseThrow();
+    out->PlaceThrowPoint(candidate.aimPoint, team);
+    out->ConfirmThrow(team);
   } else if (candidate.kind == JevActionKind::Shoot) {
     out->ChooseShoot();
     out->SetPlannedShotCount(candidate.shots, team);
@@ -323,6 +327,10 @@ bool CandidateApplied(const GameLogic& before, Team team, const JevCandidate& ca
   if (out->HasPlanOverlap() && !before.HasPlanOverlap()) return false;
   if (candidate.kind == JevActionKind::Wait) {
     return planned->plan.type == PlannedActionType::Pass;
+  }
+  if (candidate.kind == JevActionKind::Throw) {
+    return planned->plan.type == PlannedActionType::Throw && planned->plan.hasAimPoint &&
+           glm::distance(planned->plan.aimPoint, candidate.aimPoint) < 1e-3f;
   }
   if (candidate.kind == JevActionKind::Shoot) {
     return planned->plan.type == PlannedActionType::Shoot &&
@@ -356,6 +364,64 @@ std::vector<JevCandidate> GenerateCandidateSpecs(const GameLogic& game, Team tea
     candidate.actorId = actorId;
     candidate.targetId = unit.id;
     candidates.push_back(std::move(candidate));
+  }
+
+  // Grenades: one lob per visible enemy in throw range, plus one at the
+  // centre of any visible enemy cluster. The flight and blast are the
+  // game's own prediction; options that would not catch an enemy where it
+  // stands now, or that would catch our own side, are not offered.
+  if (actor->grenades > 0) {
+    std::vector<glm::vec3> aims;
+    std::vector<const Unit*> seen;
+    for (const Unit& unit : game.GetScene().units) {
+      if (!unit.alive || unit.team == team || !visibility.UnitVisible(unit.id)) continue;
+      seen.push_back(&unit);
+      aims.push_back(unit.position);
+    }
+    if (seen.size() >= 2) {
+      glm::vec3 centre{0.0f};
+      for (const Unit* unit : seen) centre += unit->position;
+      aims.push_back(centre / static_cast<float>(seen.size()));
+    }
+    int throwIndex = 0;
+    for (const glm::vec3& aim : aims) {
+      if (!CanThrowAt(*actor, aim)) continue;
+      const ThrowPreview flight = game.PredictThrowFor(*actor, aim);
+      const auto torsoDistance = [&](const Unit& unit) {
+        return glm::distance(unit.position + glm::vec3(0.0f, constants::kTorsoAimHeight, 0.0f),
+                             flight.landing);
+      };
+      int enemiesInBlast = 0;
+      int alliesInBlast = 0;
+      for (const Unit& unit : game.GetScene().units) {
+        if (!unit.alive || torsoDistance(unit) > flight.blastRadius) continue;
+        if (unit.team == team) {
+          ++alliesInBlast;
+        } else if (visibility.UnitVisible(unit.id)) {
+          ++enemiesInBlast;
+        }
+      }
+      if (enemiesInBlast == 0) continue;
+      if (alliesInBlast > 0 && game.FriendlyFireEnabled()) continue;
+      JevCandidate candidate;
+      candidate.id = "throw_" + std::to_string(throwIndex++);
+      candidate.kind = JevActionKind::Throw;
+      candidate.actorId = actorId;
+      candidate.aimPoint = aim;
+      std::ostringstream description;
+      description << "Throw a grenade (" << actor->grenades << " left, one is spent) aimed at "
+                  << PointJson(aim) << ", " << std::fixed << std::setprecision(1)
+                  << ThrowDistance(*actor, aim) << " away (range " << constants::kThrowRange
+                  << "). It detonates " << flight.fuse << " s after release at "
+                  << PointJson(flight.landing) << " after " << flight.bounces.size()
+                  << " bounce(s); the blast kills every figure within " << flight.blastRadius
+                  << " of that point unless cover blocks it. Enemies standing there now that "
+                     "would die if they stay put: "
+                  << enemiesInBlast << ". Visible enemies keep acting for those "
+                  << flight.fuse << " s, so moving targets can escape.";
+      candidate.description = description.str();
+      candidates.push_back(std::move(candidate));
+    }
   }
 
   // Fixed bearings and two radii keep the option set bounded while giving
@@ -753,14 +819,35 @@ std::string BuildVisibleState(const GameLogic& game, Team team,
                     "missed. "
                     "Bullets can hit any figure in their path, including allies (friendly "
                     "fire). A figure that sights an enemy while idle or moving may also "
-                    "react and fire on its own. There is no ammo pool across rounds.")
+                    "react and fire on its own. There is no ammo pool across rounds. "
+                    "Grenades: each figure carries a limited supply (grenades on each ally; "
+                    "one is spent per throw, none are restocked). A Throw lobs one at a point "
+                    "within throw_range; it flies, bounces off walls and ground, and always "
+                    "detonates a fixed grenade_fuse_s after release, within the same round "
+                    "as all other plans. The blast kills every figure within "
+                    "grenade_blast_radius of the detonation point unless a wall blocks the "
+                    "line; it does not damage the map, and there is no partial damage. Because "
+                    "of the fuse, enemies move or shoot meanwhile: aim where they will be "
+                    "or are pinned (behind cover, holding a position, clustered), and do not "
+                    "count on catching a runner. Position the thrower so the blast point is "
+                    "well outside the radius of your own figures, including ones that plan to "
+                    "move toward it this round; with friendly fire, blasts kill allies too. "
+                    "Several figures can throw together to cover a cluster, but spend "
+                    "grenades sparingly: prefer grenades on clusters, on enemies in cover "
+                    "that bullets cannot reach, or to flush a position, not on a lone "
+                    "exposed enemy that a shot can handle.")
       << ",\"flag\":" << FlagJson(game, team)
       << ",\"acting_figures\":[";
   for (size_t i = 0; i < actorIds.size(); ++i) out << (i ? "," : "") << actorIds[i];
   out << "],\"map_half_extent\":" << std::fixed
       << std::setprecision(2) << game.GetScene().mapHalfExtent
       << ",\"fov_half_angle_deg\":" << constants::kShootHalfFovDegrees
-      << ",\"shoot_range\":" << constants::kShootRange << ",\"playbook\":{";
+      << ",\"shoot_range\":" << constants::kShootRange
+      << ",\"throw_range\":" << constants::kThrowRange
+      << ",\"grenade_fuse_s\":" << constants::kGrenadeFuseSeconds
+      << ",\"grenade_blast_radius\":" << constants::kGrenadeBlastRadius
+      << ",\"friendly_fire\":" << (game.FriendlyFireEnabled() ? "true" : "false")
+      << ",\"playbook\":{";
   const SquadPlaybook& playbook = game.Playbook(team);
   out << "\"stationary_unseen\":" << JsonString(ReactionName(playbook.At(false, false)))
       << ",\"stationary_seen\":" << JsonString(ReactionName(playbook.At(false, true)))
@@ -813,6 +900,7 @@ std::string BuildVisibleState(const GameLogic& game, Team team,
         << ",\"scatter_half_angle_deg\":" << StatsOf(unit.weapon).scatterHalfAngleDegrees
         << ",\"max_burst\":" << MaxShotsPerAction(unit.weapon, constants::kRoundDuration)
         << ",\"move_budget\":" << unit.MoveBudget()
+        << ",\"grenades\":" << unit.grenades
         << ",\"planned\":"
         << (unit.plan.type == PlannedActionType::None ? "false" : "true") << "}";
   }

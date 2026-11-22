@@ -193,30 +193,6 @@ void TestFallsOffWallAndStaysOutside() {
   gfx::SetRagdollObstacles({});
 }
 
-// Destructible world: removing an obstacle mid-fall must not rewind a fall
-// that already started; a fresh fall sees the new world.
-void TestInFlightFallKeepsStartingColliders() {
-  tactics::Obstacle wall;
-  wall.bounds.min = glm::vec3(-0.6f, 0.0f, -3.0f);
-  wall.bounds.max = glm::vec3(0.6f, 3.0f, 3.0f);
-  gfx::SetRagdollKeepInFlight(false);
-  gfx::SetRagdollObstacles({wall});
-  tactics::Unit u = Downed(3, tactics::constants::kKnockdownMaxSeconds);
-  u.position = glm::vec3(0.3f, 3.0f, 0.0f);
-  u.knockdownAxis = glm::vec3(0.0f, 0.0f, -1.0f);
-  const gfx::RagdollPose before = gfx::SampleRagdoll(u);
-  gfx::SetRagdollKeepInFlight(true);
-  gfx::SetRagdollObstacles({});  // Wall removed.
-  const gfx::RagdollPose after = gfx::SampleRagdoll(u);
-  for (int i = 0; i < gfx::kRagJointCount; ++i) CHECK(before[i] == after[i]);
-  // A new map (keep off) drops the cache: the same fall now has no wall.
-  gfx::SetRagdollKeepInFlight(false);
-  gfx::SetRagdollObstacles({wall});
-  gfx::SetRagdollObstacles({});
-  CHECK(gfx::SampleRagdoll(u)[gfx::kRagHead] != before[gfx::kRagHead]);
-  gfx::SetRagdollKeepInFlight(false);
-}
-
 // Issue #259: a body shot toward a bridge's side rail on the deck stays on the
 // deck side instead of clipping through. The rail is a thin diagonal prism.
 void TestDeckRailBlocksBody() {
@@ -437,7 +413,6 @@ int main() {
   TestOverlappingSidewalkDoesNotLaunch();
   TestSecondHitShovesFallingBody();
   TestFallsOffWallAndStaysOutside();
-  TestInFlightFallKeepsStartingColliders();
   TestRestsOnRamp();
   TestDeckRailBlocksBody();
   TestSettlesAtRampTop();

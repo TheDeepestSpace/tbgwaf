@@ -222,67 +222,6 @@ void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, flo
   Build(typed, SquareRegion(mapHalfExtent), agentRadius, nullptr, nullptr);
 }
 
-namespace {
-
-// A fractured wall piece (Obstacle::profile, see game/Destruction.h) only
-// blocks walking where its silhouette crosses the band a figure's body
-// occupies: from a stub's height it can step over, up to its head. Narrows
-// such a piece to that part of its footprint -- so a breach is a doorway
-// exactly where the torn edges leave room -- or to nothing (`out->footprint`
-// empty) when the silhouette stays clear of the band. False for plain prisms.
-bool NarrowToWalkBand(const Obstacle& obstacle, const HeightField& heights, Obstacle* out) {
-  constexpr float kStepOver = 0.35f;
-  if (obstacle.profile.size() < 3 || obstacle.footprint.size() != 4) return false;
-  const std::vector<glm::vec2>& f = obstacle.footprint;
-  const glm::vec2 along = f[1] - f[0];
-  const float len = glm::length(along);
-  if (len < 1e-5f) return false;
-  float ground = 0.0f;
-  if (!heights.Empty()) {
-    ground = heights.HeightAt(f[0].x, f[0].y);
-    for (const glm::vec2& v : f) ground = std::max(ground, heights.HeightAt(v.x, v.y));
-  }
-  // Pieces up on a storey keep their footprint: the band is a ground rule.
-  if (obstacle.bounds.min.y - ground >= constants::kUnitHeight) return false;
-  const float lo = ground + kStepOver, hi = ground + constants::kUnitHeight;
-  float u0 = 1e30f, u1 = -1e30f;
-  const size_t n = obstacle.profile.size();
-  for (size_t i = 0; i < n; ++i) {
-    const glm::vec2 p = obstacle.profile[i], q = obstacle.profile[(i + 1) % n];
-    if (p.y >= lo && p.y <= hi) {
-      u0 = std::min(u0, p.x);
-      u1 = std::max(u1, p.x);
-    }
-    for (const float y : {lo, hi}) {
-      if ((p.y < y) != (q.y < y) && std::fabs(q.y - p.y) > 1e-9f) {
-        const float u = p.x + (q.x - p.x) * ((y - p.y) / (q.y - p.y));
-        u0 = std::min(u0, u);
-        u1 = std::max(u1, u);
-      }
-    }
-  }
-  *out = obstacle;
-  out->profile.clear();
-  if (u1 - u0 < 1e-3f) {
-    out->footprint.clear();
-    return true;
-  }
-  const glm::vec2 d = along / len, tv = f[3] - f[0];
-  const glm::vec2 s0 = f[0] + d * u0, s1 = f[0] + d * u1;
-  out->footprint = {s0, s1, s1 + tv, s0 + tv};
-  out->bounds.min.x = out->bounds.max.x = s0.x;
-  out->bounds.min.z = out->bounds.max.z = s0.y;
-  for (const glm::vec2& v : out->footprint) {
-    out->bounds.min.x = std::min(out->bounds.min.x, v.x);
-    out->bounds.max.x = std::max(out->bounds.max.x, v.x);
-    out->bounds.min.z = std::min(out->bounds.min.z, v.y);
-    out->bounds.max.z = std::max(out->bounds.max.z, v.y);
-  }
-  return true;
-}
-
-}  // namespace
-
 void NavMesh::Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent,
                      float agentRadius, const HeightField* ground,
                      const std::vector<WalkSurface>* walkSurfaces,
@@ -302,12 +241,8 @@ void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& 
   const HeightField& heights = ground ? *ground : kFlat;
   std::vector<Obstacle> obstacles;
   obstacles.reserve(allObstacles.size());
-  for (const Obstacle& original : allObstacles) {
-    if (original.dead) continue;  // Removed by a world change.
-    Obstacle narrowed;
-    const Obstacle& obstacle =
-        NarrowToWalkBand(original, heights, &narrowed) ? narrowed : original;
-    if (obstacle.footprint.empty() && !original.footprint.empty()) continue;  // Clear of the band.
+  for (const Obstacle& obstacle : allObstacles) {
+    if (obstacle.dead) continue;  // Removed by a world change.
     const AABB& b = obstacle.bounds;
     float groundTop = 0.0f;
     if (!heights.Empty()) {

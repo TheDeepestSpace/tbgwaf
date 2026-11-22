@@ -478,8 +478,7 @@ void DrawDebugPanel(bool& disableFov, bool& coverView, bool& disableShadows, boo
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
                     bool& disableOcclusionFade, bool& npr, gfx::NprSettings& nprSettings,
                     bool& showFps, bool& showRotationDome, float fps, float frameMs,
-                    float fovMs, const gfx::RenderFrameStats& stats, BombPanelState* bomb,
-                    float top) {
+                    float fovMs, const gfx::RenderFrameStats& stats, float top) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
   // Once per run (not FirstUseEver) so a saved imgui.ini can't reopen it at startup.
   ImGui::SetNextWindowCollapsed(true, ImGuiCond_Once);
@@ -529,27 +528,6 @@ void DrawDebugPanel(bool& disableFov, bool& coverView, bool& disableShadows, boo
     ImGui::SliderFloat("NPR AO radius", &nprSettings.ao.radius, 0.5f, 6.0f, "%.1f");
     ImGui::SetNextItemWidth(130.0f);
     ImGui::SliderFloat("NPR AO strength", &nprSettings.ao.strength, 0.0f, 3.0f, "%.2f");
-  }
-  // Debug bomb (issue #350): a movable explosive for exercising the
-  // destructible world. Place parks it at the camera's focus point; Detonate
-  // blows it immediately, Arm schedules it for `armAt` seconds into the next
-  // committed round (recorded in the world log, so replays agree).
-  if (bomb && ImGui::CollapsingHeader("Debug bomb")) {
-    if (ImGui::Button(bomb->placed ? "Move to camera target" : "Place at camera target")) {
-      bomb->requestPlace = true;
-    }
-    ImGui::SetNextItemWidth(130.0f);
-    ImGui::SliderFloat("Blast radius", &bomb->radius, 0.5f, 10.0f, "%.1f");
-    if (bomb->placed) {
-      ImGui::Text("Bomb at (%.1f, %.1f, %.1f)", bomb->position.x, bomb->position.y,
-                  bomb->position.z);
-      if (ImGui::Button("Detonate now")) bomb->requestDetonate = true;
-      ImGui::SetNextItemWidth(130.0f);
-      ImGui::SliderFloat("Round time", &bomb->armAt, 0.0f, tactics::constants::kRoundDuration,
-                         "%.1f s");
-      ImGui::SameLine();
-      if (ImGui::Button("Arm")) bomb->requestArm = true;
-    }
   }
   ImGui::Checkbox("Disable occlusion fade", &disableOcclusionFade);
   ImGui::Checkbox("Rotation dome", &showRotationDome);

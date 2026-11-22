@@ -33,11 +33,7 @@ struct AABB {
 // the ends and the window/door reveals (see MapGenerator's CutWindows).
 // Gameplay treats it like Generic; the renderer's see-through outline pass
 // draws only its two long faces so each window gets a single frame.
-// Rubble: a debris chunk a blast knocked loose, at rest where the server's
-// ballistic simulation landed it (see WorldChangeKind::Debris). Collides and
-// blocks sight like everything else; drawn dynamically (it falls before it
-// rests), so the static obstacle mesh skips it. A later blast removes it.
-enum class ObstacleKind { Generic, StreetFurniture, Pier, Cover, Wall, Rubble };
+enum class ObstacleKind { Generic, StreetFurniture, Pier, Cover, Wall };
 
 // Street fixtures the renderer batches as static geometry: post-sized furniture
 // and cover-sized street items (parked cars, planters, dumpsters, ...).
@@ -114,17 +110,6 @@ struct Obstacle {
   // are inert: parked off the map with no footprint, so collision, LOS,
   // navigation and rendering all ignore them.
   bool dead = false;
-  // Optional wall-plane silhouette (destruction: fracture at random angles).
-  // A convex CCW polygon in (u, y): u is world units along footprint edge
-  // 0 -> 1 from footprint[0], y is world height. The solid is the prism
-  // (footprint x bounds Y) intersected with this silhouette extruded through
-  // the wall's thickness, so a fractured wall piece can carry slanted torn
-  // edges while `bounds`/`footprint` stay its exact broad phase (the profile's
-  // bounding box always matches them). Fracture pieces set it (the Voronoi
-  // cell left standing, see game/Destruction.h); empty means the plain prism.
-  // LOS/raycast and rendering honour it, and the ground navmesh narrows the
-  // footprint to where the silhouette crosses a figure's body band.
-  std::vector<glm::vec2> profile;
 };
 
 // Building archetype (urban map issue #151, roadmap 3.2). Drawn per parcel

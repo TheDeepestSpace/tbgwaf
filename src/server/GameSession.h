@@ -71,15 +71,6 @@ class GameSession {
   // rounds or mid-match). The change joins the world log; clients get it in
   // the next round message, or immediately via WorldDeltaMessage.
   bool DebugRemoveObstacle(int index) { return game_.DebugRemoveObstacle(index); }
-  // Debug bomb (issue #350): place/move it, then either detonate immediately
-  // (between rounds; broadcast the delta via TakeWorldDelta) or arm it for a
-  // time into the next round -- the detonation then happens inside RunRound
-  // and its changes ship with the round message at that timestamp.
-  void DebugPlaceBomb(const glm::vec3& position, float radius) {
-    game_.DebugPlaceBomb(position, radius);
-  }
-  bool DebugArmBomb(float atSeconds) { return game_.DebugArmBomb(atSeconds); }
-  bool DebugDetonateBomb() { return game_.DebugDetonateBomb(); }
   // Unsent world changes (empty array when none); marks them sent.
   net::Json TakeWorldDelta();
 

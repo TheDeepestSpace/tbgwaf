@@ -178,8 +178,6 @@ void GameLogic::Reset(Scene scene) {
   navMeshUnitId_ = -1;
   worldLog_.clear();  // A new match starts from the seeded map.
   pristine_.reset();
-  debugBomb_.reset();
-  bombsDetonated_ = 0;
   roundNumber_ = 1;
 
   mode_ = InputMode::AwaitingSelection;
@@ -484,18 +482,10 @@ bool GameLogic::ApplyWorldChange(WorldChange change) {
   change.id = static_cast<int>(worldLog_.size());
   change.round = roundNumber_;
   change.at = mode_ == InputMode::Executing ? executionElapsed_ : 0.0f;
-  // Captured before the apply kills the surface: the height figures stood at.
-  float floorY = 0.0f;
-  if (change.kind == WorldChangeKind::FloorHole && change.target >= 0 &&
-      change.target < static_cast<int>(scene_.walkSurfaces.size()) &&
-      !scene_.walkSurfaces[change.target].vertices.empty()) {
-    floorY = scene_.walkSurfaces[change.target].vertices.front().y;
-  }
   if (!tactics::ApplyWorldChange(&scene_, change)) {  // Validates before mutating.
     if (worldLog_.empty()) pristine_.reset();
     return false;
   }
-  if (change.kind == WorldChangeKind::FloorHole) DropFiguresThroughHole(change, floorY);
   worldLog_.push_back(std::move(change));
   OnWorldChanged();
   return true;
@@ -506,75 +496,6 @@ bool GameLogic::DebugRemoveObstacle(int index) {
   c.kind = WorldChangeKind::ObstacleRemoved;
   c.target = index;
   return ApplyWorldChange(std::move(c));
-}
-
-void GameLogic::DebugPlaceBomb(const glm::vec3& position, float radius) {
-  DebugBomb bomb;
-  bomb.position = position;
-  bomb.radius = std::clamp(radius, 0.5f, 10.0f);
-  bomb.detonateAt = debugBomb_ ? debugBomb_->detonateAt : -1.0f;
-  debugBomb_ = bomb;
-}
-
-bool GameLogic::DebugArmBomb(float atSeconds) {
-  if (!debugBomb_ || atSeconds < 0.0f) return false;
-  debugBomb_->detonateAt = atSeconds;
-  return true;
-}
-
-bool GameLogic::DebugDetonateBomb() {
-  if (!debugBomb_) return false;
-  BombSpec spec;
-  spec.position = debugBomb_->position;
-  spec.radius = debugBomb_->radius;
-  spec.seed = ExplosionSeed(matchSeed_, roundNumber_, bombsDetonated_);
-  debugBomb_.reset();
-  ++bombsDetonated_;
-  if (recorder_.ptr) {
-    char buf[192];
-    std::snprintf(buf, sizeof buf,
-                  "bomb pos=(%.4f,%.4f,%.4f) radius=%.3f seed=%u exec=%.4f round=%d",
-                  spec.position.x, spec.position.y, spec.position.z, spec.radius, spec.seed,
-                  executionElapsed_, roundNumber_);
-    LogSim(buf);
-  }
-  bool any = false;
-  // The plan was validated against this very scene state; applying in order
-  // reproduces its chained piece indices.
-  for (const WorldChange& change : PlanExplosion(scene_, spec)) {
-    any |= ApplyWorldChange(change);
-  }
-  return any;
-}
-
-void GameLogic::DropFiguresThroughHole(const WorldChange& c, float floorY) {
-  const float x0 = std::min(c.rect.x, c.rect.z), x1 = std::max(c.rect.x, c.rect.z);
-  const float z0 = std::min(c.rect.y, c.rect.w), z1 = std::max(c.rect.y, c.rect.w);
-  for (Unit& unit : scene_.units) {
-    if (!unit.alive) continue;
-    const glm::vec3& p = unit.position;
-    if (p.x < x0 || p.x > x1 || p.z < z0 || p.z > z1) continue;
-    if (std::fabs(p.y - floorY) > 0.5f) continue;  // Not standing on that floor.
-    // Still on a piece of it the fracture left standing?
-    bool standing = false;
-    for (const WalkSurface& s : scene_.walkSurfaces) {
-      if (s.dead || s.vertices.size() < 3 || !SurfaceContainsXZ(s, p.x, p.z)) continue;
-      standing |= std::fabs(SurfaceHeightAt(s, p.x, p.z) - p.y) <= 0.5f;
-    }
-    if (standing) continue;
-    // Highest support left underneath: the ground, or a live lower surface.
-    float support = scene_.ground.HeightAt(p.x, p.z);
-    for (const WalkSurface& s : scene_.walkSurfaces) {
-      if (s.dead || s.vertices.size() < 3 || !SurfaceContainsXZ(s, p.x, p.z)) continue;
-      const float y = SurfaceHeightAt(s, p.x, p.z);
-      if (y < p.y - 0.5f) support = std::max(support, y);
-    }
-    glm::vec3 dir = p - glm::vec3(0.5f * (x0 + x1), p.y, 0.5f * (z0 + z1));
-    dir.y = 0.0f;
-    if (glm::length(dir) < 1e-4f) dir = unit.FacingDirection();
-    KnockDown(unit, glm::normalize(dir));
-    unit.knockdownDrop = std::max(0.0f, p.y - support);
-  }
 }
 
 bool GameLogic::AcceptWorldChange(const WorldChange& change) {
@@ -1334,13 +1255,6 @@ void GameLogic::UpdateUnrecorded(float dtSeconds) {
 void GameLogic::AdvanceExecutingRound(float dtSeconds) {
   const float tickStart = executionElapsed_;
   executionElapsed_ += dtSeconds;
-  // An armed debug bomb goes off the first tick the round clock passes its
-  // time; the resulting world changes carry that stamp, so replays and
-  // remote playback apply them at the same moment.
-  if (debugBomb_ && debugBomb_->detonateAt >= 0.0f &&
-      executionElapsed_ >= debugBomb_->detonateAt) {
-    DebugDetonateBomb();
-  }
   std::vector<FlagTouch> flagTouches;
   CollectStationaryFlagTouches(tickStart, &flagTouches);
   const bool flagLoose = flag_.enabled && flag_.carrierId < 0;

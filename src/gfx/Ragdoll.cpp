@@ -529,19 +529,7 @@ std::vector<Trajectory>& Cache() {
   static std::vector<Trajectory> cache;
   return cache;
 }
-bool& KeepInFlight() {
-  static bool keep = false;
-  return keep;
-}
-// Collider set changed: drop cached falls, unless the change is an in-match
-// world change (SetRagdollKeepInFlight), where each fall keeps the colliders
-// it was simulated with and only new/evicted falls see the new world.
-void OnCollidersChanged() {
-  if (!KeepInFlight()) Cache().clear();
-}
 }  // namespace
-
-void SetRagdollKeepInFlight(bool keep) { KeepInFlight() = keep; }
 
 void SetRagdollObstacles(const std::vector<tactics::Obstacle>& obstacles) {
   std::vector<tactics::AABB> boxes;
@@ -555,7 +543,7 @@ void SetRagdollObstacles(const std::vector<tactics::Obstacle>& obstacles) {
                                });
   if (same) return;
   cur = std::move(boxes);
-  OnCollidersChanged();
+  Cache().clear();
 }
 
 void SetRagdollFigures(const std::vector<RagdollFigureCollider>& figures) {
@@ -577,7 +565,7 @@ void SetRagdollRails(const std::vector<tactics::MassingDetail>& massing) {
                                });
   if (same) return;
   cur = std::move(rails);
-  OnCollidersChanged();
+  Cache().clear();
 }
 
 void SetRagdollGround(const std::vector<tactics::WalkSurface>& surfaces,
@@ -607,7 +595,7 @@ void SetRagdollGround(const std::vector<tactics::WalkSurface>& surfaces,
     cur.push_back(std::move(w));
   }
   Terrain() = terrain;
-  OnCollidersChanged();
+  Cache().clear();
 }
 
 bool RagdollActive(const Unit& unit) { return !unit.alive && unit.knockdownElapsed >= 0.0f; }

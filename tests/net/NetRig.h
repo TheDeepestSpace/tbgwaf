@@ -98,42 +98,6 @@ struct ServerProcess {
   }
 };
 
-// One control-tap request expecting an {"ok": true} reply.
-inline bool ControlOk(WsClient& control, const Json& request, std::string* error) {
-  control.Send(request.Dump());
-  std::vector<std::string> reply;
-  const int64_t deadline = NowMs() + kWaitMs;
-  while (reply.empty() && NowMs() < deadline) control.Poll(20, &reply);
-  Json parsed;
-  if (reply.empty() || !Json::Parse(reply.front(), &parsed) || !parsed["ok"].AsBool()) {
-    *error = request["t"].AsString() + " failed: " +
-             (reply.empty() ? std::string("no reply") : reply.front());
-    return false;
-  }
-  return true;
-}
-
-// Debug-bomb scenario step over the control tap (issue #350): place, then
-// detonate now or arm for `bombAt` seconds into the next round.
-inline bool ControlBomb(WsClient& control, const std::string& room,
-                        const scenario::ScenarioAction& action, std::string* error) {
-  Json place;
-  place.Set("t", "place_bomb");
-  place.Set("room", room);
-  Json pos{Json::Array{}};
-  pos.Push(Json(static_cast<double>(action.destination.x)));
-  pos.Push(Json(static_cast<double>(action.destination.y)));
-  pos.Push(Json(static_cast<double>(action.destination.z)));
-  place.Set("pos", std::move(pos));
-  place.Set("radius", Json(static_cast<double>(action.bombRadius)));
-  if (!ControlOk(control, place, error)) return false;
-  Json detonate;
-  detonate.Set("t", "detonate_bomb");
-  detonate.Set("room", room);
-  if (action.bombAt) detonate.Set("at", Json(static_cast<double>(*action.bombAt)));
-  return ControlOk(control, detonate, error);
-}
-
 // Loads `scenario`'s scene into a fresh `room` over the control tap.
 inline bool LoadRoom(WsClient& control, const Scenario& scenario, const std::string& room,
                      std::string* error) {

@@ -63,6 +63,13 @@ struct RagdollGun {
   glm::quat rot{1.0f, 0.0f, 0.0f, 0.0f};  // Weapon-local -> world (+X is the barrel).
 };
 
+// While true, a change to the obstacles/rails/ground below does NOT drop
+// cached trajectories: in-flight falls keep the colliders they started with
+// (destructible world: a removed obstacle must not rewind a fall). Set it per
+// frame before the Set* calls; false (default) clears on any change, which is
+// right for a new map.
+void SetRagdollKeepInFlight(bool keep);
+
 // Obstacles the ragdolls collide with. Call before sampling (cheap when
 // unchanged; a change drops all cached trajectories).
 void SetRagdollObstacles(const std::vector<tactics::Obstacle>& obstacles);

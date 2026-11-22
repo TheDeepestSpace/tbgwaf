@@ -8,12 +8,12 @@ description: >
 
 map:
   obstacles:
-    - {center: [0, -4], half_extent: [1.0, 2.0], height: 2.0, climbable: false}
-    - {center: [0, 4], half_extent: [1.0, 2.0], height: 2.0, climbable: false}
-    - {center: [-4, 6.5], half_extent: [0.6, 0.6], height: 1.2, climbable: true}
-    - {center: [4, -6.5], half_extent: [0.6, 0.6], height: 1.2, climbable: true}
-    - {center: [-3.5, -7.5], half_extent: [0.6, 0.6], height: 1.2, climbable: true}
-    - {center: [3.5, 7.5], half_extent: [0.6, 0.6], height: 1.2, climbable: true}
+    - {center: [0, -4], half_extent: [1.0, 2.0], height: 2.0}
+    - {center: [0, 4], half_extent: [1.0, 2.0], height: 2.0}
+    - {center: [-4, 6.5], half_extent: [0.6, 0.6], height: 1.2}
+    - {center: [4, -6.5], half_extent: [0.6, 0.6], height: 1.2}
+    - {center: [-3.5, -7.5], half_extent: [0.6, 0.6], height: 1.2}
+    - {center: [3.5, 7.5], half_extent: [0.6, 0.6], height: 1.2}
 
 units:
   - {id: 0, team: blue, position: [-8, 0, -4], facing_degrees: 0}

@@ -1,0 +1,33 @@
+name: occlusion_fade_building_interior
+description: >
+  PR #304 review: a camera-faded enterable multi-storey building shows its
+  innards. One Blue figure stands on the ground floor of a three-storey
+  building (seed 7) and another just behind it, so Blue's pane draws the
+  building see-through. Its walls and roof blend at the usual see-through
+  opacity, while the upper floors and the stair flights inside are drawn
+  first and more opaque (steps included), so they read as a cutaway through
+  the shell instead of vanishing behind the nearest wall; the floor slabs
+  directly over the indoor figure keep the shell opacity so it stays visible.
+  Red's pane has a clear line to its own figure and keeps the building opaque.
+
+map:
+  generate: {seed: 7, type: urban, elevated: false, features: {terrain: off}}
+
+units:
+  - {id: 0, team: blue, position: [-31.9, 0, -6.7], facing_degrees: 0}
+  - {id: 1, team: red, position: [40, 0, -30], facing_degrees: 180}
+  - {id: 2, team: blue, position: [-35.6, 0, -2.1], facing_degrees: 0}
+
+camera:
+  target: [-31.9, -6.7]
+  zoom: -130
+
+script:
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 2
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {round: 2}

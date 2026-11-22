@@ -97,7 +97,8 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        # Shard count is derived from this list via strategy.job-total below.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -127,7 +128,7 @@ jobs:
               --runner build/tactics_visual_tests \
               --server build/tbgwaf_server_testctl \
               --out scenarios-out \
-              --shard ${{ matrix.shard }}/6
+              --shard ${{ matrix.shard }}/${{ strategy.job-total }}
 
       - name: Upload shard
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

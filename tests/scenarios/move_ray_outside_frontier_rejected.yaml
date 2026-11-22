@@ -1,0 +1,35 @@
+name: move_ray_outside_frontier_rejected
+description: >
+  Frontier-aware move selection outside the frontier: from the same ground-
+  floor start as move_ray_skips_unreachable_floors, a straight-down ray over
+  the neighboring building (storeys at y = 3/6/9, none of it reachable in
+  one leg) crosses no surface the move frontier covers. The selector then
+  falls back to the plain nearest hit -- the neighbor's y = 9 top floor,
+  exactly where the player is pointing -- and the click is rejected as out
+  of reach, leaving nothing planned: an unreachable surface never silently
+  redirects the move somewhere else.
+
+map:
+  generate: {seed: 7, type: urban, elevated: false, features: {terrain: off}}
+
+units:
+  - {id: 0, team: blue, position: [-31.9, 0, -6.7], facing_degrees: 0}
+  - {id: 1, team: red, position: [40, 0, -30], facing_degrees: 180}
+
+camera:
+  target: [-32.3, -8.1]
+  zoom: -145
+
+script:
+  - action: move
+    actor: 0
+    ray_from: [-38, 60, -6]
+    ray_dir: [0, -1, 0]
+    expect_unreachable: true
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [-31.9, 0, -6.7], tolerance: 0.1}
+  - assert: {round: 2}

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <utility>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -33,6 +34,18 @@ bool RayIntersectsObstacle(const glm::vec3& origin, const glm::vec3& direction,
 bool RayIntersectsWalkSurface(const glm::vec3& origin, const glm::vec3& direction,
                               const WalkSurface& surface, float thickness,
                               float* outT = nullptr);
+
+// Convex decomposition of a simple polygon (roadmap 5.4). Non-convex floor
+// plans (an L, a floor with a stairwell notch) become convex `pieces`, each
+// counter-clockwise and made only of the input's vertices, plus `links`:
+// index pairs of pieces sharing an edge (the seams a figure crosses between
+// them). A convex input yields one piece and no links; fewer than three
+// non-degenerate vertices yield nothing. Input may be clockwise.
+struct ConvexDecomposition {
+  std::vector<std::vector<glm::vec2>> pieces;
+  std::vector<std::pair<int, int>> links;
+};
+ConvexDecomposition DecomposeToConvex(const std::vector<glm::vec2>& polygon);
 
 bool SurfaceContainsXZ(const WalkSurface& surface, float x, float z);
 float SurfaceHeightAt(const WalkSurface& surface, float x, float z);

@@ -140,6 +140,21 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 // contact shading live: reach in world units, darkening strength, samples
 // per ray, and blur half-width (see gfx::AmbientOcclusionSettings).
 // `thermalFovAlpha` is the FOV tint opacity used while the thermal view is on.
+// Debug-bomb controls (issue #350), shown inside the debug panel. In:
+// `placed`/`position` mirror GameLogic's debug bomb each frame. In/out: the
+// radius and arm-time sliders. Out: one-frame request flags the app layer
+// acts on (place/move at the camera target, detonate now, arm for `armAt`
+// seconds into the next executing round) and then clears.
+struct BombPanelState {
+  bool placed = false;
+  glm::vec3 position{0.0f};
+  float radius = 3.5f;
+  float armAt = 1.0f;
+  bool requestPlace = false;
+  bool requestDetonate = false;
+  bool requestArm = false;
+};
+
 // `wasmHeapBytes` is the WASM linear-memory size (nullopt on native builds,
 // shown as N/A). WASM memory never shrinks, so this is also the peak.
 void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
@@ -147,8 +162,8 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
                     bool& disableOcclusionFade, bool& npr, gfx::NprSettings& nprSettings,
                     bool& showFps, bool& showRotationDome, float fps, float frameMs,
-                    float fovMs, const gfx::RenderFrameStats& stats, float top,
-                    std::optional<size_t> wasmHeapBytes);
+                    float fovMs, const gfx::RenderFrameStats& stats, BombPanelState* bomb,
+                    float top, std::optional<size_t> wasmHeapBytes);
 
 // Camera-rotation dome (issue #298): small corner widget in the bottom-right
 // of `rect`. A wireframe half-sphere with a compass circle at its base, drawn

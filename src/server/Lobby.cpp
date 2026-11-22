@@ -345,6 +345,12 @@ void Lobby::MaybeRunRound(Room& room) {
     SendSeat(room, t, session.PlansMessage(t));
     SendSeat(room, t, Json(Json::Object{{"t", Json("peer")}, {"ready", Json(false)}}));
   }
+  // Match over: players saw a fogged timeline, so hand them the full one for
+  // the post-game replay (spectators already received it unfiltered).
+  if (session.game().Mode() == InputMode::GameOver) {
+    const Json reveal = session.RevealMessage();
+    for (int ti = 0; ti < 2; ++ti) SendSeat(room, static_cast<Team>(ti), reveal);
+  }
   for (int spectator : room.spectators) {
     Send(spectator, reports[2]);
     Send(spectator, session.SpectatorPlansMessage());
@@ -540,6 +546,69 @@ Json Lobby::OnControl(const Json& message) {
         if (r.IsNumber()) room.shotRolls.push_back(static_cast<float>(r.AsNumber()));
       }
     }
+    return reply(true, "");
+  }
+  if (type == "remove_obstacle") {  // Debug: remove an obstacle mid-match.
+    auto it = rooms_.find(name);
+    if (it == rooms_.end() || !it->second.session) return reply(false, "no running match in room");
+    Room& room = it->second;
+    if (!message["obstacle"].IsNumber()) return reply(false, "obstacle index required");
+    if (!room.session->DebugRemoveObstacle(static_cast<int>(message["obstacle"].AsNumber()))) {
+      return reply(false, "no such live obstacle");
+    }
+    Json world = Typed("world");
+    world.Set("world", room.session->TakeWorldDelta());
+    for (int ti = 0; ti < 2; ++ti) SendSeat(room, static_cast<Team>(ti), world);
+    for (int spectator : room.spectators) Send(spectator, world);
+    // Removing an obstacle can reveal figures: refresh each seat's state.
+    for (int ti = 0; ti < 2; ++ti) {
+      SendSeat(room, static_cast<Team>(ti), room.session->StateMessage(static_cast<Team>(ti)));
+    }
+    for (int spectator : room.spectators) Send(spectator, room.session->SpectatorStateMessage());
+    return reply(true, "");
+  }
+  if (type == "place_bomb") {  // Debug: place/move the debug bomb (issue #350).
+    auto it = rooms_.find(name);
+    if (it == rooms_.end() || !it->second.session) return reply(false, "no running match in room");
+    glm::vec3 pos(0.0f);
+    if (!message["pos"].IsArray() || message["pos"].AsArray().size() != 3) {
+      return reply(false, "pos must be [x, y, z]");
+    }
+    const auto& arr = message["pos"].AsArray();
+    for (int i = 0; i < 3; ++i) {
+      if (!arr[i].IsNumber()) return reply(false, "pos must be [x, y, z]");
+      pos[i] = static_cast<float>(arr[i].AsNumber());
+    }
+    const float radius = message["radius"].IsNumber()
+                             ? static_cast<float>(message["radius"].AsNumber())
+                             : kDefaultBombRadius;
+    it->second.session->DebugPlaceBomb(pos, radius);
+    return reply(true, "");
+  }
+  if (type == "detonate_bomb") {  // Debug: blow the placed bomb (issue #350).
+    auto it = rooms_.find(name);
+    if (it == rooms_.end() || !it->second.session) return reply(false, "no running match in room");
+    Room& room = it->second;
+    if (message["at"].IsNumber()) {
+      // Armed: it goes off at this time into the next round's execution; the
+      // changes ship inside that round message with the matching timestamp.
+      if (!room.session->DebugArmBomb(static_cast<float>(message["at"].AsNumber()))) {
+        return reply(false, "no placed bomb");
+      }
+      return reply(true, "");
+    }
+    if (!room.session->DebugDetonateBomb()) {
+      return reply(false, "no placed bomb or nothing destructible in range");
+    }
+    Json world = Typed("world");
+    world.Set("world", room.session->TakeWorldDelta());
+    for (int ti = 0; ti < 2; ++ti) SendSeat(room, static_cast<Team>(ti), world);
+    for (int spectator : room.spectators) Send(spectator, world);
+    // Blowing a hole can reveal figures: refresh each seat's fog-filtered state.
+    for (int ti = 0; ti < 2; ++ti) {
+      SendSeat(room, static_cast<Team>(ti), room.session->StateMessage(static_cast<Team>(ti)));
+    }
+    for (int spectator : room.spectators) Send(spectator, room.session->SpectatorStateMessage());
     return reply(true, "");
   }
   if (type == "dump_state") {

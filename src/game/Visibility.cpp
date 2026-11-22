@@ -118,6 +118,28 @@ bool CanUnitSee(const Unit& viewer, const Unit& target, const std::vector<Obstac
   });
 }
 
+std::vector<glm::vec3> FigureSeeThroughProbes(Team team, bool allTeams, bool fogActive,
+                                              const std::vector<Unit>& units,
+                                              const std::vector<Obstacle>& obstacles,
+                                              const std::vector<WalkSurface>& walkSurfaces,
+                                              const HeightField& terrain) {
+  constexpr float kSurfaceLift = 0.3f;
+  std::vector<glm::vec3> probes;
+  for (const Unit& unit : units) {
+    bool include = allTeams || unit.team == team;
+    if (!include && !unit.alive) {
+      include = !fogActive;
+      for (size_t i = 0; !include && i < units.size(); ++i) {
+        include = units[i].team == team && CanUnitSee(units[i], unit, obstacles, walkSurfaces, terrain);
+      }
+    }
+    if (!include) continue;
+    probes.push_back(unit.EyePosition());
+    probes.push_back(unit.position + glm::vec3(0.0f, kSurfaceLift, 0.0f));
+  }
+  return probes;
+}
+
 namespace {
 
 // Obstacles are boxes, not points. Approximate "some part of this obstacle

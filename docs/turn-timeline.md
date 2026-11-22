@@ -58,8 +58,9 @@ moves, shot lines and plan rings are stripped from the replay instance.
   **Red has its own timeline**, which is the simpler option because it needs
   no new bus messages; a follower that joins mid-match simply starts its
   history at the state it joined on. The native split-screen window keeps
-  one shared timeline/replay for its one shared `GameLogic`: scrubbing in
-  either pane shows the replay in both, each through its own fog.
+  one shared recorded timeline for its one shared `GameLogic`, but replay
+  is per player: each pane has its own playback, so one player can review
+  the match while the other keeps planning.
 - **New game clears history** (cf. #124). Every `Reset` path restarts the
   timeline at a fresh `Start` tick; a follower detects the restart from the
   round counter going backwards (same heuristic as `ImportState`).

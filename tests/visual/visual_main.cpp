@@ -206,6 +206,8 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     if (scenario.cameraTarget) {
       camera.target = glm::vec3(scenario.cameraTarget->x, 0.0f, scenario.cameraTarget->y);
     }
+    camera.Rotate(glm::radians(scenario.cameraYawDegrees),
+                  glm::radians(scenario.cameraPitchDegrees));
     camera.Zoom(scenario.cameraZoom);
     camera.Update(1.0e3f);  // Snap any scenario zoom adjustment.
   }
@@ -217,6 +219,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   // controller via hooks.onTimeline below).
   const tactics::TurnTimeline* timelineView = nullptr;
   const tactics::TimelinePlayback* timelinePlayback = nullptr;
+  const GameLogic* liveGame = nullptr;  // in-process runner only
 
   // Issue #110: the scenario (or --fov-shadow-map) picks the FOV overlay
   // path; restored to the CPU default after the scenario.
@@ -228,9 +231,14 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   gfx::RenderDebugOptions renderDebug;
   // Decorative trees are covered separately; keep gameplay goldens unchanged.
   renderDebug.disableTrees = true;
+  renderDebug.settleDebris = true;  // Chunks at rest: the fall runs on a wall clock.
   // Every scenario renders in the AO view, like the live app default.
   renderDebug.thermal = true;
   renderDebug.thermalBlackHot = scenario.thermalBlackHot;
+  // Ink outlines (NPR over the AO view) only where a scenario asks for them;
+  // the default goldens pin the plain AO view.
+  renderDebug.npr = scenario.npr;
+  renderDebug.nprSettings = gfx::DefaultAppNprSettings();
   // --profile: per-pane RenderPane wall time (glFinish before and after)
   // and the number of own living units whose cones were drawn, so the cost
   // per pane and per unit can be read off.
@@ -260,11 +268,15 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   auto renderPanes = [&](const PaneGames& games, const ClickMarker* marker = nullptr) {
     for (int pane = 0; pane < 2; ++pane) {
       const GameLogic& game = *games[pane];
-      const bool fogActive = game.Mode() != InputMode::GameOver;
+      // Once the live match is over, a replay reveals both teams (as in the app).
+      const bool matchOver = liveGame && liveGame->Mode() == InputMode::GameOver;
+      const bool fogActive = game.Mode() != InputMode::GameOver && !matchOver;
       const Team team = PaneTeam(pane);
       TeamVisibility visibility;
       if (fogActive) visibility = game.ComputeVisibility(team);
-      const gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(game, team);
+      gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(game, team);
+      // After the match both teams' FOV is shown to everyone (as in the app).
+      overlays.spectatorFov = overlays.spectatorFov || matchOver;
       if (options.profile) {
         glFinish();
         const auto start = std::chrono::steady_clock::now();
@@ -455,6 +467,7 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
     timelineView = &timeline;
     timelinePlayback = &playback;
   };
+  hooks.onLiveGame = [&](const GameLogic& live) { liveGame = &live; };
   hooks.onActionComplete = [&](const GameLogic& game, int turn) {
     // The holds for this action have already been emitted, so framesWritten
     // is the exclusive end of the action's video segment (turn 0 = the
@@ -573,6 +586,15 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
             rig.For(team).game.UpdateSightingMemory(0.05f);
           }
         }
+      } else if (action.kind == ScenarioAction::Kind::Bomb) {
+        // Debug bomb (issue #350): the server detonates; the filmed mirrors
+        // pick the world delta up from the broadcast.
+        std::string error;
+        if (!tactics::testing::ControlBomb(net->control, room, action, &error)) {
+          result.failures.push_back("step " + std::to_string(i) + ": " + error);
+          break;
+        }
+        for (Team team : {Team::Blue, Team::Red}) rig.Sync(rig.For(team));
       } else {
         const tactics::Unit* actor = nullptr;
         for (const tactics::Unit& u : scenario.scene.units) {

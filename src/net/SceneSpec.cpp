@@ -154,8 +154,19 @@ bool SceneFromSpec(const Json& spec, tactics::Scene* out, std::string* error) {
     Obstacle obstacle;
     obstacle.bounds = AABB{glm::vec3(center.x - half.x, 0.0f, center.y - half.y),
                            glm::vec3(center.x + half.x, o["height"].AsNumber(), center.y + half.y)};
-    obstacle.climbable = o["climbable"].AsBool();
     scene.obstacles.push_back(obstacle);
+    // `ramp: "-x"|"+x"|"-z"|"+z"`: a climbable crate (issue #40): a walkable
+    // top plus a ramp leaning on that side of the box.
+    if (o["ramp"].IsString()) {
+      const std::string side = o["ramp"].AsString();
+      glm::vec2 dir(0.0f);
+      if (side == "-x") dir = {-1.0f, 0.0f};
+      else if (side == "+x") dir = {1.0f, 0.0f};
+      else if (side == "-z") dir = {0.0f, -1.0f};
+      else if (side == "+z") dir = {0.0f, 1.0f};
+      else return Fail(error, "map.obstacles[].ramp must be one of -x, +x, -z, +z");
+      AddClimbRamp(&scene, static_cast<int>(scene.obstacles.size()) - 1, dir);
+    }
     // `roof_slab: true`: a flat walkable slab on the obstacle's top (a
     // zipline's roof end), reachable only by line.
     if (o["roof_slab"].AsBool()) {

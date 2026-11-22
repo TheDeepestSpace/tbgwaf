@@ -160,6 +160,10 @@ void GameLogic::Reset(Scene scene) {
   }
   navMesh_ = NavMesh();
   navMeshUnitId_ = -1;
+  worldLog_.clear();  // A new match starts from the seeded map.
+  pristine_.reset();
+  debugBomb_.reset();
+  bombsDetonated_ = 0;
   roundNumber_ = 1;
 
   mode_ = InputMode::AwaitingSelection;
@@ -389,7 +393,7 @@ void GameLogic::EnsureNavMeshFor(const Unit& mover, const glm::vec3& origin) {
   region.zMin = std::max(-half, origin.z - reach);
   region.zMax = std::min(half, origin.z + reach);
   navMesh_.Build(scene_.obstacles, region, constants::kAgentRadius, &scene_.ground,
-                 &scene_.walkSurfaces);
+                 &scene_.walkSurfaces, &scene_.terrainTunnels);
   navMeshUnitId_ = mover.id;
   navMeshOrigin_ = origin;
 }
@@ -438,7 +442,173 @@ GameSnapshot GameLogic::ExportState() const {
   snap.winner = winner_ ? static_cast<int>(*winner_) : -1;
   snap.flag = flag_;
   if (flag_.carrierId >= 0) snap.flag.position = FlagPosition();
+  snap.world = worldLog_;
   return snap;
+}
+
+Scene GameLogic::BaseScene() const { return pristine_ ? *pristine_ : scene_; }
+
+void GameLogic::OnWorldChanged() {
+  obstacleBounds_ = ObstacleBounds(scene_.obstacles);
+  sightObstacles_ = tactics::SightObstacles(scene_);
+  navMesh_ = NavMesh();
+  navMeshUnitId_ = -1;
+  ClearMoveOverlays();
+  // Planned paths were routed over the old geometry; an imported/planned
+  // move is re-validated when the round commits.
+  movePreviewValid_ = false;
+}
+
+bool GameLogic::ApplyWorldChange(WorldChange change) {
+  if (!pristine_) pristine_ = scene_;
+  change.id = static_cast<int>(worldLog_.size());
+  change.round = roundNumber_;
+  change.at = mode_ == InputMode::Executing ? executionElapsed_ : 0.0f;
+  // Captured before the apply kills the surface: the height figures stood at.
+  float floorY = 0.0f;
+  if (change.kind == WorldChangeKind::FloorHole && change.target >= 0 &&
+      change.target < static_cast<int>(scene_.walkSurfaces.size()) &&
+      !scene_.walkSurfaces[change.target].vertices.empty()) {
+    floorY = scene_.walkSurfaces[change.target].vertices.front().y;
+  }
+  if (!tactics::ApplyWorldChange(&scene_, change)) {  // Validates before mutating.
+    if (worldLog_.empty()) pristine_.reset();
+    return false;
+  }
+  if (change.kind == WorldChangeKind::FloorHole) DropFiguresThroughHole(change, floorY);
+  worldLog_.push_back(std::move(change));
+  OnWorldChanged();
+  return true;
+}
+
+bool GameLogic::DebugRemoveObstacle(int index) {
+  WorldChange c;
+  c.kind = WorldChangeKind::ObstacleRemoved;
+  c.target = index;
+  return ApplyWorldChange(std::move(c));
+}
+
+void GameLogic::DebugPlaceBomb(const glm::vec3& position, float radius) {
+  DebugBomb bomb;
+  bomb.position = position;
+  bomb.radius = std::clamp(radius, 0.5f, 10.0f);
+  bomb.detonateAt = debugBomb_ ? debugBomb_->detonateAt : -1.0f;
+  debugBomb_ = bomb;
+}
+
+bool GameLogic::DebugArmBomb(float atSeconds) {
+  if (!debugBomb_ || atSeconds < 0.0f) return false;
+  debugBomb_->detonateAt = atSeconds;
+  return true;
+}
+
+bool GameLogic::DebugDetonateBomb() {
+  if (!debugBomb_) return false;
+  BombSpec spec;
+  spec.position = debugBomb_->position;
+  spec.radius = debugBomb_->radius;
+  spec.seed = ExplosionSeed(matchSeed_, roundNumber_, bombsDetonated_);
+  debugBomb_.reset();
+  ++bombsDetonated_;
+  if (recorder_.ptr) {
+    char buf[192];
+    std::snprintf(buf, sizeof buf,
+                  "bomb pos=(%.4f,%.4f,%.4f) radius=%.3f seed=%u exec=%.4f round=%d",
+                  spec.position.x, spec.position.y, spec.position.z, spec.radius, spec.seed,
+                  executionElapsed_, roundNumber_);
+    LogSim(buf);
+  }
+  bool any = false;
+  // The plan was validated against this very scene state; applying in order
+  // reproduces its chained piece indices.
+  for (const WorldChange& change : PlanExplosion(scene_, spec)) {
+    any |= ApplyWorldChange(change);
+  }
+  return any;
+}
+
+void GameLogic::DropFiguresThroughHole(const WorldChange& c, float floorY) {
+  const float x0 = std::min(c.rect.x, c.rect.z), x1 = std::max(c.rect.x, c.rect.z);
+  const float z0 = std::min(c.rect.y, c.rect.w), z1 = std::max(c.rect.y, c.rect.w);
+  for (Unit& unit : scene_.units) {
+    if (!unit.alive) continue;
+    const glm::vec3& p = unit.position;
+    if (p.x < x0 || p.x > x1 || p.z < z0 || p.z > z1) continue;
+    if (std::fabs(p.y - floorY) > 0.5f) continue;  // Not standing on that floor.
+    // Still on a piece of it the fracture left standing?
+    bool standing = false;
+    for (const WalkSurface& s : scene_.walkSurfaces) {
+      if (s.dead || s.vertices.size() < 3 || !SurfaceContainsXZ(s, p.x, p.z)) continue;
+      standing |= std::fabs(SurfaceHeightAt(s, p.x, p.z) - p.y) <= 0.5f;
+    }
+    if (standing) continue;
+    // Highest support left underneath: the ground, or a live lower surface.
+    float support = scene_.ground.HeightAt(p.x, p.z);
+    for (const WalkSurface& s : scene_.walkSurfaces) {
+      if (s.dead || s.vertices.size() < 3 || !SurfaceContainsXZ(s, p.x, p.z)) continue;
+      const float y = SurfaceHeightAt(s, p.x, p.z);
+      if (y < p.y - 0.5f) support = std::max(support, y);
+    }
+    glm::vec3 dir = p - glm::vec3(0.5f * (x0 + x1), p.y, 0.5f * (z0 + z1));
+    dir.y = 0.0f;
+    if (glm::length(dir) < 1e-4f) dir = unit.FacingDirection();
+    KnockDown(unit, glm::normalize(dir));
+    unit.knockdownDrop = std::max(0.0f, p.y - support);
+  }
+}
+
+bool GameLogic::AcceptWorldChange(const WorldChange& change) {
+  const int size = static_cast<int>(worldLog_.size());
+  if (change.id < size) return true;  // Already applied (e.g. via a state message).
+  if (change.id != size) return false;
+  if (!pristine_) pristine_ = scene_;
+  if (!tactics::ApplyWorldChange(&scene_, change)) {
+    if (worldLog_.empty()) pristine_.reset();
+    return false;
+  }
+  worldLog_.push_back(change);
+  OnWorldChanged();
+  return true;
+}
+
+// Brings the live geometry to exactly `log`: keeps the common prefix,
+// otherwise rewinds to the pristine scene, then applies the rest in order.
+bool GameLogic::SyncWorld(const std::vector<WorldChange>& log) {
+  if (log.size() == worldLog_.size() && (log.empty() || log.back() == worldLog_.back())) {
+    return true;  // Hot path: ImportState runs every frame during playback.
+  }
+  size_t common = 0;
+  while (common < log.size() && common < worldLog_.size() && log[common] == worldLog_[common]) {
+    ++common;
+  }
+  if (common < worldLog_.size()) {  // Diverged or shorter: start over.
+    if (pristine_) {
+      scene_.obstacles = pristine_->obstacles;
+      scene_.buildings = pristine_->buildings;
+      scene_.massing = pristine_->massing;
+      scene_.facadeOpenings = pristine_->facadeOpenings;
+      scene_.walkSurfaces = pristine_->walkSurfaces;
+      scene_.ground = pristine_->ground;
+    }
+    worldLog_.clear();
+    common = 0;
+  }
+  if (log.empty()) {
+    pristine_.reset();
+    OnWorldChanged();
+    return true;
+  }
+  if (!pristine_) pristine_ = scene_;
+  bool ok = true;
+  for (size_t i = common; i < log.size(); ++i) {
+    if (log[i].id != static_cast<int>(i) || !tactics::ApplyWorldChange(&scene_, log[i])) {
+      ok = false;
+      break;
+    }
+    worldLog_.push_back(log[i]);
+  }
+  OnWorldChanged();
+  return ok;
 }
 
 namespace {
@@ -484,6 +654,7 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   if (recorder_.ptr) e.text = SerializeSnapshot(snap);
   RecordScope record(this, std::move(e));
   if (!SnapshotMatchesUnits(snap, scene_.units)) return false;
+  if (!SyncWorld(snap.world)) return false;
   // Deaths arriving in this snapshot whose victim the opposing team cannot
   // see happened outside its FOV: a free-aim blind hit resolved on the
   // simulating peer. Sighting memory is per-page derived state (never
@@ -627,6 +798,12 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
   out << ' ' << (snap.flag.enabled ? 1 : 0) << ' ' << snap.flag.carrierId << ' '
       << snap.flag.position.x << ' ' << snap.flag.position.y << ' ' << snap.flag.position.z << ' '
       << snap.flag.dropElapsed;
+  // Only a changed world adds tokens, so unchanged matches keep their
+  // historical text (and hashes).
+  if (!snap.world.empty()) {
+    out << ' ' << snap.world.size();
+    for (const WorldChange& c : snap.world) WriteWorldChange(out, c);
+  }
   return out.str();
 }
 
@@ -731,6 +908,14 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
   bool carrierKnown = snap.flag.carrierId < 0;
   for (const auto& u : snap.units) carrierKnown |= u.id == snap.flag.carrierId;
   if (!carrierKnown) return false;
+  size_t worldCount = 0;
+  if (in >> worldCount) {  // Optional trailing world-change log.
+    if (worldCount > kMaxEntries) return false;
+    snap.world.resize(worldCount);
+    for (WorldChange& c : snap.world) {
+      if (!ReadWorldChange(in, &c)) return false;
+    }
+  }
   *outSnap = std::move(snap);
   return true;
 }
@@ -1041,6 +1226,13 @@ void GameLogic::UpdateUnrecorded(float dtSeconds) {
 void GameLogic::AdvanceExecutingRound(float dtSeconds) {
   const float tickStart = executionElapsed_;
   executionElapsed_ += dtSeconds;
+  // An armed debug bomb goes off the first tick the round clock passes its
+  // time; the resulting world changes carry that stamp, so replays and
+  // remote playback apply them at the same moment.
+  if (debugBomb_ && debugBomb_->detonateAt >= 0.0f &&
+      executionElapsed_ >= debugBomb_->detonateAt) {
+    DebugDetonateBomb();
+  }
   std::vector<FlagTouch> flagTouches;
   CollectStationaryFlagTouches(tickStart, &flagTouches);
   const bool flagLoose = flag_.enabled && flag_.carrierId < 0;
@@ -1199,6 +1391,107 @@ void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
   }
 }
 
+namespace {
+
+struct WalkableHit {
+  float t = 0.0f;
+  glm::vec3 point{0.0f};
+};
+
+// Every walkable-surface crossing along a camera ray, unsorted: the ground
+// (flat plane or sampled terrain, inside the map square), sidewalk slab tops
+// and walk-surface planes (decks, ramps, stairs, floors). The same surface
+// set the app's plain ground picking chooses from, so the frontier-aware
+// resolver below sees every candidate that pick would have offered.
+void CollectWalkableHits(const glm::vec3& origin, const glm::vec3& dir, const Scene& scene,
+                         std::vector<WalkableHit>* hits) {
+  if (scene.ground.Empty()) {
+    if (std::fabs(dir.y) > 1e-6f) {
+      const float t = -origin.y / dir.y;
+      if (t >= 0.0f) {
+        const glm::vec3 p = origin + dir * t;
+        if (std::fabs(p.x) <= scene.mapHalfExtent && std::fabs(p.z) <= scene.mapHalfExtent) {
+          hits->push_back({t, p});
+        }
+      }
+    }
+  } else if (origin.y > scene.ground.HeightAt(origin.x, origin.z)) {
+    // Coarse ray-march refined by bisection, same approach as the app's
+    // terrain click picking.
+    constexpr float kCoarseStep = 0.5f;
+    constexpr float kMaxDistance = 2000.0f;
+    float prevT = 0.0f;
+    for (float t = kCoarseStep; t <= kMaxDistance; t += kCoarseStep) {
+      const glm::vec3 p = origin + dir * t;
+      if (p.y - scene.ground.HeightAt(p.x, p.z) <= 0.0f) {
+        float lo = prevT, hi = t;
+        for (int i = 0; i < 24; ++i) {
+          const float mid = 0.5f * (lo + hi);
+          const glm::vec3 q = origin + dir * mid;
+          (q.y - scene.ground.HeightAt(q.x, q.z) <= 0.0f ? hi : lo) = mid;
+        }
+        const float hitT = 0.5f * (lo + hi);
+        const glm::vec3 hit = origin + dir * hitT;
+        if (std::fabs(hit.x) <= scene.mapHalfExtent && std::fabs(hit.z) <= scene.mapHalfExtent) {
+          hits->push_back({hitT, hit});
+        }
+        break;
+      }
+      prevT = t;
+    }
+  }
+
+  constexpr float kTopFaceEpsilon = 1e-2f;
+  float t = 0.0f;
+  for (const AABB& slab : scene.sidewalks) {
+    if (!RayIntersectsAABB(origin, dir, slab, &t)) continue;
+    const glm::vec3 hit = origin + dir * t;
+    if (hit.y < slab.max.y - kTopFaceEpsilon) continue;  // Hit a side, not the top.
+    hits->push_back({t, hit});
+  }
+  for (const WalkSurface& surface : scene.walkSurfaces) {
+    if (surface.vertices.size() < 3) continue;
+    const glm::vec3 normal = glm::cross(surface.vertices[1] - surface.vertices[0],
+                                        surface.vertices[2] - surface.vertices[0]);
+    const float denominator = glm::dot(normal, dir);
+    if (std::fabs(denominator) < 1e-7f) continue;
+    const float planeT = glm::dot(normal, surface.vertices[0] - origin) / denominator;
+    if (planeT < 0.0f) continue;
+    const glm::vec3 hit = origin + dir * planeT;
+    if (!SurfaceContainsXZ(surface, hit.x, hit.z)) continue;
+    hits->push_back({planeT, hit});
+  }
+}
+
+}  // namespace
+
+std::optional<glm::vec3> GameLogic::ResolveMoveRay(const glm::vec3& origin,
+                                                   const glm::vec3& direction) const {
+  if (glm::length(direction) < 1e-6f) return std::nullopt;
+  const glm::vec3 dir = glm::normalize(direction);
+  std::vector<WalkableHit> hits;
+  CollectWalkableHits(origin, dir, scene_, &hits);
+  if (hits.empty()) return std::nullopt;
+  std::sort(hits.begin(), hits.end(),
+            [](const WalkableHit& a, const WalkableHit& b) { return a.t < b.t; });
+
+  // Half a storey separates stacked floors (the lowest generated spacing is
+  // 2.8), while comfortably absorbing the height error of sampling a sloped
+  // ramp/stair cell at its node center instead of the exact hit point.
+  constexpr float kLayerTolerance = 1.0f;
+  if (const ReachField* frontier = MoveFrontier()) {
+    for (const WalkableHit& hit : hits) {
+      if (frontier->CoversPoint(hit.point, kLayerTolerance)) return hit.point;
+      for (const ZiplineFrontier& zipline : ziplineFrontiers_) {
+        if (zipline.field.CoversPoint(hit.point, kLayerTolerance)) return hit.point;
+      }
+    }
+  }
+  // No frontier up (not planning a move, or it is disabled), or the ray
+  // crosses it nowhere: the plain nearest-surface pick, as before.
+  return hits.front().point;
+}
+
 // Any manual touch of a figure's plan drops its queued multi-round route.
 void GameLogic::ClearQueuedLegs(std::optional<int> unitId) {
   if (Unit* unit = FindUnit(unitId.value_or(-1))) {
@@ -1290,7 +1583,7 @@ void GameLogic::BuildZiplineFrontiers(const Unit& mover, const glm::vec3& origin
       region.zMax = std::min(half, exit.z + reach);
       NavMesh mesh;
       mesh.Build(scene_.obstacles, region, constants::kAgentRadius, &scene_.ground,
-                 &scene_.walkSurfaces);
+                 &scene_.walkSurfaces, &scene_.terrainTunnels);
       ZiplineFrontier frontier;
       frontier.zipline = static_cast<int>(i);
       frontier.entry = entry;
@@ -2431,6 +2724,7 @@ void GameLogic::FinishRound() {
 
   // Auto-arm the next leg of any multi-round route; the player can still
   // replan (which clears the queue) before committing.
+  std::vector<int> armedLegs;
   for (auto& unit : scene_.units) {
     if (unit.plan.queuedLegs.empty()) continue;
     if (!unit.alive) {
@@ -2444,6 +2738,25 @@ void GameLogic::FinishRound() {
     unit.plan.queuedLegs.erase(unit.plan.queuedLegs.begin());
     unit.plan.queuedLegRides.erase(unit.plan.queuedLegRides.begin());
     unit.plan.endFacingYaw = FinalYaw(unit.plan.movePath, unit.facingYaw);
+    armedLegs.push_back(unit.id);
+  }
+  // Queued legs were planned rounds ago against other positions, so an armed
+  // leg can now run into another figure and stall the round (Commit Round
+  // unavailable). Drop such legs, with the rest of that figure's queue, so
+  // the owner (player or Jev) re-plans it.
+  while (HasPlanOverlap()) {
+    bool dropped = false;
+    for (const int id : armedLegs) {
+      Unit* unit = FindUnit(id);
+      if (!unit || unit->plan.type != PlannedActionType::Move ||
+          !PathOverlapsFigure(*unit, unit->plan.movePath, unit->plan.moveRides)) {
+        continue;
+      }
+      unit->plan = PlannedAction{};
+      dropped = true;
+      break;
+    }
+    if (!dropped) break;
   }
 
   SyncFlag();

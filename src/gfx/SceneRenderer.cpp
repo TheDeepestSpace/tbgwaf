@@ -1132,6 +1132,21 @@ void AppendFacadeOpening(const tactics::Scene& scene, const tactics::FacadeOpeni
   }
 }
 
+// Unnormalised polygon normal (Newell), so collinear leading vertices --
+// fracture cells have plenty -- cannot zero it the way a cross product of the
+// first three vertices does (a NaN normal made the drawn floor top vanish).
+glm::vec3 PolygonNormal(const std::vector<glm::vec3>& polygon) {
+  glm::vec3 n(0.0f);
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    const glm::vec3& a = polygon[i];
+    const glm::vec3& b = polygon[(i + 1) % polygon.size()];
+    n.x += (a.y - b.y) * (a.z + b.z);
+    n.y += (a.z - b.z) * (a.x + b.x);
+    n.z += (a.x - b.x) * (a.y + b.y);
+  }
+  return n;
+}
+
 // `hiddenEdges[i]` (optional) skips the side wall under polygon edge i, for
 // edges butted against a neighbouring slab: the wall would only show as a
 // seam, most visibly through the faded see-through pass.
@@ -1139,7 +1154,9 @@ void AppendSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
                         LitVertices* vertices, std::vector<GLuint>* indices,
                         const std::vector<char>* hiddenEdges = nullptr) {
   if (polygon.size() < 3) return;
-  glm::vec3 topNormal = glm::normalize(glm::cross(polygon[1] - polygon[0], polygon[2] - polygon[0]));
+  glm::vec3 topNormal = PolygonNormal(polygon);
+  if (glm::length(topNormal) < 1e-9f) return;
+  topNormal = glm::normalize(topNormal);
   if (topNormal.y < 0.0f) topNormal = -topNormal;
   auto triangle = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 normal) {
     AppendTriangle(a, b, c, normal, vertices, indices);
@@ -4797,7 +4814,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           for (int j : slabs) {
             if (j == self) continue;
             const std::vector<glm::vec3>& v = walkSurfaces[j].vertices;
-            const glm::vec3 n = glm::cross(v[1] - v[0], v[2] - v[0]);
+            const glm::vec3 n = PolygonNormal(v);
             const float denom = glm::dot(ray, n);
             if (std::fabs(denom) < 1e-6f) continue;
             const float t = glm::dot(v[0] - cameraPos, n) / denom;
@@ -5072,8 +5089,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       if (!tactics::SurfaceContainsXZ(surface, position.x, position.z)) continue;
       if (std::fabs(tactics::SurfaceHeightAt(surface, position.x, position.z) - position.y) > 0.3f)
         continue;
-      glm::vec3 n = glm::cross(surface.vertices[1] - surface.vertices[0],
-                               surface.vertices[2] - surface.vertices[0]);
+      glm::vec3 n = PolygonNormal(surface.vertices);
       if (glm::length(n) < 1e-6f) continue;
       n = glm::normalize(n);
       return n.y < 0.0f ? -n : n;

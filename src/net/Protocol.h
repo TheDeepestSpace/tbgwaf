@@ -85,8 +85,12 @@ namespace tactics::net {
 // exist, and obstacles serialize a wall-plane profile -- a peer on 3 would
 // reject the new kinds and compute different geometry. 5: FloorHole and
 // MassingCut may carry fracture-cell pieces and debris flights serialize a
-// rest yaw and a solid flag (only solid chunks become obstacles).
-constexpr int kProtocolVersion = 5;
+// rest yaw and a solid flag (only solid chunks become obstacles). 6: the
+// OpeningRemoved kind exists, ObstacleReplaced detaches the target's facade
+// openings instead of killing them, FloorHole / MassingCut cell pieces may cut
+// sloped patches / sloped-top details, and a change may carry up to 256
+// pieces -- a peer on 5 would reject or mis-apply those.
+constexpr int kProtocolVersion = 6;
 constexpr size_t kMaxMessageBytes = 16 * 1024;
 constexpr size_t kMaxWaypoints = 32;
 

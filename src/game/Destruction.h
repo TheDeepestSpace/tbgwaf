@@ -7,21 +7,29 @@
 // PlanExplosion turns one such record plus the current scene into an ordered
 // list of WorldChanges (see game/WorldChange.h), the way pre-fractured
 // destruction usually works (Voronoi cells, damage by radius): every concrete
-// element the blast reaches is pre-cracked into seeded Voronoi cells in its
-// own plane -- walls, the jamb / sill / head strips around windows and corner
-// posts in the wall plane; ceiling / roof slabs, floor surfaces and the roof
-// massing (parapets) in XZ. The crack pattern is world-anchored, so coplanar
-// elements crack along the same lines. Cells near the blast are knocked out;
-// the others stay standing as convex pieces (wall pieces carry the cell as
-// their wall-plane profile), so every torn edge sits at the fracture's own
-// angle. Each knocked-out cell becomes a debris chunk of exactly that shape:
-// the Debris change simulates its flight here against the post-cut scene
-// until it lands flat -- the largest chunks as rubble obstacles (blocking
-// movement and sight), smaller ones as litter -- with per-chunk flight
-// parameters so clients replay the same fall out of the same hole. The plan
-// is a pure function of (scene, spec): the server applies it through
-// GameLogic::ApplyWorldChange and ships the resulting log entries, so every
-// client rebuilds exactly the same holes and rubble.
+// element the blast reaches is pre-cracked into seeded Voronoi cells --
+// walls, the jamb / sill / head strips around windows and corner posts in
+// the wall plane; ceiling / roof slabs, floors, overpass decks and ramps and
+// the massing (parapets, deck rails, pier caps) in XZ; thick solids
+// (overpass piers, solid building blocks) in XZ per layer of their height.
+// The crack pattern is world-anchored, so coplanar elements crack along the
+// same lines. Cells near the blast are knocked out; the others stay standing
+// as convex pieces (wall pieces carry the cell as their wall-plane profile),
+// so every torn edge sits at the fracture's own angle. A stair flight the
+// blast reaches comes down whole; window frames in the blast are blown off,
+// the others stay on what is left standing. Terrain is not cut.
+//
+// Everything knocked out is accounted for: each cell becomes a debris chunk
+// of exactly that shape, whose flight is simulated here against the post-cut
+// scene -- thrown by the blast, stopped by whatever stands in its way, at
+// rest lying flat on the ground, a floor or the rubble already down (the
+// breach included, if that is where it falls). Chunks of 0.1 m^2 and up are
+// rubble obstacles (blocking movement and sight), smaller ones litter; the
+// Debris changes carry per-chunk flight parameters so clients replay the
+// same fall out of the same hole. The plan is a pure function of
+// (scene, spec): the server applies it through GameLogic::ApplyWorldChange
+// and ships the resulting log entries, so every client rebuilds exactly the
+// same holes and rubble.
 
 #include <cstdint>
 #include <vector>
@@ -47,8 +55,9 @@ uint32_t ExplosionSeed(uint32_t matchSeed, int round, int bombId);
 
 // Deterministic fracture plan for one blast against the current scene. The
 // plan must be applied in order (GameLogic::ApplyWorldChange does; ids/time
-// stamps are its job). Bounded by a piece budget; empty when nothing
-// destructible is in range.
+// stamps are its job). Bounded by a cut budget (elements past it are left
+// intact, never cut without their chunks); empty when nothing destructible
+// is in range.
 std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& spec);
 
 // Where debris chunk `piece` (a Debris change's rest-pose prism) is `t`

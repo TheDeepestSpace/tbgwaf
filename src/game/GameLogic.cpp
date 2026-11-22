@@ -464,18 +464,27 @@ bool GameLogic::ApplyWorldChange(WorldChange change) {
   change.id = static_cast<int>(worldLog_.size());
   change.round = roundNumber_;
   change.at = mode_ == InputMode::Executing ? executionElapsed_ : 0.0f;
-  // Captured before the apply kills the surface: the height figures stood at.
-  float floorY = 0.0f;
-  if (change.kind == WorldChangeKind::FloorHole && change.target >= 0 &&
-      change.target < static_cast<int>(scene_.walkSurfaces.size()) &&
-      !scene_.walkSurfaces[change.target].vertices.empty()) {
-    floorY = scene_.walkSurfaces[change.target].vertices.front().y;
+  // Captured before the apply kills the surface: who was standing on it.
+  std::vector<int> standing;
+  if ((change.kind == WorldChangeKind::FloorHole ||
+       change.kind == WorldChangeKind::SurfaceRemoved) &&
+      change.target >= 0 && change.target < static_cast<int>(scene_.walkSurfaces.size())) {
+    const WalkSurface& s = scene_.walkSurfaces[change.target];
+    if (!s.dead && s.vertices.size() >= 3) {
+      for (const Unit& unit : scene_.units) {
+        const glm::vec3& p = unit.position;
+        if (unit.alive && SurfaceContainsXZ(s, p.x, p.z) &&
+            std::fabs(SurfaceHeightAt(s, p.x, p.z) - p.y) <= 0.5f) {
+          standing.push_back(unit.id);
+        }
+      }
+    }
   }
   if (!tactics::ApplyWorldChange(&scene_, change)) {  // Validates before mutating.
     if (worldLog_.empty()) pristine_.reset();
     return false;
   }
-  if (change.kind == WorldChangeKind::FloorHole) DropFiguresThroughHole(change, floorY);
+  if (!standing.empty()) DropFiguresThroughHole(change, standing);
   worldLog_.push_back(std::move(change));
   OnWorldChanged();
   return true;
@@ -527,14 +536,15 @@ bool GameLogic::DebugDetonateBomb() {
   return any;
 }
 
-void GameLogic::DropFiguresThroughHole(const WorldChange& c, float floorY) {
+void GameLogic::DropFiguresThroughHole(const WorldChange& c, const std::vector<int>& wasOn) {
+  // Blast centre in XZ, for the direction figures topple: the hole's rect, or
+  // (a surface removed whole) the figure's own facing.
   const float x0 = std::min(c.rect.x, c.rect.z), x1 = std::max(c.rect.x, c.rect.z);
   const float z0 = std::min(c.rect.y, c.rect.w), z1 = std::max(c.rect.y, c.rect.w);
+  const bool hasRect = c.kind == WorldChangeKind::FloorHole;
   for (Unit& unit : scene_.units) {
-    if (!unit.alive) continue;
+    if (!unit.alive || std::find(wasOn.begin(), wasOn.end(), unit.id) == wasOn.end()) continue;
     const glm::vec3& p = unit.position;
-    if (p.x < x0 || p.x > x1 || p.z < z0 || p.z > z1) continue;
-    if (std::fabs(p.y - floorY) > 0.5f) continue;  // Not standing on that floor.
     // Still on a piece of it the fracture left standing?
     bool standing = false;
     for (const WalkSurface& s : scene_.walkSurfaces) {
@@ -549,7 +559,8 @@ void GameLogic::DropFiguresThroughHole(const WorldChange& c, float floorY) {
       const float y = SurfaceHeightAt(s, p.x, p.z);
       if (y < p.y - 0.5f) support = std::max(support, y);
     }
-    glm::vec3 dir = p - glm::vec3(0.5f * (x0 + x1), p.y, 0.5f * (z0 + z1));
+    glm::vec3 dir = hasRect ? p - glm::vec3(0.5f * (x0 + x1), p.y, 0.5f * (z0 + z1))
+                            : glm::vec3(0.0f);
     dir.y = 0.0f;
     if (glm::length(dir) < 1e-4f) dir = unit.FacingDirection();
     KnockDown(unit, glm::normalize(dir));

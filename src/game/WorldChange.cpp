@@ -12,7 +12,7 @@ namespace tactics {
 
 namespace {
 
-constexpr size_t kMaxPieces = 64;
+constexpr size_t kMaxPieces = 256;
 constexpr size_t kMaxPolygon = 64;
 constexpr float kParkedY = -1000.0f;
 constexpr float kMinPieceSide = 0.02f;
@@ -126,14 +126,14 @@ bool ApplyFloorHole(Scene* scene, const WorldChange& c) {
   const bool cells = !c.pieces.empty();
   if (cells && c.pieces.size() > kMaxPieces) return false;
   if (!cells && (x1 - x0 < kMinPieceSide || z1 - z0 < kMinPieceSide)) return false;
-  // Floors only: the piece clipping below keeps each vertex's own height, but
-  // a steep ramp/stair cut this way would leave inconsistent seams.
+  // The rect form is for flat floors only. Cell pieces clip the patch's own
+  // plane, so a sloped planar patch (a ramp) stays consistent along the cuts.
   float yMin = base.vertices.front().y, yMax = yMin;
   for (const glm::vec3& v : base.vertices) {
     yMin = std::min(yMin, v.y);
     yMax = std::max(yMax, v.y);
   }
-  if (yMax - yMin > 0.5f) return false;
+  if (!cells && yMax - yMin > 0.5f) return false;
   // Disjoint convex partition of the patch minus the hole: everything left
   // of the hole, right of it, and the strips before/behind it in between.
   const auto& v = base.vertices;
@@ -499,7 +499,7 @@ bool ApplyMassingCut(Scene* scene, const WorldChange& c) {
   if (!c.pieces.empty()) {
     // Fracture cells left standing (see PlanExplosion): taken as planned,
     // as long as they really are a smaller part of this detail.
-    if (c.pieces.size() > kMaxPieces || !detail.top.empty()) return false;
+    if (c.pieces.size() > kMaxPieces) return false;
     float keptArea = 0.0f;
     for (const Obstacle& cell : c.pieces) {
       if (cell.footprint.size() < 3) return false;
@@ -524,6 +524,21 @@ bool ApplyMassingCut(Scene* scene, const WorldChange& c) {
   for (std::vector<glm::vec2>& piece : pieces) {
     MassingDetail out;
     out.kind = detail.kind;
+    if (!detail.top.empty()) {
+      // A sloped-top detail (deck rail): the piece keeps the part of the top
+      // polygon over its footprint.
+      const float winding = PolygonSignedArea(piece) < 0.0f ? -1.0f : 1.0f;
+      std::vector<glm::vec3> top = detail.top;
+      for (size_t i = 0; i < piece.size() && top.size() >= 3; ++i) {
+        const glm::vec2 p = piece[i], q = piece[(i + 1) % piece.size()];
+        top = ClipPolygon3(top, [&](float x, float z) {
+          return -winding * ((q.x - p.x) * (z - p.y) - (q.y - p.y) * (x - p.x));
+        });
+      }
+      if (top.size() < 3) continue;
+      out.top = std::move(top);
+      out.depth = detail.depth;
+    }
     out.footprint = std::move(piece);
     out.y0 = detail.y0;
     out.y1 = detail.y1;
@@ -603,6 +618,23 @@ bool WorldChange::operator==(const WorldChange& o) const {
   return true;
 }
 
+bool FacadeOpeningEdge(const Scene& scene, const FacadeOpening& opening, glm::vec2* a,
+                       glm::vec2* b) {
+  if (opening.detached) {
+    *a = opening.edgeA;
+    *b = opening.edgeB;
+    return glm::distance(*a, *b) > 1e-4f;
+  }
+  if (!ValidObstacle(scene, opening.obstacle)) return false;
+  const std::vector<glm::vec2> f = ObstacleFootprint(scene.obstacles[opening.obstacle]);
+  if (f.size() < 3 || opening.wallEdge < 0 || opening.wallEdge >= static_cast<int>(f.size())) {
+    return false;
+  }
+  *a = f[opening.wallEdge];
+  *b = f[(opening.wallEdge + 1) % f.size()];
+  return glm::distance(*a, *b) > 1e-4f;
+}
+
 void KillObstacle(Scene* scene, int index) {
   if (!ValidObstacle(*scene, index)) return;
   Obstacle& o = scene->obstacles[index];
@@ -615,7 +647,7 @@ void KillObstacle(Scene* scene, int index) {
   // learned about `dead` still finds nothing to hit, collide with, or see.
   o.bounds.min = o.bounds.max = glm::vec3(c.x, kParkedY, c.z);
   for (FacadeOpening& f : scene->facadeOpenings) {
-    if (f.obstacle == index) f.dead = true;
+    if (f.obstacle == index && !f.detached) f.dead = true;
   }
   RefreshBuildingLiveness(scene, o.building);
   // Buildings that name this prism as their roof/base but whose own prisms
@@ -653,6 +685,18 @@ bool ApplyWorldChange(Scene* scene, const WorldChange& c) {
     case WorldChangeKind::ObstacleReplaced: {
       if (!ValidObstacle(*scene, c.target) || scene->obstacles[c.target].dead) return false;
       if (c.pieces.size() > kMaxPieces) return false;
+      if (!c.pieces.empty()) {
+        // What was laid out on the prism (window frames, doors) stays on the
+        // pieces left standing: it only dies by its own OpeningRemoved.
+        for (FacadeOpening& f : scene->facadeOpenings) {
+          if (f.dead || f.detached || f.obstacle != c.target) continue;
+          glm::vec2 a, b;
+          if (!FacadeOpeningEdge(*scene, f, &a, &b)) continue;
+          f.detached = true;
+          f.edgeA = a;
+          f.edgeB = b;
+        }
+      }
       KillObstacle(scene, c.target);
       for (const Obstacle& piece : c.pieces) {
         Obstacle p = piece;
@@ -707,6 +751,13 @@ bool ApplyWorldChange(Scene* scene, const WorldChange& c) {
       return ApplyMassingCut(scene, c);
     case WorldChangeKind::Debris:
       return ApplyDebris(scene, c);
+    case WorldChangeKind::OpeningRemoved:
+      if (c.target < 0 || c.target >= static_cast<int>(scene->facadeOpenings.size()) ||
+          scene->facadeOpenings[c.target].dead) {
+        return false;
+      }
+      scene->facadeOpenings[c.target].dead = true;
+      return true;
   }
   return false;
 }

@@ -224,6 +224,10 @@ void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, flo
 
 namespace {
 
+// What a figure steps over without breaking stride: a stub left at the foot
+// of a breach, a debris chunk lying flat on the ground.
+constexpr float kStepOver = 0.35f;
+
 // A fractured wall piece (Obstacle::profile, see game/Destruction.h) only
 // blocks walking where its silhouette crosses the band a figure's body
 // occupies: from a stub's height it can step over, up to its head. Narrows
@@ -231,7 +235,6 @@ namespace {
 // exactly where the torn edges leave room -- or to nothing (`out->footprint`
 // empty) when the silhouette stays clear of the band. False for plain prisms.
 bool NarrowToWalkBand(const Obstacle& obstacle, const HeightField& heights, Obstacle* out) {
-  constexpr float kStepOver = 0.35f;
   if (obstacle.profile.size() < 3 || obstacle.footprint.size() != 4) return false;
   const std::vector<glm::vec2>& f = obstacle.footprint;
   const glm::vec2 along = f[1] - f[0];
@@ -325,6 +328,9 @@ void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& 
       }
     }
     if (b.min.y - groundTop >= constants::kUnitHeight) continue;
+    // Rubble lying no higher than a step is walked over, like the stub at
+    // the foot of a breach; a pile of it (or a thick block) blocks.
+    if (obstacle.kind == ObstacleKind::Rubble && b.max.y - groundTop <= kStepOver) continue;
     std::vector<std::vector<glm::vec2>> pieces;
     if (!GroundBlockingPieces(obstacle, tunnels, &pieces)) {
       obstacles.push_back(obstacle);

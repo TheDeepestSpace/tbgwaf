@@ -838,9 +838,10 @@ class GameLogic {
   std::optional<DebugBomb> debugBomb_;
   int bombsDetonated_ = 0;
   uint32_t matchSeed_ = 0;
-  // A figure standing over a fresh floor hole falls: knocked down (ragdoll)
-  // with a drop to whatever support remains below it.
-  void DropFiguresThroughHole(const WorldChange& change, float floorY);
+  // A figure left without footing by a floor hole or a removed surface (ids
+  // `wasOn` stood on the target before the change) falls: knocked down
+  // (ragdoll) with a drop to whatever support remains below it.
+  void DropFiguresThroughHole(const WorldChange& change, const std::vector<int>& wasOn);
 
   InputMode mode_ = InputMode::AwaitingSelection;
   std::optional<int> selectedUnitId_;

@@ -22,6 +22,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "game/Geometry.h"
+#include "game/WorldChange.h"
 
 using tactics::AABB;
 using tactics::GameLogic;
@@ -964,19 +965,13 @@ struct OpeningBasis {
 OpeningBasis OpeningBasisFor(const tactics::Scene& scene,
                              const tactics::FacadeOpening& opening) {
   OpeningBasis basis;
-  if (opening.obstacle < 0 ||
-      opening.obstacle >= static_cast<int>(scene.obstacles.size())) {
+  // The wall edge: the opening's own once its prism was fractured (it then
+  // sits on the pieces left standing), else read off the prism's footprint.
+  glm::vec2 a, b;
+  if (opening.u1 <= opening.u0 || opening.y1 <= opening.y0 ||
+      !tactics::FacadeOpeningEdge(scene, opening, &a, &b)) {
     return basis;
   }
-  const std::vector<glm::vec2> fp =
-      tactics::ObstacleFootprint(scene.obstacles[opening.obstacle]);
-  if (fp.size() < 3 || opening.wallEdge < 0 ||
-      opening.wallEdge >= static_cast<int>(fp.size()) || opening.u1 <= opening.u0 ||
-      opening.y1 <= opening.y0) {
-    return basis;
-  }
-  const glm::vec2 a = fp[opening.wallEdge];
-  const glm::vec2 b = fp[(opening.wallEdge + 1) % fp.size()];
   const float len = glm::length(b - a);
   if (len < 1e-4f) return basis;
   const glm::vec2 dir = (b - a) / len;
@@ -1072,6 +1067,23 @@ void AppendFacadeOpening(const tactics::Scene& scene, const tactics::FacadeOpeni
     const glm::vec3 a = f.base + f.right * qu0 + glm::vec3(0.0f, qy0, 0.0f) + f.normal * d;
     AppendQuad(a, f.right * (qu1 - qu0), glm::vec3(0.0f, qy1 - qy0, 0.0f), vertices, indices);
   };
+  if (style.recessed && opening.detached) {
+    // Its prism was fractured: the standing pieces have no niche cut for it,
+    // so the pane and its mullions sit flush on the wall face instead.
+    const float bar = style.bar;
+    for (int i = 1; i < style.gridU; ++i) {
+      const float u = u0 + (u1 - u0) * static_cast<float>(i) / style.gridU;
+      AppendOpeningBox(f, u - 0.5f * bar, u + 0.5f * bar, y0, y1, 0.0f, 0.05f, true, vertices,
+                       indices);
+    }
+    for (int i = 1; i < style.gridV; ++i) {
+      const float y = y0 + (y1 - y0) * static_cast<float>(i) / style.gridV;
+      AppendOpeningBox(f, u0, u1, y - 0.5f * bar, y + 0.5f * bar, 0.0f, 0.05f, true, vertices,
+                       indices);
+    }
+    quad(u0, u1, y0, y1, 0.015f);
+    return;
+  }
   if (style.recessed) {
     const float d = style.depth;
     {
@@ -1569,6 +1581,7 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
   }
   for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
     mix(&o.dead, sizeof(o.dead));
+    mix(&o.detached, sizeof(o.detached));
     mix(&o.obstacle, sizeof(o.obstacle));
     mix(&o.wallEdge, sizeof(o.wallEdge));
     mix(&o.u0, sizeof(o.u0));
@@ -1629,6 +1642,9 @@ unsigned long long FacadeFingerprint(const tactics::Scene& scene) {
   };
   for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
     mix(&o.dead, sizeof(o.dead));
+    mix(&o.detached, sizeof(o.detached));
+    mix(&o.edgeA, sizeof(o.edgeA));
+    mix(&o.edgeB, sizeof(o.edgeB));
     mix(&o.kind, sizeof(o.kind));
     mix(&o.building, sizeof(o.building));  // The pane style reads the building's archetype.
     mix(&o.obstacle, sizeof(o.obstacle));
@@ -1663,7 +1679,7 @@ std::unordered_map<int, std::vector<std::vector<glm::vec4>>> RecessHolesByObstac
   std::unordered_map<int, std::vector<std::vector<glm::vec4>>> holes;
   for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
     if (o.dead) continue;
-    if (OpeningIsRealGap(scene, o) || !OpeningRecessed(scene, o)) continue;
+    if (o.detached || OpeningIsRealGap(scene, o) || !OpeningRecessed(scene, o)) continue;
     if (o.obstacle < 0 || o.obstacle >= static_cast<int>(scene.obstacles.size())) continue;
     const tactics::Obstacle& wall = scene.obstacles[o.obstacle];
     if (wall.footprint.empty() || o.wallEdge < 0 ||
@@ -4758,12 +4774,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             !scene.buildings[o.building].enterable) {
           continue;
         }
-        if (o.obstacle < 0 || o.obstacle >= static_cast<int>(obstacles.size())) continue;
-        const std::vector<glm::vec2>& fp = obstacles[o.obstacle].footprint;
-        if (fp.size() < 3 || o.wallEdge < 0 || o.wallEdge >= static_cast<int>(fp.size())) {
-          continue;
-        }
-        const glm::vec2 a = fp[o.wallEdge], b = fp[(o.wallEdge + 1) % fp.size()];
+        glm::vec2 a, b;
+        if (!tactics::FacadeOpeningEdge(scene, o, &a, &b)) continue;
         const float len = glm::distance(a, b);
         if (len < 1e-4f) continue;
         const glm::vec2 dir = (b - a) / len;

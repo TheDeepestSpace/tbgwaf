@@ -1010,7 +1010,7 @@ void TestWorldChangeSentInRoundOnce() {
   }
   // 4: fracture outlines with profiled pieces, MassingCut + Debris kinds.
   // 5: fracture-cell pieces on FloorHole / MassingCut, debris rest yaw + solid.
-  CHECK(net::kProtocolVersion == 5);
+  CHECK(net::kProtocolVersion == 6);
 }
 
 // Thin full-height wall between the two figures, for bomb tests.

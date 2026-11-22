@@ -36,7 +36,7 @@ struct AABB {
 // Rubble: a debris chunk a blast knocked loose, at rest where the server's
 // ballistic simulation landed it (see WorldChangeKind::Debris). Collides and
 // blocks sight like everything else; drawn dynamically (it falls before it
-// rests), so the static obstacle mesh skips it. A later blast removes it.
+// rests), so the static obstacle mesh skips it. A later blast throws it again.
 enum class ObstacleKind { Generic, StreetFurniture, Pier, Cover, Wall, Rubble };
 
 // Street fixtures the renderer batches as static geometry: post-sized furniture
@@ -236,6 +236,12 @@ struct FacadeOpening {
   float y0 = 0.0f, y1 = 0.0f;
   int floor = 0;
   bool dead = false;  // Its wall was removed; never drawn.
+  // Set once the prism the opening was laid out on is fractured (world
+  // change ObstacleReplaced): the world-space edge `u` runs along, so the
+  // frame stays where it is on the standing pieces instead of dying with the
+  // prism's index. Until then the edge is read off `obstacle`'s footprint.
+  bool detached = false;
+  glm::vec2 edgeA{0.0f}, edgeB{0.0f};
 };
 
 // A convex, planar walkable patch above (or sloping away from) the ground.

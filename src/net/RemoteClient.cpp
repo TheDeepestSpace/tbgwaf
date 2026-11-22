@@ -524,6 +524,19 @@ void RemoteClient::NormalizeEnemyPlans() {
   }
 }
 
+void RemoteClient::SendPlaceBomb(const glm::vec3& pos, float radius) {
+  Json m(Json::Object{{"t", Json("place_bomb")},
+                      {"pos", Json(Json::Array{Json(double(pos.x)), Json(double(pos.y)), Json(double(pos.z))})},
+                      {"radius", Json(double(radius))}});
+  Queue(m);
+}
+
+void RemoteClient::SendDetonateBomb(float at) {
+  Json m(Json::Object{{"t", Json("detonate_bomb")}});
+  if (at >= 0.0f) m.Set("at", Json(double(at)));
+  Queue(m);
+}
+
 int RemoteClient::QueueAction(Action action) {
   action.seq = nextSeq_++;
   lastSentSeq_ = action.seq;

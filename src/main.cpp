@@ -1063,6 +1063,8 @@ int main() {
   float frameMs = 0.0f;
   float fovMs = 0.0f;
   gfx::RenderFrameStats frameStats;
+  bool remoteBombPlaced = false;  // Server-held bomb (remote matches): panel state only.
+  glm::vec3 remoteBombPos{0.0f};
   ui::BombPanelState bombPanel;  // Debug bomb (issue #350), debug-panel driven.
 
   // Starts a hotseat game on builder scene `index`: per-session reset and a
@@ -2274,8 +2276,13 @@ int main() {
     }
     // Anchored under the Round panel so it follows collapse/expand.
     const bool hudWasThermal = debugOptions.thermal;
-    bombPanel.placed = game.GetDebugBomb().has_value();
-    if (bombPanel.placed) bombPanel.position = game.GetDebugBomb()->position;
+    if (remoteMode) {
+      bombPanel.placed = remoteBombPlaced;
+      bombPanel.position = remoteBombPos;
+    } else {
+      bombPanel.placed = game.GetDebugBomb().has_value();
+      if (bombPanel.placed) bombPanel.position = game.GetDebugBomb()->position;
+    }
     ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, debugOptions.thermal,
                        debugOptions.thermalBlackHot, debugOptions.thermalFovAlpha,
                        debugOptions.thermalAo.radius,
@@ -2288,19 +2295,32 @@ int main() {
     // Debug bomb (issue #350): panel requests act on the local game. Placing
     // parks it at the left pane's camera focus, one unit above the ground
     // there (so a blast at a wall's foot still opens a doorway-height hole).
-    // Only where this instance is the authority: in a server-backed match the
-    // mirror must not fork the world (use the control tap's place_bomb /
-    // detonate_bomb there).
+    // In a server-backed match the mirror must not fork the world: the
+    // requests go to the server, which simulates the blast and ships the
+    // world changes back. (Spectators are read-only.)
+    glm::vec3 bombSpot = cameraForPane(0).target;
+    bombSpot.y = game.GetScene().ground.HeightAt(bombSpot.x, bombSpot.z) + 1.0f;
     if (remoteMode) {
-      bombPanel.requestPlace = bombPanel.requestDetonate = bombPanel.requestArm = false;
+      if (!remote->spectating()) {
+        if (bombPanel.requestPlace) {
+          remote->SendPlaceBomb(bombSpot, bombPanel.radius);
+          remoteBombPlaced = true;
+          remoteBombPos = bombSpot;
+        }
+        if (bombPanel.requestDetonate) {
+          remote->SendDetonateBomb();
+          remoteBombPlaced = false;
+        }
+        if (bombPanel.requestArm) {
+          remote->SendDetonateBomb(bombPanel.armAt);
+          remoteBombPlaced = false;
+        }
+      }
+    } else {
+      if (bombPanel.requestPlace) game.DebugPlaceBomb(bombSpot, bombPanel.radius);
+      if (bombPanel.requestDetonate) game.DebugDetonateBomb();
+      if (bombPanel.requestArm) game.DebugArmBomb(bombPanel.armAt);
     }
-    if (bombPanel.requestPlace) {
-      glm::vec3 spot = cameraForPane(0).target;
-      spot.y = game.GetScene().ground.HeightAt(spot.x, spot.z) + 1.0f;
-      game.DebugPlaceBomb(spot, bombPanel.radius);
-    }
-    if (bombPanel.requestDetonate) game.DebugDetonateBomb();
-    if (bombPanel.requestArm) game.DebugArmBomb(bombPanel.armAt);
     bombPanel.requestPlace = bombPanel.requestDetonate = bombPanel.requestArm = false;
     if (const auto& bomb = game.GetDebugBomb()) {
       // Marker: a small ring + label in every pane, over the 3D view.

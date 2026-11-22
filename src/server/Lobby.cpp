@@ -289,6 +289,22 @@ void Lobby::HandleAction(int conn, Member& member, const Json& message) {
     HandleBotControl(conn, it->second, message);
     return;
   }
+  if (message["t"].IsString() && (message["t"].AsString() == "place_bomb" ||
+                                  message["t"].AsString() == "detonate_bomb")) {
+    // Debug bomb from a player's debug panel (issue #350): same effect as the
+    // control tap, scoped to the sender's own room.
+    if (member.spectator) {
+      SendError(conn, "spectators are read-only");
+      return;
+    }
+    Json tap = message;
+    tap.Set("room", member.room);
+    const Json result = OnControl(tap);
+    if (result["ok"].IsBool() && !result["ok"].AsBool()) {
+      SendError(conn, result["error"].IsString() ? result["error"].AsString() : "bomb failed");
+    }
+    return;
+  }
   if (member.spectator) {
     SendError(conn, "spectators are read-only");
     return;

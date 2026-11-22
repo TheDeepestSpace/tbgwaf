@@ -1111,6 +1111,13 @@ void TestDebugBombControlTap() {
     CHECK(sawWorld);
   }
   CHECK(!w.lobby.OnControl(detonate)["ok"].AsBool());  // Spent.
+
+  // A seated player's own debug panel sends the same messages (no room field).
+  w.Send(1, R"({"t":"place_bomb","pos":[0,1,0],"radius":3})");
+  w.Send(1, R"({"t":"detonate_bomb"})");
+  bool sawWorld = false;
+  for (const Json& m : w.Drain(2)) sawWorld = sawWorld || m["t"].AsString() == "world";
+  CHECK(sawWorld);
 }
 
 void TestWorldChangeKinds() {

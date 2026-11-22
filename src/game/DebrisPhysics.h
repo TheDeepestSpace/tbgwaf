@@ -18,8 +18,10 @@
 // removed by moving bodies apart rather than adding velocity, whatever is in
 // contact is damped, and a body that has gone still is put to sleep -- frozen
 // at its exact rest pose; its track simply ends there, and it wakes only if
-// something hits it hard. A pile that has not settled after a few seconds is
-// damped ever harder, so every blast terminates.
+// something hits it hard. A body that keeps shuffling on the spot (no net
+// travel for a second or more) is damped ever harder until it stops; one
+// that is still going somewhere -- falling, sliding, rolling off another --
+// never is, however long the blast has been running.
 
 #include <vector>
 
@@ -60,7 +62,8 @@ constexpr float kDeckThickness = 0.45f;       // Solid below a walk surface.
 // One track per body: its centre of mass and orientation every kDebrisKeyDt
 // from t = 0 (keys[0] is the launch pose) until the moment it came to rest;
 // the last key is its exact rest pose. `settled` is false for a body that was
-// still moving when `maxSeconds` ran out (or fell out of the world).
+// in the air or still moving when `maxSeconds` ran out (or fell out of the
+// world).
 struct DebrisTrack {
   std::vector<DebrisKey> keys;
   bool settled = true;

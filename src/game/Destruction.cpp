@@ -33,8 +33,8 @@ constexpr float kSurfaceThickness = 0.45f;
 constexpr float kFrameBar = 0.08f;        // Window-frame bar width / depth.
 constexpr float kUnitClearance = 0.45f;   // A figure's body radius, for chunks coming to rest.
 constexpr float kUnitBodyHeight = 1.9f;
-constexpr float kMaxDebrisSeconds = 8.0f;
-constexpr size_t kMaxDebrisKeys = 8 * 20 + 2;  // kMaxDebrisSeconds at kDebrisKeyDt, plus ends.
+constexpr float kMaxDebrisSeconds = 12.0f;
+constexpr size_t kMaxDebrisKeys = 12 * 20 + 2;  // kMaxDebrisSeconds at kDebrisKeyDt, plus ends.
 
 // Same hand-drawn mt19937 draws as MapGenerator's Rng: fully specified by
 // the standard, so a seed fractures identically on every platform.

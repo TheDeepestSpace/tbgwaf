@@ -4748,6 +4748,23 @@ void TestDebrisSimulationIsDeterministicAndSettles() {
   }
 }
 
+// A chunk that is still on its way down late in a blast keeps falling: the
+// anti-jitter damping goes by how far a body has got, not by the clock, so
+// nothing is slowed to a crawl in mid-air and left hanging there.
+void TestDebrisStillFallingLateIsNotSlowed() {
+  DebrisWorldDesc world;
+  world.extent = 50.0f;
+  // Thrown straight up hard enough to be airborne for ~5.7 s.
+  const auto tracks =
+      SimulateDebris(world, {SlabBody({0.0f, 1.0f, 0.0f}, 0.0f, {0.0f, 28.0f, 0.0f})}, 12.0f);
+  CHECK(tracks[0].settled);
+  CHECK(tracks[0].keys.back().position.y < 0.5f);
+  // Free fall all the way: it is back down when gravity says so.
+  const float landed = static_cast<float>(tracks[0].keys.size() - 1) * kDebrisKeyDt;
+  CHECK(landed > 5.5f);
+  CHECK(landed < 8.0f);
+}
+
 // A sloped-top massing detail (an overpass deck rail) cut by cells keeps its
 // slope on the pieces left standing.
 void TestMassingCutKeepsSlopedTop() {
@@ -5004,6 +5021,7 @@ int main() {
   TestDebrisRestsTiltedOnASlope();
   TestDebrisDeflectsOffAFigure();
   TestDebrisSimulationIsDeterministicAndSettles();
+  TestDebrisStillFallingLateIsNotSlowed();
   TestMassingCutKeepsSlopedTop();
 
   if (g_failures == 0) {

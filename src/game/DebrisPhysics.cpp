@@ -34,8 +34,13 @@ constexpr float kStillTime = 0.8f;       // ... or this long without going anywh
 constexpr float kStillDistance = 0.004f;
 constexpr float kStillDot = 0.99998f;    // cos(half the angle): ~0.006 rad.      // Seconds quiet before an island freezes.
 constexpr float kWakeSpeed = 0.5f;       // An impact this hard wakes a sleeper.
-constexpr int kSettleAfter = 360;          // Step (3 s) after which piles are damped ever harder.
-constexpr float kSettleRamp = 180.0f;
+// A body that has gone nowhere for a while -- it shuffles, rocks or hums in
+// place without ever falling quiet -- is damped ever harder until it does.
+// Judged per body by how far it got, never by the clock: one that is still
+// falling, sliding or rolling off another keeps moving freely however late.
+constexpr float kStallDistance = 0.15f;  // Net travel that counts as going somewhere.
+constexpr float kStallAfter = 1.0f;      // Seconds within that before the damping starts ...
+constexpr float kStallRamp = 1.5f;       // ... and seconds until it is at full strength.
 constexpr int kLaunchGrace = 48;          // Steps launch-time contacts are ignored for.
 constexpr float kDeckBelowReach = 0.1f;  // A body this far under a deck's top is below it.
 
@@ -100,6 +105,8 @@ struct Body {
   glm::vec3 refX{0.0f};
   glm::quat refQ{1.0f, 0.0f, 0.0f, 0.0f};
   bool touching = false;      // In contact this step (only those may sleep).
+  float stall = 0.0f;         // Seconds within kStallDistance of stallX (kept across a wake).
+  glm::vec3 stallX{0.0f};
 
   glm::vec3 x{0.0f};
   glm::quat q{1.0f, 0.0f, 0.0f, 0.0f};
@@ -440,6 +447,7 @@ std::vector<DebrisTrack> SimulateDebris(const DebrisWorldDesc& world,
     b.keys.push_back({b.x, b.q});
     b.refX = b.x;
     b.refQ = b.q;
+    b.stallX = b.x;
   }
   for (size_t i = 0; i < world.statics.size(); ++i) {
     Body& b = bodies[1 + dynamicCount + i];
@@ -800,12 +808,18 @@ std::vector<DebrisTrack> SimulateDebris(const DebrisWorldDesc& world,
       if (!live(b)) continue;
       float damp = b.touching ? 0.985f : 0.9995f;
       float drag = 0.9998f;
-      if (step > kSettleAfter) {
-        // Out of patience: whatever is still shuffling in a pile is brought
-        // to a halt, more firmly the longer it takes, rather than left to
-        // jitter or to plough on forever (a collapse that has not settled in
-        // a few seconds is moving through honey by the time it gets here).
-        const float ramp = std::min(1.0f, static_cast<float>(step - kSettleAfter) / kSettleRamp);
+      if (glm::distance(b.x, b.stallX) > kStallDistance) {
+        b.stallX = b.x;
+        b.stall = 0.0f;
+      } else {
+        b.stall += kDt;
+      }
+      if (b.stall > kStallAfter) {
+        // Out of patience with this body: it has been shuffling on the spot,
+        // so it is brought to a halt, more firmly the longer it takes, rather
+        // than left to jitter. The moment it does get somewhere (its support
+        // gave way, it slid off an edge) it is let go again.
+        const float ramp = std::min(1.0f, (b.stall - kStallAfter) / kStallRamp);
         drag *= 1.0f - 0.25f * ramp;
         damp *= 1.0f - 0.25f * ramp;
       }
@@ -869,7 +883,11 @@ std::vector<DebrisTrack> SimulateDebris(const DebrisWorldDesc& world,
   for (int i = 0; i < dynamicCount; ++i) {
     Body& b = bodies[1 + i];
     if (!b.asleep) {
-      b.settled = false;
+      // Out of time. One lying on something and all but still (its pile was
+      // nudged a moment ago) is where it will stay; anything else is not.
+      if (!b.touching || glm::length(b.v) >= kSleepLinear || glm::length(b.w) >= kSleepAngular) {
+        b.settled = false;
+      }
       pushKey(b);
     }
     // A body that sat still while its island was still awake holds the same

@@ -77,8 +77,11 @@ same log to the same seeded map, so drawn == simulated geometry.
   are cold-started and penetration is removed by moving bodies apart, not by
   adding velocity, so piles do not creep; a body that has gone still (by
   velocity, or by pose) is put to sleep -- frozen exactly -- and wakes only on
-  a hard hit, and a pile still shuffling after 3 s is damped ever harder, so
-  nothing "seizes" and every blast ends (<= 8 s). Litter-sized chunks
+  a hard hit, and a body that keeps shuffling on the spot (under 0.15 m of
+  net travel for over a second) is damped ever harder until it stops, so
+  nothing "seizes"; a body still going somewhere (falling, sliding, rolling
+  off another) is never slowed, however late. A blast is cut off at 12 s.
+  Litter-sized chunks
   collide with everything but never push a heavier chunk. `Debris` changes
   (batches of 60) carry the chunks as they left the wall / slab (`pieces`:
   the prism it was cut from) plus one `DebrisFlight` per piece: its pose

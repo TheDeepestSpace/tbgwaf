@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 #include "game/MapGenerator.h"
 #include "net/ActionApply.h"
@@ -79,6 +80,7 @@ std::string RemoteClient::StatusText() const {
     case Status::Disconnected: return "Disconnected from server. Reload to reconnect.";
     case Status::Playing: break;
   }
+  if (worldOutOfSync_) return "Map out of sync with the server: destruction is not shown.";
   if (playback_) return "Round in progress...";
   if (!lastError_.empty()) return lastError_;
   if (CommitLocked()) return peerReady_ ? "Both ready..." : "Committed; waiting for opponent...";
@@ -131,6 +133,7 @@ void RemoteClient::HandleStart(const Json& m) {
   const auto team = spectate_ ? std::optional<Team>(Team::Blue) : ParseTeamName(m["team"].AsString());
   if (!team || !m["seed"].IsNumber()) return;
   team_ = team;
+  worldOutOfSync_ = false;
   // Rooms loaded through the server's test control tap carry an explicit
   // scene; ordinary matches are rebuilt from the shared deterministic seed.
   tactics::Scene scene;
@@ -215,14 +218,28 @@ void RemoteClient::ApplyPlans(const Json& m) {
 void RemoteClient::ApplyWorldList(const Json& list) {
   for (const Json& entry : list.AsArray()) {
     tactics::WorldChange change;
-    if (!DecodeWorldChange(entry, &change)) continue;
-    game_->AcceptWorldChange(change);
+    if (!DecodeWorldChange(entry, &change) || !game_->AcceptWorldChange(change)) {
+      NoteWorldRejected(entry["id"].IsNumber() ? static_cast<int>(entry["id"].AsNumber()) : -1);
+    }
   }
+}
+
+// A change this mirror cannot apply means its map is not the server's (the
+// log is gapless, so every later change is refused too). Say so instead of
+// quietly showing a world that stopped changing.
+void RemoteClient::NoteWorldRejected(int id) {
+  if (!worldOutOfSync_) {
+    std::fprintf(stderr, "world change %d does not apply to this client's map; "
+                         "later world changes are not shown\n", id);
+  }
+  worldOutOfSync_ = true;
 }
 
 void RemoteClient::ApplyWorldUpTo(Playback* pb, float clock) {
   while (pb->worldApplied < pb->world.size() && pb->world[pb->worldApplied].at <= clock) {
-    game_->AcceptWorldChange(pb->world[pb->worldApplied]);
+    if (!game_->AcceptWorldChange(pb->world[pb->worldApplied])) {
+      NoteWorldRejected(pb->world[pb->worldApplied].id);
+    }
     ++pb->worldApplied;
   }
 }

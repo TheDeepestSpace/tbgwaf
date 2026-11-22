@@ -1214,6 +1214,41 @@ void TestClientServerBombDebris() {
   CHECK(sawBlastAtItsTime);
   CHECK(debrisCount(blue.game) > chunksBefore);
   CHECK(blue.game.WorldLog() == red.game.WorldLog());
+  CHECK(!blue.client.worldOutOfSync());
+  CHECK(!red.client.worldOutOfSync());
+}
+
+// A world change the mirror cannot apply (its generated map is not the
+// server's -- seen on the web build, whose roofs came out different) used to
+// be dropped in silence, together with every change after it: walls opened but
+// the window frames stayed and no debris appeared. The client now says so.
+void TestClientReportsRejectedWorldChange() {
+  Wire w;
+  ClientRig blue(1, "wr"), red(2, "wr");
+  blue.client.OnOpen();
+  red.client.OnOpen();
+  for (int i = 0; i < 3; ++i) {
+    blue.Pump(w);
+    red.Pump(w);
+  }
+  CHECK(blue.client.status() == net::RemoteClient::Status::Playing);
+  CHECK(!blue.client.worldOutOfSync());
+  // A cut of a roof detail this map does not have.
+  WorldChange bad;
+  bad.id = 0;
+  bad.kind = WorldChangeKind::MassingCut;
+  bad.target = static_cast<int>(blue.game.GetScene().massing.size()) + 5;
+  bad.rect = glm::vec4(-1.0f, -1.0f, 1.0f, 1.0f);
+  Json list{Json::Array{}};
+  list.Push(net::EncodeWorldChange(bad));
+  Json msg;
+  msg.Set("t", "world");
+  msg.Set("world", std::move(list));
+  blue.client.OnMessage(msg.Dump());
+  CHECK(blue.game.WorldLog().empty());
+  CHECK(blue.client.worldOutOfSync());
+  CHECK(blue.client.StatusText().find("out of sync") != std::string::npos);
+  CHECK(!red.client.worldOutOfSync());
 }
 
 void TestWorldChangeKinds() {
@@ -1764,6 +1799,7 @@ int main(int argc, char** argv) {
       TBG_TEST(TestDebugBombArmedShipsInRound),
       TBG_TEST(TestDebugBombControlTap),
       TBG_TEST(TestClientServerBombDebris),
+      TBG_TEST(TestClientReportsRejectedWorldChange),
       TBG_TEST(TestClientServerRound),
       TBG_TEST(TestPlaybackFallFromCable),
       TBG_TEST(TestStaleEchoDoesNotRevertFreshPlans),

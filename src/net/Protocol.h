@@ -7,7 +7,6 @@
 #include <glm/glm.hpp>
 
 #include "game/Types.h"
-#include "game/WorldChange.h"
 #include "game/Unit.h"
 #include "net/Json.h"
 
@@ -57,36 +56,19 @@
 //
 // Server -> client:
 //   {"t":"waiting","room":"<name>"}
-//   {"t":"start","team":"blue"|"red"|"spectator","seed":N,"protocol":2[,"scene":<spec>]}   scene only in
+//   {"t":"start","team":"blue"|"red"|"spectator","seed":N,"protocol":1[,"scene":<spec>]}   scene only in
 //                                                  test-control rooms (net/SceneSpec.h)
 //   {"t":"ack","seq":N,"ok":true|false,"error":"..."}
 //   {"t":"plans","round":N,"ready":bool,"plans":[<action>...],"playbook":[a,b,c,d]}   own team only
 //   {"t":"peer","ready":bool}
-//   {"t":"round","round":N,"duration":s,"frames":[...],"shots":[...],"world":[<change>...],"state":{...}}
-//                                                  "world": world changes not yet sent (ordered; each
-//                                                  carries "at", seconds into this round, when it takes
-//                                                  effect during playback)
-//   {"t":"state","round":N,"over":bool,"winner":"blue"|"red"|"none"|null,"units":[...],"world":[...]}
-//                                                  "world": the FULL change log since match start (join,
-//                                                  reconnect, spectator); applying it to the seeded map
-//                                                  reproduces the server's geometry
-//   {"t":"world","world":[<change>...]}   debug/out-of-round world changes, sent as they happen
-//   <change> = {"id":N,"round":N,"at":s,"kind":K,"data":"<WriteWorldChange text>"}  (see game/WorldChange.h;
-//                                                  ids are gapless from 0, re-applying a known id is a no-op)
+//   {"t":"round","round":N,"duration":s,"frames":[...],"shots":[...],"state":{...}}
+//   {"t":"state","round":N,"over":bool,"winner":"blue"|"red"|"none"|null,"units":[...]}
 //   {"t":"bots","mode":..,"running":bool,"thinking":["red"],"error":"..","fallback":bool}
 //                                                  Jev rooms: status after every change
 //   {"t":"opponent_left"}   {"t":"error","error":"..."}
 namespace tactics::net {
 
-// 2: world-change log ("world") in round/state. 3: WallHole really cuts the
-// wall geometry and the FloorHole kind exists (issue #350), so a peer on 2
-// would compute different geometry from the same log. 4: WallHole carries a
-// fracture outline cutting profiled pieces, the MassingCut and Debris kinds
-// exist, and obstacles serialize a wall-plane profile -- a peer on 3 would
-// reject the new kinds and compute different geometry. 5: FloorHole and
-// MassingCut may carry fracture-cell pieces and debris flights serialize a
-// rest yaw and a solid flag (only solid chunks become obstacles).
-constexpr int kProtocolVersion = 5;
+constexpr int kProtocolVersion = 1;
 constexpr size_t kMaxMessageBytes = 16 * 1024;
 constexpr size_t kMaxWaypoints = 32;
 
@@ -118,11 +100,6 @@ std::optional<tactics::PlannedActionType> ParsePlanName(const std::string& name)
 
 Json EncodePlaybook(const tactics::SquadPlaybook& playbook);
 bool DecodePlaybook(const Json& j, tactics::SquadPlaybook* out);
-
-// World-change log entries (game/WorldChange.h). The payload is the exact
-// snapshot text so floats round-trip bit-for-bit (the checksum covers them).
-Json EncodeWorldChange(const tactics::WorldChange& change);
-bool DecodeWorldChange(const Json& j, tactics::WorldChange* out);
 
 Json EncodeVec3(const glm::vec3& v);
 bool DecodeVec3(const Json& j, glm::vec3* out);

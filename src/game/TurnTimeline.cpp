@@ -14,22 +14,6 @@ void TurnTimeline::Reset(const GameLogic& game) {
   ticks_.push_back(Tick{"Start", 0});
 }
 
-void TurnTimeline::ReplaceHistory(const GameLogic& game, std::vector<HistoryFrame> frames,
-                                  std::vector<Tick> ticks) {
-  if (frames.empty() || ticks.empty()) return;
-  frames_.clear();
-  for (HistoryFrame& f : frames) {
-    Frame frame;
-    frame.time = f.time;
-    frame.snapshot = std::move(f.snapshot);
-    frames_.push_back(std::move(frame));
-  }
-  ticks_ = std::move(ticks);
-  time_ = frames_.back().time;
-  lastRound_ = game.RoundNumber();
-  lastMode_ = game.Mode();
-}
-
 void TurnTimeline::Capture(const GameLogic& game) {
   Frame frame;
   frame.time = time_;
@@ -94,7 +78,7 @@ void TimelinePlayback::ShowFrame(const TurnTimeline& timeline, const GameLogic& 
   // finish their hold + fade rather than cutting them at the step boundary.
   const bool keepGhosts = active_ && replay_ && index > frame_;
   if (!replay_ || !replay_->ImportState(snapshot)) {
-    replay_ = std::make_unique<GameLogic>(live.BaseScene());
+    replay_ = std::make_unique<GameLogic>(live.GetScene());
     replay_->SetReplayGhostMode(true);
     if (!replay_->ImportState(snapshot)) {
       // History doesn't match the live scene (shouldn't happen: both reset

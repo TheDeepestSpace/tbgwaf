@@ -71,27 +71,13 @@ heights, with sharp edges (no rolling noise). The sampled heightfield only
 drives movement (an unseen nav wall along each cliff keeps figures off the
 edge). The terrain is planned first;
 the highway profile is then chosen against it per seed: the artery stays at
-grade and ramps through walls, or holds its grade through a sufficiently tall
-raised band as a two-portal tunnel,
+grade and ramps through every wall (a main road cutting through the levels),
 or climbs onto a deck before a run of walls, flies over them clear of the
 highest tier and settles onto the level beyond, with either ramp optionally
 replaced by an elevated map edge, up to one tall deck above every level. The
 branch merges onto whatever the artery is doing and ramps through the walls
-it meets at grade. Local streets use the same tunnel planner when two
-successive walls enclose enough headroom (the taller the band, the likelier
-the bore); the road matches the level at each portal, ramping down inside
-the bore where the far side is lower. The raised level stays walkable over
-the tunnel roof, independently of the road below: streets crossing the roof
-step onto it where they meet its edge, never from the road beneath. The
-road's strip on top is not reserved: a local street's tunnel does not split
-the blocks above it, which are laid out (sidewalks, buildings) as if the road
-were not there. The roof is a camera see-through occluder like a building or
-the overpass: when it hides one of your figures, its movement frontier or a
-path inside the tunnel, the roof slab and the paving on it turn translucent
-in your pane (the solid tier beside the bore stays opaque), so what is in
-the tunnel stays readable. A local
-street that gets neither a tunnel nor the selected level ramp never runs into
-a level or across a road that is ramping through one: an avenue may ramp through a level; any other
+it meets at grade. A local street never runs into a level or across a road
+that is ramping through one: an avenue may ramp through a level; any other
 street whose pavement would reach the level band or a ramp corridor stops at
 the last street it crossed before it (a T, not an X) and resumes at the first
 one beyond it, and the blocks either side of the missing stretch stay one
@@ -154,22 +140,6 @@ windows and doors themselves stay visual for now. Switch the openings off
 with `MapGeneratorConfig::features.facades` or scenario YAML
 `map.generate.features: {facades: off}`.
 
-About half the parcels (`MapGeneratorConfig::enterableChance`, own seed
-stream) are built **enterable** (issues #157, #158, #159): thin wall
-`Obstacle`s around the footprint instead of a solid prism, a real doorway on
-the frontage (plus a rear doorway for some), windows cut out of the walls on
-every floor (jambs, sill and head pieces, so an eye sees through the hole while
-the sill hides a foot probe), and the upper storeys as walkable floors: each
-floor is one or more convex `WalkSurface`s inside the walls (non-convex plans
-are split by `DecomposeToConvex` and linked as neighbours) over a ceiling slab,
-reached by a straight stair -- one steep flight `WalkSurface` per storey, drawn
-as steps, stacked in a stairwell notched out of the floors above. Figures path
-in through the door, up the stairs and to a window on any floor like anywhere
-else; a figure at an upper window covers the street below. Nothing is
-"climbable" by flag any more (issue #40): crates and parked cars carry a top
-`WalkSurface` plus a little ramp (`AddClimbRamp`), and every raised place is
-reached over a ramp or stair.
-
 Urban maps carry pre-built **ziplines** (0-2 per block, seed-deterministic,
 `MapGeneratorConfig::maxZiplinesPerBlock`): two-way cables between anchor
 posts along the block sidewalks. A move plan may walk to one anchor, ride,
@@ -219,10 +189,7 @@ to green. The **FOV opacity** slider (while AO is on) sets the team FOV tint str
 the thermal world (default 0.25; the normal view uses 0.15). The `thermal_urban_black_hot` and
 `thermal_urban_white_hot` scenarios show both polarities on the same city;
 scenario YAML selects them with `render: {thermal: true, thermal_black_hot: false}`
-for white-hot (omit `thermal_black_hot` for black-hot). `render: {npr: true}`
-adds the ink outlines (the debug panel's NPR toggle) on top of the AO view;
-the `see_through_building_outlines*` scenarios use it to pin how a
-camera-faded building's walls, floors and window frames are outlined.
+for white-hot (omit `thermal_black_hot` for black-hot).
 
 The AO sliders in the debug panel tune the contact shading: radius (default
 6.0), strength (1.0), quality (4 samples per ray) and softness (3 px blur).
@@ -249,7 +216,7 @@ medium flat field (40 x 40) in 3D with a side panel to rename the scene, add
 cubes and edit their position, size and height, and add Blue/Red figures and
 pick each one's gun (Desert Eagle, Assault Rifle, Sniper Rifle). Drag a
 figure in the 3D view to move it; it snaps onto the ground or a cube top
-(every cube has a ramp up onto its top). **Start** (enabled once both teams have a figure
+(every cube is climbable). **Start** (enabled once both teams have a figure
 and every figure stands clear) plays the scene **hotseat** on one screen:
 both teams' figures and FOV cones are shown, any figure can be clicked and
 planned, and the HUD follows the selected figure's team; **Commit Round** once

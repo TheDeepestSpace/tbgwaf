@@ -1,7 +1,5 @@
 #include "net/Protocol.h"
 
-#include <sstream>
-
 #include <algorithm>
 #include <cmath>
 
@@ -182,28 +180,6 @@ Json EncodeAction(const Action& a) {
     j.Set("table", EncodePlaybook(a.playbook));
   }
   return j;
-}
-
-Json EncodeWorldChange(const tactics::WorldChange& change) {
-  std::ostringstream text;
-  text.precision(9);
-  tactics::WriteWorldChange(text, change);
-  Json j;
-  j.Set("id", change.id);
-  j.Set("round", change.round);
-  j.Set("at", static_cast<double>(change.at));
-  j.Set("kind", static_cast<int>(change.kind));
-  j.Set("data", text.str());
-  return j;
-}
-
-bool DecodeWorldChange(const Json& j, tactics::WorldChange* out) {
-  if (!j["data"].IsString()) return false;
-  std::istringstream text(j["data"].AsString());
-  tactics::WorldChange c;
-  if (!tactics::ReadWorldChange(text, &c)) return false;
-  *out = std::move(c);
-  return true;
 }
 
 const char* TeamName(Team team) { return team == Team::Blue ? "blue" : "red"; }

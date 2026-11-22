@@ -11,11 +11,9 @@
 
 #include <glm/glm.hpp>
 
-#include "game/Destruction.h"
 #include "game/NavMesh.h"
 #include "game/Scene.h"
 #include "game/Types.h"
-#include "game/WorldChange.h"
 #include "game/Unit.h"
 #include "game/Visibility.h"
 
@@ -166,9 +164,6 @@ struct GameSnapshot {
   float executionElapsed = 0.0f;
   int winner = -1;  // -1 = none, else static_cast<int>(Team).
   FlagState flag;
-  // The full world-change log since match start (see game/WorldChange.h).
-  // Importing it brings the receiver's geometry in line with the sender's.
-  std::vector<WorldChange> world;
 };
 
 // Text encoding of a snapshot (for the page-level message bus). Deserialize
@@ -244,9 +239,6 @@ class GameLogic {
   std::optional<int> SelectedUnitId() const { return selectedUnitId_; }
   std::optional<Team> Winner() const { return winner_; }
   int RoundNumber() const { return roundNumber_; }
-  // Seconds into the executing round (also valid during replay playback);
-  // the renderer replays debris flights against it.
-  float ExecutionElapsed() const { return executionElapsed_; }
 
   // --- Neutral flag objective (CTF part 1). A living figure whose move
   // passes through the flag's spot (anywhere along its path, not just where
@@ -494,19 +486,6 @@ class GameLogic {
   // origin of the next leg.
   glm::vec3 MoveChainEnd() const;
   void HoverGround(const glm::vec3& point, Team byTeam);
-  // Camera-ray form of the move hover/click: resolves the ray to the
-  // walkable surface the move selector should land on. While a move
-  // frontier is up, surfaces the mover cannot stop on this leg are
-  // transparent to the ray -- an unreachable upper floor between the camera
-  // and the frontier, and any surface whose layer is not the one the
-  // frontier priced for that cell -- so the selector falls through to the
-  // reachable floor the frontier is actually drawn on instead of parking on
-  // a storey the figure cannot reach. When the ray crosses the frontier
-  // nowhere (hovering genuinely out of range), the nearest walkable hit is
-  // returned unchanged, so the invalid-destination feedback stays where the
-  // player points. nullopt when the ray hits no walkable surface at all.
-  std::optional<glm::vec3> ResolveMoveRay(const glm::vec3& origin,
-                                          const glm::vec3& direction) const;
 
   // Advances the executing round (Mode() == InputMode::Executing) by
   // `dtSeconds`: every in-flight planned move on both teams advances along
@@ -548,50 +527,6 @@ class GameLogic {
   // learning what the other side has planned) and leaves everything else,
   // including local selection, alone; it too returns false on mismatch.
   GameSnapshot ExportState() const;
-
-  // --- World changes (see game/WorldChange.h) ---
-  // The ordered log of map edits since Reset(); part of ExportState(),
-  // hence of StateHash().
-  const std::vector<WorldChange>& WorldLog() const { return worldLog_; }
-  // The scene as generated, before any logged change (== GetScene() while
-  // the log is empty). Copy it to build a game that replays the log.
-  Scene BaseScene() const;
-  // Authority side: validates `change` against the live scene, stamps it
-  // (id, round, time within the round) and appends it to the log. Returns
-  // false, changing nothing, if it does not apply.
-  bool ApplyWorldChange(WorldChange change);
-  // Debug command: remove obstacle `index` now (the stump of
-  // ApplyWorldChange). Safe mid-match.
-  bool DebugRemoveObstacle(int index);
-
-  // --- Debug bomb (issue #350): a debug explosive the player moves around
-  // the map and detonates, either immediately between rounds or at an armed
-  // time into the executing round. It emits the same explosion record a
-  // grenade will later (position, radius, seed = hash(match seed, round,
-  // bomb id)) and applies the fracture plan (see game/Destruction.h) through
-  // the world log, so clients, replay scrubbing and reconnects all rebuild
-  // the same holes. Planning-local debug state: never serialized. ---
-  struct DebugBomb {
-    glm::vec3 position{0.0f};
-    float radius = kDefaultBombRadius;
-    float detonateAt = -1.0f;  // Armed: seconds into the executing round; <0 = manual.
-  };
-  const std::optional<DebugBomb>& GetDebugBomb() const { return debugBomb_; }
-  // Places (or moves) the bomb. Radius is clamped to a sane debug range.
-  void DebugPlaceBomb(const glm::vec3& position, float radius = kDefaultBombRadius);
-  // Arms the placed bomb: it detonates once the executing round's clock
-  // reaches `atSeconds` (this round if already executing, else the next).
-  bool DebugArmBomb(float atSeconds);
-  // Detonates the placed bomb now. False without a placed bomb or when the
-  // blast touches nothing destructible.
-  bool DebugDetonateBomb();
-  // Seed half of the explosion record; set by whoever generated the map
-  // (defaults to 0 for hand-authored scenes). Survives Reset like playbooks.
-  void SetMatchSeed(uint32_t seed) { matchSeed_ = seed; }
-  uint32_t MatchSeed() const { return matchSeed_; }
-  // Follower side: applies a change received from the authority. Changes
-  // already in the log (same id) are ignored; a gap in ids is rejected.
-  bool AcceptWorldChange(const WorldChange& change);
   bool ImportState(const GameSnapshot& snapshot);
   bool ImportTeamPlans(const GameSnapshot& snapshot, Team team);
   // Drops every figure's plan (incl. queued legs). The timeline replay uses
@@ -824,23 +759,8 @@ class GameLogic {
   int navMeshUnitId_ = -1;
   glm::vec3 navMeshOrigin_{0.0f};
   int roundNumber_ = 1;
-  std::vector<WorldChange> worldLog_;
-  // Copy of the scene taken just before the first logged change, so a
-  // shorter/different log (new match, timeline rewind) can be replayed from
-  // the start. Empty while the log is.
-  std::optional<Scene> pristine_;
-  void OnWorldChanged();  // Rebuilds geometry-derived caches.
-  bool SyncWorld(const std::vector<WorldChange>& log);
   std::vector<Obstacle> sightObstacles_;  // See SightObstacles(); rebuilt in Reset.
   std::vector<AABB> obstacleBounds_;  // Retained for compatibility/debug broad-phase inspection.
-  // Debug bomb (issue #350): placement/arming state, blast counter for the
-  // deterministic explosion seed, and the generator seed it is hashed with.
-  std::optional<DebugBomb> debugBomb_;
-  int bombsDetonated_ = 0;
-  uint32_t matchSeed_ = 0;
-  // A figure standing over a fresh floor hole falls: knocked down (ragdoll)
-  // with a drop to whatever support remains below it.
-  void DropFiguresThroughHole(const WorldChange& change, float floorY);
 
   InputMode mode_ = InputMode::AwaitingSelection;
   std::optional<int> selectedUnitId_;

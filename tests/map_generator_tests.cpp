@@ -8,7 +8,6 @@
 #include <vector>
 
 #include "game/GameLogic.h"
-#include "test_shard.h"
 #include "game/Geometry.h"
 #include "game/MapGenerator.h"
 #include "OldSizeConfig.h"
@@ -65,7 +64,7 @@ bool SameScene(const Scene& a, const Scene& b) {
     const auto& x = a.obstacles[i];
     const auto& y = b.obstacles[i];
     if (x.bounds.min != y.bounds.min || x.bounds.max != y.bounds.max ||
-        x.footprint != y.footprint || x.kind != y.kind ||
+        x.climbable != y.climbable || x.footprint != y.footprint || x.kind != y.kind ||
         x.fixtureModel != y.fixtureModel || x.fixtureYaw != y.fixtureYaw ||
         x.fixtureBaseY != y.fixtureBaseY || x.fixtureRoll != y.fixtureRoll) {
       return false;
@@ -85,20 +84,7 @@ bool SameScene(const Scene& a, const Scene& b) {
   for (size_t i = 0; i < a.walkSurfaces.size(); ++i) {
     if (a.walkSurfaces[i].vertices != b.walkSurfaces[i].vertices ||
         a.walkSurfaces[i].neighbors != b.walkSurfaces[i].neighbors ||
-        a.walkSurfaces[i].connectsToGround != b.walkSurfaces[i].connectsToGround ||
-        a.walkSurfaces[i].groundConnections != b.walkSurfaces[i].groundConnections ||
-        a.walkSurfaces[i].overpass != b.walkSurfaces[i].overpass ||
-        a.walkSurfaces[i].terrain != b.walkSurfaces[i].terrain) {
-      return false;
-    }
-  }
-  if (a.terrainTunnels.size() != b.terrainTunnels.size()) return false;
-  for (size_t i = 0; i < a.terrainTunnels.size(); ++i) {
-    const TerrainTunnel& x = a.terrainTunnels[i];
-    const TerrainTunnel& y = b.terrainTunnels[i];
-    if (x.bore != y.bore || x.roof != y.roof || x.entrance != y.entrance ||
-        x.exit != y.exit || x.width != y.width || x.roofSurface != y.roofSurface ||
-        x.highway != y.highway) {
+        a.walkSurfaces[i].connectsToGround != b.walkSurfaces[i].connectsToGround) {
       return false;
     }
   }
@@ -338,10 +324,7 @@ void TestBuildingKindsFloorsAndHeights() {
   MapGeneratorConfig downtown = OldSizeConfig(), residential = OldSizeConfig();
   downtown.character = BlockCharacter::Downtown;
   residential.character = BlockCharacter::Residential;
-  // Solid prisms: this checks set-back offices, which hollow shells drop (#321).
-  MapGeneratorConfig solid = OldSizeConfig();
-  solid.enterableChance = downtown.enterableChance = residential.enterableChance = 0.0f;
-  const Scene base = GenerateUrbanMap(42, solid);
+  const Scene base = GenerateUrbanMap(42, OldSizeConfig());
   const Scene town = GenerateUrbanMap(42, downtown);
   const Scene homes = GenerateUrbanMap(42, residential);
   CHECK(town.buildings.size() == base.buildings.size());
@@ -604,6 +587,7 @@ void TestStreetsAndSidewalksAreObstacleFree() {
       }
       CHECK(owner >= 0);
       if (owner >= 0) ++perBlock[owner];
+      CHECK(!o.climbable);
     }
     for (size_t i = 0; i < blocks.size(); ++i) CHECK(perBlock[i] >= 6);
   }
@@ -1427,7 +1411,7 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   int groundConnections = 0;
   bool mergeNode = false;
   for (const WalkSurface& surface : scene.walkSurfaces) {
-    groundConnections += (surface.connectsToGround && surface.overpass) ? 1 : 0;
+    groundConnections += surface.connectsToGround ? 1 : 0;
     mergeNode |= surface.neighbors.size() >= 3;
   }
   CHECK(groundConnections == 3);
@@ -1441,7 +1425,7 @@ void TestElevatedOverpassRampsPiersAndDistinctLayers() {
   // from the piers, by the merge) stays clear for ground shots.
   glm::vec3 top(0.0f);
   for (const WalkSurface& surface : scene.walkSurfaces) {
-    if (!surface.overpass || surface.neighbors.empty()) continue;  // Deck only: not a roof slab or floor.
+    if (surface.neighbors.empty()) continue;  // A zipline's roof slab, not the deck.
     const glm::vec3 center = SurfaceCenter(surface);
     if (center.y > top.y) top = center;
   }
@@ -1714,7 +1698,7 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
       // Ground transitions: one per on-map ramp foot plus the branch's foot.
       int groundConnections = 0;
       for (const WalkSurface& surface : scene.walkSurfaces) {
-        groundConnections += (surface.connectsToGround && surface.overpass) ? 1 : 0;
+        groundConnections += surface.connectsToGround ? 1 : 0;
       }
       CHECK(groundConnections == 1 + (tc.gradeStart ? 1 : 0) + (tc.gradeEnd ? 1 : 0));
 
@@ -1748,7 +1732,7 @@ void TestOverpassLayoutGeometryAndBranchRampOff() {
                 &scene.walkSurfaces);
       glm::vec3 top(0.0f);  // Highest deck surface center still on the map.
       for (const WalkSurface& surface : scene.walkSurfaces) {
-        if (!surface.overpass || surface.neighbors.empty()) continue;  // Deck only: not a roof slab or floor.
+        if (surface.neighbors.empty()) continue;  // A zipline's roof slab, not the deck.
         const glm::vec3 center = SurfaceCenter(surface);
         if (std::max(std::fabs(center.x), std::fabs(center.z)) > half - 2.0f) continue;
         if (center.y > top.y) top = center;
@@ -1812,7 +1796,7 @@ void TestBranchMayRunOffMapWithoutRamp() {
     CHECK(std::fabs(std::max(std::fabs(branch.front().x), std::fabs(branch.front().z)) - half) < kEps);
     int groundConnections = 0;
     for (const WalkSurface& surface : scene.walkSurfaces) {
-      groundConnections += (surface.connectsToGround && surface.overpass) ? 1 : 0;
+      groundConnections += surface.connectsToGround ? 1 : 0;
     }
     CHECK(groundConnections == 2);  // The artery's two ramp feet only.
     for (const Obstacle& o : scene.obstacles) {
@@ -2285,15 +2269,7 @@ void TestFacadeOpeningsDoorsStoopsAndPlatforms() {
       const Scene bareScene = GenerateUrbanMap(seed, bare);
       CHECK(bareScene.facadeOpenings.empty());
       CHECK(bareScene.walkSurfaces.size() <= scene.walkSurfaces.size());
-      // Facades never move a wall, but cover items keep clear of the stoops
-      // and platforms they add, so only those may differ (never grow).
-      const auto countNonCover = [](const Scene& s) {
-        size_t n = 0;
-        for (const Obstacle& o : s.obstacles) n += o.kind == ObstacleKind::Cover ? 0 : 1;
-        return n;
-      };
-      CHECK(countNonCover(bareScene) == countNonCover(scene));
-      CHECK(bareScene.obstacles.size() >= scene.obstacles.size());
+      CHECK(bareScene.obstacles.size() == scene.obstacles.size());
     }
     std::vector<int> frontDoors(scene.buildings.size(), 0);
     int windows = 0;
@@ -2659,6 +2635,7 @@ void TestFurnitureHugsSidewalksAndRespectsClearances() {
       const Obstacle& o = scene.obstacles[i];
       if (o.kind == ObstacleKind::Cover) continue;  // Covered by the cover-item test.
       CHECK(o.footprint.empty());
+      CHECK(!o.climbable);
       CHECK(o.kind == ObstacleKind::StreetFurniture);
       const glm::vec3 size = o.bounds.max - o.bounds.min;
       CHECK(size.x <= 0.4f && size.z <= 0.4f);  // Post-sized, never cover-sized.
@@ -2896,34 +2873,11 @@ void TestTrafficPropsSitAtJunctionsAndStayVisualOnly() {
   CHECK(GenerateUrbanMap(kSeeds[0], FurnitureConfig(FeatureMode::Off)).props.empty());
 }
 
-// A climbable box (issue #40): the top WalkSurface over the obstacle's XZ
-// extent at its top (the box stops kClimbTopLift under it) and the ramp
-// leaning on one of its faces, as AddClimbRamp emits them; -1/-1 if absent.
-std::pair<int, int> ClimbSurfacesOf(const Scene& scene, const Obstacle& o) {
-  const float top = o.bounds.max.y + kClimbTopLift;
-  for (size_t i = 0; i + 1 < scene.walkSurfaces.size(); ++i) {
-    const WalkSurface& s = scene.walkSurfaces[i];
-    if (s.vertices.size() != 4 || s.connectsToGround) continue;
-    bool onTop = true;
-    for (const glm::vec3& v : s.vertices) {
-      onTop &= std::fabs(v.y - top) < 1e-3f;
-      onTop &= v.x >= o.bounds.min.x - 1e-3f && v.x <= o.bounds.max.x + 1e-3f &&
-               v.z >= o.bounds.min.z - 1e-3f && v.z <= o.bounds.max.z + 1e-3f;
-    }
-    if (!onTop) continue;
-    const WalkSurface& ramp = scene.walkSurfaces[i + 1];
-    if (ramp.neighbors != std::vector<int>{static_cast<int>(i)}) continue;
-    return {static_cast<int>(i), static_cast<int>(i) + 1};
-  }
-  return {-1, -1};
-}
-
 // Cover-sized street items (issue #153, roadmap 2.5): every item is a box
 // whose top clears a foot probe but not a standing eye, so a standing eye
 // sees over it while a low probe is hidden behind it; the Off switch removes
 // them all; and the layout is deterministic. Parked vehicles (sedans, SUVs,
-// pickups) are climbable over a ramp off one bumper (issue #40) wherever the
-// road beyond it is clear. The coach bus is the one full-height exception,
+// pickups) are climbable. The coach bus is the one full-height exception,
 // covered by TestCoachBusesStopMidStreet.
 void TestCoverItemsAreEyeLowAndFootHigh() {
   const MapGeneratorConfig on = FurnitureConfig(FeatureMode::On);
@@ -2937,9 +2891,6 @@ void TestCoverItemsAreEyeLowAndFootHigh() {
     }
     int cover = 0, climbable = 0, large = 0;
     std::set<StreetFixtureModel> models;
-    NavMesh mesh;
-    mesh.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
-               &scene.walkSurfaces);
     for (const Obstacle& o : scene.obstacles) {
       if (o.fixtureModel != StreetFixtureModel::None) {
         models.insert(o.fixtureModel);
@@ -2952,31 +2903,8 @@ void TestCoverItemsAreEyeLowAndFootHigh() {
       if (!o.footprint.empty()) continue;  // Artery wrecks: TestArteryWrecks.
       if (o.fixtureModel == StreetFixtureModel::CoachBus) continue;
       ++cover;
-      const auto [top, ramp] = ClimbSurfacesOf(scene, o);
-      if (!IsCurbVehicle(o.fixtureModel)) {
-        CHECK(top < 0);
-      } else if (top >= 0 && ++climbable <= 4) {
-        // Ground -> ramp -> roof (a few per seed: each path search is a full
-        // city route): the figure ends on the car's roof.
-        glm::vec3 foot(0.0f);
-        int feet = 0;
-        for (const glm::vec3& v : scene.walkSurfaces[ramp].vertices) {
-          if (v.y < o.bounds.min.y + 1e-3f) { foot += v; ++feet; }
-        }
-        CHECK(feet == 2);
-        foot /= static_cast<float>(std::max(feet, 1));
-        const glm::vec3 roof = SurfaceCenter(scene.walkSurfaces[top]);
-        glm::vec3 start(foot.x, scene.ground.HeightAt(foot.x, foot.z), foot.z);
-        const glm::vec3 center = o.bounds.Center();
-        const glm::vec2 away = glm::normalize(glm::vec2(foot.x - center.x, foot.z - center.z));
-        start.x += away.x * 0.6f;
-        start.z += away.y * 0.6f;
-        if (mesh.IsWalkable(start.x, start.z)) {
-          std::vector<glm::vec3> path;
-          CHECK(mesh.FindPath(start, roof, &path));
-          CHECK(!path.empty() && std::fabs(path.back().y - roof.y) < 1e-3f);
-        }
-      }
+      climbable += o.climbable;
+      CHECK(o.climbable == IsCurbVehicle(o.fixtureModel));
       const glm::vec3 size = o.bounds.max - o.bounds.min;
       large += std::max(size.x, size.z) > 1.0f;
       const float base = o.bounds.min.y;
@@ -3028,6 +2956,7 @@ void TestCoachBusesStopMidStreet() {
     (buses.empty() ? mapsWithout : mapsWithBus) += 1;
     for (const Obstacle* bus : buses) {
       CHECK(bus->kind == ObstacleKind::Cover);
+      CHECK(!bus->climbable);
       CHECK(bus->footprint.empty());
       const glm::vec3 size = bus->bounds.max - bus->bounds.min;
       CHECK(size.y > constants::kEyeHeight + 1.0f);
@@ -3090,6 +3019,7 @@ void TestArteryWrecks() {
       const Obstacle& o = scene.obstacles[i];
       if (o.kind != ObstacleKind::Cover || o.footprint.empty()) continue;
       ++wrecks;
+      CHECK(!o.climbable);
       CHECK(o.footprint.size() == 4);
       CHECK(o.fixtureModel != StreetFixtureModel::None);
       const bool bus = o.fixtureModel == StreetFixtureModel::CoachBus;
@@ -3277,9 +3207,6 @@ void TestEnterableBuildingsHaveDoorways() {
   std::set<BuildingKind> kinds;
   for (uint32_t seed : kSeeds) {
     const Scene scene = GenerateUrbanMap(seed, c);
-    NavMesh mesh;
-    mesh.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
-               &scene.walkSurfaces);
     for (size_t bi = 0; bi < scene.buildings.size(); ++bi) {
       const Building& b = scene.buildings[bi];
       CHECK(!b.floors.empty());
@@ -3299,75 +3226,19 @@ void TestEnterableBuildingsHaveDoorways() {
       CHECK(lintel);
       CHECK(b.doorWidth >= 0.9f && b.doorHeight >= constants::kUnitHeight);
       if (b.kind == BuildingKind::Commercial) wideBay = wideBay || b.doorWidth >= 4.0f;
-      // Upper storeys are convex walk surfaces inside the walls with a
-      // ceiling slab under each, joined by one stair flight per storey gap
-      // (roadmap 5.4/5.5).
-      if (b.floors.size() >= 2) {
+      // One overhead slab under every upper storey.
+      int slabs = 0;
+      for (size_t f = 1; f < b.floors.size(); ++f) {
+        for (const Obstacle& o : scene.obstacles) {
+          if (o.building == static_cast<int>(bi) && o.footprint == roof &&
+              std::fabs(o.bounds.max.y - b.floors[f].y0) < kEps) ++slabs;
+        }
         multi = true;
-        CHECK(!b.floorSurfaces.empty());
-        CHECK(b.stairSurfaces.size() == b.floors.size() - 1);
-        CHECK(b.stairEdge >= 0 && b.stairEdge < static_cast<int>(roof.size()));
-        CHECK(b.stairU1 > b.stairU0 + 1.0f);
-        for (size_t f = 1; f < b.floors.size(); ++f) {
-          const float y = b.floors[f].y0;
-          int pieces = 0, ceilings = 0;
-          for (int si : b.floorSurfaces) {
-            const WalkSurface& s = scene.walkSurfaces[si];
-            if (std::fabs(s.vertices.front().y - y) > kEps) continue;
-            ++pieces;
-            CHECK(s.building == static_cast<int>(bi) && !s.stair && !s.connectsToGround);
-            std::vector<glm::vec2> xz;
-            for (const glm::vec3& v : s.vertices) {
-              CHECK(std::fabs(v.y - y) < kEps);
-              CHECK(PointInConvexPolygon({v.x, v.z}, roof, 1e-3f));
-              xz.emplace_back(v.x, v.z);
-            }
-            CHECK(PolygonSignedArea(xz) > 0.0f);
-            for (size_t i = 0; i < xz.size(); ++i) {
-              const glm::vec2 a = xz[(i + xz.size() - 1) % xz.size()], p = xz[i],
-                              q = xz[(i + 1) % xz.size()];
-              const glm::vec2 e0 = p - a, e1 = q - p;
-              CHECK(e0.x * e1.y - e0.y * e1.x > -1e-4f);  // Convex.
-            }
-          }
-          CHECK(pieces >= 1);
-          for (const Obstacle& o : scene.obstacles) {
-            if (o.building == static_cast<int>(bi) && o.footprint.size() >= 3 &&
-                o.bounds.max.y < y && o.bounds.max.y > y - 0.05f) ++ceilings;
-          }
-          CHECK(ceilings >= 1);
-        }
-        // Storeys are joined only through the flights: a floor piece's
-        // neighbours are pieces of its own storey or a flight meeting it at
-        // its own height (two shared 3D vertices), never another storey.
-        for (int si : b.floorSurfaces) {
-          const WalkSurface& s = scene.walkSurfaces[si];
-          for (int ni : s.neighbors) {
-            const WalkSurface& other = scene.walkSurfaces[ni];
-            CHECK(other.building == static_cast<int>(bi));
-            int shared = 0;
-            for (const glm::vec3& v : s.vertices) {
-              for (const glm::vec3& w : other.vertices) shared += glm::distance(v, w) < 1e-3f;
-            }
-            CHECK(shared == 2);
-            if (!other.stair) CHECK(std::fabs(other.vertices.front().y - s.vertices.front().y) < kEps);
-          }
-        }
-        for (size_t f = 0; f + 1 < b.floors.size(); ++f) {
-          const WalkSurface& flight = scene.walkSurfaces[b.stairSurfaces[f]];
-          CHECK(flight.stair && flight.building == static_cast<int>(bi));
-          CHECK(flight.connectsToGround == (f == 0));
-          float lo = 1e9f, hi = -1e9f;
-          for (const glm::vec3& v : flight.vertices) {
-            lo = std::min(lo, v.y);
-            hi = std::max(hi, v.y);
-          }
-          CHECK(std::fabs(lo - b.floors[f].y0) < kEps && std::fabs(hi - b.floors[f + 1].y0) < kEps);
-          CHECK(!flight.neighbors.empty());  // Joined to the floor it reaches.
-        }
-      } else {
-        CHECK(b.floorSurfaces.empty() && b.stairSurfaces.empty() && b.stairEdge < 0);
       }
+      CHECK(slabs == static_cast<int>(b.floors.size()) - 1);
+      NavMesh mesh;
+      mesh.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
+                 &scene.walkSurfaces);
       // Narrow interiors vanish under the agent-radius inflation of the walls.
       // Garages (decks/ramps) and Civic towers (non-convex cores) are skipped.
       if (b.kind != BuildingKind::Garage && b.kind != BuildingKind::Civic &&
@@ -3387,73 +3258,21 @@ void TestEnterableBuildingsHaveDoorways() {
   for (const Building& b : solid.buildings) CHECK(!b.enterable);
 }
 
-// Issue #321: with the default config every building is enterable: hollow,
-// with a doorway whose outside and inside are joined on the nav mesh.
-void TestAllBuildingsEnterableAcrossSeeds() {
-  const MapGeneratorConfig c = OldSizeConfig();
-  CHECK(MapGeneratorConfig{}.enterableChance >= 1.0f);
-  int checked = 0;
-  for (uint32_t seed : {1u, 42u, 2024u, 7u, 99u, 2533922924u}) {
-    const Scene scene = GenerateUrbanMap(seed, c);
-    const std::vector<UrbanParcel> parcels = UrbanParcels(seed, c);
-    NavMesh mesh;
-    mesh.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
-               &scene.walkSurfaces);
-    for (const Building& b : scene.buildings) {
-      CHECK(b.enterable);
-      CHECK(b.doorWidth >= 0.9f && b.doorHeight >= constants::kUnitHeight);
-      CHECK(b.parcel >= 0 && b.parcel < static_cast<int>(parcels.size()));
-      if (!b.enterable || b.parcel < 0 || b.parcel >= static_cast<int>(parcels.size())) continue;
-      const UrbanParcel& p = parcels[b.parcel];
-      const size_t n = p.footprint.size();
-      const glm::vec2 a = p.footprint[p.frontageEdge % n], e = p.footprint[(p.frontageEdge + 1) % n];
-      const glm::vec2 d = glm::normalize(e - a), in(-d.y, d.x), mid = 0.5f * (a + e);
-      // Some walkable point just outside the doorway joins some walkable
-      // point inside the walls through the nav mesh (stair flights near the
-      // door can make a single probe point unreachable, so try a grid).
-      bool ok = false;
-      for (float so = 0.3f; so <= 3.0f && !ok; so += 0.5f) {
-        const glm::vec2 outside = mid - in * so;
-        if (!mesh.IsWalkable(outside.x, outside.y)) continue;
-        for (float si = 0.5f; si <= 4.0f && !ok; si += 0.5f) {
-          for (float lat : {0.0f, -0.4f, 0.4f}) {
-            const glm::vec2 inside = mid + in * si + d * lat;
-            if (!mesh.IsWalkable(inside.x, inside.y)) continue;
-            std::vector<glm::vec3> path;
-            if (mesh.FindPath(glm::vec3(outside.x, b.baseY, outside.y),
-                              glm::vec3(inside.x, b.baseY, inside.y), &path)) {
-              ok = true;
-              break;
-            }
-          }
-        }
-      }
-      if (!ok) std::fprintf(stderr, "not enterable: seed %u parcel %d\n", seed, b.parcel);
-      CHECK(ok);
-      ++checked;
-    }
-  }
-  CHECK(checked > 0);
-}
-
 // Roadmap 5.3: windows on enterable buildings are real holes in the walls.
 void TestWindowsAreWallCutouts() {
   MapGeneratorConfig c = OldSizeConfig();
   c.enterableChance = 1.0f;
-  int tested = 0, upper = 0;
+  int tested = 0;
   for (uint32_t seed : kSeeds) {
     const Scene scene = GenerateUrbanMap(seed, c);
     NavMesh mesh;
     mesh.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
                &scene.walkSurfaces);
     for (const FacadeOpening& o : scene.facadeOpenings) {
-      if (o.kind != FacadeOpening::Kind::Window) continue;
+      if (o.kind != FacadeOpening::Kind::Window || o.floor != 0) continue;
       const Building& b = scene.buildings[o.building];
       if (!b.enterable) continue;
-      // Every floor is cut (roadmap 5.4 made the upper ones walkable):
-      // heights are relative to the window's own floor.
-      const float floorY = b.floors[static_cast<size_t>(o.floor)].y0;
-      const float sill = o.y0 - floorY, head = o.y1 - floorY;
+      const float sill = o.y0 - b.baseY, head = o.y1 - b.baseY;
       if (sill < 0.8f || head < 1.7f) continue;  // Needs a sill that hides the foot probe.
       const auto& fp = scene.obstacles[b.obstacle].footprint;
       const size_t e = static_cast<size_t>(o.wallEdge), n = fp.size();
@@ -3462,7 +3281,7 @@ void TestWindowsAreWallCutouts() {
       const float um = 0.5f * (o.u0 + o.u1);
       const auto at = [&](float u, float depth, float height) {
         const glm::vec2 p = a + d * u + in * depth;
-        return glm::vec3(p.x, floorY + height, p.y);
+        return glm::vec3(p.x, b.baseY + height, p.y);
       };
       // Just the wall pieces on this edge: the cutout itself is under test.
       std::vector<Obstacle> own;
@@ -3485,95 +3304,11 @@ void TestWindowsAreWallCutouts() {
       CHECK(LineOfSightClear(at(um, -12.0f, constants::kEyeHeight),
                              at(um, 0.4f, constants::kEyeHeight), own));
       // Nobody walks through a window.
-      if (o.floor == 0) CHECK(!mesh.IsWalkable(at(um, 0.15f, 0.0f).x, at(um, 0.15f, 0.0f).z));
+      CHECK(!mesh.IsWalkable(at(um, 0.15f, 0.0f).x, at(um, 0.15f, 0.0f).z));
       ++tested;
-      upper += o.floor > 0;
     }
   }
   CHECK(tested > 0);
-  CHECK(upper > 0);
-}
-
-// Roadmap 5.4/5.5: every upper floor of an enterable building is reachable
-// from its street doorway, up the stair, and back down again.
-void TestEnterableFloorsReachableByStairs() {
-  MapGeneratorConfig c = OldSizeConfig();
-  c.enterableChance = 1.0f;
-  int floorsTested = 0, buildingsTested = 0;
-  for (uint32_t seed : kSeeds) {
-    const Scene scene = GenerateUrbanMap(seed, c);
-    const std::vector<UrbanParcel> parcels = UrbanParcels(seed, c);
-    NavMesh mesh;
-    mesh.Build(scene.obstacles, scene.mapHalfExtent, constants::kAgentRadius, &scene.ground,
-               &scene.walkSurfaces);
-    int sampled = 0;
-    for (size_t bi = 0; bi < scene.buildings.size(); ++bi) {
-      const Building& b = scene.buildings[bi];
-      if (!b.enterable || b.floorSurfaces.empty()) continue;
-      const auto& fp = scene.obstacles[b.obstacle].footprint;
-      const size_t n = fp.size();
-      const size_t door = static_cast<size_t>(parcels[b.parcel].frontageEdge) % n;
-      CHECK(b.stairEdge != static_cast<int>(door));
-      // Just inside the doorway, on the ground floor.
-      const glm::vec2 a = fp[door], q = fp[(door + 1) % n];
-      const glm::vec2 d = glm::normalize(q - a);
-      const glm::vec2 in(-d.y, d.x);
-      const glm::vec2 inside = a + d * (0.5f * glm::distance(a, q)) + in * 0.9f;
-      const glm::vec3 start(inside.x, b.baseY, inside.y);
-      if (!mesh.IsWalkable(start.x, start.z)) continue;  // Cramped interior; skip.
-      // Every seventh such building (full-city path searches are slow).
-      if (sampled++ % 7 != 0) continue;
-      ++buildingsTested;
-      for (int si : b.floorSurfaces) {
-        const glm::vec3 goal = SurfaceCenter(scene.walkSurfaces[si]);
-        std::vector<glm::vec3> up, down;
-        const bool climbed = mesh.FindPath(start, goal, &up);
-        CHECK(climbed);
-        if (!climbed) {
-          std::fprintf(stderr, "seed %u building %zu: floor surface %d unreachable\n", seed, bi, si);
-          continue;
-        }
-        CHECK(std::fabs(up.back().y - goal.y) < 1e-3f);
-        // Up the stair, never through a wall: every waypoint stays inside the footprint.
-        for (const glm::vec3& p : up) CHECK(PointInConvexPolygon({p.x, p.z}, fp, 1e-3f));
-        CHECK(mesh.FindPath(goal, start, &down));
-        CHECK(!down.empty() && std::fabs(down.back().y - start.y) < 1e-3f);
-        // Only ever via the stair: no leg climbs steeper than a flight (the
-        // stacked flights share one XZ footprint, which once left the path
-        // on the ground flight until a final storey-high vertical step), and
-        // every waypoint stands on this building's ground floor, a floor
-        // slab or a flight.
-        for (const std::vector<glm::vec3>* path : {&up, &down}) {
-          for (size_t i = 0; i + 1 < path->size(); ++i) {
-            const glm::vec3& p = (*path)[i];
-            const glm::vec3& q = (*path)[i + 1];
-            const float run = std::hypot(q.x - p.x, q.z - p.z);
-            CHECK(std::fabs(q.y - p.y) <= constants::kMaxWalkSlope * run + 1e-3f);
-          }
-          for (const glm::vec3& p : *path) {
-            bool onBuilding = std::fabs(p.y - b.baseY) < 1e-3f;
-            for (const int si2 : b.floorSurfaces) {
-              const WalkSurface& s = scene.walkSurfaces[si2];
-              onBuilding |= SurfaceContainsXZ(s, p.x, p.z) &&
-                            std::fabs(SurfaceHeightAt(s, p.x, p.z) - p.y) < 1e-2f;
-            }
-            for (const int si2 : b.stairSurfaces) {
-              const WalkSurface& s = scene.walkSurfaces[si2];
-              onBuilding |= SurfaceContainsXZ(s, p.x, p.z) &&
-                            std::fabs(SurfaceHeightAt(s, p.x, p.z) - p.y) < 1e-2f;
-            }
-            CHECK(onBuilding);
-          }
-        }
-        ++floorsTested;
-      }
-      // (The move-frontier climb is covered by the dedicated reach-field tests: a
-      // reach field here prices every cell with a full-city ground search, which
-      // took hours per shard.)
-    }
-  }
-  CHECK(buildingsTested > 0);
-  CHECK(floorsTested > 0);
 }
 
 void TestTreesStayOnEmptyBlocksAndAreSolid() {
@@ -3599,7 +3334,7 @@ void TestTreesStayOnEmptyBlocksAndAreSolid() {
       }
       for (size_t i = 0; i < scene.trees.size(); ++i) {
         const Obstacle& o = scene.obstacles[bare.obstacles.size() + i];
-        CHECK(o.navOnly);
+        CHECK(o.navOnly && !o.climbable);
       }
       auto blocks = UrbanBlocks(seed, config);
       if (config.arteryCount == 0) {
@@ -3655,76 +3390,71 @@ void TestTreesStayOnEmptyBlocksAndAreSolid() {
   CHECK(GenerateHillyMap(7).trees.empty());
 }
 
-int main(int argc, char** argv) {
-  const std::vector<TestCase> cases = {
-      TBG_TEST(TestNavMeshIgnoresOverheadObstacles),
-      TBG_TEST(TestEnterableBuildingsHaveDoorways),
-      TBG_TEST(TestAllBuildingsEnterableAcrossSeeds),
-      TBG_TEST(TestWindowsAreWallCutouts),
-      TBG_TEST(TestEnterableFloorsReachableByStairs),
-      TBG_TEST(TestTreesStayOnEmptyBlocksAndAreSolid),
-      TBG_TEST(TestRoadPatchesDoNotZFight),
-      TBG_TEST(TestFeatureFlagsAndStreetGraph),
-      TBG_TEST(TestLongBlockApartmentRowsAndPedestrianSplits),
-      TBG_TEST(TestFurnitureHugsSidewalksAndRespectsClearances),
-      TBG_TEST(TestFurnitureKeepsSidewalksConnected),
-      TBG_TEST(TestTrafficPropsSitAtJunctionsAndStayVisualOnly),
-      TBG_TEST(TestCoverItemsAreEyeLowAndFootHigh),
-      TBG_TEST(TestCoachBusesStopMidStreet),
-      TBG_TEST(TestArteryWrecks),
-      TBG_TEST(TestPinnedFurnitureFingerprints),
-      TBG_TEST(TestDeterminismAndVariety),
-      TBG_TEST(TestZiplinesAreDeterministicBoundedAndValid),
-      TBG_TEST(TestZiplineStreetEndsReachableRoofsOnlyByLine),
-      TBG_TEST(TestPinnedSeedFingerprints),
-      TBG_TEST(TestParcelsMatchBuildingsAndFrontStreets),
-      TBG_TEST(TestBuildingKindsFloorsAndHeights),
-      TBG_TEST(TestSkylineReachesHigherAndClusters),
-      TBG_TEST(TestExtraArteries),
-      TBG_TEST(TestFacadeOpeningsDoorsStoopsAndPlatforms),
-      TBG_TEST(TestMassingStaysOnItsBuilding),
-      TBG_TEST(TestRoofMassingBlocksWalking),
-      TBG_TEST(TestMassingBlocksSight),
-      TBG_TEST(TestTreesBlockSight),
-      TBG_TEST(TestPinnedKindHistograms),
-      TBG_TEST(TestMapIsMuchLargerThanDefault),
-      TBG_TEST(TestStreetsAndSidewalksAreObstacleFree),
-      TBG_TEST(TestEveryBlockHasWallToWallAndGappedRuns),
-      TBG_TEST(TestVariedHeightsWithFewTowers),
-      TBG_TEST(TestBlocksAndStreetsVary),
-      TBG_TEST(TestSidewalksCoverEveryBlock),
-      TBG_TEST(TestLocalStreetsPavedAndSidewalkIsRing),
-      TBG_TEST(TestLocalStreetBandsReachMapEdgeAtFullWidth),
-      TBG_TEST(TestLotVariety),
-      TBG_TEST(TestNavMeshFullyReachableFromSpawns),
-      TBG_TEST(TestWindowedNavMeshMatchesGlobalWithinBudget),
-      TBG_TEST(TestGameLogicUsesRangeScopedNavMesh),
-      TBG_TEST(TestVisibilityStillSpansWholeMap),
-      TBG_TEST(TestObliqueArteryAndBranchMerge),
-      TBG_TEST(TestPolygonBlocksAdaptToAngledStreets),
-      TBG_TEST(TestNoCornerSplitBuildings),
-      TBG_TEST(TestCornerBuildingsDoNotChainAcrossAFrontage),
-      TBG_TEST(TestThinCornerBuildingSliversAreDropped),
-      TBG_TEST(TestPolygonCollisionLosAndNavigationUseRealFootprint),
-      TBG_TEST(TestForkRailsFollowDeckEdges),
-      TBG_TEST(TestElevatedOverpassRampsPiersAndDistinctLayers),
-      TBG_TEST(TestOverpassColumnsAvoidStreets),
-      TBG_TEST(TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable),
-      TBG_TEST(TestOverpassLayoutGeometryAndBranchRampOff),
-      TBG_TEST(TestBranchMayRunOffMapWithoutRamp),
-      TBG_TEST(TestMoveFrontierCoversBranchRampAtJunction),
-      TBG_TEST(TestBranchJunctionCrossingsStayLocalAcrossLayouts),
-      TBG_TEST(TestSpawnReachabilityAndSurfaceSnapshotSynchronization),
-      TBG_TEST(TestHillyDeterminismAndVariety),
-      TBG_TEST(TestHillyTerrainIsGenuinelyUneven),
-      TBG_TEST(TestHillyUnitsSpawnOnTerrain),
-      TBG_TEST(TestHillyPathsFollowTerrain),
-      TBG_TEST(TestHillyReachFieldCostsIncludeSlope),
-      TBG_TEST(TestHillyGameLogicMoveLandsOnTerrain),
-      TBG_TEST(TestHillyShortSameCellMoveStaysOnTerrain),
-      TBG_TEST(TestSpawnHintsPlaceOppositeCornersAndCenterFlag),
-  };
-  if (!RunSelectedTests(argc, argv, cases)) return 2;
+int main() {
+  TestNavMeshIgnoresOverheadObstacles();
+  TestEnterableBuildingsHaveDoorways();
+  TestWindowsAreWallCutouts();
+  TestTreesStayOnEmptyBlocksAndAreSolid();
+  TestRoadPatchesDoNotZFight();
+  TestFeatureFlagsAndStreetGraph();
+  TestLongBlockApartmentRowsAndPedestrianSplits();
+  TestFurnitureHugsSidewalksAndRespectsClearances();
+  TestFurnitureKeepsSidewalksConnected();
+  TestTrafficPropsSitAtJunctionsAndStayVisualOnly();
+  TestCoverItemsAreEyeLowAndFootHigh();
+  TestCoachBusesStopMidStreet();
+  TestArteryWrecks();
+  TestPinnedFurnitureFingerprints();
+  TestDeterminismAndVariety();
+  TestZiplinesAreDeterministicBoundedAndValid();
+  TestZiplineStreetEndsReachableRoofsOnlyByLine();
+  TestPinnedSeedFingerprints();
+  TestParcelsMatchBuildingsAndFrontStreets();
+  TestBuildingKindsFloorsAndHeights();
+  TestSkylineReachesHigherAndClusters();
+  TestExtraArteries();
+  TestFacadeOpeningsDoorsStoopsAndPlatforms();
+  TestMassingStaysOnItsBuilding();
+  TestRoofMassingBlocksWalking();
+  TestMassingBlocksSight();
+  TestTreesBlockSight();
+  TestPinnedKindHistograms();
+  TestMapIsMuchLargerThanDefault();
+  TestStreetsAndSidewalksAreObstacleFree();
+  TestEveryBlockHasWallToWallAndGappedRuns();
+  TestVariedHeightsWithFewTowers();
+  TestBlocksAndStreetsVary();
+  TestSidewalksCoverEveryBlock();
+  TestLocalStreetsPavedAndSidewalkIsRing();
+  TestLocalStreetBandsReachMapEdgeAtFullWidth();
+  TestLotVariety();
+  TestNavMeshFullyReachableFromSpawns();
+  TestWindowedNavMeshMatchesGlobalWithinBudget();
+  TestGameLogicUsesRangeScopedNavMesh();
+  TestVisibilityStillSpansWholeMap();
+  TestObliqueArteryAndBranchMerge();
+  TestPolygonBlocksAdaptToAngledStreets();
+  TestNoCornerSplitBuildings();
+  TestCornerBuildingsDoNotChainAcrossAFrontage();
+  TestThinCornerBuildingSliversAreDropped();
+  TestPolygonCollisionLosAndNavigationUseRealFootprint();
+  TestForkRailsFollowDeckEdges();
+  TestElevatedOverpassRampsPiersAndDistinctLayers();
+  TestOverpassColumnsAvoidStreets();
+  TestOverpassPresenceAndLayoutsAreSeedDrivenAndForceable();
+  TestOverpassLayoutGeometryAndBranchRampOff();
+  TestBranchMayRunOffMapWithoutRamp();
+  TestMoveFrontierCoversBranchRampAtJunction();
+  TestBranchJunctionCrossingsStayLocalAcrossLayouts();
+  TestSpawnReachabilityAndSurfaceSnapshotSynchronization();
+  TestHillyDeterminismAndVariety();
+  TestHillyTerrainIsGenuinelyUneven();
+  TestHillyUnitsSpawnOnTerrain();
+  TestHillyPathsFollowTerrain();
+  TestHillyReachFieldCostsIncludeSlope();
+  TestHillyGameLogicMoveLandsOnTerrain();
+  TestHillyShortSameCellMoveStaysOnTerrain();
+  TestSpawnHintsPlaceOppositeCornersAndCenterFlag();
   if (g_failures) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;

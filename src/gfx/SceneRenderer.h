@@ -56,10 +56,6 @@ struct RenderDebugOptions {
   float thermalFovAlpha = 0.25f;
   // Contact-shading tunables for the thermal view's debug-panel sliders.
   AmbientOcclusionSettings thermalAo;
-  // Draw debris chunks at rest instead of replaying their fall: a
-  // detonation outside a round falls on a wall clock, which the golden
-  // runner cannot pin.
-  bool settleDebris = false;
   // Issue #136: skip the camera-occlusion see-through pass (occluding
   // blocks/decks are then always drawn fully opaque).
   bool disableOcclusionFade = false;
@@ -211,7 +207,6 @@ class SceneRenderer {
     uint64_t geometryKey = 0;
     std::vector<glm::vec3> probes;
     std::vector<char> fadeObstacle, fadeSurface, fadeMassing, fadeBuilding;
-    std::vector<char> directSurface;  // Surfaces crossing a probe ray themselves.
     bool anyFaded = false;
   };
   FadeCache fadeCache_[2];
@@ -233,10 +228,6 @@ class SceneRenderer {
   // instances), which an address key would mistake for "unchanged".
   LitTriangleMesh terrainMesh_;
   LitTriangleMesh terrainRaisedMesh_;  // Concrete level tops and cliff faces of a city.
-  // Slabs restoring the level over each tunnel bore (issue #156), grouped
-  // by roof walk-surface index so the camera see-through pass can skip a
-  // roof hiding a figure or frontier in the tunnel and blend it back in.
-  LitTriangleMesh tunnelRoofMesh_;
   LitTriangleMesh terrainRoadMesh_, terrainSidewalkMesh_, terrainStairMesh_;
   unsigned long long pavementKey_ = 0;
   // Reused scratch mesh for polygon prisms and road/deck patches. Geometry
@@ -322,20 +313,6 @@ class SceneRenderer {
   LitTriangleMesh obstacleMesh_;        // Drawn prisms, recessed openings cut out.
   LitTriangleMesh obstacleCasterMesh_;  // The same, solid, for the shadow map.
   unsigned long long obstacleKey_ = 0;
-  size_t ragdollWorldSeen_ = 0;  // World-log size at the last pane render.
-  // Debris replay (WorldChangeKind::Debris): every chunk's rest prism --
-  // the fracture cell it was knocked out of -- posed along its recorded
-  // flight (tactics::DebrisPose): against the round clock during playback,
-  // against a local clock for a detonation outside a round, and at rest
-  // afterwards. Rubble is excluded from the static obstacle mesh and drawn
-  // from this one, rebuilt only while something is falling.
-  void UpdateDebris(const tactics::GameLogic& game, bool settled);
-  LitTriangleMesh debrisMesh_;
-  bool debrisHasGeometry_ = false;
-  bool debrisMoving_ = false;
-  unsigned long long debrisKey_ = 0;
-  std::unordered_map<int, double> debrisStarted_;  // Change id -> local clock start.
-  size_t debrisLogSeen_ = 0;
   std::vector<int> surfaceBuilding_;  // Roof slab -> building, see RoofBuildings.
   unsigned long long surfaceBuildingKey_ = 0;
   // The slot holding `unit`'s depth maps looking along `facingYaw` (for

@@ -60,27 +60,14 @@ struct ScenarioAction {
   // BeginMove opens move planning (select + Move) and deliberately stops
   // there, leaving the movement frontier up for the visual runner's
   // post-action capture; no destination is clicked and no plan is recorded.
-  // Bomb (issue #350) is the debug-bomb flow: place it at `destination`
-  // (field `bombRadius`), then either detonate immediately or -- with
-  // `bombAt` set -- arm it to go off that many seconds into the next
-  // committed round, exactly like the debug panel / server control taps.
   enum class Kind {
     Move, BeginMove, Shoot, Aim, Pass, Cancel, Commit, Focus, NewGame,
-    TimelineSeek, TimelinePlay, TimelinePause, Wait, Bomb,
+    TimelineSeek, TimelinePlay, TimelinePause, Wait,
   };
 
   int actor = -1;  // Unused (and not required in YAML) for Commit/NewGame/Timeline*.
   Kind kind = Kind::Pass;
   glm::vec3 destination{0.0f};  // Move only: the last leg's end.
-  // Move only, mutually exclusive with `destination`: a camera-style ray
-  // (`ray_from`/`ray_dir`) resolved through GameLogic::ResolveMoveRay
-  // exactly like a real move hover/click, so the clicked destination is the
-  // surface the frontier-aware selector lands on (a floor the mover cannot
-  // reach this leg, sitting between the camera and the frontier, is
-  // skipped). A ray that hits no walkable surface fails the step unless
-  // `expect_unreachable` is set.
-  std::optional<glm::vec3> moveRayFrom;
-  std::optional<glm::vec3> moveRayDir;
   std::vector<glm::vec3> waypoints;  // Move only: earlier leg ends, clicked in
                                       // order before `destination` (multi-leg
                                       // plan, one leg executes per round).
@@ -113,8 +100,6 @@ struct ScenarioAction {
   // Absent means "bar untouched": the plan keeps whatever level is dialed in
   // (1 unless an earlier step of the same aim set it).
   std::optional<int> shots;
-  float bombRadius = 3.5f;         // Bomb only: blast radius.
-  std::optional<float> bombAt;     // Bomb only: arm for this round time.
 };
 
 // Every field is optional; only the ones present in the YAML step are
@@ -181,27 +166,20 @@ struct Scenario {
   std::vector<ScenarioStep> steps;
   // Optional visual-runner camera adjustments (both panes), applied after
   // the initial view is fitted to the map: orbit target on the ground plane,
-  // zoom delta (positive = further out), and orbit deltas in degrees from
-  // the default view (pitch is clamped to the app's orbit limits).
+  // and zoom delta (positive = further out).
   std::optional<glm::vec2> cameraTarget;
   float cameraZoom = 0.0f;
-  float cameraYawDegrees = 0.0f;
-  float cameraPitchDegrees = 0.0f;
   // Optional visual-runner render settings (`render:` section). Ignored by
   // the logic-only runner.
   //   fov_overlay: "cpu" (default) | "shadow_map" -- issue #110 prototype.
   //   fov_probe_height: shadow_map only; see SceneRenderer::SetFovProbeHeight.
   //   thermal: false (default) | true -- thermal render prototype.
   //   thermal_black_hot: true (default) | false -- white-hot when false.
-  //   npr: false (default) | true -- screen-space ink outlines on top of the
-  //     AO view (RenderDebugOptions::npr), including the see-through pass's
-  //     outlines of faded buildings and their window edges.
   enum class FovOverlay { Cpu, ShadowMap };
   FovOverlay fovOverlay = FovOverlay::Cpu;
   float fovProbeHeight = 0.0f;
   bool thermal = false;
   bool thermalBlackHot = true;
-  bool npr = false;
 };
 
 // Throws std::runtime_error with a descriptive message on malformed YAML.
@@ -269,10 +247,6 @@ struct PlaybackHooks {
   // the GameLogic passed to onFrame/onActionComplete is the *replayed*
   // state, exactly what the app would render.
   std::function<void(const TurnTimeline&, const TimelinePlayback&)> onTimeline;
-  // Hands over the live game (outlives RunScenario) so a renderer can key
-  // full-information reveal on the *live* match being over, not on the
-  // replayed frame it is drawing (issue #284).
-  std::function<void(const GameLogic&)> onLiveGame;
 };
 
 // Runs `scenario` against a fresh GameLogic instance built from its scene,

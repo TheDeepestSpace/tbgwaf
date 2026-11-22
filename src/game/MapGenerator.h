@@ -102,7 +102,7 @@ struct MapGeneratorConfig {
   // Enterable buildings (issue #157): P(a parcel of any kind (set-back
   // offices excepted) is hollow: thin walls, a frontage doorway, interior floor slabs
   // and a roof slab overhead). 0 keeps every building a solid prism.
-  float enterableChance = 1.0f;  // Share of parcels built hollow (#157); 1 = all enterable (#321).
+  float enterableChance = 0.5f;  // Share of parcels built hollow (#157).
   float rearDoorOpenChance = 0.5f;     // Enterable: chance the rear wall has an open doorway.
   float bayHalfClosedChance = 0.5f;    // Enterable warehouses: chance the bay is half shuttered.
   int towerCount = 2;           // Tall landmark buildings scattered across the city.
@@ -160,10 +160,9 @@ struct MapGeneratorConfig {
   // retaining wall parallel to that street. Steps overlap into nested
   // tiers (sharp, no rolling noise). The highway profile is planned
   // against the levels: the artery/branch ramp through a wall at grade (a
-  // main road cutting through the level), tunnel through a sufficiently
-  // tall raised band, or fly over a run of walls on a deck; an avenue may
-  // ramp or tunnel through; stair flights attached along each wall face
-  // climb it elsewhere. terrainLevelCount: -1 draws 1-3 per
+  // main road cutting through the level) or fly over a run of walls on a
+  // deck; an avenue may ramp through; stair flights attached along each
+  // wall face climb it elsewhere. terrainLevelCount: -1 draws 1-3 per
   // seed; 0 keeps the city flat. Legacy arteryCount=0 stays flat.
   int terrainLevelCount = -1;
   UrbanFeatures features;
@@ -287,30 +286,6 @@ struct UrbanParcel {
 // Every parcel of GenerateUrbanMap(seed, config), in Scene::buildings order.
 // Empty for arteryCount=0 (the legacy grid has no parcel pass).
 std::vector<UrbanParcel> UrbanParcels(uint32_t seed, const MapGeneratorConfig& config = {});
-
-// One generated building to drop into an existing Scene (Builder mode): a
-// rectangular parcel centred on (cx, cz) with half extents (hx, hz). `seed`
-// picks everything else (archetype, floors, doorway side, rear door,
-// windows, stoops, roof massing) the way a seed does for a city parcel.
-struct GeneratedBuildingSpec {
-  uint32_t seed = 0;
-  float cx = 0.0f, cz = 0.0f;
-  float hx = 5.0f, hz = 5.0f;
-};
-// Smallest half extent AppendGeneratedBuilding accepts (a doorway, a stair
-// and a ring of wall need about this much), and the clear margin around the
-// footprint it uses for the sidewalk ring and the stoop/rear platform.
-constexpr float kGeneratedBuildingMinHalfExtent = 3.0f;
-constexpr float kGeneratedBuildingMargin = 4.0f;
-
-// Runs the city generator's building passes (hollow enterable shell with
-// floors and stairs when it fits, else a solid prism; sidewalk ring, facade
-// windows/doors/stoops, parapets and roof furniture) on one parcel and
-// appends the result to `*scene` (flat ground assumed). Returns false and
-// leaves `*scene` untouched when the parcel is too small. Deterministic in
-// the spec. Call after the scene's units are placed: stoops keep clear of
-// them. Buildings appended by separate calls do not interact.
-bool AppendGeneratedBuilding(Scene* scene, const GeneratedBuildingSpec& spec);
 
 // Half-extent of the generated map for `config` (independent of seed).
 float UrbanMapHalfExtent(const MapGeneratorConfig& config);

@@ -226,7 +226,7 @@ namespace {
 
 // What a figure steps over without breaking stride: a stub left at the foot
 // of a breach, a debris chunk lying flat on the ground.
-constexpr float kStepOver = 0.35f;
+constexpr float kStepOver = constants::kStepOverHeight;
 
 // A fractured wall piece (Obstacle::profile, see game/Destruction.h) only
 // blocks walking where its silhouette crosses the band a figure's body
@@ -328,18 +328,45 @@ void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& 
       }
     }
     if (b.min.y - groundTop >= constants::kUnitHeight) continue;
-    // Rubble lying no higher than a step is walked over, like the stub at
-    // the foot of a breach; a pile of it (or a thick block) blocks.
-    if (obstacle.kind == ObstacleKind::Rubble && b.max.y - groundTop <= kStepOver) continue;
+    // Rubble blocks walking only where its true body crosses the band a
+    // standing figure occupies: the low tail of a chunk is stepped over and
+    // the high reach of a slab leaning on a wall is walked beside, so its
+    // blocking footprint is the body's silhouette clipped to that band --
+    // not the whole vertical envelope of the tilted prism, whose hull (plus
+    // agent padding) blankets open ground and can box a figure in next to a
+    // blast with no move left at all.
+    Obstacle banded;
+    const Obstacle* blocking = &obstacle;
+    if (obstacle.kind == ObstacleKind::Rubble) {
+      const std::vector<glm::vec2> bandFootprint =
+          RubbleBandFootprint(obstacle, groundTop + kStepOver, groundTop + constants::kUnitHeight);
+      if (!bandFootprint.empty()) {
+        banded = obstacle;
+        banded.footprint = bandFootprint;
+        banded.bounds.min.x = banded.bounds.max.x = bandFootprint.front().x;
+        banded.bounds.min.z = banded.bounds.max.z = bandFootprint.front().y;
+        for (const glm::vec2& p : bandFootprint) {
+          banded.bounds.min.x = std::min(banded.bounds.min.x, p.x);
+          banded.bounds.max.x = std::max(banded.bounds.max.x, p.x);
+          banded.bounds.min.z = std::min(banded.bounds.min.z, p.y);
+          banded.bounds.max.z = std::max(banded.bounds.max.z, p.y);
+        }
+        blocking = &banded;
+      } else if (obstacle.rubble.outline.size() >= 3 || b.max.y - groundTop <= kStepOver) {
+        // Clear of the band (or, without a body record, lying no higher
+        // than a step): walked over like the stub at the foot of a breach.
+        continue;
+      }
+    }
     std::vector<std::vector<glm::vec2>> pieces;
-    if (!GroundBlockingPieces(obstacle, tunnels, &pieces)) {
-      obstacles.push_back(obstacle);
+    if (!GroundBlockingPieces(*blocking, tunnels, &pieces)) {
+      obstacles.push_back(*blocking);
       continue;
     }
     // Straddles a tunnel bore: block with the clipped pieces only, each a
     // polygon obstacle of its own with bounds shrunk to fit.
     for (std::vector<glm::vec2>& piece : pieces) {
-      Obstacle part = obstacle;
+      Obstacle part = *blocking;
       part.bounds.min.x = part.bounds.max.x = piece.front().x;
       part.bounds.min.z = part.bounds.max.z = piece.front().y;
       for (const glm::vec2& p : piece) {

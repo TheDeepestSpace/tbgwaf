@@ -92,11 +92,18 @@ same log to the same seeded map, so drawn == simulated geometry.
   that settle are `solid`: appended as `ObstacleKind::Rubble` obstacles whose
   footprint / bounds are the vertical envelope of the tilted body at rest
   (`DebrisRestObstacle`; `Obstacle::rubble` keeps the true body), blocking
-  sight and movement from the change's `at` (rubble lying no higher than a
-  0.35 m step is walked over, like a stub at the foot of a breach; heaps
-  block); a later blast throws them again as the very bodies they are. A
-  chunk that would lie over a figure, and every chunk under 0.1 m^2, is
-  litter: drawn where it came to rest, never an obstacle. **Timing:** a blast
+  sight from the change's `at`; a later blast throws them again as the very
+  bodies they are. Movement is blocked more narrowly: the navmesh clips the
+  true body to the walk band -- 0.35 m (step-over) to 1.8 m (head) above the
+  ground -- and blocks only that silhouette (`RubbleBandFootprint`), so a
+  chunk lying no higher than a step is walked over like a stub at the foot
+  of a breach, a slab propped above head height is walked under, a leaning
+  slab blocks only the strip its body actually stands in, and heaps block. A
+  chunk that would lie over a figure, one whose walk-band silhouette (padded
+  by the navmesh agent radius plus a routing step) would pin a figure where
+  it stands, and every chunk under 0.1 m^2, is litter: drawn where it came
+  to rest, never an obstacle -- a blast can cost a figure ground, never its
+  ability to move at all. **Timing:** a blast
   inside a round (`at` > 0) is drawn against the round clock alone
   (`DebrisRoundAge`: launch pose on the frame it goes off; a replay paused on
   any frame holds the chunks still; a flight that outlasts its turn freezes

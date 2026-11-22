@@ -4765,6 +4765,101 @@ void TestDebrisStillFallingLateIsNotSlowed() {
   CHECK(landed < 8.0f);
 }
 
+// Rubble blocks walking only where its body crosses the band a standing
+// figure occupies: a chunk lying flat is stepped over, a slab propped above
+// head height is walked under, and a leaning slab blocks a strip no wider
+// than its full tilted envelope.
+void TestRubbleBandFootprintClipsBody() {
+  const auto slab = [](const glm::mat4& pose) {
+    Obstacle o;
+    o.kind = ObstacleKind::Rubble;
+    o.rubble.outline = {{-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}};
+    o.rubble.thickness = 0.2f;
+    o.rubble.pose = pose;
+    return o;
+  };
+  const float lo = constants::kStepOverHeight, hi = constants::kUnitHeight;
+  // Lying flat on the ground (top at 0.2): clear of the band.
+  const glm::mat4 flat =
+      glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.1f, 0.0f)) *
+      glm::rotate(glm::mat4(1.0f), -1.5707963f, glm::vec3(1.0f, 0.0f, 0.0f));
+  CHECK(RubbleBandFootprint(slab(flat), lo, hi).empty());
+  // The same slab propped level above head height: walked under.
+  const glm::mat4 propped =
+      glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 2.2f, 0.0f)) *
+      glm::rotate(glm::mat4(1.0f), -1.5707963f, glm::vec3(1.0f, 0.0f, 0.0f));
+  CHECK(RubbleBandFootprint(slab(propped), lo, hi).empty());
+  // A 4x4 slab leaning at 45 degrees, lower edge on the ground, upper edge
+  // past head height: it crosses the band, but blocks only the strip between
+  // the step-over toe and head clearance -- well under the full envelope's
+  // floor shadow.
+  const glm::mat4 leaning =
+      glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 1.4142136f, 0.0f)) *
+      glm::rotate(glm::mat4(1.0f), -0.7853982f, glm::vec3(1.0f, 0.0f, 0.0f));
+  Obstacle lean = slab(leaning);
+  lean.rubble.outline = {{-2.0f, -2.0f}, {2.0f, -2.0f}, {2.0f, 2.0f}, {-2.0f, 2.0f}};
+  const std::vector<glm::vec2> band = RubbleBandFootprint(lean, lo, hi);
+  CHECK(band.size() >= 3);
+  DebrisFlight still;  // Two identical keys: the body never moved.
+  still.keys = {DebrisKey{}, DebrisKey{}};
+  const std::vector<glm::vec2> envelope = DebrisRestObstacle(lean, still).footprint;
+  CHECK(PolygonArea(band) > 0.1f);
+  CHECK(PolygonArea(band) < 0.75f * PolygonArea(envelope));
+  // Standing upright (band crosses the body): blocks with roughly its own
+  // footprint, present and sane.
+  const glm::mat4 upright = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+  CHECK(PolygonArea(RubbleBandFootprint(slab(upright), lo, hi)) > 0.3f);
+}
+
+// A figure standing right beside the blast keeps its moves: no chunk may
+// rest so close that the navmesh's padded silhouette swallows its feet, and
+// the rubble that does land nearby blocks only where its body stands in the
+// walk band -- so the reach field stays alive from every spot the figure
+// could have been (the review screenshot had it boxed in with zero moves).
+void TestFigureBesideBlastKeepsMoves() {
+  const auto scanReach = [](float x, float z) {
+    Scene scene;
+    scene.mapHalfExtent = 20.0f;
+    Obstacle wall;
+    wall.bounds = AABB{glm::vec3(-0.15f, 0.0f, -12.0f), glm::vec3(0.15f, 3.0f, 12.0f)};
+    wall.kind = ObstacleKind::Wall;
+    scene.obstacles.push_back(wall);
+    Unit blue;
+    blue.id = 0;
+    blue.team = Team::Blue;
+    blue.position = glm::vec3(x, 0.0f, z);
+    scene.units.push_back(blue);
+    GameLogic game(scene);
+    game.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
+    CHECK(game.DebugDetonateBomb());
+    const Unit& mover = game.GetScene().units[0];
+    NavMesh nav;
+    NavRegion region;
+    const float reach = mover.MoveBudget() + 2.0f * constants::kAgentRadius;
+    region.xMin = std::max(-scene.mapHalfExtent, mover.position.x - reach);
+    region.xMax = std::min(scene.mapHalfExtent, mover.position.x + reach);
+    region.zMin = std::max(-scene.mapHalfExtent, mover.position.z - reach);
+    region.zMax = std::min(scene.mapHalfExtent, mover.position.z + reach);
+    const Scene& after = game.GetScene();
+    nav.Build(after.obstacles, region, constants::kAgentRadius, &after.ground,
+              &after.walkSurfaces, &after.terrainTunnels);
+    CHECK(nav.IsWalkable(mover.position.x, mover.position.z));
+    const ReachField f = nav.ComputeReachField(mover.position, mover.MoveBudget());
+    int reachable = 0;
+    for (const float d : f.dist) {
+      if (d < 1e29f) ++reachable;
+    }
+    return reachable;
+  };
+  // Positions flanking the blast at 0.6..1.5 m off the wall; before the fix
+  // two of these had their start swallowed (no moves at all) and two more
+  // were ringed in with 2-3 reachable nodes.
+  CHECK(scanReach(0.8f, 0.75f) > 1000);
+  CHECK(scanReach(1.5f, -1.5f) > 1000);
+  CHECK(scanReach(0.8f, -0.75f) > 1000);
+  CHECK(scanReach(1.0f, 0.0f) > 1000);
+}
+
 // A sloped-top massing detail (an overpass deck rail) cut by cells keeps its
 // slope on the pieces left standing.
 void TestMassingCutKeepsSlopedTop() {
@@ -5022,6 +5117,8 @@ int main() {
   TestDebrisDeflectsOffAFigure();
   TestDebrisSimulationIsDeterministicAndSettles();
   TestDebrisStillFallingLateIsNotSlowed();
+  TestRubbleBandFootprintClipsBody();
+  TestFigureBesideBlastKeepsMoves();
   TestMassingCutKeepsSlopedTop();
 
   if (g_failures == 0) {

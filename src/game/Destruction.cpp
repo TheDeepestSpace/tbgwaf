@@ -481,30 +481,6 @@ class DebrisWorld {
   std::vector<DebrisShape> shapes_;
 };
 
-// Convex hull of XZ points (counter-clockwise), monotone chain.
-Poly ConvexHull2D(Poly pts) {
-  std::sort(pts.begin(), pts.end(), [](const glm::vec2& a, const glm::vec2& b) {
-    return a.x < b.x || (a.x == b.x && a.y < b.y);
-  });
-  pts.erase(std::unique(pts.begin(), pts.end()), pts.end());
-  if (pts.size() < 3) return pts;
-  Poly hull(2 * pts.size());
-  size_t k = 0;
-  const auto cross = [](const glm::vec2& o, const glm::vec2& a, const glm::vec2& b) {
-    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-  };
-  for (size_t i = 0; i < pts.size(); ++i) {
-    while (k >= 2 && cross(hull[k - 2], hull[k - 1], pts[i]) <= 0.0f) --k;
-    hull[k++] = pts[i];
-  }
-  for (size_t i = pts.size() - 1, t = k + 1; i > 0; --i) {
-    while (k >= t && cross(hull[k - 2], hull[k - 1], pts[i - 1]) <= 0.0f) --k;
-    hull[k++] = pts[i - 1];
-  }
-  hull.resize(k - 1);
-  return hull;
-}
-
 }  // namespace
 
 bool DebrisPieceShape(const Obstacle& piece, DebrisShape* out) {
@@ -1199,18 +1175,36 @@ std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& bomb)
       flight.keys = tracks[i].keys;
       if (flight.keys.size() > kMaxDebrisKeys) flight.keys.resize(kMaxDebrisKeys);
       // Solid only if it came to rest, is big enough to matter, and does not
-      // lie over a figure (no figure is ever entombed in an obstacle).
+      // lie over a figure (no figure is ever entombed in an obstacle) nor
+      // pin one where it stands: the navmesh pads every blocking footprint
+      // by kAgentRadius, so a chunk whose walk-band silhouette rests within
+      // that padding (plus one 0.25 routing step of clearance) of a figure
+      // would swallow its start node and leave it with no legal move at all.
       bool solid = chunks[i].area >= kSolidChunkArea && tracks[i].settled;
       if (solid) {
         const Obstacle rest = DebrisRestObstacle(chunks[i].piece, flight);
+        float ground = 0.0f;
+        if (!scratch.ground.Empty()) {
+          for (const glm::vec2& v : rest.footprint) {
+            ground = std::max(ground, scratch.ground.HeightAt(v.x, v.y));
+          }
+        }
+        const Poly band = RubbleBandFootprint(rest, ground + constants::kStepOverHeight,
+                                              ground + constants::kUnitHeight);
         const Poly fat = ExpandConvexPolygon(rest.footprint, 0.2f);
+        const Poly pinning =
+            band.empty() ? band : ExpandConvexPolygon(band, constants::kAgentRadius + 0.25f);
         for (const Unit& unit : scratch.units) {
           if (!unit.alive) continue;
           if (rest.bounds.min.y > unit.position.y + kUnitBodyHeight ||
               rest.bounds.max.y < unit.position.y - 0.05f) {
             continue;
           }
-          if (PointInConvexPolygon(glm::vec2(unit.position.x, unit.position.z), fat)) solid = false;
+          const glm::vec2 foot(unit.position.x, unit.position.z);
+          if (PointInConvexPolygon(foot, fat) ||
+              (!pinning.empty() && PointInConvexPolygon(foot, pinning))) {
+            solid = false;
+          }
         }
       }
       flight.solid = solid;

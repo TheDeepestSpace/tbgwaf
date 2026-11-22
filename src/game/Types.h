@@ -420,6 +420,12 @@ constexpr float kAgentRadius = 0.4f;     // Padding used to inflate obstacles fo
 constexpr float kNavWallPad = 0.1f;
 constexpr float kUnitHalfWidth = 0.35f;
 constexpr float kUnitHeight = 1.8f;
+// What a figure steps over without breaking stride: a stub left at the foot
+// of a breach, a debris chunk lying flat on the ground. With kUnitHeight it
+// bounds the walk band -- the heights a standing body actually occupies --
+// used to decide what blocks walking (navmesh) and what rubble may pin a
+// figure (destruction planning).
+constexpr float kStepOverHeight = 0.35f;
 constexpr float kEyeHeight = 1.5f;
 // Ground beneath a deck/ramp is only walkable with at least this much headroom.
 constexpr float kMinDeckHeadroom = 2.2f;

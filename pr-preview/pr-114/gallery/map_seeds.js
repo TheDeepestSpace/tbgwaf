@@ -99,8 +99,6 @@ window.MAP_SEED_GOLDENS = [
   "city_terrain_seed_2024.png",
   "city_terrain_seed_42.png",
   "city_terrain_seed_7.png",
-  "city_terrain_tunnel_artery_seed_72.png",
-  "city_terrain_tunnel_street_seed_31.png",
   "city_trash_bin_seed_7.png",
   "hilly_seed_2024.png",
   "hilly_seed_7.png",

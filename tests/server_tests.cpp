@@ -1120,6 +1120,102 @@ void TestDebugBombControlTap() {
   CHECK(sawWorld);
 }
 
+// A blast set off from a player's debug panel reaches both mirrors whole: the
+// cuts and every Debris change (chunks with their pose tracks), immediate or
+// armed into a round.
+void TestClientServerBombDebris() {
+  Wire w;
+  ClientRig blue(1, "bd"), red(2, "bd");
+  blue.client.OnOpen();
+  red.client.OnOpen();
+  for (int i = 0; i < 3; ++i) {
+    blue.Pump(w);
+    red.Pump(w);
+  }
+  CHECK(blue.client.status() == net::RemoteClient::Status::Playing);
+  // Next to the first enterable building's wall.
+  glm::vec3 spot(0.0f);
+  for (const Obstacle& o : blue.game.GetScene().obstacles) {
+    if (o.dead || o.kind != ObstacleKind::Wall) continue;
+    spot = glm::vec3((o.bounds.min.x + o.bounds.max.x) * 0.5f, o.bounds.min.y + 1.0f,
+                     (o.bounds.min.z + o.bounds.max.z) * 0.5f);
+    break;
+  }
+  const auto debrisCount = [](const GameLogic& g) {
+    size_t n = 0;
+    for (const WorldChange& c : g.WorldLog()) {
+      if (c.kind == WorldChangeKind::Debris) n += c.pieces.size();
+    }
+    return n;
+  };
+  blue.client.SendPlaceBomb(spot, 4.0f);
+  blue.client.SendDetonateBomb();
+  size_t sent = 0;
+  blue.Pump(w);
+  for (const std::string& t : w.inbox[2]) {
+    Json m;
+    CHECK(Json::Parse(t, &m));
+    if (m["t"].AsString() == "world") sent += m["world"].AsArray().size();
+  }
+  blue.Pump(w);
+  red.Pump(w);
+  CHECK(sent > 0);
+  CHECK(blue.game.WorldLog().size() == sent);
+  CHECK(red.game.WorldLog().size() == sent);
+  CHECK(debrisCount(blue.game) > 0);
+  CHECK(blue.game.WorldLog() == red.game.WorldLog());
+
+  // Armed: the blast ships inside the round and plays against the round
+  // clock on the mirrors, like on the server.
+  const size_t before = blue.game.WorldLog().size();
+  const size_t chunksBefore = debrisCount(blue.game);
+  glm::vec3 second = spot;
+  for (const Obstacle& o : blue.game.GetScene().obstacles) {
+    if (o.dead || o.kind != ObstacleKind::Wall) continue;
+    const glm::vec3 c((o.bounds.min.x + o.bounds.max.x) * 0.5f, o.bounds.min.y + 1.0f,
+                      (o.bounds.min.z + o.bounds.max.z) * 0.5f);
+    if (glm::distance(c, spot) > 12.0f) {
+      second = c;
+      break;
+    }
+  }
+  blue.client.SendPlaceBomb(second, 3.0f);
+  blue.client.SendDetonateBomb(1.0f);
+  PlanAllLocally(blue);
+  PlanAllLocally(red);
+  blue.client.Update(0.016f);
+  red.client.Update(0.016f);
+  for (int i = 0; i < 2; ++i) {
+    blue.Pump(w);
+    red.Pump(w);
+  }
+  blue.client.RequestCommit();
+  red.client.RequestCommit();
+  for (int i = 0; i < 3; ++i) {
+    blue.Pump(w);
+    red.Pump(w);
+  }
+  CHECK(blue.client.playingBack());
+  CHECK(blue.game.WorldLog().size() == before);  // Not before its time.
+  bool sawBlastAtItsTime = false;
+  for (int i = 0; i < 600 && blue.client.playingBack(); ++i) {
+    blue.client.Update(1.0f / 30.0f);
+    red.client.Update(1.0f / 30.0f);
+    if (!blue.client.playingBack()) break;
+    if (blue.game.WorldLog().size() > before && !sawBlastAtItsTime) {
+      sawBlastAtItsTime = true;
+      const WorldChange& c = blue.game.WorldLog().back();
+      CHECK(c.at >= 1.0f && c.at < 1.1f);
+      // The mirror's round clock is right at the blast: the chunks start
+      // from their launch pose.
+      CHECK(blue.game.ExecutionElapsed() >= c.at && blue.game.ExecutionElapsed() - c.at < 0.05f);
+    }
+  }
+  CHECK(sawBlastAtItsTime);
+  CHECK(debrisCount(blue.game) > chunksBefore);
+  CHECK(blue.game.WorldLog() == red.game.WorldLog());
+}
+
 void TestWorldChangeKinds() {
   Scene scene = GenerateUrbanMap(1);
   // Replacement: dead target, pieces appended with deterministic indices.
@@ -1667,6 +1763,7 @@ int main(int argc, char** argv) {
       TBG_TEST(TestWorldChangeKinds),
       TBG_TEST(TestDebugBombArmedShipsInRound),
       TBG_TEST(TestDebugBombControlTap),
+      TBG_TEST(TestClientServerBombDebris),
       TBG_TEST(TestClientServerRound),
       TBG_TEST(TestPlaybackFallFromCable),
       TBG_TEST(TestStaleEchoDoesNotRevertFreshPlans),

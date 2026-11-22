@@ -552,6 +552,17 @@ uint32_t ExplosionSeed(uint32_t matchSeed, int round, int bombId) {
   return h;
 }
 
+float DebrisRoundAge(const WorldChange& change, int round, bool executing, float elapsed) {
+  if (!(change.at > 0.0f)) return -1.0f;
+  if (change.round >= round) return std::max(0.0f, elapsed - change.at);
+  // The flight outlasts its turn: physics is frozen while a turn is over, so
+  // the chunk holds its pose at the turn's end and carries on with the same
+  // motion once the next turn executes.
+  const float whole = static_cast<float>(round - change.round - 1);
+  return std::max(0.0f, constants::kRoundDuration - change.at) +
+         whole * constants::kRoundDuration + (executing ? std::max(0.0f, elapsed) : 0.0f);
+}
+
 glm::mat4 DebrisPose(const DebrisFlight& flight, float t) {
   const std::vector<DebrisKey>& keys = flight.keys;
   if (keys.size() < 2) return glm::mat4(1.0f);

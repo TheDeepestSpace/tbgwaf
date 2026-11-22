@@ -73,6 +73,15 @@ bool DebrisPieceShape(const Obstacle& piece, DebrisShape* shape);
 // at the rest pose from the end of the track on).
 glm::mat4 DebrisPose(const DebrisFlight& flight, float t);
 
+// How long a Debris change's flights have been running in a game showing
+// `round`, `elapsed` seconds into its execution (`executing`: the round is
+// playing, live or replayed). A blast inside a round (`at` > 0) runs on the
+// round clock alone: 0 on the frame it goes off, the same age for the same
+// clock (so a paused replay holds the chunks still), frozen at the turn's end
+// and carried on through the turns that follow. Negative for a change made
+// outside a round (`at` is exactly 0 only then): no round clock covers it.
+float DebrisRoundAge(const WorldChange& change, int round, bool executing, float elapsed);
+
 // The rubble obstacle a settled chunk becomes: its body at rest, with the
 // footprint / bounds of its vertical envelope. Used by both the planner and
 // every client applying the change, so they agree to the bit.

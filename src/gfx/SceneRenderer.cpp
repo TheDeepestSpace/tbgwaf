@@ -3750,22 +3750,15 @@ void SceneRenderer::UpdateDebris(const tactics::GameLogic& game, bool settled) {
   for (const tactics::WorldChange& c : log) {
     if (c.kind != tactics::WorldChangeKind::Debris) continue;
     if (c.pieces.size() != c.flights.size()) continue;
-    float t;
-    if (c.round < game.RoundNumber() && c.at > 1e-4f) {
-      // A turn-bound flight that outlasts its turn: physics is frozen while
-      // the turn is over, so the chunk holds its pose at the turn's end and
-      // carries on with the same motion once the next turn executes.
-      const float whole = static_cast<float>(game.RoundNumber() - c.round - 1);
-      t = std::max(0.0f, tactics::constants::kRoundDuration - c.at) +
-          whole * tactics::constants::kRoundDuration;
-      if (game.Mode() == tactics::InputMode::Executing) t += game.ExecutionElapsed();
-    } else if (c.round == game.RoundNumber() && game.ExecutionElapsed() > c.at + 1e-4f) {
-      // Round playback (live or scrubbed): the flight follows the round clock.
-      t = game.ExecutionElapsed() - c.at;
-      debrisStarted_[c.id] = now - t;  // Stays continuous once the round ends.
-    } else {
-      // Outside playback (debug detonation between rounds, fresh join): run
-      // the fall once on a local clock from when this pane first saw it.
+    // A blast inside a round runs on the round clock alone, so it starts
+    // from the launch pose on the frame it goes off, and a replay paused or
+    // scrubbed anywhere -- that first frame included -- shows that moment.
+    float t = tactics::DebrisRoundAge(c, game.RoundNumber(),
+                                      game.Mode() == tactics::InputMode::Executing,
+                                      game.ExecutionElapsed());
+    if (t < 0.0f) {
+      // Outside a round (debug detonation while planning): run the fall once
+      // on a local clock from when this renderer first saw it.
       const auto [it, inserted] = debrisStarted_.try_emplace(c.id, now);
       t = static_cast<float>(now - it->second);
     }

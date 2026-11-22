@@ -530,24 +530,29 @@ void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool&
     ImGui::SliderFloat("NPR AO strength", &nprSettings.ao.strength, 0.0f, 3.0f, "%.2f");
   }
   // Debug bomb (issue #350): a movable explosive for exercising the
-  // destructible world. Place parks it at the camera's focus point; Detonate
+  // destructible world. Its position is typed / dragged as world coordinates
+  // (a marker in the 3D view shows where that is once placed); Detonate
   // blows it immediately, Arm schedules it for `armAt` seconds into the next
   // committed round (recorded in the world log, so replays agree).
   if (bomb && ImGui::CollapsingHeader("Debug bomb")) {
-    if (ImGui::Button(bomb->placed ? "Move to camera target" : "Place at camera target")) {
-      bomb->requestPlace = true;
-    }
+    bool edited = false;
+    ImGui::SetNextItemWidth(190.0f);
+    edited |= ImGui::DragFloat3("X / Y / Z", &bomb->position.x, 0.05f, 0.0f, 0.0f, "%.2f");
+    if (ImGui::Button("Put on ground")) bomb->requestGround = true;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Y = 1 m above the ground at X / Z");
     ImGui::SetNextItemWidth(130.0f);
-    ImGui::SliderFloat("Blast radius", &bomb->radius, 0.5f, 10.0f, "%.1f");
-    if (bomb->placed) {
-      ImGui::Text("Bomb at (%.1f, %.1f, %.1f)", bomb->position.x, bomb->position.y,
-                  bomb->position.z);
+    edited |= ImGui::SliderFloat("Blast radius", &bomb->radius, 0.5f, 10.0f, "%.1f");
+    if (!bomb->placed) {
+      if (ImGui::Button("Place")) bomb->requestPlace = true;
+    } else {
+      if (edited) bomb->requestPlace = true;  // Moves / resizes the placed bomb live.
       if (ImGui::Button("Detonate now")) bomb->requestDetonate = true;
       ImGui::SetNextItemWidth(130.0f);
       ImGui::SliderFloat("Round time", &bomb->armAt, 0.0f, tactics::constants::kRoundDuration,
                          "%.1f s");
       ImGui::SameLine();
       if (ImGui::Button("Arm")) bomb->requestArm = true;
+      if (bomb->armed) ImGui::TextUnformatted("Armed: goes off in the next round");
     }
   }
   ImGui::Checkbox("Disable occlusion fade", &disableOcclusionFade);

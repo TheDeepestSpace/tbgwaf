@@ -93,7 +93,14 @@ same log to the same seeded map, so drawn == simulated geometry.
   0.35 m step is walked over, like a stub at the foot of a breach; heaps
   block); a later blast throws them again as the very bodies they are. A
   chunk that would lie over a figure, and every chunk under 0.1 m^2, is
-  litter: drawn where it came to rest, never an obstacle. In the figures'
+  litter: drawn where it came to rest, never an obstacle. **Timing:** a blast
+  inside a round (`at` > 0) is drawn against the round clock alone
+  (`DebrisRoundAge`: launch pose on the frame it goes off; a replay paused on
+  any frame holds the chunks still; a flight that outlasts its turn freezes
+  at the turn's end and carries on in the next). A networked mirror keeps
+  that clock during round playback. Only a detonation outside a round
+  (`at` = 0) falls on a local wall clock, and the app does not count the
+  time spent planning a blast as game time. In the figures'
   sight (FoV) maps the renderer draws solid chunks at their pose *right now*,
   not at their landing spot. Street fixtures (cars, benches) in a blast are
   still removed outright.
@@ -125,10 +132,15 @@ same log to the same seeded map, so drawn == simulated geometry.
   wall sites and ~12-16 floor sites, dense near the bomb, plus a ring of
   always-standing anchor sites at the blast's in-plane radius that bounds
   the hole), and the Debris changes with the chunks' simulated pose tracks.
-  Native app: the "Debug bomb" section of the debug
-  panel places it at the camera focus, detonates it now, or arms it for a
-  time into the next round (the changes then carry that `at`, so playback
-  and replays blow it at the same moment). Server: control taps
+  App: the "Debug bomb" section of the debug panel places it at the world
+  coordinates typed / dragged there (X / Y / Z; "Put on ground" sets Y to
+  1 m above the ground; a marker in the 3D view shows the placed bomb, and
+  editing the coordinates or radius moves it live), detonates it now, or
+  arms it for a time into the next round (the changes then carry that `at`,
+  so playback and replays blow it at the same moment). In a server-backed
+  match the panel sends `place_bomb` / `detonate_bomb` to the server instead
+  (seated players only); the marker there is this client's own request.
+  Server: control taps
   `{"t":"place_bomb","room":..,"pos":[x,y,z],"radius":r}` and
   `{"t":"detonate_bomb","room":..}` (optional `"at":s` arms instead; an
   immediate detonation broadcasts the delta and re-sends each seat's

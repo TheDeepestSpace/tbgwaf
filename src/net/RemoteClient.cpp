@@ -334,6 +334,7 @@ void RemoteClient::HandleRound(const Json& m) {
   ApplyWorldUpTo(&*playback_, 0.0f);  // Changes made between rounds.
   GameSnapshot snap = game_->ExportState();
   snap.mode = InputMode::Executing;
+  snap.executionElapsed = 0.0f;
   game_->ImportState(snap);
 }
 
@@ -369,6 +370,9 @@ void RemoteClient::PosePlayback(GameSnapshot* snapOut, const Playback& pb, float
   const float s = span > 1e-4f ? std::clamp((pb.clock - a.t) / span, 0.0f, 1.0f) : 1.0f;
 
   snap.mode = InputMode::Executing;
+  // The round clock: the renderer times in-round effects (debris flights)
+  // against it, exactly as on the simulating side.
+  snap.executionElapsed = pb.clock;
   for (auto& u : snap.units) {
     const Sample* sa = nullptr;
     const Sample* sb = nullptr;

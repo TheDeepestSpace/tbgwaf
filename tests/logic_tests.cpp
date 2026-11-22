@@ -4807,7 +4807,70 @@ void TestArmedBombDetonatesMidRound() {
   CHECK(!game.GetDebugBomb().has_value());
 }
 
+// A blast inside a round is timed by the round clock alone: the frame it goes
+// off shows the launch pose, and a replay sitting on any recorded frame --
+// that first one included -- holds the chunks still.
+void TestDebrisFollowsRoundClock() {
+  GameLogic game(BombWallScene());
+  game.SetMatchSeed(7u);
+  game.ClickUnit(0, Team::Blue);
+  game.ChoosePass();
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
+  CHECK(game.DebugArmBomb(0.9f));
+  TurnTimeline timeline;
+  timeline.Observe(game, 0.0f);
+  game.CommitRound();
+  const auto debris = [](const GameLogic& g) -> const WorldChange* {
+    for (const WorldChange& c : g.WorldLog()) {
+      if (c.kind == WorldChangeKind::Debris) return &c;
+    }
+    return nullptr;
+  };
+  const auto age = [&](const GameLogic& g) {
+    return DebrisRoundAge(*debris(g), g.RoundNumber(), g.Mode() == InputMode::Executing,
+                          g.ExecutionElapsed());
+  };
+  bool sawLaunch = false;
+  int guard = 0;
+  while (game.Mode() == InputMode::Executing && ++guard < 1000) {
+    game.Update(1.0f / 60.0f);
+    timeline.Observe(game, 1.0f / 60.0f);
+    if (debris(game) && !sawLaunch) {
+      sawLaunch = true;
+      CHECK(age(game) == 0.0f);  // The tick it goes off: nothing has moved yet.
+    }
+  }
+  CHECK(sawLaunch);
+  if (!sawLaunch) return;
+  // After the round the flight is frozen where the turn ended...
+  const float at = debris(game)->at;
+  CHECK(std::fabs(age(game) - (constants::kRoundDuration - at)) < 0.05f);
+  CHECK(age(game) == age(game));
+  // ...and every recorded frame of the replay has one fixed age.
+  TimelinePlayback playback;
+  bool sawReplayLaunch = false;
+  float last = -1.0f;
+  for (size_t f = 0; f < timeline.FrameCount(); ++f) {
+    CHECK(playback.SeekFrame(timeline, game, f));
+    if (!debris(playback.Game())) continue;
+    const float a = age(playback.Game());
+    CHECK(a >= 0.0f && a == age(playback.Game()));
+    if (!sawReplayLaunch) CHECK(a < 2.0f * TurnTimeline::kCaptureInterval);
+    sawReplayLaunch = true;
+    CHECK(a >= last);
+    last = a;
+  }
+  CHECK(sawReplayLaunch);
+  // A detonation outside a round has no round clock.
+  WorldChange loose = *debris(game);
+  loose.at = 0.0f;
+  CHECK(DebrisRoundAge(loose, 2, false, 0.0f) < 0.0f);
+}
+
 int main() {
+  TestDebrisFollowsRoundClock();
   TestDeadFiguresSeeThroughProbes();
   TestBuildingsContainingPoints();
   TestNavMeshRoutesAroundObstacle();

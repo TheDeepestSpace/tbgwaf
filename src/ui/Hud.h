@@ -140,16 +140,21 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 // per ray, and blur half-width (see gfx::AmbientOcclusionSettings).
 // `thermalFovAlpha` is the FOV tint opacity used while the thermal view is on.
 // Debug-bomb controls (issue #350), shown inside the debug panel. In:
-// `placed`/`position` mirror GameLogic's debug bomb each frame. In/out: the
-// radius and arm-time sliders. Out: one-frame request flags the app layer
-// acts on (place/move at the camera target, detonate now, arm for `armAt`
-// seconds into the next executing round) and then clears.
+// `placed`/`armed` mirror the debug bomb each frame. In/out: `position` (world
+// coordinates, edited in the panel; the app layer overwrites it with the
+// placed bomb's), the radius and arm-time sliders. Out: one-frame request
+// flags the app layer acts on and then clears -- place/move the bomb to
+// `position` with `radius` (also raised when either is edited while placed),
+// put `position` on the ground there, detonate now, arm for `armAt` seconds
+// into the next executing round.
 struct BombPanelState {
   bool placed = false;
-  glm::vec3 position{0.0f};
+  bool armed = false;
+  glm::vec3 position{0.0f, 1.0f, 0.0f};
   float radius = 3.5f;
   float armAt = 1.0f;
   bool requestPlace = false;
+  bool requestGround = false;
   bool requestDetonate = false;
   bool requestArm = false;
 };

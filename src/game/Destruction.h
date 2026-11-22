@@ -20,22 +20,25 @@
 // the others stay on what is left standing. Terrain is not cut.
 //
 // Everything knocked out is accounted for: each cell becomes a debris chunk
-// of exactly that shape, whose flight is simulated here against the post-cut
-// scene -- thrown by the blast, stopped by whatever stands in its way, at
-// rest lying flat on the ground, a floor or the rubble already down (the
-// breach included, if that is where it falls). Chunks of 0.1 m^2 and up are
-// rubble obstacles (blocking movement and sight), smaller ones litter; the
-// Debris changes carry per-chunk flight parameters so clients replay the
-// same fall out of the same hole. The plan is a pure function of
-// (scene, spec): the server applies it through GameLogic::ApplyWorldChange
-// and ships the resulting log entries, so every client rebuilds exactly the
-// same holes and rubble.
+// of exactly that shape, a rigid body thrown by the blast and simulated here
+// (game/DebrisPhysics.h) against the post-cut scene: it tumbles, bounces off
+// standing geometry, the ground, floors, figures and the other chunks, and
+// comes to rest in whatever pose the contacts leave it in -- flat, tilted,
+// leaning on a neighbour, heaped in the breach if that is where it lands.
+// Chunks of 0.1 m^2 and up that settle are rubble obstacles (blocking
+// movement and sight through their vertical envelope), smaller ones litter;
+// the Debris changes carry each chunk's sampled pose track so clients replay
+// the very same collisions. The plan is a pure function of (scene, spec): the
+// server applies it through GameLogic::ApplyWorldChange and ships the
+// resulting log entries, so every client rebuilds exactly the same holes and
+// rubble.
 
 #include <cstdint>
 #include <vector>
 
 #include <glm/glm.hpp>
 
+#include "game/DebrisPhysics.h"
 #include "game/Scene.h"
 #include "game/WorldChange.h"
 
@@ -60,11 +63,19 @@ uint32_t ExplosionSeed(uint32_t matchSeed, int round, int bombId);
 // is in range.
 std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& spec);
 
-// Where debris chunk `piece` (a Debris change's rest-pose prism) is `t`
-// seconds after launch, as the transform to apply to its rest geometry: the
-// closed-form ballistic between the recorded launch point and the rest pose,
-// yawing and tumbling so that at t = 0 the chunk sits exactly in the cell it
-// was knocked out of and from `duration` on it is the identity.
-glm::mat4 DebrisPose(const Obstacle& piece, const DebrisFlight& flight, float t);
+// The prism of a Debris change's `piece` at launch (in the wall or slab it
+// was cut from), or of a rubble obstacle where it lies. False when `piece`
+// has no usable outline.
+bool DebrisPieceShape(const Obstacle& piece, DebrisShape* shape);
+
+// The transform to apply to a chunk's launch geometry `t` seconds after
+// launch: its sampled track, linearly interpolated (identity at t = 0; held
+// at the rest pose from the end of the track on).
+glm::mat4 DebrisPose(const DebrisFlight& flight, float t);
+
+// The rubble obstacle a settled chunk becomes: its body at rest, with the
+// footprint / bounds of its vertical envelope. Used by both the planner and
+// every client applying the change, so they agree to the bit.
+Obstacle DebrisRestObstacle(const Obstacle& piece, const DebrisFlight& flight);
 
 }  // namespace tactics

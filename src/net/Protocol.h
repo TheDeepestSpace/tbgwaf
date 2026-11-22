@@ -89,8 +89,11 @@ namespace tactics::net {
 // OpeningRemoved kind exists, ObstacleReplaced detaches the target's facade
 // openings instead of killing them, FloorHole / MassingCut cell pieces may cut
 // sloped patches / sloped-top details, and a change may carry up to 256
-// pieces -- a peer on 5 would reject or mis-apply those.
-constexpr int kProtocolVersion = 6;
+// pieces -- a peer on 5 would reject or mis-apply those. 7: debris is a rigid-body
+// simulation: a Debris change's pieces are the chunks at launch, its flights are
+// sampled pose tracks (not ballistic parameters), and rubble obstacles serialize
+// their tilted body -- a peer on 6 would parse none of it.
+constexpr int kProtocolVersion = 7;
 constexpr size_t kMaxMessageBytes = 16 * 1024;
 constexpr size_t kMaxWaypoints = 32;
 

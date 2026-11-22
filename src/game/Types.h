@@ -34,9 +34,11 @@ struct AABB {
 // Gameplay treats it like Generic; the renderer's see-through outline pass
 // draws only its two long faces so each window gets a single frame.
 // Rubble: a debris chunk a blast knocked loose, at rest where the server's
-// ballistic simulation landed it (see WorldChangeKind::Debris). Collides and
-// blocks sight like everything else; drawn dynamically (it falls before it
-// rests), so the static obstacle mesh skips it. A later blast throws it again.
+// rigid-body simulation left it (see WorldChangeKind::Debris). Its footprint
+// and bounds are the vertical envelope of the tilted body (see
+// Obstacle::rubble), so it collides and blocks sight like everything else;
+// drawn dynamically (it tumbles before it rests), so the static obstacle mesh
+// skips it. A later blast throws it again.
 enum class ObstacleKind { Generic, StreetFurniture, Pier, Cover, Wall, Rubble };
 
 // Street fixtures the renderer batches as static geometry: post-sized furniture
@@ -125,6 +127,16 @@ struct Obstacle {
   // LOS/raycast and rendering honour it, and the ground navmesh narrows the
   // footprint to where the silhouette crosses a figure's body band.
   std::vector<glm::vec2> profile;
+  // Rubble only: the chunk's true body, a convex prism of `outline` (local
+  // x, y; counter-clockwise) extruded +-thickness/2 along local z, posed by
+  // `pose` (local -> world). `footprint` / `bounds` are its vertical
+  // envelope at rest, whatever the tilt. Empty outline: no body.
+  struct RubbleBody {
+    std::vector<glm::vec2> outline;
+    float thickness = 0.0f;
+    glm::mat4 pose{1.0f};
+  };
+  RubbleBody rubble;
 };
 
 // Building archetype (urban map issue #151, roadmap 3.2). Drawn per parcel

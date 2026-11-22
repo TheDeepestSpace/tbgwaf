@@ -332,6 +332,8 @@ class SceneRenderer {
   void UpdateDebris(const tactics::GameLogic& game, bool settled);
   LitTriangleMesh debrisMesh_;
   bool debrisHasGeometry_ = false;
+  LitTriangleMesh debrisFovMesh_;  // The solid chunks alone, for the figures' sight maps.
+  bool debrisFovHasGeometry_ = false;
   bool debrisMoving_ = false;
   unsigned long long debrisKey_ = 0;
   std::unordered_map<int, double> debrisStarted_;  // Change id -> local clock start.

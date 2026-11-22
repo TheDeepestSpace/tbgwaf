@@ -27,13 +27,14 @@ constexpr size_t kDebrisBatch = 60;       // Chunks per Debris change.
 constexpr float kMinKeptArea = 0.01f;     // Smaller standing slivers break off as chunks.
 constexpr float kDustArea = 0.004f;       // Chunks smaller than this are dust.
 constexpr float kSolidChunkArea = 0.1f;   // Chunks at least this big are rubble obstacles.
-constexpr float kGravity = 9.81f;         // Debris ballistics.
 // Drawn thickness of a walk surface (the renderer's deck/stair slab): what
 // a chunk of an overpass deck, ramp or stair flight is made of.
 constexpr float kSurfaceThickness = 0.45f;
 constexpr float kFrameBar = 0.08f;        // Window-frame bar width / depth.
 constexpr float kUnitClearance = 0.45f;   // A figure's body radius, for chunks coming to rest.
 constexpr float kUnitBodyHeight = 1.9f;
+constexpr float kMaxDebrisSeconds = 8.0f;
+constexpr size_t kMaxDebrisKeys = 8 * 20 + 2;  // kMaxDebrisSeconds at kDebrisKeyDt, plus ends.
 
 // Same hand-drawn mt19937 draws as MapGenerator's Rng: fully specified by
 // the standard, so a seed fractures identically on every platform.
@@ -367,7 +368,7 @@ float PlaneHeight(const std::vector<glm::vec3>& top, glm::vec2 xz) {
 
 // One knocked-out cell on its way to becoming debris.
 struct Chunk {
-  Poly local;            // Outline relative to its vertex mean: (along, up), or (x, z) when flat.
+  Obstacle piece;        // The prism as it left the wall / slab (kind Rubble).
   glm::vec3 center{0.0f};  // The vertex mean at launch (world, mid-thickness).
   glm::vec2 along{1.0f, 0.0f};  // Wall's long axis (unit, XZ); +X for flat chunks.
   glm::vec2 outward{0.0f};      // Through the wall, away from the bomb (upright only).
@@ -375,18 +376,23 @@ struct Chunk {
   bool thrown = false;   // Flat, but blasted outward (a thick solid's cell, old rubble).
   float thickness = 0.2f;
   float area = 0.0f;
+  float radius = 0.0f;   // Furthest outline vertex from the centre.
 };
 
-glm::mat4 YawMatrix(float yaw) {
-  const float c = std::cos(yaw), s = std::sin(yaw);
+// Frame (local -> world) of a prism lying with its outline in the XZ plane:
+// local x = world X, local y = world Z, local z = world -Y (a proper
+// rotation), centred on `origin`.
+glm::mat4 FlatFrame(const glm::vec3& origin) {
   glm::mat4 m(1.0f);
-  m[0] = glm::vec4(c, 0.0f, s, 0.0f);
-  m[2] = glm::vec4(-s, 0.0f, c, 0.0f);
+  m[0] = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);
+  m[1] = glm::vec4(0.0f, 0.0f, 1.0f, 0.0f);
+  m[2] = glm::vec4(0.0f, -1.0f, 0.0f, 0.0f);
+  m[3] = glm::vec4(origin, 1.0f);
   return m;
 }
 
 // What debris flies through and comes to rest on: the scene after the cuts.
-// Footprints are resolved once (a flight probes them every step).
+// Footprints are resolved once (the launch probes them).
 class DebrisWorld {
  public:
   // Only what lies within `range` of `center` in XZ: as far as a chunk flies.
@@ -412,19 +418,8 @@ class DebrisWorld {
         }
       }
       solids_.push_back(std::move(s));
-    }
-    for (const WalkSurface& w : scene.walkSurfaces) {
-      if (w.dead || w.climbProxy || w.vertices.size() < 3) continue;
-      Deck deck;
-      deck.surface = &w;
-      deck.lo = deck.hi = glm::vec2(w.vertices.front().x, w.vertices.front().z);
-      for (const glm::vec3& v : w.vertices) {
-        deck.outline.emplace_back(v.x, v.z);
-        deck.lo = glm::min(deck.lo, deck.outline.back());
-        deck.hi = glm::max(deck.hi, deck.outline.back());
-      }
-      if (!near(deck.lo, deck.hi)) continue;
-      decks_.push_back(std::move(deck));
+      DebrisShape shape;
+      if (DebrisPieceShape(o, &shape)) shapes_.push_back(std::move(shape));
     }
   }
 
@@ -447,25 +442,29 @@ class DebrisWorld {
     return false;
   }
 
-  // Highest thing under (x, z) a chunk whose underside is at `bottom` can
-  // come down on: the ground, a walk surface, the top of standing geometry.
-  float Support(glm::vec2 xz, float bottom) const {
-    float support = scene_.ground.HeightAt(xz.x, xz.y);
-    for (const Deck& deck : decks_) {
-      if (xz.x < deck.lo.x || xz.x > deck.hi.x || xz.y < deck.lo.y || xz.y > deck.hi.y) continue;
-      if (!PointInConvexPolygon(xz, deck.outline)) continue;
-      const float y = SurfaceHeightAt(*deck.surface, xz.x, xz.y);
-      if (y <= bottom + 0.3f) support = std::max(support, y);
+  // Everything chunks collide with besides each other: the standing prisms,
+  // the figures (immovable posts: a chunk deflects off one, never lies on
+  // it), floors / roofs / ramps and the ground.
+  DebrisWorldDesc Describe() const {
+    DebrisWorldDesc desc;
+    desc.ground = &scene_.ground;
+    desc.statics = shapes_;
+    desc.extent = scene_.mapHalfExtent - 0.1f;
+    for (const WalkSurface& w : scene_.walkSurfaces) {
+      if (!w.dead && !w.climbProxy && w.vertices.size() >= 3) desc.decks.push_back(&w);
     }
-    for (const Solid& s : solids_) {
-      if (s.bounds.max.y > bottom + 0.05f || s.bounds.max.y <= support) continue;
-      if (xz.x < s.bounds.min.x || xz.x > s.bounds.max.x || xz.y < s.bounds.min.z ||
-          xz.y > s.bounds.max.z) {
-        continue;
+    for (const Unit& unit : scene_.units) {
+      if (!unit.alive) continue;
+      DebrisShape post;
+      for (int k = 0; k < 8; ++k) {
+        const float a = k * 0.7853982f;
+        post.outline.emplace_back(kUnitClearance * std::cos(a), kUnitClearance * std::sin(a));
       }
-      if (PointInConvexPolygon(xz, s.footprint)) support = s.bounds.max.y;
+      post.thickness = 60.0f;
+      post.pose = FlatFrame(glm::vec3(unit.position.x, unit.position.y + 29.95f, unit.position.z));
+      desc.statics.push_back(std::move(post));
     }
-    return support;
+    return desc;
   }
 
  private:
@@ -474,17 +473,76 @@ class DebrisWorld {
     Poly footprint, profile;
     glm::vec2 a{0.0f}, d{1.0f, 0.0f};
   };
-  struct Deck {
-    const WalkSurface* surface = nullptr;
-    Poly outline;
-    glm::vec2 lo{0.0f}, hi{0.0f};
-  };
   const Scene& scene_;
   std::vector<Solid> solids_;
-  std::vector<Deck> decks_;
+  std::vector<DebrisShape> shapes_;
 };
 
+// Convex hull of XZ points (counter-clockwise), monotone chain.
+Poly ConvexHull2D(Poly pts) {
+  std::sort(pts.begin(), pts.end(), [](const glm::vec2& a, const glm::vec2& b) {
+    return a.x < b.x || (a.x == b.x && a.y < b.y);
+  });
+  pts.erase(std::unique(pts.begin(), pts.end()), pts.end());
+  if (pts.size() < 3) return pts;
+  Poly hull(2 * pts.size());
+  size_t k = 0;
+  const auto cross = [](const glm::vec2& o, const glm::vec2& a, const glm::vec2& b) {
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  };
+  for (size_t i = 0; i < pts.size(); ++i) {
+    while (k >= 2 && cross(hull[k - 2], hull[k - 1], pts[i]) <= 0.0f) --k;
+    hull[k++] = pts[i];
+  }
+  for (size_t i = pts.size() - 1, t = k + 1; i > 0; --i) {
+    while (k >= t && cross(hull[k - 2], hull[k - 1], pts[i - 1]) <= 0.0f) --k;
+    hull[k++] = pts[i - 1];
+  }
+  hull.resize(k - 1);
+  return hull;
+}
+
 }  // namespace
+
+bool DebrisPieceShape(const Obstacle& piece, DebrisShape* out) {
+  if (piece.rubble.outline.size() >= 3 && piece.rubble.thickness > 1e-4f) {
+    out->outline = piece.rubble.outline;
+    out->thickness = piece.rubble.thickness;
+    out->pose = piece.rubble.pose;
+    return true;
+  }
+  if (piece.profile.size() >= 3 && piece.footprint.size() == 4) {
+    // A cell of a wall: the profile (u, y) in the footprint's plane.
+    const glm::vec2 ab = piece.footprint[1] - piece.footprint[0];
+    const glm::vec2 tv = piece.footprint[3] - piece.footprint[0];
+    const float len = glm::length(ab), thickness = glm::length(tv);
+    if (len < 1e-5f || thickness < 1e-4f) return false;
+    const glm::vec2 d = ab / len;
+    const glm::vec2 n = Perp(d);
+    const glm::vec2 mean = VertexMean(piece.profile);
+    out->outline.clear();
+    for (const glm::vec2& p : piece.profile) out->outline.push_back(p - mean);
+    if (PolygonSignedArea(out->outline) < 0.0f) std::reverse(out->outline.begin(), out->outline.end());
+    out->thickness = thickness;
+    const glm::vec2 xz = piece.footprint[0] + d * mean.x + n * (0.5f * thickness);
+    glm::mat4 pose(1.0f);
+    pose[0] = glm::vec4(d.x, 0.0f, d.y, 0.0f);
+    pose[1] = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
+    pose[2] = glm::vec4(n.x, 0.0f, n.y, 0.0f);
+    pose[3] = glm::vec4(xz.x, mean.y, xz.y, 1.0f);
+    out->pose = pose;
+    return true;
+  }
+  Poly fp = ObstacleFootprint(piece);
+  if (fp.size() < 3 || !(piece.bounds.max.y - piece.bounds.min.y > 1e-4f)) return false;
+  if (PolygonSignedArea(fp) < 0.0f) std::reverse(fp.begin(), fp.end());
+  const glm::vec2 mean = VertexMean(fp);
+  out->outline.clear();
+  for (const glm::vec2& p : fp) out->outline.push_back(p - mean);
+  out->thickness = piece.bounds.max.y - piece.bounds.min.y;
+  out->pose = FlatFrame(glm::vec3(mean.x, 0.5f * (piece.bounds.min.y + piece.bounds.max.y), mean.y));
+  return true;
+}
 
 uint32_t ExplosionSeed(uint32_t matchSeed, int round, int bombId) {
   uint32_t h = 2166136261u;  // FNV-1a offset basis.
@@ -494,27 +552,48 @@ uint32_t ExplosionSeed(uint32_t matchSeed, int round, int bombId) {
   return h;
 }
 
-glm::mat4 DebrisPose(const Obstacle& piece, const DebrisFlight& flight, float t) {
-  if (!(flight.duration > 1e-3f) || t >= flight.duration || piece.footprint.empty()) {
-    return glm::mat4(1.0f);
+glm::mat4 DebrisPose(const DebrisFlight& flight, float t) {
+  const std::vector<DebrisKey>& keys = flight.keys;
+  if (keys.size() < 2) return glm::mat4(1.0f);
+  const float at = std::clamp(t, 0.0f, flight.Duration()) / kDebrisKeyDt;
+  const size_t i = std::min(static_cast<size_t>(at), keys.size() - 2);
+  const float f = std::clamp(at - static_cast<float>(i), 0.0f, 1.0f);
+  const glm::vec3 pos = glm::mix(keys[i].position, keys[i + 1].position, f);
+  glm::quat a = keys[i].rotation, b = keys[i + 1].rotation;
+  if (glm::dot(a, b) < 0.0f) b = -b;
+  const glm::quat q = glm::normalize(glm::mix(a, b, f));
+  const glm::quat turn = q * glm::inverse(keys[0].rotation);
+  return glm::translate(glm::mat4(1.0f), pos) * glm::mat4_cast(turn) *
+         glm::translate(glm::mat4(1.0f), -keys[0].position);
+}
+
+Obstacle DebrisRestObstacle(const Obstacle& piece, const DebrisFlight& flight) {
+  Obstacle out;
+  out.kind = ObstacleKind::Rubble;
+  out.building = -1;
+  DebrisShape shape;
+  if (!DebrisPieceShape(piece, &shape)) return out;
+  const glm::mat4 rest = DebrisPose(flight, flight.Duration()) * shape.pose;
+  Poly xz;
+  glm::vec3 lo(1e30f), hi(-1e30f);
+  const float h = 0.5f * shape.thickness;
+  for (const glm::vec2& p : shape.outline) {
+    for (const float z : {-h, h}) {
+      const glm::vec3 w(rest * glm::vec4(p.x, p.y, z, 1.0f));
+      xz.emplace_back(w.x, w.z);
+      lo = glm::min(lo, w);
+      hi = glm::max(hi, w);
+    }
   }
-  const glm::vec2 mean = VertexMean(piece.footprint);
-  const glm::vec3 rest(mean.x, 0.5f * (piece.bounds.min.y + piece.bounds.max.y), mean.y);
-  t = std::max(0.0f, t);
-  const float s = t / flight.duration;
-  const float vy0 =
-      (rest.y - flight.from.y + 0.5f * kGravity * flight.duration * flight.duration) /
-      flight.duration;
-  const glm::vec3 pos(glm::mix(flight.from.x, rest.x, s),
-                      flight.from.y + vy0 * t - 0.5f * kGravity * t * t,
-                      glm::mix(flight.from.z, rest.z, s));
-  float dYaw = flight.fromYaw - flight.restYaw;
-  while (dYaw > 3.1415927f) dYaw -= 6.2831853f;
-  while (dYaw < -3.1415927f) dYaw += 6.2831853f;
-  const glm::vec3 axis(std::cos(flight.restYaw), 0.0f, std::sin(flight.restYaw));
-  return glm::translate(glm::mat4(1.0f), pos) * YawMatrix(dYaw * (1.0f - s)) *
-         glm::rotate(glm::mat4(1.0f), flight.spin * (s - 1.0f), axis) *
-         glm::translate(glm::mat4(1.0f), -rest);
+  out.footprint = ConvexHull2D(xz);
+  if (out.footprint.size() < 3) {
+    out.footprint = {{lo.x, lo.z}, {hi.x, lo.z}, {hi.x, hi.z}, {lo.x, hi.z}};
+  }
+  out.bounds = AABB{lo, hi};
+  out.rubble.outline = shape.outline;
+  out.rubble.thickness = shape.thickness;
+  out.rubble.pose = rest;
+  return out;
 }
 
 std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& bomb) {
@@ -553,33 +632,64 @@ std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& bomb)
   };
 
   std::vector<Chunk> chunks;
-  const auto flatChunk = [&](const Poly& world, float y0, float y1, bool thrown) {
+  // Common tail of every chunk: radius and the launch centre come from the
+  // very shape clients will derive from the piece.
+  const auto addChunk = [&](Chunk chunk) {
+    DebrisShape shape;
+    if (!DebrisPieceShape(chunk.piece, &shape)) return;
+    chunk.thickness = shape.thickness;
+    chunk.center = glm::vec3(shape.pose[3]);
+    for (const glm::vec2& p : shape.outline) chunk.radius = std::max(chunk.radius, glm::length(p));
+    chunks.push_back(std::move(chunk));
+  };
+  const auto flatChunk = [&](Poly world, float y0, float y1, bool thrown) {
     Chunk chunk;
     chunk.area = PolygonArea(world);
     if (chunk.area < kDustArea || !(y1 > y0)) return;
-    const glm::vec2 mean = VertexMean(world);
-    for (const glm::vec2& p : world) chunk.local.push_back(p - mean);
-    chunk.center = glm::vec3(mean.x, 0.5f * (y0 + y1), mean.y);
+    if (PolygonSignedArea(world) < 0.0f) std::reverse(world.begin(), world.end());
+    chunk.piece.kind = ObstacleKind::Rubble;
+    chunk.piece.building = -1;
+    chunk.piece.footprint = std::move(world);
+    FitBoundsXZ(&chunk.piece);
+    chunk.piece.bounds.min.y = y0;
+    chunk.piece.bounds.max.y = y1;
     chunk.flat = true;
     chunk.thrown = thrown;
-    chunk.thickness = y1 - y0;
-    chunks.push_back(std::move(chunk));
+    addChunk(std::move(chunk));
   };
   // A cell in a wall plane: `shape` in (u, y) along `d` from `a`, its
   // mid-thickness line through `mid` (the point at u = 0).
-  const auto wallChunk = [&](const Poly& shape, glm::vec2 mid, glm::vec2 d, glm::vec2 outward,
+  const auto wallChunk = [&](Poly shape, glm::vec2 mid, glm::vec2 d, glm::vec2 outward,
                              float thickness) {
     Chunk chunk;
     chunk.area = PolygonArea(shape);
     if (chunk.area < kDustArea) return;
-    const glm::vec2 mean = VertexMean(shape);
-    for (const glm::vec2& p : shape) chunk.local.push_back(p - mean);
-    const glm::vec2 xz = mid + d * mean.x;
-    chunk.center = glm::vec3(xz.x, mean.y, xz.y);
+    if (PolygonSignedArea(shape) < 0.0f) std::reverse(shape.begin(), shape.end());
+    glm::vec2 lo, hi;
+    Bounds2(shape, &lo, &hi);
+    const glm::vec2 tv = Perp(d) * thickness;
+    const glm::vec2 a = mid - 0.5f * tv;
+    const glm::vec2 s0 = a + d * lo.x, s1 = a + d * hi.x;
+    chunk.piece.kind = ObstacleKind::Rubble;
+    chunk.piece.building = -1;
+    chunk.piece.footprint = {s0, s1, s1 + tv, s0 + tv};
+    FitBoundsXZ(&chunk.piece);
+    chunk.piece.bounds.min.y = lo.y;
+    chunk.piece.bounds.max.y = hi.y;
+    for (const glm::vec2& p : shape) chunk.piece.profile.emplace_back(p.x - lo.x, p.y);
     chunk.along = d;
     chunk.outward = outward;
-    chunk.thickness = thickness;
-    chunks.push_back(std::move(chunk));
+    addChunk(std::move(chunk));
+  };
+  // Rubble an earlier blast left, thrown again as the very body it is.
+  const auto rubbleChunk = [&](const Obstacle& rubble) {
+    Chunk chunk;
+    chunk.piece = rubble;
+    chunk.piece.dead = false;
+    chunk.area = PolygonArea(rubble.rubble.outline);
+    chunk.flat = true;
+    chunk.thrown = true;
+    addChunk(std::move(chunk));
   };
 
   // 1. Street fixtures in the blast are blown away; rubble an earlier blast
@@ -592,11 +702,13 @@ std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& bomb)
     WorldChange remove;
     remove.kind = WorldChangeKind::ObstacleRemoved;
     remove.target = static_cast<int>(i);
-    const Poly footprint = ObstacleFootprint(o);
-    const float y0 = o.bounds.min.y, y1 = o.bounds.max.y;
     const bool rubble = o.kind == ObstacleKind::Rubble;
-    if (planChange(std::move(remove)) && rubble && footprint.size() >= 3) {
-      flatChunk(footprint, y0, y1, true);
+    if (planChange(std::move(remove)) && rubble) {
+      if (o.rubble.outline.size() >= 3) {
+        rubbleChunk(o);
+      } else {
+        flatChunk(ObstacleFootprint(o), o.bounds.min.y, o.bounds.max.y, true);
+      }
     }
   }
 
@@ -987,24 +1099,72 @@ std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& bomb)
   }
 
   // 8. Debris: every knocked-out cell detaches as a chunk of exactly its own
-  // shape and is thrown by the blast. The flight is simulated here -- on
-  // whatever authority is planning the blast, i.e. the server for networked
-  // matches -- against the post-cut scratch scene: gravity, standing
-  // geometry stops a chunk in its tracks (it drops where it hit), and it
-  // comes to rest lying flat on whatever is under it: the ground, a floor,
-  // a roof, the top of an obstacle, or the chunks already down (sliding
-  // off those towards any lower spot beside), so rubble heaps up wherever the
-  // blast puts it -- in a doorway or the fresh breach included. The rest poses plus flight parameters ship in Debris changes
-  // for clients to replay. Chunks of kSolidChunkArea and up are rubble
-  // obstacles; smaller ones are litter that blocks nothing.
+  // shape and is thrown by the blast. The chunks are simulated together as
+  // rigid bodies (game/DebrisPhysics.h) -- on whatever authority is planning
+  // the blast, i.e. the server for networked matches -- against the post-cut
+  // scratch scene: they tumble, hit standing geometry, floors, the ground,
+  // figures and each other, and come to rest in whatever pose the contacts
+  // leave them in. Each chunk's sampled pose track ships in the Debris
+  // changes for clients to replay verbatim. Settled chunks of kSolidChunkArea
+  // and up are rubble obstacles (their vertical envelope blocks movement and
+  // sight); smaller ones, and any that would entomb a figure, are litter.
   if (!chunks.empty()) {
-    // Bottom-up, so piles build in order.
-    std::stable_sort(chunks.begin(), chunks.end(),
-                     [](const Chunk& a, const Chunk& b) { return a.center.y < b.center.y; });
-    // Launch speeds stay under ~6.5 m/s and no flight outlasts 10 s of
-    // falling, so nothing gets further than this from the bomb.
     const DebrisWorld world(scratch, bombXZ, bomb.radius + 20.0f);
     Rng rng(Mix(bomb.seed, 0x6d2b79f5u));
+    std::vector<DebrisBodyDesc> bodies;
+    bodies.reserve(chunks.size());
+    for (const Chunk& chunk : chunks) {
+      DebrisBodyDesc body;
+      DebrisPieceShape(chunk.piece, &body.shape);
+      const glm::vec3 radial = chunk.center - bomb.position;
+      const float dist = glm::length(radial);
+      const float push = std::clamp(1.0f - dist / bomb.radius, 0.0f, 1.0f);
+      const glm::vec2 away = glm::length(glm::vec2(radial.x, radial.z)) > 1e-3f
+                                 ? glm::normalize(glm::vec2(radial.x, radial.z))
+                                 : glm::vec2(1.0f, 0.0f);
+      glm::vec2 dir;
+      float speed, vy;
+      glm::vec3 spin(0.0f);
+      if (!chunk.flat) {
+        // A wall cell is thrown through the wall, fanned out radially, and
+        // tipped about its long axis by the shove.
+        glm::vec2 base = chunk.outward;
+        if (dist > 1e-3f) base += glm::vec2(radial.x, radial.z) * (0.5f / dist);
+        base = glm::length(base) > 1e-3f ? glm::normalize(base) : chunk.outward;
+        dir = Rotate2(base, rng.Float(-0.45f, 0.45f));
+        if (glm::dot(dir, chunk.outward) < 0.25f) dir = chunk.outward;
+        speed = 1.3f + 3.2f * push + rng.Float(0.0f, 0.9f);
+        vy = 0.3f + 1.6f * push * std::max(0.0f, (dist > 1e-3f ? radial.y / dist : 0.0f) + 0.4f) +
+             rng.Float(0.0f, 0.7f);
+        const float tip = (rng.Int(0, 1) ? 1.0f : -1.0f) * (0.8f + 2.8f * push + rng.Float(0.0f, 1.5f));
+        spin = glm::vec3(chunk.along.x, 0.0f, chunk.along.y) * tip +
+               glm::vec3(0.0f, rng.Float(-1.5f, 1.5f), 0.0f);
+      } else if (chunk.thrown) {
+        // A cell of a thick solid (or old rubble) is blasted away from the
+        // bomb -- or, on the face the blast hit, back out of the crater.
+        dir = Rotate2(away, rng.Float(-0.5f, 0.5f));
+        const glm::vec3 probe =
+            chunk.center + glm::vec3(dir.x, 0.0f, dir.y) * (chunk.radius + 0.15f);
+        if (world.SolidAt(probe)) dir = -dir;
+        speed = 1.0f + 2.5f * push + rng.Float(0.0f, 0.8f);
+        vy = 0.3f + 1.2f * push + rng.Float(0.0f, 0.6f);
+        spin = glm::vec3(rng.Float(-2.5f, 2.5f), rng.Float(-1.5f, 1.5f), rng.Float(-2.5f, 2.5f)) *
+               (0.4f + push);
+      } else {
+        // A slab cell drops, drifting a little away from the blast.
+        dir = Rotate2(away, rng.Float(-1.2f, 1.2f));
+        speed = rng.Float(0.1f, 0.9f);
+        vy = 0.0f;
+        spin = glm::vec3(rng.Float(-0.8f, 0.8f), rng.Float(-0.8f, 0.8f), rng.Float(-0.8f, 0.8f));
+      }
+      body.light = chunk.area < kSolidChunkArea;
+      body.velocity = glm::vec3(dir.x * speed, vy, dir.y * speed);
+      body.angularVelocity = spin;
+      bodies.push_back(std::move(body));
+    }
+    const std::vector<DebrisTrack> tracks =
+        SimulateDebris(world.Describe(), bodies, kMaxDebrisSeconds);
+
     WorldChange debris;
     debris.kind = WorldChangeKind::Debris;
     debris.target = -1;
@@ -1014,176 +1174,28 @@ std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& bomb)
       debris.pieces.clear();
       debris.flights.clear();
     };
-    struct Placed {
-      glm::vec2 center;
-      float radius;
-      float top;
-    };
-    std::vector<Placed> placed;
-    const float margin = scene.mapHalfExtent - 0.4f;
-    for (const Chunk& chunk : chunks) {
-      float chunkRadius = 0.0f;
-      for (const glm::vec2& p : chunk.local) chunkRadius = std::max(chunkRadius, glm::length(p));
-      const float t = chunk.thickness;
-      const float half = 0.5f * t;
-      // What this chunk can come down on at `xz`, its centre at height `y`.
-      // `under` (optional) gets the chunk it would rest on, if it is one.
-      const auto supportAt = [&](glm::vec2 xz, float y, const Placed** under = nullptr) {
-        float support = world.Support(xz, y - half);
-        if (under) *under = nullptr;
-        for (const Placed& other : placed) {
-          if (other.top > y || other.top <= support) continue;
-          if (glm::distance(xz, other.center) < 0.6f * (chunkRadius + other.radius)) {
-            support = other.top;
-            if (under) *under = &other;
-          }
-        }
-        return support;
-      };
-      const glm::vec3 radial = chunk.center - bomb.position;
-      const float dist = glm::length(radial);
-      const float push = std::clamp(1.0f - dist / bomb.radius, 0.0f, 1.0f);
-      const glm::vec2 away = glm::length(glm::vec2(radial.x, radial.z)) > 1e-3f
-                                 ? glm::normalize(glm::vec2(radial.x, radial.z))
-                                 : glm::vec2(1.0f, 0.0f);
-      glm::vec2 dir;
-      float speed, vy;
-      if (!chunk.flat) {
-        // A wall cell is thrown through the wall, fanned out radially.
-        glm::vec2 base = chunk.outward;
-        if (dist > 1e-3f) base += glm::vec2(radial.x, radial.z) * (0.5f / dist);
-        base = glm::length(base) > 1e-3f ? glm::normalize(base) : chunk.outward;
-        dir = Rotate2(base, rng.Float(-0.45f, 0.45f));
-        if (glm::dot(dir, chunk.outward) < 0.25f) dir = chunk.outward;
-        speed = 1.3f + 3.2f * push + rng.Float(0.0f, 0.9f);
-        vy = 0.3f + 1.6f * push * std::max(0.0f, (dist > 1e-3f ? radial.y / dist : 0.0f) + 0.4f) +
-             rng.Float(0.0f, 0.7f);
-      } else if (chunk.thrown) {
-        // A cell of a thick solid (or old rubble) is blasted away from the
-        // bomb -- or, on the face the blast hit, back out of the crater.
-        dir = Rotate2(away, rng.Float(-0.5f, 0.5f));
-        const glm::vec3 probe =
-            chunk.center + glm::vec3(dir.x, 0.0f, dir.y) * (chunkRadius + 0.15f);
-        if (world.SolidAt(probe)) dir = -dir;
-        speed = 1.0f + 2.5f * push + rng.Float(0.0f, 0.8f);
-        vy = 0.3f + 1.2f * push + rng.Float(0.0f, 0.6f);
-      } else {
-        // A slab cell drops, drifting a little away from the blast.
-        dir = Rotate2(away, rng.Float(-1.2f, 1.2f));
-        speed = rng.Float(0.1f, 0.9f);
-        vy = 0.0f;
-      }
-      const float sigma = rng.Int(0, 1) ? 1.0f : -1.0f;
-      const float yawJitter = rng.Float(-0.9f, 0.9f);
-
-      // The flight: explicit steps, so the chunk meets what is in its way.
-      constexpr float kStep = 1.0f / 90.0f;
-      glm::vec3 pos = chunk.center;
-      glm::vec2 vel = dir * speed;
-      float duration = 0.0f;
-      float support = supportAt(glm::vec2(pos.x, pos.z), pos.y);
-      for (int step = 0; step < 900; ++step) {
-        glm::vec3 next = pos + glm::vec3(vel.x, vy, vel.y) * kStep;
-        vy -= kGravity * kStep;
-        duration += kStep;
-        if (std::fabs(next.x) > margin || std::fabs(next.z) > margin || world.SolidAt(next)) {
-          next.x = pos.x;  // Stopped dead: it drops from here.
-          next.z = pos.z;
-          vel = glm::vec2(0.0f);
-        }
-        support = supportAt(glm::vec2(next.x, next.z), pos.y);
-        pos = next;
-        if (vy <= 0.0f && pos.y - half <= support) break;
-      }
-      glm::vec2 land(pos.x, pos.z);
-      // A chunk coming down on another slides off it wherever the spot
-      // beside is lower, so rubble spreads into a heap instead of a tower;
-      // it stays on top only where the heap around is as high already.
-      for (int slide = 0; slide < 6; ++slide) {
-        const Placed* under = nullptr;
-        const float here = supportAt(land, support + half, &under);
-        if (!under) break;
-        glm::vec2 off = land - under->center;
-        off = glm::length(off) > 1e-3f ? glm::normalize(off)
-                                       : glm::length(dir) > 1e-3f ? dir : glm::vec2(1.0f, 0.0f);
-        const glm::vec2 beside =
-            under->center + off * (0.6f * (chunkRadius + under->radius) + 0.02f);
-        if (std::fabs(beside.x) > margin || std::fabs(beside.y) > margin) break;
-        const float lower = supportAt(beside, here + half);
-        if (lower > here - 0.05f ||
-            world.SolidAt(glm::vec3(beside.x, lower + half, beside.y))) {
-          break;
-        }
-        land = beside;
-        support = lower;
-      }
-
-      // A chunk coming down on a figure slides off beside it; where there is
-      // no room for that it settles as litter (no figure is ever entombed in
-      // an obstacle).
-      bool solid = chunk.area >= kSolidChunkArea;
-      const auto onFigure = [&](glm::vec2 xz, float base) -> const Unit* {
-        for (const Unit& unit : scene.units) {
+    for (size_t i = 0; i < chunks.size(); ++i) {
+      DebrisFlight flight;
+      flight.keys = tracks[i].keys;
+      if (flight.keys.size() > kMaxDebrisKeys) flight.keys.resize(kMaxDebrisKeys);
+      // Solid only if it came to rest, is big enough to matter, and does not
+      // lie over a figure (no figure is ever entombed in an obstacle).
+      bool solid = chunks[i].area >= kSolidChunkArea && tracks[i].settled;
+      if (solid) {
+        const Obstacle rest = DebrisRestObstacle(chunks[i].piece, flight);
+        const Poly fat = ExpandConvexPolygon(rest.footprint, 0.2f);
+        for (const Unit& unit : scratch.units) {
           if (!unit.alive) continue;
-          if (base >= unit.position.y + kUnitBodyHeight || base + t <= unit.position.y - 0.05f) {
+          if (rest.bounds.min.y > unit.position.y + kUnitBodyHeight ||
+              rest.bounds.max.y < unit.position.y - 0.05f) {
             continue;
           }
-          if (glm::distance(xz, glm::vec2(unit.position.x, unit.position.z)) <
-              chunkRadius + kUnitClearance) {
-            return &unit;
-          }
-        }
-        return nullptr;
-      };
-      if (const Unit* hit = onFigure(land, support)) {
-        const glm::vec2 unitXZ(hit->position.x, hit->position.z);
-        glm::vec2 off = land - unitXZ;
-        off = glm::length(off) > 1e-3f ? glm::normalize(off) : dir;
-        const glm::vec2 beside = unitXZ + off * (chunkRadius + kUnitClearance + 0.05f);
-        const float besideSupport = supportAt(beside, support + half + 0.05f);
-        if (std::fabs(beside.x) <= margin && std::fabs(beside.y) <= margin &&
-            !world.SolidAt(glm::vec3(beside.x, besideSupport + half, beside.y)) &&
-            !onFigure(beside, besideSupport)) {
-          land = beside;
-          support = besideSupport;
-        } else {
-          solid = false;
+          if (PointInConvexPolygon(glm::vec2(unit.position.x, unit.position.z), fat)) solid = false;
         }
       }
-
-      // Rest pose: the cell lying flat. A wall cell tips over about its
-      // along-axis (a quarter turn plus whole tumbles), a slab cell lands
-      // as it left; DebrisPose plays the same motion backwards from here.
-      const glm::vec2 from(chunk.center.x, chunk.center.z);
-      const bool moved = glm::distance(land, from) > 0.1f;
-      const float fromYaw = chunk.flat ? 0.0f : std::atan2(chunk.along.y, chunk.along.x);
-      const float restYaw =
-          fromYaw + (chunk.flat ? (moved ? 0.5f * yawJitter : 0.0f) : yawJitter);
-      const glm::vec2 axis(std::cos(restYaw), std::sin(restYaw));
-      const glm::vec2 across = Perp(axis) * (chunk.flat ? 1.0f : sigma);
-      Obstacle piece;
-      piece.kind = ObstacleKind::Rubble;
-      piece.building = -1;
-      for (const glm::vec2& p : chunk.local) {
-        piece.footprint.push_back(land + axis * p.x + across * p.y);
-      }
-      if (PolygonSignedArea(piece.footprint) < 0.0f) {
-        std::reverse(piece.footprint.begin(), piece.footprint.end());
-      }
-      FitBoundsXZ(&piece);
-      piece.bounds.min.y = support;
-      piece.bounds.max.y = support + t;
-      DebrisFlight flight;
-      flight.from = chunk.center;
-      flight.duration = duration;
-      const float turns = duration > 0.8f ? 6.2831853f : 0.0f;
-      flight.spin = sigma * (chunk.flat ? (moved ? turns : 0.0f) : 1.5707963f + turns);
-      flight.fromYaw = fromYaw;
-      flight.restYaw = restYaw;
       flight.solid = solid;
-      debris.pieces.push_back(std::move(piece));
-      debris.flights.push_back(flight);
-      placed.push_back({land, chunkRadius, support + t});
+      debris.pieces.push_back(chunks[i].piece);
+      debris.flights.push_back(std::move(flight));
       if (debris.pieces.size() >= kDebrisBatch) flush();
     }
     flush();

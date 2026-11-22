@@ -62,28 +62,41 @@ same log to the same seeded map, so drawn == simulated geometry.
   every standing sliver too small to keep) detaches as a chunk of exactly its
   own shape; only outlines under 0.004 m^2 are dust. No cap on chunks, pieces
   or changes drops anything: past the cut budget (600 elements per blast)
-  the remaining elements are simply left intact. The flight is simulated
-  inside `PlanExplosion` -- on the authority planning the blast, i.e. the
-  server for networked matches -- against the post-cut scene, seeded and
-  deterministic: a launch velocity from the blast, gravity, standing
-  geometry stops a chunk where it hits (it drops from there), and it comes to
-  rest lying flat on whatever is under it -- ground, floor, roof, obstacle
-  top, or the chunks already down (sliding off those towards any lower spot
-  beside, so rubble heaps rather than towers). Nothing steers chunks clear of
-  the breach or a doorway: if the physics seals it, it is sealed. A chunk
-  coming down on a figure slides off beside it (or settles as litter where
-  there is no room), so no figure is entombed in an obstacle. `Debris`
-  changes (batches of 60) carry the rest-pose prisms (the cell outline as
-  footprint) plus one `DebrisFlight` per piece (launch point, launch/rest
-  yaw, flight time, tumble); clients replay the closed-form motion
-  (`DebrisPose`): at launch the chunk sits exactly in the cell it was
-  knocked out of, at the end exactly on its rest pose. Chunks of 0.1 m^2 and
-  up are `solid`: appended as `ObstacleKind::Rubble` obstacles, blocking
+  the remaining elements are simply left intact. The chunks are a rigid-body
+  simulation (`src/game/DebrisPhysics.cpp`) run inside `PlanExplosion` -- on
+  the authority planning the blast, i.e. the server for networked matches --
+  against the post-cut scene: each chunk is a convex prism thrown by the
+  blast with a launch velocity and spin, under gravity, colliding (SAT
+  contacts with face clipping, sequential impulses, friction, a little
+  restitution) with the other chunks, standing geometry, the ground, floors
+  and roofs, the map edge, and figures (immovable posts: a chunk is deflected
+  off a figure, never lies on one). It comes to rest in whatever pose the
+  contacts leave it in -- flat, tilted, leaning on a neighbour, heaped in a
+  doorway. Nothing steers chunks clear of the breach: if the physics seals it,
+  it is sealed. Fixed 120 Hz step, fixed iteration order, no clock; contacts
+  are cold-started and penetration is removed by moving bodies apart, not by
+  adding velocity, so piles do not creep; a body that has gone still (by
+  velocity, or by pose) is put to sleep -- frozen exactly -- and wakes only on
+  a hard hit, and a pile still shuffling after 3 s is damped ever harder, so
+  nothing "seizes" and every blast ends (<= 8 s). Litter-sized chunks
+  collide with everything but never push a heavier chunk. `Debris` changes
+  (batches of 60) carry the chunks as they left the wall / slab (`pieces`:
+  the prism it was cut from) plus one `DebrisFlight` per piece: its pose
+  (centre of mass + quaternion) sampled every 1/20 s until it stopped. The
+  clients integrate nothing -- they interpolate the track (`DebrisPose`;
+  identity at launch, the rest pose from the end on), so a chunk that hits a
+  figure or a wall does so identically everywhere. Chunks of 0.1 m^2 and up
+  that settle are `solid`: appended as `ObstacleKind::Rubble` obstacles whose
+  footprint / bounds are the vertical envelope of the tilted body at rest
+  (`DebrisRestObstacle`; `Obstacle::rubble` keeps the true body), blocking
   sight and movement from the change's `at` (rubble lying no higher than a
   0.35 m step is walked over, like a stub at the foot of a breach; heaps
-  block); a later blast throws them again. Smaller chunks are litter: drawn
-  where they came to rest, never simulated. Street fixtures (cars, benches)
-  in a blast are still removed outright.
+  block); a later blast throws them again as the very bodies they are. A
+  chunk that would lie over a figure, and every chunk under 0.1 m^2, is
+  litter: drawn where it came to rest, never an obstacle. In the figures'
+  sight (FoV) maps the renderer draws solid chunks at their pose *right now*,
+  not at their landing spot. Street fixtures (cars, benches) in a blast are
+  still removed outright.
 - **Stable ids:** nothing is erased. Removed obstacles / surfaces / buildings /
   openings / massing get `dead = true` and stay in their vectors, so every
   index holder (`Obstacle::building`, `Building::obstacle|upperObstacle|
@@ -97,7 +110,7 @@ same log to the same seeded map, so drawn == simulated geometry.
   snapshot text (only when non-empty, so old hashes are unchanged) and hence
   `StateHash()`. `ImportState` syncs geometry to the snapshot's log (rewinding
   from `BaseScene()` when it is shorter/different). `Reset` clears it.
-- **Wire (protocol 6):** `round.world` = changes not yet sent (each has `at`,
+- **Wire (protocol 7):** `round.world` = changes not yet sent (each has `at`,
   seconds into the round; the client applies them as playback passes it);
   `state.world` = full log (join/reconnect/spectator); `{"t":"world"}` for
   changes made outside a round. `RemoteClient` ignores ids it already has.
@@ -111,7 +124,7 @@ same log to the same seeded map, so drawn == simulated geometry.
   list: street fixtures blown away, then the fracture described above (~30-40
   wall sites and ~12-16 floor sites, dense near the bomb, plus a ring of
   always-standing anchor sites at the blast's in-plane radius that bounds
-  the hole), and the Debris changes with the chunks' simulated flights.
+  the hole), and the Debris changes with the chunks' simulated pose tracks.
   Native app: the "Debug bomb" section of the debug
   panel places it at the camera focus, detonates it now, or arms it for a
   time into the next round (the changes then carry that `at`, so playback

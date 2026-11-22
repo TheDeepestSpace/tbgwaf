@@ -908,6 +908,36 @@ void AppendPolygonPrism(const tactics::Obstacle& obstacle, LitVertices* vertices
   }
 }
 
+// A debris chunk's prism at launch (a fracture cell of a wall or slab), as
+// the shape every client derives from the Debris piece. The caller poses it
+// along the recorded flight.
+void AppendDebrisPrism(const tactics::DebrisShape& shape, LitVertices* vertices,
+                       std::vector<GLuint>* indices) {
+  const size_t n = shape.outline.size();
+  if (n < 3) return;
+  const float h = 0.5f * shape.thickness;
+  const glm::mat3 rot(shape.pose);
+  const auto at = [&](const glm::vec2& p, float z) {
+    return glm::vec3(shape.pose * glm::vec4(p.x, p.y, z, 1.0f));
+  };
+  const glm::vec3 up = rot * glm::vec3(0.0f, 0.0f, 1.0f);
+  for (size_t i = 1; i + 1 < n; ++i) {
+    AppendTriangle(at(shape.outline[0], h), at(shape.outline[i], h), at(shape.outline[i + 1], h),
+                   up, vertices, indices);
+    AppendTriangle(at(shape.outline[0], -h), at(shape.outline[i + 1], -h),
+                   at(shape.outline[i], -h), -up, vertices, indices);
+  }
+  for (size_t i = 0; i < n; ++i) {
+    const glm::vec2 a = shape.outline[i], b = shape.outline[(i + 1) % n];
+    const glm::vec2 edge = b - a;
+    if (glm::length(edge) < 1e-6f) continue;
+    const glm::vec2 e = glm::normalize(edge);
+    const glm::vec3 normal = rot * glm::vec3(e.y, -e.x, 0.0f);
+    AppendTriangle(at(a, -h), at(b, -h), at(b, h), normal, vertices, indices);
+    AppendTriangle(at(a, -h), at(b, h), at(a, h), normal, vertices, indices);
+  }
+}
+
 void BuildPolygonPrism(const tactics::Obstacle& obstacle, LitTriangleMesh* mesh,
                        const std::vector<std::vector<glm::vec4>>* holesPerEdge = nullptr) {
   LitVertices vertices;
@@ -1491,6 +1521,9 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   std::vector<GLuint> indices;
   for (const tactics::Obstacle& obstacle : scene.obstacles) {
     if (obstacle.navOnly) continue;  // A cliff edge: the terrain mesh is the caster.
+    // Rubble occludes where the chunk is right now, not where it will land:
+    // it joins the depth maps from the debris mesh (see UpdateDebris).
+    if (obstacle.kind == tactics::ObstacleKind::Rubble) continue;
     if (tactics::IsStreetFixture(obstacle.kind)) {
       AppendStreetFixture(obstacle, &vertices, &indices);
     } else {
@@ -1557,6 +1590,7 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
     mix(v.data(), v.size() * sizeof(glm::vec3));
   };
   for (const tactics::Obstacle& o : scene.obstacles) {
+    if (o.kind == tactics::ObstacleKind::Rubble) continue;  // Not in the mesh.
     mix(&o.bounds, sizeof(o.bounds));
     mix(&o.kind, sizeof(o.kind));
     mix(&o.fixtureModel, sizeof(o.fixtureModel));
@@ -3295,6 +3329,7 @@ bool SceneRenderer::Init() {
   terrainStairMesh_.Init();
   geometryMesh_.Init();
   debrisMesh_.Init();
+  debrisFovMesh_.Init();
   streetFurnitureMesh_.Init();
   streetPropDepthMesh_.Init();
   for (LitTriangleMesh& mesh : streetPropMeshes_) mesh.Init();
@@ -3368,7 +3403,9 @@ void SceneRenderer::Destroy() {
   pavementKey_ = 0;
   geometryMesh_.Destroy();
   debrisMesh_.Destroy();
+  debrisFovMesh_.Destroy();
   debrisHasGeometry_ = false;
+  debrisFovHasGeometry_ = false;
   debrisKey_ = 0;
   streetFurnitureMesh_.Destroy();
   streetPropDepthMesh_.Destroy();
@@ -3558,6 +3595,11 @@ int SceneRenderer::AcquireFovMaps(const Unit& unit, int sector, float facingYaw,
       // gameplay LOS (their solid obstacles always block sight lines).
       treeMesh_.DrawVisible(inMap);
     }
+    if (debrisFovHasGeometry_) {
+      // Rubble blocks sight where it is this very moment.
+      depthShader_.SetMat4("uLightMVP", slot.matrix[half]);
+      debrisFovMesh_.Draw();
+    }
   }
   return index;
 }
@@ -3662,6 +3704,7 @@ void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::v
       cubeMesh_.Draw();
     }
     if (fovSceneMesh_.HasGeometry()) drawReceiver(fovSceneMesh_);
+    if (debrisFovHasGeometry_) drawReceiver(debrisFovMesh_);
     // Facade pane extrusions receive the tint like the walls they sit on: the
     // extruded frames stand proud of the wall and need their own coverage.
     if (facadeMesh_.HasGeometry()) drawReceiver(facadeMesh_);
@@ -3700,10 +3743,10 @@ void SceneRenderer::UpdateDebris(const tactics::GameLogic& game, bool settled) {
   for (const tactics::Obstacle& o : game.GetScene().obstacles) {
     if (!o.dead && o.kind == tactics::ObstacleKind::Rubble) liveRubble.insert(rubbleKey(o));
   }
-  LitVertices vertices;
-  std::vector<GLuint> indices;
   bool moving = false;
   unsigned long long key = log.size() * 1099511628211ull + liveRubble.size();
+  // Every debris change with the age of its flight.
+  std::vector<std::pair<const tactics::WorldChange*, float>> falls;
   for (const tactics::WorldChange& c : log) {
     if (c.kind != tactics::WorldChangeKind::Debris) continue;
     if (c.pieces.size() != c.flights.size()) continue;
@@ -3727,27 +3770,47 @@ void SceneRenderer::UpdateDebris(const tactics::GameLogic& game, bool settled) {
       t = static_cast<float>(now - it->second);
     }
     if (settled) t = 1e9f;
-    for (size_t i = 0; i < c.pieces.size(); ++i) {
-      const tactics::Obstacle& piece = c.pieces[i];
-      if (piece.footprint.size() < 3) continue;
-      if (c.flights[i].solid && !liveRubble.count(rubbleKey(piece))) continue;
-      moving |= t < c.flights[i].duration;
-      // The chunk's rest prism, carried back along its flight.
-      const size_t first = vertices.size();
-      AppendPolygonPrism(piece, &vertices, &indices);
-      const glm::mat4 pose = tactics::DebrisPose(piece, c.flights[i], t);
-      const glm::mat3 turn(pose);
-      for (size_t v = first; v < vertices.size(); ++v) {
-        vertices[v].pos = glm::vec3(pose * glm::vec4(vertices[v].pos, 1.0f));
-        vertices[v].normal = turn * vertices[v].normal;
-      }
-    }
+    for (const tactics::DebrisFlight& flight : c.flights) moving |= t < flight.Duration();
+    falls.emplace_back(&c, t);
   }
   // Settled debris keeps its mesh; only falling chunks re-tessellate.
-  if (moving || debrisMoving_ || key != debrisKey_) {
-    debrisMesh_.SetMesh(vertices, indices);
-    debrisHasGeometry_ = !indices.empty();
+  if (!moving && !debrisMoving_ && key == debrisKey_) return;
+  LitVertices vertices, fovVertices;
+  std::vector<GLuint> indices, fovIndices;
+  for (const auto& [change, t] : falls) {
+    const tactics::WorldChange& c = *change;
+    for (size_t i = 0; i < c.pieces.size(); ++i) {
+      const tactics::Obstacle& piece = c.pieces[i];
+      const tactics::DebrisFlight& flight = c.flights[i];
+      tactics::DebrisShape shape;
+      if (!tactics::DebrisPieceShape(piece, &shape)) continue;
+      if (flight.solid &&
+          !liveRubble.count(rubbleKey(tactics::DebrisRestObstacle(piece, flight)))) {
+        continue;
+      }
+      // The chunk's launch prism, carried along its recorded track.
+      const glm::mat4 pose = tactics::DebrisPose(flight, t);
+      const glm::mat3 turn(pose);
+      const auto append = [&](LitVertices* vs, std::vector<GLuint>* is) {
+        const size_t first = vs->size();
+        AppendDebrisPrism(shape, vs, is);
+        for (size_t v = first; v < vs->size(); ++v) {
+          (*vs)[v].pos = glm::vec3(pose * glm::vec4((*vs)[v].pos, 1.0f));
+          (*vs)[v].normal = turn * (*vs)[v].normal;
+        }
+      };
+      append(&vertices, &indices);
+      // Solid chunks block sight like any obstacle -- from where they are
+      // now, mid-flight included -- so they join the figures' depth maps.
+      if (flight.solid) append(&fovVertices, &fovIndices);
+    }
   }
+  debrisMesh_.SetMesh(vertices, indices);
+  debrisHasGeometry_ = !indices.empty();
+  debrisFovMesh_.SetMesh(fovVertices, fovIndices);
+  debrisFovHasGeometry_ = !fovIndices.empty();
+  // The figures' sight maps were rendered against the old chunk poses.
+  ++fovMapGeneration_;
   debrisMoving_ = moving;
   debrisKey_ = key;
 }

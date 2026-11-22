@@ -34,10 +34,10 @@ script:
   - assert: {unit: 1, visible_to: blue, visible: true}
   - action: move
     actor: 0
-    destination: [2.5, 0, 1.5]
-    comment: Through the floor-reaching breach to the red side.
+    destination: [3.0, 0, -1.0]
+    comment: Through the floor-reaching breach (past the rubble) to the red side.
   - action: pass
     actor: 1
   - action: commit
-  - assert: {unit: 0, position: [2.5, 0, 1.5], tolerance: 0.3}
+  - assert: {unit: 0, position: [3.0, 0, -1.0], tolerance: 0.3}
   - assert: {round: 2}

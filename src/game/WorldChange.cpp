@@ -6,6 +6,7 @@
 #include <istream>
 #include <ostream>
 
+#include "game/Destruction.h"
 #include "game/Geometry.h"
 
 namespace tactics {
@@ -26,7 +27,9 @@ bool SameObstacle(const Obstacle& a, const Obstacle& b) {
          a.footprint == b.footprint && a.kind == b.kind && a.building == b.building &&
          a.navOnly == b.navOnly && a.fixtureModel == b.fixtureModel &&
          a.fixtureYaw == b.fixtureYaw && a.fixtureBaseY == b.fixtureBaseY &&
-         a.fixtureRoll == b.fixtureRoll && a.dead == b.dead && a.profile == b.profile;
+         a.fixtureRoll == b.fixtureRoll && a.dead == b.dead && a.profile == b.profile &&
+         a.rubble.outline == b.rubble.outline && a.rubble.thickness == b.rubble.thickness &&
+         a.rubble.pose == b.rubble.pose;
 }
 
 void RefreshBuildingLiveness(Scene* scene, int building) {
@@ -548,19 +551,29 @@ bool ApplyMassingCut(Scene* scene, const WorldChange& c) {
   return true;
 }
 
+constexpr size_t kMaxDebrisKeys = 400;
+
 bool ApplyDebris(Scene* scene, const WorldChange& c) {
   if (c.pieces.empty() || c.pieces.size() > kMaxPieces) return false;
   if (c.flights.size() != c.pieces.size()) return false;
-  for (const Obstacle& piece : c.pieces) {
-    if (!(piece.bounds.max.y > piece.bounds.min.y) || piece.footprint.size() < 3) return false;
+  for (size_t i = 0; i < c.pieces.size(); ++i) {
+    DebrisShape shape;
+    if (!DebrisPieceShape(c.pieces[i], &shape)) return false;
+    const std::vector<DebrisKey>& keys = c.flights[i].keys;
+    if (keys.size() < 2 || keys.size() > kMaxDebrisKeys) return false;
+    for (const DebrisKey& k : keys) {
+      if (!std::isfinite(k.position.x + k.position.y + k.position.z) ||
+          !std::isfinite(k.rotation.x + k.rotation.y + k.rotation.z + k.rotation.w) ||
+          std::fabs(glm::length(k.rotation) - 1.0f) > 0.05f) {
+        return false;
+      }
+    }
   }
-  for (const DebrisFlight& flight : c.flights) {
-    if (!(flight.duration >= 0.0f) || !std::isfinite(flight.duration)) return false;
-  }
-  // Solid chunks are rubble obstacles from here on; litter is only drawn.
+  // Solid chunks are rubble obstacles from here on (their envelope at rest);
+  // litter is only drawn.
   for (size_t i = 0; i < c.pieces.size(); ++i) {
     if (!c.flights[i].solid) continue;
-    Obstacle p = c.pieces[i];
+    Obstacle p = DebrisRestObstacle(c.pieces[i], c.flights[i]);
     p.dead = false;
     scene->obstacles.push_back(std::move(p));
   }
@@ -576,6 +589,14 @@ void WriteObstacle(std::ostream& out, const Obstacle& o) {
   for (const glm::vec2& p : o.footprint) out << ' ' << p.x << ' ' << p.y;
   out << ' ' << o.profile.size();
   for (const glm::vec2& p : o.profile) out << ' ' << p.x << ' ' << p.y;
+  out << ' ' << o.rubble.outline.size();
+  if (!o.rubble.outline.empty()) {
+    out << ' ' << o.rubble.thickness;
+    for (const glm::vec2& p : o.rubble.outline) out << ' ' << p.x << ' ' << p.y;
+    for (int col = 0; col < 4; ++col) {
+      for (int row = 0; row < 3; ++row) out << ' ' << o.rubble.pose[col][row];
+    }
+  }
 }
 
 bool ReadObstacle(std::istream& in, Obstacle* o) {
@@ -600,10 +621,29 @@ bool ReadObstacle(std::istream& in, Obstacle* o) {
   for (glm::vec2& p : o->profile) {
     if (!(in >> p.x >> p.y)) return false;
   }
+  size_t rubbleCount = 0;
+  if (!(in >> rubbleCount) || rubbleCount > kMaxPolygon) return false;
+  if (rubbleCount > 0) {
+    if (!(in >> o->rubble.thickness)) return false;
+    o->rubble.outline.resize(rubbleCount);
+    for (glm::vec2& p : o->rubble.outline) {
+      if (!(in >> p.x >> p.y)) return false;
+    }
+    o->rubble.pose = glm::mat4(1.0f);
+    for (int col = 0; col < 4; ++col) {
+      for (int row = 0; row < 3; ++row) {
+        if (!(in >> o->rubble.pose[col][row])) return false;
+      }
+    }
+  }
   return true;
 }
 
 }  // namespace
+
+float DebrisFlight::Duration() const {
+  return keys.size() < 2 ? 0.0f : static_cast<float>(keys.size() - 1) * kDebrisKeyDt;
+}
 
 bool WorldChange::operator==(const WorldChange& o) const {
   if (id != o.id || round != o.round || at != o.at || kind != o.kind || target != o.target ||
@@ -772,8 +812,11 @@ void WriteWorldChange(std::ostream& out, const WorldChange& c) {
   for (const Obstacle& o : c.pieces) WriteObstacle(out, o);
   out << ' ' << c.flights.size();
   for (const DebrisFlight& f : c.flights) {
-    out << ' ' << f.from.x << ' ' << f.from.y << ' ' << f.from.z << ' ' << f.duration << ' '
-        << f.spin << ' ' << f.fromYaw << ' ' << f.restYaw << ' ' << (f.solid ? 1 : 0);
+    out << ' ' << (f.solid ? 1 : 0) << ' ' << f.keys.size();
+    for (const DebrisKey& k : f.keys) {
+      out << ' ' << k.position.x << ' ' << k.position.y << ' ' << k.position.z << ' '
+          << k.rotation.w << ' ' << k.rotation.x << ' ' << k.rotation.y << ' ' << k.rotation.z;
+    }
   }
 }
 
@@ -801,11 +844,16 @@ bool ReadWorldChange(std::istream& in, WorldChange* c) {
   c->flights.assign(flightCount, DebrisFlight{});
   for (DebrisFlight& f : c->flights) {
     int solid = 1;
-    if (!(in >> f.from.x >> f.from.y >> f.from.z >> f.duration >> f.spin >> f.fromYaw >>
-          f.restYaw >> solid)) {
-      return false;
-    }
+    size_t keyCount = 0;
+    if (!(in >> solid >> keyCount) || keyCount > kMaxDebrisKeys) return false;
     f.solid = solid != 0;
+    f.keys.resize(keyCount);
+    for (DebrisKey& k : f.keys) {
+      if (!(in >> k.position.x >> k.position.y >> k.position.z >> k.rotation.w >> k.rotation.x >>
+            k.rotation.y >> k.rotation.z)) {
+        return false;
+      }
+    }
   }
   return true;
 }

@@ -4183,10 +4183,11 @@ void TestExplosionFractureHasAngledEdges() {
 }
 
 // The debris is the destroyed part of the wall: every chunk is one
-// knocked-out fracture cell. Played back to its launch (DebrisPose at t = 0)
-// its rest prism stands upright inside the wall slab, exactly where the
-// applied scene now has a hole; the chunks land as rubble obstacles (small
-// ones as litter) wherever their flight ends, each with a replayable flight,
+// knocked-out fracture cell, shipped as the prism it was cut from -- upright,
+// inside the wall slab, exactly where the applied scene now has a hole --
+// plus the sampled rigid-body track it followed. The track starts at the
+// launch pose (identity transform) and ends on a rest pose above the ground;
+// chunks land as rubble obstacles (small ones as litter) wherever that is,
 // and the whole thing round-trips the codec.
 void TestExplosionDebrisMatchesKnockedOutCells() {
   GameLogic game(BombWallScene());
@@ -4211,36 +4212,33 @@ void TestExplosionDebrisMatchesKnockedOutCells() {
     const DebrisFlight& flight = debris->flights[i];
     solid += flight.solid;
     CHECK(piece.kind == ObstacleKind::Rubble);
-    CHECK(piece.footprint.size() >= 3);
-    // Resting on the ground, or piled on a chunk that came down before it
-    // (wherever the flight put it -- the breach included)...
-    bool supported = std::fabs(piece.bounds.min.y) < 0.05f;
-    for (size_t j = 0; j < i && !supported; ++j) {
-      supported = std::fabs(piece.bounds.min.y - debris->pieces[j].bounds.max.y) < 1e-3f;
-    }
-    CHECK(supported);
-    CHECK(std::fabs(piece.bounds.max.y - piece.bounds.min.y - 0.3f) < 1e-3f);  // ... flat.
-    glm::vec2 mean(0.0f);
-    for (const glm::vec2& p : piece.footprint) mean += p;
-    mean /= static_cast<float>(piece.footprint.size());
-    CHECK(std::fabs(mean.x) < 8.0f && std::fabs(mean.y) < 8.0f);  // On the map.
-    CHECK(flight.duration > 0.0f);
-    // At launch the chunk is a cell of the wall: upright, inside the slab.
-    const glm::mat4 launch = DebrisPose(piece, flight, 0.0f);
-    for (const glm::vec2& p : piece.footprint) {
-      for (const float y : {piece.bounds.min.y, piece.bounds.max.y}) {
-        const glm::vec3 v(launch * glm::vec4(p.x, y, p.y, 1.0f));
+    CHECK(flight.keys.size() >= 2);
+    CHECK(flight.Duration() > 0.0f);
+    DebrisShape shape;
+    CHECK(DebrisPieceShape(piece, &shape));
+    // At launch the chunk is a cell of the wall: upright, inside the slab,
+    // and the pose track starts exactly there.
+    const glm::mat4 launch = DebrisPose(flight, 0.0f);
+    CHECK(launch == glm::mat4(1.0f));
+    for (const glm::vec2& p : shape.outline) {
+      for (const float z : {-0.5f * shape.thickness, 0.5f * shape.thickness}) {
+        const glm::vec3 v(shape.pose * glm::vec4(p.x, p.y, z, 1.0f));
         CHECK(std::fabs(v.x) < 0.15f + 2e-3f);
         CHECK(v.y > -2e-3f && v.y < 3.0f + 2e-3f);
         CHECK(std::fabs(v.z) < 8.0f + 2e-3f);
       }
     }
     // ... and that cell is now open: sight passes through its middle.
-    const glm::vec3 c = flight.from;
-    CHECK(std::fabs(c.x) < 1e-3f);
+    const glm::vec3 c = flight.keys[0].position;
+    CHECK(std::fabs(c.x) < 0.15f);
     CHECK(LineOfSightClear({-0.5f, c.y, c.z}, {0.5f, c.y, c.z}, standing));
-    // At (and past) the end of the flight the chunk is its rest prism.
-    CHECK(DebrisPose(piece, flight, flight.duration) == glm::mat4(1.0f));
+    // At rest the chunk is on the map and not sunk into the ground, however
+    // it lies.
+    const Obstacle rest = DebrisRestObstacle(piece, flight);
+    CHECK(rest.bounds.min.y > -0.06f);
+    CHECK(std::fabs(0.5f * (rest.bounds.min.x + rest.bounds.max.x)) < 8.0f);
+    CHECK(std::fabs(0.5f * (rest.bounds.min.z + rest.bounds.max.z)) < 8.0f);
+    CHECK(DebrisPose(flight, flight.Duration() + 5.0f) == DebrisPose(flight, flight.Duration()));
   }
   // The solid chunks really are obstacles in the applied scene.
   CHECK(solid >= 1);
@@ -4398,7 +4396,8 @@ float DebrisVolume(const std::vector<WorldChange>& plan, int* pieces = nullptr) 
   for (const WorldChange& c : plan) {
     if (c.kind != WorldChangeKind::Debris) continue;
     for (const Obstacle& piece : c.pieces) {
-      volume += PolygonArea(piece.footprint) * (piece.bounds.max.y - piece.bounds.min.y);
+      DebrisShape shape;
+      if (DebrisPieceShape(piece, &shape)) volume += PolygonArea(shape.outline) * shape.thickness;
       if (pieces) ++*pieces;
     }
   }
@@ -4549,8 +4548,13 @@ void TestExplosionFracturesThickSolids() {
   }
   CHECK(replaced == 2);
   CHECK(scene.obstacles[0].dead && scene.obstacles[1].dead);
-  // The pier is cut through at the bomb's height, standing above and below.
-  CHECK(LineOfSightClear(west, east, scene.obstacles));
+  // The pier is cut through at the bomb's height, standing above and below
+  // (what stands, that is: the rubble may land wherever physics puts it).
+  std::vector<Obstacle> standing;
+  for (const Obstacle& o : scene.obstacles) {
+    if (o.kind != ObstacleKind::Rubble) standing.push_back(o);
+  }
+  CHECK(LineOfSightClear(west, east, standing));
   bool above = false;
   for (const Obstacle& o : scene.obstacles) {
     above |= !o.dead && o.kind == ObstacleKind::Pier && o.bounds.max.y > 5.9f;
@@ -4624,7 +4628,7 @@ void TestExplosionRethrowsRubble() {
   float rubbleBefore = 0.0f;
   for (const Obstacle& o : scene.obstacles) {
     if (!o.dead && o.kind == ObstacleKind::Rubble) {
-      rubbleBefore += PolygonArea(o.footprint) * (o.bounds.max.y - o.bounds.min.y);
+      rubbleBefore += PolygonArea(o.rubble.outline) * o.rubble.thickness;
     }
   }
   CHECK(rubbleBefore > 0.1f);
@@ -4636,7 +4640,7 @@ void TestExplosionRethrowsRubble() {
   float rubbleLeft = 0.0f;
   for (const Obstacle& o : scene.obstacles) {
     if (!o.dead && o.kind == ObstacleKind::Rubble) {
-      rubbleLeft += PolygonArea(o.footprint) * (o.bounds.max.y - o.bounds.min.y);
+      rubbleLeft += PolygonArea(o.rubble.outline) * o.rubble.thickness;
     }
   }
   // Second-blast debris = newly knocked-out wall + every re-thrown chunk;
@@ -4644,6 +4648,104 @@ void TestExplosionRethrowsRubble() {
   const float knocked = standingBefore - StandingVolume(scene);
   CHECK(rubbleLeft > rubbleBefore - 1e-3f);
   CHECK(DebrisVolume(second) > knocked - 0.02f * knocked - 0.01f);
+}
+
+// --- Debris rigid-body simulation (issue #354) ----------------------------
+
+DebrisBodyDesc SlabBody(glm::vec3 centre, float tiltAboutX, glm::vec3 velocity = glm::vec3(0.0f)) {
+  DebrisBodyDesc b;
+  b.shape.outline = {{-0.5f, -0.5f}, {0.5f, -0.5f}, {0.5f, 0.5f}, {-0.5f, 0.5f}};
+  b.shape.thickness = 0.3f;
+  // Local z (the thickness) points up; tilt leans it about X.
+  b.shape.pose = glm::translate(glm::mat4(1.0f), centre) *
+                 glm::rotate(glm::mat4(1.0f), tiltAboutX, glm::vec3(1.0f, 0.0f, 0.0f)) *
+                 glm::rotate(glm::mat4(1.0f), -1.5707963f, glm::vec3(1.0f, 0.0f, 0.0f));
+  b.velocity = velocity;
+  return b;
+}
+
+glm::vec3 SlabUp(const DebrisKey& k) { return glm::mat3_cast(k.rotation) * glm::vec3(0.0f, 0.0f, 1.0f); }
+
+// A slab dropped slightly crooked comes to rest lying flat on the ground,
+// and a second one dropped across it lies flat on top of the first.
+void TestDebrisSlabsLandFlatAndStack() {
+  DebrisWorldDesc world;
+  world.extent = 50.0f;
+  const auto tracks = SimulateDebris(
+      world, {SlabBody({0.0f, 1.0f, 0.0f}, 0.25f), SlabBody({0.15f, 2.5f, 0.05f}, 0.0f)});
+  CHECK(tracks.size() == 2);
+  for (const DebrisTrack& t : tracks) {
+    CHECK(t.settled);
+    CHECK(t.keys.size() >= 2 && t.keys.size() < 8 * 20);
+    CHECK(std::fabs(std::fabs(SlabUp(t.keys.back()).y) - 1.0f) < 0.01f);  // Flat.
+  }
+  CHECK(std::fabs(tracks[0].keys.back().position.y - 0.15f) < 0.02f);
+  CHECK(std::fabs(tracks[1].keys.back().position.y - 0.45f) < 0.03f);  // Resting on it.
+  CHECK(DebrisPose(DebrisFlight{{tracks[0].keys}, true}, 0.0f) == glm::mat4(1.0f));
+}
+
+// Full collision, not a flat-landing shortcut: a slab landing on a 30 degree
+// slope stays on it, tilted to match, instead of lying horizontally.
+void TestDebrisRestsTiltedOnASlope() {
+  DebrisWorldDesc world;
+  world.extent = 50.0f;
+  DebrisShape slope;
+  slope.outline = {{-3.0f, -3.0f}, {3.0f, -3.0f}, {3.0f, 3.0f}, {-3.0f, 3.0f}};
+  slope.thickness = 1.0f;
+  const float lean = 0.5235988f;  // 30 degrees about X, local z tipped toward +Z.
+  slope.pose = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 1.0f, 0.0f)) *
+               glm::rotate(glm::mat4(1.0f), -1.5707963f + lean, glm::vec3(1.0f, 0.0f, 0.0f));
+  world.statics.push_back(slope);
+  const glm::vec3 normal = glm::mat3(slope.pose) * glm::vec3(0.0f, 0.0f, 1.0f);
+  const auto tracks = SimulateDebris(world, {SlabBody({0.0f, 2.2f, 0.0f}, lean)});
+  CHECK(tracks[0].settled);
+  const DebrisKey& rest = tracks[0].keys.back();
+  CHECK(glm::dot(SlabUp(rest), normal) > 0.99f);  // Lies along the slope...
+  CHECK(SlabUp(rest).y < 0.95f);                  // ... not horizontal,
+  CHECK(glm::dot(rest.position - glm::vec3(slope.pose[3]), normal) > 0.6f);  // ... on top of it.
+}
+
+// A chunk thrown at a figure (an immovable post) stops against it.
+void TestDebrisDeflectsOffAFigure() {
+  DebrisWorldDesc world;
+  world.extent = 50.0f;
+  DebrisShape post;
+  for (int k = 0; k < 8; ++k) {
+    post.outline.emplace_back(0.45f * std::cos(k * 0.7853982f), 0.45f * std::sin(k * 0.7853982f));
+  }
+  post.thickness = 60.0f;
+  post.pose = glm::translate(glm::mat4(1.0f), glm::vec3(2.0f, 29.95f, 0.0f)) *
+              glm::mat4(glm::mat3(glm::vec3(1, 0, 0), glm::vec3(0, 0, 1), glm::vec3(0, -1, 0)));
+  world.statics.push_back(post);
+  const auto tracks =
+      SimulateDebris(world, {SlabBody({0.0f, 0.2f, 0.0f}, 0.0f, {5.0f, 0.5f, 0.0f})});
+  CHECK(tracks[0].settled);
+  // Its far edge cannot have passed the post's near face (x = 1.55).
+  CHECK(tracks[0].keys.back().position.x + 0.5f < 1.6f);
+}
+
+// The same input yields the same track, bit for bit (the server is the
+// only place this runs, but replays and tests rely on it), and a settled pile
+// ends: no body is still moving when its track stops.
+void TestDebrisSimulationIsDeterministicAndSettles() {
+  DebrisWorldDesc world;
+  world.extent = 50.0f;
+  std::vector<DebrisBodyDesc> bodies;
+  for (int i = 0; i < 8; ++i) {
+    bodies.push_back(SlabBody({0.15f * (i % 3), 0.5f + 0.7f * i, 0.1f * (i % 2)}, 0.3f * i,
+                              {0.3f * (i % 3 - 1), 0.0f, 0.2f}));
+  }
+  const auto a = SimulateDebris(world, bodies);
+  const auto b = SimulateDebris(world, bodies);
+  CHECK(a.size() == b.size());
+  for (size_t i = 0; i < a.size(); ++i) {
+    CHECK(a[i].settled);
+    CHECK(a[i].keys == b[i].keys);
+    // No seizure: the last second of a track holds still (trimmed), and the
+    // body is on or above the ground, never sunk in it.
+    CHECK(a[i].keys.size() < 8 * 20);
+    for (const DebrisKey& k : a[i].keys) CHECK(k.position.y > 0.1f);
+  }
 }
 
 // A sloped-top massing detail (an overpass deck rail) cut by cells keeps its
@@ -4835,6 +4937,10 @@ int main() {
   TestExplosionFracturesThickSolids();
   TestExplosionBringsDownStairFlight();
   TestExplosionRethrowsRubble();
+  TestDebrisSlabsLandFlatAndStack();
+  TestDebrisRestsTiltedOnASlope();
+  TestDebrisDeflectsOffAFigure();
+  TestDebrisSimulationIsDeterministicAndSettles();
   TestMassingCutKeepsSlopedTop();
 
   if (g_failures == 0) {

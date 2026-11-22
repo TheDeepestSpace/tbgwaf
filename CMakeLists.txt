@@ -73,6 +73,7 @@ set(GAME_LOGIC_SOURCES
   src/game/Scene.cpp
   src/game/WorldChange.cpp
   src/game/Destruction.cpp
+  src/game/DebrisPhysics.cpp
   src/game/Geometry.cpp
   src/game/MapGenerator.cpp
   src/game/NavMesh.cpp

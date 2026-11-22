@@ -21,6 +21,7 @@
 #include <vector>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include "game/Scene.h"
 #include "game/Types.h"
@@ -68,14 +69,16 @@ enum class WorldChangeKind : int {
   // clipped to each footprint); the rect form only removes them whole.
   MassingCut = 7,
   // Chunks knocked loose by a blast (destruction: the knocked-out fracture
-  // cells detach, fall and become obstacles). `pieces` are the chunks at
-  // rest -- each cell lying flat, its outline as the footprint -- where the
-  // server's ballistic simulation landed them. `flights`, one per piece,
-  // replays the fall on clients (see DebrisPose in game/Destruction.h), so
-  // every client animates the same chunk out of the same hole and ends
-  // exactly on the rest pose. Pieces whose flight is `solid` are appended to
-  // the scene as ObstacleKind::Rubble and block movement and sight like any
-  // obstacle; the rest are litter, drawn but never simulated.
+  // cells detach, tumble and become obstacles). `pieces` are the chunks as
+  // they left the wall / slab -- each cell in place, the prism it was cut
+  // from. `flights`, one per piece, is the server's rigid-body simulation of
+  // that chunk (see DebrisPhysics.h): a pose track clients replay verbatim
+  // (DebrisPose in game/Destruction.h), so every client animates the same
+  // collisions and ends on exactly the same rest pose, however it came to
+  // rest -- tilted, leaning, on top of other chunks. Pieces whose flight is
+  // `solid` are appended to the scene as ObstacleKind::Rubble (their vertical
+  // envelope at rest) and block movement and sight like any obstacle; the
+  // rest are litter, drawn but never simulated.
   Debris = 8,
   // Scene::facadeOpenings[target] (a window frame / door leaf) blown off its
   // wall: the opening dies. Its bars leave as debris chunks.
@@ -83,24 +86,30 @@ enum class WorldChangeKind : int {
 };
 constexpr int kWorldChangeKindCount = 10;
 
-// How one debris chunk flew: enough for a client to replay the server's
-// ballistic fall of the matching `pieces` entry (which holds the rest pose).
-// Yaws put local +X at (cos, 0, sin). The chunk's vertex mean travels from
-// `from` to its rest spot while the chunk yaws from `fromYaw` to `restYaw`
-// and tumbles about its along-axis by `spin` in total -- a quarter turn
-// (plus whole turns) for a wall cell tipping over flat.
+// Seconds between a debris chunk's pose samples (20 Hz).
+constexpr float kDebrisKeyDt = 1.0f / 20.0f;
+
+// One sample of a chunk's body: where its centre of mass is and how it is
+// oriented (unit quaternion, world frame), kDebrisKeyDt apart.
+struct DebrisKey {
+  glm::vec3 position{0.0f};
+  glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+
+  bool operator==(const DebrisKey& o) const {
+    return position == o.position && rotation == o.rotation;
+  }
+};
+
+// How one debris chunk moved: the matching `pieces` entry's body sampled at
+// a fixed rate from launch (keys[0], its pose in the wall) until it came to
+// rest (keys.back(), held from then on). Computed once on the authority, so
+// who a chunk hit and where it ended is never up to a client's arithmetic.
 struct DebrisFlight {
-  glm::vec3 from{0.0f};  // Vertex mean of the chunk at launch (mid-thickness).
-  float duration = 0.0f; // Seconds from launch (the change's `at`) to rest.
-  float spin = 0.0f;     // Total tumble over the flight, radians (signed).
-  float fromYaw = 0.0f;  // Yaw of the along-axis at launch.
-  float restYaw = 0.0f;  // Yaw of the along-axis at rest.
+  std::vector<DebrisKey> keys;
   bool solid = true;     // Becomes a rubble obstacle (else cosmetic litter).
 
-  bool operator==(const DebrisFlight& o) const {
-    return from == o.from && duration == o.duration && spin == o.spin &&
-           fromYaw == o.fromYaw && restYaw == o.restYaw && solid == o.solid;
-  }
+  float Duration() const;
+  bool operator==(const DebrisFlight& o) const { return solid == o.solid && keys == o.keys; }
 };
 
 struct WorldChange {

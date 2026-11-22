@@ -78,7 +78,15 @@
 //   {"t":"opponent_left"}   {"t":"error","error":"..."}
 namespace tactics::net {
 
-constexpr int kProtocolVersion = 2;  // 2: world-change log ("world") in round/state.
+// 2: world-change log ("world") in round/state. 3: WallHole really cuts the
+// wall geometry and the FloorHole kind exists (issue #350), so a peer on 2
+// would compute different geometry from the same log. 4: WallHole carries a
+// fracture outline cutting profiled pieces, the MassingCut and Debris kinds
+// exist, and obstacles serialize a wall-plane profile -- a peer on 3 would
+// reject the new kinds and compute different geometry. 5: FloorHole and
+// MassingCut may carry fracture-cell pieces and debris flights serialize a
+// rest yaw and a solid flag (only solid chunks become obstacles).
+constexpr int kProtocolVersion = 5;
 constexpr size_t kMaxMessageBytes = 16 * 1024;
 constexpr size_t kMaxWaypoints = 32;
 

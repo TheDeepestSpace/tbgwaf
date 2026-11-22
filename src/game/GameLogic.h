@@ -12,6 +12,7 @@
 #include <glm/glm.hpp>
 
 #include "game/Cover.h"
+#include "game/Destruction.h"
 #include "game/NavMesh.h"
 #include "game/Scene.h"
 #include "game/Types.h"
@@ -252,6 +253,9 @@ class GameLogic {
   std::optional<int> SelectedUnitId() const { return selectedUnitId_; }
   std::optional<Team> Winner() const { return winner_; }
   int RoundNumber() const { return roundNumber_; }
+  // Seconds into the executing round (also valid during replay playback);
+  // the renderer replays debris flights against it.
+  float ExecutionElapsed() const { return executionElapsed_; }
 
   // --- Neutral flag objective (CTF part 1). A living figure whose move
   // passes through the flag's spot (anywhere along its path, not just where
@@ -573,6 +577,32 @@ class GameLogic {
   // Debug command: remove obstacle `index` now (the stump of
   // ApplyWorldChange). Safe mid-match.
   bool DebugRemoveObstacle(int index);
+
+  // --- Debug bomb (issue #350): a debug explosive the player moves around
+  // the map and detonates, either immediately between rounds or at an armed
+  // time into the executing round. It emits the same explosion record a
+  // grenade will later (position, radius, seed = hash(match seed, round,
+  // bomb id)) and applies the fracture plan (see game/Destruction.h) through
+  // the world log, so clients, replay scrubbing and reconnects all rebuild
+  // the same holes. Planning-local debug state: never serialized. ---
+  struct DebugBomb {
+    glm::vec3 position{0.0f};
+    float radius = kDefaultBombRadius;
+    float detonateAt = -1.0f;  // Armed: seconds into the executing round; <0 = manual.
+  };
+  const std::optional<DebugBomb>& GetDebugBomb() const { return debugBomb_; }
+  // Places (or moves) the bomb. Radius is clamped to a sane debug range.
+  void DebugPlaceBomb(const glm::vec3& position, float radius = kDefaultBombRadius);
+  // Arms the placed bomb: it detonates once the executing round's clock
+  // reaches `atSeconds` (this round if already executing, else the next).
+  bool DebugArmBomb(float atSeconds);
+  // Detonates the placed bomb now. False without a placed bomb or when the
+  // blast touches nothing destructible.
+  bool DebugDetonateBomb();
+  // Seed half of the explosion record; set by whoever generated the map
+  // (defaults to 0 for hand-authored scenes). Survives Reset like playbooks.
+  void SetMatchSeed(uint32_t seed) { matchSeed_ = seed; }
+  uint32_t MatchSeed() const { return matchSeed_; }
   // Follower side: applies a change received from the authority. Changes
   // already in the log (same id) are ignored; a gap in ids is rejected.
   bool AcceptWorldChange(const WorldChange& change);
@@ -823,6 +853,14 @@ class GameLogic {
   bool SyncWorld(const std::vector<WorldChange>& log);
   std::vector<Obstacle> sightObstacles_;  // See SightObstacles(); rebuilt in Reset.
   std::vector<AABB> obstacleBounds_;  // Retained for compatibility/debug broad-phase inspection.
+  // Debug bomb (issue #350): placement/arming state, blast counter for the
+  // deterministic explosion seed, and the generator seed it is hashed with.
+  std::optional<DebugBomb> debugBomb_;
+  int bombsDetonated_ = 0;
+  uint32_t matchSeed_ = 0;
+  // A figure standing over a fresh floor hole falls: knocked down (ragdoll)
+  // with a drop to whatever support remains below it.
+  void DropFiguresThroughHole(const WorldChange& change, float floorY);
 
   InputMode mode_ = InputMode::AwaitingSelection;
   std::optional<int> selectedUnitId_;

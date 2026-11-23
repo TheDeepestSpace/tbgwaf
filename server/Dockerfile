@@ -16,13 +16,17 @@ RUN cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 # Runtime: Node (for the Jev adapter sidecar) on a glibc at least as new as the build's.
 FROM docker.io/node:22-bookworm-slim
 RUN useradd --system --no-create-home tbgwaf && \
-    mkdir -p /var/lib/tbgwaf/scenes && chown tbgwaf /var/lib/tbgwaf/scenes
+    mkdir -p /var/lib/tbgwaf/scenes /var/lib/tbgwaf/db && chown tbgwaf /var/lib/tbgwaf/scenes /var/lib/tbgwaf/db
 COPY --from=build /src/build/tbgwaf_server /usr/local/bin/tbgwaf_server
 COPY server/jev-adapter/jev-client.mjs server/jev-adapter/server.mjs /opt/jev-adapter/
 COPY server/entrypoint.sh /usr/local/bin/tbgwaf-entrypoint
-USER tbgwaf
+# Starts as root only so the entrypoint can chown a freshly mounted volume
+# (Fly mounts them root-owned), then drops to the tbgwaf user.
 # Builder scenes are stored here; mount a volume at /var/lib/tbgwaf/scenes to keep
 # them across machine restarts (without one they last until the container is replaced).
-ENV PORT=8080 NODE_ENV=production TBGWAF_SCENES_DIR=/var/lib/tbgwaf/scenes
+# Stored matches (SQLite, see docs/persistence.md): mount a volume over the
+# database directory (Fly: /data, set in fly.toml) to keep them across restarts.
+ENV PORT=8080 NODE_ENV=production TBGWAF_SCENES_DIR=/var/lib/tbgwaf/scenes \
+    TBGWAF_DB_PATH=/var/lib/tbgwaf/db/tbgwaf.db
 EXPOSE 8080
 CMD ["tbgwaf-entrypoint"]

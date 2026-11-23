@@ -18,3 +18,10 @@ evenly spaced times, projecting the upper/lower arm and leg vectors into the
 sagittal plane, and storing the resulting joint angles plus normalized body
 height. Runtime interpolation and all proportion retargeting are implemented
 locally in `SceneRenderer.cpp`.
+
+## SQLite
+
+The game server stores matches with SQLite 3.45.1 (the public-domain
+amalgamation, fetched at configure time and compiled in; see
+`src/server/GameStore`). SQLite is in the public domain
+(<https://www.sqlite.org/copyright.html>).

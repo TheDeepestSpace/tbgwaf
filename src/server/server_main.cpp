@@ -7,12 +7,17 @@
 // Jev adapter (http://host:port; the shipped image runs it on 127.0.0.1:8787
 // when TBGWAF_JEV_API_KEY is set). TBGWAF_JEV_MAX_ROOMS caps concurrent Jev matches.
 //
+// Game persistence: set TBGWAF_DB_PATH (or --db FILE) to a SQLite file; matches
+// between two players who joined with a device token are stored there and
+// restored on startup. Unset, matches live in memory only.
+//
 // Builder scene storage: set TBGWAF_SCENES_DIR to keep scenes on disk (one JSON
 // file each, survives restarts); unset, they live in memory until restart.
 //
 // Built with -DTBGWAF_TEST_CONTROL (the tbgwaf_server_testctl target, used by
 // the networked scenario tests) it also accepts --control-port N (the loopback-only
-// test control tap) and --rate-limit N (messages/s per connection). The shipped binary has no such flag.
+// test control tap) and --rate-limit N (messages/s per connection) and
+// --round-limit N (matches end as a draw after N rounds). The shipped binary has no such flag.
 #include <execinfo.h>
 #include <unistd.h>
 
@@ -74,6 +79,7 @@ int main(int argc, char** argv) {
   if (const char* env = std::getenv("PORT")) config.port = static_cast<uint16_t>(std::atoi(env));
   if (const char* jev = std::getenv("TBGWAF_JEV_ADAPTER_URL")) config.jevAdapterUrl = jev;
   if (const char* scenes = std::getenv("TBGWAF_SCENES_DIR")) config.scenesDir = scenes;
+  if (const char* db = std::getenv("TBGWAF_DB_PATH")) config.dbPath = db;
   if (const char* rooms = std::getenv("TBGWAF_JEV_MAX_ROOMS")) config.maxBotRooms = std::atoi(rooms);
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -81,14 +87,18 @@ int main(int argc, char** argv) {
       config.port = static_cast<uint16_t>(std::atoi(argv[++i]));
     } else if (arg == "--bind" && i + 1 < argc) {
       config.bindAddress = argv[++i];
+    } else if (arg == "--db" && i + 1 < argc) {
+      config.dbPath = argv[++i];
 #ifdef TBGWAF_TEST_CONTROL
     } else if (arg == "--control-port" && i + 1 < argc) {
       config.controlPort = std::atoi(argv[++i]);
     } else if (arg == "--rate-limit" && i + 1 < argc) {
       config.maxMessagesPerSecond = std::atoi(argv[++i]);
+    } else if (arg == "--round-limit" && i + 1 < argc) {
+      config.roundLimit = std::atoi(argv[++i]);
 #endif
     } else {
-      std::fprintf(stderr, "usage: %s [--port N] [--bind ADDR]\n", argv[0]);
+      std::fprintf(stderr, "usage: %s [--port N] [--bind ADDR] [--db FILE]\n", argv[0]);
       return arg == "--help" ? 0 : 2;
     }
   }

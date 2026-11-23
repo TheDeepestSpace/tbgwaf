@@ -49,6 +49,20 @@ class TurnTimeline {
     size_t frame = 0;   // Index into Frames().
   };
 
+  // One recorded frame handed in from outside (see ReplaceHistory).
+  struct HistoryFrame {
+    float time = 0.0f;
+    GameSnapshot snapshot;
+  };
+
+  // Swaps in a history built elsewhere. A networked client only ever
+  // observes its own fogged view; after game over the server sends the full
+  // match, which replaces that so the replay shows both teams (issue #284).
+  // `ticks` index into `frames`; the first frame must be the Start tick.
+  // Observation then continues from `game`'s current state without resetting.
+  void ReplaceHistory(const GameLogic& game, std::vector<HistoryFrame> frames,
+                      std::vector<Tick> ticks);
+
   // Restarts history from `game`'s current state (the new "Start" tick).
   // Call wherever the game itself is Reset().
   void Reset(const GameLogic& game);

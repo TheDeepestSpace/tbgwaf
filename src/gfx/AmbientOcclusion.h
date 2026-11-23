@@ -32,6 +32,16 @@ struct NprSettings {
   AmbientOcclusionSettings ao{4.0f, 0.9f, 3, 1};
 };
 
+// The app's default NPR look (tuned thinner/subtler than the struct defaults).
+// Shared by the live app and the visual runner so goldens match what ships.
+inline NprSettings DefaultAppNprSettings() {
+  NprSettings s;
+  s.outlineThickness = 0.8f;
+  s.outlineStrength = 0.46f;
+  s.detailSize = 0.02f;
+  return s;
+}
+
 // Pane-local, screen-space ambient occlusion for the thermal world. Capture
 // opaque color, world normals and depth; composite before translucent geometry
 // and sensor processing. Uses only core GLES3/WebGL2 attachment formats.
@@ -52,13 +62,15 @@ class AmbientOcclusion {
   void CompositeNpr(GLuint target, int x, int y, const glm::mat4& view,
                     const glm::mat4& projection, const NprSettings& settings);
   // See-through geometry: BeginFaded() rebinds the G-buffer (keeping the
-  // opaque depth) so the faded blocks can be drawn into it tagged
-  // (normal alpha 0.75); CompositeFadedOutlines() then blends outlines of
-  // just those pixels onto `target`, scaled by the blocks' `opacity`.
+  // opaque depth, stencil cleared) so the faded blocks can be drawn into it
+  // tagged (normal alpha 0.75 for the shell, 0.5 for a faded building's
+  // floors and stairs); CompositeFadedOutlines() then blends outlines of
+  // just those pixels onto `target`, scaled by `opacity` or
+  // `interiorOpacity` per tag.
   void BeginFaded();
   void CompositeFadedOutlines(GLuint target, int x, int y, const glm::mat4& view,
                               const glm::mat4& projection, const NprSettings& settings,
-                              float opacity);
+                              float opacity, float interiorOpacity);
 
  private:
   Shader occlusionShader_, compositeShader_, nprShader_, fadedOutlineShader_;

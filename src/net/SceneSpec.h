@@ -15,7 +15,7 @@ namespace tactics::net {
 //                         "artery_width": W, "local_street_width": W,
 //                         "elevated": bool},
 //            "obstacles": [{"center": [x, z], "half_extent": [x, z],
-//                           "height": h, "climbable": bool}, ...]},
+//                           "height": h, "ramp": "-x"|"+x"|"-z"|"+z"}, ...]},
 //    "units": [{"id": 0, "team": "blue", "position": [x, y, z],
 //               "facing_degrees": d}, ...]}
 //

@@ -14,10 +14,10 @@ name: fov_shadow_map_building_walls
 
 map:
   obstacles:
-    - {center: [-1, 2], half_extent: [2.0, 2.5], height: 4.0, climbable: false}
-    - {center: [2, -5], half_extent: [1.5, 1.5], height: 1.0, climbable: false}
-    - {center: [-5, -7], half_extent: [1.5, 2.0], height: 2.5, climbable: false}
-    - {center: [3, 7], half_extent: [0.6, 0.6], height: 1.2, climbable: true}
+    - {center: [-1, 2], half_extent: [2.0, 2.5], height: 4.0}
+    - {center: [2, -5], half_extent: [1.5, 1.5], height: 1.0}
+    - {center: [-5, -7], half_extent: [1.5, 2.0], height: 2.5}
+    - {center: [3, 7], half_extent: [0.6, 0.6], height: 1.2}
 
 render:
   fov_overlay: shadow_map

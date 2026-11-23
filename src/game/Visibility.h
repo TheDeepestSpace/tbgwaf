@@ -60,6 +60,17 @@ bool CanUnitSee(const Unit& viewer, const Unit& target, const std::vector<Obstac
 bool CanUnitSee(const Unit& viewer, const Unit& target, const std::vector<Obstacle>& obstacles,
                 const std::vector<WalkSurface>& walkSurfaces, const HeightField& terrain);
 
+// World-space probe points (eye + feet per figure) that `team`'s pane must
+// keep visible through camera-occluding geometry: all of the team's own
+// figures, alive or dead, plus dead opponents inside the team's squad FOV
+// (always, when `fogActive` is false). `allTeams` (omniscient spectator)
+// probes every figure. Living opponents are not probed.
+std::vector<glm::vec3> FigureSeeThroughProbes(Team team, bool allTeams, bool fogActive,
+                                              const std::vector<Unit>& units,
+                                              const std::vector<Obstacle>& obstacles,
+                                              const std::vector<WalkSurface>& walkSurfaces,
+                                              const HeightField& terrain);
+
 // Computes the full per-team visibility set: which enemy figures (downed included) and
 // which obstacles are currently inside the combined FOV of `team`'s living
 // figures.

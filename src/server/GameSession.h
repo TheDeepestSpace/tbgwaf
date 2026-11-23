@@ -62,6 +62,27 @@ class GameSession {
   // the spectator's: the same round, unfiltered.
   std::array<net::Json, 3> RunRound();
 
+  // After game over: every round's unfiltered timeline, so each player can
+  // replay the whole match with both teams visible (issue #284). Only send
+  // once the match is over; mid-match it would leak the fog.
+  net::Json RevealMessage() const;
+
+  // Debug command: removes obstacle `index` from the world now (between
+  // rounds or mid-match). The change joins the world log; clients get it in
+  // the next round message, or immediately via WorldDeltaMessage.
+  bool DebugRemoveObstacle(int index) { return game_.DebugRemoveObstacle(index); }
+  // Debug bomb (issue #350): place/move it, then either detonate immediately
+  // (between rounds; broadcast the delta via TakeWorldDelta) or arm it for a
+  // time into the next round -- the detonation then happens inside RunRound
+  // and its changes ship with the round message at that timestamp.
+  void DebugPlaceBomb(const glm::vec3& position, float radius) {
+    game_.DebugPlaceBomb(position, radius);
+  }
+  bool DebugArmBomb(float atSeconds) { return game_.DebugArmBomb(atSeconds); }
+  bool DebugDetonateBomb() { return game_.DebugDetonateBomb(); }
+  // Unsent world changes (empty array when none); marks them sent.
+  net::Json TakeWorldDelta();
+
   // Rule-state views for one team (fog-filtered; own plans included).
   net::Json StateMessage(Team team) const;
   net::Json PlansMessage(Team team) const;
@@ -76,6 +97,7 @@ class GameSession {
 
  private:
   net::Json StateBody(std::optional<Team> viewer) const;  // nullopt: unfiltered.
+  net::Json WorldLog(size_t from) const;
 
   uint32_t seed_;
   std::string mapKind_;  // See GenerateMapByKind; "" = default city.
@@ -83,6 +105,8 @@ class GameSession {
   std::optional<Scene> fixedScene_;
   GameLogic game_;
   std::array<bool, 2> ready_{false, false};
+  size_t worldSent_ = 0;  // World-log entries already shipped in a round message.
+  std::vector<net::Json> history_;  // Unfiltered round messages of this match.
 };
 
 constexpr float kSimStep = constants::kSimStepSeconds;

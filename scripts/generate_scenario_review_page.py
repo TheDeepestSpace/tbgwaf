@@ -518,7 +518,17 @@ def _action_text(step: dict, units: dict) -> str:
         return f"{actor} cancels"
     if kind == "focus":
         return f"double-click focus on {actor}"
-    return html.escape(f"{kind} (actor {step.get('actor')})")
+    if kind == "timeline_seek":
+        return html.escape(f"replay: seek to tick {step.get('tick')}")
+    if kind == "timeline_play":
+        return "replay: play"
+    if kind == "timeline_pause":
+        return "replay: pause"
+    if kind == "wait":
+        return html.escape(f"wait {step.get('seconds')}s")
+    if kind == "new_game":
+        return "new game"
+    return html.escape(str(kind))
 
 
 def _fmt_value(v) -> str:

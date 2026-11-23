@@ -9,10 +9,9 @@ namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
 
-Obstacle Box(float cx, float cz, float hx, float hz, float height, bool climbable) {
+Obstacle Box(float cx, float cz, float hx, float hz, float height) {
   Obstacle o;
   o.bounds = AABB{glm::vec3(cx - hx, 0.0f, cz - hz), glm::vec3(cx + hx, height, cz + hz)};
-  o.climbable = climbable;
   return o;
 }
 
@@ -37,9 +36,10 @@ Unit Figure(int id, Team team, float x, float z, float facingDegrees) {
 Scene BuildOddRagdollRepro() {
   Scene scene;
   scene.mapHalfExtent = 15.0f;
-  scene.obstacles.push_back(Box(9.0f, 0.5f, 0.8f, 0.8f, 1.2f, true));   // Crate east of the crossing.
-  scene.obstacles.push_back(Box(-3.0f, -9.0f, 3.0f, 0.6f, 2.5f, false));  // Wall, out of the way.
-  scene.obstacles.push_back(Box(3.0f, 9.0f, 3.0f, 0.6f, 2.5f, false));
+  // Crate east of the crossing; its ramp faces away from the shot line.
+  AddClimbableBox(&scene, Box(9.0f, 0.5f, 0.8f, 0.8f, 1.2f).bounds, {1.0f, 0.0f});
+  scene.obstacles.push_back(Box(-3.0f, -9.0f, 3.0f, 0.6f, 2.5f));  // Wall, out of the way.
+  scene.obstacles.push_back(Box(3.0f, 9.0f, 3.0f, 0.6f, 2.5f));
   scene.units.push_back(Figure(0, Team::Blue, -9.0f, -5.0f, 0.0f));    // Assault rifle.
   scene.units.push_back(Figure(1, Team::Blue, -9.0f, 0.0f, 0.0f));     // Sniper: the shooter.
   scene.units.push_back(Figure(2, Team::Red, 5.0f, -6.0f, 90.0f));     // Desert Eagle: walks north across the line.

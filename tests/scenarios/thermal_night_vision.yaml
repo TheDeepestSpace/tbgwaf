@@ -10,8 +10,8 @@ shot_rolls: [0.0]
 
 map:
   obstacles:
-    - {center: [0, -4], half_extent: [1.5, 1.5], height: 4.0, climbable: false}
-    - {center: [0, 5], half_extent: [2.0, 1.0], height: 1.0, climbable: false}
+    - {center: [0, -4], half_extent: [1.5, 1.5], height: 4.0}
+    - {center: [0, 5], half_extent: [2.0, 1.0], height: 1.0}
 
 render:
   thermal: true

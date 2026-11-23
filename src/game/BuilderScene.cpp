@@ -1,9 +1,12 @@
 #include "game/BuilderScene.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "game/DemoScenes.h"
+#include "game/Geometry.h"
 #include "game/Json.h"
+#include "game/MapGenerator.h"
 
 namespace tactics {
 namespace {
@@ -66,12 +69,91 @@ Scene BuildScene(const BuilderScene& bs) {
   Scene scene;
   scene.mapHalfExtent = bs.mapHalfExtent;
   scene.roundLimit = bs.roundLimit;
+  // Boxes first (Obstacle index == box index), then their tops and ramps.
   for (const BuilderBox& box : bs.boxes) {
     Obstacle o;
     o.bounds = AABB{glm::vec3(box.cx - box.hx, box.y, box.cz - box.hz),
                     glm::vec3(box.cx + box.hx, BoxTop(box), box.cz + box.hz)};
-    o.climbable = true;
     scene.obstacles.push_back(o);
+  }
+  // The ramp leans on the first side (toward -X, +X, -Z, +Z) whose footprint
+  // stays inside the map and clear of every other box reaching above the
+  // ramp's own base; failing that, the -X side. A stacked box's ramp must
+  // land on the box it stands on, so its run is capped at the distance from
+  // the face to that support's edge (steeper, but connected).
+  const glm::vec2 sides[] = {{-1.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, -1.0f}, {0.0f, 1.0f}};
+  for (size_t i = 0; i < bs.boxes.size(); ++i) {
+    const BuilderBox& box = bs.boxes[i];
+    const glm::vec2 c(box.cx, box.cz);
+    const glm::vec2 half(box.hx, box.hz);
+    const glm::vec2 faceLo = c - half, faceHi = c + half;
+    glm::vec2 chosen = sides[0];
+    float chosenRun = box.height / kClimbRampSlope;
+    bool found = false;
+    for (const glm::vec2& side : sides) {
+      float run = box.height / kClimbRampSlope;
+      if (box.y > 1e-4f) {
+        // Support: the box whose top is this one's base and which holds the
+        // point just outside the face's middle.
+        const glm::vec2 probe = c + side * (glm::dot(glm::abs(side), half) + 0.05f);
+        float room = -1.0f;
+        for (size_t j = 0; j < bs.boxes.size(); ++j) {
+          const BuilderBox& other = bs.boxes[j];
+          if (j == i || std::fabs(BoxTop(other) - box.y) > 1e-4f || !BoxContains(other, probe.x, probe.y)) continue;
+          const float edge = side.x != 0.0f ? (side.x > 0.0f ? other.cx + other.hx : other.cx - other.hx)
+                                            : (side.y > 0.0f ? other.cz + other.hz : other.cz - other.hz);
+          const float along = side.x != 0.0f ? probe.x : probe.y;  // Probe, on the side's axis.
+          room = std::max(room, std::fabs(edge - along) + 0.05f);  // Face to the support's edge.
+        }
+        if (room < 0.2f) continue;  // Nothing to stand on beyond this face.
+        run = std::min(run, room - 0.05f);
+      }
+      // Ramp footprint: the box face pushed out by `run`.
+      glm::vec2 lo = faceLo, hi = faceHi;
+      if (side.x < 0.0f) { hi.x = faceLo.x; lo.x = faceLo.x - run; }
+      if (side.x > 0.0f) { lo.x = faceHi.x; hi.x = faceHi.x + run; }
+      if (side.y < 0.0f) { hi.y = faceLo.y; lo.y = faceLo.y - run; }
+      if (side.y > 0.0f) { lo.y = faceHi.y; hi.y = faceHi.y + run; }
+      bool clear = std::max(std::fabs(lo.x), std::fabs(hi.x)) <= bs.mapHalfExtent &&
+                   std::max(std::fabs(lo.y), std::fabs(hi.y)) <= bs.mapHalfExtent;
+      for (size_t j = 0; j < bs.boxes.size() && clear; ++j) {
+        if (j == i) continue;
+        const BuilderBox& other = bs.boxes[j];
+        if (BoxTop(other) <= box.y + 1e-4f) continue;  // Under the ramp's base: it is the floor.
+        clear &= other.cx - other.hx >= hi.x - 1e-4f || other.cx + other.hx <= lo.x + 1e-4f ||
+                 other.cz - other.hz >= hi.y - 1e-4f || other.cz + other.hz <= lo.y + 1e-4f;
+      }
+      if (clear) {
+        chosen = side;
+        chosenRun = run;
+        found = true;
+        break;
+      }
+    }
+    if (!found && box.y > 1e-4f) chosenRun = 0.5f;  // Floating box: a stub ramp, as a hint.
+    const int top = AddClimbRamp(&scene, static_cast<int>(i), chosen, chosenRun);
+    if (top < 0 || box.y <= 1e-4f) continue;
+    // Stacked: the ramp's foot stands on the top of the box beneath. Link it
+    // to that top (the first earlier top surface containing the foot's
+    // midpoint at the same height).
+    const int ramp = top + 1;
+    const WalkSurface& flight = scene.walkSurfaces[ramp];
+    glm::vec3 foot(0.0f);
+    int count = 0;
+    for (const glm::vec3& v : flight.vertices) {
+      if (std::fabs(v.y - box.y) < 1e-3f) { foot += v; ++count; }
+    }
+    if (count == 0) continue;
+    foot /= static_cast<float>(count);
+    for (int s = 0; s < ramp; ++s) {
+      const WalkSurface& other = scene.walkSurfaces[s];
+      if (other.vertices.size() != 4 || other.connectsToGround) continue;
+      if (std::fabs(other.vertices[0].y - box.y) > 1e-3f) continue;
+      if (!SurfaceContainsXZ(other, foot.x, foot.z)) continue;
+      scene.walkSurfaces[s].neighbors.push_back(ramp);
+      scene.walkSurfaces[ramp].neighbors.push_back(s);
+      break;
+    }
   }
   int id = 0;
   for (const BuilderFigure& figure : bs.figures) {
@@ -84,6 +166,11 @@ Scene BuildScene(const BuilderScene& bs) {
     u.alive = true;
     u.weapon = figure.weapon;
     scene.units.push_back(u);
+  }
+  for (const BuilderBuilding& building : bs.buildings) {
+    AppendGeneratedBuilding(&scene, GeneratedBuildingSpec{static_cast<uint32_t>(building.seed),
+                                                          building.cx, building.cz, building.hx,
+                                                          building.hz});
   }
   return scene;
 }
@@ -102,7 +189,18 @@ std::string SerializeBuilderScene(const BuilderScene& bs) {
     if (b.y != 0.0f) out += ',' + FloatText(b.y);  // Omitted for ground cubes.
     out += ']';
   }
-  out += "],\"figures\":[";
+  out += ']';
+  if (!bs.buildings.empty()) {
+    out += ",\"buildings\":[";
+    for (size_t i = 0; i < bs.buildings.size(); ++i) {
+      const BuilderBuilding& b = bs.buildings[i];
+      if (i) out += ',';
+      out += '[' + std::to_string(b.seed) + ',' + FloatText(b.cx) + ',' + FloatText(b.cz) + ',' +
+             FloatText(b.hx) + ',' + FloatText(b.hz) + ']';
+    }
+    out += ']';
+  }
+  out += ",\"figures\":[";
   for (size_t i = 0; i < bs.figures.size(); ++i) {
     const BuilderFigure& f = bs.figures[i];
     if (i) out += ',';
@@ -149,6 +247,25 @@ bool ParseBuilderScene(const std::string& text, BuilderScene* out, std::string* 
       return FailWith(error, "box extents and height must be positive and y non-negative");
     }
     bs.boxes.push_back(b);
+  }
+
+  if (const JsonValue* buildings = root.Find("buildings")) {
+    if (buildings->type != JsonValue::Type::Array) {
+      return FailWith(error, "builder scene 'buildings' must be an array");
+    }
+    for (const JsonValue& v : buildings->array) {
+      BuilderBuilding b;
+      float seed = 0.0f;
+      if (v.type != JsonValue::Type::Array || v.array.size() != 5 || !ReadNumberAt(v, 0, &seed) ||
+          !ReadNumberAt(v, 1, &b.cx) || !ReadNumberAt(v, 2, &b.cz) || !ReadNumberAt(v, 3, &b.hx) ||
+          !ReadNumberAt(v, 4, &b.hz)) {
+        return FailWith(error, "building must be [seed, cx, cz, hx, hz]");
+      }
+      if (!ReadInt(&v.array[0], &b.seed) || b.seed < 0 || b.hx <= 0.0f || b.hz <= 0.0f) {
+        return FailWith(error, "building seed must be a non-negative integer and extents positive");
+      }
+      bs.buildings.push_back(b);
+    }
   }
 
   const JsonValue* figures = root.Find("figures");

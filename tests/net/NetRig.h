@@ -45,10 +45,7 @@ struct ServerProcess {
   uint16_t gamePort = 0;
   uint16_t controlPort = 0;
 
-  // `extraArgs` are appended to the command line (e.g. {"--db", path}).
-  bool Start(const std::string& binary, std::string* error,
-             const std::vector<std::string>& extraArgs = {}, int waitMs = kWaitMs) {
-    gamePort = controlPort = 0;
+  bool Start(const std::string& binary, std::string* error) {
     int fds[2];
     if (pipe(fds) != 0) return false;
     pid = fork();
@@ -57,19 +54,14 @@ struct ServerProcess {
       close(fds[0]);
       close(fds[1]);
       // Scenario scripts are bursty; lift the per-connection message cap.
-      std::vector<std::string> args = {binary, "--port", "0", "--control-port", "0",
-                                       "--rate-limit", "100000"};
-      args.insert(args.end(), extraArgs.begin(), extraArgs.end());
-      std::vector<char*> argv;
-      for (std::string& a : args) argv.push_back(a.data());
-      argv.push_back(nullptr);
-      execv(binary.c_str(), argv.data());
+      execl(binary.c_str(), binary.c_str(), "--port", "0", "--control-port", "0", "--rate-limit",
+            "100000", static_cast<char*>(nullptr));
       _exit(127);
     }
     close(fds[1]);
     // Read the startup banner: "...listening on A:PORT" then "...control tap on A:PORT".
     std::string text;
-    const int64_t deadline = NowMs() + waitMs;
+    const int64_t deadline = NowMs() + kWaitMs;
     while ((gamePort == 0 || controlPort == 0) && NowMs() < deadline) {
       pollfd p{fds[0], POLLIN, 0};
       if (poll(&p, 1, 100) <= 0) continue;
@@ -95,15 +87,6 @@ struct ServerProcess {
       return false;
     }
     return true;
-  }
-
-  // SIGKILL: no shutdown path runs (a crash).
-  void Crash() {
-    if (pid <= 0) return;
-    kill(pid, SIGKILL);
-    int status = 0;
-    waitpid(pid, &status, 0);
-    pid = -1;
   }
 
   void Stop() {

@@ -25,21 +25,19 @@ constexpr int kSpectatorSlot = 2;
 
 namespace {
 // Seed-generated matches spawn at the map-suggested opposite corners (#226).
-Scene GenerateMatchScene(uint32_t seed, const std::string& kind, bool ctf, int roundLimit) {
+Scene GenerateMatchScene(uint32_t seed, const std::string& kind, bool ctf) {
   Scene scene = GenerateMapByKind(seed, kind);
   ApplySpawnHints(&scene);
   scene.flag.enabled = ctf;
-  scene.roundLimit = roundLimit;
   return scene;
 }
 }  // namespace
 
-GameSession::GameSession(uint32_t seed, std::string mapKind, bool ctf, int roundLimit)
+GameSession::GameSession(uint32_t seed, std::string mapKind, bool ctf)
     : seed_(seed),
       mapKind_(std::move(mapKind)),
       ctf_(ctf),
-      roundLimit_(roundLimit),
-      game_(GenerateMatchScene(seed, mapKind_, ctf_, roundLimit_)) {
+      game_(GenerateMatchScene(seed, mapKind_, ctf_)) {
   game_.SetMatchSeed(seed_);  // Explosion seeds hash it (issue #350).
 }
 
@@ -72,7 +70,7 @@ GameSession::Result GameSession::Apply(Team team, const net::Action& action, uin
   if (action.kind == net::ActionKind::NewMatch) {
     if (game_.Mode() != InputMode::GameOver) return {false, "match is still running"};
     seed_ = newSeed;
-    game_.Reset(fixedScene_ ? *fixedScene_ : GenerateMatchScene(seed_, mapKind_, ctf_, roundLimit_));
+    game_.Reset(fixedScene_ ? *fixedScene_ : GenerateMatchScene(seed_, mapKind_, ctf_));
     ready_ = {false, false};
     history_.clear();
     worldSent_ = 0;
@@ -101,43 +99,6 @@ GameSession::Result GameSession::ApplyBotPlan(Team team, const ai::JevRequest* r
   net::Action commit;
   commit.kind = net::ActionKind::Commit;
   return Apply(team, commit);
-}
-
-Json GameSession::OrdersFor(Team team) const {
-  Json plans{Json::Array{}};
-  for (const Unit& u : game_.GetScene().units) {
-    if (u.team != team || !u.alive) continue;
-    plans.Push(net::EncodeAction(net::PlanToAction(u)));
-  }
-  Json orders;
-  orders.Set("plans", std::move(plans));
-  orders.Set("playbook", net::EncodePlaybook(game_.Playbook(team)));
-  return orders;
-}
-
-GameSession::Result GameSession::ApplyOrders(Team team, const Json& orders) {
-  std::vector<net::Action> actions;
-  for (const Json& plan : orders["plans"].AsArray()) {
-    net::Action action;
-    std::string error;
-    if (!net::ParseAction(plan, &action, &error)) return {false, "stored order: " + error};
-    actions.push_back(std::move(action));
-  }
-  Json reaction;
-  reaction.Set("t", "reaction");
-  reaction.Set("table", orders["playbook"]);
-  net::Action playbook;
-  std::string error;
-  if (!net::ParseAction(reaction, &playbook, &error)) return {false, "stored playbook: " + error};
-  actions.push_back(std::move(playbook));
-  net::Action commit;
-  commit.kind = net::ActionKind::Commit;
-  actions.push_back(std::move(commit));
-  for (const net::Action& action : actions) {
-    const Result result = Apply(team, action);
-    if (!result.ok) return result;
-  }
-  return {};
 }
 
 std::array<Json, 3> GameSession::RunRound() {

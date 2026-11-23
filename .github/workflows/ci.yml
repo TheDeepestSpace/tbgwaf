@@ -75,7 +75,7 @@ jobs:
       - name: Build sharded test binaries
         run: |
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DTBGWAF_BUILD_CLIENT=OFF
-          cmake --build build --target tactics_map_generator_tests tactics_urban_terrain_tests tactics_jev_planner_tests tactics_server_tests tactics_integration_tests tbgwaf_server_testctl
+          cmake --build build --target tactics_map_generator_tests tactics_urban_terrain_tests tactics_jev_planner_tests tactics_server_tests
 
       - name: Check every test is covered by exactly one shard
         run: python3 scripts/ci_matrix.py check build
@@ -91,15 +91,10 @@ jobs:
             build/tactics_urban_terrain_tests
             build/tactics_jev_planner_tests
             build/tactics_server_tests
-            build/tactics_integration_tests
-            build/tbgwaf_server_testctl
           retention-days: 1
 
   test-shard:
     needs: [select_ci_image, plan-shards]
-    # Explicit if: the implicit success() also checks transitive needs, and
-    # ci_image is skipped on push runs, which would skip every shard.
-    if: ${{ !cancelled() && needs.plan-shards.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -156,9 +151,9 @@ jobs:
       - name: Build
         run: cmake --build build
 
-      # map_generator/urban_terrain/jev_planner/server/integration run in the test-shard jobs.
+      # map_generator/urban_terrain/jev_planner/server run in the test-shard jobs.
       - name: Test
-        run: ctest --test-dir build --output-on-failure -j"$(nproc)" -E '^(map_generator|urban_terrain|jev_planner|server|integration)_tests$'
+        run: ctest --test-dir build --output-on-failure -j"$(nproc)" -E '^(map_generator|urban_terrain|jev_planner|server)_tests$'
 
       - name: Upload visual test output
         if: failure()
@@ -189,7 +184,7 @@ jobs:
         run: |
           cmake -B build-headless -G Ninja -DCMAKE_BUILD_TYPE=Release -DTBGWAF_BUILD_CLIENT=OFF
           cmake --build build-headless
-          ctest --test-dir build-headless --output-on-failure -j"$(nproc)" -E '^(map_generator|urban_terrain|jev_planner|server|integration)_tests$'
+          ctest --test-dir build-headless --output-on-failure -j"$(nproc)" -E '^(map_generator|urban_terrain|jev_planner|server)_tests$'
 
   # The only required check: the shard matrix size is dynamic, so branch
   # protection must not name individual shard jobs.

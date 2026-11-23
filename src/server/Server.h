@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 
+#include "server/GameStore.h"
 #include "server/Lobby.h"
 #include "server/SceneStore.h"
 #include "server/WebSocket.h"
@@ -32,6 +33,13 @@ struct ServerConfig {
   // Directory for stored Builder scenes (one JSON file each); empty keeps
   // them in memory only, lost on restart. See SceneStore.
   std::string scenesDir;
+  // SQLite file holding persisted two-player matches (see GameStore); empty
+  // keeps matches in memory only (lost on restart). On a Fly machine this
+  // lives on the mounted volume.
+  std::string dbPath;
+  // Human matches end as a draw after this many rounds (0 = unlimited). Only
+  // the test-control build sets it (--round-limit).
+  int roundLimit = 0;
 };
 
 // Single-threaded poll() WebSocket server feeding a Lobby. Also answers
@@ -86,6 +94,7 @@ class Server {
   std::map<int, Conn> conns_;
   JevBotRunner bots_;  // Declared before lobby_, which holds a pointer to it.
   SceneStore scenes_;  // Declared before lobby_, which holds a pointer to it.
+  std::unique_ptr<GameStore> games_;  // Likewise; null without ServerConfig::dbPath.
   Lobby lobby_;
 };
 

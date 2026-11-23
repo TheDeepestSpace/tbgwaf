@@ -1,0 +1,32 @@
+name: replay_matches_live
+description: >
+  A match (round limit 3, so it ends as a draw) is played to the end. After a server restart, My games
+  lists it as finished for both players, and Replay delivers the same final state and the same
+  full-information timeline (reveal) the players received live.
+round_limit: 3
+steps:
+  - server: start
+  - app: [alice, bob]
+  - click: {app: alice, button: New Game}
+  - click: {app: alice, button: Online (2 players)}
+  - click: {app: alice, button: New room}
+  - click: {app: bob, button: New Game}
+  - click: {app: bob, button: Online (2 players)}
+  - type_room_code: {app: bob, from: alice}
+  - click: {app: bob, button: Join}
+  - round: {apps: [alice, bob], count: 3}
+  - assert: {app: alice, game_over: true, has_reveal: true}
+  - assert: {app: bob, game_over: true, has_reveal: true}
+  - snapshot: {app: alice, name: alice_live}
+  - snapshot: {app: bob, name: bob_live}
+  - server: restart
+  - reload: alice
+  - reload: bob
+  - click: {app: alice, button: New Game}
+  - click: {app: alice, button: My games}
+  - assert: {app: alice, games_total: 1, games_finished: 1, games_active: 0}
+  - click: {app: alice, button: Replay, row: 0}
+  - assert: {app: alice, screen: gameplay, game_over: true, has_reveal: true, same_as: alice_live}
+  - click: {app: bob, button: New Game}
+  - click: {app: bob, button: Continue}
+  - assert: {app: bob, screen: gameplay, game_over: true, has_reveal: true, same_as: bob_live}

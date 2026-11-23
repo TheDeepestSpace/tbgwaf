@@ -49,6 +49,13 @@ class RemoteClient {
     mapSeed_ = seed;
   }
 
+  // Anonymous per-device token: sent on join so a two-player match is stored
+  // (and listed under "My games") for this device. Call before OnOpen().
+  void SetToken(std::string token) { token_ = std::move(token); }
+  // Resume the stored match `gameId` (needs SetToken) instead of joining a
+  // room; a finished game comes back as its final state plus the full reveal.
+  void SetResume(std::string gameId) { resumeGame_ = std::move(gameId); }
+
   // Transport events.
   void OnOpen();
   void OnMessage(const std::string& text);
@@ -86,6 +93,13 @@ class RemoteClient {
   bool CommitLocked() const { return commitPending_ || selfReady_; }
   const std::string& lastError() const { return lastError_; }
   const std::string& room_code() const { return room_; }
+  // The stored match this client plays (from the server's "start"); empty if
+  // the match is not persisted.
+  const std::string& game_id() const { return gameId_; }
+  // The resumed game had already finished (only the reveal is available).
+  bool gameFinished() const { return gameFinished_; }
+  // The opponent's connection dropped; their seat is held until they resume.
+  bool peerAway() const { return peerAway_; }
   // True once after a (new) match started so the host can re-frame cameras.
   bool ConsumeMatchStarted() {
     const bool v = matchStarted_;
@@ -158,6 +172,11 @@ class RemoteClient {
   std::string room_;
   std::string intent_;
   std::string botMode_;
+  std::string token_;
+  std::string resumeGame_;
+  std::string gameId_;
+  bool gameFinished_ = false;
+  bool peerAway_ = false;
   std::string mapKind_;
   std::optional<uint32_t> mapSeed_;
   bool ctf_ = false;

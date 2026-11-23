@@ -18,7 +18,9 @@ namespace tactics::server {
 // and the WebSocket layer stays a thin pipe.
 class GameSession {
  public:
-  explicit GameSession(uint32_t seed, std::string mapKind = "", bool ctf = false);
+  // `roundLimit` > 0 ends the match as a draw after that many rounds.
+  explicit GameSession(uint32_t seed, std::string mapKind = "", bool ctf = false,
+                       int roundLimit = 0);
   // A match on a fixed, explicitly built scene (test control tap); `new_match`
   // restarts on the same scene.
   explicit GameSession(const Scene& scene);
@@ -30,6 +32,7 @@ class GameSession {
   uint32_t seed() const { return seed_; }
   const std::string& mapKind() const { return mapKind_; }
   bool ctf() const { return ctf_; }
+  int roundLimit() const { return roundLimit_; }
   const GameLogic& game() const { return game_; }
 
   struct Result {
@@ -52,6 +55,13 @@ class GameSession {
   // `request == nullptr` just commits (nothing was left to plan).
   Result ApplyBotPlan(Team team, const ai::JevRequest* request,
                       const std::vector<std::string>& choices);
+
+  // The team's plans and playbook as stored when it commits (persistence), and
+  // the inverse: replays such orders through Apply() and commits the team.
+  net::Json OrdersFor(Team team) const;
+  Result ApplyOrders(Team team, const net::Json& orders);
+  // Hash of the rule state (compared after replaying a stored match).
+  std::string StateChecksum() const { return std::to_string(game_.StateHash()); }
 
   bool Ready(Team team) const { return ready_[static_cast<int>(team)]; }
   bool BothReady() const { return Ready(Team::Blue) && Ready(Team::Red); }
@@ -102,6 +112,7 @@ class GameSession {
   uint32_t seed_;
   std::string mapKind_;  // See GenerateMapByKind; "" = default city.
   bool ctf_ = false;     // Capture the Flag objective on generated maps.
+  int roundLimit_ = 0;
   std::optional<Scene> fixedScene_;
   GameLogic game_;
   std::array<bool, 2> ready_{false, false};

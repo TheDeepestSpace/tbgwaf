@@ -750,12 +750,17 @@ void TestJevVsJev() {
 
   fail = false;
   w.Send(9, R"({"t":"bot_control","retry":true})");
+  // These two waits cover full Jev planning passes for both seats (request
+  // building is CPU-bound and takes ~54 s on a slow sandbox against the
+  // default 60 s), so give them real headroom: the round either comes or
+  // the test still fails, just without flaking on machine speed.
+  constexpr int kRoundWaitMs = 180000;
   CHECK(w.Pump([&] {
     for (const Json& m : w.Drain(9)) {
       if (m["t"].AsString() == "round") return true;
     }
     return false;
-  }));  // Both Jevs planned; the server ran the round.
+  }, kRoundWaitMs));  // Both Jevs planned; the server ran the round.
 
   // Opting into the deterministic fallback needs no adapter at all.
   w.Send(9, R"({"t":"bot_control","fallback":true})");
@@ -765,7 +770,7 @@ void TestJevVsJev() {
       if (m["t"].AsString() == "round") return true;
     }
     return false;
-  }));
+  }, kRoundWaitMs));
   CHECK(posts == before || posts == before + 2);  // At most in-flight asks from before the switch.
 
   w.Send(9, R"({"t":"bot_control","run":false})");

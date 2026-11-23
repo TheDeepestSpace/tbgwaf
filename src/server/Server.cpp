@@ -71,7 +71,6 @@ Server::Server(ServerConfig config)
           RandomSeed) {
   lobby_.SetBots(&bots_, config_.maxBotRooms);
   lobby_.SetSceneStore(&scenes_);
-  lobby_.SetRoundLimit(config_.roundLimit);
 }
 
 Server::~Server() {
@@ -110,19 +109,6 @@ bool Server::BindListener(const std::string& address, int port, int* fd, uint16_
 }
 
 bool Server::Listen(std::string* error) {
-  if (!config_.dbPath.empty() && !games_) {
-    games_ = std::make_unique<GameStore>(config_.dbPath);
-    if (!games_->ok()) {
-      *error = "game database: " + games_->error();
-      return false;
-    }
-    if (games_->wasReset()) {
-      std::fprintf(stderr, "tbgwaf_server: database schema changed; stored games were dropped\n");
-    }
-    const int restored = lobby_.SetGameStore(games_.get());
-    std::printf("tbgwaf_server: game database %s (%d active game(s) restored)\n",
-                config_.dbPath.c_str(), restored);
-  }
   if (!BindListener(config_.bindAddress, config_.port, &listenFd_, &port_, error)) return false;
   if (config_.controlPort >= 0 &&
       !BindListener("127.0.0.1", config_.controlPort, &controlFd_, &controlPortBound_, error)) {

@@ -59,8 +59,6 @@ void RemoteClient::OnOpen() {
   if (!mapKind_.empty()) join.Set("map", mapKind_);
   if (ctf_) join.Set("ctf", Json(true));
   if (mapSeed_) join.Set("seed", static_cast<double>(*mapSeed_));
-  if (!token_.empty()) join.Set("token", token_);
-  if (!resumeGame_.empty()) join.Set("game", resumeGame_);
   Queue(join);
 }
 
@@ -78,15 +76,12 @@ std::string RemoteClient::StatusText() const {
                            : "Room code " + room_ + " -- waiting for an opponent to join...";
     case Status::Rejected: return lastError_;
     case Status::OpponentLeft: return "Opponent left the match. Reload to play again.";
-    case Status::Disconnected:
-      return gameId_.empty() ? "Disconnected from server. Reload to reconnect."
-                             : "Disconnected from server. Reload and press Continue to resume.";
+    case Status::Disconnected: return "Disconnected from server. Reload to reconnect.";
     case Status::Playing: break;
   }
   if (playback_) return "Round in progress...";
   if (!lastError_.empty()) return lastError_;
   if (CommitLocked()) return peerReady_ ? "Both ready..." : "Committed; waiting for opponent...";
-  if (peerAway_) return "Opponent disconnected; the match resumes when they return.";
   if (peerReady_) return "Opponent is ready.";
   return "";
 }
@@ -120,10 +115,6 @@ void RemoteClient::OnMessage(const std::string& text) {
     const bool ok = m["ok"].AsBool(true);
     lastError_ = ok ? "" : m["error"].AsString();
     if (!ok && seq == commitSeq_) commitPending_ = false;  // Commit refused: unlock planning.
-  } else if (type == "opponent_away") {
-    peerAway_ = true;
-  } else if (type == "opponent_back") {
-    peerAway_ = false;
   } else if (type == "opponent_left") {
     status_ = Status::OpponentLeft;
     playback_.reset();
@@ -140,9 +131,6 @@ void RemoteClient::HandleStart(const Json& m) {
   const auto team = spectate_ ? std::optional<Team>(Team::Blue) : ParseTeamName(m["team"].AsString());
   if (!team || !m["seed"].IsNumber()) return;
   team_ = team;
-  gameId_ = m["game"].IsString() ? m["game"].AsString() : "";
-  gameFinished_ = m["finished"].AsBool();
-  peerAway_ = false;
   // Rooms loaded through the server's test control tap carry an explicit
   // scene; ordinary matches are rebuilt from the shared deterministic seed.
   tactics::Scene scene;

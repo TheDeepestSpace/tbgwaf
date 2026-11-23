@@ -26,7 +26,10 @@
 #include "net/BuilderSceneSync.h"
 #include "net/RemoteClient.h"
 #include "net/SceneSpec.h"
+#include <sqlite3.h>
+
 #include "server/GameSession.h"
+#include "server/GameStore.h"
 #include "server/HttpClient.h"
 #include "server/JevBot.h"
 #include "server/Lobby.h"
@@ -1497,6 +1500,333 @@ void TestRealSocketLoopback() {
 
 }  // namespace
 
+
+// ---- Persistence (issue #364) ----
+
+std::string TempDbPath(const char* name) {
+  const std::string path = (std::filesystem::temp_directory_path() /
+                            (std::string("tbgwaf_") + name + "_" + std::to_string(::getpid()) + ".db")).string();
+  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
+  return path;
+}
+
+const char* kBlueToken = "blue-device-token-0001";
+const char* kRedToken = "red-device-token-00002";
+
+std::string JoinMsg(const char* room, const char* token) {
+  return std::string(R"({"t":"join","room":")") + room + R"(","token":")" + token + R"("})";
+}
+
+// Plans "pass" for all three of a team's figures and commits.
+void PassAndCommit(Wire& w, int conn, int firstUnit) {
+  for (int i = 0; i < 3; ++i) {
+    w.Send(conn, R"({"t":"pass","unit":)" + std::to_string(firstUnit + i) + "}");
+  }
+  w.Send(conn, R"({"t":"commit"})");
+}
+
+const Json* Find(const std::vector<Json>& msgs, const char* type) {
+  for (const Json& m : msgs) if (m["t"].AsString() == type) return &m;
+  return nullptr;
+}
+
+// Both players join `room` with their tokens; returns the game id.
+std::string StartStoredMatch(Wire& w, const char* room, int blueConn, int redConn) {
+  w.Send(blueConn, JoinMsg(room, kBlueToken));
+  w.Send(redConn, JoinMsg(room, kRedToken));
+  const auto blue = w.Drain(blueConn);
+  w.Drain(redConn);
+  const Json* start = Find(blue, "start");
+  CHECK(start != nullptr);
+  return start ? (*start)["game"].AsString() : "";
+}
+
+void TestGameStoreBasics() {
+  const std::string path = TempDbPath("store");
+  {
+    server::GameStore store(path);
+    CHECK(store.ok() && !store.wasReset());
+    server::GameStore::Game g;
+    g.id = "g1";
+    g.room = "R1";
+    g.seed = 42;
+    CHECK(store.CreateGame(g, "tokenA", "tokenB"));
+    CHECK(!store.CreateGame(g, "tokenA", "tokenB"));  // Duplicate id.
+    CHECK(store.PutOrders("g1", 1, 0, "{}"));
+    CHECK(store.Orders("g1").size() == 1);
+    CHECK(store.TeamOf("g1", "tokenB") == std::optional<int>(1));
+    CHECK(!store.TeamOf("g1", "nobody").has_value());
+    server::GameStore::Turn turn;
+    turn.round = 1;
+    turn.messages[0] = "b";
+    turn.messages[1] = "r";
+    turn.messages[2] = "s";
+    turn.stateHash = "h";
+    CHECK(store.PutTurn("g1", turn, false, ""));
+    CHECK(store.Find("g1")->round == 2 && !store.Find("g1")->finished);
+    CHECK(store.ActiveGames().size() == 1);
+    CHECK(store.PutTurn("g1", {2, {"b", "r", "s"}, "h"}, true, "blue"));
+    CHECK(store.Find("g1")->finished && store.Find("g1")->winner == "blue");
+    CHECK(store.ActiveGames().empty());
+    std::vector<int> teams;
+    CHECK(store.GamesOf("tokenA", &teams).size() == 1 && teams[0] == 0);
+    CHECK(store.GamesOf("tokenZ", &teams).empty());
+  }
+  {  // Reopening keeps everything.
+    server::GameStore store(path);
+    CHECK(store.ok() && !store.wasReset() && store.Find("g1").has_value());
+    CHECK(store.Turns("g1").size() == 2);
+  }
+  {  // A database of another schema version is dropped, not migrated.
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(path.c_str(), &db) == SQLITE_OK);
+    CHECK(sqlite3_exec(db, "PRAGMA user_version=999", nullptr, nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close(db);
+    server::GameStore store(path);
+    CHECK(store.ok() && store.wasReset() && !store.Find("g1").has_value());
+    CHECK(store.CreateGame({"g2", "R", 1}, "a", "b"));
+  }
+  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
+}
+
+// Commits and resolved turns survive a server restart: the replacement lobby
+// rebuilds the match from the DB and players resume with their tokens.
+void TestPersistedMatchSurvivesRestart() {
+  const std::string path = TempDbPath("restart");
+  std::string gameId;
+  std::string bluePos;
+  {
+    server::GameStore store(path);
+    Wire w;
+    CHECK(w.lobby.SetGameStore(&store) == 0);
+    gameId = StartStoredMatch(w, "r1", 1, 2);
+    CHECK(!gameId.empty());
+    for (int round = 0; round < 2; ++round) {
+      PassAndCommit(w, 1, 0);
+      PassAndCommit(w, 2, 3);
+      CHECK(Has(w.Drain(1), "round"));
+      w.Drain(2);
+    }
+    PassAndCommit(w, 1, 0);  // Round 3: only Blue commits before the "crash".
+    w.Drain(1);
+    CHECK(store.Turns(gameId).size() == 2 && store.Orders(gameId).size() == 5);
+  }
+  {
+    server::GameStore store(path);
+    Wire w;
+    CHECK(w.lobby.SetGameStore(&store) == 1);
+    CHECK(w.lobby.RoomCount() == 1);
+    // Wrong token / unknown game are refused.
+    w.Send(5, R"({"t":"join","game":")" + gameId + R"(","token":"someone-else-token-123"})");
+    CHECK(w.Drain(5)[0]["t"].AsString() == "error");
+    w.Send(5, R"({"t":"join","game":"gnope","token":"blue-device-token-0001"})");
+    CHECK(w.Drain(5)[0]["t"].AsString() == "error");
+    // A plain join of the room does not steal the seat.
+    w.Send(5, R"({"t":"join","room":"r1"})");
+    CHECK(w.Drain(5)[0]["t"].AsString() == "error");
+
+    w.Send(1, R"({"t":"join","game":")" + gameId + R"(","token":")" + kBlueToken + R"("})");
+    const auto blue = w.Drain(1);
+    CHECK(Has(blue, "start") && Has(blue, "plans") && Has(blue, "state") && Has(blue, "round"));
+    CHECK(blue.back()["t"].AsString() == "peer" && blue[blue.size() - 2]["t"].AsString() == "plans");
+    CHECK((*Find(blue, "start"))["resumed"].AsBool() && (*Find(blue, "start"))["team"].AsString() == "blue");
+    CHECK((*Find(blue, "plans"))["ready"].AsBool());  // Blue's commit survived.
+    CHECK((*Find(blue, "state"))["units"].AsArray().size() >= 3);
+
+    w.Send(2, R"({"t":"join","game":")" + gameId + R"(","token":")" + kRedToken + R"("})");
+    const auto red = w.Drain(2);
+    CHECK(!(*Find(red, "plans"))["ready"].AsBool());
+    CHECK((*Find(red, "peer"))["ready"].AsBool());
+    CHECK(Has(w.Drain(1), "opponent_back"));
+    PassAndCommit(w, 2, 3);
+    CHECK(Has(w.Drain(2), "round") && Has(w.Drain(1), "round"));
+    CHECK(store.Turns(gameId).size() == 3);
+  }
+  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
+}
+
+// A dropped player's seat is held; the opponent keeps the room and the round
+// waits for the returning player.
+void TestDisconnectHoldsSeat() {
+  const std::string path = TempDbPath("seat");
+  server::GameStore store(path);
+  Wire w;
+  w.lobby.SetGameStore(&store);
+  const std::string gameId = StartStoredMatch(w, "r1", 1, 2);
+  w.lobby.OnDisconnect(2);
+  CHECK(Has(w.Drain(1), "opponent_away"));
+  CHECK(w.lobby.RoomCount() == 1);
+  PassAndCommit(w, 1, 0);
+  w.Drain(1);
+  // Red returns on a new connection, even though conn 3 replaces a live one.
+  w.Send(3, R"({"t":"join","game":")" + gameId + R"(","token":")" + kRedToken + R"("})");
+  CHECK((*Find(w.Drain(3), "peer"))["ready"].AsBool());
+  PassAndCommit(w, 3, 3);
+  CHECK(Has(w.Drain(1), "round"));
+  // Same device reconnecting while its old socket is still registered.
+  w.Send(4, R"({"t":"join","game":")" + gameId + R"(","token":")" + kRedToken + R"("})");
+  CHECK(Has(w.Drain(4), "start"));
+  CHECK(Has(w.Drain(3), "opponent_left"));
+  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
+}
+
+void TestMyGamesListsOnlyOwn() {
+  const std::string path = TempDbPath("mine");
+  server::GameStore store(path);
+  Wire w;
+  w.lobby.SetGameStore(&store);
+  const std::string first = StartStoredMatch(w, "r1", 1, 2);
+  // A second, unrelated pair, and an ephemeral (token-less) match.
+  w.Send(3, JoinMsg("r2", "carol-device-token-0003"));
+  w.Send(4, JoinMsg("r2", "dave-device-token-00004"));
+  w.Drain(3);
+  w.Drain(4);
+  w.Send(5, R"({"t":"join","room":"r3"})");
+  w.Send(6, R"({"t":"join","room":"r3"})");
+
+  w.Send(9, std::string(R"({"t":"my_games","token":")") + kBlueToken + R"("})");
+  auto reply = w.Drain(9);
+  CHECK(reply.size() == 1 && reply[0]["t"].AsString() == "games");
+  CHECK(reply[0]["games"].AsArray().size() == 1);
+  const Json& g = reply[0]["games"].AsArray()[0];
+  CHECK(g["id"].AsString() == first && g["status"].AsString() == "active" &&
+        g["team"].AsString() == "blue" && g["round"].AsNumber() == 1);
+  w.Send(9, std::string(R"({"t":"my_games","token":")") + kRedToken + R"("})");
+  CHECK((w.Drain(9)[0]["games"].AsArray()[0]["team"].AsString()) == "red");
+  w.Send(9, R"({"t":"my_games","token":"nobody-has-this-token-1"})");
+  CHECK(w.Drain(9)[0]["games"].AsArray().empty());
+  w.Send(9, R"({"t":"my_games"})");
+  CHECK(w.Drain(9)[0]["t"].AsString() == "error");
+  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
+}
+
+// A finished game comes back as its final state plus the full reveal, and the
+// reveal equals what the players were sent live.
+void TestFinishedGameReplay() {
+  const std::string path = TempDbPath("finished");
+  std::string gameId;
+  Json liveReveal;
+  {
+    server::GameStore store(path);
+    Wire w;
+    w.lobby.SetGameStore(&store);
+    w.lobby.SetRoundLimit(2);  // The match ends as a draw after two rounds.
+    gameId = StartStoredMatch(w, "r1", 1, 2);
+    for (int round = 0; round < 2; ++round) {
+      PassAndCommit(w, 1, 0);
+      PassAndCommit(w, 2, 3);
+      const auto blue = w.Drain(1);
+      w.Drain(2);
+      if (const Json* reveal = Find(blue, "reveal")) liveReveal = *reveal;
+    }
+    CHECK(store.Find(gameId)->finished && store.Find(gameId)->winner == "none");
+    CHECK(store.Find(gameId)->roundLimit == 2);
+  }
+  server::GameStore store(path);
+  Wire w;
+  CHECK(w.lobby.SetGameStore(&store) == 0);  // Finished games are not restored into rooms.
+  w.Send(7, R"({"t":"join","game":")" + gameId + R"(","token":")" + kRedToken + R"("})");
+  const auto msgs = w.Drain(7);
+  CHECK(Has(msgs, "start") && Has(msgs, "state") && Has(msgs, "reveal"));
+  CHECK((*Find(msgs, "start"))["finished"].AsBool() && (*Find(msgs, "start"))["team"].AsString() == "red");
+  CHECK((*Find(msgs, "state"))["over"].AsBool() && (*Find(msgs, "state"))["winner"].AsString() == "none");
+  // The stored reveal is the one the players got live.
+  CHECK(liveReveal.IsObject() && Find(msgs, "reveal")->Dump() == liveReveal.Dump());
+  CHECK(Find(msgs, "reveal")->operator[]("rounds").AsArray().size() == 2);
+  w.Send(7, R"({"t":"pass","unit":3})");
+  CHECK(w.Drain(7)[0]["t"].AsString() == "error");  // Read-only: not seated.
+  w.Send(7, std::string(R"({"t":"my_games","token":")") + kBlueToken + R"("})");
+  const Json listed = w.Drain(7)[0]["games"].AsArray()[0];
+  CHECK(listed["status"].AsString() == "finished" && listed["winner"].AsString() == "none");
+  // A client resuming it ends in game over with the reveal ready.
+  ClientRig again(8, "r1");
+  again.client.SetToken(kBlueToken);
+  again.client.SetResume(gameId);
+  again.client.OnOpen();
+  again.Pump(w);
+  again.Pump(w);
+  CHECK(again.client.gameFinished() && again.client.hasReveal());
+  CHECK(again.game.Mode() == InputMode::GameOver);
+  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
+}
+
+// Replaying stored orders from the seed gives the live state, round by round
+// (the store checks the hash on restore; here through RemoteClient too).
+void TestResumedClientMatchesLive() {
+  const std::string path = TempDbPath("client");
+  server::GameStore store(path);
+  Wire w;
+  w.lobby.SetGameStore(&store);
+  ClientRig blue(1, "r1"), red(2, "r1");
+  blue.client.SetToken(kBlueToken);
+  red.client.SetToken(kRedToken);
+  blue.client.OnOpen();
+  red.client.OnOpen();
+  for (int i = 0; i < 3; ++i) {
+    blue.Pump(w);
+    red.Pump(w);
+  }
+  CHECK(blue.client.status() == net::RemoteClient::Status::Playing && !blue.client.game_id().empty());
+  PlanAllLocally(blue);
+  PlanAllLocally(red);
+  for (int i = 0; i < 3; ++i) {
+    blue.client.Update(0.016f);
+    red.client.Update(0.016f);
+    blue.Pump(w);
+    red.Pump(w);
+  }
+  blue.client.RequestCommit();
+  red.client.RequestCommit();
+  for (int i = 0; i < 3; ++i) {
+    blue.Pump(w);
+    red.Pump(w);
+  }
+  for (int i = 0; i < 600 && blue.client.playingBack(); ++i) blue.client.Update(1.0f / 30.0f);
+  CHECK(!blue.client.playingBack());
+
+  // Blue drops and resumes through a fresh client: same state as before.
+  const std::string gameId = blue.client.game_id();
+  w.lobby.OnDisconnect(1);
+  ClientRig again(3, "r1");
+  again.client.SetToken(kBlueToken);
+  again.client.SetResume(gameId);
+  again.client.OnOpen();
+  again.Pump(w);
+  again.Pump(w);
+  for (int i = 0; i < 600 && again.client.playingBack(); ++i) again.client.Update(1.0f / 30.0f);
+  CHECK(again.client.status() == net::RemoteClient::Status::Playing);
+  CHECK(again.client.game_id() == gameId && again.client.team() == Team::Blue);
+  for (int id = 0; id < 6; ++id) {
+    const Unit* a = blue.game.FindUnit(id);
+    const Unit* b = again.game.FindUnit(id);
+    CHECK(a && b && a->alive == b->alive);
+    if (a && b) CHECK(glm::distance(a->position, b->position) < 0.05f);
+  }
+  CHECK(again.game.RoundNumber() == blue.game.RoundNumber());
+  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
+}
+
+// Real sockets + a file DB: the server process-level path used in production.
+void TestServerRestoresFromDbFile() {
+  const std::string path = TempDbPath("server");
+  {
+    server::GameStore store(path);
+    Wire w;
+    w.lobby.SetGameStore(&store);
+    StartStoredMatch(w, "r1", 1, 2);
+  }
+  server::ServerConfig config;
+  config.port = 0;
+  config.dbPath = path;
+  server::Server restarted(config);
+  std::string error;
+  CHECK(restarted.Listen(&error));
+  config.dbPath = "/nonexistent-dir/x/y.db";
+  server::Server broken(config);
+  CHECK(!broken.Listen(&error) && !error.empty());
+  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
+}
+
 int main(int argc, char** argv) {
   const std::vector<TestCase> cases = {
       TBG_TEST(TestBotRoomHonoursMapAndSeed),
@@ -1531,6 +1861,13 @@ int main(int argc, char** argv) {
       TBG_TEST(TestCommitLockHandshake),
       TBG_TEST(TestRejectedActionResyncs),
       TBG_TEST(TestRealSocketLoopback),
+      TBG_TEST(TestGameStoreBasics),
+      TBG_TEST(TestPersistedMatchSurvivesRestart),
+      TBG_TEST(TestDisconnectHoldsSeat),
+      TBG_TEST(TestMyGamesListsOnlyOwn),
+      TBG_TEST(TestFinishedGameReplay),
+      TBG_TEST(TestResumedClientMatchesLive),
+      TBG_TEST(TestServerRestoresFromDbFile),
   };
   if (!RunSelectedTests(argc, argv, cases)) return 2;
   if (g_failures == 0) {

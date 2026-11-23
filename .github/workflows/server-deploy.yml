@@ -59,6 +59,14 @@ jobs:
           flyctl apps list --org "$FLY_ORG" --json | jq -e --arg a "$FLY_APP" 'any(.[]; .Name == $a)' > /dev/null \
             || flyctl apps create "$FLY_APP" --org "$FLY_ORG"
 
+      # Stored matches live on a volume (server/fly.toml [mounts]); a volume pins
+      # the app to one machine, which is what SQLite needs.
+      - name: Create data volume if missing
+        if: steps.has_server.outputs.present == 'true'
+        run: |
+          flyctl volumes list --app "$FLY_APP" --json | jq -e 'any(.[]; .name == "tbgwaf_data")' > /dev/null \
+            || flyctl volumes create tbgwaf_data --app "$FLY_APP" --region iad --size 1 --yes
+
       # Server-side Jev (Blue vs Jev / Jev vs Jev): the image runs the Jev
       # adapter as a loopback sidecar when this key is set. Optional: without
       # it the Jev modes report "Jev is not configured on this server".
@@ -69,7 +77,7 @@ jobs:
       - name: Deploy
         if: steps.has_server.outputs.present == 'true'
         run: |
-          flyctl deploy --remote-only --app "$FLY_APP" --config server/fly.toml --dockerfile server/Dockerfile .
+          flyctl deploy --remote-only --ha=false --app "$FLY_APP" --config server/fly.toml --dockerfile server/Dockerfile .
           echo "Server URL: wss://$FLY_APP.fly.dev (open the page with ?server=wss://$FLY_APP.fly.dev)" >> "$GITHUB_STEP_SUMMARY"
 
   cleanup:

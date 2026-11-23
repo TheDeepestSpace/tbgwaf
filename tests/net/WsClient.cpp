@@ -16,6 +16,9 @@
 namespace tactics::testing {
 
 bool WsClient::Connect(uint16_t port, std::string* error) {
+  Close();
+  closed_ = false;
+  inbuf_.clear();
   fd_ = socket(AF_INET, SOCK_STREAM, 0);
   sockaddr_in addr{};
   addr.sin_family = AF_INET;

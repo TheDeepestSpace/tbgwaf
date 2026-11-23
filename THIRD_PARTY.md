@@ -41,3 +41,10 @@ redistributed.
   and [Universal Animation Library 2](https://quaternius.itch.io/universal-animation-library-2)
   (Standard zips, as published November 2026)
 - License: [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/)
+
+## SQLite
+
+The game server stores matches with SQLite 3.45.1 (the public-domain
+amalgamation, fetched at configure time and compiled in; see
+`src/server/GameStore`). SQLite is in the public domain
+(<https://www.sqlite.org/copyright.html>).

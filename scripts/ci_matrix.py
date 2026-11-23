@@ -17,8 +17,13 @@ BINARIES = {  # ctest-name -> (binary, source)
     "urban_terrain_tests": ("tactics_urban_terrain_tests", "tests/urban_terrain_tests.cpp"),
     "jev_planner_tests": ("tactics_jev_planner_tests", "tests/jev_planner_tests.cpp"),
     "server_tests": ("tactics_server_tests", "tests/server_tests.cpp"),
+    # Scenario suite: one test per tests/integration/*.yaml (needs tbgwaf_server_testctl
+    # next to the binary).
+    "integration_tests": ("tactics_integration_tests", "tests/integration/*.yaml"),
 }
 TESTS_PER_SHARD = 4
+# Suites whose tests are each minutes long get one test per shard.
+TESTS_PER_SHARD_BY_SUITE = {"integration_tests": 1}
 MAX_SHARDS = 16
 
 
@@ -28,15 +33,16 @@ def listing(build, binary):
     return out.split()
 
 
-def shard_count(n):
-    return max(1, min(MAX_SHARDS, -(-n // TESTS_PER_SHARD)))
+def shard_count(n, suite=""):
+    per = TESTS_PER_SHARD_BY_SUITE.get(suite, TESTS_PER_SHARD)
+    return max(1, min(MAX_SHARDS, -(-n // per)))
 
 
 def matrix(build):
     include = []
     for name, (binary, _) in BINARIES.items():
         n = len(listing(build, binary))
-        count = shard_count(n)
+        count = shard_count(n, name)
         include += [{"suite": name, "binary": binary, "shard": f"{i}/{count}"}
                     for i in range(count)]
     return {"include": include}
@@ -48,12 +54,15 @@ def check(build):
         tests = listing(build, binary)
         if len(tests) != len(set(tests)):
             bad.append(f"{name}: duplicate names in --list")
-        defined = set(re.findall(r"^(?:static )?void (Test\w+)\(\)", Path(src).read_text(), re.M))
+        if src.endswith("*.yaml"):
+            defined = {p.stem for p in Path(src).parent.glob("*.yaml")}
+        else:
+            defined = set(re.findall(r"^(?:static )?void (Test\w+)\(\)", Path(src).read_text(), re.M))
         # Seed-range variants (Foo_1_3) are defined as wrappers; accept them.
         if defined != set(tests):
             bad.append(f"{name}: defined-but-unregistered {sorted(defined - set(tests))}, "
                        f"registered-but-undefined {sorted(set(tests) - defined)}")
-        count = shard_count(len(tests))
+        count = shard_count(len(tests), name)
         seen = []
         for i in range(count):
             seen += [t for k, t in enumerate(tests) if k % count == i]

@@ -4981,8 +4981,127 @@ void TestDebrisFollowsRoundClock() {
   CHECK(DebrisRoundAge(loose, 2, false, 0.0f) < 0.0f);
 }
 
+// A hand-authored falling slab: a 1.2 x 1.2 x 0.6 box dropped straight down
+// to come to rest centred on `rest` (0.3 above the ground), its flight
+// lasting `duration` seconds from a blast `at` seconds into round 1.
+WorldChange FallingSlabChange(const glm::vec3& rest, float at, float duration) {
+  WorldChange c;
+  c.id = 0;
+  c.round = 1;
+  c.at = at;
+  c.kind = WorldChangeKind::Debris;
+  Obstacle piece;
+  piece.footprint = {{rest.x - 0.6f, rest.z - 0.6f},
+                     {rest.x + 0.6f, rest.z - 0.6f},
+                     {rest.x + 0.6f, rest.z + 0.6f},
+                     {rest.x - 0.6f, rest.z + 0.6f}};
+  constexpr float kLaunchBottom = 4.0f;
+  piece.bounds = AABB{glm::vec3(rest.x - 0.6f, kLaunchBottom, rest.z - 0.6f),
+                      glm::vec3(rest.x + 0.6f, kLaunchBottom + 0.6f, rest.z + 0.6f)};
+  DebrisFlight flight;
+  flight.solid = true;
+  const int segments = std::max(1, static_cast<int>(std::lround(duration / kDebrisKeyDt)));
+  const glm::vec3 from(rest.x, kLaunchBottom + 0.3f, rest.z);
+  const glm::vec3 to(rest.x, 0.3f, rest.z);
+  for (int k = 0; k <= segments; ++k) {
+    DebrisKey key;
+    key.position = glm::mix(from, to, static_cast<float>(k) / static_cast<float>(segments));
+    flight.keys.push_back(key);
+  }
+  c.pieces = {piece};
+  c.flights = {flight};
+  return c;
+}
+
+// While a chunk is still in flight, its future landing spot neither blocks
+// planning (the waypoint is reachable) nor previews itself through the
+// sight obstacles; once it has actually landed, it does both.
+void TestAirborneDebrisNeitherBlocksNorPreviews() {
+  GameLogic game(BombWallScene());
+  const glm::vec3 spot(-4.0f, 0.0f, 3.0f);
+  // Lands 6 s after a blast at 0.5 s into round 1: 1.5 s into round 2.
+  CHECK(game.AcceptWorldChange(FallingSlabChange(spot, 0.5f, 6.0f)));
+  const auto rubbleInSight = [&game]() {
+    for (const Obstacle& o : game.SightObstacles()) {
+      if (!o.dead && o.kind == ObstacleKind::Rubble) return true;
+    }
+    return false;
+  };
+  const auto clickDistance = [&game, &spot]() {
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseMove();
+    game.ClickGround(spot, Team::Blue);
+    const float d = glm::distance(glm::vec2(game.MoveChainEnd().x, game.MoveChainEnd().z),
+                                  glm::vec2(spot.x, spot.z));
+    game.CancelAction();  // Back to the action menu...
+    game.CancelAction();  // ...and to no selection.
+    return d;
+  };
+  const auto passRound = [&game]() {
+    game.ClickUnit(0, Team::Blue);
+    game.ChoosePass();
+    game.ClickUnit(1, Team::Red);
+    game.ChoosePass();
+    CHECK(game.CanCommitRound());
+    game.CommitRound();
+    int guard = 0;
+    while (game.Mode() == InputMode::Executing && ++guard < 1000) game.Update(0.05f);
+  };
+  // The rubble rest obstacle is in the scene from the apply on (dormant)...
+  bool sceneHasRubble = false;
+  for (const Obstacle& o : game.GetScene().obstacles) {
+    sceneHasRubble |= !o.dead && o.kind == ObstacleKind::Rubble;
+  }
+  CHECK(sceneHasRubble);
+  // ...but round 1 planning sees and routes through the landing spot.
+  CHECK(!rubbleInSight());
+  CHECK(clickDistance() < 0.2f);
+  passRound();
+  // Round 2 planning: the chunk hangs frozen mid-flight; still open.
+  CHECK(game.RoundNumber() == 2);
+  CHECK(!rubbleInSight());
+  CHECK(clickDistance() < 0.2f);
+  passRound();
+  // It landed 1.5 s into round 2: round 3 planning routes around it and the
+  // sight obstacles carry it.
+  CHECK(game.RoundNumber() == 3);
+  CHECK(rubbleInSight());
+  CHECK(clickDistance() > 0.4f);
+}
+
+// A figure sent through a chunk's landing spot is the player's own gamble:
+// the chunk comes down on it and kills it.
+void TestFallingChunkCrushesFigureInItsPath() {
+  GameLogic game(BombWallScene());
+  const glm::vec3 spot(-4.0f, 0.0f, 3.0f);
+  // Lands 2 s after a blast at 0.5 s into round 1, i.e. mid-round.
+  CHECK(game.AcceptWorldChange(FallingSlabChange(spot, 0.5f, 2.0f)));
+  // Blue walks onto the landing spot (reachable: the chunk is airborne)
+  // and stands there; red passes.
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(spot, Team::Blue);
+  CHECK(glm::distance(game.MoveChainEnd(), spot) < 0.2f);
+  game.FinishMovePlan();
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+  int guard = 0;
+  bool blueAliveAtStart = false;
+  while (game.Mode() == InputMode::Executing && ++guard < 1000) {
+    if (game.ExecutionElapsed() < 0.4f) blueAliveAtStart |= game.GetScene().units[0].alive;
+    game.Update(0.05f);
+  }
+  CHECK(blueAliveAtStart);                     // Walked in unharmed...
+  CHECK(!game.GetScene().units[0].alive);      // ...and the slab came down on it.
+  CHECK(game.GetScene().units[1].alive);
+}
+
 int main() {
   TestDebrisFollowsRoundClock();
+  TestAirborneDebrisNeitherBlocksNorPreviews();
+  TestFallingChunkCrushesFigureInItsPath();
   TestDeadFiguresSeeThroughProbes();
   TestBuildingsContainingPoints();
   TestNavMeshRoutesAroundObstacle();

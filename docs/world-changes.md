@@ -91,9 +91,20 @@ same log to the same seeded map, so drawn == simulated geometry.
   figure or a wall does so identically everywhere. Chunks of 0.1 m^2 and up
   that settle are `solid`: appended as `ObstacleKind::Rubble` obstacles whose
   footprint / bounds are the vertical envelope of the tilted body at rest
-  (`DebrisRestObstacle`; `Obstacle::rubble` keeps the true body), blocking
-  sight from the change's `at`; a later blast throws them again as the very
-  bodies they are. Movement is blocked more narrowly: the navmesh clips the
+  (`DebrisRestObstacle`; `Obstacle::rubble` keeps the true body); a later
+  blast throws them again as the very bodies they are. The rest obstacle of
+  an in-round blast is **dormant until its chunk actually lands** on the
+  round clock (`RubbleBody::landRound`/`landAt`, derived from the change's
+  stamp plus the flight's duration; `RubbleAtRest`): while the chunk is in
+  flight it blocks neither sight (no chunk-shaped holes in the visibility
+  overlay silently previewing where everything will land) nor the planning
+  navmesh -- a player may knowingly route a figure through a future landing
+  spot; reading the falling debris is their own job. The gamble is real:
+  during execution a solid chunk whose body overlaps a figure -- falling
+  onto it, sliding into it, or walked into after it landed that same round
+  -- knocks it down (`CrushFiguresUnderDebris`: the body silhouette clipped
+  to the figure's column, padded by its radius). From landing on it blocks
+  like any settled rubble. Movement is blocked more narrowly: the navmesh clips the
   true body to the walk band -- 0.35 m (step-over) to 1.8 m (head) above the
   ground -- and blocks only that silhouette (`RubbleBandFootprint`), so a
   chunk lying no higher than a step is walked over like a stub at the foot

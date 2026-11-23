@@ -135,9 +135,29 @@ struct Obstacle {
     std::vector<glm::vec2> outline;
     float thickness = 0.0f;
     glm::mat4 pose{1.0f};
+    // When the chunk actually comes to rest on the round clock: `landAt`
+    // seconds into round `landRound`'s execution (set by ApplyDebris for
+    // rubble born of an in-round blast; 0/0 means at rest from birth).
+    // Until that moment the obstacle is dormant -- it blocks neither sight
+    // nor movement, so planning sees the world as it is, not where chunks
+    // will land; a figure sent through the landing spot is the player's
+    // own gamble (the falling chunk kills it). Derived from the change's
+    // round/at + flight duration, never serialized (every peer recomputes
+    // the same values when it applies the log).
+    int landRound = 0;
+    float landAt = 0.0f;
   };
   RubbleBody rubble;
 };
+
+// False only for a Rubble obstacle whose chunk is still in flight at the
+// given moment of the round clock: it has not landed yet, so it must not
+// block sight or movement. `elapsed` counts only while `executing`.
+inline bool RubbleAtRest(const Obstacle& o, int round, bool executing, float elapsed) {
+  if (o.kind != ObstacleKind::Rubble) return true;
+  if (round != o.rubble.landRound) return round > o.rubble.landRound;
+  return executing && elapsed >= o.rubble.landAt;
+}
 
 // Building archetype (urban map issue #151, roadmap 3.2). Drawn per parcel
 // from a street-class-weighted table with a per-block character bias;

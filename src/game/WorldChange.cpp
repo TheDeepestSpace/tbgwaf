@@ -570,11 +570,26 @@ bool ApplyDebris(Scene* scene, const WorldChange& c) {
     }
   }
   // Solid chunks are rubble obstacles from here on (their envelope at rest);
-  // litter is only drawn.
+  // litter is only drawn. An in-round blast's rubble is stamped with the
+  // moment its flight ends on the round clock (flights freeze at a turn's
+  // end and resume the next, so a long fall can land rounds later); until
+  // then the obstacle is dormant (RubbleAtRest) -- planning routes through
+  // the landing spot, at the player's own risk.
   for (size_t i = 0; i < c.pieces.size(); ++i) {
     if (!c.flights[i].solid) continue;
     Obstacle p = DebrisRestObstacle(c.pieces[i], c.flights[i]);
     p.dead = false;
+    if (c.at > 0.0f) {
+      const float spill = c.flights[i].Duration() - (constants::kRoundDuration - c.at);
+      if (spill <= 0.0f) {
+        p.rubble.landRound = c.round;
+        p.rubble.landAt = c.at + c.flights[i].Duration();
+      } else {
+        const int whole = static_cast<int>(spill / constants::kRoundDuration);
+        p.rubble.landRound = c.round + 1 + whole;
+        p.rubble.landAt = spill - static_cast<float>(whole) * constants::kRoundDuration;
+      }
+    }
     scene->obstacles.push_back(std::move(p));
   }
   return true;

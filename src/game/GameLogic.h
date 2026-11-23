@@ -831,6 +831,17 @@ class GameLogic {
   std::optional<Scene> pristine_;
   void OnWorldChanged();  // Rebuilds geometry-derived caches.
   bool SyncWorld(const std::vector<WorldChange>& log);
+  // Rubble whose chunk is still in flight on the round clock is dormant
+  // (RubbleAtRest): no sight or movement blocking until it lands, so a
+  // player may knowingly route a figure through a future landing spot.
+  bool RubbleAtRestNow(const Obstacle& o) const;
+  size_t CountRubbleAtRest() const;
+  void RebuildSightObstacles();  // SightObstacles(scene_) minus dormant rubble.
+  void RefreshRubbleState();     // Re-derives caches when chunks have landed.
+  // A solid chunk whose body overlaps a figure -- falling onto it, sliding
+  // into it, or walked into after it landed this round -- knocks it down.
+  void CrushFiguresUnderDebris();
+  size_t rubbleAtRestCount_ = 0;  // Count RebuildSightObstacles() last saw.
   std::vector<Obstacle> sightObstacles_;  // See SightObstacles(); rebuilt in Reset.
   std::vector<AABB> obstacleBounds_;  // Retained for compatibility/debug broad-phase inspection.
   // Debug bomb (issue #350): placement/arming state, blast counter for the

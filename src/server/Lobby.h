@@ -10,7 +10,6 @@
 #include <vector>
 
 #include "server/GameSession.h"
-#include "server/GameStore.h"
 #include "server/JevBot.h"
 #include "server/SceneStore.h"
 
@@ -40,15 +39,6 @@ class Lobby {
   // Enables Builder scene storage (scenes_list / scene_put / scene_delete,
   // usable by any connection, joined or not). `store` must outlive the Lobby.
   void SetSceneStore(SceneStore* store) { sceneStore_ = store; }
-  // Enables persistence of human-v-human matches (see GameStore): a match is
-  // stored when both players joined with a device `token`, commits and
-  // resolved turns are written as they happen, and matches still active in
-  // the store are restored now (players rejoin with their token). `store`
-  // must outlive the Lobby. Returns how many active games were restored.
-  int SetGameStore(GameStore* store);
-  // New human matches end as a draw after this many rounds (0 = unlimited;
-  // test-control servers use a short limit to reach game over quickly).
-  void SetRoundLimit(int rounds) { roundLimit_ = rounds; }
   // Call every loop iteration: applies finished Jev answers and starts new
   // requests. Cheap when no room has a bot.
   void Tick();
@@ -91,11 +81,6 @@ class Lobby {
     bool friendlyFire = true;    // Test knobs from load_scenario.
     bool figureOverlapCheck = true;
     std::vector<float> shotRolls;
-    // Persistence (empty gameId = ephemeral room).
-    std::string gameId;
-    std::string tokens[2];   // Device tokens by Team, as sent on join.
-    int turn = 1;            // Next round to resolve, from 1 (the store's round numbering).
-    std::string lastRound[2];  // Latest resolved round message per team (resume).
   };
   struct Member {
     std::string room;
@@ -109,21 +94,6 @@ class Lobby {
   // scenes_list / scene_put / scene_delete; false if `type` is not one of them.
   bool HandleSceneMessage(int conn, const std::string& type, const net::Json& message);
   void StartMatch(Room& room);
-  // my_games: the token's own stored games.
-  void HandleMyGames(int conn, const net::Json& message);
-  // Join by stored game id + token: reseats a player in an active game, or
-  // sends a finished game's final state and full reveal for replay.
-  void Resume(int conn, const std::string& gameId, const std::string& token);
-  void ViewFinished(int conn, const GameStore::Game& game, Team team);
-  // Rebuilds a stored game's session by replaying its resolved turns (and,
-  // with `pending`, the commits of the round in progress).
-  std::unique_ptr<GameSession> ReplayGame(const GameStore::Game& game, bool pending,
-                                          int* nextTurn, std::string* error);
-  void PersistNewGame(Room& room);
-  void PersistCommit(Room& room, Team team);
-  void PersistTurn(Room& room, const std::array<net::Json, 3>& reports);
-  net::Json StartMessage(const Room& room, Team team) const;
-  std::string NewGameId();
   void SpectatorJoin(int conn, const net::Json& message);
   void CreateBotRoom(int conn, const std::string& name, const std::string& mode,
                      const std::string& mapKind = "", std::optional<uint32_t> seed = std::nullopt,
@@ -145,8 +115,6 @@ class Lobby {
   SeedFn seed_;
   JevBotRunner* bots_ = nullptr;
   SceneStore* sceneStore_ = nullptr;
-  GameStore* gameStore_ = nullptr;
-  int roundLimit_ = 0;
   int maxBotRooms_ = 4;
   bool pacePlayback_ = true;
   uint64_t nextRoomId_ = 1;

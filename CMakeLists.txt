@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(tbgwaf C CXX)
+project(tbgwaf CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -115,7 +115,6 @@ add_library(tactics_net STATIC
   src/net/RemoteClient.cpp
   src/net/SceneSpec.cpp
   src/net/BuilderSceneSync.cpp
-  src/net/GamesClient.cpp
 )
 target_include_directories(tactics_net PUBLIC src)
 target_link_libraries(tactics_net PUBLIC tactics_logic glm::glm)
@@ -337,22 +336,7 @@ else()
   add_test(NAME net_tests COMMAND tactics_net_tests)
 
   if(TBGWAF_BUILD_SERVER)
-    # SQLite (public-domain amalgamation, compiled in: no system package, and
-    # the runtime image needs no libsqlite3) backs the game store (src/server/GameStore).
-    FetchContent_Declare(
-      sqlite_amalgamation
-      URL https://www.sqlite.org/2024/sqlite-amalgamation-3450100.zip
-      URL_HASH SHA256=5592243caf28b2cdef41e6ab58d25d653dfc53deded8450eb66072c929f030c4
-    )
-    FetchContent_MakeAvailable(sqlite_amalgamation)
-    add_library(sqlite3_static STATIC ${sqlite_amalgamation_SOURCE_DIR}/sqlite3.c)
-    target_include_directories(sqlite3_static PUBLIC ${sqlite_amalgamation_SOURCE_DIR})
-    target_compile_definitions(sqlite3_static PRIVATE SQLITE_OMIT_LOAD_EXTENSION SQLITE_THREADSAFE=1)
-    set_target_properties(sqlite3_static PROPERTIES C_STANDARD 99)
-    target_link_libraries(sqlite3_static PUBLIC ${CMAKE_DL_LIBS} pthread)
-
     add_library(tactics_server_lib STATIC
-      src/server/GameStore.cpp
       src/server/GameSession.cpp
       src/server/HttpClient.cpp
       src/server/JevBot.cpp
@@ -362,7 +346,7 @@ else()
       src/server/Server.cpp
     )
     target_include_directories(tactics_server_lib PUBLIC src)
-    target_link_libraries(tactics_server_lib PUBLIC tactics_net tactics_logic sqlite3_static)
+    target_link_libraries(tactics_server_lib PUBLIC tactics_net tactics_logic)
 
     add_executable(tbgwaf_server src/server/server_main.cpp)
     target_link_libraries(tbgwaf_server PRIVATE tactics_server_lib)
@@ -382,20 +366,6 @@ else()
       COMMAND tactics_net_scenario_tests $<TARGET_FILE:tbgwaf_server_testctl> tests/scenarios
       WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     )
-
-    # "integration" suite: headless apps (menu flow + RemoteClient + GamesClient)
-    # against a real test-control server with a temp SQLite DB, including
-    # server restarts and killed clients. Scenarios: tests/integration/*.yaml.
-    add_executable(tactics_integration_tests tests/integration_tests.cpp tests/net/WsClient.cpp)
-    target_include_directories(tactics_integration_tests PRIVATE src tests tests/net ${FLOW_GEN_DIR})
-    target_link_libraries(tactics_integration_tests PRIVATE tactics_scenario tactics_server_lib)
-    add_dependencies(tactics_integration_tests tbgwaf_server_testctl app_flow_gen)
-    add_test(
-      NAME integration_tests
-      COMMAND tactics_integration_tests --server $<TARGET_FILE:tbgwaf_server_testctl>
-      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    )
-    set_tests_properties(integration_tests PROPERTIES TIMEOUT 900)
 
     add_executable(tactics_server_tests tests/server_tests.cpp)
     target_link_libraries(tactics_server_tests PRIVATE tactics_server_lib)

@@ -31,24 +31,6 @@ struct BuilderMenu {
   bool downloadLastLog = false;
 };
 
-// One stored match on the My games screen.
-struct GameRow {
-  std::string id;
-  std::string title;  // e.g. "Blue - round 4 - active".
-  bool finished = false;
-};
-
-// The My games screen's inputs and what the user did on it. `canContinue`
-// (also read by Game Mode) shows a Continue button: this device has a last
-// match to resume.
-struct GamesMenu {
-  std::vector<GameRow> rows;
-  bool loaded = false;       // The server's list arrived.
-  bool canContinue = false;
-  std::string status;        // Load error / why a game could not be opened.
-  int openIndex = -1;        // Output: row opened (fires OpenGame); reset every frame.
-};
-
 // State of the Room screen's join-by-code field. `code` is the normalized
 // (upper-case) code once JoinRoom fires; `error` is shown under the field
 // (set by the menu for a malformed code, by the host for a refused join).
@@ -73,7 +55,6 @@ struct RoomForm {
 std::optional<tbgwaf_flow::Event> DrawMenu(tbgwaf_flow::State state, int windowWidth,
                                            int windowHeight, uint32_t* mapSeed,
                                            bool onlineAvailable = false, RoomForm* room = nullptr,
-                                           BuilderMenu* builder = nullptr,
-                                           GamesMenu* games = nullptr);
+                                           BuilderMenu* builder = nullptr);
 
 }  // namespace tactics::ui

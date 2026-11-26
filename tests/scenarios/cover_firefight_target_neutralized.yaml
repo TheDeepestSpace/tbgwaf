@@ -1,0 +1,47 @@
+name: cover_firefight_target_neutralized
+description: >
+  Issue #292 cover vs an ongoing firefight, neutralized edge case: same
+  useless-cover geometry as cover_firefight_exposed_stays_standing (low
+  barrier north, enemy south-east), but the rolls are pinned to hits, so the
+  figure guns the enemy down while walking up. With the threat neutralized
+  before arrival there is nothing left to stay exposed for: the figure takes
+  cover as normal -- crouched behind the low barrier.
+
+map:
+  obstacles:
+    - {center: [0, 5], half_extent: [6.0, 0.4], height: 1.0, climbable: false}
+
+playbook:
+  blue: {moving_seen: shoot_continue, moving_unseen: shoot_continue, stationary_seen: shoot}
+
+# Every roll hits: the walker drops the enemy mid-walk.
+shot_rolls: [0.0]
+
+units:
+  - {id: 0, team: blue, position: [-8, 0, 3.2], facing_degrees: 0}
+  # The target, in the walker's forward cone from the start.
+  - {id: 1, team: red, position: [6, 0, -6], facing_degrees: 150}
+  # Keeps the match alive after unit 1 falls; placed north-west, outside the
+  # walker's view cone both during the walk and after the arrival turn.
+  - {id: 2, team: red, position: [-12, 0, 8], facing_degrees: -90}
+
+camera:
+  target: [0, 0]
+  zoom: 5
+
+script:
+  - action: move
+    actor: 0
+    destination: [0, 0, 4.2]
+    comment: Kills the enemy on the way; arrives with no threat left, so crouches
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {unit: 1, alive: false}
+  - assert: {unit: 0, position: [0, 0, 4.2], tolerance: 0.05}
+  - assert: {unit: 0, facing_degrees: -90, tolerance: 0.5}
+  # The enemy that made the barrier useless is down: cover proceeds as normal.
+  - assert: {unit: 0, cover_pose: crouch}
+  - assert: {unit: 2, alive: true}

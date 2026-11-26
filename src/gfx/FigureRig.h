@@ -17,6 +17,13 @@ namespace gfx {
 
 enum class FigurePrimitive { Rounded, Box };
 
+// Loop lengths of the retargeted cover clips (Crouch_Idle_Loop and
+// Idle_FoldArms_Loop from the Quaternius Universal Animation Library, see
+// THIRD_PARTY.md). BuildFigure loops them over unit.idleElapsed while the
+// unit holds cover; the asset gallery uses them as item durations.
+inline constexpr float kCoverCrouchLoopSeconds = 2.933f;
+inline constexpr float kCoverLeanLoopSeconds = 2.5f;
+
 // One drawable piece of a posed figure or weapon: a world (or caller-frame)
 // model matrix over either the shared unit sphere (Rounded) or the shared
 // unit cube spanning [0,1]^3 (Box).

@@ -140,7 +140,7 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 // contact shading live: reach in world units, darkening strength, samples
 // per ray, and blur half-width (see gfx::AmbientOcclusionSettings).
 // `thermalFovAlpha` is the FOV tint opacity used while the thermal view is on.
-void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
+void DrawDebugPanel(bool& disableFov, bool& coverView, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
                     float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
                     bool& disableOcclusionFade, bool& npr, gfx::NprSettings& nprSettings,

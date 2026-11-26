@@ -11,6 +11,7 @@
 
 #include <glm/glm.hpp>
 
+#include "game/Cover.h"
 #include "game/NavMesh.h"
 #include "game/Scene.h"
 #include "game/Throw.h"
@@ -180,6 +181,14 @@ struct GameSnapshot {
     // Grenade supply (issue #349). Serialized only while it differs from the
     // starting supply, so pre-grenade snapshots keep their text and hashes.
     int grenades = constants::kStartingGrenades;
+    // Cover pose (issues #290/#292), mirrored so a follower replaying a
+    // round from snapshots shows the crouch/lean the moment the simulator's
+    // figure takes it (a follower skips Update() -- where the pose blends --
+    // while Executing), instead of only once planning reopens.
+    uint8_t coverKind = 0;
+    uint8_t coverTileKind = 0;
+    float coverYaw = 0.0f;
+    float coverBlend = 0.0f;
   };
   // One in-flight grenade right now (issue #349): enough for a mirroring
   // follower (or a timeline replay) to draw it; the flight itself lives only
@@ -329,6 +338,11 @@ class GameLogic {
 
   // Reachable-area field for the selected figure's move budget, computed once
   // when entering move-destination mode (null otherwise).
+  // Cover tiles for MoveFrontier()'s grid, or null when there is no frontier.
+  const CoverMap* MoveCover() const {
+    return mode_ == InputMode::AwaitingMoveDestination && moveCover_.nx > 0 ? &moveCover_
+                                                                           : nullptr;
+  }
   const ReachField* MoveFrontier() const {
     return mode_ == InputMode::AwaitingMoveDestination && moveFrontier_.nx > 0 ? &moveFrontier_
                                                                               : nullptr;
@@ -795,6 +809,12 @@ class GameLogic {
   // the cached one already covers this figure at this origin.
   void EnsureNavMeshFor(const Unit& mover, const glm::vec3& origin);
   void RefreshMoveFrontier();
+  void UpdateCoverPoses(float dtSeconds);
+  // True when a living enemy `unit` can see could still land a shot on the
+  // chest `unit` would hold in cover pose `poseKind` (1 stand, 2 crouch):
+  // the blockers do not cross that shot line, so taking the pose is useless
+  // against it. See UpdateCoverPoses.
+  bool CoverExposedToSightedEnemy(const Unit& unit, uint8_t poseKind) const;
   // Rebuilds ziplineFrontiers_ (and their navmeshes) for a leg from `origin`.
   void BuildZiplineFrontiers(const Unit& mover, const glm::vec3& origin);
   // Plans one leg from `from` to `goal`: a plain walk when affordable within
@@ -882,7 +902,14 @@ class GameLogic {
   std::vector<glm::vec3> movePreviewPath_;
   bool movePreviewValid_ = false;
   bool movePreviewBlocked_ = false;
+  // HoverGround memo key: the preview stands until one of its inputs moves
+  // (unit -1 = no valid preview cached). See HoverGround.
+  int hoverKeyUnit_ = -1;
+  glm::vec3 hoverKeyFrom_{0.0f};
+  glm::vec3 hoverKeyPoint_{0.0f};
+  int hoverKeyRevision_ = -1;
   ReachField moveFrontier_;
+  CoverMap moveCover_;  // Cover per moveFrontier_ node (issue #290); UI reads only.
   bool moveFrontierEnabled_ = true;
   bool overlapCheckEnabled_ = true;
   int frontierRevision_ = 0;  // Stamped into recomputed fields (ReachField::revision).

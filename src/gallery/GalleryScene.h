@@ -28,7 +28,7 @@ enum class ItemKind {
 // EmptyMag: the whole magazine fired at the weapon's own pace (issue #140),
 // every bullet leaving its own scattered tracer line.
 // Throw: the overarm grenade throw (cock, release, follow-through).
-enum class AnimKind { Idle, Run, Shoot, ZipDown, ZipUp, EmptyMag, Throw };
+enum class AnimKind { Idle, Run, Shoot, ZipDown, ZipUp, EmptyMag, Throw, CoverLean, CoverCrouch };
 
 struct GalleryItem {
   const char* id;     // Stable slug; also the golden-file prefix.
@@ -44,8 +44,8 @@ struct GalleryItem {
   tactics::StreetFixtureModel fixture = tactics::StreetFixtureModel::None;
 };
 
-// 3 weapon turntables, idle/run/shoot/zip-down/zip-up/empty-mag/throw per weapon,
-// then every street fixture model (vehicles first).
+// 3 weapon turntables, idle/run/shoot/zip-down/zip-up/empty-mag/throw/cover-lean/
+// cover-crouch per weapon, then every street fixture model (vehicles first).
 const std::vector<GalleryItem>& Catalog();
 
 // The obstacle a StreetFixture item renders: its gameplay box centered on

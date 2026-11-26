@@ -101,6 +101,12 @@ class RemoteClient {
     float yaw = 0.0f;
     bool alive = true;
     bool moving = false;
+    // Cover pose (issue #292), server-derived: the client can't judge the
+    // take-the-pose rules itself (it never simulates the round), so the
+    // frames carry the pose like alive/moving.
+    uint8_t coverKind = 0;
+    float coverBlend = 0.0f;
+    float coverYaw = 0.0f;
   };
   struct Frame {
     float t = 0.0f;

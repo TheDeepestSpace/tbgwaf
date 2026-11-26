@@ -159,7 +159,7 @@ struct BombPanelState {
   bool requestArm = false;
 };
 
-void DrawDebugPanel(bool& disableFov, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
+void DrawDebugPanel(bool& disableFov, bool& coverView, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
                     float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
                     bool& disableOcclusionFade, bool& npr, gfx::NprSettings& nprSettings,

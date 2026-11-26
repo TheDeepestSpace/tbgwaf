@@ -2306,7 +2306,8 @@ int main() {
       bombPanel.armed = bombPanel.placed && game.GetDebugBomb()->detonateAt >= 0.0f;
       if (bombPanel.placed) bombPanel.position = game.GetDebugBomb()->position;
     }
-    ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, debugOptions.thermal,
+    ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.coverView,
+                       debugOptions.disableShadows, debugOptions.thermal,
                        debugOptions.thermalBlackHot, debugOptions.thermalFovAlpha,
                        debugOptions.thermalAo.radius,
                        debugOptions.thermalAo.strength, debugOptions.thermalAo.quality,

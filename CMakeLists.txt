@@ -77,6 +77,7 @@ set(GAME_LOGIC_SOURCES
   src/game/Geometry.cpp
   src/game/MapGenerator.cpp
   src/game/NavMesh.cpp
+  src/game/Cover.cpp
   src/game/Raycast.cpp
   src/game/Visibility.cpp
   src/game/GameLogic.cpp
@@ -246,6 +247,17 @@ else()
   target_link_libraries(tactics_logic_tests PRIVATE tactics_logic)
   add_test(NAME logic_tests COMMAND tactics_logic_tests)
 
+  add_executable(tactics_cover_tests tests/cover_tests.cpp)
+  target_include_directories(tactics_cover_tests PRIVATE src)
+  target_link_libraries(tactics_cover_tests PRIVATE tactics_logic)
+  add_test(NAME cover_tests COMMAND tactics_cover_tests)
+
+  add_executable(tactics_cover_pose_tests tests/cover_pose_tests.cpp src/gfx/FigureRig.cpp
+                 src/gfx/Ragdoll.cpp)
+  target_include_directories(tactics_cover_pose_tests PRIVATE src)
+  target_link_libraries(tactics_cover_pose_tests PRIVATE tactics_logic glm::glm)
+  add_test(NAME cover_pose_tests COMMAND tactics_cover_pose_tests)
+
   add_executable(tactics_jev_planner_tests tests/jev_planner_tests.cpp)
   target_include_directories(tactics_jev_planner_tests PRIVATE src)
   target_link_libraries(tactics_jev_planner_tests PRIVATE tactics_logic)
@@ -266,7 +278,7 @@ else()
   add_test(NAME camera_tests COMMAND tactics_camera_tests)
 
   add_executable(tactics_frontier_field_tests tests/frontier_field_tests.cpp
-                 src/gfx/FrontierField.cpp)
+                 src/gfx/FrontierField.cpp src/game/Cover.cpp src/game/Geometry.cpp)
   target_include_directories(tactics_frontier_field_tests PRIVATE src)
   target_link_libraries(tactics_frontier_field_tests PRIVATE glm::glm)
   add_test(NAME frontier_field_tests COMMAND tactics_frontier_field_tests)
@@ -544,7 +556,8 @@ else()
       # 83 scenarios take ~230 s on the CI runner and the suite grows with
       # each PR that pins a new rendering behaviour; 300 s left no headroom
       # (PR #304's two see-through scenarios tipped it over).
-      # Under ctest -j the suite shares CPU with other GL tests and hit 600 s.
+      # Runs alongside other heavy ctest jobs; wall time varies 230-510+ s, so
+      # 600 s flaked (cover scenarios now also settle their pose blend).
       set_tests_properties(visual_tests PROPERTIES
         TIMEOUT 1800
         ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
@@ -560,7 +573,7 @@ else()
           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         )
         set_tests_properties(visual_server_tests PROPERTIES
-          TIMEOUT 600
+          TIMEOUT 1200
           ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_VIDEODRIVER=x11"
         )
       endif()

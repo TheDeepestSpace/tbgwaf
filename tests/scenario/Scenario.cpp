@@ -237,6 +237,13 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   if (node["alive"]) assertion.alive = node["alive"].as<bool>();
   if (node["position"]) assertion.position = ParseVec3(node["position"], "assert.position");
   if (node["facing_degrees"]) assertion.facingDegrees = node["facing_degrees"].as<float>();
+  if (node["cover_pose"]) {
+    assertion.coverPose = node["cover_pose"].as<std::string>();
+    if (*assertion.coverPose != "none" && *assertion.coverPose != "stand" &&
+        *assertion.coverPose != "crouch") {
+      throw std::runtime_error("assert.cover_pose must be none, stand or crouch");
+    }
+  }
   if (node["tolerance"]) assertion.tolerance = node["tolerance"].as<float>();
   if (node["visible_to"]) {
     assertion.visibleToTeam = ParseTeam(node["visible_to"].as<std::string>(), "assert.visible_to");
@@ -277,9 +284,10 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   }
 
   if ((assertion.alive || assertion.position || assertion.facingDegrees ||
-       assertion.visible || assertion.remembered || assertion.ghostAlpha) && !assertion.unit) {
+       assertion.coverPose || assertion.visible || assertion.remembered ||
+       assertion.ghostAlpha) && !assertion.unit) {
     throw std::runtime_error(
-        "assert checking alive/position/facing_degrees/visible/remembered/ghost_alpha requires 'unit'");
+        "assert checking alive/position/facing_degrees/cover_pose/visible/remembered/ghost_alpha requires 'unit'");
   }
   if ((assertion.remembered || assertion.ghostAlpha) && !assertion.rememberedByTeam) {
     throw std::runtime_error("assert 'remembered'/'ghost_alpha' require 'remembered_by'");
@@ -463,7 +471,13 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
       if (hooks.onMoveFrontier) {
         for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
           hooks.onMoveFrontier(game, actorTeam);
-          if (hooks.tickSeconds > 0.0f) game.UpdateSightingMemory(hooks.tickSeconds);
+          if (hooks.tickSeconds > 0.0f) {
+            // Planning time passes while the frontier is up, as in the app's
+            // frame loop (main.cpp ticks Update/sighting/timeline every frame).
+            game.Update(hooks.tickSeconds);
+            game.UpdateSightingMemory(hooks.tickSeconds);
+            timeline.Observe(game, hooks.tickSeconds);
+          }
         }
       }
       for (const glm::vec3& waypoint : action.waypoints) {
@@ -505,14 +519,19 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
         game.CancelAction();  // ...and deselect.
         return true;
       }
+      NotifyMenuClick(actorTeam, "Done");
       game.FinishMovePlan();
       if (game.Mode() != InputMode::AwaitingSelection) {
         return Fail("has no path to destination " + ToString(destination) +
                     " (unreachable, or beyond the mover's round move budget)");
       }
       if (action.finalFacingDegrees) {
-        game.SetPlannedMoveFacing(action.actor, *action.finalFacingDegrees * 3.14159265f / 180.0f,
-                                  actorTeam);
+        const float yaw = *action.finalFacingDegrees * 3.14159265f / 180.0f;
+        // The player aims the ghost by dragging from the destination toward
+        // the facing direction (main.cpp); show that drag end as a click.
+        NotifyClick(actorTeam, action.destination +
+                                   3.0f * glm::vec3(std::cos(yaw), 0.0f, std::sin(yaw)));
+        game.SetPlannedMoveFacing(action.actor, yaw, actorTeam);
       }
       return true;
     }
@@ -527,7 +546,11 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
       if (hooks.onMoveFrontier) {
         for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
           hooks.onMoveFrontier(game, actorTeam);
-          if (hooks.tickSeconds > 0.0f) game.UpdateSightingMemory(hooks.tickSeconds);
+          if (hooks.tickSeconds > 0.0f) {
+            game.Update(hooks.tickSeconds);
+            game.UpdateSightingMemory(hooks.tickSeconds);
+            timeline.Observe(game, hooks.tickSeconds);
+          }
         }
       }
       return true;
@@ -664,6 +687,14 @@ void CheckAssertionImpl(const GameLogic& game, const ScenarioAssertion& a, int s
                std::to_string(unit->facingYaw * 180.0f / 3.14159265f));
         }
       }
+      if (a.coverPose) {
+        static const char* const kPoses[] = {"none", "stand", "crouch"};
+        const char* actual = unit->coverKind < 3 ? kPoses[unit->coverKind] : "?";
+        if (*a.coverPose != actual) {
+          Fail("unit " + std::to_string(*a.unit) + " expected cover_pose " + *a.coverPose +
+               " but was " + actual);
+        }
+      }
       if (a.visible) {
         const bool actual = game.ComputeVisibility(*a.visibleToTeam).UnitVisible(*a.unit);
         if (actual != *a.visible) {
@@ -740,10 +771,10 @@ void CheckAssertionImpl(const GameLogic& game, const ScenarioAssertion& a, int s
 }  // namespace
 
 bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& action,
-                   int stepIndex, ScenarioResult* result) {
+                   int stepIndex, ScenarioResult* result, const PlaybackHooks& hooks) {
   TurnTimeline timeline;
   TimelinePlayback playback;
-  return ExecuteActionImpl(game, scene, action, stepIndex, {}, timeline, playback, result);
+  return ExecuteActionImpl(game, scene, action, stepIndex, hooks, timeline, playback, result);
 }
 
 void CheckAssertion(const GameLogic& game, const ScenarioAssertion& assertion, int stepIndex,
@@ -859,10 +890,16 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
     if (!hooks.onFrame) return;
     for (int i = 0; i < std::max(1, hooks.holdFramesAfterAction); ++i) {
       hooks.onFrame(Display());
-      // Video mode: time passes while planning, so ghosts/bullets keep
-      // fading across the held frames instead of freezing mid-hold.
+      // Video mode: planning time passes across the held frames exactly as
+      // in the app's frame loop (main.cpp ticks Update, sighting memory and
+      // the timeline every frame), so idle animation, ghost/bullet fades and
+      // the cover-pose blend behave as they would live -- a figure that just
+      // stopped on a cover tile eases into its crouch/lean right here, not
+      // in some test-only tail.
       if (hooks.tickSeconds > 0.0f && !playback.Active()) {
+        game.Update(hooks.tickSeconds);
         game.UpdateSightingMemory(hooks.tickSeconds);
+        timeline.Observe(game, hooks.tickSeconds);
       }
     }
   };

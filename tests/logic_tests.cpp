@@ -3733,6 +3733,68 @@ void TestReachFieldFromRampIncludesGroundBeyondFoot() {
   CHECK(!reached(-9.0f, 0.0f));  // Past the budget.
 }
 
+// Issue #292 follow-up: where the reach covers stacked walk layers (a deck
+// over usable ground), the field keeps every layer -- the grid holds one
+// sample per node and the rest land in `stacked` -- so clicking either layer
+// works (CoversPoint) and SplitReachSheets can hand the renderer one
+// single-valued sheet per layer.
+void TestReachFieldStackedLayersAndSheets() {
+  // Deck at y = 3 over open ground, reached over a ramp at its -x edge.
+  tactics::WalkSurface deck;
+  deck.vertices = {{0.0f, 3.0f, -3.0f}, {6.0f, 3.0f, -3.0f}, {6.0f, 3.0f, 3.0f},
+                   {0.0f, 3.0f, 3.0f}};
+  deck.neighbors = {1};
+  tactics::WalkSurface ramp;
+  ramp.vertices = {{-6.0f, 0.0f, -1.0f}, {-6.0f, 0.0f, 1.0f}, {0.0f, 3.0f, 1.0f},
+                   {0.0f, 3.0f, -1.0f}};
+  ramp.neighbors = {0};
+  ramp.connectsToGround = true;
+  std::vector<tactics::WalkSurface> surfaces{deck, ramp};
+  tactics::NavMesh nav;
+  nav.Build(std::vector<tactics::Obstacle>{}, 30.0f, 0.4f, nullptr, &surfaces);
+  const tactics::ReachField f = nav.ComputeReachField(glm::vec3(-8.0f, 0.0f, 0.0f), 22.0f);
+
+  // Under the deck, both the ground and the deck itself are reachable.
+  CHECK(!f.stacked.empty());
+  CHECK(f.CoversPoint(glm::vec3(3.0f, 0.0f, 0.0f), 0.5f));
+  CHECK(f.CoversPoint(glm::vec3(3.0f, 3.0f, 0.0f), 0.5f));
+  CHECK(!f.CoversPoint(glm::vec3(3.0f, 1.5f, 0.0f), 0.5f));
+
+  // The sheets are single-valued, keep every sample exactly once, and both
+  // layers of the stacked spot appear on different sheets.
+  const std::vector<tactics::ReachField> sheets = tactics::SplitReachSheets(f);
+  CHECK(sheets.size() >= 2);
+  size_t mainSamples = 0;
+  for (int iz = 0; iz < f.nz; ++iz) {
+    for (int ix = 0; ix < f.nx; ++ix) mainSamples += f.Reached(ix, iz);
+  }
+  size_t sheetSamples = 0;
+  bool groundSheet = false, deckSheet = false;
+  for (const tactics::ReachField& sheet : sheets) {
+    CHECK(sheet.layerStart.size() == sheet.dist.size() + 1);
+    for (int iz = 0; iz < sheet.nz; ++iz) {
+      for (int ix = 0; ix < sheet.nx; ++ix) sheetSamples += sheet.Reached(ix, iz);
+    }
+    if (sheet.CoversPoint(glm::vec3(3.0f, 0.0f, 0.0f), 0.5f)) {
+      groundSheet = true;
+      // The seam-suppression data sees the deck stacked over this spot.
+      const int ix = static_cast<int>(std::lround((3.0f - sheet.minX) / sheet.step));
+      const int iz = static_cast<int>(std::lround((0.0f - sheet.minZ) / sheet.step));
+      CHECK(sheet.LayerContinues(iz * sheet.nx + ix, 3.0f));
+    }
+    if (sheet.CoversPoint(glm::vec3(3.0f, 3.0f, 0.0f), 0.5f)) deckSheet = true;
+  }
+  CHECK(groundSheet);
+  CHECK(deckSheet);
+  CHECK(sheetSamples == mainSamples + f.stacked.size());
+
+  // A flat field without stacked reach does not split at all.
+  const tactics::ReachField flatField =
+      nav.ComputeReachField(glm::vec3(-20.0f, 0.0f, -20.0f), 4.0f);
+  CHECK(flatField.stacked.empty());
+  CHECK(tactics::SplitReachSheets(flatField).empty());
+}
+
 // Benchmark: ~300 small deck/ramp surfaces (interiors-scale). Guards the
 // per-Build route table and surface spatial index; the ceiling is generous
 // so only an algorithmic regression trips it (the pre-cache code took ~3.3 s here).
@@ -3861,6 +3923,118 @@ void TestBuildingsContainingPoints() {
   CHECK(BuildingsContainingPoints(scene, {}) == std::vector<char>({0, 0}));
   // Any one point is enough (a path that merely clips the building).
   CHECK(BuildingsContainingPoints(scene, {{-5.0f, 0.3f, 2.0f}, {5.5f, 0.3f, 3.5f}})[0] == 1);
+}
+
+// Chest-low barrier (1.2 high, crouch cover on its -Z side) between Blue 0
+// (south, z=0) and Red 1 (north, z=10, facing south). Used by the issue #292
+// crouch-geometry tests below.
+tactics::Scene LowBarrierDuelScene() {
+  tactics::Scene scene;
+  scene.mapHalfExtent = 20.0f;
+  scene.obstacles.push_back(tactics::Obstacle{
+      tactics::AABB{glm::vec3(-6.0f, 0.0f, 4.0f), glm::vec3(6.0f, 1.2f, 4.8f)}});
+  tactics::Unit blue;
+  blue.id = 0;
+  blue.team = tactics::Team::Blue;
+  blue.position = glm::vec3(0.0f, 0.0f, 0.0f);
+  blue.facingYaw = 1.5707963f;  // Facing the barrier (+Z).
+  scene.units.push_back(blue);
+  tactics::Unit red;
+  red.id = 1;
+  red.team = tactics::Team::Red;
+  red.position = glm::vec3(0.0f, 0.0f, 10.0f);
+  red.facingYaw = -1.5707963f;  // Facing -Z, straight at Blue's lane.
+  scene.units.push_back(red);
+  return scene;
+}
+
+// Issue #292: the cover pose engages the moment the figure reaches its spot,
+// mid-round -- visually (coverKind/coverBlend) and bounding-box-wise -- not
+// only once the turn ends.
+void TestCoverPoseEngagesOnArrivalMidRound() {
+  GameLogic game(LowBarrierDuelScene());
+  MakePassive(game);
+  // Standing in the open lane, Blue is in Red's sight.
+  CHECK(game.ComputeVisibility(Team::Red).UnitVisible(0));
+  PlanMove(game, 0, glm::vec3(0.0f, 0.0f, 3.5f));
+  PassRest(game);
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+  // The walk takes ~0.9 s and the blend ~0.3 s more; at the 2 s mark the
+  // 5 s round is still executing with the pose already fully held.
+  for (float t = 0.0f; t < 2.0f; t += 0.02f) game.Update(0.02f);
+  CHECK(game.Mode() == InputMode::Executing);
+  const Unit* blue = game.FindUnit(0);
+  CHECK(glm::distance(blue->position, glm::vec3(0.0f, 0.0f, 3.5f)) < 0.05f);
+  CHECK(blue->coverKind == 2);
+  CHECK(blue->coverBlend > 0.99f);
+  // The hit box sank with the pose...
+  CHECK(blue->Bounds().max.y < constants::kCrouchedHeight + 0.01f);
+  // ...so the crouched figure is tucked out of Red's sight, mid-round.
+  CHECK(!game.ComputeVisibility(Team::Red).UnitVisible(0));
+  RunRound(game);
+  CHECK(game.FindUnit(0)->coverKind == 2);  // Pose persists into planning.
+}
+
+// Issue #292: holding the crouch protects bounding-box-wise. The same
+// pinned-roll locked shot that drops a standing figure over the chest-high
+// barrier cannot even be taken at the crouched one.
+void TestCrouchedFigureBlocksLockedShot() {
+  {
+    // Control: standing at the cover spot (pose never blended in), Red's
+    // line to the standing head clears the 1.2 barrier and the shot lands.
+    GameLogic game(LowBarrierDuelScene());
+    MakePassive(game);
+    game.SetShotRollSource([] { return 0.0f; });
+    Unit* blue = game.FindUnit(0);
+    blue->position = glm::vec3(0.0f, 0.0f, 3.5f);
+    CHECK(game.ResolveShot(*game.FindUnit(1), *blue));
+    CHECK(!blue->alive);
+  }
+  {
+    // Crouched there (pose settled over planning ticks; Red is behind
+    // Blue's back so the firefight rule does not suppress it), the sight
+    // probe and torso line both duck behind the barrier: no shot at all.
+    GameLogic game(LowBarrierDuelScene());
+    MakePassive(game);
+    game.SetShotRollSource([] { return 0.0f; });
+    Unit* blue = game.FindUnit(0);
+    blue->position = glm::vec3(0.0f, 0.0f, 3.5f);
+    blue->facingYaw = -1.5707963f;  // Back to the barrier.
+    for (int i = 0; i < 100; ++i) game.Update(0.02f);
+    CHECK(blue->coverKind == 2);
+    CHECK(blue->coverBlend > 0.99f);
+    bool fired = true;
+    CHECK(!game.ResolveShot(*game.FindUnit(1), *blue, &fired));
+    CHECK(!fired);
+    CHECK(blue->alive);
+  }
+}
+
+// Issue #292: the cover pose rides in snapshots, so a follower mirroring a
+// round shows the crouch when the simulator's figure takes it (it cannot
+// derive the pose itself: it never runs the round's Update ticks).
+void TestSnapshotCarriesCoverPose() {
+  GameLogic game(LowBarrierDuelScene());
+  MakePassive(game);
+  Unit* blue = game.FindUnit(0);
+  blue->position = glm::vec3(0.0f, 0.0f, 3.5f);
+  blue->facingYaw = -1.5707963f;
+  for (int i = 0; i < 100; ++i) game.Update(0.02f);
+  CHECK(blue->coverKind == 2);
+  CHECK(blue->coverBlend > 0.99f);
+
+  GameSnapshot snap;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &snap));
+  GameLogic mirror(LowBarrierDuelScene());
+  CHECK(mirror.ImportState(snap));
+  const Unit* mirrored = mirror.FindUnit(0);
+  CHECK(mirrored->coverKind == 2);
+  CHECK(mirrored->coverTileKind == 2);
+  CHECK(std::fabs(mirrored->coverBlend - blue->coverBlend) < 1e-4f);
+  CHECK(std::fabs(mirrored->coverYaw - blue->coverYaw) < 1e-4f);
+  // The mirrored pose shrinks the mirrored silhouette the same way.
+  CHECK(mirrored->Bounds().max.y < constants::kCrouchedHeight + 0.01f);
 }
 
 // --- Destruction I (issue #350): debug bomb, fracture, wall/floor holes. ---
@@ -5106,6 +5280,7 @@ int main() {
   TestBuildingsContainingPoints();
   TestNavMeshRoutesAroundObstacle();
   TestReachFieldFromRampIncludesGroundBeyondFoot();
+  TestReachFieldStackedLayersAndSheets();
   TestNavMeshDirectPathWhenUnobstructed();
   TestNavMeshCellsCoverThinLedgeBetweenRotatedFootprints();
   TestNavMeshRejectsPointsInsideObstacle();
@@ -5213,6 +5388,9 @@ int main() {
   TestKnockdownOnZiplineRecordsDrop();
   TestFallenBoundsCollapse();
   TestBurstPlanSurvivesSnapshotAndClampsOnImport();
+  TestCoverPoseEngagesOnArrivalMidRound();
+  TestCrouchedFigureBlocksLockedShot();
+  TestSnapshotCarriesCoverPose();
   TestReachFieldManySurfacesPerformance();
   TestExplosionPlanDeterministicCells();
   TestBombBlowsSeeAndWalkThroughHole();

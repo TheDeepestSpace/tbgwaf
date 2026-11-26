@@ -211,11 +211,12 @@ void TestSessionReadyAndRound() {
     for (const char* banned : {"walkPhase", "walkBlend", "idleElapsed", "knockdown", "shootElapsed"}) {
       CHECK(text.find(banned) == std::string::npos);
     }
-    // Every unit sample is [id,x,y,z,yaw,alive,moving] and own units always appear.
+    // Every unit sample is [id,x,y,z,yaw,alive,moving,coverKind,coverBlend,
+    // coverYaw] and own units always appear.
     for (const Json& f : round[ti]["frames"].AsArray()) {
       int own = 0;
       for (const Json& row : f["u"].AsArray()) {
-        CHECK(row.AsArray().size() == 7);
+        CHECK(row.AsArray().size() == 10);
         const int id = static_cast<int>(row.AsArray()[0].AsNumber());
         if ((id < 3) == (ti == 0)) ++own;
       }

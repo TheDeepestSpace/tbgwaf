@@ -421,10 +421,12 @@ void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& 
   polygonMode_ = false;
   paddedPolygons_.clear();
   paddedPolygons_.reserve(obstacles.size());
+  paddedPolygonPad_.clear();
   for (const Obstacle& obstacle : obstacles) {
     polygonMode_ |= !obstacle.footprint.empty();
     paddedPolygons_.push_back(
         ExpandConvexPolygon(ObstacleFootprint(obstacle), ObstaclePad(obstacle, agentRadius)));
+    paddedPolygonPad_.push_back(ObstaclePad(obstacle, agentRadius));
   }
   AddLowDeckBlockers(agentRadius);
   BuildGroundMesh(obstacles, region, agentRadius);
@@ -734,6 +736,79 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
     }
   }
 
+  // Exact signed distance from each node to the union of padded obstacle
+  // outlines, for nodes near one (see ReachField::wallDist): negative inside
+  // any padded polygon. The sign matters where outlines nest or overlap -- a
+  // pier shaft inside its wider footing, abutting buildings -- because an
+  // unsigned "distance to the nearest outline" there measures the inner,
+  // non-blocking outline and warps the drawn boundary. The min over signed
+  // per-polygon distances is exact outside the union and along its boundary.
+  // Only near-contour values are ever drawn, so nodes farther than
+  // kWallDistRange from every outline stay at infinity and skip the work.
+  constexpr float kWallDistRange = 2.0f;
+  // The drawn boundary sits this far off an obstacle's real face.
+  constexpr float kFaceGap = 0.05f;
+  const float windowMaxX = field.minX + (field.nx - 1) * step;
+  const float windowMaxZ = field.minZ + (field.nz - 1) * step;
+  int wallOutlines = 0;
+  const auto pushWallSegs = [&](const std::vector<glm::vec2>& polygon, float inset, bool ground,
+                                float yMin, float yMax) {
+    const int outline = wallOutlines++;
+    for (size_t e = 0; e < polygon.size(); ++e) {
+      BoundarySeg seg;
+      seg.outline = outline;
+      seg.a = polygon[e];
+      seg.b = polygon[(e + 1) % polygon.size()];
+      seg.inset = inset;
+      seg.ground = ground;
+      seg.yMin = yMin;
+      seg.yMax = yMax;
+      field.wallSegs.push_back(seg);
+    }
+  };
+  field.wallDist.assign(field.dist.size(), inf);
+  for (size_t polygonIndex = 0; polygonIndex < paddedPolygons_.size(); ++polygonIndex) {
+    const std::vector<glm::vec2>& polygon = paddedPolygons_[polygonIndex];
+    if (polygon.size() < 3) continue;
+    glm::vec2 lo = polygon[0], hi = polygon[0];
+    for (const glm::vec2& v : polygon) {
+      lo = glm::min(lo, v);
+      hi = glm::max(hi, v);
+    }
+    if (hi.x >= field.minX - 1.0f && hi.y >= field.minZ - 1.0f && lo.x <= windowMaxX + 1.0f &&
+        lo.y <= windowMaxZ + 1.0f) {
+      const float pad =
+          polygonIndex < paddedPolygonPad_.size() ? paddedPolygonPad_[polygonIndex] : 0.0f;
+      pushWallSegs(polygon, std::max(0.0f, pad - kFaceGap), /*ground=*/true, 0.0f, 0.0f);
+    }
+    const auto nodeMin = [&](float v, float minV) {
+      return std::max(0, static_cast<int>(std::floor((v - kWallDistRange - minV) / step)));
+    };
+    const int ix0 = nodeMin(lo.x, field.minX), iz0 = nodeMin(lo.y, field.minZ);
+    const int ix1 = std::min(
+        field.nx - 1, static_cast<int>(std::ceil((hi.x + kWallDistRange - field.minX) / step)));
+    const int iz1 = std::min(
+        field.nz - 1, static_cast<int>(std::ceil((hi.y + kWallDistRange - field.minZ) / step)));
+    for (int iz = iz0; iz <= iz1; ++iz) {
+      for (int ix = ix0; ix <= ix1; ++ix) {
+        const glm::vec2 p(field.minX + ix * step, field.minZ + iz * step);
+        float& best = field.wallDist[iz * field.nx + ix];
+        float edge = inf;
+        bool inside = true;  // ExpandConvexPolygon output is counter-clockwise.
+        for (size_t e = 0; e < polygon.size(); ++e) {
+          const glm::vec2 a = polygon[e];
+          const glm::vec2 ab = polygon[(e + 1) % polygon.size()] - a;
+          const glm::vec2 ap = p - a;
+          inside &= ab.x * ap.y - ab.y * ap.x >= 0.0f;
+          const float t =
+              std::clamp(glm::dot(ap, ab) / std::max(glm::dot(ab, ab), 1e-12f), 0.0f, 1.0f);
+          edge = std::min(edge, glm::length(ap - t * ab));
+        }
+        best = std::min(best, inside ? -edge : edge);
+      }
+    }
+  }
+
   // Broadphase for the Dijkstra below (issue #256): testing every node and
   // every short edge against every padded blocker polygon is
   // O(nodes x polygons) and cost ~0.5 s per move click on urban maps. Bucket
@@ -789,9 +864,9 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
   static const int kMoves[16][2] = {{1, 0},  {-1, 0}, {0, 1},  {0, -1}, {1, 1},  {1, -1},
                                     {-1, 1}, {-1, -1}, {2, 1},  {2, -1}, {-2, 1}, {-2, -1},
                                     {1, 2},  {1, -2}, {-1, 2}, {-1, -2}};
-  std::vector<char> walkable(field.dist.size(), -1);  // -1 unknown, 0/1 cached.
+  field.walkable.assign(field.dist.size(), -1);  // -1 unknown, 0/1 cached.
   auto nodeWalkable = [&](int ix, int iz) {
-    char& w = walkable[iz * field.nx + ix];
+    char& w = field.walkable[iz * field.nx + ix];
     if (w < 0) {
       const glm::vec3 p = field.Node(ix, iz);
       if (!polygonMode_) {
@@ -929,11 +1004,49 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
     for (size_t i = 0; i + 1 < path.size(); ++i) length += glm::distance(path[i], path[i + 1]);
     return length;
   };
+  field.elevated.assign(field.dist.size(), 0);
+  // Blockers standing on walk surfaces (parapets, roof furniture) bound the
+  // reach up there the way padded obstacles do on the ground.
+  for (size_t s = 0; s < surfaceBlockers_.size() && s < walkSurfaces_.size(); ++s) {
+    for (const std::vector<glm::vec2>& polygon : surfaceBlockers_[s]) {
+      if (polygon.size() < 3) continue;
+      glm::vec2 lo = polygon[0], hi = polygon[0];
+      float yMin = inf, yMax = -inf;
+      for (const glm::vec2& v : polygon) {
+        lo = glm::min(lo, v);
+        hi = glm::max(hi, v);
+        const float y = SurfaceHeightAt(walkSurfaces_[s], v.x, v.y);
+        yMin = std::min(yMin, y);
+        yMax = std::max(yMax, y);
+      }
+      if (hi.x < field.minX - 1.0f || hi.y < field.minZ - 1.0f || lo.x > windowMaxX + 1.0f ||
+          lo.y > windowMaxZ + 1.0f) {
+        continue;
+      }
+      pushWallSegs(polygon,
+                   std::max(0.0f, std::min(constants::kAgentRadius, constants::kNavWallPad) -
+                                      kFaceGap),
+                   /*ground=*/false, yMin, yMax);
+    }
+  }
+  // Terrain height per node, snapshotted before the elevated pass overwrites
+  // stacked nodes (dropped again below when nothing stacks).
+  field.groundY = field.surfaceY;
+  // Every reachable layer at the node under scrutiny: the grid keeps one of
+  // them, the rest go to field.stacked (issue #292 follow-up).
+  struct LayerCand {
+    float dist = 0.0f;
+    float y = 0.0f;
+    char elevated = 1;
+  };
+  std::vector<LayerCand> layerCands;
   for (int iz = 0; iz < field.nz; ++iz) {
     for (int ix = 0; ix < field.nx; ++ix) {
       const int idx = iz * field.nx + ix;
       const float x = field.minX + ix * field.step;
       const float z = field.minZ + iz * field.step;
+      const float groundDist = field.dist[idx];
+      layerCands.clear();
       for (int surface : SurfaceCandidates(x, z)) {
         if (!SurfaceContains(surface, x, z) || SurfaceBlocked(surface, x, z)) continue;
         glm::vec3 goal(x, SurfaceHeightAt(walkSurfaces_[surface], x, z), z);
@@ -970,14 +1083,38 @@ ReachField NavMesh::ComputeReachField(const glm::vec3& start, float budget, floa
           }
         }
         if (!found) continue;
+        if (distance <= budget) layerCands.push_back({distance, goal.y, 1});
         if (distance <= budget && (startSurface >= 0 || distance < field.dist[idx] + 0.5f)) {
           field.dist[idx] = distance;
           field.surfaceY[idx] = goal.y;
+          field.elevated[idx] = 1;
           field.parent[idx] = -1;  // Priced over the surface graph, not this grid.
         }
       }
+      if (layerCands.empty()) continue;
+      // Stacked layers (issue #292 follow-up): everything reachable that the
+      // grid's one sample per node cannot hold -- the ground sample when an
+      // elevated one overwrote it, and elevated layers beyond the stored one.
+      // Same-height duplicates (two floor pieces sharing an edge node)
+      // collapse onto the cheapest.
+      if (field.elevated[idx] && groundDist <= budget) {
+        layerCands.push_back({groundDist, field.groundY[idx], 0});
+      }
+      std::sort(layerCands.begin(), layerCands.end(),
+                [](const LayerCand& a, const LayerCand& b) { return a.dist < b.dist; });
+      const size_t nodeBegin = field.stacked.size();
+      for (const LayerCand& cand : layerCands) {
+        if (std::fabs(cand.y - field.surfaceY[idx]) <= kReachLayerStep) continue;
+        bool duplicate = false;
+        for (size_t s = nodeBegin; s < field.stacked.size() && !duplicate; ++s) {
+          duplicate = std::fabs(cand.y - field.stacked[s].surfaceY) <= kReachLayerStep;
+        }
+        if (duplicate) continue;
+        field.stacked.push_back({idx, cand.dist, cand.y, cand.elevated});
+      }
     }
   }
+  if (field.stacked.empty()) field.groundY.clear();
 
   // A terrain roof meets the tier along its whole long edges: flood it from
   // every reached tier node under its outline (the overhang strip), so the
@@ -1586,13 +1723,88 @@ bool NavMesh::FindPolygonGroundPath(glm::vec3 start, glm::vec3 goal,
     }
     polygonBounds.push_back(bounds);
   }
+  // Bucket the polygons into a coarse grid so each visibility test only
+  // walks the cells its segment crosses (the same broadphase trick as
+  // ComputeReachField's Dijkstra): the previous full sweep over every
+  // polygon per node pair cost ~0.3 s per path on enterable-building maps.
+  glm::vec2 gridLo(std::min(start.x, goal.x), std::min(start.z, goal.z));
+  glm::vec2 gridHi(std::max(start.x, goal.x), std::max(start.z, goal.z));
+  for (const glm::vec4& bounds : polygonBounds) {
+    if (bounds.x > bounds.z) continue;  // Empty polygon.
+    gridLo = glm::min(gridLo, glm::vec2(bounds.x, bounds.y));
+    gridHi = glm::max(gridHi, glm::vec2(bounds.z, bounds.w));
+  }
+  constexpr float kBucketCell = 4.0f;
+  const int gridNx =
+      std::max(1, static_cast<int>(std::ceil((gridHi.x - gridLo.x) / kBucketCell)));
+  const int gridNz =
+      std::max(1, static_cast<int>(std::ceil((gridHi.y - gridLo.y) / kBucketCell)));
+  const auto cellX = [&](float x) {
+    return std::clamp(static_cast<int>((x - gridLo.x) / kBucketCell), 0, gridNx - 1);
+  };
+  const auto cellZ = [&](float z) {
+    return std::clamp(static_cast<int>((z - gridLo.y) / kBucketCell), 0, gridNz - 1);
+  };
+  std::vector<std::vector<int>> buckets(static_cast<size_t>(gridNx) * gridNz);
+  for (size_t i = 0; i < paddedPolygons_.size(); ++i) {
+    const glm::vec4& bounds = polygonBounds[i];
+    if (bounds.x > bounds.z) continue;
+    // The epsilon keeps a polygon whose box ends exactly on a cell boundary
+    // bucketed on both sides of it.
+    const int x0 = cellX(bounds.x - 1e-3f), x1 = cellX(bounds.z + 1e-3f);
+    const int z0 = cellZ(bounds.y - 1e-3f), z1 = cellZ(bounds.w + 1e-3f);
+    for (int gz = z0; gz <= z1; ++gz) {
+      for (int gx = x0; gx <= x1; ++gx) {
+        buckets[static_cast<size_t>(gz) * gridNx + gx].push_back(static_cast<int>(i));
+      }
+    }
+  }
+  // Each polygon is in every bucket its box overlaps, so a crossing polygon
+  // always shares a cell with the segment; the stamp dedupes repeat visits.
+  std::vector<int> stamp(paddedPolygons_.size(), -1);
+  int query = 0;
   auto clear = [&](glm::vec2 a, glm::vec2 b) {
+    ++query;
     const float xMin = std::min(a.x, b.x), xMax = std::max(a.x, b.x);
     const float zMin = std::min(a.y, b.y), zMax = std::max(a.y, b.y);
-    for (size_t i = 0; i < paddedPolygons_.size(); ++i) {
-      const glm::vec4& bounds = polygonBounds[i];
-      if (xMax < bounds.x || xMin > bounds.z || zMax < bounds.y || zMin > bounds.w) continue;
-      if (SegmentEntersConvexPolygon(a, b, paddedPolygons_[i])) return false;
+    const auto cellBlocked = [&](int gx, int gz) {
+      for (int i : buckets[static_cast<size_t>(gz) * gridNx + gx]) {
+        if (stamp[i] == query) continue;
+        stamp[i] = query;
+        const glm::vec4& bounds = polygonBounds[i];
+        if (xMax < bounds.x || xMin > bounds.z || zMax < bounds.y || zMin > bounds.w) continue;
+        if (SegmentEntersConvexPolygon(a, b, paddedPolygons_[i])) return true;
+      }
+      return false;
+    };
+    // Amanatides-Woo cell walk from a to b.
+    int cx = cellX(a.x), cz = cellZ(a.y);
+    const int ex = cellX(b.x), ez = cellZ(b.y);
+    const glm::vec2 d = b - a;
+    const int stepX = d.x > 0.0f ? 1 : -1, stepZ = d.y > 0.0f ? 1 : -1;
+    const float inf = std::numeric_limits<float>::infinity();
+    float tMaxX = inf, tDeltaX = inf, tMaxZ = inf, tDeltaZ = inf;
+    if (std::fabs(d.x) > 1e-9f) {
+      const float edge = gridLo.x + (cx + (stepX > 0 ? 1 : 0)) * kBucketCell;
+      tMaxX = (edge - a.x) / d.x;
+      tDeltaX = kBucketCell / std::fabs(d.x);
+    }
+    if (std::fabs(d.y) > 1e-9f) {
+      const float edge = gridLo.y + (cz + (stepZ > 0 ? 1 : 0)) * kBucketCell;
+      tMaxZ = (edge - a.y) / d.y;
+      tDeltaZ = kBucketCell / std::fabs(d.y);
+    }
+    while (true) {
+      if (cellBlocked(cx, cz)) return false;
+      if (cx == ex && cz == ez) break;
+      if (tMaxX < tMaxZ) {
+        cx += stepX;
+        tMaxX += tDeltaX;
+      } else {
+        cz += stepZ;
+        tMaxZ += tDeltaZ;
+      }
+      if (cx < 0 || cz < 0 || cx >= gridNx || cz >= gridNz) break;
     }
     return true;
   };
@@ -1600,26 +1812,31 @@ bool NavMesh::FindPolygonGroundPath(glm::vec3 start, glm::vec3 goal,
   std::vector<float> distance(n, std::numeric_limits<float>::infinity());
   std::vector<int> parent(n, -1);
   std::vector<char> closed(n, false);
-  using Entry = std::pair<float, int>;
+  // A* over the lazily discovered visibility graph: the straight-line
+  // heuristic is admissible and consistent for Euclidean shortest paths, so
+  // the result matches the previous Dijkstra; testing the distance
+  // improvement before the (far costlier) visibility test and expanding
+  // toward the goal first is what makes the sweep affordable.
+  const glm::vec2 goalNode = nodes[1];
+  using Entry = std::pair<float, int>;  // f = g + straight-line-to-goal, node.
   std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
   distance[0] = 0.0f;
-  open.push({0.0f, 0});
+  open.push({glm::distance(nodes[0], goalNode), 0});
   while (!open.empty()) {
-    const auto [d, current] = open.top();
+    const auto [f, current] = open.top();
     open.pop();
     if (closed[current]) continue;
     closed[current] = true;
     if (current == 1) break;
+    const float d = distance[current];
     for (size_t next = 0; next < n; ++next) {
-      if (next == static_cast<size_t>(current) || closed[next] || !clear(nodes[current], nodes[next])) {
-        continue;
-      }
+      if (next == static_cast<size_t>(current) || closed[next]) continue;
       const float candidate = d + glm::distance(nodes[current], nodes[next]);
-      if (candidate < distance[next]) {
-        distance[next] = candidate;
-        parent[next] = current;
-        open.push({candidate, static_cast<int>(next)});
-      }
+      if (candidate >= distance[next]) continue;
+      if (!clear(nodes[current], nodes[next])) continue;
+      distance[next] = candidate;
+      parent[next] = current;
+      open.push({candidate + glm::distance(nodes[next], goalNode), static_cast<int>(next)});
     }
   }
   if (!std::isfinite(distance[1])) return false;
@@ -1756,6 +1973,7 @@ void NavMesh::AddLowDeckBlockers(float agentRadius) {
     if (padded.size() < 3) continue;
     polygonMode_ = true;
     paddedPolygons_.push_back(std::move(padded));
+    paddedPolygonPad_.push_back(0.0f);
   }
 }
 
@@ -2072,6 +2290,182 @@ void NavMesh::LiftGroundPathOntoTerrain(std::vector<glm::vec3>* outPath) const {
     }
   }
   *outPath = std::move(lifted);
+}
+
+std::vector<ReachField> SplitReachSheets(const ReachField& field) {
+  std::vector<ReachField> sheets;
+  const int nx = field.nx, nz = field.nz;
+  const size_t total = static_cast<size_t>(nx) * nz;
+  if (field.stacked.empty() || nx <= 0 || nz <= 0 || field.dist.size() != total ||
+      field.surfaceY.size() != total) {
+    return sheets;
+  }
+
+  // Every reached sample -- the grid's one per node plus the stacked ones --
+  // flattened into a per-node CSR list.
+  struct Sample {
+    int node = 0;
+    float dist = 0.0f;
+    float y = 0.0f;
+    char elevated = 0;
+    int sheet = -1;
+  };
+  std::vector<int> start(total + 1, 0);
+  std::vector<Sample> samples;
+  {
+    std::vector<int> count(total, 0);
+    for (int iz = 0; iz < nz; ++iz) {
+      for (int ix = 0; ix < nx; ++ix) {
+        if (field.Reached(ix, iz)) ++count[iz * nx + ix];
+      }
+    }
+    for (const ReachField::StackedSample& s : field.stacked) ++count[s.node];
+    for (size_t i = 0; i < total; ++i) start[i + 1] = start[i] + count[i];
+    samples.resize(start[total]);
+    std::vector<int> cursor(start.begin(), start.end() - 1);
+    const bool haveElevated = field.elevated.size() == total;
+    for (int iz = 0; iz < nz; ++iz) {
+      for (int ix = 0; ix < nx; ++ix) {
+        const int node = iz * nx + ix;
+        if (!field.Reached(ix, iz)) continue;
+        samples[cursor[node]++] = {node, field.dist[node], field.surfaceY[node],
+                                   static_cast<char>(haveElevated ? field.elevated[node] : 0),
+                                   -1};
+      }
+    }
+    for (const ReachField::StackedSample& s : field.stacked) {
+      samples[cursor[s.node]++] = {s.node, s.dist, s.surfaceY, s.elevated, -1};
+    }
+  }
+
+  // Greedy sheet assignment, lowest seed first (the ground and whatever
+  // climbs away from it, then each floor above): BFS over 8-neighbour sample
+  // adjacency within kReachLayerStep, refusing nodes the sheet already holds
+  // a sample at. A fragment the growth cuts off (a flight's top rows whose
+  // nodes the ground sheet claimed) simply becomes its own small sheet; the
+  // renderer's seam suppression (LayerContinues) hides every cut.
+  std::vector<int> order(samples.size());
+  for (size_t i = 0; i < order.size(); ++i) order[i] = static_cast<int>(i);
+  std::sort(order.begin(), order.end(),
+            [&](int a, int b) { return samples[a].y < samples[b].y; });
+  constexpr size_t kMaxSheets = 32;
+  std::vector<std::vector<int>> sheetSamples;
+  std::vector<int> occupied;
+  std::vector<int> queue;
+  for (int seed : order) {
+    if (samples[seed].sheet >= 0) continue;
+    if (sheetSamples.size() >= kMaxSheets) break;
+    const int sheet = static_cast<int>(sheetSamples.size());
+    sheetSamples.emplace_back();
+    occupied.assign(total, -1);
+    samples[seed].sheet = sheet;
+    occupied[samples[seed].node] = seed;
+    sheetSamples[sheet].push_back(seed);
+    queue.assign(1, seed);
+    while (!queue.empty()) {
+      const Sample s = samples[queue.back()];
+      queue.pop_back();
+      const int ix = s.node % nx, iz = s.node / nx;
+      for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+          if (dx == 0 && dz == 0) continue;
+          const int jx = ix + dx, jz = iz + dz;
+          if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) continue;
+          const int m = jz * nx + jx;
+          if (occupied[m] >= 0) continue;
+          int best = -1;
+          float bestDy = kReachLayerStep;
+          for (int t = start[m]; t < start[m + 1]; ++t) {
+            if (samples[t].sheet >= 0) continue;
+            const float dy = std::fabs(samples[t].y - s.y);
+            if (dy <= bestDy) {
+              bestDy = dy;
+              best = t;
+            }
+          }
+          if (best < 0) continue;
+          samples[best].sheet = sheet;
+          occupied[m] = best;
+          sheetSamples[sheet].push_back(best);
+          queue.push_back(best);
+        }
+      }
+    }
+  }
+
+  // Emit each sheet windowed to its samples plus the margin the frontier
+  // smoothing and outline passes look past the reach.
+  constexpr int kSheetMargin = 18;
+  const float inf = std::numeric_limits<float>::infinity();
+  const bool haveGround = field.groundY.size() == total;
+  const bool haveWalkable = field.walkable.size() == total;
+  const bool haveWall = field.wallDist.size() == total;
+  const bool haveEdge = field.edgeDist.size() == total;
+  const bool haveElevated = field.elevated.size() == total;
+  for (const std::vector<int>& ids : sheetSamples) {
+    if (ids.empty()) continue;
+    int x0 = nx, x1 = -1, z0 = nz, z1 = -1;
+    for (int sid : ids) {
+      const int ix = samples[sid].node % nx, iz = samples[sid].node / nx;
+      x0 = std::min(x0, ix);
+      x1 = std::max(x1, ix);
+      z0 = std::min(z0, iz);
+      z1 = std::max(z1, iz);
+    }
+    x0 = std::max(0, x0 - kSheetMargin);
+    z0 = std::max(0, z0 - kSheetMargin);
+    x1 = std::min(nx - 1, x1 + kSheetMargin);
+    z1 = std::min(nz - 1, z1 + kSheetMargin);
+    ReachField sheet;
+    sheet.step = field.step;
+    sheet.budget = field.budget;
+    sheet.revision = field.revision;
+    sheet.minX = field.minX + x0 * field.step;
+    sheet.minZ = field.minZ + z0 * field.step;
+    sheet.nx = x1 - x0 + 1;
+    sheet.nz = z1 - z0 + 1;
+    const size_t sheetTotal = static_cast<size_t>(sheet.nx) * sheet.nz;
+    sheet.dist.assign(sheetTotal, inf);
+    sheet.surfaceY.resize(sheetTotal);
+    if (haveElevated) sheet.elevated.assign(sheetTotal, 0);
+    if (haveWalkable) sheet.walkable.resize(sheetTotal);
+    if (haveWall) sheet.wallDist.resize(sheetTotal);
+    if (haveEdge) sheet.edgeDist.resize(sheetTotal);
+    sheet.layerStart.assign(sheetTotal + 1, 0);
+    for (int iz = 0; iz < sheet.nz; ++iz) {
+      for (int ix = 0; ix < sheet.nx; ++ix) {
+        const size_t local = static_cast<size_t>(iz) * sheet.nx + ix;
+        const size_t parent = static_cast<size_t>(iz + z0) * nx + (ix + x0);
+        sheet.surfaceY[local] = haveGround ? field.groundY[parent] : field.surfaceY[parent];
+        if (haveWalkable) sheet.walkable[local] = field.walkable[parent];
+        if (haveWall) sheet.wallDist[local] = field.wallDist[parent];
+        if (haveEdge) sheet.edgeDist[local] = field.edgeDist[parent];
+        sheet.layerStart[local + 1] =
+            sheet.layerStart[local] + (start[parent + 1] - start[parent]);
+      }
+    }
+    sheet.layerY.resize(sheet.layerStart[sheetTotal]);
+    for (int iz = 0; iz < sheet.nz; ++iz) {
+      for (int ix = 0; ix < sheet.nx; ++ix) {
+        const size_t local = static_cast<size_t>(iz) * sheet.nx + ix;
+        const size_t parent = static_cast<size_t>(iz + z0) * nx + (ix + x0);
+        int k = sheet.layerStart[local];
+        for (int t = start[parent]; t < start[parent + 1]; ++t) sheet.layerY[k++] = samples[t].y;
+      }
+    }
+    for (int sid : ids) {
+      const Sample& s = samples[sid];
+      const int ix = s.node % nx, iz = s.node / nx;
+      const size_t local = static_cast<size_t>(iz - z0) * sheet.nx + (ix - x0);
+      sheet.dist[local] = s.dist;
+      sheet.surfaceY[local] = s.y;
+      if (haveElevated) sheet.elevated[local] = s.elevated;
+    }
+    sheet.wallSegs = field.wallSegs;
+    sheet.edgeSegs = field.edgeSegs;
+    sheets.push_back(std::move(sheet));
+  }
+  return sheets;
 }
 
 }  // namespace tactics

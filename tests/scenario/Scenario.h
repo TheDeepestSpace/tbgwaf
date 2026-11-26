@@ -124,6 +124,7 @@ struct ScenarioAssertion {
   std::optional<int> unit;
   std::optional<bool> alive;
   std::optional<glm::vec3> position;
+  std::optional<std::string> coverPose;  // Paired with `unit`: none | stand (back to tall cover) | crouch.
   std::optional<float> facingDegrees;  // Paired with `unit`; degrees, atan2(dz, dx).
   float tolerance = 0.05f;
 
@@ -283,9 +284,12 @@ ScenarioResult RunScenario(const Scenario& scenario);
 // Building blocks for other runners (the networked one): apply one scripted
 // plan action (Move/Shoot/Pass/Cancel/Focus; also Commit/NewGame locally) to
 // a single GameLogic through its click/choose API, and check one assertion
-// against a GameLogic's state. Failures are appended to `result`.
+// against a GameLogic's state. Failures are appended to `result`. `hooks`
+// gives the caller the same presentation callbacks as RunScenario (click
+// markers, menu presses, movement-frontier holds), so a video filmed through
+// the networked rig shows the identical planning flow a real player drives.
 bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& action,
-                   int stepIndex, ScenarioResult* result);
+                   int stepIndex, ScenarioResult* result, const PlaybackHooks& hooks = {});
 void CheckAssertion(const GameLogic& game, const ScenarioAssertion& assertion, int stepIndex,
                     ScenarioResult* result);
 

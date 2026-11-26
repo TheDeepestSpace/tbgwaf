@@ -2,7 +2,7 @@ name: bomb_wall_hole_sight_and_path
 description: >
   Destruction I (issue #350): the debug bomb blows a hole through the wall
   between the squads. Before the blast neither side sees the other and the
-  wall (spanning the whole map) cannot be crossed; after it the red figure
+  wall (spanning the whole map) cannot be crossed; once the bomb has gone off during a round, the next turn the red figure
   shows through the breach (sight and shots pass), and because the hole
   reaches the floor with headroom blue walks through it to the far side.
   The goldens show the holed wall from both panes.
@@ -30,14 +30,22 @@ script:
   - action: bomb
     position: [0, 1, 0]
     radius: 3
-    comment: Debug bomb at the foot of the wall, between the figures.
+    at: 1.0
+    comment: Debug bomb at the foot of the wall, armed to go off 1s into the round.
+  - action: pass
+    actor: 0
+  - action: pass
+    actor: 1
+  - action: commit
+    comment: The blast plays out during this round (captured frame by frame).
+  - assert: {round: 2}
   - assert: {unit: 1, visible_to: blue, visible: true}
   - action: move
     actor: 0
     destination: [3.0, 0, -1.0]
-    comment: Through the floor-reaching breach (past the rubble) to the red side.
+    comment: Next turn, through the floor-reaching breach (past the rubble) to the red side.
   - action: pass
     actor: 1
   - action: commit
   - assert: {unit: 0, position: [3.0, 0, -1.0], tolerance: 0.3}
-  - assert: {round: 2}
+  - assert: {round: 3}

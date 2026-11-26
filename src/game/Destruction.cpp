@@ -1123,11 +1123,11 @@ std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& bomb)
         base = glm::length(base) > 1e-3f ? glm::normalize(base) : chunk.outward;
         dir = Rotate2(base, rng.Float(-0.45f, 0.45f));
         if (glm::dot(dir, chunk.outward) < 0.25f) dir = chunk.outward;
-        speed = 1.3f + 3.2f * push + rng.Float(0.0f, 0.9f);
-        vy = 0.3f + 1.6f * push * std::max(0.0f, (dist > 1e-3f ? radial.y / dist : 0.0f) + 0.4f) +
-             rng.Float(0.0f, 0.7f);
+        speed = 2.5f + 5.5f * push + rng.Float(0.0f, 1.5f);
+        vy = 0.6f + 2.6f * push * std::max(0.0f, (dist > 1e-3f ? radial.y / dist : 0.0f) + 0.4f) +
+             rng.Float(0.0f, 1.0f);
         const float tipSign = rng.Int(0, 1) ? 1.0f : -1.0f;
-        const float tip = tipSign * (0.8f + 2.8f * push + rng.Float(0.0f, 1.5f));
+        const float tip = tipSign * (1.2f + 4.0f * push + rng.Float(0.0f, 2.0f));
         spin = glm::vec3(chunk.along.x, 0.0f, chunk.along.y) * tip +
                glm::vec3(0.0f, rng.Float(-1.5f, 1.5f), 0.0f);
       } else if (chunk.thrown) {
@@ -1137,17 +1137,18 @@ std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& bomb)
         const glm::vec3 probe =
             chunk.center + glm::vec3(dir.x, 0.0f, dir.y) * (chunk.radius + 0.15f);
         if (world.SolidAt(probe)) dir = -dir;
-        speed = 1.0f + 2.5f * push + rng.Float(0.0f, 0.8f);
-        vy = 0.3f + 1.2f * push + rng.Float(0.0f, 0.6f);
+        speed = 2.0f + 4.5f * push + rng.Float(0.0f, 1.2f);
+        vy = 0.6f + 2.2f * push + rng.Float(0.0f, 0.9f);
         const float spinZ = rng.Float(-2.5f, 2.5f);
         const float spinY = rng.Float(-1.5f, 1.5f);
         const float spinX = rng.Float(-2.5f, 2.5f);
         spin = glm::vec3(spinX, spinY, spinZ) * (0.4f + push);
       } else {
-        // A slab cell drops, drifting a little away from the blast.
+        // A slab cell is punched down and out by the blast: a downward
+        // impulse (stronger near the bomb) plus a drift away from it.
         dir = Rotate2(away, rng.Float(-1.2f, 1.2f));
-        speed = rng.Float(0.1f, 0.9f);
-        vy = 0.0f;
+        speed = 0.6f + 2.4f * push + rng.Float(0.0f, 0.8f);
+        vy = -(0.8f + 3.0f * push + rng.Float(0.0f, 0.8f));
         const float spinZ = rng.Float(-0.8f, 0.8f);
         const float spinY = rng.Float(-0.8f, 0.8f);
         const float spinX = rng.Float(-0.8f, 0.8f);

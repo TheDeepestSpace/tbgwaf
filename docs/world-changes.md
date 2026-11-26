@@ -170,3 +170,9 @@ same log to the same seeded map, so drawn == simulated geometry.
   immediate detonation broadcasts the delta and re-sends each seat's
   fog-filtered state, since a fresh hole can reveal figures). Scenarios:
   `{action: bomb, position: [x,y,z], radius: r, at: s?}`.
+
+## Blast impulse and the gallery
+
+Debris is thrown harder than a nudge: wall cells leave at roughly 2.5–9 m/s, thick-solid cells at 2–7.7 m/s, and slab cells are punched down and out (downward speed up to ~4.6 m/s, stronger nearer the bomb). See step 8 of `PlanExplosion` in `src/game/Destruction.cpp`.
+
+`tests/blast_gallery/` holds rendered frames of blasts inside generated buildings, shown in the asset gallery under "Blasts in buildings". Regenerate with `xvfb-run tactics_blast_gallery tests/blast_gallery` (target `tactics_blast_gallery`).

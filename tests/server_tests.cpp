@@ -1645,6 +1645,49 @@ void TestPersistedMatchSurvivesRestart() {
   for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
 }
 
+// Blue vs Jev goes through the same store: Jev's commit is stored, a dropped
+// player's match idles (Jev stops asking), and a restart + rejoin resumes it.
+void TestJevMatchPersistsAndResumes() {
+  const std::string path = TempDbPath("jev");
+  std::string gameId;
+  {
+    server::GameStore store(path);
+    BotWire w(FirstOptionPoster);
+    CHECK(w.lobby.SetGameStore(&store) == 0);
+    w.Send(1, std::string(R"({"t":"join","room":"j1","mode":"player-v-ai","token":")") + kBlueToken + R"("})");
+    const auto start = w.Drain(1);
+    CHECK(Has(start, "start") && !(*Find(start, "start"))["game"].AsString().empty());
+    gameId = (*Find(start, "start"))["game"].AsString();
+    PassAndCommit(w, 1, 0);
+    CHECK(w.Pump([&] { return store.Turns(gameId).size() == 1; }));  // Jev planned and the round ran.
+    w.Drain(1);
+    CHECK(store.Turns(gameId).size() == 1 && store.Orders(gameId).size() == 2);
+    // The human drops: the room is held and Jev stops asking.
+    w.lobby.OnDisconnect(1);
+    CHECK(w.lobby.RoomCount() == 1);
+    CHECK(!w.Pump([&] { return !store.Orders(gameId).empty() && store.Orders(gameId).size() > 2; }, 300));
+    // Only the human's seat is listed, flagged as a Jev match.
+    w.Send(4, std::string(R"({"t":"my_games","token":")") + kBlueToken + R"("})");
+    const Json listed = w.Drain(4)[0]["games"].AsArray()[0];
+    CHECK(listed["vs"].AsString() == "ai" && listed["team"].AsString() == "blue");
+    // Nobody else can take Jev's seat.
+    w.Send(5, std::string(R"({"t":"join","game":")") + gameId + R"(","token":"jev"})");
+    CHECK(w.Drain(5)[0]["t"].AsString() == "error");
+  }
+  {
+    server::GameStore store(path);
+    BotWire w(FirstOptionPoster);
+    CHECK(w.lobby.SetGameStore(&store) == 1);
+    w.Send(1, std::string(R"({"t":"join","game":")") + gameId + R"(","token":")" + kBlueToken + R"("})");
+    const auto blue = w.Drain(1);
+    CHECK(Has(blue, "start") && Has(blue, "state") && Has(blue, "bots"));
+    CHECK((*Find(blue, "start"))["resumed"].AsBool());
+    PassAndCommit(w, 1, 0);
+    CHECK(w.Pump([&] { return store.Turns(gameId).size() == 2; }));
+  }
+  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
+}
+
 // A dropped player's seat is held; the opponent keeps the room and the round
 // waits for the returning player.
 void TestDisconnectHoldsSeat() {
@@ -1863,6 +1906,7 @@ int main(int argc, char** argv) {
       TBG_TEST(TestRealSocketLoopback),
       TBG_TEST(TestGameStoreBasics),
       TBG_TEST(TestPersistedMatchSurvivesRestart),
+      TBG_TEST(TestJevMatchPersistsAndResumes),
       TBG_TEST(TestDisconnectHoldsSeat),
       TBG_TEST(TestMyGamesListsOnlyOwn),
       TBG_TEST(TestFinishedGameReplay),

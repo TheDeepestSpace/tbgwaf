@@ -39,6 +39,7 @@ transitions:
   - {from: builder_edit, event: back_to_builder, to: builder}
   - {from: gameplay, event: back_to_builder, to: builder}
   - {from: room, event: create_room, to: gameplay}
+  - {from: room, event: create_ai_room, to: gameplay}
   - {from: room, event: join_room, to: gameplay}
   - {from: room, event: back, to: game_mode}
   - {from: my_games, event: continue_game, to: gameplay}

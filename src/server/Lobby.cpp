@@ -260,7 +260,7 @@ void Lobby::Join(int conn, const Json& message) {
       SendError(conn, "room code already in use");
       return;
     }
-    CreateBotRoom(conn, name, mode, MapKindOf(message), SeedOf(message), CtfOf(message));
+    CreateBotRoom(conn, name, mode, MapKindOf(message), SeedOf(message), CtfOf(message), token);
     return;
   }
   Room& room = rooms_[name];
@@ -415,9 +415,14 @@ int64_t Lobby::NowMs() {
 }
 
 void Lobby::CreateBotRoom(int conn, const std::string& name, const std::string& mode,
-                          const std::string& mapKind, std::optional<uint32_t> seed, bool ctf) {
+                          const std::string& mapKind, std::optional<uint32_t> seed, bool ctf,
+                          const std::string& token) {
   int botRooms = 0;
-  for (const auto& [roomName, existing] : rooms_) botRooms += existing.botMode.empty() ? 0 : 1;
+  for (const auto& [roomName, existing] : rooms_) {
+    // A stored human-v-Jev match whose player is away costs nothing (Jev idles).
+    const bool idle = existing.botMode == "player-v-ai" && existing.conns[0] < 0;
+    botRooms += existing.botMode.empty() || idle ? 0 : 1;
+  }
   if (botRooms >= maxBotRooms_) {
     SendError(conn, "too many Jev matches are running; try again shortly");
     return;
@@ -433,6 +438,11 @@ void Lobby::CreateBotRoom(int conn, const std::string& name, const std::string& 
     members_[conn] = Member{name, Team::Blue};
     room.bot[1].active = true;
     room.botsRunning = true;
+    // With a device token the match is stored like a human one, Jev's seat
+    // held by the reserved token (see GameStore::kJevToken).
+    room.tokens[0] = token;
+    room.tokens[1] = GameStore::kJevToken;
+    PersistNewGame(room);
     StartMatch(room);
     return;
   }
@@ -506,6 +516,8 @@ void Lobby::ScheduleBots(Room& room) {
   if (!bots_ || room.botMode.empty() || !room.session || !room.botsRunning) return;
   GameSession& session = *room.session;
   if (!session.PlanningOpen()) return;
+  // A held human-v-Jev match is paused while its player is away.
+  if (room.botMode == "player-v-ai" && room.conns[0] < 0) return;
   if (room.nextBotMs && NowMs() < room.nextBotMs) return;
   bool changed = false;
   for (int ti = 0; ti < 2; ++ti) {
@@ -558,6 +570,7 @@ void Lobby::Tick() {
       BroadcastBots(room);
       continue;
     }
+    PersistCommit(room, result.team);
     AnnounceBotCommit(room, result.team);
     MaybeRunRound(room);
     BroadcastBots(room);
@@ -670,7 +683,7 @@ void Lobby::PersistNewGame(Room& room) {
   room.lastRound[1].clear();
   const std::string& blue = room.tokens[0];
   const std::string& red = room.tokens[1];
-  if (!gameStore_ || room.scene || !room.botMode.empty() || blue.empty() || red.empty() ||
+  if (!gameStore_ || room.scene || room.botMode == "ai-v-ai" || blue.empty() || red.empty() ||
       blue == red) {
     return;
   }
@@ -691,7 +704,7 @@ void Lobby::PersistNewGame(Room& room) {
 void Lobby::PersistCommit(Room& room, Team team) {
   if (room.gameId.empty()) return;
   if (!gameStore_->PutOrders(room.gameId, room.turn, static_cast<int>(team),
-                             room.session->OrdersFor(team).Dump())) {
+                             room.session->OrdersFor(team).Dump(/*exact=*/true))) {
     std::fprintf(stderr, "tbgwaf_server: cannot store orders: %s\n", gameStore_->error().c_str());
   }
 }
@@ -777,6 +790,11 @@ int Lobby::SetGameStore(GameStore* store) {
     room.gameId = game.id;
     room.turn = nextTurn;
     room.session = std::move(session);
+    if (store->TeamOf(game.id, GameStore::kJevToken)) {  // Human vs Jev: Jev is Red.
+      room.botMode = "player-v-ai";
+      room.bot[1].active = true;
+      room.tokens[1] = GameStore::kJevToken;
+    }
     const std::vector<GameStore::Turn> turns = store->Turns(game.id);
     if (!turns.empty()) {
       room.lastRound[0] = turns.back().messages[0];
@@ -831,6 +849,7 @@ void Lobby::Resume(int conn, const std::string& gameId, const std::string& token
   peer.Set("ready", Json(room->session->Ready(OpposingTeam(seat))));
   Send(conn, peer);
   SendSeat(*room, OpposingTeam(seat), Typed("opponent_back"));
+  BroadcastBots(*room);
 }
 
 void Lobby::ViewFinished(int conn, const GameStore::Game& game, Team team) {
@@ -896,6 +915,7 @@ void Lobby::HandleMyGames(int conn, const Json& message) {
       item.Set("status", g.finished ? "finished" : "active");
       item.Set("team", net::TeamName(static_cast<Team>(teams[i])));
       item.Set("round", g.round);
+      if (gameStore_->TeamOf(g.id, GameStore::kJevToken)) item.Set("vs", "ai");
       if (g.finished) item.Set("winner", g.winner);
       item.Set("created", static_cast<double>(g.createdMs));
       item.Set("updated", static_cast<double>(g.updatedMs));

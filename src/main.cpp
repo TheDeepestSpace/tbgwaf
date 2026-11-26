@@ -1858,15 +1858,18 @@ int main() {
         }
       }
       if (flowEvent && (*flowEvent == tbgwaf_flow::Event::CreateRoom ||
+                        *flowEvent == tbgwaf_flow::Event::CreateAiRoom ||
                         *flowEvent == tbgwaf_flow::Event::JoinRoom)) {
 #ifdef __EMSCRIPTEN__
         // Connect now: "create" has the server pick the code (shown in-game
         // while waiting); "join" enters an existing room by code. The server
         // picks the map, so the room goes straight to gameplay.
-        const bool create = *flowEvent == tbgwaf_flow::Event::CreateRoom;
+        const bool ai = *flowEvent == tbgwaf_flow::Event::CreateAiRoom;
+        const bool create = ai || *flowEvent == tbgwaf_flow::Event::CreateRoom;
         remote = std::make_unique<tactics::net::RemoteClient>(
             &game, create ? "" : roomForm.code, create ? "create" : "join", false);
         remote->SetToken(deviceToken);
+        if (ai) remote->SetBotMode("player-v-ai");  // Stored and resumable like a human match.
         connectedFromResume = false;
         remoteMode = true;
         isSimulator = false;

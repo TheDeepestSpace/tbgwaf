@@ -65,6 +65,7 @@ std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
   } else if (state == State::Room) {
     ImGui::Begin("Online match", nullptr, flags);
     if (ImGui::Button(kButtonNewRoom, button)) fired = Event::CreateRoom;
+    if (ImGui::Button(kButtonPlayAi, button)) fired = Event::CreateAiRoom;
     ImGui::Spacing();
     ImGui::TextUnformatted("Room code");
     static char codeText[40] = "";

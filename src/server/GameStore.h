@@ -23,6 +23,9 @@ namespace tactics::server {
 class GameStore {
  public:
   static constexpr int kSchemaVersion = 1;
+  // Red's token in a human-v-Jev match. Shorter than the 16 chars a client
+  // token needs, so no device can ever present it.
+  static constexpr const char* kJevToken = "jev";
 
   struct Game {
     std::string id;

@@ -40,7 +40,7 @@ class Lobby {
   // Enables Builder scene storage (scenes_list / scene_put / scene_delete,
   // usable by any connection, joined or not). `store` must outlive the Lobby.
   void SetSceneStore(SceneStore* store) { sceneStore_ = store; }
-  // Enables persistence of human-v-human matches (see GameStore): a match is
+  // Enables persistence of human-v-human and human-v-Jev matches (see GameStore): a match is
   // stored when both players joined with a device `token`, commits and
   // resolved turns are written as they happen, and matches still active in
   // the store are restored now (players rejoin with their token). `store`
@@ -127,7 +127,8 @@ class Lobby {
   void SpectatorJoin(int conn, const net::Json& message);
   void CreateBotRoom(int conn, const std::string& name, const std::string& mode,
                      const std::string& mapKind = "", std::optional<uint32_t> seed = std::nullopt,
-                     bool ctf = false);
+                     bool ctf = false,
+                     const std::string& token = "");
   void HandleBotControl(int conn, Room& room, const net::Json& message);
   void MaybeRunRound(Room& room);
   void ScheduleBots(Room& room);

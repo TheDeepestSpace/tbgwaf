@@ -105,6 +105,7 @@ class GameSession {
   bool ctf_ = false;     // Capture the Flag objective on generated maps.
   int roundLimit_ = 0;
   std::optional<Scene> fixedScene_;
+  static net::Json OrdersOf(const GameLogic& game, Team team);
   GameLogic game_;
   std::array<bool, 2> ready_{false, false};
   size_t worldSent_ = 0;  // World-log entries already shipped in a round message.

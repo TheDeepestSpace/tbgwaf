@@ -93,23 +93,34 @@ GameSession::Result GameSession::ApplyBotPlan(Team team, const ai::JevRequest* r
                                                const std::vector<std::string>& choices) {
   if (!PlanningOpen()) return {false, "planning is closed"};
   if (ready_[static_cast<int>(team)]) return {false, "team is already committed"};
-  if (request && !ai::ApplyJevChoice(&game_, *request, choices)) {
-    return {false, "Jev's plan is no longer legal"};
+  // Jev plans on a scratch copy and its orders are then applied to the match
+  // like a human's (the click flow's side effects stay on the copy), so the
+  // live match is exactly what a restart replays from the stored orders.
+  Json orders = OrdersOf(game_, team);
+  if (request) {
+    GameLogic scratch = game_;
+    if (!ai::ApplyJevChoice(&scratch, *request, choices)) {
+      return {false, "Jev's plan is no longer legal"};
+    }
+    orders = OrdersOf(scratch, team);
   }
-  net::Action commit;
-  commit.kind = net::ActionKind::Commit;
-  return Apply(team, commit);
+  for (const Unit& u : game_.GetScene().units) {
+    if (u.team == team) game_.FindUnit(u.id)->plan = PlannedAction{};
+  }
+  return ApplyOrders(team, orders);
 }
 
-Json GameSession::OrdersFor(Team team) const {
+Json GameSession::OrdersFor(Team team) const { return OrdersOf(game_, team); }
+
+Json GameSession::OrdersOf(const GameLogic& game, Team team) {
   Json plans{Json::Array{}};
-  for (const Unit& u : game_.GetScene().units) {
+  for (const Unit& u : game.GetScene().units) {
     if (u.team != team || !u.alive) continue;
     plans.Push(net::EncodeAction(net::PlanToAction(u)));
   }
   Json orders;
   orders.Set("plans", std::move(plans));
-  orders.Set("playbook", net::EncodePlaybook(game_.Playbook(team)));
+  orders.Set("playbook", net::EncodePlaybook(game.Playbook(team)));
   return orders;
 }
 

@@ -206,22 +206,22 @@ class Parser {
   size_t pos_ = 0;
 };
 
-void DumpNumber(double v, std::string* out) {
+void DumpNumber(double v, bool exact, std::string* out) {
   if (!std::isfinite(v)) { *out += "0"; return; }
   char buf[40];
   if (v == std::floor(v) && std::fabs(v) < 1e15) {
     std::snprintf(buf, sizeof buf, "%.0f", v);
   } else {
-    std::snprintf(buf, sizeof buf, "%.7g", v);
+    std::snprintf(buf, sizeof buf, exact ? "%.9g" : "%.7g", v);
   }
   *out += buf;
 }
 
-void DumpValue(const Json& j, std::string* out) {
+void DumpValue(const Json& j, bool exact, std::string* out) {
   switch (j.type()) {
     case Json::Type::Null: *out += "null"; break;
     case Json::Type::Bool: *out += j.AsBool() ? "true" : "false"; break;
-    case Json::Type::Number: DumpNumber(j.AsNumber(), out); break;
+    case Json::Type::Number: DumpNumber(j.AsNumber(), exact, out); break;
     case Json::Type::String: DumpString(j.AsString(), out); break;
     case Json::Type::Array: {
       out->push_back('[');
@@ -229,7 +229,7 @@ void DumpValue(const Json& j, std::string* out) {
       for (const Json& item : j.AsArray()) {
         if (!first) out->push_back(',');
         first = false;
-        DumpValue(item, out);
+        DumpValue(item, exact, out);
       }
       out->push_back(']');
       break;
@@ -242,7 +242,7 @@ void DumpValue(const Json& j, std::string* out) {
         first = false;
         DumpString(key, out);
         out->push_back(':');
-        DumpValue(value, out);
+        DumpValue(value, exact, out);
       }
       out->push_back('}');
       break;
@@ -252,9 +252,9 @@ void DumpValue(const Json& j, std::string* out) {
 
 }  // namespace
 
-std::string Json::Dump() const {
+std::string Json::Dump(bool exact) const {
   std::string out;
-  DumpValue(*this, &out);
+  DumpValue(*this, exact, &out);
   return out;
 }
 

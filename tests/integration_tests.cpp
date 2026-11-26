@@ -394,16 +394,17 @@ bool Runner::Click(App& a, const std::string& button, int row) {
       if (a.screen == flow::State::MyGames) Disconnect(a);
       break;
     case flow::Event::CreateRoom:
+    case flow::Event::CreateAiRoom:
     case flow::Event::JoinRoom: {
-      const bool create = event == flow::Event::CreateRoom;
+      const bool ai = event == flow::Event::CreateAiRoom;
+      const bool create = ai || event == flow::Event::CreateRoom;
       if (!create && a.typedCode.empty()) return Fail(a.name + ": Join needs a typed room code");
       a.fromResume = false;
-      if (!StartMatchClient(a, std::make_unique<net::RemoteClient>(
-                                   &a.game, create ? "" : a.typedCode, create ? "create" : "join", false),
-                            /*waitForMatch=*/!create)) {
-        return false;
-      }
-      if (create && a.remote->status() != Status::Waiting) {
+      auto client = std::make_unique<net::RemoteClient>(
+          &a.game, create ? "" : a.typedCode, create ? "create" : "join", false);
+      if (ai) client->SetBotMode("player-v-ai");  // The match starts at once.
+      if (!StartMatchClient(a, std::move(client), /*waitForMatch=*/!create || ai)) return false;
+      if (create && !ai && a.remote->status() != Status::Waiting) {
         return Fail(a.name + ": new room did not reach 'waiting': " + a.remote->StatusText());
       }
       if (a.remote->status() == Status::Rejected) {

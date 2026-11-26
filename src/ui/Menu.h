@@ -62,7 +62,8 @@ struct RoomForm {
 // event the user fired this frame, if any. Game Mode offers Regular / CTF /
 // Builder (fires SelectRegular / SelectCtf / SelectBuilder), plus Online
 // (SelectOnline) when `onlineAvailable` (a game server is configured). The
-// Room screen has New room (CreateRoom: the server issues a code), a code
+// Room screen has New room (CreateRoom: the server issues a code), Play vs AI
+// (CreateAiRoom: Blue against Jev), a code
 // box + Join (JoinRoom, `room->code` filled) and Back. Map Select shows an
 // editable seed box bound to `*mapSeed` (digits only, plus a Random button)
 // and Urban, Urban x4, and Hills choices. Builder lists `builder->cards`

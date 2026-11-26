@@ -10,8 +10,9 @@ No accounts. Each browser makes an anonymous random **device token**
 the only credential: a stored match is seated to the two tokens that started
 it, and `my_games` returns only the games of the token it is asked with. The
 last match played is remembered as `localStorage["tbgwaf.lastGame"]` (Continue).
-A match is stored only if both players sent distinct tokens (Jev matches and
-token-less clients stay in memory).
+A match is stored only if both players sent distinct tokens (token-less
+clients stay in memory), or if the player sent a token in a Blue vs Jev match
+(`mode:"player-v-ai"`); Jev vs Jev rooms are never stored.
 
 ## Store (`src/server/GameStore`, SQLite)
 
@@ -31,6 +32,17 @@ compared with the stored one and a mismatch refuses the restore. The stored
 (`GameStore::kSchemaVersion`). If a database has another version it is deleted
 and recreated: all stored games are dropped. Bump the version for any change
 that would need a backfill.
+
+## Blue vs Jev
+
+Menu: Online -> **Play vs AI** (server needs `TBGWAF_JEV_ADAPTER_URL`). Stored
+like a human match, with Jev's seat (Red) held by the reserved token `jev`
+(`GameStore::kJevToken`; clients can't send it, tokens need 16+ chars), so no
+schema change. Jev's orders are stored on its commit and replayed like any
+other (`GameSession::ApplyBotPlan` applies them through the same orders path,
+so live == replay). While the player is away Jev stops asking (no adapter
+spend) and the room doesn't count against `TBGWAF_JEV_MAX_ROOMS`; on resume
+Jev plans again. My games flags such rows with `"vs":"ai"`.
 
 ## Configuration
 

@@ -27,6 +27,7 @@ inline constexpr const char* kButtonMyGames = "My games";
 inline constexpr const char* kButtonContinue = "Continue";
 inline constexpr const char* kButtonBack = "Back";
 inline constexpr const char* kButtonNewRoom = "New room";
+inline constexpr const char* kButtonPlayAi = "Play vs AI";
 inline constexpr const char* kButtonJoin = "Join";
 
 inline constexpr MenuButton kMenuButtons[] = {
@@ -39,6 +40,7 @@ inline constexpr MenuButton kMenuButtons[] = {
     {tbgwaf_flow::State::GameMode, kButtonContinue, tbgwaf_flow::Event::ContinueGame},
     {tbgwaf_flow::State::GameMode, kButtonBack, tbgwaf_flow::Event::Back},
     {tbgwaf_flow::State::Room, kButtonNewRoom, tbgwaf_flow::Event::CreateRoom},
+    {tbgwaf_flow::State::Room, kButtonPlayAi, tbgwaf_flow::Event::CreateAiRoom},
     {tbgwaf_flow::State::Room, kButtonJoin, tbgwaf_flow::Event::JoinRoom},
     {tbgwaf_flow::State::Room, kButtonBack, tbgwaf_flow::Event::Back},
     {tbgwaf_flow::State::MyGames, kButtonContinue, tbgwaf_flow::Event::ContinueGame},

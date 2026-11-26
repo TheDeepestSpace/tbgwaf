@@ -86,13 +86,16 @@ glm::vec3 UnitFovProbe(const Unit& target, const std::vector<WalkSurface>& walkS
 
 // A figure is sighted through either of two points (see Visibility.h): the
 // surface under its feet, so a figure standing on overlay-tinted ground is
-// always seen, or its eye, so a figure whose body shows above a deck edge,
+// always seen, or its head, so a figure whose body shows above a deck edge,
 // low cover or a terrain crest is seen even though the surface it stands on
 // is hidden. Both are tested against the same cone and the same occluders.
+// The head probe is pose-aware (Unit::SightPosition): a figure sunk into
+// the crouch is sighted at its crouched head, so a blocker tall enough to
+// hide the whole crouched body really does conceal it (issue #292).
 template <typename SeesPoint>
 bool SightedThroughAnyProbe(const glm::vec3& feetProbe, const Unit& target,
                             SeesPoint seesPoint) {
-  return seesPoint(feetProbe) || seesPoint(target.EyePosition());
+  return seesPoint(feetProbe) || seesPoint(target.SightPosition());
 }
 
 }  // namespace

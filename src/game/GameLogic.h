@@ -295,6 +295,12 @@ class GameLogic {
   bool PathOverlapsFigure(const Unit& mover, const std::vector<glm::vec3>& path,
                           const std::vector<PathRide>& rides) const;
   bool HasPlanOverlap() const;
+  // True when a planned walk crosses settled rubble (a blast landed on it
+  // after it was planned). Such a move is dropped with its queued legs, the
+  // same as one that now runs into another figure.
+  bool PathBlockedByRubble(const std::vector<glm::vec3>& path,
+                           const std::vector<PathRide>& rides) const;
+  void DropRubbleBlockedPlans();
   // True when the hover preview is invalid only because every route to it
   // would overlap another figure's planned movement (for UI messaging).
   bool MovePreviewBlockedByFigure() const { return movePreviewBlocked_; }

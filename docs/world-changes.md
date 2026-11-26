@@ -114,7 +114,10 @@ same log to the same seeded map, so drawn == simulated geometry.
   by the navmesh agent radius plus a routing step) would pin a figure where
   it stands, and every chunk under 0.1 m^2, is litter: drawn where it came
   to rest, never an obstacle -- a blast can cost a figure ground, never its
-  ability to move at all. **Timing:** a blast
+  ability to move at all. A move planned through a spot where a chunk then
+  lands and settles is undone when the round ends -- that leg and the figure's
+  queued legs are dropped for re-planning, like a leg that now meets another
+  figure (`DropRubbleBlockedPlans`). **Timing:** a blast
   inside a round (`at` > 0) is drawn against the round clock alone
   (`DebrisRoundAge`: launch pose on the frame it goes off; a replay paused on
   any frame holds the chunks still; a flight that outlasts its turn freezes

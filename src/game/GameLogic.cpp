@@ -1103,6 +1103,37 @@ MovingBlockers GameLogic::BuildMovingBlockers(const Unit& mover, const glm::vec3
   return blockers;
 }
 
+bool GameLogic::PathBlockedByRubble(const std::vector<glm::vec3>& path,
+                                    const std::vector<PathRide>& rides) const {
+  if (path.size() < 2) return false;
+  std::vector<Obstacle> rubble;
+  for (const Obstacle& o : scene_.obstacles) {
+    if (!o.dead && o.kind == ObstacleKind::Rubble && RubbleAtRestNow(o)) rubble.push_back(o);
+  }
+  if (rubble.empty()) return false;
+  NavMesh mesh;
+  mesh.Build(rubble, scene_.mapHalfExtent, constants::kAgentRadius, &scene_.ground,
+             &scene_.walkSurfaces, &scene_.terrainTunnels);
+  for (size_t i = 0; i + 1 < path.size(); ++i) {
+    const bool ride = std::any_of(rides.begin(), rides.end(),
+                                  [i](const PathRide& r) { return r.segment == static_cast<int>(i); });
+    if (ride) continue;
+    // Elevated segments (decks) are not blocked by rubble lying on the ground.
+    const float g0 = scene_.ground.HeightAt(path[i].x, path[i].z);
+    const float g1 = scene_.ground.HeightAt(path[i + 1].x, path[i + 1].z);
+    if (path[i].y - g0 > 0.5f && path[i + 1].y - g1 > 0.5f) continue;
+    if (!mesh.GroundSegmentTraversable({path[i].x, path[i].z}, {path[i + 1].x, path[i + 1].z})) return true;
+  }
+  return false;
+}
+
+void GameLogic::DropRubbleBlockedPlans() {
+  for (Unit& unit : scene_.units) {
+    if (!unit.alive || unit.plan.type != PlannedActionType::Move) continue;
+    if (PathBlockedByRubble(unit.plan.movePath, unit.plan.moveRides)) unit.plan = PlannedAction{};
+  }
+}
+
 bool GameLogic::HasPlanOverlap() const {
   for (const Unit& unit : scene_.units) {
     if (!unit.alive || unit.plan.type != PlannedActionType::Move || unit.plan.movePath.size() < 2) {
@@ -3016,6 +3047,10 @@ void GameLogic::FinishRound() {
     unit.plan.endFacingYaw = EndFacing(sightObstacles_, unit.plan.movePath, unit.facingYaw);
     armedLegs.push_back(unit.id);
   }
+  // Rubble that landed during the round may now block an armed leg: drop it
+  // with the rest of that figure's queue so it is re-planned.
+  RefreshRubbleState();
+  DropRubbleBlockedPlans();
   // Queued legs were planned rounds ago against other positions, so an armed
   // leg can now run into another figure and stall the round (Commit Round
   // unavailable). Drop such legs, with the rest of that figure's queue, so

@@ -95,6 +95,9 @@ jobs:
 
   test-shard:
     needs: [select_ci_image, plan-shards]
+    # Explicit if: the implicit success() also checks transitive needs, and
+    # ci_image is skipped on push runs, which would skip every shard.
+    if: ${{ !cancelled() && needs.plan-shards.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

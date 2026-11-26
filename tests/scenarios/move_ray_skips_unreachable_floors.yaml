@@ -3,13 +3,16 @@ description: >
   Frontier-aware move selection: Blue's figure stands on the ground floor of
   the three-storey building from stairs_only_way_up_building (seed 7), and
   the camera looks straight down into it, so the destination ray crosses the
-  second- and first-floor slabs before the ground floor the move frontier is
-  drawn on. The storeys the figure cannot reach this leg must be transparent
-  to the selector: the ray resolves through both slabs to the ground-floor
-  point under the cursor, and the committed move lands there at y = 0. (The
-  old nearest-surface pick parked the selector on the top slab, whose storey
-  is out of one leg's reach, and the click was rejected until the player
-  rotated the camera for a direct line of sight.)
+  second- and first-floor slabs before the ground floor. The storeys the
+  figure cannot reach this leg must be transparent to the selector, and the
+  nearest storey it can reach takes the click: the second floor is beyond
+  one leg's budget so the ray passes through its slab, resolves on the
+  first floor (reachable up the stair, and part of the frontier since the
+  reach field keeps stacked layers -- issue #292 follow-up), and the
+  committed move lands there at y = 4. (The old nearest-surface pick parked
+  the selector on the top slab, whose storey is out of one leg's reach, and
+  the click was rejected until the player rotated the camera for a direct
+  line of sight.)
 
 map:
   generate: {seed: 7, type: urban, elevated: false, features: {terrain: off}}
@@ -30,5 +33,5 @@ script:
   - action: pass
     actor: 1
   - action: commit
-  - assert: {unit: 0, position: [-30, 0, -6], tolerance: 0.1}
+  - assert: {unit: 0, position: [-30, 4, -6], tolerance: 0.1}
   - assert: {round: 2}

@@ -41,6 +41,9 @@ struct RenderDebugOptions {
   // Existing golden suites pin the undecorated map; live rendering defaults on.
   bool disableTrees = false;
   bool disableFov = false;
+  // Cover view (issue #292): style the movement frontier by cover kind (marks
+  // at tactical/flat cover). Off: only the thin boundary outline is drawn.
+  bool coverView = false;
   bool disableShadows = false;
   // Thermal camera prototype (issue #177): material-based grayscale with
   // pale surfaces and ambient contact shading; figures keep their team
@@ -82,6 +85,9 @@ struct PaneOverlays {
   std::optional<glm::vec3> invalidHoverHighlight;  // Red ring on an unreachable hover point.
   const std::vector<glm::vec3>* movePreviewPath = nullptr;  // Yellow preview polyline.
   const tactics::ReachField* moveFrontier = nullptr;  // Reachable-area gradient + border.
+  // Styles the frontier glow by cover kind (#290/#292): full gradient at
+  // tactical cover, slanted stripes along flat cover, none on open ground.
+  const tactics::CoverMap* moveCover = nullptr;
   bool moveFrontierSubsequentLeg = false;             // Border/path drawn at 50% alpha.
   // Zipline reach (walk -> ride -> walk), drawn as a second, cyan region with
   // the line itself highlighted; the preview/planned path marks its ride.
@@ -214,14 +220,19 @@ class SceneRenderer {
   TriangleMesh highlightRing_;
   ColorTriangleMesh frontierFill_;
   LineMesh frontierBorder_;
+  // Boundary segments lying under a higher reached storey, drawn dimmer so
+  // the floor closest to the camera keeps the full-strength line.
+  LineMesh frontierBorderDim_;
   // Frontier geometry is rebuilt only when the field changes.
   const tactics::ReachField* frontierKeyField_ = nullptr;
   glm::vec2 frontierKeyOrigin_{0.0f};
   float frontierKeyBudget_ = -1.0f;
   int frontierKeyRevision_ = -1;  // Field contents change with blockers' plans.
   int frontierKeyThermal_ = 0;  // 0 off, 1 white-hot, 2 black-hot.
+  bool frontierKeyCover_ = false;  // Whether the frontier was built in cover view.
   ColorTriangleMesh ziplineFill_;
   LineMesh ziplineBorder_;
+  LineMesh ziplineBorderDim_;
   std::vector<glm::vec4> ziplineKey_;  // (minX, minZ, budget, zipline) per region.
   // Terrain ground mesh, rebuilt only when the scene's heightfield changes.
   // Keyed on the field's contents, not its address: successive scenes can
@@ -318,6 +329,7 @@ class SceneRenderer {
   LitTriangleMesh obstacleMesh_;        // Drawn prisms, recessed openings cut out.
   LitTriangleMesh obstacleCasterMesh_;  // The same, solid, for the shadow map.
   unsigned long long obstacleKey_ = 0;
+  size_t ragdollWorldSeen_ = 0;  // World-log size at the last pane render.
   std::vector<int> surfaceBuilding_;  // Roof slab -> building, see RoofBuildings.
   unsigned long long surfaceBuildingKey_ = 0;
   // The slot holding `unit`'s depth maps looking along `facingYaw` (for

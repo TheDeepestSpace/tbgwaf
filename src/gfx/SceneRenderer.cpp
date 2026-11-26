@@ -12,12 +12,16 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <map>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "game/Cover.h"
 #include "game/Geometry.h"
 
 using tactics::AABB;
@@ -39,6 +43,7 @@ PaneOverlays BuildPaneOverlays(const tactics::GameLogic& game, tactics::Team pan
   overlays.selectionHighlight = selected->position;
   if (game.Mode() == tactics::InputMode::AwaitingMoveDestination) {
     overlays.moveFrontier = game.MoveFrontier();
+    overlays.moveCover = game.MoveCover();
     overlays.ziplineFrontiers = &game.ZiplineFrontiers();
     overlays.movePreviewRides = &game.MovePreviewRides();
     // A later leg is drawn at 50% alpha; the first leg is solid green.
@@ -1763,6 +1768,96 @@ void BuildObstacleMeshes(const tactics::Scene& scene,
   caster->SetChunkedMesh(casterVertices, casterIndices, kCullGridCells);
 }
 
+// Grid-bucketed index over the sidewalk surface patches: answers "which
+// patches contain this XZ point" without scanning every patch. The frontier
+// overlay rebuild asks this once per grid-cell corner; on a dense city map a
+// linear PatchContainsXZ scan there was almost the whole rebuild cost
+// (hundreds of milliseconds of planning-stage lag).
+class SidewalkPatchIndex {
+ public:
+  explicit SidewalkPatchIndex(const std::vector<tactics::RoadSurface>& patches)
+      : patches_(patches) {
+    glm::vec2 lo(1e9f), hi(-1e9f);
+    bounds_.resize(patches.size());
+    signs_.resize(patches.size(), 1.0f);
+    for (size_t i = 0; i < patches.size(); ++i) {
+      const std::vector<glm::vec3>& verts = patches[i].vertices;
+      if (verts.size() < 3) {
+        bounds_[i] = {glm::vec2(1.0f), glm::vec2(-1.0f)};  // Empty.
+        continue;
+      }
+      glm::vec2 bmin(1e9f), bmax(-1e9f);
+      float area = 0.0f;
+      for (size_t k = 0; k < verts.size(); ++k) {
+        const glm::vec3& a = verts[k];
+        const glm::vec3& b = verts[(k + 1) % verts.size()];
+        area += a.x * b.z - a.z * b.x;
+        bmin = glm::min(bmin, glm::vec2(a.x, a.z));
+        bmax = glm::max(bmax, glm::vec2(a.x, a.z));
+      }
+      // Pad past the containment test's own tolerance so the box never
+      // rejects a point the edge test would accept.
+      bounds_[i] = {bmin - kPad, bmax + kPad};
+      signs_[i] = area >= 0.0f ? 1.0f : -1.0f;
+      lo = glm::min(lo, bounds_[i].first);
+      hi = glm::max(hi, bounds_[i].second);
+    }
+    if (lo.x > hi.x) return;  // No usable patch; buckets stay empty.
+    origin_ = lo;
+    nx_ = static_cast<int>((hi.x - lo.x) / kCell) + 1;
+    nz_ = static_cast<int>((hi.y - lo.y) / kCell) + 1;
+    buckets_.resize(static_cast<size_t>(nx_) * nz_);
+    for (size_t i = 0; i < patches.size(); ++i) {
+      if (bounds_[i].first.x > bounds_[i].second.x) continue;
+      const int x0 = CellX(bounds_[i].first.x), x1 = CellX(bounds_[i].second.x);
+      const int z0 = CellZ(bounds_[i].first.y), z1 = CellZ(bounds_[i].second.y);
+      for (int cz = z0; cz <= z1; ++cz)
+        for (int cx = x0; cx <= x1; ++cx)
+          buckets_[cz * nx_ + cx].push_back(static_cast<int>(i));
+    }
+  }
+
+  // Highest patch surface among the patches containing (x, z), or nothing.
+  // Matches PatchContainsXZ, patch by patch.
+  std::optional<float> TopAt(float x, float z) const {
+    if (buckets_.empty()) return std::nullopt;
+    std::optional<float> top;
+    for (int i : buckets_[CellZ(z) * nx_ + CellX(x)]) {
+      const std::pair<glm::vec2, glm::vec2>& b = bounds_[i];
+      if (x < b.first.x || x > b.second.x || z < b.first.y || z > b.second.y) continue;
+      const std::vector<glm::vec3>& verts = patches_[i].vertices;
+      const float sign = signs_[i];
+      bool inside = true;
+      for (size_t k = 0; k < verts.size() && inside; ++k) {
+        const glm::vec3& a = verts[k];
+        const glm::vec3& c = verts[(k + 1) % verts.size()];
+        inside = sign * ((c.x - a.x) * (z - a.z) - (c.z - a.z) * (x - a.x)) >= -1e-4f;
+      }
+      if (inside) top = std::max(top.value_or(-1e9f), verts.front().y);
+    }
+    return top;
+  }
+
+ private:
+  static constexpr float kCell = 4.0f;  // World units per bucket.
+  static constexpr float kPad = 1e-3f;
+  // Queries outside the grid clamp onto the border buckets; the per-patch
+  // box test still rejects, so the answer stays exact.
+  int CellX(float x) const {
+    return std::clamp(static_cast<int>((x - origin_.x) / kCell), 0, nx_ - 1);
+  }
+  int CellZ(float z) const {
+    return std::clamp(static_cast<int>((z - origin_.y) / kCell), 0, nz_ - 1);
+  }
+
+  const std::vector<tactics::RoadSurface>& patches_;
+  std::vector<std::pair<glm::vec2, glm::vec2>> bounds_;  // Padded XZ boxes.
+  std::vector<float> signs_;                             // Winding of each patch.
+  glm::vec2 origin_{0.0f};
+  int nx_ = 0, nz_ = 0;
+  std::vector<std::vector<int>> buckets_;
+};
+
 bool PatchContainsXZ(const tactics::RoadSurface& patch, float x, float z) {
   if (patch.vertices.size() < 3) return false;
   float area = 0.0f;
@@ -3244,8 +3339,10 @@ bool SceneRenderer::Init() {
   sphereMesh_.Init();
   frontierFill_.Init();
   frontierBorder_.Init();
+  frontierBorderDim_.Init();
   ziplineFill_.Init();
   ziplineBorder_.Init();
+  ziplineBorderDim_.Init();
   pathLine_.Init();
   fovConeMesh_.Init();
   shotConeMesh_.Init();
@@ -3311,8 +3408,10 @@ bool SceneRenderer::Init() {
 void SceneRenderer::Destroy() {
   frontierFill_.Destroy();
   frontierBorder_.Destroy();
+  frontierBorderDim_.Destroy();
   ziplineFill_.Destroy();
   ziplineBorder_.Destroy();
+  ziplineBorderDim_.Destroy();
   pathLine_.Destroy();
   fovConeMesh_.Destroy();
   shotConeMesh_.Destroy();
@@ -3644,6 +3743,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     treeKey_ = game.GetScene().trees;
   }
   const auto& obstacles = game.GetScene().obstacles;
+  // World changes append to the log: keep in-flight falls on their original
+  // colliders. A shorter/empty log (new map, rewind) drops them as before.
+  SetRagdollKeepInFlight(!game.WorldLog().empty() && game.WorldLog().size() >= ragdollWorldSeen_);
+  ragdollWorldSeen_ = game.WorldLog().size();
   SetRagdollObstacles(obstacles);
   SetRagdollRails(game.GetScene().massing);
   SetRagdollGround(game.GetScene().walkSurfaces, game.GetScene().ground);
@@ -5180,15 +5283,52 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
 
   // Builds one reach field's glow + boundary geometry (see below) in `color`,
   // appending to `fill`/`border`. Shared by the walk region and the zipline
-  // regions, which only differ in tint.
-  const auto appendFrontier = [&](const tactics::ReachField& f, const glm::vec3& color,
+  // regions, which only differ in tint. With `cover` given, the fill is the
+  // schematic cover marks instead of the budget glow (issue #292): a solid
+  // rectangle at tactical cover (a corner or car side to peek from), 45-degree
+  // stripes along flat wall cover, and nothing at all -- no gradient -- where
+  // the boundary is only the movement budget running out.
+  // Turns segment endpoint pairs into a flat ribbon of constant world width
+  // (a GL line is always one pixel), up-facing, ends extended by half the
+  // width so consecutive segments overlap instead of leaving joint gaps.
+  const auto ribbonize = [](const std::vector<glm::vec3>& segs, float width) {
+    std::vector<glm::vec3> tris;
+    tris.reserve(segs.size() * 3);
+    const float h = 0.5f * width;
+    for (size_t i = 0; i + 1 < segs.size(); i += 2) {
+      glm::vec3 d = segs[i + 1] - segs[i];
+      glm::vec2 dir(d.x, d.z);
+      const float len = glm::length(dir);
+      if (len < 1e-6f) continue;
+      dir /= len;
+      const glm::vec3 t(dir.x * h, 0.0f, dir.y * h);
+      const glm::vec3 n(-dir.y * h, 0.0f, dir.x * h);
+      const glm::vec3 a = segs[i] - t, b = segs[i + 1] + t;
+      glm::vec3 q[4] = {a - n, b - n, b + n, a + n};
+      // Wind counter-clockwise seen from above.
+      const float facing = (q[1].z - q[0].z) * (q[2].x - q[0].x) -
+                           (q[1].x - q[0].x) * (q[2].z - q[0].z);
+      if (facing < 0.0f) std::swap(q[1], q[3]);
+      for (int k : {0, 1, 2, 0, 2, 3}) tris.push_back(q[k]);
+    }
+    return tris;
+  };
+  constexpr float kBoundaryWidth = 0.07f;  // World units.
+  // Alpha factor for boundary segments running under a higher reached storey
+  // (issue #292 follow-up): still visible through the faded building, but
+  // clearly behind the floor drawn over them.
+  constexpr float kOccludedBoundaryAlpha = 0.35f;
+  const auto appendFrontier = [&](const tactics::ReachField& f,
+                                  const tactics::CoverMap* cover, const glm::vec3& color,
                                   std::vector<ColorTriangleMesh::Vertex>& fill,
-                                  std::vector<glm::vec3>& border) {
+                                  std::vector<glm::vec3>& border,
+                                  std::vector<glm::vec3>& borderDim) {
     constexpr float kY = 0.03f;
     constexpr float kSlabOffset = 0.015f;  // Above a sidewalk slab's top face.
     constexpr float kFadeWidth = 0.8f;   // World units from boundary to transparent.
     constexpr float kEdgeAlpha = 0.65f;  // Fill alpha right at the boundary.
     const int nx = f.nx, nz = f.nz;
+    const SidewalkPatchIndex sidewalkIndex(game.GetScene().sidewalkSurfaces);
 
     // Nodes whose surface heights differ by more than a step belong to
     // different walk layers (deck vs. ground, or either side of a deck
@@ -5204,6 +5344,54 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     struct Pt {
       glm::vec3 p;
       float g;
+      // Budget-glow weight: 1 where the nearby boundary is the move budget
+      // running out, 0 where it is an obstacle outline (per field.wallDist),
+      // so the gradient glow marks only the budget arc and obstacles carry
+      // nothing but their cover marks (issue #292).
+      float w = 1.0f;
+    };
+
+    // Cover-zone rectangles (issue #292), per feet height so decks and the
+    // ground see their own walls. Obstacles are pre-filtered to the field's
+    // bounds; the full list can be huge.
+    std::vector<tactics::Obstacle> nearbyObstacles;
+    if (cover) {
+      const float margin = kFadeWidth + tactics::kCoverEdgeReach + 1.0f;
+      const float x0 = f.minX - margin, x1 = f.minX + nx * f.step + margin;
+      const float z0 = f.minZ - margin, z1 = f.minZ + nz * f.step + margin;
+      for (const tactics::Obstacle& o : game.SightObstacles()) {
+        const tactics::AABB& b = o.bounds;
+        if (b.max.x >= x0 && b.min.x <= x1 && b.max.z >= z0 && b.min.z <= z1) {
+          nearbyObstacles.push_back(o);
+        }
+      }
+    }
+    // Each rect carries its XZ bounds so the per-cell loop below can reject
+    // far-away rects without clipping.
+    struct BoundedRect {
+      tactics::CoverZoneRect r;
+      glm::vec2 bmin{0.0f}, bmax{0.0f};
+    };
+    std::map<int, std::vector<BoundedRect>> rectsByLevel;
+    const auto rectsFor = [&](float feetY) -> const std::vector<BoundedRect>& {
+      const int key = static_cast<int>(std::lround(feetY / kLayerStep));
+      auto it = rectsByLevel.find(key);
+      if (it == rectsByLevel.end()) {
+        std::vector<BoundedRect> bounded;
+        for (const tactics::CoverZoneRect& r :
+             tactics::CoverZoneRects(nearbyObstacles, feetY, kFadeWidth)) {
+          BoundedRect br{r, r.origin, r.origin};
+          for (const glm::vec2& c : {r.origin + r.along * r.length,
+                                     r.origin + r.out * r.depth,
+                                     r.origin + r.along * r.length + r.out * r.depth}) {
+            br.bmin = glm::min(br.bmin, c);
+            br.bmax = glm::max(br.bmax, c);
+          }
+          bounded.push_back(br);
+        }
+        it = rectsByLevel.emplace(key, std::move(bounded)).first;
+      }
+      return it->second;
     };
     const std::vector<AABB>& slabs = game.GetScene().sidewalks;
     // Clips a convex polygon to a slab's XZ footprint (Sutherland-Hodgman),
@@ -5223,7 +5411,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           const Pt& prev = poly[(v + poly.size() - 1) % poly.size()];
           if (inside(cur) != inside(prev)) {
             const float t = (bound - coord(prev)) / (coord(cur) - coord(prev));
-            out.push_back({prev.p + (cur.p - prev.p) * t, prev.g + (cur.g - prev.g) * t});
+            out.push_back({prev.p + (cur.p - prev.p) * t, prev.g + (cur.g - prev.g) * t,
+                           prev.w + (cur.w - prev.w) * t});
           }
           if (inside(cur)) out.push_back(cur);
         }
@@ -5233,8 +5422,120 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       return poly;
     };
     auto toVertex = [&](const Pt& q) {
-      const float a = kEdgeAlpha * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
-      return ColorTriangleMesh::Vertex{q.p, glm::vec4(color, a)};
+      const float open = q.w * std::clamp(1.0f - q.g / kFadeWidth, 0.0f, 1.0f);
+      return ColorTriangleMesh::Vertex{q.p, glm::vec4(color, kEdgeAlpha * open)};
+    };
+    // Fans around the vertex average rather than vertex 0: a fan from a
+    // corner interpolates alpha along one diagonal, which shows as faint
+    // diagonal stripes in the gradient. The centre carries the mean field
+    // value, so the ramp is symmetric.
+    auto emitFan = [&](const std::vector<Pt>& poly) {
+      if (poly.size() < 3) return;
+      Pt c{glm::vec3(0.0f), 0.0f};
+      c.w = 0.0f;
+      for (const Pt& q : poly) {
+        c.p += q.p;
+        c.g += q.g;
+        c.w += q.w;
+      }
+      c.p /= static_cast<float>(poly.size());
+      c.g /= static_cast<float>(poly.size());
+      c.w /= static_cast<float>(poly.size());
+      for (size_t k = 0; k < poly.size(); ++k) {
+        fill.push_back(toVertex(c));
+        fill.push_back(toVertex(poly[k]));
+        fill.push_back(toVertex(poly[(k + 1) % poly.size()]));
+      }
+    };
+    // Schematic cover marks (issue #292): tactical cover is a solid
+    // rectangle along the wall stretch beside an open corner, flat cover the
+    // same rectangle filled with crisp 45-degree world-space stripes --
+    // constant alpha, no gradients, so the two read apart at a glance. The
+    // marks are the only fill in cover mode: open ground and obstacle
+    // outlines get just the thin boundary line. Each cell's reach polygon is
+    // clipped to the cover rectangles exactly, so mark edges are the walls'
+    // own lines, not the sampling grid.
+    // Clips a convex polygon in place to dot(p.xz, dir) <= bound.
+    const auto clipHalfPlane = [](std::vector<glm::vec3>& poly, const glm::vec2& dir,
+                                  float bound) {
+      std::vector<glm::vec3> out;
+      out.reserve(poly.size() + 2);
+      for (size_t v = 0; v < poly.size(); ++v) {
+        const glm::vec3& cur = poly[v];
+        const glm::vec3& prev = poly[(v + poly.size() - 1) % poly.size()];
+        const float dc = cur.x * dir.x + cur.z * dir.y - bound;
+        const float dp = prev.x * dir.x + prev.z * dir.y - bound;
+        if ((dc <= 0.0f) != (dp <= 0.0f)) out.push_back(prev + (cur - prev) * (dp / (dp - dc)));
+        if (dc <= 0.0f) out.push_back(cur);
+      }
+      poly = std::move(out);
+    };
+    // Emits one convex mark polygon (and its copies on raised sidewalk
+    // slabs) at the flat mark alpha.
+    const auto emitMarkPoly = [&](const std::vector<glm::vec3>& poly) {
+      const auto fan = [&](const std::vector<glm::vec3>& q) {
+        for (size_t k = 1; k + 1 < q.size(); ++k) {
+          fill.push_back({q[0], glm::vec4(color, kEdgeAlpha)});
+          fill.push_back({q[k], glm::vec4(color, kEdgeAlpha)});
+          fill.push_back({q[k + 1], glm::vec4(color, kEdgeAlpha)});
+        }
+      };
+      if (poly.size() < 3) return;
+      fan(poly);
+      for (const AABB& slab : slabs) {
+        std::vector<glm::vec3> onSlab = poly;
+        clipHalfPlane(onSlab, {-1.0f, 0.0f}, -slab.min.x);
+        clipHalfPlane(onSlab, {1.0f, 0.0f}, slab.max.x);
+        clipHalfPlane(onSlab, {0.0f, -1.0f}, -slab.min.z);
+        clipHalfPlane(onSlab, {0.0f, 1.0f}, slab.max.z);
+        if (onSlab.size() < 3) continue;
+        for (glm::vec3& p : onSlab) p.y = slab.max.y + kSlabOffset;
+        fan(onSlab);
+      }
+    };
+    // Stripe pattern for flat cover, in u = x + z (unnormalized 45-degree
+    // coordinate): a stripe covers the first half of each period.
+    constexpr float kStripePeriod = 0.6f;
+    const auto emitMarks = [&](const std::vector<Pt>& region, float feetY) {
+      if (region.size() < 3) return;
+      std::vector<glm::vec3> base(region.size());
+      glm::vec2 cellMin(region[0].p.x, region[0].p.z), cellMax = cellMin;
+      for (size_t k = 0; k < region.size(); ++k) {
+        base[k] = region[k].p;
+        cellMin = glm::min(cellMin, glm::vec2(base[k].x, base[k].z));
+        cellMax = glm::max(cellMax, glm::vec2(base[k].x, base[k].z));
+      }
+      for (const BoundedRect& br : rectsFor(feetY)) {
+        if (br.bmin.x > cellMax.x || br.bmax.x < cellMin.x || br.bmin.y > cellMax.y ||
+            br.bmax.y < cellMin.y) {
+          continue;
+        }
+        const tactics::CoverZoneRect& r = br.r;
+        const float o = glm::dot(r.origin, r.out);
+        const float a = glm::dot(r.origin, r.along);
+        std::vector<glm::vec3> piece = base;
+        clipHalfPlane(piece, -r.out, -o);
+        clipHalfPlane(piece, r.out, o + r.depth);
+        clipHalfPlane(piece, -r.along, -a);
+        clipHalfPlane(piece, r.along, a + r.length);
+        if (piece.size() < 3) continue;
+        if (r.tactical) {
+          emitMarkPoly(piece);
+          continue;
+        }
+        float umin = piece[0].x + piece[0].z, umax = umin;
+        for (const glm::vec3& p : piece) {
+          umin = std::min(umin, p.x + p.z);
+          umax = std::max(umax, p.x + p.z);
+        }
+        for (int k = static_cast<int>(std::floor(umin / kStripePeriod));
+             k <= static_cast<int>(std::floor(umax / kStripePeriod)); ++k) {
+          std::vector<glm::vec3> stripe = piece;
+          clipHalfPlane(stripe, {-1.0f, -1.0f}, -k * kStripePeriod);
+          clipHalfPlane(stripe, {1.0f, 1.0f}, (k + 0.5f) * kStripePeriod);
+          emitMarkPoly(stripe);
+        }
+      }
     };
     for (int iz = 0; iz + 1 < nz; ++iz) {
       for (int ix = 0; ix + 1 < nx; ++ix) {
@@ -5243,92 +5544,186 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         Pt quad[4];
         bool anyIn = false;
         for (int k = 0; k < 4; ++k) {
-          quad[k] = {f.Node(cx[k], cz[k]), g[cz[k] * nx + cx[k]]};
+          const int idx = cz[k] * nx + cx[k];
+          // Glow only where the boundary is the budget: beside an obstacle
+          // outline (wallDist and the boundary depth agree) the gradient is
+          // muted, so the obstacle carries only its cover marks.
+          float openGlow = 1.0f;
+          if (f.wallDist.size() == g.size() && std::isfinite(f.wallDist[idx])) {
+            openGlow = std::clamp((f.wallDist[idx] - std::max(g[idx], 0.0f)) / (2.0f * f.step),
+                                  0.0f, 1.0f);
+          }
+          quad[k] = {f.Node(cx[k], cz[k]), g[idx], openGlow};
           // Each node rides the terrain under it (HeightAt is 0 on flat
           // maps); the 0.25-unit grid is fine enough that the linear
           // contour/edge interpolation below stays on the slope.
-          for (const tactics::RoadSurface& sidewalk : game.GetScene().sidewalkSurfaces) {
-            if (PatchContainsXZ(sidewalk, quad[k].p.x, quad[k].p.z)) {
-              quad[k].p.y = std::max(quad[k].p.y, terrain.Empty() ? sidewalk.vertices.front().y
-                               : terrain.MeshHeightAt(quad[k].p.x, quad[k].p.z) + 0.12f);
-            }
+          if (const std::optional<float> top =
+                  sidewalkIndex.TopAt(quad[k].p.x, quad[k].p.z)) {
+            quad[k].p.y = std::max(quad[k].p.y, terrain.Empty()
+                              ? *top
+                              : terrain.MeshHeightAt(quad[k].p.x, quad[k].p.z) + 0.12f);
           }
           quad[k].p.y += kY;
           anyIn |= quad[k].g > 0.0f;
         }
         if (!anyIn) continue;
-        // Never triangulate across a layer step (deck/roof edge). Corners
-        // on another layer than the strongest one become virtual unreached
-        // nodes at the same height, so the contour rounds off at the edge
-        // like it does beside a ground obstacle instead of leaving a
-        // grid-stepped gap.
-        int dom = 0;
-        for (int k = 1; k < 4; ++k)
-          if (quad[k].g > quad[dom].g) dom = k;
-        for (int k = 0; k < 4; ++k) {
-          if (sameLayer(cx[dom], cz[dom], cx[k], cz[k])) continue;
-          quad[k].p.y = quad[dom].p.y;
-          quad[k].g = -0.5f * f.step;
-        }
-        // Clip the cell to g >= 0 (Sutherland-Hodgman against the field).
-        std::vector<Pt> poly;
-        std::vector<Pt> cut;  // Contour crossings, in polygon order.
-        for (int k = 0; k < 4; ++k) {
-          const Pt& a = quad[k];
-          const Pt& b = quad[(k + 1) % 4];
-          const bool ain = a.g >= 0.0f, bin = b.g >= 0.0f;
-          if (ain) poly.push_back(a);
-          if (ain != bin) {
-            const float t = a.g / (a.g - b.g);
-            const Pt c{a.p + (b.p - a.p) * t, 0.0f};
-            poly.push_back(c);
-            cut.push_back(c);
+        // Never triangulate across a layer step (deck/roof edge): each layer
+        // present in the cell renders its own piece, with the corners on the
+        // other layer(s) turned into virtual unreached nodes at its height.
+        // Rendering every layer (not just the deepest) keeps both sides' fill
+        // and line continuous along the step instead of alternating by which
+        // layer happens to dominate each cell. The virtual corner carries the
+        // exact distance to the level-edge line where one was measured
+        // (issue #292), so the crossing interpolates onto the real cliff /
+        // deck-edge geometry instead of the grid rasterisation of the step.
+        bool used[4] = {false, false, false, false};
+        for (int g0 = 0; g0 < 4; ++g0) {
+          if (used[g0]) continue;
+          bool member[4];
+          int dom = g0;
+          for (int k = 0; k < 4; ++k) {
+            member[k] = !used[k] && sameLayer(cx[g0], cz[g0], cx[k], cz[k]);
+            if (member[k]) {
+              used[k] = true;
+              if (quad[k].g > quad[dom].g) dom = k;
+            }
           }
+          if (quad[dom].g <= 0.0f) continue;
+          Pt cell[4];
+          for (int k = 0; k < 4; ++k) {
+            cell[k] = quad[k];
+            if (member[k]) continue;
+            const int idx = cz[k] * nx + cx[k];
+            float virtualG = -0.5f * f.step;
+            if (f.edgeDist.size() == g.size() && std::isfinite(f.edgeDist[idx]) &&
+                f.edgeDist[idx] <= 3.0f * f.step) {
+              virtualG = -(f.edgeDist[idx] + kLevelEdgeInset);
+            }
+            cell[k].p.y = quad[dom].p.y;
+            cell[k].g = virtualG;
+            cell[k].w = quad[dom].w;
+          }
+          // Clip the cell to g >= 0 (Sutherland-Hodgman against the field).
+          std::vector<Pt> poly;
+          for (int k = 0; k < 4; ++k) {
+            const Pt& a = cell[k];
+            const Pt& b = cell[(k + 1) % 4];
+            const bool ain = a.g >= 0.0f, bin = b.g >= 0.0f;
+            if (ain) poly.push_back(a);
+            if (ain != bin) {
+              const float t = a.g / (a.g - b.g);
+              const Pt c{a.p + (b.p - a.p) * t, 0.0f, a.w + (b.w - a.w) * t};
+              poly.push_back(c);
+            }
+          }
+          if (cover) {
+            // Cover marks only: the clip to the cover rectangles happens
+            // against this reach polygon, so marks never cross the movement
+            // boundary, and emitMarkPoly lays the slab copies itself.
+            emitMarks(poly, f.Node(cx[dom], cz[dom]).y);
+            continue;
+          }
+          emitFan(poly);
+          // The ground-level copy is buried under raised sidewalk slabs, so
+          // lay a clipped copy on top of each slab the cell overlaps.
+          for (const AABB& slab : slabs) emitFan(clipToSlab(poly, slab));
         }
-        for (size_t k = 1; k + 1 < poly.size(); ++k) {
-          fill.push_back(toVertex(poly[0]));
-          fill.push_back(toVertex(poly[k]));
-          fill.push_back(toVertex(poly[k + 1]));
-        }
-        if (cut.size() == 2) {
-          border.push_back(cut[0].p);
-          border.push_back(cut[1].p);
-        }
-        // The ground-level copy is buried under raised sidewalk slabs, so
-        // lay a clipped copy on top of each slab the cell overlaps.
+      }
+    }
+    // The boundary line itself is not contoured from the grid: it is the
+    // vector outline (issue #292), every wall / cliff side one exact
+    // straight line, the budget arc smooth.
+    const auto liftY = [&](glm::vec3 p) {
+      if (const std::optional<float> top = sidewalkIndex.TopAt(p.x, p.z)) {
+        p.y = std::max(p.y, terrain.Empty() ? *top : terrain.MeshHeightAt(p.x, p.z) + 0.12f);
+      }
+      p.y += kY;
+      return p;
+    };
+    // True when another reached walk layer sits above `yRef` at node `idx`
+    // (per the sheet's CSR layer list, which holds every sibling sheet's
+    // reached heights too): the spot lies behind a floor nearer the
+    // overhead camera.
+    const auto layerAbove = [&](int idx, float yRef) {
+      if (f.layerStart.size() != static_cast<size_t>(nx) * nz + 1) return false;
+      for (int t = f.layerStart[idx]; t < f.layerStart[idx + 1]; ++t) {
+        if (f.layerY[t] > yRef + kLayerStep) return true;
+      }
+      return false;
+    };
+    const auto occludedAt = [&](const glm::vec3& p) {
+      const int ix =
+          std::clamp(static_cast<int>(std::lround((p.x - f.minX) / f.step)), 0, nx - 1);
+      const int iz =
+          std::clamp(static_cast<int>(std::lround((p.z - f.minZ) / f.step)), 0, nz - 1);
+      return layerAbove(iz * nx + ix, p.y);
+    };
+    for (const FrontierOutline& outline : TraceFrontierOutline(f)) {
+      const size_t count = outline.points.size();
+      if (count < 2) continue;
+      std::vector<glm::vec3> lifted(count);
+      for (size_t k = 0; k < count; ++k) lifted[k] = liftY(outline.points[k]);
+      const size_t segCount = outline.closed ? count : count - 1;
+      for (size_t k = 0; k < segCount; ++k) {
+        const glm::vec3 a = lifted[k], d = lifted[(k + 1) % count] - a;
+        // A segment spanning a layer step would hang in the air: skip it.
+        if (std::abs(d.y) > kLayerStep) continue;
+        // A boundary running under a higher reached storey stays visible but
+        // dimmer, so where floors overlap the storey closest to the camera
+        // keeps the full-strength line (issue #292 follow-up). Floors that do
+        // not overlap each other both render the regular color.
+        const bool dim = occludedAt(outline.points[k]) &&
+                         occludedAt(outline.points[(k + 1) % count]);
+        std::vector<glm::vec3>& out = dim ? borderDim : border;
+        out.push_back(a);
+        out.push_back(a + d);
+        // Copy on top of each raised sidewalk slab it crosses (Liang-Barsky
+        // clip of the segment to the slab footprint).
         for (const AABB& slab : slabs) {
-          const std::vector<Pt> piece = clipToSlab(poly, slab);
-          for (size_t k = 1; k + 1 < piece.size(); ++k) {
-            fill.push_back(toVertex(piece[0]));
-            fill.push_back(toVertex(piece[k]));
-            fill.push_back(toVertex(piece[k + 1]));
+          float t0 = 0.0f, t1 = 1.0f;
+          const float lo[2] = {slab.min.x, slab.min.z}, hi[2] = {slab.max.x, slab.max.z};
+          const float a2[2] = {a.x, a.z}, d2[2] = {d.x, d.z};
+          bool vis = true;
+          for (int ax = 0; ax < 2 && vis; ++ax) {
+            if (std::abs(d2[ax]) < 1e-9f) {
+              vis = a2[ax] >= lo[ax] && a2[ax] <= hi[ax];
+              continue;
+            }
+            float ta = (lo[ax] - a2[ax]) / d2[ax], tb = (hi[ax] - a2[ax]) / d2[ax];
+            if (ta > tb) std::swap(ta, tb);
+            t0 = std::max(t0, ta);
+            t1 = std::min(t1, tb);
+            vis = t0 < t1;
           }
-          if (cut.size() == 2) {
-            // Liang-Barsky clip of the border segment to the slab footprint.
-            const glm::vec3 a = cut[0].p, d = cut[1].p - cut[0].p;
-            float t0 = 0.0f, t1 = 1.0f;
-            const float lo[2] = {slab.min.x, slab.min.z}, hi[2] = {slab.max.x, slab.max.z};
-            const float a2[2] = {a.x, a.z}, d2[2] = {d.x, d.z};
-            bool vis = true;
-            for (int ax = 0; ax < 2 && vis; ++ax) {
-              if (std::abs(d2[ax]) < 1e-9f) {
-                vis = a2[ax] >= lo[ax] && a2[ax] <= hi[ax];
-                continue;
-              }
-              float ta = (lo[ax] - a2[ax]) / d2[ax], tb = (hi[ax] - a2[ax]) / d2[ax];
-              if (ta > tb) std::swap(ta, tb);
-              t0 = std::max(t0, ta);
-              t1 = std::min(t1, tb);
-              vis = t0 < t1;
-            }
-            if (vis) {
-              const float y = slab.max.y + kSlabOffset;
-              border.emplace_back(a.x + d.x * t0, y, a.z + d.z * t0);
-              border.emplace_back(a.x + d.x * t1, y, a.z + d.z * t1);
-            }
+          if (vis) {
+            const float y = slab.max.y + kSlabOffset;
+            out.emplace_back(a.x + d.x * t0, y, a.z + d.z * t0);
+            out.emplace_back(a.x + d.x * t1, y, a.z + d.z * t1);
           }
         }
       }
+    }
+  };
+
+  // Stacked walk layers (issue #292 follow-up): where the reach covers
+  // several floors of one XZ spot (a multi-storey interior, a deck over the
+  // street), the single-valued field cannot show them all at once, so it is
+  // split into per-layer sheets and each sheet rendered like a field of its
+  // own, with the level-edge lines re-measured against the sheet's own
+  // storey. Fields without stacked reach render directly, unchanged.
+  const auto appendFrontierLayers = [&](const tactics::ReachField& f,
+                                        const tactics::CoverMap* cover, const glm::vec3& color,
+                                        std::vector<ColorTriangleMesh::Vertex>& fill,
+                                        std::vector<glm::vec3>& border,
+                                        std::vector<glm::vec3>& borderDim) {
+    std::vector<tactics::ReachField> sheets = tactics::SplitReachSheets(f);
+    if (sheets.empty()) {
+      appendFrontier(f, cover, color, fill, border, borderDim);
+      return;
+    }
+    for (tactics::ReachField& sheet : sheets) {
+      tactics::FillLevelEdgeDistances(game.GetScene(), &sheet);
+      appendFrontier(sheet, cover, color, fill, border, borderDim);
     }
   };
 
@@ -5343,20 +5738,32 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // is smooth rather than following the sampling grid.
   if (overlays.moveFrontier && overlays.moveFrontier->nx > 0) {
     const tactics::ReachField& f = *overlays.moveFrontier;
+    const tactics::CoverMap* cover =
+        debug.coverView && overlays.moveCover && overlays.moveCover->nx == f.nx && overlays.moveCover->nz == f.nz
+            ? overlays.moveCover
+            : nullptr;
     const glm::vec2 origin(f.minX, f.minZ);
-    if (frontierKeyField_ != &f || frontierKeyOrigin_ != origin ||
-        frontierKeyBudget_ != f.budget || frontierKeyRevision_ != f.revision ||
-        frontierKeyThermal_ != thermalKey) {
+    const bool frontierRebuilt = frontierKeyField_ != &f || frontierKeyOrigin_ != origin ||
+                                 frontierKeyBudget_ != f.budget ||
+                                 frontierKeyRevision_ != f.revision ||
+                                 frontierKeyThermal_ != thermalKey ||
+                                 frontierKeyCover_ != debug.coverView;
+    if (frontierRebuilt) {
       frontierKeyField_ = &f;
       frontierKeyOrigin_ = origin;
       frontierKeyBudget_ = f.budget;
       frontierKeyRevision_ = f.revision;
       frontierKeyThermal_ = thermalKey;
+      frontierKeyCover_ = debug.coverView;
       std::vector<ColorTriangleMesh::Vertex> fill;
-      std::vector<glm::vec3> border;
-      appendFrontier(f, debug.thermal ? thermalGreen : kSetupColor, fill, border);
+      std::vector<glm::vec3> border, borderDim;
+      appendFrontierLayers(f, cover, debug.thermal ? thermalGreen : kSetupColor, fill, border,
+                           borderDim);
+      // Without the cover view the frontier is just its boundary outline.
+      if (!debug.coverView) fill.clear();
       frontierFill_.SetVertices(fill);
-      frontierBorder_.SetPoints(border);
+      frontierBorder_.SetPoints(ribbonize(border, kBoundaryWidth));
+      frontierBorderDim_.SetPoints(ribbonize(borderDim, kBoundaryWidth));
     }
     // Same depth bias as the FOV cone, against z-fighting at distance.
     glEnable(GL_POLYGON_OFFSET_FILL);
@@ -5366,13 +5773,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     frontierFill_.Draw();
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
-    // Same green for every leg, half-transparent after the
-    // first (blending is already on for the whole overlay section; turning it
-    // off here would flatten the zipline fill's alpha gradient below).
+    // Same green and width for every leg; later legs are slightly more transparent.
     const glm::vec3 frontierColor = debug.thermal ? thermalGreen : kSetupColor;
-    unlitShader_.SetVec4("uColor", glm::vec4(frontierColor,
-                                             overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f));
-    frontierBorder_.DrawSegments();
+    const float frontierAlpha = overlays.moveFrontierSubsequentLeg ? 0.75f : 1.0f;
+    unlitShader_.SetVec4("uColor", glm::vec4(frontierColor, frontierAlpha));
+    frontierBorder_.DrawTriangles();
+    unlitShader_.SetVec4("uColor",
+                         glm::vec4(frontierColor, frontierAlpha * kOccludedBoundaryAlpha));
+    frontierBorderDim_.DrawTriangles();
     glDisable(GL_POLYGON_OFFSET_FILL);
   }
   // Zipline regions: where a walk -> ride -> walk plan can reach, in a second
@@ -5392,12 +5800,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     if (key != ziplineKey_) {
       ziplineKey_ = key;
       std::vector<ColorTriangleMesh::Vertex> fill;
-      std::vector<glm::vec3> border;
+      std::vector<glm::vec3> border, borderDim;
       for (const auto& fr : frontiers) {
-        if (fr.field.nx > 0) appendFrontier(fr.field, regionColor, fill, border);
+        if (fr.field.nx > 0) {
+          appendFrontierLayers(fr.field, nullptr, regionColor, fill, border, borderDim);
+        }
       }
       ziplineFill_.SetVertices(fill);
-      ziplineBorder_.SetPoints(border);
+      ziplineBorder_.SetPoints(ribbonize(border, kBoundaryWidth));
+      ziplineBorderDim_.SetPoints(ribbonize(borderDim, kBoundaryWidth));
     }
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(-2.0f, -4.0f);
@@ -5406,9 +5817,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     ziplineFill_.Draw();
     unlitShader_.Use();
     unlitShader_.SetMat4("uMVP", viewProj);
-    const float legAlpha = overlays.moveFrontierSubsequentLeg ? 0.5f : 1.0f;
+    const float legAlpha = overlays.moveFrontierSubsequentLeg ? 0.75f : 1.0f;
     unlitShader_.SetVec4("uColor", glm::vec4(regionColor, legAlpha));
-    ziplineBorder_.DrawSegments();
+    ziplineBorder_.DrawTriangles();
+    unlitShader_.SetVec4("uColor", glm::vec4(regionColor, legAlpha * kOccludedBoundaryAlpha));
+    ziplineBorderDim_.DrawTriangles();
     glDisable(GL_POLYGON_OFFSET_FILL);
     for (const auto& fr : frontiers) {
       // The ring below overwrites uMVP/uColor, so restore them per line.
@@ -5610,6 +6023,25 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         ghost.position = unit.plan.movePath.back();
         ghost.facingYaw = unit.plan.endFacingYaw;
         ghost.turnLag = 0.0f;
+        // Frozen stand-in: the copy would otherwise inherit the live figure's
+        // idle/walk clocks and cover pose (which belongs to its current tile).
+        ghost.idleElapsed = 0.0f;
+        ghost.walkPhase = 0.0f;
+        ghost.walkBlend = 0.0f;
+        // The cover pose belongs to the destination, not the current tile:
+        // classify it so a ghost ending behind cover crouches (or leans) as
+        // the figure will on arrival.
+        {
+          float coverYaw = 0.0f;
+          const tactics::CoverTile tile =
+              tactics::ClassifyCover(game.SightObstacles(), ghost.position, &coverYaw);
+          ghost.coverKind = tile.kind == tactics::CoverKind::None ? 0 : (tile.crouch ? 2 : 1);
+          ghost.coverYaw = coverYaw;
+          ghost.coverBlend = ghost.coverKind != 0 ? 1.0f : 0.0f;
+        }
+        ghost.shootElapsed = -1.0f;
+        ghost.rideTravel = -1.0f;
+        ghost.grabElapsed = -1.0f;
         // Common highlight green for both teams (darker in the black-hot view).
         DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost,
                           debug.thermal ? glm::vec4(thermalGreen, 1.0f)

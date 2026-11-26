@@ -1,0 +1,29 @@
+name: move_frontier_stacked_floors
+description: >
+  Issue #292 follow-up: the movement frontier across stacked storeys. Blue
+  stands on the first floor of the three-storey building from
+  stairs_only_way_up_building (seed 7), where one leg's budget reaches parts
+  of all three storeys, and begin_move leaves the frontier up under a
+  near-top-down camera. The reach field keeps every stacked layer and the
+  renderer splits it into per-storey sheets, so each storey shows its own
+  boundary and the stair flights read as reachable instead of the old
+  single-layer partition (arbitrary seams between floors, flights cut off by
+  a boundary line at whichever floor had claimed their nodes).
+
+map:
+  generate: {seed: 7, type: urban, elevated: false, features: {terrain: off}}
+
+units:
+  - {id: 0, team: blue, position: [-29.11, 4, -8.25], facing_degrees: 0}
+  - {id: 1, team: red, position: [40, 0, -30], facing_degrees: 180}
+
+camera:
+  target: [-32.3, -8.1]
+  zoom: -145
+
+script:
+  - action: begin_move
+    actor: 0
+    comment: Frontier up, spanning the ground, first and second storeys.
+  - assert: {unit: 0, position: [-29.11, 4, -8.25], tolerance: 0.05}
+  - assert: {round: 1}

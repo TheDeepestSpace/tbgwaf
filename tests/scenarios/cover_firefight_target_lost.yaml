@@ -1,0 +1,46 @@
+name: cover_firefight_target_lost
+description: >
+  Issue #292 cover vs an ongoing firefight, lost-sight edge case: the figure
+  walks along a tall wall to a cover tile the wall cannot defend (the enemy
+  is south of it), shooting at the enemy while both move (rolls pinned to
+  misses). The enemy ducks behind a building during the same round. While it
+  was visible the figure stayed standing; once it is out of sight the threat
+  that made the wall useless is gone, so the figure takes cover as normal --
+  back against the tall wall.
+
+map:
+  obstacles:
+    - {center: [0, 5], half_extent: [6.0, 0.5], height: 3.0, climbable: false}
+    - {center: [-5, -9], half_extent: [2.5, 2.5], height: 4.0, climbable: false}
+
+playbook:
+  blue: {moving_seen: shoot_continue, moving_unseen: shoot_continue, stationary_seen: shoot}
+
+# Every roll misses: the enemy must survive to hide behind the building.
+shot_rolls: [0.99]
+
+units:
+  - {id: 0, team: blue, position: [-8, 0, 3.2], facing_degrees: 0}
+  # Starts in the open facing the walker, then withdraws behind the building.
+  - {id: 1, team: red, position: [5, 0, -5], facing_degrees: 140}
+
+camera:
+  target: [0, -2]
+  zoom: 6
+
+script:
+  - action: move
+    actor: 0
+    destination: [0, 0, 4]
+    comment: Shoots while the enemy is in view; covers up once it slips away
+  - action: move
+    actor: 1
+    destination: [-5, 0, -13]
+    comment: Withdraws behind the building, out of the walker's sight
+  - action: commit
+  - assert: {unit: 0, position: [0, 0, 4], tolerance: 0.05}
+  - assert: {unit: 0, facing_degrees: -90, tolerance: 0.5}
+  - assert: {unit: 1, alive: true}
+  # Alive but hidden: no sighted threat is left, so the wall pose is taken.
+  - assert: {unit: 1, visible_to: blue, visible: false}
+  - assert: {unit: 0, cover_pose: stand}

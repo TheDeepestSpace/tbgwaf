@@ -40,6 +40,7 @@ double RenderFrames(gfx::SceneRenderer* renderer, const tactics::GameLogic& game
     }
     gfx::RenderDebugOptions debug;
     debug.disableOcclusionFade = disableFade;
+    debug.coverView = true;
     for (int pane = 0; pane < kPaneCount; ++pane) {
       const gfx::PaneOverlays overlays = gfx::BuildPaneOverlays(game, teams[pane]);
       renderer->RenderPane(game, teams[pane], /*fogActive=*/true, visibility[pane],

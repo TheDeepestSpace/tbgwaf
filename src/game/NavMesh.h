@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -41,6 +42,35 @@ struct NavCell {
 // unreachable / out-of-budget / non-walkable nodes. Node() always reports
 // y = 0; consumers that need terrain-following geometry sample the scene's
 // HeightField themselves.
+// Two reached samples whose surface heights differ by more than this stand
+// on different walk layers (stacked floors, a deck over the street); at or
+// below it they are one continuous surface (a ramp's grade, a curb). Shared
+// by the reach field's stacked-layer bookkeeping and the frontier overlay's
+// layer splits.
+constexpr float kReachLayerStep = 0.6f;
+
+// A straight piece of exact boundary geometry near a ReachField's window:
+// the vector outline of the movement boundary is snapped onto these (see
+// gfx::TraceFrontierOutline, issue #292).
+struct BoundarySeg {
+  glm::vec2 a{0.0f}, b{0.0f};
+  // How far past the line the drawn boundary sits. Wall segments are edges
+  // of counter-clockwise padded outlines, so "past" is to the left of
+  // a -> b (toward the obstacle's real face); level-edge segments have no
+  // orientation and are inset toward the reached side.
+  float inset = 0.0f;
+  // Height band the segment applies to (a node only snaps to segments of
+  // its own storey).
+  float yMin = 0.0f, yMax = 0.0f;
+  // Wall segments only: true for ground obstacles (applies to nodes walking
+  // the ground, whatever its height), false for blockers standing on a walk
+  // surface (applies to that surface's nodes, by height band).
+  bool ground = true;
+  // Wall segments only: the padded outline (a convex polygon) the segment
+  // belongs to; one outline's segments are stored consecutively, in order.
+  int outline = -1;
+};
+
 struct ReachField {
   float minX = 0.0f, minZ = 0.0f, step = 1.0f;
   int nx = 0, nz = 0;
@@ -58,6 +88,64 @@ struct ReachField {
   // comes too close after the mover would have arrived (it stands at its
   // destination for the rest of the round). Empty otherwise.
   std::vector<char> endpointBlocked;
+  // Ground walkability per node (-1 unknown, 0 obstacle-blocked, 1 free),
+  // cached by the reach computation for the nodes it inspected. Blocked
+  // nodes mark where the frontier is a wall rather than the budget running
+  // out, so the drawn boundary can hug obstacles exactly. Empty for fields
+  // built by hand (tests).
+  std::vector<char> walkable;
+  // Exact XZ world distance from each node to the boundary of the union of
+  // padded obstacle outlines, negative inside any padded polygon. Filled by
+  // ComputeReachField for nodes within a couple of metres of an outline
+  // (infinity elsewhere; may be empty, e.g. hand-built fields). Where the
+  // reach boundary is a wall, the frontier overlay contours this instead of
+  // grid-derived depths, so the drawn edge follows the obstacle outline
+  // itself -- straight faces, square corners, oblique walls exact, and
+  // nested outlines (a pier shaft inside its footing) cannot pull the line
+  // inward (issue #292).
+  std::vector<float> wallDist;
+  // Exact XZ world distance from each node to the nearest level-edge line --
+  // a terrain tier's cliff, a stair flight's flank, a walk-surface (deck,
+  // roof, ramp) outline -- for nodes within a couple of metres of one
+  // (infinity elsewhere; empty unless FillLevelEdgeDistances ran). Where the
+  // reach boundary is such an edge, the frontier overlay contours this
+  // instead of grid-derived depths, so the drawn line follows the level's
+  // real geometry -- straight cliff lines and stair flanks -- rather than
+  // the grid rasterisation of the layer step (issue #292).
+  std::vector<float> edgeDist;
+  // The geometry behind wallDist / edgeDist as line segments, for the vector
+  // outline: padded obstacle outline edges (ground obstacles and walk-surface
+  // blockers) and level-edge spans. Empty for hand-built fields.
+  std::vector<BoundarySeg> wallSegs;
+  std::vector<BoundarySeg> edgeSegs;
+  // 1 for nodes priced by the elevated walk-surface pass (deck, roof, ramp,
+  // floor) rather than over the ground. Empty for hand-built fields.
+  std::vector<char> elevated;
+  // Reached samples on stacked layers the single-valued grid above cannot
+  // hold (issue #292 follow-up): where several walk layers cover one XZ node
+  // (an upper floor over the ground, two flights of one stairwell), `dist` /
+  // `surfaceY` keep one sample per node and every other reachable layer's
+  // sample lands here, sorted by node. CoversPoint consults them, and
+  // SplitReachSheets turns the field into per-layer sheets for rendering.
+  // Empty when no reached layers stack.
+  struct StackedSample {
+    int node = 0;
+    float dist = 0.0f;
+    float surfaceY = 0.0f;
+    char elevated = 1;
+  };
+  std::vector<StackedSample> stacked;
+  // Terrain height per node (surfaceY before the elevated pass overwrote
+  // stacked nodes). Kept only while `stacked` is non-empty; SplitReachSheets
+  // uses it as the base height of nodes a sheet does not reach.
+  std::vector<float> groundY;
+  // Sheets from SplitReachSheets only: CSR list, per node, of the surface
+  // heights of every reached sample of the parent field (this sheet's and
+  // its siblings'). The frontier smoothing and outline suppress a boundary
+  // where movement continues onto a sibling layer (LayerContinues). Empty on
+  // fields computed directly.
+  std::vector<int> layerStart;
+  std::vector<float> layerY;
   // Bumped by the owner each recompute, so renderers caching geometry by
   // (origin, budget) notice content-only changes (blockers moved).
   int revision = 0;
@@ -75,8 +163,29 @@ struct ReachField {
   bool CoversPoint(const glm::vec3& p, float layerTolerance) const {
     const int ix = static_cast<int>(std::lround((p.x - minX) / step));
     const int iz = static_cast<int>(std::lround((p.z - minZ) / step));
-    if (!Reached(ix, iz)) return false;
-    return std::fabs(p.y - surfaceY[iz * nx + ix]) <= layerTolerance;
+    if (ix < 0 || iz < 0 || ix >= nx || iz >= nz) return false;
+    const int node = iz * nx + ix;
+    if (Reached(ix, iz) && std::fabs(p.y - surfaceY[node]) <= layerTolerance) return true;
+    // Stacked layers beyond the grid's one sample per node. These carry no
+    // endpoint-blocking flags; the authoritative path sweep still validates
+    // the final destination.
+    auto it = std::lower_bound(stacked.begin(), stacked.end(), node,
+                               [](const StackedSample& s, int n) { return s.node < n; });
+    for (; it != stacked.end() && it->node == node; ++it) {
+      if (std::fabs(p.y - it->surfaceY) <= layerTolerance) return true;
+    }
+    return false;
+  }
+  // Sheets only: true when some sample of the parent field (any sheet)
+  // reaches `node` within kReachLayerStep of height `y` -- movement
+  // continues there on a stacked sibling layer, so the spot is not a real
+  // boundary of the figure's reach.
+  bool LayerContinues(int node, float y) const {
+    if (layerStart.size() != dist.size() + 1) return false;
+    for (int k = layerStart[node]; k < layerStart[node + 1]; ++k) {
+      if (std::fabs(layerY[k] - y) <= kReachLayerStep) return true;
+    }
+    return false;
   }
   glm::vec3 Node(int ix, int iz) const {
     const int index = iz * nx + ix;
@@ -243,6 +352,9 @@ class NavMesh {
   std::vector<WalkSurface> walkSurfaces_;
   std::vector<std::vector<std::vector<glm::vec2>>> surfaceBlockers_;  // Agent-padded.
   std::vector<std::vector<glm::vec2>> paddedPolygons_;
+  // Per padded polygon: how far inside the outline the visible face sits
+  // (the pad it was expanded by; 0 for low-deck headroom blockers).
+  std::vector<float> paddedPolygonPad_;
   bool polygonMode_ = false;
 
   std::vector<std::vector<glm::vec2>> surfaceFootprints_;
@@ -255,5 +367,18 @@ class NavMesh {
   int gridNx_ = 0, gridNz_ = 0;
   std::vector<std::vector<int>> surfaceGrid_;     // Ascending surface indices per cell.
 };
+
+// Splits a field whose reach covers stacked walk layers (`field.stacked`
+// non-empty) into single-valued sheets for the frontier overlay: every
+// reached sample -- the grid's and the stacked ones -- is assigned to
+// exactly one sheet so that each sheet holds at most one sample per node and
+// neighbouring samples of a sheet stay within kReachLayerStep of each other
+// (one storey with its stairs, the ground with its ramps). Each sheet is a
+// self-contained ReachField windowed to its samples (sharing the parent's
+// walkability / wall / level-edge data) plus the layerStart/layerY list that
+// lets the renderer suppress the artificial seams where one sheet's reach
+// continues on a sibling (LayerContinues). Returns an empty vector when
+// nothing stacks: render the field itself, unchanged.
+std::vector<ReachField> SplitReachSheets(const ReachField& field);
 
 }  // namespace tactics

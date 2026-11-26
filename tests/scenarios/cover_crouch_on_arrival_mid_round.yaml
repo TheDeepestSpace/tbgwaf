@@ -1,0 +1,53 @@
+name: cover_crouch_on_arrival_mid_round
+description: >
+  The crouch is taken the moment the figure reaches its cover spot, not once
+  the turn ends (issue #292): replaying the committed round mid-execution via
+  the turn timeline shows the pose already held -- and carried by the
+  snapshots the replay imports -- while a teammate is still walking.
+
+map:
+  obstacles:
+    # Chest-low barrier (1.2 high): crouch cover.
+    - {center: [0, 5], half_extent: [6.0, 0.4], height: 1.2, climbable: false}
+
+units:
+  # Short walk to the barrier: arrives ~0.8 s into the 5 s round.
+  - {id: 0, team: blue, position: [0, 0, 1], facing_degrees: 90}
+  # Long walk that keeps the round visibly mid-execution while 0 poses.
+  - {id: 1, team: blue, position: [-9, 0, -8], facing_degrees: 0}
+  # Beyond the barrier, outside figure 0's final (back-to-the-wall) view
+  # cone, and its shot line to the in-cover chest is blocked: the pose is
+  # taken on arrival (issue #292 firefight rules don't suppress it).
+  - {id: 2, team: red, position: [0, 0, 14], facing_degrees: -90}
+
+camera:
+  target: [0, 3]
+  zoom: 4
+
+script:
+  - action: move
+    actor: 0
+    destination: [0, 0, 4.2]
+    comment: "Chest-low barrier ahead: crouches the moment it arrives"
+  - action: move
+    actor: 1
+    destination: [9, 0, -8]
+  - action: pass
+    actor: 2
+  - action: commit
+  # Replay the round from the start: still walking at 0.5 s, no pose yet.
+  - action: timeline_play
+    seconds: 0.5
+  - assert: {unit: 0, cover_pose: none}
+  # 2.5 s in: figure 0 reached the barrier (~0.8 s) and blended into the
+  # crouch (~0.3 s more) while figure 1 is still mid-walk -- the pose must
+  # already be held here, mid-round, not only once the turn ended.
+  - action: timeline_play
+    seconds: 2.0
+  - assert: {unit: 0, cover_pose: crouch, position: [0, 0, 4.2], tolerance: 0.05}
+  - assert: {round: 1}
+  # Back to the live post-round state: pose still held.
+  - action: timeline_pause
+  - action: timeline_seek
+    tick: 1
+  - assert: {unit: 0, cover_pose: crouch, position: [0, 0, 4.2], tolerance: 0.05}

@@ -41,7 +41,6 @@
 #include "game/Visibility.h"
 #include "gfx/Camera.h"
 #include "gfx/SceneRenderer.h"
-#include "net/GamesClient.h"
 #include "net/RemoteClient.h"
 #include "AppFlow.h"
 #include "net/BuilderSceneSync.h"
@@ -210,42 +209,6 @@ EM_JS(char*, tbgwaf_server_room_intent, (), {
   const ptr = _malloc(size);
   stringToUTF8(text, ptr, size);
   return ptr;
-});
-
-// Anonymous per-device identity for stored matches (no accounts): a random
-// token kept in localStorage, plus the id of the last match this device
-// played (Continue). Both are empty-string/no-op when storage is unavailable.
-EM_JS(char*, tbgwaf_device_token, (), {
-  let token = "";
-  try {
-    token = window.localStorage.getItem("tbgwaf.token") || "";
-    if (!/^[A-Za-z0-9_-]{16,64}$/.test(token)) {
-      const bytes = new Uint8Array(16);
-      window.crypto.getRandomValues(bytes);
-      token = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-      window.localStorage.setItem("tbgwaf.token", token);
-    }
-  } catch (e) {
-    // Storage blocked: a per-page-load token still lets this session play,
-    // it just cannot be resumed after a reload.
-    if (!token) token = Math.random().toString(16).slice(2).padEnd(16, "0") +
-                        Math.random().toString(16).slice(2).padEnd(16, "0");
-  }
-  const size = lengthBytesUTF8(token) + 1;
-  const ptr = _malloc(size);
-  stringToUTF8(token, ptr, size);
-  return ptr;
-});
-EM_JS(char*, tbgwaf_last_game_get, (), {
-  let id = "";
-  try { id = window.localStorage.getItem("tbgwaf.lastGame") || ""; } catch (e) {}
-  const size = lengthBytesUTF8(id) + 1;
-  const ptr = _malloc(size);
-  stringToUTF8(id, ptr, size);
-  return ptr;
-});
-EM_JS(void, tbgwaf_last_game_set, (const char* id), {
-  try { window.localStorage.setItem("tbgwaf.lastGame", UTF8ToString(id)); } catch (e) {}
 });
 
 // Back to the page's start screen (drops the connection, fresh game).
@@ -952,23 +915,8 @@ int main() {
   // connectOnline). Empty on native builds and when the page names a room.
   std::string onlineServerUrl;
   bool connectedFromMenu = false;
-  bool connectedFromResume = false;  // The menu connection resumes a stored match.
   tactics::ui::RoomForm roomForm;
-  // My games / Continue: stored two-player matches, keyed by an anonymous
-  // per-device token (empty natively: there is no server connection there).
-  std::string deviceToken;
-  std::string lastGameId;
-  bool gamesSocketOpen = false;  // Web build only.
-  tactics::ui::GamesMenu gamesMenu;
 #ifdef __EMSCRIPTEN__
-  {
-    char* tokenRaw = tbgwaf_device_token();
-    deviceToken = tokenRaw;
-    std::free(tokenRaw);
-    char* lastRaw = tbgwaf_last_game_get();
-    lastGameId = lastRaw;
-    std::free(lastRaw);
-  }
   {
     char* urlRaw = tbgwaf_server_url();
     const std::string serverUrl(urlRaw);
@@ -982,7 +930,6 @@ int main() {
         fixedTeam = Team::Blue;  // One pane; a local mirror until a room is chosen.
       } else {
         remote = std::make_unique<tactics::net::RemoteClient>(&game, roomRaw, intentRaw, spectate);
-        remote->SetToken(deviceToken);
         char* botModeRaw = tbgwaf_server_bot_mode();
         remote->SetBotMode(botModeRaw);
         {
@@ -1003,7 +950,6 @@ int main() {
     }
   }
 #endif
-  tactics::net::GamesClient gamesClient(deviceToken);
   bool remoteMode = remote != nullptr;
   const bool networked = fixedTeam.has_value();
   // The Blue instance (or the lone native window) simulates rounds; the Red
@@ -1118,7 +1064,6 @@ int main() {
   float frameMs = 0.0f;
   float fovMs = 0.0f;
   gfx::RenderFrameStats frameStats;
-  ui::BombPanelState bombPanel;  // Debug bomb (issue #350), debug-panel driven.
 
   // Starts a hotseat game on builder scene `index`: per-session reset and a
   // fresh recording (the log embeds the scene), cameras framed on it.
@@ -1366,46 +1311,6 @@ int main() {
         pendingServerScenes.reset();
       }
     }
-    // My games: a short-lived socket fetches this device's stored matches.
-    if (!onlineServerUrl.empty() && !remoteMode) {
-      const bool wantGamesSocket = screen == tbgwaf_flow::State::MyGames;
-      if (wantGamesSocket && !gamesSocketOpen && !sceneSocketOpen) {
-        gamesMenu.loaded = false;
-        gamesMenu.status.clear();
-        tbgwaf_ws_open(onlineServerUrl.c_str());
-        gamesSocketOpen = true;
-      }
-      while (gamesSocketOpen) {
-        char* raw = tbgwaf_ws_next();
-        if (!raw) break;
-        const std::string event(raw);
-        std::free(raw);
-        if (event == "O") {
-          gamesClient.OnOpen();
-          for (const std::string& frame : gamesClient.TakeOutgoing()) tbgwaf_ws_send(frame.c_str());
-        } else if (event == "C") {
-          gamesClient.OnClose();
-          gamesSocketOpen = false;
-          if (!gamesMenu.loaded) gamesMenu.status = "Could not reach the server.";
-        } else if (event.size() > 1 && event[0] == 'M') {
-          if (gamesClient.OnMessage(event.substr(1))) {
-            gamesMenu.loaded = true;
-            gamesMenu.rows.clear();
-            for (const auto& entry : gamesClient.entries()) {
-              gamesMenu.rows.push_back(
-                  {entry.id, tactics::net::GamesClient::Title(entry), entry.finished});
-            }
-          } else if (!gamesClient.lastError().empty()) {
-            gamesMenu.status = "Server: " + gamesClient.lastError();
-          }
-        }
-      }
-      if (!wantGamesSocket && gamesSocketOpen) {
-        tbgwaf_ws_close();
-        gamesClient.OnClose();
-        gamesSocketOpen = false;
-      }
-    }
     if (remoteMode) {
       while (char* raw = tbgwaf_ws_next()) {
         const std::string event(raw);
@@ -1415,10 +1320,6 @@ int main() {
         else if (event.size() > 1 && event[0] == 'M') remote->OnMessage(event.substr(1));
       }
       if (remote->team()) fixedTeam = remote->team();
-      if (!remote->game_id().empty() && remote->game_id() != lastGameId) {
-        lastGameId = remote->game_id();
-        tbgwaf_last_game_set(lastGameId.c_str());
-      }
       if (remote->ConsumeMatchStarted()) {
         pendingJevRequest.reset();
         jevBuilder.reset();
@@ -1432,21 +1333,12 @@ int main() {
       // back to the Room screen with the reason.
       if (connectedFromMenu && remote->status() == tactics::net::RemoteClient::Status::Rejected) {
         roomForm.error = remote->lastError();
-        if (connectedFromResume) gamesMenu.status = remote->lastError();
         tbgwaf_ws_close();
         remote.reset();
         remoteMode = false;
         isSimulator = true;
         connectedFromMenu = false;
-        if (connectedFromResume) {
-          // The stored game is gone (database reset, or never existed): forget it.
-          lastGameId.clear();
-          tbgwaf_last_game_set("");
-          screen = tbgwaf_flow::State::MyGames;
-        } else {
-          screen = tbgwaf_flow::State::Room;
-        }
-        connectedFromResume = false;
+        screen = tbgwaf_flow::State::Room;
       }
     } else if (networked) {
       // Builder screens/games are local: the peer's messages are drained
@@ -1813,10 +1705,9 @@ int main() {
         builderMenu.lastLogAvailable = reproRecorder.Started();
         builderMenu.status = builderStatus;
       }
-      gamesMenu.canContinue = !lastGameId.empty() || gamesClient.LatestActive() != nullptr;
       std::optional<tbgwaf_flow::Event> flowEvent =
           tactics::ui::DrawMenu(screen, windowWidth, windowHeight, &mapSeed,
-                                !onlineServerUrl.empty(), &roomForm, &builderMenu, &gamesMenu);
+                                !onlineServerUrl.empty(), &roomForm, &builderMenu);
       if (builderMenu.downloadLastLog) {
         const std::string where = DownloadReproLog(reproRecorder, builderLogSceneId);
         builderStatus = where.empty() ? "Download failed" : "Saved " + where;
@@ -1868,49 +1759,12 @@ int main() {
         const bool create = *flowEvent == tbgwaf_flow::Event::CreateRoom;
         remote = std::make_unique<tactics::net::RemoteClient>(
             &game, create ? "" : roomForm.code, create ? "create" : "join", false);
-        remote->SetToken(deviceToken);
-        connectedFromResume = false;
         remoteMode = true;
         isSimulator = false;
         connectedFromMenu = true;
         roomForm.error.clear();
         tbgwaf_ws_open(onlineServerUrl.c_str());
 #endif
-      }
-      if (flowEvent && (*flowEvent == tbgwaf_flow::Event::ContinueGame ||
-                        *flowEvent == tbgwaf_flow::Event::OpenGame)) {
-        // Resume (active) or replay (finished) a stored match with this
-        // device's token. Continue picks the newest active match the server
-        // listed, else the last one played here.
-        std::string gameId = lastGameId;
-        if (*flowEvent == tbgwaf_flow::Event::OpenGame) {
-          gameId = gamesMenu.openIndex >= 0 &&
-                           gamesMenu.openIndex < static_cast<int>(gamesMenu.rows.size())
-                       ? gamesMenu.rows[gamesMenu.openIndex].id
-                       : "";
-        } else if (screen == tbgwaf_flow::State::MyGames && gamesClient.LatestActive()) {
-          gameId = gamesClient.LatestActive()->id;
-        }
-        if (gameId.empty() || onlineServerUrl.empty()) {
-          flowEvent.reset();  // Nothing to resume: stay on this screen.
-        } else {
-#ifdef __EMSCRIPTEN__
-          if (gamesSocketOpen) {
-            tbgwaf_ws_close();
-            gamesClient.OnClose();
-            gamesSocketOpen = false;
-          }
-          remote = std::make_unique<tactics::net::RemoteClient>(&game, "", "", false);
-          remote->SetToken(deviceToken);
-          remote->SetResume(gameId);
-          connectedFromResume = true;
-          remoteMode = true;
-          isSimulator = false;
-          connectedFromMenu = true;
-          roomForm.error.clear();
-          tbgwaf_ws_open(onlineServerUrl.c_str());
-#endif
-        }
       }
       if (flowEvent) {
         if (*flowEvent == tbgwaf_flow::Event::SelectRegular ||
@@ -2426,48 +2280,16 @@ int main() {
     wasmHeapBytes = emscripten_get_heap_size();
 #endif
     const bool hudWasThermal = debugOptions.thermal;
-    bombPanel.placed = game.GetDebugBomb().has_value();
-    if (bombPanel.placed) bombPanel.position = game.GetDebugBomb()->position;
-    ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.disableShadows, debugOptions.thermal,
+    ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.coverView,
+                       debugOptions.disableShadows, debugOptions.thermal,
                        debugOptions.thermalBlackHot, debugOptions.thermalFovAlpha,
                        debugOptions.thermalAo.radius,
                        debugOptions.thermalAo.strength, debugOptions.thermalAo.quality,
                        debugOptions.thermalAo.softness,
                        debugOptions.disableOcclusionFade, debugOptions.npr,
                        debugOptions.nprSettings, showFps, showRotationDome,
-                       smoothedFps, frameMs, fovMs, frameStats, &bombPanel,
+                       smoothedFps, frameMs, fovMs, frameStats,
                        roundPanelBottom + 6.0f, wasmHeapBytes);
-    // Debug bomb (issue #350): panel requests act on the local game. Placing
-    // parks it at the left pane's camera focus, one unit above the ground
-    // there (so a blast at a wall's foot still opens a doorway-height hole).
-    // Only where this instance is the authority: in a server-backed match the
-    // mirror must not fork the world (use the control tap's place_bomb /
-    // detonate_bomb there).
-    if (remoteMode) {
-      bombPanel.requestPlace = bombPanel.requestDetonate = bombPanel.requestArm = false;
-    }
-    if (bombPanel.requestPlace) {
-      glm::vec3 spot = cameraForPane(0).target;
-      spot.y = game.GetScene().ground.HeightAt(spot.x, spot.z) + 1.0f;
-      game.DebugPlaceBomb(spot, bombPanel.radius);
-    }
-    if (bombPanel.requestDetonate) game.DebugDetonateBomb();
-    if (bombPanel.requestArm) game.DebugArmBomb(bombPanel.armAt);
-    bombPanel.requestPlace = bombPanel.requestDetonate = bombPanel.requestArm = false;
-    if (const auto& bomb = game.GetDebugBomb()) {
-      // Marker: a small ring + label in every pane, over the 3D view.
-      ImDrawList* fg = ImGui::GetForegroundDrawList();
-      for (int pane = 0; pane < paneCount; ++pane) {
-        const glm::vec2 at = ui::WorldToWindow(bomb->position, cameraForPane(pane),
-                                               paneRects[pane], windowHeight);
-        if (at.x < paneRects[pane].x || at.x > paneRects[pane].x + paneRects[pane].width) continue;
-        const ImU32 color = IM_COL32(255, 90, 40, 230);
-        fg->AddCircle(ImVec2(at.x, at.y), 9.0f, color, 0, 2.0f);
-        fg->AddCircleFilled(ImVec2(at.x, at.y), 3.0f, color);
-        const char* label = bomb->detonateAt >= 0.0f ? "BOMB (armed)" : "BOMB";
-        fg->AddText(ImVec2(at.x + 12.0f, at.y - 7.0f), color, label);
-      }
-    }
     // Pop against the pre-panel state: the checkbox may have just toggled
     // `thermal`, but the push at the top of this frame is what must unwind.
     if (hudWasThermal) ui::PopThermalHudStyle();

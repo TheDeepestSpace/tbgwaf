@@ -153,23 +153,6 @@ bool RayIntersectsObstacle(const glm::vec3& origin, const glm::vec3& direction,
                       ObstacleFootprint(obstacle), &enter, &exit)) {
     return false;
   }
-  // Fractured wall pieces with slanted torn edges: additionally clip against
-  // the wall-plane silhouette (see Obstacle::profile), so rays pass over a
-  // slanted cut exactly where the renderer shows daylight.
-  if (obstacle.profile.size() >= 3 && obstacle.footprint.size() >= 2) {
-    const glm::vec2 a = obstacle.footprint[0];
-    const glm::vec2 ab = obstacle.footprint[1] - a;
-    const float len = glm::length(ab);
-    if (len > kEps) {
-      const glm::vec2 d = ab / len;
-      const glm::vec2 o(origin.x - a.x, origin.z - a.y);
-      if (!ClipParametric({glm::dot(o, d), origin.y},
-                          {glm::dot(glm::vec2(direction.x, direction.z), d), direction.y},
-                          obstacle.profile, &enter, &exit)) {
-        return false;
-      }
-    }
-  }
   if (exit < 0.0f) return false;
   if (outT) *outT = std::max(0.0f, enter);
   return true;

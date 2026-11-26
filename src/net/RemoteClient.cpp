@@ -59,8 +59,6 @@ void RemoteClient::OnOpen() {
   if (!mapKind_.empty()) join.Set("map", mapKind_);
   if (ctf_) join.Set("ctf", Json(true));
   if (mapSeed_) join.Set("seed", static_cast<double>(*mapSeed_));
-  if (!token_.empty()) join.Set("token", token_);
-  if (!resumeGame_.empty()) join.Set("game", resumeGame_);
   Queue(join);
 }
 
@@ -78,15 +76,12 @@ std::string RemoteClient::StatusText() const {
                            : "Room code " + room_ + " -- waiting for an opponent to join...";
     case Status::Rejected: return lastError_;
     case Status::OpponentLeft: return "Opponent left the match. Reload to play again.";
-    case Status::Disconnected:
-      return gameId_.empty() ? "Disconnected from server. Reload to reconnect."
-                             : "Disconnected from server. Reload and press Continue to resume.";
+    case Status::Disconnected: return "Disconnected from server. Reload to reconnect.";
     case Status::Playing: break;
   }
   if (playback_) return "Round in progress...";
   if (!lastError_.empty()) return lastError_;
   if (CommitLocked()) return peerReady_ ? "Both ready..." : "Committed; waiting for opponent...";
-  if (peerAway_) return "Opponent disconnected; the match resumes when they return.";
   if (peerReady_) return "Opponent is ready.";
   return "";
 }
@@ -120,10 +115,6 @@ void RemoteClient::OnMessage(const std::string& text) {
     const bool ok = m["ok"].AsBool(true);
     lastError_ = ok ? "" : m["error"].AsString();
     if (!ok && seq == commitSeq_) commitPending_ = false;  // Commit refused: unlock planning.
-  } else if (type == "opponent_away") {
-    peerAway_ = true;
-  } else if (type == "opponent_back") {
-    peerAway_ = false;
   } else if (type == "opponent_left") {
     status_ = Status::OpponentLeft;
     playback_.reset();
@@ -140,9 +131,6 @@ void RemoteClient::HandleStart(const Json& m) {
   const auto team = spectate_ ? std::optional<Team>(Team::Blue) : ParseTeamName(m["team"].AsString());
   if (!team || !m["seed"].IsNumber()) return;
   team_ = team;
-  gameId_ = m["game"].IsString() ? m["game"].AsString() : "";
-  gameFinished_ = m["finished"].AsBool();
-  peerAway_ = false;
   // Rooms loaded through the server's test control tap carry an explicit
   // scene; ordinary matches are rebuilt from the shared deterministic seed.
   tactics::Scene scene;
@@ -302,13 +290,19 @@ RemoteClient::Playback RemoteClient::ParseRound(const Json& m) {
     frame.t = static_cast<float>(f["t"].AsNumber());
     for (const Json& row : f["u"].AsArray()) {
       const auto& a = row.AsArray();
-      if (a.size() != 7) continue;
+      if (a.size() < 7) continue;
       Sample s;
       s.id = static_cast<int>(a[0].AsNumber());
       s.pos = glm::vec3(a[1].AsNumber(), a[2].AsNumber(), a[3].AsNumber());
       s.yaw = static_cast<float>(a[4].AsNumber());
       s.alive = a[5].AsNumber() != 0;
       s.moving = a[6].AsNumber() != 0;
+      if (a.size() >= 10) {
+        const int kind = static_cast<int>(a[7].AsNumber());
+        s.coverKind = kind >= 0 && kind <= 2 ? static_cast<uint8_t>(kind) : 0;
+        s.coverBlend = glm::clamp(static_cast<float>(a[8].AsNumber()), 0.0f, 1.0f);
+        s.coverYaw = static_cast<float>(a[9].AsNumber());
+      }
       frame.units.push_back(s);
     }
     pb.frames.push_back(std::move(frame));
@@ -392,6 +386,9 @@ void RemoteClient::PosePlayback(GameSnapshot* snapOut, const Playback& pb, float
       u.moving = false;
       u.walkBlend = 0.0f;
       u.shootElapsed = -1.0f;
+      u.coverKind = 0;
+      u.coverTileKind = 0;
+      u.coverBlend = 0.0f;
       continue;
     }
     glm::vec3 pos = sa->pos;
@@ -403,6 +400,13 @@ void RemoteClient::PosePlayback(GameSnapshot* snapOut, const Playback& pb, float
     u.position = pos;
     u.facingYaw = yaw;
     u.moving = sa->moving;
+    // Cover pose straight from the server's frames (issue #292): the blend
+    // interpolates between samples like the position, so the crouch eases
+    // in exactly when the simulated figure's did, mid-round.
+    u.coverKind = sa->coverKind;
+    u.coverTileKind = sa->coverKind;
+    u.coverYaw = sa->coverYaw;
+    u.coverBlend = sb ? glm::mix(sa->coverBlend, sb->coverBlend, s) : sa->coverBlend;
     if (u.alive && !sa->alive) {  // Fell this segment: start the knockdown beat.
       u.alive = false;
       u.knockdownElapsed = 0.0f;

@@ -8,23 +8,12 @@ primary_region = "iad"
 
 [env]
   PORT = "8080"
-  # Stored matches (SQLite) live on the volume below; see docs/persistence.md.
-  TBGWAF_DB_PATH = "/data/tbgwaf.db"
-
-# One volume, so one machine: a Fly volume attaches to a single machine, and
-# SQLite must have a single writer. Never scale beyond one machine (the deploy
-# uses --ha=false). Daily volume snapshots are the backup; keep two weeks.
-[mounts]
-  source = "tbgwaf_data"
-  destination = "/data"
-  snapshot_retention = 14
 
 [http_service]
   internal_port = 8080
   force_https = true
   # Scale to zero when nobody is connected: an idle backend costs ~nothing, so
-  # one app per PR is cheap. Stored matches are on the volume and survive a stop;
-  # a match in progress is restored from the database on the next start.
+  # one app per PR is cheap. Match state is in memory and is lost on stop.
   auto_stop_machines = "stop"
   auto_start_machines = true
   min_machines_running = 0

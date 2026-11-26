@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdio>
 
 #include "net/SceneSpec.h"
 
@@ -47,19 +46,6 @@ std::optional<uint32_t> SeedOf(const Json& message) {
   return static_cast<uint32_t>(s);
 }
 
-// Anonymous per-device token (client-generated): 16-64 of [A-Za-z0-9_-].
-std::string TokenOf(const Json& message) {
-  if (!message["token"].IsString()) return "";
-  const std::string& t = message["token"].AsString();
-  if (t.size() < 16 || t.size() > 64) return "";
-  for (char c : t) {
-    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                    c == '-' || c == '_';
-    if (!ok) return "";
-  }
-  return t;
-}
-
 }  // namespace
 
 void Lobby::SendError(int conn, const std::string& why) {
@@ -76,10 +62,6 @@ void Lobby::OnMessage(int conn, const std::string& text) {
   }
   if (message["t"].IsString() &&
       HandleSceneMessage(conn, message["t"].AsString(), message)) {
-    return;
-  }
-  if (message["t"].IsString() && message["t"].AsString() == "my_games") {
-    HandleMyGames(conn, message);
     return;
   }
   auto it = members_.find(conn);
@@ -195,11 +177,6 @@ void Lobby::SpectatorJoin(int conn, const Json& message) {
 }
 
 void Lobby::Join(int conn, const Json& message) {
-  const std::string token = TokenOf(message);
-  if (message["game"].IsString()) {
-    Resume(conn, message["game"].AsString(), token);
-    return;
-  }
   const std::string mode = message["mode"].IsString() ? message["mode"].AsString() : "";
   if (!mode.empty()) {
     if (mode != "player-v-ai" && mode != "ai-v-ai") {
@@ -238,15 +215,6 @@ void Lobby::Join(int conn, const Json& message) {
     name = message["room"].AsString();
   }
   const bool exists = rooms_.count(name) > 0;
-  // A token that owns a seat in a stored match resumes it, whatever the intent.
-  if (exists && !token.empty() && !rooms_[name].gameId.empty()) {
-    const Room& existing = rooms_[name];
-    if (const auto seat = gameStore_ ? gameStore_->TeamOf(existing.gameId, token) : std::nullopt) {
-      
-      Resume(conn, existing.gameId, token);
-      return;
-    }
-  }
   if (intent == "create" && exists) {
     SendError(conn, "room code already in use");
     return;
@@ -265,7 +233,7 @@ void Lobby::Join(int conn, const Json& message) {
   }
   Room& room = rooms_[name];
   if (!room.id) room.id = nextRoomId_++;
-  if (!room.botMode.empty() || room.session || (room.conns[0] >= 0 && room.conns[1] >= 0)) {
+  if (!room.botMode.empty() || (room.conns[0] >= 0 && room.conns[1] >= 0)) {
     SendError(conn, "room is full");
     return;
   }
@@ -274,7 +242,6 @@ void Lobby::Join(int conn, const Json& message) {
     room.mapKind = MapKindOf(message);
     room.mapSeed = SeedOf(message);
     room.ctf = CtfOf(message);
-    room.tokens[0] = token;
     members_[conn] = Member{name, Team::Blue};
     Json waiting = Typed("waiting");
     waiting.Set("room", name);
@@ -282,27 +249,12 @@ void Lobby::Join(int conn, const Json& message) {
     return;
   }
   room.conns[1] = conn;
-  room.tokens[1] = token;
   members_[conn] = Member{name, Team::Red};
   room.session = room.scene ? std::make_unique<GameSession>(*room.scene)
                             : std::make_unique<GameSession>(room.mapSeed ? *room.mapSeed : seed_(),
-                                                        room.mapKind, room.ctf, roundLimit_);
+                                                        room.mapKind, room.ctf);
   if (room.scene) room.session->ConfigureForTest(room.friendlyFire, room.figureOverlapCheck, room.shotRolls);
-  room.name = name;
-  PersistNewGame(room);
   StartMatch(room);
-}
-
-Json Lobby::StartMessage(const Room& room, Team team) const {
-  Json start = Typed("start");
-  start.Set("team", net::TeamName(team));
-  start.Set("seed", static_cast<double>(room.session->seed()));
-  if (!room.session->mapKind().empty()) start.Set("map", room.session->mapKind());
-  if (room.session->ctf()) start.Set("ctf", Json(true));
-  if (room.scene) start.Set("scene", room.sceneSpec);
-  if (!room.gameId.empty()) start.Set("game", room.gameId);
-  start.Set("protocol", net::kProtocolVersion);
-  return start;
 }
 
 void Lobby::StartMatch(Room& room) {
@@ -315,7 +267,13 @@ void Lobby::StartMatch(Room& room) {
   }
   for (int ti = 0; ti < 2; ++ti) {
     const Team team = static_cast<Team>(ti);
-    const Json start = StartMessage(room, team);
+    Json start = Typed("start");
+    start.Set("team", net::TeamName(team));
+    start.Set("seed", static_cast<double>(room.session->seed()));
+    if (!room.session->mapKind().empty()) start.Set("map", room.session->mapKind());
+    if (room.session->ctf()) start.Set("ctf", Json(true));
+    if (room.scene) start.Set("scene", room.sceneSpec);
+    start.Set("protocol", net::kProtocolVersion);
     SendSeat(room, team, start);
     SendSeat(room, team, room.session->PlansMessage(team));
     SendSeat(room, team, room.session->StateMessage(team));
@@ -360,10 +318,8 @@ void Lobby::HandleAction(int conn, Member& member, const Json& message) {
   ack.Set("ok", Json(result.ok));
   if (!result.ok) ack.Set("error", result.error);
   Send(conn, ack);
-  if (action.kind == net::ActionKind::Commit && result.ok) PersistCommit(room, team);
 
   if (action.kind == net::ActionKind::NewMatch && result.ok) {
-    PersistNewGame(room);
     StartMatch(room);
     return;
   }
@@ -383,7 +339,6 @@ void Lobby::MaybeRunRound(Room& room) {
   GameSession& session = *room.session;
   if (!session.BothReady()) return;
   const auto reports = session.RunRound();
-  PersistTurn(room, reports);
   for (int ti = 0; ti < 2; ++ti) {
     const Team t = static_cast<Team>(ti);
     SendSeat(room, t, reports[ti]);
@@ -605,55 +560,6 @@ Json Lobby::OnControl(const Json& message) {
     world.Set("world", room.session->TakeWorldDelta());
     for (int ti = 0; ti < 2; ++ti) SendSeat(room, static_cast<Team>(ti), world);
     for (int spectator : room.spectators) Send(spectator, world);
-    // Removing an obstacle can reveal figures: refresh each seat's state.
-    for (int ti = 0; ti < 2; ++ti) {
-      SendSeat(room, static_cast<Team>(ti), room.session->StateMessage(static_cast<Team>(ti)));
-    }
-    for (int spectator : room.spectators) Send(spectator, room.session->SpectatorStateMessage());
-    return reply(true, "");
-  }
-  if (type == "place_bomb") {  // Debug: place/move the debug bomb (issue #350).
-    auto it = rooms_.find(name);
-    if (it == rooms_.end() || !it->second.session) return reply(false, "no running match in room");
-    glm::vec3 pos(0.0f);
-    if (!message["pos"].IsArray() || message["pos"].AsArray().size() != 3) {
-      return reply(false, "pos must be [x, y, z]");
-    }
-    const auto& arr = message["pos"].AsArray();
-    for (int i = 0; i < 3; ++i) {
-      if (!arr[i].IsNumber()) return reply(false, "pos must be [x, y, z]");
-      pos[i] = static_cast<float>(arr[i].AsNumber());
-    }
-    const float radius = message["radius"].IsNumber()
-                             ? static_cast<float>(message["radius"].AsNumber())
-                             : kDefaultBombRadius;
-    it->second.session->DebugPlaceBomb(pos, radius);
-    return reply(true, "");
-  }
-  if (type == "detonate_bomb") {  // Debug: blow the placed bomb (issue #350).
-    auto it = rooms_.find(name);
-    if (it == rooms_.end() || !it->second.session) return reply(false, "no running match in room");
-    Room& room = it->second;
-    if (message["at"].IsNumber()) {
-      // Armed: it goes off at this time into the next round's execution; the
-      // changes ship inside that round message with the matching timestamp.
-      if (!room.session->DebugArmBomb(static_cast<float>(message["at"].AsNumber()))) {
-        return reply(false, "no placed bomb");
-      }
-      return reply(true, "");
-    }
-    if (!room.session->DebugDetonateBomb()) {
-      return reply(false, "no placed bomb or nothing destructible in range");
-    }
-    Json world = Typed("world");
-    world.Set("world", room.session->TakeWorldDelta());
-    for (int ti = 0; ti < 2; ++ti) SendSeat(room, static_cast<Team>(ti), world);
-    for (int spectator : room.spectators) Send(spectator, world);
-    // Blowing a hole can reveal figures: refresh each seat's fog-filtered state.
-    for (int ti = 0; ti < 2; ++ti) {
-      SendSeat(room, static_cast<Team>(ti), room.session->StateMessage(static_cast<Team>(ti)));
-    }
-    for (int spectator : room.spectators) Send(spectator, room.session->SpectatorStateMessage());
     return reply(true, "");
   }
   if (type == "dump_state") {
@@ -679,14 +585,6 @@ void Lobby::OnDisconnect(int conn) {
     if (room.botMode == "ai-v-ai" && room.spectators.empty()) rooms_.erase(roomIt);
     return;
   }
-  // A stored, unfinished match survives a dropped player: the seat is held
-  // for their token (Resume), the opponent keeps the room.
-  if (!room.gameId.empty() && room.session &&
-      room.session->game().Mode() != InputMode::GameOver) {
-    room.conns[static_cast<int>(member.team)] = -1;
-    SendSeat(room, OpposingTeam(member.team), Typed("opponent_away"));
-    return;
-  }
   for (int spectator : room.spectators) {
     Send(spectator, Typed("opponent_left"));
     members_.erase(spectator);
@@ -697,262 +595,6 @@ void Lobby::OnDisconnect(int conn) {
     members_.erase(otherConn);  // The match is over; the survivor may join again.
   }
   rooms_.erase(roomIt);
-}
-
-
-// ---- Persistence ----
-
-std::string Lobby::NewGameId() {
-  if (!codeRng_) codeRng_.emplace(seed_());
-  static const char* kHex = "0123456789abcdef";
-  for (;;) {
-    std::string id = "g";
-    for (int i = 0; i < 12; ++i) id += kHex[(*codeRng_)() % 16];
-    if (!gameStore_->Find(id)) return id;
-  }
-}
-
-void Lobby::PersistNewGame(Room& room) {
-  room.gameId.clear();
-  room.turn = 1;
-  room.lastRound[0].clear();
-  room.lastRound[1].clear();
-  const std::string& blue = room.tokens[0];
-  const std::string& red = room.tokens[1];
-  if (!gameStore_ || room.scene || !room.botMode.empty() || blue.empty() || red.empty() ||
-      blue == red) {
-    return;
-  }
-  GameStore::Game game;
-  game.id = NewGameId();
-  game.room = room.name;
-  game.seed = room.session->seed();
-  game.mapKind = room.session->mapKind();
-  game.ctf = room.session->ctf();
-  game.roundLimit = room.session->roundLimit();
-  if (!gameStore_->CreateGame(game, blue, red)) {
-    std::fprintf(stderr, "tbgwaf_server: cannot store game: %s\n", gameStore_->error().c_str());
-    return;
-  }
-  room.gameId = game.id;
-}
-
-void Lobby::PersistCommit(Room& room, Team team) {
-  if (room.gameId.empty()) return;
-  if (!gameStore_->PutOrders(room.gameId, room.turn, static_cast<int>(team),
-                             room.session->OrdersFor(team).Dump())) {
-    std::fprintf(stderr, "tbgwaf_server: cannot store orders: %s\n", gameStore_->error().c_str());
-  }
-}
-
-void Lobby::PersistTurn(Room& room, const std::array<Json, 3>& reports) {
-  if (room.gameId.empty()) return;
-  GameStore::Turn turn;
-  turn.round = room.turn++;
-  for (int i = 0; i < 3; ++i) turn.messages[i] = reports[i].Dump();
-  turn.stateHash = room.session->StateChecksum();
-  room.lastRound[0] = turn.messages[0];
-  room.lastRound[1] = turn.messages[1];
-  const GameSession& session = *room.session;
-  const bool over = session.game().Mode() == InputMode::GameOver;
-  const std::string winner =
-      !over ? "" : (session.game().Winner() ? net::TeamName(*session.game().Winner()) : "none");
-  if (!gameStore_->PutTurn(room.gameId, turn, over, winner)) {
-    std::fprintf(stderr, "tbgwaf_server: cannot store turn: %s\n", gameStore_->error().c_str());
-  }
-}
-
-std::unique_ptr<GameSession> Lobby::ReplayGame(const GameStore::Game& game, bool pending,
-                                               int* nextTurn, std::string* error) {
-  auto session = std::make_unique<GameSession>(game.seed, game.mapKind, game.ctf, game.roundLimit);
-  const std::vector<GameStore::Order> orders = gameStore_->Orders(game.id);
-  const std::vector<GameStore::Turn> turns = gameStore_->Turns(game.id);
-  auto ordersOf = [&](int round, int team) -> const GameStore::Order* {
-    for (const GameStore::Order& o : orders) {
-      if (o.round == round && o.team == team) return &o;
-    }
-    return nullptr;
-  };
-  auto apply = [&](int round, int team) {
-    const GameStore::Order* order = ordersOf(round, team);
-    Json json;
-    if (!order || !Json::Parse(order->json, &json)) {
-      *error = "missing orders for round " + std::to_string(round);
-      return false;
-    }
-    const GameSession::Result result = session->ApplyOrders(static_cast<Team>(team), json);
-    if (!result.ok) *error = "round " + std::to_string(round) + ": " + result.error;
-    return result.ok;
-  };
-  int round = 1;
-  for (const GameStore::Turn& turn : turns) {
-    if (turn.round != round || !apply(round, 0) || !apply(round, 1)) {
-      if (error->empty()) *error = "turn gap at round " + std::to_string(round);
-      return nullptr;
-    }
-    session->RunRound();
-    if (session->StateChecksum() != turn.stateHash) {
-      *error = "replay diverged at round " + std::to_string(round);
-      return nullptr;
-    }
-    ++round;
-  }
-  if (pending) {
-    for (int team = 0; team < 2; ++team) {
-      if (ordersOf(round, team) && !apply(round, team)) return nullptr;
-    }
-  }
-  *nextTurn = round;
-  return session;
-}
-
-int Lobby::SetGameStore(GameStore* store) {
-  gameStore_ = store;
-  if (!store || !store->ok()) return 0;
-  int restored = 0;
-  for (const GameStore::Game& game : store->ActiveGames()) {
-    if (rooms_.count(game.room)) continue;
-    std::string error;
-    int nextTurn = 1;
-    auto session = ReplayGame(game, true, &nextTurn, &error);
-    if (!session) {
-      std::fprintf(stderr, "tbgwaf_server: game %s not restored: %s\n", game.id.c_str(),
-                   error.c_str());
-      continue;
-    }
-    Room& room = rooms_[game.room];
-    room.name = game.room;
-    room.id = nextRoomId_++;
-    room.gameId = game.id;
-    room.turn = nextTurn;
-    room.session = std::move(session);
-    const std::vector<GameStore::Turn> turns = store->Turns(game.id);
-    if (!turns.empty()) {
-      room.lastRound[0] = turns.back().messages[0];
-      room.lastRound[1] = turns.back().messages[1];
-    }
-    ++restored;
-  }
-  return restored;
-}
-
-void Lobby::Resume(int conn, const std::string& gameId, const std::string& token) {
-  const auto team = gameStore_ && !token.empty() ? gameStore_->TeamOf(gameId, token) : std::nullopt;
-  const auto game = team ? gameStore_->Find(gameId) : std::nullopt;
-  if (!game) {
-    SendError(conn, "no such game");
-    return;
-  }
-  const Team seat = static_cast<Team>(*team);
-  if (game->finished) {
-    ViewFinished(conn, *game, seat);
-    return;
-  }
-  Room* room = nullptr;
-  for (auto& [name, candidate] : rooms_) {
-    if (candidate.gameId == gameId) room = &candidate;
-  }
-  if (!room || !room->session) {
-    SendError(conn, "game is not available");
-    return;
-  }
-  if (members_.count(conn)) {
-    SendError(conn, "already in a game");
-    return;
-  }
-  int& seatConn = room->conns[*team];
-  if (seatConn >= 0) {  // The same device reconnecting before the old socket was noticed gone.
-    Send(seatConn, Typed("opponent_left"));
-    members_.erase(seatConn);
-  }
-  seatConn = conn;
-  members_[conn] = Member{room->name, seat};
-  Json start = StartMessage(*room, seat);
-  start.Set("resumed", Json(true));
-  Send(conn, start);
-  Send(conn, room->session->StateMessage(seat));
-  // The latest resolved turn plays back first (as it did live), then the
-  // authoritative plans: they carry this player's commit flag, which a round
-  // clears on the client.
-  if (!room->lastRound[*team].empty()) send_(conn, room->lastRound[*team]);
-  Send(conn, room->session->PlansMessage(seat));
-  Json peer = Typed("peer");
-  peer.Set("ready", Json(room->session->Ready(OpposingTeam(seat))));
-  Send(conn, peer);
-  SendSeat(*room, OpposingTeam(seat), Typed("opponent_back"));
-}
-
-void Lobby::ViewFinished(int conn, const GameStore::Game& game, Team team) {
-  // Everything comes from the stored turns (no re-simulation): the final
-  // state is the last round message's own state body, the world log is the
-  // rounds' changes in order, and the reveal is the unfiltered timeline.
-  const std::vector<GameStore::Turn> turns = gameStore_->Turns(game.id);
-  Json last;
-  if (turns.empty() || !Json::Parse(turns.back().messages[static_cast<int>(team)], &last)) {
-    SendError(conn, "game cannot be replayed: no stored turns");
-    return;
-  }
-  Json start = Typed("start");
-  start.Set("team", net::TeamName(team));
-  start.Set("seed", static_cast<double>(game.seed));
-  if (!game.mapKind.empty()) start.Set("map", game.mapKind);
-  if (game.ctf) start.Set("ctf", Json(true));
-  start.Set("game", game.id);
-  start.Set("finished", Json(true));
-  start.Set("protocol", net::kProtocolVersion);
-  Send(conn, start);
-
-  Json plans = Typed("plans");
-  plans.Set("round", last["state"]["round"]);
-  plans.Set("ready", Json(false));
-  plans.Set("plans", Json(Json::Array{}));
-  if (last["state"].Has("playbook")) plans.Set("playbook", last["state"]["playbook"]);
-  Send(conn, plans);
-
-  Json world{Json::Array{}};
-  Json rounds{Json::Array{}};
-  for (const GameStore::Turn& turn : turns) {
-    Json mine, spectator;
-    if (Json::Parse(turn.messages[static_cast<int>(team)], &mine)) {
-      for (const Json& change : mine["world"].AsArray()) world.Push(change);
-    }
-    if (Json::Parse(turn.messages[2], &spectator)) rounds.Push(std::move(spectator));
-  }
-  Json state = last["state"];
-  state.Set("t", "state");
-  state.Set("world", std::move(world));
-  Send(conn, state);
-  Json reveal = Typed("reveal");
-  reveal.Set("rounds", std::move(rounds));
-  Send(conn, reveal);
-}
-
-void Lobby::HandleMyGames(int conn, const Json& message) {
-  const std::string token = TokenOf(message);
-  if (token.empty()) {
-    SendError(conn, "a device token is required");
-    return;
-  }
-  Json list = Typed("games");
-  Json games{Json::Array{}};
-  if (gameStore_) {
-    std::vector<int> teams;
-    const std::vector<GameStore::Game> own = gameStore_->GamesOf(token, &teams);
-    for (size_t i = 0; i < own.size(); ++i) {
-      const GameStore::Game& g = own[i];
-      Json item;
-      item.Set("id", g.id);
-      item.Set("status", g.finished ? "finished" : "active");
-      item.Set("team", net::TeamName(static_cast<Team>(teams[i])));
-      item.Set("round", g.round);
-      if (g.finished) item.Set("winner", g.winner);
-      item.Set("created", static_cast<double>(g.createdMs));
-      item.Set("updated", static_cast<double>(g.updatedMs));
-      games.Push(std::move(item));
-    }
-  }
-  list.Set("games", std::move(games));
-  Send(conn, list);
 }
 
 }  // namespace tactics::server

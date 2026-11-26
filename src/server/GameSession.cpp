@@ -25,23 +25,19 @@ constexpr int kSpectatorSlot = 2;
 
 namespace {
 // Seed-generated matches spawn at the map-suggested opposite corners (#226).
-Scene GenerateMatchScene(uint32_t seed, const std::string& kind, bool ctf, int roundLimit) {
+Scene GenerateMatchScene(uint32_t seed, const std::string& kind, bool ctf) {
   Scene scene = GenerateMapByKind(seed, kind);
   ApplySpawnHints(&scene);
   scene.flag.enabled = ctf;
-  scene.roundLimit = roundLimit;
   return scene;
 }
 }  // namespace
 
-GameSession::GameSession(uint32_t seed, std::string mapKind, bool ctf, int roundLimit)
+GameSession::GameSession(uint32_t seed, std::string mapKind, bool ctf)
     : seed_(seed),
       mapKind_(std::move(mapKind)),
       ctf_(ctf),
-      roundLimit_(roundLimit),
-      game_(GenerateMatchScene(seed, mapKind_, ctf_, roundLimit_)) {
-  game_.SetMatchSeed(seed_);  // Explosion seeds hash it (issue #350).
-}
+      game_(GenerateMatchScene(seed, mapKind_, ctf_)) {}
 
 GameSession::GameSession(const Scene& scene) : seed_(0), fixedScene_(scene), game_(scene) {}
 
@@ -72,7 +68,7 @@ GameSession::Result GameSession::Apply(Team team, const net::Action& action, uin
   if (action.kind == net::ActionKind::NewMatch) {
     if (game_.Mode() != InputMode::GameOver) return {false, "match is still running"};
     seed_ = newSeed;
-    game_.Reset(fixedScene_ ? *fixedScene_ : GenerateMatchScene(seed_, mapKind_, ctf_, roundLimit_));
+    game_.Reset(fixedScene_ ? *fixedScene_ : GenerateMatchScene(seed_, mapKind_, ctf_));
     ready_ = {false, false};
     history_.clear();
     worldSent_ = 0;
@@ -103,43 +99,6 @@ GameSession::Result GameSession::ApplyBotPlan(Team team, const ai::JevRequest* r
   return Apply(team, commit);
 }
 
-Json GameSession::OrdersFor(Team team) const {
-  Json plans{Json::Array{}};
-  for (const Unit& u : game_.GetScene().units) {
-    if (u.team != team || !u.alive) continue;
-    plans.Push(net::EncodeAction(net::PlanToAction(u)));
-  }
-  Json orders;
-  orders.Set("plans", std::move(plans));
-  orders.Set("playbook", net::EncodePlaybook(game_.Playbook(team)));
-  return orders;
-}
-
-GameSession::Result GameSession::ApplyOrders(Team team, const Json& orders) {
-  std::vector<net::Action> actions;
-  for (const Json& plan : orders["plans"].AsArray()) {
-    net::Action action;
-    std::string error;
-    if (!net::ParseAction(plan, &action, &error)) return {false, "stored order: " + error};
-    actions.push_back(std::move(action));
-  }
-  Json reaction;
-  reaction.Set("t", "reaction");
-  reaction.Set("table", orders["playbook"]);
-  net::Action playbook;
-  std::string error;
-  if (!net::ParseAction(reaction, &playbook, &error)) return {false, "stored playbook: " + error};
-  actions.push_back(std::move(playbook));
-  net::Action commit;
-  commit.kind = net::ActionKind::Commit;
-  actions.push_back(std::move(commit));
-  for (const net::Action& action : actions) {
-    const Result result = Apply(team, action);
-    if (!result.ok) return result;
-  }
-  return {};
-}
-
 std::array<Json, 3> GameSession::RunRound() {
   std::array<Json, 3> out;
   const Json empty{Json::Array{}};
@@ -164,9 +123,15 @@ std::array<Json, 3> GameSession::RunRound() {
       Json list{Json::Array{}};
       for (const Unit& u : units) {
         if (!spectator && !Visible(game_, viewer, u, vis)) continue;
+        // [id,x,y,z,yaw,alive,moving,coverKind,coverBlend,coverYaw]: the
+        // cover pose ships with each frame (issue #292) because a client
+        // never simulates a round -- without it the crouch/lean would only
+        // appear once planning reopens, not when the figure takes it.
         list.Push(Json(Json::Array{Num(u.id), Num(u.position.x), Num(u.position.y), Num(u.position.z),
                                    Num(u.facingYaw), Num(u.alive ? 1 : 0),
-                                   Num(game_.IsUnitMoving(u.id) ? 1 : 0)}));
+                                   Num(game_.IsUnitMoving(u.id) ? 1 : 0), Num(u.coverKind),
+                                   Num(std::round(u.coverBlend * 1000.0) / 1000.0),
+                                   Num(std::round(u.coverYaw * 1000.0) / 1000.0)}));
       }
       Json frame;
       frame.Set("t", Num(std::round(t * 100.0) / 100.0));
@@ -287,7 +252,6 @@ Json GameSession::DumpState() const {
   dump.Set("t", "state_dump");
   dump.Set("round", Num(game_.RoundNumber()));
   dump.Set("world_changes", Num(static_cast<double>(game_.WorldLog().size())));
-  dump.Set("world", WorldLog(0));  // Full log, so a test oracle can replay it.
   dump.Set("checksum", Json(std::to_string(game_.StateHash())));
   dump.Set("over", Json(game_.Mode() == InputMode::GameOver));
   dump.Set("winner", game_.Winner() ? Json(net::TeamName(*game_.Winner())) : Json());

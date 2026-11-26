@@ -97,6 +97,22 @@ float FinalYaw(const std::vector<glm::vec3>& path, float fallback) {
   return fallback;
 }
 
+// Facing a figure ends a move with. On a cover tile (flat or tactical) it is
+// forced to put its back to the blocker; elsewhere it keeps the walk
+// direction. *forced reports whether cover decided it.
+float EndFacing(const std::vector<Obstacle>& obstacles, const std::vector<glm::vec3>& path,
+                float fallback, bool* forced = nullptr) {
+  if (!path.empty()) {
+    float yaw = 0.0f;
+    if (ClassifyCover(obstacles, path.back(), &yaw).kind != CoverKind::None) {
+      if (forced) *forced = true;
+      return std::remainder(yaw + 3.14159265358979f, 2.0f * 3.14159265358979f);
+    }
+  }
+  if (forced) *forced = false;
+  return FinalYaw(path, fallback);
+}
+
 }  // namespace
 
 std::optional<Team> CheckWinner(const std::vector<Unit>& units) {
@@ -162,8 +178,6 @@ void GameLogic::Reset(Scene scene) {
   navMeshUnitId_ = -1;
   worldLog_.clear();  // A new match starts from the seeded map.
   pristine_.reset();
-  debugBomb_.reset();
-  bombsDetonated_ = 0;
   roundNumber_ = 1;
 
   mode_ = InputMode::AwaitingSelection;
@@ -431,6 +445,10 @@ GameSnapshot GameLogic::ExportState() const {
     u.rideSlope = unit.rideSlope;
     u.grabElapsed = unit.grabElapsed;
     u.moving = IsUnitMoving(unit.id);
+    u.coverKind = unit.coverKind;
+    u.coverTileKind = unit.coverTileKind;
+    u.coverYaw = unit.coverYaw;
+    u.coverBlend = unit.coverBlend;
     snap.units.push_back(std::move(u));
   }
   snap.tracers = tracers_;
@@ -464,18 +482,10 @@ bool GameLogic::ApplyWorldChange(WorldChange change) {
   change.id = static_cast<int>(worldLog_.size());
   change.round = roundNumber_;
   change.at = mode_ == InputMode::Executing ? executionElapsed_ : 0.0f;
-  // Captured before the apply kills the surface: the height figures stood at.
-  float floorY = 0.0f;
-  if (change.kind == WorldChangeKind::FloorHole && change.target >= 0 &&
-      change.target < static_cast<int>(scene_.walkSurfaces.size()) &&
-      !scene_.walkSurfaces[change.target].vertices.empty()) {
-    floorY = scene_.walkSurfaces[change.target].vertices.front().y;
-  }
   if (!tactics::ApplyWorldChange(&scene_, change)) {  // Validates before mutating.
     if (worldLog_.empty()) pristine_.reset();
     return false;
   }
-  if (change.kind == WorldChangeKind::FloorHole) DropFiguresThroughHole(change, floorY);
   worldLog_.push_back(std::move(change));
   OnWorldChanged();
   return true;
@@ -486,75 +496,6 @@ bool GameLogic::DebugRemoveObstacle(int index) {
   c.kind = WorldChangeKind::ObstacleRemoved;
   c.target = index;
   return ApplyWorldChange(std::move(c));
-}
-
-void GameLogic::DebugPlaceBomb(const glm::vec3& position, float radius) {
-  DebugBomb bomb;
-  bomb.position = position;
-  bomb.radius = std::clamp(radius, 0.5f, 10.0f);
-  bomb.detonateAt = debugBomb_ ? debugBomb_->detonateAt : -1.0f;
-  debugBomb_ = bomb;
-}
-
-bool GameLogic::DebugArmBomb(float atSeconds) {
-  if (!debugBomb_ || atSeconds < 0.0f) return false;
-  debugBomb_->detonateAt = atSeconds;
-  return true;
-}
-
-bool GameLogic::DebugDetonateBomb() {
-  if (!debugBomb_) return false;
-  BombSpec spec;
-  spec.position = debugBomb_->position;
-  spec.radius = debugBomb_->radius;
-  spec.seed = ExplosionSeed(matchSeed_, roundNumber_, bombsDetonated_);
-  debugBomb_.reset();
-  ++bombsDetonated_;
-  if (recorder_.ptr) {
-    char buf[192];
-    std::snprintf(buf, sizeof buf,
-                  "bomb pos=(%.4f,%.4f,%.4f) radius=%.3f seed=%u exec=%.4f round=%d",
-                  spec.position.x, spec.position.y, spec.position.z, spec.radius, spec.seed,
-                  executionElapsed_, roundNumber_);
-    LogSim(buf);
-  }
-  bool any = false;
-  // The plan was validated against this very scene state; applying in order
-  // reproduces its chained piece indices.
-  for (const WorldChange& change : PlanExplosion(scene_, spec)) {
-    any |= ApplyWorldChange(change);
-  }
-  return any;
-}
-
-void GameLogic::DropFiguresThroughHole(const WorldChange& c, float floorY) {
-  const float x0 = std::min(c.rect.x, c.rect.z), x1 = std::max(c.rect.x, c.rect.z);
-  const float z0 = std::min(c.rect.y, c.rect.w), z1 = std::max(c.rect.y, c.rect.w);
-  for (Unit& unit : scene_.units) {
-    if (!unit.alive) continue;
-    const glm::vec3& p = unit.position;
-    if (p.x < x0 || p.x > x1 || p.z < z0 || p.z > z1) continue;
-    if (std::fabs(p.y - floorY) > 0.5f) continue;  // Not standing on that floor.
-    // Still on a piece of it the fracture left standing?
-    bool standing = false;
-    for (const WalkSurface& s : scene_.walkSurfaces) {
-      if (s.dead || s.vertices.size() < 3 || !SurfaceContainsXZ(s, p.x, p.z)) continue;
-      standing |= std::fabs(SurfaceHeightAt(s, p.x, p.z) - p.y) <= 0.5f;
-    }
-    if (standing) continue;
-    // Highest support left underneath: the ground, or a live lower surface.
-    float support = scene_.ground.HeightAt(p.x, p.z);
-    for (const WalkSurface& s : scene_.walkSurfaces) {
-      if (s.dead || s.vertices.size() < 3 || !SurfaceContainsXZ(s, p.x, p.z)) continue;
-      const float y = SurfaceHeightAt(s, p.x, p.z);
-      if (y < p.y - 0.5f) support = std::max(support, y);
-    }
-    glm::vec3 dir = p - glm::vec3(0.5f * (x0 + x1), p.y, 0.5f * (z0 + z1));
-    dir.y = 0.0f;
-    if (glm::length(dir) < 1e-4f) dir = unit.FacingDirection();
-    KnockDown(unit, glm::normalize(dir));
-    unit.knockdownDrop = std::max(0.0f, p.y - support);
-  }
 }
 
 bool GameLogic::AcceptWorldChange(const WorldChange& change) {
@@ -647,6 +588,7 @@ void GameLogic::ClearAllPlans() {
   for (auto& unit : scene_.units) unit.plan = PlannedAction{};
   movePreviewPath_.clear();
   movePreviewValid_ = false;
+  hoverKeyUnit_ = -1;
 }
 
 bool GameLogic::ImportState(const GameSnapshot& snap) {
@@ -688,6 +630,19 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     unit->rideLength = u.rideLength;
     unit->rideSlope = u.rideSlope;
     unit->grabElapsed = u.grabElapsed;
+    unit->coverKind = u.coverKind;
+    unit->coverTileKind = u.coverTileKind;
+    unit->coverYaw = u.coverYaw;
+    unit->coverBlend = u.coverBlend;
+    // Mark the imported pose as classified here so a planning-time
+    // UpdateCoverPoses continues the blend instead of re-deriving from a
+    // stale position (it still re-judges the exposure rule every tick).
+    // A snapshot carrying no pose (a figure mid-walk, a net client's round
+    // end) leaves coverFrom stale so the next tick classifies the tile it
+    // actually stands on.
+    if (u.coverTileKind != 0 || u.coverKind != 0 || u.coverBlend > 0.0f) {
+      unit->coverFrom = u.position;
+    }
     ApplyPlan(u, unit);
     if (u.moving) mirroredMoving_.push_back(u.id);
   }
@@ -740,14 +695,27 @@ bool GameLogic::ImportTeamPlans(const GameSnapshot& snap, Team team) {
   if (recorder_.ptr) e.text = SerializeSnapshot(snap);
   RecordScope record(this, std::move(e));
   if (!SnapshotMatchesUnits(snap, scene_.units)) return false;
+  bool changed = false;
   for (const auto& u : snap.units) {
     Unit* unit = FindUnit(u.id);
     if (unit->team != team) continue;
+    const PlannedAction before = unit->plan;
     ApplyPlan(u, unit);
+    const PlannedAction& after = unit->plan;
+    changed = changed || before.type != after.type ||
+              before.shootTargetId != after.shootTargetId ||
+              before.hasAimPoint != after.hasAimPoint || before.aimPoint != after.aimPoint ||
+              before.shots != after.shots || before.movePath != after.movePath ||
+              before.queuedLegs != after.queuedLegs || before.moveRides != after.moveRides ||
+              before.queuedLegRides != after.queuedLegRides ||
+              before.endFacingYaw != after.endFacingYaw;
   }
   // Imported plans move the blockers the frontier was computed against; a
   // player mid-move-planning sees the allowed range update (issue #267).
-  if (mode_ == InputMode::AwaitingMoveDestination) RefreshMoveFrontier();
+  // Only when something really changed: peers rebroadcast their state every
+  // frame (animation clocks tick), and recomputing the frontier per message
+  // froze planning.
+  if (changed && mode_ == InputMode::AwaitingMoveDestination) RefreshMoveFrontier();
   return true;
 }
 
@@ -786,6 +754,8 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
       out << ' ' << im.at << ' ' << im.axis.x << ' ' << im.axis.y << ' ' << im.axis.z;
     }
     out << ' ' << u.knockdownDrop;
+    out << ' ' << static_cast<int>(u.coverKind) << ' ' << static_cast<int>(u.coverTileKind)
+        << ' ' << u.coverYaw << ' ' << u.coverBlend;
   }
   out << ' ' << snap.tracers.size();
   for (const Tracer& t : snap.tracers) {
@@ -876,6 +846,11 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
       if (!(in >> im.at >> im.axis.x >> im.axis.y >> im.axis.z)) return false;
     }
     if (!(in >> u.knockdownDrop)) return false;
+    int coverKind = 0, coverTileKind = 0;
+    if (!(in >> coverKind >> coverTileKind >> u.coverYaw >> u.coverBlend)) return false;
+    if (coverKind < 0 || coverKind > 2 || coverTileKind < 0 || coverTileKind > 2) return false;
+    u.coverKind = static_cast<uint8_t>(coverKind);
+    u.coverTileKind = static_cast<uint8_t>(coverTileKind);
   }
   size_t tracerCount = 0;
   if (!(in >> tracerCount) || tracerCount > kMaxEntries) return false;
@@ -1092,7 +1067,7 @@ void GameLogic::ClickGround(const glm::vec3& point, Team byTeam) {
     // Default the final facing to the leg's last non-degenerate segment
     // direction (what the walk animation would leave the figure facing), so
     // an untouched ghost costs nothing extra.
-    mover->plan.endFacingYaw = FinalYaw(path, mover->facingYaw);
+    mover->plan.endFacingYaw = EndFacing(sightObstacles_, path, mover->facingYaw);
     // Plan only: nothing moves until this plan is executed by CommitRound();
     // the facing stays adjustable via SetPlannedMoveFacing() until then.
     mover->plan.type = PlannedActionType::Move;
@@ -1131,6 +1106,10 @@ void GameLogic::SetPlannedMoveFacing(int unitId, float yaw, Team byTeam) {
   Unit* unit = FindUnit(unitId);
   if (!unit || !unit->alive || unit->team != byTeam) return;
   if (unit->plan.type != PlannedActionType::Move || unit->plan.movePath.empty()) return;
+  // Cover destinations fix the facing (back to the wall); not adjustable.
+  bool forced = false;
+  EndFacing(sightObstacles_, unit->plan.movePath, 0.0f, &forced);
+  if (forced) return;
   unit->plan.endFacingYaw = std::remainder(yaw, 2.0f * 3.14159265358979f);
 }
 
@@ -1156,6 +1135,55 @@ void GameLogic::Update(float dtSeconds) {
     RecordScope record(this, std::move(e));
     UpdateUnrecorded(dtSeconds);
   }
+}
+
+// Cover pose state (issue #290): a figure standing still on a cover tile eases
+// into the pose; moving or downed figures ease out. Classification is redone
+// only when the figure's position changes.
+//
+// Taking the pose defers to the fight (issue #292): cover that would not
+// stop a sighted enemy's shots is useless, so while the figure sees a living
+// enemy whose line to its in-cover chest the blockers do not cross, it stays
+// standing (free to keep shooting per the playbook). The instant every such
+// enemy is dead or out of sight -- including an enemy the blockers *do*
+// protect from -- it takes the pose as normal.
+void GameLogic::UpdateCoverPoses(float dtSeconds) {
+  for (Unit& unit : scene_.units) {
+    if (!unit.alive || IsUnitMoving(unit.id) || unit.rideTravel >= 0.0f) {
+      unit.coverBlend = std::max(0.0f, unit.coverBlend - dtSeconds * 4.0f);
+      continue;
+    }
+    if (unit.coverFrom != unit.position) {
+      unit.coverFrom = unit.position;
+      float yaw = 0.0f;
+      const CoverTile tile = ClassifyCover(sightObstacles_, unit.position, &yaw);
+      // Pose: 0 none, 1 back against the wall (tall cover), 2 crouch (low cover).
+      unit.coverTileKind = tile.kind == CoverKind::None ? 0 : (tile.crouch ? 2 : 1);
+      unit.coverYaw = yaw;
+    }
+    unit.coverKind = unit.coverTileKind != 0 &&
+                             CoverExposedToSightedEnemy(unit, unit.coverTileKind)
+                         ? 0
+                         : unit.coverTileKind;
+    const float target = unit.coverKind != 0 ? 1.0f : 0.0f;
+    const float step = dtSeconds * 3.0f;
+    unit.coverBlend = unit.coverBlend < target ? std::min(target, unit.coverBlend + step)
+                                               : std::max(target, unit.coverBlend - step);
+  }
+}
+
+bool GameLogic::CoverExposedToSightedEnemy(const Unit& unit, uint8_t poseKind) const {
+  const float chestY = poseKind == 2 ? kCrouchChestHeight : constants::kTorsoAimHeight;
+  const glm::vec3 chest = unit.position + glm::vec3(0.0f, chestY, 0.0f);
+  for (const Unit& enemy : scene_.units) {
+    if (!enemy.alive || enemy.team == unit.team) continue;
+    if (!CanUnitSee(unit, enemy, sightObstacles_, scene_.walkSurfaces, scene_.ground)) continue;
+    if (LineOfSightClear(enemy.EyePosition(), chest, sightObstacles_, scene_.walkSurfaces,
+                         scene_.ground)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void GameLogic::UpdateUnrecorded(float dtSeconds) {
@@ -1186,6 +1214,7 @@ void GameLogic::UpdateUnrecorded(float dtSeconds) {
       if (unit.grabElapsed >= constants::kGrabAnimDuration) unit.grabElapsed = -1.0f;
     }
   }
+  UpdateCoverPoses(dtSeconds);
   if (flag_.dropElapsed >= 0.0f) {
     flag_.dropElapsed = std::min(flag_.dropElapsed + dtSeconds, constants::kFlagDropDuration);
   }
@@ -1226,13 +1255,6 @@ void GameLogic::UpdateUnrecorded(float dtSeconds) {
 void GameLogic::AdvanceExecutingRound(float dtSeconds) {
   const float tickStart = executionElapsed_;
   executionElapsed_ += dtSeconds;
-  // An armed debug bomb goes off the first tick the round clock passes its
-  // time; the resulting world changes carry that stamp, so replays and
-  // remote playback apply them at the same moment.
-  if (debugBomb_ && debugBomb_->detonateAt >= 0.0f &&
-      executionElapsed_ >= debugBomb_->detonateAt) {
-    DebugDetonateBomb();
-  }
   std::vector<FlagTouch> flagTouches;
   CollectStationaryFlagTouches(tickStart, &flagTouches);
   const bool flagLoose = flag_.enabled && flag_.carrierId < 0;
@@ -1369,12 +1391,24 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
 }
 
 void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
+  // The app re-resolves the hover ray every frame, mostly to the same spot;
+  // re-running the pathfinder for an unchanged query froze planning. The
+  // frontier revision covers everything else the preview depends on (other
+  // figures' plans, the nav mesh, the selected leg).
+  const Unit* mover = mode_ == InputMode::AwaitingMoveDestination
+                          ? FindUnit(selectedUnitId_.value_or(-1))
+                          : nullptr;
+  if (mover && mover->team == byTeam && hoverKeyUnit_ == mover->id &&
+      hoverKeyFrom_ == MoveChainEnd() && hoverKeyPoint_ == point &&
+      hoverKeyRevision_ == frontierRevision_) {
+    return;
+  }
+  hoverKeyUnit_ = -1;
   movePreviewBlocked_ = false;
   movePreviewPath_.clear();
   movePreviewRides_.clear();
   movePreviewValid_ = false;
   if (mode_ != InputMode::AwaitingMoveDestination) return;
-  const Unit* mover = FindUnit(selectedUnitId_.value_or(-1));
   if (!mover || mover->team != byTeam) return;
   movePreviewValid_ = PlanLeg(*mover, MoveChainEnd(), point, &movePreviewPath_, &movePreviewRides_);
   const bool chaining = mover->plan.type == PlannedActionType::Move && !mover->plan.movePath.empty();
@@ -1389,6 +1423,10 @@ void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
       movePreviewBlocked_ = true;
     }
   }
+  hoverKeyUnit_ = mover->id;
+  hoverKeyFrom_ = MoveChainEnd();
+  hoverKeyPoint_ = point;
+  hoverKeyRevision_ = frontierRevision_;
 }
 
 namespace {
@@ -1507,6 +1545,7 @@ void GameLogic::ClearQueuedLegs(std::optional<int> unitId) {
 // legs run in later rounds and get the plain field.
 void GameLogic::RefreshMoveFrontier() {
   moveFrontier_ = ReachField();
+  moveCover_ = CoverMap();
   ziplineFrontiers_.clear();
   ziplineMeshes_.clear();
   ziplineUnitId_ = -1;
@@ -1520,7 +1559,9 @@ void GameLogic::RefreshMoveFrontier() {
     moveFrontier_ = navMesh_.ComputeReachField(
         origin, mover->MoveBudget(), 0.25f,
         firstLeg && !blockers.trajectories.empty() ? &blockers : nullptr);
+    FillLevelEdgeDistances(scene_, &moveFrontier_);
     moveFrontier_.revision = ++frontierRevision_;
+    moveCover_ = ComputeCoverMap(sightObstacles_, moveFrontier_);
     BuildZiplineFrontiers(*mover, origin);
   }
 }
@@ -1545,6 +1586,7 @@ void GameLogic::ClearMoveOverlays() {
   movePreviewPath_.clear();
   movePreviewRides_.clear();
   movePreviewValid_ = false;
+  hoverKeyUnit_ = -1;
 }
 
 // Zipline edges of the nav graph for a leg starting at `origin`: for each
@@ -1599,6 +1641,7 @@ void GameLogic::BuildZiplineFrontiers(const Unit& mover, const glm::vec3& origin
       frontier.field = mesh.ComputeReachField(
           exit, remaining, 0.25f,
           firstLeg && !blockers.trajectories.empty() ? &blockers : nullptr);
+      FillLevelEdgeDistances(scene_, &frontier.field);
       frontier.field.revision = ++frontierRevision_;
       ziplineFrontiers_.push_back(std::move(frontier));
       ziplineMeshes_.push_back(std::move(mesh));
@@ -1820,7 +1863,9 @@ float GameLogic::ShotHitChance(const Unit& shooter, const Unit& target) const {
   const ShotProfile& profile = kDefaultShotProfile;  // Future: derive from shooter's role.
   if (IsUnitRiding(shooter.id)) return 0.0f;  // Hands on the cable: no shooting while riding.
   const glm::vec3 eye = shooter.EyePosition();
-  const glm::vec3 targetEye = target.EyePosition();
+  // Pose-aware: a crouched target is sighted (and range-judged) at its
+  // crouched head, so cover tall enough to hide it blocks the lock too.
+  const glm::vec3 targetEye = target.SightPosition();
   if (!InFovCone(eye, shooter.FacingDirection(), targetEye, profile.halfAngleDegrees,
                  std::numeric_limits<float>::infinity()) ||
       !LineOfSightClear(eye, targetEye, sightObstacles_, scene_.walkSurfaces, scene_.ground)) {
@@ -1912,7 +1957,7 @@ void GameLogic::ApplyShot(Unit& shooter, Unit& target, bool hit) {
   PlayShootBeat(shooter, std::atan2(dir.z, dir.x));
   Unit aimed = shooter;
   aimed.facingYaw = shooter.shootAimYaw;
-  RecordTracer(shooter, aimed.MuzzlePosition(), target.EyePosition());
+  RecordTracer(shooter, aimed.MuzzlePosition(), target.SightPosition());
   if (recorder_.ptr) {
     char buf[160];
     std::snprintf(buf, sizeof buf, "shot shooter=%d target=%d hit=%d exec=%.4f round=%d",
@@ -2153,7 +2198,7 @@ std::vector<GameLogic::AimTraceCandidate> GameLogic::RayTraceCandidates(
     }
     // Same profile falloff as a locked shot, at the struck figure's actual
     // bearing/distance (the bearing is near-zero for anything on the ray).
-    const glm::vec3 toEye = unit.EyePosition() - muzzle;
+    const glm::vec3 toEye = unit.SightPosition() - muzzle;
     float angle = 0.0f;
     if (glm::length(glm::vec2(toEye.x, toEye.z)) > 1e-6f) {
       const glm::vec3 to = glm::normalize(glm::vec3(toEye.x, 0.0f, toEye.z));
@@ -2265,9 +2310,9 @@ void GameLogic::ResolvePendingShots() {
       if (!ShotConnects(*shooter, *target)) continue;
       // The bullets fly muzzle -> torso, so the hold-fire gate waits for
       // that very line too: a burst must not open up while chest-high cover
-      // still blocks the trajectory the eyes already see over.
-      const glm::vec3 aimPoint =
-          target->position + glm::vec3(0.0f, constants::kTorsoAimHeight, 0.0f);
+      // still blocks the trajectory the eyes already see over. Pose-aware:
+      // a crouched target's torso is its in-cover chest.
+      const glm::vec3 aimPoint = target->TorsoAimPosition();
       const Unit aimed = AimedAt(*shooter, aimPoint);
       if (!LineOfSightClear(aimed.MuzzlePosition(), aimPoint, sightObstacles_,
                             scene_.walkSurfaces, scene_.ground)) {
@@ -2345,9 +2390,7 @@ void GameLogic::ResolvePendingShots() {
     const float scatter = glm::radians(StatsOf(b.shooter->weapon).scatterHalfAngleDegrees);
     if (!b.judged) {
       b.judged = true;
-      b.aimPoint = b.target ? b.target->position +
-                                  glm::vec3(0.0f, constants::kTorsoAimHeight, 0.0f)
-                            : b.shot->aimPoint;
+      b.aimPoint = b.target ? b.target->TorsoAimPosition() : b.shot->aimPoint;
     }
     const Unit aimed = AimedAt(*b.shooter, b.aimPoint);
     bullet.from = aimed.MuzzlePosition();
@@ -2737,7 +2780,7 @@ void GameLogic::FinishRound() {
     unit.plan.moveRides = std::move(unit.plan.queuedLegRides.front());
     unit.plan.queuedLegs.erase(unit.plan.queuedLegs.begin());
     unit.plan.queuedLegRides.erase(unit.plan.queuedLegRides.begin());
-    unit.plan.endFacingYaw = FinalYaw(unit.plan.movePath, unit.facingYaw);
+    unit.plan.endFacingYaw = EndFacing(sightObstacles_, unit.plan.movePath, unit.facingYaw);
     armedLegs.push_back(unit.id);
   }
   // Queued legs were planned rounds ago against other positions, so an armed

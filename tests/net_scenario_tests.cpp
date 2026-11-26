@@ -67,12 +67,6 @@ bool Hidden(const glm::vec3& p) { return p.x >= net::kHiddenCoord * 0.5f; }
 GameLogic OracleFromDump(const Scenario& scenario, const Json& dump) {
   GameLogic oracle(scenario.scene);
   GameSnapshot snap = oracle.ExportState();
-  // Replay the server's world log so the oracle's geometry (blast holes,
-  // removed obstacles) matches before visibility is recomputed.
-  for (const Json& e : dump["world"].AsArray()) {
-    WorldChange change;
-    if (net::DecodeWorldChange(e, &change)) snap.world.push_back(change);
-  }
   for (auto& u : snap.units) {
     for (const Json& e : dump["units"].AsArray()) {
       if (static_cast<int>(e["id"].AsNumber(-1)) != u.id) continue;
@@ -111,6 +105,9 @@ void CheckNetAssertion(const Scenario& scenario, Rig& rig, const Json& dump,
                        const ScenarioAssertion& a, int step, AssertionStats* stats) {
   ScenarioResult result;
   GameLogic oracle = OracleFromDump(scenario, dump);
+  // Cover poses are presentation state set by the per-frame update; the
+  // oracle rebuilt from a dump needs one tick to classify its idle units.
+  if (a.coverPose) oracle.Update(0.0f);
 
   // 1. Ground truth, via the shared assertion code (sighting memory is a
   //    client-side presentation concern, handled below).
@@ -208,18 +205,6 @@ std::vector<std::string> RunNetScenario(const Scenario& scenario, int index, Ser
           for (float t = 0.0f; t < action.playSeconds - 1e-4f; t += 0.05f) {
             rig.For(team).game.UpdateSightingMemory(0.05f);
           }
-        }
-      } else if (action.kind == ScenarioAction::Kind::Bomb) {
-        // Debug bomb (issue #350): place/arm/detonate over the control tap
-        // (the server is the authority); the mirrors pick the resulting
-        // world delta up from the broadcast {"t":"world"} / round message.
-        std::string error;
-        if (!testing::ControlBomb(control, room, action, &error)) {
-          rig.Fail("step " + std::to_string(i) + ": " + error);
-          break;
-        }
-        for (Team team : {Team::Blue, Team::Red}) {
-          if (!rig.Sync(rig.For(team))) break;
         }
       } else {
         const Unit* actor = nullptr;

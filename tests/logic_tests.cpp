@@ -7,7 +7,6 @@
 #include <cmath>
 #include <cstdio>
 #include <initializer_list>
-#include <sstream>
 #include <vector>
 
 #include "game/GameLogic.h"
@@ -3731,6 +3730,68 @@ void TestReachFieldFromRampIncludesGroundBeyondFoot() {
   CHECK(!reached(-9.0f, 0.0f));  // Past the budget.
 }
 
+// Issue #292 follow-up: where the reach covers stacked walk layers (a deck
+// over usable ground), the field keeps every layer -- the grid holds one
+// sample per node and the rest land in `stacked` -- so clicking either layer
+// works (CoversPoint) and SplitReachSheets can hand the renderer one
+// single-valued sheet per layer.
+void TestReachFieldStackedLayersAndSheets() {
+  // Deck at y = 3 over open ground, reached over a ramp at its -x edge.
+  tactics::WalkSurface deck;
+  deck.vertices = {{0.0f, 3.0f, -3.0f}, {6.0f, 3.0f, -3.0f}, {6.0f, 3.0f, 3.0f},
+                   {0.0f, 3.0f, 3.0f}};
+  deck.neighbors = {1};
+  tactics::WalkSurface ramp;
+  ramp.vertices = {{-6.0f, 0.0f, -1.0f}, {-6.0f, 0.0f, 1.0f}, {0.0f, 3.0f, 1.0f},
+                   {0.0f, 3.0f, -1.0f}};
+  ramp.neighbors = {0};
+  ramp.connectsToGround = true;
+  std::vector<tactics::WalkSurface> surfaces{deck, ramp};
+  tactics::NavMesh nav;
+  nav.Build(std::vector<tactics::Obstacle>{}, 30.0f, 0.4f, nullptr, &surfaces);
+  const tactics::ReachField f = nav.ComputeReachField(glm::vec3(-8.0f, 0.0f, 0.0f), 22.0f);
+
+  // Under the deck, both the ground and the deck itself are reachable.
+  CHECK(!f.stacked.empty());
+  CHECK(f.CoversPoint(glm::vec3(3.0f, 0.0f, 0.0f), 0.5f));
+  CHECK(f.CoversPoint(glm::vec3(3.0f, 3.0f, 0.0f), 0.5f));
+  CHECK(!f.CoversPoint(glm::vec3(3.0f, 1.5f, 0.0f), 0.5f));
+
+  // The sheets are single-valued, keep every sample exactly once, and both
+  // layers of the stacked spot appear on different sheets.
+  const std::vector<tactics::ReachField> sheets = tactics::SplitReachSheets(f);
+  CHECK(sheets.size() >= 2);
+  size_t mainSamples = 0;
+  for (int iz = 0; iz < f.nz; ++iz) {
+    for (int ix = 0; ix < f.nx; ++ix) mainSamples += f.Reached(ix, iz);
+  }
+  size_t sheetSamples = 0;
+  bool groundSheet = false, deckSheet = false;
+  for (const tactics::ReachField& sheet : sheets) {
+    CHECK(sheet.layerStart.size() == sheet.dist.size() + 1);
+    for (int iz = 0; iz < sheet.nz; ++iz) {
+      for (int ix = 0; ix < sheet.nx; ++ix) sheetSamples += sheet.Reached(ix, iz);
+    }
+    if (sheet.CoversPoint(glm::vec3(3.0f, 0.0f, 0.0f), 0.5f)) {
+      groundSheet = true;
+      // The seam-suppression data sees the deck stacked over this spot.
+      const int ix = static_cast<int>(std::lround((3.0f - sheet.minX) / sheet.step));
+      const int iz = static_cast<int>(std::lround((0.0f - sheet.minZ) / sheet.step));
+      CHECK(sheet.LayerContinues(iz * sheet.nx + ix, 3.0f));
+    }
+    if (sheet.CoversPoint(glm::vec3(3.0f, 3.0f, 0.0f), 0.5f)) deckSheet = true;
+  }
+  CHECK(groundSheet);
+  CHECK(deckSheet);
+  CHECK(sheetSamples == mainSamples + f.stacked.size());
+
+  // A flat field without stacked reach does not split at all.
+  const tactics::ReachField flatField =
+      nav.ComputeReachField(glm::vec3(-20.0f, 0.0f, -20.0f), 4.0f);
+  CHECK(flatField.stacked.empty());
+  CHECK(tactics::SplitReachSheets(flatField).empty());
+}
+
 // Benchmark: ~300 small deck/ramp surfaces (interiors-scale). Guards the
 // per-Build route table and surface spatial index; the ceiling is generous
 // so only an algorithmic regression trips it (the pre-cache code took ~3.3 s here).
@@ -3861,538 +3922,116 @@ void TestBuildingsContainingPoints() {
   CHECK(BuildingsContainingPoints(scene, {{-5.0f, 0.3f, 2.0f}, {5.5f, 0.3f, 3.5f}})[0] == 1);
 }
 
-// --- Destruction I (issue #350): debug bomb, fracture, wall/floor holes. ---
-
-// One thin wall across the whole map between two facing figures: nothing
-// gets past it except through a blast hole.
-Scene BombWallScene() {
-  Scene scene;
-  scene.mapHalfExtent = 8.0f;
-  Obstacle wall;
-  wall.bounds = AABB{glm::vec3(-0.15f, 0.0f, -8.0f), glm::vec3(0.15f, 3.0f, 8.0f)};
-  wall.kind = ObstacleKind::Wall;
-  scene.obstacles.push_back(wall);
-  Unit blue;
+// Chest-low barrier (1.2 high, crouch cover on its -Z side) between Blue 0
+// (south, z=0) and Red 1 (north, z=10, facing south). Used by the issue #292
+// crouch-geometry tests below.
+tactics::Scene LowBarrierDuelScene() {
+  tactics::Scene scene;
+  scene.mapHalfExtent = 20.0f;
+  scene.obstacles.push_back(tactics::Obstacle{
+      tactics::AABB{glm::vec3(-6.0f, 0.0f, 4.0f), glm::vec3(6.0f, 1.2f, 4.8f)}});
+  tactics::Unit blue;
   blue.id = 0;
-  blue.team = Team::Blue;
-  blue.position = glm::vec3(-4.0f, 0.0f, 0.0f);
-  blue.facingYaw = 0.0f;
+  blue.team = tactics::Team::Blue;
+  blue.position = glm::vec3(0.0f, 0.0f, 0.0f);
+  blue.facingYaw = 1.5707963f;  // Facing the barrier (+Z).
   scene.units.push_back(blue);
-  Unit red;
+  tactics::Unit red;
   red.id = 1;
-  red.team = Team::Red;
-  red.position = glm::vec3(4.0f, 0.0f, 0.0f);
-  red.facingYaw = kPi;
+  red.team = tactics::Team::Red;
+  red.position = glm::vec3(0.0f, 0.0f, 10.0f);
+  red.facingYaw = -1.5707963f;  // Facing -Z, straight at Blue's lane.
   scene.units.push_back(red);
   return scene;
 }
 
-// A one-room building floor at y = 3 (surface 0), the ceiling slab under it,
-// one far wall keeping the building alive, and a side patch linked as the
-// floor's neighbour.
-Scene BombFloorScene() {
-  Scene scene;
-  scene.mapHalfExtent = 10.0f;
-  Building building;
-  building.enterable = true;
-  building.floorSurfaces = {0};
-  scene.buildings.push_back(building);
-  WalkSurface floor;
-  floor.building = 0;
-  floor.vertices = {{-3, 3, -3}, {3, 3, -3}, {3, 3, 3}, {-3, 3, 3}};
-  floor.neighbors = {1};
-  scene.walkSurfaces.push_back(floor);
-  WalkSurface side;
-  side.building = 0;
-  side.vertices = {{3, 3, -1}, {5, 3, -1}, {5, 3, 1}, {3, 3, 1}};
-  side.neighbors = {0};
-  scene.walkSurfaces.push_back(side);
-  Obstacle slab;
-  slab.building = 0;
-  slab.bounds = AABB{glm::vec3(-3.0f, 2.6f, -3.0f), glm::vec3(3.0f, 2.9f, 3.0f)};
-  slab.footprint = {{-3, -3}, {3, -3}, {3, 3}, {-3, 3}};
-  scene.obstacles.push_back(slab);
-  Obstacle wall;  // Out of blast range: keeps the building index alive.
-  wall.building = 0;
-  wall.kind = ObstacleKind::Wall;
-  wall.bounds = AABB{glm::vec3(-8.15f, 0.0f, -3.0f), glm::vec3(-7.85f, 6.0f, 3.0f)};
-  scene.obstacles.push_back(wall);
-  Unit blue;
-  blue.id = 0;
-  blue.team = Team::Blue;
-  blue.position = glm::vec3(0.0f, 3.0f, 0.0f);  // Standing over the hole-to-be.
-  scene.units.push_back(blue);
-  Unit red;
-  red.id = 1;
-  red.team = Team::Red;
-  red.position = glm::vec3(7.0f, 0.0f, 7.0f);
-  scene.units.push_back(red);
-  return scene;
-}
-
-void TestExplosionPlanDeterministicCells() {
-  CHECK(ExplosionSeed(7u, 1, 0) == ExplosionSeed(7u, 1, 0));
-  CHECK(ExplosionSeed(7u, 1, 0) != ExplosionSeed(7u, 1, 1));
-  CHECK(ExplosionSeed(7u, 1, 0) != ExplosionSeed(7u, 2, 0));
-  const Scene scene = BombWallScene();
-  BombSpec spec;
-  spec.position = glm::vec3(0.0f, 1.0f, 0.0f);
-  spec.radius = 3.0f;
-  spec.seed = ExplosionSeed(7u, 1, 0);
-  const std::vector<WorldChange> planA = PlanExplosion(scene, spec);
-  const std::vector<WorldChange> planB = PlanExplosion(scene, spec);
-  CHECK(!planA.empty());
-  CHECK(planA.size() == planB.size());
-  for (size_t i = 0; i < std::min(planA.size(), planB.size()); ++i) {
-    CHECK(planA[i] == planB[i]);
-  }
-  // The wall (obstacle 0) is replaced by the cells left standing.
-  bool sawWallCut = false;
-  for (const WorldChange& c : planA) {
-    sawWallCut |= c.kind == WorldChangeKind::ObstacleReplaced && c.target == 0 &&
-                  !c.pieces.empty();
-  }
-  CHECK(sawWallCut);
-  // A plan out of blast range is empty.
-  BombSpec far = spec;
-  far.position = glm::vec3(6.0f, 1.0f, 6.0f);
-  far.radius = 2.0f;
-  CHECK(PlanExplosion(scene, far).empty());
-}
-
-void TestBombBlowsSeeAndWalkThroughHole() {
-  GameLogic game(BombWallScene());
-  game.SetMatchSeed(7u);
-  const glm::vec3 blueEye(-4.0f, 1.5f, 0.0f), redEye(4.0f, 1.5f, 0.0f);
-  CHECK(!LineOfSightClear(blueEye, redEye, game.SightObstacles()));
-  {
-    NavMesh nav;
-    nav.Build(game.GetScene().obstacles, 8.0f, 0.4f);
-    std::vector<glm::vec3> path;
-    CHECK(!nav.FindPath(glm::vec3(-4.0f, 0.0f, 0.0f), glm::vec3(4.0f, 0.0f, 0.0f), &path));
-  }
-  game.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
-  CHECK(game.GetDebugBomb().has_value());
-  CHECK(game.DebugDetonateBomb());
-  CHECK(!game.GetDebugBomb().has_value());  // Spent.
-  CHECK(!game.WorldLog().empty());
-  // Figures can see and shoot through the hole...
-  CHECK(LineOfSightClear(blueEye, redEye, game.SightObstacles()));
-  // ... and it reaches the floor with headroom, so they can walk through it.
-  {
-    NavMesh nav;
-    nav.Build(game.GetScene().obstacles, 8.0f, 0.4f);
-    std::vector<glm::vec3> path;
-    CHECK(nav.FindPath(glm::vec3(-4.0f, 0.0f, 0.0f), glm::vec3(4.0f, 0.0f, 0.0f), &path));
-  }
-  // A follower importing the state rebuilds the same holes (reconnect).
-  GameLogic follower(BombWallScene());
-  CHECK(follower.ImportState(game.ExportState()));
-  CHECK(follower.GetScene().obstacles.size() == game.GetScene().obstacles.size());
-  CHECK(follower.StateHash() == game.StateHash());
-  // Rewinding the log (timeline scrubbing to the start) restores the wall.
-  GameSnapshot start = game.ExportState();
-  start.world.clear();
-  CHECK(follower.ImportState(start));
-  CHECK(!LineOfSightClear(blueEye, redEye, follower.SightObstacles()));
-}
-
-void TestWallHoleChangeCutsGeometry() {
-  Scene scene = BombWallScene();
-  const size_t before = scene.obstacles.size();
-  WorldChange hole;
-  hole.kind = WorldChangeKind::WallHole;
-  hole.target = 0;
-  hole.wallEdge = 1;  // The implicit footprint's long (+z) edge.
-  hole.u0 = 6.0f;     // z in [-2, 0] along that edge.
-  hole.u1 = 8.0f;
-  hole.y0 = 0.0f;
-  hole.y1 = 2.0f;
-  CHECK(ApplyWorldChange(&scene, hole));
-  CHECK(scene.obstacles[0].dead);
-  // Floor-reaching hole: two jambs and a head, no sill.
-  CHECK(scene.obstacles.size() == before + 3);
-  CHECK(!scene.facadeOpenings.empty() &&
-        scene.facadeOpenings.back().kind == FacadeOpening::Kind::Breach);
-  // Rays pass through the hole, the jambs still block.
-  CHECK(LineOfSightClear({-4.0f, 1.0f, -1.0f}, {4.0f, 1.0f, -1.0f}, scene.obstacles));
-  CHECK(!LineOfSightClear({-4.0f, 1.0f, 4.0f}, {4.0f, 1.0f, 4.0f}, scene.obstacles));
-  CHECK(!LineOfSightClear({-4.0f, 2.5f, -1.0f}, {4.0f, 2.5f, -1.0f}, scene.obstacles));  // Head.
-  CHECK(!ApplyWorldChange(&scene, hole));  // Target already dead.
-  // A hole that misses its wall does not apply.
-  WorldChange miss = hole;
-  miss.target = static_cast<int>(before);  // Left jamb: z in [-8, -2].
-  miss.u0 = 7.0f;
-  miss.u1 = 9.0f;
-  miss.y0 = 10.0f;
-  miss.y1 = 12.0f;
-  CHECK(!ApplyWorldChange(&scene, miss));
-}
-
-void TestFloorHolePiecesAndLinks() {
-  Scene scene = BombFloorScene();
-  WorldChange hole;
-  hole.kind = WorldChangeKind::FloorHole;
-  hole.target = 0;
-  hole.rect = glm::vec4(-1.0f, -1.0f, 1.0f, 1.0f);
-  CHECK(ApplyWorldChange(&scene, hole));
-  CHECK(scene.walkSurfaces[0].dead);
-  CHECK(scene.walkSurfaces.size() == 6);  // 4 pieces appended.
-  for (size_t i = 2; i < 6; ++i) {
-    const WalkSurface& piece = scene.walkSurfaces[i];
-    CHECK(!piece.dead && piece.vertices.size() >= 3);
-    CHECK(!SurfaceContainsXZ(piece, 0.0f, 0.0f));  // The hole is open.
-    CHECK(!piece.neighbors.empty());  // Linked across the cut lines.
-    CHECK(piece.building == 0);
-  }
-  // The old side patch is relinked to the piece still touching it.
-  const WalkSurface& side = scene.walkSurfaces[1];
-  CHECK(!side.neighbors.empty());
-  for (const int n : side.neighbors) {
-    CHECK(n >= 2);
-    CHECK(SurfaceContainsXZ(scene.walkSurfaces[n], 2.9f, 0.0f));
-  }
-  CHECK(!ApplyWorldChange(&scene, hole));  // Dead target.
-  // A hole missing the patch entirely is rejected.
-  WorldChange miss = hole;
-  miss.target = 1;
-  miss.rect = glm::vec4(-8.0f, -8.0f, -6.0f, -6.0f);
-  CHECK(!ApplyWorldChange(&scene, miss));
-}
-
-void TestBombFloorHoleDropsFigure() {
-  GameLogic game(BombFloorScene());
-  game.DebugPlaceBomb(glm::vec3(0.0f, 3.0f, 0.0f), 2.5f);
-  CHECK(game.DebugDetonateBomb());
-  bool sawFloorHole = false, sawSlabCut = false;
-  bool sawSlantedCut = false;
-  for (const WorldChange& c : game.WorldLog()) {
-    sawFloorHole |= c.kind == WorldChangeKind::FloorHole;
-    sawSlabCut |= c.kind == WorldChangeKind::ObstacleReplaced;
-    if (c.kind != WorldChangeKind::ObstacleReplaced) continue;
-    for (const Obstacle& piece : c.pieces) {
-      for (size_t i = 0; i < piece.footprint.size(); ++i) {
-        const glm::vec2 e = piece.footprint[(i + 1) % piece.footprint.size()] - piece.footprint[i];
-        sawSlantedCut |= std::fabs(e.x) > 0.05f && std::fabs(e.y) > 0.05f;
-      }
-    }
-  }
-  CHECK(sawSlantedCut);  // The slab tears along fracture cells, not a rect.
-  CHECK(sawFloorHole);
-  CHECK(sawSlabCut);  // The ceiling slab under the floor got a matching hole.
-  const Unit* fallen = game.FindUnit(0);
-  CHECK(fallen && !fallen->alive);
-  CHECK(fallen && fallen->knockdownElapsed >= 0.0f);
-  CHECK(fallen && std::fabs(fallen->knockdownDrop - 3.0f) < 0.2f);  // Fell to the ground.
-  const Unit* bystander = game.FindUnit(1);
-  CHECK(bystander && bystander->alive);
-}
-
-// A WallHole carrying a fracture outline cuts angled pieces: the leftover
-// obstacles carry wall-plane profiles, and LOS honours the slanted torn
-// edges exactly (clear inside the outline, blocked outside it, including
-// spots a plain bounding-box hole would have opened).
-void TestWallHoleOutlineCutsAngledPieces() {
-  Scene scene = BombWallScene();
-  WorldChange hole;
-  hole.kind = WorldChangeKind::WallHole;
-  hole.target = 0;
-  hole.wallEdge = 1;  // The implicit footprint's long (+z) edge: u = z + 8.
-  // A six-sided outline: lower chain dips to y=0.8 mid-hole, upper chain
-  // rises to y=2.6. All four slanted edges are neither horizontal nor
-  // vertical.
-  hole.polygon = {{6.0f, 1.5f, 0.0f}, {7.0f, 0.8f, 0.0f}, {8.0f, 1.5f, 0.0f},
-                  {8.0f, 2.2f, 0.0f}, {7.0f, 2.6f, 0.0f}, {6.0f, 2.2f, 0.0f}};
-  hole.u0 = 6.0f;
-  hole.u1 = 8.0f;
-  hole.y0 = 0.8f;
-  hole.y1 = 2.6f;
-  const size_t before = scene.obstacles.size();
-  CHECK(ApplyWorldChange(&scene, hole));
-  CHECK(scene.obstacles[0].dead);
-  CHECK(scene.obstacles.size() > before);
-  bool sawProfile = false;
-  for (size_t i = before; i < scene.obstacles.size(); ++i) {
-    sawProfile |= scene.obstacles[i].profile.size() >= 3;
-  }
-  CHECK(sawProfile);
-  // Through the middle of the outline (u=7 -> z=-1): clear.
-  CHECK(LineOfSightClear({-4.0f, 1.7f, -1.0f}, {4.0f, 1.7f, -1.0f}, scene.obstacles));
-  // Near the left corner (u=6.1 -> z=-1.9) the outline has pinched: y=1.8 is
-  // inside it, y=1.0 is under the slanted lower edge -- a rect hole over the
-  // outline's bounding box would have cleared both.
-  CHECK(LineOfSightClear({-4.0f, 1.8f, -1.9f}, {4.0f, 1.8f, -1.9f}, scene.obstacles));
-  CHECK(!LineOfSightClear({-4.0f, 1.0f, -1.9f}, {4.0f, 1.0f, -1.9f}, scene.obstacles));
-  // Above the upper chain mid-hole: blocked by the slanted head piece.
-  CHECK(!LineOfSightClear({-4.0f, 2.75f, -1.0f}, {4.0f, 2.75f, -1.0f}, scene.obstacles));
-  // Outside the hole entirely: still a wall.
-  CHECK(!LineOfSightClear({-4.0f, 1.5f, 3.0f}, {4.0f, 1.5f, 3.0f}, scene.obstacles));
-}
-
-// PlanExplosion pre-cracks the wall into Voronoi cells: the standing pieces
-// are convex wall-plane profiles with slanted edges, they never overlap what
-// was knocked out, and nothing is created from thin air (standing + debris
-// area never exceeds the wall).
-void TestExplosionFractureHasAngledEdges() {
-  const Scene scene = BombWallScene();
-  BombSpec spec;
-  spec.position = glm::vec3(0.0f, 1.0f, 0.0f);
-  spec.radius = 3.0f;
-  spec.seed = ExplosionSeed(7u, 1, 0);
-  bool sawSlantedEdge = false;
-  float standing = 0.0f, knocked = 0.0f;
-  for (const WorldChange& c : PlanExplosion(scene, spec)) {
-    if (c.kind == WorldChangeKind::ObstacleReplaced && c.target == 0) {
-      for (const Obstacle& piece : c.pieces) {
-        CHECK(piece.footprint.size() == 4);
-        if (piece.profile.size() < 3) {
-          standing += glm::distance(piece.footprint[0], piece.footprint[1]) *
-                      (piece.bounds.max.y - piece.bounds.min.y);
-          continue;
-        }
-        CHECK(PolygonSignedArea(piece.profile) > 0.0f);  // CCW, as the renderer expects.
-        standing += PolygonArea(piece.profile);
-        for (size_t i = 0; i < piece.profile.size(); ++i) {
-          const glm::vec2 a = piece.profile[i];
-          const glm::vec2 b = piece.profile[(i + 1) % piece.profile.size()];
-          sawSlantedEdge |= std::fabs(b.x - a.x) > 0.05f && std::fabs(b.y - a.y) > 0.05f;
-          // Convex: every turn is a left turn.
-          const glm::vec2 c2 = piece.profile[(i + 2) % piece.profile.size()];
-          CHECK((b.x - a.x) * (c2.y - b.y) - (b.y - a.y) * (c2.x - b.x) > -1e-3f);
-        }
-      }
-    } else if (c.kind == WorldChangeKind::Debris) {
-      for (const Obstacle& piece : c.pieces) knocked += PolygonArea(piece.footprint);
-    }
-  }
-  CHECK(sawSlantedEdge);
-  CHECK(standing > 20.0f);              // Most of the 16 x 3 wall still stands...
-  CHECK(knocked > 3.0f);                // ... a real hole came out of it ...
-  CHECK(standing + knocked < 48.01f);   // ... and the two never overlap.
-  GameLogic game(BombWallScene());
-  game.SetMatchSeed(7u);
-  game.DebugPlaceBomb(spec.position, spec.radius);
-  CHECK(game.DebugDetonateBomb());
-  bool sawProfiledPiece = false;
-  for (const Obstacle& o : game.GetScene().obstacles) {
-    sawProfiledPiece |= !o.dead && o.profile.size() >= 3;
-  }
-  CHECK(sawProfiledPiece);
-}
-
-// The debris is the destroyed part of the wall: every chunk is one
-// knocked-out fracture cell. Played back to its launch (DebrisPose at t = 0)
-// its rest prism stands upright inside the wall slab, exactly where the
-// applied scene now has a hole; the largest chunks land as rubble obstacles
-// clear of the breach, the rest as litter, each with a replayable flight,
-// and the whole thing round-trips the codec.
-void TestExplosionDebrisMatchesKnockedOutCells() {
-  GameLogic game(BombWallScene());
-  game.SetMatchSeed(7u);
-  game.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
-  CHECK(game.DebugDetonateBomb());
-  const WorldChange* debris = nullptr;
-  for (const WorldChange& c : game.WorldLog()) {
-    if (c.kind == WorldChangeKind::Debris) debris = &c;
-  }
-  CHECK(debris != nullptr);
-  if (!debris) return;
-  CHECK(debris->pieces.size() >= 6);
-  CHECK(debris->flights.size() == debris->pieces.size());
-  std::vector<Obstacle> standing;  // What is left of the wall (no rubble).
-  for (const Obstacle& o : game.GetScene().obstacles) {
-    if (!o.dead && o.kind != ObstacleKind::Rubble) standing.push_back(o);
-  }
-  int solid = 0;
-  for (size_t i = 0; i < debris->pieces.size(); ++i) {
-    const Obstacle& piece = debris->pieces[i];
-    const DebrisFlight& flight = debris->flights[i];
-    solid += flight.solid;
-    CHECK(piece.kind == ObstacleKind::Rubble);
-    CHECK(piece.footprint.size() >= 3);
-    CHECK(std::fabs(piece.bounds.min.y) < 0.05f);  // Resting on the ground...
-    CHECK(std::fabs(piece.bounds.max.y - piece.bounds.min.y - 0.3f) < 1e-3f);  // ... flat.
-    glm::vec2 mean(0.0f);
-    for (const glm::vec2& p : piece.footprint) mean += p;
-    mean /= static_cast<float>(piece.footprint.size());
-    // Clear of the wall plane (x = 0): a chunk must not plug the breach.
-    CHECK(std::fabs(mean.x) > 0.4f);
-    CHECK(std::fabs(mean.x) < 8.0f && std::fabs(mean.y) < 8.0f);  // On the map.
-    CHECK(flight.duration > 0.0f);
-    // At launch the chunk is a cell of the wall: upright, inside the slab.
-    const glm::mat4 launch = DebrisPose(piece, flight, 0.0f);
-    for (const glm::vec2& p : piece.footprint) {
-      for (const float y : {piece.bounds.min.y, piece.bounds.max.y}) {
-        const glm::vec3 v(launch * glm::vec4(p.x, y, p.y, 1.0f));
-        CHECK(std::fabs(v.x) < 0.15f + 2e-3f);
-        CHECK(v.y > -2e-3f && v.y < 3.0f + 2e-3f);
-        CHECK(std::fabs(v.z) < 8.0f + 2e-3f);
-      }
-    }
-    // ... and that cell is now open: sight passes through its middle.
-    const glm::vec3 c = flight.from;
-    CHECK(std::fabs(c.x) < 1e-3f);
-    CHECK(LineOfSightClear({-0.5f, c.y, c.z}, {0.5f, c.y, c.z}, standing));
-    // At (and past) the end of the flight the chunk is its rest prism.
-    CHECK(DebrisPose(piece, flight, flight.duration) == glm::mat4(1.0f));
-  }
-  // The solid chunks really are obstacles in the applied scene.
-  CHECK(solid >= 1);
-  int rubble = 0;
-  for (const Obstacle& o : game.GetScene().obstacles) {
-    rubble += !o.dead && o.kind == ObstacleKind::Rubble;
-  }
-  CHECK(rubble == solid);
-  // Codec round-trip, flights included. Float text is 6 significant digits,
-  // so the stable invariant is write(read(write(x))) == write(x), as for the
-  // snapshot text everywhere else.
-  std::ostringstream out;
-  WriteWorldChange(out, *debris);
-  std::istringstream in(out.str());
-  WorldChange back;
-  CHECK(ReadWorldChange(in, &back));
-  CHECK(back.kind == WorldChangeKind::Debris);
-  CHECK(back.pieces.size() == debris->pieces.size());
-  CHECK(back.flights.size() == debris->flights.size());
-  std::ostringstream again;
-  WriteWorldChange(again, back);
-  CHECK(again.str() == out.str());
-}
-
-// Everything concrete breaks: a corner post too short to count as a wall and
-// the short head strip over a window fracture like the wall between them.
-void TestExplosionBreaksPostsAndStrips() {
-  Scene scene = BombWallScene();
-  scene.obstacles[0].bounds = AABB{glm::vec3(-0.15f, 0.0f, 0.5f), glm::vec3(0.15f, 3.0f, 8.0f)};
-  Obstacle post;  // 0.2 x 0.3 corner post.
-  post.kind = ObstacleKind::Wall;
-  post.bounds = AABB{glm::vec3(-0.15f, 0.0f, -0.1f), glm::vec3(0.15f, 3.0f, 0.1f)};
-  scene.obstacles.push_back(post);
-  Obstacle head;  // Head strip over an opening.
-  head.kind = ObstacleKind::Wall;
-  head.bounds = AABB{glm::vec3(-0.15f, 2.5f, -2.5f), glm::vec3(0.15f, 3.0f, -0.1f)};
-  scene.obstacles.push_back(head);
-  BombSpec spec;
-  spec.position = glm::vec3(1.0f, 1.2f, 0.0f);
-  spec.radius = 3.0f;
-  spec.seed = ExplosionSeed(7u, 1, 0);
-  bool wall = false, postHit = false, headHit = false;
-  for (const WorldChange& c : PlanExplosion(scene, spec)) {
-    if (c.kind != WorldChangeKind::ObstacleReplaced && c.kind != WorldChangeKind::ObstacleRemoved) {
-      continue;
-    }
-    wall |= c.target == 0;
-    postHit |= c.target == 1;
-    headHit |= c.target == 2;
-  }
-  CHECK(wall);
-  CHECK(postHit);
-  CHECK(headHit);
-}
-
-// A floor hole given as fracture cells: the patches left standing are the
-// cells' footprints clipped to the floor, linked across their shared edges.
-void TestFloorHoleFromCells() {
-  Scene scene = BombFloorScene();
-  WorldChange hole;
-  hole.kind = WorldChangeKind::FloorHole;
-  hole.target = 0;
-  hole.rect = glm::vec4(-1.0f, -3.0f, 3.0f, 3.0f);
-  Obstacle left, wedge;
-  left.footprint = {{-4.0f, -4.0f}, {-1.0f, -4.0f}, {0.0f, 4.0f}, {-4.0f, 4.0f}};  // Slanted cut.
-  wedge.footprint = {{0.0f, 4.0f}, {-1.0f, -4.0f}, {1.0f, -4.0f}};
-  hole.pieces = {left, wedge};
-  CHECK(ApplyWorldChange(&scene, hole));
-  CHECK(scene.walkSurfaces[0].dead);
-  CHECK(scene.walkSurfaces.size() == 4);
-  const WalkSurface& a = scene.walkSurfaces[2];
-  const WalkSurface& b = scene.walkSurfaces[3];
-  CHECK(SurfaceContainsXZ(a, -2.0f, 0.0f) && !SurfaceContainsXZ(a, 0.5f, -2.0f));
-  CHECK(SurfaceContainsXZ(b, 0.0f, -2.0f));
-  CHECK(!SurfaceContainsXZ(a, 2.0f, 0.0f) && !SurfaceContainsXZ(b, 2.0f, 0.0f));  // The hole.
-  for (const glm::vec3& v : a.vertices) CHECK(v.y == 3.0f && std::fabs(v.x) <= 3.001f);
-  CHECK(std::find(a.neighbors.begin(), a.neighbors.end(), 3) != a.neighbors.end());
-  // Cells covering the whole patch remove nothing: rejected.
-  Scene intact = BombFloorScene();
-  WorldChange none = hole;
-  Obstacle all;
-  all.footprint = {{-4.0f, -4.0f}, {4.0f, -4.0f}, {4.0f, 4.0f}, {-4.0f, 4.0f}};
-  none.pieces = {all};
-  CHECK(!ApplyWorldChange(&intact, none));
-}
-
-// The roof-edge wrap-around (parapet massing) breaks with the wall: the
-// blast emits a MassingCut whose apply kills the band and appends the convex
-// leftovers outside the blast box.
-void TestMassingCutBreaksParapet() {
-  Scene scene = BombWallScene();
-  MassingDetail parapet;
-  parapet.kind = MassingDetail::Kind::Parapet;
-  parapet.footprint = {{-0.15f, -8.0f}, {0.15f, -8.0f}, {0.15f, 8.0f}, {-0.15f, 8.0f}};
-  parapet.y0 = 3.0f;
-  parapet.y1 = 3.6f;
-  scene.massing.push_back(parapet);
-  BombSpec spec;
-  spec.position = glm::vec3(0.0f, 1.0f, 0.0f);
-  spec.radius = 3.0f;
-  spec.seed = ExplosionSeed(7u, 1, 0);
-  bool sawMassingCut = false;
-  for (const WorldChange& c : PlanExplosion(scene, spec)) {
-    sawMassingCut |= c.kind == WorldChangeKind::MassingCut && c.target == 0;
-  }
-  CHECK(sawMassingCut);
-  // Direct apply: a cut through the middle of the band leaves the two ends.
-  WorldChange cut;
-  cut.kind = WorldChangeKind::MassingCut;
-  cut.target = 0;
-  cut.rect = glm::vec4(-2.0f, -1.5f, 2.0f, 1.5f);
-  CHECK(ApplyWorldChange(&scene, cut));
-  CHECK(scene.massing[0].dead && scene.massing[0].footprint.empty());
-  CHECK(scene.massing.size() == 3);  // Two surviving end pieces appended.
-  for (size_t i = 1; i < scene.massing.size(); ++i) {
-    const MassingDetail& piece = scene.massing[i];
-    CHECK(!piece.dead && piece.footprint.size() >= 3);
-    CHECK(piece.kind == MassingDetail::Kind::Parapet);
-    CHECK(piece.y0 == 3.0f && piece.y1 == 3.6f);
-    for (const glm::vec2& p : piece.footprint) CHECK(std::fabs(p.y) >= 1.5f - 1e-3f);
-  }
-  CHECK(!ApplyWorldChange(&scene, cut));  // Dead target.
-  // A cut that misses a detail entirely is rejected.
-  WorldChange miss = cut;
-  miss.target = 1;
-  miss.rect = glm::vec4(5.0f, 5.0f, 6.0f, 6.0f);
-  CHECK(!ApplyWorldChange(&scene, miss));
-  // A detail entirely inside the box is removed whole.
-  WorldChange whole = cut;
-  whole.target = 1;
-  whole.rect = glm::vec4(-10.0f, -10.0f, 10.0f, 10.0f);
-  CHECK(ApplyWorldChange(&scene, whole));
-  CHECK(scene.massing[1].dead);
-  CHECK(scene.massing.size() == 3);  // Nothing appended.
-}
-
-void TestArmedBombDetonatesMidRound() {
-  GameLogic game(BombWallScene());
-  game.SetMatchSeed(7u);
-  // Blue walks 10 units (2.5 s), red passes; the bomb is armed for t = 1 s.
-  game.ClickUnit(0, Team::Blue);
-  game.ChooseMove();
-  game.ClickGround(glm::vec3(-4.0f, 0.0f, 6.0f), Team::Blue);
-  game.FinishMovePlan();
-  game.ClickUnit(1, Team::Red);
-  game.ChoosePass();
-  game.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
-  CHECK(game.DebugArmBomb(1.0f));
+// Issue #292: the cover pose engages the moment the figure reaches its spot,
+// mid-round -- visually (coverKind/coverBlend) and bounding-box-wise -- not
+// only once the turn ends.
+void TestCoverPoseEngagesOnArrivalMidRound() {
+  GameLogic game(LowBarrierDuelScene());
+  MakePassive(game);
+  // Standing in the open lane, Blue is in Red's sight.
+  CHECK(game.ComputeVisibility(Team::Red).UnitVisible(0));
+  PlanMove(game, 0, glm::vec3(0.0f, 0.0f, 3.5f));
+  PassRest(game);
   CHECK(game.CanCommitRound());
   game.CommitRound();
-  CHECK(game.WorldLog().empty());  // Not yet: armed, not detonated.
-  int guard = 0;
-  while (game.Mode() == InputMode::Executing && ++guard < 1000) game.Update(0.05f);
-  CHECK(!game.WorldLog().empty());
-  const WorldChange& first = game.WorldLog().front();
-  CHECK(first.round == 1);
-  CHECK(first.at >= 1.0f && first.at <= 1.1f);  // Stamped at the armed moment.
-  CHECK(!game.GetDebugBomb().has_value());
+  // The walk takes ~0.9 s and the blend ~0.3 s more; at the 2 s mark the
+  // 5 s round is still executing with the pose already fully held.
+  for (float t = 0.0f; t < 2.0f; t += 0.02f) game.Update(0.02f);
+  CHECK(game.Mode() == InputMode::Executing);
+  const Unit* blue = game.FindUnit(0);
+  CHECK(glm::distance(blue->position, glm::vec3(0.0f, 0.0f, 3.5f)) < 0.05f);
+  CHECK(blue->coverKind == 2);
+  CHECK(blue->coverBlend > 0.99f);
+  // The hit box sank with the pose...
+  CHECK(blue->Bounds().max.y < constants::kCrouchedHeight + 0.01f);
+  // ...so the crouched figure is tucked out of Red's sight, mid-round.
+  CHECK(!game.ComputeVisibility(Team::Red).UnitVisible(0));
+  RunRound(game);
+  CHECK(game.FindUnit(0)->coverKind == 2);  // Pose persists into planning.
+}
+
+// Issue #292: holding the crouch protects bounding-box-wise. The same
+// pinned-roll locked shot that drops a standing figure over the chest-high
+// barrier cannot even be taken at the crouched one.
+void TestCrouchedFigureBlocksLockedShot() {
+  {
+    // Control: standing at the cover spot (pose never blended in), Red's
+    // line to the standing head clears the 1.2 barrier and the shot lands.
+    GameLogic game(LowBarrierDuelScene());
+    MakePassive(game);
+    game.SetShotRollSource([] { return 0.0f; });
+    Unit* blue = game.FindUnit(0);
+    blue->position = glm::vec3(0.0f, 0.0f, 3.5f);
+    CHECK(game.ResolveShot(*game.FindUnit(1), *blue));
+    CHECK(!blue->alive);
+  }
+  {
+    // Crouched there (pose settled over planning ticks; Red is behind
+    // Blue's back so the firefight rule does not suppress it), the sight
+    // probe and torso line both duck behind the barrier: no shot at all.
+    GameLogic game(LowBarrierDuelScene());
+    MakePassive(game);
+    game.SetShotRollSource([] { return 0.0f; });
+    Unit* blue = game.FindUnit(0);
+    blue->position = glm::vec3(0.0f, 0.0f, 3.5f);
+    blue->facingYaw = -1.5707963f;  // Back to the barrier.
+    for (int i = 0; i < 100; ++i) game.Update(0.02f);
+    CHECK(blue->coverKind == 2);
+    CHECK(blue->coverBlend > 0.99f);
+    bool fired = true;
+    CHECK(!game.ResolveShot(*game.FindUnit(1), *blue, &fired));
+    CHECK(!fired);
+    CHECK(blue->alive);
+  }
+}
+
+// Issue #292: the cover pose rides in snapshots, so a follower mirroring a
+// round shows the crouch when the simulator's figure takes it (it cannot
+// derive the pose itself: it never runs the round's Update ticks).
+void TestSnapshotCarriesCoverPose() {
+  GameLogic game(LowBarrierDuelScene());
+  MakePassive(game);
+  Unit* blue = game.FindUnit(0);
+  blue->position = glm::vec3(0.0f, 0.0f, 3.5f);
+  blue->facingYaw = -1.5707963f;
+  for (int i = 0; i < 100; ++i) game.Update(0.02f);
+  CHECK(blue->coverKind == 2);
+  CHECK(blue->coverBlend > 0.99f);
+
+  GameSnapshot snap;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &snap));
+  GameLogic mirror(LowBarrierDuelScene());
+  CHECK(mirror.ImportState(snap));
+  const Unit* mirrored = mirror.FindUnit(0);
+  CHECK(mirrored->coverKind == 2);
+  CHECK(mirrored->coverTileKind == 2);
+  CHECK(std::fabs(mirrored->coverBlend - blue->coverBlend) < 1e-4f);
+  CHECK(std::fabs(mirrored->coverYaw - blue->coverYaw) < 1e-4f);
+  // The mirrored pose shrinks the mirrored silhouette the same way.
+  CHECK(mirrored->Bounds().max.y < constants::kCrouchedHeight + 0.01f);
 }
 
 int main() {
@@ -4400,6 +4039,7 @@ int main() {
   TestBuildingsContainingPoints();
   TestNavMeshRoutesAroundObstacle();
   TestReachFieldFromRampIncludesGroundBeyondFoot();
+  TestReachFieldStackedLayersAndSheets();
   TestNavMeshDirectPathWhenUnobstructed();
   TestNavMeshCellsCoverThinLedgeBetweenRotatedFootprints();
   TestNavMeshRejectsPointsInsideObstacle();
@@ -4507,19 +4147,10 @@ int main() {
   TestKnockdownOnZiplineRecordsDrop();
   TestFallenBoundsCollapse();
   TestBurstPlanSurvivesSnapshotAndClampsOnImport();
+  TestCoverPoseEngagesOnArrivalMidRound();
+  TestCrouchedFigureBlocksLockedShot();
+  TestSnapshotCarriesCoverPose();
   TestReachFieldManySurfacesPerformance();
-  TestExplosionPlanDeterministicCells();
-  TestBombBlowsSeeAndWalkThroughHole();
-  TestWallHoleChangeCutsGeometry();
-  TestWallHoleOutlineCutsAngledPieces();
-  TestExplosionFractureHasAngledEdges();
-  TestExplosionDebrisMatchesKnockedOutCells();
-  TestExplosionBreaksPostsAndStrips();
-  TestFloorHoleFromCells();
-  TestMassingCutBreaksParapet();
-  TestFloorHolePiecesAndLinks();
-  TestBombFloorHoleDropsFigure();
-  TestArmedBombDetonatesMidRound();
 
   if (g_failures == 0) {
     std::printf("All logic tests passed.\n");

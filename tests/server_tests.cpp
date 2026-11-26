@@ -26,10 +26,7 @@
 #include "net/BuilderSceneSync.h"
 #include "net/RemoteClient.h"
 #include "net/SceneSpec.h"
-#include <sqlite3.h>
-
 #include "server/GameSession.h"
-#include "server/GameStore.h"
 #include "server/HttpClient.h"
 #include "server/JevBot.h"
 #include "server/Lobby.h"
@@ -214,11 +211,12 @@ void TestSessionReadyAndRound() {
     for (const char* banned : {"walkPhase", "walkBlend", "idleElapsed", "knockdown", "shootElapsed"}) {
       CHECK(text.find(banned) == std::string::npos);
     }
-    // Every unit sample is [id,x,y,z,yaw,alive,moving] and own units always appear.
+    // Every unit sample is [id,x,y,z,yaw,alive,moving,coverKind,coverBlend,
+    // coverYaw] and own units always appear.
     for (const Json& f : round[ti]["frames"].AsArray()) {
       int own = 0;
       for (const Json& row : f["u"].AsArray()) {
-        CHECK(row.AsArray().size() == 7);
+        CHECK(row.AsArray().size() == 10);
         const int id = static_cast<int>(row.AsArray()[0].AsNumber());
         if ((id < 3) == (ti == 0)) ++own;
       }
@@ -1011,108 +1009,7 @@ void TestWorldChangeSentInRoundOnce() {
     const auto second = s.RunRound();
     CHECK(second[0]["world"].AsArray().empty());  // Already delivered.
   }
-  // 4: fracture outlines with profiled pieces, MassingCut + Debris kinds.
-  // 5: fracture-cell pieces on FloorHole / MassingCut, debris rest yaw + solid.
-  CHECK(net::kProtocolVersion == 5);
-}
-
-// Thin full-height wall between the two figures, for bomb tests.
-Scene BombWallScene() {
-  Scene scene;
-  scene.mapHalfExtent = 8.0f;
-  Obstacle wall;
-  wall.bounds = AABB{glm::vec3(-0.15f, 0.0f, -8.0f), glm::vec3(0.15f, 3.0f, 8.0f)};
-  wall.kind = ObstacleKind::Wall;
-  scene.obstacles.push_back(wall);
-  Unit blue;
-  blue.id = 0;
-  blue.team = Team::Blue;
-  blue.position = glm::vec3(-4.0f, 0.0f, 0.0f);
-  scene.units.push_back(blue);
-  Unit red;
-  red.id = 1;
-  red.team = Team::Red;
-  red.position = glm::vec3(4.0f, 0.0f, 0.0f);
-  red.facingYaw = 3.14159265f;
-  scene.units.push_back(red);
-  return scene;
-}
-
-// Debug bomb (issue #350): an armed bomb detonates inside RunRound at its
-// armed time, and the fracture changes ship with that round message carrying
-// the detonation timestamp.
-void TestDebugBombArmedShipsInRound() {
-  server::GameSession s(BombWallScene());
-  s.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
-  CHECK(s.DebugArmBomb(1.0f));
-  Action commit;
-  commit.kind = ActionKind::Commit;
-  PlanEveryone(s, Team::Blue);
-  PlanEveryone(s, Team::Red);
-  CHECK(s.Apply(Team::Blue, commit).ok && s.Apply(Team::Red, commit).ok);
-  const auto round = s.RunRound();
-  for (int ti = 0; ti < 3; ++ti) {
-    const auto& world = round[ti]["world"].AsArray();
-    CHECK(!world.empty());
-    WorldChange change;
-    CHECK(net::DecodeWorldChange(world.front(), &change));
-    CHECK(change.round == 1);
-    CHECK(change.at >= 1.0f && change.at <= 1.2f);
-  }
-  CHECK(s.TakeWorldDelta().AsArray().empty());  // Already shipped.
-  // A joining client replays the log to the same geometry.
-  GameLogic joiner(s.game().BaseScene());
-  const Json state = s.StateMessage(Team::Blue);
-  for (const Json& e : state["world"].AsArray()) {
-    WorldChange change;
-    CHECK(net::DecodeWorldChange(e, &change));
-    CHECK(joiner.AcceptWorldChange(change));
-  }
-  // Same log -> same geometry (units differ: the joiner only replayed the world).
-  CHECK(joiner.WorldLog().size() == s.game().WorldLog().size());
-  const auto& mine = joiner.GetScene().obstacles;
-  const auto& theirs = s.game().GetScene().obstacles;
-  CHECK(mine.size() == theirs.size());
-  for (size_t i = 0; i < std::min(mine.size(), theirs.size()); ++i) {
-    CHECK(mine[i].dead == theirs[i].dead);
-    CHECK(mine[i].bounds.min == theirs[i].bounds.min && mine[i].bounds.max == theirs[i].bounds.max);
-  }
-}
-
-// Debug bomb via lobby control taps: place_bomb / detonate_bomb, immediate
-// detonation broadcast as a {"t":"world"} delta.
-void TestDebugBombControlTap() {
-  const char* scene = R"({"map":{"obstacles":[{"center":[0,0],"half_extent":[0.15,6],"height":3}]},"units":[
-    {"id":0,"team":"blue","position":[-5,0,0],"facing_degrees":0},
-    {"id":1,"team":"red","position":[5,0,0],"facing_degrees":180}]})";
-  Wire w;
-  Json load;
-  CHECK(Json::Parse(std::string(R"({"t":"load_scenario","room":"b1","scene":)") + scene + "}", &load));
-  CHECK(w.lobby.OnControl(load)["ok"].AsBool());
-  w.Send(1, R"({"t":"join","room":"b1"})");
-  w.Send(2, R"({"t":"join","room":"b1"})");
-  w.Drain(1);
-  w.Drain(2);
-  Json detonate;
-  CHECK(Json::Parse(R"({"t":"detonate_bomb","room":"b1"})", &detonate));
-  CHECK(!w.lobby.OnControl(detonate)["ok"].AsBool());  // Nothing placed yet.
-  Json badPlace;
-  CHECK(Json::Parse(R"({"t":"place_bomb","room":"b1","pos":[0,1]})", &badPlace));
-  CHECK(!w.lobby.OnControl(badPlace)["ok"].AsBool());
-  Json place;
-  CHECK(Json::Parse(R"({"t":"place_bomb","room":"b1","pos":[0,1,0],"radius":3})", &place));
-  CHECK(w.lobby.OnControl(place)["ok"].AsBool());
-  CHECK(w.lobby.OnControl(detonate)["ok"].AsBool());
-  for (int conn : {1, 2}) {
-    bool sawWorld = false;
-    for (const Json& m : w.Drain(conn)) {
-      if (m["t"].AsString() != "world") continue;
-      sawWorld = true;
-      CHECK(!m["world"].AsArray().empty());
-    }
-    CHECK(sawWorld);
-  }
-  CHECK(!w.lobby.OnControl(detonate)["ok"].AsBool());  // Spent.
+  CHECK(net::kProtocolVersion == 2);
 }
 
 void TestWorldChangeKinds() {
@@ -1180,39 +1077,17 @@ void TestWorldChangeKinds() {
     CHECK(!ApplyWorldChange(&scene, remove));
   }
 
-  // Wall hole: really cuts the wall around a breach (issue #350). Replace
-  // the stump with a thin wall piece first so the hole has a wall to cut.
-  {
-    const glm::vec3 base = scene.obstacles[n].bounds.min;
-    Obstacle wallPiece = scene.obstacles[n];
-    wallPiece.kind = ObstacleKind::Wall;
-    wallPiece.bounds = AABB{base, base + glm::vec3(4.0f, 3.0f, 0.3f)};
-    wallPiece.footprint = {{base.x, base.z}, {base.x + 4.0f, base.z},
-                           {base.x + 4.0f, base.z + 0.3f}, {base.x, base.z + 0.3f}};
-    WorldChange toWall;
-    toWall.kind = WorldChangeKind::ObstacleReplaced;
-    toWall.target = static_cast<int>(n);
-    toWall.pieces.push_back(wallPiece);
-    CHECK(ApplyWorldChange(&scene, toWall));
-    const int wallIdx = static_cast<int>(scene.obstacles.size()) - 1;
-    WorldChange hole;
-    hole.kind = WorldChangeKind::WallHole;
-    hole.target = wallIdx;
-    hole.wallEdge = 0;
-    hole.u0 = 1.0f; hole.u1 = 2.0f;
-    hole.y0 = base.y + 0.5f; hole.y1 = base.y + 2.0f;
-    const size_t openings = scene.facadeOpenings.size();
-    const size_t obstacles = scene.obstacles.size();
-    CHECK(ApplyWorldChange(&scene, hole));
-    CHECK(scene.obstacles[wallIdx].dead);
-    CHECK(scene.obstacles.size() == obstacles + 4);  // Jambs, sill, head.
-    CHECK(scene.facadeOpenings.size() == openings + 1 &&
-          scene.facadeOpenings.back().kind == FacadeOpening::Kind::Breach);
-    CHECK(!ApplyWorldChange(&scene, hole));  // Target now dead.
-    hole.target = static_cast<int>(obstacles);  // Left jamb, but a degenerate hole.
-    hole.u1 = hole.u0;
-    CHECK(!ApplyWorldChange(&scene, hole));
-  }
+  // Wall hole.
+  WorldChange hole;
+  hole.kind = WorldChangeKind::WallHole;
+  hole.target = n;  // The live stump.
+  hole.u0 = 0.2f; hole.u1 = 1.0f; hole.y0 = 0.0f; hole.y1 = 0.2f;
+  const size_t openings = scene.facadeOpenings.size();
+  CHECK(ApplyWorldChange(&scene, hole));
+  CHECK(scene.facadeOpenings.size() == openings + 1 &&
+        scene.facadeOpenings.back().kind == FacadeOpening::Kind::Breach);
+  hole.u1 = hole.u0;
+  CHECK(!ApplyWorldChange(&scene, hole));
 
   // Height patch needs sampled ground; flat maps refuse it.
   WorldChange patch;
@@ -1239,16 +1114,6 @@ void TestWorldChangeKinds() {
   CHECK(ReadWorldChange(in, &back) && back == full);
   WorldChange viaJson;
   CHECK(net::DecodeWorldChange(net::EncodeWorldChange(full), &viaJson) && viaJson == full);
-  WorldChange floorHole;
-  floorHole.kind = WorldChangeKind::FloorHole;
-  floorHole.target = 3;
-  floorHole.rect = glm::vec4(-1.0f, -2.0f, 3.0f, 4.0f);
-  std::ostringstream floorText;
-  floorText.precision(9);
-  WriteWorldChange(floorText, floorHole);
-  std::istringstream floorIn(floorText.str());
-  CHECK(ReadWorldChange(floorIn, &back) && back == floorHole);
-  CHECK(net::DecodeWorldChange(net::EncodeWorldChange(floorHole), &viaJson) && viaJson == floorHole);
   std::istringstream bad("1 2 3");
   CHECK(!ReadWorldChange(bad, &back));
 }
@@ -1633,333 +1498,6 @@ void TestRealSocketLoopback() {
 
 }  // namespace
 
-
-// ---- Persistence (issue #364) ----
-
-std::string TempDbPath(const char* name) {
-  const std::string path = (std::filesystem::temp_directory_path() /
-                            (std::string("tbgwaf_") + name + "_" + std::to_string(::getpid()) + ".db")).string();
-  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
-  return path;
-}
-
-const char* kBlueToken = "blue-device-token-0001";
-const char* kRedToken = "red-device-token-00002";
-
-std::string JoinMsg(const char* room, const char* token) {
-  return std::string(R"({"t":"join","room":")") + room + R"(","token":")" + token + R"("})";
-}
-
-// Plans "pass" for all three of a team's figures and commits.
-void PassAndCommit(Wire& w, int conn, int firstUnit) {
-  for (int i = 0; i < 3; ++i) {
-    w.Send(conn, R"({"t":"pass","unit":)" + std::to_string(firstUnit + i) + "}");
-  }
-  w.Send(conn, R"({"t":"commit"})");
-}
-
-const Json* Find(const std::vector<Json>& msgs, const char* type) {
-  for (const Json& m : msgs) if (m["t"].AsString() == type) return &m;
-  return nullptr;
-}
-
-// Both players join `room` with their tokens; returns the game id.
-std::string StartStoredMatch(Wire& w, const char* room, int blueConn, int redConn) {
-  w.Send(blueConn, JoinMsg(room, kBlueToken));
-  w.Send(redConn, JoinMsg(room, kRedToken));
-  const auto blue = w.Drain(blueConn);
-  w.Drain(redConn);
-  const Json* start = Find(blue, "start");
-  CHECK(start != nullptr);
-  return start ? (*start)["game"].AsString() : "";
-}
-
-void TestGameStoreBasics() {
-  const std::string path = TempDbPath("store");
-  {
-    server::GameStore store(path);
-    CHECK(store.ok() && !store.wasReset());
-    server::GameStore::Game g;
-    g.id = "g1";
-    g.room = "R1";
-    g.seed = 42;
-    CHECK(store.CreateGame(g, "tokenA", "tokenB"));
-    CHECK(!store.CreateGame(g, "tokenA", "tokenB"));  // Duplicate id.
-    CHECK(store.PutOrders("g1", 1, 0, "{}"));
-    CHECK(store.Orders("g1").size() == 1);
-    CHECK(store.TeamOf("g1", "tokenB") == std::optional<int>(1));
-    CHECK(!store.TeamOf("g1", "nobody").has_value());
-    server::GameStore::Turn turn;
-    turn.round = 1;
-    turn.messages[0] = "b";
-    turn.messages[1] = "r";
-    turn.messages[2] = "s";
-    turn.stateHash = "h";
-    CHECK(store.PutTurn("g1", turn, false, ""));
-    CHECK(store.Find("g1")->round == 2 && !store.Find("g1")->finished);
-    CHECK(store.ActiveGames().size() == 1);
-    CHECK(store.PutTurn("g1", {2, {"b", "r", "s"}, "h"}, true, "blue"));
-    CHECK(store.Find("g1")->finished && store.Find("g1")->winner == "blue");
-    CHECK(store.ActiveGames().empty());
-    std::vector<int> teams;
-    CHECK(store.GamesOf("tokenA", &teams).size() == 1 && teams[0] == 0);
-    CHECK(store.GamesOf("tokenZ", &teams).empty());
-  }
-  {  // Reopening keeps everything.
-    server::GameStore store(path);
-    CHECK(store.ok() && !store.wasReset() && store.Find("g1").has_value());
-    CHECK(store.Turns("g1").size() == 2);
-  }
-  {  // A database of another schema version is dropped, not migrated.
-    sqlite3* db = nullptr;
-    CHECK(sqlite3_open(path.c_str(), &db) == SQLITE_OK);
-    CHECK(sqlite3_exec(db, "PRAGMA user_version=999", nullptr, nullptr, nullptr) == SQLITE_OK);
-    sqlite3_close(db);
-    server::GameStore store(path);
-    CHECK(store.ok() && store.wasReset() && !store.Find("g1").has_value());
-    CHECK(store.CreateGame({"g2", "R", 1}, "a", "b"));
-  }
-  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
-}
-
-// Commits and resolved turns survive a server restart: the replacement lobby
-// rebuilds the match from the DB and players resume with their tokens.
-void TestPersistedMatchSurvivesRestart() {
-  const std::string path = TempDbPath("restart");
-  std::string gameId;
-  std::string bluePos;
-  {
-    server::GameStore store(path);
-    Wire w;
-    CHECK(w.lobby.SetGameStore(&store) == 0);
-    gameId = StartStoredMatch(w, "r1", 1, 2);
-    CHECK(!gameId.empty());
-    for (int round = 0; round < 2; ++round) {
-      PassAndCommit(w, 1, 0);
-      PassAndCommit(w, 2, 3);
-      CHECK(Has(w.Drain(1), "round"));
-      w.Drain(2);
-    }
-    PassAndCommit(w, 1, 0);  // Round 3: only Blue commits before the "crash".
-    w.Drain(1);
-    CHECK(store.Turns(gameId).size() == 2 && store.Orders(gameId).size() == 5);
-  }
-  {
-    server::GameStore store(path);
-    Wire w;
-    CHECK(w.lobby.SetGameStore(&store) == 1);
-    CHECK(w.lobby.RoomCount() == 1);
-    // Wrong token / unknown game are refused.
-    w.Send(5, R"({"t":"join","game":")" + gameId + R"(","token":"someone-else-token-123"})");
-    CHECK(w.Drain(5)[0]["t"].AsString() == "error");
-    w.Send(5, R"({"t":"join","game":"gnope","token":"blue-device-token-0001"})");
-    CHECK(w.Drain(5)[0]["t"].AsString() == "error");
-    // A plain join of the room does not steal the seat.
-    w.Send(5, R"({"t":"join","room":"r1"})");
-    CHECK(w.Drain(5)[0]["t"].AsString() == "error");
-
-    w.Send(1, R"({"t":"join","game":")" + gameId + R"(","token":")" + kBlueToken + R"("})");
-    const auto blue = w.Drain(1);
-    CHECK(Has(blue, "start") && Has(blue, "plans") && Has(blue, "state") && Has(blue, "round"));
-    CHECK(blue.back()["t"].AsString() == "peer" && blue[blue.size() - 2]["t"].AsString() == "plans");
-    CHECK((*Find(blue, "start"))["resumed"].AsBool() && (*Find(blue, "start"))["team"].AsString() == "blue");
-    CHECK((*Find(blue, "plans"))["ready"].AsBool());  // Blue's commit survived.
-    CHECK((*Find(blue, "state"))["units"].AsArray().size() >= 3);
-
-    w.Send(2, R"({"t":"join","game":")" + gameId + R"(","token":")" + kRedToken + R"("})");
-    const auto red = w.Drain(2);
-    CHECK(!(*Find(red, "plans"))["ready"].AsBool());
-    CHECK((*Find(red, "peer"))["ready"].AsBool());
-    CHECK(Has(w.Drain(1), "opponent_back"));
-    PassAndCommit(w, 2, 3);
-    CHECK(Has(w.Drain(2), "round") && Has(w.Drain(1), "round"));
-    CHECK(store.Turns(gameId).size() == 3);
-  }
-  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
-}
-
-// A dropped player's seat is held; the opponent keeps the room and the round
-// waits for the returning player.
-void TestDisconnectHoldsSeat() {
-  const std::string path = TempDbPath("seat");
-  server::GameStore store(path);
-  Wire w;
-  w.lobby.SetGameStore(&store);
-  const std::string gameId = StartStoredMatch(w, "r1", 1, 2);
-  w.lobby.OnDisconnect(2);
-  CHECK(Has(w.Drain(1), "opponent_away"));
-  CHECK(w.lobby.RoomCount() == 1);
-  PassAndCommit(w, 1, 0);
-  w.Drain(1);
-  // Red returns on a new connection, even though conn 3 replaces a live one.
-  w.Send(3, R"({"t":"join","game":")" + gameId + R"(","token":")" + kRedToken + R"("})");
-  CHECK((*Find(w.Drain(3), "peer"))["ready"].AsBool());
-  PassAndCommit(w, 3, 3);
-  CHECK(Has(w.Drain(1), "round"));
-  // Same device reconnecting while its old socket is still registered.
-  w.Send(4, R"({"t":"join","game":")" + gameId + R"(","token":")" + kRedToken + R"("})");
-  CHECK(Has(w.Drain(4), "start"));
-  CHECK(Has(w.Drain(3), "opponent_left"));
-  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
-}
-
-void TestMyGamesListsOnlyOwn() {
-  const std::string path = TempDbPath("mine");
-  server::GameStore store(path);
-  Wire w;
-  w.lobby.SetGameStore(&store);
-  const std::string first = StartStoredMatch(w, "r1", 1, 2);
-  // A second, unrelated pair, and an ephemeral (token-less) match.
-  w.Send(3, JoinMsg("r2", "carol-device-token-0003"));
-  w.Send(4, JoinMsg("r2", "dave-device-token-00004"));
-  w.Drain(3);
-  w.Drain(4);
-  w.Send(5, R"({"t":"join","room":"r3"})");
-  w.Send(6, R"({"t":"join","room":"r3"})");
-
-  w.Send(9, std::string(R"({"t":"my_games","token":")") + kBlueToken + R"("})");
-  auto reply = w.Drain(9);
-  CHECK(reply.size() == 1 && reply[0]["t"].AsString() == "games");
-  CHECK(reply[0]["games"].AsArray().size() == 1);
-  const Json& g = reply[0]["games"].AsArray()[0];
-  CHECK(g["id"].AsString() == first && g["status"].AsString() == "active" &&
-        g["team"].AsString() == "blue" && g["round"].AsNumber() == 1);
-  w.Send(9, std::string(R"({"t":"my_games","token":")") + kRedToken + R"("})");
-  CHECK((w.Drain(9)[0]["games"].AsArray()[0]["team"].AsString()) == "red");
-  w.Send(9, R"({"t":"my_games","token":"nobody-has-this-token-1"})");
-  CHECK(w.Drain(9)[0]["games"].AsArray().empty());
-  w.Send(9, R"({"t":"my_games"})");
-  CHECK(w.Drain(9)[0]["t"].AsString() == "error");
-  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
-}
-
-// A finished game comes back as its final state plus the full reveal, and the
-// reveal equals what the players were sent live.
-void TestFinishedGameReplay() {
-  const std::string path = TempDbPath("finished");
-  std::string gameId;
-  Json liveReveal;
-  {
-    server::GameStore store(path);
-    Wire w;
-    w.lobby.SetGameStore(&store);
-    w.lobby.SetRoundLimit(2);  // The match ends as a draw after two rounds.
-    gameId = StartStoredMatch(w, "r1", 1, 2);
-    for (int round = 0; round < 2; ++round) {
-      PassAndCommit(w, 1, 0);
-      PassAndCommit(w, 2, 3);
-      const auto blue = w.Drain(1);
-      w.Drain(2);
-      if (const Json* reveal = Find(blue, "reveal")) liveReveal = *reveal;
-    }
-    CHECK(store.Find(gameId)->finished && store.Find(gameId)->winner == "none");
-    CHECK(store.Find(gameId)->roundLimit == 2);
-  }
-  server::GameStore store(path);
-  Wire w;
-  CHECK(w.lobby.SetGameStore(&store) == 0);  // Finished games are not restored into rooms.
-  w.Send(7, R"({"t":"join","game":")" + gameId + R"(","token":")" + kRedToken + R"("})");
-  const auto msgs = w.Drain(7);
-  CHECK(Has(msgs, "start") && Has(msgs, "state") && Has(msgs, "reveal"));
-  CHECK((*Find(msgs, "start"))["finished"].AsBool() && (*Find(msgs, "start"))["team"].AsString() == "red");
-  CHECK((*Find(msgs, "state"))["over"].AsBool() && (*Find(msgs, "state"))["winner"].AsString() == "none");
-  // The stored reveal is the one the players got live.
-  CHECK(liveReveal.IsObject() && Find(msgs, "reveal")->Dump() == liveReveal.Dump());
-  CHECK(Find(msgs, "reveal")->operator[]("rounds").AsArray().size() == 2);
-  w.Send(7, R"({"t":"pass","unit":3})");
-  CHECK(w.Drain(7)[0]["t"].AsString() == "error");  // Read-only: not seated.
-  w.Send(7, std::string(R"({"t":"my_games","token":")") + kBlueToken + R"("})");
-  const Json listed = w.Drain(7)[0]["games"].AsArray()[0];
-  CHECK(listed["status"].AsString() == "finished" && listed["winner"].AsString() == "none");
-  // A client resuming it ends in game over with the reveal ready.
-  ClientRig again(8, "r1");
-  again.client.SetToken(kBlueToken);
-  again.client.SetResume(gameId);
-  again.client.OnOpen();
-  again.Pump(w);
-  again.Pump(w);
-  CHECK(again.client.gameFinished() && again.client.hasReveal());
-  CHECK(again.game.Mode() == InputMode::GameOver);
-  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
-}
-
-// Replaying stored orders from the seed gives the live state, round by round
-// (the store checks the hash on restore; here through RemoteClient too).
-void TestResumedClientMatchesLive() {
-  const std::string path = TempDbPath("client");
-  server::GameStore store(path);
-  Wire w;
-  w.lobby.SetGameStore(&store);
-  ClientRig blue(1, "r1"), red(2, "r1");
-  blue.client.SetToken(kBlueToken);
-  red.client.SetToken(kRedToken);
-  blue.client.OnOpen();
-  red.client.OnOpen();
-  for (int i = 0; i < 3; ++i) {
-    blue.Pump(w);
-    red.Pump(w);
-  }
-  CHECK(blue.client.status() == net::RemoteClient::Status::Playing && !blue.client.game_id().empty());
-  PlanAllLocally(blue);
-  PlanAllLocally(red);
-  for (int i = 0; i < 3; ++i) {
-    blue.client.Update(0.016f);
-    red.client.Update(0.016f);
-    blue.Pump(w);
-    red.Pump(w);
-  }
-  blue.client.RequestCommit();
-  red.client.RequestCommit();
-  for (int i = 0; i < 3; ++i) {
-    blue.Pump(w);
-    red.Pump(w);
-  }
-  for (int i = 0; i < 600 && blue.client.playingBack(); ++i) blue.client.Update(1.0f / 30.0f);
-  CHECK(!blue.client.playingBack());
-
-  // Blue drops and resumes through a fresh client: same state as before.
-  const std::string gameId = blue.client.game_id();
-  w.lobby.OnDisconnect(1);
-  ClientRig again(3, "r1");
-  again.client.SetToken(kBlueToken);
-  again.client.SetResume(gameId);
-  again.client.OnOpen();
-  again.Pump(w);
-  again.Pump(w);
-  for (int i = 0; i < 600 && again.client.playingBack(); ++i) again.client.Update(1.0f / 30.0f);
-  CHECK(again.client.status() == net::RemoteClient::Status::Playing);
-  CHECK(again.client.game_id() == gameId && again.client.team() == Team::Blue);
-  for (int id = 0; id < 6; ++id) {
-    const Unit* a = blue.game.FindUnit(id);
-    const Unit* b = again.game.FindUnit(id);
-    CHECK(a && b && a->alive == b->alive);
-    if (a && b) CHECK(glm::distance(a->position, b->position) < 0.05f);
-  }
-  CHECK(again.game.RoundNumber() == blue.game.RoundNumber());
-  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
-}
-
-// Real sockets + a file DB: the server process-level path used in production.
-void TestServerRestoresFromDbFile() {
-  const std::string path = TempDbPath("server");
-  {
-    server::GameStore store(path);
-    Wire w;
-    w.lobby.SetGameStore(&store);
-    StartStoredMatch(w, "r1", 1, 2);
-  }
-  server::ServerConfig config;
-  config.port = 0;
-  config.dbPath = path;
-  server::Server restarted(config);
-  std::string error;
-  CHECK(restarted.Listen(&error));
-  config.dbPath = "/nonexistent-dir/x/y.db";
-  server::Server broken(config);
-  CHECK(!broken.Listen(&error) && !error.empty());
-  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
-}
-
 int main(int argc, char** argv) {
   const std::vector<TestCase> cases = {
       TBG_TEST(TestBotRoomHonoursMapAndSeed),
@@ -1987,8 +1525,6 @@ int main(int argc, char** argv) {
       TBG_TEST(TestWorldChangeDebugRemoveAgrees),
       TBG_TEST(TestWorldChangeSentInRoundOnce),
       TBG_TEST(TestWorldChangeKinds),
-      TBG_TEST(TestDebugBombArmedShipsInRound),
-      TBG_TEST(TestDebugBombControlTap),
       TBG_TEST(TestClientServerRound),
       TBG_TEST(TestPlaybackFallFromCable),
       TBG_TEST(TestStaleEchoDoesNotRevertFreshPlans),
@@ -1996,13 +1532,6 @@ int main(int argc, char** argv) {
       TBG_TEST(TestCommitLockHandshake),
       TBG_TEST(TestRejectedActionResyncs),
       TBG_TEST(TestRealSocketLoopback),
-      TBG_TEST(TestGameStoreBasics),
-      TBG_TEST(TestPersistedMatchSurvivesRestart),
-      TBG_TEST(TestDisconnectHoldsSeat),
-      TBG_TEST(TestMyGamesListsOnlyOwn),
-      TBG_TEST(TestFinishedGameReplay),
-      TBG_TEST(TestResumedClientMatchesLive),
-      TBG_TEST(TestServerRestoresFromDbFile),
   };
   if (!RunSelectedTests(argc, argv, cases)) return 2;
   if (g_failures == 0) {

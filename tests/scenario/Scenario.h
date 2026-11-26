@@ -60,13 +60,9 @@ struct ScenarioAction {
   // BeginMove opens move planning (select + Move) and deliberately stops
   // there, leaving the movement frontier up for the visual runner's
   // post-action capture; no destination is clicked and no plan is recorded.
-  // Bomb (issue #350) is the debug-bomb flow: place it at `destination`
-  // (field `bombRadius`), then either detonate immediately or -- with
-  // `bombAt` set -- arm it to go off that many seconds into the next
-  // committed round, exactly like the debug panel / server control taps.
   enum class Kind {
     Move, BeginMove, Shoot, Aim, Pass, Cancel, Commit, Focus, NewGame,
-    TimelineSeek, TimelinePlay, TimelinePause, Wait, Bomb,
+    TimelineSeek, TimelinePlay, TimelinePause, Wait,
   };
 
   int actor = -1;  // Unused (and not required in YAML) for Commit/NewGame/Timeline*.
@@ -113,8 +109,6 @@ struct ScenarioAction {
   // Absent means "bar untouched": the plan keeps whatever level is dialed in
   // (1 unless an earlier step of the same aim set it).
   std::optional<int> shots;
-  float bombRadius = 3.5f;         // Bomb only: blast radius.
-  std::optional<float> bombAt;     // Bomb only: arm for this round time.
 };
 
 // Every field is optional; only the ones present in the YAML step are
@@ -124,6 +118,7 @@ struct ScenarioAssertion {
   std::optional<int> unit;
   std::optional<bool> alive;
   std::optional<glm::vec3> position;
+  std::optional<std::string> coverPose;  // Paired with `unit`: none | stand (back to tall cover) | crouch.
   std::optional<float> facingDegrees;  // Paired with `unit`; degrees, atan2(dz, dx).
   float tolerance = 0.05f;
 
@@ -283,9 +278,12 @@ ScenarioResult RunScenario(const Scenario& scenario);
 // Building blocks for other runners (the networked one): apply one scripted
 // plan action (Move/Shoot/Pass/Cancel/Focus; also Commit/NewGame locally) to
 // a single GameLogic through its click/choose API, and check one assertion
-// against a GameLogic's state. Failures are appended to `result`.
+// against a GameLogic's state. Failures are appended to `result`. `hooks`
+// gives the caller the same presentation callbacks as RunScenario (click
+// markers, menu presses, movement-frontier holds), so a video filmed through
+// the networked rig shows the identical planning flow a real player drives.
 bool ExecuteAction(GameLogic& game, const Scene& scene, const ScenarioAction& action,
-                   int stepIndex, ScenarioResult* result);
+                   int stepIndex, ScenarioResult* result, const PlaybackHooks& hooks = {});
 void CheckAssertion(const GameLogic& game, const ScenarioAssertion& assertion, int stepIndex,
                     ScenarioResult* result);
 

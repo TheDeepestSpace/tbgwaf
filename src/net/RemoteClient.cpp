@@ -491,6 +491,16 @@ std::optional<RemoteClient::RevealedHistory> RemoteClient::TakeRevealedHistory(
   }
   history.frames.push_back({0.0f, snap});
   history.ticks.push_back({"Start", 0});
+  // The whole match's world-change log (building collapses, holes, debris),
+  // so the replay re-creates them: each frame carries the changes that had
+  // gone off by then. Includes blasts outside a round, which no round message
+  // carries.
+  std::vector<tactics::WorldChange> worldLog;
+  for (const Json& w : reveal["world"].AsArray()) {
+    tactics::WorldChange change;
+    if (DecodeWorldChange(w, &change)) worldLog.push_back(std::move(change));
+  }
+  const bool haveWorld = reveal.Has("world");
   float time = 0.0f;
   constexpr float kStep = TurnTimeline::kCaptureInterval;
   for (const Json& round : reveal["rounds"].AsArray()) {
@@ -498,13 +508,27 @@ std::optional<RemoteClient::RevealedHistory> RemoteClient::TakeRevealedHistory(
     if (pb.frames.empty()) continue;
     const float end = pb.frames.back().t;
     snap.tracers.clear();
+    const int roundNumber = snap.roundNumber;
+    // Appends the log entries that have gone off by `clock` into this round.
+    const auto syncWorld = [&](float clock) {
+      if (!haveWorld) return;
+      while (snap.world.size() < worldLog.size()) {
+        const tactics::WorldChange& next = worldLog[snap.world.size()];
+        if (next.round > roundNumber || (next.round == roundNumber && next.at > clock)) break;
+        snap.world.push_back(next);
+      }
+    };
     for (pb.clock = kStep; pb.clock < end; pb.clock += kStep) {
       PosePlayback(&snap, pb, kStep);
+      snap.roundNumber = roundNumber;  // Debris flights age against it.
+      syncWorld(pb.clock);
       history.frames.push_back({time + pb.clock, snap});
     }
     // Round end: the unfogged rule state, as the live game lands on it.
     pb.clock = end;
     PosePlayback(&snap, pb, kStep);
+    snap.roundNumber = roundNumber;
+    syncWorld(std::numeric_limits<float>::infinity());
     time += end;
     const Json& state = pb.finalState;
     for (auto& u : snap.units) {
@@ -518,6 +542,7 @@ std::optional<RemoteClient::RevealedHistory> RemoteClient::TakeRevealedHistory(
       }
     }
     snap.roundNumber = static_cast<int>(state["round"].AsNumber(snap.roundNumber));
+    snap.executionElapsed = 0.0f;
     if (state["over"].AsBool()) {
       snap.mode = InputMode::GameOver;
       const auto winner = ParseTeamName(state["winner"].AsString());

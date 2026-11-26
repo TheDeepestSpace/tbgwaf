@@ -1041,6 +1041,39 @@ Scene BombWallScene() {
   return scene;
 }
 
+// The post-game replay re-creates the collapses: frames before the armed
+// blast have no world changes, frames after it carry the full log, and the
+// replay game rebuilds the same geometry.
+void TestRevealHistoryReplaysDestruction() {
+  server::GameSession s(BombWallScene());
+  s.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
+  CHECK(s.DebugArmBomb(2.0f));
+  Action commit;
+  commit.kind = ActionKind::Commit;
+  PlanEveryone(s, Team::Blue);
+  PlanEveryone(s, Team::Red);
+  CHECK(s.Apply(Team::Blue, commit).ok && s.Apply(Team::Red, commit).ok);
+  s.RunRound();
+  const size_t total = s.game().WorldLog().size();
+  CHECK(total > 0);
+  GameLogic game(s.game().BaseScene());
+  net::RemoteClient client(&game, "t");
+  client.OnMessage(s.RevealMessage().Dump());
+  const auto history = client.TakeRevealedHistory(game.ExportState());
+  CHECK(history.has_value());
+  if (!history) return;
+  CHECK(history->frames.front().snapshot.world.empty());
+  CHECK(history->frames.back().snapshot.world.size() == total);
+  size_t last = 0;
+  for (const auto& f : history->frames) {
+    CHECK(f.snapshot.world.size() >= last);
+    last = f.snapshot.world.size();
+  }
+  GameLogic replay(s.game().BaseScene());
+  CHECK(replay.ImportState(history->frames.back().snapshot));
+  CHECK(replay.WorldLog().size() == total);
+}
+
 // Debug bomb (issue #350): an armed bomb detonates inside RunRound at its
 // armed time, and the fracture changes ship with that round message carrying
 // the detonation timestamp.
@@ -1802,6 +1835,7 @@ int main(int argc, char** argv) {
       TBG_TEST(TestWorldChangeSentInRoundOnce),
       TBG_TEST(TestWorldChangeKinds),
       TBG_TEST(TestDebugBombArmedShipsInRound),
+      TBG_TEST(TestRevealHistoryReplaysDestruction),
       TBG_TEST(TestDebugBombControlTap),
       TBG_TEST(TestClientServerBombDebris),
       TBG_TEST(TestClientReportsRejectedWorldChange),

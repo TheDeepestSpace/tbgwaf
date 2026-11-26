@@ -288,6 +288,7 @@ Json GameSession::RevealMessage() const {
   Json msg;
   msg.Set("t", "reveal");
   msg.Set("rounds", std::move(rounds));
+  msg.Set("world", WorldLog(0));  // Full log: includes blasts outside a round.
   return msg;
 }
 

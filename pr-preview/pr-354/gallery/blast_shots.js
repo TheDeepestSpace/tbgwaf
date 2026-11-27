@@ -13,3 +13,8 @@ window.BLAST_SHOTS = [
   "upper_floor_blast_3.png",
   "upper_floor_blast_4.png",
 ];
+window.BLAST_GIFS = [
+  "corner_blast.gif",
+  "ground_floor_blast.gif",
+  "upper_floor_blast.gif",
+];

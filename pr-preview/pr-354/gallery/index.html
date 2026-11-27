@@ -309,14 +309,28 @@
         var blastShotsEl = document.getElementById("blastShots");
         var blastShotsBtn = null;
         var blastShots = window.BLAST_SHOTS || [];
-        if (blastShots.length) {
+        var blastGifs = window.BLAST_GIFS || [];
+        if (blastShots.length || blastGifs.length) {
           addGroup("Blasts in buildings");
           blastShotsBtn = document.createElement("button");
           blastShotsBtn.className = "item";
-          blastShotsBtn.innerText = "All blasts (" + blastShots.length + " frames)";
+          blastShotsBtn.innerText = "All blasts (" + blastGifs.length + " gifs, " + blastShots.length + " frames)";
           blastShotsBtn.onclick = showBlastShots;
           itemsEl.appendChild(blastShotsBtn);
           var blastGrid = blastShotsEl.querySelector(".grid");
+          // 10 s animations first: watch the rubble settle.
+          blastGifs.forEach(function (file) {
+            var fig = document.createElement("figure");
+            var img = document.createElement("img");
+            img.src = "blast_gallery/" + file;
+            img.loading = "lazy";
+            img.alt = file;
+            var cap = document.createElement("figcaption");
+            cap.innerText = file.replace(/\.gif$/, "").replace(/_/g, " ") + " (10 s animation)";
+            fig.appendChild(img);
+            fig.appendChild(cap);
+            blastGrid.appendChild(fig);
+          });
           blastShots.forEach(function (file) {
             var m = file.replace(/\.png$/, "").match(/^(.*)_(\d+)$/);
             var fig = document.createElement("figure");

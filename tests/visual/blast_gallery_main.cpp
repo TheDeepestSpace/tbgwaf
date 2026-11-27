@@ -6,11 +6,14 @@
 // Each case builds one hollow building on an empty scene, places the debug
 // bomb inside it, detonates, and captures the blast at a few moments of the
 // debris flight (the renderer replays the recorded tracks on a wall clock
-// when the blast goes off outside a round).
+// when the blast goes off outside a round). A second detonation per case is
+// recorded in real time for kGifSeconds and encoded (via ffmpeg) into a
+// <name>.gif, so the rubble can be watched settling.
 #include <SDL.h>
 #include <GLES3/gl3.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 
@@ -34,8 +37,10 @@ const Case kCases[] = {
 };
 const float kShotTimes[] = {0.0f, 0.4f, 0.9f, 4.0f};
 constexpr int kW = 960, kH = 600;
+constexpr int kGifSeconds = 10, kGifFps = 10, kGifWidth = 640;
 
-bool Run(gfx::SceneRenderer& renderer, const Case& c, const std::filesystem::path& out) {
+bool Run(gfx::SceneRenderer& renderer, const Case& c, const std::filesystem::path& out,
+         bool gif) {
   tactics::Scene scene;
   tactics::GeneratedBuildingSpec spec;
   spec.seed = c.buildingSeed;
@@ -59,6 +64,30 @@ bool Run(gfx::SceneRenderer& renderer, const Case& c, const std::filesystem::pat
   game.DebugPlaceBomb(c.bomb, c.radius);
   if (!game.DebugDetonateBomb()) return false;
   const Uint32 start = SDL_GetTicks();
+  if (gif) {
+    // Frames land in a scratch dir next to the output, then ffmpeg builds a
+    // palette-optimised GIF from them.
+    const std::filesystem::path frames = out / (std::string(c.name) + "_frames");
+    std::filesystem::remove_all(frames);
+    std::filesystem::create_directories(frames);
+    const int count = kGifSeconds * kGifFps;
+    for (int i = 0; i < count; ++i) {
+      const Uint32 due = start + static_cast<Uint32>(i * 1000 / kGifFps);
+      while (SDL_GetTicks() < due) SDL_Delay(2);
+      char name[32];
+      std::snprintf(name, sizeof name, "f%04d.png", i);
+      if (!visual::SavePng(frames / name, render())) return false;
+    }
+    const std::string cmd =
+        "ffmpeg -y -loglevel error -framerate " + std::to_string(kGifFps) + " -i '" +
+        (frames / "f%04d.png").string() + "' -vf 'scale=" + std::to_string(kGifWidth) +
+        ":-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128[p];[b][p]paletteuse="
+        "dither=bayer:bayer_scale=4' -loop 0 '" +
+        (out / (std::string(c.name) + ".gif")).string() + "'";
+    const int rc = std::system(cmd.c_str());
+    std::filesystem::remove_all(frames);
+    return rc == 0;
+  }
   for (size_t shot = 0; shot < sizeof kShotTimes / sizeof kShotTimes[0]; ++shot) {
     const Uint32 due = start + static_cast<Uint32>(kShotTimes[shot] * 1000.0f);
     while (SDL_GetTicks() < due) SDL_Delay(5);
@@ -100,7 +129,7 @@ int main(int argc, char** argv) {
       result = 1;
     } else {
       for (const Case& c : kCases) {
-        if (!Run(renderer, c, out)) {
+        if (!Run(renderer, c, out, false) || !Run(renderer, c, out, true)) {
           std::fprintf(stderr, "case %s failed\n", c.name);
           result = 1;
         }

@@ -335,6 +335,44 @@ bool CandidateApplied(const GameLogic& before, Team team, const JevCandidate& ca
 // Unvalidated candidate specs; ValidateCandidate() checks each one through a
 // GameLogic copy (move pathing is the expensive part, so callers can spread
 // validation across frames).
+// Squad roles keep figures from all heading to the same spot. Living figures
+// are ranked by distance to the flag (or by lane without one); roles then
+// cycle attacker, left flanker, right flanker, defender. Stable across
+// rounds as long as positions are.
+enum class JevRole { Attacker, FlankerLeft, FlankerRight, Defender };
+
+const char* RoleName(JevRole role) {
+  switch (role) {
+    case JevRole::Attacker: return "attacker";
+    case JevRole::FlankerLeft: return "flanker_left";
+    case JevRole::FlankerRight: return "flanker_right";
+    case JevRole::Defender: return "defender";
+  }
+  return "attacker";
+}
+
+JevRole RoleOf(const GameLogic& game, Team team, int actorId) {
+  std::vector<const Unit*> squad;
+  for (const Unit& unit : game.GetScene().units) {
+    if (unit.team == team && unit.alive) squad.push_back(&unit);
+  }
+  const bool hasFlag = game.Flag().enabled;
+  const glm::vec3 flag = hasFlag ? game.FlagPosition() : glm::vec3(0.0f);
+  const float sign = team == Team::Blue ? 1.0f : -1.0f;
+  auto key = [&](const Unit* u) {
+    return hasFlag ? XZDistance(u->position, flag) : -sign * u->position.x;
+  };
+  std::sort(squad.begin(), squad.end(), [&](const Unit* a, const Unit* b) {
+    const float ka = key(a), kb = key(b);
+    return ka != kb ? ka < kb : a->id < b->id;
+  });
+  size_t rank = 0;
+  for (size_t i = 0; i < squad.size(); ++i) {
+    if (squad[i]->id == actorId) rank = i;
+  }
+  return static_cast<JevRole>(rank % 4);
+}
+
 std::vector<JevCandidate> GenerateCandidateSpecs(const GameLogic& game, Team team, int actorId) {
   const Unit* actor = game.FindUnit(actorId);
   if (!actor) return {};
@@ -453,6 +491,47 @@ std::vector<JevCandidate> GenerateCandidateSpecs(const GameLogic& game, Team tea
       candidates.push_back(std::move(candidate));
     }
   }
+  // Role-based objective routes so the squad does not stack on one path:
+  // flankers circle the flag laterally, the defender holds back toward the
+  // own deployment edge.
+  const JevRole role = RoleOf(game, team, actorId);
+  if (game.Flag().enabled && flagOffered && (role == JevRole::FlankerLeft || role == JevRole::FlankerRight)) {
+    const glm::vec3 flag = game.FlagPosition();
+    glm::vec3 dir = flag - actor->position;
+    dir.y = 0.0f;
+    if (glm::length(dir) > 6.0f) {
+      dir = glm::normalize(dir);
+      const glm::vec3 side(-dir.z, 0.0f, dir.x);
+      const float lateral = role == JevRole::FlankerLeft ? 7.0f : -7.0f;
+      const float half = game.GetScene().mapHalfExtent - 2.0f;
+      glm::vec3 goal = flag + side * lateral;
+      goal.x = std::clamp(goal.x, -half, half);
+      goal.z = std::clamp(goal.z, -half, half);
+      JevCandidate candidate;
+      candidate.id = "flank";
+      candidate.kind = JevActionKind::Move;
+      candidate.actorId = actorId;
+      candidate.destination = actor->position;
+      candidate.routeGoal = goal;
+      candidate.description = "Flank toward the flag from the " +
+                              std::string(role == JevRole::FlankerLeft ? "left" : "right") +
+                              " side, approaching " + PointJson(goal) +
+                              " so the squad arrives from several directions.";
+      candidates.push_back(std::move(candidate));
+    }
+  }
+  if (game.Flag().enabled && role == JevRole::Defender && flagOffered) {
+    const float sign = team == Team::Blue ? 1.0f : -1.0f;
+    const float half = game.GetScene().mapHalfExtent - 4.0f;
+    JevCandidate candidate;
+    candidate.id = "hold";
+    candidate.kind = JevActionKind::Move;
+    candidate.actorId = actorId;
+    candidate.destination = actor->position;
+    candidate.routeGoal = glm::vec3(-sign * half * 0.5f, actor->position.y, actor->position.z);
+    candidate.description = "Fall back toward your own deployment area to guard the approach and cover the squad.";
+    candidates.push_back(std::move(candidate));
+  }
   int hunted = 0;
   for (const Ghost& ghost : ghosts) {
     if (hunted >= 2) break;
@@ -480,9 +559,14 @@ std::vector<JevCandidate> GenerateCandidateSpecs(const GameLogic& game, Team tea
     candidate.kind = JevActionKind::Move;
     candidate.actorId = actorId;
     candidate.destination = actor->position;  // No straight-line fallback: dropped if unroutable.
-    candidate.routeGoal = glm::vec3(sign * (game.GetScene().mapHalfExtent - 4.0f),
-                                    actor->position.y, actor->position.z);
-    candidate.description = "Advance toward the opposing deployment edge.";
+    const float half = game.GetScene().mapHalfExtent - 4.0f;
+    // Each role takes its own lane so figures do not all push down one line.
+    const float shift = role == JevRole::FlankerLeft ? -6.0f
+                        : role == JevRole::FlankerRight ? 6.0f : 0.0f;
+    const float lane = std::clamp(actor->position.z + shift, -half, half);
+    candidate.routeGoal = glm::vec3(sign * half, actor->position.y, lane);
+    candidate.description = std::string("Advance toward the opposing deployment edge") +
+                            (role == JevRole::Attacker || role == JevRole::Defender ? "." : " along a flank lane.");
     candidates.push_back(std::move(candidate));
   }
 
@@ -707,7 +791,11 @@ const char* ObjectiveText(const GameLogic& game) {
            "team; touching it anywhere along a move path counts, with no action needed. "
            "Both teams race for it, so favour the 'flag' option, shield or screen the "
            "figure running to it, and shoot enemies that are closer to it than you are. "
-           "Eliminating the opposing squad also still wins.";
+           "Eliminating the opposing squad also still wins. Each ally has a role: the "
+           "attacker runs for the flag, flankers use 'flank' to approach from the sides, "
+           "the defender uses 'hold' to cover the approach. Do not send every figure "
+           "down the same path or onto the same spot; prefer routes through cover and "
+           "avoid exposed moves.";
   }
   return "Flag objective: a neutral flag lies on the map (state.flag, 'F' on the grid). "
          "Figures pick it up by touching it; a carrier drops it where it dies. "
@@ -813,6 +901,7 @@ std::string BuildVisibleState(const GameLogic& game, Team team,
         << ",\"scatter_half_angle_deg\":" << StatsOf(unit.weapon).scatterHalfAngleDegrees
         << ",\"max_burst\":" << MaxShotsPerAction(unit.weapon, constants::kRoundDuration)
         << ",\"move_budget\":" << unit.MoveBudget()
+        << ",\"role\":" << JsonString(RoleName(RoleOf(game, team, unit.id)))
         << ",\"planned\":"
         << (unit.plan.type == PlannedActionType::None ? "false" : "true") << "}";
   }
@@ -1024,21 +1113,44 @@ bool ApplyJevChoice(GameLogic* game, const JevRequest& request,
 std::vector<std::string> DeterministicFallbackChoice(const JevRequest& request) {
   std::vector<std::string> choices;
   const float sign = request.team == Team::Blue ? 1.0f : -1.0f;
+  std::vector<glm::vec3> taken;  // Destinations already chosen this round.
+  auto endsWith = [](const std::string& id, const char* suffix) {
+    const std::string suf = suffix;
+    return id.size() >= suf.size() && id.compare(id.size() - suf.size(), suf.size(), suf) == 0;
+  };
+  bool flagTaken = false;
   for (const int actorId : request.actorIds) {
     const JevCandidate* shoot = nullptr;
     const JevCandidate* best = nullptr;
     const JevCandidate* wait = nullptr;
+    const JevCandidate* objective = nullptr;
+    const JevCandidate* flank = nullptr;
+    const JevCandidate* flag = nullptr;
+    auto crowded = [&](const JevCandidate& c) {
+      for (const glm::vec3& t : taken) {
+        if (XZDistance(t, c.routeGoal ? *c.routeGoal : c.destination) < 2.0f) return true;
+      }
+      return false;
+    };
     for (const JevCandidate& candidate : request.candidates) {
       if (candidate.actorId != actorId) continue;
       if (candidate.kind == JevActionKind::Shoot && !shoot) shoot = &candidate;
       if (candidate.kind == JevActionKind::Wait && !wait) wait = &candidate;
-      if (candidate.kind == JevActionKind::Move &&
-          (!best || sign * candidate.destination.x > sign * best->destination.x)) {
-        best = &candidate;
-      }
+      if (candidate.kind != JevActionKind::Move) continue;
+      if (endsWith(candidate.id, "_flag")) flag = &candidate;
+      if (endsWith(candidate.id, "_flank")) flank = &candidate;
+      if (crowded(candidate)) continue;
+      if (!best || sign * candidate.destination.x > sign * best->destination.x) best = &candidate;
     }
-    const JevCandidate* pick = shoot ? shoot : best ? best : wait;
-    if (pick) choices.push_back(pick->id);
+    // Flank options exist only for flankers; the attacker takes the flag
+    // and later figures (who also see a flag option) must not all follow.
+    objective = flank ? flank : (flag && !flagTaken) ? flag : nullptr;
+    if (objective == flag) flagTaken = true;
+    const JevCandidate* pick = shoot ? shoot : objective ? objective : best ? best : flag ? flag : wait;
+    if (pick) {
+      choices.push_back(pick->id);
+      if (pick->kind == JevActionKind::Move) taken.push_back(pick->routeGoal ? *pick->routeGoal : pick->destination);
+    }
   }
   return choices;
 }

@@ -143,7 +143,7 @@ void CheckRenderer() {
     tactics::Unit friendly;
     friendly.id = 3;
     friendly.team = tactics::Team::Blue;
-    friendly.position = away * 3.0f;
+    friendly.position = away * 4.0f;
     seeThrough.units.push_back(friendly);
     tactics::GameLogic fadeGame(seeThrough);
     auto renderFaded = [&]() {
@@ -209,7 +209,7 @@ void CheckRenderer() {
       tactics::Unit friendly;
       friendly.id = 3;
       friendly.team = tactics::Team::Blue;
-      friendly.position = figureInside ? glm::vec3(0.0f) : away * 3.0f;
+      friendly.position = figureInside ? glm::vec3(0.0f) : away * 4.0f;
       s.units.push_back(friendly);
       return s;
     };

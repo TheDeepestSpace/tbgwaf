@@ -404,12 +404,29 @@ class DebrisWorld {
       return center.x >= lo.x - range && center.x <= hi.x + range && center.y >= lo.y - range &&
              center.y <= hi.y + range;
     };
-    for (const Obstacle& o : scene.obstacles) {
-      if (o.dead || o.navOnly) continue;
-      if (!near({o.bounds.min.x, o.bounds.min.z}, {o.bounds.max.x, o.bounds.max.z})) continue;
+    // Roof massing (the parapet band wrapping the roof edge, fixtures,
+    // awnings, deck rails) stops chunks like any wall: viewed as prisms.
+    std::vector<Obstacle> massing;
+    for (const MassingDetail& d : scene.massing) {
+      if (d.dead || d.footprint.size() < 3 || d.y1 <= d.y0) continue;
+      Obstacle prism;
+      prism.footprint = d.footprint;
+      prism.bounds.min = glm::vec3(1e30f, d.y0, 1e30f);
+      prism.bounds.max = glm::vec3(-1e30f, d.y1, -1e30f);
+      for (const glm::vec2& p : d.footprint) {
+        prism.bounds.min.x = std::min(prism.bounds.min.x, p.x);
+        prism.bounds.max.x = std::max(prism.bounds.max.x, p.x);
+        prism.bounds.min.z = std::min(prism.bounds.min.z, p.y);
+        prism.bounds.max.z = std::max(prism.bounds.max.z, p.y);
+      }
+      massing.push_back(std::move(prism));
+    }
+    const auto addSolid = [&](const Obstacle& o) {
+      if (o.dead || o.navOnly) return;
+      if (!near({o.bounds.min.x, o.bounds.min.z}, {o.bounds.max.x, o.bounds.max.z})) return;
       Solid s;
       s.footprint = ObstacleFootprint(o);
-      if (s.footprint.size() < 3) continue;
+      if (s.footprint.size() < 3) return;
       s.bounds = o.bounds;
       if (o.profile.size() >= 3 && o.footprint.size() >= 2) {
         const glm::vec2 ab = o.footprint[1] - o.footprint[0];
@@ -423,7 +440,9 @@ class DebrisWorld {
       solids_.push_back(std::move(s));
       DebrisShape shape;
       if (DebrisPieceShape(o, &shape)) shapes_.push_back(std::move(shape));
-    }
+    };
+    for (const Obstacle& o : scene.obstacles) addSolid(o);
+    for (const Obstacle& o : massing) addSolid(o);
   }
 
   // Inside standing geometry (a wall piece's torn silhouette included).

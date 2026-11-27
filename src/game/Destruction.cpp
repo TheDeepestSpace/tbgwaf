@@ -1118,7 +1118,13 @@ std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& bomb)
   // and up are rubble obstacles (their vertical envelope blocks movement and
   // sight); smaller ones, and any that would entomb a figure, are litter.
   if (!chunks.empty()) {
-    const DebrisWorld world(scratch, bombXZ, bomb.radius + 20.0f);
+    // Collidable geometry must cover everything a chunk can reach: a high
+    // impulse throws them (up to the simulator's 30 m/s cap) far beyond the
+    // blast radius, and anything left out of the world is flown straight
+    // through. Ballistic range v^2 / g, with slack for launch height/rolling.
+    const float launchSpeed = std::min(30.0f, 8.0f * std::max(bomb.impulse, 1.0f));
+    const float reach = std::max(20.0f, 1.25f * launchSpeed * launchSpeed / 9.81f + 8.0f);
+    const DebrisWorld world(scratch, bombXZ, bomb.radius + reach);
     Rng rng(Mix(bomb.seed, 0x6d2b79f5u));
     std::vector<DebrisBodyDesc> bodies;
     bodies.reserve(chunks.size());

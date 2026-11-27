@@ -4930,6 +4930,26 @@ void TestDebrisDeflectsOffAFigure() {
   CHECK(tracks[0].keys.back().position.x + 0.5f < 1.6f);
 }
 
+// A fast chunk (0.25 m per step) cannot tunnel through a thin wall.
+void TestDebrisFastChunkDoesNotTunnelThroughThinWall() {
+  DebrisWorldDesc world;
+  world.extent = 80.0f;
+  DebrisShape wall;
+  wall.outline = {{-6.0f, -3.0f}, {6.0f, -3.0f}, {6.0f, 3.0f}, {-6.0f, 3.0f}};
+  wall.thickness = 0.08f;
+  // Local z (thickness) along world X: a wall in the plane x = 10.
+  wall.pose = glm::translate(glm::mat4(1.0f), glm::vec3(10.0f, 3.0f, 0.0f)) *
+              glm::mat4(glm::mat3(glm::vec3(0, 0, -1), glm::vec3(0, 1, 0), glm::vec3(1, 0, 0)));
+  world.statics.push_back(wall);
+  DebrisBodyDesc shard = SlabBody({0.0f, 2.0f, 0.0f}, 0.0f, {30.0f, 1.0f, 0.0f});
+  shard.shape.outline = {{-0.03f, -0.03f}, {0.03f, -0.03f}, {0.03f, 0.03f}, {-0.03f, 0.03f}};
+  shard.shape.thickness = 0.05f;
+  const auto tracks = SimulateDebris(world, {shard});
+  float maxX = -1e9f;
+  for (const DebrisKey& k : tracks[0].keys) maxX = std::max(maxX, k.position.x);
+  CHECK(maxX < 10.0f && maxX > 8.5f);  // Reached the wall, never crossed it.
+}
+
 // The same input yields the same track, bit for bit (the server is the
 // only place this runs, but replays and tests rely on it), and a settled pile
 // ends: no body is still moving when its track stops.
@@ -5445,6 +5465,7 @@ int main() {
   TestDebrisSlabsLandFlatAndStack();
   TestDebrisRestsTiltedOnASlope();
   TestDebrisDeflectsOffAFigure();
+  TestDebrisFastChunkDoesNotTunnelThroughThinWall();
   TestDebrisSimulationIsDeterministicAndSettles();
   TestDebrisStillFallingLateIsNotSlowed();
   TestRubbleBandFootprintClipsBody();

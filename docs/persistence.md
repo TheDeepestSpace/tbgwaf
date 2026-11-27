@@ -35,7 +35,7 @@ that would need a backfill.
 
 ## Blue vs Jev
 
-Menu: Online -> **Play vs AI** (server needs `TBGWAF_JEV_ADAPTER_URL`). Stored
+Menu: New Game -> mode -> map -> **Play vs AI** (server needs `TBGWAF_JEV_ADAPTER_URL`). Stored
 like a human match, with Jev's seat (Red) held by the reserved token `jev`
 (`GameStore::kJevToken`; clients can't send it, tokens need 16+ chars), so no
 schema change. Jev's orders are stored on its commit and replayed like any
@@ -60,7 +60,7 @@ player's own commit flag.
 
 ## Client
 
-Game Mode (online only) has **My games** (list: Resume for active, Replay for
+The Splash (online only) has **My games** (list: Resume for active, Replay for
 finished) and **Continue** (resume the last match). Flow:
 `flow/app_flow.yaml` (`my_games` state); logic: `net::GamesClient`,
 `RemoteClient::SetToken/SetResume`.

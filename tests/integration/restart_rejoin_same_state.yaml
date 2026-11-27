@@ -7,10 +7,14 @@ steps:
   - server: start
   - app: [alice, bob]
   - click: {app: alice, button: New Game}
+  - click: {app: alice, button: Regular}
+  - click: {app: alice, button: Urban}
   - click: {app: alice, button: Online (2 players)}
   - click: {app: alice, button: New room}
   - assert: {app: alice, screen: gameplay, status: waiting}
   - click: {app: bob, button: New Game}
+  - click: {app: bob, button: Regular}
+  - click: {app: bob, button: Urban}
   - click: {app: bob, button: Online (2 players)}
   - type_room_code: {app: bob, from: alice}
   - click: {app: bob, button: Join}
@@ -28,10 +32,8 @@ steps:
   - assert: {app: bob, peer_away: true}
   - server: restart
   - reload: bob
-  - click: {app: alice, button: New Game}
   - click: {app: alice, button: Continue}
   - assert: {app: alice, screen: gameplay, status: playing, same_as: alice_before}
-  - click: {app: bob, button: New Game}
   - click: {app: bob, button: Continue}
   - assert: {app: bob, screen: gameplay, status: playing, same_as: bob_before}
   - assert: {app: bob, peer_ready: true, self_ready: false}

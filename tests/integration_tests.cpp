@@ -10,7 +10,7 @@
 // token and last-game memory (localStorage), net::GamesClient for "My games"
 // and net::RemoteClient over a native WebSocket for the match. `click` presses
 // a menu button by the label DrawMenu draws (ui/MenuButtons.h), so scenarios
-// walk Splash -> Game Mode -> Online / My games / Continue the way a player
+// walk Splash -> (Game Mode -> Map Select -> Opponent -> Online) / My games / Continue the way a player
 // does. The server can be restarted or killed mid-scenario; its SQLite file
 // survives. See tests/integration/README.md for the step vocabulary.
 //
@@ -60,6 +60,7 @@ const char* ScreenName(flow::State s) {
     case flow::State::MapSelect: return "map_select";
     case flow::State::Builder: return "builder";
     case flow::State::BuilderEdit: return "builder_edit";
+    case flow::State::Opponent: return "opponent";
     case flow::State::Room: return "room";
     case flow::State::MyGames: return "my_games";
     case flow::State::Gameplay: return "gameplay";

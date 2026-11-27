@@ -789,6 +789,7 @@ int main() {
   // issue #130); TBGWAF_MAP=urban forces it off, urban-elevated forces it on;
   // urban-full forces every optional feature layer on.
   std::string mapType = "urban-auto";
+  std::string onlineMapKind = "urban";  // Server name of the map last picked on Map Select.
 #ifdef __EMSCRIPTEN__
   // Splash pick (the same ids the Map Select screen maps to below).
   if (const int choice = tbgwaf_map_choice(); choice == 1) mapType = "urban-auto-x1";
@@ -1832,6 +1833,7 @@ int main() {
       if (autoEnterGameplay && !flowEvent) {
         switch (screen) {
           case tbgwaf_flow::State::Splash: flowEvent = tbgwaf_flow::Event::NewGame; break;
+          case tbgwaf_flow::State::Opponent: flowEvent = tbgwaf_flow::Event::StartLocal; break;
           case tbgwaf_flow::State::Room: break;  // Needs a typed code or a click.
           case tbgwaf_flow::State::GameMode:
             flowEvent = isSmokeBuilder ? tbgwaf_flow::Event::SelectBuilder
@@ -1869,6 +1871,8 @@ int main() {
         remote = std::make_unique<tactics::net::RemoteClient>(
             &game, create ? "" : roomForm.code, create ? "create" : "join", false);
         remote->SetToken(deviceToken);
+        // The map and mode picked before the Opponent step (a joiner gets the host's).
+        if (create) remote->SetMatchSetup(onlineMapKind, mapSeed, ctfMode);
         if (ai) remote->SetBotMode("player-v-ai");  // Stored and resumable like a human match.
         connectedFromResume = false;
         remoteMode = true;
@@ -1945,12 +1949,19 @@ int main() {
           if (*flowEvent == tbgwaf_flow::Event::SelectHills) mapType = "hilly";
           else if (*flowEvent == tbgwaf_flow::Event::SelectUrbanX4) mapType = "urban-auto";
           else mapType = "urban-auto-x1";
+          onlineMapKind = *flowEvent == tbgwaf_flow::Event::SelectHills     ? "hills"
+                          : *flowEvent == tbgwaf_flow::Event::SelectUrbanX4 ? "urban-x4"
+                                                                           : "urban";
           game.Reset(makeMap());
           timeline.Reset(game);
           for (auto& playback : timelinePlayback) playback.Reset();
           for (auto& camera : cameras) camera.FitToExtent(game.GetScene().mapHalfExtent);
         }
         if (flowEvent) screen = tbgwaf_flow::Next(screen, *flowEvent);
+        // Nobody to pick without a game server: the Opponent step is Local.
+        if (screen == tbgwaf_flow::State::Opponent && onlineServerUrl.empty()) {
+          screen = tbgwaf_flow::Next(screen, tbgwaf_flow::Event::StartLocal);
+        }
         lastFrameTicks = SDL_GetTicks();
       }
       glViewport(0, 0, windowWidth, windowHeight);

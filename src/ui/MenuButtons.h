@@ -28,19 +28,29 @@ inline constexpr const char* kButtonContinue = "Continue";
 inline constexpr const char* kButtonBack = "Back";
 inline constexpr const char* kButtonNewRoom = "New room";
 inline constexpr const char* kButtonPlayAi = "Play vs AI";
+inline constexpr const char* kButtonUrban = "Urban";
+inline constexpr const char* kButtonUrbanX4 = "Urban x4";
+inline constexpr const char* kButtonHills = "Hills";
+inline constexpr const char* kButtonLocal = "Local";
 inline constexpr const char* kButtonJoin = "Join";
 
 inline constexpr MenuButton kMenuButtons[] = {
     {tbgwaf_flow::State::Splash, kButtonNewGame, tbgwaf_flow::Event::NewGame},
+    {tbgwaf_flow::State::Splash, kButtonContinue, tbgwaf_flow::Event::ContinueGame},
+    {tbgwaf_flow::State::Splash, kButtonMyGames, tbgwaf_flow::Event::SelectMyGames},
     {tbgwaf_flow::State::GameMode, kButtonRegular, tbgwaf_flow::Event::SelectRegular},
     {tbgwaf_flow::State::GameMode, kButtonCtf, tbgwaf_flow::Event::SelectCtf},
     {tbgwaf_flow::State::GameMode, kButtonBuilder, tbgwaf_flow::Event::SelectBuilder},
-    {tbgwaf_flow::State::GameMode, kButtonOnline, tbgwaf_flow::Event::SelectOnline},
-    {tbgwaf_flow::State::GameMode, kButtonMyGames, tbgwaf_flow::Event::SelectMyGames},
-    {tbgwaf_flow::State::GameMode, kButtonContinue, tbgwaf_flow::Event::ContinueGame},
     {tbgwaf_flow::State::GameMode, kButtonBack, tbgwaf_flow::Event::Back},
+    {tbgwaf_flow::State::MapSelect, kButtonUrban, tbgwaf_flow::Event::SelectUrban},
+    {tbgwaf_flow::State::MapSelect, kButtonUrbanX4, tbgwaf_flow::Event::SelectUrbanX4},
+    {tbgwaf_flow::State::MapSelect, kButtonHills, tbgwaf_flow::Event::SelectHills},
+    {tbgwaf_flow::State::MapSelect, kButtonBack, tbgwaf_flow::Event::Back},
+    {tbgwaf_flow::State::Opponent, kButtonLocal, tbgwaf_flow::Event::StartLocal},
+    {tbgwaf_flow::State::Opponent, kButtonOnline, tbgwaf_flow::Event::SelectOnline},
+    {tbgwaf_flow::State::Opponent, kButtonPlayAi, tbgwaf_flow::Event::CreateAiRoom},
+    {tbgwaf_flow::State::Opponent, kButtonBack, tbgwaf_flow::Event::Back},
     {tbgwaf_flow::State::Room, kButtonNewRoom, tbgwaf_flow::Event::CreateRoom},
-    {tbgwaf_flow::State::Room, kButtonPlayAi, tbgwaf_flow::Event::CreateAiRoom},
     {tbgwaf_flow::State::Room, kButtonJoin, tbgwaf_flow::Event::JoinRoom},
     {tbgwaf_flow::State::Room, kButtonBack, tbgwaf_flow::Event::Back},
     {tbgwaf_flow::State::MyGames, kButtonContinue, tbgwaf_flow::Event::ContinueGame},

@@ -163,6 +163,7 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     if (!node["position"]) throw std::runtime_error("bomb requires 'position'");
     action.destination = ParseVec3(node["position"], "script[].position");
     if (node["radius"]) action.bombRadius = node["radius"].as<float>();
+    if (node["impulse"]) action.bombImpulse = node["impulse"].as<float>();
     if (node["at"]) action.bombAt = node["at"].as<float>();
     return action;
   }
@@ -431,7 +432,7 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
   }
 
   if (action.kind == ScenarioAction::Kind::Bomb) {
-    game.DebugPlaceBomb(action.destination, action.bombRadius);
+    game.DebugPlaceBomb(action.destination, action.bombRadius, action.bombImpulse);
     if (action.bombAt) {
       if (!game.DebugArmBomb(*action.bombAt)) return Fail("bomb could not be armed");
       return true;

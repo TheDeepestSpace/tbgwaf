@@ -4182,6 +4182,29 @@ void TestBombBlowsSeeAndWalkThroughHole() {
   CHECK(!LineOfSightClear(blueEye, redEye, follower.SightObstacles()));
 }
 
+// Blast impulse (debug bomb parameter) scales debris launch velocity: the
+// highest point any chunk reaches grows with it.
+float BombPeakHeight(float impulse) {
+  GameLogic game(BombWallScene());
+  game.SetMatchSeed(7u);
+  game.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f, impulse);
+  CHECK(game.DebugDetonateBomb());
+  float peak = -1e9f;
+  for (const WorldChange& c : game.WorldLog()) {
+    for (const DebrisFlight& f : c.flights) {
+      for (const DebrisKey& k : f.keys) peak = std::max(peak, k.position.y);
+    }
+  }
+  return peak;
+}
+
+void TestBombImpulseLaunchesDebrisHigher() {
+  const float stock = BombPeakHeight(1.0f);
+  const float strong = BombPeakHeight(4.0f);
+  CHECK(strong > stock + 1.0f);
+  CHECK(BombPeakHeight(0.0f) < stock);
+}
+
 void TestWallHoleChangeCutsGeometry() {
   Scene scene = BombWallScene();
   const size_t before = scene.obstacles.size();
@@ -5404,6 +5427,7 @@ int main() {
   TestExplosionPlanDeterministicCells();
   TestBombBlowsSeeAndWalkThroughHole();
   TestWallHoleChangeCutsGeometry();
+  TestBombImpulseLaunchesDebrisHigher();
   TestWallHoleOutlineCutsAngledPieces();
   TestExplosionFractureHasAngledEdges();
   TestExplosionDebrisMatchesKnockedOutCells();

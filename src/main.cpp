@@ -2338,7 +2338,7 @@ int main() {
         const Uint32 ticks = SDL_GetTicks();
         if (remoteBombDirty && (bombPanel.requestDetonate || bombPanel.requestArm ||
                                 ticks - remoteBombSentTicks >= 100)) {
-          remote->SendPlaceBomb(bombPanel.position, bombPanel.radius);
+          remote->SendPlaceBomb(bombPanel.position, bombPanel.radius, bombPanel.impulse);
           remoteBombDirty = false;
           remoteBombSentTicks = ticks;
         }
@@ -2354,7 +2354,7 @@ int main() {
       }
     } else {
       const size_t worldBefore = game.WorldLog().size();
-      if (bombPanel.requestPlace) game.DebugPlaceBomb(bombPanel.position, bombPanel.radius);
+      if (bombPanel.requestPlace) game.DebugPlaceBomb(bombPanel.position, bombPanel.radius, bombPanel.impulse);
       if (bombPanel.requestDetonate) game.DebugDetonateBomb();
       if (bombPanel.requestArm) game.DebugArmBomb(bombPanel.armAt);
       // Planning the blast took real time; it is not game time.

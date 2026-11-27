@@ -594,11 +594,13 @@ class GameLogic {
   struct DebugBomb {
     glm::vec3 position{0.0f};
     float radius = kDefaultBombRadius;
+    float impulse = kDefaultBombImpulse;  // Debris launch-velocity scale.
     float detonateAt = -1.0f;  // Armed: seconds into the executing round; <0 = manual.
   };
   const std::optional<DebugBomb>& GetDebugBomb() const { return debugBomb_; }
   // Places (or moves) the bomb. Radius is clamped to a sane debug range.
-  void DebugPlaceBomb(const glm::vec3& position, float radius = kDefaultBombRadius);
+  void DebugPlaceBomb(const glm::vec3& position, float radius = kDefaultBombRadius,
+                      float impulse = kDefaultBombImpulse);
   // Arms the placed bomb: it detonates once the executing round's clock
   // reaches `atSeconds` (this round if already executing, else the next).
   bool DebugArmBomb(float atSeconds);

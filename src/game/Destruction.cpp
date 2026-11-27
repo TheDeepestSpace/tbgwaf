@@ -1174,7 +1174,7 @@ std::vector<WorldChange> PlanExplosion(const Scene& scene, const BombSpec& bomb)
         spin = glm::vec3(spinX, spinY, spinZ);
       }
       body.light = chunk.area < kSolidChunkArea;
-      body.velocity = glm::vec3(dir.x * speed, vy, dir.y * speed);
+      body.velocity = glm::vec3(dir.x * speed, vy, dir.y * speed) * bomb.impulse;
       body.angularVelocity = spin;
       bodies.push_back(std::move(body));
     }

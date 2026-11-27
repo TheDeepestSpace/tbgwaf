@@ -543,6 +543,9 @@ void DrawDebugPanel(bool& disableFov, bool& coverView, bool& disableShadows, boo
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Y = 1 m above the ground at X / Z");
     ImGui::SetNextItemWidth(130.0f);
     edited |= ImGui::SliderFloat("Blast radius", &bomb->radius, 0.5f, 10.0f, "%.1f");
+    ImGui::SetNextItemWidth(130.0f);
+    edited |= ImGui::SliderFloat("Blast impulse", &bomb->impulse, 0.0f, 6.0f, "%.2fx");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scales debris launch velocity (1 = stock)");
     if (!bomb->placed) {
       if (ImGui::Button("Place")) bomb->requestPlace = true;
     } else {

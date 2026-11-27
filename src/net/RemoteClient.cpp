@@ -586,10 +586,11 @@ void RemoteClient::NormalizeEnemyPlans() {
   }
 }
 
-void RemoteClient::SendPlaceBomb(const glm::vec3& pos, float radius) {
+void RemoteClient::SendPlaceBomb(const glm::vec3& pos, float radius, float impulse) {
   Json m(Json::Object{{"t", Json("place_bomb")},
                       {"pos", Json(Json::Array{Json(double(pos.x)), Json(double(pos.y)), Json(double(pos.z))})},
-                      {"radius", Json(double(radius))}});
+                      {"radius", Json(double(radius))},
+                      {"impulse", Json(double(impulse))}});
   Queue(m);
 }
 

@@ -152,6 +152,7 @@ struct BombPanelState {
   bool armed = false;
   glm::vec3 position{0.0f, 1.0f, 0.0f};
   float radius = 3.5f;
+  float impulse = 1.0f;  // Debris launch-velocity scale.
   float armAt = 1.0f;
   bool requestPlace = false;
   bool requestGround = false;

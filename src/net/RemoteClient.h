@@ -95,7 +95,7 @@ class RemoteClient {
   std::string StatusText() const;
   // Debug bomb (issue #350): asks the server to place/move or detonate it.
   // `at` >= 0 arms it for that time in the next round instead.
-  void SendPlaceBomb(const glm::vec3& pos, float radius);
+  void SendPlaceBomb(const glm::vec3& pos, float radius, float impulse = 1.0f);
   void SendDetonateBomb(float at = -1.0f);
   // The server sent a world change this mirror could not apply: its map is
   // not the server's, and no later change is shown.

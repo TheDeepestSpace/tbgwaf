@@ -126,6 +126,7 @@ inline bool ControlBomb(WsClient& control, const std::string& room,
   pos.Push(Json(static_cast<double>(action.destination.z)));
   place.Set("pos", std::move(pos));
   place.Set("radius", Json(static_cast<double>(action.bombRadius)));
+  place.Set("impulse", Json(static_cast<double>(action.bombImpulse)));
   if (!ControlOk(control, place, error)) return false;
   Json detonate;
   detonate.Set("t", "detonate_bomb");

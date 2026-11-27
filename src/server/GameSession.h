@@ -75,8 +75,9 @@ class GameSession {
   // (between rounds; broadcast the delta via TakeWorldDelta) or arm it for a
   // time into the next round -- the detonation then happens inside RunRound
   // and its changes ship with the round message at that timestamp.
-  void DebugPlaceBomb(const glm::vec3& position, float radius) {
-    game_.DebugPlaceBomb(position, radius);
+  void DebugPlaceBomb(const glm::vec3& position, float radius,
+                      float impulse = kDefaultBombImpulse) {
+    game_.DebugPlaceBomb(position, radius, impulse);
   }
   bool DebugArmBomb(float atSeconds) { return game_.DebugArmBomb(atSeconds); }
   bool DebugDetonateBomb() { return game_.DebugDetonateBomb(); }

@@ -598,7 +598,10 @@ Json Lobby::OnControl(const Json& message) {
     const float radius = message["radius"].IsNumber()
                              ? static_cast<float>(message["radius"].AsNumber())
                              : kDefaultBombRadius;
-    it->second.session->DebugPlaceBomb(pos, radius);
+    const float impulse = message["impulse"].IsNumber()
+                              ? static_cast<float>(message["impulse"].AsNumber())
+                              : kDefaultBombImpulse;
+    it->second.session->DebugPlaceBomb(pos, radius, impulse);
     return reply(true, "");
   }
   if (type == "detonate_bomb") {  // Debug: blow the placed bomb (issue #350).

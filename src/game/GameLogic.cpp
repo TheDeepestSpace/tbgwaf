@@ -570,10 +570,11 @@ bool GameLogic::DebugRemoveObstacle(int index) {
   return ApplyWorldChange(std::move(c));
 }
 
-void GameLogic::DebugPlaceBomb(const glm::vec3& position, float radius) {
+void GameLogic::DebugPlaceBomb(const glm::vec3& position, float radius, float impulse) {
   DebugBomb bomb;
   bomb.position = position;
   bomb.radius = std::clamp(radius, 0.5f, 10.0f);
+  bomb.impulse = std::clamp(impulse, 0.0f, kMaxBombImpulse);
   bomb.detonateAt = debugBomb_ ? debugBomb_->detonateAt : -1.0f;
   debugBomb_ = bomb;
 }
@@ -589,14 +590,15 @@ bool GameLogic::DebugDetonateBomb() {
   BombSpec spec;
   spec.position = debugBomb_->position;
   spec.radius = debugBomb_->radius;
+  spec.impulse = debugBomb_->impulse;
   spec.seed = ExplosionSeed(matchSeed_, roundNumber_, bombsDetonated_);
   debugBomb_.reset();
   ++bombsDetonated_;
   if (recorder_.ptr) {
     char buf[192];
     std::snprintf(buf, sizeof buf,
-                  "bomb pos=(%.4f,%.4f,%.4f) radius=%.3f seed=%u exec=%.4f round=%d",
-                  spec.position.x, spec.position.y, spec.position.z, spec.radius, spec.seed,
+                  "bomb pos=(%.4f,%.4f,%.4f) radius=%.3f impulse=%.3f seed=%u exec=%.4f round=%d",
+                  spec.position.x, spec.position.y, spec.position.z, spec.radius, spec.impulse, spec.seed,
                   executionElapsed_, roundNumber_);
     LogSim(buf);
   }

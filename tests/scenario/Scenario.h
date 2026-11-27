@@ -114,6 +114,7 @@ struct ScenarioAction {
   // (1 unless an earlier step of the same aim set it).
   std::optional<int> shots;
   float bombRadius = 3.5f;         // Bomb only: blast radius.
+  float bombImpulse = 1.0f;        // Bomb only: debris launch-velocity scale.
   std::optional<float> bombAt;     // Bomb only: arm for this round time.
 };
 

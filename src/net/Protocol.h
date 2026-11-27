@@ -30,7 +30,7 @@
 //   {"t":"join","room":"<name>","spectate":true,"mode":"ai-v-ai"}   Jev vs Jev: opens a room of two
 //                                                  server-side Jevs (starts paused) and watches it
 //                                                  (needs TBGWAF_JEV_ADAPTER_URL on the server)
-//   {"t":"place_bomb","pos":[x,y,z],"radius":r} / {"t":"detonate_bomb"[,"at":s]}   debug bomb (#350), any seated player; same as the control tap, own room
+//   {"t":"place_bomb","pos":[x,y,z],"radius":r[,"impulse":k]} / {"t":"detonate_bomb"[,"at":s]}   debug bomb (#350), any seated player; same as the control tap, own room
 //   {"t":"bot_control","run":bool,"retry":bool,"fallback":bool}   Jev rooms only, any member:
 //                                                  run=false/true pauses/starts Jev vs Jev; retry
 //                                                  re-asks after an error; fallback=true switches to

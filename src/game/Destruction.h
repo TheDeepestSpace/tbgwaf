@@ -48,9 +48,13 @@ struct BombSpec {
   glm::vec3 position{0.0f};
   float radius = 3.5f;
   uint32_t seed = 0;
+  // Scales every chunk's launch velocity (1 = the stock blast).
+  float impulse = 1.0f;
 };
 
 constexpr float kDefaultBombRadius = 3.5f;
+constexpr float kDefaultBombImpulse = 1.0f;
+constexpr float kMaxBombImpulse = 6.0f;
 
 // Explosion seed = hash(match seed, round, bomb id): stable across replays
 // and reconnects, never derived from a clock.

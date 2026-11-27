@@ -3815,7 +3815,7 @@ void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::v
   glDepthFunc(GL_LESS);
 }
 
-void SceneRenderer::UpdateDebris(const tactics::GameLogic& game, bool settled) {
+void SceneRenderer::UpdateDebris(const tactics::GameLogic& game) {
   const auto& log = game.WorldLog();
   if (log.size() < debrisLogSeen_) debrisStarted_.clear();  // New match / rewind.
   debrisLogSeen_ = log.size();
@@ -3861,7 +3861,6 @@ void SceneRenderer::UpdateDebris(const tactics::GameLogic& game, bool settled) {
       const auto [it, inserted] = debrisStarted_.try_emplace(c.id, now);
       t = static_cast<float>(now - it->second);
     }
-    if (settled) t = 1e9f;
     for (const tactics::DebrisFlight& flight : c.flights) moving |= t < flight.Duration();
     falls.emplace_back(&c, t);
   }
@@ -3919,7 +3918,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     treeKey_ = game.GetScene().trees;
   }
   const auto& obstacles = game.GetScene().obstacles;
-  UpdateDebris(game, debug.settleDebris);
+  UpdateDebris(game);
   // World changes append to the log: keep in-flight falls on their original
   // colliders. A shorter/empty log (new map, rewind) drops them as before.
   SetRagdollKeepInFlight(!game.WorldLog().empty() && game.WorldLog().size() >= ragdollWorldSeen_);

@@ -59,10 +59,6 @@ struct RenderDebugOptions {
   float thermalFovAlpha = 0.25f;
   // Contact-shading tunables for the thermal view's debug-panel sliders.
   AmbientOcclusionSettings thermalAo;
-  // Draw debris chunks at rest instead of replaying their fall: a
-  // detonation outside a round falls on a wall clock, which the golden
-  // runner cannot pin.
-  bool settleDebris = false;
   // Issue #136: skip the camera-occlusion see-through pass (occluding
   // blocks/decks are then always drawn fully opaque).
   bool disableOcclusionFade = false;
@@ -340,7 +336,7 @@ class SceneRenderer {
   // against a local clock for a detonation outside a round, and at rest
   // afterwards. Rubble is excluded from the static obstacle mesh and drawn
   // from this one, rebuilt only while something is falling.
-  void UpdateDebris(const tactics::GameLogic& game, bool settled);
+  void UpdateDebris(const tactics::GameLogic& game);
   LitTriangleMesh debrisMesh_;
   bool debrisHasGeometry_ = false;
   LitTriangleMesh debrisFovMesh_;  // The solid chunks alone, for the figures' sight maps.

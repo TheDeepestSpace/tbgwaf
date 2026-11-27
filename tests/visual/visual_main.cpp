@@ -233,7 +233,6 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
   renderDebug.disableTrees = true;
   // Cover styling is hidden in goldens, matching the live default (outline-only).
   renderDebug.coverView = false;
-  renderDebug.settleDebris = true;  // Chunks at rest: the fall runs on a wall clock.
   // Every scenario renders in the AO view, like the live app default.
   renderDebug.thermal = true;
   renderDebug.thermalBlackHot = scenario.thermalBlackHot;

@@ -3047,10 +3047,6 @@ void GameLogic::FinishRound() {
     unit.plan.endFacingYaw = EndFacing(sightObstacles_, unit.plan.movePath, unit.facingYaw);
     armedLegs.push_back(unit.id);
   }
-  // Rubble that landed during the round may now block an armed leg: drop it
-  // with the rest of that figure's queue so it is re-planned.
-  RefreshRubbleState();
-  DropRubbleBlockedPlans();
   // Queued legs were planned rounds ago against other positions, so an armed
   // leg can now run into another figure and stall the round (Commit Round
   // unavailable). Drop such legs, with the rest of that figure's queue, so
@@ -3100,6 +3096,10 @@ void GameLogic::FinishRound() {
   // moved with the round counter) start/stop blocking for the new planning
   // phase.
   RefreshRubbleState();
+  // Rubble that landed during the round may now block an armed leg: drop it
+  // with the rest of that figure's queue so it is re-planned. Only now is
+  // this round's rubble at rest (the round counter just moved on).
+  DropRubbleBlockedPlans();
 }
 
 // --- Input recording (issue #240) ---

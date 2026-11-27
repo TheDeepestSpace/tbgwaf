@@ -244,6 +244,7 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
       throw std::runtime_error("assert.cover_pose must be none, stand or crouch");
     }
   }
+  if (node["planned"]) assertion.planned = node["planned"].as<bool>();
   if (node["tolerance"]) assertion.tolerance = node["tolerance"].as<float>();
   if (node["visible_to"]) {
     assertion.visibleToTeam = ParseTeam(node["visible_to"].as<std::string>(), "assert.visible_to");
@@ -284,10 +285,10 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   }
 
   if ((assertion.alive || assertion.position || assertion.facingDegrees ||
-       assertion.coverPose || assertion.visible || assertion.remembered ||
-       assertion.ghostAlpha) && !assertion.unit) {
+       assertion.coverPose || assertion.planned || assertion.visible ||
+       assertion.remembered || assertion.ghostAlpha) && !assertion.unit) {
     throw std::runtime_error(
-        "assert checking alive/position/facing_degrees/cover_pose/visible/remembered/ghost_alpha requires 'unit'");
+        "assert checking alive/position/facing_degrees/cover_pose/planned/visible/remembered/ghost_alpha requires 'unit'");
   }
   if ((assertion.remembered || assertion.ghostAlpha) && !assertion.rememberedByTeam) {
     throw std::runtime_error("assert 'remembered'/'ghost_alpha' require 'remembered_by'");
@@ -685,6 +686,13 @@ void CheckAssertionImpl(const GameLogic& game, const ScenarioAssertion& a, int s
           Fail("unit " + std::to_string(*a.unit) + " expected facing near " +
                std::to_string(*a.facingDegrees) + " deg but is at " +
                std::to_string(unit->facingYaw * 180.0f / 3.14159265f));
+        }
+      }
+      if (a.planned) {
+        const bool actual = unit->plan.type != PlannedActionType::None;
+        if (actual != *a.planned) {
+          Fail("unit " + std::to_string(*a.unit) + " expected planned=" +
+               (*a.planned ? "true" : "false") + " but has " + (actual ? "a plan" : "no plan"));
         }
       }
       if (a.coverPose) {

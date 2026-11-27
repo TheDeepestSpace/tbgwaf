@@ -126,6 +126,9 @@ struct ScenarioAssertion {
   std::optional<glm::vec3> position;
   std::optional<std::string> coverPose;  // Paired with `unit`: none | stand (back to tall cover) | crouch.
   std::optional<float> facingDegrees;  // Paired with `unit`; degrees, atan2(dz, dx).
+  // Paired with `unit`: the figure has (true) / lacks (false) a plan for the
+  // round -- e.g. false once a collapse invalidated its queued route.
+  std::optional<bool> planned;
   float tolerance = 0.05f;
 
   std::optional<Team> visibleToTeam;  // Paired with `visible`.

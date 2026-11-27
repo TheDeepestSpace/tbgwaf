@@ -3887,6 +3887,15 @@ void TestDeadFiguresSeeThroughProbes() {
   CHECK(has(probes, units[1].EyePosition()));
   probes = FigureSeeThroughProbes(Team::Blue, false, false, units, {}, noSurfaces, flat);
   CHECK(has(probes, units[2].EyePosition()));
+  // The whole body is probed: every corner of the prism around the figure.
+  const glm::vec3 at = units[0].position;
+  const float hw = constants::kUnitHalfWidth;
+  for (const float dx : {-hw, hw}) {
+    for (const float dz : {-hw, hw}) {
+      CHECK(has(probes, at + glm::vec3(dx, constants::kUnitHeight, dz)));
+      CHECK(has(probes, at + glm::vec3(dx, 0.3f, dz)));
+    }
+  }
 }
 
 // Camera see-through: a faded enterable building keeps its interior view only

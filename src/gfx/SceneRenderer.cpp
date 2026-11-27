@@ -3868,6 +3868,7 @@ void SceneRenderer::UpdateDebris(const tactics::GameLogic& game) {
   if (!moving && !debrisMoving_ && key == debrisKey_) return;
   LitVertices vertices, fovVertices;
   std::vector<GLuint> indices, fovIndices;
+  debrisChunks_.clear();
   for (const auto& [change, t] : falls) {
     const tactics::WorldChange& c = *change;
     for (size_t i = 0; i < c.pieces.size(); ++i) {
@@ -3891,11 +3892,25 @@ void SceneRenderer::UpdateDebris(const tactics::GameLogic& game) {
         }
       };
       append(&vertices, &indices);
+      {
+        DebrisChunk chunk;
+        append(&chunk.vertices, &chunk.indices);
+        if (!chunk.indices.empty()) {
+          chunk.min = glm::vec3(std::numeric_limits<float>::infinity());
+          chunk.max = glm::vec3(-std::numeric_limits<float>::infinity());
+          for (const auto& v : chunk.vertices) {
+            chunk.min = glm::min(chunk.min, v.pos);
+            chunk.max = glm::max(chunk.max, v.pos);
+          }
+          debrisChunks_.push_back(std::move(chunk));
+        }
+      }
       // Solid chunks block sight like any obstacle -- from where they are
       // now, mid-flight included -- so they join the figures' depth maps.
       if (flight.solid) append(&fovVertices, &fovIndices);
     }
   }
+  ++debrisGeneration_;
   debrisMesh_.SetMesh(vertices, indices);
   debrisHasGeometry_ = !indices.empty();
   debrisFovMesh_.SetMesh(fovVertices, fovIndices);
@@ -4255,6 +4270,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   std::vector<char> fadeSurface(walkSurfaces.size(), 0);
   std::vector<char> fadeMassing(massing.size(), 0);
   std::vector<char> fadeBuilding;
+  // Debris chunks (debrisChunks_) that block a sightline. Each chunk fades
+  // on its own: a chunk is not part of any building group.
+  std::vector<char> fadeChunk(debrisChunks_.size(), 0);
   // Surfaces that themselves cross a sightline (before the building and
   // overpass grouping below): a faded building's floors keep the shell
   // opacity where they hide a probe, see kInteriorFadeOpacity.
@@ -4283,12 +4301,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     const uint64_t geometryKey = FadeGeometryKey(game.GetScene());
     FadeCache& fadeCache = fadeCache_[team == tactics::Team::Blue ? 0 : 1];
     if (fadeCache.valid && fadeCache.cameraPos == cameraPos &&
-        fadeCache.geometryKey == geometryKey && fadeCache.probes == probes) {
+        fadeCache.geometryKey == geometryKey && fadeCache.probes == probes &&
+        fadeCache.debrisGeneration == debrisGeneration_) {
       fadeObstacle = fadeCache.fadeObstacle;
       fadeSurface = fadeCache.fadeSurface;
       fadeMassing = fadeCache.fadeMassing;
       fadeBuilding = fadeCache.fadeBuilding;
       directSurface = fadeCache.directSurface;
+      fadeChunk = fadeCache.fadeChunk;
       anyFaded = fadeCache.anyFaded;
     } else {
       struct ProbeRay {
@@ -4371,9 +4391,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       for (size_t i = 0; i < obstacles.size(); ++i) {
         // Post-sized furniture is too small to hide a useful target and is kept
         // in one static render batch below.
-        if (obstacles[i].navOnly || tactics::IsStreetFixture(obstacles[i].kind)) {
+        if (obstacles[i].navOnly || obstacles[i].dead ||
+            tactics::IsStreetFixture(obstacles[i].kind)) {
           continue;
         }
+        // Settled chunks are drawn (and faded) per chunk below, from their
+        // posed prisms, not as the rubble obstacle's vertical envelope.
+        if (obstacles[i].kind == tactics::ObstacleKind::Rubble) continue;
         if (crossesProbeRay(obstacles[i])) {
           fadeObstacle[i] = 1;
           anyFaded = true;
@@ -4381,7 +4405,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
       for (size_t i = 0; i < walkSurfaces.size(); ++i) {
         const tactics::WalkSurface& surface = walkSurfaces[i];
-        if (surface.vertices.size() < 3) continue;  // Never intersected.
+        if (surface.dead || surface.vertices.size() < 3) continue;  // Never intersected.
         glm::vec2 lo(surface.vertices[0].x, surface.vertices[0].z);
         glm::vec2 hi = lo;
         for (const glm::vec3& v : surface.vertices) {
@@ -4406,7 +4430,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       // sight prisms used by gameplay LOS so those hits trigger group fading.
       for (size_t i = 0; i < massing.size(); ++i) {
         const tactics::MassingDetail& d = massing[i];
-        if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
+        if (d.dead || d.footprint.size() < 3 || d.y1 <= d.y0) continue;
         tactics::Obstacle prism;
         prism.footprint = d.footprint;
         prism.bounds.min = glm::vec3(std::numeric_limits<float>::infinity(), d.y0,
@@ -4421,6 +4445,54 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         }
         if (crossesProbeRay(prism)) {
           fadeMassing[i] = 1;
+          anyFaded = true;
+        }
+      }
+      // Debris chunks: each one is its own occluder. Broadphase by the
+      // chunk's bounding circle, then its AABB (slab test) and posed
+      // triangles, so a chunk fades only where it really crosses a sightline.
+      for (size_t c = 0; c < debrisChunks_.size(); ++c) {
+        const DebrisChunk& chunk = debrisChunks_[c];
+        const glm::vec2 lo(chunk.min.x, chunk.min.z), hi(chunk.max.x, chunk.max.z);
+        const bool crossed =
+            anyRayHits(0.5f * (lo + hi), 0.5f * glm::length(hi - lo), [&](const ProbeRay& ray) {
+              const float tMax = ray.length - kEndpointEpsilon;
+              float t0 = kEndpointEpsilon, t1 = tMax;
+              for (int axis = 0; axis < 3; ++axis) {
+                if (std::fabs(ray.direction[axis]) < 1e-8f) {
+                  if (cameraPos[axis] < chunk.min[axis] || cameraPos[axis] > chunk.max[axis]) {
+                    return false;
+                  }
+                  continue;
+                }
+                float a = (chunk.min[axis] - cameraPos[axis]) / ray.direction[axis];
+                float b = (chunk.max[axis] - cameraPos[axis]) / ray.direction[axis];
+                if (a > b) std::swap(a, b);
+                t0 = std::max(t0, a);
+                t1 = std::min(t1, b);
+                if (t0 > t1) return false;
+              }
+              for (size_t k = 0; k + 2 < chunk.indices.size(); k += 3) {
+                const glm::vec3& p0 = chunk.vertices[chunk.indices[k]].pos;
+                const glm::vec3 e1 = chunk.vertices[chunk.indices[k + 1]].pos - p0;
+                const glm::vec3 e2 = chunk.vertices[chunk.indices[k + 2]].pos - p0;
+                const glm::vec3 pv = glm::cross(ray.direction, e2);
+                const float det = glm::dot(e1, pv);
+                if (std::fabs(det) < 1e-9f) continue;
+                const float inv = 1.0f / det;
+                const glm::vec3 tv = cameraPos - p0;
+                const float u = glm::dot(tv, pv) * inv;
+                if (u < 0.0f || u > 1.0f) continue;
+                const glm::vec3 qv = glm::cross(tv, e1);
+                const float v = glm::dot(ray.direction, qv) * inv;
+                if (v < 0.0f || u + v > 1.0f) continue;
+                const float t = glm::dot(e2, qv) * inv;
+                if (t > kEndpointEpsilon && t < tMax) return true;
+              }
+              return false;
+            });
+        if (crossed) {
+          fadeChunk[c] = 1;
           anyFaded = true;
         }
       }
@@ -4441,8 +4513,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       for (size_t i = 0; i < massing.size(); ++i) {
         if (fadeMassing[i]) markBuilding(massing[i].building);
       }
+      // Only what still stands joins the group: a part a blast removed is
+      // gone from the picture, so it must not fade (or draw) as a silhouette.
       for (size_t i = 0; i < obstacles.size(); ++i) {
         const int b = obstacles[i].building;
+        if (obstacles[i].dead || obstacles[i].kind == tactics::ObstacleKind::Rubble) continue;
         if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
           fadeObstacle[i] = 1;
           anyFaded = true;
@@ -4450,6 +4525,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
       for (size_t i = 0; i < walkSurfaces.size(); ++i) {
         const int b = surfaceBuilding[i];
+        if (walkSurfaces[i].dead) continue;
         if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
           fadeSurface[i] = 1;
           anyFaded = true;
@@ -4457,6 +4533,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
       for (size_t i = 0; i < massing.size(); ++i) {
         const int b = massing[i].building;
+        if (massing[i].dead) continue;
         if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
           fadeMassing[i] = 1;
           anyFaded = true;
@@ -4481,13 +4558,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
       if (fadeOverpass) {
         for (size_t i = 0; i < obstacles.size(); ++i) {
-          if (obstacles[i].kind == tactics::ObstacleKind::Pier) fadeObstacle[i] = 1;
+          if (obstacles[i].kind == tactics::ObstacleKind::Pier && !obstacles[i].dead) {
+            fadeObstacle[i] = 1;
+          }
         }
         for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-          if (walkSurfaces[i].overpass) fadeSurface[i] = 1;
+          if (walkSurfaces[i].overpass && !walkSurfaces[i].dead) fadeSurface[i] = 1;
         }
         for (size_t i = 0; i < massing.size(); ++i) {
-          if (overpassDetail(massing[i])) fadeMassing[i] = 1;
+          if (overpassDetail(massing[i]) && !massing[i].dead) fadeMassing[i] = 1;
         }
         anyFaded = true;
       }
@@ -4500,6 +4579,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       fadeCache.fadeMassing = fadeMassing;
       fadeCache.fadeBuilding = fadeBuilding;
       fadeCache.directSurface = directSurface;
+      fadeCache.fadeChunk = fadeChunk;
+      fadeCache.debrisGeneration = debrisGeneration_;
       fadeCache.anyFaded = anyFaded;
     }
     plainBuilding.assign(fadeBuilding.size(), 0);
@@ -4604,6 +4685,18 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // Every static batch below is grouped (per surface, obstacle or building)
   // so camera-faded occluders are skipped here and re-drawn translucent
   // after the figures, without re-tessellating the rest every frame.
+  // The posed debris chunks whose fade flag equals `faded`, as one mesh.
+  const auto buildChunkMesh = [&](bool faded) {
+    std::pair<std::vector<LitTriangleMesh::Vertex>, std::vector<GLuint>> mesh;
+    for (size_t c = 0; c < debrisChunks_.size(); ++c) {
+      if ((c < fadeChunk.size() && fadeChunk[c] != 0) != faded) continue;
+      const GLuint base = static_cast<GLuint>(mesh.first.size());
+      mesh.first.insert(mesh.first.end(), debrisChunks_[c].vertices.begin(),
+                        debrisChunks_[c].vertices.end());
+      for (const GLuint i : debrisChunks_[c].indices) mesh.second.push_back(base + i);
+    }
+    return mesh;
+  };
   const auto fadedBuilding = [&](int b) {
     return b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b];
   };
@@ -4689,8 +4782,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // their rubble obstacle (excluded from the static mesh above).
   if (debrisHasGeometry_) {
     thermalMaterial(ThermalMaterial::Building);
-    DrawLitModel(litShader_, debrisMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
-                 glm::vec4(kObstacleColor * 0.82f, 1.0f));
+    if (std::find(fadeChunk.begin(), fadeChunk.end(), char(1)) == fadeChunk.end()) {
+      DrawLitModel(litShader_, debrisMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                   glm::vec4(kObstacleColor * 0.82f, 1.0f));
+    } else if (const auto solid = buildChunkMesh(false); !solid.second.empty()) {
+      // Chunks that block a sightline are re-drawn translucent below.
+      geometryMesh_.SetMesh(solid.first, solid.second);
+      DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                   glm::vec4(kObstacleColor * 0.82f, 1.0f));
+    }
   }
   thermalMaterial(ThermalMaterial::Figure);
   for (const Unit& unit : game.GetScene().units) {
@@ -4740,11 +4840,28 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     };
     // Plain buildings: the walls, window cuts and floor slabs are replaced by
     // the building's full footprint extruded floor to roof.
+    // A damaged building (something of it blown away) has no intact outline
+    // to extrude: its standing parts fade as themselves, floors included, so
+    // neither the original silhouette nor a vanished building shows.
+    std::vector<char> damaged(plainBuilding.size(), 0);
+    const auto markDamaged = [&](int b) {
+      if (b >= 0 && b < static_cast<int>(damaged.size())) damaged[b] = 1;
+    };
+    for (const tactics::Obstacle& o : obstacles) {
+      if (o.dead) markDamaged(o.building);
+    }
+    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+      if (walkSurfaces[i].dead) markDamaged(walkSurfaces[i].building);
+    }
+    for (const tactics::MassingDetail& d : massing) {
+      if (d.dead) markDamaged(d.building);
+    }
+    const auto isPlainSolid = [&](int b) { return isPlain(b) && !damaged[b]; };
     std::vector<tactics::Obstacle> plainPrisms(plainBuilding.size());
     for (size_t i = 0; i < obstacles.size(); ++i) {
-      if (!fadeObstacle[i]) continue;
+      if (!fadeObstacle[i] || obstacles[i].dead) continue;
       const int b = obstacles[i].building;
-      if (isPlain(b)) {
+      if (isPlainSolid(b)) {
         tactics::Obstacle& prism = plainPrisms[b];
         if (prism.footprint.empty()) {
           prism.bounds.min = obstacles[i].bounds.min;
@@ -4771,8 +4888,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                        static_cast<int>(b)});
     }
     for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-      if (fadeSurface[i] && !walkSurfaces[i].climbProxy && !isPlain(walkSurfaces[i].building)) {
-        (walkSurfaces[i].building >= 0 ? interior : shell)
+      if (fadeSurface[i] && !walkSurfaces[i].dead && !walkSurfaces[i].climbProxy &&
+          !isPlainSolid(walkSurfaces[i].building)) {
+        const bool inInterior = walkSurfaces[i].building >= 0 && !isPlain(walkSurfaces[i].building);
+        (inInterior ? interior : shell)
             .push_back({glm::distance(cameraPos, tactics::SurfaceCenter(walkSurfaces[i])), -1,
                         static_cast<int>(i)});
       }
@@ -4823,6 +4942,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     };
     const auto drawShellGeometry = [&](bool mark) {
       if (mark) litShader_.SetInt("uFadedMark", 1);
+      // Debris chunks that block a sightline: each faded on its own.
+      if (const auto chunks = buildChunkMesh(true); !chunks.second.empty()) {
+        thermalMaterial(ThermalMaterial::Building);
+        geometryMesh_.SetMesh(chunks.first, chunks.second);
+        DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                     glm::vec4(kObstacleColor * 0.82f, kOccluderFadeOpacity));
+      }
       // Massing first: it stands proud of the grouped prisms/slabs, so it claims
       // its pixels in the stencil cap instead of being hidden behind them.
       for (size_t i = 0; i < massing.size(); ++i) {

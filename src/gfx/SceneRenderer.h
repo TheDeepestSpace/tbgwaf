@@ -214,6 +214,8 @@ class SceneRenderer {
     std::vector<glm::vec3> probes;
     std::vector<char> fadeObstacle, fadeSurface, fadeMassing, fadeBuilding;
     std::vector<char> directSurface;  // Surfaces crossing a probe ray themselves.
+    std::vector<char> fadeChunk;      // Per debris chunk (debrisChunks_).
+    unsigned debrisGeneration = 0;    // debrisGeneration_ the chunk flags were computed for.
     bool anyFaded = false;
   };
   FadeCache fadeCache_[2];
@@ -338,6 +340,16 @@ class SceneRenderer {
   // from this one, rebuilt only while something is falling.
   void UpdateDebris(const tactics::GameLogic& game);
   LitTriangleMesh debrisMesh_;
+  // Every chunk posed as of the last rebuild, kept CPU-side so the camera
+  // see-through pass can fade each chunk on its own (a chunk that blocks a
+  // figure goes translucent, the rest stay solid). `min`/`max`: world AABB.
+  struct DebrisChunk {
+    std::vector<LitTriangleMesh::Vertex> vertices;
+    std::vector<GLuint> indices;
+    glm::vec3 min{0.0f}, max{0.0f};
+  };
+  std::vector<DebrisChunk> debrisChunks_;
+  unsigned debrisGeneration_ = 0;  // Bumped whenever debrisChunks_ is rebuilt.
   bool debrisHasGeometry_ = false;
   LitTriangleMesh debrisFovMesh_;  // The solid chunks alone, for the figures' sight maps.
   bool debrisFovHasGeometry_ = false;

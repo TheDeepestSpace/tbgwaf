@@ -117,6 +117,13 @@ constexpr float kCrouchLean = 16.0f;     // Spine toward the edge, degrees.
 constexpr float kFlatCoverLean = 11.0f;  // Spine resting back on the wall, degrees.
 
 constexpr float kTwoPi = 6.28318530717958647692f;
+// Grenade throw (unit.throwElapsed): the arm cocks back-up, sweeps overarm
+// through the vertical at kThrowReleaseTime, then settles back to rest.
+constexpr float kThrowCockSwing = glm::radians(-132.0f);   // Arm cocked back and up.
+constexpr float kThrowReleaseSwing = glm::radians(-270.0f);  // Follow-through, forward-down.
+constexpr float kThrowSweepDuration = 0.15f;
+constexpr float kThrowRecoverDuration = 0.3f;
+constexpr float kThrowLean = glm::radians(22.0f);  // Peak forward lean at the release.
 constexpr float kGrabLean = glm::radians(32.0f);  // Peak forward dip of the flag-grab reach.
 
 float SampleLoop(const BipedCurve& curve, float phase) {
@@ -712,6 +719,29 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
     const float t = glm::clamp(unit.grabElapsed / tactics::constants::kGrabAnimDuration, 0.0f, 1.0f);
     grabLean = kGrabLean * std::sin(glm::pi<float>() * t);
   }
+  // Throw beat: arm swing (rotation about the shoulder, 0 = hanging, positive =
+  // forward), a forward lean peaking at the release, and a blend weight.
+  float throwSwing = 0.0f;
+  float throwWeight = 0.0f;
+  if (unit.throwElapsed >= 0.0f && !compactWeapon &&
+      !(unit.rideTravel >= 0.0f && unit.rideLength > 0.0f)) {
+    const float d = tactics::constants::kThrowAnimDuration;
+    const float rel = tactics::constants::kThrowReleaseTime;
+    const float t = unit.throwElapsed;
+    if (t < rel) {
+      throwSwing = kThrowCockSwing * EaseOutQuad(t / rel);
+    } else if (t < d - kThrowRecoverDuration) {
+      throwSwing = glm::mix(kThrowCockSwing, kThrowReleaseSwing,
+                            EaseOutQuad((t - rel) / kThrowSweepDuration));
+    } else {
+      throwSwing = kThrowReleaseSwing * (1.0f - EaseOutQuad((t - (d - kThrowRecoverDuration)) /
+                                                            kThrowRecoverDuration));
+    }
+    throwWeight = glm::clamp(std::min(t / 0.08f, (d - t) / 0.15f), 0.0f, 1.0f);
+    const float lean = glm::clamp((t - rel + kThrowSweepDuration) /
+                                      (2.0f * kThrowSweepDuration), 0.0f, 1.0f);
+    grabLean += kThrowLean * std::sin(glm::pi<float>() * lean) * throwWeight;
+  }
   // Turn animation (issue #237). The body frame follows the animated heading
   // (VisualYaw), so the torso, head and arms lead the turn; the legs trail it
   // by a fraction of the remaining angle (legTwist) and then catch up, with
@@ -857,13 +887,18 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
     // with the gait, the gun arm swings too while running, snaps up to a
     // straight horizontal aim for the shot, and the pistol pitches between
     // low-ready (barrel forward while the arm hangs) and aim.
+    // A grenade throw uses the free left arm.
     const float leftShoulder =
-        glm::radians(SampleLoop(kWalkLeftShoulder, unit.walkPhase) * 0.75f) * walk;
+        unit.throwElapsed >= 0.0f && throwWeight > 0.0f
+            ? glm::mix(glm::radians(SampleLoop(kWalkLeftShoulder, unit.walkPhase) * 0.75f) * walk,
+                       throwSwing, throwWeight)
+            : glm::radians(SampleLoop(kWalkLeftShoulder, unit.walkPhase) * 0.75f) * walk;
     const float rightShoulder =
         glm::radians(SampleLoop(kWalkRightShoulder, unit.walkPhase) * 0.75f) * walk;
     const float leftElbow = glm::mix(
-        glm::radians(48.0f), glm::radians(SampleLoop(kWalkLeftElbow, unit.walkPhase) * 0.75f),
-        walk);
+        glm::mix(glm::radians(48.0f),
+                 glm::radians(SampleLoop(kWalkLeftElbow, unit.walkPhase) * 0.75f), walk),
+        glm::radians(25.0f), throwWeight);
     const float rightElbow = glm::mix(
         glm::radians(45.0f), glm::radians(SampleLoop(kWalkRightElbow, unit.walkPhase) * 0.78f),
         walk);
@@ -998,9 +1033,18 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
     AppendWeapon(&parts, figure * weaponFig, unit.weapon, compactWeapon);
     AppendMuzzleFlash(&parts, figure * weaponFig, unit.weapon, shot.recoil, compactWeapon);
 
-    const glm::vec3 rightHand =
+    glm::vec3 rightHand =
         glm::mix(glm::vec3(weaponFig * glm::vec4(0.0f, -0.03f, 0.0f, 1.0f)), handleRight,
                  ride.armsUp);
+    if (throwWeight > 0.0f) {
+      // The grenade arm leaves the rifle grip (the left hand keeps the
+      // handguard) and sweeps overarm about the shoulder.
+      const float reach = (kUpperArmLength + kLowerArmLength) * 0.92f;
+      const glm::vec3 throwHand =
+          glm::vec3(0.0f, kShoulderHeight, kArmSideOffset) +
+          reach * glm::vec3(std::sin(throwSwing), -std::cos(throwSwing), 0.0f);
+      rightHand = glm::mix(rightHand, throwHand, throwWeight);
+    }
     const glm::vec3 leftHand =
         glm::mix(glm::vec3(weaponFig * glm::vec4(WeaponLeftHandLocal(unit.weapon), 1.0f)),
                  handleLeft, ride.armsUp);

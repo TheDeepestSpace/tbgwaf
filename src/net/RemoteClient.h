@@ -118,6 +118,9 @@ class RemoteClient {
   struct Frame {
     float t = 0.0f;
     std::vector<Sample> units;
+    // In-flight grenades visible to us at this frame (issue #349), already
+    // fog-filtered by the server.
+    std::vector<GameSnapshot::Grenade> grenades;
   };
   struct Shot {
     float t = 0.0f;
@@ -133,6 +136,7 @@ class RemoteClient {
     std::vector<Frame> frames;
     std::vector<Shot> shots;
     std::vector<TracerEvent> tracers;
+    std::vector<tactics::Explosion> explosions;  // Stamped `at` seconds into the round.
     float clock = 0.0f;
     float duration = 0.0f;
     Json finalState;
@@ -147,7 +151,7 @@ class RemoteClient {
   void HandlePlans(const Json& m);
   void HandleRound(const Json& m);
   void HandleReveal(const Json& m);
-  static Playback ParseRound(const Json& m);
+  Playback ParseRound(const Json& m) const;
   // Writes the pose of `pb` at pb.clock into `snap` (units, shots, tracers).
   void PosePlayback(GameSnapshot* snap, const Playback& pb, float dt);
   void ApplyPlans(const Json& m);

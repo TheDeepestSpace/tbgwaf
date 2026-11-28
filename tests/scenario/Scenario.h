@@ -57,6 +57,10 @@ struct ScenarioAction {
   // shoot-target mode and places the "+" aim marker without confirming, so
   // the step ends mid-aim (for visual captures of the aiming UI). A
   // following `shoot` step by the same actor confirms it (the Fire button).
+  // Throw (grenades) plans a throw at `at`: select + Throw, place the
+  // landing mark, confirm. `expect_noop` (reusing expectNoop) asserts the
+  // throw is rejected -- no grenades, or `at` beyond kThrowRange -- and
+  // leaves no plan.
   // BeginMove opens move planning (select + Move) and deliberately stops
   // there, leaving the movement frontier up for the visual runner's
   // post-action capture; no destination is clicked and no plan is recorded.
@@ -65,7 +69,7 @@ struct ScenarioAction {
   // `bombAt` set -- arm it to go off that many seconds into the next
   // committed round, exactly like the debug panel / server control taps.
   enum class Kind {
-    Move, BeginMove, Shoot, Aim, Pass, Cancel, Commit, Focus, NewGame,
+    Move, BeginMove, Shoot, Aim, Pass, Throw, Cancel, Commit, Focus, NewGame,
     TimelineSeek, TimelinePlay, TimelinePause, Wait, Bomb,
   };
 
@@ -92,7 +96,7 @@ struct ScenarioAction {
                                              // is planned. Waypoints are
                                              // clicked first as usual.
   int target = -1;              // Shoot only: locked-on figure target.
-  bool expectNoop = false;      // Shoot only: the click is expected not to
+  bool expectNoop = false;      // Shoot/Throw only: the click is expected not to
                                  // resolve (e.g. target outside the
                                  // shooter's team FOV) and not record a plan.
   int timelineTick = 0;         // TimelineSeek only.
@@ -124,6 +128,7 @@ struct ScenarioAction {
 struct ScenarioAssertion {
   std::optional<int> unit;
   std::optional<bool> alive;
+  std::optional<int> grenades;  // Paired with `unit`: remaining grenade supply.
   std::optional<glm::vec3> position;
   std::optional<std::string> coverPose;  // Paired with `unit`: none | stand (back to tall cover) | crouch.
   std::optional<float> facingDegrees;  // Paired with `unit`; degrees, atan2(dz, dx).

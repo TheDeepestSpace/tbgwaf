@@ -566,7 +566,7 @@ flowchart TD
 ## Controls
 
 - **Left click** one of your own figures (in your own viewport) to select
-  it, then choose **Move**, **Shoot**, or **Pass** from the
+  it, then choose **Move**, **Shoot**, **Throw**, or **Pass** from the
   action menu.
   - Move: click a destination on the ground; the figure paths around
     obstacles via its navmesh. A move can only reach as far as the figure
@@ -576,6 +576,16 @@ flowchart TD
     cone with a clear line of sight -- including mid-round, if the target
     only walks into view while the round plays out. If that never happens
     before everything stops moving, the shot expires as a miss.
+  - Throw: click a surface point within 25 units to place the landing
+    mark; the predicted flight (arc, bounces off geometry) and blast radius
+    preview, then confirm with **Throw**. Needs a grenade in the figure's
+    supply (2 each; committing the throw spends one). When the round
+    executes the grenade flies the previewed arc and detonates on a fixed
+    2 s fuse: every figure whose torso is inside the 4-unit blast radius
+    dies unless cover blocks the line from the blast centre (the friendly
+    fire setting applies). Walls and terrain are untouched. Enemy grenades
+    are fogged like figures: visible only while inside your squad's FOV;
+    the explosion itself is shown to everyone.
 - **Right-click drag** to orbit the camera; **scroll** to zoom. Either side
   can freely look around its own viewport at any time.
 - **Esc** cancels the current action/selection.

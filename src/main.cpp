@@ -2112,10 +2112,17 @@ int main() {
           if (hud.move) game.ChooseMove();
           if (hud.shoot) game.ChooseShoot();
           if (hud.pass) game.ChoosePass();
+          if (hud.throwGrenade) game.ChooseThrow();
           if (hud.cancel) game.CancelAction();
           if (hud.playbook) game.SetPlaybook(paneTeam(pane), *hud.playbook);
           if (hud.done) game.FinishMovePlan();
-          if (hud.fire) game.ConfirmAim(paneTeam(pane));
+          if (hud.fire) {
+            if (game.Mode() == InputMode::AwaitingThrowTarget) {
+              game.ConfirmThrow(paneTeam(pane));
+            } else {
+              game.ConfirmAim(paneTeam(pane));
+            }
+          }
           if (hud.shots) game.SetPlannedShotCount(*hud.shots, paneTeam(pane));
         }
       }
@@ -2176,8 +2183,9 @@ int main() {
     const bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse;
     if (!uiWantsMouse && humanPlanning && !replayActive[keyPane]) {
       const int hoverPane = keyPane;
-      if (game.Mode() == InputMode::AwaitingShootTarget) {
-        // The preview cone follows the cursor until an aim point is placed.
+      if (game.Mode() == InputMode::AwaitingShootTarget ||
+          game.Mode() == InputMode::AwaitingThrowTarget) {
+        // The preview cone (or throw arc) follows the cursor until an aim point is placed.
         const PaneRect& rect = paneRects[hoverPane];
         const gfx::Ray hoverRay = cameras[hoverPane].ScreenPointToRay(
             static_cast<float>(mouseX - rect.x), static_cast<float>(mouseY),
@@ -2250,7 +2258,11 @@ int main() {
         lastClickUnitId = doubleClick ? -1 : hitUnit;
         lastClickPane = clickPane;
         lastClickTicks = clickTicks;
-        if (game.Mode() == InputMode::AwaitingShootTarget) {
+        if (game.Mode() == InputMode::AwaitingThrowTarget) {
+          // Throwing: the click ray places the landing mark on the nearest
+          // surface within throw range.
+          game.ClickThrowRay(clickRay.origin, clickRay.direction, clickTeam);
+        } else if (game.Mode() == InputMode::AwaitingShootTarget) {
           // Aiming: every click goes through the aim ray, which picks a
           // figure first (staging the lock-on; the shot-level bar stays up
           // and Fire commits) and otherwise places/moves the free-aim "+"

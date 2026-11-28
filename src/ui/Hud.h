@@ -57,6 +57,7 @@ struct HudActions {
   bool move = false;
   bool shoot = false;
   bool pass = false;
+  bool throwGrenade = false;  // Throw: enter throw targeting.
   bool cancel = false;
   bool done = false;
   // Free-aim (issue #129): Fire confirms the placed aim point.

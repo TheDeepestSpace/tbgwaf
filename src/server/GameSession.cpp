@@ -107,6 +107,7 @@ std::array<Json, 3> GameSession::RunRound() {
   std::array<Json, 3> frames{empty, empty, empty};
   std::array<Json, 3> shots{empty, empty, empty};
   std::array<Json, 3> tracers{empty, empty, empty};
+  std::array<Json, 3> explosions{empty, empty, empty};
   ready_ = {false, false};
   game_.CommitRound();
 
@@ -114,8 +115,9 @@ std::array<Json, 3> GameSession::RunRound() {
   std::vector<float> lastShoot(units.size(), -1.0f);
   float t = 0.0f;
   int step = 0;
-  // Tracers already forwarded this round.
+  // Tracers / explosions already forwarded this round.
   size_t tracersSent = 0;
+  size_t explosionsSent = 0;
 
   auto sampleFrame = [&]() {
     for (int ti = 0; ti < 3; ++ti) {
@@ -138,6 +140,20 @@ std::array<Json, 3> GameSession::RunRound() {
       Json frame;
       frame.Set("t", Num(std::round(t * 100.0) / 100.0));
       frame.Set("u", std::move(list));
+      // In-flight grenades, each [thrower,x,y,z] (issue #349). Fog: an enemy
+      // grenade is sent to a team only while inside that team's FOV.
+      size_t grenadeCount = 0;
+      Json grenadeList{Json::Array{}};
+      for (const auto& g : game_.Grenades()) {
+        if (!spectator && g.team != viewer &&
+            !game_.GrenadePointVisibleTo(viewer, g.position)) {
+          continue;
+        }
+        grenadeList.Push(Json(Json::Array{Num(g.thrower), Num(g.position.x), Num(g.position.y),
+                                          Num(g.position.z)}));
+        ++grenadeCount;
+      }
+      if (grenadeCount > 0) frame.Set("g", std::move(grenadeList));
       frames[ti].Push(std::move(frame));
     }
   };
@@ -190,6 +206,23 @@ std::array<Json, 3> GameSession::RunRound() {
         }
       }
     }
+    {
+      // Explosions (issue #349) go to every slot unfiltered: a blast is
+      // seen/heard map-wide; only the grenade's flight is fogged.
+      const auto& all = game_.Explosions();
+      for (; explosionsSent < all.size(); ++explosionsSent) {
+        const Explosion& x = all[explosionsSent];
+        for (int ti = 0; ti < 3; ++ti) {
+          Json j;
+          j.Set("t", Num(std::round(x.at * 100.0) / 100.0));
+          j.Set("pos", net::EncodeVec3(x.position));
+          j.Set("radius", Num(x.radius));
+          j.Set("seed", Num(x.seed));
+          j.Set("team", net::TeamName(x.team));
+          explosions[ti].Push(std::move(j));
+        }
+      }
+    }
     if (step % kFrameEvery == 0 || game_.Mode() != InputMode::Executing) sampleFrame();
   }
 
@@ -201,6 +234,7 @@ std::array<Json, 3> GameSession::RunRound() {
     msg.Set("frames", std::move(frames[ti]));
     msg.Set("shots", std::move(shots[ti]));
     msg.Set("tracers", std::move(tracers[ti]));
+    msg.Set("explosions", std::move(explosions[ti]));
     msg.Set("world", WorldLog(worldSent_));
     msg.Set("state", ti == kSpectatorSlot ? StateBody(std::nullopt)
                                           : StateBody(static_cast<Team>(ti)));
@@ -242,6 +276,9 @@ Json GameSession::StateBody(std::optional<Team> viewer) const {
     j.Set("pos", net::EncodeVec3(u.position));
     j.Set("yaw", Num(u.facingYaw));
     j.Set("alive", Json(u.alive));
+    // Grenade supply is own-team (or spectator) info only: an enemy's
+    // remaining grenades stay hidden even while the figure is visible.
+    if (own || !viewer) j.Set("grenades", Num(u.grenades));
     list.Push(std::move(j));
   }
   body.Set("units", std::move(list));
@@ -266,6 +303,7 @@ Json GameSession::DumpState() const {
     j.Set("pos", net::EncodeVec3(u.position));
     j.Set("yaw", Num(u.facingYaw));
     j.Set("alive", Json(u.alive));
+    j.Set("grenades", Num(u.grenades));
     units.Push(std::move(j));
   }
   dump.Set("units", std::move(units));

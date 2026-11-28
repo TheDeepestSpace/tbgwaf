@@ -81,6 +81,7 @@ set(GAME_LOGIC_SOURCES
   src/game/Raycast.cpp
   src/game/Visibility.cpp
   src/game/GameLogic.cpp
+  src/game/Throw.cpp
   src/game/TurnTimeline.cpp
   src/game/Json.cpp
   src/game/ReproLog.cpp

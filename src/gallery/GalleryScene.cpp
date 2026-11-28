@@ -212,6 +212,7 @@ const std::vector<GalleryItem>& Catalog() {
         {AnimKind::ZipDown, "zip_down", "zipline (downhill)", kZipRideSeconds},
         {AnimKind::ZipUp, "zip_up", "zipline (uphill)", kZipRideSeconds},
         {AnimKind::EmptyMag, "empty_mag", "empty mag", 0.0f},  // Per weapon, below.
+        {AnimKind::Throw, "throw", "grenade throw", tactics::constants::kThrowAnimDuration},
         {AnimKind::CoverLean, "cover_lean", "cover (wall lean)",
          gfx::kCoverLeanLoopSeconds},
         {AnimKind::CoverCrouch, "cover_crouch", "cover (crouch)",
@@ -333,6 +334,10 @@ Unit AnimationUnit(const GalleryItem& item, double t) {
     case AnimKind::EmptyMag:
       unit.shootElapsed = SampleEmptyMag(item.weapon, t).shootElapsed;
       unit.shootAimYaw = unit.facingYaw;
+      break;
+    case AnimKind::Throw:
+      unit.throwElapsed =
+          static_cast<float>(std::fmod(t, tactics::constants::kThrowAnimDuration));
       break;
     case AnimKind::CoverLean:
     case AnimKind::CoverCrouch:

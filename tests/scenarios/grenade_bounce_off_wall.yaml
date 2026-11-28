@@ -1,0 +1,32 @@
+name: grenade_bounce_off_wall
+description: >
+  Grenade bounce: blue lobs a grenade at a point behind a tall wall. The arc cannot clear it,
+  so the grenade rebounds off the near face and detonates on blue's side of the wall. The red
+  figure standing in front of the wall dies; the red figure at the aim point behind it is
+  shielded by the wall and survives.
+
+map:
+  half_extent: 40
+  obstacles:
+    - {center: [10, 0], half_extent: [0.3, 8.0], height: 6.0}
+
+friendly_fire: false
+
+units:
+  - {id: 0, team: blue, position: [0, 0, 0], facing_degrees: 0}
+  - {id: 1, team: red, position: [7.5, 0, 1], facing_degrees: 180}   # Near side, by the wall.
+  - {id: 2, team: red, position: [13, 0, 0], facing_degrees: 180}    # Far side, the aim point.
+
+script:
+  - action: throw
+    actor: 0
+    at: [13, 0, 0]
+  - action: pass
+    actor: 1
+  - action: pass
+    actor: 2
+  - action: commit
+  - assert: {unit: 0, alive: true, grenades: 1}
+  - assert: {unit: 1, alive: false, comment: Caught by the blast after the rebound}
+  - assert: {unit: 2, alive: true, comment: The wall blocks the blast from the far side}
+  - assert: {winner: none}

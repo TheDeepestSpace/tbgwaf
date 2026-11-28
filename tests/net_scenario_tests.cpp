@@ -79,6 +79,7 @@ GameLogic OracleFromDump(const Scenario& scenario, const Json& dump) {
       net::DecodeVec3(e["pos"], &u.position);
       u.facingYaw = static_cast<float>(e["yaw"].AsNumber());
       u.alive = e["alive"].AsBool(true);
+      u.grenades = static_cast<int>(e["grenades"].AsNumber(u.grenades));
       u.knockdownElapsed = u.alive ? -1.0f : constants::kKnockdownDuration;
     }
   }

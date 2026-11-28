@@ -284,7 +284,7 @@ struct Trajectory {
 bool SameAnimation(const Unit& a, const Unit& b) {
   return a.walkPhase == b.walkPhase && a.walkBlend == b.walkBlend &&
          a.idleElapsed == b.idleElapsed && a.shootElapsed == b.shootElapsed &&
-         a.shootAimYaw == b.shootAimYaw && a.grabElapsed == b.grabElapsed &&
+         a.shootAimYaw == b.shootAimYaw && a.grabElapsed == b.grabElapsed && a.throwElapsed == b.throwElapsed &&
          a.rideTravel == b.rideTravel && a.rideLength == b.rideLength &&
          a.rideSlope == b.rideSlope && a.weapon == b.weapon;
 }
@@ -317,8 +317,6 @@ Trajectory Simulate(const Unit& unit) {
     const glm::vec3 d(-axis.z, 0.0f, axis.x);
     return glm::length(d) < 1e-4f ? unit.FacingDirection() : glm::normalize(d);
   };
-  const glm::vec3 dir = shotDir(unit.knockdownAxis);
-  const glm::vec3 side(-dir.z, 0.0f, dir.x);
   // Vary the strength along the hit line so neighbours do not fall
   // identically.  Do not add a sideways component here: there is no lateral
   // force in the replicated hit state, and doing so made a body drift (and
@@ -326,13 +324,23 @@ Trajectory Simulate(const Unit& unit) {
   const float impactScale =
       1.0f + 0.12f * std::sin(static_cast<float>(unit.id) * 12.9898f);
 
+  // A blast victim's axis is longer than 1 (see constants::kBlastAxisLength): a harder jolt than
+  // a bullet, but still a tumble rather than a launch, so the lift grows far less than the speed.
+  const auto blastness = [](const glm::vec3& axis) {
+    return glm::clamp(glm::length(axis) - 1.0f, 0.0f, 1.0f) / (tactics::constants::kBlastAxisLength - 1.0f);
+  };
+  const auto launchVelocity = [&](const glm::vec3& axis, const glm::vec3& d) {
+    const float b = blastness(axis);
+    return d * (kLaunchSpeed * impactScale * (1.0f + 1.2f * b)) +
+           glm::vec3(0.0f, kLaunchLift * (1.0f + 0.35f * b), 0.0f);
+  };
+  const glm::vec3 dir = shotDir(unit.knockdownAxis);
+  const glm::vec3 side(-dir.z, 0.0f, dir.x);
   // Start from the pose the figure was actually in when it was hit (the
   // animation state is frozen from then on), not a neutral stand.
   RagdollPose pos = AnimatedPose(unit), prev;
   for (int i = 0; i < kRagJointCount; ++i) {
-    const glm::vec3 v = (dir * (kLaunchSpeed * impactScale) +
-                         glm::vec3(0.0f, kLaunchLift, 0.0f)) *
-                        kLaunchWeight[i];
+    const glm::vec3 v = launchVelocity(unit.knockdownAxis, dir) * kLaunchWeight[i];
     prev[i] = pos[i] - v * kRagdollStep;
   }
   traj.frames.reserve(kRagdollSteps + 1);
@@ -394,8 +402,7 @@ Trajectory Simulate(const Unit& unit) {
     while (nextImpact < impacts.size() &&
            std::lround(impacts[nextImpact].at / kRagdollStep) <= step) {
       const glm::vec3 hitDir = shotDir(impacts[nextImpact].axis);
-      const glm::vec3 hitV =
-          hitDir * (kLaunchSpeed * impactScale) + glm::vec3(0.0f, kLaunchLift, 0.0f);
+      const glm::vec3 hitV = launchVelocity(impacts[nextImpact].axis, hitDir);
       for (int i = 0; i < kRagJointCount; ++i) {
         prev[i] -= hitV * kLaunchWeight[i] * kRagdollStep;
       }

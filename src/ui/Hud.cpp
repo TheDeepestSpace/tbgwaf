@@ -248,6 +248,11 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
             "Click an enemy figure to lock on, or any surface point in the green area to place "
             "a free-aim shot ('+'). Set the shot count with the bar, then Fire. Esc cancels.");
         break;
+      case InputMode::AwaitingThrowTarget:
+        ImGui::TextWrapped(
+            "Click a surface point within throw range to place the landing mark; the arc "
+            "and blast radius preview. Then Throw to confirm. Esc cancels.");
+        break;
       case InputMode::Executing:
         ImGui::TextWrapped("Round executing: both teams' plans are playing out...");
         break;
@@ -289,7 +294,8 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
       if (selected && selected->team == team &&
           (game.Mode() == InputMode::ActionMenu ||
            game.Mode() == InputMode::AwaitingMoveDestination ||
-           game.Mode() == InputMode::AwaitingShootTarget)) {
+           game.Mode() == InputMode::AwaitingShootTarget ||
+           game.Mode() == InputMode::AwaitingThrowTarget)) {
         const glm::vec2 pos = WorldToWindow(selected->position + glm::vec3(0.0f, 1.9f, 0.0f),
                                             camera, rect, windowHeight);
         ImGui::SetNextWindowPos(ImVec2(pos.x, pos.y), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
@@ -302,6 +308,10 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
           if (Button("Shoot")) actions.shoot = true;
           ImGui::SameLine();
           if (Button("Pass")) actions.pass = true;
+          ImGui::SameLine();
+          ImGui::BeginDisabled(selected->grenades <= 0);
+          if (Button("Throw")) actions.throwGrenade = true;
+          ImGui::EndDisabled();
         } else {
           if (game.Mode() == InputMode::AwaitingMoveDestination) {
             if (Button("Done")) actions.done = true;
@@ -312,6 +322,10 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
           if (game.Mode() == InputMode::AwaitingShootTarget &&
               (game.GetAimPreview() || game.GetLockPreview())) {
             if (Button("Fire")) actions.fire = true;
+            ImGui::SameLine();
+          }
+          if (game.Mode() == InputMode::AwaitingThrowTarget && game.GetAimPreview()) {
+            if (Button("Throw")) actions.fire = true;
             ImGui::SameLine();
           }
           if (Button("Cancel")) actions.cancel = true;

@@ -38,6 +38,8 @@
 //   {"t":"move","unit":3,"waypoints":[[x,y,z],...],"facing":yaw}
 //   {"t":"shoot","unit":3,"target":4}
 //   {"t":"pass","unit":3}
+//   {"t":"throw","unit":3,"aim":[x,y,z]}              grenade at that point; nacked if out of
+//                                                     range (kThrowRange) or the unit has no grenades
 //   {"t":"cancel","unit":3}                           drop that unit's plan
 //   {"t":"focus","unit":3}                            validated no-op (camera is client-side)
 //   {"t":"reaction","table":[a,b,c,d]}               squad playbook, a..d = actions for
@@ -63,10 +65,17 @@
 //   {"t":"ack","seq":N,"ok":true|false,"error":"..."}
 //   {"t":"plans","round":N,"ready":bool,"plans":[<action>...],"playbook":[a,b,c,d]}   own team only
 //   {"t":"peer","ready":bool}
-//   {"t":"round","round":N,"duration":s,"frames":[...],"shots":[...],"world":[<change>...],"state":{...}}
+//   {"t":"round","round":N,"duration":s,"frames":[...],"shots":[...],"explosions":[...],
+//    "world":[<change>...],"state":{...}}
 //                                                  "world": world changes not yet sent (ordered; each
 //                                                  carries "at", seconds into this round, when it takes
 //                                                  effect during playback)
+//                                                  each frame: {"t":s,"u":[[id,x,y,z,yaw,alive,moving],...]
+//                                                  [,"g":[[thrower,x,y,z],...]]} -- "g" lists in-flight
+//                                                  grenades; an enemy grenade appears only while inside
+//                                                  the receiving team's FOV (spectators get all of them)
+//                                                  "explosions" (unfiltered): each
+//                                                  {"t":s,"pos":[x,y,z],"radius":r,"seed":N,"team":...}
 //   {"t":"state","round":N,"over":bool,"winner":"blue"|"red"|"none"|null,"units":[...],"world":[...]}
 //                                                  "world": the FULL change log since match start (join,
 //                                                  reconnect, spectator); applying it to the seeded map
@@ -98,7 +107,7 @@ constexpr int kProtocolVersion = 7;
 constexpr size_t kMaxMessageBytes = 16 * 1024;
 constexpr size_t kMaxWaypoints = 32;
 
-enum class ActionKind { Move, Shoot, Pass, Cancel, Focus, Reaction, Commit, NewMatch };
+enum class ActionKind { Move, Shoot, Pass, Throw, Cancel, Focus, Reaction, Commit, NewMatch };
 
 struct Action {
   ActionKind kind = ActionKind::Pass;
@@ -106,6 +115,7 @@ struct Action {
   int target = -1;
   // Shoot only: a free-aim shot (issue #129) carries aimPoint instead of a
   // target; shots is the burst size (issue #138).
+  // Throw: aimPoint is the required landing point.
   std::optional<glm::vec3> aimPoint;
   int shots = 1;
   std::vector<glm::vec3> waypoints;

@@ -69,6 +69,16 @@ bool ApplyPlanAction(GameLogic& game, Team team, const Action& action, std::stri
     case ActionKind::Pass:
       game.ChoosePass();
       return true;
+    case ActionKind::Throw:
+      if (!action.aimPoint) return Rollback("throw needs an aim point");
+      game.ChooseThrow();
+      if (game.Mode() != InputMode::AwaitingThrowTarget) return Rollback("no grenades to throw");
+      game.PlaceThrowPoint(*action.aimPoint, team);
+      game.ConfirmThrow(team);
+      if (game.Mode() != InputMode::AwaitingSelection) {
+        return Rollback("throw target out of range (or no grenades)");
+      }
+      return true;
     case ActionKind::Shoot: {
       game.ChooseShoot();
       game.SetPlannedShotCount(action.shots, team);
@@ -121,6 +131,10 @@ Action PlanToAction(const Unit& unit) {
       a.shots = unit.plan.shots;
       break;
     case PlannedActionType::Pass: a.kind = ActionKind::Pass; break;
+    case PlannedActionType::Throw:
+      a.kind = ActionKind::Throw;
+      if (unit.plan.hasAimPoint) a.aimPoint = unit.plan.aimPoint;
+      break;
     case PlannedActionType::None: a.kind = ActionKind::Cancel; break;
   }
   return a;

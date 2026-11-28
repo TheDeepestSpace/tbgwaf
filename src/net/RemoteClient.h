@@ -107,6 +107,13 @@ class RemoteClient {
     return v;
   }
   std::string StatusText() const;
+  // Debug bomb (issue #350): asks the server to place/move or detonate it.
+  // `at` >= 0 arms it for that time in the next round instead.
+  void SendPlaceBomb(const glm::vec3& pos, float radius, float impulse = 1.0f);
+  void SendDetonateBomb(float at = -1.0f);
+  // The server sent a world change this mirror could not apply: its map is
+  // not the server's, and no later change is shown.
+  bool worldOutOfSync() const { return worldOutOfSync_; }
 
  private:
   struct Sample {
@@ -161,6 +168,7 @@ class RemoteClient {
   void ApplyState(const Json& state);
   // Applies every change of `list` (JSON) the local log does not have yet.
   void ApplyWorldList(const Json& list);
+  void NoteWorldRejected(int id);
   void ApplyWorldUpTo(Playback* pb, float clock);
   void AdvancePlayback(float dt);
   void SyncPlans();
@@ -199,6 +207,7 @@ class RemoteClient {
   // Commit lock: set when RequestCommit() queues the commit, cleared when the
   // server refuses it (nack of commitSeq_), when a round runs, or on restart.
   bool commitPending_ = false;
+  bool worldOutOfSync_ = false;  // A world change was refused (see NoteWorldRejected).
   int commitSeq_ = 0;
   std::string lastError_;
 };

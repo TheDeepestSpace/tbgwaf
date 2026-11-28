@@ -1,0 +1,64 @@
+name: bomb_collapse_forces_replan
+description: >
+  Destruction I (issue #350): replanning after a collapse. Blue0 queues a valid three-leg route
+  along the north face of a building, hemmed in by a wall to the north, so the corridor is the
+  only way east. During round 1 an armed bomb brings the building's wall down across that
+  corridor. Leg 1 (away from the blast) still executes, but the rubble now blocks the queued
+  leg 2: the route is dropped, blue0 has no plan, and the player must replan -- here round the
+  south side of the building. The goldens show the queued route, the rubble in the corridor
+  and the new route.
+
+camera:
+  target: [0, 0]
+  zoom: 24
+
+map:
+  half_extent: 12
+  obstacles:
+    - {center: [0, -1.5], half_extent: [2.5, 2.5], height: 6}
+    - {center: [0, 6], half_extent: [12, 0.15], height: 3}
+
+units:
+  - {id: 0, team: blue, position: [-10, 0, 3], facing_degrees: 0}
+  - {id: 1, team: red, position: [10, 0, 9], facing_degrees: 180}
+
+script:
+  - action: move
+    actor: 0
+    waypoints:
+      - [-6, 0, 3]
+      - [6, 0, 3]
+    destination: [10, 0, 3]
+    comment: Three legs east through the corridor between the building and the north wall.
+  - action: pass
+    actor: 1
+  - action: bomb
+    position: [0, 3, 1]
+    radius: 3.5
+    at: 1.0
+    comment: Armed to go off 1s into round 1, bringing the building's north face down.
+  - action: commit
+  - assert: {round: 2}
+  - assert: {unit: 0, position: [-6, 0, 3], tolerance: 0.3}
+  - assert: {unit: 0, planned: false}
+  - action: move
+    actor: 0
+    waypoints:
+      - [-6, 0, -7]
+      - [4, 0, -7]
+    destination: [10, 0, -1]
+    comment: Replans round the south side of the building, again three legs.
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [-6, 0, -7], tolerance: 0.3}
+  - assert: {round: 3}
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [4, 0, -7], tolerance: 0.3}
+  - action: pass
+    actor: 1
+  - action: commit
+  - assert: {unit: 0, position: [10, 0, -1], tolerance: 0.3}
+  - assert: {round: 5}

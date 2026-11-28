@@ -55,6 +55,8 @@ jobs:
           cp build-web/tactics_gallery.wasm site/gallery/
           cp build-web/map_seeds.js site/gallery/
           cp -r build-web/map_goldens site/gallery/
+          cp build-web/blast_shots.js site/gallery/
+          cp -r build-web/blast_gallery site/gallery/
 
       # Other workflows (pr-preview, performance) push to gh-pages too; retry on a lost race.
       - name: Deploy to GitHub Pages

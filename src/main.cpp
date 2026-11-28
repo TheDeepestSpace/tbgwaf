@@ -1118,6 +1118,15 @@ int main() {
   float frameMs = 0.0f;
   float fovMs = 0.0f;
   gfx::RenderFrameStats frameStats;
+  // Server-held bomb (remote matches): what this client last asked for, for
+  // the panel and the marker (the mirror's game never holds the bomb).
+  bool remoteBombPlaced = false;
+  bool remoteBombArmed = false;
+  bool remoteBombDirty = false;       // A move not sent yet (drags are throttled).
+  bool remoteBombWasPlayingBack = false;
+  Uint32 remoteBombSentTicks = 0;
+  size_t remoteBombWorldSeen = 0;     // World-log size when it was armed.
+  ui::BombPanelState bombPanel;  // Debug bomb (issue #350), debug-panel driven.
 
   // Starts a hotseat game on builder scene `index`: per-session reset and a
   // fresh recording (the log embeds the scene), cameras framed on it.
@@ -1991,7 +2000,12 @@ int main() {
     // simulates it itself.
     const bool simulatesLocally = isSimulator || builderHotseat;
     if (!simulationPaused && (simulatesLocally || game.Mode() != InputMode::Executing)) {
+      const size_t worldBefore = game.WorldLog().size();
       game.Update(dt);
+      // A blast went off this tick: planning it (fracture + the debris
+      // simulation) took real time, which must not be played as game time --
+      // the next frame would jump the round, and the explosion, ahead by it.
+      if (game.WorldLog().size() > worldBefore) lastFrameTicks = SDL_GetTicks();
     }
     // Sighting memory is per-page derived state: tick it unconditionally so
     // a follower (which skips Update() while Executing) still builds it.
@@ -2432,6 +2446,25 @@ int main() {
     }
     // Anchored under the Round panel so it follows collapse/expand.
     const bool hudWasThermal = debugOptions.thermal;
+    if (remoteMode) {
+      // An armed bomb is spent once its blast arrives, or the round it was
+      // armed for has played out (nothing in range leaves no world change).
+      const bool playingBack = remote->playingBack();
+      if (remoteBombArmed && (game.WorldLog().size() > remoteBombWorldSeen ||
+                              (remoteBombWasPlayingBack && !playingBack))) {
+        remoteBombPlaced = remoteBombArmed = false;
+      }
+      remoteBombWasPlayingBack = playingBack;
+      if (remote->status() != tactics::net::RemoteClient::Status::Playing) {
+        remoteBombPlaced = remoteBombArmed = remoteBombDirty = false;
+      }
+      bombPanel.placed = remoteBombPlaced;
+      bombPanel.armed = remoteBombArmed;
+    } else {
+      bombPanel.placed = game.GetDebugBomb().has_value();
+      bombPanel.armed = bombPanel.placed && game.GetDebugBomb()->detonateAt >= 0.0f;
+      if (bombPanel.placed) bombPanel.position = game.GetDebugBomb()->position;
+    }
     ui::DrawDebugPanel(debugOptions.disableFov, debugOptions.coverView,
                        debugOptions.disableShadows, debugOptions.thermal,
                        debugOptions.thermalBlackHot, debugOptions.thermalFovAlpha,
@@ -2440,8 +2473,71 @@ int main() {
                        debugOptions.thermalAo.softness,
                        debugOptions.disableOcclusionFade, debugOptions.npr,
                        debugOptions.nprSettings, showFps, showRotationDome,
-                       smoothedFps, frameMs, fovMs, frameStats,
+                       smoothedFps, frameMs, fovMs, frameStats, &bombPanel,
                        roundPanelBottom + 6.0f);
+    // Debug bomb (issue #350): the panel edits the bomb's world coordinates
+    // and its requests act on the local game. In a server-backed match the
+    // mirror must not fork the world: the requests go to the server, which
+    // simulates the blast and ships the world changes back. (Spectators are
+    // read-only.)
+    if (bombPanel.requestGround) {
+      bombPanel.position.y =
+          game.GetScene().ground.HeightAt(bombPanel.position.x, bombPanel.position.z) + 1.0f;
+      if (bombPanel.placed) bombPanel.requestPlace = true;
+    }
+    if (remoteMode) {
+      if (!remote->spectating() &&
+          remote->status() == tactics::net::RemoteClient::Status::Playing) {
+        if (bombPanel.requestPlace) {
+          remoteBombPlaced = true;
+          remoteBombDirty = true;
+        }
+        // A drag edits the position every frame: send moves at most ~10 /s,
+        // and always before a detonate / arm.
+        const Uint32 ticks = SDL_GetTicks();
+        if (remoteBombDirty && (bombPanel.requestDetonate || bombPanel.requestArm ||
+                                ticks - remoteBombSentTicks >= 100)) {
+          remote->SendPlaceBomb(bombPanel.position, bombPanel.radius, bombPanel.impulse);
+          remoteBombDirty = false;
+          remoteBombSentTicks = ticks;
+        }
+        if (bombPanel.requestDetonate && remoteBombPlaced) {
+          remote->SendDetonateBomb();
+          remoteBombPlaced = remoteBombArmed = false;
+        }
+        if (bombPanel.requestArm && remoteBombPlaced) {
+          remote->SendDetonateBomb(bombPanel.armAt);
+          remoteBombArmed = true;
+          remoteBombWorldSeen = game.WorldLog().size();
+        }
+      }
+    } else {
+      const size_t worldBefore = game.WorldLog().size();
+      if (bombPanel.requestPlace) game.DebugPlaceBomb(bombPanel.position, bombPanel.radius, bombPanel.impulse);
+      if (bombPanel.requestDetonate) game.DebugDetonateBomb();
+      if (bombPanel.requestArm) game.DebugArmBomb(bombPanel.armAt);
+      // Planning the blast took real time; it is not game time.
+      if (game.WorldLog().size() > worldBefore) lastFrameTicks = SDL_GetTicks();
+    }
+    bombPanel.requestPlace = bombPanel.requestGround = false;
+    bombPanel.requestDetonate = bombPanel.requestArm = false;
+    const bool bombShown = remoteMode ? remoteBombPlaced : game.GetDebugBomb().has_value();
+    if (bombShown) {
+      // Marker: a small ring + label in every pane, over the 3D view.
+      const glm::vec3 bombAt = remoteMode ? bombPanel.position : game.GetDebugBomb()->position;
+      const bool bombArmed =
+          remoteMode ? remoteBombArmed : game.GetDebugBomb()->detonateAt >= 0.0f;
+      ImDrawList* fg = ImGui::GetForegroundDrawList();
+      for (int pane = 0; pane < paneCount; ++pane) {
+        const glm::vec2 at = ui::WorldToWindow(bombAt, cameraForPane(pane),
+                                               paneRects[pane], windowHeight);
+        if (at.x < paneRects[pane].x || at.x > paneRects[pane].x + paneRects[pane].width) continue;
+        const ImU32 color = IM_COL32(255, 90, 40, 230);
+        fg->AddCircle(ImVec2(at.x, at.y), 9.0f, color, 0, 2.0f);
+        fg->AddCircleFilled(ImVec2(at.x, at.y), 3.0f, color);
+        fg->AddText(ImVec2(at.x + 12.0f, at.y - 7.0f), color, bombArmed ? "BOMB (armed)" : "BOMB");
+      }
+    }
     // Pop against the pre-panel state: the checkbox may have just toggled
     // `thermal`, but the push at the top of this frame is what must unwind.
     if (hudWasThermal) ui::PopThermalHudStyle();

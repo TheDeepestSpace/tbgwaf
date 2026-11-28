@@ -387,6 +387,7 @@ std::vector<Obstacle> SightObstacles(const Scene& scene) {
       prism.bounds.max.z = std::max(prism.bounds.max.z, p.y);
     }
     prism.building = d.building;
+    prism.leanable = d.kind == MassingDetail::Kind::DeckRail;
     out.push_back(std::move(prism));
   }
   return out;

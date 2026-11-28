@@ -100,9 +100,17 @@ float FinalYaw(const std::vector<glm::vec3>& path, float fallback) {
 // Facing a figure ends a move with. On a cover tile (flat or tactical) it is
 // forced to put its back to the blocker; elsewhere it keeps the walk
 // direction. *forced reports whether cover decided it.
+// An attack position (issue #369) is not forced: the figure faces the
+// obstacle by default and the player may turn it within the arc
+// (SetPlannedMoveFacing clamps).
 float EndFacing(const std::vector<Obstacle>& obstacles, const std::vector<glm::vec3>& path,
                 float fallback, bool* forced = nullptr) {
   if (!path.empty()) {
+    float normal = 0.0f;
+    if (ClassifyAttackPosition(obstacles, path.back(), &normal)) {
+      if (forced) *forced = false;
+      return std::remainder(normal, 2.0f * 3.14159265358979f);
+    }
     float yaw = 0.0f;
     if (ClassifyCover(obstacles, path.back(), &yaw).kind != CoverKind::None) {
       if (forced) *forced = true;
@@ -848,7 +856,7 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
     if (!(in >> u.knockdownDrop)) return false;
     int coverKind = 0, coverTileKind = 0;
     if (!(in >> coverKind >> coverTileKind >> u.coverYaw >> u.coverBlend)) return false;
-    if (coverKind < 0 || coverKind > 2 || coverTileKind < 0 || coverTileKind > 2) return false;
+    if (coverKind < 0 || coverKind > 3 || coverTileKind < 0 || coverTileKind > 3) return false;
     u.coverKind = static_cast<uint8_t>(coverKind);
     u.coverTileKind = static_cast<uint8_t>(coverTileKind);
   }
@@ -1107,9 +1115,14 @@ void GameLogic::SetPlannedMoveFacing(int unitId, float yaw, Team byTeam) {
   if (!unit || !unit->alive || unit->team != byTeam) return;
   if (unit->plan.type != PlannedActionType::Move || unit->plan.movePath.empty()) return;
   // Cover destinations fix the facing (back to the wall); not adjustable.
+  // Attack positions allow it within the arc around the obstacle normal.
   bool forced = false;
   EndFacing(sightObstacles_, unit->plan.movePath, 0.0f, &forced);
   if (forced) return;
+  float normal = 0.0f;
+  if (ClassifyAttackPosition(sightObstacles_, unit->plan.movePath.back(), &normal)) {
+    yaw = ClampAttackFacing(yaw, normal);
+  }
   unit->plan.endFacingYaw = std::remainder(yaw, 2.0f * 3.14159265358979f);
 }
 
@@ -1157,14 +1170,26 @@ void GameLogic::UpdateCoverPoses(float dtSeconds) {
       unit.coverFrom = unit.position;
       float yaw = 0.0f;
       const CoverTile tile = ClassifyCover(sightObstacles_, unit.position, &yaw);
-      // Pose: 0 none, 1 back against the wall (tall cover), 2 crouch (low cover).
+      // Pose: 0 none, 1 back against the wall (tall cover), 2 crouch (low
+      // cover), 3 leaning on a sill/railing (attack position, issue #369).
       unit.coverTileKind = tile.kind == CoverKind::None ? 0 : (tile.crouch ? 2 : 1);
       unit.coverYaw = yaw;
+      if (ClassifyAttackPosition(sightObstacles_, unit.position)) unit.coverTileKind = 3;
     }
-    unit.coverKind = unit.coverTileKind != 0 &&
-                             CoverExposedToSightedEnemy(unit, unit.coverTileKind)
-                         ? 0
-                         : unit.coverTileKind;
+    if (unit.coverTileKind == 3) {
+      // The lean follows the facing within the arc around the obstacle
+      // normal; it is a firing pose, so it never defers to sighted enemies.
+      float normal = 0.0f;
+      if (ClassifyAttackPosition(sightObstacles_, unit.position, &normal)) {
+        unit.coverYaw = ClampAttackFacing(unit.facingYaw, normal);
+      }
+      unit.coverKind = 3;
+    } else {
+      unit.coverKind = unit.coverTileKind != 0 &&
+                               CoverExposedToSightedEnemy(unit, unit.coverTileKind)
+                           ? 0
+                           : unit.coverTileKind;
+    }
     const float target = unit.coverKind != 0 ? 1.0f : 0.0f;
     const float step = dtSeconds * 3.0f;
     unit.coverBlend = unit.coverBlend < target ? std::min(target, unit.coverBlend + step)

@@ -162,6 +162,59 @@ CoverTile ClassifyCover(const std::vector<Obstacle>& obstacles, const glm::vec3&
   return tile;
 }
 
+bool ClassifyAttackPosition(const std::vector<Obstacle>& obstacles, const glm::vec3& feet,
+                            float* normalYaw) {
+  const glm::vec2 c(feet.x, feet.z);
+  bool found = false;
+  float bestOffset = kAttackProbeDistance + 1.0f;
+  glm::vec2 bestToward(0.0f);
+  std::vector<glm::vec2> poly;
+  for (const Obstacle& ob : obstacles) {
+    if (!ob.leanable || ob.navOnly || ob.dead) continue;
+    const AABB& b = ob.bounds;
+    const float height = b.max.y - feet.y;
+    if (height < kAttackMinHeight || height > kAttackMaxHeight || b.min.y > feet.y + 0.3f) continue;
+    if (c.x < b.min.x - kAttackProbeDistance || c.x > b.max.x + kAttackProbeDistance ||
+        c.y < b.min.z - kAttackProbeDistance || c.y > b.max.z + kAttackProbeDistance) {
+      continue;
+    }
+    if (!ob.footprint.empty()) {
+      poly = ob.footprint;
+    } else {
+      poly = {{b.min.x, b.min.z}, {b.max.x, b.min.z}, {b.max.x, b.max.z}, {b.min.x, b.max.z}};
+    }
+    if (PointInConvexPolygon(c, poly)) return false;  // Inside the obstacle: not a standing spot.
+    glm::vec2 centroid(0.0f);
+    for (const glm::vec2& v : poly) centroid += v;
+    centroid /= static_cast<float>(poly.size());
+    for (size_t i = 0; i < poly.size(); ++i) {
+      const glm::vec2 v0 = poly[i], v1 = poly[(i + 1) % poly.size()];
+      const float len = glm::length(v1 - v0);
+      if (len < kAttackMinFaceLength) continue;
+      const glm::vec2 along = (v1 - v0) / len;
+      glm::vec2 n(along.y, -along.x);
+      if (glm::dot(centroid - v0, n) > 0.0f) n = -n;  // Outward.
+      const float o = glm::dot(c - v0, n);
+      if (o <= 1e-4f || o > kAttackProbeDistance) continue;
+      const float t = glm::dot(c - v0, along);
+      if (t < 0.0f || t > len) continue;  // Past the face's span.
+      if (o < bestOffset) {
+        bestOffset = o;
+        bestToward = -n;
+        found = true;
+      }
+    }
+  }
+  if (found && normalYaw) *normalYaw = std::atan2(bestToward.y, bestToward.x);
+  return found;
+}
+
+float ClampAttackFacing(float yaw, float normalYaw) {
+  constexpr float kTwoPi = 2.0f * 3.14159265358979f;
+  const float d = std::clamp(std::remainder(yaw - normalYaw, kTwoPi), -kAttackArc, kAttackArc);
+  return normalYaw + d;
+}
+
 std::vector<CoverZoneRect> CoverZoneRects(const std::vector<Obstacle>& obstacles, float feetY,
                                           float band) {
   std::vector<CoverZoneRect> rects;

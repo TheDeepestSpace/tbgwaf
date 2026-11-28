@@ -114,6 +114,7 @@ constexpr BipedCurve kLeanSpinePitch = {4.8f, 4.5f, 6.1f, 6.2f,
                                         4.8f, 4.5f, 6.1f, 6.2f};
 constexpr float kCoverSpinePitchScale = 0.6f;
 constexpr float kCrouchLean = 16.0f;     // Spine toward the edge, degrees.
+constexpr float kAttackLean = 22.0f;     // Spine forward over the sill/railing, degrees.
 constexpr float kFlatCoverLean = 11.0f;  // Spine resting back on the wall, degrees.
 
 constexpr float kTwoPi = 6.28318530717958647692f;
@@ -746,7 +747,8 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
     // nor lingers at the ends.
     const float raw = glm::clamp(unit.coverBlend * (1.0f - walk), 0.0f, 1.0f);
     const float b = raw * raw * (3.0f - 2.0f * raw);
-    const bool flat = unit.coverKind == 1;
+    const bool attack = unit.coverKind == 3;  // Leaning on a sill/railing (issue #369).
+    const bool flat = unit.coverKind == 1 || attack;
     const float coverPhase =
         unit.idleElapsed *
             (kTwoPi / (flat ? kCoverLeanLoopSeconds : kCoverCrouchLoopSeconds)) +
@@ -768,9 +770,9 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
     const float cy = std::cos(unit.coverYaw - unit.VisualYaw());
     const float sy = std::sin(unit.coverYaw - unit.VisualYaw());
     spineAxis = glm::vec3(sy, 0.0f, -cy);  // Tips +Y toward the wall.
-    spineLean = glm::radians(flat ? kFlatCoverLean : kCrouchLean) * b;
+    spineLean = glm::radians(attack ? kAttackLean : (flat ? kFlatCoverLean : kCrouchLean)) * b;
     coverPitch = curve(kLeanSpinePitch, kCrouchSpinePitch) * kCoverSpinePitchScale * b;
-    coverShift = glm::vec3(cy, 0.0f, sy) * ((flat ? 0.10f : 0.04f) * b);
+    coverShift = glm::vec3(cy, 0.0f, sy) * ((attack ? 0.12f : (flat ? 0.10f : 0.04f)) * b);
   }
 
   const glm::mat4 hipFrame =

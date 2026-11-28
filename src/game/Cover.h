@@ -76,6 +76,31 @@ struct CoverZoneRect {
 std::vector<CoverZoneRect> CoverZoneRects(const std::vector<Obstacle>& obstacles, float feetY,
                                           float band);
 
+// Attack positions (issue #369). Beside a leanable obstacle -- a window sill
+// or a deck railing, flagged Obstacle::leanable by the generator -- whose top
+// is a comfortable elbow rest (kAttackMinHeight..kAttackMaxHeight above the
+// feet), a figure leans onto the edge and fires over it. Like cover this is
+// purely geometric and static (replay-safe). The position takes precedence
+// over plain cover on the same tile: it faces the obstacle (not back to it)
+// and the player may rotate within +-kAttackArc of that normal.
+constexpr float kAttackProbeDistance = 0.7f;  // Tile centre to obstacle face.
+constexpr float kAttackMinHeight = 0.8f;      // Lowest edge worth leaning on.
+constexpr float kAttackMaxHeight = 1.3f;      // Highest: above this is a wall, not a rest.
+constexpr float kAttackMinFaceLength = 0.6f;  // Narrower than this is a post, not a sill.
+// Allowed facing arc either side of the obstacle normal (30 degrees). Tune here.
+constexpr float kAttackArc = 30.0f * 3.14159265358979f / 180.0f;
+constexpr float kAttackLeanForward = constants::kAttackLeanReach;  // Head/muzzle reach over the edge.
+
+// True when standing at `feet` is an attack position. `normalYaw` (if given)
+// receives the yaw pointing from the figure into the obstacle face: the
+// centre of the allowed facing arc.
+bool ClassifyAttackPosition(const std::vector<Obstacle>& obstacles, const glm::vec3& feet,
+                            float* normalYaw = nullptr);
+
+// `yaw` limited to within kAttackArc of `normalYaw` (result in the same
+// 2*pi window around normalYaw).
+float ClampAttackFacing(float yaw, float normalYaw);
+
 // Per-node cover for every node of `field` (same grid and indexing). Nodes
 // the field does not reach stay None.
 struct CoverMap {

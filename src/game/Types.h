@@ -98,6 +98,10 @@ struct Obstacle {
   // Blocks movement and LOS but is never drawn: the unseen wall along a
   // terrain cliff edge, whose face the terrain mesh itself renders.
   bool navOnly = false;
+  // Low edge a figure can rest its elbows on (issue #369): a window sill or a
+  // deck railing. Standing beside one (see ClassifyAttackPosition) is an
+  // attack position. Set by the generator / SightObstacles, never inferred.
+  bool leanable = false;
   StreetFixtureModel fixtureModel = StreetFixtureModel::None;
   float fixtureYaw = 0.0f;    // Local +X heading; local +Z points toward the block.
   float fixtureBaseY = 0.0f;  // Visible feet rest on the road/sidewalk above bounds.min.y.
@@ -409,6 +413,7 @@ constexpr float kTorsoAimHeight = 0.9f;
 // (GameLogic::CoverExposedToSightedEnemy) still sights approaching enemies.
 constexpr float kCrouchedHeight = 1.15f;   // Top of the crouched body.
 constexpr float kCrouchEyeHeight = 1.0f;   // Head/sight probe of the crouched pose.
+constexpr float kAttackLeanReach = 0.25f;  // Head/weapon reach over a sill or railing (issue #369).
 constexpr float kCrouchChestHeight = 0.7f; // Chest a shot at the crouched pose aims for.
 // Sighting range: effectively unlimited (exceeds any generated map's diagonal).
 // Visibility stays on this so capping the shot range doesn't shrink what a team sees.

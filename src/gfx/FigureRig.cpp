@@ -2,6 +2,7 @@
 
 #include "gfx/Ragdoll.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 
@@ -114,7 +115,10 @@ constexpr BipedCurve kLeanSpinePitch = {4.8f, 4.5f, 6.1f, 6.2f,
                                         4.8f, 4.5f, 6.1f, 6.2f};
 constexpr float kCoverSpinePitchScale = 0.6f;
 constexpr float kCrouchLean = 16.0f;     // Spine toward the edge, degrees.
-constexpr float kAttackLean = 22.0f;     // Spine forward over the sill/railing, degrees.
+// Attack position (issue #369): a modest forward tip -- the "resting on the
+// sill" read comes from the arms coming up to a level weapon hold (below),
+// not from folding at the waist.
+constexpr float kAttackLean = 14.0f;
 constexpr float kFlatCoverLean = 11.0f;  // Spine resting back on the wall, degrees.
 
 constexpr float kTwoPi = 6.28318530717958647692f;
@@ -738,6 +742,11 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
   float coverDrop = 0.0f;
   float spineLean = 0.0f;
   float coverPitch = 0.0f;
+  // Attack position (coverKind 3, issue #369): how far the arms are into the
+  // elbows-on-the-sill weapon hold, and the weapon pitch that counters the
+  // forward spine lean so the barrel stays level over the edge.
+  float attackHold = 0.0f;
+  float attackPitch = 0.0f;
   glm::vec3 spineAxis(0.0f, 0.0f, 1.0f);
   glm::vec3 coverShift(0.0f);
   if (!joints && unit.coverBlend > 0.0f && unit.coverKind != 0 && unit.alive &&
@@ -772,7 +781,13 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
     spineAxis = glm::vec3(sy, 0.0f, -cy);  // Tips +Y toward the wall.
     spineLean = glm::radians(attack ? kAttackLean : (flat ? kFlatCoverLean : kCrouchLean)) * b;
     coverPitch = curve(kLeanSpinePitch, kCrouchSpinePitch) * kCoverSpinePitchScale * b;
-    coverShift = glm::vec3(cy, 0.0f, sy) * ((attack ? 0.12f : (flat ? 0.10f : 0.04f)) * b);
+    coverShift = glm::vec3(cy, 0.0f, sy) * ((attack ? 0.16f : (flat ? 0.10f : 0.04f)) * b);
+    if (attack) {
+      attackHold = b;
+      // The facing may sit up to kAttackArc off the sill normal; only the
+      // sagittal component of the lean pitches the barrel.
+      attackPitch = spineLean * cy;
+    }
   }
 
   const glm::mat4 hipFrame =
@@ -794,8 +809,12 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
   // kRifleAimBlade and leans the head to the sight line; both follow
   // shot.raise so idle/run/knockdown are untouched.
   const bool rifleCarry = ClassOf(unit.weapon) != WeaponClass::Handgun;
+  // The attack-position hold blades the torso like the aim does: shouldering
+  // the rifle over the sill swings the support shoulder forward far enough
+  // for its elbow to reach down onto the edge.
   const float torsoYaw =
-      rifleCarry ? shot.aimYawDelta + kRifleAimBlade * shot.raise : 0.0f;
+      rifleCarry ? shot.aimYawDelta + kRifleAimBlade * std::max(shot.raise, attackHold)
+                 : 0.0f;
   const glm::mat3 aimRot = glm::mat3(
       glm::rotate(glm::mat4(1.0f), shot.aimYawDelta, glm::vec3(0.0f, -1.0f, 0.0f)));
   glm::vec3 headCenter(0.0f, kHeadCenterHeight, 0.0f);
@@ -871,15 +890,18 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
         walk);
 
     // The gun arm's two bones straighten into a single forward line while
-    // aiming; recoil layers on the shoulder after that blend.
-    const float gunArmSwing = glm::mix(rightShoulder, glm::half_pi<float>(), shot.raise) +
+    // aiming; recoil layers on the shoulder after that blend. The attack
+    // position (coverKind 3) holds the same two-handed stance over the sill
+    // between shots, pistol along the facing.
+    const float holdUp = std::max(shot.raise, attackHold);
+    const float gunArmSwing = glm::mix(rightShoulder, glm::half_pi<float>(), holdUp) +
                               kRecoilArmKick * shot.recoil;
-    const float gunElbow = glm::mix(rightElbow, 0.0f, shot.raise);
+    const float gunElbow = glm::mix(rightElbow, 0.0f, holdUp);
     // Pistol in the hand: tilted 90 degrees so it points forward while the
     // arm hangs (low ready), aligning with the arm as the aim comes up, then
     // flipping up with the recoil.
     const float gunPitch =
-        glm::half_pi<float>() * (1.0f - shot.raise) + kRecoilMuzzleFlip * shot.recoil;
+        glm::half_pi<float>() * (1.0f - holdUp) + kRecoilMuzzleFlip * shot.recoil;
 
     // Arm frames are built figure-local (identity base) so the weapon frame
     // can double as the IK target space for the support hand below.
@@ -890,7 +912,7 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
 
     // The gun arm angles inward as the aim comes up so the support hand can
     // reach the grip; negative yawTwist turns it toward the body's center.
-    const float inward = -kPistolAimInward * shot.raise;
+    const float inward = -kPistolAimInward * holdUp;
     const glm::mat4 gunUpperArm =
         LimbFrame(glm::mat4(1.0f), glm::vec3(0.0f, kShoulderHeight, kArmSideOffset),
                   gunArmSwing, shot.aimYawDelta + inward, -kArmSplay * (1.0f - shot.raise));
@@ -946,7 +968,7 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
       armOut(kRagElbowL, kRagHandL, &e, &h);
       AppendArmIK(&parts, figure, leftShoulderPivot, glm::mix(swingHand, handleLeft, ride.armsUp),
                   glm::vec3(-0.3f, -0.6f, -0.8f), teamColor, e, h);
-    } else if (unit.shootElapsed >= 0.0f) {
+    } else if (unit.shootElapsed >= 0.0f || holdUp > 0.0f) {
       // Two-handed firing stance: the support hand leaves its gait swing and
       // clasps the front of the grip as the gun comes up (and rides the
       // recoil with it, since the target lives in the weapon frame).
@@ -957,7 +979,7 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
       glm::vec3 *e, *h;
       armOut(kRagElbowL, kRagHandL, &e, &h);
       AppendArmIK(&parts, figure, leftShoulderPivot,
-                  glm::mix(swingHand, supportHand, shot.raise),
+                  glm::mix(swingHand, supportHand, holdUp),
                   glm::vec3(-0.6f, -0.8f, -0.3f), teamColor, e, h);
     } else {
       parts.push_back({RoundedSegment(figure * leftUpperArm, kUpperArmLength, kArmRadius),
@@ -978,14 +1000,21 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
     // handguard; the aim grip rises toward the leaned head's sight line.
     const glm::vec3 gripLow(0.26f, 0.75f, -0.02f);
     const glm::vec3 gripAim(0.22f, 1.02f, 0.03f);
+    // Attack position (coverKind 3): held level along the facing at sill
+    // height between shots, both hands forward on the weapon so the elbows
+    // drop onto the edge; a shot still raises it to the sight line.
+    const glm::vec3 gripAttack(0.22f, 1.0f, 0.03f);
     // Riding: the rifle is slung muzzle-up across the back.
     const glm::vec3 gripSling(-0.26f, 0.62f, 0.10f);
-    const glm::vec3 grip = glm::mix(glm::mix(gripLow, gripAim, shot.raise), gripSling, ride.armsUp);
+    const float hold = std::max(shot.raise, attackHold);
+    const glm::vec3 gripUp = glm::mix(gripAim, gripAttack, attackHold * (1.0f - shot.raise));
+    const glm::vec3 grip = glm::mix(glm::mix(gripLow, gripUp, hold), gripSling, ride.armsUp);
     // rotate(+angle, +Y) yaws the muzzle toward the figure's left (-Z);
     // rotate(+angle, Z) pitches it up.
     const float weaponYaw =
-        glm::mix(glm::radians(35.0f) + sway, 0.0f, shot.raise) * (1.0f - ride.armsUp);
-    const float weaponPitch = glm::mix(glm::mix(glm::radians(-35.0f), 0.0f, shot.raise) +
+        glm::mix(glm::radians(35.0f) + sway, 0.0f, hold) * (1.0f - ride.armsUp);
+    const float carryPitch = glm::mix(glm::radians(-35.0f), attackPitch, attackHold);
+    const float weaponPitch = glm::mix(glm::mix(carryPitch, 0.0f, shot.raise) +
                                            kRecoilMuzzleFlip * kRifleRecoilScale * shot.recoil,
                                        glm::radians(80.0f), ride.armsUp);
     // The whole weapon-and-arms assembly twists onto the target's bearing

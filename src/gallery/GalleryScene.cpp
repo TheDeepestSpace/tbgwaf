@@ -216,6 +216,8 @@ const std::vector<GalleryItem>& Catalog() {
          gfx::kCoverLeanLoopSeconds},
         {AnimKind::CoverCrouch, "cover_crouch", "cover (crouch)",
          gfx::kCoverCrouchLoopSeconds},
+        {AnimKind::AttackLean, "attack_lean", "attack (elbows on sill)",
+         gfx::kCoverLeanLoopSeconds},
     };
     for (const W& w : weapons) {
       for (A a : anims) {
@@ -343,6 +345,14 @@ Unit AnimationUnit(const GalleryItem& item, double t) {
       unit.coverBlend = 1.0f;
       unit.coverYaw = glm::pi<float>();
       break;
+    case AnimKind::AttackLean:
+      // Attack position (issue #369): the sill sits ahead of the figure, so
+      // it leans forward with the elbows on the edge, weapon level.
+      unit.idleElapsed = static_cast<float>(t);
+      unit.coverKind = 3;
+      unit.coverBlend = 1.0f;
+      unit.coverYaw = 0.0f;
+      break;
   }
   return unit;
 }
@@ -447,6 +457,16 @@ void GalleryRenderer::Render(int itemIndex, double t, const ViewState& view, int
       prop.color = glm::vec4(0.45f, 0.45f, 0.48f, 1.0f);
       prop.primitive = gfx::FigurePrimitive::Box;
       parts.push_back(prop);
+    }
+    if (item.anim == AnimKind::AttackLean) {
+      // The sill the attack pose rests its elbows on: a waist-high ledge in
+      // front of the figure (toward +X, where AnimationUnit put it).
+      gfx::FigurePart sill;
+      sill.model = glm::translate(glm::mat4(1.0f), glm::vec3(0.45f, 0.0f, -1.1f)) *
+                   glm::scale(glm::mat4(1.0f), glm::vec3(0.30f, 0.9f, 2.2f));
+      sill.color = glm::vec4(0.45f, 0.45f, 0.48f, 1.0f);
+      sill.primitive = gfx::FigurePrimitive::Box;
+      parts.push_back(sill);
     }
     if (item.anim == AnimKind::EmptyMag) {
       // Longer stage with a backstop plate, plus one tracer per bullet fired

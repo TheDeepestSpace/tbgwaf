@@ -958,9 +958,11 @@ void Lobby::ViewFinished(int conn, const GameStore::Game& game, Team team) {
   }
   Json state = last["state"];
   state.Set("t", "state");
+  Json revealWorld = world;  // The world log is unfiltered, so the reveal carries the same one.
   state.Set("world", std::move(world));
   Send(conn, state);
   Json reveal = Typed("reveal");
+  reveal.Set("world", std::move(revealWorld));
   reveal.Set("rounds", std::move(rounds));
   Send(conn, reveal);
 }

@@ -4,6 +4,7 @@
 #include <chrono>
 
 #include "net/SceneSpec.h"
+#include "server/Log.h"
 
 namespace tactics::server {
 
@@ -261,6 +262,8 @@ void Lobby::StartMatch(Room& room) {
   // A new match: answers still in flight belong to the old one.
   room.id = nextRoomId_++;
   room.nextBotMs = 0;
+  log::Info("room %s: match started (mode=%s, seed=%u, rooms=%zu)", room.name.c_str(),
+            room.botMode.empty() ? "pvp" : room.botMode.c_str(), room.session->seed(), rooms_.size());
   for (BotSeat& seat : room.bot) {
     seat.inFlight = false;
     seat.error.clear();
@@ -354,7 +357,17 @@ void Lobby::HandleAction(int conn, Member& member, const Json& message) {
 void Lobby::MaybeRunRound(Room& room) {
   GameSession& session = *room.session;
   if (!session.BothReady()) return;
+  const auto t0 = NowMs();
   const auto reports = session.RunRound();
+  const auto roundMs = NowMs() - t0;
+  // The server is single-threaded: a slow round stalls every other room.
+  if (roundMs >= 200) {
+    log::Warn("room %s: round %d simulated in %lld ms", room.name.c_str(),
+              session.game().RoundNumber(), static_cast<long long>(roundMs));
+  } else {
+    log::Info("room %s: round %d simulated in %lld ms", room.name.c_str(),
+              session.game().RoundNumber(), static_cast<long long>(roundMs));
+  }
   for (int ti = 0; ti < 2; ++ti) {
     const Team t = static_cast<Team>(ti);
     SendSeat(room, t, reports[ti]);
@@ -515,6 +528,7 @@ void Lobby::Tick() {
     }
     if (!result.error.empty()) {
       seat.error = result.error;
+      log::Warn("room %s: Jev request failed: %s", room.name.c_str(), result.error.c_str());
       BroadcastBots(room);
       continue;
     }
@@ -645,6 +659,8 @@ void Lobby::OnDisconnect(int conn) {
   members_.erase(it);
   auto roomIt = rooms_.find(member.room);
   if (roomIt == rooms_.end()) return;
+  log::Info("room %s: %s left (conn %d)", member.room.c_str(),
+            member.spectator ? "spectator" : "player", conn);
   Room& room = roomIt->second;
   if (member.spectator) {
     room.spectators.erase(std::remove(room.spectators.begin(), room.spectators.end(), conn),

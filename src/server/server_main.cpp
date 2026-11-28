@@ -13,22 +13,63 @@
 // Built with -DTBGWAF_TEST_CONTROL (the tbgwaf_server_testctl target, used by
 // the networked scenario tests) it also accepts --control-port N (the loopback-only
 // test control tap) and --rate-limit N (messages/s per connection). The shipped binary has no such flag.
+#include <execinfo.h>
+#include <unistd.h>
+
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <string>
 
+#include "server/Log.h"
 #include "server/Server.h"
 
 namespace {
 tactics::server::Server* g_server = nullptr;
-void HandleSignal(int) {
+void WriteErr(const char* text) {
+  const ssize_t ignored = write(STDOUT_FILENO, text, std::strlen(text));
+  (void)ignored;
+}
+void HandleSignal(int sig) {
+  // Fly sends SIGTERM when it stops or replaces the machine (autostop, deploy,
+  // OOM kills arrive as SIGKILL and leave no trace here): leave a marker.
+  WriteErr(sig == SIGTERM ? "SIGTERM received: shutting down\n" : "SIGINT received: shutting down\n");
   if (g_server) g_server->Stop();
+}
+// Fatal signals: print a backtrace (async-signal-safe calls only) so a crash
+// shows up in `fly logs` instead of just a machine restart.
+void HandleCrash(int sig) {
+  WriteErr("FATAL: crashed with signal ");
+  WriteErr(strsignal(sig));
+  WriteErr("\n");
+  void* frames[48];
+  const int n = backtrace(frames, 48);
+  backtrace_symbols_fd(frames, n, STDOUT_FILENO);
+  std::signal(sig, SIG_DFL);
+  std::raise(sig);
+}
+void HandleTerminate() {
+  try {
+    if (auto e = std::current_exception()) std::rethrow_exception(e);
+    tactics::server::log::Error("FATAL: std::terminate without an exception");
+  } catch (const std::exception& e) {
+    tactics::server::log::Error("FATAL: uncaught exception: %s", e.what());
+  } catch (...) {
+    tactics::server::log::Error("FATAL: uncaught non-standard exception");
+  }
+  void* frames[48];
+  const int n = backtrace(frames, 48);
+  backtrace_symbols_fd(frames, n, STDOUT_FILENO);
+  std::abort();
 }
 }  // namespace
 
 int main(int argc, char** argv) {
+  tactics::server::log::SetEnabled(true);
+  std::set_terminate(HandleTerminate);
+  for (int sig : {SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL}) std::signal(sig, HandleCrash);
   tactics::server::ServerConfig config;
   if (const char* env = std::getenv("PORT")) config.port = static_cast<uint16_t>(std::atoi(env));
   if (const char* jev = std::getenv("TBGWAF_JEV_ADAPTER_URL")) config.jevAdapterUrl = jev;
@@ -67,6 +108,8 @@ int main(int argc, char** argv) {
     std::printf("tbgwaf_server control tap on 127.0.0.1:%u\n", server.control_port());
   }
   std::fflush(stdout);
+  server.StartWatchdog();
   server.Run();
+  tactics::server::log::Info("tbgwaf_server exiting cleanly");
   return 0;
 }

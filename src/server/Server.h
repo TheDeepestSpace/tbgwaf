@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "server/Lobby.h"
 #include "server/SceneStore.h"
@@ -17,6 +18,10 @@ struct ServerConfig {
   std::string bindAddress = "0.0.0.0";
   size_t maxConnections = 128;
   int handshakeTimeoutMs = 5000;
+  int closeTimeoutMs = 10000;  // A closing connection that cannot flush is dropped after this.
+  size_t maxOutbufBytes = 4u << 20;  // A peer that lets this much pile up unread is dropped.
+  int heartbeatMs = 30000;     // Period of the "stats" log line.
+  int stallWarnMs = 3000;      // The watchdog logs when one loop pass takes longer than this.
   int idleTimeoutMs = 60000;   // Dropped if silent this long (clients are pinged at half).
   int maxMessagesPerSecond = 60;
   // Test-only control tap: a second loopback listener (same WebSocket
@@ -41,6 +46,10 @@ class Server {
   explicit Server(ServerConfig config);
   ~Server();
 
+  // Starts the stall watchdog (a thread that logs where the loop is stuck if a
+  // single pass runs longer than stallWarnMs). Call once, before Run().
+  void StartWatchdog();
+
   // Binds and listens. Returns false (with *error set) on failure.
   bool Listen(std::string* error);
   uint16_t port() const { return port_; }
@@ -63,6 +72,10 @@ class Server {
     int64_t connectedMs = 0, lastActivityMs = 0, lastPingMs = 0;
     int64_t windowStartMs = 0;
     int windowCount = 0;
+    int64_t closingSinceMs = 0;
+    const char* closeReason = "";
+    size_t bytesIn = 0, bytesOut = 0;
+    uint64_t messages = 0;
   };
 
   void Accept(int listenFd, bool control);
@@ -73,6 +86,9 @@ class Server {
   void ProcessFrames(int id, Conn& c, int64_t now);
   void Flush(Conn& c);
   void Drop(int id);
+  // Marks `c` for closing (once; the first reason wins) and optionally discards unsent output.
+  void BeginClose(Conn& c, const char* reason, bool discardOutput = false);
+  void Heartbeat(int64_t now);
   void Queue(Conn& c, const std::string& bytes) { c.outbuf += bytes; }
   static int64_t NowMs();
 
@@ -84,6 +100,13 @@ class Server {
   std::atomic<bool> stop_{false};
   int nextId_ = 1;
   std::map<int, Conn> conns_;
+  // Diagnostics. `phase_` is read by the watchdog thread, so it is atomic.
+  std::atomic<const char*> phase_{"init"};
+  std::atomic<int64_t> passStartMs_{0};  // 0 while idle in poll().
+  std::atomic<bool> watchdogStop_{false};
+  std::thread watchdog_;
+  int64_t startMs_ = 0, lastHeartbeatMs_ = 0, maxPassMs_ = 0;
+  uint64_t accepted_ = 0, dropped_ = 0, passes_ = 0;
   JevBotRunner bots_;  // Declared before lobby_, which holds a pointer to it.
   SceneStore scenes_;  // Declared before lobby_, which holds a pointer to it.
   Lobby lobby_;

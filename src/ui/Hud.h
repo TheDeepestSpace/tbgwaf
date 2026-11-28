@@ -139,12 +139,34 @@ TimelineActions DrawTimeline(const tactics::TurnTimeline& timeline,
 // contact shading live: reach in world units, darkening strength, samples
 // per ray, and blur half-width (see gfx::AmbientOcclusionSettings).
 // `thermalFovAlpha` is the FOV tint opacity used while the thermal view is on.
+// Debug-bomb controls (issue #350), shown inside the debug panel. In:
+// `placed`/`armed` mirror the debug bomb each frame. In/out: `position` (world
+// coordinates, edited in the panel; the app layer overwrites it with the
+// placed bomb's), the radius and arm-time sliders. Out: one-frame request
+// flags the app layer acts on and then clears -- place/move the bomb to
+// `position` with `radius` (also raised when either is edited while placed),
+// put `position` on the ground there, detonate now, arm for `armAt` seconds
+// into the next executing round.
+struct BombPanelState {
+  bool placed = false;
+  bool armed = false;
+  glm::vec3 position{0.0f, 1.0f, 0.0f};
+  float radius = 3.5f;
+  float impulse = 1.0f;  // Debris launch-velocity scale.
+  float armAt = 1.0f;
+  bool requestPlace = false;
+  bool requestGround = false;
+  bool requestDetonate = false;
+  bool requestArm = false;
+};
+
 void DrawDebugPanel(bool& disableFov, bool& coverView, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
                     float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
                     bool& disableOcclusionFade, bool& npr, gfx::NprSettings& nprSettings,
                     bool& showFps, bool& showRotationDome, float fps, float frameMs,
-                    float fovMs, const gfx::RenderFrameStats& stats, float top);
+                    float fovMs, const gfx::RenderFrameStats& stats, BombPanelState* bomb,
+                    float top);
 
 // Camera-rotation dome (issue #298): small corner widget in the bottom-right
 // of `rect`. A wireframe half-sphere with a compass circle at its base, drawn

@@ -172,6 +172,65 @@ void TestCaptureTheFlagIsExplained() {
   }
 }
 
+// Issue #367: in CTF the squad heads for the flag from different roles and
+// does not stack on one spot or one corner.
+void TestJevCtfSquadSpreadsAcrossRoles() {
+  Scene scene = TwoUnitScene(24.0f, false);
+  scene.mapHalfExtent = 40.0f;
+  for (Unit& u : scene.units) {
+    if (u.team == Team::Red) u.position = {38.0f, 0.0f, 38.0f};
+  }
+  scene.flag.enabled = true;
+  scene.flag.position = glm::vec3(10.0f, 0.0f, 0.0f);
+  for (int i = 0; i < 3; ++i) {
+    Unit u;
+    u.id = 2 + i;
+    u.team = Team::Blue;
+    u.position = {-20.0f, 0.0f, -6.0f + 6.0f * static_cast<float>(i)};
+    scene.units.push_back(u);
+  }
+  GameLogic game(scene);
+  const auto request = BuildJevRequest(game, Team::Blue, 5);
+  CHECK(request.has_value());
+  if (!request) return;
+  CHECK(request->json.find("\"role\":\"attacker\"") != std::string::npos);
+  CHECK(request->json.find("\"role\":\"flanker_left\"") != std::string::npos);
+  int flanks = 0;
+  for (const auto& c : request->candidates) {
+    if (c.id.size() > 6 && c.id.compare(c.id.size() - 6, 6, "_flank") == 0) ++flanks;
+  }
+  CHECK(flanks >= 2);
+
+  // Ignore shots: this checks movement toward the objective.
+  tactics::ai::JevRequest moveOnly = *request;
+  moveOnly.candidates.erase(
+      std::remove_if(moveOnly.candidates.begin(), moveOnly.candidates.end(),
+                     [](const auto& c) { return c.kind == tactics::ai::JevActionKind::Shoot; }),
+      moveOnly.candidates.end());
+  const auto choice = DeterministicFallbackChoice(moveOnly);
+  CHECK(choice.size() == request->actorIds.size());
+  GameLogic copy = game;
+  CHECK(ApplyJevChoice(&copy, *request, choice));
+  // Chosen destinations are distinct and not all in one corner.
+  std::vector<glm::vec3> dests;
+  for (const auto& id : choice) {
+    for (const auto& c : request->candidates) {
+      if (c.id == id && c.kind == tactics::ai::JevActionKind::Move) {
+        dests.push_back(c.routeGoal ? *c.routeGoal : c.destination);
+      }
+    }
+  }
+  float minZ = 1e9f, maxZ = -1e9f;
+  for (size_t i = 0; i < dests.size(); ++i) {
+    minZ = std::min(minZ, dests[i].z);
+    maxZ = std::max(maxZ, dests[i].z);
+    for (size_t j = i + 1; j < dests.size(); ++j) {
+      CHECK(glm::distance(dests[i], dests[j]) > 1.0f);
+    }
+  }
+  CHECK(maxZ - minZ > 4.0f);
+}
+
 void TestWholeSquadIsPlannedAtOnce() {
   Scene scene = TwoUnitScene(24.0f, false);
   Unit second;
@@ -662,6 +721,7 @@ int main(int argc, char** argv) {
       TBG_TEST(TestShootCandidateIsFullBurstAndStateDescribesWeapons),
       TBG_TEST(TestMapGhostsAndTacticalMovesAreCommunicated),
       TBG_TEST(TestCaptureTheFlagIsExplained),
+      TBG_TEST(TestJevCtfSquadSpreadsAcrossRoles),
       TBG_TEST(TestWholeSquadIsPlannedAtOnce),
       TBG_TEST(TestHiddenEnemyNeverSerialized),
       TBG_TEST(TestInvalidAndStaleResponsesDoNotMutate),

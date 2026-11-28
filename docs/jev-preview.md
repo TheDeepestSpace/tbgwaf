@@ -169,3 +169,12 @@ the fallback is always labelled as not live Jev.
 exactly one upstream Choice request with retries disabled and reports
 `api_requests=1`. Fork PRs do not receive the secret. The dispatcher or local
 development environment is never expected to have it.
+
+Squad roles (issue #367): living figures are ranked by distance to the flag
+(or by forward position without one) and given a role (`attacker`,
+`flanker_left`, `flanker_right`, `defender`, cycling), listed as `role` on each
+ally. Flankers get a routed `flank` option that approaches the flag from the
+side, the defender a `hold` option back toward its own deployment area, and
+without a flag the `advance` lane is shifted per flanker. The deterministic
+fallback uses the same options (one figure takes the flag, flankers flank, no
+two figures share a destination).

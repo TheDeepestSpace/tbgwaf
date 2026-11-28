@@ -89,7 +89,7 @@
         padding: 5px 0;
         cursor: pointer;
       }
-      #mapSeeds {
+      #mapSeeds, #blastShots {
         flex: 1 1 auto;
         display: none;
         overflow-y: auto;
@@ -97,21 +97,21 @@
         padding: 16px;
         box-sizing: border-box;
       }
-      #mapSeeds .grid {
+      #mapSeeds .grid, #blastShots .grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
         gap: 14px;
       }
-      #mapSeeds figure {
+      #mapSeeds figure, #blastShots figure {
         margin: 0;
         background: #1d1f23;
         border: 1px solid #2a2c31;
         border-radius: 8px;
         overflow: hidden;
       }
-      #mapSeeds img { display: block; width: 100%; height: auto; }
-      #mapSeeds figcaption { font-size: 12px; padding: 8px 10px; }
-      #mapSeeds figcaption .seed { color: #9aa0a6; }
+      #mapSeeds img, #blastShots img { display: block; width: 100%; height: auto; }
+      #mapSeeds figcaption, #blastShots figcaption { font-size: 12px; padding: 8px 10px; }
+      #mapSeeds figcaption .seed, #blastShots figcaption .seed { color: #9aa0a6; }
       #mapSeeds figure { cursor: pointer; }
       #mapSeeds figure:hover { border-color: #8ab4ff; }
       #seedModal {
@@ -185,6 +185,7 @@
           <span id="timeLabel"></span>
         </div>
         <div id="mapSeeds"><div class="grid"></div></div>
+        <div id="blastShots"><div class="grid"></div></div>
       </div>
     </div>
     <div id="seedModal">
@@ -204,6 +205,7 @@
       }
     </script>
     <script src="map_seeds.js"></script>
+    <script src="blast_shots.js"></script>
     <script src="tactics_gallery.js"></script>
     <script>
       var statusEl = document.getElementById("status");
@@ -301,6 +303,34 @@
         }
 
 
+        // Blasts in buildings: a separate folder of animated GIFs from
+        // tests/blast_gallery/ (build-time manifest, blast_shots.js).
+        var blastShotsEl = document.getElementById("blastShots");
+        var blastShotsBtn = null;
+        var blastGifs = window.BLAST_GIFS || [];
+        if (blastGifs.length) {
+          addGroup("Blasts in buildings");
+          blastShotsBtn = document.createElement("button");
+          blastShotsBtn.className = "item";
+          blastShotsBtn.innerText = "All blasts (" + blastGifs.length + " gifs)";
+          blastShotsBtn.onclick = showBlastShots;
+          itemsEl.appendChild(blastShotsBtn);
+          var blastGrid = blastShotsEl.querySelector(".grid");
+          // 10 s animations first: watch the rubble settle.
+          blastGifs.forEach(function (file) {
+            var fig = document.createElement("figure");
+            var img = document.createElement("img");
+            img.src = "blast_gallery/" + file;
+            img.loading = "lazy";
+            img.alt = file;
+            var cap = document.createElement("figcaption");
+            cap.innerText = file.replace(/\.gif$/, "").replace(/_/g, " ") + " (10 s animation)";
+            fig.appendChild(img);
+            fig.appendChild(cap);
+            blastGrid.appendChild(fig);
+          });
+        }
+
         // 3D seed viewer: the WASM module regenerates the map and draws it
         // with the game's own renderer (greyscale) onto the gallery canvas,
         // which is moved into the modal while it is open. Camera input is the
@@ -332,15 +362,29 @@
           viewportEl.style.display = "none";
           controlsEl.style.display = "none";
           mapSeedsEl.style.display = "block";
+          blastShotsEl.style.display = "";
           buttons.forEach(function (b) { b.classList.remove("active"); });
+          if (blastShotsBtn) blastShotsBtn.classList.remove("active");
           mapSeedsBtn.classList.add("active");
+        }
+
+        function showBlastShots() {
+          viewportEl.style.display = "none";
+          controlsEl.style.display = "none";
+          mapSeedsEl.style.display = "";
+          blastShotsEl.style.display = "block";
+          buttons.forEach(function (b) { b.classList.remove("active"); });
+          if (mapSeedsBtn) mapSeedsBtn.classList.remove("active");
+          blastShotsBtn.classList.add("active");
         }
 
         function select(i) {
           viewportEl.style.display = "";
           controlsEl.style.display = "";
           mapSeedsEl.style.display = "";
+          blastShotsEl.style.display = "";
           if (mapSeedsBtn) mapSeedsBtn.classList.remove("active");
+          if (blastShotsBtn) blastShotsBtn.classList.remove("active");
           mod.ccall("gallery_select", null, ["number"], [i]);
           buttons.forEach(function (b, k) { b.classList.toggle("active", k === i); });
         }

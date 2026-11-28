@@ -121,12 +121,13 @@ ended, the game ended) or after 600 frames.
 | `click_ground` | `point`, `team` | `ClickGround` |
 | `finish_move` | | `FinishMovePlan` |
 | `choose_move` / `choose_shoot` / `choose_pass` / `cancel` | | `ChooseMove` / `ChooseShoot` / `ChoosePass` / `CancelAction` |
+| `choose_peek` | `side` (0 left, 1 right of the figure facing its wall) | `ChoosePeek` |
 | `set_move_facing` | `unit`, `yaw`, `team` | `SetPlannedMoveFacing` |
 | `click_aim_ray` | `origin`, `dir`, `team` | `ClickAimRay` |
 | `place_aim` | `point`, `team` | `PlaceAimPoint` |
 | `confirm_aim` | `team` | `ConfirmAim` |
 | `set_shots` | `count`, `team` | `SetPlannedShotCount` |
-| `set_playbook` | `team`, `table` (4 reaction ids, `[stationary-unseen, stationary-seen, moving-unseen, moving-seen]`), `ignore_idle` | `SetPlaybook` |
+| `set_playbook` | `team`, `table` (4 reaction ids, `[stationary-unseen, stationary-seen, moving-unseen, moving-seen]`), `ignore_idle`, `take_cover` (optional in old logs) | `SetPlaybook` |
 | `set_friendly_fire` | `enabled` | `SetFriendlyFireEnabled` |
 | `commit` | | `CommitRound` |
 | `clear_plans` | | `ClearAllPlans` |

@@ -216,6 +216,8 @@ const std::vector<GalleryItem>& Catalog() {
          gfx::kCoverLeanLoopSeconds},
         {AnimKind::CoverCrouch, "cover_crouch", "cover (crouch)",
          gfx::kCoverCrouchLoopSeconds},
+        {AnimKind::Peek, "peek", "tactical peek",
+         tactics::constants::kPeekTotalSeconds},
     };
     for (const W& w : weapons) {
       for (A a : anims) {
@@ -342,6 +344,14 @@ Unit AnimationUnit(const GalleryItem& item, double t) {
       unit.coverKind = item.anim == AnimKind::CoverLean ? 1 : 2;
       unit.coverBlend = 1.0f;
       unit.coverYaw = glm::pi<float>();
+      break;
+    case AnimKind::Peek:
+      // One full peek beat: creep out to the figure's right, aim around the
+      // corner, creep back.
+      unit.idleElapsed = static_cast<float>(t);
+      unit.peekElapsed =
+          static_cast<float>(std::fmod(t, tactics::constants::kPeekTotalSeconds));
+      unit.peekYaw = unit.facingYaw + glm::half_pi<float>();
       break;
   }
   return unit;

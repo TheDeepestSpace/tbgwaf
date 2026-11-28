@@ -1,0 +1,38 @@
+name: cover_take_cover_on_fire
+description: >
+  Take cover on return fire (issue #291). Blue 0 stands in the open with its squad's
+  "take cover on return fire" playbook flag on; Red 1 opens up from the south and misses
+  (pinned roll). Being targeted -- not hit -- is the trigger: the shot in flight on the
+  trigger tick still resolved against Blue's tick-start position, and from the next tick
+  Blue scrambles to the nearest reachable cover tile, the low barrier to its north.
+
+shot_rolls: [0.99]
+
+playbook:
+  blue: {stationary_seen: do_nothing, stationary_unseen: do_nothing, take_cover_on_fire: true}
+  red: {stationary_seen: do_nothing, stationary_unseen: do_nothing}
+
+map:
+  obstacles:
+    - {center: [0, 4.4], half_extent: [6, 0.4], height: 1.2}
+
+units:
+  - {id: 0, team: blue, position: [0, 0, 0], facing_degrees: 90}
+  - {id: 1, team: red, position: [0, 0, -10], facing_degrees: 90}
+
+camera:
+  target: [0, 0]
+  zoom: -1
+
+script:
+  - action: shoot
+    description: Red opens fire on Blue across the open ground (and misses).
+    actor: 1
+    target: 0
+  - action: pass
+    actor: 0
+  - action: commit
+
+  - assert: {unit: 0, alive: true, comment: The pinned roll missed}
+  - assert: {unit: 0, position: [0, 0, 3.5], tolerance: 0.4, comment: Dove to the barrier's cover band}
+  - assert: {round: 2}

@@ -38,6 +38,8 @@
 //   {"t":"move","unit":3,"waypoints":[[x,y,z],...],"facing":yaw}
 //   {"t":"shoot","unit":3,"target":4}
 //   {"t":"pass","unit":3}
+//   {"t":"peek","unit":3,"side":"left"|"right"}       tactical peek (issue #291); only valid on a
+//                                                     tactical cover tile with that corner open
 //   {"t":"cancel","unit":3}                           drop that unit's plan
 //   {"t":"focus","unit":3}                            validated no-op (camera is client-side)
 //   {"t":"reaction","table":[a,b,c,d]}               squad playbook, a..d = actions for
@@ -98,7 +100,7 @@ constexpr int kProtocolVersion = 7;
 constexpr size_t kMaxMessageBytes = 16 * 1024;
 constexpr size_t kMaxWaypoints = 32;
 
-enum class ActionKind { Move, Shoot, Pass, Cancel, Focus, Reaction, Commit, NewMatch };
+enum class ActionKind { Move, Shoot, Pass, Peek, Cancel, Focus, Reaction, Commit, NewMatch };
 
 struct Action {
   ActionKind kind = ActionKind::Pass;
@@ -108,6 +110,9 @@ struct Action {
   // target; shots is the burst size (issue #138).
   std::optional<glm::vec3> aimPoint;
   int shots = 1;
+  // Peek only (issue #291): the open corner side to step around,
+  // 0 = left / 1 = right of the figure facing its cover wall.
+  int side = 0;
   std::vector<glm::vec3> waypoints;
   std::optional<float> facing;
   tactics::SquadPlaybook playbook;  // Reaction only.

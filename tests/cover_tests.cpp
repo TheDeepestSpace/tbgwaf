@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstdio>
 #include <vector>
 
@@ -197,6 +198,50 @@ int main() {
     bool allNone = true;
     for (const CoverTile& t : m.tiles) allNone &= t.kind == CoverKind::None;
     CHECK(allNone);
+  }
+
+  // --- Tactical peek spots (issue #291) ---
+  {
+    // Car-sized block, feet near its left (x = 0) corner: exactly one peek
+    // option, around that corner. Facing the wall (+Z), stepping toward -X
+    // is stepping to the figure's right.
+    const std::vector<Obstacle> car = {Box(0, 0, 1.2f, 1)};
+    const std::vector<PeekOption> one = PeekOptions(car, {0.3f, 0, -0.25f});
+    CHECK(one.size() == 1);
+    CHECK(one[0].side == 1);
+    CHECK(std::fabs(one[0].spot.x - (0.3f - (0.3f + kPeekClearance))) < 1e-4f);
+    CHECK(std::fabs(one[0].spot.z - (-0.25f)) < 1e-4f);
+    CHECK(one[0].wallYaw > 1.5f && one[0].wallYaw < 1.65f);  // Toward +Z.
+    CHECK(std::fabs(std::fabs(one[0].stepYaw) - kPi) < 0.01f);  // Step toward -X.
+
+    // Mid-face and close in: both corners are inside the wedge -> two
+    // options, sorted left (side 0) first; left steps +X past x = 1.2.
+    const std::vector<PeekOption> both = PeekOptions(car, {0.6f, 0, -0.3f});
+    CHECK(both.size() == 2);
+    CHECK(both[0].side == 0 && both[1].side == 1);
+    CHECK(both[0].spot.x > 1.2f);
+    CHECK(both[1].spot.x < 0.0f);
+
+    // A blocker parked on the peek spot (but clear of the corner-openness
+    // probes, so the tile itself stays tactical) removes the option.
+    const std::vector<Obstacle> parked = {Box(0, 0, 1.2f, 1),
+                                          Box(-0.9f, -0.5f, -0.45f, -0.1f)};
+    CHECK(ClassifyCover(parked, {0.3f, 0, -0.25f}).kind == CoverKind::Tactical);
+    CHECK(PeekOptions(parked, {0.3f, 0, -0.25f}).empty());
+
+    // Flat cover (mid-wall, far from any corner) offers nothing to peek
+    // around; open ground neither.
+    const std::vector<Obstacle> longWall = {Box(-20, 0, 20, 1)};
+    CHECK(PeekOptions(longWall, {0, 0, -0.4f}).empty());
+    CHECK(PeekOptions(longWall, {0, 0, -5.0f}).empty());
+
+    // Deterministic.
+    const std::vector<PeekOption> again = PeekOptions(car, {0.6f, 0, -0.3f});
+    CHECK(again.size() == both.size());
+    for (size_t i = 0; i < again.size(); ++i) {
+      CHECK(again[i].side == both[i].side);
+      CHECK(again[i].spot == both[i].spot);
+    }
   }
 
   if (gFailures) return 1;

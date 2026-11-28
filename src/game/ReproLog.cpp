@@ -71,6 +71,7 @@ constexpr OpName kOpNames[] = {
     {InputEvent::Op::ChooseMove, "choose_move"},
     {InputEvent::Op::ChooseShoot, "choose_shoot"},
     {InputEvent::Op::ChoosePass, "choose_pass"},
+    {InputEvent::Op::ChoosePeek, "choose_peek"},
     {InputEvent::Op::CancelAction, "cancel"},
     {InputEvent::Op::SetMoveFacing, "set_move_facing"},
     {InputEvent::Op::ClickAimRay, "click_aim_ray"},
@@ -118,6 +119,9 @@ void AppendInputFields(std::string* out, const InputEvent& e) {
       *out += ",\"count\":" + std::to_string(e.count);
       team();
       break;
+    case Op::ChoosePeek:
+      *out += ",\"side\":" + std::to_string(e.count);
+      break;
     case Op::SetPlaybook:
       team();
       *out += ",\"table\":[";
@@ -129,6 +133,8 @@ void AppendInputFields(std::string* out, const InputEvent& e) {
       }
       *out += "],\"ignore_idle\":";
       *out += e.playbook.ignoreIdle ? "true" : "false";
+      *out += ",\"take_cover\":";
+      *out += e.playbook.takeCoverOnFire ? "true" : "false";
       break;
     case Op::SetFriendlyFire:
       *out += ",\"enabled\":";
@@ -185,6 +191,8 @@ bool ReadInputFields(const JsonValue& obj, InputEvent* e, std::string* error) {
     case Op::SetShotCount:
       return need(ReadInt(obj.Find("count"), &e->count), "count") &&
              need(ParseTeamName(obj.Find("team"), &e->team), "team");
+    case Op::ChoosePeek:
+      return need(ReadInt(obj.Find("side"), &e->count), "side");
     case Op::SetPlaybook: {
       if (!need(ParseTeamName(obj.Find("team"), &e->team), "team")) return false;
       const JsonValue* table = obj.Find("table");
@@ -204,6 +212,9 @@ bool ReadInputFields(const JsonValue& obj, InputEvent* e, std::string* error) {
       bool ignoreIdle = false;
       if (!need(ReadBool(obj.Find("ignore_idle"), &ignoreIdle), "ignore_idle")) return false;
       e->playbook.ignoreIdle = ignoreIdle;
+      // Optional (logs predating issue #291 lack it).
+      bool takeCover = false;
+      if (ReadBool(obj.Find("take_cover"), &takeCover)) e->playbook.takeCoverOnFire = takeCover;
       return true;
     }
     case Op::SetFriendlyFire:
@@ -532,6 +543,7 @@ ReplayReport ReplayReproLog(const ReproLog& log, const Scene& scene, GameLogic* 
       case Op::ChooseMove: game->ChooseMove(); break;
       case Op::ChooseShoot: game->ChooseShoot(); break;
       case Op::ChoosePass: game->ChoosePass(); break;
+      case Op::ChoosePeek: game->ChoosePeek(e.count); break;
       case Op::CancelAction: game->CancelAction(); break;
       case Op::SetMoveFacing: game->SetPlannedMoveFacing(e.unit, e.value, e.team); break;
       case Op::ClickAimRay: game->ClickAimRay(e.point, e.direction, e.team); break;

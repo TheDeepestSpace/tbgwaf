@@ -1,0 +1,49 @@
+name: cover_peek
+description: >
+  Tactical peek (issue #291). Blue 0 is tucked behind the open corner of a tall wall (a
+  tactical cover tile); Red 1 waits in the lane beyond, hidden from Blue and vice versa.
+  Blue spends its round's action on a peek: it slides out past the wall's end, holds
+  there exposed (recon -- both sides sight each other and remember the glimpse), and
+  returns to its tile with its original facing before the round ends. Nobody fires: both
+  playbooks are passive. Out in the open, Red has no corner to peek around, so the same
+  action is refused for it.
+
+playbook:
+  blue: {stationary_seen: do_nothing, stationary_unseen: do_nothing}
+  red: {stationary_seen: do_nothing, stationary_unseen: do_nothing}
+
+map:
+  obstacles:
+    - {center: [-3, 4], half_extent: [3, 0.4], height: 2.0}
+
+units:
+  - {id: 0, team: blue, position: [-0.5, 0, 3.1], facing_degrees: 90}
+  - {id: 1, team: red, position: [0.55, 0, 10], facing_degrees: 270}
+
+camera:
+  target: [0, 4]
+  zoom: -1
+
+script:
+  - assert: {unit: 1, visible_to: blue, visible: false, comment: The wall hides the lane from Blue}
+  - assert: {unit: 0, visible_to: red, visible: false, comment: ...and Blue from Red}
+  - action: peek
+    description: No corner in the open; the peek is refused and nothing is planned.
+    actor: 1
+    side: left
+    expect_noop: true
+  - action: peek
+    description: Blue peeks around the wall's open end (its left, facing the wall).
+    actor: 0
+    side: left
+  - action: pass
+    actor: 1
+  - action: commit
+
+  - assert: {unit: 0, position: [-0.5, 0, 3.1], comment: Automatically back on its tile}
+  - assert: {unit: 0, facing_degrees: 90, comment: Facing restored with the stance}
+  - assert: {unit: 1, remembered_by: blue, remembered: true, comment: The recon paid out}
+  - assert: {unit: 0, remembered_by: red, remembered: true, comment: Exposure cut both ways}
+  - assert: {unit: 0, alive: true}
+  - assert: {unit: 1, alive: true}
+  - assert: {round: 2}

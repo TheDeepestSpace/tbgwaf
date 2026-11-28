@@ -61,6 +61,9 @@ struct HudActions {
   bool done = false;
   // Free-aim (issue #129): Fire confirms the placed aim point.
   bool fire = false;
+  // Tactical peek (issue #291): set to the corner side (0 left / 1 right)
+  // when a Peek button was pressed; route to GameLogic::ChoosePeek.
+  std::optional<int> peek;
   // Multi-shot bursts (issue #138): set when the player dragged the shot
   // bar to a new level this frame; route to GameLogic::SetPlannedShotCount.
   std::optional<int> shots;

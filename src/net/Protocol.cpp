@@ -23,7 +23,8 @@ struct KindName {
 };
 constexpr KindName kKinds[] = {
     {"move", ActionKind::Move},         {"shoot", ActionKind::Shoot},
-    {"pass", ActionKind::Pass},         {"cancel", ActionKind::Cancel},
+    {"pass", ActionKind::Pass},         {"peek", ActionKind::Peek},
+    {"cancel", ActionKind::Cancel},
     {"focus", ActionKind::Focus},       {"reaction", ActionKind::Reaction},
     {"commit", ActionKind::Commit},     {"new_match", ActionKind::NewMatch},
 };
@@ -67,16 +68,22 @@ Json EncodePlaybook(const SquadPlaybook& playbook) {
     }
   }
   list.Push(Json(playbook.ignoreIdle));
+  list.Push(Json(playbook.takeCoverOnFire));
   return list;
 }
 
 bool DecodePlaybook(const Json& j, SquadPlaybook* out) {
-  // Four reaction names, plus an optional trailing ignore-idle flag.
-  if (!j.IsArray() || (j.AsArray().size() != 4 && j.AsArray().size() != 5)) return false;
+  // Four reaction names, plus optional trailing ignore-idle and
+  // take-cover-on-fire flags (issue #291).
+  if (!j.IsArray() || j.AsArray().size() < 4 || j.AsArray().size() > 6) return false;
   SquadPlaybook pb;
-  if (j.AsArray().size() == 5) {
+  if (j.AsArray().size() >= 5) {
     if (!j.AsArray()[4].IsBool()) return false;
     pb.ignoreIdle = j.AsArray()[4].AsBool();
+  }
+  if (j.AsArray().size() >= 6) {
+    if (!j.AsArray()[5].IsBool()) return false;
+    pb.takeCoverOnFire = j.AsArray()[5].AsBool();
   }
   for (int i = 0; i < 4; ++i) {
     const Json& e = j.AsArray()[i];
@@ -146,6 +153,14 @@ bool ParseAction(const Json& m, Action* out, std::string* error) {
       }
       break;
     }
+    case ActionKind::Peek: {
+      if (!m["side"].IsString()) return Fail("missing peek side");
+      const std::string& side = m["side"].AsString();
+      if (side == "left") a.side = 0;
+      else if (side == "right") a.side = 1;
+      else return Fail("bad peek side");
+      break;
+    }
     case ActionKind::Reaction: {
       if (!DecodePlaybook(m["table"], &a.playbook)) return Fail("bad reaction table");
       break;
@@ -177,6 +192,9 @@ Json EncodeAction(const Action& a) {
     for (const auto& w : a.waypoints) pts.Push(EncodeVec3(w));
     j.Set("waypoints", std::move(pts));
     if (a.facing) j.Set("facing", static_cast<double>(*a.facing));
+  }
+  if (a.kind == ActionKind::Peek) {
+    j.Set("side", a.side == 0 ? "left" : "right");
   }
   if (a.kind == ActionKind::Reaction) {
     j.Set("table", EncodePlaybook(a.playbook));
@@ -219,6 +237,7 @@ const char* PlanName(PlannedActionType type) {
     case PlannedActionType::Move: return "move";
     case PlannedActionType::Shoot: return "shoot";
     case PlannedActionType::Pass: return "pass";
+    case PlannedActionType::Peek: return "peek";
     case PlannedActionType::None: break;
   }
   return "none";
@@ -228,6 +247,7 @@ std::optional<PlannedActionType> ParsePlanName(const std::string& name) {
   if (name == "move") return PlannedActionType::Move;
   if (name == "shoot") return PlannedActionType::Shoot;
   if (name == "pass") return PlannedActionType::Pass;
+  if (name == "peek") return PlannedActionType::Peek;
   if (name == "none") return PlannedActionType::None;
   return std::nullopt;
 }

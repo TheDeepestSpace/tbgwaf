@@ -76,6 +76,23 @@ struct CoverZoneRect {
 std::vector<CoverZoneRect> CoverZoneRects(const std::vector<Obstacle>& obstacles, float feetY,
                                           float band);
 
+// Tactical peek (issue #291): where a figure standing at a tactical cover
+// tile can step out past the open corner. One candidate per open corner
+// side, at most one per side; `side` is relative to the figure facing its
+// wall (0 = step to its left, 1 = to its right). The spot keeps the
+// figure's offset from the wall and slides it along the face until the body
+// clears the corner by kPeekClearance; the path there and the spot itself
+// must both be free of blockers, or the side is not offered.
+constexpr float kPeekClearance = 0.55f;  // Past the corner, along the wall.
+struct PeekOption {
+  int side = 0;            // 0 = left of the corner, 1 = right.
+  glm::vec3 spot{0.0f};    // Feet position out past the corner (y = feet y).
+  float wallYaw = 0.0f;    // World yaw toward the wall: the peek's aim facing.
+  float stepYaw = 0.0f;    // World yaw of the step from the tile to the spot.
+};
+std::vector<PeekOption> PeekOptions(const std::vector<Obstacle>& obstacles,
+                                    const glm::vec3& feet);
+
 // Per-node cover for every node of `field` (same grid and indexing). Nodes
 // the field does not reach stay None.
 struct CoverMap {

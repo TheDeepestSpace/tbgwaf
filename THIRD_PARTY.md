@@ -32,9 +32,23 @@ Library packs:
   (Standard), flat-cover lean (legs/spine only; the arms keep carrying the
   weapon).
 
+The tactical-peek beat (issue #291) additionally includes a compact,
+retargeted sample of:
+
+- `Crouch_Fwd_Loop` from `UAL1_Standard.glb`, Universal Animation Library
+  (Standard), the crouched creep used while the figure slides out past the
+  corner and back (legs/spine only; the arms keep carrying the weapon, and
+  the aimed hold reuses the `Crouch_Idle_Loop` samples above).
+
 Only eight scalar pose samples per joint curve are included, produced with
 `scripts/extract_biped_clip.py`; the source meshes, rigs and GLBs are not
 redistributed.
+
+Mixamo (Adobe) was considered as a source for the peek clip and rejected:
+its animations are royalty-free for use *in* a project, but Adobe's terms do
+not clearly permit redistributing the animation data itself (even
+retargeted) in a public open-source repository, and downloads require an
+Adobe account. The Quaternius packs are CC0, which is unambiguous.
 
 - Animations: Quaternius
 - Source: [Universal Animation Library](https://quaternius.itch.io/universal-animation-library)

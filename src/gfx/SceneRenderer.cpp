@@ -6386,6 +6386,39 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         }
         glDisable(GL_BLEND);
       }
+      // Planned peek (issue #291): a short out-and-back line to the corner
+      // spot plus a wireframe stand-in there, aimed past the wall, so the
+      // plan reads like a miniature move preview.
+      if (unit.plan.type == tactics::PlannedActionType::Peek) {
+        for (const tactics::PeekOption& option :
+             tactics::PeekOptions(game.SightObstacles(), unit.position)) {
+          if (option.side != unit.plan.peekSide) continue;
+          glEnable(GL_BLEND);
+          glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+          static const std::vector<tactics::PathRide> kNoPeekRides;
+          drawMovePath({unit.position, option.spot}, kNoPeekRides, glm::vec4(pathGreen, 1.0f));
+          Unit ghost = unit;
+          ghost.position = option.spot;
+          ghost.facingYaw = option.wallYaw;
+          ghost.turnLag = 0.0f;
+          ghost.idleElapsed = 0.0f;
+          ghost.walkPhase = 0.0f;
+          ghost.walkBlend = 0.0f;
+          ghost.coverKind = 0;
+          ghost.coverBlend = 0.0f;
+          ghost.shootElapsed = -1.0f;
+          ghost.rideTravel = -1.0f;
+          ghost.grabElapsed = -1.0f;
+          // The stand-in holds the peek's aimed stance at the corner.
+          ghost.peekElapsed = tactics::constants::kPeekOutSeconds;
+          ghost.peekYaw = option.stepYaw;
+          DrawUnitWireframe(unlitShader_, pathLine_, viewProj, ghost,
+                            debug.thermal ? glm::vec4(thermalGreen, 1.0f)
+                                          : glm::vec4(0.3f, 0.9f, 0.4f, 1.0f));
+          glDisable(GL_BLEND);
+          break;
+        }
+      }
       // Planned locked shots draw no line here: the shot cone aimed at the
       // target's torso (plus the "+" marker) is the whole preview, same as
       // a planned free-aim shot.

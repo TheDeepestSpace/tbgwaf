@@ -2112,6 +2112,7 @@ int main() {
           if (hud.move) game.ChooseMove();
           if (hud.shoot) game.ChooseShoot();
           if (hud.pass) game.ChoosePass();
+          if (hud.peek) game.ChoosePeek(*hud.peek);
           if (hud.cancel) game.CancelAction();
           if (hud.playbook) game.SetPlaybook(paneTeam(pane), *hud.playbook);
           if (hud.done) game.FinishMovePlan();

@@ -39,6 +39,7 @@ struct InputEvent {
     ChooseMove,
     ChooseShoot,
     ChoosePass,
+    ChoosePeek,       // count = corner side (0 left, 1 right)
     CancelAction,
     SetMoveFacing,    // unit, value = yaw, team
     ClickAimRay,      // point = origin, direction, team
@@ -136,6 +137,7 @@ struct GameSnapshot {
     bool planHasAimPoint = false;  // Free-aim shot plan (issue #129).
     glm::vec3 planAimPoint{0.0f};
     int planShots = 1;  // Burst size of a Shoot plan (issue #138).
+    int planPeekSide = 0;  // Corner side of a Peek plan (issue #291).
     std::vector<glm::vec3> planPath;
     std::vector<std::vector<glm::vec3>> planQueuedLegs;
     std::vector<PathRide> planRides;
@@ -157,6 +159,10 @@ struct GameSnapshot {
     float rideLength = 0.0f;
     float rideSlope = 0.0f;
     float grabElapsed = -1.0f;  // Flag pickup reach beat (see Unit).
+    // Peek beat (issue #291), mirrored like the walk/ride state so a
+    // follower draws the same slide-out/aim/return the simulator plays.
+    float peekElapsed = -1.0f;
+    float peekYaw = 0.0f;
     bool moving = false;  // Has an in-flight move in the executing round.
     // Cover pose (issues #290/#292), mirrored so a follower replaying a
     // round from snapshots shows the crouch/lean the moment the simulator's
@@ -546,6 +552,16 @@ class GameLogic {
   void ChooseMove();
   void ChooseShoot();
   void ChoosePass();
+  // Tactical peek (issue #291): records a Peek plan around the open corner
+  // on `side` (0 left / 1 right of the figure facing its wall). A no-op
+  // unless the selected figure's tile offers that side (PeekOptionsForSelected).
+  void ChoosePeek(int side);
+  // The peek steps the selected figure could plan right now: non-empty only
+  // in ActionMenu with the figure on a tactical cover tile whose corner
+  // spots are clear. Drives the HUD's Peek buttons and the plan preview.
+  std::vector<PeekOption> PeekOptionsForSelected() const;
+  // True while `unitId` is mid-peek in the executing round.
+  bool IsUnitPeeking(int unitId) const;
 
   // Re-aims a planned move's final facing. Allowed at any time before the
   // round is committed, by the unit's own team; no-op for units without a planned move.
@@ -672,6 +688,26 @@ class GameLogic {
     std::vector<PathRide> rides;
     int ridingZipline = -1;  // Zipline currently occupied by this rider, else -1.
   };
+
+  // One figure's executing peek (issue #291). Pure function of the
+  // execution clock: the figure's position is mix(from, to, s(t)) with the
+  // fixed out/hold/return schedule of constants::kPeek*Seconds, so any
+  // tick slicing lands the figure on the same spots at the same times.
+  struct ActivePeek {
+    int unitId = -1;
+    glm::vec3 from{0.0f};
+    glm::vec3 to{0.0f};
+    float returnFacingYaw = 0.0f;  // Restored when the peek completes.
+  };
+  // Advances/finishes every active peek at the current execution clock.
+  void AdvancePeeks();
+  // Take cover on return fire (issue #291): dives every figure queued by
+  // this tick's resolved shots (fired at, survived, playbook flag on) to
+  // the nearest reachable cover tile -- or stops it if already on one.
+  void ApplyTakeCoverReactions();
+  // Route `unit` to the nearest cover tile reachable within `budget` and
+  // replace/install its ActiveMove. False when no cover tile is in reach.
+  bool DivertToNearestCover(Unit& unit, float budget);
 
   // A planned shot waiting for its first tick with valid FOV+LOS. Expires
   // (as a miss / hold-fire) if the shooter or target dies first, or if the
@@ -912,7 +948,12 @@ class GameLogic {
   // the executing round, valid only while mode_ == Executing; empty once
   // the round finishes.
   std::vector<ActiveMove> activeMoves_;
+  std::vector<ActivePeek> activePeeks_;
   std::vector<PendingShot> pendingShots_;
+  // Unit ids a burst opened fire on this tick (take-cover trigger queue)
+  // and the ids already diverted this round (one dive per figure per round).
+  std::vector<int> underFireThisTick_;
+  std::vector<int> tookCoverThisRound_;
   // Rounds left in each figure's magazine for reaction fire this round.
   std::map<int, int> reactionAmmo_;
   // When each figure's reaction burst may next fire: a dropped burst (target

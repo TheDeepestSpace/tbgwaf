@@ -69,6 +69,12 @@ bool ApplyPlanAction(GameLogic& game, Team team, const Action& action, std::stri
     case ActionKind::Pass:
       game.ChoosePass();
       return true;
+    case ActionKind::Peek:
+      game.ChoosePeek(action.side);
+      if (game.Mode() != InputMode::AwaitingSelection) {
+        return Rollback("cannot peek there (not a tactical cover tile with that corner open)");
+      }
+      return true;
     case ActionKind::Shoot: {
       game.ChooseShoot();
       game.SetPlannedShotCount(action.shots, team);
@@ -121,6 +127,10 @@ Action PlanToAction(const Unit& unit) {
       a.shots = unit.plan.shots;
       break;
     case PlannedActionType::Pass: a.kind = ActionKind::Pass; break;
+    case PlannedActionType::Peek:
+      a.kind = ActionKind::Peek;
+      a.side = unit.plan.peekSide;
+      break;
     case PlannedActionType::None: a.kind = ActionKind::Cancel; break;
   }
   return a;

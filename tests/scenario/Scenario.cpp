@@ -74,6 +74,10 @@ void ParsePlaybooks(const YAML::Node& root, SquadPlaybook (&out)[2]) {
         pb.ignoreIdle = slot.second.as<bool>();
         continue;
       }
+      if (key == "take_cover_on_fire") {
+        pb.takeCoverOnFire = slot.second.as<bool>();
+        continue;
+      }
       const ReactionAction action = ParseReaction(slot.second.as<std::string>());
       if (key == "moving_seen") pb.At(true, true) = action;
       else if (key == "moving_unseen") pb.At(true, false) = action;
@@ -215,6 +219,14 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     }
     if (node["shots"]) action.shots = node["shots"].as<int>();
     action.expectNoop = node["expect_noop"] && node["expect_noop"].as<bool>();
+  } else if (kind == "peek") {
+    action.kind = ScenarioAction::Kind::Peek;
+    if (!node["side"]) throw std::runtime_error("script 'peek' requires 'side' (left|right)");
+    const std::string side = node["side"].as<std::string>();
+    if (side == "left") action.peekSide = 0;
+    else if (side == "right") action.peekSide = 1;
+    else throw std::runtime_error("script 'peek' side must be left or right");
+    action.expectNoop = node["expect_noop"] && node["expect_noop"].as<bool>();
   } else if (kind == "begin_move") {
     action.kind = ScenarioAction::Kind::BeginMove;
   } else if (kind == "pass") {
@@ -226,7 +238,7 @@ ScenarioAction ParseAction(const YAML::Node& node) {
   } else {
     throw std::runtime_error(
         "unknown script action '" + kind +
-        "' (expected move/begin_move/shoot/aim/pass/cancel/focus/commit/new_game/"
+        "' (expected move/begin_move/shoot/aim/pass/peek/cancel/focus/commit/new_game/"
         "timeline_seek/timeline_play/timeline_pause/wait/bomb)");
   }
   return action;
@@ -343,6 +355,7 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
         game.Update(hooks.tickSeconds);
         game.UpdateSightingMemory(hooks.tickSeconds);
         timeline.Observe(game, hooks.tickSeconds);
+        if (hooks.onExecutedTick) hooks.onExecutedTick(game);
         if (hooks.onFrame) hooks.onFrame(game);
       }
       // Shots resolve at commit, so the fall may outlive (or entirely
@@ -367,6 +380,7 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
         game.Update(kFastStepSeconds);
         game.UpdateSightingMemory(kFastStepSeconds);
         timeline.Observe(game, kFastStepSeconds);
+        if (hooks.onExecutedTick) hooks.onExecutedTick(game);
       }
       game.Update(1.0e6f);  // Settle anything still pending (e.g. knockdowns).
       game.UpdateSightingMemory(0.0f);
@@ -638,6 +652,26 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
       NotifyMenuClick(actorTeam, "Pass");
       game.ChoosePass();
       return true;
+    case ScenarioAction::Kind::Peek: {
+      NotifyMenuClick(actorTeam, action.peekSide == 0 ? "Peek L" : "Peek R");
+      game.ChoosePeek(action.peekSide);
+      const tactics::Unit* actor = game.FindUnit(action.actor);
+      const bool planned = actor && actor->plan.type == PlannedActionType::Peek &&
+                           game.Mode() == InputMode::AwaitingSelection;
+      if (action.expectNoop) {
+        if (planned) {
+          return Fail("peek was expected to be refused, but it was planned");
+        }
+        NotifyMenuClick(actorTeam, "Cancel");
+        game.CancelAction();  // Deselect, mirroring a real player backing out.
+        return true;
+      }
+      if (!planned) {
+        return Fail("peek could not be planned (not a tactical cover tile, or that corner "
+                    "is not open)");
+      }
+      return true;
+    }
     case ScenarioAction::Kind::Focus:
       // Double-click: the first click's selection already happened above;
       // the camera easing is a rendering concern, so only observers act.
@@ -860,7 +894,7 @@ Scenario LoadScenarioFromFile(const std::string& path) {
   return scenario;
 }
 
-ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks) {
+ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& callerHooks) {
   ScenarioResult result;
   GameLogic game(scenario.scene);
   game.SetPlaybook(Team::Blue, scenario.playbooks[0]);
@@ -881,6 +915,14 @@ ScenarioResult RunScenario(const Scenario& scenario, const PlaybackHooks& hooks)
   auto SyncFollower = [&] {
     follower.ImportState(game.ExportState());
     follower.UpdateSightingMemory(0.0f);
+  };
+  // Stream mid-round state to the follower like a networked pane would
+  // (throttled: every few ticks is plenty to witness any exposure window).
+  PlaybackHooks hooks = callerHooks;
+  int executedTicks = 0;
+  hooks.onExecutedTick = [&](const GameLogic& g) {
+    if (callerHooks.onExecutedTick) callerHooks.onExecutedTick(g);
+    if (++executedTicks % 4 == 0) SyncFollower();
   };
 
   // Turn timeline (issue #143): recorded/replayed exactly as in main.cpp.

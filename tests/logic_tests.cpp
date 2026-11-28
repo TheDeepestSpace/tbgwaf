@@ -4046,6 +4046,28 @@ void TestSnapshotCarriesCoverPose() {
   CHECK(mirrored->Bounds().max.y < constants::kCrouchedHeight + 0.01f);
 }
 
+// Issue #291: a wall ending at x = 0 (tall, so it hides a standing figure),
+// Blue tucked behind it near the corner, Red out in the lane beyond.
+tactics::Scene PeekCornerScene() {
+  tactics::Scene scene;
+  scene.mapHalfExtent = 20.0f;
+  scene.obstacles.push_back(tactics::Obstacle{
+      tactics::AABB{glm::vec3(-6.0f, 0.0f, 3.6f), glm::vec3(0.0f, 2.0f, 4.4f)}});
+  tactics::Unit blue;
+  blue.id = 0;
+  blue.team = tactics::Team::Blue;
+  blue.position = glm::vec3(-0.5f, 0.0f, 3.1f);  // Tactical tile: corner at x = 0.
+  blue.facingYaw = 1.5707963f;  // Facing the wall (+Z).
+  scene.units.push_back(blue);
+  tactics::Unit red;
+  red.id = 1;
+  red.team = tactics::Team::Red;
+  red.position = glm::vec3(0.55f, 0.0f, 10.0f);
+  red.facingYaw = -1.5707963f;
+  scene.units.push_back(red);
+  return scene;
+}
+
 // --- Destruction I (issue #350): debug bomb, fracture, wall/floor holes. ---
 
 // One thin wall across the whole map between two facing figures: nothing
@@ -4070,6 +4092,128 @@ Scene BombWallScene() {
   red.facingYaw = kPi;
   scene.units.push_back(red);
   return scene;
+}
+
+// Issue #291: the peek steps out past the corner on the fixed clock
+// schedule, is exposed (both ways) at the hold, and returns to its tile
+// with the original facing by the end of the round.
+void TestPeekStepsOutActsAndReturns() {
+  GameLogic game(PeekCornerScene());
+  MakePassive(game);
+  const glm::vec3 home = game.FindUnit(0)->position;
+  const float homeYaw = game.FindUnit(0)->facingYaw;
+  CHECK(!game.ComputeVisibility(Team::Red).UnitVisible(0));
+  CHECK(!game.ComputeVisibility(Team::Blue).UnitVisible(1));
+
+  // Peek is only offered on the open-corner side (right of the wall is
+  // closed: the wall continues to -x far past reach).
+  game.ClickUnit(0, Team::Blue);
+  CHECK(game.PeekOptionsForSelected().size() == 1);
+  CHECK(game.PeekOptionsForSelected()[0].side == 0);  // +X is Blue's left.
+  game.ChoosePeek(1);  // The closed side is refused...
+  CHECK(game.Mode() == InputMode::ActionMenu);
+  CHECK(game.FindUnit(0)->plan.type == PlannedActionType::None);
+  game.ChoosePeek(0);  // ...the open one records the plan.
+  CHECK(game.FindUnit(0)->plan.type == PlannedActionType::Peek);
+  CHECK(game.Mode() == InputMode::AwaitingSelection);
+
+  // On open ground there is nothing to peek around: a no-op.
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePeek(0);
+  CHECK(game.FindUnit(1)->plan.type == PlannedActionType::None);
+  game.ChoosePass();
+
+  game.CommitRound();
+  // Past the slide-out the figure holds at the peek spot, past the corner,
+  // exposed both ways; its own sight sweeps the lane (recon).
+  float elapsed = 0.0f;
+  while (elapsed < constants::kPeekOutSeconds + 0.3f) {
+    game.Update(0.02f);
+    game.UpdateSightingMemory(0.02f);
+    elapsed += 0.02f;
+  }
+  const Unit* blue = game.FindUnit(0);
+  CHECK(blue->position.x > 0.3f);
+  CHECK(blue->peekElapsed >= 0.0f);
+  CHECK(game.ComputeVisibility(Team::Red).UnitVisible(0));
+  CHECK(game.ComputeVisibility(Team::Blue).UnitVisible(1));
+  CHECK(!game.Sightings(Team::Blue, 1).empty());
+  // The exposure window closes on schedule: position and facing restored,
+  // back under the wall's cover, still inside the same round.
+  while (elapsed < constants::kPeekTotalSeconds + 0.1f) {
+    game.Update(0.02f);
+    game.UpdateSightingMemory(0.02f);
+    elapsed += 0.02f;
+  }
+  CHECK(game.Mode() == InputMode::Executing);
+  CHECK(glm::distance(game.FindUnit(0)->position, home) < 1e-3f);
+  CHECK(std::fabs(game.FindUnit(0)->facingYaw - homeYaw) < 1e-4f);
+  CHECK(game.FindUnit(0)->peekElapsed < 0.0f);
+  CHECK(!game.ComputeVisibility(Team::Red).UnitVisible(0));
+  RunRound(game);
+  CHECK(game.RoundNumber() == 2);
+  // Settled back into the tile's cover pose without a gap.
+  CHECK(game.FindUnit(0)->coverTileKind != 0);
+}
+
+// Issue #291: whether the peek *attacks* is the squad playbook's stationary
+// row. With "shoot when seen" (the default), the peeking figure opens fire
+// on the enemy it sights around the corner.
+void TestPeekAttacksThroughPlaybook() {
+  GameLogic game(PeekCornerScene());
+  game.SetPlaybook(Team::Blue, SquadPlaybook{});  // Default: stationary+seen = shoot.
+  game.SetPlaybook(Team::Red, SquadPlaybook::Passive());
+  game.SetShotRollSource([] { return 0.0f; });  // Every taken shot lands.
+  game.ClickUnit(0, Team::Blue);
+  game.ChoosePeek(0);
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  RunRound(game);
+  CHECK(!game.FindUnit(1)->alive);
+  CHECK(game.FindUnit(0)->alive);
+  CHECK(glm::distance(game.FindUnit(0)->position, glm::vec3(-0.5f, 0.0f, 3.1f)) < 1e-3f);
+}
+
+// Issue #291: "take cover on return fire". A figure a burst opens fire on
+// dives to the nearest reachable cover tile mid-round -- only with its
+// team's playbook flag on, and only from the tick after the triggering
+// shots (which still resolve against the tick-start snapshot).
+void TestTakeCoverOnReturnFire() {
+  for (const bool flag : {true, false}) {
+    GameLogic game(LowBarrierDuelScene());
+    SquadPlaybook pb = SquadPlaybook::Passive();
+    pb.takeCoverOnFire = flag;
+    game.SetPlaybook(Team::Blue, pb);
+    game.SetPlaybook(Team::Red, SquadPlaybook::Passive());
+    game.SetShotRollSource([] { return 0.999f; });  // Red's shot misses.
+    // Red fires from the open side (south), so the barrier north of Blue
+    // is the nearest cover but never blocks the triggering burst.
+    Unit* red = game.FindUnit(1);
+    red->position = glm::vec3(0.0f, 0.0f, -10.0f);
+    red->SetFacingYaw(1.5707963f);
+    // Red locks a shot on Blue standing in the open lane.
+    game.ClickUnit(1, Team::Red);
+    game.ChooseShoot();
+    game.ClickUnit(0, Team::Red);
+    CHECK(game.FindUnit(1)->plan.type == PlannedActionType::Shoot);
+    game.ClickUnit(0, Team::Blue);
+    game.ChoosePass();
+    game.CommitRound();
+    RunRound(game);
+    CHECK(game.FindUnit(0)->alive);
+    const glm::vec3 end = game.FindUnit(0)->position;
+    if (flag) {
+      // Dove to the barrier's cover band. (The crouch pose itself stays
+      // suppressed here: Red fires from the uncovered side, so the pose
+      // would be useless against it -- the issue #292 exposure rule.)
+      CHECK(end.z > 3.0f);
+      CHECK(ClassifyCover(game.SightObstacles(), end).kind != CoverKind::None);
+      CHECK(game.FindUnit(0)->coverTileKind == 2);
+    } else {
+      CHECK(glm::distance(end, glm::vec3(0.0f)) < 1e-3f);
+    }
+  }
 }
 
 // A one-room building floor at y = 3 (surface 0), the ceiling slab under it,
@@ -5120,6 +5264,67 @@ void TestMassingCutKeepsSlopedTop() {
   }
 }
 
+// Issue #291: a figure already on a cover tile when fired on holds it (its
+// remaining move is cut) instead of running out.
+void TestTakeCoverStopsMoverAlreadyOnCover() {
+  GameLogic game(LowBarrierDuelScene());
+  SquadPlaybook pb = SquadPlaybook::Passive();
+  pb.takeCoverOnFire = true;
+  game.SetPlaybook(Team::Blue, pb);
+  game.SetPlaybook(Team::Red, SquadPlaybook::Passive());
+  game.SetShotRollSource([] { return 0.999f; });
+  // Blue starts on the cover band and plans to walk out along it into the
+  // open (past the barrier's end). Red again fires from the open south.
+  Unit* red = game.FindUnit(1);
+  red->position = glm::vec3(0.0f, 0.0f, -10.0f);
+  red->SetFacingYaw(1.5707963f);
+  Unit* blue = game.FindUnit(0);
+  blue->position = glm::vec3(0.0f, 0.0f, 3.5f);
+  PlanMove(game, 0, glm::vec3(10.0f, 0.0f, 3.5f));
+  game.ClickUnit(1, Team::Red);
+  game.ChooseShoot();
+  game.ClickUnit(0, Team::Red);
+  game.CommitRound();
+  RunRound(game);
+  CHECK(game.FindUnit(0)->alive);
+  // Stopped where the trigger caught it, still on the cover band, well
+  // short of the planned destination.
+  const glm::vec3 end = game.FindUnit(0)->position;
+  CHECK(end.x < 5.0f);
+  CHECK(ClassifyCover(game.SightObstacles(), end).kind != CoverKind::None);
+}
+
+// Issue #291: the peek plan, beat state and the new playbook flag survive
+// the snapshot text round trip (follower mirroring / plan import).
+void TestPeekPlanAndPlaybookSnapshotRoundTrip() {
+  GameLogic game(PeekCornerScene());
+  SquadPlaybook pb;
+  pb.takeCoverOnFire = true;
+  pb.ignoreIdle = true;
+  game.SetPlaybook(Team::Blue, pb);
+  game.ClickUnit(0, Team::Blue);
+  game.ChoosePeek(0);
+  GameSnapshot snap;
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &snap));
+  GameLogic mirror(PeekCornerScene());
+  CHECK(mirror.ImportState(snap));
+  CHECK(mirror.FindUnit(0)->plan.type == PlannedActionType::Peek);
+  CHECK(mirror.FindUnit(0)->plan.peekSide == 0);
+  CHECK(mirror.Playbook(Team::Blue) == game.Playbook(Team::Blue));
+  CHECK(mirror.Playbook(Team::Blue).takeCoverOnFire);
+
+  // Mid-peek, the beat state mirrors too (the follower draws the slide).
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.CommitRound();
+  for (int i = 0; i < 50; ++i) game.Update(0.02f);
+  CHECK(game.FindUnit(0)->peekElapsed > 0.0f);
+  CHECK(DeserializeSnapshot(SerializeSnapshot(game.ExportState()), &snap));
+  CHECK(mirror.ImportState(snap));
+  CHECK(std::fabs(mirror.FindUnit(0)->peekElapsed - game.FindUnit(0)->peekElapsed) < 1e-4f);
+  CHECK(std::fabs(mirror.FindUnit(0)->peekYaw - game.FindUnit(0)->peekYaw) < 1e-4f);
+  CHECK(glm::distance(mirror.FindUnit(0)->position, game.FindUnit(0)->position) < 1e-4f);
+}
 
 void TestArmedBombDetonatesMidRound() {
   GameLogic game(BombWallScene());
@@ -5443,6 +5648,11 @@ int main() {
   TestCoverPoseEngagesOnArrivalMidRound();
   TestCrouchedFigureBlocksLockedShot();
   TestSnapshotCarriesCoverPose();
+  TestPeekStepsOutActsAndReturns();
+  TestPeekAttacksThroughPlaybook();
+  TestTakeCoverOnReturnFire();
+  TestTakeCoverStopsMoverAlreadyOnCover();
+  TestPeekPlanAndPlaybookSnapshotRoundTrip();
   TestReachFieldManySurfacesPerformance();
   TestExplosionPlanDeterministicCells();
   TestBombBlowsSeeAndWalkThroughHole();

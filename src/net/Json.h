@@ -45,7 +45,9 @@ class Json {
   Json& Set(const std::string& key, Json value);
   Json& Push(Json value);
 
-  std::string Dump() const;
+  // `exact` writes numbers with 9 significant digits (a float survives the
+  // text round trip) instead of the wire's 7.
+  std::string Dump(bool exact = false) const;
   // Returns false on malformed input or nesting deeper than kMaxDepth.
   static bool Parse(const std::string& text, Json* out);
 

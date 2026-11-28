@@ -25,19 +25,21 @@ constexpr int kSpectatorSlot = 2;
 
 namespace {
 // Seed-generated matches spawn at the map-suggested opposite corners (#226).
-Scene GenerateMatchScene(uint32_t seed, const std::string& kind, bool ctf) {
+Scene GenerateMatchScene(uint32_t seed, const std::string& kind, bool ctf, int roundLimit) {
   Scene scene = GenerateMapByKind(seed, kind);
   ApplySpawnHints(&scene);
   scene.flag.enabled = ctf;
+  scene.roundLimit = roundLimit;
   return scene;
 }
 }  // namespace
 
-GameSession::GameSession(uint32_t seed, std::string mapKind, bool ctf)
+GameSession::GameSession(uint32_t seed, std::string mapKind, bool ctf, int roundLimit)
     : seed_(seed),
       mapKind_(std::move(mapKind)),
       ctf_(ctf),
-      game_(GenerateMatchScene(seed, mapKind_, ctf_)) {
+      roundLimit_(roundLimit),
+      game_(GenerateMatchScene(seed, mapKind_, ctf_, roundLimit_)) {
   game_.SetMatchSeed(seed_);  // Explosion seeds hash it (issue #350).
 }
 
@@ -70,7 +72,7 @@ GameSession::Result GameSession::Apply(Team team, const net::Action& action, uin
   if (action.kind == net::ActionKind::NewMatch) {
     if (game_.Mode() != InputMode::GameOver) return {false, "match is still running"};
     seed_ = newSeed;
-    game_.Reset(fixedScene_ ? *fixedScene_ : GenerateMatchScene(seed_, mapKind_, ctf_));
+    game_.Reset(fixedScene_ ? *fixedScene_ : GenerateMatchScene(seed_, mapKind_, ctf_, roundLimit_));
     ready_ = {false, false};
     history_.clear();
     worldSent_ = 0;
@@ -93,12 +95,60 @@ GameSession::Result GameSession::ApplyBotPlan(Team team, const ai::JevRequest* r
                                                const std::vector<std::string>& choices) {
   if (!PlanningOpen()) return {false, "planning is closed"};
   if (ready_[static_cast<int>(team)]) return {false, "team is already committed"};
-  if (request && !ai::ApplyJevChoice(&game_, *request, choices)) {
-    return {false, "Jev's plan is no longer legal"};
+  // Jev plans on a scratch copy and its orders are then applied to the match
+  // like a human's (the click flow's side effects stay on the copy), so the
+  // live match is exactly what a restart replays from the stored orders.
+  Json orders = OrdersOf(game_, team);
+  if (request) {
+    GameLogic scratch = game_;
+    if (!ai::ApplyJevChoice(&scratch, *request, choices)) {
+      return {false, "Jev's plan is no longer legal"};
+    }
+    orders = OrdersOf(scratch, team);
   }
+  for (const Unit& u : game_.GetScene().units) {
+    if (u.team == team) game_.FindUnit(u.id)->plan = PlannedAction{};
+  }
+  return ApplyOrders(team, orders);
+}
+
+Json GameSession::OrdersFor(Team team) const { return OrdersOf(game_, team); }
+
+Json GameSession::OrdersOf(const GameLogic& game, Team team) {
+  Json plans{Json::Array{}};
+  for (const Unit& u : game.GetScene().units) {
+    if (u.team != team || !u.alive) continue;
+    plans.Push(net::EncodeAction(net::PlanToAction(u)));
+  }
+  Json orders;
+  orders.Set("plans", std::move(plans));
+  orders.Set("playbook", net::EncodePlaybook(game.Playbook(team)));
+  return orders;
+}
+
+GameSession::Result GameSession::ApplyOrders(Team team, const Json& orders) {
+  std::vector<net::Action> actions;
+  for (const Json& plan : orders["plans"].AsArray()) {
+    net::Action action;
+    std::string error;
+    if (!net::ParseAction(plan, &action, &error)) return {false, "stored order: " + error};
+    actions.push_back(std::move(action));
+  }
+  Json reaction;
+  reaction.Set("t", "reaction");
+  reaction.Set("table", orders["playbook"]);
+  net::Action playbook;
+  std::string error;
+  if (!net::ParseAction(reaction, &playbook, &error)) return {false, "stored playbook: " + error};
+  actions.push_back(std::move(playbook));
   net::Action commit;
   commit.kind = net::ActionKind::Commit;
-  return Apply(team, commit);
+  actions.push_back(std::move(commit));
+  for (const net::Action& action : actions) {
+    const Result result = Apply(team, action);
+    if (!result.ok) return result;
+  }
+  return {};
 }
 
 std::array<Json, 3> GameSession::RunRound() {

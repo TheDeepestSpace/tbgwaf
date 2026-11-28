@@ -437,6 +437,12 @@ cmake --build build
 ./build/tbgwaf_server --port 8080     # PORT env var also works; GET /health -> 200
 ```
 
+**Persistence:** `TBGWAF_DB_PATH=/path/games.db` (or `--db FILE`) stores two-player
+matches in SQLite so they survive reconnects and restarts; the menu gets
+**My games** and **Continue**. See [docs/persistence.md](docs/persistence.md).
+The `integration` scenario suite (`tests/integration/`, ctest `integration_tests`)
+exercises this against a real server.
+
 `-DTBGWAF_BUILD_CLIENT=OFF` skips the SDL2/GLES app and GL-based tests;
 `-DTBGWAF_BUILD_SERVER=OFF` skips the server. Both default to ON.
 
@@ -559,6 +565,7 @@ flowchart TD
     builder_edit -->|back_to_builder| builder
     gameplay -->|back_to_builder| builder
     room -->|create_room| gameplay
+    room -->|create_ai_room| gameplay
     room -->|join_room| gameplay
     room -->|back| game_mode
 ```

@@ -1,0 +1,44 @@
+name: restart_rejoin_same_state
+description: >
+  Two players play turns, one client is killed mid-turn (after committing), the server restarts,
+  and both rejoin through Game Mode -> Continue. State, commit flags and the round are unchanged;
+  the unresolved round then completes.
+steps:
+  - server: start
+  - app: [alice, bob]
+  - click: {app: alice, button: New Game}
+  - click: {app: alice, button: Regular}
+  - click: {app: alice, button: Urban}
+  - click: {app: alice, button: Online (2 players)}
+  - click: {app: alice, button: New room}
+  - assert: {app: alice, screen: gameplay, status: waiting}
+  - click: {app: bob, button: New Game}
+  - click: {app: bob, button: Regular}
+  - click: {app: bob, button: Urban}
+  - click: {app: bob, button: Online (2 players)}
+  - type_room_code: {app: bob, from: alice}
+  - click: {app: bob, button: Join}
+  - assert: {app: bob, screen: gameplay, status: playing, round: 1}
+  - assert: {app: alice, status: playing, round: 1}
+  - round: {apps: [alice, bob], count: 2}
+  - assert: {app: alice, round: 3}
+  # Mid-turn: alice commits, bob is still planning, then alice's client dies.
+  - commit: alice
+  - snapshot: {app: alice, name: alice_before}
+  - snapshot: {app: bob, name: bob_before}
+  - assert: {app: alice, self_ready: true}
+  - assert: {app: bob, peer_ready: true}
+  - reload: alice
+  - assert: {app: bob, peer_away: true}
+  - server: restart
+  - reload: bob
+  - click: {app: alice, button: Continue}
+  - assert: {app: alice, screen: gameplay, status: playing, same_as: alice_before}
+  - click: {app: bob, button: Continue}
+  - assert: {app: bob, screen: gameplay, status: playing, same_as: bob_before}
+  - assert: {app: bob, peer_ready: true, self_ready: false}
+  - assert: {app: alice, peer_away: false}
+  # The stored commit stands: bob's commit resolves round 3.
+  - commit: bob
+  - assert: {app: alice, round: 4, self_ready: false}
+  - assert: {app: bob, round: 4, self_ready: false}

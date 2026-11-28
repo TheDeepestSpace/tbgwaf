@@ -7,3 +7,6 @@ visual_out/
 
 # Default --out-dir of the map visual runner.
 map_visual_out/
+
+__pycache__/
+*.pyc

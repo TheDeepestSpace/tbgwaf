@@ -26,7 +26,8 @@
 //                                                  unfiltered state, both teams' plans and
 //                                                  unfiltered rounds; any other message is an error
 //   {"t":"join",...,"mode":"player-v-ai"|"ai-v-ai"[,"map":"urban"|"urban-x4"|"hills"][,"seed":N][,"ctf":true]}   optional map/seed for the new Jev room; start echoes "map" and "ctf"
-//   {"t":"join","room":"<name>","mode":"player-v-ai"}   Blue vs Jev: the server seats Jev as Red
+//   {"t":"join","room":"<name>","mode":"player-v-ai"}   Blue vs Jev: the server seats Jev as Red; with a
+//                                                  "token" the match is stored and resumable like a human one
 //   {"t":"join","room":"<name>","spectate":true,"mode":"ai-v-ai"}   Jev vs Jev: opens a room of two
 //                                                  server-side Jevs (starts paused) and watches it
 //                                                  (needs TBGWAF_JEV_ADAPTER_URL on the server)
@@ -35,6 +36,18 @@
 //                                                  run=false/true pauses/starts Jev vs Jev; retry
 //                                                  re-asks after an error; fallback=true switches to
 //                                                  the explicit deterministic (non-Jev) planner
+//   Stored matches (server started with a DB, see docs/persistence.md). "token" is the device's anonymous
+//   16-64 char [A-Za-z0-9_-] id; a two-player match whose players both joined with distinct tokens is stored:
+//   {"t":"join","room":"<name>","token":"<token>"}   as above, plus the token; start then carries "game":"<id>"
+//   {"t":"join","game":"<id>","token":"<token>"}     resume: reseats that token in its stored match (also
+//                                                  {"room":..,"token":..} for a room that holds one). Active
+//                                                  game: start (+"resumed":true), state, the latest resolved
+//                                                  round, plans (own commit flag in "ready"), peer. Finished
+//                                                  game: start (+"finished":true), plans, state, reveal
+//   {"t":"my_games","token":"<token>"}              -> {"t":"games","games":[{"id","status":"active"|"finished",
+//                                                  "team","round","winner"?,"created","updated"}]}  own games only,
+//                                                  newest first; usable without a join
+//   A dropped player's seat is held: the opponent gets {"t":"opponent_away"}, then {"t":"opponent_back"}.
 //   {"t":"move","unit":3,"waypoints":[[x,y,z],...],"facing":yaw}
 //   {"t":"shoot","unit":3,"target":4}
 //   {"t":"pass","unit":3}

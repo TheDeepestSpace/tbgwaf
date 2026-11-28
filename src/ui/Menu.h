@@ -31,6 +31,24 @@ struct BuilderMenu {
   bool downloadLastLog = false;
 };
 
+// One stored match on the My games screen.
+struct GameRow {
+  std::string id;
+  std::string title;  // e.g. "Blue - round 4 - active".
+  bool finished = false;
+};
+
+// The My games screen's inputs and what the user did on it. `canContinue`
+// (also read by Game Mode) shows a Continue button: this device has a last
+// match to resume.
+struct GamesMenu {
+  std::vector<GameRow> rows;
+  bool loaded = false;       // The server's list arrived.
+  bool canContinue = false;
+  std::string status;        // Load error / why a game could not be opened.
+  int openIndex = -1;        // Output: row opened (fires OpenGame); reset every frame.
+};
+
 // State of the Room screen's join-by-code field. `code` is the normalized
 // (upper-case) code once JoinRoom fires; `error` is shown under the field
 // (set by the menu for a malformed code, by the host for a refused join).
@@ -39,22 +57,24 @@ struct RoomForm {
   std::string error;
 };
 
-// Draws the Splash / Game Mode / Map Select / Builder / Room screen for
-// `state` (call between ImGui::NewFrame() and Render()). Returns the flow
-// event the user fired this frame, if any. Game Mode offers Regular / CTF /
-// Builder (fires SelectRegular / SelectCtf / SelectBuilder), plus Online
-// (SelectOnline) when `onlineAvailable` (a game server is configured). The
-// Room screen has New room (CreateRoom: the server issues a code), a code
-// box + Join (JoinRoom, `room->code` filled) and Back. Map Select shows an
-// editable seed box bound to `*mapSeed` (digits only, plus a Random button)
-// and Urban, Urban x4, and Hills choices. Builder lists `builder->cards`
-// plus a New Scene card: opening a card fires OpenBuilderScene and sets
-// `openIndex`; New Scene fires it with `newScene` set (the caller appends
-// the scene); Back fires ExitBuilder. Gameplay and the Builder editor draw
-// no menu.
+// Draws the Splash / Game Mode / Map Select / Opponent / Builder / Room /
+// My games screen for `state` (call between ImGui::NewFrame() and Render()).
+// Returns the flow event the user fired this frame, if any. The Splash has New
+// Game plus, when `onlineAvailable` (a game server is configured), Continue
+// (when `games->canContinue`) and My games. Game Mode offers Regular / CTF /
+// Builder; Map Select then picks the map (seed box bound to `*mapSeed`, digits
+// only, plus Random; Urban, Urban x4, Hills); Opponent follows: Local, Online
+// (SelectOnline -> Room) or Play vs AI (CreateAiRoom: Blue against Jev). The
+// Room screen has New room (CreateRoom: the server issues a code), a code box
+// + Join (JoinRoom, `room->code` filled) and Back. Builder lists
+// `builder->cards` plus a New Scene card: opening a card fires
+// OpenBuilderScene and sets `openIndex`; New Scene fires it with `newScene`
+// set (the caller appends the scene); Back fires ExitBuilder. Gameplay and the
+// Builder editor draw no menu.
 std::optional<tbgwaf_flow::Event> DrawMenu(tbgwaf_flow::State state, int windowWidth,
                                            int windowHeight, uint32_t* mapSeed,
                                            bool onlineAvailable = false, RoomForm* room = nullptr,
-                                           BuilderMenu* builder = nullptr);
+                                           BuilderMenu* builder = nullptr,
+                                           GamesMenu* games = nullptr);
 
 }  // namespace tactics::ui

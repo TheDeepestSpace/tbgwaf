@@ -2,6 +2,8 @@
 
 #include <imgui.h>
 
+#include "ui/MenuButtons.h"
+
 #include <algorithm>
 #include <cfloat>
 #include <cstdint>
@@ -17,7 +19,8 @@ using tbgwaf_flow::State;
 
 std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
                                   uint32_t* mapSeed, bool onlineAvailable, RoomForm* room,
-                                  BuilderMenu* builder) {
+                                  BuilderMenu* builder, GamesMenu* games) {
+  if (games) games->openIndex = -1;
   if (builder) {
     builder->openIndex = -1;
     builder->newScene = false;
@@ -25,7 +28,7 @@ std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
     builder->downloadLastLog = false;
   }
   if (state != State::Splash && state != State::GameMode && state != State::MapSelect &&
-      state != State::Builder && state != State::Room) {
+      state != State::Builder && state != State::Opponent && state != State::Room && state != State::MyGames) {
     return std::nullopt;
   }
 
@@ -43,20 +46,32 @@ std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
     ImGui::TextUnformatted("Firestep");
     ImGui::SetWindowFontScale(1.0f);
     ImGui::Spacing();
-    if (ImGui::Button("New Game", button)) fired = Event::NewGame;
+    if (ImGui::Button(kButtonNewGame, button)) fired = Event::NewGame;
+    if (onlineAvailable && games && games->canContinue &&
+        ImGui::Button(kButtonContinue, button)) {
+      fired = Event::ContinueGame;
+    }
+    if (onlineAvailable && ImGui::Button(kButtonMyGames, button)) fired = Event::SelectMyGames;
     ImGui::End();
   } else if (state == State::GameMode) {
     ImGui::Begin("Game Mode", nullptr, flags);
-    if (ImGui::Button("Regular", button)) fired = Event::SelectRegular;
-    if (ImGui::Button("Capture the Flag", button)) fired = Event::SelectCtf;
-    if (ImGui::Button("Builder", button)) fired = Event::SelectBuilder;
-    if (onlineAvailable && ImGui::Button("Online (2 players)", button)) fired = Event::SelectOnline;
+    if (ImGui::Button(kButtonRegular, button)) fired = Event::SelectRegular;
+    if (ImGui::Button(kButtonCtf, button)) fired = Event::SelectCtf;
+    if (ImGui::Button(kButtonBuilder, button)) fired = Event::SelectBuilder;
     ImGui::Spacing();
-    if (ImGui::Button("Back", ImVec2(100.0f, 0.0f))) fired = Event::Back;
+    if (ImGui::Button(kButtonBack, ImVec2(100.0f, 0.0f))) fired = Event::Back;
+    ImGui::End();
+  } else if (state == State::Opponent) {
+    ImGui::Begin("Opponent", nullptr, flags);
+    if (ImGui::Button(kButtonLocal, button)) fired = Event::StartLocal;
+    if (ImGui::Button(kButtonOnline, button)) fired = Event::SelectOnline;
+    if (ImGui::Button(kButtonPlayAi, button)) fired = Event::CreateAiRoom;
+    ImGui::Spacing();
+    if (ImGui::Button(kButtonBack, ImVec2(100.0f, 0.0f))) fired = Event::Back;
     ImGui::End();
   } else if (state == State::Room) {
     ImGui::Begin("Online match", nullptr, flags);
-    if (ImGui::Button("New room", button)) fired = Event::CreateRoom;
+    if (ImGui::Button(kButtonNewRoom, button)) fired = Event::CreateRoom;
     ImGui::Spacing();
     ImGui::TextUnformatted("Room code");
     static char codeText[40] = "";
@@ -66,7 +81,7 @@ std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
                                               ImGuiInputTextFlags_CharsNoBlank |
                                               ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::SameLine();
-    if (ImGui::Button("Join") || entered) {
+    if (ImGui::Button(kButtonJoin) || entered) {
       // Same alphabet and length the server accepts: [A-Z0-9_-]{1,32}.
       std::string code(codeText);
       bool valid = !code.empty() && code.size() <= 32;
@@ -89,7 +104,38 @@ std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
       ImGui::PopStyleColor();
     }
     ImGui::Spacing();
-    if (ImGui::Button("Back", ImVec2(100.0f, 0.0f))) fired = Event::Back;
+    if (ImGui::Button(kButtonBack, ImVec2(100.0f, 0.0f))) fired = Event::Back;
+    ImGui::End();
+  } else if (state == State::MyGames) {
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f),
+                                        ImVec2(windowWidth - 20.0f, windowHeight - 20.0f));
+    ImGui::Begin("My games", nullptr, flags);
+    if (games && games->canContinue && ImGui::Button(kButtonContinue, button)) {
+      fired = Event::ContinueGame;
+    }
+    ImGui::Spacing();
+    if (!games || !games->loaded) {
+      ImGui::TextUnformatted(games && !games->status.empty() ? games->status.c_str()
+                                                              : "Loading...");
+    } else if (games->rows.empty()) {
+      ImGui::TextUnformatted("No games yet: start an online match.");
+    }
+    if (games) {
+      for (int i = 0; i < static_cast<int>(games->rows.size()); ++i) {
+        const GameRow& row = games->rows[i];
+        ImGui::PushID(i);
+        ImGui::TextUnformatted(row.title.c_str());
+        ImGui::SameLine(300.0f);
+        if (ImGui::Button(row.finished ? "Replay" : "Resume", ImVec2(90.0f, 0.0f))) {
+          fired = Event::OpenGame;
+          games->openIndex = i;
+        }
+        ImGui::PopID();
+      }
+      if (games->loaded && !games->status.empty()) ImGui::TextUnformatted(games->status.c_str());
+    }
+    ImGui::Spacing();
+    if (ImGui::Button(kButtonBack, ImVec2(100.0f, 0.0f))) fired = Event::Back;
     ImGui::End();
   } else if (state == State::Builder) {
     // One card per player-built scene (thumbnail, a button with its name,
@@ -180,11 +226,11 @@ std::optional<Event> DrawMenu(State state, int windowWidth, int windowHeight,
     ImGui::SameLine();
     if (ImGui::Button("Random")) *mapSeed = std::random_device{}();
     ImGui::Spacing();
-    if (ImGui::Button("Urban", button)) fired = Event::SelectUrban;
-    if (ImGui::Button("Urban x4", button)) fired = Event::SelectUrbanX4;
-    if (ImGui::Button("Hills", button)) fired = Event::SelectHills;
+    if (ImGui::Button(kButtonUrban, button)) fired = Event::SelectUrban;
+    if (ImGui::Button(kButtonUrbanX4, button)) fired = Event::SelectUrbanX4;
+    if (ImGui::Button(kButtonHills, button)) fired = Event::SelectHills;
     ImGui::Spacing();
-    if (ImGui::Button("Back", ImVec2(100.0f, 0.0f))) fired = Event::Back;
+    if (ImGui::Button(kButtonBack, ImVec2(100.0f, 0.0f))) fired = Event::Back;
     ImGui::End();
   }
   return fired;

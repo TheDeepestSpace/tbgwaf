@@ -1,0 +1,52 @@
+name: my_games_lists_only_own
+description: >
+  My games shows the device's own matches only: alice and bob play one, carol and dave another;
+  each sees exactly their game (by token), never the other pair's. A device that never played
+  sees none. Opening a row resumes it.
+steps:
+  - server: start
+  - app: [alice, bob, carol, dave, erin]
+  - click: {app: alice, button: New Game}
+  - click: {app: alice, button: Regular}
+  - click: {app: alice, button: Urban}
+  - click: {app: alice, button: Online (2 players)}
+  - click: {app: alice, button: New room}
+  - click: {app: bob, button: New Game}
+  - click: {app: bob, button: Regular}
+  - click: {app: bob, button: Urban}
+  - click: {app: bob, button: Online (2 players)}
+  - type_room_code: {app: bob, from: alice}
+  - click: {app: bob, button: Join}
+  - click: {app: carol, button: New Game}
+  - click: {app: carol, button: Regular}
+  - click: {app: carol, button: Urban}
+  - click: {app: carol, button: Online (2 players)}
+  - click: {app: carol, button: New room}
+  - click: {app: dave, button: New Game}
+  - click: {app: dave, button: Regular}
+  - click: {app: dave, button: Urban}
+  - click: {app: dave, button: Online (2 players)}
+  - type_room_code: {app: dave, from: carol}
+  - click: {app: dave, button: Join}
+  - round: {apps: [alice, bob]}
+  # Each player goes back to the menu (page reload) and opens My games.
+  - reload: alice
+  - reload: carol
+  - reload: erin
+  - click: {app: alice, button: My games}
+  - assert: {app: alice, screen: my_games, games_total: 1, games_active: 1, game_id_differs_from: carol}
+  - click: {app: carol, button: My games}
+  - assert: {app: carol, screen: my_games, games_total: 1, game_id_differs_from: alice}
+  - click: {app: erin, button: My games}
+  - assert: {app: erin, screen: my_games, games_total: 0}
+  # Opening alice's row resumes the match she was in (round 2 after the played round).
+  - click: {app: alice, button: Resume, row: 0}
+  - assert: {app: alice, screen: gameplay, status: playing, round: 2}
+  # Back from My games, and Continue from there.
+  - reload: carol
+  - click: {app: carol, button: My games}
+  - click: {app: carol, button: Back}
+  - assert: {app: carol, screen: splash}
+  - click: {app: carol, button: My games}
+  - click: {app: carol, button: Continue}
+  - assert: {app: carol, screen: gameplay, status: playing, round: 1}

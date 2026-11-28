@@ -222,6 +222,70 @@ void NavMesh::Build(const std::vector<AABB>& obstacles, float mapHalfExtent, flo
   Build(typed, SquareRegion(mapHalfExtent), agentRadius, nullptr, nullptr);
 }
 
+namespace {
+
+// What a figure steps over without breaking stride: a stub left at the foot
+// of a breach, a debris chunk lying flat on the ground.
+constexpr float kStepOver = constants::kStepOverHeight;
+
+// A fractured wall piece (Obstacle::profile, see game/Destruction.h) only
+// blocks walking where its silhouette crosses the band a figure's body
+// occupies: from a stub's height it can step over, up to its head. Narrows
+// such a piece to that part of its footprint -- so a breach is a doorway
+// exactly where the torn edges leave room -- or to nothing (`out->footprint`
+// empty) when the silhouette stays clear of the band. False for plain prisms.
+bool NarrowToWalkBand(const Obstacle& obstacle, const HeightField& heights, Obstacle* out) {
+  if (obstacle.profile.size() < 3 || obstacle.footprint.size() != 4) return false;
+  const std::vector<glm::vec2>& f = obstacle.footprint;
+  const glm::vec2 along = f[1] - f[0];
+  const float len = glm::length(along);
+  if (len < 1e-5f) return false;
+  float ground = 0.0f;
+  if (!heights.Empty()) {
+    ground = heights.HeightAt(f[0].x, f[0].y);
+    for (const glm::vec2& v : f) ground = std::max(ground, heights.HeightAt(v.x, v.y));
+  }
+  // Pieces up on a storey keep their footprint: the band is a ground rule.
+  if (obstacle.bounds.min.y - ground >= constants::kUnitHeight) return false;
+  const float lo = ground + kStepOver, hi = ground + constants::kUnitHeight;
+  float u0 = 1e30f, u1 = -1e30f;
+  const size_t n = obstacle.profile.size();
+  for (size_t i = 0; i < n; ++i) {
+    const glm::vec2 p = obstacle.profile[i], q = obstacle.profile[(i + 1) % n];
+    if (p.y >= lo && p.y <= hi) {
+      u0 = std::min(u0, p.x);
+      u1 = std::max(u1, p.x);
+    }
+    for (const float y : {lo, hi}) {
+      if ((p.y < y) != (q.y < y) && std::fabs(q.y - p.y) > 1e-9f) {
+        const float u = p.x + (q.x - p.x) * ((y - p.y) / (q.y - p.y));
+        u0 = std::min(u0, u);
+        u1 = std::max(u1, u);
+      }
+    }
+  }
+  *out = obstacle;
+  out->profile.clear();
+  if (u1 - u0 < 1e-3f) {
+    out->footprint.clear();
+    return true;
+  }
+  const glm::vec2 d = along / len, tv = f[3] - f[0];
+  const glm::vec2 s0 = f[0] + d * u0, s1 = f[0] + d * u1;
+  out->footprint = {s0, s1, s1 + tv, s0 + tv};
+  out->bounds.min.x = out->bounds.max.x = s0.x;
+  out->bounds.min.z = out->bounds.max.z = s0.y;
+  for (const glm::vec2& v : out->footprint) {
+    out->bounds.min.x = std::min(out->bounds.min.x, v.x);
+    out->bounds.max.x = std::max(out->bounds.max.x, v.x);
+    out->bounds.min.z = std::min(out->bounds.min.z, v.y);
+    out->bounds.max.z = std::max(out->bounds.max.z, v.y);
+  }
+  return true;
+}
+
+}  // namespace
+
 void NavMesh::Build(const std::vector<Obstacle>& obstacles, float mapHalfExtent,
                      float agentRadius, const HeightField* ground,
                      const std::vector<WalkSurface>* walkSurfaces,
@@ -241,8 +305,12 @@ void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& 
   const HeightField& heights = ground ? *ground : kFlat;
   std::vector<Obstacle> obstacles;
   obstacles.reserve(allObstacles.size());
-  for (const Obstacle& obstacle : allObstacles) {
-    if (obstacle.dead) continue;  // Removed by a world change.
+  for (const Obstacle& original : allObstacles) {
+    if (original.dead) continue;  // Removed by a world change.
+    Obstacle narrowed;
+    const Obstacle& obstacle =
+        NarrowToWalkBand(original, heights, &narrowed) ? narrowed : original;
+    if (obstacle.footprint.empty() && !original.footprint.empty()) continue;  // Clear of the band.
     const AABB& b = obstacle.bounds;
     float groundTop = 0.0f;
     if (!heights.Empty()) {
@@ -260,15 +328,45 @@ void NavMesh::Build(const std::vector<Obstacle>& allObstacles, const NavRegion& 
       }
     }
     if (b.min.y - groundTop >= constants::kUnitHeight) continue;
+    // Rubble blocks walking only where its true body crosses the band a
+    // standing figure occupies: the low tail of a chunk is stepped over and
+    // the high reach of a slab leaning on a wall is walked beside, so its
+    // blocking footprint is the body's silhouette clipped to that band --
+    // not the whole vertical envelope of the tilted prism, whose hull (plus
+    // agent padding) blankets open ground and can box a figure in next to a
+    // blast with no move left at all.
+    Obstacle banded;
+    const Obstacle* blocking = &obstacle;
+    if (obstacle.kind == ObstacleKind::Rubble) {
+      const std::vector<glm::vec2> bandFootprint =
+          RubbleBandFootprint(obstacle, groundTop + kStepOver, groundTop + constants::kUnitHeight);
+      if (!bandFootprint.empty()) {
+        banded = obstacle;
+        banded.footprint = bandFootprint;
+        banded.bounds.min.x = banded.bounds.max.x = bandFootprint.front().x;
+        banded.bounds.min.z = banded.bounds.max.z = bandFootprint.front().y;
+        for (const glm::vec2& p : bandFootprint) {
+          banded.bounds.min.x = std::min(banded.bounds.min.x, p.x);
+          banded.bounds.max.x = std::max(banded.bounds.max.x, p.x);
+          banded.bounds.min.z = std::min(banded.bounds.min.z, p.y);
+          banded.bounds.max.z = std::max(banded.bounds.max.z, p.y);
+        }
+        blocking = &banded;
+      } else if (obstacle.rubble.outline.size() >= 3 || b.max.y - groundTop <= kStepOver) {
+        // Clear of the band (or, without a body record, lying no higher
+        // than a step): walked over like the stub at the foot of a breach.
+        continue;
+      }
+    }
     std::vector<std::vector<glm::vec2>> pieces;
-    if (!GroundBlockingPieces(obstacle, tunnels, &pieces)) {
-      obstacles.push_back(obstacle);
+    if (!GroundBlockingPieces(*blocking, tunnels, &pieces)) {
+      obstacles.push_back(*blocking);
       continue;
     }
     // Straddles a tunnel bore: block with the clipped pieces only, each a
     // polygon obstacle of its own with bounds shrunk to fit.
     for (std::vector<glm::vec2>& piece : pieces) {
-      Obstacle part = obstacle;
+      Obstacle part = *blocking;
       part.bounds.min.x = part.bounds.max.x = piece.front().x;
       part.bounds.min.z = part.bounds.max.z = piece.front().y;
       for (const glm::vec2& p : piece) {

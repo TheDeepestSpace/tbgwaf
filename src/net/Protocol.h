@@ -30,6 +30,7 @@
 //   {"t":"join","room":"<name>","spectate":true,"mode":"ai-v-ai"}   Jev vs Jev: opens a room of two
 //                                                  server-side Jevs (starts paused) and watches it
 //                                                  (needs TBGWAF_JEV_ADAPTER_URL on the server)
+//   {"t":"place_bomb","pos":[x,y,z],"radius":r[,"impulse":k]} / {"t":"detonate_bomb"[,"at":s]}   debug bomb (#350), any seated player; same as the control tap, own room
 //   {"t":"bot_control","run":bool,"retry":bool,"fallback":bool}   Jev rooms only, any member:
 //                                                  run=false/true pauses/starts Jev vs Jev; retry
 //                                                  re-asks after an error; fallback=true switches to
@@ -80,7 +81,22 @@
 //   {"t":"opponent_left"}   {"t":"error","error":"..."}
 namespace tactics::net {
 
-constexpr int kProtocolVersion = 2;  // 2: world-change log ("world") in round/state.
+// 2: world-change log ("world") in round/state. 3: WallHole really cuts the
+// wall geometry and the FloorHole kind exists (issue #350), so a peer on 2
+// would compute different geometry from the same log. 4: WallHole carries a
+// fracture outline cutting profiled pieces, the MassingCut and Debris kinds
+// exist, and obstacles serialize a wall-plane profile -- a peer on 3 would
+// reject the new kinds and compute different geometry. 5: FloorHole and
+// MassingCut may carry fracture-cell pieces and debris flights serialize a
+// rest yaw and a solid flag (only solid chunks become obstacles). 6: the
+// OpeningRemoved kind exists, ObstacleReplaced detaches the target's facade
+// openings instead of killing them, FloorHole / MassingCut cell pieces may cut
+// sloped patches / sloped-top details, and a change may carry up to 256
+// pieces -- a peer on 5 would reject or mis-apply those. 7: debris is a rigid-body
+// simulation: a Debris change's pieces are the chunks at launch, its flights are
+// sampled pose tracks (not ballistic parameters), and rubble obstacles serialize
+// their tilted body -- a peer on 6 would parse none of it.
+constexpr int kProtocolVersion = 7;
 constexpr size_t kMaxMessageBytes = 16 * 1024;
 constexpr size_t kMaxWaypoints = 32;
 

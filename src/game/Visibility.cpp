@@ -127,6 +127,7 @@ std::vector<glm::vec3> FigureSeeThroughProbes(Team team, bool allTeams, bool fog
                                               const std::vector<WalkSurface>& walkSurfaces,
                                               const HeightField& terrain) {
   constexpr float kSurfaceLift = 0.3f;
+  constexpr float kBodyHalfWidth = constants::kUnitHalfWidth;
   std::vector<glm::vec3> probes;
   for (const Unit& unit : units) {
     bool include = allTeams || unit.team == team;
@@ -139,6 +140,17 @@ std::vector<glm::vec3> FigureSeeThroughProbes(Team team, bool allTeams, bool fog
     if (!include) continue;
     probes.push_back(unit.EyePosition());
     probes.push_back(unit.position + glm::vec3(0.0f, kSurfaceLift, 0.0f));
+    // The whole body is expected to be seen: the corners of a prism that
+    // holds the figure (the figure's body half-width; navmesh padding keeps a figure
+    // clear of walls, so no corner probes through one), lifted off the ground like
+    // the feet probe.
+    for (const float dx : {-kBodyHalfWidth, kBodyHalfWidth}) {
+      for (const float dz : {-kBodyHalfWidth, kBodyHalfWidth}) {
+        for (const float y : {kSurfaceLift, constants::kUnitHeight}) {
+          probes.push_back(unit.position + glm::vec3(dx, y, dz));
+        }
+      }
+    }
   }
   return probes;
 }

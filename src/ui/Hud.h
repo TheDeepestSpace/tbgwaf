@@ -6,6 +6,7 @@
 // ImGui::Render(). Const w.r.t. the game: button presses are reported back
 // via HudActions for the caller to apply.
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <utility>
@@ -160,13 +161,16 @@ struct BombPanelState {
   bool requestArm = false;
 };
 
+// `wasmHeapBytes` is the WASM linear-memory size (nullopt on native builds,
+// shown as N/A). WASM memory never shrinks, so this is also the peak.
 void DrawDebugPanel(bool& disableFov, bool& coverView, bool& disableShadows, bool& thermal, bool& thermalBlackHot,
                     float& thermalFovAlpha,
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
                     bool& disableOcclusionFade, bool& npr, gfx::NprSettings& nprSettings,
                     bool& showFps, bool& showRotationDome, float fps, float frameMs,
                     float fovMs, const gfx::RenderFrameStats& stats, BombPanelState* bomb,
-                    float top);
+                    float top,
+                    std::optional<size_t> wasmHeapBytes);
 
 // Camera-rotation dome (issue #298): small corner widget in the bottom-right
 // of `rect`. A wireframe half-sphere with a compass circle at its base, drawn

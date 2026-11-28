@@ -9,6 +9,7 @@
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#include <emscripten/heap.h>
 #include <functional>
 #endif
 
@@ -2286,6 +2287,12 @@ int main() {
                              pane, debugOptions.thermal && debugOptions.thermalBlackHot);
     }
     // Anchored under the Round panel so it follows collapse/expand.
+    // emscripten_get_heap_size() just reads the current memory size, so it is
+    // cheap enough to call every frame.
+    std::optional<size_t> wasmHeapBytes;
+#ifdef __EMSCRIPTEN__
+    wasmHeapBytes = emscripten_get_heap_size();
+#endif
     const bool hudWasThermal = debugOptions.thermal;
     if (remoteMode) {
       // An armed bomb is spent once its blast arrives, or the round it was
@@ -2315,7 +2322,7 @@ int main() {
                        debugOptions.disableOcclusionFade, debugOptions.npr,
                        debugOptions.nprSettings, showFps, showRotationDome,
                        smoothedFps, frameMs, fovMs, frameStats, &bombPanel,
-                       roundPanelBottom + 6.0f);
+                       roundPanelBottom + 6.0f, wasmHeapBytes);
     // Debug bomb (issue #350): the panel edits the bomb's world coordinates
     // and its requests act on the local game. In a server-backed match the
     // mirror must not fork the world: the requests go to the server, which

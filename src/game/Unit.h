@@ -189,7 +189,15 @@ struct Unit {
   // the stand-up-when-flanked re-check) never shrinks with the pose --
   // only how others see and hit it does (SightPosition/TorsoAimPosition).
   glm::vec3 EyePosition() const {
-    return position + glm::vec3(0.0f, constants::kEyeHeight, 0.0f);
+    return position + LeanOffset() + glm::vec3(0.0f, constants::kEyeHeight, 0.0f);
+  }
+
+  // Forward reach of the attack-position lean (coverKind 3, issue #369): the
+  // head and weapon lean out over the sill/railing along the facing, so vision
+  // and fire come from the leaned pose. Blends in with the pose.
+  glm::vec3 LeanOffset() const {
+    if (!alive || coverKind != 3) return glm::vec3(0.0f);
+    return FacingDirection() * (constants::kAttackLeanReach * coverBlend);
   }
 
   // 0..1 how deep into the crouch pose the body is right now. The lean
@@ -201,7 +209,7 @@ struct Unit {
   // Where this figure is *sighted and locked onto* by others: the head,
   // sinking from standing eye to crouched head as the pose blends in.
   glm::vec3 SightPosition() const {
-    return position +
+    return position + LeanOffset() +
            glm::vec3(0.0f,
                      glm::mix(constants::kEyeHeight, constants::kCrouchEyeHeight, CrouchAmount()),
                      0.0f);
@@ -223,7 +231,7 @@ struct Unit {
   glm::vec3 MuzzlePosition() const {
     const glm::vec3 fwd = FacingDirection();
     const glm::vec3 right(-fwd.z, 0.0f, fwd.x);
-    return position + fwd * constants::kMuzzleForward + right * constants::kMuzzleSide +
+    return position + LeanOffset() + fwd * constants::kMuzzleForward + right * constants::kMuzzleSide +
            glm::vec3(0.0f, constants::kMuzzleHeight, 0.0f);
   }
 

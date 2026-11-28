@@ -57,6 +57,64 @@ int main() {
   CHECK(glm::length(crouchB - crouchA) > 1e-3f);
   u.idleElapsed = 0.0f;
 
+  // Attack position (coverKind 3, issue #369): leans forward over the edge
+  // (toward the obstacle at +Z here) staying upright, and the eye and muzzle
+  // reach out with it; blended out, they are back at the standing spot.
+  u.coverKind = 3;
+  u.coverBlend = 1.0f;
+  u.facingYaw = glm::half_pi<float>();
+  u.coverYaw = glm::half_pi<float>();
+  {
+    Unit s = u;
+    s.coverKind = 0;
+    s.coverBlend = 0.0f;
+    const glm::vec3 headStand = Head(s), headLean = Head(u);
+    CHECK(headLean.z > headStand.z + 0.1f);
+    CHECK(headLean.y > headStand.y - 0.15f);
+    CHECK(u.EyePosition().z > s.EyePosition().z + 0.2f);
+    CHECK(u.SightPosition().z > s.SightPosition().z + 0.2f);
+    CHECK(u.MuzzlePosition().z > s.MuzzlePosition().z + 0.2f);
+    u.coverBlend = 0.0f;
+    CHECK(glm::length(u.EyePosition() - s.EyePosition()) < 1e-5f);
+  }
+  u.facingYaw = 0.0f;
+  u.coverYaw = glm::half_pi<float>();
+
+  // The attack hold places the elbows on the sill with the weapon level
+  // along the facing (issue #370): the wireframe weapon box (the only Box
+  // part) must point forward and horizontal from a grip held out at
+  // elbow-rest height -- not the pitched low carry of a figure merely bent
+  // over the edge.
+  {
+    Unit a;
+    a.alive = true;
+    a.position = glm::vec3(0.0f);
+    a.facingYaw = 0.0f;  // Facing +X, sill toward +X.
+    a.coverYaw = 0.0f;
+    a.coverKind = 3;
+    a.coverBlend = 1.0f;
+    a.weapon = WeaponType::AssaultRifle;
+    const auto WeaponBox = [](const Unit& unit) {
+      for (const gfx::FigurePart& p : gfx::BuildFigureWireframe(unit)) {
+        if (p.primitive == gfx::FigurePrimitive::Box) return p.model;
+      }
+      return glm::mat4(0.0f);
+    };
+    const glm::mat4 held = WeaponBox(a);
+    const glm::vec3 barrel = glm::normalize(glm::vec3(held[0]));
+    CHECK(barrel.x > 0.9f);              // Along the facing...
+    CHECK(std::fabs(barrel.y) < 0.15f);  // ...and level over the edge.
+    const glm::vec3 center(held * glm::vec4(0.5f, 0.5f, 0.5f, 1.0f));
+    CHECK(center.x > 0.3f);                       // Held out over the sill...
+    CHECK(center.y > 0.75f && center.y < 1.15f);  // ...at elbow-rest height.
+    Unit s = a;
+    s.coverKind = 0;
+    s.coverBlend = 0.0f;
+    const glm::vec3 carry = glm::normalize(glm::vec3(WeaponBox(s)[0]));
+    CHECK(std::fabs(carry.y) > 0.4f);  // Standing low carry stays pitched.
+  }
+
+  u.coverKind = 2;
   u.coverBlend = 0.0f;
   CHECK(std::fabs(Head(u).z - stand.z) < 1e-4f);
 

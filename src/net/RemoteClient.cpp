@@ -316,7 +316,7 @@ RemoteClient::Playback RemoteClient::ParseRound(const Json& m) {
       s.moving = a[6].AsNumber() != 0;
       if (a.size() >= 10) {
         const int kind = static_cast<int>(a[7].AsNumber());
-        s.coverKind = kind >= 0 && kind <= 2 ? static_cast<uint8_t>(kind) : 0;
+        s.coverKind = kind >= 0 && kind <= 3 ? static_cast<uint8_t>(kind) : 0;
         s.coverBlend = glm::clamp(static_cast<float>(a[8].AsNumber()), 0.0f, 1.0f);
         s.coverYaw = static_cast<float>(a[9].AsNumber());
       }

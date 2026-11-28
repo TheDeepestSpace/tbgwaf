@@ -1405,6 +1405,31 @@ void TestGameLogicMoveFacingAdjustableBeforeCommit() {
   CHECK(std::fabs(game.FindUnit(id)->facingYaw - 1.5f) < 1e-4f);
 }
 
+// Attack position (issue #369): a move ending beside a leanable railing faces
+// it by default and may be rotated only within +-kAttackArc of its normal.
+void TestGameLogicAttackPositionFacing() {
+  tactics::Scene scene = LegacyScene();
+  tactics::Obstacle rail;
+  rail.bounds = tactics::AABB{glm::vec3(-9.0f, 0.0f, 1.5f), glm::vec3(-7.0f, 1.0f, 1.9f)};
+  rail.leanable = true;
+  scene.obstacles.push_back(rail);
+  GameLogic game(std::move(scene));
+  const int id = 1;  // Starts at (-8, 0, 0).
+  game.ClickUnit(id, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(glm::vec3(-8.0f, 0.0f, 0.9f), Team::Blue);
+  game.FinishMovePlan();
+  const float toward = 1.57079633f;  // The railing lies toward +Z.
+  CHECK(game.FindUnit(id)->plan.type == PlannedActionType::Move);
+  CHECK(std::fabs(game.FindUnit(id)->plan.endFacingYaw - toward) < 1e-3f);
+  game.SetPlannedMoveFacing(id, toward - 0.2f, Team::Blue);  // Inside the arc.
+  CHECK(std::fabs(game.FindUnit(id)->plan.endFacingYaw - (toward - 0.2f)) < 1e-4f);
+  game.SetPlannedMoveFacing(id, 0.0f, Team::Blue);  // Far outside: clamped.
+  CHECK(std::fabs(game.FindUnit(id)->plan.endFacingYaw - (toward - tactics::kAttackArc)) < 1e-4f);
+  game.SetPlannedMoveFacing(id, 3.0f, Team::Blue);
+  CHECK(std::fabs(game.FindUnit(id)->plan.endFacingYaw - (toward + tactics::kAttackArc)) < 1e-4f);
+}
+
 void TestGameLogicIgnoresInputWhileExecuting() {
   GameLogic game(LegacyScene());
   game.ClickUnit(0, Team::Blue);
@@ -5367,6 +5392,7 @@ int main() {
   TestGameLogicMoveUpdatesPositionAndFacing();
   TestGameLogicMoveAnimatesProgressively();
   TestGameLogicMoveFacingAdjustableBeforeCommit();
+  TestGameLogicAttackPositionFacing();
   TestGameLogicIgnoresInputWhileExecuting();
   TestGameLogicMoveCanClimbOntoObstacle();
   TestGameLogicPlaybookShootsOnFovEntryAndPersistsAcrossRounds();

@@ -6347,6 +6347,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
               tactics::ClassifyCover(game.SightObstacles(), ghost.position, &coverYaw);
           ghost.coverKind = tile.kind == tactics::CoverKind::None ? 0 : (tile.crouch ? 2 : 1);
           ghost.coverYaw = coverYaw;
+          // Attack position (issue #369): the ghost leans on the sill/railing
+          // at the chosen facing, which stays inside the position's arc.
+          float normalYaw = 0.0f;
+          if (tactics::ClassifyAttackPosition(game.SightObstacles(), ghost.position,
+                                              &normalYaw)) {
+            ghost.coverKind = 3;
+            ghost.coverYaw = tactics::ClampAttackFacing(ghost.facingYaw, normalYaw);
+          }
           ghost.coverBlend = ghost.coverKind != 0 ? 1.0f : 0.0f;
         }
         ghost.shootElapsed = -1.0f;

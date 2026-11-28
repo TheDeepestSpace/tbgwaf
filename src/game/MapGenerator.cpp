@@ -5289,10 +5289,11 @@ void CutWindows(Scene* scene, const std::vector<WindowCut>& cuts) {
       const float oy0 = std::max(ylo, w.y0), oy1 = std::min(yhi, w.y1);
       if (ou1 - ou0 < kMinSide || oy1 - oy0 < kMinSide) continue;
       bool reused = false;
-      const auto emit = [&](float u0, float u1, float y0, float y1) {
+      const auto emit = [&](float u0, float u1, float y0, float y1, bool leanable = false) {
         if (u1 - u0 < kMinSide || y1 - y0 < kMinSide) return;
         const glm::vec2 s0 = w.a + d * u0, s1 = w.a + d * u1;
         Obstacle o = piece;
+        o.leanable = leanable;  // Only the sill: a place to rest elbows (issue #369).
         o.footprint = {s0, s1, s1 + in * thickness, s0 + in * thickness};
         o.bounds.min = glm::vec3(1e30f, y0, 1e30f);
         o.bounds.max = glm::vec3(-1e30f, y1, -1e30f);
@@ -5312,7 +5313,7 @@ void CutWindows(Scene* scene, const std::vector<WindowCut>& cuts) {
       };
       emit(p0, ou0, ylo, yhi);   // Left jamb.
       emit(ou1, p1, ylo, yhi);   // Right jamb.
-      emit(ou0, ou1, ylo, oy0);  // Sill.
+      emit(ou0, ou1, ylo, oy0, true);  // Sill.
       emit(ou0, ou1, oy1, yhi);  // Head.
       if (!reused) {
         // Whole piece is the opening (cannot happen for real windows): keep

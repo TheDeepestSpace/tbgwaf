@@ -199,6 +199,42 @@ int main() {
     CHECK(allNone);
   }
 
+  // Attack positions (issue #369): only leanable obstacles of elbow height.
+  {
+    Obstacle rail = Box(-3, 0, 3, 0.4f, 1.0f);
+    rail.leanable = true;
+    float normal = 0.0f;
+    CHECK(ClassifyAttackPosition({rail}, {0, 0, -0.4f}, &normal));
+    CHECK(std::fabs(normal - 1.5707963f) < 1e-3f);  // Obstacle lies toward +Z.
+    CHECK(!ClassifyAttackPosition({rail}, {0, 0, -2.0f}));   // Too far.
+    CHECK(!ClassifyAttackPosition({rail}, {4.0f, 0, 0.2f}));  // Past the face's span.
+    CHECK(!ClassifyAttackPosition({rail}, {0, 0, 0.2f}));     // Inside it.
+    Obstacle plain = rail;
+    plain.leanable = false;
+    CHECK(!ClassifyAttackPosition({plain}, {0, 0, -0.4f}));
+    Obstacle tooLow = Box(-3, 0, 3, 0.4f, 0.5f);
+    tooLow.leanable = true;
+    CHECK(!ClassifyAttackPosition({tooLow}, {0, 0, -0.4f}));
+    Obstacle tooHigh = Box(-3, 0, 3, 0.4f, 2.0f);
+    tooHigh.leanable = true;
+    CHECK(!ClassifyAttackPosition({tooHigh}, {0, 0, -0.4f}));
+    Obstacle post = Box(0, 0, 0.3f, 0.4f, 1.0f);
+    post.leanable = true;
+    CHECK(!ClassifyAttackPosition({post}, {0.15f, 0, -0.4f}));
+    // Feet on a higher level measure the edge from there.
+    CHECK(!ClassifyAttackPosition({rail}, {0, 0.5f, -0.4f}));
+  }
+  // Facing arc: +-kAttackArc around the normal, wrapping across +-pi.
+  {
+    const float n = 1.5707963f;
+    CHECK(std::fabs(ClampAttackFacing(n + 0.1f, n) - (n + 0.1f)) < 1e-5f);
+    CHECK(std::fabs(ClampAttackFacing(n + 1.0f, n) - (n + kAttackArc)) < 1e-5f);
+    CHECK(std::fabs(ClampAttackFacing(n - 2.0f, n) - (n - kAttackArc)) < 1e-5f);
+    const float pi = 3.14159265f;
+    const float wrapped = ClampAttackFacing(-pi + 0.1f, pi);  // 0.1 past the normal.
+    CHECK(std::fabs(std::remainder(wrapped - pi, 2.0f * pi) - 0.1f) < 1e-4f);
+  }
+
   if (gFailures) return 1;
   std::puts("cover_tests passed");
   return 0;

@@ -560,7 +560,10 @@ HighwayPlan BeginHighwayPlan(uint32_t seed, const MapGeneratorConfig& c) {
   plan.elevated = overpass.elevated;
   plan.layout = overpass.layout;
   ArterySpec& artery = plan.artery;
-  const float angle = glm::radians(rng.Float(11.0f, 21.0f)) * (rng.Chance(0.5f) ? 1.0f : -1.0f);
+  // One draw per statement: the order two draws in one expression run in is
+  // up to the compiler, and the server and the web client must agree.
+  const float angleSize = glm::radians(rng.Float(11.0f, 21.0f));
+  const float angle = angleSize * (rng.Chance(0.5f) ? 1.0f : -1.0f);
   artery.dir = glm::vec2(std::cos(angle), std::sin(angle));
   artery.normal = glm::vec2(-artery.dir.y, artery.dir.x);
   artery.origin = artery.normal * (half * rng.Float(-0.12f, 0.12f));
@@ -5153,7 +5156,13 @@ void EmitMassing(Scene* scene, const std::vector<Parcel>& parcels, uint32_t seed
         }
         if (PolygonArea(roof) < 4.0f * (halfDiag + margin) * (halfDiag + margin)) break;
         for (int attempt = 0; attempt < 12; ++attempt) {
-          const glm::vec2 centre(rng.Float(lo.x, hi.x), rng.Float(lo.y, hi.y));
+          // One draw per statement (z first, as the server has always built
+          // it): the order of two draws in one expression is up to the
+          // compiler, and the web client's roofs came out different from the
+          // server's -- so a parapet cut named a detail the client never had.
+          const float centreZ = rng.Float(lo.y, hi.y);
+          const float centreX = rng.Float(lo.x, hi.x);
+          const glm::vec2 centre(centreX, centreZ);
           // Every corner on the roof and clear of its edge (checked against
           // the roof itself: a deep inset of a sharp roof isn't trustworthy).
           const glm::vec2 u = along * (0.5f * f.along), v = outward * (0.5f * f.across);

@@ -33,7 +33,13 @@ struct AABB {
 // the ends and the window/door reveals (see MapGenerator's CutWindows).
 // Gameplay treats it like Generic; the renderer's see-through outline pass
 // draws only its two long faces so each window gets a single frame.
-enum class ObstacleKind { Generic, StreetFurniture, Pier, Cover, Wall };
+// Rubble: a debris chunk a blast knocked loose, at rest where the server's
+// rigid-body simulation left it (see WorldChangeKind::Debris). Its footprint
+// and bounds are the vertical envelope of the tilted body (see
+// Obstacle::rubble), so it collides and blocks sight like everything else;
+// drawn dynamically (it tumbles before it rests), so the static obstacle mesh
+// skips it. A later blast throws it again.
+enum class ObstacleKind { Generic, StreetFurniture, Pier, Cover, Wall, Rubble };
 
 // Street fixtures the renderer batches as static geometry: post-sized furniture
 // and cover-sized street items (parked cars, planters, dumpsters, ...).
@@ -110,7 +116,48 @@ struct Obstacle {
   // are inert: parked off the map with no footprint, so collision, LOS,
   // navigation and rendering all ignore them.
   bool dead = false;
+  // Optional wall-plane silhouette (destruction: fracture at random angles).
+  // A convex CCW polygon in (u, y): u is world units along footprint edge
+  // 0 -> 1 from footprint[0], y is world height. The solid is the prism
+  // (footprint x bounds Y) intersected with this silhouette extruded through
+  // the wall's thickness, so a fractured wall piece can carry slanted torn
+  // edges while `bounds`/`footprint` stay its exact broad phase (the profile's
+  // bounding box always matches them). Fracture pieces set it (the Voronoi
+  // cell left standing, see game/Destruction.h); empty means the plain prism.
+  // LOS/raycast and rendering honour it, and the ground navmesh narrows the
+  // footprint to where the silhouette crosses a figure's body band.
+  std::vector<glm::vec2> profile;
+  // Rubble only: the chunk's true body, a convex prism of `outline` (local
+  // x, y; counter-clockwise) extruded +-thickness/2 along local z, posed by
+  // `pose` (local -> world). `footprint` / `bounds` are its vertical
+  // envelope at rest, whatever the tilt. Empty outline: no body.
+  struct RubbleBody {
+    std::vector<glm::vec2> outline;
+    float thickness = 0.0f;
+    glm::mat4 pose{1.0f};
+    // When the chunk actually comes to rest on the round clock: `landAt`
+    // seconds into round `landRound`'s execution (set by ApplyDebris for
+    // rubble born of an in-round blast; 0/0 means at rest from birth).
+    // Until that moment the obstacle is dormant -- it blocks neither sight
+    // nor movement, so planning sees the world as it is, not where chunks
+    // will land; a figure sent through the landing spot is the player's
+    // own gamble (the falling chunk kills it). Derived from the change's
+    // round/at + flight duration, never serialized (every peer recomputes
+    // the same values when it applies the log).
+    int landRound = 0;
+    float landAt = 0.0f;
+  };
+  RubbleBody rubble;
 };
+
+// False only for a Rubble obstacle whose chunk is still in flight at the
+// given moment of the round clock: it has not landed yet, so it must not
+// block sight or movement. `elapsed` counts only while `executing`.
+inline bool RubbleAtRest(const Obstacle& o, int round, bool executing, float elapsed) {
+  if (o.kind != ObstacleKind::Rubble) return true;
+  if (round != o.rubble.landRound) return round > o.rubble.landRound;
+  return executing && elapsed >= o.rubble.landAt;
+}
 
 // Building archetype (urban map issue #151, roadmap 3.2). Drawn per parcel
 // from a street-class-weighted table with a per-block character bias;
@@ -220,6 +267,12 @@ struct FacadeOpening {
   float y0 = 0.0f, y1 = 0.0f;
   int floor = 0;
   bool dead = false;  // Its wall was removed; never drawn.
+  // Set once the prism the opening was laid out on is fractured (world
+  // change ObstacleReplaced): the world-space edge `u` runs along, so the
+  // frame stays where it is on the standing pieces instead of dying with the
+  // prism's index. Until then the edge is read off `obstacle`'s footprint.
+  bool detached = false;
+  glm::vec2 edgeA{0.0f}, edgeB{0.0f};
 };
 
 // A convex, planar walkable patch above (or sloping away from) the ground.
@@ -386,6 +439,12 @@ constexpr float kAgentRadius = 0.4f;     // Padding used to inflate obstacles fo
 constexpr float kNavWallPad = 0.1f;
 constexpr float kUnitHalfWidth = 0.35f;
 constexpr float kUnitHeight = 1.8f;
+// What a figure steps over without breaking stride: a stub left at the foot
+// of a breach, a debris chunk lying flat on the ground. With kUnitHeight it
+// bounds the walk band -- the heights a standing body actually occupies --
+// used to decide what blocks walking (navmesh) and what rubble may pin a
+// figure (destruction planning).
+constexpr float kStepOverHeight = 0.35f;
 constexpr float kEyeHeight = 1.5f;
 // Ground beneath a deck/ramp is only walkable with at least this much headroom.
 constexpr float kMinDeckHeadroom = 2.2f;

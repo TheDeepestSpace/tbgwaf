@@ -642,6 +642,15 @@ void RunOneScenario(const fs::path& file, const Options& options, gfx::SceneRend
           tickMirrors(step);
           if (options.video && videoOk) drawFrame();
         }
+      } else if (action.kind == ScenarioAction::Kind::Bomb) {
+        // Debug bomb (issue #350): the server detonates; the filmed mirrors
+        // pick the world delta up from the broadcast.
+        std::string error;
+        if (!tactics::testing::ControlBomb(net->control, room, action, &error)) {
+          result.failures.push_back("step " + std::to_string(i) + ": " + error);
+          break;
+        }
+        for (Team team : {Team::Blue, Team::Red}) rig.Sync(rig.For(team));
       } else {
         const tactics::Unit* actor = nullptr;
         for (const tactics::Unit& u : scenario.scene.units) {

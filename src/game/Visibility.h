@@ -60,7 +60,8 @@ bool CanUnitSee(const Unit& viewer, const Unit& target, const std::vector<Obstac
 bool CanUnitSee(const Unit& viewer, const Unit& target, const std::vector<Obstacle>& obstacles,
                 const std::vector<WalkSurface>& walkSurfaces, const HeightField& terrain);
 
-// World-space probe points (eye + feet per figure) that `team`'s pane must
+// World-space probe points (eye, feet and the corners of a prism around
+// the whole body, per figure) that `team`'s pane must
 // keep visible through camera-occluding geometry: all of the team's own
 // figures, alive or dead, plus dead opponents inside the team's squad FOV
 // (always, when `fogActive` is false). `allTeams` (omniscient spectator)

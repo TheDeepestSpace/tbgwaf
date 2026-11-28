@@ -11,7 +11,7 @@
 // Indices stay stable. A removed obstacle / walk surface is marked `dead` and
 // parked inert (see KillObstacle / KillWalkSurface), never erased from its
 // vector, so every index holder keeps pointing at the right thing:
-// Obstacle::building, Building::obstacle/upperObstacle/floorSurfaces/
+// Obstacle::building, Building::obstacle/floorSurfaces/
 // stairSurfaces, FacadeOpening::obstacle, MassingDetail::building,
 // WalkSurface::neighbors, TerrainTunnel::roofSurface and
 // TeamVisibility::visibleObstacle (indexed by obstacle). Replacement pieces

@@ -705,11 +705,11 @@ void KillObstacle(Scene* scene, int index) {
     if (f.obstacle == index && !f.detached) f.dead = true;
   }
   RefreshBuildingLiveness(scene, o.building);
-  // Buildings that name this prism as their roof/base but whose own prisms
+  // Buildings that name this prism as their base but whose own prisms
   // carry another (or no) building index.
   for (size_t b = 0; b < scene->buildings.size(); ++b) {
     const Building& building = scene->buildings[b];
-    if (building.obstacle == index || building.upperObstacle == index) {
+    if (building.obstacle == index) {
       RefreshBuildingLiveness(scene, static_cast<int>(b));
     }
   }

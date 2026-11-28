@@ -27,7 +27,7 @@ enum class ItemKind {
 // downhill (roof to street) or uphill (street to roof).
 // EmptyMag: the whole magazine fired at the weapon's own pace (issue #140),
 // every bullet leaving its own scattered tracer line.
-enum class AnimKind { Idle, Run, Shoot, ZipDown, ZipUp, EmptyMag, CoverLean, CoverCrouch };
+enum class AnimKind { Idle, Run, Shoot, ZipDown, ZipUp, EmptyMag, CoverLean, CoverCrouch, Peek };
 
 struct GalleryItem {
   const char* id;     // Stable slug; also the golden-file prefix.

@@ -116,6 +116,29 @@ constexpr float kCoverSpinePitchScale = 0.6f;
 constexpr float kCrouchLean = 16.0f;     // Spine toward the edge, degrees.
 constexpr float kFlatCoverLean = 11.0f;  // Spine resting back on the wall, degrees.
 
+// Tactical peek (issue #291): the slide out past the corner plays a
+// crouched creep, retargeted from the Crouch_Fwd_Loop clip of the
+// Quaternius Universal Animation Library (CC0 1.0; pinned source and
+// extraction details in THIRD_PARTY.md, sampled with
+// scripts/extract_biped_clip.py, 8 samples over its 2.0 s loop). The hold
+// at the corner cross-fades into the already-embedded Crouch_Idle_Loop
+// (kCrouch* above) with the weapon raised and the spine leaning out past
+// the edge; the slide back plays the creep in reverse. Like the cover
+// poses these are leg/spine retargets -- the arms keep carrying the weapon
+// (the aim raise reuses the shot beat's pose).
+constexpr BipedCurve kPeekCreepLeftHip = {102.2f, 96.9f, 86.8f, 64.3f,
+                                          43.0f, 13.7f, 84.7f, 100.7f};
+constexpr BipedCurve kPeekCreepLeftKnee = {-94.8f, -99.0f, -112.2f, -123.4f,
+                                           -132.8f, -111.3f, -121.5f, -100.0f};
+constexpr BipedCurve kPeekCreepRightHip = {56.7f, 21.1f, 94.6f, 102.4f,
+                                           98.8f, 93.6f, 78.9f, 66.9f};
+constexpr BipedCurve kPeekCreepRightKnee = {-134.8f, -115.9f, -124.8f, -96.7f,
+                                            -88.3f, -102.6f, -113.2f, -125.3f};
+constexpr BipedCurve kPeekCreepSpinePitch = {37.0f, 36.7f, 34.7f, 34.2f,
+                                             35.8f, 35.9f, 34.7f, 34.9f};
+constexpr float kPeekLean = 14.0f;       // Spine out past the corner, degrees.
+constexpr float kPeekLegTwistMax = 1.2f;  // Radians the legs turn toward the step.
+
 constexpr float kTwoPi = 6.28318530717958647692f;
 constexpr float kGrabLean = glm::radians(32.0f);  // Peak forward dip of the flag-grab reach.
 
@@ -701,7 +724,7 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
     rightKnee += kneeBeat;
   }
 
-  const ShootPose shot = SampleShootPose(unit);
+  ShootPose shot = SampleShootPose(unit);
   const glm::mat4 fall = KnockdownModel(unit);
   // Flag pickup beat: the figure dips forward to reach the pole and comes
   // back up (a quick overlay; it never blocks walking or shooting).  Wireframe
@@ -773,6 +796,75 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
     coverShift = glm::vec3(cy, 0.0f, sy) * ((flat ? 0.10f : 0.04f) * b);
   }
 
+  // Tactical peek (issue #291): a crouched creep out past the corner, an
+  // aimed hold leaning around it, and the creep in reverse on the way back.
+  // Layered after the cover block so the figure cross-fades from its crouch
+  // into the creep as the cover blend eases out. The legs twist toward the
+  // step direction (the body keeps facing past the wall), the weapon rises
+  // with the shot beat's own aim pose, and the spine leans out while aimed.
+  float legYaw = legTwist;
+  if (!joints && unit.alive && unit.peekElapsed >= 0.0f && !ride.riding) {
+    const float t = unit.peekElapsed;
+    constexpr float kOut = tactics::constants::kPeekOutSeconds;
+    constexpr float kHold = tactics::constants::kPeekHoldSeconds;
+    constexpr float kReturn = tactics::constants::kPeekReturnSeconds;
+    float creep, creepPhase, stance, aim;
+    if (t < kOut) {
+      creep = 1.0f;
+      creepPhase = kTwoPi * 0.5f * (t / kOut);  // One step out.
+      stance = SmoothStep01(t / 0.35f);
+      aim = SmoothStep01(t / kOut);
+    } else if (t < kOut + kHold) {
+      creep = 1.0f - SmoothStep01((t - kOut) / 0.3f);
+      creepPhase = kTwoPi * 0.5f;
+      stance = 1.0f;
+      aim = 1.0f;
+    } else {
+      const float r = glm::clamp((t - kOut - kHold) / kReturn, 0.0f, 1.0f);
+      creep = SmoothStep01(r / 0.4f);
+      creepPhase = kTwoPi * 0.5f * (1.0f - r);  // The step, backwards.
+      // Ease the whole stance out over the last stretch so the hand-off to
+      // the tile's own cover pose (which re-blends after the peek ends)
+      // starts from upright instead of popping.
+      stance = 1.0f - SmoothStep01((r - 0.7f) / 0.3f);
+      aim = 1.0f - SmoothStep01(r);
+    }
+    const float b = stance;
+    const float idleCrouchPhase =
+        unit.idleElapsed * (kTwoPi / kCoverCrouchLoopSeconds) + unit.id * 0.73f;
+    const auto creepMix = [&](const BipedCurve& creepCurve, const BipedCurve& idleCurve) {
+      return glm::radians(glm::mix(SampleLoop(idleCurve, idleCrouchPhase),
+                                   SampleLoop(creepCurve, creepPhase), creep));
+    };
+    leftHip = glm::mix(leftHip, creepMix(kPeekCreepLeftHip, kCrouchLeftHip), b);
+    rightHip = glm::mix(rightHip, creepMix(kPeekCreepRightHip, kCrouchRightHip), b);
+    leftKnee = glm::mix(leftKnee, creepMix(kPeekCreepLeftKnee, kCrouchLeftKnee), b);
+    rightKnee = glm::mix(rightKnee, creepMix(kPeekCreepRightKnee, kCrouchRightKnee), b);
+    const auto reach = [](float h, float k) {
+      return kUpperLegLength * std::cos(h) + kLowerLegLength * std::cos(h + k);
+    };
+    const float standing = kUpperLegLength + kLowerLegLength * std::cos(glm::radians(12.0f));
+    coverDrop = std::max(0.0f, standing - std::min(reach(leftHip, leftKnee),
+                                                   reach(rightHip, rightKnee)));
+    // Spine: the creep's hunch, plus the lean out past the edge while aimed.
+    const float cy = std::cos(unit.peekYaw - unit.VisualYaw());
+    const float sy = std::sin(unit.peekYaw - unit.VisualYaw());
+    spineAxis = glm::vec3(sy, 0.0f, -cy);  // Tips +Y toward the step side.
+    spineLean = glm::radians(kPeekLean) * aim * b;
+    coverPitch = glm::radians(glm::mix(SampleLoop(kCrouchSpinePitch, idleCrouchPhase),
+                                       SampleLoop(kPeekCreepSpinePitch, creepPhase), creep)) *
+                 kCoverSpinePitchScale * b;
+    coverShift = glm::vec3(0.0f);
+    // Feet step toward the corner while the torso holds the aim bearing.
+    legYaw += glm::clamp(std::remainder(unit.peekYaw - unit.VisualYaw(), kTwoPi),
+                         -kPeekLegTwistMax, kPeekLegTwistMax) *
+              creep * b;
+    // The weapon comes up as the figure emerges (shouldering a rifle,
+    // straightening a pistol), via the shot beat's own raise pose; a real
+    // reaction shot mid-peek layers its recoil on top unchanged.
+    shot.raise = std::max(shot.raise, aim);
+  }
+
   const glm::mat4 hipFrame =
       fall * YawFrame(unit.position + glm::vec3(0.0f, bob + ride.lift - coverDrop, 0.0f),
                       unit.VisualYaw()) *
@@ -821,10 +913,10 @@ FigureParts BuildFigureBase(const Unit& unit, bool compactWeapon, RagdollPose* j
   parts.push_back({EllipsoidModel(figure, headCenter, glm::vec3(kHeadRadius)), teamColor});
 
   const glm::mat4 leftThigh =
-      LimbFrame(hipFrame, glm::vec3(0.0f, kHipHeight, -kLegSideOffset), leftHip, legTwist);
+      LimbFrame(hipFrame, glm::vec3(0.0f, kHipHeight, -kLegSideOffset), leftHip, legYaw);
   const glm::mat4 leftShin = ChildBoneFrame(leftThigh, kUpperLegLength, leftKnee);
   const glm::mat4 rightThigh =
-      LimbFrame(hipFrame, glm::vec3(0.0f, kHipHeight, kLegSideOffset), rightHip, legTwist);
+      LimbFrame(hipFrame, glm::vec3(0.0f, kHipHeight, kLegSideOffset), rightHip, legYaw);
   const glm::mat4 rightShin = ChildBoneFrame(rightThigh, kUpperLegLength, rightKnee);
   // Where an IK-solved arm ends up, for the ragdoll's starting pose.
   auto armOut = [&](int elbow, int hand, glm::vec3** e, glm::vec3** h) {

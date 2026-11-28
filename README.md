@@ -241,6 +241,41 @@ hides it (a carried one shows with its carrier). `round_limit: N` ends the
 match as a draw after N rounds with no winner. Flag state travels in the
 snapshot text protocol (`ExportState`/`ImportState`).
 
+### Cover phase 2: tactical peek & take cover on return fire
+
+Issue #291, on top of #290's cover detection. From a **tactical** cover tile
+(an open corner to step around) the action menu offers **Peek L / Peek R**,
+one button per open corner side. A peek is the figure's whole action for the
+round and a temporary stance, not a move: on commit it slides out past the
+corner on a fixed clock schedule (0.7 s out, 1.6 s hold, 0.7 s back --
+`constants::kPeek*Seconds`), then returns to its tile and original facing
+automatically. The exposure is resolved in the sim: the figure's position
+really moves, so during the window it sees around the wall (recon --
+sightings are recorded as ghosts) and is itself visible and shootable.
+Whether the peek *attacks* is the squad playbook's stationary row: with
+"shoot when seen" (the default) the figure opens fire on what it sights
+around the corner; a passive row makes it pure recon. The beat is
+deterministic and replay-safe: the schedule runs on the round's execution
+clock, the peek spot is re-derived from live geometry at commit (a corner no
+longer open degrades the plan to a hold), and the pose state
+(`Unit::peekElapsed`/`peekYaw`) rides in snapshots so followers and timeline
+replays draw the same slide/aim/return (a crouched creep retargeted from the
+CC0 Quaternius `Crouch_Fwd_Loop`, see THIRD_PARTY.md).
+
+**Take cover on return fire** is a per-squad playbook checkbox (off by
+default). The trigger is being *targeted*: a locked-on or reaction burst
+opening fire on the figure, hit or miss (a hit already knocks it down; the
+shots due on the trigger tick still resolve against the tick-start
+snapshot). From the next tick the figure dives: if it already stands on a
+cover tile it stops and holds it; otherwise it routes to the nearest cover
+tile reachable within the round's remaining window and runs there,
+replacing whatever was left of its planned move (queued legs are dropped
+for re-planning). One dive per figure per round; cover is still
+enemy-agnostic (any wall counts, even one that happens to face the wrong
+way). Free-aim area fire does not trigger it. Scenarios: `cover_peek`,
+`cover_take_cover_on_fire`; playbook YAML keys `take_cover_on_fire`,
+protocol playbook list element 6.
+
 ### Builder
 
 Game Mode → **Builder** shows one card per scene you have built (a rendered

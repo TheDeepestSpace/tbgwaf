@@ -463,6 +463,18 @@ constexpr float kMoveSpeed = 4.0f;  // Default run speed, world units per second
 // fixed-length window. A figure's plannable move distance is bounded by
 // runSpeed * kRoundDuration, so every move animation fits in the window.
 constexpr float kRoundDuration = 5.0f;  // Seconds of execution per round.
+// Tactical peek (issue #291): a figure on a tactical cover tile can spend its
+// round's action stepping out past the corner, holding there exposed (its
+// sim position really moves, so sight lines and shots at it resolve
+// normally), and sliding back automatically. The whole beat is a fixed,
+// clock-driven schedule inside the round window so simulator, followers and
+// replays all see the same exposure.
+constexpr float kPeekOutSeconds = 0.7f;     // Slide out past the corner.
+constexpr float kPeekHoldSeconds = 1.6f;    // Exposed at the peek spot.
+constexpr float kPeekReturnSeconds = 0.7f;  // Slide back into cover.
+constexpr float kPeekTotalSeconds = kPeekOutSeconds + kPeekHoldSeconds + kPeekReturnSeconds;
+static_assert(kPeekTotalSeconds < kRoundDuration,
+              "a peek must finish inside its round's execution window");
 // Fixed step the headless simulators advance a round in (the server and the
 // in-process scenario runner), so reactions that trigger on the first tick
 // something is seen resolve identically in every test topology.

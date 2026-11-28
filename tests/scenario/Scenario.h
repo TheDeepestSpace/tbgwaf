@@ -61,7 +61,7 @@ struct ScenarioAction {
   // there, leaving the movement frontier up for the visual runner's
   // post-action capture; no destination is clicked and no plan is recorded.
   enum class Kind {
-    Move, BeginMove, Shoot, Aim, Pass, Cancel, Commit, Focus, NewGame,
+    Move, BeginMove, Shoot, Aim, Pass, Peek, Cancel, Commit, Focus, NewGame,
     TimelineSeek, TimelinePlay, TimelinePause, Wait,
   };
 
@@ -109,6 +109,11 @@ struct ScenarioAction {
   // Absent means "bar untouched": the plan keeps whatever level is dialed in
   // (1 unless an earlier step of the same aim set it).
   std::optional<int> shots;
+  // Peek only (issue #291): the open corner side to step around,
+  // 0 = left / 1 = right of the figure facing its cover wall. With
+  // `expect_noop`, the peek must be refused (not a tactical tile, or that
+  // corner is closed) and nothing planned.
+  int peekSide = 0;
 };
 
 // Every field is optional; only the ones present in the YAML step are
@@ -225,6 +230,14 @@ struct PlaybackHooks {
   // Fired for every playback frame (initial holds, each move tick, and
   // post-action holds). The game state is mid-scenario; do not mutate it.
   std::function<void(const GameLogic&)> onFrame;
+
+  // Fired after every simulation tick of an executing round (fast-forward
+  // and visual mode alike). RunScenario chains the follower's snapshot sync
+  // onto it, so the follower mirrors the round as it unfolds -- the way a
+  // networked pane streams state -- and builds sighting memory from
+  // transient mid-round exposure (e.g. a peek, issue #291), not just from
+  // each round's end state.
+  std::function<void(const GameLogic&)> onExecutedTick;
 
   // Fired just before each scripted click is applied (unit selection, move
   // destination, shoot target) by `team`'s player, with the world-space point the equivalent

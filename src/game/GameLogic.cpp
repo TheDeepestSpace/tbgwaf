@@ -187,7 +187,10 @@ void GameLogic::Reset(Scene scene) {
   flagWinner_.reset();
   InitFlag();
   activeMoves_.clear();
+  activePeeks_.clear();
   pendingShots_.clear();
+  underFireThisTick_.clear();
+  tookCoverThisRound_.clear();
   mirroredMoving_.clear();
   aimPreview_.reset();
   lockPreviewId_.reset();
@@ -426,6 +429,7 @@ GameSnapshot GameLogic::ExportState() const {
     u.planHasAimPoint = unit.plan.hasAimPoint;
     u.planAimPoint = unit.plan.aimPoint;
     u.planShots = unit.plan.shots;
+    u.planPeekSide = unit.plan.peekSide;
     u.planPath = unit.plan.movePath;
     u.planQueuedLegs = unit.plan.queuedLegs;
     u.planRides = unit.plan.moveRides;
@@ -444,6 +448,8 @@ GameSnapshot GameLogic::ExportState() const {
     u.rideLength = unit.rideLength;
     u.rideSlope = unit.rideSlope;
     u.grabElapsed = unit.grabElapsed;
+    u.peekElapsed = unit.peekElapsed;
+    u.peekYaw = unit.peekYaw;
     u.moving = IsUnitMoving(unit.id);
     u.coverKind = unit.coverKind;
     u.coverTileKind = unit.coverTileKind;
@@ -574,6 +580,7 @@ void ApplyPlan(const GameSnapshot::UnitState& u, Unit* unit) {
   // plan that fires past the magazine/round-window cap.
   unit->plan.shots =
       std::clamp(u.planShots, 1, MaxShotsPerAction(unit->weapon, constants::kRoundDuration));
+  unit->plan.peekSide = std::clamp(u.planPeekSide, 0, 1);
   unit->plan.movePath = u.planPath;
   unit->plan.queuedLegs = u.planQueuedLegs;
   unit->plan.moveRides = u.planRides;
@@ -630,6 +637,8 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
     unit->rideLength = u.rideLength;
     unit->rideSlope = u.rideSlope;
     unit->grabElapsed = u.grabElapsed;
+    unit->peekElapsed = u.peekElapsed;
+    unit->peekYaw = u.peekYaw;
     unit->coverKind = u.coverKind;
     unit->coverTileKind = u.coverTileKind;
     unit->coverYaw = u.coverYaw;
@@ -683,7 +692,10 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   selectedUnitId_.reset();
   ClearMoveOverlays();
   activeMoves_.clear();
+  activePeeks_.clear();
   pendingShots_.clear();
+  underFireThisTick_.clear();
+  tookCoverThisRound_.clear();
   aimPreview_.reset();
   lockPreviewId_.reset();
   return true;
@@ -705,7 +717,8 @@ bool GameLogic::ImportTeamPlans(const GameSnapshot& snap, Team team) {
     changed = changed || before.type != after.type ||
               before.shootTargetId != after.shootTargetId ||
               before.hasAimPoint != after.hasAimPoint || before.aimPoint != after.aimPoint ||
-              before.shots != after.shots || before.movePath != after.movePath ||
+              before.shots != after.shots || before.peekSide != after.peekSide ||
+              before.movePath != after.movePath ||
               before.queuedLegs != after.queuedLegs || before.moveRides != after.moveRides ||
               before.queuedLegRides != after.queuedLegRides ||
               before.endFacingYaw != after.endFacingYaw;
@@ -729,13 +742,14 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
         << u.facingYaw << ' ' << (u.alive ? 1 : 0) << ' '
         << static_cast<int>(u.planType) << ' ' << u.planShootTargetId << ' '
         << (u.planHasAimPoint ? 1 : 0) << ' ' << u.planAimPoint.x << ' ' << u.planAimPoint.y
-        << ' ' << u.planAimPoint.z << ' ' << u.planShots << ' ' << u.planEndFacingYaw << ' '
+        << ' ' << u.planAimPoint.z << ' ' << u.planShots << ' ' << u.planPeekSide << ' '
+        << u.planEndFacingYaw << ' '
         << u.knockdownAxis.x << ' ' << u.knockdownAxis.y << ' ' << u.knockdownAxis.z << ' '
         << u.knockdownElapsed << ' ' << u.walkPhase << ' ' << u.walkBlend << ' '
         << u.idleElapsed << ' ' << u.shootElapsed << ' ' << u.shootAimYaw << ' '
         << u.rideTravel << ' ' << u.rideLength << ' ' << u.rideSlope << ' '
-        << u.grabElapsed << ' ' << u.turnLag << ' ' << (u.moving ? 1 : 0) << ' '
-        << u.planPath.size();
+        << u.grabElapsed << ' ' << u.peekElapsed << ' ' << u.peekYaw << ' ' << u.turnLag << ' '
+        << (u.moving ? 1 : 0) << ' ' << u.planPath.size();
     for (const auto& p : u.planPath) out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
     out << ' ' << u.planQueuedLegs.size();
     for (const auto& leg : u.planQueuedLegs) {
@@ -762,9 +776,11 @@ std::string SerializeSnapshot(const GameSnapshot& snap) {
     out << ' ' << static_cast<int>(t.team) << ' ' << t.from.x << ' ' << t.from.y << ' ' << t.from.z
         << ' ' << t.to.x << ' ' << t.to.y << ' ' << t.to.z << ' ' << t.at << ' ' << t.age;
   }
-  for (const auto& pb : snap.playbooks)
+  for (const auto& pb : snap.playbooks) {
     for (int m = 0; m < 2; ++m)
       for (int s = 0; s < 2; ++s) out << ' ' << static_cast<int>(pb.table[m][s]);
+    out << ' ' << (pb.ignoreIdle ? 1 : 0) << ' ' << (pb.takeCoverOnFire ? 1 : 0);
+  }
   out << ' ' << (snap.flag.enabled ? 1 : 0) << ' ' << snap.flag.carrierId << ' '
       << snap.flag.position.x << ' ' << snap.flag.position.y << ' ' << snap.flag.position.z << ' '
       << snap.flag.dropElapsed;
@@ -794,14 +810,16 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
     size_t pathCount = 0;
     if (!(in >> u.id >> u.position.x >> u.position.y >> u.position.z >> u.facingYaw >> alive >>
           plan >> u.planShootTargetId >> hasAim >> u.planAimPoint.x >> u.planAimPoint.y >>
-          u.planAimPoint.z >> u.planShots >> u.planEndFacingYaw >> u.knockdownAxis.x >>
+          u.planAimPoint.z >> u.planShots >> u.planPeekSide >> u.planEndFacingYaw >>
+          u.knockdownAxis.x >>
           u.knockdownAxis.y >> u.knockdownAxis.z >> u.knockdownElapsed >> u.walkPhase >>
           u.walkBlend >> u.idleElapsed >> u.shootElapsed >> u.shootAimYaw >> u.rideTravel >> u.rideLength >>
-          u.rideSlope >> u.grabElapsed >> u.turnLag >> moving >>
+          u.rideSlope >> u.grabElapsed >> u.peekElapsed >> u.peekYaw >> u.turnLag >> moving >>
           pathCount)) {
       return false;
     }
-    if (plan < 0 || plan > static_cast<int>(PlannedActionType::Pass)) return false;
+    if (plan < 0 || plan > static_cast<int>(PlannedActionType::Peek)) return false;
+    if (u.planPeekSide < 0 || u.planPeekSide > 1) return false;
     if (u.planShots < 1 || u.planShots > static_cast<int>(kMaxEntries)) return false;
     if (pathCount > kMaxEntries) return false;
     u.planType = static_cast<PlannedActionType>(plan);
@@ -873,6 +891,10 @@ bool DeserializeSnapshot(const std::string& text, GameSnapshot* outSnap) {
         pb.table[m][s] = static_cast<ReactionAction>(action);
       }
     }
+    int ignoreIdle = 0, takeCover = 0;
+    if (!(in >> ignoreIdle >> takeCover)) return false;
+    pb.ignoreIdle = ignoreIdle != 0;
+    pb.takeCoverOnFire = takeCover != 0;
   }
   int flagEnabled = 0;
   if (!(in >> flagEnabled >> snap.flag.carrierId >> snap.flag.position.x >>
@@ -1149,7 +1171,10 @@ void GameLogic::Update(float dtSeconds) {
 // protect from -- it takes the pose as normal.
 void GameLogic::UpdateCoverPoses(float dtSeconds) {
   for (Unit& unit : scene_.units) {
-    if (!unit.alive || IsUnitMoving(unit.id) || unit.rideTravel >= 0.0f) {
+    // A peeking figure leaves its cover pose for the rig's peek beat (and
+    // its sliding position must not churn the tile classification).
+    if (!unit.alive || IsUnitMoving(unit.id) || unit.rideTravel >= 0.0f ||
+        unit.peekElapsed >= 0.0f) {
       unit.coverBlend = std::max(0.0f, unit.coverBlend - dtSeconds * 4.0f);
       continue;
     }
@@ -1354,6 +1379,10 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
     }
   }
 
+  // Peeks slide on the same clock as the movers above, so reactions and
+  // shots below judge everyone's position for this tick.
+  AdvancePeeks();
+
   // Grabs happen where the figures physically are, before reactions or shots
   // this tick can change anything (a grabber shot a moment later still held it).
   GrabFlagFrom(flagTouches);
@@ -1364,6 +1393,9 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
   // tick, held shots get their per-tick FOV/LOS re-check -- this is what
   // lets a shooter hit a target that only walks into its cone mid-round.
   ResolvePendingShots();
+  // Figures fired on this tick (and still standing) dive for cover from the
+  // next tick on, if their playbook says to.
+  ApplyTakeCoverReactions();
   SyncFlag();
 
   // Every mover advances together above; drop whichever ones just finished
@@ -1380,7 +1412,7 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
                                      }),
                       activeMoves_.end());
 
-  if (activeMoves_.empty()) {
+  if (activeMoves_.empty() && activePeeks_.empty()) {
     pendingShots_.erase(std::remove_if(pendingShots_.begin(), pendingShots_.end(),
                                        [](const PendingShot& shot) { return !shot.started; }),
                         pendingShots_.end());
@@ -1388,6 +1420,154 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
   // Every round runs its full window, even with nothing left to do: the
   // physics (falling figures, bullets, a dropped flag) keep playing out.
   if (executionElapsed_ >= constants::kRoundDuration) FinishRound();
+}
+
+void GameLogic::AdvancePeeks() {
+  const auto smooth = [](float t) {
+    t = glm::clamp(t, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+  };
+  for (auto it = activePeeks_.begin(); it != activePeeks_.end();) {
+    Unit* unit = FindUnit(it->unitId);
+    if (!unit || !unit->alive) {
+      // Shot mid-peek: the body stays where it fell, the beat's clock
+      // freezes with the rest of the hit pose.
+      it = activePeeks_.erase(it);
+      continue;
+    }
+    const float t = executionElapsed_;
+    if (t >= constants::kPeekTotalSeconds) {
+      unit->position = it->from;
+      unit->SetFacingYaw(it->returnFacingYaw);
+      unit->peekElapsed = -1.0f;
+      it = activePeeks_.erase(it);
+      continue;
+    }
+    unit->peekElapsed = t;
+    float s;
+    if (t < constants::kPeekOutSeconds) {
+      s = smooth(t / constants::kPeekOutSeconds);
+    } else if (t < constants::kPeekOutSeconds + constants::kPeekHoldSeconds) {
+      s = 1.0f;
+    } else {
+      s = 1.0f - smooth((t - constants::kPeekOutSeconds - constants::kPeekHoldSeconds) /
+                        constants::kPeekReturnSeconds);
+    }
+    unit->position = glm::mix(it->from, it->to, s);
+    ++it;
+  }
+}
+
+void GameLogic::ApplyTakeCoverReactions() {
+  if (underFireThisTick_.empty()) return;
+  std::vector<int> ids = std::move(underFireThisTick_);
+  underFireThisTick_.clear();
+  std::sort(ids.begin(), ids.end());
+  ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+  for (const int id : ids) {
+    Unit* unit = FindUnit(id);
+    if (!unit || !unit->alive) continue;
+    if (!Playbook(unit->team).takeCoverOnFire) continue;
+    if (std::find(tookCoverThisRound_.begin(), tookCoverThisRound_.end(), id) !=
+        tookCoverThisRound_.end()) {
+      continue;  // One dive per figure per round.
+    }
+    // A peeking figure is already returning to cover on its own schedule; a
+    // rider is committed to the cable.
+    if (IsUnitPeeking(id) || IsUnitRiding(id)) continue;
+    tookCoverThisRound_.push_back(id);
+    const CoverTile here = ClassifyCover(sightObstacles_, unit->position);
+    if (here.kind != CoverKind::None) {
+      // Already on a cover tile: stop and hold it rather than walking out.
+      for (ActiveMove& move : activeMoves_) {
+        if (move.unitId == id) move.segment = move.path.size();
+      }
+      unit->plan.queuedLegs.clear();
+      unit->plan.queuedLegRides.clear();
+      if (recorder_.ptr) {
+        LogSim("take_cover unit=" + std::to_string(id) + " holds exec=" +
+               std::to_string(executionElapsed_));
+      }
+      continue;
+    }
+    const float budget =
+        (constants::kRoundDuration - executionElapsed_) * unit->runSpeed;
+    if (budget <= 0.25f) continue;
+    if (DivertToNearestCover(*unit, budget)) {
+      // The diverted route replaces whatever was left of the plan; queued
+      // legs were priced from the old endpoint and no longer apply.
+      unit->plan.queuedLegs.clear();
+      unit->plan.queuedLegRides.clear();
+      if (recorder_.ptr) {
+        LogSim("take_cover unit=" + std::to_string(id) + " dives exec=" +
+               std::to_string(executionElapsed_));
+      }
+    }
+  }
+}
+
+bool GameLogic::DivertToNearestCover(Unit& unit, float budget) {
+  EnsureNavMeshFor(unit, unit.position);
+  const ReachField field = navMesh_.ComputeReachField(unit.position, budget, 0.25f);
+  if (field.nx <= 0 || field.nz <= 0) return false;
+  const CoverMap cover = ComputeCoverMap(sightObstacles_, field);
+  // Nearest routed cover node; exact ties go to the lower node index.
+  int best = -1;
+  float bestDist = std::numeric_limits<float>::infinity();
+  for (int iz = 0; iz < field.nz; ++iz) {
+    for (int ix = 0; ix < field.nx; ++ix) {
+      if (!field.Reached(ix, iz)) continue;
+      const int idx = iz * field.nx + ix;
+      if (cover.tiles[idx].kind == CoverKind::None) continue;
+      // Grid-routed ground nodes only (elevated-pass nodes carry no parent
+      // chain to extract a route from).
+      if (field.parent[idx] < 0 && field.dist[idx] > 0.0f) continue;
+      if (field.dist[idx] < bestDist) {
+        bestDist = field.dist[idx];
+        best = idx;
+      }
+    }
+  }
+  if (best < 0 || bestDist <= 0.0f) return false;
+
+  // Walk the parent chain back to the source (same extraction as
+  // PlanDodgeLeg, minus the moving-blocker timing).
+  std::vector<glm::vec2> lattice;
+  bool reachedSource = false;
+  for (int node = best, guard = field.nx * field.nz; node >= 0 && guard-- > 0;
+       node = field.parent[node]) {
+    lattice.emplace_back(field.minX + (node % field.nx) * field.step,
+                         field.minZ + (node / field.nx) * field.step);
+    if (field.dist[node] <= 0.0f) {
+      reachedSource = true;
+      break;
+    }
+  }
+  if (!reachedSource) return false;
+  std::reverse(lattice.begin(), lattice.end());
+  lattice.front() = glm::vec2(unit.position.x, unit.position.z);
+
+  // Pull taut past static obstacles, then lift onto the terrain.
+  std::vector<glm::vec3> path{glm::vec3(lattice.front().x, 0.0f, lattice.front().y)};
+  size_t i = 0;
+  while (i + 1 < lattice.size()) {
+    size_t j = std::min(lattice.size() - 1, i + 48);
+    while (j > i + 1 && !navMesh_.GroundSegmentTraversable(lattice[i], lattice[j])) --j;
+    path.emplace_back(lattice[j].x, 0.0f, lattice[j].y);
+    i = j;
+  }
+  navMesh_.LiftGroundPathOntoTerrain(&path);
+  if (path.size() < 2) return false;
+
+  // Replace (or install) the figure's in-flight move with the dive. The
+  // final facing follows the cover wall (EndFacing's cover rule).
+  const float facing = EndFacing(sightObstacles_, path, unit.facingYaw);
+  activeMoves_.erase(std::remove_if(activeMoves_.begin(), activeMoves_.end(),
+                                    [&](const ActiveMove& move) { return move.unitId == unit.id; }),
+                     activeMoves_.end());
+  if (unit.rideTravel >= 0.0f) unit.rideTravel = -1.0f;
+  activeMoves_.push_back(ActiveMove{unit.id, std::move(path), 0, facing, {}, -1});
+  return true;
 }
 
 void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
@@ -1823,6 +2003,41 @@ void GameLogic::ChoosePass() {
   unit->plan.hasAimPoint = false;
   selectedUnitId_.reset();
   mode_ = InputMode::AwaitingSelection;
+}
+
+void GameLogic::ChoosePeek(int side) {
+  InputEvent e{InputEvent::Op::ChoosePeek};
+  e.count = side;
+  RecordScope record(this, std::move(e));
+  if (mode_ != InputMode::ActionMenu) return;
+  Unit* unit = FindUnit(selectedUnitId_.value_or(-1));
+  if (!unit || !unit->alive) return;
+  bool available = false;
+  for (const PeekOption& option : PeekOptions(sightObstacles_, unit->position)) {
+    available |= option.side == side;
+  }
+  if (!available) return;  // Not on a tactical tile / that corner isn't open.
+  unit->plan.type = PlannedActionType::Peek;
+  unit->plan.peekSide = side;
+  ClearPlannedMove(&unit->plan);
+  unit->plan.shootTargetId = -1;
+  unit->plan.hasAimPoint = false;
+  selectedUnitId_.reset();
+  mode_ = InputMode::AwaitingSelection;
+}
+
+std::vector<PeekOption> GameLogic::PeekOptionsForSelected() const {
+  if (mode_ != InputMode::ActionMenu) return {};
+  const Unit* unit = FindUnit(selectedUnitId_.value_or(-1));
+  if (!unit || !unit->alive) return {};
+  return PeekOptions(sightObstacles_, unit->position);
+}
+
+bool GameLogic::IsUnitPeeking(int unitId) const {
+  for (const ActivePeek& peek : activePeeks_) {
+    if (peek.unitId == unitId) return true;
+  }
+  return false;
 }
 
 void GameLogic::CancelAction() {
@@ -2321,6 +2536,10 @@ void GameLogic::ResolvePendingShots() {
     }
     shot.started = true;
     shot.startTime = executionElapsed_;
+    // The locked target now has a burst opening fire on it: that is the
+    // "targeted / shot at" trigger for take-cover-on-return-fire (issue
+    // #291), whether or not any bullet connects.
+    if (!shot.hasAimPoint) underFireThisTick_.push_back(shot.targetId);
   }
 
   // Everything with at least one bullet due at the current execution clock.
@@ -2532,8 +2751,14 @@ void GameLogic::ApplyPlaybookReactions(bool roundStart) {
     for (Unit& enemy : scene_.units) {
       if (!enemy.alive || enemy.team == unit.team) continue;
       // With ignoreIdle a stationary figure reacts only to enemies *moving*
-      // into its view, not to everyone idling in its cone.
-      const bool enemyMoving = isMidMove(enemy.id);
+      // into its view, not to everyone idling in its cone. A peeker sliding
+      // out of (or back behind) its corner counts as movement; the held
+      // part of the peek is a stance.
+      const bool enemySliding =
+          enemy.peekElapsed >= 0.0f &&
+          (enemy.peekElapsed < constants::kPeekOutSeconds ||
+           enemy.peekElapsed >= constants::kPeekOutSeconds + constants::kPeekHoldSeconds);
+      const bool enemyMoving = isMidMove(enemy.id) || enemySliding;
       if (roundStart && enemyMoving) continue;
       if (!moving && Playbook(unit.team).ignoreIdle && !enemyMoving) continue;
       if (!CanUnitSee(unit, enemy, sightObstacles_, scene_.walkSurfaces, scene_.ground)) continue;
@@ -2575,6 +2800,7 @@ void GameLogic::StartReactionBurst(const Unit& shooter, const Unit& target) {
   shot.reaction = true;
   shot.started = true;
   shot.startTime = executionElapsed_;
+  underFireThisTick_.push_back(target.id);  // Take-cover trigger (issue #291).
   const auto next = reactionNextShotAt_.find(shooter.id);
   if (next != reactionNextShotAt_.end()) shot.startTime = std::max(shot.startTime, next->second);
   pendingShots_.push_back(shot);
@@ -2585,6 +2811,9 @@ void GameLogic::CommitRound() {
   if (!CanCommitRound()) return;
   reactionAmmo_.clear();
   reactionNextShotAt_.clear();
+  activePeeks_.clear();
+  underFireThisTick_.clear();
+  tookCoverThisRound_.clear();
 
   selectedUnitId_.reset();
   movePreviewPath_.clear();
@@ -2609,6 +2838,26 @@ void GameLogic::CommitRound() {
     } else if (plan.type == PlannedActionType::Shoot) {
       pendingShots_.push_back(
           PendingShot{unit.id, plan.shootTargetId, plan.hasAimPoint, plan.aimPoint, plan.shots});
+    } else if (plan.type == PlannedActionType::Peek) {
+      // Re-derive the peek spot from the live geometry (walls may have
+      // changed since planning); a side no longer open degrades to a Pass.
+      for (const PeekOption& option : PeekOptions(sightObstacles_, unit.position)) {
+        if (option.side != plan.peekSide) continue;
+        glm::vec3 spot = option.spot;
+        // Follow the terrain if the spot is on the ground; a figure on a
+        // deck/roof keeps its surface height (spots are same-level by
+        // construction).
+        if (!scene_.ground.Empty()) {
+          const float groundY = scene_.ground.HeightAt(spot.x, spot.z);
+          if (std::fabs(groundY - unit.position.y) < 0.5f) spot.y = groundY;
+        }
+        activePeeks_.push_back(ActivePeek{unit.id, unit.position, spot, unit.facingYaw});
+        unit.peekElapsed = 0.0f;
+        unit.peekYaw = option.stepYaw;
+        // Face past the end of the wall: the FOV sweeps what hides behind it.
+        unit.SetFacingYaw(option.wallYaw);
+        break;
+      }
     }
   }
   aimPreview_.reset();
@@ -2634,6 +2883,7 @@ void GameLogic::CommitRound() {
   // (e.g. idle enemies) start here too, so an all-pass round still reacts.
   ApplyPlaybookReactions(/*roundStart=*/true);
   ResolvePendingShots();
+  ApplyTakeCoverReactions();
   SyncFlag();
 
   // Anyone killed at tick 0 never starts walking.
@@ -2649,10 +2899,11 @@ void GameLogic::CommitRound() {
     return;
   }
 
-  // With no movement in flight, nothing can change a still-blocked shot's
-  // geometry: it expires now. The round stays executing while any opened
-  // burst still has shots scheduled; otherwise it is already over.
-  if (activeMoves_.empty()) {
+  // With no movement in flight (peeks move geometry too), nothing can
+  // change a still-blocked shot's geometry: it expires now. The round stays
+  // executing while any opened burst still has shots scheduled; otherwise
+  // it is already over.
+  if (activeMoves_.empty() && activePeeks_.empty()) {
     pendingShots_.erase(std::remove_if(pendingShots_.begin(), pendingShots_.end(),
                                        [](const PendingShot& shot) { return !shot.started; }),
                         pendingShots_.end());
@@ -2761,8 +3012,21 @@ void GameLogic::FinishRound() {
     LogSim(buf);
   }
   selectedUnitId_.reset();
+  // A peek should have completed inside the window; close out any
+  // straggler exactly as its schedule would have (position and facing
+  // restored into cover).
+  for (const ActivePeek& peek : activePeeks_) {
+    if (Unit* unit = FindUnit(peek.unitId); unit && unit->alive) {
+      unit->position = peek.from;
+      unit->SetFacingYaw(peek.returnFacingYaw);
+      unit->peekElapsed = -1.0f;
+    }
+  }
   activeMoves_.clear();
+  activePeeks_.clear();
   pendingShots_.clear();
+  underFireThisTick_.clear();
+  tookCoverThisRound_.clear();
   mode_ = InputMode::AwaitingSelection;
 
   // Auto-arm the next leg of any multi-round route; the player can still

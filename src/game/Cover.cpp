@@ -162,6 +162,85 @@ CoverTile ClassifyCover(const std::vector<Obstacle>& obstacles, const glm::vec3&
   return tile;
 }
 
+std::vector<PeekOption> PeekOptions(const std::vector<Obstacle>& obstacles,
+                                    const glm::vec3& feet) {
+  std::vector<PeekOption> options;
+  const glm::vec2 c(feet.x, feet.z);
+  if (Blocked(obstacles, c, feet.y)) return options;
+  std::vector<glm::vec2> poly;
+  for (const Obstacle& ob : obstacles) {
+    if (ob.navOnly) continue;
+    const AABB& b = ob.bounds;
+    if (b.max.y < feet.y + kCoverMinHeight || b.min.y > feet.y + 0.3f) continue;
+    const float band = kCoverProbeDistance;
+    if (c.x < b.min.x - band || c.x > b.max.x + band || c.y < b.min.z - band ||
+        c.y > b.max.z + band) {
+      continue;
+    }
+    if (!WideEnoughForCover(ob)) continue;
+    if (!ob.footprint.empty()) {
+      poly = ob.footprint;
+    } else {
+      poly = {{b.min.x, b.min.z}, {b.max.x, b.min.z}, {b.max.x, b.max.z}, {b.min.x, b.max.z}};
+    }
+    glm::vec2 centroid(0.0f);
+    for (const glm::vec2& v : poly) centroid += v;
+    centroid /= static_cast<float>(poly.size());
+    for (size_t i = 0; i < poly.size(); ++i) {
+      const glm::vec2 v0 = poly[i], v1 = poly[(i + 1) % poly.size()];
+      const float len = glm::length(v1 - v0);
+      if (len < 1e-4f) continue;
+      const glm::vec2 along = (v1 - v0) / len;
+      glm::vec2 n(along.y, -along.x);
+      if (glm::dot(centroid - v0, n) > 0.0f) n = -n;  // Outward.
+      const float o = glm::dot(c - v0, n);
+      if (o <= 1e-4f || o > kCoverProbeDistance) continue;
+      const float t = glm::dot(c - v0, along);
+      if (t < 0.0f || t > len) continue;  // Past the face's span.
+      const glm::vec2 toWall = -n;
+      const struct {
+        glm::vec2 corner, out;
+        float a;  // Distance from the point to this end along the wall.
+      } ends[2] = {{v0, -along, t}, {v1, along, len - t}};
+      for (const auto& end : ends) {
+        // Same tactical-wedge and corner-openness gates as CollectWalls.
+        if (end.a > kCoverEdgeReach || o > end.a) continue;
+        const glm::vec2 base = end.corner + end.out * kCoverEdgeProbeOut;
+        if (Blocked(obstacles, base - n * kCoverEdgeProbeIn, feet.y)) continue;
+        if (Blocked(obstacles, base + n * kCoverEdgeProbeOut, feet.y)) continue;
+        // The spot slides along the wall, keeping the figure's offset from
+        // the face, until the body clears the corner. Spot and midpoint must
+        // be free (nothing to slide into).
+        const glm::vec2 spot = c + end.out * (end.a + kPeekClearance);
+        if (Blocked(obstacles, spot, feet.y)) continue;
+        if (Blocked(obstacles, 0.5f * (c + spot), feet.y)) continue;
+        PeekOption option;
+        // Facing the wall, "right" is toWall rotated like Unit::FacingDirection's
+        // right-hand side: (-z, x).
+        const glm::vec2 right(-toWall.y, toWall.x);
+        option.side = glm::dot(end.out, right) > 0.0f ? 1 : 0;
+        option.spot = glm::vec3(spot.x, feet.y, spot.y);
+        option.wallYaw = std::atan2(toWall.y, toWall.x);
+        option.stepYaw = std::atan2(end.out.y, end.out.x);
+        // One option per side: keep the shortest step (deterministic:
+        // obstacles and faces are visited in a fixed order).
+        bool kept = false;
+        for (PeekOption& existing : options) {
+          if (existing.side != option.side) continue;
+          kept = true;
+          const float existingStep = glm::distance(glm::vec2(existing.spot.x, existing.spot.z), c);
+          if (end.a + kPeekClearance < existingStep) existing = option;
+          break;
+        }
+        if (!kept) options.push_back(option);
+      }
+    }
+  }
+  std::sort(options.begin(), options.end(),
+            [](const PeekOption& a, const PeekOption& b) { return a.side < b.side; });
+  return options;
+}
+
 std::vector<CoverZoneRect> CoverZoneRects(const std::vector<Obstacle>& obstacles, float feetY,
                                           float band) {
   std::vector<CoverZoneRect> rects;

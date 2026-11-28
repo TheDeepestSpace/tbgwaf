@@ -60,6 +60,25 @@ int main() {
   u.coverBlend = 0.0f;
   CHECK(std::fabs(Head(u).z - stand.z) < 1e-4f);
 
+  // Tactical peek beat (issue #291): holding at the corner the figure is
+  // crouched (head low) and leaning toward the step side (+Z here), with
+  // the pose alive across the hold (crouch-idle loop), and the slide-out
+  // creep posed differently from the hold.
+  u.peekYaw = glm::half_pi<float>();  // Stepping toward +Z (figure's right).
+  u.peekElapsed = tactics::constants::kPeekOutSeconds + 0.2f;  // Holding.
+  const glm::vec3 hold = Head(u);
+  CHECK(hold.y < stand.y - 0.15f);
+  CHECK(hold.z > stand.z + 0.03f);
+  u.idleElapsed = 0.4f * gfx::kCoverCrouchLoopSeconds;
+  CHECK(glm::length(Head(u) - hold) > 1e-3f);
+  u.idleElapsed = 0.0f;
+  u.peekElapsed = 0.5f * tactics::constants::kPeekOutSeconds;  // Mid-creep.
+  const glm::vec3 creep = Head(u);
+  CHECK(glm::length(creep - hold) > 1e-2f);
+  CHECK(creep.y < stand.y - 0.1f);  // The creep is crouched too.
+  u.peekElapsed = -1.0f;
+  CHECK(std::fabs(Head(u).y - stand.y) < 1e-4f);
+
   if (gFailures == 0) std::printf("cover pose tests passed\n");
   return gFailures == 0 ? 0 : 1;
 }

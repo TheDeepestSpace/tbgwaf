@@ -15,7 +15,13 @@ namespace tactics {
 // figure *will* do -- nothing executes until the whole round is committed
 // (see GameLogic::CommitRound), at which point every plan on both teams
 // plays out together.
-enum class PlannedActionType { None, Move, Shoot, Pass };
+// Peek (issue #291): only plannable while the figure stands on a *tactical*
+// cover tile (an open corner to step around, see game/Cover.h). The round's
+// whole action: the figure slides out past the corner, holds there exposed
+// (seeing -- and being seen/shot -- around the wall; whether it opens fire
+// on what it sights is its squad playbook's stationary row, so a peek is
+// recon or attack by configuration), and returns to its tile automatically.
+enum class PlannedActionType { None, Move, Shoot, Pass, Peek };
 
 // A traverse step inside a move path: the segment path[segment] ->
 // path[segment + 1] is a ride on scene.ziplines[zipline] rather than a walk.
@@ -48,6 +54,11 @@ struct PlannedAction {
   // wherever a plan is recorded or imported. Default 1 keeps every
   // pre-burst scenario/golden unchanged.
   int shots = 1;
+  // For type == Peek (issue #291): which open corner side to step around,
+  // 0 = left of the figure facing its wall, 1 = right (see Cover.h's
+  // PeekOption). The peek spot itself is re-derived from the live geometry
+  // when the round commits; a side no longer open degrades to a Pass.
+  int peekSide = 0;
 };
 
 // What a figure does, on its own, on a tick where at least one living enemy
@@ -81,6 +92,15 @@ struct SquadPlaybook {
   // (not mid-move) and only reacts to ones moving into view.
   bool ignoreIdle = false;
 
+  // Take cover on return fire (issue #291): when true, a figure a burst
+  // opens fire on (targeted, not merely hit -- a hit already knocks it
+  // down) scrambles mid-round to the nearest cover tile it can still reach
+  // in the round's remaining window, or just stops if it is already on one.
+  // Shots already due on the triggering tick still resolve against the
+  // tick-start snapshot; the dive begins on the next tick. At most one dive
+  // per figure per round. Cover is enemy-agnostic (any wall).
+  bool takeCoverOnFire = false;
+
   // All-neutral table (never shoots or stops); for tests/scenarios that
   // aren't about reactions.
   static SquadPlaybook Passive() {
@@ -98,7 +118,7 @@ struct SquadPlaybook {
     for (int m = 0; m < 2; ++m)
       for (int s = 0; s < 2; ++s)
         if (table[m][s] != o.table[m][s]) return false;
-    return ignoreIdle == o.ignoreIdle;
+    return ignoreIdle == o.ignoreIdle && takeCoverOnFire == o.takeCoverOnFire;
   }
   bool operator!=(const SquadPlaybook& o) const { return !(*this == o); }
 };
@@ -155,6 +175,14 @@ struct Unit {
   float coverYaw = 0.0f;
   float coverBlend = 0.0f;
   glm::vec3 coverFrom{1e9f};
+  // Peek beat (issue #291): seconds into an executing peek (<0 = not
+  // peeking) and the world yaw of the step from the cover tile to the peek
+  // spot. The *position* a peek moves is sim state (synced like any move);
+  // these two only drive the rig's peek pose (crouched slide out, aimed
+  // hold, slide back), mirrored in snapshots so followers and replays draw
+  // the same beat.
+  float peekElapsed = -1.0f;
+  float peekYaw = 0.0f;
   // Visual-only quick-draw beat: seconds since this figure's shot resolved
   // (<0 = idle) and the world yaw toward the target it fired at, so the gun
   // arm can swing onto the target even when it sits off-center in the FOV.

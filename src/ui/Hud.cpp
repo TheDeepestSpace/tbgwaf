@@ -108,6 +108,11 @@ void DrawPlaybookView(const GameLogic& game, Team team, const PaneRect& rect, in
                       &edited.ignoreIdle)) {
     changed = true;
   }
+  if (ImGui::Checkbox("Take cover on return fire (dive to the nearest reachable cover when "
+                      "fired on)",
+                      &edited.takeCoverOnFire)) {
+    changed = true;
+  }
   if (changed) actions.playbook = edited;
   if (ImGui::Button("Close")) PlaybookOpen(team) = false;
   ImGui::End();
@@ -301,6 +306,12 @@ HudActions DrawHud(const GameLogic& game, Team team, bool planning, const PaneRe
           ImGui::SameLine();
           if (Button("Shoot")) actions.shoot = true;
           ImGui::SameLine();
+          // Tactical peek (issue #291): offered only while the figure
+          // stands on a tactical cover tile; one button per open corner.
+          for (const tactics::PeekOption& option : game.PeekOptionsForSelected()) {
+            if (Button(option.side == 0 ? "Peek L" : "Peek R")) actions.peek = option.side;
+            ImGui::SameLine();
+          }
           if (Button("Pass")) actions.pass = true;
         } else {
           if (game.Mode() == InputMode::AwaitingMoveDestination) {

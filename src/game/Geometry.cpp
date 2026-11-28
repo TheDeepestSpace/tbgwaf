@@ -153,6 +153,23 @@ bool RayIntersectsObstacle(const glm::vec3& origin, const glm::vec3& direction,
                       ObstacleFootprint(obstacle), &enter, &exit)) {
     return false;
   }
+  // Fractured wall pieces with slanted torn edges: additionally clip against
+  // the wall-plane silhouette (see Obstacle::profile), so rays pass over a
+  // slanted cut exactly where the renderer shows daylight.
+  if (obstacle.profile.size() >= 3 && obstacle.footprint.size() >= 2) {
+    const glm::vec2 a = obstacle.footprint[0];
+    const glm::vec2 ab = obstacle.footprint[1] - a;
+    const float len = glm::length(ab);
+    if (len > kEps) {
+      const glm::vec2 d = ab / len;
+      const glm::vec2 o(origin.x - a.x, origin.z - a.y);
+      if (!ClipParametric({glm::dot(o, d), origin.y},
+                          {glm::dot(glm::vec2(direction.x, direction.z), d), direction.y},
+                          obstacle.profile, &enter, &exit)) {
+        return false;
+      }
+    }
+  }
   if (exit < 0.0f) return false;
   if (outT) *outT = std::max(0.0f, enter);
   return true;
@@ -360,6 +377,68 @@ glm::vec3 SurfaceCenter(const WalkSurface& surface) {
   if (surface.vertices.empty()) return center;
   for (const glm::vec3& v : surface.vertices) center += v;
   return center / static_cast<float>(surface.vertices.size());
+}
+
+std::vector<glm::vec2> ConvexHull2D(std::vector<glm::vec2> pts) {
+  std::sort(pts.begin(), pts.end(), [](const glm::vec2& a, const glm::vec2& b) {
+    return a.x < b.x || (a.x == b.x && a.y < b.y);
+  });
+  pts.erase(std::unique(pts.begin(), pts.end()), pts.end());
+  if (pts.size() < 3) return pts;
+  std::vector<glm::vec2> hull(2 * pts.size());
+  size_t k = 0;
+  const auto cross = [](const glm::vec2& o, const glm::vec2& a, const glm::vec2& b) {
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  };
+  for (size_t i = 0; i < pts.size(); ++i) {
+    while (k >= 2 && cross(hull[k - 2], hull[k - 1], pts[i]) <= 0.0f) --k;
+    hull[k++] = pts[i];
+  }
+  for (size_t i = pts.size() - 1, t = k + 1; i > 0; --i) {
+    while (k >= t && cross(hull[k - 2], hull[k - 1], pts[i - 1]) <= 0.0f) --k;
+    hull[k++] = pts[i - 1];
+  }
+  hull.resize(k - 1);
+  return hull;
+}
+
+std::vector<glm::vec2> RubbleBandFootprint(const Obstacle& rubble, float yLo, float yHi) {
+  std::vector<glm::vec2> band;
+  const auto& body = rubble.rubble;
+  if (body.outline.size() < 3 || !(body.thickness > 1e-4f) || !(yHi > yLo)) return band;
+  // The body's corners, world frame: the outline on both faces of the prism.
+  const size_t n = body.outline.size();
+  const float h = 0.5f * body.thickness;
+  std::vector<glm::vec3> corners(2 * n);
+  for (size_t i = 0; i < n; ++i) {
+    const glm::vec2& p = body.outline[i];
+    corners[i] = glm::vec3(body.pose * glm::vec4(p.x, p.y, -h, 1.0f));
+    corners[n + i] = glm::vec3(body.pose * glm::vec4(p.x, p.y, h, 1.0f));
+  }
+  // Every corner inside the band, plus where each edge of the prism (both
+  // face rings and the side edges joining them) crosses its planes; the
+  // convex hull of their XZ projections is the silhouette of the clipped
+  // convex solid.
+  for (const glm::vec3& c : corners) {
+    if (c.y >= yLo && c.y <= yHi) band.emplace_back(c.x, c.z);
+  }
+  const auto clipEdge = [&](const glm::vec3& a, const glm::vec3& b) {
+    for (const float y : {yLo, yHi}) {
+      if ((a.y < y) != (b.y < y) && std::fabs(b.y - a.y) > 1e-9f) {
+        const float t = (y - a.y) / (b.y - a.y);
+        band.emplace_back(a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t);
+      }
+    }
+  };
+  for (size_t i = 0; i < n; ++i) {
+    const size_t j = (i + 1) % n;
+    clipEdge(corners[i], corners[j]);
+    clipEdge(corners[n + i], corners[n + j]);
+    clipEdge(corners[i], corners[n + i]);
+  }
+  band = ConvexHull2D(std::move(band));
+  if (band.size() < 3) band.clear();
+  return band;
 }
 
 }  // namespace tactics

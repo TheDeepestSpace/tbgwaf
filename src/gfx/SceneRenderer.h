@@ -214,6 +214,8 @@ class SceneRenderer {
     std::vector<glm::vec3> probes;
     std::vector<char> fadeObstacle, fadeSurface, fadeMassing, fadeBuilding;
     std::vector<char> directSurface;  // Surfaces crossing a probe ray themselves.
+    std::vector<char> fadeChunk;      // Per debris chunk (debrisChunks_).
+    unsigned debrisGeneration = 0;    // debrisGeneration_ the chunk flags were computed for.
     bool anyFaded = false;
   };
   FadeCache fadeCache_[2];
@@ -330,6 +332,31 @@ class SceneRenderer {
   LitTriangleMesh obstacleCasterMesh_;  // The same, solid, for the shadow map.
   unsigned long long obstacleKey_ = 0;
   size_t ragdollWorldSeen_ = 0;  // World-log size at the last pane render.
+  // Debris replay (WorldChangeKind::Debris): every chunk's rest prism --
+  // the fracture cell it was knocked out of -- posed along its recorded
+  // flight (tactics::DebrisPose): against the round clock during playback,
+  // against a local clock for a detonation outside a round, and at rest
+  // afterwards. Rubble is excluded from the static obstacle mesh and drawn
+  // from this one, rebuilt only while something is falling.
+  void UpdateDebris(const tactics::GameLogic& game);
+  LitTriangleMesh debrisMesh_;
+  // Every chunk posed as of the last rebuild, kept CPU-side so the camera
+  // see-through pass can fade each chunk on its own (a chunk that blocks a
+  // figure goes translucent, the rest stay solid). `min`/`max`: world AABB.
+  struct DebrisChunk {
+    std::vector<LitTriangleMesh::Vertex> vertices;
+    std::vector<GLuint> indices;
+    glm::vec3 min{0.0f}, max{0.0f};
+  };
+  std::vector<DebrisChunk> debrisChunks_;
+  unsigned debrisGeneration_ = 0;  // Bumped whenever debrisChunks_ is rebuilt.
+  bool debrisHasGeometry_ = false;
+  LitTriangleMesh debrisFovMesh_;  // The solid chunks alone, for the figures' sight maps.
+  bool debrisFovHasGeometry_ = false;
+  bool debrisMoving_ = false;
+  unsigned long long debrisKey_ = 0;
+  std::unordered_map<int, double> debrisStarted_;  // Change id -> local clock start.
+  size_t debrisLogSeen_ = 0;
   std::vector<int> surfaceBuilding_;  // Roof slab -> building, see RoofBuildings.
   unsigned long long surfaceBuildingKey_ = 0;
   // The slot holding `unit`'s depth maps looking along `facingYaw` (for

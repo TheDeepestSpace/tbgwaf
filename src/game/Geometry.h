@@ -27,6 +27,17 @@ std::vector<glm::vec2> InsetConvexPolygon(const std::vector<glm::vec2>& polygon,
 bool SegmentEntersConvexPolygon(glm::vec2 from, glm::vec2 to,
                                 const std::vector<glm::vec2>& polygon);
 
+// Convex hull of 2D points (counter-clockwise, monotone chain). Fewer than
+// three distinct points come back as-is.
+std::vector<glm::vec2> ConvexHull2D(std::vector<glm::vec2> points);
+
+// XZ silhouette (convex, counter-clockwise) of a rubble chunk's true body
+// (Obstacle::rubble: an outline extruded through a thickness, placed by a
+// rigid pose) clipped to world heights [yLo, yHi]. Empty when the body stays
+// clear of that band -- it can then be stepped over or walked under -- or
+// when the obstacle carries no rubble body.
+std::vector<glm::vec2> RubbleBandFootprint(const Obstacle& rubble, float yLo, float yHi);
+
 // Exact ray/convex-prism intersection. The Obstacle AABB supplies the Y
 // interval; its optional polygon supplies the XZ interval.
 bool RayIntersectsObstacle(const glm::vec3& origin, const glm::vec3& direction,

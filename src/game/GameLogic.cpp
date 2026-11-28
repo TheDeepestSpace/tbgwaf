@@ -160,7 +160,7 @@ void GameLogic::Reset(Scene scene) {
   RecordScope record(this, InputEvent{InputEvent::Op::Reset});
   scene_ = std::move(scene);
   obstacleBounds_ = ObstacleBounds(scene_.obstacles);
-  sightObstacles_ = tactics::SightObstacles(scene_);
+  RebuildSightObstacles();
   // On hilly terrain every figure stands on the sampled ground, so scenario
   // files can place units by XZ alone. Flat scenes (empty field) keep their
   // authored Y (e.g. crate-top starts).
@@ -178,6 +178,8 @@ void GameLogic::Reset(Scene scene) {
   navMeshUnitId_ = -1;
   worldLog_.clear();  // A new match starts from the seeded map.
   pristine_.reset();
+  debugBomb_.reset();
+  bombsDetonated_ = 0;
   roundNumber_ = 1;
 
   mode_ = InputMode::AwaitingSelection;
@@ -406,8 +408,24 @@ void GameLogic::EnsureNavMeshFor(const Unit& mover, const glm::vec3& origin) {
   region.xMax = std::min(half, origin.x + reach);
   region.zMin = std::max(-half, origin.z - reach);
   region.zMax = std::min(half, origin.z + reach);
-  navMesh_.Build(scene_.obstacles, region, constants::kAgentRadius, &scene_.ground,
-                 &scene_.walkSurfaces, &scene_.terrainTunnels);
+  // Rubble whose chunk is still in flight does not block: the player may
+  // route through the landing spot (and eat the chunk) -- planning ahead
+  // around the falling debris is the player's own job.
+  bool anyDormant = false;
+  for (const Obstacle& o : scene_.obstacles) {
+    anyDormant |= !o.dead && o.kind == ObstacleKind::Rubble && !RubbleAtRestNow(o);
+  }
+  if (anyDormant) {
+    std::vector<Obstacle> obstacles = scene_.obstacles;
+    for (Obstacle& o : obstacles) {
+      if (!o.dead && o.kind == ObstacleKind::Rubble && !RubbleAtRestNow(o)) o.dead = true;
+    }
+    navMesh_.Build(obstacles, region, constants::kAgentRadius, &scene_.ground,
+                   &scene_.walkSurfaces, &scene_.terrainTunnels);
+  } else {
+    navMesh_.Build(scene_.obstacles, region, constants::kAgentRadius, &scene_.ground,
+                   &scene_.walkSurfaces, &scene_.terrainTunnels);
+  }
   navMeshUnitId_ = mover.id;
   navMeshOrigin_ = origin;
 }
@@ -468,7 +486,7 @@ Scene GameLogic::BaseScene() const { return pristine_ ? *pristine_ : scene_; }
 
 void GameLogic::OnWorldChanged() {
   obstacleBounds_ = ObstacleBounds(scene_.obstacles);
-  sightObstacles_ = tactics::SightObstacles(scene_);
+  RebuildSightObstacles();
   navMesh_ = NavMesh();
   navMeshUnitId_ = -1;
   ClearMoveOverlays();
@@ -477,15 +495,69 @@ void GameLogic::OnWorldChanged() {
   movePreviewValid_ = false;
 }
 
+bool GameLogic::RubbleAtRestNow(const Obstacle& o) const {
+  return RubbleAtRest(o, roundNumber_, mode_ == InputMode::Executing, executionElapsed_);
+}
+
+size_t GameLogic::CountRubbleAtRest() const {
+  size_t count = 0;
+  for (const Obstacle& o : scene_.obstacles) {
+    if (!o.dead && o.kind == ObstacleKind::Rubble && RubbleAtRestNow(o)) ++count;
+  }
+  return count;
+}
+
+void GameLogic::RebuildSightObstacles() {
+  sightObstacles_ = tactics::SightObstacles(scene_);
+  // A chunk still in flight blocks no sight at its future landing spot --
+  // otherwise planning paints chunk-shaped holes in the visibility overlay,
+  // silently previewing where everything will land.
+  sightObstacles_.erase(std::remove_if(sightObstacles_.begin(), sightObstacles_.end(),
+                                       [this](const Obstacle& o) {
+                                         return !o.dead && o.kind == ObstacleKind::Rubble &&
+                                                !RubbleAtRestNow(o);
+                                       }),
+                        sightObstacles_.end());
+  rubbleAtRestCount_ = CountRubbleAtRest();
+}
+
+void GameLogic::RefreshRubbleState() {
+  if (CountRubbleAtRest() == rubbleAtRestCount_) return;
+  // A chunk has landed since the caches were derived: from here on it
+  // blocks sight and the navmesh like any settled rubble.
+  RebuildSightObstacles();
+  navMesh_ = NavMesh();
+  navMeshUnitId_ = -1;
+  ClearMoveOverlays();
+  movePreviewValid_ = false;
+}
+
 bool GameLogic::ApplyWorldChange(WorldChange change) {
   if (!pristine_) pristine_ = scene_;
   change.id = static_cast<int>(worldLog_.size());
   change.round = roundNumber_;
   change.at = mode_ == InputMode::Executing ? executionElapsed_ : 0.0f;
+  // Captured before the apply kills the surface: who was standing on it.
+  std::vector<int> standing;
+  if ((change.kind == WorldChangeKind::FloorHole ||
+       change.kind == WorldChangeKind::SurfaceRemoved) &&
+      change.target >= 0 && change.target < static_cast<int>(scene_.walkSurfaces.size())) {
+    const WalkSurface& s = scene_.walkSurfaces[change.target];
+    if (!s.dead && s.vertices.size() >= 3) {
+      for (const Unit& unit : scene_.units) {
+        const glm::vec3& p = unit.position;
+        if (unit.alive && SurfaceContainsXZ(s, p.x, p.z) &&
+            std::fabs(SurfaceHeightAt(s, p.x, p.z) - p.y) <= 0.5f) {
+          standing.push_back(unit.id);
+        }
+      }
+    }
+  }
   if (!tactics::ApplyWorldChange(&scene_, change)) {  // Validates before mutating.
     if (worldLog_.empty()) pristine_.reset();
     return false;
   }
+  if (!standing.empty()) DropFiguresThroughHole(change, standing);
   worldLog_.push_back(std::move(change));
   OnWorldChanged();
   return true;
@@ -496,6 +568,79 @@ bool GameLogic::DebugRemoveObstacle(int index) {
   c.kind = WorldChangeKind::ObstacleRemoved;
   c.target = index;
   return ApplyWorldChange(std::move(c));
+}
+
+void GameLogic::DebugPlaceBomb(const glm::vec3& position, float radius, float impulse) {
+  DebugBomb bomb;
+  bomb.position = position;
+  bomb.radius = std::clamp(radius, 0.5f, 10.0f);
+  bomb.impulse = std::clamp(impulse, 0.0f, kMaxBombImpulse);
+  bomb.detonateAt = debugBomb_ ? debugBomb_->detonateAt : -1.0f;
+  debugBomb_ = bomb;
+}
+
+bool GameLogic::DebugArmBomb(float atSeconds) {
+  if (!debugBomb_ || atSeconds < 0.0f) return false;
+  debugBomb_->detonateAt = atSeconds;
+  return true;
+}
+
+bool GameLogic::DebugDetonateBomb() {
+  if (!debugBomb_) return false;
+  BombSpec spec;
+  spec.position = debugBomb_->position;
+  spec.radius = debugBomb_->radius;
+  spec.impulse = debugBomb_->impulse;
+  spec.seed = ExplosionSeed(matchSeed_, roundNumber_, bombsDetonated_);
+  debugBomb_.reset();
+  ++bombsDetonated_;
+  if (recorder_.ptr) {
+    char buf[192];
+    std::snprintf(buf, sizeof buf,
+                  "bomb pos=(%.4f,%.4f,%.4f) radius=%.3f impulse=%.3f seed=%u exec=%.4f round=%d",
+                  spec.position.x, spec.position.y, spec.position.z, spec.radius, spec.impulse, spec.seed,
+                  executionElapsed_, roundNumber_);
+    LogSim(buf);
+  }
+  bool any = false;
+  // The plan was validated against this very scene state; applying in order
+  // reproduces its chained piece indices.
+  for (const WorldChange& change : PlanExplosion(scene_, spec)) {
+    any |= ApplyWorldChange(change);
+  }
+  return any;
+}
+
+void GameLogic::DropFiguresThroughHole(const WorldChange& c, const std::vector<int>& wasOn) {
+  // Blast centre in XZ, for the direction figures topple: the hole's rect, or
+  // (a surface removed whole) the figure's own facing.
+  const float x0 = std::min(c.rect.x, c.rect.z), x1 = std::max(c.rect.x, c.rect.z);
+  const float z0 = std::min(c.rect.y, c.rect.w), z1 = std::max(c.rect.y, c.rect.w);
+  const bool hasRect = c.kind == WorldChangeKind::FloorHole;
+  for (Unit& unit : scene_.units) {
+    if (!unit.alive || std::find(wasOn.begin(), wasOn.end(), unit.id) == wasOn.end()) continue;
+    const glm::vec3& p = unit.position;
+    // Still on a piece of it the fracture left standing?
+    bool standing = false;
+    for (const WalkSurface& s : scene_.walkSurfaces) {
+      if (s.dead || s.vertices.size() < 3 || !SurfaceContainsXZ(s, p.x, p.z)) continue;
+      standing |= std::fabs(SurfaceHeightAt(s, p.x, p.z) - p.y) <= 0.5f;
+    }
+    if (standing) continue;
+    // Highest support left underneath: the ground, or a live lower surface.
+    float support = scene_.ground.HeightAt(p.x, p.z);
+    for (const WalkSurface& s : scene_.walkSurfaces) {
+      if (s.dead || s.vertices.size() < 3 || !SurfaceContainsXZ(s, p.x, p.z)) continue;
+      const float y = SurfaceHeightAt(s, p.x, p.z);
+      if (y < p.y - 0.5f) support = std::max(support, y);
+    }
+    glm::vec3 dir = hasRect ? p - glm::vec3(0.5f * (x0 + x1), p.y, 0.5f * (z0 + z1))
+                            : glm::vec3(0.0f);
+    dir.y = 0.0f;
+    if (glm::length(dir) < 1e-4f) dir = unit.FacingDirection();
+    KnockDown(unit, glm::normalize(dir));
+    unit.knockdownDrop = std::max(0.0f, p.y - support);
+  }
 }
 
 bool GameLogic::AcceptWorldChange(const WorldChange& change) {
@@ -686,6 +831,10 @@ bool GameLogic::ImportState(const GameSnapshot& snap) {
   pendingShots_.clear();
   aimPreview_.reset();
   lockPreviewId_.reset();
+  // A mirror advances the round clock through snapshots alone (SyncWorld
+  // only runs when the log itself changes), so chunks landing mid-playback
+  // update the derived caches here.
+  RefreshRubbleState();
   return true;
 }
 
@@ -954,6 +1103,37 @@ MovingBlockers GameLogic::BuildMovingBlockers(const Unit& mover, const glm::vec3
     blockers.trajectories.push_back(std::move(trajectory));
   }
   return blockers;
+}
+
+bool GameLogic::PathBlockedByRubble(const std::vector<glm::vec3>& path,
+                                    const std::vector<PathRide>& rides) const {
+  if (path.size() < 2) return false;
+  std::vector<Obstacle> rubble;
+  for (const Obstacle& o : scene_.obstacles) {
+    if (!o.dead && o.kind == ObstacleKind::Rubble && RubbleAtRestNow(o)) rubble.push_back(o);
+  }
+  if (rubble.empty()) return false;
+  NavMesh mesh;
+  mesh.Build(rubble, scene_.mapHalfExtent, constants::kAgentRadius, &scene_.ground,
+             &scene_.walkSurfaces, &scene_.terrainTunnels);
+  for (size_t i = 0; i + 1 < path.size(); ++i) {
+    const bool ride = std::any_of(rides.begin(), rides.end(),
+                                  [i](const PathRide& r) { return r.segment == static_cast<int>(i); });
+    if (ride) continue;
+    // Elevated segments (decks) are not blocked by rubble lying on the ground.
+    const float g0 = scene_.ground.HeightAt(path[i].x, path[i].z);
+    const float g1 = scene_.ground.HeightAt(path[i + 1].x, path[i + 1].z);
+    if (path[i].y - g0 > 0.5f && path[i + 1].y - g1 > 0.5f) continue;
+    if (!mesh.GroundSegmentTraversable({path[i].x, path[i].z}, {path[i + 1].x, path[i + 1].z})) return true;
+  }
+  return false;
+}
+
+void GameLogic::DropRubbleBlockedPlans() {
+  for (Unit& unit : scene_.units) {
+    if (!unit.alive || unit.plan.type != PlannedActionType::Move) continue;
+    if (PathBlockedByRubble(unit.plan.movePath, unit.plan.moveRides)) unit.plan = PlannedAction{};
+  }
 }
 
 bool GameLogic::HasPlanOverlap() const {
@@ -1255,6 +1435,13 @@ void GameLogic::UpdateUnrecorded(float dtSeconds) {
 void GameLogic::AdvanceExecutingRound(float dtSeconds) {
   const float tickStart = executionElapsed_;
   executionElapsed_ += dtSeconds;
+  // An armed debug bomb goes off the first tick the round clock passes its
+  // time; the resulting world changes carry that stamp, so replays and
+  // remote playback apply them at the same moment.
+  if (debugBomb_ && debugBomb_->detonateAt >= 0.0f &&
+      executionElapsed_ >= debugBomb_->detonateAt) {
+    DebugDetonateBomb();
+  }
   std::vector<FlagTouch> flagTouches;
   CollectStationaryFlagTouches(tickStart, &flagTouches);
   const bool flagLoose = flag_.enabled && flag_.carrierId < 0;
@@ -1358,6 +1545,13 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
   // this tick can change anything (a grabber shot a moment later still held it).
   GrabFlagFrom(flagTouches);
 
+  // Debris is lethal where it actually is: a figure under a falling chunk,
+  // or walking into one that landed this round, goes down. Landed chunks
+  // then start blocking sight/navigation (RefreshRubbleState) before shots
+  // re-check their LOS this tick.
+  CrushFiguresUnderDebris();
+  RefreshRubbleState();
+
   ApplyPlaybookReactions();
 
   // Continuous shot resolution: with everyone's position advanced for this
@@ -1388,6 +1582,78 @@ void GameLogic::AdvanceExecutingRound(float dtSeconds) {
   // Every round runs its full window, even with nothing left to do: the
   // physics (falling figures, bullets, a dropped flag) keep playing out.
   if (executionElapsed_ >= constants::kRoundDuration) FinishRound();
+}
+
+void GameLogic::CrushFiguresUnderDebris() {
+  if (worldLog_.empty()) return;
+  // A standing figure's crush radius: its body column, not the padded nav
+  // agent -- brushing past a chunk is survival, overlapping it is not.
+  constexpr float kFigureRadius = 0.3f;
+  for (const WorldChange& c : worldLog_) {
+    if (c.kind != WorldChangeKind::Debris || !(c.at > 0.0f)) continue;
+    if (c.pieces.size() != c.flights.size()) continue;
+    const float age = DebrisRoundAge(c, roundNumber_, true, executionElapsed_);
+    if (age < 0.0f) continue;
+    // Chunks already at rest when this round began are plain rubble: the
+    // navmesh routed every legal plan around them, so only chunks still
+    // moving this round (or freshly landed within it, which a path planned
+    // earlier may still cross) can crush anyone.
+    const float roundStartAge = DebrisRoundAge(c, roundNumber_, true, 0.0f);
+    for (size_t i = 0; i < c.flights.size(); ++i) {
+      const DebrisFlight& flight = c.flights[i];
+      if (!flight.solid || flight.keys.size() < 2) continue;
+      const float duration = flight.Duration();
+      if (duration <= roundStartAge) continue;
+      DebrisShape shape;
+      if (!DebrisPieceShape(c.pieces[i], &shape)) continue;
+      const float t = std::min(age, duration);
+      const glm::mat4 track = DebrisPose(flight, t);
+      const glm::vec3 centre(track * glm::vec4(flight.keys.front().position, 1.0f));
+      // Broad phase: the chunk's bounding sphere about its centre of mass.
+      float radius = 0.0f;
+      const float half = 0.5f * shape.thickness;
+      for (const glm::vec2& p : shape.outline) {
+        for (const float z : {-half, half}) {
+          const glm::vec3 corner(shape.pose * glm::vec4(p.x, p.y, z, 1.0f));
+          radius = std::max(radius, glm::distance(corner, flight.keys.front().position));
+        }
+      }
+      Obstacle body;
+      bool bodyBuilt = false;
+      for (Unit& unit : scene_.units) {
+        if (!unit.alive) continue;
+        const glm::vec2 foot(unit.position.x, unit.position.z);
+        const glm::vec2 at(centre.x, centre.z);
+        if (glm::distance(foot, at) > radius + kFigureRadius) continue;
+        if (centre.y - radius > unit.position.y + constants::kUnitHeight) continue;
+        if (centre.y + radius < unit.position.y) continue;
+        if (!bodyBuilt) {
+          body.kind = ObstacleKind::Rubble;
+          body.rubble.outline = shape.outline;
+          body.rubble.thickness = shape.thickness;
+          body.rubble.pose = track * shape.pose;
+          bodyBuilt = true;
+        }
+        // The chunk's silhouette where it crosses this figure's body column
+        // (just above the feet to head height), padded by the body radius.
+        const std::vector<glm::vec2> band = RubbleBandFootprint(
+            body, unit.position.y + 0.05f, unit.position.y + constants::kUnitHeight);
+        if (band.size() < 3) continue;
+        const std::vector<glm::vec2> fat = ExpandConvexPolygon(band, kFigureRadius);
+        if (fat.size() < 3 || !PointInConvexPolygon(foot, fat)) continue;
+        glm::vec3 dir = unit.position - centre;
+        dir.y = 0.0f;
+        if (glm::length(dir) < 1e-4f) dir = unit.FacingDirection();
+        if (recorder_.ptr) {
+          char buf[160];
+          std::snprintf(buf, sizeof buf, "debris crush unit=%d change=%d chunk=%zu exec=%.4f round=%d",
+                        unit.id, c.id, i, executionElapsed_, roundNumber_);
+          LogSim(buf);
+        }
+        KnockDown(unit, glm::normalize(dir));
+      }
+    }
+  }
 }
 
 void GameLogic::HoverGround(const glm::vec3& point, Team byTeam) {
@@ -2828,6 +3094,14 @@ void GameLogic::FinishRound() {
     return;
   }
   ++roundNumber_;
+  // Chunks that settled during the round (or whose dormancy window just
+  // moved with the round counter) start/stop blocking for the new planning
+  // phase.
+  RefreshRubbleState();
+  // Rubble that landed during the round may now block an armed leg: drop it
+  // with the rest of that figure's queue so it is re-planned. Only now is
+  // this round's rubble at rest (the round counter just moved on).
+  DropRubbleBlockedPlans();
 }
 
 // --- Input recording (issue #240) ---

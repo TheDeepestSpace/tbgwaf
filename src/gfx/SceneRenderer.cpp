@@ -9,20 +9,24 @@
 #include <algorithm>
 #include <functional>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <unordered_set>
 
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "game/Cover.h"
 #include "game/Geometry.h"
+#include "game/WorldChange.h"
 
 using tactics::AABB;
 using tactics::GameLogic;
@@ -652,7 +656,6 @@ void DrawBoxDepth(const Shader& shader, const CubeMesh& cube, const glm::mat4& l
   cube.Draw();
 }
 
-
 struct StreetPropPart {
   glm::mat4 model{1.0f};
   size_t material = 0;
@@ -830,12 +833,59 @@ void AppendWallFaceWithHoles(glm::vec2 a, glm::vec2 b, float lo, float hi,
   }
 }
 
+// A fractured wall piece with a wall-plane silhouette (Obstacle::profile):
+// the convex (u, y) polygon extruded through the wall's thickness, so the
+// drawn torn edges match the gameplay raycast exactly.
+void AppendProfilePiece(const tactics::Obstacle& obstacle, LitVertices* vertices,
+                        std::vector<GLuint>* indices) {
+  const std::vector<glm::vec2>& fp = obstacle.footprint;
+  const std::vector<glm::vec2>& profile = obstacle.profile;
+  const glm::vec2 a = fp[0];
+  const glm::vec2 ab = fp[1] - a;
+  const float len = glm::length(ab);
+  if (len < 1e-5f) return;
+  const glm::vec2 d = ab / len;
+  const glm::vec2 tv = fp[3] - fp[0];
+  auto at = [&](const glm::vec2& p, float side) {
+    const glm::vec2 xz = a + d * p.x + tv * side;
+    return glm::vec3(xz.x, p.y, xz.y);
+  };
+  auto triangle = [&](glm::vec3 p, glm::vec3 q, glm::vec3 r, glm::vec3 normal) {
+    AppendTriangle(p, q, r, normal, vertices, indices);
+  };
+  const glm::vec3 outNormal(d.y, 0.0f, -d.x);  // As AppendPolygonPrism's faces.
+  // Both wall faces (the profile polygon is CCW seen from the +normal side).
+  for (size_t i = 1; i + 1 < profile.size(); ++i) {
+    triangle(at(profile[0], 0.0f), at(profile[i], 0.0f), at(profile[i + 1], 0.0f), outNormal);
+    triangle(at(profile[0], 1.0f), at(profile[i + 1], 1.0f), at(profile[i], 1.0f), -outNormal);
+  }
+  // The rim: one quad per profile edge, through the thickness.
+  for (size_t i = 0; i < profile.size(); ++i) {
+    const glm::vec2 p = profile[i], q = profile[(i + 1) % profile.size()];
+    const glm::vec3 p0 = at(p, 0.0f), q0 = at(q, 0.0f);
+    const glm::vec3 p1 = at(p, 1.0f), q1 = at(q, 1.0f);
+    const glm::vec2 edge = q - p;
+    const float edgeLen = glm::length(edge);
+    if (edgeLen < 1e-6f) continue;
+    // Edge normal in the wall plane (outward for a CCW profile), to world.
+    const glm::vec2 n2(edge.y / edgeLen, -edge.x / edgeLen);
+    const glm::vec3 normal = glm::normalize(glm::vec3(d.x, 0.0f, d.y) * n2.x +
+                                            glm::vec3(0.0f, 1.0f, 0.0f) * n2.y);
+    triangle(p0, q1, q0, normal);  // Clockwise outward, as the prism faces.
+    triangle(p0, p1, q1, normal);
+  }
+}
+
 // `holesPerEdge` (optional, indexed like the footprint's edges) cuts the
 // listed opening rectangles out of the wall faces; see
 // AppendWallFaceWithHoles. Box-bounds obstacles never carry openings.
 void AppendPolygonPrism(const tactics::Obstacle& obstacle, LitVertices* vertices,
                         std::vector<GLuint>* indices,
                         const std::vector<std::vector<glm::vec4>>* holesPerEdge = nullptr) {
+  if (obstacle.profile.size() >= 3 && obstacle.footprint.size() == 4) {
+    AppendProfilePiece(obstacle, vertices, indices);
+    return;
+  }
   const std::vector<glm::vec2> polygon = tactics::ObstacleFootprint(obstacle);
   auto triangle = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 normal) {
     AppendTriangle(a, b, c, normal, vertices, indices);
@@ -860,6 +910,36 @@ void AppendPolygonPrism(const tactics::Obstacle& obstacle, LitVertices* vertices
     const glm::vec3 b0(b.x, lo, b.y), b1(b.x, hi, b.y);
     triangle(a0, b0, b1, normal);
     triangle(a0, b1, a1, normal);
+  }
+}
+
+// A debris chunk's prism at launch (a fracture cell of a wall or slab), as
+// the shape every client derives from the Debris piece. The caller poses it
+// along the recorded flight.
+void AppendDebrisPrism(const tactics::DebrisShape& shape, LitVertices* vertices,
+                       std::vector<GLuint>* indices) {
+  const size_t n = shape.outline.size();
+  if (n < 3) return;
+  const float h = 0.5f * shape.thickness;
+  const glm::mat3 rot(shape.pose);
+  const auto at = [&](const glm::vec2& p, float z) {
+    return glm::vec3(shape.pose * glm::vec4(p.x, p.y, z, 1.0f));
+  };
+  const glm::vec3 up = rot * glm::vec3(0.0f, 0.0f, 1.0f);
+  for (size_t i = 1; i + 1 < n; ++i) {
+    AppendTriangle(at(shape.outline[0], h), at(shape.outline[i], h), at(shape.outline[i + 1], h),
+                   up, vertices, indices);
+    AppendTriangle(at(shape.outline[0], -h), at(shape.outline[i + 1], -h),
+                   at(shape.outline[i], -h), -up, vertices, indices);
+  }
+  for (size_t i = 0; i < n; ++i) {
+    const glm::vec2 a = shape.outline[i], b = shape.outline[(i + 1) % n];
+    const glm::vec2 edge = b - a;
+    if (glm::length(edge) < 1e-6f) continue;
+    const glm::vec2 e = glm::normalize(edge);
+    const glm::vec3 normal = rot * glm::vec3(e.y, -e.x, 0.0f);
+    AppendTriangle(at(a, -h), at(b, -h), at(b, h), normal, vertices, indices);
+    AppendTriangle(at(a, -h), at(b, h), at(a, h), normal, vertices, indices);
   }
 }
 
@@ -920,19 +1000,13 @@ struct OpeningBasis {
 OpeningBasis OpeningBasisFor(const tactics::Scene& scene,
                              const tactics::FacadeOpening& opening) {
   OpeningBasis basis;
-  if (opening.obstacle < 0 ||
-      opening.obstacle >= static_cast<int>(scene.obstacles.size())) {
+  // The wall edge: the opening's own once its prism was fractured (it then
+  // sits on the pieces left standing), else read off the prism's footprint.
+  glm::vec2 a, b;
+  if (opening.u1 <= opening.u0 || opening.y1 <= opening.y0 ||
+      !tactics::FacadeOpeningEdge(scene, opening, &a, &b)) {
     return basis;
   }
-  const std::vector<glm::vec2> fp =
-      tactics::ObstacleFootprint(scene.obstacles[opening.obstacle]);
-  if (fp.size() < 3 || opening.wallEdge < 0 ||
-      opening.wallEdge >= static_cast<int>(fp.size()) || opening.u1 <= opening.u0 ||
-      opening.y1 <= opening.y0) {
-    return basis;
-  }
-  const glm::vec2 a = fp[opening.wallEdge];
-  const glm::vec2 b = fp[(opening.wallEdge + 1) % fp.size()];
   const float len = glm::length(b - a);
   if (len < 1e-4f) return basis;
   const glm::vec2 dir = (b - a) / len;
@@ -1028,6 +1102,23 @@ void AppendFacadeOpening(const tactics::Scene& scene, const tactics::FacadeOpeni
     const glm::vec3 a = f.base + f.right * qu0 + glm::vec3(0.0f, qy0, 0.0f) + f.normal * d;
     AppendQuad(a, f.right * (qu1 - qu0), glm::vec3(0.0f, qy1 - qy0, 0.0f), vertices, indices);
   };
+  if (style.recessed && opening.detached) {
+    // Its prism was fractured: the standing pieces have no niche cut for it,
+    // so the pane and its mullions sit flush on the wall face instead.
+    const float bar = style.bar;
+    for (int i = 1; i < style.gridU; ++i) {
+      const float u = u0 + (u1 - u0) * static_cast<float>(i) / style.gridU;
+      AppendOpeningBox(f, u - 0.5f * bar, u + 0.5f * bar, y0, y1, 0.0f, 0.05f, true, vertices,
+                       indices);
+    }
+    for (int i = 1; i < style.gridV; ++i) {
+      const float y = y0 + (y1 - y0) * static_cast<float>(i) / style.gridV;
+      AppendOpeningBox(f, u0, u1, y - 0.5f * bar, y + 0.5f * bar, 0.0f, 0.05f, true, vertices,
+                       indices);
+    }
+    quad(u0, u1, y0, y1, 0.015f);
+    return;
+  }
   if (style.recessed) {
     const float d = style.depth;
     {
@@ -1088,6 +1179,21 @@ void AppendFacadeOpening(const tactics::Scene& scene, const tactics::FacadeOpeni
   }
 }
 
+// Unnormalised polygon normal (Newell), so collinear leading vertices --
+// fracture cells have plenty -- cannot zero it the way a cross product of the
+// first three vertices does (a NaN normal made the drawn floor top vanish).
+glm::vec3 PolygonNormal(const std::vector<glm::vec3>& polygon) {
+  glm::vec3 n(0.0f);
+  for (size_t i = 0; i < polygon.size(); ++i) {
+    const glm::vec3& a = polygon[i];
+    const glm::vec3& b = polygon[(i + 1) % polygon.size()];
+    n.x += (a.y - b.y) * (a.z + b.z);
+    n.y += (a.z - b.z) * (a.x + b.x);
+    n.z += (a.x - b.x) * (a.y + b.y);
+  }
+  return n;
+}
+
 // `hiddenEdges[i]` (optional) skips the side wall under polygon edge i, for
 // edges butted against a neighbouring slab: the wall would only show as a
 // seam, most visibly through the faded see-through pass.
@@ -1095,7 +1201,9 @@ void AppendSurfacePatch(const std::vector<glm::vec3>& polygon, float thickness,
                         LitVertices* vertices, std::vector<GLuint>* indices,
                         const std::vector<char>* hiddenEdges = nullptr) {
   if (polygon.size() < 3) return;
-  glm::vec3 topNormal = glm::normalize(glm::cross(polygon[1] - polygon[0], polygon[2] - polygon[0]));
+  glm::vec3 topNormal = PolygonNormal(polygon);
+  if (glm::length(topNormal) < 1e-9f) return;
+  topNormal = glm::normalize(topNormal);
   if (topNormal.y < 0.0f) topNormal = -topNormal;
   auto triangle = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 normal) {
     AppendTriangle(a, b, c, normal, vertices, indices);
@@ -1418,6 +1526,9 @@ void BuildFovSceneMesh(const tactics::Scene& scene, LitTriangleMesh* mesh) {
   std::vector<GLuint> indices;
   for (const tactics::Obstacle& obstacle : scene.obstacles) {
     if (obstacle.navOnly) continue;  // A cliff edge: the terrain mesh is the caster.
+    // Rubble occludes where the chunk is right now, not where it will land:
+    // it joins the depth maps from the debris mesh (see UpdateDebris).
+    if (obstacle.kind == tactics::ObstacleKind::Rubble) continue;
     if (tactics::IsStreetFixture(obstacle.kind)) {
       AppendStreetFixture(obstacle, &vertices, &indices);
     } else {
@@ -1484,6 +1595,7 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
     mix(v.data(), v.size() * sizeof(glm::vec3));
   };
   for (const tactics::Obstacle& o : scene.obstacles) {
+    if (o.kind == tactics::ObstacleKind::Rubble) continue;  // Not in the mesh.
     mix(&o.bounds, sizeof(o.bounds));
     mix(&o.kind, sizeof(o.kind));
     mix(&o.fixtureModel, sizeof(o.fixtureModel));
@@ -1491,6 +1603,7 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
     mix(&o.fixtureBaseY, sizeof(o.fixtureBaseY));
     mix(&o.fixtureRoll, sizeof(o.fixtureRoll));
     mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
+    mix(o.profile.data(), o.profile.size() * sizeof(glm::vec2));
   }
   for (const tactics::StreetProp& prop : scene.props) {
     mix(&prop.kind, sizeof(prop.kind));
@@ -1507,6 +1620,7 @@ unsigned long long FovSceneFingerprint(const tactics::Scene& scene) {
   }
   for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
     mix(&o.dead, sizeof(o.dead));
+    mix(&o.detached, sizeof(o.detached));
     mix(&o.obstacle, sizeof(o.obstacle));
     mix(&o.wallEdge, sizeof(o.wallEdge));
     mix(&o.u0, sizeof(o.u0));
@@ -1567,6 +1681,9 @@ unsigned long long FacadeFingerprint(const tactics::Scene& scene) {
   };
   for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
     mix(&o.dead, sizeof(o.dead));
+    mix(&o.detached, sizeof(o.detached));
+    mix(&o.edgeA, sizeof(o.edgeA));
+    mix(&o.edgeB, sizeof(o.edgeB));
     mix(&o.kind, sizeof(o.kind));
     mix(&o.building, sizeof(o.building));  // The pane style reads the building's archetype.
     mix(&o.obstacle, sizeof(o.obstacle));
@@ -1601,7 +1718,7 @@ std::unordered_map<int, std::vector<std::vector<glm::vec4>>> RecessHolesByObstac
   std::unordered_map<int, std::vector<std::vector<glm::vec4>>> holes;
   for (const tactics::FacadeOpening& o : scene.facadeOpenings) {
     if (o.dead) continue;
-    if (OpeningIsRealGap(scene, o) || !OpeningRecessed(scene, o)) continue;
+    if (o.detached || OpeningIsRealGap(scene, o) || !OpeningRecessed(scene, o)) continue;
     if (o.obstacle < 0 || o.obstacle >= static_cast<int>(scene.obstacles.size())) continue;
     const tactics::Obstacle& wall = scene.obstacles[o.obstacle];
     if (wall.footprint.empty() || o.wallEdge < 0 ||
@@ -1736,6 +1853,7 @@ unsigned long long ObstacleFingerprint(const tactics::Scene& scene) {
     mix(&o.dead, sizeof(o.dead));
     mix(&o.building, sizeof(o.building));
     mix(o.footprint.data(), o.footprint.size() * sizeof(glm::vec2));
+    mix(o.profile.data(), o.profile.size() * sizeof(glm::vec2));
   }
   return h;
 }
@@ -1753,6 +1871,9 @@ void BuildObstacleMeshes(const tactics::Scene& scene,
   for (size_t i = 0; i < scene.obstacles.size(); ++i) {
     const tactics::Obstacle& obstacle = scene.obstacles[i];
     if (obstacle.navOnly || tactics::IsStreetFixture(obstacle.kind)) continue;
+    // Rubble is drawn dynamically (DrawDebris): chunks animate their fall
+    // before coming to rest, so they stay out of the static mesh.
+    if (obstacle.kind == tactics::ObstacleKind::Rubble) continue;
     if (obstacle.footprint.empty()) {
       AppendBox(obstacle.bounds, &drawnVertices, &drawnIndices);
       AppendBox(obstacle.bounds, &casterVertices, &casterIndices);
@@ -3304,6 +3425,8 @@ bool SceneRenderer::Init() {
   terrainSidewalkMesh_.Init();
   terrainStairMesh_.Init();
   geometryMesh_.Init();
+  debrisMesh_.Init();
+  debrisFovMesh_.Init();
   streetFurnitureMesh_.Init();
   streetPropDepthMesh_.Init();
   for (LitTriangleMesh& mesh : streetPropMeshes_) mesh.Init();
@@ -3378,6 +3501,11 @@ void SceneRenderer::Destroy() {
   terrainStairMesh_.Destroy();
   pavementKey_ = 0;
   geometryMesh_.Destroy();
+  debrisMesh_.Destroy();
+  debrisFovMesh_.Destroy();
+  debrisHasGeometry_ = false;
+  debrisFovHasGeometry_ = false;
+  debrisKey_ = 0;
   streetFurnitureMesh_.Destroy();
   streetPropDepthMesh_.Destroy();
   for (LitTriangleMesh& mesh : streetPropMeshes_) mesh.Destroy();
@@ -3566,6 +3694,11 @@ int SceneRenderer::AcquireFovMaps(const Unit& unit, int sector, float facingYaw,
       // gameplay LOS (their solid obstacles always block sight lines).
       treeMesh_.DrawVisible(inMap);
     }
+    if (debrisFovHasGeometry_) {
+      // Rubble blocks sight where it is this very moment.
+      depthShader_.SetMat4("uLightMVP", slot.matrix[half]);
+      debrisFovMesh_.Draw();
+    }
   }
   return index;
 }
@@ -3670,6 +3803,7 @@ void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::v
       cubeMesh_.Draw();
     }
     if (fovSceneMesh_.HasGeometry()) drawReceiver(fovSceneMesh_);
+    if (debrisFovHasGeometry_) drawReceiver(debrisFovMesh_);
     // Facade pane extrusions receive the tint like the walls they sit on: the
     // extruded frames stand proud of the wall and need their own coverage.
     if (facadeMesh_.HasGeometry()) drawReceiver(facadeMesh_);
@@ -3679,6 +3813,112 @@ void SceneRenderer::DrawFovMasks(const std::vector<FovMask>& masks, const glm::v
     if (drawTrees && treeMesh_.HasGeometry()) drawReceiver(treeMesh_);
   }
   glDepthFunc(GL_LESS);
+}
+
+void SceneRenderer::UpdateDebris(const tactics::GameLogic& game) {
+  const auto& log = game.WorldLog();
+  if (log.size() < debrisLogSeen_) debrisStarted_.clear();  // New match / rewind.
+  debrisLogSeen_ = log.size();
+  const double now =
+      std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  // Solid chunks are live Rubble obstacles; one a later blast blew away is
+  // gone from the picture too.
+  const auto rubbleKey = [](const tactics::Obstacle& o) {
+    unsigned long long key = 1469598103934665603ull;
+    const auto mix = [&key](float v) {
+      unsigned int bits;
+      std::memcpy(&bits, &v, sizeof bits);
+      key = (key ^ bits) * 1099511628211ull;
+    };
+    mix(o.bounds.min.x);
+    mix(o.bounds.min.y);
+    mix(o.bounds.min.z);
+    mix(o.bounds.max.x);
+    mix(o.bounds.max.z);
+    return key;
+  };
+  std::unordered_set<unsigned long long> liveRubble;
+  for (const tactics::Obstacle& o : game.GetScene().obstacles) {
+    if (!o.dead && o.kind == tactics::ObstacleKind::Rubble) liveRubble.insert(rubbleKey(o));
+  }
+  bool moving = false;
+  unsigned long long key = log.size() * 1099511628211ull + liveRubble.size();
+  // Every debris change with the age of its flight.
+  std::vector<std::pair<const tactics::WorldChange*, float>> falls;
+  for (const tactics::WorldChange& c : log) {
+    if (c.kind != tactics::WorldChangeKind::Debris) continue;
+    if (c.pieces.size() != c.flights.size()) continue;
+    // A blast inside a round runs on the round clock alone, so it starts
+    // from the launch pose on the frame it goes off, and a replay paused or
+    // scrubbed anywhere -- that first frame included -- shows that moment.
+    float t = tactics::DebrisRoundAge(c, game.RoundNumber(),
+                                      game.Mode() == tactics::InputMode::Executing,
+                                      game.ExecutionElapsed());
+    if (t < 0.0f) {
+      // Outside a round (debug detonation while planning): run the fall once
+      // on a local clock from when this renderer first saw it.
+      const auto [it, inserted] = debrisStarted_.try_emplace(c.id, now);
+      t = static_cast<float>(now - it->second);
+    }
+    for (const tactics::DebrisFlight& flight : c.flights) moving |= t < flight.Duration();
+    falls.emplace_back(&c, t);
+  }
+  // Settled debris keeps its mesh; only falling chunks re-tessellate.
+  if (!moving && !debrisMoving_ && key == debrisKey_) return;
+  LitVertices vertices, fovVertices;
+  std::vector<GLuint> indices, fovIndices;
+  debrisChunks_.clear();
+  for (const auto& [change, t] : falls) {
+    const tactics::WorldChange& c = *change;
+    for (size_t i = 0; i < c.pieces.size(); ++i) {
+      const tactics::Obstacle& piece = c.pieces[i];
+      const tactics::DebrisFlight& flight = c.flights[i];
+      tactics::DebrisShape shape;
+      if (!tactics::DebrisPieceShape(piece, &shape)) continue;
+      if (flight.solid &&
+          !liveRubble.count(rubbleKey(tactics::DebrisRestObstacle(piece, flight)))) {
+        continue;
+      }
+      // The chunk's launch prism, carried along its recorded track.
+      const glm::mat4 pose = tactics::DebrisPose(flight, t);
+      const glm::mat3 turn(pose);
+      const auto append = [&](LitVertices* vs, std::vector<GLuint>* is) {
+        const size_t first = vs->size();
+        AppendDebrisPrism(shape, vs, is);
+        for (size_t v = first; v < vs->size(); ++v) {
+          (*vs)[v].pos = glm::vec3(pose * glm::vec4((*vs)[v].pos, 1.0f));
+          (*vs)[v].normal = turn * (*vs)[v].normal;
+        }
+      };
+      append(&vertices, &indices);
+      {
+        DebrisChunk chunk;
+        append(&chunk.vertices, &chunk.indices);
+        if (!chunk.indices.empty()) {
+          chunk.min = glm::vec3(std::numeric_limits<float>::infinity());
+          chunk.max = glm::vec3(-std::numeric_limits<float>::infinity());
+          for (const auto& v : chunk.vertices) {
+            chunk.min = glm::min(chunk.min, v.pos);
+            chunk.max = glm::max(chunk.max, v.pos);
+          }
+          debrisChunks_.push_back(std::move(chunk));
+        }
+      }
+      // Solid chunks block sight like any obstacle -- from where they are
+      // now, mid-flight included -- so they join the figures' depth maps.
+      if (flight.solid) append(&fovVertices, &fovIndices);
+    }
+  }
+  ++debrisGeneration_;
+  debrisMesh_.SetMesh(vertices, indices);
+  debrisHasGeometry_ = !indices.empty();
+  debrisFovMesh_.SetMesh(fovVertices, fovIndices);
+  debrisFovHasGeometry_ = !fovIndices.empty();
+  // The figures' sight maps were rendered against the old chunk poses.
+  ++fovMapGeneration_;
+  debrisMoving_ = moving;
+  debrisKey_ = key;
 }
 
 void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
@@ -3693,6 +3933,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     treeKey_ = game.GetScene().trees;
   }
   const auto& obstacles = game.GetScene().obstacles;
+  UpdateDebris(game);
   // World changes append to the log: keep in-flight falls on their original
   // colliders. A shorter/empty log (new map, rewind) drops them as before.
   SetRagdollKeepInFlight(!game.WorldLog().empty() && game.WorldLog().size() >= ragdollWorldSeen_);
@@ -3912,6 +4153,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
       DrawUnitDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, unit);
     }
+    if (debrisHasGeometry_) {
+      depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
+      debrisMesh_.Draw();
+    }
     DrawPlantedFlagDepth(depthShader_, cubeMesh_, sphereMesh_, lightSpaceMatrix_, game);
     if (!debug.disableTrees && treeMesh_.HasGeometry()) {
       depthShader_.SetMat4("uLightMVP", lightSpaceMatrix_);
@@ -4025,6 +4270,9 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   std::vector<char> fadeSurface(walkSurfaces.size(), 0);
   std::vector<char> fadeMassing(massing.size(), 0);
   std::vector<char> fadeBuilding;
+  // Debris chunks (debrisChunks_) that block a sightline. Each chunk fades
+  // on its own: a chunk is not part of any building group.
+  std::vector<char> fadeChunk(debrisChunks_.size(), 0);
   // Surfaces that themselves cross a sightline (before the building and
   // overpass grouping below): a faded building's floors keep the shell
   // opacity where they hide a probe, see kInteriorFadeOpacity.
@@ -4053,12 +4301,14 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     const uint64_t geometryKey = FadeGeometryKey(game.GetScene());
     FadeCache& fadeCache = fadeCache_[team == tactics::Team::Blue ? 0 : 1];
     if (fadeCache.valid && fadeCache.cameraPos == cameraPos &&
-        fadeCache.geometryKey == geometryKey && fadeCache.probes == probes) {
+        fadeCache.geometryKey == geometryKey && fadeCache.probes == probes &&
+        fadeCache.debrisGeneration == debrisGeneration_) {
       fadeObstacle = fadeCache.fadeObstacle;
       fadeSurface = fadeCache.fadeSurface;
       fadeMassing = fadeCache.fadeMassing;
       fadeBuilding = fadeCache.fadeBuilding;
       directSurface = fadeCache.directSurface;
+      fadeChunk = fadeCache.fadeChunk;
       anyFaded = fadeCache.anyFaded;
     } else {
       struct ProbeRay {
@@ -4141,9 +4391,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       for (size_t i = 0; i < obstacles.size(); ++i) {
         // Post-sized furniture is too small to hide a useful target and is kept
         // in one static render batch below.
-        if (obstacles[i].navOnly || tactics::IsStreetFixture(obstacles[i].kind)) {
+        if (obstacles[i].navOnly || obstacles[i].dead ||
+            tactics::IsStreetFixture(obstacles[i].kind)) {
           continue;
         }
+        // Settled chunks are drawn (and faded) per chunk below, from their
+        // posed prisms, not as the rubble obstacle's vertical envelope.
+        if (obstacles[i].kind == tactics::ObstacleKind::Rubble) continue;
         if (crossesProbeRay(obstacles[i])) {
           fadeObstacle[i] = 1;
           anyFaded = true;
@@ -4151,7 +4405,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
       for (size_t i = 0; i < walkSurfaces.size(); ++i) {
         const tactics::WalkSurface& surface = walkSurfaces[i];
-        if (surface.vertices.size() < 3) continue;  // Never intersected.
+        if (surface.dead || surface.vertices.size() < 3) continue;  // Never intersected.
         glm::vec2 lo(surface.vertices[0].x, surface.vertices[0].z);
         glm::vec2 hi = lo;
         for (const glm::vec3& v : surface.vertices) {
@@ -4176,7 +4430,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       // sight prisms used by gameplay LOS so those hits trigger group fading.
       for (size_t i = 0; i < massing.size(); ++i) {
         const tactics::MassingDetail& d = massing[i];
-        if (d.footprint.size() < 3 || d.y1 <= d.y0) continue;
+        if (d.dead || d.footprint.size() < 3 || d.y1 <= d.y0) continue;
         tactics::Obstacle prism;
         prism.footprint = d.footprint;
         prism.bounds.min = glm::vec3(std::numeric_limits<float>::infinity(), d.y0,
@@ -4191,6 +4445,54 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
         }
         if (crossesProbeRay(prism)) {
           fadeMassing[i] = 1;
+          anyFaded = true;
+        }
+      }
+      // Debris chunks: each one is its own occluder. Broadphase by the
+      // chunk's bounding circle, then its AABB (slab test) and posed
+      // triangles, so a chunk fades only where it really crosses a sightline.
+      for (size_t c = 0; c < debrisChunks_.size(); ++c) {
+        const DebrisChunk& chunk = debrisChunks_[c];
+        const glm::vec2 lo(chunk.min.x, chunk.min.z), hi(chunk.max.x, chunk.max.z);
+        const bool crossed =
+            anyRayHits(0.5f * (lo + hi), 0.5f * glm::length(hi - lo), [&](const ProbeRay& ray) {
+              const float tMax = ray.length - kEndpointEpsilon;
+              float t0 = kEndpointEpsilon, t1 = tMax;
+              for (int axis = 0; axis < 3; ++axis) {
+                if (std::fabs(ray.direction[axis]) < 1e-8f) {
+                  if (cameraPos[axis] < chunk.min[axis] || cameraPos[axis] > chunk.max[axis]) {
+                    return false;
+                  }
+                  continue;
+                }
+                float a = (chunk.min[axis] - cameraPos[axis]) / ray.direction[axis];
+                float b = (chunk.max[axis] - cameraPos[axis]) / ray.direction[axis];
+                if (a > b) std::swap(a, b);
+                t0 = std::max(t0, a);
+                t1 = std::min(t1, b);
+                if (t0 > t1) return false;
+              }
+              for (size_t k = 0; k + 2 < chunk.indices.size(); k += 3) {
+                const glm::vec3& p0 = chunk.vertices[chunk.indices[k]].pos;
+                const glm::vec3 e1 = chunk.vertices[chunk.indices[k + 1]].pos - p0;
+                const glm::vec3 e2 = chunk.vertices[chunk.indices[k + 2]].pos - p0;
+                const glm::vec3 pv = glm::cross(ray.direction, e2);
+                const float det = glm::dot(e1, pv);
+                if (std::fabs(det) < 1e-9f) continue;
+                const float inv = 1.0f / det;
+                const glm::vec3 tv = cameraPos - p0;
+                const float u = glm::dot(tv, pv) * inv;
+                if (u < 0.0f || u > 1.0f) continue;
+                const glm::vec3 qv = glm::cross(tv, e1);
+                const float v = glm::dot(ray.direction, qv) * inv;
+                if (v < 0.0f || u + v > 1.0f) continue;
+                const float t = glm::dot(e2, qv) * inv;
+                if (t > kEndpointEpsilon && t < tMax) return true;
+              }
+              return false;
+            });
+        if (crossed) {
+          fadeChunk[c] = 1;
           anyFaded = true;
         }
       }
@@ -4211,8 +4513,11 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       for (size_t i = 0; i < massing.size(); ++i) {
         if (fadeMassing[i]) markBuilding(massing[i].building);
       }
+      // Only what still stands joins the group: a part a blast removed is
+      // gone from the picture, so it must not fade (or draw) as a silhouette.
       for (size_t i = 0; i < obstacles.size(); ++i) {
         const int b = obstacles[i].building;
+        if (obstacles[i].dead || obstacles[i].kind == tactics::ObstacleKind::Rubble) continue;
         if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
           fadeObstacle[i] = 1;
           anyFaded = true;
@@ -4220,6 +4525,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
       for (size_t i = 0; i < walkSurfaces.size(); ++i) {
         const int b = surfaceBuilding[i];
+        if (walkSurfaces[i].dead) continue;
         if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
           fadeSurface[i] = 1;
           anyFaded = true;
@@ -4227,6 +4533,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
       for (size_t i = 0; i < massing.size(); ++i) {
         const int b = massing[i].building;
+        if (massing[i].dead) continue;
         if (b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b]) {
           fadeMassing[i] = 1;
           anyFaded = true;
@@ -4251,13 +4558,15 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       }
       if (fadeOverpass) {
         for (size_t i = 0; i < obstacles.size(); ++i) {
-          if (obstacles[i].kind == tactics::ObstacleKind::Pier) fadeObstacle[i] = 1;
+          if (obstacles[i].kind == tactics::ObstacleKind::Pier && !obstacles[i].dead) {
+            fadeObstacle[i] = 1;
+          }
         }
         for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-          if (walkSurfaces[i].overpass) fadeSurface[i] = 1;
+          if (walkSurfaces[i].overpass && !walkSurfaces[i].dead) fadeSurface[i] = 1;
         }
         for (size_t i = 0; i < massing.size(); ++i) {
-          if (overpassDetail(massing[i])) fadeMassing[i] = 1;
+          if (overpassDetail(massing[i]) && !massing[i].dead) fadeMassing[i] = 1;
         }
         anyFaded = true;
       }
@@ -4270,6 +4579,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       fadeCache.fadeMassing = fadeMassing;
       fadeCache.fadeBuilding = fadeBuilding;
       fadeCache.directSurface = directSurface;
+      fadeCache.fadeChunk = fadeChunk;
+      fadeCache.debrisGeneration = debrisGeneration_;
       fadeCache.anyFaded = anyFaded;
     }
     plainBuilding.assign(fadeBuilding.size(), 0);
@@ -4374,6 +4685,18 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
   // Every static batch below is grouped (per surface, obstacle or building)
   // so camera-faded occluders are skipped here and re-drawn translucent
   // after the figures, without re-tessellating the rest every frame.
+  // The posed debris chunks whose fade flag equals `faded`, as one mesh.
+  const auto buildChunkMesh = [&](bool faded) {
+    std::pair<std::vector<LitTriangleMesh::Vertex>, std::vector<GLuint>> mesh;
+    for (size_t c = 0; c < debrisChunks_.size(); ++c) {
+      if ((c < fadeChunk.size() && fadeChunk[c] != 0) != faded) continue;
+      const GLuint base = static_cast<GLuint>(mesh.first.size());
+      mesh.first.insert(mesh.first.end(), debrisChunks_[c].vertices.begin(),
+                        debrisChunks_[c].vertices.end());
+      for (const GLuint i : debrisChunks_[c].indices) mesh.second.push_back(base + i);
+    }
+    return mesh;
+  };
   const auto fadedBuilding = [&](int b) {
     return b >= 0 && b < static_cast<int>(fadeBuilding.size()) && fadeBuilding[b];
   };
@@ -4455,6 +4778,20 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     DrawLitVisible(litShader_, treeMesh_, viewProj, lightSpaceMatrix_,
                    glm::vec4(kObstacleColor, 1.0f), onScreen);
   }
+  // Debris chunks: falling ones along their recorded flight, settled ones on
+  // their rubble obstacle (excluded from the static mesh above).
+  if (debrisHasGeometry_) {
+    thermalMaterial(ThermalMaterial::Building);
+    if (std::find(fadeChunk.begin(), fadeChunk.end(), char(1)) == fadeChunk.end()) {
+      DrawLitModel(litShader_, debrisMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                   glm::vec4(kObstacleColor * 0.82f, 1.0f));
+    } else if (const auto solid = buildChunkMesh(false); !solid.second.empty()) {
+      // Chunks that block a sightline are re-drawn translucent below.
+      geometryMesh_.SetMesh(solid.first, solid.second);
+      DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                   glm::vec4(kObstacleColor * 0.82f, 1.0f));
+    }
+  }
   thermalMaterial(ThermalMaterial::Figure);
   for (const Unit& unit : game.GetScene().units) {
     if (!IsUnitVisibleForRender(unit, team, fogActive, visibility, game.GetScene())) continue;
@@ -4503,11 +4840,28 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     };
     // Plain buildings: the walls, window cuts and floor slabs are replaced by
     // the building's full footprint extruded floor to roof.
+    // A damaged building (something of it blown away) has no intact outline
+    // to extrude: its standing parts fade as themselves, floors included, so
+    // neither the original silhouette nor a vanished building shows.
+    std::vector<char> damaged(plainBuilding.size(), 0);
+    const auto markDamaged = [&](int b) {
+      if (b >= 0 && b < static_cast<int>(damaged.size())) damaged[b] = 1;
+    };
+    for (const tactics::Obstacle& o : obstacles) {
+      if (o.dead) markDamaged(o.building);
+    }
+    for (size_t i = 0; i < walkSurfaces.size(); ++i) {
+      if (walkSurfaces[i].dead) markDamaged(walkSurfaces[i].building);
+    }
+    for (const tactics::MassingDetail& d : massing) {
+      if (d.dead) markDamaged(d.building);
+    }
+    const auto isPlainSolid = [&](int b) { return isPlain(b) && !damaged[b]; };
     std::vector<tactics::Obstacle> plainPrisms(plainBuilding.size());
     for (size_t i = 0; i < obstacles.size(); ++i) {
-      if (!fadeObstacle[i]) continue;
+      if (!fadeObstacle[i] || obstacles[i].dead) continue;
       const int b = obstacles[i].building;
-      if (isPlain(b)) {
+      if (isPlainSolid(b)) {
         tactics::Obstacle& prism = plainPrisms[b];
         if (prism.footprint.empty()) {
           prism.bounds.min = obstacles[i].bounds.min;
@@ -4534,8 +4888,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
                        static_cast<int>(b)});
     }
     for (size_t i = 0; i < walkSurfaces.size(); ++i) {
-      if (fadeSurface[i] && !walkSurfaces[i].climbProxy && !isPlain(walkSurfaces[i].building)) {
-        (walkSurfaces[i].building >= 0 ? interior : shell)
+      if (fadeSurface[i] && !walkSurfaces[i].dead && !walkSurfaces[i].climbProxy &&
+          !isPlainSolid(walkSurfaces[i].building)) {
+        const bool inInterior = walkSurfaces[i].building >= 0 && !isPlain(walkSurfaces[i].building);
+        (inInterior ? interior : shell)
             .push_back({glm::distance(cameraPos, tactics::SurfaceCenter(walkSurfaces[i])), -1,
                         static_cast<int>(i)});
       }
@@ -4586,6 +4942,13 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
     };
     const auto drawShellGeometry = [&](bool mark) {
       if (mark) litShader_.SetInt("uFadedMark", 1);
+      // Debris chunks that block a sightline: each faded on its own.
+      if (const auto chunks = buildChunkMesh(true); !chunks.second.empty()) {
+        thermalMaterial(ThermalMaterial::Building);
+        geometryMesh_.SetMesh(chunks.first, chunks.second);
+        DrawLitModel(litShader_, geometryMesh_, viewProj, lightSpaceMatrix_, glm::mat4(1.0f),
+                     glm::vec4(kObstacleColor * 0.82f, kOccluderFadeOpacity));
+      }
       // Massing first: it stands proud of the grouped prisms/slabs, so it claims
       // its pixels in the stencil cap instead of being hidden behind them.
       for (size_t i = 0; i < massing.size(); ++i) {
@@ -4610,8 +4973,10 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             // Outline pass: a wall piece contributes just its outer and
             // inner faces, so each window is outlined once (see
             // BuildWallLongFaces). The colour pass keeps the full prism.
+            // Fractured pieces with a wall-plane profile keep their torn
+            // silhouette (no window decals land on them anyway).
             if (mark && obstacle.kind == tactics::ObstacleKind::Wall &&
-                obstacle.footprint.size() == 4) {
+                obstacle.footprint.size() == 4 && obstacle.profile.empty()) {
               BuildWallLongFaces(obstacle, &geometryMesh_);
             } else {
               BuildPolygonPrism(obstacle, &geometryMesh_);
@@ -4689,12 +5054,8 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
             !scene.buildings[o.building].enterable) {
           continue;
         }
-        if (o.obstacle < 0 || o.obstacle >= static_cast<int>(obstacles.size())) continue;
-        const std::vector<glm::vec2>& fp = obstacles[o.obstacle].footprint;
-        if (fp.size() < 3 || o.wallEdge < 0 || o.wallEdge >= static_cast<int>(fp.size())) {
-          continue;
-        }
-        const glm::vec2 a = fp[o.wallEdge], b = fp[(o.wallEdge + 1) % fp.size()];
+        glm::vec2 a, b;
+        if (!tactics::FacadeOpeningEdge(scene, o, &a, &b)) continue;
         const float len = glm::distance(a, b);
         if (len < 1e-4f) continue;
         const glm::vec2 dir = (b - a) / len;
@@ -4753,7 +5114,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
           for (int j : slabs) {
             if (j == self) continue;
             const std::vector<glm::vec3>& v = walkSurfaces[j].vertices;
-            const glm::vec3 n = glm::cross(v[1] - v[0], v[2] - v[0]);
+            const glm::vec3 n = PolygonNormal(v);
             const float denom = glm::dot(ray, n);
             if (std::fabs(denom) < 1e-6f) continue;
             const float t = glm::dot(v[0] - cameraPos, n) / denom;
@@ -5028,8 +5389,7 @@ void SceneRenderer::RenderPane(const GameLogic& game, Team team, bool fogActive,
       if (!tactics::SurfaceContainsXZ(surface, position.x, position.z)) continue;
       if (std::fabs(tactics::SurfaceHeightAt(surface, position.x, position.z) - position.y) > 0.3f)
         continue;
-      glm::vec3 n = glm::cross(surface.vertices[1] - surface.vertices[0],
-                               surface.vertices[2] - surface.vertices[0]);
+      glm::vec3 n = PolygonNormal(surface.vertices);
       if (glm::length(n) < 1e-6f) continue;
       n = glm::normalize(n);
       return n.y < 0.0f ? -n : n;

@@ -492,7 +492,8 @@ void DrawDebugPanel(bool& disableFov, bool& coverView, bool& disableShadows, boo
                     float& aoRadius, float& aoStrength, int& aoQuality, int& aoSoftness,
                     bool& disableOcclusionFade, bool& npr, gfx::NprSettings& nprSettings,
                     bool& showFps, bool& showRotationDome, float fps, float frameMs,
-                    float fovMs, const gfx::RenderFrameStats& stats, float top) {
+                    float fovMs, const gfx::RenderFrameStats& stats, BombPanelState* bomb,
+                    float top) {
   ImGui::SetNextWindowPos(ImVec2(10.0f, top), ImGuiCond_Always);
   // Once per run (not FirstUseEver) so a saved imgui.ini can't reopen it at startup.
   ImGui::SetNextWindowCollapsed(true, ImGuiCond_Once);
@@ -542,6 +543,35 @@ void DrawDebugPanel(bool& disableFov, bool& coverView, bool& disableShadows, boo
     ImGui::SliderFloat("NPR AO radius", &nprSettings.ao.radius, 0.5f, 6.0f, "%.1f");
     ImGui::SetNextItemWidth(130.0f);
     ImGui::SliderFloat("NPR AO strength", &nprSettings.ao.strength, 0.0f, 3.0f, "%.2f");
+  }
+  // Debug bomb (issue #350): a movable explosive for exercising the
+  // destructible world. Its position is typed / dragged as world coordinates
+  // (a marker in the 3D view shows where that is once placed); Detonate
+  // blows it immediately, Arm schedules it for `armAt` seconds into the next
+  // committed round (recorded in the world log, so replays agree).
+  if (bomb && ImGui::CollapsingHeader("Debug bomb")) {
+    bool edited = false;
+    ImGui::SetNextItemWidth(190.0f);
+    edited |= ImGui::DragFloat3("X / Y / Z", &bomb->position.x, 0.05f, 0.0f, 0.0f, "%.2f");
+    if (ImGui::Button("Put on ground")) bomb->requestGround = true;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Y = 1 m above the ground at X / Z");
+    ImGui::SetNextItemWidth(130.0f);
+    edited |= ImGui::SliderFloat("Blast radius", &bomb->radius, 0.5f, 10.0f, "%.1f");
+    ImGui::SetNextItemWidth(130.0f);
+    edited |= ImGui::SliderFloat("Blast impulse", &bomb->impulse, 0.0f, 6.0f, "%.2fx");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scales debris launch velocity (1 = stock)");
+    if (!bomb->placed) {
+      if (ImGui::Button("Place")) bomb->requestPlace = true;
+    } else {
+      if (edited) bomb->requestPlace = true;  // Moves / resizes the placed bomb live.
+      if (ImGui::Button("Detonate now")) bomb->requestDetonate = true;
+      ImGui::SetNextItemWidth(130.0f);
+      ImGui::SliderFloat("Round time", &bomb->armAt, 0.0f, tactics::constants::kRoundDuration,
+                         "%.1f s");
+      ImGui::SameLine();
+      if (ImGui::Button("Arm")) bomb->requestArm = true;
+      if (bomb->armed) ImGui::TextUnformatted("Armed: goes off in the next round");
+    }
   }
   ImGui::Checkbox("Disable occlusion fade", &disableOcclusionFade);
   ImGui::Checkbox("Rotation dome", &showRotationDome);

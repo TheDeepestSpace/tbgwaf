@@ -158,6 +158,15 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     action.kind = ScenarioAction::Kind::TimelinePause;
     return action;
   }
+  if (kind == "bomb") {  // Debug bomb (issue #350): place + detonate/arm.
+    action.kind = ScenarioAction::Kind::Bomb;
+    if (!node["position"]) throw std::runtime_error("bomb requires 'position'");
+    action.destination = ParseVec3(node["position"], "script[].position");
+    if (node["radius"]) action.bombRadius = node["radius"].as<float>();
+    if (node["impulse"]) action.bombImpulse = node["impulse"].as<float>();
+    if (node["at"]) action.bombAt = node["at"].as<float>();
+    return action;
+  }
 
   if (!node["actor"]) throw std::runtime_error("script action step requires 'actor'");
   action.actor = node["actor"].as<int>();
@@ -223,7 +232,7 @@ ScenarioAction ParseAction(const YAML::Node& node) {
     throw std::runtime_error(
         "unknown script action '" + kind +
         "' (expected move/begin_move/shoot/aim/pass/throw/cancel/focus/commit/new_game/"
-        "timeline_seek/timeline_play/timeline_pause)");
+        "timeline_seek/timeline_play/timeline_pause/wait/bomb)");
   }
   return action;
 }
@@ -242,6 +251,7 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
       throw std::runtime_error("assert.cover_pose must be none, stand or crouch");
     }
   }
+  if (node["planned"]) assertion.planned = node["planned"].as<bool>();
   if (node["tolerance"]) assertion.tolerance = node["tolerance"].as<float>();
   if (node["visible_to"]) {
     assertion.visibleToTeam = ParseTeam(node["visible_to"].as<std::string>(), "assert.visible_to");
@@ -282,9 +292,10 @@ ScenarioAssertion ParseAssertion(const YAML::Node& node) {
   }
 
   if ((assertion.alive || assertion.grenades || assertion.position || assertion.facingDegrees ||
-       assertion.coverPose || assertion.visible || assertion.remembered || assertion.ghostAlpha) && !assertion.unit) {
+       assertion.coverPose || assertion.planned || assertion.visible ||
+       assertion.remembered || assertion.ghostAlpha) && !assertion.unit) {
     throw std::runtime_error(
-        "assert checking alive/grenades/position/facing_degrees/cover_pose/visible/remembered/ghost_alpha requires 'unit'");
+        "assert checking alive/grenades/position/facing_degrees/cover_pose/planned/visible/remembered/ghost_alpha requires 'unit'");
   }
   if ((assertion.remembered || assertion.ghostAlpha) && !assertion.rememberedByTeam) {
     throw std::runtime_error("assert 'remembered'/'ghost_alpha' require 'remembered_by'");
@@ -423,6 +434,18 @@ bool ExecuteActionImpl(GameLogic& game, const Scene& scene, const ScenarioAction
 
   if (action.kind == ScenarioAction::Kind::Cancel) {
     game.CancelAction();
+    return true;
+  }
+
+  if (action.kind == ScenarioAction::Kind::Bomb) {
+    game.DebugPlaceBomb(action.destination, action.bombRadius, action.bombImpulse);
+    if (action.bombAt) {
+      if (!game.DebugArmBomb(*action.bombAt)) return Fail("bomb could not be armed");
+      return true;
+    }
+    if (!game.DebugDetonateBomb()) {
+      return Fail("bomb detonation changed nothing (nothing destructible in range)");
+    }
     return true;
   }
 
@@ -695,6 +718,13 @@ void CheckAssertionImpl(const GameLogic& game, const ScenarioAssertion& a, int s
           Fail("unit " + std::to_string(*a.unit) + " expected facing near " +
                std::to_string(*a.facingDegrees) + " deg but is at " +
                std::to_string(unit->facingYaw * 180.0f / 3.14159265f));
+        }
+      }
+      if (a.planned) {
+        const bool actual = unit->plan.type != PlannedActionType::None;
+        if (actual != *a.planned) {
+          Fail("unit " + std::to_string(*a.unit) + " expected planned=" +
+               (*a.planned ? "true" : "false") + " but has " + (actual ? "a plan" : "no plan"));
         }
       }
       if (a.coverPose) {

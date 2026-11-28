@@ -810,12 +810,17 @@ void TestJevVsJev() {
 
   fail = false;
   w.Send(9, R"({"t":"bot_control","retry":true})");
+  // These two waits cover full Jev planning passes for both seats (request
+  // building is CPU-bound and takes ~54 s on a slow sandbox against the
+  // default 60 s), so give them real headroom: the round either comes or
+  // the test still fails, just without flaking on machine speed.
+  constexpr int kRoundWaitMs = 180000;
   CHECK(w.Pump([&] {
     for (const Json& m : w.Drain(9)) {
       if (m["t"].AsString() == "round") return true;
     }
     return false;
-  }));  // Both Jevs planned; the server ran the round.
+  }, kRoundWaitMs));  // Both Jevs planned; the server ran the round.
 
   // Opting into the deterministic fallback needs no adapter at all.
   w.Send(9, R"({"t":"bot_control","fallback":true})");
@@ -825,7 +830,7 @@ void TestJevVsJev() {
       if (m["t"].AsString() == "round") return true;
     }
     return false;
-  }));
+  }, kRoundWaitMs));
   CHECK(posts == before || posts == before + 2);  // At most in-flight asks from before the switch.
 
   w.Send(9, R"({"t":"bot_control","run":false})");
@@ -1068,7 +1073,280 @@ void TestWorldChangeSentInRoundOnce() {
     const auto second = s.RunRound();
     CHECK(second[0]["world"].AsArray().empty());  // Already delivered.
   }
-  CHECK(net::kProtocolVersion == 2);
+  // 4: fracture outlines with profiled pieces, MassingCut + Debris kinds.
+  // 5: fracture-cell pieces on FloorHole / MassingCut, debris rest yaw + solid.
+  // 6: OpeningRemoved; 7: debris pose tracks and rubble bodies.
+  CHECK(net::kProtocolVersion == 7);
+}
+
+// Thin full-height wall between the two figures, for bomb tests.
+Scene BombWallScene() {
+  Scene scene;
+  scene.mapHalfExtent = 8.0f;
+  Obstacle wall;
+  wall.bounds = AABB{glm::vec3(-0.15f, 0.0f, -8.0f), glm::vec3(0.15f, 3.0f, 8.0f)};
+  wall.kind = ObstacleKind::Wall;
+  scene.obstacles.push_back(wall);
+  Unit blue;
+  blue.id = 0;
+  blue.team = Team::Blue;
+  blue.position = glm::vec3(-4.0f, 0.0f, 0.0f);
+  scene.units.push_back(blue);
+  Unit red;
+  red.id = 1;
+  red.team = Team::Red;
+  red.position = glm::vec3(4.0f, 0.0f, 0.0f);
+  red.facingYaw = 3.14159265f;
+  scene.units.push_back(red);
+  return scene;
+}
+
+// The post-game replay re-creates the collapses: frames before the armed
+// blast have no world changes, frames after it carry the full log, and the
+// replay game rebuilds the same geometry.
+void TestRevealHistoryReplaysDestruction() {
+  server::GameSession s(BombWallScene());
+  s.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
+  CHECK(s.DebugArmBomb(2.0f));
+  Action commit;
+  commit.kind = ActionKind::Commit;
+  PlanEveryone(s, Team::Blue);
+  PlanEveryone(s, Team::Red);
+  CHECK(s.Apply(Team::Blue, commit).ok && s.Apply(Team::Red, commit).ok);
+  s.RunRound();
+  const size_t total = s.game().WorldLog().size();
+  CHECK(total > 0);
+  GameLogic game(s.game().BaseScene());
+  net::RemoteClient client(&game, "t");
+  client.OnMessage(s.RevealMessage().Dump());
+  const auto history = client.TakeRevealedHistory(game.ExportState());
+  CHECK(history.has_value());
+  if (!history) return;
+  CHECK(history->frames.front().snapshot.world.empty());
+  CHECK(history->frames.back().snapshot.world.size() == total);
+  size_t last = 0;
+  for (const auto& f : history->frames) {
+    CHECK(f.snapshot.world.size() >= last);
+    last = f.snapshot.world.size();
+  }
+  GameLogic replay(s.game().BaseScene());
+  CHECK(replay.ImportState(history->frames.back().snapshot));
+  CHECK(replay.WorldLog().size() == total);
+}
+
+// Debug bomb (issue #350): an armed bomb detonates inside RunRound at its
+// armed time, and the fracture changes ship with that round message carrying
+// the detonation timestamp.
+void TestDebugBombArmedShipsInRound() {
+  server::GameSession s(BombWallScene());
+  s.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
+  CHECK(s.DebugArmBomb(1.0f));
+  Action commit;
+  commit.kind = ActionKind::Commit;
+  PlanEveryone(s, Team::Blue);
+  PlanEveryone(s, Team::Red);
+  CHECK(s.Apply(Team::Blue, commit).ok && s.Apply(Team::Red, commit).ok);
+  const auto round = s.RunRound();
+  for (int ti = 0; ti < 3; ++ti) {
+    const auto& world = round[ti]["world"].AsArray();
+    CHECK(!world.empty());
+    WorldChange change;
+    CHECK(net::DecodeWorldChange(world.front(), &change));
+    CHECK(change.round == 1);
+    CHECK(change.at >= 1.0f && change.at <= 1.2f);
+  }
+  CHECK(s.TakeWorldDelta().AsArray().empty());  // Already shipped.
+  // A joining client replays the log to the same geometry.
+  GameLogic joiner(s.game().BaseScene());
+  const Json state = s.StateMessage(Team::Blue);
+  for (const Json& e : state["world"].AsArray()) {
+    WorldChange change;
+    CHECK(net::DecodeWorldChange(e, &change));
+    CHECK(joiner.AcceptWorldChange(change));
+  }
+  // Same log -> same geometry (units differ: the joiner only replayed the world).
+  CHECK(joiner.WorldLog().size() == s.game().WorldLog().size());
+  const auto& mine = joiner.GetScene().obstacles;
+  const auto& theirs = s.game().GetScene().obstacles;
+  CHECK(mine.size() == theirs.size());
+  for (size_t i = 0; i < std::min(mine.size(), theirs.size()); ++i) {
+    CHECK(mine[i].dead == theirs[i].dead);
+    CHECK(mine[i].bounds.min == theirs[i].bounds.min && mine[i].bounds.max == theirs[i].bounds.max);
+  }
+}
+
+// Debug bomb via lobby control taps: place_bomb / detonate_bomb, immediate
+// detonation broadcast as a {"t":"world"} delta.
+void TestDebugBombControlTap() {
+  const char* scene = R"({"map":{"obstacles":[{"center":[0,0],"half_extent":[0.15,6],"height":3}]},"units":[
+    {"id":0,"team":"blue","position":[-5,0,0],"facing_degrees":0},
+    {"id":1,"team":"red","position":[5,0,0],"facing_degrees":180}]})";
+  Wire w;
+  Json load;
+  CHECK(Json::Parse(std::string(R"({"t":"load_scenario","room":"b1","scene":)") + scene + "}", &load));
+  CHECK(w.lobby.OnControl(load)["ok"].AsBool());
+  w.Send(1, R"({"t":"join","room":"b1"})");
+  w.Send(2, R"({"t":"join","room":"b1"})");
+  w.Drain(1);
+  w.Drain(2);
+  Json detonate;
+  CHECK(Json::Parse(R"({"t":"detonate_bomb","room":"b1"})", &detonate));
+  CHECK(!w.lobby.OnControl(detonate)["ok"].AsBool());  // Nothing placed yet.
+  Json badPlace;
+  CHECK(Json::Parse(R"({"t":"place_bomb","room":"b1","pos":[0,1]})", &badPlace));
+  CHECK(!w.lobby.OnControl(badPlace)["ok"].AsBool());
+  Json place;
+  CHECK(Json::Parse(R"({"t":"place_bomb","room":"b1","pos":[0,1,0],"radius":3})", &place));
+  CHECK(w.lobby.OnControl(place)["ok"].AsBool());
+  CHECK(w.lobby.OnControl(detonate)["ok"].AsBool());
+  for (int conn : {1, 2}) {
+    bool sawWorld = false;
+    for (const Json& m : w.Drain(conn)) {
+      if (m["t"].AsString() != "world") continue;
+      sawWorld = true;
+      CHECK(!m["world"].AsArray().empty());
+    }
+    CHECK(sawWorld);
+  }
+  CHECK(!w.lobby.OnControl(detonate)["ok"].AsBool());  // Spent.
+
+  // A seated player's own debug panel sends the same messages (no room field).
+  w.Send(1, R"({"t":"place_bomb","pos":[0,1,0],"radius":3})");
+  w.Send(1, R"({"t":"detonate_bomb"})");
+  bool sawWorld = false;
+  for (const Json& m : w.Drain(2)) sawWorld = sawWorld || m["t"].AsString() == "world";
+  CHECK(sawWorld);
+}
+
+// A blast set off from a player's debug panel reaches both mirrors whole: the
+// cuts and every Debris change (chunks with their pose tracks), immediate or
+// armed into a round.
+void TestClientServerBombDebris() {
+  Wire w;
+  ClientRig blue(1, "bd"), red(2, "bd");
+  blue.client.OnOpen();
+  red.client.OnOpen();
+  for (int i = 0; i < 3; ++i) {
+    blue.Pump(w);
+    red.Pump(w);
+  }
+  CHECK(blue.client.status() == net::RemoteClient::Status::Playing);
+  // Next to the first enterable building's wall.
+  glm::vec3 spot(0.0f);
+  for (const Obstacle& o : blue.game.GetScene().obstacles) {
+    if (o.dead || o.kind != ObstacleKind::Wall) continue;
+    spot = glm::vec3((o.bounds.min.x + o.bounds.max.x) * 0.5f, o.bounds.min.y + 1.0f,
+                     (o.bounds.min.z + o.bounds.max.z) * 0.5f);
+    break;
+  }
+  const auto debrisCount = [](const GameLogic& g) {
+    size_t n = 0;
+    for (const WorldChange& c : g.WorldLog()) {
+      if (c.kind == WorldChangeKind::Debris) n += c.pieces.size();
+    }
+    return n;
+  };
+  blue.client.SendPlaceBomb(spot, 4.0f);
+  blue.client.SendDetonateBomb();
+  size_t sent = 0;
+  blue.Pump(w);
+  for (const std::string& t : w.inbox[2]) {
+    Json m;
+    CHECK(Json::Parse(t, &m));
+    if (m["t"].AsString() == "world") sent += m["world"].AsArray().size();
+  }
+  blue.Pump(w);
+  red.Pump(w);
+  CHECK(sent > 0);
+  CHECK(blue.game.WorldLog().size() == sent);
+  CHECK(red.game.WorldLog().size() == sent);
+  CHECK(debrisCount(blue.game) > 0);
+  CHECK(blue.game.WorldLog() == red.game.WorldLog());
+
+  // Armed: the blast ships inside the round and plays against the round
+  // clock on the mirrors, like on the server.
+  const size_t before = blue.game.WorldLog().size();
+  const size_t chunksBefore = debrisCount(blue.game);
+  glm::vec3 second = spot;
+  for (const Obstacle& o : blue.game.GetScene().obstacles) {
+    if (o.dead || o.kind != ObstacleKind::Wall) continue;
+    const glm::vec3 c((o.bounds.min.x + o.bounds.max.x) * 0.5f, o.bounds.min.y + 1.0f,
+                      (o.bounds.min.z + o.bounds.max.z) * 0.5f);
+    if (glm::distance(c, spot) > 12.0f) {
+      second = c;
+      break;
+    }
+  }
+  blue.client.SendPlaceBomb(second, 3.0f);
+  blue.client.SendDetonateBomb(1.0f);
+  PlanAllLocally(blue);
+  PlanAllLocally(red);
+  blue.client.Update(0.016f);
+  red.client.Update(0.016f);
+  for (int i = 0; i < 2; ++i) {
+    blue.Pump(w);
+    red.Pump(w);
+  }
+  blue.client.RequestCommit();
+  red.client.RequestCommit();
+  for (int i = 0; i < 3; ++i) {
+    blue.Pump(w);
+    red.Pump(w);
+  }
+  CHECK(blue.client.playingBack());
+  CHECK(blue.game.WorldLog().size() == before);  // Not before its time.
+  bool sawBlastAtItsTime = false;
+  for (int i = 0; i < 600 && blue.client.playingBack(); ++i) {
+    blue.client.Update(1.0f / 30.0f);
+    red.client.Update(1.0f / 30.0f);
+    if (!blue.client.playingBack()) break;
+    if (blue.game.WorldLog().size() > before && !sawBlastAtItsTime) {
+      sawBlastAtItsTime = true;
+      const WorldChange& c = blue.game.WorldLog().back();
+      CHECK(c.at >= 1.0f && c.at < 1.1f);
+      // The mirror's round clock is right at the blast: the chunks start
+      // from their launch pose.
+      CHECK(blue.game.ExecutionElapsed() >= c.at && blue.game.ExecutionElapsed() - c.at < 0.05f);
+    }
+  }
+  CHECK(sawBlastAtItsTime);
+  CHECK(debrisCount(blue.game) > chunksBefore);
+  CHECK(blue.game.WorldLog() == red.game.WorldLog());
+  CHECK(!blue.client.worldOutOfSync());
+  CHECK(!red.client.worldOutOfSync());
+}
+
+// A world change the mirror cannot apply (its generated map is not the
+// server's -- seen on the web build, whose roofs came out different) used to
+// be dropped in silence, together with every change after it: walls opened but
+// the window frames stayed and no debris appeared. The client now says so.
+void TestClientReportsRejectedWorldChange() {
+  Wire w;
+  ClientRig blue(1, "wr"), red(2, "wr");
+  blue.client.OnOpen();
+  red.client.OnOpen();
+  for (int i = 0; i < 3; ++i) {
+    blue.Pump(w);
+    red.Pump(w);
+  }
+  CHECK(blue.client.status() == net::RemoteClient::Status::Playing);
+  CHECK(!blue.client.worldOutOfSync());
+  // A cut of a roof detail this map does not have.
+  WorldChange bad;
+  bad.id = 0;
+  bad.kind = WorldChangeKind::MassingCut;
+  bad.target = static_cast<int>(blue.game.GetScene().massing.size()) + 5;
+  bad.rect = glm::vec4(-1.0f, -1.0f, 1.0f, 1.0f);
+  Json list{Json::Array{}};
+  list.Push(net::EncodeWorldChange(bad));
+  Json msg;
+  msg.Set("t", "world");
+  msg.Set("world", std::move(list));
+  blue.client.OnMessage(msg.Dump());
+  CHECK(blue.game.WorldLog().empty());
+  CHECK(blue.client.worldOutOfSync());
+  CHECK(blue.client.StatusText().find("out of sync") != std::string::npos);
+  CHECK(!red.client.worldOutOfSync());
 }
 
 void TestWorldChangeKinds() {
@@ -1136,17 +1414,39 @@ void TestWorldChangeKinds() {
     CHECK(!ApplyWorldChange(&scene, remove));
   }
 
-  // Wall hole.
-  WorldChange hole;
-  hole.kind = WorldChangeKind::WallHole;
-  hole.target = n;  // The live stump.
-  hole.u0 = 0.2f; hole.u1 = 1.0f; hole.y0 = 0.0f; hole.y1 = 0.2f;
-  const size_t openings = scene.facadeOpenings.size();
-  CHECK(ApplyWorldChange(&scene, hole));
-  CHECK(scene.facadeOpenings.size() == openings + 1 &&
-        scene.facadeOpenings.back().kind == FacadeOpening::Kind::Breach);
-  hole.u1 = hole.u0;
-  CHECK(!ApplyWorldChange(&scene, hole));
+  // Wall hole: really cuts the wall around a breach (issue #350). Replace
+  // the stump with a thin wall piece first so the hole has a wall to cut.
+  {
+    const glm::vec3 base = scene.obstacles[n].bounds.min;
+    Obstacle wallPiece = scene.obstacles[n];
+    wallPiece.kind = ObstacleKind::Wall;
+    wallPiece.bounds = AABB{base, base + glm::vec3(4.0f, 3.0f, 0.3f)};
+    wallPiece.footprint = {{base.x, base.z}, {base.x + 4.0f, base.z},
+                           {base.x + 4.0f, base.z + 0.3f}, {base.x, base.z + 0.3f}};
+    WorldChange toWall;
+    toWall.kind = WorldChangeKind::ObstacleReplaced;
+    toWall.target = static_cast<int>(n);
+    toWall.pieces.push_back(wallPiece);
+    CHECK(ApplyWorldChange(&scene, toWall));
+    const int wallIdx = static_cast<int>(scene.obstacles.size()) - 1;
+    WorldChange hole;
+    hole.kind = WorldChangeKind::WallHole;
+    hole.target = wallIdx;
+    hole.wallEdge = 0;
+    hole.u0 = 1.0f; hole.u1 = 2.0f;
+    hole.y0 = base.y + 0.5f; hole.y1 = base.y + 2.0f;
+    const size_t openings = scene.facadeOpenings.size();
+    const size_t obstacles = scene.obstacles.size();
+    CHECK(ApplyWorldChange(&scene, hole));
+    CHECK(scene.obstacles[wallIdx].dead);
+    CHECK(scene.obstacles.size() == obstacles + 4);  // Jambs, sill, head.
+    CHECK(scene.facadeOpenings.size() == openings + 1 &&
+          scene.facadeOpenings.back().kind == FacadeOpening::Kind::Breach);
+    CHECK(!ApplyWorldChange(&scene, hole));  // Target now dead.
+    hole.target = static_cast<int>(obstacles);  // Left jamb, but a degenerate hole.
+    hole.u1 = hole.u0;
+    CHECK(!ApplyWorldChange(&scene, hole));
+  }
 
   // Height patch needs sampled ground; flat maps refuse it.
   WorldChange patch;
@@ -1173,6 +1473,16 @@ void TestWorldChangeKinds() {
   CHECK(ReadWorldChange(in, &back) && back == full);
   WorldChange viaJson;
   CHECK(net::DecodeWorldChange(net::EncodeWorldChange(full), &viaJson) && viaJson == full);
+  WorldChange floorHole;
+  floorHole.kind = WorldChangeKind::FloorHole;
+  floorHole.target = 3;
+  floorHole.rect = glm::vec4(-1.0f, -2.0f, 3.0f, 4.0f);
+  std::ostringstream floorText;
+  floorText.precision(9);
+  WriteWorldChange(floorText, floorHole);
+  std::istringstream floorIn(floorText.str());
+  CHECK(ReadWorldChange(floorIn, &back) && back == floorHole);
+  CHECK(net::DecodeWorldChange(net::EncodeWorldChange(floorHole), &viaJson) && viaJson == floorHole);
   std::istringstream bad("1 2 3");
   CHECK(!ReadWorldChange(bad, &back));
 }
@@ -1585,6 +1895,11 @@ int main(int argc, char** argv) {
       TBG_TEST(TestWorldChangeDebugRemoveAgrees),
       TBG_TEST(TestWorldChangeSentInRoundOnce),
       TBG_TEST(TestWorldChangeKinds),
+      TBG_TEST(TestDebugBombArmedShipsInRound),
+      TBG_TEST(TestRevealHistoryReplaysDestruction),
+      TBG_TEST(TestDebugBombControlTap),
+      TBG_TEST(TestClientServerBombDebris),
+      TBG_TEST(TestClientReportsRejectedWorldChange),
       TBG_TEST(TestClientServerRound),
       TBG_TEST(TestPlaybackFallFromCable),
       TBG_TEST(TestStaleEchoDoesNotRevertFreshPlans),

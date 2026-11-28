@@ -72,6 +72,8 @@ set(GAME_LOGIC_SOURCES
   src/ai/JevPlanner.cpp
   src/game/Scene.cpp
   src/game/WorldChange.cpp
+  src/game/Destruction.cpp
+  src/game/DebrisPhysics.cpp
   src/game/Geometry.cpp
   src/game/MapGenerator.cpp
   src/game/NavMesh.cpp
@@ -233,6 +235,7 @@ if(EMSCRIPTEN)
   add_custom_target(gallery_map_seeds ALL
     COMMAND ${CMAKE_COMMAND}
             -DGOLDENS_DIR=${CMAKE_SOURCE_DIR}/tests/map_goldens
+            -DBLASTS_DIR=${CMAKE_SOURCE_DIR}/tests/blast_gallery
             -DOUT_DIR=${CMAKE_BINARY_DIR}
             -P ${CMAKE_SOURCE_DIR}/scripts/gen_gallery_map_seeds.cmake
     COMMENT "Collecting map-seed goldens for the gallery")
@@ -510,6 +513,13 @@ else()
       PkgConfig::SDL2
       PkgConfig::EGL
     )
+
+    # Renders the gallery's blast-in-building frames (tests/blast_gallery/);
+    # run under xvfb-run, see tests/visual/blast_gallery_main.cpp.
+    add_executable(tactics_blast_gallery tests/visual/blast_gallery_main.cpp)
+    target_include_directories(tactics_blast_gallery PRIVATE tests ${stb_SOURCE_DIR})
+    target_link_libraries(tactics_blast_gallery PRIVATE tactics_gfx tactics_logic PkgConfig::SDL2
+                                                        PkgConfig::EGL)
 
     find_program(XVFB_RUN_EXECUTABLE xvfb-run)
     if(XVFB_RUN_EXECUTABLE)

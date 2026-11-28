@@ -7,8 +7,11 @@
 #include <cmath>
 #include <cstdio>
 #include <initializer_list>
+#include <sstream>
 #include <vector>
 
+#include "game/BuilderScene.h"
+#include "game/Destruction.h"
 #include "game/GameLogic.h"
 #include "game/Geometry.h"
 #include "game/NavMesh.h"
@@ -3884,6 +3887,15 @@ void TestDeadFiguresSeeThroughProbes() {
   CHECK(has(probes, units[1].EyePosition()));
   probes = FigureSeeThroughProbes(Team::Blue, false, false, units, {}, noSurfaces, flat);
   CHECK(has(probes, units[2].EyePosition()));
+  // The whole body is probed: every corner of the prism around the figure.
+  const glm::vec3 at = units[0].position;
+  const float hw = constants::kUnitHalfWidth;
+  for (const float dx : {-hw, hw}) {
+    for (const float dz : {-hw, hw}) {
+      CHECK(has(probes, at + glm::vec3(dx, constants::kUnitHeight, dz)));
+      CHECK(has(probes, at + glm::vec3(dx, 0.3f, dz)));
+    }
+  }
 }
 
 // Camera see-through: a faded enterable building keeps its interior view only
@@ -4267,11 +4279,1292 @@ void TestSnapshotCarriesCoverPose() {
   CHECK(mirrored->Bounds().max.y < constants::kCrouchedHeight + 0.01f);
 }
 
+// --- Destruction I (issue #350): debug bomb, fracture, wall/floor holes. ---
+
+// One thin wall across the whole map between two facing figures: nothing
+// gets past it except through a blast hole.
+Scene BombWallScene() {
+  Scene scene;
+  scene.mapHalfExtent = 8.0f;
+  Obstacle wall;
+  wall.bounds = AABB{glm::vec3(-0.15f, 0.0f, -8.0f), glm::vec3(0.15f, 3.0f, 8.0f)};
+  wall.kind = ObstacleKind::Wall;
+  scene.obstacles.push_back(wall);
+  Unit blue;
+  blue.id = 0;
+  blue.team = Team::Blue;
+  blue.position = glm::vec3(-4.0f, 0.0f, 0.0f);
+  blue.facingYaw = 0.0f;
+  scene.units.push_back(blue);
+  Unit red;
+  red.id = 1;
+  red.team = Team::Red;
+  red.position = glm::vec3(4.0f, 0.0f, 0.0f);
+  red.facingYaw = kPi;
+  scene.units.push_back(red);
+  return scene;
+}
+
+// A one-room building floor at y = 3 (surface 0), the ceiling slab under it,
+// one far wall keeping the building alive, and a side patch linked as the
+// floor's neighbour.
+Scene BombFloorScene() {
+  Scene scene;
+  scene.mapHalfExtent = 10.0f;
+  Building building;
+  building.enterable = true;
+  building.floorSurfaces = {0};
+  scene.buildings.push_back(building);
+  WalkSurface floor;
+  floor.building = 0;
+  floor.vertices = {{-3, 3, -3}, {3, 3, -3}, {3, 3, 3}, {-3, 3, 3}};
+  floor.neighbors = {1};
+  scene.walkSurfaces.push_back(floor);
+  WalkSurface side;
+  side.building = 0;
+  side.vertices = {{3, 3, -1}, {5, 3, -1}, {5, 3, 1}, {3, 3, 1}};
+  side.neighbors = {0};
+  scene.walkSurfaces.push_back(side);
+  Obstacle slab;
+  slab.building = 0;
+  slab.bounds = AABB{glm::vec3(-3.0f, 2.6f, -3.0f), glm::vec3(3.0f, 2.9f, 3.0f)};
+  slab.footprint = {{-3, -3}, {3, -3}, {3, 3}, {-3, 3}};
+  scene.obstacles.push_back(slab);
+  Obstacle wall;  // Out of blast range: keeps the building index alive.
+  wall.building = 0;
+  wall.kind = ObstacleKind::Wall;
+  wall.bounds = AABB{glm::vec3(-8.15f, 0.0f, -3.0f), glm::vec3(-7.85f, 6.0f, 3.0f)};
+  scene.obstacles.push_back(wall);
+  Unit blue;
+  blue.id = 0;
+  blue.team = Team::Blue;
+  blue.position = glm::vec3(0.0f, 3.0f, 0.0f);  // Standing over the hole-to-be.
+  scene.units.push_back(blue);
+  Unit red;
+  red.id = 1;
+  red.team = Team::Red;
+  red.position = glm::vec3(7.0f, 0.0f, 7.0f);
+  scene.units.push_back(red);
+  return scene;
+}
+
+void TestExplosionPlanDeterministicCells() {
+  CHECK(ExplosionSeed(7u, 1, 0) == ExplosionSeed(7u, 1, 0));
+  CHECK(ExplosionSeed(7u, 1, 0) != ExplosionSeed(7u, 1, 1));
+  CHECK(ExplosionSeed(7u, 1, 0) != ExplosionSeed(7u, 2, 0));
+  const Scene scene = BombWallScene();
+  BombSpec spec;
+  spec.position = glm::vec3(0.0f, 1.0f, 0.0f);
+  spec.radius = 3.0f;
+  spec.seed = ExplosionSeed(7u, 1, 0);
+  const std::vector<WorldChange> planA = PlanExplosion(scene, spec);
+  const std::vector<WorldChange> planB = PlanExplosion(scene, spec);
+  CHECK(!planA.empty());
+  CHECK(planA.size() == planB.size());
+  for (size_t i = 0; i < std::min(planA.size(), planB.size()); ++i) {
+    CHECK(planA[i] == planB[i]);
+  }
+  // The wall (obstacle 0) is replaced by the cells left standing.
+  bool sawWallCut = false;
+  for (const WorldChange& c : planA) {
+    sawWallCut |= c.kind == WorldChangeKind::ObstacleReplaced && c.target == 0 &&
+                  !c.pieces.empty();
+  }
+  CHECK(sawWallCut);
+  // A plan out of blast range is empty.
+  BombSpec far = spec;
+  far.position = glm::vec3(6.0f, 1.0f, 6.0f);
+  far.radius = 2.0f;
+  CHECK(PlanExplosion(scene, far).empty());
+}
+
+void TestBombBlowsSeeAndWalkThroughHole() {
+  GameLogic game(BombWallScene());
+  game.SetMatchSeed(7u);
+  const glm::vec3 blueEye(-4.0f, 1.5f, 0.0f), redEye(4.0f, 1.5f, 0.0f);
+  CHECK(!LineOfSightClear(blueEye, redEye, game.SightObstacles()));
+  {
+    NavMesh nav;
+    nav.Build(game.GetScene().obstacles, 8.0f, 0.4f);
+    std::vector<glm::vec3> path;
+    CHECK(!nav.FindPath(glm::vec3(-4.0f, 0.0f, 0.0f), glm::vec3(4.0f, 0.0f, 0.0f), &path));
+  }
+  game.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
+  CHECK(game.GetDebugBomb().has_value());
+  CHECK(game.DebugDetonateBomb());
+  CHECK(!game.GetDebugBomb().has_value());  // Spent.
+  CHECK(!game.WorldLog().empty());
+  // Figures can see and shoot through the hole...
+  CHECK(LineOfSightClear(blueEye, redEye, game.SightObstacles()));
+  // ... and it reaches the floor with headroom, so they can walk through it.
+  {
+    NavMesh nav;
+    nav.Build(game.GetScene().obstacles, 8.0f, 0.4f);
+    std::vector<glm::vec3> path;
+    CHECK(nav.FindPath(glm::vec3(-4.0f, 0.0f, 0.0f), glm::vec3(4.0f, 0.0f, 0.0f), &path));
+  }
+  // A follower importing the state rebuilds the same holes (reconnect).
+  GameLogic follower(BombWallScene());
+  CHECK(follower.ImportState(game.ExportState()));
+  CHECK(follower.GetScene().obstacles.size() == game.GetScene().obstacles.size());
+  CHECK(follower.StateHash() == game.StateHash());
+  // Rewinding the log (timeline scrubbing to the start) restores the wall.
+  GameSnapshot start = game.ExportState();
+  start.world.clear();
+  CHECK(follower.ImportState(start));
+  CHECK(!LineOfSightClear(blueEye, redEye, follower.SightObstacles()));
+}
+
+// Blast impulse (debug bomb parameter) scales debris launch velocity: the
+// highest point any chunk reaches grows with it.
+float BombPeakHeight(float impulse) {
+  GameLogic game(BombWallScene());
+  game.SetMatchSeed(7u);
+  game.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f, impulse);
+  CHECK(game.DebugDetonateBomb());
+  float peak = -1e9f;
+  for (const WorldChange& c : game.WorldLog()) {
+    for (const DebrisFlight& f : c.flights) {
+      for (const DebrisKey& k : f.keys) peak = std::max(peak, k.position.y);
+    }
+  }
+  return peak;
+}
+
+void TestBombImpulseLaunchesDebrisHigher() {
+  const float stock = BombPeakHeight(1.0f);
+  const float strong = BombPeakHeight(4.0f);
+  CHECK(strong > stock + 1.0f);
+  CHECK(BombPeakHeight(0.0f) < stock);
+}
+
+void TestWallHoleChangeCutsGeometry() {
+  Scene scene = BombWallScene();
+  const size_t before = scene.obstacles.size();
+  WorldChange hole;
+  hole.kind = WorldChangeKind::WallHole;
+  hole.target = 0;
+  hole.wallEdge = 1;  // The implicit footprint's long (+z) edge.
+  hole.u0 = 6.0f;     // z in [-2, 0] along that edge.
+  hole.u1 = 8.0f;
+  hole.y0 = 0.0f;
+  hole.y1 = 2.0f;
+  CHECK(ApplyWorldChange(&scene, hole));
+  CHECK(scene.obstacles[0].dead);
+  // Floor-reaching hole: two jambs and a head, no sill.
+  CHECK(scene.obstacles.size() == before + 3);
+  CHECK(!scene.facadeOpenings.empty() &&
+        scene.facadeOpenings.back().kind == FacadeOpening::Kind::Breach);
+  // Rays pass through the hole, the jambs still block.
+  CHECK(LineOfSightClear({-4.0f, 1.0f, -1.0f}, {4.0f, 1.0f, -1.0f}, scene.obstacles));
+  CHECK(!LineOfSightClear({-4.0f, 1.0f, 4.0f}, {4.0f, 1.0f, 4.0f}, scene.obstacles));
+  CHECK(!LineOfSightClear({-4.0f, 2.5f, -1.0f}, {4.0f, 2.5f, -1.0f}, scene.obstacles));  // Head.
+  CHECK(!ApplyWorldChange(&scene, hole));  // Target already dead.
+  // A hole that misses its wall does not apply.
+  WorldChange miss = hole;
+  miss.target = static_cast<int>(before);  // Left jamb: z in [-8, -2].
+  miss.u0 = 7.0f;
+  miss.u1 = 9.0f;
+  miss.y0 = 10.0f;
+  miss.y1 = 12.0f;
+  CHECK(!ApplyWorldChange(&scene, miss));
+}
+
+void TestFloorHolePiecesAndLinks() {
+  Scene scene = BombFloorScene();
+  WorldChange hole;
+  hole.kind = WorldChangeKind::FloorHole;
+  hole.target = 0;
+  hole.rect = glm::vec4(-1.0f, -1.0f, 1.0f, 1.0f);
+  CHECK(ApplyWorldChange(&scene, hole));
+  CHECK(scene.walkSurfaces[0].dead);
+  CHECK(scene.walkSurfaces.size() == 6);  // 4 pieces appended.
+  for (size_t i = 2; i < 6; ++i) {
+    const WalkSurface& piece = scene.walkSurfaces[i];
+    CHECK(!piece.dead && piece.vertices.size() >= 3);
+    CHECK(!SurfaceContainsXZ(piece, 0.0f, 0.0f));  // The hole is open.
+    CHECK(!piece.neighbors.empty());  // Linked across the cut lines.
+    CHECK(piece.building == 0);
+  }
+  // The old side patch is relinked to the piece still touching it.
+  const WalkSurface& side = scene.walkSurfaces[1];
+  CHECK(!side.neighbors.empty());
+  for (const int n : side.neighbors) {
+    CHECK(n >= 2);
+    CHECK(SurfaceContainsXZ(scene.walkSurfaces[n], 2.9f, 0.0f));
+  }
+  CHECK(!ApplyWorldChange(&scene, hole));  // Dead target.
+  // A hole missing the patch entirely is rejected.
+  WorldChange miss = hole;
+  miss.target = 1;
+  miss.rect = glm::vec4(-8.0f, -8.0f, -6.0f, -6.0f);
+  CHECK(!ApplyWorldChange(&scene, miss));
+}
+
+void TestBombFloorHoleDropsFigure() {
+  GameLogic game(BombFloorScene());
+  game.DebugPlaceBomb(glm::vec3(0.0f, 3.0f, 0.0f), 2.5f);
+  CHECK(game.DebugDetonateBomb());
+  bool sawFloorHole = false, sawSlabCut = false;
+  bool sawSlantedCut = false;
+  for (const WorldChange& c : game.WorldLog()) {
+    sawFloorHole |= c.kind == WorldChangeKind::FloorHole;
+    sawSlabCut |= c.kind == WorldChangeKind::ObstacleReplaced;
+    if (c.kind != WorldChangeKind::ObstacleReplaced) continue;
+    for (const Obstacle& piece : c.pieces) {
+      for (size_t i = 0; i < piece.footprint.size(); ++i) {
+        const glm::vec2 e = piece.footprint[(i + 1) % piece.footprint.size()] - piece.footprint[i];
+        sawSlantedCut |= std::fabs(e.x) > 0.05f && std::fabs(e.y) > 0.05f;
+      }
+    }
+  }
+  CHECK(sawSlantedCut);  // The slab tears along fracture cells, not a rect.
+  CHECK(sawFloorHole);
+  CHECK(sawSlabCut);  // The ceiling slab under the floor got a matching hole.
+  const Unit* fallen = game.FindUnit(0);
+  CHECK(fallen && !fallen->alive);
+  CHECK(fallen && fallen->knockdownElapsed >= 0.0f);
+  CHECK(fallen && std::fabs(fallen->knockdownDrop - 3.0f) < 0.2f);  // Fell to the ground.
+  const Unit* bystander = game.FindUnit(1);
+  CHECK(bystander && bystander->alive);
+}
+
+// A WallHole carrying a fracture outline cuts angled pieces: the leftover
+// obstacles carry wall-plane profiles, and LOS honours the slanted torn
+// edges exactly (clear inside the outline, blocked outside it, including
+// spots a plain bounding-box hole would have opened).
+void TestWallHoleOutlineCutsAngledPieces() {
+  Scene scene = BombWallScene();
+  WorldChange hole;
+  hole.kind = WorldChangeKind::WallHole;
+  hole.target = 0;
+  hole.wallEdge = 1;  // The implicit footprint's long (+z) edge: u = z + 8.
+  // A six-sided outline: lower chain dips to y=0.8 mid-hole, upper chain
+  // rises to y=2.6. All four slanted edges are neither horizontal nor
+  // vertical.
+  hole.polygon = {{6.0f, 1.5f, 0.0f}, {7.0f, 0.8f, 0.0f}, {8.0f, 1.5f, 0.0f},
+                  {8.0f, 2.2f, 0.0f}, {7.0f, 2.6f, 0.0f}, {6.0f, 2.2f, 0.0f}};
+  hole.u0 = 6.0f;
+  hole.u1 = 8.0f;
+  hole.y0 = 0.8f;
+  hole.y1 = 2.6f;
+  const size_t before = scene.obstacles.size();
+  CHECK(ApplyWorldChange(&scene, hole));
+  CHECK(scene.obstacles[0].dead);
+  CHECK(scene.obstacles.size() > before);
+  bool sawProfile = false;
+  for (size_t i = before; i < scene.obstacles.size(); ++i) {
+    sawProfile |= scene.obstacles[i].profile.size() >= 3;
+  }
+  CHECK(sawProfile);
+  // Through the middle of the outline (u=7 -> z=-1): clear.
+  CHECK(LineOfSightClear({-4.0f, 1.7f, -1.0f}, {4.0f, 1.7f, -1.0f}, scene.obstacles));
+  // Near the left corner (u=6.1 -> z=-1.9) the outline has pinched: y=1.8 is
+  // inside it, y=1.0 is under the slanted lower edge -- a rect hole over the
+  // outline's bounding box would have cleared both.
+  CHECK(LineOfSightClear({-4.0f, 1.8f, -1.9f}, {4.0f, 1.8f, -1.9f}, scene.obstacles));
+  CHECK(!LineOfSightClear({-4.0f, 1.0f, -1.9f}, {4.0f, 1.0f, -1.9f}, scene.obstacles));
+  // Above the upper chain mid-hole: blocked by the slanted head piece.
+  CHECK(!LineOfSightClear({-4.0f, 2.75f, -1.0f}, {4.0f, 2.75f, -1.0f}, scene.obstacles));
+  // Outside the hole entirely: still a wall.
+  CHECK(!LineOfSightClear({-4.0f, 1.5f, 3.0f}, {4.0f, 1.5f, 3.0f}, scene.obstacles));
+}
+
+// PlanExplosion pre-cracks the wall into Voronoi cells: the standing pieces
+// are convex wall-plane profiles with slanted edges, they never overlap what
+// was knocked out, and nothing is created from thin air (standing + debris
+// area never exceeds the wall).
+void TestExplosionFractureHasAngledEdges() {
+  const Scene scene = BombWallScene();
+  BombSpec spec;
+  spec.position = glm::vec3(0.0f, 1.0f, 0.0f);
+  spec.radius = 3.0f;
+  spec.seed = ExplosionSeed(7u, 1, 0);
+  bool sawSlantedEdge = false;
+  float standing = 0.0f, knocked = 0.0f;
+  for (const WorldChange& c : PlanExplosion(scene, spec)) {
+    if (c.kind == WorldChangeKind::ObstacleReplaced && c.target == 0) {
+      for (const Obstacle& piece : c.pieces) {
+        CHECK(piece.footprint.size() == 4);
+        if (piece.profile.size() < 3) {
+          standing += glm::distance(piece.footprint[0], piece.footprint[1]) *
+                      (piece.bounds.max.y - piece.bounds.min.y);
+          continue;
+        }
+        CHECK(PolygonSignedArea(piece.profile) > 0.0f);  // CCW, as the renderer expects.
+        standing += PolygonArea(piece.profile);
+        for (size_t i = 0; i < piece.profile.size(); ++i) {
+          const glm::vec2 a = piece.profile[i];
+          const glm::vec2 b = piece.profile[(i + 1) % piece.profile.size()];
+          sawSlantedEdge |= std::fabs(b.x - a.x) > 0.05f && std::fabs(b.y - a.y) > 0.05f;
+          // Convex: every turn is a left turn.
+          const glm::vec2 c2 = piece.profile[(i + 2) % piece.profile.size()];
+          CHECK((b.x - a.x) * (c2.y - b.y) - (b.y - a.y) * (c2.x - b.x) > -1e-3f);
+        }
+      }
+    } else if (c.kind == WorldChangeKind::Debris) {
+      for (const Obstacle& piece : c.pieces) knocked += PolygonArea(piece.footprint);
+    }
+  }
+  CHECK(sawSlantedEdge);
+  CHECK(standing > 20.0f);              // Most of the 16 x 3 wall still stands...
+  CHECK(knocked > 3.0f);                // ... a real hole came out of it ...
+  CHECK(standing + knocked < 48.01f);   // ... and the two never overlap.
+  GameLogic game(BombWallScene());
+  game.SetMatchSeed(7u);
+  game.DebugPlaceBomb(spec.position, spec.radius);
+  CHECK(game.DebugDetonateBomb());
+  bool sawProfiledPiece = false;
+  for (const Obstacle& o : game.GetScene().obstacles) {
+    sawProfiledPiece |= !o.dead && o.profile.size() >= 3;
+  }
+  CHECK(sawProfiledPiece);
+}
+
+// The debris is the destroyed part of the wall: every chunk is one
+// knocked-out fracture cell, shipped as the prism it was cut from -- upright,
+// inside the wall slab, exactly where the applied scene now has a hole --
+// plus the sampled rigid-body track it followed. The track starts at the
+// launch pose (identity transform) and ends on a rest pose above the ground;
+// chunks land as rubble obstacles (small ones as litter) wherever that is,
+// and the whole thing round-trips the codec.
+void TestExplosionDebrisMatchesKnockedOutCells() {
+  GameLogic game(BombWallScene());
+  game.SetMatchSeed(7u);
+  game.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
+  CHECK(game.DebugDetonateBomb());
+  const WorldChange* debris = nullptr;
+  for (const WorldChange& c : game.WorldLog()) {
+    if (c.kind == WorldChangeKind::Debris) debris = &c;
+  }
+  CHECK(debris != nullptr);
+  if (!debris) return;
+  CHECK(debris->pieces.size() >= 6);
+  CHECK(debris->flights.size() == debris->pieces.size());
+  std::vector<Obstacle> standing;  // What is left of the wall (no rubble).
+  for (const Obstacle& o : game.GetScene().obstacles) {
+    if (!o.dead && o.kind != ObstacleKind::Rubble) standing.push_back(o);
+  }
+  int solid = 0;
+  for (size_t i = 0; i < debris->pieces.size(); ++i) {
+    const Obstacle& piece = debris->pieces[i];
+    const DebrisFlight& flight = debris->flights[i];
+    solid += flight.solid;
+    CHECK(piece.kind == ObstacleKind::Rubble);
+    CHECK(flight.keys.size() >= 2);
+    CHECK(flight.Duration() > 0.0f);
+    DebrisShape shape;
+    CHECK(DebrisPieceShape(piece, &shape));
+    // At launch the chunk is a cell of the wall: upright, inside the slab,
+    // and the pose track starts exactly there.
+    const glm::mat4 launch = DebrisPose(flight, 0.0f);
+    CHECK(launch == glm::mat4(1.0f));
+    for (const glm::vec2& p : shape.outline) {
+      for (const float z : {-0.5f * shape.thickness, 0.5f * shape.thickness}) {
+        const glm::vec3 v(shape.pose * glm::vec4(p.x, p.y, z, 1.0f));
+        CHECK(std::fabs(v.x) < 0.15f + 2e-3f);
+        CHECK(v.y > -2e-3f && v.y < 3.0f + 2e-3f);
+        CHECK(std::fabs(v.z) < 8.0f + 2e-3f);
+      }
+    }
+    // ... and that cell is now open: sight passes through its middle.
+    const glm::vec3 c = flight.keys[0].position;
+    CHECK(std::fabs(c.x) < 0.15f);
+    CHECK(LineOfSightClear({-0.5f, c.y, c.z}, {0.5f, c.y, c.z}, standing));
+    // At rest the chunk is on the map and not sunk into the ground, however
+    // it lies.
+    const Obstacle rest = DebrisRestObstacle(piece, flight);
+    CHECK(rest.bounds.min.y > -0.06f);
+    CHECK(std::fabs(0.5f * (rest.bounds.min.x + rest.bounds.max.x)) < 8.0f);
+    CHECK(std::fabs(0.5f * (rest.bounds.min.z + rest.bounds.max.z)) < 8.0f);
+    CHECK(DebrisPose(flight, flight.Duration() + 5.0f) == DebrisPose(flight, flight.Duration()));
+  }
+  // The solid chunks really are obstacles in the applied scene.
+  CHECK(solid >= 1);
+  int rubble = 0;
+  for (const Obstacle& o : game.GetScene().obstacles) {
+    rubble += !o.dead && o.kind == ObstacleKind::Rubble;
+  }
+  CHECK(rubble == solid);
+  // Codec round-trip, flights included. Float text is 6 significant digits,
+  // so the stable invariant is write(read(write(x))) == write(x), as for the
+  // snapshot text everywhere else.
+  std::ostringstream out;
+  WriteWorldChange(out, *debris);
+  std::istringstream in(out.str());
+  WorldChange back;
+  CHECK(ReadWorldChange(in, &back));
+  CHECK(back.kind == WorldChangeKind::Debris);
+  CHECK(back.pieces.size() == debris->pieces.size());
+  CHECK(back.flights.size() == debris->flights.size());
+  std::ostringstream again;
+  WriteWorldChange(again, back);
+  CHECK(again.str() == out.str());
+}
+
+// Everything concrete breaks: a corner post too short to count as a wall and
+// the short head strip over a window fracture like the wall between them.
+void TestExplosionBreaksPostsAndStrips() {
+  Scene scene = BombWallScene();
+  scene.obstacles[0].bounds = AABB{glm::vec3(-0.15f, 0.0f, 0.5f), glm::vec3(0.15f, 3.0f, 8.0f)};
+  Obstacle post;  // 0.2 x 0.3 corner post.
+  post.kind = ObstacleKind::Wall;
+  post.bounds = AABB{glm::vec3(-0.15f, 0.0f, -0.1f), glm::vec3(0.15f, 3.0f, 0.1f)};
+  scene.obstacles.push_back(post);
+  Obstacle head;  // Head strip over an opening.
+  head.kind = ObstacleKind::Wall;
+  head.bounds = AABB{glm::vec3(-0.15f, 2.5f, -2.5f), glm::vec3(0.15f, 3.0f, -0.1f)};
+  scene.obstacles.push_back(head);
+  BombSpec spec;
+  spec.position = glm::vec3(1.0f, 1.2f, 0.0f);
+  spec.radius = 3.0f;
+  spec.seed = ExplosionSeed(7u, 1, 0);
+  bool wall = false, postHit = false, headHit = false;
+  for (const WorldChange& c : PlanExplosion(scene, spec)) {
+    if (c.kind != WorldChangeKind::ObstacleReplaced && c.kind != WorldChangeKind::ObstacleRemoved) {
+      continue;
+    }
+    wall |= c.target == 0;
+    postHit |= c.target == 1;
+    headHit |= c.target == 2;
+  }
+  CHECK(wall);
+  CHECK(postHit);
+  CHECK(headHit);
+}
+
+// A floor hole given as fracture cells: the patches left standing are the
+// cells' footprints clipped to the floor, linked across their shared edges.
+void TestFloorHoleFromCells() {
+  Scene scene = BombFloorScene();
+  WorldChange hole;
+  hole.kind = WorldChangeKind::FloorHole;
+  hole.target = 0;
+  hole.rect = glm::vec4(-1.0f, -3.0f, 3.0f, 3.0f);
+  Obstacle left, wedge;
+  left.footprint = {{-4.0f, -4.0f}, {-1.0f, -4.0f}, {0.0f, 4.0f}, {-4.0f, 4.0f}};  // Slanted cut.
+  wedge.footprint = {{0.0f, 4.0f}, {-1.0f, -4.0f}, {1.0f, -4.0f}};
+  hole.pieces = {left, wedge};
+  CHECK(ApplyWorldChange(&scene, hole));
+  CHECK(scene.walkSurfaces[0].dead);
+  CHECK(scene.walkSurfaces.size() == 4);
+  const WalkSurface& a = scene.walkSurfaces[2];
+  const WalkSurface& b = scene.walkSurfaces[3];
+  CHECK(SurfaceContainsXZ(a, -2.0f, 0.0f) && !SurfaceContainsXZ(a, 0.5f, -2.0f));
+  CHECK(SurfaceContainsXZ(b, 0.0f, -2.0f));
+  CHECK(!SurfaceContainsXZ(a, 2.0f, 0.0f) && !SurfaceContainsXZ(b, 2.0f, 0.0f));  // The hole.
+  for (const glm::vec3& v : a.vertices) CHECK(v.y == 3.0f && std::fabs(v.x) <= 3.001f);
+  CHECK(std::find(a.neighbors.begin(), a.neighbors.end(), 3) != a.neighbors.end());
+  // Cells covering the whole patch remove nothing: rejected.
+  Scene intact = BombFloorScene();
+  WorldChange none = hole;
+  Obstacle all;
+  all.footprint = {{-4.0f, -4.0f}, {4.0f, -4.0f}, {4.0f, 4.0f}, {-4.0f, 4.0f}};
+  none.pieces = {all};
+  CHECK(!ApplyWorldChange(&intact, none));
+}
+
+// The roof-edge wrap-around (parapet massing) breaks with the wall: the
+// blast emits a MassingCut whose apply kills the band and appends the convex
+// leftovers outside the blast box.
+void TestMassingCutBreaksParapet() {
+  Scene scene = BombWallScene();
+  MassingDetail parapet;
+  parapet.kind = MassingDetail::Kind::Parapet;
+  parapet.footprint = {{-0.15f, -8.0f}, {0.15f, -8.0f}, {0.15f, 8.0f}, {-0.15f, 8.0f}};
+  parapet.y0 = 3.0f;
+  parapet.y1 = 3.6f;
+  scene.massing.push_back(parapet);
+  BombSpec spec;
+  spec.position = glm::vec3(0.0f, 1.0f, 0.0f);
+  spec.radius = 3.0f;
+  spec.seed = ExplosionSeed(7u, 1, 0);
+  bool sawMassingCut = false;
+  for (const WorldChange& c : PlanExplosion(scene, spec)) {
+    sawMassingCut |= c.kind == WorldChangeKind::MassingCut && c.target == 0;
+  }
+  CHECK(sawMassingCut);
+  // Direct apply: a cut through the middle of the band leaves the two ends.
+  WorldChange cut;
+  cut.kind = WorldChangeKind::MassingCut;
+  cut.target = 0;
+  cut.rect = glm::vec4(-2.0f, -1.5f, 2.0f, 1.5f);
+  CHECK(ApplyWorldChange(&scene, cut));
+  CHECK(scene.massing[0].dead && scene.massing[0].footprint.empty());
+  CHECK(scene.massing.size() == 3);  // Two surviving end pieces appended.
+  for (size_t i = 1; i < scene.massing.size(); ++i) {
+    const MassingDetail& piece = scene.massing[i];
+    CHECK(!piece.dead && piece.footprint.size() >= 3);
+    CHECK(piece.kind == MassingDetail::Kind::Parapet);
+    CHECK(piece.y0 == 3.0f && piece.y1 == 3.6f);
+    for (const glm::vec2& p : piece.footprint) CHECK(std::fabs(p.y) >= 1.5f - 1e-3f);
+  }
+  CHECK(!ApplyWorldChange(&scene, cut));  // Dead target.
+  // A cut that misses a detail entirely is rejected.
+  WorldChange miss = cut;
+  miss.target = 1;
+  miss.rect = glm::vec4(5.0f, 5.0f, 6.0f, 6.0f);
+  CHECK(!ApplyWorldChange(&scene, miss));
+  // A detail entirely inside the box is removed whole.
+  WorldChange whole = cut;
+  whole.target = 1;
+  whole.rect = glm::vec4(-10.0f, -10.0f, 10.0f, 10.0f);
+  CHECK(ApplyWorldChange(&scene, whole));
+  CHECK(scene.massing[1].dead);
+  CHECK(scene.massing.size() == 3);  // Nothing appended.
+}
+
+// Concrete volume of what stands (rubble and unseen nav walls excluded).
+float StandingVolume(const Scene& scene) {
+  float volume = 0.0f;
+  for (const Obstacle& o : scene.obstacles) {
+    if (o.dead || o.navOnly || o.kind == ObstacleKind::Rubble) continue;
+    const std::vector<glm::vec2> f = ObstacleFootprint(o);
+    if (f.size() < 3) continue;
+    if (o.profile.size() >= 3 && f.size() == 4) {
+      volume += PolygonArea(o.profile) * glm::distance(f[0], f[3]);
+    } else {
+      volume += PolygonArea(f) * (o.bounds.max.y - o.bounds.min.y);
+    }
+  }
+  return volume;
+}
+
+float DebrisVolume(const std::vector<WorldChange>& plan, int* pieces = nullptr) {
+  float volume = 0.0f;
+  for (const WorldChange& c : plan) {
+    if (c.kind != WorldChangeKind::Debris) continue;
+    for (const Obstacle& piece : c.pieces) {
+      DebrisShape shape;
+      if (DebrisPieceShape(piece, &shape)) volume += PolygonArea(shape.outline) * shape.thickness;
+      if (pieces) ++*pieces;
+    }
+  }
+  return volume;
+}
+
+// Nothing a blast knocks out just disappears: whatever volume stops standing
+// leaves as debris chunks (up to dust-sized slivers), however big the blast
+// -- no cap on chunks, pieces or changes drops any of it.
+void TestExplosionAccountsForEveryChunk() {
+  for (const float radius : {3.0f, 8.0f}) {
+    Scene scene = BombWallScene();
+    BombSpec spec;
+    spec.position = glm::vec3(0.6f, 1.0f, 0.0f);
+    spec.radius = radius;
+    spec.seed = 99u;
+    const float before = StandingVolume(scene);
+    const std::vector<WorldChange> plan = PlanExplosion(scene, spec);
+    CHECK(!plan.empty());
+    for (const WorldChange& c : plan) CHECK(ApplyWorldChange(&scene, c));
+    const float lost = before - StandingVolume(scene);
+    int pieces = 0;
+    const float debris = DebrisVolume(plan, &pieces);
+    CHECK(lost > 0.5f);
+    CHECK(std::fabs(lost - debris) < 0.02f * lost + 0.01f);
+    CHECK(pieces >= 6);
+    // Applying the plan made every solid chunk an obstacle.
+    int solid = 0, rubble = 0;
+    for (const WorldChange& c : plan) {
+      if (c.kind != WorldChangeKind::Debris) continue;
+      CHECK(c.pieces.size() <= 64);
+      for (const DebrisFlight& f : c.flights) solid += f.solid;
+    }
+    for (const Obstacle& o : scene.obstacles) rubble += !o.dead && o.kind == ObstacleKind::Rubble;
+    CHECK(rubble == solid);
+  }
+}
+
+// A generated building under a big blast (the repro from PR #354): the
+// volume is accounted for, the window frames within the blast are blown off
+// (OpeningRemoved) while the frames further out stay on the building even
+// though the roof slab they were laid out on is fractured, and a follower
+// replaying the log rebuilds the same thing.
+void TestExplosionOnBuildingKeepsFarWindowFrames() {
+  BuilderScene bs;
+  bs.mapHalfExtent = 20.0f;
+  BuilderBuilding building;
+  building.seed = 732495299;
+  building.cx = 6.06210518f;
+  building.cz = -2.39949226f;
+  building.hx = 5.80922747f;
+  building.hz = 7.1162014f;
+  bs.buildings.push_back(building);
+  bs.figures.push_back(BuilderFigure{Team::Blue, WeaponType::AssaultRifle, -16.0f, -8.0f});
+  bs.figures.push_back(BuilderFigure{Team::Red, WeaponType::AssaultRifle, 19.0f, 13.0f});
+  const Scene base = BuildScene(bs);
+  CHECK(!base.facadeOpenings.empty());
+  if (base.facadeOpenings.empty()) return;
+  BombSpec spec;
+  spec.position = glm::vec3(6.9546f, 1.0f, 7.4734f);
+  spec.radius = 10.0f;
+  spec.seed = 615415118u;
+  Scene scene = base;
+  const float before = StandingVolume(scene);
+  const std::vector<WorldChange> plan = PlanExplosion(scene, spec);
+  for (const WorldChange& c : plan) CHECK(ApplyWorldChange(&scene, c));
+  const float lost = before - StandingVolume(scene);
+  // Debris also holds the frame bars and parapet cells, which are not
+  // obstacles: it can only exceed what the obstacles lost.
+  const float debris = DebrisVolume(plan);
+  CHECK(lost > 5.0f);
+  CHECK(debris > lost - 0.02f * lost);
+  CHECK(debris < lost + 6.0f);
+  int removed = 0, live = 0;
+  for (const WorldChange& c : plan) removed += c.kind == WorldChangeKind::OpeningRemoved;
+  for (const FacadeOpening& o : scene.facadeOpenings) {
+    if (o.dead) continue;
+    ++live;
+    glm::vec2 a, b;
+    CHECK(FacadeOpeningEdge(scene, o, &a, &b));  // Still drawable.
+  }
+  CHECK(removed > 0);
+  CHECK(live > 0);
+  CHECK(removed + live == static_cast<int>(base.facadeOpenings.size()));
+  // Every surviving frame is where it was: same edge as before the blast.
+  for (size_t i = 0; i < base.facadeOpenings.size(); ++i) {
+    if (scene.facadeOpenings[i].dead) continue;
+    glm::vec2 a0, b0, a1, b1;
+    CHECK(FacadeOpeningEdge(base, base.facadeOpenings[i], &a0, &b0));
+    CHECK(FacadeOpeningEdge(scene, scene.facadeOpenings[i], &a1, &b1));
+    CHECK(glm::distance(a0, a1) < 1e-4f && glm::distance(b0, b1) < 1e-4f);
+  }
+  // Deterministic, and it replays: codec round-trip of every change applies
+  // to the same result.
+  CHECK(PlanExplosion(base, spec) == plan);
+  Scene replay = base;
+  for (const WorldChange& c : plan) {
+    std::ostringstream out;
+    WriteWorldChange(out, c);
+    std::istringstream in(out.str());
+    WorldChange back;
+    CHECK(ReadWorldChange(in, &back));
+    CHECK(ApplyWorldChange(&replay, back));
+  }
+  CHECK(replay.obstacles.size() == scene.obstacles.size());
+  CHECK(replay.walkSurfaces.size() == scene.walkSurfaces.size());
+  int replayLive = 0;
+  for (const FacadeOpening& o : replay.facadeOpenings) replayLive += !o.dead;
+  CHECK(replayLive == live);
+}
+
+// Thick solids fracture too (in layers): an overpass pier severed by a
+// blast beside it, and a solid block cratered on the face the blast hit.
+void TestExplosionFracturesThickSolids() {
+  Scene scene;
+  scene.mapHalfExtent = 12.0f;
+  Obstacle pier;
+  pier.kind = ObstacleKind::Pier;
+  pier.bounds = AABB{glm::vec3(-0.75f, 0.0f, -0.75f), glm::vec3(0.75f, 6.0f, 0.75f)};
+  scene.obstacles.push_back(pier);
+  Obstacle block;  // A solid 6 x 5 x 6 block, its near face 2.5 m from the bomb.
+  block.bounds = AABB{glm::vec3(3.5f, 0.0f, -3.0f), glm::vec3(9.5f, 5.0f, 3.0f)};
+  scene.obstacles.push_back(block);
+  WalkSurface top;  // The block's roof.
+  top.vertices = {{3.5f, 5.0f, -3.0f}, {9.5f, 5.0f, -3.0f}, {9.5f, 5.0f, 3.0f}, {3.5f, 5.0f, 3.0f}};
+  scene.walkSurfaces.push_back(top);
+  const glm::vec3 west(-3.0f, 1.2f, 0.0f), east(3.0f, 1.2f, 0.0f);
+  CHECK(!LineOfSightClear(west, east, scene.obstacles));
+  BombSpec spec;
+  // Close enough that the pier's whole cross-section lies nearer the bomb
+  // than any standing cell's site can be.
+  spec.position = glm::vec3(1.0f, 1.2f, 0.0f);
+  spec.radius = 5.0f;
+  spec.seed = 5u;
+  const float before = StandingVolume(scene);
+  const std::vector<WorldChange> plan = PlanExplosion(scene, spec);
+  int replaced = 0;
+  for (const WorldChange& c : plan) {
+    if (c.kind == WorldChangeKind::ObstacleReplaced) {
+      ++replaced;
+      CHECK(c.target == 0 || c.target == 1);
+      for (const Obstacle& piece : c.pieces) {
+        CHECK(piece.profile.empty());  // Plain prisms: cell footprint x layer.
+        CHECK(piece.kind == scene.obstacles[c.target].kind);
+      }
+    }
+    CHECK(ApplyWorldChange(&scene, c));
+  }
+  CHECK(replaced == 2);
+  CHECK(scene.obstacles[0].dead && scene.obstacles[1].dead);
+  // The pier is cut through at the bomb's height, standing above and below
+  // (what stands, that is: the rubble may land wherever physics puts it).
+  std::vector<Obstacle> standing;
+  for (const Obstacle& o : scene.obstacles) {
+    if (o.kind != ObstacleKind::Rubble) standing.push_back(o);
+  }
+  CHECK(LineOfSightClear(west, east, standing));
+  bool above = false;
+  for (const Obstacle& o : scene.obstacles) {
+    above |= !o.dead && o.kind == ObstacleKind::Pier && o.bounds.max.y > 5.9f;
+  }
+  CHECK(above);
+  // The block: a crater in the face, the far side untouched, and the roof
+  // out of the blast's reach still whole.
+  float blockLeft = 0.0f;
+  for (const WorldChange& c : plan) {
+    if (c.kind != WorldChangeKind::ObstacleReplaced || c.target != 1) continue;
+    for (const Obstacle& piece : c.pieces) {
+      blockLeft += PolygonArea(ObstacleFootprint(piece)) * (piece.bounds.max.y - piece.bounds.min.y);
+    }
+  }
+  CHECK(blockLeft > 0.5f * 180.0f && blockLeft < 180.0f - 0.5f);
+  CHECK(!LineOfSightClear(glm::vec3(3.0f, 1.2f, 0.0f), glm::vec3(10.5f, 1.2f, 0.0f),
+                          scene.obstacles));
+  CHECK(!scene.walkSurfaces[0].dead);
+  const float lost = before - StandingVolume(scene);
+  const float debris = DebrisVolume(plan);
+  CHECK(lost > 1.0f);
+  CHECK(std::fabs(lost - debris) < 0.02f * lost + 0.01f);
+}
+
+// A stair flight the blast reaches comes down whole, as chunks; a figure on
+// it falls.
+void TestExplosionBringsDownStairFlight() {
+  Scene scene;
+  scene.mapHalfExtent = 10.0f;
+  WalkSurface stair;
+  stair.stair = true;
+  stair.connectsToGround = true;
+  stair.vertices = {{0.0f, 0.0f, -0.6f}, {4.0f, 3.0f, -0.6f}, {4.0f, 3.0f, 0.6f}, {0.0f, 0.0f, 0.6f}};
+  scene.walkSurfaces.push_back(stair);
+  Unit blue;
+  blue.id = 0;
+  blue.team = Team::Blue;
+  blue.position = glm::vec3(3.0f, 2.25f, 0.0f);  // Three quarters up the flight.
+  scene.units.push_back(blue);
+  Unit red;
+  red.id = 1;
+  red.team = Team::Red;
+  red.position = glm::vec3(-8.0f, 0.0f, -8.0f);
+  scene.units.push_back(red);
+  GameLogic game(scene);
+  game.DebugPlaceBomb(glm::vec3(1.0f, 0.5f, 1.2f), 2.5f);
+  CHECK(game.DebugDetonateBomb());
+  CHECK(game.GetScene().walkSurfaces[0].dead);
+  bool removed = false;
+  float chunkArea = 0.0f;
+  for (const WorldChange& c : game.WorldLog()) {
+    removed |= c.kind == WorldChangeKind::SurfaceRemoved && c.target == 0;
+    if (c.kind != WorldChangeKind::Debris) continue;
+    for (const Obstacle& piece : c.pieces) chunkArea += PolygonArea(piece.footprint);
+  }
+  CHECK(removed);
+  CHECK(std::fabs(chunkArea - 4.0f * 1.2f) < 0.1f);  // The whole flight, in pieces.
+  const Unit* fallen = game.FindUnit(0);
+  CHECK(fallen != nullptr);
+  if (fallen) CHECK(fallen->knockdownDrop > 2.0f);
+}
+
+// A second blast throws the rubble of the first again instead of deleting it.
+void TestExplosionRethrowsRubble() {
+  Scene scene = BombWallScene();
+  BombSpec spec;
+  spec.position = glm::vec3(0.6f, 1.0f, 0.0f);
+  spec.radius = 3.0f;
+  spec.seed = 3u;
+  for (const WorldChange& c : PlanExplosion(scene, spec)) CHECK(ApplyWorldChange(&scene, c));
+  float rubbleBefore = 0.0f;
+  for (const Obstacle& o : scene.obstacles) {
+    if (!o.dead && o.kind == ObstacleKind::Rubble) {
+      rubbleBefore += PolygonArea(o.rubble.outline) * o.rubble.thickness;
+    }
+  }
+  CHECK(rubbleBefore > 0.1f);
+  const float standingBefore = StandingVolume(scene);
+  spec.seed = 4u;
+  spec.position = glm::vec3(-1.5f, 0.5f, 0.5f);
+  const std::vector<WorldChange> second = PlanExplosion(scene, spec);
+  for (const WorldChange& c : second) CHECK(ApplyWorldChange(&scene, c));
+  float rubbleLeft = 0.0f;
+  for (const Obstacle& o : scene.obstacles) {
+    if (!o.dead && o.kind == ObstacleKind::Rubble) {
+      rubbleLeft += PolygonArea(o.rubble.outline) * o.rubble.thickness;
+    }
+  }
+  // Second-blast debris = newly knocked-out wall + every re-thrown chunk;
+  // solid rubble only ever grows (re-thrown chunks are all >= the solid size).
+  const float knocked = standingBefore - StandingVolume(scene);
+  CHECK(rubbleLeft > rubbleBefore - 1e-3f);
+  CHECK(DebrisVolume(second) > knocked - 0.02f * knocked - 0.01f);
+}
+
+// --- Debris rigid-body simulation (issue #354) ----------------------------
+
+DebrisBodyDesc SlabBody(glm::vec3 centre, float tiltAboutX, glm::vec3 velocity = glm::vec3(0.0f)) {
+  DebrisBodyDesc b;
+  b.shape.outline = {{-0.5f, -0.5f}, {0.5f, -0.5f}, {0.5f, 0.5f}, {-0.5f, 0.5f}};
+  b.shape.thickness = 0.3f;
+  // Local z (the thickness) points up; tilt leans it about X.
+  b.shape.pose = glm::translate(glm::mat4(1.0f), centre) *
+                 glm::rotate(glm::mat4(1.0f), tiltAboutX, glm::vec3(1.0f, 0.0f, 0.0f)) *
+                 glm::rotate(glm::mat4(1.0f), -1.5707963f, glm::vec3(1.0f, 0.0f, 0.0f));
+  b.velocity = velocity;
+  return b;
+}
+
+glm::vec3 SlabUp(const DebrisKey& k) { return glm::mat3_cast(k.rotation) * glm::vec3(0.0f, 0.0f, 1.0f); }
+
+// A slab dropped slightly crooked comes to rest lying flat on the ground,
+// and a second one dropped across it lies flat on top of the first.
+void TestDebrisSlabsLandFlatAndStack() {
+  DebrisWorldDesc world;
+  world.extent = 50.0f;
+  const auto tracks = SimulateDebris(
+      world, {SlabBody({0.0f, 1.0f, 0.0f}, 0.25f), SlabBody({0.15f, 2.5f, 0.05f}, 0.0f)});
+  CHECK(tracks.size() == 2);
+  for (const DebrisTrack& t : tracks) {
+    CHECK(t.settled);
+    CHECK(t.keys.size() >= 2 && t.keys.size() < 8 * 20);
+    CHECK(std::fabs(std::fabs(SlabUp(t.keys.back()).y) - 1.0f) < 0.01f);  // Flat.
+  }
+  CHECK(std::fabs(tracks[0].keys.back().position.y - 0.15f) < 0.02f);
+  CHECK(std::fabs(tracks[1].keys.back().position.y - 0.45f) < 0.03f);  // Resting on it.
+  CHECK(DebrisPose(DebrisFlight{{tracks[0].keys}, true}, 0.0f) == glm::mat4(1.0f));
+}
+
+// Full collision, not a flat-landing shortcut: a slab landing on a 30 degree
+// slope stays on it, tilted to match, instead of lying horizontally.
+void TestDebrisRestsTiltedOnASlope() {
+  DebrisWorldDesc world;
+  world.extent = 50.0f;
+  DebrisShape slope;
+  slope.outline = {{-3.0f, -3.0f}, {3.0f, -3.0f}, {3.0f, 3.0f}, {-3.0f, 3.0f}};
+  slope.thickness = 1.0f;
+  const float lean = 0.5235988f;  // 30 degrees about X, local z tipped toward +Z.
+  slope.pose = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 1.0f, 0.0f)) *
+               glm::rotate(glm::mat4(1.0f), -1.5707963f + lean, glm::vec3(1.0f, 0.0f, 0.0f));
+  world.statics.push_back(slope);
+  const glm::vec3 normal = glm::mat3(slope.pose) * glm::vec3(0.0f, 0.0f, 1.0f);
+  const auto tracks = SimulateDebris(world, {SlabBody({0.0f, 2.2f, 0.0f}, lean)});
+  CHECK(tracks[0].settled);
+  const DebrisKey& rest = tracks[0].keys.back();
+  CHECK(glm::dot(SlabUp(rest), normal) > 0.99f);  // Lies along the slope...
+  CHECK(SlabUp(rest).y < 0.95f);                  // ... not horizontal,
+  CHECK(glm::dot(rest.position - glm::vec3(slope.pose[3]), normal) > 0.6f);  // ... on top of it.
+}
+
+// A chunk thrown at a figure (an immovable post) stops against it.
+void TestDebrisDeflectsOffAFigure() {
+  DebrisWorldDesc world;
+  world.extent = 50.0f;
+  DebrisShape post;
+  for (int k = 0; k < 8; ++k) {
+    post.outline.emplace_back(0.45f * std::cos(k * 0.7853982f), 0.45f * std::sin(k * 0.7853982f));
+  }
+  post.thickness = 60.0f;
+  post.pose = glm::translate(glm::mat4(1.0f), glm::vec3(2.0f, 29.95f, 0.0f)) *
+              glm::mat4(glm::mat3(glm::vec3(1, 0, 0), glm::vec3(0, 0, 1), glm::vec3(0, -1, 0)));
+  world.statics.push_back(post);
+  const auto tracks =
+      SimulateDebris(world, {SlabBody({0.0f, 0.2f, 0.0f}, 0.0f, {5.0f, 0.5f, 0.0f})});
+  CHECK(tracks[0].settled);
+  // Its far edge cannot have passed the post's near face (x = 1.55).
+  CHECK(tracks[0].keys.back().position.x + 0.5f < 1.6f);
+}
+
+// A fast chunk (0.25 m per step) cannot tunnel through a thin wall.
+void TestDebrisFastChunkDoesNotTunnelThroughThinWall() {
+  DebrisWorldDesc world;
+  world.extent = 80.0f;
+  DebrisShape wall;
+  wall.outline = {{-6.0f, -3.0f}, {6.0f, -3.0f}, {6.0f, 3.0f}, {-6.0f, 3.0f}};
+  wall.thickness = 0.08f;
+  // Local z (thickness) along world X: a wall in the plane x = 10.
+  wall.pose = glm::translate(glm::mat4(1.0f), glm::vec3(10.0f, 3.0f, 0.0f)) *
+              glm::mat4(glm::mat3(glm::vec3(0, 0, -1), glm::vec3(0, 1, 0), glm::vec3(1, 0, 0)));
+  world.statics.push_back(wall);
+  DebrisBodyDesc shard = SlabBody({0.0f, 2.0f, 0.0f}, 0.0f, {30.0f, 1.0f, 0.0f});
+  shard.shape.outline = {{-0.03f, -0.03f}, {0.03f, -0.03f}, {0.03f, 0.03f}, {-0.03f, 0.03f}};
+  shard.shape.thickness = 0.05f;
+  const auto tracks = SimulateDebris(world, {shard});
+  float maxX = -1e9f;
+  for (const DebrisKey& k : tracks[0].keys) maxX = std::max(maxX, k.position.x);
+  CHECK(maxX < 10.0f && maxX > 8.5f);  // Reached the wall, never crossed it.
+}
+
+// The same input yields the same track, bit for bit (the server is the
+// only place this runs, but replays and tests rely on it), and a settled pile
+// ends: no body is still moving when its track stops.
+void TestDebrisSimulationIsDeterministicAndSettles() {
+  DebrisWorldDesc world;
+  world.extent = 50.0f;
+  std::vector<DebrisBodyDesc> bodies;
+  for (int i = 0; i < 8; ++i) {
+    bodies.push_back(SlabBody({0.15f * (i % 3), 0.5f + 0.7f * i, 0.1f * (i % 2)}, 0.3f * i,
+                              {0.3f * (i % 3 - 1), 0.0f, 0.2f}));
+  }
+  const auto a = SimulateDebris(world, bodies);
+  const auto b = SimulateDebris(world, bodies);
+  CHECK(a.size() == b.size());
+  for (size_t i = 0; i < a.size(); ++i) {
+    CHECK(a[i].settled);
+    CHECK(a[i].keys == b[i].keys);
+    // No seizure: the last second of a track holds still (trimmed), and the
+    // body is on or above the ground, never sunk in it.
+    CHECK(a[i].keys.size() < 8 * 20);
+    for (const DebrisKey& k : a[i].keys) CHECK(k.position.y > 0.1f);
+  }
+}
+
+// A chunk that is still on its way down late in a blast keeps falling: the
+// anti-jitter damping goes by how far a body has got, not by the clock, so
+// nothing is slowed to a crawl in mid-air and left hanging there.
+void TestDebrisStillFallingLateIsNotSlowed() {
+  DebrisWorldDesc world;
+  world.extent = 50.0f;
+  // Thrown straight up hard enough to be airborne for ~5.7 s.
+  const auto tracks =
+      SimulateDebris(world, {SlabBody({0.0f, 1.0f, 0.0f}, 0.0f, {0.0f, 28.0f, 0.0f})}, 12.0f);
+  CHECK(tracks[0].settled);
+  CHECK(tracks[0].keys.back().position.y < 0.5f);
+  // Free fall all the way: it is back down when gravity says so.
+  const float landed = static_cast<float>(tracks[0].keys.size() - 1) * kDebrisKeyDt;
+  CHECK(landed > 5.5f);
+  CHECK(landed < 8.0f);
+}
+
+// Rubble blocks walking only where its body crosses the band a standing
+// figure occupies: a chunk lying flat is stepped over, a slab propped above
+// head height is walked under, and a leaning slab blocks a strip no wider
+// than its full tilted envelope.
+void TestRubbleBandFootprintClipsBody() {
+  const auto slab = [](const glm::mat4& pose) {
+    Obstacle o;
+    o.kind = ObstacleKind::Rubble;
+    o.rubble.outline = {{-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}};
+    o.rubble.thickness = 0.2f;
+    o.rubble.pose = pose;
+    return o;
+  };
+  const float lo = constants::kStepOverHeight, hi = constants::kUnitHeight;
+  // Lying flat on the ground (top at 0.2): clear of the band.
+  const glm::mat4 flat =
+      glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.1f, 0.0f)) *
+      glm::rotate(glm::mat4(1.0f), -1.5707963f, glm::vec3(1.0f, 0.0f, 0.0f));
+  CHECK(RubbleBandFootprint(slab(flat), lo, hi).empty());
+  // The same slab propped level above head height: walked under.
+  const glm::mat4 propped =
+      glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 2.2f, 0.0f)) *
+      glm::rotate(glm::mat4(1.0f), -1.5707963f, glm::vec3(1.0f, 0.0f, 0.0f));
+  CHECK(RubbleBandFootprint(slab(propped), lo, hi).empty());
+  // A 4x4 slab leaning at 45 degrees, lower edge on the ground, upper edge
+  // past head height: it crosses the band, but blocks only the strip between
+  // the step-over toe and head clearance -- well under the full envelope's
+  // floor shadow.
+  const glm::mat4 leaning =
+      glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 1.4142136f, 0.0f)) *
+      glm::rotate(glm::mat4(1.0f), -0.7853982f, glm::vec3(1.0f, 0.0f, 0.0f));
+  Obstacle lean = slab(leaning);
+  lean.rubble.outline = {{-2.0f, -2.0f}, {2.0f, -2.0f}, {2.0f, 2.0f}, {-2.0f, 2.0f}};
+  const std::vector<glm::vec2> band = RubbleBandFootprint(lean, lo, hi);
+  CHECK(band.size() >= 3);
+  DebrisFlight still;  // Two identical keys: the body never moved.
+  still.keys = {DebrisKey{}, DebrisKey{}};
+  const std::vector<glm::vec2> envelope = DebrisRestObstacle(lean, still).footprint;
+  CHECK(PolygonArea(band) > 0.1f);
+  CHECK(PolygonArea(band) < 0.75f * PolygonArea(envelope));
+  // Standing upright (band crosses the body): blocks with roughly its own
+  // footprint, present and sane.
+  const glm::mat4 upright = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+  CHECK(PolygonArea(RubbleBandFootprint(slab(upright), lo, hi)) > 0.3f);
+}
+
+// A figure standing right beside the blast keeps its moves: no chunk may
+// rest so close that the navmesh's padded silhouette swallows its feet, and
+// the rubble that does land nearby blocks only where its body stands in the
+// walk band -- so the reach field stays alive from every spot the figure
+// could have been (the review screenshot had it boxed in with zero moves).
+void TestFigureBesideBlastKeepsMoves() {
+  const auto scanReach = [](float x, float z) {
+    Scene scene;
+    scene.mapHalfExtent = 20.0f;
+    Obstacle wall;
+    wall.bounds = AABB{glm::vec3(-0.15f, 0.0f, -12.0f), glm::vec3(0.15f, 3.0f, 12.0f)};
+    wall.kind = ObstacleKind::Wall;
+    scene.obstacles.push_back(wall);
+    Unit blue;
+    blue.id = 0;
+    blue.team = Team::Blue;
+    blue.position = glm::vec3(x, 0.0f, z);
+    scene.units.push_back(blue);
+    GameLogic game(scene);
+    game.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
+    CHECK(game.DebugDetonateBomb());
+    const Unit& mover = game.GetScene().units[0];
+    NavMesh nav;
+    NavRegion region;
+    const float reach = mover.MoveBudget() + 2.0f * constants::kAgentRadius;
+    region.xMin = std::max(-scene.mapHalfExtent, mover.position.x - reach);
+    region.xMax = std::min(scene.mapHalfExtent, mover.position.x + reach);
+    region.zMin = std::max(-scene.mapHalfExtent, mover.position.z - reach);
+    region.zMax = std::min(scene.mapHalfExtent, mover.position.z + reach);
+    const Scene& after = game.GetScene();
+    nav.Build(after.obstacles, region, constants::kAgentRadius, &after.ground,
+              &after.walkSurfaces, &after.terrainTunnels);
+    CHECK(nav.IsWalkable(mover.position.x, mover.position.z));
+    const ReachField f = nav.ComputeReachField(mover.position, mover.MoveBudget());
+    int reachable = 0;
+    for (const float d : f.dist) {
+      if (d < 1e29f) ++reachable;
+    }
+    return reachable;
+  };
+  // Positions flanking the blast at 0.6..1.5 m off the wall; before the fix
+  // two of these had their start swallowed (no moves at all) and two more
+  // were ringed in with 2-3 reachable nodes.
+  CHECK(scanReach(0.8f, 0.75f) > 1000);
+  CHECK(scanReach(1.5f, -1.5f) > 1000);
+  CHECK(scanReach(0.8f, -0.75f) > 1000);
+  CHECK(scanReach(1.0f, 0.0f) > 1000);
+}
+
+// A sloped-top massing detail (an overpass deck rail) cut by cells keeps its
+// slope on the pieces left standing.
+void TestMassingCutKeepsSlopedTop() {
+  Scene scene;
+  MassingDetail rail;
+  rail.kind = MassingDetail::Kind::DeckRail;
+  rail.footprint = {{0.0f, 0.0f}, {8.0f, 0.0f}, {8.0f, 0.3f}, {0.0f, 0.3f}};
+  rail.y0 = 2.0f;
+  rail.y1 = 5.0f;
+  rail.top = {{0.0f, 3.0f, 0.0f}, {8.0f, 5.0f, 0.0f}, {8.0f, 5.0f, 0.3f}, {0.0f, 3.0f, 0.3f}};
+  rail.depth = 1.0f;
+  scene.massing.push_back(rail);
+  WorldChange cut;
+  cut.kind = WorldChangeKind::MassingCut;
+  cut.target = 0;
+  Obstacle left, right;
+  left.footprint = {{0.0f, 0.0f}, {2.0f, 0.0f}, {2.0f, 0.3f}, {0.0f, 0.3f}};
+  right.footprint = {{6.0f, 0.0f}, {8.0f, 0.0f}, {8.0f, 0.3f}, {6.0f, 0.3f}};
+  cut.pieces = {left, right};
+  CHECK(ApplyWorldChange(&scene, cut));
+  CHECK(scene.massing[0].dead);
+  CHECK(scene.massing.size() == 3);
+  if (scene.massing.size() != 3) return;
+  for (size_t i = 1; i < 3; ++i) {
+    const MassingDetail& piece = scene.massing[i];
+    CHECK(piece.kind == MassingDetail::Kind::DeckRail);
+    CHECK(piece.top.size() >= 3);
+    CHECK(piece.depth == 1.0f);
+    for (const glm::vec3& v : piece.top) {
+      CHECK(std::fabs(v.y - (3.0f + 0.25f * v.x)) < 1e-3f);  // On the rail's slope.
+    }
+  }
+}
+
+
+void TestArmedBombDetonatesMidRound() {
+  GameLogic game(BombWallScene());
+  game.SetMatchSeed(7u);
+  // Blue walks 10 units (2.5 s), red passes; the bomb is armed for t = 1 s.
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(glm::vec3(-4.0f, 0.0f, 6.0f), Team::Blue);
+  game.FinishMovePlan();
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
+  CHECK(game.DebugArmBomb(1.0f));
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+  CHECK(game.WorldLog().empty());  // Not yet: armed, not detonated.
+  int guard = 0;
+  while (game.Mode() == InputMode::Executing && ++guard < 1000) game.Update(0.05f);
+  CHECK(!game.WorldLog().empty());
+  const WorldChange& first = game.WorldLog().front();
+  CHECK(first.round == 1);
+  CHECK(first.at >= 1.0f && first.at <= 1.1f);  // Stamped at the armed moment.
+  CHECK(!game.GetDebugBomb().has_value());
+}
+
+// A blast inside a round is timed by the round clock alone: the frame it goes
+// off shows the launch pose, and a replay sitting on any recorded frame --
+// that first one included -- holds the chunks still.
+void TestDebrisFollowsRoundClock() {
+  GameLogic game(BombWallScene());
+  game.SetMatchSeed(7u);
+  game.ClickUnit(0, Team::Blue);
+  game.ChoosePass();
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  game.DebugPlaceBomb(glm::vec3(0.0f, 1.0f, 0.0f), 3.0f);
+  CHECK(game.DebugArmBomb(0.9f));
+  TurnTimeline timeline;
+  timeline.Observe(game, 0.0f);
+  game.CommitRound();
+  const auto debris = [](const GameLogic& g) -> const WorldChange* {
+    for (const WorldChange& c : g.WorldLog()) {
+      if (c.kind == WorldChangeKind::Debris) return &c;
+    }
+    return nullptr;
+  };
+  const auto age = [&](const GameLogic& g) {
+    return DebrisRoundAge(*debris(g), g.RoundNumber(), g.Mode() == InputMode::Executing,
+                          g.ExecutionElapsed());
+  };
+  bool sawLaunch = false;
+  int guard = 0;
+  while (game.Mode() == InputMode::Executing && ++guard < 1000) {
+    game.Update(1.0f / 60.0f);
+    timeline.Observe(game, 1.0f / 60.0f);
+    if (debris(game) && !sawLaunch) {
+      sawLaunch = true;
+      CHECK(age(game) == 0.0f);  // The tick it goes off: nothing has moved yet.
+    }
+  }
+  CHECK(sawLaunch);
+  if (!sawLaunch) return;
+  // After the round the flight is frozen where the turn ended...
+  const float at = debris(game)->at;
+  CHECK(std::fabs(age(game) - (constants::kRoundDuration - at)) < 0.05f);
+  CHECK(age(game) == age(game));
+  // ...and every recorded frame of the replay has one fixed age.
+  TimelinePlayback playback;
+  bool sawReplayLaunch = false;
+  float last = -1.0f;
+  for (size_t f = 0; f < timeline.FrameCount(); ++f) {
+    CHECK(playback.SeekFrame(timeline, game, f));
+    if (!debris(playback.Game())) continue;
+    const float a = age(playback.Game());
+    CHECK(a >= 0.0f && a == age(playback.Game()));
+    if (!sawReplayLaunch) CHECK(a < 2.0f * TurnTimeline::kCaptureInterval);
+    sawReplayLaunch = true;
+    CHECK(a >= last);
+    last = a;
+  }
+  CHECK(sawReplayLaunch);
+  // A detonation outside a round has no round clock.
+  WorldChange loose = *debris(game);
+  loose.at = 0.0f;
+  CHECK(DebrisRoundAge(loose, 2, false, 0.0f) < 0.0f);
+}
+
+// A hand-authored falling slab: a 1.2 x 1.2 x 0.6 box dropped straight down
+// to come to rest centred on `rest` (0.3 above the ground), its flight
+// lasting `duration` seconds from a blast `at` seconds into round 1.
+WorldChange FallingSlabChange(const glm::vec3& rest, float at, float duration) {
+  WorldChange c;
+  c.id = 0;
+  c.round = 1;
+  c.at = at;
+  c.kind = WorldChangeKind::Debris;
+  Obstacle piece;
+  piece.footprint = {{rest.x - 0.6f, rest.z - 0.6f},
+                     {rest.x + 0.6f, rest.z - 0.6f},
+                     {rest.x + 0.6f, rest.z + 0.6f},
+                     {rest.x - 0.6f, rest.z + 0.6f}};
+  constexpr float kLaunchBottom = 4.0f;
+  piece.bounds = AABB{glm::vec3(rest.x - 0.6f, kLaunchBottom, rest.z - 0.6f),
+                      glm::vec3(rest.x + 0.6f, kLaunchBottom + 0.6f, rest.z + 0.6f)};
+  DebrisFlight flight;
+  flight.solid = true;
+  const int segments = std::max(1, static_cast<int>(std::lround(duration / kDebrisKeyDt)));
+  const glm::vec3 from(rest.x, kLaunchBottom + 0.3f, rest.z);
+  const glm::vec3 to(rest.x, 0.3f, rest.z);
+  for (int k = 0; k <= segments; ++k) {
+    DebrisKey key;
+    key.position = glm::mix(from, to, static_cast<float>(k) / static_cast<float>(segments));
+    flight.keys.push_back(key);
+  }
+  c.pieces = {piece};
+  c.flights = {flight};
+  return c;
+}
+
+// While a chunk is still in flight, its future landing spot neither blocks
+// planning (the waypoint is reachable) nor previews itself through the
+// sight obstacles; once it has actually landed, it does both.
+void TestAirborneDebrisNeitherBlocksNorPreviews() {
+  GameLogic game(BombWallScene());
+  const glm::vec3 spot(-4.0f, 0.0f, 3.0f);
+  // Lands 6 s after a blast at 0.5 s into round 1: 1.5 s into round 2.
+  CHECK(game.AcceptWorldChange(FallingSlabChange(spot, 0.5f, 6.0f)));
+  const auto rubbleInSight = [&game]() {
+    for (const Obstacle& o : game.SightObstacles()) {
+      if (!o.dead && o.kind == ObstacleKind::Rubble) return true;
+    }
+    return false;
+  };
+  const auto clickDistance = [&game, &spot]() {
+    game.ClickUnit(0, Team::Blue);
+    game.ChooseMove();
+    game.ClickGround(spot, Team::Blue);
+    const float d = glm::distance(glm::vec2(game.MoveChainEnd().x, game.MoveChainEnd().z),
+                                  glm::vec2(spot.x, spot.z));
+    game.CancelAction();  // Back to the action menu...
+    game.CancelAction();  // ...and to no selection.
+    return d;
+  };
+  const auto passRound = [&game]() {
+    game.ClickUnit(0, Team::Blue);
+    game.ChoosePass();
+    game.ClickUnit(1, Team::Red);
+    game.ChoosePass();
+    CHECK(game.CanCommitRound());
+    game.CommitRound();
+    int guard = 0;
+    while (game.Mode() == InputMode::Executing && ++guard < 1000) game.Update(0.05f);
+  };
+  // The rubble rest obstacle is in the scene from the apply on (dormant)...
+  bool sceneHasRubble = false;
+  for (const Obstacle& o : game.GetScene().obstacles) {
+    sceneHasRubble |= !o.dead && o.kind == ObstacleKind::Rubble;
+  }
+  CHECK(sceneHasRubble);
+  // ...but round 1 planning sees and routes through the landing spot.
+  CHECK(!rubbleInSight());
+  CHECK(clickDistance() < 0.2f);
+  passRound();
+  // Round 2 planning: the chunk hangs frozen mid-flight; still open.
+  CHECK(game.RoundNumber() == 2);
+  CHECK(!rubbleInSight());
+  CHECK(clickDistance() < 0.2f);
+  passRound();
+  // It landed 1.5 s into round 2: round 3 planning routes around it and the
+  // sight obstacles carry it.
+  CHECK(game.RoundNumber() == 3);
+  CHECK(rubbleInSight());
+  CHECK(clickDistance() > 0.4f);
+}
+
+// A figure sent through a chunk's landing spot is the player's own gamble:
+// the chunk comes down on it and kills it.
+void TestFallingChunkCrushesFigureInItsPath() {
+  GameLogic game(BombWallScene());
+  const glm::vec3 spot(-4.0f, 0.0f, 3.0f);
+  // Lands 2 s after a blast at 0.5 s into round 1, i.e. mid-round.
+  CHECK(game.AcceptWorldChange(FallingSlabChange(spot, 0.5f, 2.0f)));
+  // Blue walks onto the landing spot (reachable: the chunk is airborne)
+  // and stands there; red passes.
+  game.ClickUnit(0, Team::Blue);
+  game.ChooseMove();
+  game.ClickGround(spot, Team::Blue);
+  CHECK(glm::distance(game.MoveChainEnd(), spot) < 0.2f);
+  game.FinishMovePlan();
+  game.ClickUnit(1, Team::Red);
+  game.ChoosePass();
+  CHECK(game.CanCommitRound());
+  game.CommitRound();
+  int guard = 0;
+  bool blueAliveAtStart = false;
+  while (game.Mode() == InputMode::Executing && ++guard < 1000) {
+    if (game.ExecutionElapsed() < 0.4f) blueAliveAtStart |= game.GetScene().units[0].alive;
+    game.Update(0.05f);
+  }
+  CHECK(blueAliveAtStart);                     // Walked in unharmed...
+  CHECK(!game.GetScene().units[0].alive);      // ...and the slab came down on it.
+  CHECK(game.GetScene().units[1].alive);
+}
+
 int main() {
   TestThrowPlanningRangeSupplyAndPreview();
   TestGrenadeBlastKillsCoverAndSupply();
   TestGrenadeBlastFriendlyFire();
   TestGrenadeFlightBouncesOffWalls();
+  TestDebrisFollowsRoundClock();
+  TestAirborneDebrisNeitherBlocksNorPreviews();
+  TestFallingChunkCrushesFigureInItsPath();
   TestDeadFiguresSeeThroughProbes();
   TestBuildingsContainingPoints();
   TestNavMeshRoutesAroundObstacle();
@@ -4388,6 +5681,33 @@ int main() {
   TestCrouchedFigureBlocksLockedShot();
   TestSnapshotCarriesCoverPose();
   TestReachFieldManySurfacesPerformance();
+  TestExplosionPlanDeterministicCells();
+  TestBombBlowsSeeAndWalkThroughHole();
+  TestWallHoleChangeCutsGeometry();
+  TestBombImpulseLaunchesDebrisHigher();
+  TestWallHoleOutlineCutsAngledPieces();
+  TestExplosionFractureHasAngledEdges();
+  TestExplosionDebrisMatchesKnockedOutCells();
+  TestExplosionBreaksPostsAndStrips();
+  TestFloorHoleFromCells();
+  TestMassingCutBreaksParapet();
+  TestFloorHolePiecesAndLinks();
+  TestBombFloorHoleDropsFigure();
+  TestArmedBombDetonatesMidRound();
+  TestExplosionAccountsForEveryChunk();
+  TestExplosionOnBuildingKeepsFarWindowFrames();
+  TestExplosionFracturesThickSolids();
+  TestExplosionBringsDownStairFlight();
+  TestExplosionRethrowsRubble();
+  TestDebrisSlabsLandFlatAndStack();
+  TestDebrisRestsTiltedOnASlope();
+  TestDebrisDeflectsOffAFigure();
+  TestDebrisFastChunkDoesNotTunnelThroughThinWall();
+  TestDebrisSimulationIsDeterministicAndSettles();
+  TestDebrisStillFallingLateIsNotSlowed();
+  TestRubbleBandFootprintClipsBody();
+  TestFigureBesideBlastKeepsMoves();
+  TestMassingCutKeepsSlopedTop();
 
   if (g_failures == 0) {
     std::printf("All logic tests passed.\n");
